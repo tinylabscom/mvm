@@ -75,10 +75,14 @@ impl Platform {
         matches!(self, Platform::LinuxNative)
     }
 
-    /// Whether Apple Containers are available on this platform.
+    /// Whether this host is the macOS tier where Vz is the auto-detect
+    /// default backend (macOS 26+ — the Apple Silicon arch half is
+    /// asserted by callers via `cfg!(target_arch = "aarch64")`).
     ///
-    /// Requires macOS 26+ on Apple Silicon.
-    pub fn has_apple_containers(self) -> bool {
+    /// Distinct from [`has_vz`], which reports mere Vz *availability*
+    /// from macOS 13 up. Vz is opt-in on macOS 13-25 and only the
+    /// default from 26 on, so the selection paths gate on this.
+    pub fn is_vz_default_tier(self) -> bool {
         if !matches!(self, Platform::MacOS) {
             return false;
         }
@@ -440,11 +444,11 @@ mod tests {
     }
 
     #[test]
-    fn test_has_apple_containers_non_macos() {
-        assert!(!Platform::LinuxNative.has_apple_containers());
-        assert!(!Platform::LinuxNoKvm.has_apple_containers());
-        assert!(!Platform::Wsl2.has_apple_containers());
-        assert!(!Platform::Windows.has_apple_containers());
+    fn test_is_vz_default_tier_non_macos() {
+        assert!(!Platform::LinuxNative.is_vz_default_tier());
+        assert!(!Platform::LinuxNoKvm.is_vz_default_tier());
+        assert!(!Platform::Wsl2.is_vz_default_tier());
+        assert!(!Platform::Windows.is_vz_default_tier());
     }
 
     #[test]
@@ -474,7 +478,7 @@ mod tests {
         let p = current();
         let _ = p.has_kvm();
         let _ = p.supports_native_runner();
-        let _ = p.has_apple_containers();
+        let _ = p.is_vz_default_tier();
     }
 
     #[test]

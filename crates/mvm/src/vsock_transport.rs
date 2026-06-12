@@ -5,11 +5,9 @@
 //! (or its mode-0700 proxy socket) behind one trait, so callers that
 //! just need "give me a connected stream to vsock port `P` on VM `V`"
 //! don't have to know which backend the VM is running under. Before
-//! this trait, every
-//! caller open-coded the same `if let Ok(stream) =
-//! mvm_backend::providers::apple_container::vsock_connect(...) { ... } else { ... }`
-//! ladder; new backends or backend changes had to chase down every
-//! occurrence.
+//! this trait, every caller open-coded the same per-backend
+//! `vsock_connect(...)` if-ladder; new backends or backend changes had
+//! to chase down every occurrence.
 //!
 //! Each impl is stateless apart from configuration captured at
 //! construction time. `connect()` always returns a fresh stream —
@@ -145,61 +143,6 @@ impl VsockTransport for VzTransport {
     }
 }
 
-/// Connects through Apple's `Virtualization.framework` vsock device.
-///
-/// `mvm_backend::providers::apple_container::vsock_connect` consults the framework's
-/// in-process VM registry and either returns a direct
-/// `VZVirtioSocketDevice` stream (mac host) or routes through the
-/// per-VM proxy socket (cross-process / development).
-pub struct AppleContainerTransport {
-    vm_name: String,
-}
-
-impl AppleContainerTransport {
-    pub fn new(vm_name: impl Into<String>) -> Self {
-        Self {
-            vm_name: vm_name.into(),
-        }
-    }
-}
-
-impl VsockTransport for AppleContainerTransport {
-    fn connect(&self, port: u32) -> Result<UnixStream> {
-        mvm_backend::providers::apple_container::vsock_connect(&self.vm_name, port)
-            .map_err(|e| anyhow::anyhow!("Apple Container vsock connect failed: {e}"))
-    }
-}
-
-/// Connects through the daemon-managed mode-0700 proxy Unix socket.
-///
-/// Used for cross-process access in dev — the `mvmctl dev` daemon
-/// owns the framework-side VM and exposes a per-VM Unix socket where
-/// each new connection writes the destination vsock port as a
-/// 4-byte little-endian prefix and the daemon then forwards bytes
-/// to the framework. Mode-0700 is the security boundary.
-pub struct VsockProxyTransport {
-    proxy_path: String,
-}
-
-impl VsockProxyTransport {
-    pub fn new(proxy_path: impl Into<String>) -> Self {
-        Self {
-            proxy_path: proxy_path.into(),
-        }
-    }
-}
-
-impl VsockTransport for VsockProxyTransport {
-    fn connect(&self, port: u32) -> Result<UnixStream> {
-        let mut stream = UnixStream::connect(&self.proxy_path)
-            .with_context(|| format!("Failed to connect to vsock proxy at {}", &self.proxy_path))?;
-        stream
-            .write_all(&port.to_le_bytes())
-            .with_context(|| "Failed to write vsock proxy port prefix")?;
-        Ok(stream)
-    }
-}
-
 /// Connects through the nesting hop: the outer host
 /// reaches a workload microVM's vsock *via* the long-lived libkrun
 /// host VM. The hop socket is the host VM's libkrun UDS for
@@ -255,25 +198,16 @@ impl VsockTransport for NestingHopTransport {
 
 /// Pick a transport for a VM by name.
 ///
-/// Probes Apple Container first by attempting a real connect to the
-/// agent control port — that's the cheapest probe that doesn't
-/// require the caller to know the backend ahead of time. Then tries
-/// libkrun's per-port Unix socket, then Firecracker by resolving the
-/// running VM's instance directory.
+/// Probes libkrun's per-port Unix socket first, then the vz supervisor's
+/// per-port socket, then Firecracker by resolving the running VM's
+/// instance directory — the cheapest probe that doesn't require the
+/// caller to know the backend ahead of time.
 ///
 /// Note: the probe consumes one stream and immediately drops it;
 /// callers get a *fresh* stream from the returned transport's
 /// `connect()`. This matches the legacy ladder it replaces, which
 /// already did one throwaway probe before the real call.
 pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
-    if mvm_backend::providers::apple_container::vsock_connect(
-        vm_name,
-        mvm_guest::vsock::GUEST_AGENT_PORT,
-    )
-    .is_ok()
-    {
-        return Ok(Box::new(AppleContainerTransport::new(vm_name)));
-    }
     let libkrun = LibkrunTransport::for_vm(vm_name);
     if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Box::new(libkrun));
@@ -290,26 +224,6 @@ pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn proxy_transport_writes_port_prefix() {
-        // socketpair acts as a stand-in for the daemon's listening
-        // proxy socket: the "client" side of VsockProxyTransport
-        // should write the port bytes immediately on connect.
-        // We can't actually drive `connect()` here because the
-        // proxy_path needs to be a real filesystem socket; this test
-        // only exercises construction + the public surface so the
-        // factory contract has a regression net even on hosts where
-        // `tempfile` + UDS listeners would be flaky in CI.
-        let t = VsockProxyTransport::new("/tmp/mvm-proxy-does-not-exist.sock");
-        let err = t
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-            .expect_err("should fail to connect");
-        assert!(
-            err.to_string().contains("vsock proxy"),
-            "error didn't mention proxy: {err}"
-        );
-    }
 
     #[test]
     fn firecracker_transport_constructs_with_instance_dir() {
@@ -372,8 +286,8 @@ mod tests {
     #[test]
     fn for_vm_selects_vz_when_only_vz_socket_present() {
         use std::os::unix::net::UnixListener;
-        // With a Vz workload's socket present (and no apple-container/libkrun/
-        // firecracker surface), the picker must select the Vz transport rather
+        // With a Vz workload's socket present (and no libkrun/firecracker
+        // surface), the picker must select the Vz transport rather
         // than falling through to the firecracker error. Regression for the
         // "console can't reach a Vz workload" gap.
         let dir = tempfile::tempdir().unwrap();

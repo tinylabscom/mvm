@@ -7,10 +7,11 @@
 //! the in-VM proxy is reachable from `localhost:8443`) and
 //! outbound traffic owned by the proxy's uid are allowed out.
 //!
-//! Called from `mvm-host-vm-init`'s boot sequence after the
-//! basic `setup_network()`. Failure is **fatal** — without the
-//! lockdown, the builder VM's egress allowlist is unenforced and
-//! the transitive trust onto the builder VM has no defense layer.
+//! Two call sites, two postures: the install arm locks egress at
+//! entry (fail-closed — untrusted dep code must not reach the network
+//! directly); the persistent dispatch loop sets posture per job kind
+//! before each dispatch (install → locked, flake build → open so nix
+//! can fetch substitutes and pinned inputs without a proxy).
 
 use std::process::Command;
 
@@ -85,15 +86,23 @@ pub fn install_egress_lockdown(runner: &dyn IptablesRunner, proxy_uid: u32) -> R
     Ok(())
 }
 
+/// Reset the OUTPUT chain to open egress for a trusted flake-build
+/// dispatch. The inner `nix build` fetches substitutes and pinned
+/// flake inputs directly (no proxy), so the chain must not filter it.
+pub fn open_egress(runner: &dyn IptablesRunner) -> Result<(), String> {
+    runner.run(&["-F", "OUTPUT"])?;
+    runner.run(&["-P", "OUTPUT", "ACCEPT"])?;
+    Ok(())
+}
+
 /// Re-install the egress lockdown from a known-good in-binary recipe.
 ///
-/// `install_egress_lockdown` runs once at boot. In the persistent
-/// builder VM jobs share the kernel's iptables state across
+/// Called at the start of each install dispatch in the persistent
+/// builder VM. Jobs share the kernel's iptables state across
 /// dispatches — a build that runs `iptables -I OUTPUT 1 -j
 /// ACCEPT` (or exploits a `CAP_NET_ADMIN` leak via the new mount
 /// namespace from `unshare --mount`) poisons every subsequent
-/// job. The persistent dispatch loop calls this between
-/// dispatches to reset the chain.
+/// job, so the dispatch loop resets the chain before each one.
 ///
 /// Implementation: flush the OUTPUT chain, then re-install the 3
 /// baseline rules. Cheap (~10 ms per the plan's estimate) and
@@ -201,6 +210,33 @@ mod tests {
         assert!(
             runner.invocations.borrow()[1].iter().any(|a| a == "9999"),
             "uid passed through to --uid-owner",
+        );
+    }
+
+    #[test]
+    fn open_egress_emits_flush_then_accept_policy() {
+        let runner = RecordingRunner::new();
+        open_egress(&runner).expect("happy path");
+        let invocations = runner.invocations.borrow();
+        assert_eq!(invocations.len(), 2);
+        // 1: flush OUTPUT chain.
+        assert_eq!(invocations[0], vec!["-F".to_string(), "OUTPUT".to_string()],);
+        // 2: set OUTPUT policy ACCEPT.
+        assert_eq!(
+            invocations[1],
+            vec!["-P".to_string(), "OUTPUT".to_string(), "ACCEPT".to_string()],
+        );
+    }
+
+    #[test]
+    fn open_egress_propagates_flush_failure() {
+        let runner = RecordingRunner::fail_at(0);
+        let result = open_egress(&runner);
+        assert!(result.is_err());
+        assert_eq!(
+            runner.invocations.borrow().len(),
+            1,
+            "only the flush was attempted before the error",
         );
     }
 

@@ -99,8 +99,7 @@ mvm-guest.workspace = true
 # `ensure_signed()` is the codesigning gate. macOS rejects
 # any process that calls `Hypervisor.framework` without
 # `com.apple.security.hypervisor`; the smoke binary self-signs on
-# first run and re-spawns, same as `mvmctl up --hypervisor
-# apple-container` does.
+# first run and re-spawns, same as `mvmctl up --hypervisor vz` does.
 mvm-backend.workspace = true
 # Unit tests for `KrunContext`'s serde shape (incl. the new
 # `virtio_fs_mounts` field with `#[serde(default)]`

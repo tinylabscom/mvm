@@ -13,7 +13,7 @@
 //! | `cow`           | Reflink (CoW) file cloning + `clone_rootfs_for_instance` |
 //! | `config`        | Builder VM name, FC network/path constants, wire types |
 //! | `shell`         | Host + Linux-env command execution helpers             |
-//! | `linux_env`     | Dispatch trait impls (NativeEnv, AppleContainerEnv)    |
+//! | `linux_env`     | Dispatch trait impls (NativeEnv, VzDevEnv)             |
 //!
 //! ## Re-exports kept by `mvm`
 //!

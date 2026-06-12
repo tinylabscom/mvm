@@ -81,6 +81,44 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("prctl", libc::SYS_prctl),
     ("set_tid_address", libc::SYS_set_tid_address),
     ("set_robust_list", libc::SYS_set_robust_list),
+    // ── substitution-endpoint additions ────────────────────────────
+    // The endpoint runs a multi-thread tokio runtime and a rustls TLS
+    // forward leg (reqwest, rustls-native-certs) that the bridge does
+    // not. These cover thread creation, the glibc allocator + resolver,
+    // socket-option negotiation, and cert-store directory reads. Erring
+    // toward inclusion: a missing syscall SIGSYS-kills the endpoint
+    // mid-egress, which is worse than a slightly wider allowlist on an
+    // already-isolated per-VM process.
+    ("clone", libc::SYS_clone),     // tokio worker / blocking thread spawn
+    ("clone3", libc::SYS_clone3),   // modern glibc pthread_create path
+    ("rseq", libc::SYS_rseq),       // glibc registers rseq on each new thread
+    ("madvise", libc::SYS_madvise), // allocator MADV_DONTNEED / MADV_FREE
+    ("sched_yield", libc::SYS_sched_yield), // futex spin fallback
+    ("eventfd2", libc::SYS_eventfd2), // tokio reactor wakeup fd
+    ("getsockname", libc::SYS_getsockname),
+    ("getpeername", libc::SYS_getpeername),
+    ("getsockopt", libc::SYS_getsockopt), // SO_ORIGINAL_DST (terminator), TLS
+    ("setsockopt", libc::SYS_setsockopt), // TCP_NODELAY, socket tuning
+    ("poll", libc::SYS_poll),             // glibc resolver / connect timeouts
+    ("ppoll", libc::SYS_ppoll),
+    ("pread64", libc::SYS_pread64),
+    ("pwrite64", libc::SYS_pwrite64),
+    ("statx", libc::SYS_statx), // newer glibc stat() for cert files
+    ("socketpair", libc::SYS_socketpair),
+    ("recvmmsg", libc::SYS_recvmmsg),     // glibc DNS resolver
+    ("sendmmsg", libc::SYS_sendmmsg),     // glibc DNS resolver
+    ("getdents64", libc::SYS_getdents64), // read /etc/ssl/certs dir
+    ("readlinkat", libc::SYS_readlinkat), // cert symlink resolution
+    ("fcntl", libc::SYS_fcntl),           // O_NONBLOCK on accepted sockets
+    ("shutdown", libc::SYS_shutdown),     // graceful socket close
+    ("clock_nanosleep", libc::SYS_clock_nanosleep), // tokio timer
+    // The audit signer create_dir_all's the audit dir on first open;
+    // Rust std emits the legacy `mkdir` on x86_64.
+    ("mkdir", libc::SYS_mkdir),
+    ("mkdirat", libc::SYS_mkdirat),
+    // tokio's runtime queries CPU affinity when it spawns workers after
+    // confinement (worker count / NUMA placement).
+    ("sched_getaffinity", libc::SYS_sched_getaffinity),
 ];
 
 #[cfg(target_arch = "aarch64")]
@@ -131,6 +169,39 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("prctl", libc::SYS_prctl),
     ("set_tid_address", libc::SYS_set_tid_address),
     ("set_robust_list", libc::SYS_set_robust_list),
+    // ── substitution-endpoint additions (see x86_64 block for rationale) ──
+    ("clone", libc::SYS_clone),
+    ("clone3", libc::SYS_clone3),
+    ("rseq", libc::SYS_rseq),
+    ("madvise", libc::SYS_madvise),
+    ("sched_yield", libc::SYS_sched_yield),
+    ("eventfd2", libc::SYS_eventfd2),
+    ("getsockname", libc::SYS_getsockname),
+    ("getpeername", libc::SYS_getpeername),
+    ("getsockopt", libc::SYS_getsockopt),
+    ("setsockopt", libc::SYS_setsockopt),
+    // arch divergence: aarch64 has no bare `poll` syscall — both `poll`
+    // and `ppoll` fold into `SYS_ppoll` (the policy layer keeps both names).
+    ("poll", libc::SYS_ppoll),
+    ("ppoll", libc::SYS_ppoll),
+    ("pread64", libc::SYS_pread64),
+    ("pwrite64", libc::SYS_pwrite64),
+    ("statx", libc::SYS_statx),
+    ("socketpair", libc::SYS_socketpair),
+    ("recvmmsg", libc::SYS_recvmmsg),
+    ("sendmmsg", libc::SYS_sendmmsg),
+    ("getdents64", libc::SYS_getdents64),
+    ("readlinkat", libc::SYS_readlinkat),
+    ("fcntl", libc::SYS_fcntl),
+    ("shutdown", libc::SYS_shutdown),
+    ("clock_nanosleep", libc::SYS_clock_nanosleep),
+    // arch divergence: aarch64 has no bare `mkdir` — it folds into
+    // `mkdirat` (the policy layer keeps both names).
+    ("mkdir", libc::SYS_mkdirat),
+    ("mkdirat", libc::SYS_mkdirat),
+    // tokio's runtime queries CPU affinity when it spawns workers after
+    // confinement (worker count / NUMA placement).
+    ("sched_getaffinity", libc::SYS_sched_getaffinity),
 ];
 
 /// Resolve a syscall by name to its `libc::SYS_*` number on the current

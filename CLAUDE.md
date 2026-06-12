@@ -11,7 +11,7 @@ macOS Host (this CLI) -> libkrun Linux VM -> Firecracker microVM (/dev/kvm)
 Linux Host (this CLI) -> Firecracker microVM (/dev/kvm)
 ```
 
-Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Plan 72 W0–W6 + Plan 75 W0). libkrun is the default macOS backend; Apple Container is the macOS 26+ Apple Silicon backend; Firecracker is the Linux KVM path. There is no `--lima` flag and no Lima fallback.
+Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Plan 72 W0–W6 + Plan 75 W0). libkrun is the default macOS backend; Vz (Apple Virtualization.framework) is the macOS 26+ Apple Silicon backend; Firecracker is the Linux KVM path. There is no `--lima` flag and no Lima fallback. Plan 177 Phase 2 folded the former in-process `apple_container` backend into the supervisor-model `vz` backend — there is one AVF code path now, and `--hypervisor apple-container` is gone (use `vz`).
 
 ## Host dependencies (macOS)
 
@@ -51,7 +51,7 @@ binaries are already embedded.
 The builder VM (the Linux guest that runs `nix build` inside `mvmctl build image` / `mvmctl up` / `mvmctl dev`) picks between two host VMMs:
 
 - **libkrun** — third-party in-process VMM via the Homebrew trio above. Default on Linux + macOS 13-25. Works everywhere mvm runs.
-- **Vz** — Apple Virtualization.framework. Default on macOS 26+ Apple Silicon (mirrors the Apple Container runtime tier). macOS-only.
+- **Vz** — Apple Virtualization.framework. Default on macOS 26+ Apple Silicon; the single AVF backend (the in-process `apple_container` path was folded into it in Plan 177 Phase 2). macOS-only.
 
 Selection priority (highest first):
 
@@ -76,7 +76,7 @@ Persistent builder state dirs live under `~/.cache/mvm/builder-vm/vms/`, disting
 - `mvm-guest` -- vsock protocol, console, integrations, agent; `runner` module + `mvm-runner` `[[bin]]` (in-guest function entrypoint).
 - `mvm-build` -- Nix builder pipeline; also hosts `vz` (Swift-supervisor interface, was `mvm-vz`), `egress_proxy` (lib), and the builder-VM-only `[[bin]]`s `mvm-host-vm-init` + `mvm-egress-proxy` (cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
 - `mvm` -- runtime: shell, VM lifecycle, UI, templates. Re-exports `shell`/`ui`/`shell_mock`/`cow`/`runtime_meta` from `mvm-backend::base` to preserve the mvmd `mvmctl::runtime::*` contract.
-- `mvm-backend` -- `VmBackend` trait + every backend impl + selection/dispatch; `base` (host substrate, was `mvm-base`), `providers` (Apple VZ/Container objc2 interface, was `mvm-providers`), `libkrun`/`vz`/`firecracker`/`apple_container`/`docker`/`cloud_hypervisor` dispatch.
+- `mvm-backend` -- `VmBackend` trait + every backend impl + selection/dispatch; `base` (host substrate, was `mvm-base`), the Apple VZ objc2 interface (folded into `vz`, was the `mvm-providers` crate), `libkrun`/`vz`/`vz_control`/`firecracker`/`qemu`/`mock` dispatch.
 - `crates/deps/libkrun-sys` -- the one true C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`/gvproxy/passt); was `mvm-libkrun`. Lives low so `mvm-build` can consume the wrapper.
 - `mvm-hostd` -- host-side daemon roles: `supervisor` + `jailer` (libs) + `broker`/`host_signer`/`audit_signer` (libs + three subprocess `[[bin]]`s — the process moat). Was `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`.
 - `mvm-vm-host` -- per-VM supervisor host processes (one per guest): cfg-gated `[[bin]]`s `mvm-libkrun-supervisor` / `mvm-vz-drainer` / `mvm-firecracker-bridge`; the lib carries the firecracker-bridge config/passt-hash parsers.
@@ -94,7 +94,7 @@ Binary: `mvmctl` (from root, delegates to mvm-cli)
 
 mvm-core: `plan/` (ExecutionPlan, bundle, signing, validity), `policy/` (security, audit, network_policy, bundle/resolver/policies), `crypto/` (attestation, keystore, secret_store, snapshot_*), `protocol.rs`, `agent.rs`, `catalog.rs`, `dev_network.rs`, `config.rs` (XDG)
 
-mvm-backend: `base/` (shell, ui, linux_env, cow, runtime_meta, config — was mvm-base), `providers/apple_container`, `libkrun.rs`/`vz.rs`/`firecracker.rs`/`apple_container.rs`/`docker.rs` (dispatch), `artifacts/`
+mvm-backend: `base/` (shell, ui, linux_env, cow, runtime_meta, config — was mvm-base), `libkrun.rs`/`vz.rs`/`vz_control.rs`/`firecracker.rs`/`qemu.rs`/`mock.rs` (dispatch), `codesign.rs`, `artifacts/`
 
 mvm-build: `pipeline/` (`build.rs` = `pool_build`, `dev_build.rs`), `vz/` (Swift-supervisor config), `egress_proxy/`, `src/bin/mvm-host-vm-init*` + `src/bin/mvm-egress-proxy.rs`, `nix/`
 
@@ -126,12 +126,12 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 
 ### Key Design Decisions
 
-- **Firecracker-only on Linux; libkrun/Apple Container on macOS**: no Docker/containers on the runtime path. Builds run Nix inside the builder VM (libkrun on macOS, Firecracker on Linux KVM). The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately not wired into its start path (it's Tier 2 dev/test, not a workload-bearing tier — see ADR-002 §"Per-backend tier matrix" claim-10 egress-enforcement note). Egress default-deny is enforced on the two workload backends: Firecracker (nftables `install_default_deny`) and libkrun (gateway-bridge `PlanFlowPolicy` + scans).
+- **Firecracker-only on Linux; libkrun (macOS 13-25) / vz (macOS 26+) on macOS**: no Docker/containers on the runtime path. Builds run Nix inside the builder VM (libkrun on macOS, Firecracker on Linux KVM). The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately not wired into its start path (it's Tier 2 dev/test, not a workload-bearing tier — see ADR-002 §"Per-backend tier matrix" claim-10 egress-enforcement note). Egress default-deny is enforced on the two workload backends: Firecracker (nftables `install_default_deny`) and libkrun (gateway-bridge `PlanFlowPolicy` + scans).
 - **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The dev environment is the builder VM (`mvmctl dev` / `mvmctl dev shell`), not the microVM. See **Security model** below for the full posture.
-- **Dev mode**: `mvmctl dev` (or `mvmctl dev up`) auto-bootstraps then drops into a dev shell. On macOS 26+ Apple Silicon: boots an Apple Container with Nix + build tools via PTY-over-vsock console. On other macOS: libkrun builder VM. On Linux with KVM: Firecracker directly. `mvmctl dev down` stops it. `mvmctl dev shell` opens a shell. `mvmctl dev status` shows environment info. It does NOT start or SSH into a Firecracker microVM.
+- **Dev mode**: `mvmctl dev` (or `mvmctl dev up`) auto-bootstraps then drops into a dev shell. On macOS 26+ Apple Silicon: boots a long-lived vz builder VM (the detached `mvm-vz-supervisor` outlives the CLI; `dev down` reaps it by PID file) with Nix + build tools via PTY-over-vsock console. On other macOS: libkrun builder VM. On Linux with KVM: Firecracker directly. `mvmctl dev down` stops it. `mvmctl dev shell` opens a shell. `mvmctl dev status` shows environment info. It does NOT start or SSH into a Firecracker microVM.
 - **Headless microVMs**: `mvmctl start` and `mvmctl run` boot Firecracker as a daemon. Interactive access via `mvmctl console` (PTY-over-vsock, dev-mode only).
 - **Dev mode isolation**: `mvmctl start/stop/dev` use a completely separate code path from orchestration.
-- **Shell scripts inside run_in_vm**: complex ops are bash scripts handed to the active `LinuxEnv` backend (libkrun / Apple Container / Firecracker). Deliberate — they run inside the Linux VM, not on the macOS/Linux host.
+- **Shell scripts inside run_in_vm**: complex ops are bash scripts handed to the active `LinuxEnv` backend (libkrun / vz / Firecracker). Deliberate — they run inside the Linux VM, not on the macOS/Linux host.
 - **Idempotent setup**: every step checks if already done before acting.
 - **Templates use dev_build path**: `mvmctl template build` runs `nix build` locally inside the builder VM (no ephemeral FC builder VMs).
 - **mvm-core stays whole**: orchestration types (tenant, pool, instance, agent, protocol) remain in mvm-core even though they're only used by mvmd. This avoids a third shared-types crate and keeps the facade dependency simple.
@@ -471,7 +471,7 @@ cargo run -- cache prune             # clean stale temp files
 MicroVM (172.16.0.2, eth0)
     | TAP interface
 Builder VM (172.16.0.1, tap0) -- iptables NAT -- internet
-    | libkrun (macOS) / Apple Container (macOS 26+) / direct (Linux KVM)
+    | libkrun (macOS 13-25) / vz (macOS 26+) / direct (Linux KVM)
 macOS / Linux Host
 ```
 

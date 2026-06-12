@@ -104,6 +104,27 @@ pub fn tenant_from_signed_json(plan_json: &str) -> Result<String, serde_json::Er
     Ok(plan.tenant.0)
 }
 
+/// Decode an admitted plan from the per-VM `plan.json`, accepting both
+/// on-disk shapes: the bare `ExecutionPlan` (what the post-admission
+/// plan persist writes for lifecycle verbs, and what the firecracker
+/// bridge parses) and the `SignedExecutionPlan` envelope (what the
+/// gateway-bridge stash writes). The two shapes are disjoint — the
+/// envelope lacks every required plan field and the bare plan lacks the
+/// payload/signature fields — so trying bare first cannot misparse an
+/// envelope. No signature re-verification: the host verified the
+/// envelope at admission and the file is mode-0600 in the host TCB.
+/// On failure, the bare-decode error is returned (the persisted bare
+/// plan is the primary producer).
+pub fn plan_from_admitted_json(plan_json: &str) -> Result<ExecutionPlan, serde_json::Error> {
+    match serde_json::from_str::<ExecutionPlan>(plan_json) {
+        Ok(plan) => Ok(plan),
+        Err(bare_err) => match serde_json::from_str::<SignedExecutionPlan>(plan_json) {
+            Ok(signed) => serde_json::from_slice(&signed.0.payload),
+            Err(_) => Err(bare_err),
+        },
+    }
+}
+
 /// Verify a signed plan against a set of trusted keys, returning the
 /// parsed `ExecutionPlan` on success.
 ///
@@ -285,6 +306,42 @@ mod tests {
             &secrets[0].source,
             SecretSource::Keystore { address } if address == "openai"
         ));
+    }
+
+    #[test]
+    fn admitted_json_decodes_bare_plan() {
+        let mut plan = sample_plan();
+        plan.secrets = vec![SecretBinding {
+            name: "API_KEY".into(),
+            source: SecretSource::Keystore {
+                address: "echo-key".into(),
+            },
+        }];
+        let json = serde_json::to_string(&plan).unwrap();
+        let decoded = plan_from_admitted_json(&json).unwrap();
+        assert_eq!(decoded, plan);
+    }
+
+    #[test]
+    fn admitted_json_decodes_signed_envelope() {
+        let mut plan = sample_plan();
+        plan.secrets = vec![SecretBinding {
+            name: "API_KEY".into(),
+            source: SecretSource::Keystore {
+                address: "echo-key".into(),
+            },
+        }];
+        let (sk, _vk) = fresh_key();
+        let signed = sign_plan(&plan, &sk, "test-signer");
+        let json = serde_json::to_string(&signed).unwrap();
+        let decoded = plan_from_admitted_json(&json).unwrap();
+        assert_eq!(decoded, plan);
+    }
+
+    #[test]
+    fn admitted_json_rejects_garbage_with_bare_error() {
+        assert!(plan_from_admitted_json("{\"not\":\"a plan\"}").is_err());
+        assert!(plan_from_admitted_json("not json").is_err());
     }
 
     #[test]

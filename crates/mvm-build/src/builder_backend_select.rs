@@ -96,11 +96,11 @@ pub fn auto_detect_default_for(is_macos_26_apple_silicon: bool) -> BuilderBacken
 }
 
 /// Auto-detect using the live runtime platform + compile-time arch.
-/// `has_apple_containers()` already enforces `Platform::MacOS` +
+/// `is_vz_default_tier()` already enforces `Platform::MacOS` +
 /// `is_macos_26_or_later()`; the arch check completes the "Apple
 /// Silicon" half of the predicate.
 pub fn auto_detect_default() -> BuilderBackendChoice {
-    let is_target = current().has_apple_containers() && cfg!(target_arch = "aarch64");
+    let is_target = current().is_vz_default_tier() && cfg!(target_arch = "aarch64");
     auto_detect_default_for(is_target)
 }
 

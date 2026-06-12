@@ -25,9 +25,8 @@ pub struct TenantId(pub String);
 #[serde(transparent)]
 pub struct WorkloadId(pub String);
 
-/// Reference to a runtime profile (Firecracker / Apple Container /
-/// MicrovmNix / Lima / containerd). The open `BackendRegistry`
-/// resolves the name to a backend factory.
+/// Reference to a runtime profile (Firecracker / libkrun / Vz / QEMU).
+/// The open `BackendRegistry` resolves the name to a backend factory.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RuntimeProfileRef(pub String);

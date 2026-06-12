@@ -14,14 +14,9 @@
 //!   macOS-only, aarch64-only in practice (Apple Silicon + HVF),
 //!   gvproxy networking, snapshot-capable on macOS 14+
 //!   (capabilities() is host-probed; compat reports the nominal capability).
-//! - **AppleContainer**: `crates/mvm-backend/src/apple_container.rs`; macOS
-//!   26+ Apple Silicon only; vmnet networking; no snapshots or jailer.
 //! - **Qemu**: no implementation yet; capabilities are conventional QEMU
 //!   defaults for the mvm workload shape (ELF/Image per arch, ext4 rootfs,
 //!   TAP networking, snapshots, no jailer). Flagged with `// assumption`.
-//! - **Vfkit**: no implementation yet; Apple Virtualization.framework thin
-//!   wrapper (same tier as Vz), aarch64/macOS only, gvproxy networking.
-//!   Flagged with `// assumption`.
 
 use mvm_core::arch::GuestArch;
 use mvm_core::kernel_format::KernelFormat;
@@ -35,9 +30,7 @@ pub enum MicrovmBackend {
     Firecracker,
     Libkrun,
     Vz,
-    AppleContainer,
     Qemu,
-    Vfkit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -169,30 +162,6 @@ static VZ: BackendCompat = BackendCompat {
     networking: NetworkingModel::Gvproxy,
 };
 
-// AppleContainer: source — crates/mvm-backend/src/apple_container.rs.
-// macOS 26+ Apple Silicon only; aarch64 only.
-// Apple Containerization.framework manages its own kernel internally (vminitd);
-// the host-level start() receives a kernel_path but the framework controls
-// the boot, so kernel format is opaque to mvm. Modelled as Image (arm64 Linux
-// Image) since that is what mkGuest produces for Apple Container targets.
-// vmnet networking (dedicated per-container; documented in module header).
-// No jailer, no snapshots (capabilities() confirms both false).
-static APPLE_CONTAINER: BackendCompat = BackendCompat {
-    backend: MicrovmBackend::AppleContainer,
-    guest_arches: &[Aarch64], // macOS 26+ Apple Silicon
-    kernel_formats: &[
-        // The Containerization.framework boots the guest; kernel format
-        // is framework-internal. We model Image (the arm64 Linux Image
-        // that mkGuest emits) as the accepted format.  // assumption
-        (Aarch64, &[K::Image]),
-    ],
-    rootfs_formats: &[R::Ext4],
-    required_boot_args: &["console=hvc0"],
-    supports_snapshots: false,
-    supports_jailer: false,
-    networking: NetworkingModel::UserModeVirtio, // vmnet; closest model is UserModeVirtio
-};
-
 // Qemu: no implementation yet. Capabilities are conventional QEMU defaults
 // for the mvm workload shape. All fields are marked // assumption below.
 // x86_64: ELF vmlinux or bzImage (Raw accepted as generic blob);  // assumption
@@ -212,22 +181,6 @@ static QEMU: BackendCompat = BackendCompat {
     networking: NetworkingModel::Tap,       // assumption: QEMU standard TAP
 };
 
-// Vfkit: no implementation yet. Apple Virtualization.framework thin wrapper
-// (same tier as Vz), aarch64/macOS only. Capabilities modelled after Vz
-// since both use the same underlying Apple VZ API.                // assumption
-static VFKIT: BackendCompat = BackendCompat {
-    backend: MicrovmBackend::Vfkit,
-    guest_arches: &[Aarch64], // assumption: Apple Silicon / macOS only
-    kernel_formats: &[
-        (Aarch64, &[K::Elf, K::Image]), // assumption: same as Vz (Apple VZ accepts both)
-    ],
-    rootfs_formats: &[R::Ext4],            // assumption
-    required_boot_args: &["console=hvc0"], // assumption: matches Vz shape
-    supports_snapshots: false, // assumption: conservative; Vfkit snapshot API unverified
-    supports_jailer: false,    // assumption: no jailer (Apple VZ path)
-    networking: NetworkingModel::Gvproxy, // assumption: mirrors Vz gvproxy path
-};
-
 // ── lookup ────────────────────────────────────────────────────────────────────
 
 pub fn compat(b: MicrovmBackend) -> &'static BackendCompat {
@@ -235,9 +188,7 @@ pub fn compat(b: MicrovmBackend) -> &'static BackendCompat {
         MicrovmBackend::Firecracker => &FIRECRACKER,
         MicrovmBackend::Libkrun => &LIBKRUN,
         MicrovmBackend::Vz => &VZ,
-        MicrovmBackend::AppleContainer => &APPLE_CONTAINER,
         MicrovmBackend::Qemu => &QEMU,
-        MicrovmBackend::Vfkit => &VFKIT,
     }
 }
 
@@ -270,9 +221,7 @@ mod tests {
             MicrovmBackend::Firecracker,
             MicrovmBackend::Libkrun,
             MicrovmBackend::Vz,
-            MicrovmBackend::AppleContainer,
             MicrovmBackend::Qemu,
-            MicrovmBackend::Vfkit,
         ] {
             assert_eq!(compat(b).backend, b);
         }
@@ -299,21 +248,12 @@ mod tests {
     }
 
     #[test]
-    fn apple_container_is_aarch64_only() {
-        let c = compat(MicrovmBackend::AppleContainer);
-        assert!(c.guest_arches.contains(&Aarch64));
-        assert!(!c.guest_arches.contains(&X86_64));
-    }
-
-    #[test]
     fn firecracker_supports_jailer_others_do_not() {
         assert!(compat(MicrovmBackend::Firecracker).supports_jailer);
         for b in [
             MicrovmBackend::Libkrun,
             MicrovmBackend::Vz,
-            MicrovmBackend::AppleContainer,
             MicrovmBackend::Qemu,
-            MicrovmBackend::Vfkit,
         ] {
             assert!(!compat(b).supports_jailer, "{b:?} should not have jailer");
         }
