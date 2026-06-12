@@ -346,6 +346,7 @@ in Phase 2.
 | Vz / Virtualization.framework (macOS 13+) | ✅ HVF | ✅ Vz (Apple-controlled API surface on top of HVF) | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — the single AVF backend (the former in-process Apple-Container path folded in here, Plan 177 Phase 2). Same `Hypervisor.framework` primitive as libkrun, smaller Apple-controlled API surface, balloon + snapshots. Claim 3 partial — dm-verity pipeline targets Firecracker today; claims 1, 2, 4, 5, 6, 7 hold. Auto-selected default on macOS 26+ Apple Silicon; opt-in elsewhere on macOS via `--builder vz` / `--hypervisor vz`. |
 | libkrun / libkrun (Linux KVM, macOS HVF) | ✅ | ✅ | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — claim 3 partial; comparable VMM TCB to Firecracker; the macOS 13-25 default and the Linux-without-KVM fallback per ADR-013. |
 | QEMU (Linux KVM/TCG) | ✅ KVM | ⚠️ QEMU TCB much larger | ⚠️ partial verified boot | ✅ | ✅ | Tier 2 — claim 3 partial; QEMU's larger device model raises L2 audit cost. **Dev/test only** (Plan 166, was microvm.nix): selected by `mvm` for a Linux dev/test loop, never by `mvmd` — it carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately *not* wired into its start path (see the egress-enforcement note below). |
+| `wasm-sandbox` (browser / WASI) | ❌ | ❌ | ❌ | ❌ | ❌ | **Off the isolation scale** (ADR-069). A portable backend for browser/wasm demos and previews (real WASI execution is deferred — Plan 144) — no KVM, no real kernel, no TAP/virtio/vsock. Asserts **none** of the numbered claims, declares its own non-virtualization honestly (`hardware_virtualization=false`), and fails closed on any kernel/TAP/vsock request. Opt-in only (`--hypervisor wasm-sandbox` / `browser`); `auto_select()` never returns it. See the Tier-0 preview note below. |
 
 **Tier discipline**: Tier 1 is the production default and the only
 tier that carries the *full* ADR-002 promise. Tier 2 carries six of
@@ -379,6 +380,28 @@ through its start path first (`VmStartConfig` carries no egress-policy field
 today); that is a deliberate future decision, not a Phase A gap. This refines
 the "Network policy enforcement at hypervisor level" non-goal below, which
 predates Plan 123's host-side enforcement.
+
+**Tier-0 preview substrate (a naming bridge).** The `wasm-sandbox` backend
+above asserts none of the numbered claims by design, so it sits *outside* the
+Tier 1/2 isolation scale rather than below it — there is no "Tier 3" to demote
+it to (Docker held that slot and was deleted). ADR-080 (proposed) builds a
+dev-preview workflow on this backend and refers to it as the **Tier 0**
+preview tier — "Tier 0" there meaning *zero production claims asserted*, not a
+rung on the ascending-is-weaker scale used here. The two names describe the
+same substrate; the threat-model framing is what makes the absence of claims
+safe: Tier 0 is **single-principal** — a developer's own code running in their
+own browser sandbox, endangering only themselves (adversary class 1's
+"malicious *guest*" does not apply when the guest author and the only party at
+risk are the same person). No production isolation claim is asserted or
+needed. Promotion to a real, claim-bearing microVM does **not** lift the
+preview's running state; it re-materializes the workload from recorded intent
+through the audited build + admission pipeline (the claim 8 admission path,
+claim 11 sealed deps, and claim 3 verified boot where the target backend
+supports it), so nothing produced in a no-claims tier carries authority into a
+claim-bearing one. The moment a `wasm-sandbox` host serves *more than one*
+principal, this single-principal justification lapses and it would need to run
+inside a real microVM — a requirement ADR-080 (proposed) would impose, not a
+property enforced by this backend today.
 
 ## Consequences
 
