@@ -21,7 +21,25 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use mvm_sdk::ir::Workload;
-use mvm_sdk::runtime::{RuntimeRecording, compile_recording};
+use mvm_sdk::runtime::{
+    Divergence, RuntimeRecording, compile_recording_with_findings, recording_sha256_hex,
+    verify_recording_digest,
+};
+
+/// Hard cap on recording bytes read from disk — guards the JSON parser
+/// against a multi-GiB file before serde ever runs. Far above any
+/// legitimate recording (ops are capped downstream).
+const MAX_RECORDING_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A recording loaded from disk: the lowered workload, the divergence
+/// findings the admission path gates on, the content digest captured
+/// at read time, and any raw-secret findings from the host-side scan.
+pub(in crate::commands) struct LoadedRecording {
+    pub workload: Workload,
+    pub findings: Vec<Divergence>,
+    pub digest_hex: String,
+    pub secret_findings: Vec<crate::commands::build::trace_secret_scan::SecretFinding>,
+}
 
 /// Languages the auto-exec path supports.
 #[derive(Debug, Clone, Copy)]
@@ -52,7 +70,11 @@ pub(in crate::commands) fn script_language_from_path(path: &Path) -> Option<Scri
 /// Run `<interpreter> <script>` on the host with
 /// `MVM_SDK_MODE=record` and `MVM_SDK_OUT_PATH=<tempfile>`, then
 /// load the recording the SDK's atexit hook wrote and lower it
-/// to a Workload.
+/// to a [`LoadedRecording`].
+///
+/// The digest is captured the moment the tempfile is read — right
+/// after the subprocess exits — making it the trusted baseline for
+/// downstream audit and verification.
 ///
 /// **Security**: this *runs the user's script on the host*. Per
 /// S2 in the SDK plan, this is a deliberate departure from the
@@ -61,7 +83,7 @@ pub(in crate::commands) fn script_language_from_path(path: &Path) -> Option<Scri
 pub(in crate::commands) fn auto_exec_record_script(
     script: &Path,
     lang: ScriptLanguage,
-) -> Result<Workload> {
+) -> Result<LoadedRecording> {
     let interpreter = resolve_interpreter(lang)?;
     let tmp = tempfile::Builder::new()
         .prefix("mvm-recording-")
@@ -115,20 +137,56 @@ pub(in crate::commands) fn auto_exec_record_script(
             script.display()
         );
     }
-    load_recording(&out_path)
+    load_recording(&out_path, None)
 }
 
-/// Load a recording JSON from disk and lower it through the SDK's
-/// `compile_recording`. Reused by `mvmctl compile --from-recording`
-/// and the auto-exec path above.
-pub(in crate::commands) fn load_recording(path: &Path) -> Result<Workload> {
+/// Load a recording JSON from disk, verify its size and optionally its
+/// digest, lower it through the SDK, and return the workload together
+/// with divergence findings and the captured digest.
+///
+/// Reused by `mvmctl compile --from-recording` and the auto-exec path
+/// above. The `expected_sha256` argument is `None` in the auto-exec
+/// path (freshly captured) and `Some` when the caller supplies
+/// `--recording-sha256`.
+pub(in crate::commands) fn load_recording(
+    path: &Path,
+    expected_sha256: Option<&str>,
+) -> Result<LoadedRecording> {
+    let meta = std::fs::metadata(path)
+        .with_context(|| format!("reading metadata for {}", path.display()))?;
+    if meta.len() > MAX_RECORDING_BYTES {
+        bail!(
+            "recording file {} is {} bytes, exceeding the {} byte cap — \
+             a legitimate recording never approaches this size; a runaway \
+             loop or adversarial file does.",
+            path.display(),
+            meta.len(),
+            MAX_RECORDING_BYTES
+        );
+    }
     let bytes = std::fs::read(path)
         .with_context(|| format!("reading runtime recording from {}", path.display()))?;
+    let digest_hex = recording_sha256_hex(&bytes);
+    if let Some(expected) = expected_sha256 {
+        verify_recording_digest(&bytes, expected)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .with_context(|| format!("digest verification failed for {}", path.display()))?;
+    }
     let recording: RuntimeRecording = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing runtime recording JSON from {}", path.display()))?;
-    compile_recording(&recording)
+    let secret_findings = crate::commands::build::trace_secret_scan::scan_recording_for_secrets(
+        &recording,
+        &mvm_hostd::supervisor::secrets_scanner::SecretsScanner::with_default_rules(),
+    );
+    let (workload, findings) = compile_recording_with_findings(&recording)
         .map_err(|e| anyhow::anyhow!("{e}"))
-        .with_context(|| format!("lowering runtime recording from {}", path.display()))
+        .with_context(|| format!("lowering runtime recording from {}", path.display()))?;
+    Ok(LoadedRecording {
+        workload,
+        findings,
+        digest_hex,
+        secret_findings,
+    })
 }
 
 /// Resolve which interpreter to spawn for a given language. Each

@@ -1,6 +1,6 @@
 //! Emit the canonical Addon Manifest JSON Schema to stdout.
 //!
-//! Mirrors `mvm-ir/src/bin/emit_schema.rs`. Output is canonicalized
+//! Mirrors `mvm-sdk/src/bin/emit_schema.rs`. Output is canonicalized
 //! via `mvm_sdk::ir::canonicalize` so that schema-freshness checks are
 //! deterministic across toolchain versions and platforms.
 

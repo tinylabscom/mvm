@@ -10,7 +10,7 @@
 //! | Module | Crate | Purpose |
 //! |--------|-------|---------|
 //! | [`core`] | mvm-core | Types, IDs, config, protocol, signing, routing |
-//! | [`security`] | mvm-security | Command gating, threat classification, rate limiting |
+//! | [`security`] | mvm-core::crypto | Command gating, threat classification, rate limiting |
 //! | [`runtime`] | mvm | Shell execution, VM lifecycle, template management |
 //! | [`build`] | mvm-build | Nix builder pipeline |
 //! | [`guest`] | mvm-guest | Vsock protocol, integration manifest, guest agent |

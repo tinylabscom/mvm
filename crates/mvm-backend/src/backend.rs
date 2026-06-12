@@ -1,3 +1,4 @@
+use crate::catalog::{self, BackendKind};
 use anyhow::Result;
 use mvm_core::vm_backend::{
     BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, StartMode, VmBackend,
@@ -6,7 +7,7 @@ use mvm_core::vm_backend::{
 
 // Every backend variant + the FC support modules live in this crate.
 // `microvm`, `image` are siblings under `crate::`; the substrate
-// (`config`, `shell`, `runtime_meta`) lives in `mvm-base`.
+// (`config`, `shell`, `runtime_meta`) lives in `crate::base`.
 use crate::base::config::{PortMapping, VMS_DIR};
 use crate::base::shell::run_in_vm_stdout;
 use crate::image::RuntimeVolume;
@@ -371,19 +372,9 @@ impl AnyBackend {
     /// `"vz"` (Apple Virtualization.framework, macOS), `"libkrun"`
     /// (Linux KVM / macOS HVF). Unknown names fall back to Firecracker.
     pub fn from_hypervisor(name: &str) -> Self {
-        match name {
-            "libkrun" | "krun" => Self::Libkrun(LibkrunBackend),
-            "vz" | "virtualization" => Self::Vz(VzBackend),
-            // `"qemu"` is the Linux dev/test backend (KVM where
-            // present, TCG fallback).
-            "qemu" => Self::Qemu(QemuBackend),
-            // Test-only in-memory backend. See `crate::mock`. Routing
-            // here from a production caller is a misconfiguration, but
-            // the explicit selector lets integration tests drive every
-            // VM-lifecycle CLI verb hermetically.
-            "mock" => Self::Mock(MockBackend::new()),
-            _ => Self::Firecracker(FirecrackerBackend),
-        }
+        catalog::kind_for_selector(name)
+            .map(BackendKind::instantiate)
+            .unwrap_or_else(Self::default_backend)
     }
 
     /// Select the best backend for the current platform.
@@ -438,17 +429,12 @@ impl AnyBackend {
     /// default in that case.
     pub fn for_started_vm(name: &str) -> Option<Self> {
         let dir = mvm_core::config::vm_state_dir(name);
-        if dir.join("qemu.pid").is_file() {
-            Some(Self::Qemu(QemuBackend))
-        } else if dir.join("libkrun.pid").is_file() {
-            Some(Self::Libkrun(LibkrunBackend))
-        } else if dir.join("fc.pid").is_file() {
-            Some(Self::Firecracker(FirecrackerBackend))
-        } else if dir.join("vz.pid").is_file() {
-            Some(Self::Vz(VzBackend))
-        } else {
-            None
-        }
+        catalog::started_vm_probe_entries()
+            .into_iter()
+            .filter_map(|entry| entry.marker_file)
+            .find(|marker_file| dir.join(marker_file).is_file())
+            .and_then(catalog::kind_for_marker_file)
+            .map(BackendKind::instantiate)
     }
 
     /// Aggregate the running-VM listing across every backend that can be
@@ -458,12 +444,7 @@ impl AnyBackend {
     /// and stoppable, not just whichever backend the CLI defaulted to.
     pub fn list_all() -> Vec<VmInfo> {
         let mut vms = Vec::new();
-        for backend in [
-            Self::Qemu(QemuBackend),
-            Self::Libkrun(LibkrunBackend),
-            Self::Firecracker(FirecrackerBackend),
-            Self::Vz(VzBackend),
-        ] {
+        for backend in catalog::list_all_entries().map(|entry| entry.kind.instantiate()) {
             if let Ok(found) = backend.list() {
                 vms.extend(found);
             }
@@ -482,36 +463,7 @@ impl AnyBackend {
     /// asserts the two stay in sync; bumping one without the other
     /// fails CI.
     pub fn tier(&self) -> BackendTier {
-        match self {
-            // Tier 1: hardened production. Firecracker (with jailer +
-            // seccomp) is the sole Tier-1 VMM.
-            Self::Firecracker(_) => BackendTier::Tier1,
-
-            // Tier 2: fast local. libkrun's host/guest boundary
-            // is well-engineered but not equivalent to
-            // Firecracker + jailer + seccomp. Apple Container
-            // (Virtualization.framework) sits here per its existing
-            // `BackendSecurityProfile.tier` string.
-            // QEMU: best-case Tier 2 (KVM-accelerated). The TCG (no-KVM)
-            // mode is a runtime Tier-3 degradation surfaced by the QEMU
-            // backend's `start` banner + doctor, not by this compile-time
-            // classification.
-            Self::Libkrun(_) | Self::Vz(_) | Self::Qemu(_) => BackendTier::Tier2,
-
-            // Tier 3: test-only. Mock is in-memory.
-            Self::Mock(_) => BackendTier::Tier3,
-        }
-    }
-
-    /// Dispatch helper — returns a `&dyn VmBackend` for the inner backend.
-    fn inner(&self) -> &dyn VmBackend {
-        match self {
-            Self::Firecracker(b) => b,
-            Self::Libkrun(b) => b,
-            Self::Vz(b) => b,
-            Self::Qemu(b) => b,
-            Self::Mock(b) => b,
-        }
+        catalog::entry(self.kind()).tier
     }
 
     pub fn name(&self) -> &str {
@@ -772,6 +724,13 @@ mod tests {
     }
 
     #[test]
+    fn test_any_backend_from_hypervisor_mock() {
+        let backend = AnyBackend::from_hypervisor("mock");
+        assert_eq!(backend.name(), "mock");
+        assert!(matches!(backend, AnyBackend::Mock(_)));
+    }
+
+    #[test]
     fn test_any_backend_from_hypervisor_unknown_defaults() {
         let backend = AnyBackend::from_hypervisor("unknown");
         assert_eq!(backend.name(), "firecracker");
@@ -789,36 +748,23 @@ mod tests {
     fn for_started_vm_resolves_owning_backend_by_marker() {
         // A started VM's owning backend is resolved from its state-dir pid
         // marker so `down`/`status`/`ls` dispatch to the right VMM.
-        let temp = std::path::PathBuf::from(format!(
-            "/tmp/mvmac-fsv-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let vms = temp.join(".mvm/vms");
+        let _legacy_guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let temp = tempfile::tempdir().expect("create temp HOME");
+        let vms = temp.path().join(".mvm/vms");
         for (name, marker) in [("q1", "qemu.pid"), ("l1", "libkrun.pid"), ("f1", "fc.pid")] {
             std::fs::create_dir_all(vms.join(name)).expect("mkdir vm dir");
             std::fs::write(vms.join(name).join(marker), "123").expect("write marker");
         }
-        let saved = std::env::var("HOME").ok();
-        // SAFETY: for_started_vm (HOME consumer) is the only env reader in
-        // this test; restored below.
-        unsafe { std::env::set_var("HOME", &temp) };
+        env.set("HOME", temp.path());
+        env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
 
         let q = AnyBackend::for_started_vm("q1");
         let l = AnyBackend::for_started_vm("l1");
         let f = AnyBackend::for_started_vm("f1");
         let none = AnyBackend::for_started_vm("does-not-exist");
-
-        unsafe {
-            match saved {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-        let _ = std::fs::remove_dir_all(&temp);
 
         assert!(matches!(q, Some(AnyBackend::Qemu(_))), "qemu.pid → Qemu");
         assert!(
@@ -834,29 +780,17 @@ mod tests {
 
     #[test]
     fn for_started_vm_resolves_vz_by_marker() {
-        let temp = std::path::PathBuf::from(format!(
-            "/tmp/mvmac-fsv-vz-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let vms = temp.join(".mvm/vms");
+        let _legacy_guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let temp = tempfile::tempdir().expect("create temp HOME");
+        let vms = temp.path().join(".mvm/vms");
         std::fs::create_dir_all(vms.join("vzvm")).expect("mkdir vm dir");
         std::fs::write(vms.join("vzvm").join("vz.pid"), "12345").expect("write marker");
-        let saved = std::env::var("HOME").ok();
-        // SAFETY: for_started_vm (HOME consumer) is the only env reader in
-        // this test; restored below.
-        unsafe { std::env::set_var("HOME", &temp) };
+        env.set("HOME", temp.path());
+        env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
         let result = AnyBackend::for_started_vm("vzvm");
-        unsafe {
-            match saved {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-        let _ = std::fs::remove_dir_all(&temp);
         assert!(matches!(result, Some(AnyBackend::Vz(_))), "vz.pid → Vz");
     }
 
@@ -868,6 +802,81 @@ mod tests {
             // The full set of legitimate auto_select returns is:
             matches!(name, "firecracker" | "vz" | "libkrun"),
             "auto_select returned unexpected backend: {name}"
+        );
+    }
+
+    #[test]
+    fn backend_catalog_matrix_is_stable() {
+        let actual: Vec<_> = catalog::entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.selector,
+                    entry.aliases.to_vec(),
+                    entry.tier,
+                    entry.marker_file,
+                    entry.started_vm_probe_order,
+                    entry.include_in_list_all,
+                    entry.include_in_balloon_support,
+                    entry.include_in_warm_start_support,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    "firecracker",
+                    Vec::new(),
+                    BackendTier::Tier1,
+                    Some("fc.pid"),
+                    Some(3),
+                    true,
+                    true,
+                    true,
+                ),
+                (
+                    "libkrun",
+                    vec!["krun"],
+                    BackendTier::Tier2,
+                    Some("libkrun.pid"),
+                    Some(2),
+                    true,
+                    true,
+                    true,
+                ),
+                (
+                    "vz",
+                    vec!["virtualization"],
+                    BackendTier::Tier2,
+                    Some("vz.pid"),
+                    Some(4),
+                    false,
+                    false,
+                    true,
+                ),
+                (
+                    "qemu",
+                    Vec::new(),
+                    BackendTier::Tier2,
+                    Some("qemu.pid"),
+                    Some(1),
+                    true,
+                    true,
+                    true,
+                ),
+                (
+                    "mock",
+                    Vec::new(),
+                    BackendTier::Tier3,
+                    None,
+                    None,
+                    false,
+                    false,
+                    false,
+                ),
+            ]
         );
     }
 

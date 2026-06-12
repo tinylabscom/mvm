@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-12**
+**Last updated: 2026-06-12** (ADR-080 program batch landed: Plans 188/186/187)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -29,10 +29,18 @@ details** below for the workstream-level state.
 - [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C2/C3 (FC/Vz warm-start) gated
 - [ ] **PLAN 124** — Lean guest agent · 🟡 ~65%; SDK codegen + signed on-device config remain
 - [ ] **PLAN 126** — Dependency reduction · 🟡 ~30%; duplicate-major lock-gate landed (+ supply-chain CI restored); sigstore/aws-lc/forbidden-dep-gate remain
-- [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 convergence landed (#806) — remaining: hardware smoke (host-gated) + cosmetic rename slice
+- [x] **PLAN 177** — Backend consolidation (8→4) · ✅ both phases merged (#806/#789/#812/#814/#817); DX-parity → Plan 189; lone caveat = host-gated hardware smoke
+- [ ] **PLAN 182** — Trait hygiene + backend catalog · 🟡 code+docs done locally; aggregate workspace-test SIGKILL remains
+- [ ] **PLAN 184** — Backend descriptor registry · 🔴 not started
+- [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 shared TestEnv landed; mvm-core + backend marker tests migrated
+- [ ] **PLAN 189** — VZ DX parity (post-convergence) · 🔴 scoped, not started — save/restore verbs, cached fast-boot default, --json coverage, base pinning (spun out of 177; sibling of 159)
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
+- [x] **PLAN 188** — Capability projection seam (ADR-080 P5) · ✅ LANDED (#801); kernel-side wiring spec'd as Plan 190; WASI-context mapping deferred
+- [x] **PLAN 186** — Trace hardening (ADR-080 P1/P3/P4 + hardened P2 pin) · ✅ LANDED (#809; caught + fixed a live shell-injection in the FilesWrite lowering)
+- [x] **PLAN 187** — Secret-scan admission gate (ADR-080 P7) · ✅ LANDED (#811)
+- [ ] **PLAN 190** — Kernel egress decision converges on CanonicalEgress (ADR-080 P5 close-out) · 🔴 spec'd, not started (lenient L4 lowering, zero claim-10 behaviour change)
 
 ## Plan details
 
@@ -265,6 +273,38 @@ PLAN 124 — Lean guest agent                     🟡 ~65%
   [ ] D1.2/D1.3 SDK codegen
   [ ] E signed on-device config
 
+PLAN 184 — Backend descriptor registry          🔴 not started
+  [ ] Promote `mvm-backend`'s shipped backend catalog into a first-class
+      `BackendDescriptor` / registry API while preserving `VmBackend` as the
+      sole backend behavior trait
+  [ ] Add descriptor-driven construction for both `AnyBackend` and
+      `Arc<dyn VmBackend>` consumers
+  [ ] Migrate read-only and clearly generic backend consumers away from enum
+      dispatch where no backend-specific behavior is needed
+  [ ] Keep `AnyBackend` only for intentionally enum-specific operations
+      (`auto_select` policy, backend-specific helpers, explicit variant checks)
+
+PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
+  [x] Add `mvm_core::util::test_env::TestEnv` behind `cfg(test)` /
+      `mvm-core/test-support`; migrate `mvm-core` keystore env tests; verify
+      with focused tests + `cargo clippy -p mvm-core --all-targets -- -D warnings`
+  [x] Migrate `mvm-backend::backend` selector/started-VM marker tests to
+      `TestEnv` + `tempfile::TempDir`; keep the legacy backend env lock until
+      the rest of that crate migrates
+  [ ] Roll `TestEnv` through remaining high-risk env-mutating tests in `mvm-backend`,
+      `mvm-cli`, and `mvm-build`
+  [ ] Standardize poisoned-lock handling by distinguishing test/global
+      serialization locks from real runtime state locks
+  [ ] Rename overly generic internal traits/types where the blast radius is
+      small, including storage/backend and layer-local egress proxy names
+  [ ] Push stringly backend/provider selectors toward typed values at module
+      boundaries
+  [ ] Audit long constructors, params structs, builders, and large functions
+      only where the split adds testable structure
+  [ ] Audit unsafe/platform/feature boundaries, standardize error shapes,
+      consolidate repeated fixtures, check secret/debug exposure, and add
+      Rustdoc verification to closeout
+
 PLAN 170 — Host lifecycle convergence           ✅ mvm-side done (density → mvmd)
   [x] WS-A reconcile-on-entry — PR #688 (merged)
   [~] WS-B idle-reaper mechanism — PR #696 (merged, no consumer)
@@ -291,9 +331,18 @@ PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C1
       doctor warm-start matrix + Linux NBD/HugeTLB substrate probe
   [ ] C2 Firecracker live-memory fast-resume — carved out → Plan 175
   [ ] C3 Vz save/restore (macOS 26+) — owned by Plan 152 WS-C
-  [ ] C4 warm-start CLI/RPC wiring — carved out → Plan 175 (rides C2)
+
+PLAN 182 — Trait hygiene + backend catalog      🟡 code+docs in; aggregate workspace-test gate remains
+  [x] shared `mvm_core::time::{Clock,SystemClock}` replaces the three local copies
+  [x] duplicate `KeyProvider` retired in favor of `mvm_core::crypto::keystore`
+  [x] backend metadata catalog becomes the single source for `AnyBackend` selectors
+      and `mvmctl doctor` backend support maps
+  [x] macro scope stays narrow: land `backend_catalog!`, reject broader trait-impl/noop macros
+  [x] architecture docs now describe the current trait seams and ownership rules
+  [ ] literal `cargo test --workspace` aggregate run (package-local tests are green; workspace run hits SIGKILL on `mvm-backend` here)
 
 PLAN 175 — Firecracker live-memory warm-start    🔴 NOT STARTED (live-KVM-gated; Plan 123 C2 carve-out)
+  [ ] C4 warm-start CLI/RPC wiring — carved out → Plan 175 (rides C2)
   [ ] T1 VMGenID delivery on PostRestore (token payload + GenIdReseeder dispatch)
   [ ] T2 UFFD/NBD/hugepages fast-resume substrate (diff snapshot + lazy paging)
   [ ] T3 SIGUSR1 "primed" ready-barrier for a deterministic warm base
@@ -317,7 +366,7 @@ PLAN 126 — Dependency reduction                 🟡 ~25%
 PLAN 153 — CLI directory split                  ✅ DONE (subsumed into Plan 178)
   [x] image.rs → image/ ; catalog.rs → catalog/ (last two flat files)
 
-PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 convergence LANDED (#806) — 4 backends + mock; one vz AVF path. Remaining to tick DONE: hardware smoke (host-gated) + cosmetic rename slice  (ADR-076)
+PLAN 177 — Backend consolidation (8→4)           ✅ DONE — both phases merged; 4 backends + mock; one vz AVF path. DX-parity → Plan 189. Lone caveat = host-gated macOS-26 hardware smoke (validation of merged code)  (ADR-076)
   [x] Phase 1 delete docker (+ dead Tier-3 banner subsystem)
   [x] Phase 1 delete cloud_hypervisor (+ ch_runtime, ch-bootcheck)
   [x] Phase 1 fold microvm_nix → qemu
@@ -332,13 +381,21 @@ PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 
       `has_apple_containers`→`is_vz_default_tier`; all `"apple-container"` selectors
       collapsed to vz; backend.rs tests repointed; ADR-002 tier matrix pruned
       (docker/CH/apple-container rows dropped, microvm.nix→QEMU); CLAUDE.md updated.
-  [ ] Remaining before Phase 2 ticks fully DONE: (a) live macOS-26 vz `dev up`/`up`
-      hardware smoke (host-gated — deferred while a parallel session is mid-vz-debug
-      on this host + known in-flight dev-boot bugs would confound attribution);
-      (b) cosmetic rename slice — the env module file `apple_container.rs`,
-      `AppleContainerEnv`, `MicrovmBackend::AppleContainer`, and the objc2
-      `mvm_apple_container_*` cdecl symbols still carry the old name (functional
-      path is already vz).
+  [x] Cosmetic rename slice — env module `apple_container.rs`, `AppleContainerEnv`,
+      `MicrovmBackend::AppleContainer`, and the objc2 `mvm_apple_container_*` cdecl
+      symbols deleted (#814 + #817).
+  [x] Trailing dead `VsockProxyTransport` removed (zero callers post-convergence).
+  [~] Lone caveat: live macOS-26 vz `dev up`/`up` hardware smoke — host-gated
+      validation of already-merged code (vz boot path already exercised by Plan 152
+      parity gate + Plan 159 workload-liveness); not a blocker for DONE.
+
+PLAN 189 — VZ DX parity (post-convergence)        🔴 scoped, not started  (ADR-076 §"Out of scope")
+  Spun out of Plan 177's deferred DX-parity follow-on; sibling of Plan 159 (owns
+  only the additive parity slice, cross-refs 159/140/148 for primitives).
+  [ ] WS-1 surface save/restore verbs (gated by snapshot_capability tier)
+  [ ] WS-2 cached fast-boot as the default vz boot posture
+  [ ] WS-3 --json coverage across vz lifecycle verbs
+  [ ] WS-4 base pinning (reuse artifact/template machinery, no parallel registry)
 
 PLAN 178 — CLI surface consolidation (~56→~28)   ✅ DONE (dir-purity deferred)  (ADR-077)
   [x] lock tree (D1–D6) + hide internal subprocess commands
@@ -382,6 +439,44 @@ PLAN 181 — App-builder product surface           🔴 NOT STARTED  (ADR-079; m
   NOTE: deliberately rejects the sibling app-builder's isolation model — no Docker
   socket, no host-path mounts into a workload, no auth-off/caps-off defaults, no
   baked-in agents, no multi-tenant HTTP/auth in mvm (mvmd per ADR-070 §5/Plan 33).
+
+PLAN 188 — Capability projection seam (ADR-080 P5)  ✅ LANDED (#801) — was numbered 184 pre-merge; renumbered when main claimed 184
+  [x] Proto + CanonicalRule atom (projection seam module created)
+  [x] CanonicalEgress decision set with unconditional mandatory-deny
+  [x] canonicalize_effective — L4 rules leg
+  [x] canonicalize_effective — allow-list / DNS-pin leg
+  [x] mandatory-deny overlap refusal at projection time (incl. rebinding fixture)
+  [x] to_wasi_grants + wasi_allows — hostname-keyed WASI projection (separate walk)
+  [x] clamp — intersection-only merge (requests attenuate, never widen)
+  [x] cross-projection consistency + clamp-never-widens property witnesses
+      (ADR-080 §8 P5 witness names: cross_projection_consistency_property,
+       clamp_never_widens_property, rebinding_pin_into_metadata_range_refuses)
+  [x] pub use re-exports from mvm-core::policy; ADR-080 P5 row updated
+  [ ] kernel-side wiring: LiveL4Gate/PlanFlowPolicy consume CanonicalEgress — spec'd as Plan 190
+  [ ] WASI-context mapping: WasiEgress → WasiCtxBuilder in the wasmtime runner — deferred
+  NOTE: 41 tests (39 unit + 2 property witnesses), mutation-verified. No new dependencies.
+
+PLAN 186 — Trace hardening (ADR-080 P1/P3/P4 + hardened P2 pin)  ✅ LANDED (#809)
+  [x] P1: MAX_RECORDED_OPS (1024) + 8 MiB FilesWrite cap + DuplicateFilesWritePath refusal
+  [x] P1: fuzz_runtime_recording harness in security.yml (crates/mvm-sdk/fuzz)
+  [x] P2 (interim, HARDENED): the b64-alphabet pin caught a LIVE shell-injection in the
+      FilesWrite→HookCmd::Shell lowering; fixed by base64-encoding the path too (was
+      single-quote-interpolated); verified injection-safe by executing hooks vs /bin/sh
+  [x] P3: recording_sha256_hex + verify_recording_digest + --recording-sha256; 64 MiB byte cap
+  [x] P4: Divergence vocabulary + require_acknowledged gate on `run --mode plan` (--ack-divergence)
+  [ ] P2 full (declarative IR file-materialization field, replacing the shell hook) — own plan
+  NOTE: P2-full / P6 / P8 remain open in the ADR-080 §8 ledger.
+
+PLAN 187 — Secret-scan admission gate (ADR-080 P7)  ✅ LANDED (#811)
+  [x] scan_recording_for_secrets — env literals + argv + DECODED FilesWrite payloads (Plan 129 SecretsScanner)
+  [x] refuse_embedded_secrets — HARD-refuses `run --mode plan` admission (not acknowledgeable; fix = SecretRef)
+  [x] SecretRef values skipped (Sigv4Params.access_key_id = public AKIA half, correctly not flagged); compile warns
+  [ ] paste-time detector — deferred with the browser preview tier
+
+PLAN 190 — Kernel egress decision converges on CanonicalEgress (ADR-080 P5 close-out)  🔴 spec'd, not started
+  decision: lenient canonicalize_l4 (no mandatory-deny-overlap refusal) → L4PolicyScan via
+  CanonicalEgress::permits; deletes the L4Policy/LiveL4Gate duplicate; ZERO claim-10 behaviour
+  change (rejected the whole-policy-fail-closed variant). Depends on Plan 188 (landed).
 ```
 
 ## Security claims

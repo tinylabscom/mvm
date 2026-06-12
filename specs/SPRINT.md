@@ -37,6 +37,16 @@ plan 25 sequences the work into six independently-shippable workstreams.
 ## Planning updates
 
 - [x] Added [`plans/132-programmable-storage-io.md`](plans/132-programmable-storage-io.md), a security-first plan for typed block request contracts, declared storage transforms, compressed ephemeral volumes, plan-bound storage policy, guest storage status, and a gated Linux-only userspace block-device spike.
+- [x] Added [`plans/182-trait-hygiene-and-backend-catalog.md`](plans/182-trait-hygiene-and-backend-catalog.md), a focused cleanup plan to unify duplicate micro-traits (`Clock`, `KeyProvider`), move backend name/tier/marker metadata behind one catalog source, and constrain macro use to a single backend-catalog generator instead of broader trait-impl macros.
+- [x] Added [`plans/184-backend-descriptor-registry.md`](plans/184-backend-descriptor-registry.md), a follow-on architecture plan to promote the shipped backend catalog into a first-class compile-time descriptor/registry API while keeping `VmBackend` as the sole behavior trait and retaining `AnyBackend` only for genuinely enum-specific operations.
+- [x] Added [`plans/185-idiomatic-rust-hygiene.md`](plans/185-idiomatic-rust-hygiene.md), a bounded cleanup plan for project-wide Rust idioms: shared test env guards, poisoned-lock policy, clearer internal names, typed selectors at module boundaries, params structs/builders, function splits only where they add testable structure, unsafe/platform/feature-boundary audits, error-shape cleanup, fixture consolidation, secret/debug exposure checks, and Rustdoc verification.
+- [x] Started Plan 185 implementation: added `mvm_core::util::test_env::TestEnv` behind `cfg(test)` / `mvm-core/test-support`, covered restore behavior with unit tests, and migrated `mvm-core` keystore env tests away from direct process-global env mutation. Verified with `cargo test -p mvm-core test_env`, `cargo test -p mvm-core keystore`, and `cargo clippy -p mvm-core --all-targets -- -D warnings`.
+- [x] Advanced Plan 185 into `mvm-backend`: backend selector/started-VM marker tests now use `TestEnv` and `tempfile::TempDir` instead of manual `HOME`/`MVM_DATA_DIR` save-restore blocks, while keeping the legacy backend env lock until the rest of that crate migrates. Verified with `cargo test -p mvm-backend backend` and `cargo clippy -p mvm-core -p mvm-backend --all-targets -- -D warnings`.
+- [x] Started Plan 182 implementation: `mvm_core::time::{Clock, SystemClock}` now owns the shared wall-clock seam, replacing the duplicate local `Clock` traits in `mvm-hostd` supervisor aggregate/circuit-breaker code and `mvm-cli` plan admission. Verified with `cargo test -p mvm-core time`, `cargo test -p mvm-hostd circuit_breaker`, `cargo test -p mvm-hostd launch_rejects_expired_plan`, `cargo test -p mvm-cli plan_admission`, and `cargo clippy -p mvm-core -p mvm-hostd -p mvm-cli --all-targets -- -D warnings`.
+- [x] Landed Plan 182 Task 2: removed the dead duplicate runtime `KeyProvider` module (`crates/mvm/src/security/keystore.rs`), kept `mvm_core::crypto::keystore` as the sole key-provider surface, and updated the stale overlay docs to point at the core trait. Verified with `cargo test -p mvm-core keystore`, `cargo test -p mvm --no-run`, and `cargo clippy -p mvm-core -p mvm --all-targets -- -D warnings`.
+- [x] Advanced Plan 182 backend-catalog wiring: added `crates/mvm-backend/src/catalog.rs` with one `backend_catalog!` metadata table, preserved legacy started-VM marker probe order explicitly, moved `AnyBackend::{from_hypervisor,for_started_vm,tier,list_all}` and doctor's balloon/warm-start backend sets onto that catalog, and froze the visible backend matrix/order with backend + doctor tests. Verified with `cargo test -p mvm-backend backend`, `cargo test -p mvm-cli doctor`, and `cargo clippy -p mvm-backend -p mvm-cli --all-targets -- -D warnings`.
+- [x] Updated the architecture reference for Plan 182: `public/src/content/docs/reference/architecture.md` now documents the actual workspace crates, the canonical trait seams (`VmBackend`, `BuilderVm`, `BackendLauncher`, `NetworkProvider`, `VolumeBackend`, `ServiceHandler`, `SecretStore`, `KeyProvider`, etc.), the trait ownership rule, and the current builder-VM/runtime-backend split. Also removed stale Lima-era wording in `mvm-core` environment trait comments.
+- [x] Finished the remaining Plan 182 code cleanup: the backend catalog macro now also owns `BackendKind`/`AnyBackend` kind+constructor+inner mappings, and a separate `mvm` test flake was fixed by serializing one stray `MVM_DATA_DIR` mutation in `vsock_transport` and making reconcile's test lock poison-tolerant. Verified with `cargo test -p mvm-backend`, `cargo test -p mvm`, `cargo check --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`. The literal aggregate `cargo test --workspace` still hits a host-side `SIGKILL` in the `mvm-backend` unit binary even though the package-local runs are green.
 
 ## Dependency Reduction Roadmap (analysis checkpoint: 2026-05-26)
 
@@ -2562,6 +2572,62 @@ idle-TTL/keepalive contract (W2) for its density loop (Plan 170 WS-D).
 - Container isolation / Docker-socket control plane; host-path mounts into a
   workload; auth-off / caps-off defaults; baked-in coding agents; any
   multi-tenant HTTP listener or tenant auth in mvm (mvmd per ADR-070 §5).
+
+## Sprint 62 — ADR-080 Tier-0 wasm preview → microVM ship (in flight)  [`adrs/080-wasm-preview-promotion-and-capability-policy.md`](adrs/080-wasm-preview-promotion-and-capability-policy.md)
+
+### Why this sprint
+
+ADR-080 decides the bridge from a no-claims browser/wasm dev-preview tier (the
+ADR-069 `wasm-sandbox` backend, recorded as off-the-isolation-scale "Tier 0" in
+ADR-002) to a claims-bearing production microVM: promotion is a **trace, never a
+snapshot** (record-mode → IR → audited rebuild); one capability policy projects
+to two enforcement fidelities (WASI fine-grained / kernel coarse); and eight
+fail-closed preconditions (P1–P8 in ADR-080 §8) gate the promotion path until
+each has a witness. The sprint lands those preconditions incrementally.
+
+### Workstream breakdown
+
+- **P5 — capability projection seam** ✅ LANDED (Plan 188, #801): `mvm-core::policy::projection`
+  — `canonicalize_effective`/`to_wasi_grants`/`clamp`, mandatory-deny + rebinding
+  refusal, mutation-verified cross-projection + clamp property witnesses.
+- **P1/P3/P4 — trace hardening** ✅ LANDED (Plan 186, #809): op/size/duplicate limits +
+  fuzz harness (P1); content-digest capture + verify + `--recording-sha256` (P3);
+  `Divergence` gate on `run --mode plan` (P4). The P2 interim pin **caught + fixed a
+  live shell-injection** in the FilesWrite lowering (path now base64-encoded into the
+  hook; verified against `/bin/sh`).
+- **P7 — secret-scan admission** ✅ LANDED (Plan 187, #811): `scan_recording_for_secrets`
+  (env/argv/decoded-file payloads via the Plan 129 `SecretsScanner`) hard-refuses
+  `run --mode plan` on embedded raw secrets; `SecretRef` skipped; compile warns.
+- **P5 kernel close-out** 🔴 spec'd (Plan 190): kernel L4 egress decision converges on
+  `CanonicalEgress::permits` via a lenient `canonicalize_l4`, deleting the `L4Policy`
+  duplicate, with **zero claim-10 behaviour change** (whole-policy-fail-closed variant
+  rejected).
+- **ADR-002 Tier-0 note** ✅ LANDED (#816): records the `wasm-sandbox` backend off the
+  isolation scale + the Tier-0 single-principal threat-model framing.
+
+### Deferred (ADR-080 §8 ledger)
+
+- **P2 full** — declarative IR file-materialization field replacing the shell hook.
+- **P6** — preview-fetched component digests carried into the IR; mutable refs refused
+  under `--prod`.
+- **P8** — single-session relay primitive (websocket session-token binding + wasmtime
+  fuel/memory/wall-clock caps); multi-principal host execution must run wasmtime-in-microVM.
+- The **WASI-context mapping** (`WasiEgress` → `WasiCtxBuilder`) for the in-microVM
+  wasmtime runner.
+- Multi-tenant streaming service, sessions, auth, billing — **mvmd's**, per ADR-070.
+
+### Sprint 62 success criteria
+
+- Every ADR-080 §8 precondition that gates the promotion path either has a landed
+  witness or fails closed (promotion refused) until it does. `xtask
+  check-claim-catalog` stays green; no ADR-002 numbered claim regresses.
+
+### Non-goals (explicit)
+
+- Asserting the wasm-in-microVM "double posture" as a claim before the wasmtime
+  runner exists (the unwitnessed-claim anti-pattern ADR-002 guards against).
+- Any production isolation claim for Tier 0 — it is single-principal dev preview,
+  by design.
 
 ## Completed Sprints
 

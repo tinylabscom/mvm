@@ -1,236 +1,154 @@
 ---
 title: Architecture
-description: Workspace structure, multi-backend design, dependency graph, and key abstractions.
+description: Workspace structure, backend layering, dependency graph, and canonical trait seams.
 ---
 
-## Multi-Backend Design
+## Overview
 
-mvmctl supports multiple VM backends and auto-selects the best one for your platform:
+`mvmctl` has two distinct execution layers:
 
-| Backend | Platform | Selection Priority |
-|---------|----------|-------------------|
-| Firecracker | Linux with `/dev/kvm` | 1st (preferred) |
-| libkrun | macOS Apple Silicon (Hypervisor.framework) | 2nd |
-| Apple Container | macOS 26+ Apple Silicon | 3rd fallback |
-| Docker | Any platform with Docker daemon | 4th (reduced isolation) |
-| microvm.nix | Linux (NixOS-native QEMU) | Via `--hypervisor qemu` |
+- **Build layer**: Nix evaluation/builds and Linux-only host operations run through the
+  shared builder VM.
+- **Runtime layer**: a selected VM backend boots the finished guest artifacts.
 
-```
-Linux (KVM):    mvmctl up  -->  Firecracker microVM (direct)
-macOS:          mvmctl up  -->  libkrun microVM (Hypervisor.framework)
-Docker:         mvmctl up  -->  Docker container (Tier 3 fallback)
-```
+The key design choice is that these layers are separated by traits. Build code depends on
+build/environment traits; runtime code depends on `VmBackend`; host policy/audit code depends
+on launcher and service traits.
 
-All backends consume the same Nix-built ext4 rootfs. The rootfs is built through the builder VM first, then booted by the selected runtime backend. Override runtime auto-detection with `--hypervisor`:
+## Multi-Backend Runtime Design
 
-```bash
-mvmctl up --flake . --hypervisor apple-container
-mvmctl up --flake . --hypervisor firecracker
-mvmctl up --flake . --hypervisor docker
-mvmctl up --flake . --hypervisor qemu    # microvm.nix
-mvmctl doctor   # check available backends
-```
+Concrete runtime backends implement
+`mvm_core::vm_backend::VmBackend`. The closed enum
+`mvm_backend::backend::AnyBackend` is the dispatch layer that:
 
-### Backend Capabilities
+- applies platform auto-selection policy,
+- preserves explicit backend selection (`--hypervisor ...`),
+- routes already-started VMs back to the backend that owns their state.
 
-| Capability | Firecracker | Apple Container | libkrun | microvm.nix | Docker |
-|------------|:-----------:|:---------------:|:-------:|:-----------:|:------:|
-| Snapshots | Yes | No | No | No | No |
-| Pause/resume | Yes | No | No | No | Yes |
-| vsock | Yes | Yes | Yes | Yes | No |
-| TAP networking | Yes | No (vmnet) | TSI | Yes | No |
-| Port forwarding (`-p`) | Yes | Yes | Yes | Yes | Yes |
-| Detach mode (`-d`) | Yes | Yes | Yes | Yes | Yes |
+### Runtime backend matrix
 
-Template snapshots (`--snapshot`) are only available on the Firecracker backend.
+| Backend | Selection mode | Notes |
+|---------|----------------|-------|
+| Firecracker | Auto on Linux with native KVM | Production Tier 1 backend |
+| Apple Container | Auto on supported macOS 26+ hosts | Preferred macOS local backend when available |
+| libkrun | Auto fallback on supported hosts | Fast local Tier 2 backend |
+| Vz | Explicit opt-in (`--hypervisor vz`) | Supported, but not auto-selected |
+| QEMU | Explicit opt-in (`--hypervisor qemu`) | Linux dev/test backend |
+| Mock | Explicit opt-in (`--hypervisor mock`) | Test-only in-memory backend |
+
+The backend catalog in `crates/mvm-backend/src/catalog.rs` is the single source of truth for
+backend names, aliases, tiers, marker files, and doctor-facing support sets.
 
 ## Workspace Structure
 
-mvmctl is a Cargo workspace with 7 crates plus a root facade:
+The workspace is organized by responsibility rather than by platform:
 
-| Crate | Purpose |
-|-------|---------|
-| **mvm-core** | Pure types, IDs, config, protocol, signing, routing (no runtime deps) |
-| **mvm-guest** | Vsock protocol, integration health checks, guest agent binary |
-| **mvm-build** | Nix builder pipeline (dev_build for local, pool_build for fleet) |
-| **mvm-runtime** | Shell execution, VM lifecycle, UI, template management |
-| **mvm-security** | Security posture evaluation, jailer operations, seccomp profiles |
-| **mvm-apple-container** | Apple Virtualization.framework backend (macOS 26+) |
-| **mvm-cli** | Clap CLI, bootstrap, update, doctor, template commands |
+| Area | Crates | Role |
+|------|--------|------|
+| Core types and contracts | `mvm-core` | Shared types, protocols, config helpers, canonical lightweight traits |
+| Runtime backends | `mvm-backend`, `mvm`, `mvm-vm-host` | VM lifecycle, backend adapters, per-VM host helpers |
+| Build pipeline | `mvm-build` | Builder VM flow, artifact production, builder backend seams |
+| Host policy / supervision | `mvm-hostd` | Admission, audit, policy enforcement, launch preparation |
+| Guest / protocol surfaces | `mvm-guest`, `mvm-guest-helpers`, `mvm-mcp` | Guest agent and protocol-facing tooling |
+| Domain-specific subsystems | `mvm-storage`, `mvm-network`, `mvm-oci`, `mvm-verify` | Storage, networking, OCI, audit verification |
+| CLI / SDK surface | `mvm-cli`, `mvm-sdk`, `mvm-sdk-macros` | User interface and workload authoring APIs |
 
-The root crate is a facade (`src/lib.rs`) that re-exports all sub-crates as `mvmctl::core`, `mvmctl::runtime`, `mvmctl::build`, `mvmctl::guest`. The binary entry point (`src/main.rs`) delegates to `mvm_cli::run()`.
+The root crate (`mvm`) is the facade/runtime integration crate. `mvm-cli` is the binary-facing
+command surface.
 
 ## Dependency Graph
 
-```
-mvm-core (foundation, no mvm deps)
-├── mvm-guest (core)
-├── mvm-build (core, guest)
-├── mvm-security (core)
-├── mvm-apple-container (core)
-├── mvm-runtime (core, guest, build, security)
-└── mvm-cli (core, runtime, build, guest)
-```
+At a high level:
 
-Changes to `mvm-core` affect all crates. Changes to `mvm-cli` affect nothing else.
-
-## Key Abstractions
-
-### VmBackend
-
-VM lifecycle abstraction defined in `mvm-core`:
-
-- `start()`, `stop()`, `status()`, `list()`
-- `capabilities()` -- pause/resume, snapshots, vsock, TAP networking
-
-Implementations:
-- **`FirecrackerBackend`** -- KVM microVMs via Firecracker (Linux native)
-- **`AppleContainerBackend`** -- Virtualization.framework (macOS 26+ Apple Silicon)
-- **`LibkrunBackend`** -- libkrun-backed local VM support (Linux KVM, macOS Apple Silicon)
-- **`MicrovmNixBackend`** -- NixOS-native QEMU runner
-- **`DockerBackend`** -- Container-based fallback, universal platform support
-- **`AnyBackend`** -- enum dispatch, auto-selects at runtime
-
-### LinuxEnv
-
-Where Linux commands run. Defined in `mvm-core`:
-
-- `run()` -- run a command, return Output
-- `run_visible()` -- run with stdout/stderr forwarded
-- `run_stdout()` -- run and return stdout as String
-- `run_capture()` -- run and capture both stdout and stderr
-
-Implementations:
-- **`BuilderVmEnv`** -- delegates Linux-only build work into the project builder VM
-- **`NativeEnv`** -- runs Linux commands directly where the host itself is the Linux execution boundary
-
-### ShellEnvironment
-
-Build-time shell abstraction:
-
-- `shell_exec()`, `shell_exec_stdout()`, `shell_exec_visible()`
-- `log_info()`, `log_success()`, `log_warn()`
-
-Used by `dev_build()` for local Nix builds.
-
-### BuildEnvironment
-
-Extends `ShellEnvironment` for fleet orchestration:
-
-- `load_pool_spec()`, `load_tenant_config()`
-- `ensure_bridge()`, `setup_tap()`, `teardown_tap()`
-- `record_revision()`
-
-### Supervisor: the two layers
-
-"Supervisor" is reused at two distinct layers in this codebase. Knowing which one a given file or PR talks about removes most of the confusion when reading the source.
-
-#### 1. `mvm-supervisor` — host-side admission and audit substrate
-
-The library at `crates/mvm-supervisor/`, consumed by `mvm-cli` when you run `mvmctl up`. It turns a "I want to run this workload" intent into a launched, audited microVM on a single host. Responsibilities, all on the host (not in the guest):
-
-- **Admit an `ExecutionPlan`** — verify the Ed25519 signature, enforce the validity window, refuse replays via a nonce ledger. See `admit_for_run` and `host_signer::load_or_init_at`.
-- **Chain-sign audit events** — append `plan.admitted` / `plan.launched` / `plan.failed` / `plan.oci_provenance` / `gateway.flow_opened` / `gateway.flow_closed` entries to `~/.mvm/audit/<tenant>.jsonl`, each hash-linked to the previous (`AuditEntry`, `FileAuditSigner` under cross-process `flock`, `verify_audit_chain`).
-- **Run the gateway audit bridge** — splice every guest network byte through an in-process bridge that emits flow events into the chain (`gateway_bridge`, `gateway_audit`). The bridge is the load-bearing piece of [security claim 10](/security/ci-claims).
-- **Verify sealed deps volumes**, **resolve policy bundles**, **enforce default-deny network policy**, **run the L4 / L7 egress proxies**.
-
-It does not link libkrun, does not call `krun_start_enter`, and never owns the guest's lifetime directly. It tells a per-VM child process to do that.
-
-#### 2. `mvm-libkrun-supervisor` (and `mvm-vz-supervisor`) — per-VM long-lived processes
-
-The bin at `crates/mvm-libkrun-supervisor/` (and the Swift sibling at `crates/mvm-vz-supervisor/`) is the actual process that owns one running guest. **One process per VM**, by design:
-
-> `krun_start_enter` calls `exit()` on the calling process when the guest powers off. An in-process registry would tear down every other libkrun guest the parent `mvmctl` is supervising. One process per VM scopes the `exit()` to a single supervisor, so the parent `mvmctl` returns immediately after spawning and survives a guest shutdown.
-
-Lifecycle:
-
-1. `mvm-backend::LibkrunBackend::start()` spawns the binary with a JSON `SupervisorConfig` piped to stdin.
-2. The bin ad-hoc-codesigns itself for `Hypervisor.framework` on macOS, creates the per-VM state dir, writes its PID file.
-3. Configures libkrun (`configure_with_gateway`), spawns the userspace network gateway (`passt` on Linux, `gvproxy` on macOS), spawns the gateway audit bridge.
-4. Calls `krun_start_enter`, which blocks until the guest exits, then `exit()`s.
-
-When `mvmctl stop <vm>` runs it reads the PID file and `SIGTERM`s this process. `mvm-vz-supervisor` is the parallel Swift binary that fills the same role on macOS 26+ Apple Silicon (Vz backend).
-
-#### How they relate
-
-The host-side `mvm-supervisor` (layer 1) builds a `SupervisorConfig`, spawns the per-VM bin (layer 2) with that JSON, and returns. The audit chain bridges the two layers: admission events (`plan.admitted` etc.) are written by layer 1 *before* layer 2 starts; runtime events (`gateway.flow_*`) are written by the bridge running *inside* layer 2. Both append to the same `~/.mvm/audit/<tenant>.jsonl` under cross-process `flock`, so the chain stays linear and `mvmctl audit verify` can validate it end-to-end.
-
-```
-mvmctl up <flake>
-  └── mvm-supervisor (layer 1, in mvmctl process)
-        │  • verifies ExecutionPlan signature
-        │  • emits plan.admitted to ~/.mvm/audit/<tenant>.jsonl
-        │  • resolves policy bundle, installs host firewall
-        │  • spawns ↓
-        └── mvm-libkrun-supervisor (layer 2, one process per VM)
-              • boots libkrun guest
-              • bridges guest network through gateway_bridge
-              • emits gateway.flow_opened / flow_closed
-                to the same ~/.mvm/audit/<tenant>.jsonl
-              • exits when the guest exits
+```text
+mvm-core
+├── mvm-storage
+├── mvm-network
+├── mvm-build
+├── mvm-backend
+├── mvm-hostd
+├── mvm-guest
+├── mvm
+└── mvm-cli
 ```
 
-#### Why the split exists at all (the mvm / mvmd boundary)
+Interpretation:
 
-This repo (`mvm`) is the single-host runtime — one host trusts itself with the hypervisor and the host-signer key. `mvm-supervisor` enforces the security claims at that boundary.
+- `mvm-core` is the dependency root and should stay runtime-light.
+- `mvm-backend`, `mvm-build`, and `mvm-hostd` are peer owning crates for their
+  respective execution domains.
+- `mvm-cli` sits at the top of the stack and composes the lower layers.
 
-Multi-tenant fleet orchestration lives in the separate [mvmd](https://github.com/tinylabscom/mvmd) repo. mvmd does *not* consume `mvm-supervisor` as a library — it has its own gateway (`mvmd-gateway`), its own runtime (`mvmd-runtime`), and its own admission flow that ultimately calls down to mvm-tier backends. The cross-repo split is intentional per the [threat model](/security/threat-model) (ADR-002) and the [CI-enforced security claims](/security/ci-claims) (claim 10 substrate, ADR-058):
+## Canonical Trait Seams
 
-- `mvm-supervisor` ↔ per-VM, per-host, per-tenant admission + audit (security claims 8, 9, 10).
-- `mvmd` ↔ cross-VM, cross-host, cross-tenant orchestration. mvmd's Plan 50 (network manager) layers per-tenant gateway pools, egress quotas, cross-tenant traffic isolation, and tenant-level audit rollup *above* mvm-supervisor's per-VM substrate.
+These are the main behavior seams in the current codebase:
 
-A workload running through mvmd transits both layers: mvmd's admission decides which host the workload lands on and sets cross-tenant policy; mvm-supervisor on that host then runs the per-VM admission + audit substrate this doc describes.
+| Trait | Owning crate | Purpose |
+|-------|--------------|---------|
+| `VmBackend` | `mvm-core` | Runtime VM lifecycle and capability contract |
+| `ShellEnvironment` | `mvm-core` | Minimal shell/logging seam for build flows |
+| `BuildEnvironment` | `mvm-core` | Extended build orchestration environment |
+| `LinuxEnv` | `mvm-core` | Linux execution boundary abstraction |
+| `KeyProvider` | `mvm-core` | Snapshot/secret key loading |
+| `SecretStore` | `mvm-core` | Secret retrieval/storage seam |
+| `ServiceHandler` | `mvm-core` | Protocol service dispatch |
+| `BuilderVm` | `mvm-build` | High-level builder VM driver |
+| `VmBackendForBuilder` | `mvm-build` | Low-level builder backend seam |
+| `BackendLauncher` | `mvm-hostd` | Host-side backend launch preparation/execution |
+| `NetworkProvider` | `mvm-network` | Network provisioning / policy seam |
+| `VolumeBackend` | `mvm-storage` | Storage backend seam |
 
-### Supervisor Enforcement
+### Ownership rule
 
-`mvm-supervisor` owns the host-side policy slots used after plan admission:
+Reusable, runtime-light seams live in `mvm-core`.
 
-- `L4Gate` evaluates policy-bundle `[[network.l4]]` rows with default-deny semantics
-- `BackendLauncher::prepare_launch()` returns backend-owned runtime slot metadata before tenant launch, without starting tenant code
-- `FirecrackerRunConfigLauncher` adapts a prebuilt Firecracker `FlakeRunConfig` into the supervisor backend slot, exposing its `VmSlot` during preparation and calling `run_from_build()` only after firewall install
-- `Supervisor::with_*` assembly methods wire backend, policy, audit, artifact, and firewall slots without bypassing the launch-time firewall validation gate
-- `FirewallSpec::from_vm_slot()` derives VM identity and TAP device from backend runtime `VmSlot` metadata, then validates identifiers before any platform rule generation
-- `FirewallEnforcer` installs per-VM default-deny host firewall rules before backend launch and tears them down on failed launch or stop
-- `LinuxNftFirewall` generates VM-scoped nftables tables that only allow TAP traffic to the supervisor proxy interface
-- `NoopFirewallEnforcer` fails closed when no platform firewall is wired
+That means traits like `VmBackend`, `KeyProvider`, `SecretStore`, and the build-shell
+abstractions belong in `mvm-core` because many crates depend on them and they do not require
+runtime-heavy backend code.
 
-## How It Works
+Backend- or subsystem-specific seams stay in the owning crate:
 
-At startup, mvmctl detects the platform and selects the appropriate runtime backend:
+- `VmBackendForBuilder` belongs in `mvm-build`.
+- `BackendLauncher` belongs in `mvm-hostd`.
+- `NetworkProvider` belongs in `mvm-network`.
+- `VolumeBackend` belongs in `mvm-storage`.
 
-1. **Native Linux with `/dev/kvm`** -- uses `FirecrackerBackend` for runtime VM lifecycle
-2. **macOS 26+ Apple Silicon** -- uses `AppleContainerBackend` for dev/runtime VM lifecycle; Nix builds run inside the libkrun-backed builder VM
-3. **Other hosts** -- unsupported for local microVM isolation today; Docker is a Tier 3 convenience fallback only (see [Matryoshka model](/security/matryoshka))
+This keeps `mvm-core` small while still giving the rest of the workspace stable contracts.
 
-WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work, not part of the supported local platform matrix.
+## Runtime Flow
 
-```
-Host (macOS Apple Silicon / native Linux KVM)
-  ├── Builder VM
-  │     └── nix eval / nix build / artifact extraction
-  └── Runtime backend (auto-selected)
-        └── Runtime guest (your workload, headless, vsock where supported)
-```
+Runtime launch is layered:
+
+1. `mvm-cli` parses intent and assembles launch configuration.
+2. `mvm-hostd` handles admission, audit, and launch-time host policy.
+3. `mvm-backend` selects a concrete `VmBackend` implementation.
+4. The selected backend boots the Nix-built artifacts.
+
+`AnyBackend` is intentionally a closed enum rather than a dynamic plugin registry. The runtime
+seam is the `VmBackend` trait; the enum is the current policy/dispatch wrapper around known
+backends.
 
 ## Build Pipeline
 
-`mvmctl build` is a host command that discovers a manifest-backed project and stages a build job for the builder VM. The builder VM invokes `nix build` inside Linux, producing:
+`mvmctl build` and related build flows do not boot workload backends directly.
 
-- **vmlinux** -- Firecracker-compatible kernel
-- **rootfs.ext4** or **rootfs.squashfs** -- guest root filesystem
+Instead:
 
-No initrd is needed -- the kernel boots directly into a busybox init script on the rootfs.
+1. the host prepares a build request,
+2. the builder VM performs the Linux/Nix work,
+3. the produced artifacts are handed to the runtime layer,
+4. a runtime backend boots those artifacts later.
 
-The builder VM is not the runtime VM. Runtime commands such as `mvmctl up`, `mvmctl run`, and boot benchmarks consume the finished artifacts from the host cache. See [Builder VM](/guides/builder-vm/) for the detailed control-plane flow.
+The builder VM is the Linux execution boundary for Nix eval/builds and microVM-management
+operations. It is not the same thing as the selected workload runtime backend.
 
 ## Platform Support
 
-| Platform | Architecture | Backend |
-|----------|-------------|---------|
-| macOS | Apple Silicon (aarch64) | libkrun (Hypervisor.framework) |
-| macOS 26+ without libkrun | Apple Silicon (aarch64) | Apple Container fallback |
-| Linux with `/dev/kvm` | x86_64, aarch64 | Firecracker (native) |
-| Linux without `/dev/kvm` | x86_64, aarch64 | Docker (Tier 3 fallback) |
-| macOS Intel | x86_64 | Unsupported for local microVMs |
-| WSL2 | x86_64 | Future/experimental backend work |
-| Any platform with Docker | x86_64, aarch64 | Docker (universal fallback) |
+| Host platform | Default runtime path |
+|---------------|----------------------|
+| Linux with native KVM | Firecracker |
+| Supported macOS 26+ host | Apple Container |
+| Supported host with libkrun available | libkrun |
+
+Other backends such as Vz and QEMU exist, but they are selected explicitly rather than by
+default policy.

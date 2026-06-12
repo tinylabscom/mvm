@@ -1,0 +1,1 @@
+{"workload_id":"seed","create":{"template":"minimal"},"ops":[{"kind":"files_write","path":"/app/a.txt","bytes_b64":"aGk="},{"kind":"command_start","argv":["/bin/true"]},{"kind":"kill"}]}

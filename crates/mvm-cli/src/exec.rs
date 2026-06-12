@@ -861,7 +861,7 @@ pub struct SessionVm {
 /// backend spawns the substitution endpoint (the guest never holds a raw
 /// secret). The caller (`invoke --from-workload-ir`) admits the workload's
 /// lowered secrets and hands these JSON-serialized fields back; `boot_session_vm`
-/// threads them into the `VmStartConfig`. Strings (not typed `mvm-plan` values)
+/// threads them into the `VmStartConfig`. Strings (not typed `mvm-core::plan` values)
 /// so this module carries no admission-type dep. **Do not log `plan_json`** — the
 /// signed envelope carries secret bindings.
 pub struct SessionAuditSubstrate {
@@ -1112,10 +1112,8 @@ mod tests {
 
     #[test]
     fn add_dir_expands_tilde_in_host_path() {
-        // SAFETY: test process is single-threaded for env access.
-        unsafe {
-            std::env::set_var("HOME", "/tmp/fakehome");
-        }
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("HOME", "/tmp/fakehome");
         let d = AddDir::parse("~/configs:/etc/configs").unwrap();
         assert_eq!(d.host_path, "/tmp/fakehome/configs");
         assert_eq!(d.guest_path, "/etc/configs");
