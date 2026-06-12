@@ -241,10 +241,12 @@ pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError>
     }
     let mut seen_paths = std::collections::BTreeSet::new();
     for op in &rec.ops {
-        if let RecordedOp::FilesWrite { path, .. } = op
-            && !seen_paths.insert(path.clone())
-        {
-            return Err(LowerError::DuplicateFilesWritePath { path: path.clone() });
+        // nested rather than a let-chain: let-chains need Rust 1.88, MSRV is 1.85
+        #[allow(clippy::collapsible_if)]
+        if let RecordedOp::FilesWrite { path, .. } = op {
+            if !seen_paths.insert(path.clone()) {
+                return Err(LowerError::DuplicateFilesWritePath { path: path.clone() });
+            }
         }
     }
 
