@@ -28,7 +28,7 @@ pub use policies::{
 };
 pub use projection::{
     CanonicalEgress, CanonicalRule, ProjectionError, Proto, WasiEgress, WasiOutboundGrant,
-    WasiTarget, canonicalize_effective, clamp, to_wasi_grants, wasi_allows,
+    WasiTarget, canonicalize_effective, canonicalize_l4, clamp, to_wasi_grants, wasi_allows,
 };
 pub use redaction::{
     EntropyMode, NameMode, RedactionAction, RedactionPolicy, RedactionProfile, SecretAction,

@@ -183,6 +183,52 @@ fn refuse_inverted_ports(dest: &str, lo: u16, hi: u16) -> Result<(), ProjectionE
     Ok(())
 }
 
+/// Lower L4 rule specs to canonical rules. `refuse_overlap` gates the
+/// admission-time mandatory-deny refusal: the projection/preview path
+/// (canonicalize_effective) passes true; the kernel packet path passes
+/// false, because permits() denies mandatory-deny ranges at decision
+/// time and the always-on deny scan backstops it.
+fn lower_l4_specs(
+    specs: &[crate::policy::policies::L4RuleSpec],
+    refuse_overlap: bool,
+) -> Result<Vec<CanonicalRule>, ProjectionError> {
+    let mut rules = Vec::new();
+    for spec in specs {
+        let net: IpNet = spec
+            .dst_cidr
+            .parse()
+            .map_err(|source| ProjectionError::BadCidr {
+                cidr: spec.dst_cidr.clone(),
+                source,
+            })?;
+        if refuse_overlap {
+            refuse_mandatory_overlap(&spec.dst_cidr, &net)?;
+        }
+        refuse_inverted_ports(&spec.dst_cidr, spec.port_lo, spec.port_hi)?;
+        let (port_lo, port_hi) = normalize_ports(spec.port_lo, spec.port_hi);
+        rules.push(CanonicalRule {
+            proto: Proto::parse(&spec.proto)?,
+            net,
+            port_lo,
+            port_hi,
+        });
+    }
+    Ok(rules)
+}
+
+/// Lenient L4 lowering for the kernel packet path: malformed-input
+/// refusals only (bad CIDR, unknown proto, inverted ports). Does NOT
+/// refuse mandatory-deny overlap — permits() denies mandatory-deny
+/// ranges at decision time and the always-on deny scan backstops it.
+pub fn canonicalize_l4(
+    specs: &[crate::policy::policies::L4RuleSpec],
+) -> Result<CanonicalEgress, ProjectionError> {
+    let mut rules = lower_l4_specs(specs, false)?;
+    rules.sort();
+    rules.dedup();
+    Ok(CanonicalEgress::Rules(rules))
+}
+
 /// Lower a resolved policy + admission-time pin registry into the
 /// canonical egress grant set. Pure; fail-closed on every
 /// malformed or unpinnable input. `now` is an RFC 3339 UTC
@@ -196,25 +242,7 @@ pub fn canonicalize_effective(
     if eff.egress.mode.as_deref() == Some("open") {
         return Ok(CanonicalEgress::Unrestricted);
     }
-    let mut rules = Vec::new();
-    for spec in &eff.network.l4 {
-        let net: IpNet = spec
-            .dst_cidr
-            .parse()
-            .map_err(|source| ProjectionError::BadCidr {
-                cidr: spec.dst_cidr.clone(),
-                source,
-            })?;
-        refuse_mandatory_overlap(&spec.dst_cidr, &net)?;
-        refuse_inverted_ports(&spec.dst_cidr, spec.port_lo, spec.port_hi)?;
-        let (port_lo, port_hi) = normalize_ports(spec.port_lo, spec.port_hi);
-        rules.push(CanonicalRule {
-            proto: Proto::parse(&spec.proto)?,
-            net,
-            port_lo,
-            port_hi,
-        });
-    }
+    let mut rules = lower_l4_specs(&eff.network.l4, true)?;
     rules.extend(pinned_allow_list_rules(eff, pins, now)?);
     rules.sort();
     rules.dedup();
@@ -959,6 +987,59 @@ mod tests {
         }
         // And the covered request survives.
         assert!(granted.permits(&Proto::Udp, ip("8.8.8.8"), 53));
+    }
+
+    // ─────────────────────────────────────────────────
+    // canonicalize_l4 — lenient kernel-path lowering
+    // ─────────────────────────────────────────────────
+
+    #[test]
+    fn canonicalize_l4_lowers_rules_like_canonicalize_effective() {
+        let specs = vec![
+            l4("tcp", "93.184.216.0/24", 443, 443),
+            l4("udp", "8.8.8.8/32", 0, 0),
+        ];
+        let eg = canonicalize_l4(&specs).unwrap();
+        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
+        assert!(eg.permits(&Proto::Udp, ip("8.8.8.8"), 53)); // (0,0) any-port
+        assert!(!eg.permits(&Proto::Tcp, ip("93.184.216.34"), 80));
+    }
+
+    #[test]
+    fn canonicalize_l4_refuses_bad_cidr_and_unknown_proto_and_inverted_ports() {
+        assert!(matches!(
+            canonicalize_l4(&[l4("tcp", "nope", 1, 1)]).unwrap_err(),
+            ProjectionError::BadCidr { .. }
+        ));
+        assert!(matches!(
+            canonicalize_l4(&[l4("icmp", "8.8.8.8/32", 0, 0)]).unwrap_err(),
+            ProjectionError::UnknownProto { .. }
+        ));
+        assert!(matches!(
+            canonicalize_l4(&[l4("tcp", "8.8.8.8/32", 443, 80)]).unwrap_err(),
+            ProjectionError::InvertedPortRange { .. }
+        ));
+    }
+
+    #[test]
+    fn canonicalize_l4_does_not_refuse_mandatory_deny_overlap_but_permits_denies_it() {
+        // The lenient kernel lowering BUILDS a metadata-overlapping rule
+        // (unlike canonicalize_effective, which refuses it), but the
+        // decision function still denies the metadata IP — mandatory-deny
+        // is checked first in permits().
+        let eg = canonicalize_l4(&[l4("tcp", "169.254.0.0/16", 0, 0)])
+            .expect("lenient: builds, no refusal");
+        assert!(
+            !eg.permits(&Proto::Tcp, ip("169.254.169.254"), 80),
+            "metadata denied at decision time"
+        );
+    }
+
+    #[test]
+    fn canonicalize_l4_empty_is_deny_all() {
+        let eg = canonicalize_l4(&[]).unwrap();
+        assert!(!eg.permits(&Proto::Tcp, ip("8.8.8.8"), 53));
+        assert_eq!(eg, CanonicalEgress::Rules(vec![]));
     }
 }
 
