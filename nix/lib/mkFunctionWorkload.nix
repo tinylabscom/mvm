@@ -117,13 +117,17 @@ let
     before_stop = [ ];
   };
 
+  # Declarative files baked into the rootfs at build time. Default to
+  # empty so IR documents without `files` keep evaluating.
+  files = app.files or [ ];
+
   factory = mkFunctionServiceImpl {
     inherit pkgs appPkg;
     language = primary.language;
     workloadId = ir.id;
     inherit (primary) module function format;
     sourcePath = workingDir;
-    inherit hooks;
+    inherit hooks files;
   };
 in
 # PID 1 is the factory's idle boot command (stage source → before_start

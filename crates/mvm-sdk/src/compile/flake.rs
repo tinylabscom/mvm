@@ -127,6 +127,8 @@ pub fn build_flake_nix(workload: &Workload) -> Result<String, serde_json::Error>
             concurrency = launch.entrypoint.concurrency or null;
             # SDK port Phase 10b — pre-merged per-phase hook lists.
             hooks = launch.hooks or {{ before_build = [ ]; before_start = [ ]; after_start = [ ]; before_stop = [ ]; }};
+            # Declarative files baked into the rootfs at build time.
+            files = launch.files or [ ];
           }}
           else throw "mvmforge: pinned mvm revision does not expose `mvm.lib.${{system}}.mkFunctionService` (per ADR-0010 §3 / specs/contracts/mvm-mkfunctionservice.md). Bump `MVM_REV` in crates/mvm-sdk/src/compile/mvm_pin.rs to a revision that ships the upstream factory, or override via MVM_FLAKE_URL.";
     in {{

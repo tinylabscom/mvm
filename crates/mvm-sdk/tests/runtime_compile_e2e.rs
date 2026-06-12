@@ -89,6 +89,24 @@ fn recording_json_round_trips_through_compile_pipeline() {
         "flake.nix not emitted at {}",
         out.display()
     );
+
+    // The declarative file must ride into launch.json (the sidecar the
+    // generated flake reads at evaluation time) so mkFunctionService can
+    // base64-decode it into the rootfs at build time.
+    let launch: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.join("launch.json")).unwrap()).unwrap();
+    let files = launch["files"].as_array().expect("launch.files array");
+    assert_eq!(files.len(), 1, "launch.files carries the one declared file");
+    assert_eq!(files[0]["path"], "/app/note.txt");
+    assert_eq!(files[0]["bytes_b64"], "aGkK", "base64 of 'hi\\n'");
+
+    // The flake must thread launch.files into the factory call so the
+    // bake actually fires.
+    let flake = fs::read_to_string(out.join("flake.nix")).unwrap();
+    assert!(
+        flake.contains("files = launch.files or [ ]"),
+        "flake must pass launch.files into mkFunctionService"
+    );
 }
 
 #[test]
