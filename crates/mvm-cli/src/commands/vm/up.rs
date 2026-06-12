@@ -2585,7 +2585,10 @@ fn resolve_vz_workload_kernel(vmlinux_path: &str, hypervisor: &str) -> anyhow::R
     if std::path::Path::new(vmlinux_path).exists() {
         return Ok(vmlinux_path.to_string());
     }
-    if !matches!(hypervisor, "vz" | "apple-container") {
+    // `virtualization` is the long-form alias the backend dispatcher
+    // accepts for vz; missing it here would skip the fallback and hand
+    // VZ a nonexistent kernel path.
+    if !matches!(hypervisor, "vz" | "virtualization" | "apple-container") {
         return Ok(vmlinux_path.to_string());
     }
     let arch = if cfg!(target_arch = "aarch64") {

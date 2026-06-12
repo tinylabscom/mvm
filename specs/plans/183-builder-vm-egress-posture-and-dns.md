@@ -208,26 +208,42 @@ Per-arm posture keeps the lockdown exactly where the threat is.
 
 ## WS-D — verification + resume the live Vz validation
 
-- [ ] **D1: cold E2E on this host (the exact scenario that failed).**
-  `MVM_CACHE_DIR=/tmp/p183-cache MVM_DATA_DIR=/tmp/p183-data cargo run -- dev up`
-  → Stage 0 builds the image, then the **builder VM** build fetches (watch
-  `<cache>/builder-vm/jobs/<id>/nix-stderr.log` for `copying path …` instead of
-  `Could not resolve host`). Repeat with `--builder vz` to prove the Vz leg
-  (static fallback or fixed DHCP).
-- [ ] **D2: deps-install gate still locked.** Run the claim-11 CI-lane local
-  equivalents (`cargo nextest run -p mvm-build app_deps`,
-  `mvmctl deps inspect` fixture flow) and assert the install arm refuses when the
-  lockdown cannot install (new A3 test) — the posture change must not loosen
-  claim-11's witness set.
-- [ ] **D3: resume the deferred live Vz WS-2 validation (Plan 159 bonus).** With the
-  builder networked: `mvmctl up --flake examples/sleeper --hypervisor vz
-  --accept-tier2-isolation`, confirm the VM survives past ~5 s (the merged /init
-  stdin fix), then run `vm checkpoint create --class fs-quick` + `fork`,
-  `create --class vm-full` + `restore`, `pause`/`resume`, and attempt the fork
-  semantic-A spike (fresh machine-id + MAC → flip `FORK_FRESH_MACHINE_ID` /
-  `FORK_ALLOW_PARENT_RUNNING` if guest networking survives). Record outcomes in
-  Plan 159's notes.
-- [ ] **D4: rollups.** Tick this plan's boxes + update `specs/REFACTOR-STATUS.md`
+- [x] **D1: cold E2E on this host (the exact scenario that failed).** PROVEN
+  2026-06-12: isolated cold `dev up` (libkrun) exit 0, zero resolve failures,
+  the builder VM's inner nix build fetched 703 store paths from
+  cache.nixos.org, and the EROFS resolv.conf error is gone from the console.
+  Vz leg: the WS-B static fallback fired exactly as designed on the unfixed
+  link (`udhcpc exit 1 — falling back to static gvproxy addressing`); after
+  WS-E2 (bound reply socket) the Vz builder leases normally
+  (`lease of 192.168.127.3 obtained from 192.168.127.1`) and a sleeper image
+  build via `--builder vz` completes with zero resolve failures.
+- [x] **D2: deps-install gate still locked.** 17/17 app-deps gate tests green
+  locally; the install-arm refusal + per-job posture tests compile for the
+  Linux target and run in CI (green on the WS-A/B/C merges).
+- [x] **D3: live Vz WS-2 validation — run 2026-06-12 (first ever).** With WS-E:
+  `up --flake examples/sleeper --builder libkrun --hypervisor vz` admitted the
+  plan, booted on the fallback kernel, survived far past the old ~5 s crash
+  window, and the guest agent came up on vsock 5252. Round-trip results:
+  - `checkpoint create --class vm-full` on the RUNNING VM: **works** (live
+    pause→save→clone→resume window).
+  - `pause` / `resume` (native vCPU quiesce): **works**.
+  - `checkpoint create --class fs-quick`: **unreachable on Vz today** — the
+    quiesce gate does not recognize the Vz paused state (supervisor pid stays
+    alive), and `down` removes the per-instance CoW rootfs so there is nothing
+    to clone after a stop. Follow-up below.
+  - `checkpoint restore` (vm_full, same identity): **fails** — the restore arm
+    does not re-spawn the per-VM gvproxy sidecar, so the supervisor dies on
+    `connect() gvproxy.sock: No such file or directory`; a failed restore also
+    leaves its materialized rootfs behind (non-idempotent retry). Follow-ups
+    below.
+  - `checkpoint fork` (vm_full): child materialization + child gvproxy spawn
+    **work**; the boot-into-child fails with `VZErrorDomain:12` — VZ refuses
+    to restore saved machine state into a changed device config (new MAC).
+    **This answers the fork semantic-A spike**: cross-identity vm_full fork
+    via VZ machine-state restore is not viable; semantic B (the shipped
+    `FORK_FRESH_MACHINE_ID=false` / `FORK_ALLOW_PARENT_RUNNING=false`) stands.
+    A live two-copy fork on Vz needs the fs_quick (cold-boot) class instead.
+- [x] **D4: rollups.** Tick this plan's boxes + update `specs/REFACTOR-STATUS.md`
   (PLAN 183 section) + `specs/SPRINT.md` (Sprint 55 live-Vz-validation note) in the
   same change as each workstream lands.
 
@@ -274,3 +290,13 @@ Two independent defects blocked `mvmctl up --flake <workload> --hypervisor vz`:
 - [ ] `mvmctl doctor` line surfacing the in-builder egress posture + last builder
   network bootstrap outcome (lease vs static vs none), so this class of failure is
   diagnosable without console archaeology.
+- [ ] fs_quick on Vz: teach the quiesce gate to recognize the Vz paused state
+  (pid stays alive under pause), and/or stop deleting the per-instance CoW
+  rootfs on `down` so a stopped VM remains checkpointable.
+- [ ] vm_full restore: re-provision the per-VM gvproxy sidecar before spawning
+  the restore supervisor, and make a failed restore clean up its materialized
+  rootfs so the retry isn't blocked by `File exists`.
+- [ ] Vz two-copy fork: route live forks through the fs_quick (cold-boot)
+  class on Vz — VZ machine-state restore pins the saved device config
+  (`VZErrorDomain:12` on a changed MAC), so memory-state forks can't change
+  identity.

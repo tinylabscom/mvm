@@ -31,7 +31,7 @@ details** below for the workstream-level state.
 - [ ] **PLAN 126** — Dependency reduction · 🟡 ~25%; sigstore/aws-lc/lock-gate remain
 - [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 (AVF convergence) in progress
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
-- [ ] **PLAN 183** — Builder-VM egress posture + network bootstrap · 🟡 WS-A/B/C/E landed; WS-D (E2E proof) remains
+- [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
 
 ## Plan details
@@ -226,10 +226,14 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       hoisted to mvm_hostd::audit (mvmd-reachable library API); mvm-cli shimmed
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
   [ ] signed delta-image distribution (unowned — needs a home)
-  [ ] live Vz WS-2 round-trip validation + fork semantic-A spike — BLOCKED on
-      Plan 183 (builder-VM egress lockdown breaks every uncached flake build)
+  [x] live Vz WS-2 round-trip validation + fork semantic-A spike — RUN
+      2026-06-12 via Plan 183 WS-D: first live Vz workload boot; vm_full
+      create + pause/resume proven; semantic-A ANSWERED (VZ pins machine-state
+      restore to the saved device config → stay semantic B; live two-copy fork
+      goes through fs_quick). Vz checkpoint-integration gaps → Plan 183
+      follow-ups.
 
-PLAN 183 — Builder-VM egress posture + net boot 🟡 WS-A/B/C/E landed; WS-D (E2E proof) remains
+PLAN 183 — Builder-VM egress posture + net boot ✅ DONE (follow-ups tracked in plan)
   Last updated: 2026-06-12
   Diagnosis proven 2026-06-11: boot-time install_egress_lockdown (OUTPUT DROP,
   proxy-uid-only) applied to the whole builder VM and dropped every nix fetch.
@@ -245,8 +249,12 @@ PLAN 183 — Builder-VM egress posture + net boot 🟡 WS-A/B/C/E landed; WS-D (
       landed; shared guest_net module; DHCP root cause found + fixed in WS-E
   [x] WS-C writable /run-bind-mounted resolv.conf seeded with gateway resolver
   [x] WS-E vz workload boot: kernel fallback + bound gvproxy reply socket
-  [ ] WS-D cold E2E proof on macOS + claim-11 install gate still locked +
-      resume Plan 159 live Vz validation
+  [x] WS-D E2E proven 2026-06-12: cold dev up green (703 in-builder fetches,
+      0 resolve failures); Vz builder leases post-WS-E; claim-11 gates green;
+      FIRST live Vz workload boot (sleeper, agent on vsock) + WS-2 round-trips:
+      vm_full create ✅ pause/resume ✅; fs_quick-on-Vz, vm_full restore
+      (gvproxy re-spawn), and Vz two-copy fork (fs_quick class; semantic-A
+      answered: VZ pins restore to saved device config) → plan follow-ups
 
 PLAN 124 — Lean guest agent                     🟡 ~65%
   [x] A1/A3 drop tokio+rtnetlink (-27 crates)

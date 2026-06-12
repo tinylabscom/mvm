@@ -1737,9 +1737,9 @@ fn connect_gvproxy_dgram(path: &str) -> Result<OwnedFd> {
         .to_str()
         .ok_or_else(|| anyhow!("reply socket path is not valid UTF-8"))?;
 
-    // Remove any stale bind socket from a previous run before binding.
-    // SAFETY: unlink on a filesystem path; ENOENT is expected and ignored.
-    unsafe { libc::unlink(reply_path_str.as_ptr().cast()) };
+    // Remove any stale bind socket from a previous run before binding;
+    // a missing file is the normal first-boot case.
+    let _ = std::fs::remove_file(&reply_path);
 
     let bind_addr = sockaddr_un_from_path(reply_path_str)?;
     // SAFETY: bind() with a correctly-populated sockaddr_un and its size.
