@@ -46,6 +46,15 @@ use crate::ir::{
 
 const SCHEMA_VERSION: &str = "0.1";
 
+/// Hard cap on ops per recording. A hand-authored script never
+/// approaches this; a runaway loop or adversarial trace does.
+pub const MAX_RECORDED_OPS: usize = 1024;
+
+/// Hard cap on one `FilesWrite`'s decoded payload. Larger assets
+/// belong in the source bundle or a dependency volume, not inlined
+/// in the trace.
+pub const MAX_FILES_WRITE_DECODED_BYTES: usize = 8 * 1024 * 1024;
+
 // ────────────────────────────────────────────────────────────────────
 // Recording — what the language-SDK side appends to.
 // ────────────────────────────────────────────────────────────────────
@@ -201,6 +210,20 @@ pub enum LowerError {
         path: String,
         error: base64::DecodeError,
     },
+    #[error("recording has {count} ops, max {max} — a runaway or adversarial trace, not a script")]
+    TooManyOps { count: usize, max: usize },
+    #[error(
+        "FilesWrite for `{path}` decodes to {decoded} bytes, max {max} — ship large assets via the source bundle, not the trace"
+    )]
+    FilesWriteTooLarge {
+        path: String,
+        decoded: usize,
+        max: usize,
+    },
+    #[error(
+        "recording writes `{path}` more than once — ambiguous in a declarative scaffold; make the script write each file once"
+    )]
+    DuplicateFilesWritePath { path: String },
 }
 
 /// Lower a [`RuntimeRecording`] into a `Workload`.
@@ -210,6 +233,21 @@ pub enum LowerError {
 /// `CommandStart` and `FilesWrite` becomes a `before_start` hook in
 /// declaration order, and `Kill` ops are dropped.
 pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError> {
+    if rec.ops.len() > MAX_RECORDED_OPS {
+        return Err(LowerError::TooManyOps {
+            count: rec.ops.len(),
+            max: MAX_RECORDED_OPS,
+        });
+    }
+    let mut seen_paths = std::collections::BTreeSet::new();
+    for op in &rec.ops {
+        if let RecordedOp::FilesWrite { path, .. } = op
+            && !seen_paths.insert(path.clone())
+        {
+            return Err(LowerError::DuplicateFilesWritePath { path: path.clone() });
+        }
+    }
+
     let image = resolve_base_image(&rec.create.template)?;
     let resources = rec.create.resources.clone().unwrap_or(Resources {
         cpu_cores: 1,
@@ -248,15 +286,21 @@ pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError>
                 }
             }
             RecordedOp::FilesWrite { path, bytes_b64 } => {
-                // Sanity-check the encoding now so a malformed
-                // recording fails closed at lower time rather than
-                // baking a broken hook into the rootfs.
-                base64::engine::general_purpose::STANDARD
+                // Decode now so a malformed or oversize recording fails
+                // closed at lower time rather than baking a broken hook.
+                let decoded = base64::engine::general_purpose::STANDARD
                     .decode(bytes_b64)
                     .map_err(|error| LowerError::InvalidFilesWriteB64 {
                         path: path.clone(),
                         error,
                     })?;
+                if decoded.len() > MAX_FILES_WRITE_DECODED_BYTES {
+                    return Err(LowerError::FilesWriteTooLarge {
+                        path: path.clone(),
+                        decoded: decoded.len(),
+                        max: MAX_FILES_WRITE_DECODED_BYTES,
+                    });
+                }
                 // Emit a shell hook that pipes the base64 string
                 // through `base64 -d` into the destination. Single
                 // quotes around the b64 token are safe — the
@@ -575,6 +619,71 @@ mod tests {
         assert_eq!(shell_single_quote("hello"), "'hello'");
         assert_eq!(shell_single_quote(""), "''");
         assert_eq!(shell_single_quote("it's"), "'it'\\''s'");
+    }
+
+    fn start_op(argv: &[&str]) -> RecordedOp {
+        RecordedOp::CommandStart {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            env: BTreeMap::new(),
+        }
+    }
+
+    fn write_op(path: &str, bytes: &[u8]) -> RecordedOp {
+        RecordedOp::FilesWrite {
+            path: path.to_string(),
+            bytes_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+
+    fn rec_with_ops(ops: Vec<RecordedOp>) -> RuntimeRecording {
+        RuntimeRecording {
+            workload_id: "wl-limits".to_string(),
+            create: minimal_create("minimal"),
+            ops,
+        }
+    }
+
+    #[test]
+    fn too_many_ops_refuses() {
+        let mut ops: Vec<RecordedOp> = (0..MAX_RECORDED_OPS).map(|_| RecordedOp::Kill).collect();
+        ops.push(start_op(&["/bin/true"]));
+        let err = compile_recording(&rec_with_ops(ops)).unwrap_err();
+        assert!(matches!(err, LowerError::TooManyOps { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn op_count_at_limit_is_accepted() {
+        let mut ops: Vec<RecordedOp> = (0..MAX_RECORDED_OPS - 1)
+            .map(|_| RecordedOp::Kill)
+            .collect();
+        ops.push(start_op(&["/bin/true"]));
+        assert_eq!(ops.len(), MAX_RECORDED_OPS);
+        compile_recording(&rec_with_ops(ops)).expect("at-limit recording must lower");
+    }
+
+    #[test]
+    fn files_write_oversize_refuses() {
+        let big = vec![0u8; MAX_FILES_WRITE_DECODED_BYTES + 1];
+        let ops = vec![write_op("/app/big.bin", &big), start_op(&["/bin/true"])];
+        let err = compile_recording(&rec_with_ops(ops)).unwrap_err();
+        assert!(
+            matches!(err, LowerError::FilesWriteTooLarge { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_files_write_path_refuses() {
+        let ops = vec![
+            write_op("/app/conf.toml", b"a = 1"),
+            write_op("/app/conf.toml", b"a = 2"),
+            start_op(&["/bin/true"]),
+        ];
+        let err = compile_recording(&rec_with_ops(ops)).unwrap_err();
+        assert!(
+            matches!(err, LowerError::DuplicateFilesWritePath { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
