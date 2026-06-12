@@ -45,7 +45,7 @@
 //!    parameter-free tools so the registry can build a default
 //!    bundle.
 //! 4. Add the tool name to the canonical allowlist in
-//!    `mvm-policy::ToolPolicy::DEFAULTS` (separate slice; this
+//!    `mvm-core::policy::ToolPolicy::DEFAULTS` (separate slice; this
 //!    substrate does not pre-allowlist anything).
 
 pub mod download;

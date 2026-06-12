@@ -219,7 +219,8 @@ const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// gateway_events_socket, signing_key_path}` and activate the
 /// bridge-factory path.
 ///
-/// JSON-encoded so `mvm-core` carries no typed dep on `mvm-plan`. The
+/// JSON-encoded so the `VmStartConfig` wire type stays a serde seam
+/// with no typed coupling to `mvm_core::plan` at the backend boundary. The
 /// supervisor re-verifies the `SignedExecutionPlan` envelope before
 /// trusting any decoded field — see
 /// `mvm_hostd::supervisor::supervisor::SupervisorAdmission::admit`.

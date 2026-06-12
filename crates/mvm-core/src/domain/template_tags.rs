@@ -7,7 +7,7 @@
 //!
 //! - **tags** — set of free-form labels for filtering / discovery
 //!   (`mvmctl template ls --tag <tag>`). Tenant-controlled, so
-//!   they go through the same `mvm-security::policy::InputValidator`
+//!   they go through the same `mvm-core::crypto::policy::InputValidator`
 //!   discipline as sandbox tags.
 //! - **aliases** — name → revision_hash pointers (`latest`,
 //!   `stable`, etc.). Resolution happens at `mvmctl up` /

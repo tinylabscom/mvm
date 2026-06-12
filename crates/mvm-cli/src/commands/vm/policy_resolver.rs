@@ -1,6 +1,6 @@
 //! `PolicyRef → concrete component slot` resolver.
 //!
-//! `mvm-plan::ExecutionPlan` carries four policy refs that name (but
+//! `mvm-core::plan::ExecutionPlan` carries four policy refs that name (but
 //! do not contain) the policy bundle a workload runs under:
 //!
 //! - `network_policy: PolicyRef`

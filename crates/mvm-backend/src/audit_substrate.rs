@@ -33,7 +33,7 @@ pub struct AuditSubstrate {
 /// NUL, etc.) are fail-open by construction; allowlist is the correct
 /// shape.
 ///
-/// `mvm-plan`'s `TenantId` is an unchecked `String` newtype today
+/// `mvm-core::plan`'s `TenantId` is an unchecked `String` newtype today
 /// (only sha256_hex is validated); this is the defense-in-depth
 /// boundary.
 fn validate_dns_label(label: &str, kind: &str) -> Result<()> {

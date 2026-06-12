@@ -437,12 +437,14 @@ mod accessible_gate_tests {
     use super::*;
     use mvm::vm::runtime_meta::{StartModeKind, VmRuntimeMeta, write as write_meta};
 
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn with_home<F: FnOnce(&std::path::Path)>(f: F) {
+        let _guard = mvm::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");
         env.set("HOME", tmp.path());
+        env.set("MVM_DATA_DIR", tmp.path().join(".mvm"));
         f(tmp.path());
     }
 
@@ -494,12 +496,9 @@ mod accessible_gate_tests {
 
     #[test]
     fn touch_activity_refreshes_last_active_for_registered_vm() {
-        // Serialize env mutation with the file's HOME lock; MVM_SHARE_DIR
-        // relocates registry_path() to a throwaway dir.
-        let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var_os("MVM_SHARE_DIR");
-        unsafe { std::env::set_var("MVM_SHARE_DIR", tmp.path()) };
+        env.set("MVM_SHARE_DIR", tmp.path());
 
         let path = mvm::vm::name_registry::registry_path();
         let mut reg = mvm::vm::name_registry::VmNameRegistry::default();
@@ -518,13 +517,6 @@ mod accessible_gate_tests {
         touch_activity("ghost");
         let reloaded = mvm::vm::name_registry::VmNameRegistry::load(&path).unwrap();
         assert!(reloaded.lookup("ghost").is_none());
-
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MVM_SHARE_DIR", v),
-                None => std::env::remove_var("MVM_SHARE_DIR"),
-            }
-        }
     }
 
     #[test]
