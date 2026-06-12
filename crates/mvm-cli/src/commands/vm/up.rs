@@ -653,6 +653,10 @@ fn should_thread_signed_plan(gateway_bridge_enabled: bool, hypervisor: &str) -> 
     gateway_bridge_enabled || hypervisor == "qemu"
 }
 
+fn should_wait_for_direct_boot_agent(detach: bool, ports_env: Option<&str>) -> bool {
+    !detach || ports_env.is_some_and(|ports| !ports.is_empty())
+}
+
 pub(super) fn load_workload_ir(
     workload_ir_path: Option<&std::path::Path>,
 ) -> Result<Option<mvm_sdk::ir::Workload>> {
@@ -1587,17 +1591,28 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // MVM_DIRECT_BOOT + `--hypervisor mock`.
         mvm_core::audit_emit!(VmStart, vm: &vm_name);
 
-        // Services-health: wait for the
-        // guest agent unconditionally, then poll integration health.
+        let direct_boot_ports = std::env::var("MVM_PORTS").ok();
+
+        // Services-health: foreground direct boot waits for the
+        // guest agent, then polls integration health. Detached direct
+        // boot is fire-and-forget unless port forwarding was
+        // requested via MVM_PORTS; forwarding still needs the agent
+        // before the CLI exits so the host proxy can be established.
         // The wait was previously gated on `MVM_PORTS` because port
         // forwarding was the only existing reason to block here. The
         // gate moved off — every up now records `AgentConnecting` /
         // `AgentReady` / `ServicesStarting` / `ServicesReady` so
         // `mvmctl ls --json` shows a useful wait reason for every
         // VM, not just port-forwarded ones.
-        ui::info("Waiting for guest agent...");
-        record_vm_readiness(&vm_name, InstanceReadiness::AgentConnecting);
-        let agent_ready = wait_for_guest_agent(&vm_name, 30);
+        let should_wait_for_agent =
+            should_wait_for_direct_boot_agent(detach, direct_boot_ports.as_deref());
+        let agent_ready = if should_wait_for_agent {
+            ui::info("Waiting for guest agent...");
+            record_vm_readiness(&vm_name, InstanceReadiness::AgentConnecting);
+            wait_for_guest_agent(&vm_name, 30)
+        } else {
+            false
+        };
         if agent_ready {
             record_vm_readiness(&vm_name, InstanceReadiness::AgentReady);
             // Agent ready means /init ran, which
@@ -1615,7 +1630,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             }
             let timeout = std::time::Duration::from_secs(services_health_timeout_secs);
             super::readiness::wait_for_services_ready(&vm_name, timeout);
-        } else {
+        } else if should_wait_for_agent {
             ui::warn("Guest agent not reachable.");
         }
 
@@ -1623,7 +1638,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // Requires the agent — skip silently if the wait above gave
         // up.
         if agent_ready
-            && let Ok(ports_str) = std::env::var("MVM_PORTS")
+            && let Some(ports_str) = direct_boot_ports.as_deref()
             && !ports_str.is_empty()
         {
             for spec in ports_str.split(',') {
@@ -3670,6 +3685,19 @@ mod resolve_deps_volume_tests {
         assert!(!should_thread_signed_plan(false, "libkrun"));
         assert!(!should_thread_signed_plan(false, "vz"));
         assert!(should_thread_signed_plan(true, "libkrun"));
+    }
+
+    #[test]
+    fn direct_boot_detach_without_ports_skips_agent_wait() {
+        assert!(!should_wait_for_direct_boot_agent(true, None));
+        assert!(!should_wait_for_direct_boot_agent(true, Some("")));
+    }
+
+    #[test]
+    fn direct_boot_waits_for_foreground_or_ports() {
+        assert!(should_wait_for_direct_boot_agent(false, None));
+        assert!(should_wait_for_direct_boot_agent(false, Some("")));
+        assert!(should_wait_for_direct_boot_agent(true, Some("8080:80")));
     }
 
     #[test]

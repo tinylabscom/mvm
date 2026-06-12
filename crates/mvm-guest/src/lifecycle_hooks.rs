@@ -25,8 +25,87 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HookExit {
+    success: bool,
+    code: Option<i32>,
+}
+
+#[cfg(test)]
+impl HookExit {
+    const fn success() -> Self {
+        Self {
+            success: true,
+            code: Some(0),
+        }
+    }
+
+    const fn failure(code: i32) -> Self {
+        Self {
+            success: false,
+            code: Some(code),
+        }
+    }
+}
+
+impl From<ExitStatus> for HookExit {
+    fn from(status: ExitStatus) -> Self {
+        Self {
+            success: status.success(),
+            code: status.code(),
+        }
+    }
+}
+
+trait HookChild {
+    fn try_wait(&mut self) -> io::Result<Option<HookExit>>;
+    fn kill(&mut self) -> io::Result<()>;
+    fn wait(&mut self) -> io::Result<HookExit>;
+}
+
+trait HookRunner {
+    type Child: HookChild;
+
+    fn status(&self, script_path: &Path) -> io::Result<HookExit>;
+    fn spawn(&self, script_path: &Path) -> io::Result<Self::Child>;
+
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+struct RealHookRunner;
+
+impl HookRunner for RealHookRunner {
+    type Child = RealHookChild;
+
+    fn status(&self, script_path: &Path) -> io::Result<HookExit> {
+        Command::new(script_path).status().map(HookExit::from)
+    }
+
+    fn spawn(&self, script_path: &Path) -> io::Result<Self::Child> {
+        Command::new(script_path).spawn().map(RealHookChild)
+    }
+}
+
+struct RealHookChild(Child);
+
+impl HookChild for RealHookChild {
+    fn try_wait(&mut self) -> io::Result<Option<HookExit>> {
+        self.0.try_wait().map(|status| status.map(HookExit::from))
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        self.0.kill()
+    }
+
+    fn wait(&mut self) -> io::Result<HookExit> {
+        self.0.wait().map(HookExit::from)
+    }
+}
 
 /// Tuning for the readiness probe. Defaults are reasonable for a
 /// typical function-service warm-up; the worker pool can override
@@ -99,6 +178,13 @@ pub enum ReadinessError {
 /// captures its exit code, not its output, so anything the script
 /// wants to log should go to stderr.
 pub fn poll_readiness(cfg: &ReadinessConfig) -> Result<(), ReadinessError> {
+    poll_readiness_with_runner(cfg, &RealHookRunner)
+}
+
+fn poll_readiness_with_runner<R>(cfg: &ReadinessConfig, runner: &R) -> Result<(), ReadinessError>
+where
+    R: HookRunner,
+{
     let start = Instant::now();
     loop {
         let elapsed = start.elapsed();
@@ -108,8 +194,8 @@ pub fn poll_readiness(cfg: &ReadinessConfig) -> Result<(), ReadinessError> {
                 elapsed,
             });
         }
-        match Command::new(&cfg.script_path).status() {
-            Ok(status) if status.success() => return Ok(()),
+        match runner.status(&cfg.script_path) {
+            Ok(status) if status.success => return Ok(()),
             Ok(_) => {
                 // Non-zero exit: try again after the interval, but
                 // first guard against busy-looping right up against
@@ -122,7 +208,7 @@ pub fn poll_readiness(cfg: &ReadinessConfig) -> Result<(), ReadinessError> {
                         elapsed,
                     });
                 }
-                std::thread::sleep(sleep_for);
+                runner.sleep(sleep_for);
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(ReadinessError::ScriptMissing {
@@ -179,7 +265,19 @@ pub fn run_shutdown_hook(
     grace: Duration,
     poll_interval: Duration,
 ) -> Result<(), ShutdownError> {
-    let mut child = match Command::new(script_path).spawn() {
+    run_shutdown_hook_with_runner(script_path, grace, poll_interval, &RealHookRunner)
+}
+
+fn run_shutdown_hook_with_runner<R>(
+    script_path: &Path,
+    grace: Duration,
+    poll_interval: Duration,
+    runner: &R,
+) -> Result<(), ShutdownError>
+where
+    R: HookRunner,
+{
+    let mut child = match runner.spawn(script_path) {
         Ok(c) => c,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Err(ShutdownError::ScriptMissing {
@@ -198,12 +296,12 @@ pub fn run_shutdown_hook(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                if status.success() {
+                if status.success {
                     return Ok(());
                 }
                 return Err(ShutdownError::NonZeroExit {
                     script: script_path.to_path_buf(),
-                    code: status.code(),
+                    code: status.code,
                 });
             }
             Ok(None) => {
@@ -215,7 +313,7 @@ pub fn run_shutdown_hook(
                         grace,
                     });
                 }
-                std::thread::sleep(poll_interval);
+                runner.sleep(poll_interval);
             }
             Err(e) => {
                 return Err(ShutdownError::ExecError {
@@ -230,55 +328,155 @@ pub fn run_shutdown_hook(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
 
-    fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
-        let p = dir.join(name);
-        let mut f = fs::File::create(&p).unwrap();
-        f.write_all(body.as_bytes()).unwrap();
-        let mut perms = fs::metadata(&p).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&p, perms).unwrap();
-        p
+    struct FakeStatusRunner {
+        exits: Mutex<VecDeque<HookExit>>,
+        fallback: HookExit,
+    }
+
+    impl FakeStatusRunner {
+        fn new(exits: impl IntoIterator<Item = HookExit>, fallback: HookExit) -> Self {
+            Self {
+                exits: Mutex::new(exits.into_iter().collect()),
+                fallback,
+            }
+        }
+    }
+
+    impl HookRunner for FakeStatusRunner {
+        type Child = FakeChild;
+
+        fn status(&self, _script_path: &Path) -> io::Result<HookExit> {
+            Ok(self
+                .exits
+                .lock()
+                .expect("fake status mutex poisoned")
+                .pop_front()
+                .unwrap_or(self.fallback))
+        }
+
+        fn spawn(&self, _script_path: &Path) -> io::Result<Self::Child> {
+            Err(io::Error::other("fake status runner does not spawn"))
+        }
+
+        fn sleep(&self, _duration: Duration) {}
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeChildState {
+        polls: usize,
+        killed: bool,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum FakeChildBehavior {
+        ExitAfter { polls: usize, exit: HookExit },
+        NeverExit,
+    }
+
+    struct FakeChild {
+        behavior: FakeChildBehavior,
+        state: Arc<Mutex<FakeChildState>>,
+    }
+
+    impl HookChild for FakeChild {
+        fn try_wait(&mut self) -> io::Result<Option<HookExit>> {
+            let mut state = self.state.lock().expect("fake child mutex poisoned");
+            state.polls += 1;
+            match self.behavior {
+                FakeChildBehavior::ExitAfter { polls, exit } if state.polls >= polls => {
+                    Ok(Some(exit))
+                }
+                _ => Ok(None),
+            }
+        }
+
+        fn kill(&mut self) -> io::Result<()> {
+            self.state.lock().expect("fake child mutex poisoned").killed = true;
+            Ok(())
+        }
+
+        fn wait(&mut self) -> io::Result<HookExit> {
+            Ok(HookExit {
+                success: false,
+                code: None,
+            })
+        }
+    }
+
+    struct FakeSpawnRunner {
+        child: Mutex<Option<FakeChild>>,
+    }
+
+    impl FakeSpawnRunner {
+        fn new(behavior: FakeChildBehavior) -> (Self, Arc<Mutex<FakeChildState>>) {
+            let state = Arc::new(Mutex::new(FakeChildState::default()));
+            let child = FakeChild {
+                behavior,
+                state: Arc::clone(&state),
+            };
+            (
+                Self {
+                    child: Mutex::new(Some(child)),
+                },
+                state,
+            )
+        }
+    }
+
+    impl HookRunner for FakeSpawnRunner {
+        type Child = FakeChild;
+
+        fn status(&self, _script_path: &Path) -> io::Result<HookExit> {
+            Err(io::Error::other("fake spawn runner does not poll status"))
+        }
+
+        fn spawn(&self, _script_path: &Path) -> io::Result<Self::Child> {
+            self.child
+                .lock()
+                .expect("fake child slot mutex poisoned")
+                .take()
+                .ok_or_else(|| io::Error::other("fake child already spawned"))
+        }
+
+        fn sleep(&self, _duration: Duration) {}
     }
 
     #[test]
     fn poll_readiness_succeeds_when_script_exits_zero() {
-        let tmp = tempfile::tempdir().unwrap();
-        let s = write_script(tmp.path(), "ok.sh", "#!/bin/sh\nexit 0\n");
-        let cfg = ReadinessConfig::new(s)
+        let runner = FakeStatusRunner::new([HookExit::success()], HookExit::failure(1));
+        let cfg = ReadinessConfig::new(PathBuf::from("/fake/ok.sh"))
             .with_timeout(Duration::from_secs(1))
             .with_interval(Duration::from_millis(50));
-        poll_readiness(&cfg).expect("ready");
+        poll_readiness_with_runner(&cfg, &runner).expect("ready");
     }
 
     #[test]
     fn poll_readiness_times_out_when_script_always_fails() {
-        let tmp = tempfile::tempdir().unwrap();
-        let s = write_script(tmp.path(), "fail.sh", "#!/bin/sh\nexit 1\n");
-        let cfg = ReadinessConfig::new(s)
-            .with_timeout(Duration::from_millis(250))
+        let runner = FakeStatusRunner::new([], HookExit::failure(1));
+        let cfg = ReadinessConfig::new(PathBuf::from("/fake/fail.sh"))
+            .with_timeout(Duration::from_millis(5))
             .with_interval(Duration::from_millis(50));
-        let err = poll_readiness(&cfg).unwrap_err();
+        let err = poll_readiness_with_runner(&cfg, &runner).unwrap_err();
         assert!(matches!(err, ReadinessError::Timeout { .. }));
     }
 
     #[test]
     fn poll_readiness_succeeds_after_initial_failures() {
-        let tmp = tempfile::tempdir().unwrap();
-        let counter = tmp.path().join("count");
-        fs::write(&counter, "0").unwrap();
-        let body = format!(
-            "#!/bin/sh\nc=$(cat {ctr})\nc=$((c+1))\necho $c > {ctr}\n[ $c -ge 3 ] && exit 0\nexit 1\n",
-            ctr = counter.display()
+        let runner = FakeStatusRunner::new(
+            [
+                HookExit::failure(1),
+                HookExit::failure(1),
+                HookExit::success(),
+            ],
+            HookExit::failure(1),
         );
-        let s = write_script(tmp.path(), "warmup.sh", &body);
-        let cfg = ReadinessConfig::new(s)
-            .with_timeout(Duration::from_secs(3))
+        let cfg = ReadinessConfig::new(PathBuf::from("/fake/warmup.sh"))
+            .with_timeout(Duration::from_secs(1))
             .with_interval(Duration::from_millis(50));
-        poll_readiness(&cfg).expect("warmed up");
+        poll_readiness_with_runner(&cfg, &runner).expect("warmed up");
     }
 
     #[test]
@@ -290,32 +488,34 @@ mod tests {
         assert!(matches!(err, ReadinessError::ScriptMissing { .. }));
     }
 
-    // Grace period for the "fast script" tests below. Previously
-    // 2s, which sounds generous but doesn't survive concurrent
-    // workspace test load on macOS hosts — shell startup + fork +
-    // exec routinely exceeds 2s when ~80 test binaries run in
-    // parallel under `cargo test --workspace`, and the test then
-    // fails with `GraceExceeded` instead of the expected
-    // `expect("clean shutdown")`. 30s is well past anything a
-    // legitimate concurrent-load shell takes (typically <2s even
-    // under heavy load) while still bounding the test's worst
-    // case so a regression in the run-shutdown-hook path doesn't
-    // hang CI indefinitely.
-    const FAST_SCRIPT_GRACE: Duration = Duration::from_secs(30);
-
     #[test]
     fn run_shutdown_hook_succeeds_for_fast_script() {
-        let tmp = tempfile::tempdir().unwrap();
-        let s = write_script(tmp.path(), "stop.sh", "#!/bin/sh\nexit 0\n");
-        run_shutdown_hook(&s, FAST_SCRIPT_GRACE, Duration::from_millis(50))
-            .expect("clean shutdown");
+        let (runner, _state) = FakeSpawnRunner::new(FakeChildBehavior::ExitAfter {
+            polls: 1,
+            exit: HookExit::success(),
+        });
+        run_shutdown_hook_with_runner(
+            Path::new("/fake/stop.sh"),
+            Duration::from_secs(1),
+            Duration::from_millis(50),
+            &runner,
+        )
+        .expect("clean shutdown");
     }
 
     #[test]
     fn run_shutdown_hook_reports_non_zero_exit() {
-        let tmp = tempfile::tempdir().unwrap();
-        let s = write_script(tmp.path(), "stop.sh", "#!/bin/sh\nexit 7\n");
-        let err = run_shutdown_hook(&s, FAST_SCRIPT_GRACE, Duration::from_millis(50)).unwrap_err();
+        let (runner, _state) = FakeSpawnRunner::new(FakeChildBehavior::ExitAfter {
+            polls: 1,
+            exit: HookExit::failure(7),
+        });
+        let err = run_shutdown_hook_with_runner(
+            Path::new("/fake/stop.sh"),
+            Duration::from_secs(1),
+            Duration::from_millis(50),
+            &runner,
+        )
+        .unwrap_err();
         match err {
             ShutdownError::NonZeroExit { code, .. } => assert_eq!(code, Some(7)),
             other => panic!("expected NonZeroExit, got {other:?}"),
@@ -324,11 +524,16 @@ mod tests {
 
     #[test]
     fn run_shutdown_hook_kills_after_grace_deadline() {
-        let tmp = tempfile::tempdir().unwrap();
-        let s = write_script(tmp.path(), "slow.sh", "#!/bin/sh\nsleep 5\n");
-        let err = run_shutdown_hook(&s, Duration::from_millis(200), Duration::from_millis(50))
-            .unwrap_err();
+        let (runner, state) = FakeSpawnRunner::new(FakeChildBehavior::NeverExit);
+        let err = run_shutdown_hook_with_runner(
+            Path::new("/fake/slow.sh"),
+            Duration::from_millis(5),
+            Duration::from_millis(1),
+            &runner,
+        )
+        .unwrap_err();
         assert!(matches!(err, ShutdownError::GraceExceeded { .. }));
+        assert!(state.lock().expect("fake child mutex poisoned").killed);
     }
 
     #[test]
