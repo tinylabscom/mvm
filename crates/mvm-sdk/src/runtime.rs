@@ -46,6 +46,15 @@ use crate::ir::{
 
 const SCHEMA_VERSION: &str = "0.1";
 
+/// Hard cap on ops per recording. A hand-authored script never
+/// approaches this; a runaway loop or adversarial trace does.
+pub const MAX_RECORDED_OPS: usize = 1024;
+
+/// Hard cap on one `FilesWrite`'s decoded payload. Larger assets
+/// belong in the source bundle or a dependency volume, not inlined
+/// in the trace.
+pub const MAX_FILES_WRITE_DECODED_BYTES: usize = 8 * 1024 * 1024;
+
 // ────────────────────────────────────────────────────────────────────
 // Recording — what the language-SDK side appends to.
 // ────────────────────────────────────────────────────────────────────
@@ -201,15 +210,123 @@ pub enum LowerError {
         path: String,
         error: base64::DecodeError,
     },
+    #[error("recording has {count} ops, max {max} — a runaway or adversarial trace, not a script")]
+    TooManyOps { count: usize, max: usize },
+    #[error(
+        "FilesWrite for `{path}` decodes to {decoded} bytes, max {max} — ship large assets via the source bundle, not the trace"
+    )]
+    FilesWriteTooLarge {
+        path: String,
+        decoded: usize,
+        max: usize,
+    },
+    #[error(
+        "recording writes `{path}` more than once — ambiguous in a declarative scaffold; make the script write each file once"
+    )]
+    DuplicateFilesWritePath { path: String },
+    #[error(
+        "recording digest mismatch: expected {expected}, got {actual} — the bytes changed between capture and use"
+    )]
+    DigestMismatch { expected: String, actual: String },
 }
 
-/// Lower a [`RuntimeRecording`] into a `Workload`.
+/// One place the trace replay knowingly differs from what the
+/// recorded script actually did. Findings do not block lowering —
+/// they block *admission* unless explicitly acknowledged, because
+/// a preview that ran one way and a ship that behaves another is
+/// exactly the dishonesty the promotion gate exists to refuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Divergence {
+    /// A `sb.kill()` was recorded and dropped: the replayed
+    /// workload's lifetime is the orchestrator's TTL, not the
+    /// script's explicit kill point.
+    KillDropped { op_index: usize },
+    /// The script wrote this file after starting the entrypoint;
+    /// the replay writes it before boot. Anything the entrypoint
+    /// did before the write existed will behave differently.
+    FilesWriteAfterEntrypoint { op_index: usize, path: String },
+}
+
+impl Divergence {
+    /// Stable slug used by `--ack-divergence` to acknowledge a
+    /// finding class. Kept kebab-case to read naturally on a CLI.
+    pub fn kind_slug(&self) -> &'static str {
+        match self {
+            Self::KillDropped { .. } => "kill-dropped",
+            Self::FilesWriteAfterEntrypoint { .. } => "files-write-after-entrypoint",
+        }
+    }
+}
+
+impl std::fmt::Display for Divergence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KillDropped { op_index } => write!(
+                f,
+                "[kill-dropped] op #{op_index}: sb.kill() is dropped — replay lifetime is the orchestrator's TTL"
+            ),
+            Self::FilesWriteAfterEntrypoint { op_index, path } => write!(
+                f,
+                "[files-write-after-entrypoint] op #{op_index}: `{path}` was written after start; replay writes it before boot"
+            ),
+        }
+    }
+}
+
+/// SHA-256 of the raw recording bytes, lowercase hex. Captured the
+/// moment the recording is read; verified again wherever the bytes
+/// cross a tamperable boundary (a file at rest between record and
+/// ship is exactly that boundary).
+pub fn recording_sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// Refuse recording bytes whose digest does not match the expected
+/// hex (case-insensitive). Fail-closed: a mismatch means the bytes
+/// changed between capture and use.
+pub fn verify_recording_digest(bytes: &[u8], expected_hex: &str) -> Result<(), LowerError> {
+    let actual = recording_sha256_hex(bytes);
+    if !actual.eq_ignore_ascii_case(expected_hex) {
+        return Err(LowerError::DigestMismatch {
+            expected: expected_hex.to_ascii_lowercase(),
+            actual,
+        });
+    }
+    Ok(())
+}
+
+/// Lower a [`RuntimeRecording`] into a `Workload`, collecting
+/// divergence findings in the process.
 ///
 /// The exact shape is documented at the top of the module. In one
 /// line: the *final* `CommandStart` is the entrypoint, every prior
 /// `CommandStart` and `FilesWrite` becomes a `before_start` hook in
-/// declaration order, and `Kill` ops are dropped.
-pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError> {
+/// declaration order, and `Kill` ops are dropped (emitting a
+/// [`Divergence::KillDropped`] finding). `FilesWrite` ops after the
+/// final `CommandStart` emit [`Divergence::FilesWriteAfterEntrypoint`].
+pub fn compile_recording_with_findings(
+    rec: &RuntimeRecording,
+) -> Result<(Workload, Vec<Divergence>), LowerError> {
+    if rec.ops.len() > MAX_RECORDED_OPS {
+        return Err(LowerError::TooManyOps {
+            count: rec.ops.len(),
+            max: MAX_RECORDED_OPS,
+        });
+    }
+    let mut seen_paths = std::collections::BTreeSet::new();
+    for op in &rec.ops {
+        // nested rather than a let-chain: let-chains need Rust 1.88, MSRV is 1.85
+        #[allow(clippy::collapsible_if)]
+        if let RecordedOp::FilesWrite { path, .. } = op {
+            if !seen_paths.insert(path.clone()) {
+                return Err(LowerError::DuplicateFilesWritePath { path: path.clone() });
+            }
+        }
+    }
+
     let image = resolve_base_image(&rec.create.template)?;
     let resources = rec.create.resources.clone().unwrap_or(Resources {
         cpu_cores: 1,
@@ -229,6 +346,7 @@ pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError>
     // declaration order so they fire before the entrypoint at boot.
     let mut before_start: Vec<HookCmd> = Vec::new();
     let mut entrypoint: Option<Entrypoint> = None;
+    let mut findings: Vec<Divergence> = Vec::new();
 
     for (idx, op) in rec.ops.iter().enumerate() {
         match op {
@@ -248,29 +366,45 @@ pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError>
                 }
             }
             RecordedOp::FilesWrite { path, bytes_b64 } => {
-                // Sanity-check the encoding now so a malformed
-                // recording fails closed at lower time rather than
-                // baking a broken hook into the rootfs.
-                base64::engine::general_purpose::STANDARD
+                // Decode now so a malformed or oversize recording fails
+                // closed at lower time rather than baking a broken hook.
+                let decoded = base64::engine::general_purpose::STANDARD
                     .decode(bytes_b64)
                     .map_err(|error| LowerError::InvalidFilesWriteB64 {
                         path: path.clone(),
                         error,
                     })?;
-                // Emit a shell hook that pipes the base64 string
-                // through `base64 -d` into the destination. Single
-                // quotes around the b64 token are safe — the
-                // standard alphabet contains no `'` characters.
+                if decoded.len() > MAX_FILES_WRITE_DECODED_BYTES {
+                    return Err(LowerError::FilesWriteTooLarge {
+                        path: path.clone(),
+                        decoded: decoded.len(),
+                        max: MAX_FILES_WRITE_DECODED_BYTES,
+                    });
+                }
+                if idx > final_cmd_pos {
+                    findings.push(Divergence::FilesWriteAfterEntrypoint {
+                        op_index: idx,
+                        path: path.clone(),
+                    });
+                }
+                // Emit a shell hook that materializes the file. Both
+                // the destination path and the payload are delivered
+                // via `base64 -d` so the shell line contains no
+                // raw user-controlled bytes — only STANDARD-alphabet
+                // base64 tokens, which contain no shell metacharacters.
+                let path_b64 = base64::engine::general_purpose::STANDARD.encode(path.as_bytes());
                 let line = format!(
-                    "mkdir -p \"$(dirname {path})\" && printf '%s' '{b64}' | base64 -d > {path}",
-                    path = shell_single_quote(path),
+                    "p=$(printf '%s' '{path_b64}' | base64 -d) && mkdir -p \"$(dirname \"$p\")\" && printf '%s' '{b64}' | base64 -d > \"$p\"",
+                    path_b64 = path_b64,
                     b64 = bytes_b64,
                 );
                 before_start.push(HookCmd::Shell { line });
             }
             RecordedOp::Kill => {
-                // Dropped — see lower-error doc + module doc for the
-                // TTL/orchestrator rationale.
+                // Dropped — the workload's lifetime is the orchestrator's
+                // TTL, not the recording's kill point. Emit a finding so
+                // the admission path can refuse unless acknowledged.
+                findings.push(Divergence::KillDropped { op_index: idx });
             }
         }
     }
@@ -305,33 +439,23 @@ pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError>
         },
     };
 
-    Ok(Workload {
-        schema_version: SCHEMA_VERSION.to_string(),
-        id: rec.workload_id.clone(),
-        apps: vec![app],
-        volumes: Vec::new(),
-        extensions: BTreeMap::new(),
-    })
+    Ok((
+        Workload {
+            schema_version: SCHEMA_VERSION.to_string(),
+            id: rec.workload_id.clone(),
+            apps: vec![app],
+            volumes: Vec::new(),
+            extensions: BTreeMap::new(),
+        },
+        findings,
+    ))
 }
 
-/// Wrap `s` in single quotes for shell-safe interpolation, escaping
-/// any single quotes inside. Use only when emitting shell lines for
-/// `HookCmd::Shell` — argv hooks don't need it.
-fn shell_single_quote(s: &str) -> String {
-    if s.is_empty() {
-        return "''".to_string();
-    }
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
+/// Findings-agnostic wrapper kept for callers that only need the
+/// Workload (tests, tooling). Admission paths use
+/// [`compile_recording_with_findings`] and gate on the findings.
+pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError> {
+    compile_recording_with_findings(rec).map(|(wl, _)| wl)
 }
 
 #[cfg(test)]
@@ -438,7 +562,12 @@ mod tests {
         match &app.hooks.before_start[0] {
             HookCmd::Shell { line } => {
                 assert!(line.contains("base64 -d"), "got: {line}");
-                assert!(line.contains("/app/config.json"), "got: {line}");
+                // Path is base64-encoded in the line (injection hardening):
+                // the literal path does not appear as raw bytes.
+                assert!(
+                    line.contains(&b64(b"/app/config.json")),
+                    "path b64 missing: {line}"
+                );
                 assert!(
                     line.contains(&b64(b"{\"hello\":\"world\"}\n")),
                     "got: {line}"
@@ -570,11 +699,186 @@ mod tests {
         }
     }
 
+    fn start_op(argv: &[&str]) -> RecordedOp {
+        RecordedOp::CommandStart {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            env: BTreeMap::new(),
+        }
+    }
+
+    fn write_op(path: &str, bytes: &[u8]) -> RecordedOp {
+        RecordedOp::FilesWrite {
+            path: path.to_string(),
+            bytes_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+
+    fn rec_with_ops(ops: Vec<RecordedOp>) -> RuntimeRecording {
+        RuntimeRecording {
+            workload_id: "wl-limits".to_string(),
+            create: minimal_create("minimal"),
+            ops,
+        }
+    }
+
     #[test]
-    fn shell_single_quote_escapes_apostrophes() {
-        assert_eq!(shell_single_quote("hello"), "'hello'");
-        assert_eq!(shell_single_quote(""), "''");
-        assert_eq!(shell_single_quote("it's"), "'it'\\''s'");
+    fn too_many_ops_refuses() {
+        let mut ops: Vec<RecordedOp> = (0..MAX_RECORDED_OPS).map(|_| RecordedOp::Kill).collect();
+        ops.push(start_op(&["/bin/true"]));
+        let err = compile_recording(&rec_with_ops(ops)).unwrap_err();
+        assert!(matches!(err, LowerError::TooManyOps { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn op_count_at_limit_is_accepted() {
+        let mut ops: Vec<RecordedOp> = (0..MAX_RECORDED_OPS - 1)
+            .map(|_| RecordedOp::Kill)
+            .collect();
+        ops.push(start_op(&["/bin/true"]));
+        assert_eq!(ops.len(), MAX_RECORDED_OPS);
+        compile_recording(&rec_with_ops(ops)).expect("at-limit recording must lower");
+    }
+
+    #[test]
+    fn files_write_oversize_refuses() {
+        let big = vec![0u8; MAX_FILES_WRITE_DECODED_BYTES + 1];
+        let ops = vec![write_op("/app/big.bin", &big), start_op(&["/bin/true"])];
+        let err = compile_recording(&rec_with_ops(ops)).unwrap_err();
+        assert!(
+            matches!(err, LowerError::FilesWriteTooLarge { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_files_write_path_refuses() {
+        let ops = vec![
+            write_op("/app/conf.toml", b"a = 1"),
+            write_op("/app/conf.toml", b"a = 2"),
+            start_op(&["/bin/true"]),
+        ];
+        let err = compile_recording(&rec_with_ops(ops)).unwrap_err();
+        assert!(
+            matches!(err, LowerError::DuplicateFilesWritePath { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn files_write_b64_with_single_quote_refuses() {
+        // Both path and payload are base64-encoded into the shell line;
+        // the STANDARD alphabet (no quotes, no metacharacters) is what
+        // makes both tokens safe at the point they reach the shell.
+        // The decode-before-interpolate step handles the payload token;
+        // a decoder/alphabet change that lets a quote through is an
+        // injection primitive — this pin must fail loudly first.
+        let ops = vec![
+            RecordedOp::FilesWrite {
+                path: "/app/x".to_string(),
+                bytes_b64: "ab'c=".to_string(),
+            },
+            start_op(&["/bin/true"]),
+        ];
+        let err = compile_recording(&rec_with_ops(ops)).unwrap_err();
+        assert!(
+            matches!(err, LowerError::InvalidFilesWriteB64 { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn files_write_b64_url_safe_alphabet_refuses() {
+        // URL_SAFE uses `-` and `_`; the lowering is pinned to
+        // STANDARD. Accepting both alphabets silently would widen
+        // the interpolation surface.
+        let ops = vec![
+            RecordedOp::FilesWrite {
+                path: "/app/x".to_string(),
+                bytes_b64: "a-b_".to_string(),
+            },
+            start_op(&["/bin/true"]),
+        ];
+        let err = compile_recording(&rec_with_ops(ops)).unwrap_err();
+        assert!(
+            matches!(err, LowerError::InvalidFilesWriteB64 { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn files_write_hostile_path_is_base64_encoded_in_hook() {
+        // Both path and payload are base64-encoded into the shell line
+        // using the STANDARD alphabet, which contains no metacharacters.
+        // The decode-before-interpolate step is what makes the payload
+        // token alphabet-safe; no quoting or escaping of the raw path
+        // bytes is needed or present. Verify the b64 of the hostile
+        // path appears in the line and that no injection breakout survives.
+        let hostile = "/app/x'; rm -rf /tmp/pwn; echo '";
+        let ops = vec![write_op(hostile, b"x"), start_op(&["/bin/true"])];
+        let wl = compile_recording(&rec_with_ops(ops)).expect("must lower");
+        let hooks = &wl.apps[0].hooks.before_start;
+        let HookCmd::Shell { line } = &hooks[0] else {
+            panic!("FilesWrite must lower to a Shell hook, got {hooks:?}");
+        };
+        // The path must be delivered via its base64 form — raw bytes absent.
+        let path_b64 = base64::engine::general_purpose::STANDARD.encode(hostile.as_bytes());
+        assert!(line.contains(&path_b64), "path b64 missing: {line}");
+        assert!(!line.contains("'; rm -rf"), "unescaped breakout: {line}");
+        assert!(
+            !line.contains("; rm -rf"),
+            "bare metacharacter in line: {line}"
+        );
+    }
+
+    #[test]
+    fn kill_op_yields_divergence_finding() {
+        let ops = vec![start_op(&["/bin/true"]), RecordedOp::Kill];
+        let (_, findings) =
+            compile_recording_with_findings(&rec_with_ops(ops)).expect("must lower");
+        assert_eq!(findings.len(), 1);
+        assert!(matches!(
+            findings[0],
+            Divergence::KillDropped { op_index: 1 }
+        ));
+    }
+
+    #[test]
+    fn files_write_after_entrypoint_yields_divergence_finding() {
+        // The script wrote this file AFTER starting the workload;
+        // the replay materializes it BEFORE start. That reordering
+        // is a real preview-vs-ship behavior difference.
+        let ops = vec![
+            start_op(&["/bin/server"]),
+            write_op("/app/late.txt", b"late"),
+        ];
+        let (wl, findings) =
+            compile_recording_with_findings(&rec_with_ops(ops)).expect("must lower");
+        assert!(matches!(
+            &findings[0],
+            Divergence::FilesWriteAfterEntrypoint { op_index: 1, path } if path == "/app/late.txt"
+        ));
+        // Lowering behavior is unchanged: the hook still exists.
+        assert_eq!(wl.apps[0].hooks.before_start.len(), 1);
+    }
+
+    #[test]
+    fn clean_recording_yields_no_findings() {
+        let ops = vec![write_op("/app/a.txt", b"a"), start_op(&["/bin/true"])];
+        let (_, findings) =
+            compile_recording_with_findings(&rec_with_ops(ops)).expect("must lower");
+        assert!(findings.is_empty(), "got {findings:?}");
+    }
+
+    #[test]
+    fn compile_recording_is_findings_agnostic_back_compat() {
+        let ops = vec![start_op(&["/bin/true"]), RecordedOp::Kill];
+        let rec = rec_with_ops(ops);
+        let plain = compile_recording(&rec).expect("plain must lower");
+        let (with, _) = compile_recording_with_findings(&rec).expect("must lower");
+        assert_eq!(
+            plain, with,
+            "the two entry points must produce identical Workloads"
+        );
     }
 
     #[test]
@@ -610,5 +914,70 @@ mod tests {
             err.to_string().contains("stat") || err.to_string().contains("unknown"),
             "got: {err}"
         );
+    }
+
+    /// Lower a FilesWrite hook and actually run it under /bin/sh in a
+    /// temp dir, proving the generated line creates the file with the
+    /// intended bytes. `rel` is joined onto the temp dir so the test
+    /// never writes outside it.
+    #[cfg(unix)]
+    fn files_write_roundtrip_under_tempdir(rel: &str, bytes: &[u8]) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join(rel);
+        let ops = vec![
+            write_op(target.to_str().unwrap(), bytes),
+            start_op(&["/bin/true"]),
+        ];
+        let wl = compile_recording(&rec_with_ops(ops)).expect("must lower");
+        let HookCmd::Shell { line } = &wl.apps[0].hooks.before_start[0] else {
+            panic!("expected Shell hook");
+        };
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(line)
+            .status()
+            .expect("run hook");
+        assert!(status.success(), "hook failed for {rel}: {line}");
+        let got = std::fs::read(&target).expect("file must exist");
+        assert_eq!(got, bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_write_root_level_path_materializes() {
+        files_write_roundtrip_under_tempdir("topfile", b"root-level");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_write_slashless_nested_path_materializes() {
+        files_write_roundtrip_under_tempdir("sub/deep/conf.toml", b"nested");
+    }
+
+    #[test]
+    fn recording_digest_is_stable_64_hex() {
+        let d = recording_sha256_hex(b"{}");
+        assert_eq!(d.len(), 64);
+        assert_eq!(d, recording_sha256_hex(b"{}"));
+        assert_ne!(d, recording_sha256_hex(b"{} "));
+    }
+
+    #[test]
+    fn digest_verify_match_passes_mismatch_refuses() {
+        let bytes = b"some recording bytes";
+        let good = recording_sha256_hex(bytes);
+        verify_recording_digest(bytes, &good).expect("matching digest must pass");
+        let err = verify_recording_digest(bytes, &recording_sha256_hex(b"other")).unwrap_err();
+        assert!(
+            matches!(err, LowerError::DigestMismatch { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn digest_verify_is_case_insensitive_on_expected() {
+        let bytes = b"case test";
+        let upper = recording_sha256_hex(bytes).to_uppercase();
+        verify_recording_digest(bytes, &upper).expect("hex case must not matter");
     }
 }
