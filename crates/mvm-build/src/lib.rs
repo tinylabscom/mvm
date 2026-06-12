@@ -61,6 +61,11 @@ pub mod libkrun_network_provider;
 /// nix-tarball Stage 0 seed on the stock distro kernel + initramfs with
 /// ext4 disks + slirp networking. Linux-only at runtime; compiles
 /// everywhere (the selection only picks it on Linux).
+/// Shared in-guest static-IP helpers: `configure_static` (gated
+/// `cfg(linux)`) plus pure address-parsing/encoding utilities tested
+/// on every host. Consumed by both `stage0-init` and `mvm-host-vm-init`.
+pub mod guest_net;
+
 pub mod qemu_builder;
 
 /// Vz-backed builder VM (gated by `builder-vm` for symmetry with
