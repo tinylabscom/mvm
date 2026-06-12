@@ -3989,13 +3989,11 @@ mod resolve_deps_volume_tests {
         use std::os::unix::fs::PermissionsExt;
 
         // MVM_DATA_DIR isolates the binding store, egress CA, and VM state dir.
-        // Process-per-test under nextest already isolates env; the lock keeps
-        // plain `cargo test` (shared process) safe.
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Process-per-test under nextest already isolates env; the shared
+        // guard keeps plain `cargo test` (shared process) safe.
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("MVM_DATA_DIR").ok();
-        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", tmp.path());
 
         // Record the egress binding the helper resolves bound hosts from.
         FileBindingStore::default_location()
@@ -4041,12 +4039,5 @@ mod resolve_deps_volume_tests {
             v["cert_pem"].as_str().unwrap().trim(),
             cert_file.content.trim()
         );
-
-        unsafe {
-            match prev {
-                Some(p) => std::env::set_var("MVM_DATA_DIR", p),
-                None => std::env::remove_var("MVM_DATA_DIR"),
-            }
-        }
     }
 }

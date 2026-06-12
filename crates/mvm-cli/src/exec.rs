@@ -1112,10 +1112,8 @@ mod tests {
 
     #[test]
     fn add_dir_expands_tilde_in_host_path() {
-        // SAFETY: test process is single-threaded for env access.
-        unsafe {
-            std::env::set_var("HOME", "/tmp/fakehome");
-        }
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("HOME", "/tmp/fakehome");
         let d = AddDir::parse("~/configs:/etc/configs").unwrap();
         assert_eq!(d.host_path, "/tmp/fakehome/configs");
         assert_eq!(d.guest_path, "/etc/configs");

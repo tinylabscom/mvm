@@ -484,34 +484,17 @@ mod tests {
     // Production paths now resolve via mvm_core::config::mvm_data_dir()
     // (MVM_DATA_DIR first, then $HOME). Point MVM_DATA_DIR at the test's
     // `<temp>/.mvm` so the helper-built paths land in the temp tree the
-    // test populates. Serialized via a static lock; restored on drop.
-    static DATA_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // test populates. Restored on drop by the shared process-env guard.
 
     struct DataDirGuard {
-        _guard: std::sync::MutexGuard<'static, ()>,
-        prev: Option<std::ffi::OsString>,
+        _env: mvm_core::util::test_env::TestEnv,
     }
 
     impl DataDirGuard {
         fn new(home: &std::path::Path) -> Self {
-            let guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let prev = std::env::var_os("MVM_DATA_DIR");
-            unsafe { std::env::set_var("MVM_DATA_DIR", home.join(".mvm")) };
-            Self {
-                _guard: guard,
-                prev,
-            }
-        }
-    }
-
-    impl Drop for DataDirGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.prev {
-                    Some(v) => std::env::set_var("MVM_DATA_DIR", v),
-                    None => std::env::remove_var("MVM_DATA_DIR"),
-                }
-            }
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            env.set("MVM_DATA_DIR", home.join(".mvm"));
+            Self { _env: env }
         }
     }
 

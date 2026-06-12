@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-12** (Plan 186 trace-hardening landed)
+**Last updated: 2026-06-12** (Plan 188 projection seam landed)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -30,11 +30,13 @@ details** below for the workstream-level state.
 - [ ] **PLAN 124** — Lean guest agent · 🟡 ~65%; SDK codegen + signed on-device config remain
 - [ ] **PLAN 126** — Dependency reduction · 🟡 ~30%; duplicate-major lock-gate landed (+ supply-chain CI restored); sigstore/aws-lc/forbidden-dep-gate remain
 - [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 convergence landed (#806) — remaining: hardware smoke (host-gated) + cosmetic rename slice
+- [ ] **PLAN 182** — Trait hygiene + backend catalog · 🟡 code+docs done locally; aggregate workspace-test SIGKILL remains
+- [ ] **PLAN 184** — Backend descriptor registry · 🔴 not started
+- [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 shared TestEnv landed; mvm-core + backend marker tests migrated
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
 - [ ] **PLAN 184** — Capability projection seam (ADR-080 P5) · 🟢 seam + witnesses landed; kernel-side wiring + WASI-context mapping deferred
-- [ ] **PLAN 186** — Trace hardening (ADR-080 P1/P3/P4 + interim P2 pin) · 🟢 P1/P3/P4 done + P2 interim pin hardened (live injection fix); full P2 + P6–P8 open
 
 ## Plan details
 
@@ -267,6 +269,38 @@ PLAN 124 — Lean guest agent                     🟡 ~65%
   [ ] D1.2/D1.3 SDK codegen
   [ ] E signed on-device config
 
+PLAN 184 — Backend descriptor registry          🔴 not started
+  [ ] Promote `mvm-backend`'s shipped backend catalog into a first-class
+      `BackendDescriptor` / registry API while preserving `VmBackend` as the
+      sole backend behavior trait
+  [ ] Add descriptor-driven construction for both `AnyBackend` and
+      `Arc<dyn VmBackend>` consumers
+  [ ] Migrate read-only and clearly generic backend consumers away from enum
+      dispatch where no backend-specific behavior is needed
+  [ ] Keep `AnyBackend` only for intentionally enum-specific operations
+      (`auto_select` policy, backend-specific helpers, explicit variant checks)
+
+PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
+  [x] Add `mvm_core::util::test_env::TestEnv` behind `cfg(test)` /
+      `mvm-core/test-support`; migrate `mvm-core` keystore env tests; verify
+      with focused tests + `cargo clippy -p mvm-core --all-targets -- -D warnings`
+  [x] Migrate `mvm-backend::backend` selector/started-VM marker tests to
+      `TestEnv` + `tempfile::TempDir`; keep the legacy backend env lock until
+      the rest of that crate migrates
+  [ ] Roll `TestEnv` through remaining high-risk env-mutating tests in `mvm-backend`,
+      `mvm-cli`, and `mvm-build`
+  [ ] Standardize poisoned-lock handling by distinguishing test/global
+      serialization locks from real runtime state locks
+  [ ] Rename overly generic internal traits/types where the blast radius is
+      small, including storage/backend and layer-local egress proxy names
+  [ ] Push stringly backend/provider selectors toward typed values at module
+      boundaries
+  [ ] Audit long constructors, params structs, builders, and large functions
+      only where the split adds testable structure
+  [ ] Audit unsafe/platform/feature boundaries, standardize error shapes,
+      consolidate repeated fixtures, check secret/debug exposure, and add
+      Rustdoc verification to closeout
+
 PLAN 170 — Host lifecycle convergence           ✅ mvm-side done (density → mvmd)
   [x] WS-A reconcile-on-entry — PR #688 (merged)
   [~] WS-B idle-reaper mechanism — PR #696 (merged, no consumer)
@@ -293,9 +327,18 @@ PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C1
       doctor warm-start matrix + Linux NBD/HugeTLB substrate probe
   [ ] C2 Firecracker live-memory fast-resume — carved out → Plan 175
   [ ] C3 Vz save/restore (macOS 26+) — owned by Plan 152 WS-C
-  [ ] C4 warm-start CLI/RPC wiring — carved out → Plan 175 (rides C2)
+
+PLAN 182 — Trait hygiene + backend catalog      🟡 code+docs in; aggregate workspace-test gate remains
+  [x] shared `mvm_core::time::{Clock,SystemClock}` replaces the three local copies
+  [x] duplicate `KeyProvider` retired in favor of `mvm_core::crypto::keystore`
+  [x] backend metadata catalog becomes the single source for `AnyBackend` selectors
+      and `mvmctl doctor` backend support maps
+  [x] macro scope stays narrow: land `backend_catalog!`, reject broader trait-impl/noop macros
+  [x] architecture docs now describe the current trait seams and ownership rules
+  [ ] literal `cargo test --workspace` aggregate run (package-local tests are green; workspace run hits SIGKILL on `mvm-backend` here)
 
 PLAN 175 — Firecracker live-memory warm-start    🔴 NOT STARTED (live-KVM-gated; Plan 123 C2 carve-out)
+  [ ] C4 warm-start CLI/RPC wiring — carved out → Plan 175 (rides C2)
   [ ] T1 VMGenID delivery on PostRestore (token payload + GenIdReseeder dispatch)
   [ ] T2 UFFD/NBD/hugepages fast-resume substrate (diff snapshot + lazy paging)
   [ ] T3 SIGUSR1 "primed" ready-barrier for a deterministic warm base
@@ -384,30 +427,6 @@ PLAN 181 — App-builder product surface           🔴 NOT STARTED  (ADR-079; m
   NOTE: deliberately rejects the sibling app-builder's isolation model — no Docker
   socket, no host-path mounts into a workload, no auth-off/caps-off defaults, no
   baked-in agents, no multi-tenant HTTP/auth in mvm (mvmd per ADR-070 §5/Plan 33).
-
-PLAN 186 — Trace hardening (ADR-080 P1/P3/P4)       🟢 P1/P3/P4 DONE; P2 interim pin DONE+HARDENED; full P2/P6–P8 open
-  [x] P1: MAX_RECORDED_OPS (1024) + MAX_FILES_WRITE_DECODED_BYTES (8 MiB) limits
-  [x] P1: DuplicateFilesWritePath refusal at compile_recording entry
-  [x] P1: fuzz_runtime_recording in security.yml (crates/mvm-sdk/fuzz)
-  [x] P2 interim: b64-STANDARD-alphabet pin + shell-quote regression tests
-  [x] P2 HARDENED: path itself base64-encoded into hook (was single-quote-interpolated)
-      — caught + fixed a LIVE shell-injection in the FilesWrite lowering
-      — verified injection-safe by executing generated hooks against /bin/sh
-      — witnesses: files_write_root_level_path_materializes,
-        files_write_slashless_nested_path_materializes
-  [x] P3: recording_sha256_hex + verify_recording_digest (mvm-sdk runtime)
-  [x] P3: 64 MiB byte cap before JSON parse in load_recording
-  [x] P3: --recording-sha256 flag on compile --from-recording
-  [x] P4: Divergence vocabulary (KillDropped, FilesWriteAfterEntrypoint) in mvm_sdk::runtime
-  [x] P4: compile_recording_with_findings + require_acknowledged in mvm-cli
-  [x] P4: --ack-divergence <kind> on run --mode plan admission path
-  [ ] P2 full: declarative IR file-materialization field (replace shell hook) — own plan
-  [ ] P6: preview-fetched component digests carried into IR; mutable ref refused --prod
-  [ ] P7: trace+IR secret-scan admission; paste-time detector in preview input
-  [ ] P8: relay session binding (wrong-token refusal, second-client refusal, fuel/mem/wall-clock caps)
-  NOTE: P2 fix is stronger than the plan anticipated — the pin exposed a real injection
-  surface (path metacharacters in the single-quoted shell template). Path b64 is the fix;
-  the declarative-lowering plan will delete the shell surface entirely.
 
 PLAN 184 — Capability projection seam (ADR-080 P5)  🟢 seam + witnesses LANDED; enforcement wiring deferred
   [x] Proto + CanonicalRule atom (projection seam module created)
