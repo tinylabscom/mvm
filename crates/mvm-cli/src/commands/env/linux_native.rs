@@ -66,13 +66,16 @@ pub(super) fn cmd_dev_linux_native(open_shell: bool) -> Result<()> {
 /// On Linux there is no separate dev VM to stop — the host shell is
 /// the environment. Function returns `Ok(())` so the caller's
 /// gc-root cleanup (in `super::dev`) still runs unconditionally.
-pub(super) fn cmd_dev_linux_native_down() -> Result<()> {
-    ui::info(
-        "Nothing to stop on Linux+KVM — the host is the dev environment. \
-         (mvmctl-managed microVMs are still running; use `mvmctl down <name>` \
-         to stop those individually or `mvmctl down --all`.)",
-    );
-    Ok(())
+pub(super) fn cmd_dev_linux_native_down(json: bool) -> Result<bool> {
+    if !json {
+        ui::info(
+            "Nothing to stop on Linux+KVM — the host is the dev environment. \
+             (mvmctl-managed microVMs are still running; use `mvmctl down <name>` \
+             to stop those individually or `mvmctl down --all`.)",
+        );
+    }
+    // No managed dev VM on a native-KVM host; nothing was running.
+    Ok(false)
 }
 
 /// `mvmctl dev shell` on Linux+KVM. Spawns an interactive `bash -i`.

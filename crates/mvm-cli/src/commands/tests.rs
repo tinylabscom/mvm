@@ -2998,8 +2998,30 @@ fn test_init_scaffold_with_prompt_flag() {
 
 #[test]
 fn test_dev_down_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "dev", "down"]);
-    assert!(cli.is_ok());
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "down"]).unwrap();
+    match cli.command {
+        Commands::Dev(dev::Args {
+            action: Some(DevAction::Down { reset, json }),
+        }) => {
+            assert!(!reset);
+            assert!(!json, "bare `dev down` defaults to text output");
+        }
+        _ => panic!("Expected Dev Down command"),
+    }
+}
+
+#[test]
+fn test_dev_down_json_and_reset_flags_parse() {
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "down", "--reset", "--json"]).unwrap();
+    match cli.command {
+        Commands::Dev(dev::Args {
+            action: Some(DevAction::Down { reset, json }),
+        }) => {
+            assert!(reset);
+            assert!(json);
+        }
+        _ => panic!("Expected Dev Down command"),
+    }
 }
 
 #[test]

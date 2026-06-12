@@ -396,9 +396,9 @@ PLAN 177 — Backend consolidation (8→4)           ✅ DONE — both phases me
 PLAN 189 — VZ DX parity (post-convergence)        🟡 in progress  (ADR-076 §"Out of scope")
   Spun out of Plan 177's deferred DX-parity follow-on; sibling of Plan 159 (owns
   only the additive parity slice, cross-refs 159/140/148 for primitives).
-  [x] WS-3 first slice: `dev status --json` (versioned, privacy-safe DevStatusJson;
-      all 4 dispatch arms; serde + CLI-parse tests; verified on macOS-26)
-  [ ] WS-3 remaining: dev up/down --json, snapshot/checkpoint --json, linux-native detail
+  [x] WS-3: `dev status --json` + `dev down --json` (versioned, privacy-safe;
+      all dispatch arms; down handlers return was_running; serde + CLI-parse tests)
+  [ ] WS-3 remaining: dev up --json, snapshot/checkpoint --json, linux-native detail
   [ ] WS-1 save/restore verbs · WS-2 cached fast-boot default · WS-4 base pinning
   [ ] WS-1 surface save/restore verbs (gated by snapshot_capability tier)
   [ ] WS-2 cached fast-boot as the default vz boot posture
