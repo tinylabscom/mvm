@@ -766,10 +766,11 @@ mod tests {
 
     #[test]
     fn files_write_b64_with_single_quote_refuses() {
-        // The lowering interpolates the b64 token inside single
-        // quotes in a shell line; the STANDARD alphabet containing
-        // no quote character is the property that makes that safe.
-        // A decoder/alphabet change that lets a quote through is an
+        // Both path and payload are base64-encoded into the shell line;
+        // the STANDARD alphabet (no quotes, no metacharacters) is what
+        // makes both tokens safe at the point they reach the shell.
+        // The decode-before-interpolate step handles the payload token;
+        // a decoder/alphabet change that lets a quote through is an
         // injection primitive — this pin must fail loudly first.
         let ops = vec![
             RecordedOp::FilesWrite {
@@ -805,12 +806,13 @@ mod tests {
     }
 
     #[test]
-    fn files_write_hostile_path_is_single_quoted_in_hook() {
-        // The path delivery mechanism is base64-encoding: the
-        // generated shell line carries only STANDARD-alphabet tokens,
-        // which contain no shell metacharacters. Verify that the
-        // hostile path's raw bytes do not appear in the line and
-        // that no injection breakout sequence survives.
+    fn files_write_hostile_path_is_base64_encoded_in_hook() {
+        // Both path and payload are base64-encoded into the shell line
+        // using the STANDARD alphabet, which contains no metacharacters.
+        // The decode-before-interpolate step is what makes the payload
+        // token alphabet-safe; no quoting or escaping of the raw path
+        // bytes is needed or present. Verify the b64 of the hostile
+        // path appears in the line and that no injection breakout survives.
         let hostile = "/app/x'; rm -rf /tmp/pwn; echo '";
         let ops = vec![write_op(hostile, b"x"), start_op(&["/bin/true"])];
         let wl = compile_recording(&rec_with_ops(ops)).expect("must lower");
