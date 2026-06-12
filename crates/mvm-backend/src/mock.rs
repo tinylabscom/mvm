@@ -5,7 +5,7 @@
 //! the VM-lifecycle CLI verbs (`mvmctl up`, `down`, `pause`, `resume`,
 //! `set-ttl`, `fs`, `proc`, `volume mount`, `snapshot`) can be exercised
 //! end-to-end in hermetic tests — `cargo test` on a CI runner with no
-//! KVM, no Apple Container, no Nix builder VM, no Docker daemon.
+//! KVM, no VMM, and no Nix builder VM.
 //!
 //! Selected via `mvmctl up --hypervisor mock` (matches the
 //! [`AnyBackend::from_hypervisor`] selector). Production callers don't
