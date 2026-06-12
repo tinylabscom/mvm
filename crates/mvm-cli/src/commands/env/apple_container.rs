@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 #[cfg(feature = "builder-vm")]
 use mvm::vsock_transport::{VsockTransport, VzTransport};
 
+#[cfg(feature = "builder-vm")]
 use super::super::vm::console::console_interactive;
 use super::artifact_verify::{
     bump_verify_outcome, download_file, fetch_expected_hashes, url_exists, verify_artifact_hash,
