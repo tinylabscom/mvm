@@ -310,7 +310,8 @@ Two independent defects blocked `mvmctl up --flake <workload> --hypervisor vz`:
 - [ ] restore-failure leaks the freshly-spawned gvproxy (supervisor never
   wrote its PID, the sidecar lingers; the retry orphans it) — reap the
   sidecar on the restore error path, consistent with `start()`'s behavior.
-- [ ] Vz two-copy fork: route live forks through the fs_quick (cold-boot)
-  class on Vz — VZ machine-state restore pins the saved device config
-  (`VZErrorDomain:12` on a changed MAC), so memory-state forks can't change
-  identity.
+- [x] Vz two-copy fork: `checkpoint fork --boot` admits the child under a fresh
+  plan (claim 8), passes the instance rootfs path so `prepare_instance_rootfs`
+  returns early (no clobber), inherits resource shape from parent plan, and
+  dispatches the backend.  fixed: `checkpoint.rs::boot_forked_child` +
+  `up::admit_plan_for_boot` reuse; `up::resolve_vz_workload_kernel` pub(super).

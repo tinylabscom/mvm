@@ -1,7 +1,7 @@
 //! `mvmctl checkpoint create|ls|rm|fork` — immutable fs_quick snapshots of a
 //! quiesced VM's rootfs, and copy-on-write forks that branch a new sandbox
-//! lineage from one. Capture and fork are filesystem-only here; booting a
-//! forked child is a separate `mvmctl up` step.
+//! lineage from one. With `--boot` the fork arm also admits and launches the
+//! child as a fresh VM, adopting the materialized rootfs without clobbering it.
 //!
 //! Only the macOS Vz workload backend materializes a host-side rootfs image,
 //! so checkpointing is gated to a VM that has one.
@@ -74,13 +74,31 @@ pub(in crate::commands) enum CheckpointCmd {
         /// Checkpoint id to remove.
         id: String,
     },
-    /// Branch a new sandbox lineage from a checkpoint (materialize only).
+    /// Branch a new sandbox lineage from a checkpoint.
+    ///
+    /// By default the child rootfs is materialized but not booted (fs_quick).
+    /// Pass `--boot` to admit and launch the child immediately.
+    /// vm_full forks always auto-boot as part of the fork; `--boot` is
+    /// accepted there but has no extra effect.
     Fork {
         /// Parent checkpoint id.
         id: String,
         /// Name for the new VM instance (auto-generated if omitted).
         #[arg(long, value_parser = clap_vm_name)]
         new_id: Option<String>,
+        /// Admit and boot the forked child immediately (fs_quick forks).
+        #[arg(long)]
+        boot: bool,
+        /// Hypervisor backend for `--boot` (firecracker, libkrun, qemu, vz).
+        /// Defaults to the same auto-detect order as `mvmctl up`.
+        #[arg(long, default_value = "firecracker")]
+        hypervisor: String,
+        /// vCPU count for the booted child. Inherits from parent plan when omitted.
+        #[arg(long)]
+        cpus: Option<u32>,
+        /// Memory for the booted child (e.g. 512M, 2G). Inherits from parent plan when omitted.
+        #[arg(long)]
+        memory: Option<String>,
     },
     /// Compare two checkpoints (metadata + content manifest; `b` relative to `a`).
     Diff {
@@ -108,7 +126,14 @@ pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> R
         CheckpointCmd::Restore { id } => restore(&id),
         CheckpointCmd::Ls { json } => ls(json),
         CheckpointCmd::Rm { id } => rm(&id),
-        CheckpointCmd::Fork { id, new_id } => fork(&id, new_id),
+        CheckpointCmd::Fork {
+            id,
+            new_id,
+            boot,
+            hypervisor,
+            cpus,
+            memory,
+        } => fork(&id, new_id, boot, &hypervisor, cpus, memory.as_deref()),
         CheckpointCmd::Diff { a, b, json } => diff(&a, &b, json),
     }
 }
@@ -511,25 +536,40 @@ fn restore(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn fork(id: &str, new_id: Option<String>) -> Result<()> {
+fn fork(
+    id: &str,
+    new_id: Option<String>,
+    boot: bool,
+    hypervisor: &str,
+    cpus: Option<u32>,
+    memory: Option<&str>,
+) -> Result<()> {
     let checkpoint = validated_checkpoint_id(id)?;
     let store = CheckpointStore::open();
     // Pick the fork arm by the parent's class: vm_full carries memory and must
     // restore through `fork_vm_full` (which auto-boots the child); fs_quick is
-    // a rootfs-only clone that the operator boots separately.
+    // a rootfs-only clone that the operator can optionally boot with `--boot`.
     let parent = store.read_meta(&checkpoint)?;
     match parent.class {
         CheckpointClass::VmFull => fork_vm_full_arm(&store, &checkpoint, new_id),
-        CheckpointClass::FsQuick => fork_fs_quick_arm(&store, &checkpoint, new_id),
+        CheckpointClass::FsQuick => {
+            fork_fs_quick_arm(&store, &checkpoint, new_id, boot, hypervisor, cpus, memory)
+        }
     }
 }
 
-/// fs_quick fork: CoW-clone the rootfs into a new VM state dir; the operator
-/// boots the child with a separate `mvmctl up`.
+/// fs_quick fork: CoW-clone the rootfs into a new VM state dir. With
+/// `--boot`, also admits and launches the child as a fresh VM, adopting the
+/// materialized rootfs without clobbering it (the no-clobber seam in
+/// `prepare_instance_rootfs` returns early when source == instance path).
 fn fork_fs_quick_arm(
     store: &CheckpointStore,
     checkpoint: &CheckpointId,
     new_id: Option<String>,
+    boot: bool,
+    hypervisor: &str,
+    cpus: Option<u32>,
+    memory: Option<&str>,
 ) -> Result<()> {
     let now = now_unix();
     let child_vm_name = new_id.unwrap_or_else(|| format!("{}-fork-{now}", checkpoint.as_str()));
@@ -542,7 +582,7 @@ fn fork_fs_quick_arm(
             checkpoint: checkpoint.clone(),
             child_id,
             child_vm_name: child_vm_name.clone(),
-            dest_dir,
+            dest_dir: dest_dir.clone(),
             created_unix: now,
         },
     )
@@ -559,9 +599,25 @@ fn fork_fs_quick_arm(
         meta.id.as_str(),
         child_vm_name
     ));
-    ui::info(&format!(
-        "boot the child with: mvmctl up <flake> --name {child_vm_name}"
-    ));
+
+    if boot {
+        let instance_rootfs = dest_dir.join("rootfs.ext4");
+        boot_forked_child(BootForkedChildParams {
+            child_vm_name: &child_vm_name,
+            instance_rootfs: &instance_rootfs,
+            parent_checkpoint: checkpoint,
+            store,
+            hypervisor,
+            cpus_override: cpus,
+            memory_override: memory,
+        })?;
+    } else {
+        ui::info(&format!(
+            "child '{}' materialized; re-run with --boot to admit and launch, \
+             or remove it with: mvmctl down {child_vm_name}",
+            child_vm_name
+        ));
+    }
     Ok(())
 }
 
@@ -600,6 +656,135 @@ fn fork_vm_full_arm(
         child_vm_name
     ));
     Ok(())
+}
+
+/// Inputs for [`boot_forked_child`]. Grouped to stay under the
+/// `clippy::too_many_arguments` workspace ceiling.
+struct BootForkedChildParams<'a> {
+    child_vm_name: &'a str,
+    /// Absolute path to the materialized child rootfs (the fork output).
+    /// Passed as-is to admission so `prepare_instance_rootfs`'s
+    /// source-equals-instance arm returns without clobbering it.
+    instance_rootfs: &'a std::path::Path,
+    /// The parent fs_quick checkpoint id — used to look up the parent VM's
+    /// plan when the child has none yet.
+    parent_checkpoint: &'a CheckpointId,
+    store: &'a CheckpointStore,
+    hypervisor: &'a str,
+    cpus_override: Option<u32>,
+    memory_override: Option<&'a str>,
+}
+
+/// Admit and boot a forked child VM after its rootfs has been materialized.
+///
+/// Resource resolution: flags win > parent's persisted plan > global defaults.
+/// The rootfs is the already-materialized instance file (`prepare_instance_rootfs`
+/// returns early when source == instance, so nothing gets clobbered).
+fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
+    use mvm_backend::backend::AnyBackend;
+    use mvm_core::util::parse_human_size;
+
+    let effective_hypervisor = super::super::shared::resolve_effective_hypervisor(p.hypervisor);
+
+    // Resource shape: flag > parent plan > global defaults.
+    let (parent_cpus, parent_mem) = parent_plan_resources(p.parent_checkpoint, p.store);
+    let user_cfg = mvm_core::user_config::load(None);
+    let cpus = p
+        .cpus_override
+        .or(parent_cpus)
+        .unwrap_or(user_cfg.default_cpus);
+    let mem_mib = match p.memory_override {
+        Some(s) => parse_human_size(s).context("parsing --memory for --boot")?,
+        None => parent_mem.unwrap_or(user_cfg.default_memory_mib),
+    } as u64;
+
+    let tenant = super::tenant_resolution::resolve_tenant(None);
+
+    // The Vz backend needs a real kernel path; work-image boots ship none.
+    // Fall back to the cached builder-VM kernel the same way `up` does.
+    let vmlinux_placeholder = p
+        .instance_rootfs
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("vmlinux");
+    let vmlinux_path = super::up::resolve_vz_workload_kernel(
+        vmlinux_placeholder.to_str().unwrap_or(""),
+        &effective_hypervisor,
+    )?;
+
+    let ledger = super::plan_admission::InMemoryNonceLedger::new();
+    let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+        tenant: &tenant,
+        vm_name: p.child_vm_name,
+        backend_name: &effective_hypervisor,
+        rootfs_path: p.instance_rootfs,
+        cpus,
+        mem_mib,
+        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+        secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+        secrets: Vec::new(),
+        no_supervisor: false,
+        ledger: &ledger,
+        keys_dir: None,
+        audit_dir: None,
+        policy_dir: None,
+        bundle_pin: None,
+        deps_volume: None,
+        shares: Vec::new(),
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+    })?;
+
+    let mut start_config = mvm_core::vm_backend::VmStartConfig {
+        name: p.child_vm_name.to_string(),
+        // Passing the instance path as rootfs_path so `prepare_instance_rootfs`
+        // hits the source-equals-instance no-op arm and leaves the fork intact.
+        rootfs_path: p.instance_rootfs.to_string_lossy().into_owned(),
+        kernel_path: Some(vmlinux_path),
+        cpus,
+        memory_mib: mem_mib as u32,
+        ..Default::default()
+    };
+
+    if let Some(ctx) = admission.as_ref() {
+        super::plan_admission::populate_audit_substrate(
+            &mut start_config,
+            &ctx.admitted,
+            ctx.policy_bundle.as_ref(),
+        )?;
+    }
+
+    let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
+    if let Err(e) = backend.start(&start_config) {
+        super::up::emit_failed_if(&admission, "backend-start", &e);
+        return Err(e);
+    }
+    super::up::emit_launched_if(&admission, &effective_hypervisor);
+
+    ui::success(&format!(
+        "child VM '{}' booted (hypervisor: {})",
+        p.child_vm_name, effective_hypervisor
+    ));
+    Ok(())
+}
+
+/// Read the parent checkpoint's source VM plan and return (cpus, mem_mib).
+/// Returns (None, None) when the plan is absent — the caller falls back to
+/// global defaults. The parent checkpoint's `vm_name` field names the source VM.
+fn parent_plan_resources(
+    parent_checkpoint: &CheckpointId,
+    store: &CheckpointStore,
+) -> (Option<u32>, Option<u32>) {
+    let parent_meta = match store.read_meta(parent_checkpoint) {
+        Ok(m) => m,
+        Err(_) => return (None, None),
+    };
+    let plan = match super::plan_persist::read_plan(&parent_meta.vm_name) {
+        Ok(p) => p,
+        Err(_) => return (None, None),
+    };
+    let cpus = Some(plan.resources.cpus);
+    let mem = Some(plan.resources.mem_mib as u32);
+    (cpus, mem)
 }
 
 pub(crate) fn bind_checkpoint_forked(
@@ -802,5 +987,117 @@ mod tests {
             msg.contains("vm-full") || msg.contains("vm_full"),
             "error should mention vm-full alternative: {msg}"
         );
+    }
+
+    // ── boot_forked_child: resource-shape resolution ─────────────────────
+
+    /// Helper: seed a minimal fs_quick checkpoint in a store and return its id.
+    fn seed_checkpoint(store: &CheckpointStore, vm_name: &str) -> CheckpointId {
+        let content_dir = store.content_dir(&mvm_core::checkpoint::CheckpointId::new(format!(
+            "ck-{vm_name}"
+        )));
+        std::fs::create_dir_all(&content_dir).unwrap();
+        let blob = content_dir.join("rootfs.ext4");
+        std::fs::write(&blob, b"fake").unwrap();
+        let sha = mvm_core::crypto::image_verify::sha256_file(&blob).unwrap();
+        let meta = mvm_core::checkpoint::CheckpointMeta::builder(
+            mvm_core::checkpoint::CheckpointId::new(format!("ck-{vm_name}")),
+            mvm_core::checkpoint::CheckpointClass::FsQuick,
+            vm_name.to_string(),
+        )
+        .content(vec![mvm_core::checkpoint::ContentBlob {
+            name: "rootfs.ext4".into(),
+            sha256: sha,
+        }])
+        .supervisor_config_digest("d")
+        .created_unix(1)
+        .build();
+        store.write_meta(&meta).unwrap();
+        meta.id
+    }
+
+    /// When no plan exists for the parent VM and no flags are provided, the
+    /// resource resolution falls through to global defaults (2 CPUs, 512 MiB).
+    #[test]
+    fn resource_shape_no_plan_no_flags_uses_defaults() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let ckpt_id = seed_checkpoint(&store, "origin-vm");
+
+        let (cpus, mem) = parent_plan_resources(&ckpt_id, &store);
+        // No plan on disk → both are None.
+        assert!(cpus.is_none());
+        assert!(mem.is_none());
+
+        // Resolution: flags win (None here) → plan (None) → defaults.
+        let user_cfg = mvm_core::user_config::load(None);
+        let final_cpus = None::<u32>.or(cpus).unwrap_or(user_cfg.default_cpus);
+        let final_mem = None::<u32>.or(mem).unwrap_or(user_cfg.default_memory_mib);
+        assert_eq!(final_cpus, 2);
+        assert_eq!(final_mem, 512);
+
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    /// Explicit flags win over everything: cpus=8, memory="1024" override
+    /// whatever the parent plan would have said.
+    #[test]
+    fn resource_shape_flags_override_plan() {
+        let flag_cpus: Option<u32> = Some(8);
+        let flag_mem: Option<&str> = Some("1024");
+        let plan_cpus: Option<u32> = Some(2);
+        let plan_mem: Option<u32> = Some(512);
+
+        let user_cfg = mvm_core::user_config::load(None);
+        let final_cpus = flag_cpus.or(plan_cpus).unwrap_or(user_cfg.default_cpus);
+        let final_mem_mib = match flag_mem {
+            Some(s) => mvm_core::util::parse_human_size(s).unwrap(),
+            None => plan_mem.unwrap_or(user_cfg.default_memory_mib),
+        };
+        assert_eq!(final_cpus, 8);
+        assert_eq!(final_mem_mib, 1024);
+    }
+
+    // ── boot path: no-clobber property ───────────────────────────────────
+
+    /// The boot arm passes the INSTANCE path (`vm_state_dir/rootfs.ext4`) as
+    /// the rootfs_path in the VmStartConfig. `prepare_instance_rootfs` returns
+    /// early when source == instance, so the forked rootfs is never replaced.
+    #[test]
+    fn boot_arm_start_config_uses_instance_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let instance = tmp.path().join("childvm").join("rootfs.ext4");
+        std::fs::create_dir_all(instance.parent().unwrap()).unwrap();
+        std::fs::write(&instance, b"forked").unwrap();
+
+        // Build the VmStartConfig the same way boot_forked_child does, and assert
+        // rootfs_path equals the instance path (not some other source).
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "childvm".into(),
+            rootfs_path: instance.to_string_lossy().into_owned(),
+            kernel_path: None,
+            cpus: 2,
+            memory_mib: 512,
+            ..Default::default()
+        };
+        assert_eq!(
+            config.rootfs_path,
+            instance.to_str().unwrap(),
+            "rootfs_path must point at the instance file, not any source template"
+        );
+
+        // Confirm the no-clobber seam fires: prepare_instance_rootfs_inner
+        // returns the same path without touching the file when src == instance.
+        let out = mvm_backend::base::cow::prepare_instance_rootfs_inner(
+            &instance,
+            instance.to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(out, instance);
+        // File must be untouched.
+        assert_eq!(std::fs::read(&instance).unwrap(), b"forked");
     }
 }

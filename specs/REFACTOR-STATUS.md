@@ -226,6 +226,9 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       restore_checkpoint + retire snapshot save/restore. cache GC.
       PR3 (#780): checkpoint diff <a> <b> (metadata+manifest compare) + Vz
       pause/resume (native vCPU quiesce). WS-2 COMPLETE.
+  [x] two-copy fork: checkpoint fork --boot (admitted child boot, fs_quick) —
+      fresh claim-8 admission via boot_forked_child + admit_plan_for_boot reuse;
+      no-clobber rootfs adoption; resource shape flags > parent plan > defaults.
   [x] Vz workload liveness: /init detaches sealed-workload stdin from the
       input-less console (`</dev/null`) + examples/sleeper long-lived fixture
       (unblocks live Vz validation of WS-2 + the fork semantic-A spike);

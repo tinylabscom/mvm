@@ -2445,7 +2445,10 @@ fn attach_runtime_overlay(
 /// VZ-family backends need a real kernel file; fall back to the cached
 /// builder-VM kernel (an ARM64 boot Image, the same kernel the Vz builder
 /// and dev VMs boot) rather than handing VZ a missing path.
-fn resolve_vz_workload_kernel(vmlinux_path: &str, hypervisor: &str) -> anyhow::Result<String> {
+pub(super) fn resolve_vz_workload_kernel(
+    vmlinux_path: &str,
+    hypervisor: &str,
+) -> anyhow::Result<String> {
     if std::path::Path::new(vmlinux_path).exists() {
         return Ok(vmlinux_path.to_string());
     }
