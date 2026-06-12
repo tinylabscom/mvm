@@ -1,4 +1,4 @@
-//! CLI surface tests for trace-hardening flags (plan 186 P3+P4).
+//! CLI surface tests for the trace-hardening flags.
 //!
 //! Asserts that `--ack-divergence` appears on `mvmctl run --help` and
 //! `--recording-sha256` appears on `mvmctl build compile --help`.

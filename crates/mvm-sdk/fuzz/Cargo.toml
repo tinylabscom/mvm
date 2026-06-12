@@ -27,7 +27,7 @@ path = ".."
 # `deny_unknown_fields` must fail closed on garbage, and every
 # lowering refusal (op limits, duplicate paths, oversize or malformed
 # FilesWrite b64, missing entrypoint) must surface as Err, not a panic
-# (claim 5 / ADR-002 §"Parser hardening").
+# (claim 5 — untrusted-parser hardening).
 [[bin]]
 name = "fuzz_runtime_recording"
 path = "fuzz_targets/fuzz_runtime_recording.rs"
