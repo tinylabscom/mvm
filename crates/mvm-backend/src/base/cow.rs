@@ -226,7 +226,44 @@ pub fn prepare_instance_rootfs_inner(instance_path: &Path, source_rootfs: &str) 
         instance = %instance_path.display(),
         "prepared per-instance rootfs",
     );
+
+    // The runtime-meta gate reads mvm-meta.json from the rootfs's own directory,
+    // so any rootfs clone that may later be checkpointed or forked must carry the
+    // sidecar alongside it.
+    copy_sidecar_if_present(source_path, instance_path);
+
     Ok(instance_path.to_path_buf())
+}
+
+/// Copy `mvm-meta.json` from the source rootfs's directory to the destination
+/// rootfs's directory when the sidecar exists. Silently does nothing when the
+/// source has no sidecar (older build dirs) or when source and destination dirs
+/// are the same.
+fn copy_sidecar_if_present(source_rootfs: &Path, dest_rootfs: &Path) {
+    let src_dir = match source_rootfs.parent() {
+        Some(d) => d,
+        None => return,
+    };
+    let dst_dir = match dest_rootfs.parent() {
+        Some(d) => d,
+        None => return,
+    };
+    if src_dir == dst_dir {
+        return;
+    }
+    let src_sidecar = src_dir.join(mvm_build::builder_vm::SIDECAR_FILENAME);
+    if !src_sidecar.exists() {
+        return;
+    }
+    let dst_sidecar = dst_dir.join(mvm_build::builder_vm::SIDECAR_FILENAME);
+    if let Err(e) = std::fs::copy(&src_sidecar, &dst_sidecar) {
+        tracing::warn!(
+            src = %src_sidecar.display(),
+            dst = %dst_sidecar.display(),
+            error = %e,
+            "could not copy mvm-meta.json sidecar alongside rootfs clone",
+        );
+    }
 }
 
 #[cfg(test)]
@@ -268,6 +305,69 @@ mod tests {
         std::fs::write(&inst, b"x").unwrap();
         let out = prepare_instance_rootfs_inner(&inst, inst.to_str().unwrap()).expect("noop");
         assert_eq!(out, inst);
+    }
+
+    #[test]
+    fn clone_copies_sidecar_when_present() {
+        let src_dir = tempfile::tempdir().expect("src tempdir");
+        let dst_dir = tempfile::tempdir().expect("dst tempdir");
+        let src = src_dir.path().join("rootfs.ext4");
+        std::fs::write(&src, b"data").unwrap();
+        std::fs::write(
+            src_dir.path().join(mvm_build::builder_vm::SIDECAR_FILENAME),
+            b"{\"accessible\":true,\"overlay_aware\":false}",
+        )
+        .unwrap();
+        let instance = dst_dir.path().join("rootfs.ext4");
+        prepare_instance_rootfs_inner(&instance, src.to_str().unwrap()).expect("clone");
+        let dst_sidecar = dst_dir.path().join(mvm_build::builder_vm::SIDECAR_FILENAME);
+        assert!(
+            dst_sidecar.exists(),
+            "sidecar must travel alongside the cloned rootfs"
+        );
+        let content = std::fs::read_to_string(&dst_sidecar).unwrap();
+        assert!(content.contains("accessible"));
+    }
+
+    #[test]
+    fn clone_succeeds_without_sidecar() {
+        let src_dir = tempfile::tempdir().expect("src tempdir");
+        let dst_dir = tempfile::tempdir().expect("dst tempdir");
+        let src = src_dir.path().join("rootfs.ext4");
+        std::fs::write(&src, b"data").unwrap();
+        // Deliberately no sidecar in src_dir.
+        let instance = dst_dir.path().join("rootfs.ext4");
+        prepare_instance_rootfs_inner(&instance, src.to_str().unwrap())
+            .expect("clone without sidecar");
+        assert!(instance.exists());
+        assert!(
+            !dst_dir
+                .path()
+                .join(mvm_build::builder_vm::SIDECAR_FILENAME)
+                .exists(),
+            "no sidecar in dst when source has none"
+        );
+    }
+
+    #[test]
+    fn noop_early_return_copies_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inst = dir.path().join("rootfs.ext4");
+        std::fs::write(&inst, b"x").unwrap();
+        std::fs::write(
+            dir.path().join(mvm_build::builder_vm::SIDECAR_FILENAME),
+            b"{}",
+        )
+        .unwrap();
+        // source == instance path → early return; no second sidecar file expected
+        prepare_instance_rootfs_inner(&inst, inst.to_str().unwrap()).expect("noop");
+        // Sidecar exists from the write above — confirm no second copy appeared
+        // (we can't observe a "double write" easily but at least assert no error).
+        assert!(
+            dir.path()
+                .join(mvm_build::builder_vm::SIDECAR_FILENAME)
+                .exists()
+        );
     }
 
     /// On macOS with an APFS-backed `TMPDIR` (the default), `clonefile`

@@ -582,14 +582,37 @@ pub fn capture_fs_quick(
 
     let name = file_name.to_string_lossy().into_owned();
     let content_sha256 = sha256_file_hex(&dst)?;
+    let mut content = vec![ContentBlob {
+        name,
+        sha256: content_sha256,
+    }];
+
+    // When the source rootfs directory carries a mvm-meta.json sidecar, include it
+    // as a second blob so that any fork materialised from this checkpoint can boot
+    // through the runtime-meta gate (which reads the sidecar from the rootfs dir).
+    let src_dir = params
+        .rootfs
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let src_sidecar = src_dir.join(mvm_build::builder_vm::SIDECAR_FILENAME);
+    if src_sidecar.exists() {
+        let dst_sidecar = content_dir.join(mvm_build::builder_vm::SIDECAR_FILENAME);
+        std::fs::copy(&src_sidecar, &dst_sidecar).with_context(|| {
+            format!(
+                "copying mvm-meta.json sidecar into checkpoint content dir {}",
+                content_dir.display()
+            )
+        })?;
+        content.push(ContentBlob {
+            name: mvm_build::builder_vm::SIDECAR_FILENAME.into(),
+            sha256: sha256_file_hex(&dst_sidecar)?,
+        });
+    }
 
     let meta = CheckpointMeta::builder(params.id, CheckpointClass::FsQuick, params.vm_name)
         .tag(params.tag)
         .created_unix(params.created_unix)
-        .content(vec![ContentBlob {
-            name,
-            sha256: content_sha256,
-        }])
+        .content(content)
         .supervisor_config_digest(params.supervisor_config_digest)
         .build();
     store.write_meta(&meta)?;
@@ -784,6 +807,94 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("integrity") || err.to_string().contains("sha256"));
+    }
+
+    // ── capture sidecar tests ────────────────────────────────────────────────
+
+    fn seed_fs_quick_with_sidecar(store: &CheckpointStore, tmp: &Path, id: &str) -> CheckpointMeta {
+        let rootfs = write_fake_rootfs(tmp);
+        std::fs::write(
+            tmp.join(mvm_build::builder_vm::SIDECAR_FILENAME),
+            br#"{"accessible":true,"overlay_aware":false}"#,
+        )
+        .unwrap();
+        capture_fs_quick(
+            store,
+            CaptureFsQuickParams {
+                id: CheckpointId::new(id),
+                vm_name: "parentvm".into(),
+                rootfs,
+                supervisor_config_digest: "d".into(),
+                tag: None,
+                created_unix: 1,
+                quiesced: true,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn capture_includes_sidecar_blob_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let meta = seed_fs_quick_with_sidecar(&store, tmp.path(), "c1");
+        assert_eq!(meta.content.len(), 2, "rootfs + sidecar blobs expected");
+        let names: Vec<&str> = meta.content.iter().map(|b| b.name.as_str()).collect();
+        assert!(names.contains(&"rootfs.ext4"));
+        assert!(names.contains(&mvm_build::builder_vm::SIDECAR_FILENAME));
+        // sha256 is non-empty
+        let sidecar_blob = meta
+            .content
+            .iter()
+            .find(|b| b.name == mvm_build::builder_vm::SIDECAR_FILENAME)
+            .unwrap();
+        assert!(!sidecar_blob.sha256.is_empty());
+    }
+
+    #[test]
+    fn capture_has_single_blob_without_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let meta = seed_fs_quick_checkpoint(&store, tmp.path(), "c1");
+        assert_eq!(meta.content.len(), 1, "only rootfs blob when no sidecar");
+        assert_eq!(meta.content[0].name, "rootfs.ext4");
+    }
+
+    #[test]
+    fn fork_two_blob_checkpoint_materializes_both_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fs_quick_with_sidecar(&store, tmp.path(), "p1");
+        assert_eq!(parent.content.len(), 2);
+        let dst = tmp.path().join("childvm-state");
+        let child = fork_checkpoint(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id: CheckpointId::new("f1"),
+                child_vm_name: "childvm".into(),
+                dest_dir: dst.clone(),
+                created_unix: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(child.content.len(), 2);
+        assert!(
+            dst.join("rootfs.ext4").exists(),
+            "rootfs must be present in dest"
+        );
+        assert!(
+            dst.join(mvm_build::builder_vm::SIDECAR_FILENAME).exists(),
+            "sidecar must be present in dest"
+        );
+        // The lineage metadata carries the same two blob records as the parent.
+        assert!(child.content.iter().any(|b| b.name == "rootfs.ext4"));
+        assert!(
+            child
+                .content
+                .iter()
+                .any(|b| b.name == mvm_build::builder_vm::SIDECAR_FILENAME)
+        );
     }
 
     #[test]

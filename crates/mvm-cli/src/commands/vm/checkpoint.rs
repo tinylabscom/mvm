@@ -594,7 +594,7 @@ fn fork_fs_quick_arm(
     // A fork that we can't audit (signer present but emit fails) is refused —
     // an unaudited lineage record would break the chain. A missing plan/signer
     // is best-effort, matching capture.
-    bind_checkpoint_forked(checkpoint, &meta, &child_vm_name)?;
+    bind_checkpoint_forked(checkpoint, &meta, &child_vm_name, store)?;
 
     ui::success(&format!(
         "forked {} -> checkpoint {} (vm '{}')",
@@ -651,7 +651,7 @@ fn fork_vm_full_arm(
     )
     .with_context(|| format!("forking vm_full checkpoint {:?}", checkpoint.as_str()))?;
 
-    bind_checkpoint_forked(checkpoint, &meta, &child_vm_name)?;
+    bind_checkpoint_forked(checkpoint, &meta, &child_vm_name, store)?;
 
     ui::success(&format!(
         "forked {} -> checkpoint {} (vm '{}', auto-booted)",
@@ -809,19 +809,26 @@ pub(crate) fn bind_checkpoint_forked(
     parent: &CheckpointId,
     child: &mvm_core::checkpoint::CheckpointMeta,
     child_vm_name: &str,
+    store: &CheckpointStore,
 ) -> Result<()> {
-    let plan = match super::plan_persist::read_plan(&child.vm_name).or_else(|_| {
-        // The child VM has no plan yet (not booted); fall back to the parent
-        // VM's plan so the lineage entry binds to *some* admitted identity.
-        super::plan_persist::read_plan(parent_vm_name_hint(parent))
-    }) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e,
+    // The child VM has no persisted plan yet (it was never booted as an independent
+    // VM); look up the parent VM name from the parent checkpoint record so the
+    // lineage entry binds to the admitted identity the fork branched from.
+    let parent_vm_name = store.read_meta(parent).ok().map(|m| m.vm_name);
+    let plan =
+        match super::plan_persist::read_plan(&child.vm_name).or_else(|_| {
+            match parent_vm_name.as_deref() {
+                Some(name) => super::plan_persist::read_plan(name),
+                None => Err(anyhow::anyhow!("parent checkpoint has no recorded vm_name")),
+            }
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e,
                 "no persisted plan for fork; checkpoint.forked emitted without chain binding");
-            return Ok(());
-        }
-    };
+                return Ok(());
+            }
+        };
     let signer = match super::host_signer::load_or_init() {
         Ok(s) => s,
         Err(e) => {
@@ -834,13 +841,6 @@ pub(crate) fn bind_checkpoint_forked(
     mvm_hostd::audit::bind::bind_checkpoint_forked(&emitter, &plan, parent, child, child_vm_name)
         .context("refusing an unaudited fork")?;
     Ok(())
-}
-
-/// The parent checkpoint id has no embedded VM name we can recover cheaply, so
-/// this best-effort hint just reuses the checkpoint id as a plan-lookup key.
-/// A miss degrades to the no-plan warn path above.
-fn parent_vm_name_hint(parent: &CheckpointId) -> &str {
-    parent.as_str()
 }
 
 #[cfg(test)]
@@ -1117,5 +1117,43 @@ mod tests {
         assert_eq!(out, instance);
         // File must be untouched.
         assert_eq!(std::fs::read(&instance).unwrap(), b"forked");
+    }
+
+    // ── bind_checkpoint_forked: parent-name resolution ───────────────────
+
+    /// bind_checkpoint_forked resolves the parent VM name from the stored
+    /// checkpoint record, not from a heuristic that guessed the checkpoint id.
+    /// The observable seam: the store's read_meta returns the recorded vm_name.
+    #[test]
+    fn bind_uses_parent_checkpoint_vm_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path());
+        let parent_id = CheckpointId::new("ckpt-parentvm-1700000000");
+        let parent_meta = mvm_core::checkpoint::CheckpointMeta::builder(
+            parent_id.clone(),
+            CheckpointClass::FsQuick,
+            "parentvm",
+        )
+        .content(vec![mvm_core::checkpoint::ContentBlob {
+            name: "rootfs.ext4".into(),
+            sha256: "abc".into(),
+        }])
+        .supervisor_config_digest("d")
+        .created_unix(1)
+        .build();
+        store.write_meta(&parent_meta).unwrap();
+
+        // Verify the store round-trip returns the original vm_name, not the
+        // checkpoint id string (which was what the old heuristic returned).
+        let recovered = store.read_meta(&parent_id).unwrap();
+        assert_eq!(
+            recovered.vm_name, "parentvm",
+            "store must return the recorded vm_name, not the checkpoint id"
+        );
+        assert_ne!(
+            recovered.vm_name,
+            parent_id.as_str(),
+            "checkpoint id and vm_name are different; the old heuristic was wrong"
+        );
     }
 }
