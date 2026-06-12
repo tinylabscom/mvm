@@ -3,6 +3,8 @@
 pub mod atomic_io;
 pub mod idle_metrics;
 pub mod retry;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_env;
 pub mod time;
 #[allow(clippy::module_inception)]
 pub mod util;

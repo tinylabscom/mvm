@@ -71,6 +71,8 @@ use chrono::{DateTime, Utc};
 
 use crate::supervisor::inspector::{Inspector, InspectorVerdict, RequestCtx};
 
+pub use mvm_core::time::{Clock, SystemClock};
+
 /// Configuration for the false-positive circuit breaker.
 #[derive(Clone, Debug)]
 pub struct CircuitBreakerConfig {
@@ -132,21 +134,6 @@ impl InspectorEntry {
             tripped_at: None,
             reports_at_trip: 0,
         }
-    }
-}
-
-/// Clock abstraction. Production callers use [`SystemClock`]; tests
-/// inject a fixed clock so the trip-window logic is deterministic.
-pub trait Clock: Send + Sync {
-    fn now(&self) -> DateTime<Utc>;
-}
-
-/// Production clock — wall-clock UTC.
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> DateTime<Utc> {
-        Utc::now()
     }
 }
 
