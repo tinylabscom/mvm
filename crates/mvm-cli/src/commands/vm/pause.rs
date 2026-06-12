@@ -327,12 +327,12 @@ mod tests {
     #[test]
     fn is_vz_vm_true_for_vz_marker() {
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", tmp.path());
         let dir = mvm_core::config::vm_state_dir("vzvm");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("vz.pid"), "1").unwrap();
         assert!(is_vz_vm("vzvm"));
         assert!(!is_vz_vm("nope"));
-        unsafe { std::env::remove_var("HOME") };
     }
 }

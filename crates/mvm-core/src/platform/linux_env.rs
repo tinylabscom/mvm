@@ -3,13 +3,13 @@ use std::process::Output;
 
 /// Abstraction for running Linux commands.
 ///
-/// On macOS: delegates to a Lima VM via `limactl shell`.
-/// On native Linux with KVM: runs bash directly on the host.
-/// In the future: could route to OrbStack, UTM, or a remote host.
+/// On macOS: routes Linux-only commands into the shared builder VM.
+/// On native Linux: runs them directly on the host.
 ///
 /// This trait decouples the "where scripts run" question from the rest
-/// of the codebase. All VM lifecycle, build, and networking code can
-/// accept a `&dyn LinuxEnv` instead of hardcoding Lima.
+/// of the codebase. Build, VM-lifecycle, and Linux-only networking code
+/// can accept a `&dyn LinuxEnv` instead of hardcoding one concrete
+/// execution boundary.
 pub trait LinuxEnv: Send + Sync {
     /// Run a bash script, capturing output.
     fn run(&self, script: &str) -> Result<Output>;

@@ -3909,9 +3909,7 @@ mod dev_status_image_tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvGuard {
-        home: Option<String>,
-        data_dir: Option<String>,
-        cache_dir: Option<String>,
+        _env: mvm_core::util::test_env::TestEnv,
     }
 
     impl EnvGuard {
@@ -3920,36 +3918,11 @@ mod dev_status_image_tests {
             data_dir: &std::path::Path,
             cache_dir: &std::path::Path,
         ) -> Self {
-            let guard = Self {
-                home: std::env::var("HOME").ok(),
-                data_dir: std::env::var("MVM_DATA_DIR").ok(),
-                cache_dir: std::env::var("MVM_CACHE_DIR").ok(),
-            };
-            unsafe {
-                std::env::set_var("HOME", home);
-                std::env::set_var("MVM_DATA_DIR", data_dir);
-                std::env::set_var("MVM_CACHE_DIR", cache_dir);
-            }
-            guard
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.home {
-                    Some(value) => std::env::set_var("HOME", value),
-                    None => std::env::remove_var("HOME"),
-                }
-                match &self.data_dir {
-                    Some(value) => std::env::set_var("MVM_DATA_DIR", value),
-                    None => std::env::remove_var("MVM_DATA_DIR"),
-                }
-                match &self.cache_dir {
-                    Some(value) => std::env::set_var("MVM_CACHE_DIR", value),
-                    None => std::env::remove_var("MVM_CACHE_DIR"),
-                }
-            }
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            env.set("HOME", home);
+            env.set("MVM_DATA_DIR", data_dir);
+            env.set("MVM_CACHE_DIR", cache_dir);
+            Self { _env: env }
         }
     }
 
