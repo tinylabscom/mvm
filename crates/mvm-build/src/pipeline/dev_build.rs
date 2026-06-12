@@ -169,9 +169,9 @@ pub struct DevBuildResult {
     pub revision_hash: String,
     /// Whether the build was a cache hit (artifacts already existed).
     pub cached: bool,
-    /// Path to the microvm.nix runner directory, if the build output
+    /// Path to the microvm.nix-lineage runner directory, if the build output
     /// contains runner scripts (e.g. `bin/microvm-run`). When present,
-    /// the microvm.nix backend can be used instead of manual Firecracker
+    /// the QEMU backend can use them instead of manual Firecracker
     /// API calls.
     pub runner_dir: Option<String>,
     /// Artifact file sizes (kernel, rootfs, initrd).

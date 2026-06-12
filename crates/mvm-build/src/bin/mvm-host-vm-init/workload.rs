@@ -8,7 +8,7 @@
 //! [`FirecrackerVmm`] is the only impl today and the only type that
 //! names Firecracker; the dispatch loop, the wire protocol, and the
 //! state-dir / process lifecycle are all VMM-agnostic. A second
-//! backend (cloud-hypervisor, qemu-microvm) is a pure addition: a
+//! backend (qemu) is a pure addition: a
 //! new `WorkloadVmm` impl, no other changes. Mirrors the host-side
 //! hypervisor-backend split in `mvm-backend/`.
 //!

@@ -178,13 +178,7 @@ mod linux {
     fn configure_network_qemu() -> Result<(), String> {
         let iface = find_net_iface().ok_or("no non-loopback interface present")?;
         eprintln!("stage0-init: net config {iface} = 10.0.2.15/24 gw 10.0.2.2 (slirp)");
-        let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
-        if sock < 0 {
-            return Err(format!("socket: {}", std::io::Error::last_os_error()));
-        }
-        let res = net_ioctls(sock, &iface);
-        unsafe { libc::close(sock) };
-        res
+        mvm_build::guest_net::configure_static(&iface, "10.0.2.15", "255.255.255.0", "10.0.2.2")
     }
 
     /// The non-loopback interface name from `/sys/class/net` (e.g. `ens3`).
@@ -194,79 +188,6 @@ mod linux {
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .find(|n| n != "lo")
-    }
-
-    /// SAFETY-scoped wrapper: standard `SIOCSIF*` / `SIOCADDRT` ioctls on an
-    /// AF_INET socket with correctly-sized `ifreq`/`rtentry` structs. The
-    /// `as _` casts adapt each request constant to `ioctl`'s request type
-    /// (differs gnu vs musl).
-    fn net_ioctls(sock: libc::c_int, iface: &str) -> Result<(), String> {
-        unsafe {
-            // address
-            let mut ifr = ifreq_for(iface);
-            set_sockaddr_in(&mut ifr.ifr_ifru.ifru_addr, [10, 0, 2, 15]);
-            if libc::ioctl(sock, libc::SIOCSIFADDR as _, &ifr) < 0 {
-                return Err(format!("SIOCSIFADDR: {}", std::io::Error::last_os_error()));
-            }
-            // netmask
-            let mut ifr = ifreq_for(iface);
-            set_sockaddr_in(&mut ifr.ifr_ifru.ifru_netmask, [255, 255, 255, 0]);
-            if libc::ioctl(sock, libc::SIOCSIFNETMASK as _, &ifr) < 0 {
-                return Err(format!(
-                    "SIOCSIFNETMASK: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            // flags |= UP|RUNNING (read-modify-write)
-            let mut ifr = ifreq_for(iface);
-            if libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut ifr) < 0 {
-                return Err(format!("SIOCGIFFLAGS: {}", std::io::Error::last_os_error()));
-            }
-            ifr.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
-            if libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr) < 0 {
-                return Err(format!("SIOCSIFFLAGS: {}", std::io::Error::last_os_error()));
-            }
-            // default route via 10.0.2.2
-            let mut rt: libc::rtentry = std::mem::zeroed();
-            set_sockaddr_in(&mut rt.rt_dst, [0, 0, 0, 0]);
-            set_sockaddr_in(&mut rt.rt_genmask, [0, 0, 0, 0]);
-            set_sockaddr_in(&mut rt.rt_gateway, [10, 0, 2, 2]);
-            rt.rt_flags = (libc::RTF_UP | libc::RTF_GATEWAY) as libc::c_ushort;
-            if libc::ioctl(sock, libc::SIOCADDRT as _, &rt) < 0 {
-                return Err(format!("SIOCADDRT: {}", std::io::Error::last_os_error()));
-            }
-            Ok(())
-        }
-    }
-
-    fn ifreq_for(iface: &str) -> libc::ifreq {
-        // SAFETY: ifreq is a plain C struct; zeroed is a valid empty request.
-        let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
-        for (i, b) in iface.bytes().enumerate().take(libc::IFNAMSIZ - 1) {
-            ifr.ifr_name[i] = b as libc::c_char;
-        }
-        ifr
-    }
-
-    /// Write an IPv4 `sockaddr_in` into a `sockaddr`-typed ioctl field.
-    fn set_sockaddr_in(dst: *mut libc::sockaddr, addr: [u8; 4]) {
-        let sin = libc::sockaddr_in {
-            sin_family: libc::AF_INET as libc::sa_family_t,
-            sin_port: 0,
-            sin_addr: libc::in_addr {
-                s_addr: u32::from_ne_bytes(addr),
-            },
-            sin_zero: [0; 8],
-        };
-        // SAFETY: dst points at a `sockaddr`-sized field; sockaddr_in is the
-        // same 16 bytes. Caller passes a valid, writable field pointer.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                &sin as *const libc::sockaddr_in as *const u8,
-                dst as *mut u8,
-                std::mem::size_of::<libc::sockaddr_in>(),
-            );
-        }
     }
 
     /// Diagnostic dump of the guest's network state under QEMU — so a boot log

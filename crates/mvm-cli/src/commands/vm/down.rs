@@ -18,11 +18,11 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    // Platform default for VMs with no pid-file marker (Apple Container /
-    // Docker track state out-of-band, so `for_started_vm` returns None).
+    // Platform default for VMs with no pid-file marker (the vz supervisor
+    // tracks state out-of-band, so `for_started_vm` returns None).
     let platform_default = || {
-        if mvm_core::platform::current().has_apple_containers() {
-            AnyBackend::from_hypervisor("apple-container")
+        if mvm_core::platform::current().is_vz_default_tier() {
+            AnyBackend::from_hypervisor("vz")
         } else {
             AnyBackend::default_backend()
         }

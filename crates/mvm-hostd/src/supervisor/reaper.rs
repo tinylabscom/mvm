@@ -74,7 +74,7 @@ pub type TeardownFn = Box<dyn Fn(&str, &VmRegistration) -> Result<(), String> + 
 /// reaper is about to put it to sleep (drain/pause — the *trigger*, not a
 /// new sleep mechanism). The implementation performs the
 /// backend-appropriate sleep (drain+snapshot for snapshot-capable backends,
-/// clean stop with data disk + TAP retained for libkrun/apple-container).
+/// clean stop with data disk + TAP retained for libkrun).
 /// Returning `Err` leaves the VM running so the next tick retries; the
 /// reaper itself flips `paused = true` in the registry on success.
 pub type SleepFn = Box<dyn Fn(&str, &VmRegistration) -> Result<(), String> + Send + Sync>;

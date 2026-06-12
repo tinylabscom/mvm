@@ -329,38 +329,36 @@ The following are decided and committed for v1 of this hardening:
 
 ## Per-backend tier matrix
 
-Plan 53 (cross-platform roadmap) introduces multiple backends —
-Firecracker, Apple Container, libkrun, Docker, microvm.nix — each
-with different layer coverage. A given user run carries the tier of
-its active backend, not the strongest tier the project supports. The
-following matrix is what `mvmctl doctor` reports and what the
-mvm-cli startup banner surfaces (loudly, when the active backend
-falls below Tier 1).
+mvm ships four VM backends (+ a test-only mock) — Firecracker, libkrun,
+vz, and QEMU — each with different layer coverage. A given user run
+carries the tier of its active backend, not the strongest tier the
+project supports. The following matrix is what `mvmctl doctor` reports
+and what the mvm-cli startup banner surfaces (loudly, when the active
+backend falls below Tier 1). Plan 177 consolidated the former
+8-backend set: Docker and Cloud Hypervisor were deleted in Phase 1,
+microvm.nix folded into the QEMU backend, and the in-process
+Apple-Container backend folded into the supervisor-model `vz` backend
+in Phase 2.
 
 | Backend | L1 | L2 | L3 | L4 | L5 | Notes |
 |---|---|---|---|---|---|---|
 | Firecracker (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — full ADR-002. All seven claims hold. |
-| Cloud Hypervisor (Linux + KVM) | ✅ | ✅ | ⚠️ in flight | ✅ | ✅ | **Tier 1 peer** of Firecracker — same VMM-TCB shape (rust-vmm), wider device model (VFIO, virtio-fs, larger guests). Claim 3 (verified boot) lands alongside Firecracker via the shared `mvm-verity-init` initramfs path; the CH JSON-API spawn dance is the only delta. Selected over Firecracker when a workload needs VFIO/GPU passthrough or virtio-fs. |
-| Apple Container (macOS 26+ Apple Silicon) | ✅ VZ | ✅ Containerization | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — claim 3 partial; claims 1, 2, 4, 5, 6, 7 hold. |
-| Vz / Virtualization.framework (macOS 13+) | ✅ HVF | ✅ Vz (Apple-controlled API surface on top of HVF) | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — same `Hypervisor.framework` primitive as libkrun, smaller Apple-controlled API surface, balloon + (macOS 14+) snapshots. Claim 3 partial — dm-verity pipeline targets Firecracker today; claims 1, 2, 4, 5, 6, 7 hold. Opt-in via `--backend vz` / `MVM_BACKEND=vz`; `auto_select` keeps libkrun as the macOS default (ADR-056). |
-| libkrun / libkrun (Linux KVM, macOS HVF) | ✅ | ✅ | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — claim 3 partial; comparable VMM TCB to Firecracker; shipped as the cross-platform default per ADR-013. macOS arm64/x86_64 + Linux-without-KVM hosts land here. |
-| Docker | ❌ shared host kernel | ❌ container runtime is L2=host kernel | ❌ shared with host | ✅ | ✅ | **Tier 3** — claims 1, 2, 3 do *not* hold; 4, 6, 7 hold; 5 N/A (unix socket). |
-| microvm.nix (QEMU) | ✅ KVM | ⚠️ QEMU TCB much larger | ⚠️ partial verified boot | ✅ | ✅ | Tier 2 — claims 3 partial; QEMU's larger device model raises L2 audit cost. **Dev/test only** (Plan 166): selected by `mvm` for a Linux dev/test loop, never by `mvmd` — it carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately *not* wired into its start path (see the egress-enforcement note below). |
+| Vz / Virtualization.framework (macOS 13+) | ✅ HVF | ✅ Vz (Apple-controlled API surface on top of HVF) | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — the single AVF backend (the former in-process Apple-Container path folded in here, Plan 177 Phase 2). Same `Hypervisor.framework` primitive as libkrun, smaller Apple-controlled API surface, balloon + snapshots. Claim 3 partial — dm-verity pipeline targets Firecracker today; claims 1, 2, 4, 5, 6, 7 hold. Auto-selected default on macOS 26+ Apple Silicon; opt-in elsewhere on macOS via `--builder vz` / `--hypervisor vz`. |
+| libkrun / libkrun (Linux KVM, macOS HVF) | ✅ | ✅ | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — claim 3 partial; comparable VMM TCB to Firecracker; the macOS 13-25 default and the Linux-without-KVM fallback per ADR-013. |
+| QEMU (Linux KVM/TCG) | ✅ KVM | ⚠️ QEMU TCB much larger | ⚠️ partial verified boot | ✅ | ✅ | Tier 2 — claim 3 partial; QEMU's larger device model raises L2 audit cost. **Dev/test only** (Plan 166, was microvm.nix): selected by `mvm` for a Linux dev/test loop, never by `mvmd` — it carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately *not* wired into its start path (see the egress-enforcement note below). |
 
 **Tier discipline**: Tier 1 is the production default and the only
 tier that carries the *full* ADR-002 promise. Tier 2 carries six of
 the seven claims with claim 3 (verified boot) tracked as a follow-up
-once verified-boot lands for VZ/HVF. Tier 3 (Docker) carries only the
-supply-chain and guest-agent claims; the L1–L3 isolation collapses to
-the host kernel. Plan 53 §"Security posture decision" documents *why*
-we keep Docker available but unpromoted — the convenience is real,
-but we refuse to launder a container as a microVM in marketing or in
-auto-selected defaults.
+once verified-boot lands for VZ/HVF. There is no Tier 3 anymore — the
+only Tier-3 backend was Docker (a shared-kernel container that held
+none of the L1–L3 isolation claims), and it was deleted in Plan 177
+Phase 1 along with its auto-select warning banner. mvm refuses to
+launder a container as a microVM, so no shared-kernel runtime ships.
 
 `mvmctl doctor` (plan 40 folded the standalone `security` verb into
 doctor) renders this matrix per-host with the active backend
-highlighted and prints a loud `MVM_ACK_DOCKER_TIER`-suppressible
-warning banner whenever Tier 3 is auto-selected.
+highlighted.
 
 **Claim-10 egress enforcement coverage (Plan 123 Phase A).** Claim 10's
 default-deny egress is enforced at the host-side network chokepoint of the
@@ -371,7 +369,7 @@ the TAP, with the per-tenant allow-list layered on by the L4 gate), and
 flow-open gate derived from the admitted plan's resolved policy) composed with
 the always-on `MandatoryDenyEgressScan` + per-tenant `L4PolicyScan` /
 `DnsSinkholeScan` packet scans. Both derive the same posture from the same
-`NetworkPolicy` through their respective seams. **microvm.nix (QEMU) is
+`NetworkPolicy` through their respective seams. **QEMU is
 intentionally excluded**: it is a `mvm`-only dev/test backend (Plan 166), never
 reached by `mvmd`, so it carries no untrusted multi-tenant workload and there
 is no admission flow to source a policy from — forcing `deny_all()` onto its
