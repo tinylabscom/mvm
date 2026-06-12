@@ -23,7 +23,7 @@
 //!
 //! The envelope reuses `crate::protocol::signing::SignedPayload`
 //! verbatim — same canonical-JSON-then-Ed25519 pattern that
-//! `mvm-plan` already uses for signed `ExecutionPlan`s.
+//! `mvm-core::plan` already uses for signed `ExecutionPlan`s.
 //!
 //! ## Signing pre-image
 //!
@@ -99,7 +99,7 @@ impl AttestationBody {
 }
 
 /// A signed attestation envelope. `serde(transparent)` matches the
-/// same pattern `SignedExecutionPlan` uses in `mvm-plan` — same wire
+/// same pattern `SignedExecutionPlan` uses in `mvm-core::plan` — same wire
 /// shape, distinct type for the type checker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]

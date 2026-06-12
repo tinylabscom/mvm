@@ -1,4 +1,4 @@
-//! mvm-plan — typed, signed `ExecutionPlan` contract for mvm workloads.
+//! plan — typed, signed `ExecutionPlan` contract for mvm workloads (was `mvm-plan`).
 //!
 //! The `ExecutionPlan` is the runtime contract every workload boots
 //! from: image + resources + every policy reference, signed with

@@ -486,7 +486,7 @@ mod tests {
     /// `set_var` collided with another's `remove_var` mid-run; the
     /// resulting assertion failures surfaced as flaky CI on
     /// `cargo test --workspace`. Mirrors the
-    /// `mvm-base::runtime_meta::HOME_TEST_LOCK` pattern: every test
+    /// `mvm-backend::base::runtime_meta::HOME_TEST_LOCK` pattern: every test
     /// that reads or writes one of these env vars grabs the lock at
     /// entry. Pure-logic tests (`normalize_*`) skip the lock and
     /// continue to run in parallel.

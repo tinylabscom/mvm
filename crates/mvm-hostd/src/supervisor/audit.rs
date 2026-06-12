@@ -2,7 +2,7 @@
 //!
 //! The supervisor signs each audit entry into the previous entry's
 //! hash, producing a tamper-evident chain. Per
-//! `mvm-policy::AuditPolicy`, entries can also be replicated to
+//! `mvm-core::policy::AuditPolicy`, entries can also be replicated to
 //! per-tenant streams. This module ships the trait surface; the real
 //! chain-signing impl is wired separately.
 

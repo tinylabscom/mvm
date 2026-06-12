@@ -76,7 +76,7 @@ pub struct ExecutionPlan {
     pub runtime_profile: RuntimeProfileRef,
 
     /// Signed image to boot. SHA-256 + cosign bundle reference;
-    /// resolved by `mvm-security::image_verify`.
+    /// resolved by `mvm-core::crypto::image_verify`.
     pub image: SignedImageRef,
 
     pub resources: Resources,
@@ -87,7 +87,7 @@ pub struct ExecutionPlan {
     /// enforce for this boot.
     pub admission_profile: AdmissionProfile,
 
-    /// Network policy reference. Wired to `mvm-policy::EgressPolicy`
+    /// Network policy reference. Wired to `mvm-core::policy::EgressPolicy`
     /// (L7 + PII rules) via the supervisor's `EgressProxy`.
     pub network_policy: PolicyRef,
 

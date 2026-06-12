@@ -7,7 +7,7 @@ use mvm_core::vm_backend::{
 
 // Every backend variant + the FC support modules live in this crate.
 // `microvm`, `image` are siblings under `crate::`; the substrate
-// (`config`, `shell`, `runtime_meta`) lives in `mvm-base`.
+// (`config`, `shell`, `runtime_meta`) lives in `crate::base`.
 use crate::base::config::{PortMapping, VMS_DIR};
 use crate::base::shell::run_in_vm_stdout;
 use crate::image::RuntimeVolume;

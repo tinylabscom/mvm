@@ -34,7 +34,7 @@ pub struct RuntimeProfileRef(pub String);
 /// Reference to a signed image. SHA-256 of the rootfs + name. The
 /// `cosign_bundle` field
 /// is the path or URL to the cosign keyless bundle that
-/// `mvm-security::image_verify` validates against; in dev mode the
+/// `mvm-core::crypto::image_verify` validates against; in dev mode the
 /// resolver may stub this to `None` and accept the digest alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,7 +89,7 @@ pub struct TimeoutSpec {
 }
 
 /// Opaque pointer to a policy bundle. Until the real
-/// `mvm-policy::PolicyBundle` resolver lands, this is a name the
+/// `mvm-core::policy::PolicyBundle` resolver lands, this is a name the
 /// supervisor's `Noop` resolver maps to a default-deny / open stance
 /// per its bundle.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -113,10 +113,9 @@ pub struct WorkloadIntent(pub String);
 
 /// Seccomp tier name as it appears in a signed `ExecutionPlan`.
 ///
-/// The concrete filter lives in `mvm-security`; keeping this enum in
-/// `mvm-plan` avoids a dependency edge from the wire-contract crate
-/// into the enforcement crate while still making the selected tier a
-/// typed, auditable plan field.
+/// The concrete filter lives in `mvm-core::crypto`; keeping this enum
+/// in `mvm-core::plan` keeps the selected tier a typed, auditable plan
+/// field decoupled from the filter impl.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PlanSeccompTier {
@@ -293,7 +292,7 @@ pub enum SecretSource {
     /// resolves to a SecretId at the supervisor.
     Keystore { address: String },
     /// External provider (Vault, AWS SM, etc.). The provider URL +
-    /// path are opaque to mvm-plan; resolved by `KeystoreReleaser`.
+    /// path are opaque to mvm-core::plan; resolved by `KeystoreReleaser`.
     External { provider: String, path: String },
 }
 

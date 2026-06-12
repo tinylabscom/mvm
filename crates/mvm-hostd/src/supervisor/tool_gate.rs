@@ -2,7 +2,7 @@
 //!
 //! The supervisor mediates every tool the workload invokes via vsock
 //! RPC. The gate consults the plan's `tool_policy: PolicyRef`, looks
-//! the bundle up via `mvm-policy::ToolPolicy`, and allow/deny per
+//! the bundle up via `mvm-core::policy::ToolPolicy`, and allow/deny per
 //! call. Audit entries reference both the plan id and the tool name.
 
 use async_trait::async_trait;
