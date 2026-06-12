@@ -790,9 +790,9 @@ impl VzBackend {
         // The original gvproxy sidecar died when the VM was stopped. The
         // supervisor's connect() into the gvproxy socket must find a live
         // listener, so spawn a fresh one before handing the config to the
-        // supervisor. `spawn_detached` removes any stale socket/PID file
-        // first, so calling it here is always safe regardless of whether a
-        // previous gvproxy process happens to still be alive.
+        // supervisor. Safe here because `stop` already reaped the
+        // predecessor gvproxy — `spawn_detached`'s unlink only clears
+        // stale socket/PID files, it does not kill a live process.
         if matches!(cfg.network, Some(vz::NetworkConfig::Gvproxy { .. })) {
             host_gvproxy::spawn_detached(&state_dir)
                 .map_err(|e| anyhow!("spawn gvproxy for restoring Vz VM '{}': {e}", id.0))?;

@@ -301,6 +301,9 @@ Two independent defects blocked `mvmctl up --flake <workload> --hypervisor vz`:
   fixed: `snapshot_restore` spawns gvproxy via `host_gvproxy::spawn_detached`
   when config has Gvproxy network; `restore_with_spawn` removes the cloned
   rootfs on any post-clone failure and errors actionably on pre-existing target.
+- [ ] restore-failure leaks the freshly-spawned gvproxy (supervisor never
+  wrote its PID, the sidecar lingers; the retry orphans it) — reap the
+  sidecar on the restore error path, consistent with `start()`'s behavior.
 - [ ] Vz two-copy fork: route live forks through the fs_quick (cold-boot)
   class on Vz — VZ machine-state restore pins the saved device config
   (`VZErrorDomain:12` on a changed MAC), so memory-state forks can't change
