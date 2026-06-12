@@ -144,11 +144,10 @@ fn now_unix() -> u64 {
 /// Resolve the host-side bootable rootfs image for a quiesced VM, or a clean
 /// error explaining why a checkpoint can't be taken.
 ///
-/// "Quiesced" means the VM is not running, OR it's marked paused in the name
-/// registry (vCPUs and virtio queues quiesced — the registry `paused` flag is
-/// set by `mvmctl pause` and cleared by `resume`). A live, unpaused VM is
-/// refused: an fs_quick checkpoint has no memory, so the rootfs must be in a
-/// clean, deterministic state.
+/// "Quiesced" means the VM is not running, OR the pause verb has written a
+/// `vz.paused` marker that matches the live supervisor pid (vCPUs and virtio
+/// queues quiesced). A live, unpaused VM is refused: an fs_quick checkpoint has
+/// no memory, so the rootfs must be in a clean, deterministic state.
 ///
 /// Rootfs location is backend-specific but both macOS workload backends keep
 /// the image under `vm_state_dir(name)`:
@@ -219,27 +218,31 @@ fn vm_is_running(name: &str) -> bool {
 
 /// fs_quick clones the instance rootfs, so the guest must not be writing:
 /// either the VM is stopped, or it is paused (vCPUs and virtio queues quiesced
-/// — the registry `paused` flag is set by `mvmctl pause` and cleared by
-/// `resume`). A running-but-paused Vz supervisor keeps its PID alive, so the
-/// pid-only `vm_is_running` probe would incorrectly refuse the checkpoint
-/// without this registry check.
+/// — the Vz pause verb stamps the supervisor pid into `vz.paused`; resume and
+/// any path that replaces the supervisor removes or invalidates it). A
+/// running-but-paused Vz supervisor keeps its pid alive, so `vm_is_running`
+/// alone would incorrectly refuse the checkpoint without this marker check.
 fn vm_is_quiesced(name: &str) -> bool {
     if !vm_is_running(name) {
         return true;
     }
-    registry_paused(name)
+    vz_pause_marker_matches_live_pid(name)
 }
 
-/// Read the `paused` flag for `name` from the persistent VM-name registry.
-/// Tolerates a missing registry or a missing entry — both mean not-paused,
-/// which is the fail-closed default (better to refuse an uncertain state
-/// than to clone a potentially-active rootfs).
-fn registry_paused(name: &str) -> bool {
-    let path = mvm::vm::name_registry::registry_path();
-    mvm::vm::name_registry::VmNameRegistry::load(&path)
-        .ok()
-        .and_then(|r| r.lookup(name).map(|reg| reg.paused))
-        .unwrap_or(false)
+/// A paused Vz VM keeps its supervisor pid alive, so pid-liveness
+/// alone reads as "running". The pause verb stamps the supervisor's
+/// pid into a marker; the marker only counts if it matches the live
+/// pid — a marker left behind by a crash or a re-launched VM names a
+/// dead or different supervisor and is ignored.
+fn vz_pause_marker_matches_live_pid(name: &str) -> bool {
+    let dir = vm_state_dir(name);
+    let (Ok(marker), Ok(pid)) = (
+        std::fs::read_to_string(dir.join("vz.paused")),
+        std::fs::read_to_string(dir.join("vz.pid")),
+    ) else {
+        return false;
+    };
+    !marker.trim().is_empty() && marker.trim() == pid.trim()
 }
 
 /// Hash the VM's persisted supervisor config so the checkpoint pins the launch
@@ -643,8 +646,8 @@ mod tests {
 
     use super::*;
 
-    // Env-var mutation is process-wide; serialize tests that set MVM_DATA_DIR /
-    // MVM_SHARE_DIR so they don't race each other.
+    // Env-var mutation is process-wide; serialize tests that set MVM_DATA_DIR
+    // so they don't race each other.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -663,9 +666,9 @@ mod tests {
         assert!(validated_checkpoint_id("a\nb").is_err());
     }
 
-    // ── vm_is_quiesced / registry_paused ──────────────────────────────────
+    // ── vm_is_quiesced / vz_pause_marker_matches_live_pid ────────────────
 
-    /// A VM with no PID files is stopped → quiesced.
+    /// A VM with no PID files is stopped → quiesced regardless of markers.
     #[test]
     fn stopped_vm_is_quiesced() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -678,75 +681,72 @@ mod tests {
         unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
-    /// A VM that is running AND marked paused in the registry → quiesced.
+    /// Running VM + matching `vz.paused` marker (pid matches `vz.pid`) → quiesced.
     #[test]
-    fn running_but_paused_vm_is_quiesced() {
+    fn running_with_matching_marker_is_quiesced() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MVM_DATA_DIR", tmp.path());
-            std::env::set_var("MVM_SHARE_DIR", tmp.path());
-        }
+        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
 
-        // Create the vz.pid file pointing at our own PID so vm_is_running → true.
         let state_dir = mvm_core::config::vm_state_dir("pausedvm");
         std::fs::create_dir_all(&state_dir).unwrap();
         let pid = unsafe { libc::getpid() };
-        std::fs::write(state_dir.join("vz.pid"), pid.to_string()).unwrap();
-
-        // Register + pause the VM in the name registry.
-        let reg_path = mvm::vm::name_registry::registry_path();
-        std::fs::create_dir_all(reg_path.parent().unwrap()).unwrap();
-        let mut reg = mvm::vm::name_registry::VmNameRegistry::default();
-        reg.register("pausedvm", state_dir.to_str().unwrap(), "default", None, 0)
-            .unwrap();
-        reg.set_paused("pausedvm", true).unwrap();
-        reg.save(&reg_path).unwrap();
+        let pid_str = pid.to_string();
+        // Both files carry the same pid — the pause verb writes it this way.
+        std::fs::write(state_dir.join("vz.pid"), &pid_str).unwrap();
+        std::fs::write(state_dir.join("vz.paused"), &pid_str).unwrap();
 
         assert!(
             vm_is_quiesced("pausedvm"),
-            "running-but-paused VM must be quiesced"
+            "running VM with matching pause marker must be quiesced"
         );
 
-        unsafe {
-            std::env::remove_var("MVM_DATA_DIR");
-            std::env::remove_var("MVM_SHARE_DIR");
-        }
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
-    /// A VM that is running AND NOT paused in the registry → not quiesced.
+    /// Running VM + no `vz.paused` marker → not quiesced.
     #[test]
-    fn running_unpaused_vm_is_not_quiesced() {
+    fn running_without_marker_is_not_quiesced() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MVM_DATA_DIR", tmp.path());
-            std::env::set_var("MVM_SHARE_DIR", tmp.path());
-        }
+        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
 
-        // Create the vz.pid file pointing at our own PID so vm_is_running → true.
         let state_dir = mvm_core::config::vm_state_dir("livevm");
         std::fs::create_dir_all(&state_dir).unwrap();
         let pid = unsafe { libc::getpid() };
         std::fs::write(state_dir.join("vz.pid"), pid.to_string()).unwrap();
-
-        // Register but do NOT pause.
-        let reg_path = mvm::vm::name_registry::registry_path();
-        std::fs::create_dir_all(reg_path.parent().unwrap()).unwrap();
-        let mut reg = mvm::vm::name_registry::VmNameRegistry::default();
-        reg.register("livevm", state_dir.to_str().unwrap(), "default", None, 0)
-            .unwrap();
-        reg.save(&reg_path).unwrap();
+        // No vz.paused written.
 
         assert!(
             !vm_is_quiesced("livevm"),
-            "running and unpaused VM must not be quiesced"
+            "running VM with no pause marker must not be quiesced"
         );
 
-        unsafe {
-            std::env::remove_var("MVM_DATA_DIR");
-            std::env::remove_var("MVM_SHARE_DIR");
-        }
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    /// Stale marker: `vz.paused` contains a pid that differs from `vz.pid`
+    /// (left behind by a crash or a re-launched supervisor) → not quiesced.
+    #[test]
+    fn running_with_stale_marker_is_not_quiesced() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+
+        let state_dir = mvm_core::config::vm_state_dir("relaunchedvm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let live_pid = unsafe { libc::getpid() };
+        // The marker was stamped with a different (old) pid.
+        let old_pid = live_pid.saturating_add(1);
+        std::fs::write(state_dir.join("vz.pid"), live_pid.to_string()).unwrap();
+        std::fs::write(state_dir.join("vz.paused"), old_pid.to_string()).unwrap();
+
+        assert!(
+            !vm_is_quiesced("relaunchedvm"),
+            "running VM with a stale pause marker (pid mismatch) must not be quiesced"
+        );
+
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     // ── resolve_quiesced_vm_rootfs: missing-rootfs error ─────────────────
