@@ -274,8 +274,8 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
 
     // Parse the signed-plan + bundle envelopes from VmStartConfig.
     // libkrun_sys::SupervisorConfig carries them as Option<serde_json::Value>
-    // so the supervisor can re-verify the envelope without depending on
-    // mvm-plan at the parse boundary.
+    // so the supervisor can re-verify the envelope without typed coupling
+    // to `mvm_core::plan` at the parse boundary.
     let plan = match config.plan_json.as_deref() {
         Some(s) => Some(
             serde_json::from_str(s)

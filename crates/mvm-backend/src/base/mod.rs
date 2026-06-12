@@ -1,4 +1,4 @@
-//! mvm-base — shared substrate for `mvm` + `mvm-backend`.
+//! base — shared substrate for `mvm` + `mvm-backend` (was `mvm-base`).
 //!
 //! Lifts the substrate that backend implementations need out of
 //! `mvm` so the concrete `VmBackend` impls can live in `mvm-backend`

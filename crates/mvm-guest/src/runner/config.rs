@@ -6,7 +6,7 @@
 //! invariant).
 //!
 //! Fields mirror the IR's `Entrypoint::Function` variant; the source
-//! of truth is `mvm-ir/src/workload.rs` and the JSON Schema regen
+//! of truth is `mvm-sdk/src/ir/workload.rs` and the JSON Schema regen
 //! lane keeps them in lockstep.
 
 use serde::{Deserialize, Serialize};

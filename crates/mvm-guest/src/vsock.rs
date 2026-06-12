@@ -236,7 +236,7 @@ pub enum GuestRequest {
     //
     // Production-safe (unlike `Exec`): every verb is constrained by
     // the agent's uid 901 + read-only bind mounts + the
-    // `mvm-security::policy::path` deny-list. Extending the
+    // `mvm-core::crypto::policy::path` deny-list. Extending the
     // `prod-agent-runentry-contract` CI lane to assert handler
     // symbols PRESENT in prod builds is part of the per-verb landing.
     // ========================================================================

@@ -1340,9 +1340,9 @@ pub struct SupervisorConfig {
     // needs `Arc<ExecutionPlan>` + `Option<Arc<PolicyBundle>>` to
     // construct chained `AuditEntry`s. Carrying them as
     // `Option<serde_json::Value>` (instead of the typed structs)
-    // avoids adding `mvm-plan` / `mvm-policy` to this crate's deps,
-    // which would close the `mvm-libkrun ← mvm-core ← mvm-plan`
-    // cycle. The leaf bin crate `mvm-libkrun-supervisor` can freely
+    // avoids a typed coupling to the `mvm_core::plan` /
+    // `mvm_core::policy` structs at this layer; the bridge stays a
+    // serde boundary. The leaf bin crate `mvm-libkrun-supervisor` can freely
     // depend on both and deserializes the Values on the bridge side.
     /// JSON-encoded [`mvm_core::plan::ExecutionPlan`] for this admission.
     /// The bin deserializes into the typed value when building

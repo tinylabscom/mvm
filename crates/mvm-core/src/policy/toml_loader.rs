@@ -54,7 +54,7 @@
 //!
 //! - **Sign / verify the bundle.** mvmd's signing key is the
 //!   eventual authoritative source; `verify_bundle` (in
-//!   `mvm-policy::signing`) takes a SignedPolicyBundle envelope.
+//!   `mvm-core::policy::signing`) takes a SignedPolicyBundle envelope.
 //!   This loader reads bare TOML for the single-host posture —
 //!   suitable for `local` tenant; mvmd-signed bundles layer on
 //!   later via the same parse + then verify-against-trusted-keys.

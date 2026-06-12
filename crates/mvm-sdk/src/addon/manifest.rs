@@ -191,7 +191,7 @@ pub enum TrustTier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SeccompProfile {
-    /// Strictest profile (default). Maps onto `mvm-security`'s
+    /// Strictest profile (default). Maps onto `mvm-core::crypto`'s
     /// existing `SecurityProfile::Strict` enum.
     #[default]
     Strict,
