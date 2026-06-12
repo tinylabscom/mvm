@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-11** (Plan 186 trace-hardening landed)
+**Last updated: 2026-06-12** (Plan 187 secret-scan admission landed)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -34,6 +34,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
 - [ ] **PLAN 184** — Capability projection seam (ADR-080 P5) · 🟢 seam + witnesses landed; kernel-side wiring + WASI-context mapping deferred
 - [ ] **PLAN 186** — Trace hardening (ADR-080 P1/P3/P4 + interim P2 pin) · 🟢 P1/P3/P4 done + P2 interim pin hardened (live injection fix); full P2 + P6–P8 open
+- [x] **PLAN 187** — Secret-scan admission (ADR-080 P7) · ✅ recording env/argv/decoded-file scan + hard refusal on `run --mode plan`; paste-time deferred with preview tier
 
 ## Plan details
 
@@ -353,6 +354,24 @@ PLAN 186 — Trace hardening (ADR-080 P1/P3/P4)       🟢 P1/P3/P4 DONE; P2 int
   NOTE: P2 fix is stronger than the plan anticipated — the pin exposed a real injection
   surface (path metacharacters in the single-quoted shell template). Path b64 is the fix;
   the declarative-lowering plan will delete the shell surface entirely.
+
+PLAN 187 — Secret-scan admission (ADR-080 P7)        ✅ DONE
+  [x] scan_recording_for_secrets: env literals + argv tokens + decoded
+      FilesWrite payloads walked; SecretRef values skipped by design;
+      reuses SecretsScanner (Plan 129 DEFAULT_RULES, zero new deps)
+  [x] LoadedRecording.secret_findings threaded through load_recording
+      and auto_exec_record_script
+  [x] refuse_embedded_secrets hard-refuses run --mode plan on any finding
+      — not acknowledgeable; eprintln per location; message directs to SecretRef
+  [x] compile warns on findings (dev shape-check verb, warn-only)
+  [x] witnesses: create_env_literal_secret_is_flagged,
+      files_write_decoded_secret_is_flagged, secret_ref_value_is_not_flagged,
+      secret_gate_refuses_any_finding, secret_gate_is_not_acknowledgeable,
+      scan_then_refuse_composition_rejects_embedded_secret,
+      argv_secret_is_flagged, op_env_literal_secret_reports_op_index
+  NOTE: Paste-time detection (Tier-0 browser input path) deferred with
+  the preview tier — no host preview surface exists yet. The admission
+  gate fires before the divergence gate in run_plan_mode.
 
 PLAN 184 — Capability projection seam (ADR-080 P5)  🟢 seam + witnesses LANDED; enforcement wiring deferred
   [x] Proto + CanonicalRule atom (projection seam module created)

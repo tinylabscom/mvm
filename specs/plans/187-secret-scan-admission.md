@@ -1,6 +1,6 @@
 # Plan 187 — Secret-scan admission gate (ADR-080 P7) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Close ADR-080 §5 / precondition P7 host-side: scan a recording for embedded **raw** secret material (env literals, argv, and the *decoded* bytes of every `FilesWrite`) using the existing Plan 129 `SecretsScanner`, and **hard-refuse** `run --mode plan` admission when any is found — the fix is a `SecretRef`, never an acknowledgement. `compile` warns (dev). Reuses the existing scanner; **no new dependency**.
 
@@ -27,7 +27,7 @@
 - Create: `crates/mvm-cli/src/commands/build/trace_secret_scan.rs`
 - Modify: `crates/mvm-cli/src/commands/build/mod.rs` (add `pub(in crate::commands) mod trace_secret_scan;` — read the file to match its `mod` declaration style)
 
-- [ ] **Step 1: Write the failing tests.** Create the module with the test block first:
+- [x] **Step 1: Write the failing tests.** Create the module with the test block first:
 
 ```rust
 //! Host-side secret scan over a runtime recording.
@@ -176,9 +176,9 @@ mod tests {
 
 **IMPLEMENTER NOTE:** replace the `secret_ref_env()` stub with a real minimal `EnvValue::SecretRef { .. }` once you've read `SecretRef`'s definition in `crates/mvm-sdk/src/ir/`. The test asserts SecretRef is NOT scanned — it must construct a valid one.
 
-- [ ] **Step 2: Run to verify failure.** `cargo nextest run -p mvm-cli trace_secret_scan` — compile error (`scan_recording_for_secrets`, `SecretFinding` not found).
+- [x] **Step 2: Run to verify failure.** `cargo nextest run -p mvm-cli trace_secret_scan` — compile error (`scan_recording_for_secrets`, `SecretFinding` not found).
 
-- [ ] **Step 3: Implement** (above the test module):
+- [x] **Step 3: Implement** (above the test module):
 
 ```rust
 /// One location in a recording carrying raw secret-shaped material.
@@ -251,9 +251,9 @@ fn push_if_hit(scanner: &SecretsScanner, location: String, body: &[u8], out: &mu
 }
 ```
 
-- [ ] **Step 4: Verify pass.** `cargo nextest run -p mvm-cli trace_secret_scan` — 6 tests green. `cargo clippy -p mvm-cli -- -D warnings`, `cargo fmt --all`.
+- [x] **Step 4: Verify pass.** `cargo nextest run -p mvm-cli trace_secret_scan` — 6 tests green. `cargo clippy -p mvm-cli -- -D warnings`, `cargo fmt --all`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-cli/src/commands/build/trace_secret_scan.rs crates/mvm-cli/src/commands/build/mod.rs
@@ -269,7 +269,7 @@ git commit -m "feat(cli): scan runtime recordings for embedded raw secrets (plan
 - Modify: `crates/mvm-cli/src/commands/vm/run_plan.rs`
 - Modify: `crates/mvm-cli/src/commands/build/compile.rs`
 
-- [ ] **Step 1: `LoadedRecording` carries findings.** Add `pub secret_findings: Vec<crate::commands::build::trace_secret_scan::SecretFinding>` to `LoadedRecording`. In `load_recording`, after the `recording` is parsed (and before/after lowering — it needs `&recording`), add:
+- [x] **Step 1: `LoadedRecording` carries findings.** Add `pub secret_findings: Vec<crate::commands::build::trace_secret_scan::SecretFinding>` to `LoadedRecording`. In `load_recording`, after the `recording` is parsed (and before/after lowering — it needs `&recording`), add:
 
 ```rust
     let secret_findings = crate::commands::build::trace_secret_scan::scan_recording_for_secrets(
@@ -280,7 +280,7 @@ git commit -m "feat(cli): scan runtime recordings for embedded raw secrets (plan
 
 and include `secret_findings` in the returned `LoadedRecording { .. }`. (Constructing the scanner per load compiles the ruleset once per CLI invocation — fine.)
 
-- [ ] **Step 2: the gate (TDD the pure part first).** In `run_plan.rs`, add a pure refuse function + 3 unit tests (write tests first):
+- [x] **Step 2: the gate (TDD the pure part first).** In `run_plan.rs`, add a pure refuse function + 3 unit tests (write tests first):
 
 ```rust
     #[test]
@@ -339,11 +339,11 @@ fn refuse_embedded_secrets(findings: &[SecretFinding]) -> Result<()> {
 
 Wire into `run_plan_mode`: after the `LoadedRecording` is obtained and the digest printed, call `refuse_embedded_secrets(&loaded.secret_findings)?` **before** `require_acknowledged(...)`. (Read the current destructuring of the `LoadedRecording` and adapt — bind `secret_findings` out of it.)
 
-- [ ] **Step 3: compile warns.** In `compile.rs`, where divergence findings are printed as warnings, add a sibling loop over `loaded.secret_findings` printing `eprintln!("warning: embedded secret at {} [{}]", f.location, f.rules.join(", "))`. Compile is the dev shape-check verb — warn-only, parallel to its divergence handling.
+- [x] **Step 3: compile warns.** In `compile.rs`, where divergence findings are printed as warnings, add a sibling loop over `loaded.secret_findings` printing `eprintln!("warning: embedded secret at {} [{}]", f.location, f.rules.join(", "))`. Compile is the dev shape-check verb — warn-only, parallel to its divergence handling.
 
-- [ ] **Step 4: behavior test.** Add an integration-style test (or extend an existing run_plan test) proving a recording with an embedded secret is refused. If `run_plan_mode` is hard to drive without a real interpreter, instead add a focused test that builds a `LoadedRecording`-shaped input through `scan_recording_for_secrets` + `refuse_embedded_secrets` and asserts the refusal — the gate composition is what matters. Prefer reusing the existing run_plan test harness pattern.
+- [x] **Step 4: behavior test.** Add an integration-style test (or extend an existing run_plan test) proving a recording with an embedded secret is refused. If `run_plan_mode` is hard to drive without a real interpreter, instead add a focused test that builds a `LoadedRecording`-shaped input through `scan_recording_for_secrets` + `refuse_embedded_secrets` and asserts the refusal — the gate composition is what matters. Prefer reusing the existing run_plan test harness pattern.
 
-- [ ] **Step 5: Verify + commit.** `cargo nextest run -p mvm-cli 2>&1 | tail -5` (all green; gate tests among them), `cargo clippy -p mvm-cli -- -D warnings`, `cargo fmt --all`.
+- [x] **Step 5: Verify + commit.** `cargo nextest run -p mvm-cli 2>&1 | tail -5` (all green; gate tests among them), `cargo clippy -p mvm-cli -- -D warnings`, `cargo fmt --all`.
 
 ```bash
 git add crates/mvm-cli/src/commands
@@ -359,7 +359,7 @@ git commit -m "feat(cli): hard-refuse plan-mode admission on embedded secrets (p
 - Modify: `specs/REFACTOR-STATUS.md`
 - Modify: `specs/plans/187-secret-scan-admission.md` (tick boxes)
 
-- [ ] **Step 1: full gates** (environmental caveats as before: mvm-backend codesign SIGKILL; embedded-binary ELF test under skip-embed):
+- [x] **Step 1: full gates** (environmental caveats as before: mvm-backend codesign SIGKILL; embedded-binary ELF test under skip-embed):
 
 ```bash
 cd /Users/auser/work/tinylabs/mvmco/mvm-187-secretscan
@@ -370,7 +370,7 @@ MVM_SKIP_EMBED_BINARIES=1 cargo clippy --workspace -- -D warnings 2>&1 | tail -6
 cargo run -p xtask -- check-spec-numbers 2>&1 | tail -3
 ```
 
-- [ ] **Step 2: ADR-080 §8 P7 row.** Replace the P7 row (adapt to the table's current form):
+- [x] **Step 2: ADR-080 §8 P7 row.** Replace the P7 row (adapt to the table's current form):
 
 ```markdown
 | P7 | Secret-scan admission (§5) | `scan_recording_for_secrets` (env literals + argv + decoded FilesWrite payloads, mvm-cli) + `refuse_embedded_secrets` hard-refuses `run --mode plan` (not acknowledgeable); reuses the Plan 129 `SecretsScanner`; `create_env_literal_secret_is_flagged` / `files_write_decoded_secret_is_flagged` / `secret_ref_value_is_not_flagged` / `secret_gate_refuses_any_finding` — landed by Plan 187. Paste-time detector deferred with the browser preview tier (no host preview surface yet). |
@@ -378,9 +378,9 @@ cargo run -p xtask -- check-spec-numbers 2>&1 | tail -3
 
 Also amend the §5 prose line that calls the scanner a precondition ("This scan is a §8 precondition: the promotion path does not enable without it") to note it has now landed for the `run --mode plan` path.
 
-- [ ] **Step 3: REFACTOR-STATUS** — add Plan 187 (glance + detail): P7 admission scan landed (recording env/argv/file-payload, hard refusal on run --mode plan); paste-time deferred with preview tier. Bump "Last updated".
+- [x] **Step 3: REFACTOR-STATUS** — add Plan 187 (glance + detail): P7 admission scan landed (recording env/argv/file-payload, hard refusal on run --mode plan); paste-time deferred with preview tier. Bump "Last updated".
 
-- [ ] **Step 4: tick this plan's boxes. Step 5: commit**
+- [x] **Step 4: tick this plan's boxes. Step 5: commit**
 
 ```bash
 git add specs/
