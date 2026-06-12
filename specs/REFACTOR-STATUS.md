@@ -235,6 +235,7 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
 
 PLAN 183 — Builder-VM egress posture + net boot ✅ DONE (follow-ups tracked in plan)
   Last updated: 2026-06-12
+  [x] follow-ups: fs_quick-on-Vz (pause-aware gate) + vm_full restore (gvproxy re-spawn, idempotent cleanup)
   Diagnosis proven 2026-06-11: boot-time install_egress_lockdown (OUTPUT DROP,
   proxy-uid-only) applied to the whole builder VM and dropped every nix fetch.
   WS-A moves the lockdown to the install arm (fail-closed) + opens egress for
