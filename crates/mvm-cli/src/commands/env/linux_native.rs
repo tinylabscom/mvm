@@ -88,10 +88,26 @@ pub(super) fn cmd_dev_linux_native_shell() -> Result<()> {
 
 /// `mvmctl dev status` on Linux+KVM. One-screen summary: KVM,
 /// Firecracker binary, kernel/rootfs presence.
-pub(super) fn cmd_dev_linux_native_status() -> Result<()> {
+pub(super) fn cmd_dev_linux_native_status(json: bool) -> Result<()> {
     let has_kvm = std::path::Path::new("/dev/kvm").exists();
     let fc_installed = firecracker::is_installed().unwrap_or(false);
     let has_assets = firecracker::has_base_assets().unwrap_or(false);
+
+    if json {
+        // Host-native dev env: no managed VM. Collapse readiness into a
+        // single state so the report shares the dev-status schema.
+        let state = if !has_kvm {
+            "no-kvm"
+        } else if fc_installed && has_assets {
+            "ready"
+        } else {
+            "not-ready"
+        };
+        return crate::json_out::emit_json(&super::dev_vz::build_dev_status_json_vmless(
+            "linux-native",
+            state,
+        ));
+    }
 
     ui::status_header();
     ui::status_line("Platform:", "Linux + KVM");

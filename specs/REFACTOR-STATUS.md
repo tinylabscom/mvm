@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-12** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187)
+**Last updated: 2026-06-12** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status --json`)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -33,7 +33,7 @@ details** below for the workstream-level state.
 - [ ] **PLAN 182** — Trait hygiene + backend catalog · 🟡 code+docs done locally; aggregate workspace-test SIGKILL remains
 - [ ] **PLAN 184** — Backend descriptor registry · 🔴 not started
 - [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 shared TestEnv expanded into mvm-cli/mvm-build; guest hook tests de-shelled
-- [ ] **PLAN 189** — VZ DX parity (post-convergence) · 🔴 scoped, not started — save/restore verbs, cached fast-boot default, --json coverage, base pinning (spun out of 177; sibling of 159)
+- [ ] **PLAN 189** — VZ DX parity (post-convergence) · 🟡 in progress — WS-3 `dev status --json` landed; remaining: save/restore verbs, cached fast-boot default, more --json coverage, base pinning (spun out of 177; sibling of 159)
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
@@ -393,9 +393,13 @@ PLAN 177 — Backend consolidation (8→4)           ✅ DONE — both phases me
       validation of already-merged code (vz boot path already exercised by Plan 152
       parity gate + Plan 159 workload-liveness); not a blocker for DONE.
 
-PLAN 189 — VZ DX parity (post-convergence)        🔴 scoped, not started  (ADR-076 §"Out of scope")
+PLAN 189 — VZ DX parity (post-convergence)        🟡 in progress  (ADR-076 §"Out of scope")
   Spun out of Plan 177's deferred DX-parity follow-on; sibling of Plan 159 (owns
   only the additive parity slice, cross-refs 159/140/148 for primitives).
+  [x] WS-3 first slice: `dev status --json` (versioned, privacy-safe DevStatusJson;
+      all 4 dispatch arms; serde + CLI-parse tests; verified on macOS-26)
+  [ ] WS-3 remaining: dev up/down --json, snapshot/checkpoint --json, linux-native detail
+  [ ] WS-1 save/restore verbs · WS-2 cached fast-boot default · WS-4 base pinning
   [ ] WS-1 surface save/restore verbs (gated by snapshot_capability tier)
   [ ] WS-2 cached fast-boot as the default vz boot posture
   [ ] WS-3 --json coverage across vz lifecycle verbs

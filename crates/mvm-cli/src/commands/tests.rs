@@ -3010,8 +3010,24 @@ fn test_dev_shell_parses() {
 
 #[test]
 fn test_dev_status_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "dev", "status"]);
-    assert!(cli.is_ok());
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "status"]).unwrap();
+    match cli.command {
+        Commands::Dev(dev::Args {
+            action: Some(DevAction::Status { json }),
+        }) => assert!(!json, "bare `dev status` defaults to text output"),
+        _ => panic!("Expected Dev Status command"),
+    }
+}
+
+#[test]
+fn test_dev_status_json_flag_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "status", "--json"]).unwrap();
+    match cli.command {
+        Commands::Dev(dev::Args {
+            action: Some(DevAction::Status { json }),
+        }) => assert!(json, "`--json` requests machine-readable output"),
+        _ => panic!("Expected Dev Status command"),
+    }
 }
 
 #[test]
