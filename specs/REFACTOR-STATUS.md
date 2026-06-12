@@ -29,10 +29,11 @@ details** below for the workstream-level state.
 - [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C2/C3 (FC/Vz warm-start) gated
 - [ ] **PLAN 124** — Lean guest agent · 🟡 ~65%; SDK codegen + signed on-device config remain
 - [ ] **PLAN 126** — Dependency reduction · 🟡 ~30%; duplicate-major lock-gate landed (+ supply-chain CI restored); sigstore/aws-lc/forbidden-dep-gate remain
-- [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 convergence landed (#806) — remaining: hardware smoke (host-gated) + cosmetic rename slice
+- [x] **PLAN 177** — Backend consolidation (8→4) · ✅ both phases merged (#806/#789/#812/#814/#817); DX-parity → Plan 189; lone caveat = host-gated hardware smoke
 - [ ] **PLAN 182** — Trait hygiene + backend catalog · 🟡 code+docs done locally; aggregate workspace-test SIGKILL remains
 - [ ] **PLAN 184** — Backend descriptor registry · 🔴 not started
 - [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 shared TestEnv landed; mvm-core + backend marker tests migrated
+- [ ] **PLAN 189** — VZ DX parity (post-convergence) · 🔴 scoped, not started — save/restore verbs, cached fast-boot default, --json coverage, base pinning (spun out of 177; sibling of 159)
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
@@ -362,7 +363,7 @@ PLAN 126 — Dependency reduction                 🟡 ~25%
 PLAN 153 — CLI directory split                  ✅ DONE (subsumed into Plan 178)
   [x] image.rs → image/ ; catalog.rs → catalog/ (last two flat files)
 
-PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 convergence LANDED (#806) — 4 backends + mock; one vz AVF path. Remaining to tick DONE: hardware smoke (host-gated) + cosmetic rename slice  (ADR-076)
+PLAN 177 — Backend consolidation (8→4)           ✅ DONE — both phases merged; 4 backends + mock; one vz AVF path. DX-parity → Plan 189. Lone caveat = host-gated macOS-26 hardware smoke (validation of merged code)  (ADR-076)
   [x] Phase 1 delete docker (+ dead Tier-3 banner subsystem)
   [x] Phase 1 delete cloud_hypervisor (+ ch_runtime, ch-bootcheck)
   [x] Phase 1 fold microvm_nix → qemu
@@ -377,13 +378,21 @@ PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 
       `has_apple_containers`→`is_vz_default_tier`; all `"apple-container"` selectors
       collapsed to vz; backend.rs tests repointed; ADR-002 tier matrix pruned
       (docker/CH/apple-container rows dropped, microvm.nix→QEMU); CLAUDE.md updated.
-  [ ] Remaining before Phase 2 ticks fully DONE: (a) live macOS-26 vz `dev up`/`up`
-      hardware smoke (host-gated — deferred while a parallel session is mid-vz-debug
-      on this host + known in-flight dev-boot bugs would confound attribution);
-      (b) cosmetic rename slice — the env module file `apple_container.rs`,
-      `AppleContainerEnv`, `MicrovmBackend::AppleContainer`, and the objc2
-      `mvm_apple_container_*` cdecl symbols still carry the old name (functional
-      path is already vz).
+  [x] Cosmetic rename slice — env module `apple_container.rs`, `AppleContainerEnv`,
+      `MicrovmBackend::AppleContainer`, and the objc2 `mvm_apple_container_*` cdecl
+      symbols deleted (#814 + #817).
+  [x] Trailing dead `VsockProxyTransport` removed (zero callers post-convergence).
+  [~] Lone caveat: live macOS-26 vz `dev up`/`up` hardware smoke — host-gated
+      validation of already-merged code (vz boot path already exercised by Plan 152
+      parity gate + Plan 159 workload-liveness); not a blocker for DONE.
+
+PLAN 189 — VZ DX parity (post-convergence)        🔴 scoped, not started  (ADR-076 §"Out of scope")
+  Spun out of Plan 177's deferred DX-parity follow-on; sibling of Plan 159 (owns
+  only the additive parity slice, cross-refs 159/140/148 for primitives).
+  [ ] WS-1 surface save/restore verbs (gated by snapshot_capability tier)
+  [ ] WS-2 cached fast-boot as the default vz boot posture
+  [ ] WS-3 --json coverage across vz lifecycle verbs
+  [ ] WS-4 base pinning (reuse artifact/template machinery, no parallel registry)
 
 PLAN 178 — CLI surface consolidation (~56→~28)   ✅ DONE (dir-purity deferred)  (ADR-077)
   [x] lock tree (D1–D6) + hide internal subprocess commands

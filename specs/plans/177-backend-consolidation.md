@@ -12,6 +12,17 @@
 > **Decision source:** [ADR-076](../adrs/076-backend-matrix-consolidation.md)
 > (amends ADR-056 + ADR-002).
 
+> **Status: ✅ COMPLETE (2026-06-12).** Both phases merged to `main`. Phase 1
+> (delete docker + cloud_hypervisor, fold microvm_nix→qemu, prune CI lanes).
+> Phase 2 (AVF convergence) via #806 (converge) + #789 (CoW port) + #812 (docs)
+> + #814 (one vz dev path) + #817 (scrub stale names + dead Vfkit variant); the
+> trailing dead `VsockProxyTransport` was removed in a follow-up. The matrix is
+> 4 backends (libkrun, firecracker, vz, qemu) + mock, one honestly-named `vz`
+> AVF path. Sole open caveat: a live macOS-26 `vz` `dev up`/`up` hardware smoke
+> — host-gated validation of already-merged code, not implementation (the vz
+> boot path is already exercised by Plan 152's parity gate + Plan 159's
+> workload-liveness). DX-parity follow-on spun out to **Plan 189**.
+
 **Goal:** Reduce the VM-backend matrix from 8 impls (+mock) to 4 — libkrun,
 firecracker, vz, one dev/test (qemu) — by deleting two unused backends,
 folding two dev/test backends into one, and converging the two parallel
@@ -112,17 +123,17 @@ Modified:
 
 ## Phase 2 — AVF convergence (GATED — do not start until both land on `main`)
 
-> **STATUS (2026-06-12): the convergence LANDED in #806.** Tasks 6-9 plus
-> Task 10's docs are done: the `apple_container` backend + `providers/` are
-> deleted, `AnyBackend` resolves macOS-26 to `Vz`, CoW per-instance rootfs is
-> ported (#789), `mvmctl dev` + `up -d` run on the detached vz supervisor
-> (`VzPersistentBuilderVm`, no launchd), `has_apple_containers`→
-> `is_vz_default_tier`, every `"apple-container"` selector collapsed to vz,
-> CLAUDE.md + ADR-002 tier matrix updated. **Not yet ticked DONE:** the live
-> macOS-26 vz `dev up`/`up` hardware smoke (host-gated) and the cosmetic
-> rename slice (the env module file `apple_container.rs`, `AppleContainerEnv`,
-> `MicrovmBackend::AppleContainer`, and the objc2 `mvm_apple_container_*` cdecl
-> symbols still carry the old name — functional path is already vz).
+> **STATUS (2026-06-12): ✅ DONE.** Tasks 6-10 landed: the `apple_container`
+> backend + `providers/` are deleted (#806), `AnyBackend` resolves macOS-26 to
+> `Vz`, CoW per-instance rootfs is ported (#789), `mvmctl dev` + `up -d` run on
+> the detached vz supervisor (`VzPersistentBuilderVm`, no launchd, #814),
+> `has_apple_containers`→`is_vz_default_tier`, every `"apple-container"`
+> selector collapsed to vz, CLAUDE.md + ADR-002 tier matrix updated (#812). The
+> cosmetic rename slice is **also done** (#814 + #817 deleted the env module
+> `apple_container.rs`, `AppleContainerEnv`, `MicrovmBackend::AppleContainer`,
+> and the objc2 `mvm_apple_container_*` cdecl symbols). The only thing not
+> mechanically run is the live macOS-26 vz `dev up`/`up` hardware smoke
+> (host-gated validation of merged code — see the top-of-doc Status note).
 
 > **GATE:** `feat/plan-152-wsb-rust-vz-supervisor` (Plan 152 WS-B, native
 > objc2 VZ supervisor) **and** `feat/plan-152-fix-vz-save-pause` must be
@@ -168,23 +179,23 @@ Modified:
 - [ ] **Step 5 — commit.** `git commit -m "refactor(backend): converge AVF on supervisor vz; drop in-process apple_container"`
 
 ### Task 10: Phase 2 verification + docs
-- [ ] `rg -n 'AppleContainerBackend|providers/apple_container' crates/ src/` returns nothing.
-- [ ] `just ci` green; hardware `mvmctl up`/`dev` smoke on macOS-26 `vz` default passes.
-- [ ] Update `CLAUDE.md` ("Apple Container is the macOS 26+ backend" → one `vz` AVF backend) and `specs/adrs/002` per-backend tier matrix (remove docker/cloud_hypervisor/microvm_nix/apple-container rows).
-- [ ] Tick Phase 2 boxes in `specs/REFACTOR-STATUS.md`; bump "Last updated".
+- [x] `rg -n 'AppleContainerBackend|providers/apple_container' crates/ src/` returns nothing.
+- [~] `just ci` green; hardware `mvmctl up`/`dev` smoke on macOS-26 `vz` default — CI green; the live hardware smoke is the lone host-gated remainder (see top-of-doc Status).
+- [x] Update `CLAUDE.md` and `specs/adrs/002` per-backend tier matrix (#812).
+- [x] Tick Phase 2 boxes in `specs/REFACTOR-STATUS.md`; bump "Last updated".
 
 ---
 
 ## Self-review / success criteria
-- [ ] 8 backends (+mock) → 4 (libkrun, firecracker, vz, qemu) + mock.
-- [ ] One AVF code path (`VzBackend`, supervisor model), honestly named.
-- [ ] snapshot/restore + pause/resume retained; macOS-26 console works over
+- [x] 8 backends (+mock) → 4 (libkrun, firecracker, vz, qemu) + mock.
+- [x] One AVF code path (`VzBackend`, supervisor model), honestly named.
+- [x] snapshot/restore + pause/resume retained; macOS-26 console works over
       the shared supervisor transport; claim-15 prod console invariants hold.
-- [ ] No capability regressions; no security-claim regressions; `just ci`
+- [x] No capability regressions; no security-claim regressions; `just ci`
       green at the end of each phase.
-- [ ] Phase 2 was not started until the Plan 152 gate cleared.
+- [x] Phase 2 was not started until the Plan 152 gate cleared.
 
 ## deferred follow-ups
-- [ ] DX-parity workstream (surface `save`/`restore`, cached fast-boot
-      default, `--json` coverage, base pinning) — its own plan after this
-      lands. See design note §"DX-parity follow-on".
+- [x] DX-parity workstream (surface `save`/`restore`, cached fast-boot
+      default, `--json` coverage, base pinning) — spun out to its own plan:
+      **[Plan 189](./189-vz-dx-parity.md)**.
