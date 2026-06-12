@@ -167,16 +167,47 @@ pub fn assemble(
         None => None,
     };
 
-    let (service, handed) = SubstitutionService::from_plan(
-        &cfg.secrets,
-        &cfg.tenant_id,
-        &bindings,
-        secret_store,
-        cfg.forward_timeout_secs,
-        cfg.redaction.clone(),
-        tls_intermediate,
-    )?;
+    // Chain-signed substitution audit. Best-effort: if the host signer key
+    // exists at the standard location, attach a Recorder so a live substituting
+    // invoke leaves `secret.substituted` / `secret.redacted` entries (metadata
+    // only) in the per-tenant audit log; absent ⇒ the endpoint serves without
+    // audit rather than refusing (the same optional posture `with_recorder` had).
+    let recorder = build_audit_recorder(&cfg.tenant_id);
+
+    let (service, handed) =
+        SubstitutionService::from_plan(crate::supervisor::substitution_proxy::FromPlanInputs {
+            plan_secrets: &cfg.secrets,
+            tenant: &cfg.tenant_id,
+            bindings: &bindings,
+            secret_store,
+            forward_timeout_secs: cfg.forward_timeout_secs,
+            redaction: cfg.redaction.clone(),
+            tls_intermediate,
+            recorder,
+        })?;
     Ok((service, handed))
+}
+
+/// Build a chain-signed audit [`Recorder`] from the standard host paths
+/// (`<keys>/host-signer.ed25519` + `<audit>/`), or `None` if the signer key
+/// isn't present (the endpoint then serves un-audited, matching the prior
+/// optional-recorder posture). The audit dir + the key are inside the
+/// endpoint's Landlock grants (see `ConfinementSpec::substitution_endpoint`).
+fn build_audit_recorder(tenant: &str) -> Option<crate::supervisor::audit_recorder::Recorder> {
+    use crate::supervisor::audit_file::FileAuditSigner;
+    use crate::supervisor::audit_recorder::Recorder;
+    use ed25519_dalek::SigningKey;
+    use mvm_core::plan::TenantId;
+
+    let key_path = mvm_core::config::mvm_keys_dir().join("host-signer.ed25519");
+    let bytes = std::fs::read(&key_path).ok()?;
+    let key_array: [u8; 32] = bytes.as_slice().try_into().ok()?;
+    let signing_key = SigningKey::from_bytes(&key_array);
+    let signer = FileAuditSigner::open(signing_key, mvm_core::config::mvm_audit_dir()).ok()?;
+    Some(Recorder::new(
+        std::sync::Arc::new(signer),
+        TenantId(tenant.to_string()),
+    ))
 }
 
 #[cfg(test)]
@@ -187,6 +218,28 @@ mod tests {
     use mvm_sdk::ir::AuthType;
     use secrecy::SecretBox;
     use tempfile::tempdir;
+
+    #[test]
+    fn build_audit_recorder_attaches_when_signer_key_present() {
+        // No host signer key under a fresh data dir → no recorder (best-effort).
+        let dir = tempdir().unwrap();
+        // SAFETY: single-threaded test; restored at scope end is unnecessary —
+        // each test process is isolated and this only steers the config helper.
+        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        assert!(
+            build_audit_recorder("local").is_none(),
+            "no signer key ⇒ no recorder"
+        );
+        // Drop a 32-byte signer key at the standard location → recorder attaches.
+        let keys = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("host-signer.ed25519"), [7u8; 32]).unwrap();
+        assert!(
+            build_audit_recorder("local").is_some(),
+            "signer key present ⇒ recorder attaches"
+        );
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
 
     fn vsock_cfg(secrets: Vec<SecretBinding>, dir: &std::path::Path) -> EndpointConfig {
         EndpointConfig {

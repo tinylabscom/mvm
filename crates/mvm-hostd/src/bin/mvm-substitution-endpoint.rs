@@ -120,7 +120,15 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
 
     let (secret_dir, binding_dir) =
         resolve_store_dirs(cfg).context("resolve substitution-endpoint store dirs")?;
-    let spec = ConfinementSpec::substitution_endpoint(secret_dir, binding_dir);
+    // The audit recorder (when the host signer key is present) reads the key
+    // and appends to the per-tenant audit log; grant both so the confined
+    // endpoint can chain-sign substitution events.
+    let spec = ConfinementSpec::substitution_endpoint(
+        secret_dir,
+        binding_dir,
+        mvm_core::config::mvm_audit_dir(),
+        mvm_core::config::mvm_keys_dir(),
+    );
     confine_self(&spec).context("confine substitution endpoint")?;
     info!("substitution endpoint self-confined (landlock + seccomp)");
     Ok(())
