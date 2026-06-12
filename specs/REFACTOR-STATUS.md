@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-11**
+**Last updated: 2026-06-12**
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -29,7 +29,7 @@ details** below for the workstream-level state.
 - [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C2/C3 (FC/Vz warm-start) gated
 - [ ] **PLAN 124** — Lean guest agent · 🟡 ~65%; SDK codegen + signed on-device config remain
 - [ ] **PLAN 126** — Dependency reduction · 🟡 ~25%; sigstore/aws-lc/lock-gate remain
-- [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 (AVF convergence) in progress
+- [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 convergence landed (#806) — remaining: hardware smoke (host-gated) + cosmetic rename slice
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [ ] **PLAN 183** — Builder-VM egress posture + network bootstrap · 🟡 WS-A/B/C landed; WS-D (E2E proof) remains
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
@@ -300,29 +300,28 @@ PLAN 126 — Dependency reduction                 🟡 ~25%
 PLAN 153 — CLI directory split                  ✅ DONE (subsumed into Plan 178)
   [x] image.rs → image/ ; catalog.rs → catalog/ (last two flat files)
 
-PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 in progress (gate cleared: Plan 152 WS-B + save/pause landed)  (ADR-076)
+PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 convergence LANDED (#806) — 4 backends + mock; one vz AVF path. Remaining to tick DONE: hardware smoke (host-gated) + cosmetic rename slice  (ADR-076)
   [x] Phase 1 delete docker (+ dead Tier-3 banner subsystem)
   [x] Phase 1 delete cloud_hypervisor (+ ch_runtime, ch-bootcheck)
   [x] Phase 1 fold microvm_nix → qemu
   [x] Phase 1 prune dead CI lane + Justfile setup recipe
   [x] Phase 1 verify: doctor lists {firecracker,libkrun,vz,qemu,apple-container,mock};
       4837/4837 workspace tests (excl mvm-backend SIGKILL bin); clippy/fmt clean
-  [ ] Phase 2 — AVF convergence onto supervisor vz + shared console transport
-      + drop apple-container. Code COMPLETE on feat/plan-177-phase2-avf (PR open):
+  [x] Phase 2 — AVF convergence onto supervisor vz — MERGED #806:
       apple_container backend + providers/ deleted; AnyBackend converted; macOS-26
       default→vz; CoW per-instance rootfs ported (#789); console/transport/codesign/
       port-proxy relocated; `mvmctl dev` + `up -d` converged onto VzPersistentBuilderVm
       (detached supervisor outlives CLI, `dev down` reaps by PID file — no launchd);
       `has_apple_containers`→`is_vz_default_tier`; all `"apple-container"` selectors
-      collapsed to vz; backend.rs tests repointed. Workspace check + clippy + fmt
-      clean; mvm-cli/mvm-build nextest green (mvm-backend tests are CI-only — local
-      codesign SIGKILL). Remaining before tick: (a) live macOS-26 vz `dev up`/`up`
-      hardware smoke (deferred — a parallel session is mid-vz-debug on this host, and
-      known in-flight dev-boot bugs would confound attribution); (b) cosmetic rename
-      slice — the env module file `apple_container.rs`, `AppleContainerEnv`,
-      `MicrovmBackend::AppleContainer`, and the objc2 `mvm_apple_container_*` cdecl
-      symbols still carry the old name (functional path is already vz); (c) ADR-002
-      tier-matrix row prune.
+      collapsed to vz; backend.rs tests repointed; ADR-002 tier matrix pruned
+      (docker/CH/apple-container rows dropped, microvm.nix→QEMU); CLAUDE.md updated.
+  [ ] Remaining before Phase 2 ticks fully DONE: (a) live macOS-26 vz `dev up`/`up`
+      hardware smoke (host-gated — deferred while a parallel session is mid-vz-debug
+      on this host + known in-flight dev-boot bugs would confound attribution);
+      (b) cosmetic rename slice — the env module file `apple_container.rs`,
+      `AppleContainerEnv`, `MicrovmBackend::AppleContainer`, and the objc2
+      `mvm_apple_container_*` cdecl symbols still carry the old name (functional
+      path is already vz).
 
 PLAN 178 — CLI surface consolidation (~56→~28)   ✅ DONE (dir-purity deferred)  (ADR-077)
   [x] lock tree (D1–D6) + hide internal subprocess commands
