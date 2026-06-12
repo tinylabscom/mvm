@@ -2201,6 +2201,7 @@ fn run_default_profile_argv_only() {
             dev,
             prod,
             argv,
+            ack_divergence,
         }) => {
             assert!(manifest.is_none(), "manifest should default to None");
             assert!(image.is_none(), "image should default to None");
@@ -2221,6 +2222,10 @@ fn run_default_profile_argv_only() {
             assert!(!dev, "dev should default to false");
             assert!(!prod, "prod should default to false");
             assert_eq!(argv, vec!["uname".to_string(), "-a".to_string()]);
+            assert!(
+                ack_divergence.is_empty(),
+                "ack_divergence should default to empty"
+            );
         }
         _ => panic!("Expected Run command"),
     }

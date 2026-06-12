@@ -40,7 +40,8 @@ use mvm_sdk::ir::{Entrypoint, Workload};
 
 use super::Cli;
 use super::sandbox_record::{
-    ScriptLanguage, auto_exec_record_script, load_recording, script_language_from_path,
+    LoadedRecording, ScriptLanguage, auto_exec_record_script, load_recording,
+    script_language_from_path,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -66,6 +67,12 @@ pub(in crate::commands) struct Args {
         conflicts_with = "from_ir"
     )]
     pub from_recording: Option<PathBuf>,
+
+    /// Expected SHA-256 (hex) of the recording file. Refuses a
+    /// recording whose bytes changed since capture. Only meaningful
+    /// with --from-recording.
+    #[arg(long, value_name = "HEX64", requires = "from_recording")]
+    pub recording_sha256: Option<String>,
 
     /// Output path. Directory by default; ending in `.tar.gz`/`.tgz`
     /// produces a deterministic archive.
@@ -114,7 +121,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         );
     }
 
-    let workload = load_workload(&args)?;
+    let loaded = load_workload(&args)?;
+    let workload = loaded.workload;
+    for finding in &loaded.findings {
+        eprintln!("divergence: {finding}");
+    }
     let manifest_dir = resolve_manifest_dir(&args)?;
 
     if is_archive_output(&args.out) {
@@ -198,7 +209,7 @@ fn parse_env_mode(raw: &str) -> Result<Mode> {
     }
 }
 
-fn load_workload(args: &Args) -> Result<Workload> {
+fn load_workload(args: &Args) -> Result<LoadedRecording> {
     let source = workload_source(args)?;
     match source {
         WorkloadSource::IrJsonPath(path) => {
@@ -206,7 +217,11 @@ fn load_workload(args: &Args) -> Result<Workload> {
                 .with_context(|| format!("reading IR JSON from {}", path.display()))?;
             let workload: Workload = serde_json::from_slice(&bytes)
                 .with_context(|| format!("parsing IR JSON from {}", path.display()))?;
-            Ok(workload)
+            Ok(LoadedRecording {
+                workload,
+                findings: Vec::new(),
+                digest_hex: String::new(),
+            })
         }
         WorkloadSource::IrJsonStdin => {
             let mut buf = Vec::new();
@@ -215,14 +230,24 @@ fn load_workload(args: &Args) -> Result<Workload> {
                 .context("reading IR JSON from stdin")?;
             let workload: Workload =
                 serde_json::from_slice(&buf).context("parsing IR JSON from stdin")?;
-            Ok(workload)
+            Ok(LoadedRecording {
+                workload,
+                findings: Vec::new(),
+                digest_hex: String::new(),
+            })
         }
-        WorkloadSource::RecordingPath(path) => load_recording(&path),
+        WorkloadSource::RecordingPath(path) => {
+            load_recording(&path, args.recording_sha256.as_deref())
+        }
         WorkloadSource::DecoratorScript(path) => {
             let bytes = std::fs::read(&path)
                 .with_context(|| format!("reading decorator script {}", path.display()))?;
             match parse_python(&bytes, &path) {
-                Ok((workload, _manifest)) => Ok(workload),
+                Ok((workload, _manifest)) => Ok(LoadedRecording {
+                    workload,
+                    findings: Vec::new(),
+                    digest_hex: String::new(),
+                }),
                 Err(ParseError::NoDecoratedFunction { .. }) => {
                     // No `@mvm.app`, so the script is record-mode.
                     // Auto-exec it on the host with
@@ -247,7 +272,11 @@ fn load_workload(args: &Args) -> Result<Workload> {
                     let bytes = std::fs::read(&path)
                         .with_context(|| format!("reading decorator script {}", path.display()))?;
                     match parse_typescript(&bytes, &path) {
-                        Ok((workload, _manifest)) => Ok(workload),
+                        Ok((workload, _manifest)) => Ok(LoadedRecording {
+                            workload,
+                            findings: Vec::new(),
+                            digest_hex: String::new(),
+                        }),
                         Err(ParseError::NoDecoratedFunction { .. }) => {
                             auto_exec_record_script(&path, ScriptLanguage::TypeScript)
                         }
@@ -358,47 +387,38 @@ fn resolve_manifest_dir(args: &Args) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn resolve_mode_default_is_record() {
-        let args = Args {
+    fn base_args() -> Args {
+        Args {
             entry: Some("./foo.json".to_string()),
             from_ir: None,
             from_recording: None,
+            recording_sha256: None,
             out: PathBuf::from("./out"),
             mode: None,
             prod: false,
             dev: false,
-        };
+        }
+    }
+
+    #[test]
+    fn resolve_mode_default_is_record() {
+        let args = base_args();
         let mode = resolve_mode(&args).expect("default mode resolves");
         assert!(matches!(mode, Mode::Record));
     }
 
     #[test]
     fn resolve_mode_prod_resolves_to_record() {
-        let args = Args {
-            entry: Some("./foo.json".to_string()),
-            from_ir: None,
-            from_recording: None,
-            out: PathBuf::from("./out"),
-            mode: None,
-            prod: true,
-            dev: false,
-        };
+        let mut args = base_args();
+        args.prod = true;
         let mode = resolve_mode(&args).expect("--prod resolves to record");
         assert!(matches!(mode, Mode::Record));
     }
 
     #[test]
     fn resolve_mode_dev_is_refused_on_compile() {
-        let args = Args {
-            entry: Some("./foo.json".to_string()),
-            from_ir: None,
-            from_recording: None,
-            out: PathBuf::from("./out"),
-            mode: None,
-            prod: false,
-            dev: true,
-        };
+        let mut args = base_args();
+        args.dev = true;
         let err = resolve_mode(&args).expect_err("--dev must be refused on compile");
         let msg = err.to_string();
         assert!(msg.contains("--dev"));
