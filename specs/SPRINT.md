@@ -2196,6 +2196,15 @@ live two-copy Vz fork goes through the fs_quick class. fs_quick-on-Vz,
 vm_full-restore gvproxy re-spawn, and restore idempotency are tracked as
 Plan 183 follow-ups.
 
+**2026-06-12 (later): two-copy fork live.** `vm checkpoint fork <fs_quick>
+--new-id <child> --boot` admits a fresh plan for the child (hash of the
+forked rootfs, parent's resource shape, fresh nonce) and boots it without
+clobbering the materialized copy; parent and child ran side by side for
+over an hour, each with its own agent, gvproxy, and admitted identity.
+Sidecar propagation made instance dirs self-describing (mvm-meta.json
+travels with rootfs clones and checkpoint content), which is what lets
+checkpoint-derived rootfs trees pass the runtime-meta boot gate.
+
 ### Sprint 55 success criteria
 
 - Phase A acceptance: `mvm-vz-supervisor` boots the dev-shell image
