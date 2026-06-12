@@ -224,7 +224,16 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        # Pinned dated nightly. cargo-fuzz needs nightly for the -Z sanitizer
+        # flags, but a floating nightly let a toolchain or dep change break the
+        # lane unseen (only this lane runs nightly). Frozen alongside the
+        # committed per-crate fuzz Cargo.locks so the whole lane is
+        # deterministic — bump this date deliberately. This is the nightly the
+        # lane last passed on. The other security lanes intentionally stay on
+        # floating @nightly: they run no sanitizer build and gain little.
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-11
 
       - name: Install cargo-fuzz
         run: cargo install --locked cargo-fuzz
@@ -248,21 +257,21 @@ jobs:
           # repo-root `rust-toolchain.toml` pins stable, and rustup walks
           # up from this `working-directory` so it would otherwise win.
           # RUSTUP_TOOLCHAIN bypasses the toolchain-file lookup entirely.
-          RUSTUP_TOOLCHAIN: nightly
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
         run: cargo fuzz run fuzz_guest_request -- -max_total_time="$DURATION"
 
       - name: Fuzz AuthenticatedFrame
         working-directory: crates/mvm-guest
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
         run: cargo fuzz run fuzz_authenticated_frame -- -max_total_time="$DURATION"
 
       - name: Fuzz authed path (signed-side)
         working-directory: crates/mvm-guest
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
         # Drives `verify_authenticated_frame` past sig check, asserting
         # tampered frames never reach the inner deserializer. Catches
         # regressions where a refactor reorders the verify/deserialize
@@ -273,7 +282,7 @@ jobs:
         working-directory: crates/deps/libkrun-sys
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
         # Plan 88 W6 / ADR-055 §"New untrusted-input surfaces" — the
         # `mvm-libkrun-supervisor` binary reads `SupervisorConfig`
         # JSON on stdin before any libkrun call. This target asserts
@@ -286,7 +295,7 @@ jobs:
         working-directory: crates/deps/libkrun-sys
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
         # Plan 118 WS-1 1a — the prelaunched supervisor reads a
         # `SupervisorAttachConfig` off a same-uid control UDS. It is the
         # only attacker-reachable surface after spawn; any panic is a
@@ -298,7 +307,7 @@ jobs:
         working-directory: crates/mvm-build
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
         # Plan 97 / ADR-002 claim 5 / ADR-056 — the Rust-native
         # mvm-vz-supervisor reads this SupervisorConfig JSON on stdin
         # with deny-unknown-fields semantics. A panic-free decoder on
@@ -310,7 +319,7 @@ jobs:
         working-directory: crates/mvm-oci
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
         # Plan 85 §R1 — `mvm_oci::unpack::unpack_layer` is the single
         # ingress point for adversarial OCI layer tarballs (path
         # traversal, hardlink chains, device-node sneak-ins, xattr
@@ -325,7 +334,7 @@ jobs:
         working-directory: crates/mvm-vm-host
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
         # Plan 113 §Task 15 / ADR-064 — the `mvm-firecracker-bridge`
         # sidecar reads a `BridgeConfigJson` document on stdin BEFORE
         # installing `mvm-jailer-lite` confinement or touching the
@@ -344,7 +353,7 @@ jobs:
         working-directory: crates/mvm-vm-host
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
         # Plan 113 §Task 15 / ADR-064 — `verify_passt_hash` reads
         # `~/.mvm/passt-hashes.toml` BEFORE confinement so a missing
         # or malformed allowlist surfaces as a clean operator hint
@@ -359,7 +368,7 @@ jobs:
         working-directory: crates/mvm-hostd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
         # Plan 141 / ADR-064 — `packet::parse` is the first real parse on
         # the guest's network path (the bridge byte-copied opaquely before
         # this plan); `rebuild_with_payload` re-serializes observer-modified
@@ -374,7 +383,7 @@ jobs:
         working-directory: crates/mvm-sdk
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
         # Plan 186 — the recording JSON is the Tier-0 promotion input:
         # user-spawned code writes it to a tmpfile the CLI reads back.
         # `deny_unknown_fields` must fail closed on garbage, and every
