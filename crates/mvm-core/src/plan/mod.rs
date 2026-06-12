@@ -39,8 +39,8 @@ pub use bundle::{
 };
 pub use execution_plan::{ExecutionPlan, SCHEMA_VERSION};
 pub use signing::{
-    PlanVerifyError, SignedExecutionPlan, redaction_from_signed_json, secrets_from_signed_json,
-    sign_plan, tenant_from_signed_json, verify_plan,
+    PlanVerifyError, SignedExecutionPlan, plan_from_admitted_json, redaction_from_signed_json,
+    secrets_from_signed_json, sign_plan, tenant_from_signed_json, verify_plan,
 };
 pub use types::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditTaxonomy,
