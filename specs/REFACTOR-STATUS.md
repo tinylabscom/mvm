@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-12**
+**Last updated: 2026-06-12** (Plan 188 projection seam landed)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -36,6 +36,7 @@ details** below for the workstream-level state.
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
+- [ ] **PLAN 184** — Capability projection seam (ADR-080 P5) · 🟢 seam + witnesses landed; kernel-side wiring + WASI-context mapping deferred
 
 ## Plan details
 
@@ -426,6 +427,22 @@ PLAN 181 — App-builder product surface           🔴 NOT STARTED  (ADR-079; m
   NOTE: deliberately rejects the sibling app-builder's isolation model — no Docker
   socket, no host-path mounts into a workload, no auth-off/caps-off defaults, no
   baked-in agents, no multi-tenant HTTP/auth in mvm (mvmd per ADR-070 §5/Plan 33).
+
+PLAN 184 — Capability projection seam (ADR-080 P5)  🟢 seam + witnesses LANDED; enforcement wiring deferred
+  [x] Proto + CanonicalRule atom (projection seam module created)
+  [x] CanonicalEgress decision set with unconditional mandatory-deny
+  [x] canonicalize_effective — L4 rules leg
+  [x] canonicalize_effective — allow-list / DNS-pin leg
+  [x] mandatory-deny overlap refusal at projection time (incl. rebinding fixture)
+  [x] to_wasi_grants + wasi_allows — hostname-keyed WASI projection (separate walk)
+  [x] clamp — intersection-only merge (requests attenuate, never widen)
+  [x] cross-projection consistency + clamp-never-widens property witnesses
+      (ADR-080 §8 P5 witness names: cross_projection_consistency_property,
+       clamp_never_widens_property, rebinding_pin_into_metadata_range_refuses)
+  [x] pub use re-exports from mvm-core::policy; ADR-080 P5 row updated
+  [ ] kernel-side wiring: LiveL4Gate/PlanFlowPolicy consume CanonicalEgress — deferred
+  [ ] WASI-context mapping: WasiEgress → WasiCtxBuilder in the wasmtime runner — deferred
+  NOTE: 41 tests (39 unit + 2 property witnesses), mutation-verified. No new dependencies.
 ```
 
 ## Security claims
