@@ -1,8 +1,27 @@
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+
+/// Shared wall-clock seam for code that needs deterministic time in tests.
+///
+/// Kept sync and object-safe so crates that only need a "what time is it now?"
+/// dependency do not have to pull in async/runtime abstractions.
+pub trait Clock: Send + Sync {
+    fn now(&self) -> DateTime<Utc>;
+}
+
+/// Production wall clock backed by `chrono::Utc::now()`.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
 /// Return the current UTC timestamp in ISO 8601 format.
 pub fn utc_now() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 /// Return the UTC timestamp `dur` seconds from now in ISO 8601 format.
@@ -13,9 +32,9 @@ pub fn utc_now() -> String {
 pub fn utc_plus_duration(dur: Duration) -> String {
     let secs = i64::try_from(dur.as_secs()).unwrap_or(i64::MAX);
     let delta = chrono::Duration::try_seconds(secs).unwrap_or(chrono::Duration::MAX);
-    let dt = chrono::Utc::now()
+    let dt = Utc::now()
         .checked_add_signed(delta)
-        .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
+        .unwrap_or(DateTime::<Utc>::MAX_UTC);
     dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
@@ -23,10 +42,10 @@ pub fn utc_plus_duration(dur: Duration) -> String {
 /// `utc_plus_duration`. Returns `None` if the string can't be parsed,
 /// so callers (e.g. the supervisor reaper) can treat malformed
 /// expirations as "no TTL" rather than panicking on disk-format drift.
-pub fn parse_iso8601(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    chrono::DateTime::parse_from_rfc3339(s)
+pub fn parse_iso8601(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
         .ok()
-        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .map(|dt| dt.with_timezone(&Utc))
 }
 
 #[cfg(test)]

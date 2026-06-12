@@ -30,6 +30,9 @@ details** below for the workstream-level state.
 - [ ] **PLAN 124** — Lean guest agent · 🟡 ~65%; SDK codegen + signed on-device config remain
 - [ ] **PLAN 126** — Dependency reduction · 🟡 ~30%; duplicate-major lock-gate landed (+ supply-chain CI restored); sigstore/aws-lc/forbidden-dep-gate remain
 - [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 convergence landed (#806) — remaining: hardware smoke (host-gated) + cosmetic rename slice
+- [ ] **PLAN 182** — Trait hygiene + backend catalog · 🟡 code+docs done locally; aggregate workspace-test SIGKILL remains
+- [ ] **PLAN 184** — Backend descriptor registry · 🔴 not started
+- [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 shared TestEnv landed; mvm-core + backend marker tests migrated
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
@@ -266,6 +269,38 @@ PLAN 124 — Lean guest agent                     🟡 ~65%
   [ ] D1.2/D1.3 SDK codegen
   [ ] E signed on-device config
 
+PLAN 184 — Backend descriptor registry          🔴 not started
+  [ ] Promote `mvm-backend`'s shipped backend catalog into a first-class
+      `BackendDescriptor` / registry API while preserving `VmBackend` as the
+      sole backend behavior trait
+  [ ] Add descriptor-driven construction for both `AnyBackend` and
+      `Arc<dyn VmBackend>` consumers
+  [ ] Migrate read-only and clearly generic backend consumers away from enum
+      dispatch where no backend-specific behavior is needed
+  [ ] Keep `AnyBackend` only for intentionally enum-specific operations
+      (`auto_select` policy, backend-specific helpers, explicit variant checks)
+
+PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
+  [x] Add `mvm_core::util::test_env::TestEnv` behind `cfg(test)` /
+      `mvm-core/test-support`; migrate `mvm-core` keystore env tests; verify
+      with focused tests + `cargo clippy -p mvm-core --all-targets -- -D warnings`
+  [x] Migrate `mvm-backend::backend` selector/started-VM marker tests to
+      `TestEnv` + `tempfile::TempDir`; keep the legacy backend env lock until
+      the rest of that crate migrates
+  [ ] Roll `TestEnv` through remaining high-risk env-mutating tests in `mvm-backend`,
+      `mvm-cli`, and `mvm-build`
+  [ ] Standardize poisoned-lock handling by distinguishing test/global
+      serialization locks from real runtime state locks
+  [ ] Rename overly generic internal traits/types where the blast radius is
+      small, including storage/backend and layer-local egress proxy names
+  [ ] Push stringly backend/provider selectors toward typed values at module
+      boundaries
+  [ ] Audit long constructors, params structs, builders, and large functions
+      only where the split adds testable structure
+  [ ] Audit unsafe/platform/feature boundaries, standardize error shapes,
+      consolidate repeated fixtures, check secret/debug exposure, and add
+      Rustdoc verification to closeout
+
 PLAN 170 — Host lifecycle convergence           ✅ mvm-side done (density → mvmd)
   [x] WS-A reconcile-on-entry — PR #688 (merged)
   [~] WS-B idle-reaper mechanism — PR #696 (merged, no consumer)
@@ -292,9 +327,18 @@ PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C1
       doctor warm-start matrix + Linux NBD/HugeTLB substrate probe
   [ ] C2 Firecracker live-memory fast-resume — carved out → Plan 175
   [ ] C3 Vz save/restore (macOS 26+) — owned by Plan 152 WS-C
-  [ ] C4 warm-start CLI/RPC wiring — carved out → Plan 175 (rides C2)
+
+PLAN 182 — Trait hygiene + backend catalog      🟡 code+docs in; aggregate workspace-test gate remains
+  [x] shared `mvm_core::time::{Clock,SystemClock}` replaces the three local copies
+  [x] duplicate `KeyProvider` retired in favor of `mvm_core::crypto::keystore`
+  [x] backend metadata catalog becomes the single source for `AnyBackend` selectors
+      and `mvmctl doctor` backend support maps
+  [x] macro scope stays narrow: land `backend_catalog!`, reject broader trait-impl/noop macros
+  [x] architecture docs now describe the current trait seams and ownership rules
+  [ ] literal `cargo test --workspace` aggregate run (package-local tests are green; workspace run hits SIGKILL on `mvm-backend` here)
 
 PLAN 175 — Firecracker live-memory warm-start    🔴 NOT STARTED (live-KVM-gated; Plan 123 C2 carve-out)
+  [ ] C4 warm-start CLI/RPC wiring — carved out → Plan 175 (rides C2)
   [ ] T1 VMGenID delivery on PostRestore (token payload + GenIdReseeder dispatch)
   [ ] T2 UFFD/NBD/hugepages fast-resume substrate (diff snapshot + lazy paging)
   [ ] T3 SIGUSR1 "primed" ready-barrier for a deterministic warm base

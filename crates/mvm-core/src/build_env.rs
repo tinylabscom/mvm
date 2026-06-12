@@ -7,7 +7,9 @@ use crate::tenant::{TenantConfig, TenantNet};
 /// Minimal shell execution abstraction used by dev-mode builds.
 ///
 /// This trait provides just shell execution and logging — enough for
-/// `dev_build()` which runs `nix build` directly in the Lima VM.
+/// `dev_build()` and related build flows that run Linux/Nix work via
+/// the current execution boundary (the shared builder VM on macOS, or
+/// the host itself on native Linux).
 pub trait ShellEnvironment: Send + Sync {
     /// Execute a shell script in the VM.
     fn shell_exec(&self, script: &str) -> Result<()>;

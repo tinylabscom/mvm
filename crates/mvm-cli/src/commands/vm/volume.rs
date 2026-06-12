@@ -828,40 +828,21 @@ fn unmount(vm_name: &str, guest_path: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    static DATA_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     struct DataDirGuard {
-        _guard: std::sync::MutexGuard<'static, ()>,
-        prev: Option<String>,
+        _env: mvm_core::util::test_env::TestEnv,
         tmp: tempfile::TempDir,
     }
 
     impl DataDirGuard {
         fn new() -> Self {
-            let guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let mut env = mvm_core::util::test_env::TestEnv::new();
             let tmp = tempfile::tempdir().expect("tempdir");
-            let prev = std::env::var("MVM_DATA_DIR").ok();
-            unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
-            Self {
-                _guard: guard,
-                prev,
-                tmp,
-            }
+            env.set("MVM_DATA_DIR", tmp.path());
+            Self { _env: env, tmp }
         }
 
         fn path(&self) -> &Path {
             self.tmp.path()
-        }
-    }
-
-    impl Drop for DataDirGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.prev {
-                    Some(prev) => std::env::set_var("MVM_DATA_DIR", prev),
-                    None => std::env::remove_var("MVM_DATA_DIR"),
-                }
-            }
         }
     }
 

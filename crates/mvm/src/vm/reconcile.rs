@@ -797,7 +797,9 @@ mod tests {
 
     #[test]
     fn converge_default_heals_drift_and_emits_audit() {
-        let _lock = crate::vm::DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let share = tmp.path().join("share");
         let data = tmp.path().join("data");
@@ -833,7 +835,9 @@ mod tests {
 
     #[test]
     fn converge_default_is_clean_with_empty_registry() {
-        let _lock = crate::vm::DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let _g1 = EnvGuard::set("MVM_SHARE_DIR", tmp.path().join("share").to_str().unwrap());
         let _g2 = EnvGuard::set("MVM_DATA_DIR", tmp.path().join("data").to_str().unwrap());

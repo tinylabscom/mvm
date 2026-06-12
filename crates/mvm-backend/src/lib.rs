@@ -31,6 +31,7 @@
 pub mod artifacts;
 pub mod audit_substrate;
 pub mod backend;
+pub mod catalog;
 pub mod checkpoint;
 pub mod codesign;
 // Shared host-side substrate (config + shell + linux_env + ui +
