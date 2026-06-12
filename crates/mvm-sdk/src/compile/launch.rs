@@ -65,6 +65,12 @@ struct LaunchPlan<'a> {
     /// without re-merging at flake-evaluation time. Empty phases
     /// serialize as empty arrays.
     hooks: serde_json::Value,
+    /// Declarative files baked into the rootfs at build time. Each
+    /// entry is `{ path, bytes_b64, mode? }`; the Nix factory base64-
+    /// decodes the bytes into a store path and lands it at `path` with
+    /// `mode` (default `0644`). Empty for workloads with no declared
+    /// files. Nothing here is decoded in a guest shell.
+    files: serde_json::Value,
     /// Application-dep declaration. `null` for stdlib-only workloads
     /// or apps declared with `mvm.no_deps()`. Carries `{ "kind":
     /// "python" | "node", "lockfile": "...", "tool":
@@ -133,6 +139,7 @@ pub fn build_launch_json(
             "expected_peers": expected_peers,
         }),
         hooks: serde_json::to_value(&merged_hooks)?,
+        files: serde_json::to_value(&app.files)?,
         dependencies,
     };
     canonicalize(&plan)
@@ -174,6 +181,7 @@ mod tests {
                 threat_tier: Default::default(),
                 addons: vec![],
                 hooks: Default::default(),
+                files: vec![],
             }],
             volumes: vec![],
             extensions: Default::default(),
@@ -212,6 +220,32 @@ mod tests {
         assert_eq!(v["source"]["kind"], "local_path");
         assert_eq!(v["source"]["subdir"], "src");
         assert_eq!(v["source"]["file_count"], 0);
+    }
+
+    #[test]
+    fn launch_json_carries_declarative_files() {
+        let src = empty_source_plan();
+        let mut w = sample();
+        w.apps[0].files = vec![crate::ir::MaterializedFile {
+            path: "/app/note.txt".into(),
+            bytes_b64: "aGkK".into(),
+            mode: Some("0600".into()),
+        }];
+        let s = build_launch_json(&w, &src).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let files = v["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["path"], "/app/note.txt");
+        assert_eq!(files[0]["bytes_b64"], "aGkK");
+        assert_eq!(files[0]["mode"], "0600");
+    }
+
+    #[test]
+    fn launch_json_files_empty_by_default() {
+        let src = empty_source_plan();
+        let s = build_launch_json(&sample(), &src).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["files"].as_array().unwrap().len(), 0);
     }
 
     #[test]

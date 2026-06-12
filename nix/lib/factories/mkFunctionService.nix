@@ -53,6 +53,12 @@
   # entries. Empty / absent phases are no-ops. Defaults to all-empty
   # so workloads without `@mvm.app(before_start=…)` need no change.
   hooks ? { before_build = [ ]; before_start = [ ]; after_start = [ ]; before_stop = [ ]; }
+, # Declarative files to bake into the rootfs. Each entry is
+  # `{ path, bytes_b64, mode? }`. The bytes are base64-decoded at BUILD
+  # time into a store path; the rootfs packer lands the file at `path`
+  # with `mode` (default `0644`). Nothing decodes in a guest shell.
+  # Defaults to empty so workloads that declare no files need no change.
+  files ? [ ]
 ,
 }:
 
@@ -152,9 +158,30 @@ let
     /etc/mvm/hooks/before_start.sh
     exec ${pkgs.coreutils}/bin/sleep infinity
   '';
+
+  # Declarative files → rootfs entries. The bytes are base64-decoded at
+  # BUILD time into a store path; the rootfs packer lands the file at the
+  # requested path with the requested mode. Nothing decodes in a guest
+  # shell. `escapeShellArg` on a STANDARD-base64 token is belt-and-
+  # suspenders (the alphabet carries no shell metacharacters) but correct.
+  materializedFiles = builtins.listToAttrs (map
+    (f: {
+      name = f.path;
+      value = {
+        source = pkgs.runCommand "mvm-file-${builtins.hashString "sha256" f.path}" { } ''
+          printf '%s' ${pkgs.lib.escapeShellArg f.bytes_b64} | ${pkgs.coreutils}/bin/base64 -d > "$out"
+        '';
+        mode = f.mode or "0644";
+      };
+    })
+    files);
 in
 {
-  extraFiles = {
+  # User-declared files merge UNDER the reserved /etc/mvm + /usr/lib/mvm
+  # entries: `materializedFiles // { reserved... }` makes a colliding user
+  # path (e.g. one aimed at /etc/mvm/hooks/before_start.sh) lose to the
+  # reserved entry, so a declared file can never clobber the boot wiring.
+  extraFiles = materializedFiles // {
     "/etc/mvm/entrypoint" = {
       content = "/usr/lib/mvm/wrappers/runner";
       mode = "0644";

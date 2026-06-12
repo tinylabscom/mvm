@@ -22,9 +22,8 @@
 //! - `entrypoint` is the **final** [`RecordedOp::CommandStart`]
 //!   argv. Earlier `CommandStart` ops become `before_start` hooks so
 //!   they fire in declaration order before the entrypoint.
-//! - [`RecordedOp::FilesWrite`] ops become `before_start` hooks
-//!   that base64-decode the recorded bytes into the declared path.
-//!   Binary-safe.
+//! - [`RecordedOp::FilesWrite`] ops lower to [`App::files`] entries
+//!   baked into the rootfs at build time — never into a shell hook.
 //! - [`RecordedOp::Kill`] ops are dropped — the workload VM lives
 //!   for its declared TTL, not until a kill in the recording.
 //!
@@ -41,7 +40,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::ir::{
-    App, Entrypoint, EnvValue, HookCmd, Hooks, Image, Network, Resources, Source, Workload,
+    App, Entrypoint, EnvValue, HookCmd, Hooks, Image, MaterializedFile, Network, Resources, Source,
+    Workload,
 };
 
 const SCHEMA_VERSION: &str = "0.1";
@@ -140,8 +140,9 @@ pub enum RecordedOp {
     },
     /// `sb.files.write(path, bytes)` — bytes are base64-encoded so
     /// the recording is plain JSON-safe and binary-safe at the same
-    /// time. Lowered into a `before_start` hook that re-emits the
-    /// file with `base64 -d`.
+    /// time. Lowered into an `App.files` entry baked into the rootfs
+    /// at build time; the path and payload are pure data, never
+    /// interpolated into a shell line.
     FilesWrite {
         path: String,
         /// Base64 (standard alphabet, with `=` padding) of the
@@ -303,8 +304,9 @@ pub fn verify_recording_digest(bytes: &[u8], expected_hex: &str) -> Result<(), L
 ///
 /// The exact shape is documented at the top of the module. In one
 /// line: the *final* `CommandStart` is the entrypoint, every prior
-/// `CommandStart` and `FilesWrite` becomes a `before_start` hook in
-/// declaration order, and `Kill` ops are dropped (emitting a
+/// `CommandStart` becomes a `before_start` hook in declaration order,
+/// `FilesWrite` ops populate `App.files` (baked at build time, never
+/// a shell hook), and `Kill` ops are dropped (emitting a
 /// [`Divergence::KillDropped`] finding). `FilesWrite` ops after the
 /// final `CommandStart` emit [`Divergence::FilesWriteAfterEntrypoint`].
 pub fn compile_recording_with_findings(
@@ -340,11 +342,11 @@ pub fn compile_recording_with_findings(
         .rposition(|op| matches!(op, RecordedOp::CommandStart { .. }))
         .ok_or(LowerError::NoEntrypoint)?;
 
-    // Walk every op, building `before_start` hooks for everything
-    // *except* the final CommandStart (which becomes the entrypoint)
-    // and any Kill ops. Earlier CommandStart ops become hooks in
-    // declaration order so they fire before the entrypoint at boot.
+    // Walk every op: earlier CommandStart ops become before_start hooks;
+    // FilesWrite ops go into materialized_files (baked at build time);
+    // Kill ops are dropped. The final CommandStart is the entrypoint.
     let mut before_start: Vec<HookCmd> = Vec::new();
+    let mut materialized_files: Vec<MaterializedFile> = Vec::new();
     let mut entrypoint: Option<Entrypoint> = None;
     let mut findings: Vec<Divergence> = Vec::new();
 
@@ -366,8 +368,9 @@ pub fn compile_recording_with_findings(
                 }
             }
             RecordedOp::FilesWrite { path, bytes_b64 } => {
-                // Decode now so a malformed or oversize recording fails
-                // closed at lower time rather than baking a broken hook.
+                // Decode to validate the payload is well-formed STANDARD
+                // base64 and within the size cap — fail closed at lower
+                // time rather than baking a broken entry into the IR.
                 let decoded = base64::engine::general_purpose::STANDARD
                     .decode(bytes_b64)
                     .map_err(|error| LowerError::InvalidFilesWriteB64 {
@@ -387,18 +390,15 @@ pub fn compile_recording_with_findings(
                         path: path.clone(),
                     });
                 }
-                // Emit a shell hook that materializes the file. Both
-                // the destination path and the payload are delivered
-                // via `base64 -d` so the shell line contains no
-                // raw user-controlled bytes — only STANDARD-alphabet
-                // base64 tokens, which contain no shell metacharacters.
-                let path_b64 = base64::engine::general_purpose::STANDARD.encode(path.as_bytes());
-                let line = format!(
-                    "p=$(printf '%s' '{path_b64}' | base64 -d) && mkdir -p \"$(dirname \"$p\")\" && printf '%s' '{b64}' | base64 -d > \"$p\"",
-                    path_b64 = path_b64,
-                    b64 = bytes_b64,
-                );
-                before_start.push(HookCmd::Shell { line });
+                // Carry as a declarative IR entry — path and payload are
+                // pure data, decoded by the Nix factory at build time.
+                // No shell line is generated; no user-controlled bytes
+                // reach a shell context at any point.
+                materialized_files.push(MaterializedFile {
+                    path: path.clone(),
+                    bytes_b64: bytes_b64.clone(),
+                    mode: None,
+                });
             }
             RecordedOp::Kill => {
                 // Dropped — the workload's lifetime is the orchestrator's
@@ -437,6 +437,7 @@ pub fn compile_recording_with_findings(
             after_start: Vec::new(),
             before_stop: Vec::new(),
         },
+        files: materialized_files,
     };
 
     Ok((
@@ -541,41 +542,32 @@ mod tests {
     }
 
     #[test]
-    fn files_write_becomes_base64_shell_hook() {
-        let rec = RuntimeRecording {
-            workload_id: "files".into(),
-            create: minimal_create("python-3.12"),
-            ops: vec![
-                RecordedOp::FilesWrite {
-                    path: "/app/config.json".into(),
-                    bytes_b64: b64(b"{\"hello\":\"world\"}\n"),
-                },
-                RecordedOp::CommandStart {
-                    argv: vec!["python".into(), "run.py".into()],
-                    env: BTreeMap::new(),
-                },
-            ],
-        };
-        let wl = compile_recording(&rec).unwrap();
+    fn files_write_lowers_to_materialized_file_not_a_hook() {
+        let ops = vec![write_op("/app/conf.toml", b"a=1"), start_op(&["/bin/true"])];
+        let wl = compile_recording(&rec_with_ops(ops)).expect("must lower");
         let app = &wl.apps[0];
-        assert_eq!(app.hooks.before_start.len(), 1);
-        match &app.hooks.before_start[0] {
-            HookCmd::Shell { line } => {
-                assert!(line.contains("base64 -d"), "got: {line}");
-                // Path is base64-encoded in the line (injection hardening):
-                // the literal path does not appear as raw bytes.
-                assert!(
-                    line.contains(&b64(b"/app/config.json")),
-                    "path b64 missing: {line}"
-                );
-                assert!(
-                    line.contains(&b64(b"{\"hello\":\"world\"}\n")),
-                    "got: {line}"
-                );
-                assert!(line.contains("mkdir -p"), "got: {line}");
-            }
-            other => panic!("expected Shell hook, got {other:?}"),
-        }
+        // No before_start hook is emitted for FilesWrite anymore.
+        assert!(
+            app.hooks.before_start.is_empty(),
+            "FilesWrite must not produce a hook"
+        );
+        assert_eq!(app.files.len(), 1);
+        assert_eq!(app.files[0].path, "/app/conf.toml");
+        assert_eq!(
+            app.files[0].bytes_b64,
+            base64::engine::general_purpose::STANDARD.encode(b"a=1")
+        );
+    }
+
+    #[test]
+    fn files_write_hostile_path_is_carried_as_data_never_a_shell_line() {
+        // The old hostile-path concern is gone: the path is a plain
+        // data field, never interpolated into a shell command.
+        let hostile = "/app/x'; rm -rf /tmp/pwn; echo '";
+        let ops = vec![write_op(hostile, b"x"), start_op(&["/bin/true"])];
+        let wl = compile_recording(&rec_with_ops(ops)).expect("must lower");
+        assert!(wl.apps[0].hooks.before_start.is_empty());
+        assert_eq!(wl.apps[0].files[0].path, hostile);
     }
 
     #[test]
@@ -765,72 +757,6 @@ mod tests {
     }
 
     #[test]
-    fn files_write_b64_with_single_quote_refuses() {
-        // Both path and payload are base64-encoded into the shell line;
-        // the STANDARD alphabet (no quotes, no metacharacters) is what
-        // makes both tokens safe at the point they reach the shell.
-        // The decode-before-interpolate step handles the payload token;
-        // a decoder/alphabet change that lets a quote through is an
-        // injection primitive — this pin must fail loudly first.
-        let ops = vec![
-            RecordedOp::FilesWrite {
-                path: "/app/x".to_string(),
-                bytes_b64: "ab'c=".to_string(),
-            },
-            start_op(&["/bin/true"]),
-        ];
-        let err = compile_recording(&rec_with_ops(ops)).unwrap_err();
-        assert!(
-            matches!(err, LowerError::InvalidFilesWriteB64 { .. }),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn files_write_b64_url_safe_alphabet_refuses() {
-        // URL_SAFE uses `-` and `_`; the lowering is pinned to
-        // STANDARD. Accepting both alphabets silently would widen
-        // the interpolation surface.
-        let ops = vec![
-            RecordedOp::FilesWrite {
-                path: "/app/x".to_string(),
-                bytes_b64: "a-b_".to_string(),
-            },
-            start_op(&["/bin/true"]),
-        ];
-        let err = compile_recording(&rec_with_ops(ops)).unwrap_err();
-        assert!(
-            matches!(err, LowerError::InvalidFilesWriteB64 { .. }),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn files_write_hostile_path_is_base64_encoded_in_hook() {
-        // Both path and payload are base64-encoded into the shell line
-        // using the STANDARD alphabet, which contains no metacharacters.
-        // The decode-before-interpolate step is what makes the payload
-        // token alphabet-safe; no quoting or escaping of the raw path
-        // bytes is needed or present. Verify the b64 of the hostile
-        // path appears in the line and that no injection breakout survives.
-        let hostile = "/app/x'; rm -rf /tmp/pwn; echo '";
-        let ops = vec![write_op(hostile, b"x"), start_op(&["/bin/true"])];
-        let wl = compile_recording(&rec_with_ops(ops)).expect("must lower");
-        let hooks = &wl.apps[0].hooks.before_start;
-        let HookCmd::Shell { line } = &hooks[0] else {
-            panic!("FilesWrite must lower to a Shell hook, got {hooks:?}");
-        };
-        // The path must be delivered via its base64 form — raw bytes absent.
-        let path_b64 = base64::engine::general_purpose::STANDARD.encode(hostile.as_bytes());
-        assert!(line.contains(&path_b64), "path b64 missing: {line}");
-        assert!(!line.contains("'; rm -rf"), "unescaped breakout: {line}");
-        assert!(
-            !line.contains("; rm -rf"),
-            "bare metacharacter in line: {line}"
-        );
-    }
-
-    #[test]
     fn kill_op_yields_divergence_finding() {
         let ops = vec![start_op(&["/bin/true"]), RecordedOp::Kill];
         let (_, findings) =
@@ -857,8 +783,11 @@ mod tests {
             &findings[0],
             Divergence::FilesWriteAfterEntrypoint { op_index: 1, path } if path == "/app/late.txt"
         ));
-        // Lowering behavior is unchanged: the hook still exists.
-        assert_eq!(wl.apps[0].hooks.before_start.len(), 1);
+        // The file is carried in app.files even when written after the entrypoint.
+        assert_eq!(wl.apps[0].files.len(), 1);
+        assert_eq!(wl.apps[0].files[0].path, "/app/late.txt");
+        // No shell hook is produced.
+        assert!(wl.apps[0].hooks.before_start.is_empty());
     }
 
     #[test]
@@ -914,44 +843,6 @@ mod tests {
             err.to_string().contains("stat") || err.to_string().contains("unknown"),
             "got: {err}"
         );
-    }
-
-    /// Lower a FilesWrite hook and actually run it under /bin/sh in a
-    /// temp dir, proving the generated line creates the file with the
-    /// intended bytes. `rel` is joined onto the temp dir so the test
-    /// never writes outside it.
-    #[cfg(unix)]
-    fn files_write_roundtrip_under_tempdir(rel: &str, bytes: &[u8]) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let target = dir.path().join(rel);
-        let ops = vec![
-            write_op(target.to_str().unwrap(), bytes),
-            start_op(&["/bin/true"]),
-        ];
-        let wl = compile_recording(&rec_with_ops(ops)).expect("must lower");
-        let HookCmd::Shell { line } = &wl.apps[0].hooks.before_start[0] else {
-            panic!("expected Shell hook");
-        };
-        let status = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(line)
-            .status()
-            .expect("run hook");
-        assert!(status.success(), "hook failed for {rel}: {line}");
-        let got = std::fs::read(&target).expect("file must exist");
-        assert_eq!(got, bytes);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn files_write_root_level_path_materializes() {
-        files_write_roundtrip_under_tempdir("topfile", b"root-level");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn files_write_slashless_nested_path_materializes() {
-        files_write_roundtrip_under_tempdir("sub/deep/conf.toml", b"nested");
     }
 
     #[test]

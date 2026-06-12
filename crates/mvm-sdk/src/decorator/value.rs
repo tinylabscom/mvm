@@ -246,6 +246,7 @@ pub fn lower_to_workload(
         threat_tier: Default::default(),
         addons: vec![],
         hooks,
+        files: Vec::new(),
     };
 
     Ok(Workload {
