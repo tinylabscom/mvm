@@ -145,9 +145,10 @@ fn now_unix() -> u64 {
 /// error explaining why a checkpoint can't be taken.
 ///
 /// "Quiesced" means the VM is not running, OR it's marked paused in the name
-/// registry (a sealed instance snapshot exists). A live VM is refused: an
-/// fs_quick checkpoint has no memory, so the rootfs must be in a clean,
-/// deterministic state.
+/// registry (vCPUs and virtio queues quiesced — the registry `paused` flag is
+/// set by `mvmctl pause` and cleared by `resume`). A live, unpaused VM is
+/// refused: an fs_quick checkpoint has no memory, so the rootfs must be in a
+/// clean, deterministic state.
 ///
 /// Rootfs location is backend-specific but both macOS workload backends keep
 /// the image under `vm_state_dir(name)`:
@@ -155,7 +156,7 @@ fn now_unix() -> u64 {
 ///   - Vz boots from a supplied path but persists the launch config, whose
 ///     `rootfs` disk records that path.
 fn resolve_quiesced_vm_rootfs(name: &str) -> Result<PathBuf> {
-    if vm_is_running(name) {
+    if !vm_is_quiesced(name) {
         bail!("stop or pause VM '{name}' before checkpointing");
     }
     let state_dir = vm_state_dir(name);
@@ -169,6 +170,15 @@ fn resolve_quiesced_vm_rootfs(name: &str) -> Result<PathBuf> {
     // Vz persists its full supervisor config at launch; the rootfs disk's
     // path points at the bootable image.
     if let Some(path) = vz_rootfs_from_supervisor_config(&state_dir)? {
+        if !path.exists() {
+            bail!(
+                "fs_quick checkpoint needs the VM's instance rootfs ({}), which is \
+                 removed when the VM is stopped on this backend. Pause instead: \
+                 `mvmctl vm pause {name}`, checkpoint, then `mvmctl vm resume {name}` \
+                 — or use `--class vm-full` on a running VM.",
+                path.display()
+            );
+        }
         return Ok(path);
     }
 
@@ -205,6 +215,31 @@ fn vm_is_running(name: &str) -> bool {
         .filter_map(|s| s.trim().parse::<libc::pid_t>().ok())
         // SAFETY: signal 0 only probes existence; it delivers nothing.
         .any(|pid| unsafe { libc::kill(pid, 0) == 0 })
+}
+
+/// fs_quick clones the instance rootfs, so the guest must not be writing:
+/// either the VM is stopped, or it is paused (vCPUs and virtio queues quiesced
+/// — the registry `paused` flag is set by `mvmctl pause` and cleared by
+/// `resume`). A running-but-paused Vz supervisor keeps its PID alive, so the
+/// pid-only `vm_is_running` probe would incorrectly refuse the checkpoint
+/// without this registry check.
+fn vm_is_quiesced(name: &str) -> bool {
+    if !vm_is_running(name) {
+        return true;
+    }
+    registry_paused(name)
+}
+
+/// Read the `paused` flag for `name` from the persistent VM-name registry.
+/// Tolerates a missing registry or a missing entry — both mean not-paused,
+/// which is the fail-closed default (better to refuse an uncertain state
+/// than to clone a potentially-active rootfs).
+fn registry_paused(name: &str) -> bool {
+    let path = mvm::vm::name_registry::registry_path();
+    mvm::vm::name_registry::VmNameRegistry::load(&path)
+        .ok()
+        .and_then(|r| r.lookup(name).map(|reg| reg.paused))
+        .unwrap_or(false)
 }
 
 /// Hash the VM's persisted supervisor config so the checkpoint pins the launch
@@ -604,7 +639,13 @@ fn parent_vm_name_hint(parent: &CheckpointId) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    // Env-var mutation is process-wide; serialize tests that set MVM_DATA_DIR /
+    // MVM_SHARE_DIR so they don't race each other.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn validated_checkpoint_id_accepts_normal() {
@@ -620,5 +661,166 @@ mod tests {
         assert!(validated_checkpoint_id("").is_err());
         assert!(validated_checkpoint_id("a\0b").is_err());
         assert!(validated_checkpoint_id("a\nb").is_err());
+    }
+
+    // ── vm_is_quiesced / registry_paused ──────────────────────────────────
+
+    /// A VM with no PID files is stopped → quiesced.
+    #[test]
+    fn stopped_vm_is_quiesced() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+        assert!(
+            vm_is_quiesced("no-such-vm-stopped"),
+            "stopped VM must be quiesced"
+        );
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    /// A VM that is running AND marked paused in the registry → quiesced.
+    #[test]
+    fn running_but_paused_vm_is_quiesced() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+            std::env::set_var("MVM_SHARE_DIR", tmp.path());
+        }
+
+        // Create the vz.pid file pointing at our own PID so vm_is_running → true.
+        let state_dir = mvm_core::config::vm_state_dir("pausedvm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let pid = unsafe { libc::getpid() };
+        std::fs::write(state_dir.join("vz.pid"), pid.to_string()).unwrap();
+
+        // Register + pause the VM in the name registry.
+        let reg_path = mvm::vm::name_registry::registry_path();
+        std::fs::create_dir_all(reg_path.parent().unwrap()).unwrap();
+        let mut reg = mvm::vm::name_registry::VmNameRegistry::default();
+        reg.register("pausedvm", state_dir.to_str().unwrap(), "default", None, 0)
+            .unwrap();
+        reg.set_paused("pausedvm", true).unwrap();
+        reg.save(&reg_path).unwrap();
+
+        assert!(
+            vm_is_quiesced("pausedvm"),
+            "running-but-paused VM must be quiesced"
+        );
+
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+            std::env::remove_var("MVM_SHARE_DIR");
+        }
+    }
+
+    /// A VM that is running AND NOT paused in the registry → not quiesced.
+    #[test]
+    fn running_unpaused_vm_is_not_quiesced() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+            std::env::set_var("MVM_SHARE_DIR", tmp.path());
+        }
+
+        // Create the vz.pid file pointing at our own PID so vm_is_running → true.
+        let state_dir = mvm_core::config::vm_state_dir("livevm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let pid = unsafe { libc::getpid() };
+        std::fs::write(state_dir.join("vz.pid"), pid.to_string()).unwrap();
+
+        // Register but do NOT pause.
+        let reg_path = mvm::vm::name_registry::registry_path();
+        std::fs::create_dir_all(reg_path.parent().unwrap()).unwrap();
+        let mut reg = mvm::vm::name_registry::VmNameRegistry::default();
+        reg.register("livevm", state_dir.to_str().unwrap(), "default", None, 0)
+            .unwrap();
+        reg.save(&reg_path).unwrap();
+
+        assert!(
+            !vm_is_quiesced("livevm"),
+            "running and unpaused VM must not be quiesced"
+        );
+
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+            std::env::remove_var("MVM_SHARE_DIR");
+        }
+    }
+
+    // ── resolve_quiesced_vm_rootfs: missing-rootfs error ─────────────────
+
+    /// When the supervisor-config rootfs path does not exist on disk after the VM
+    /// was stopped (Vz/apple_container teardown), the error explains the
+    /// pause-based workflow rather than cryptically failing on the path.
+    #[test]
+    fn missing_rootfs_produces_actionable_error() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+            std::env::set_var("MVM_SHARE_DIR", tmp.path());
+        }
+
+        let state_dir = mvm_core::config::vm_state_dir("gone-vm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Write a supervisor config pointing at a rootfs that does NOT exist.
+        let cfg = mvm_build::vz::SupervisorConfig {
+            name: "gone-vm".into(),
+            vm_state_dir: state_dir.to_string_lossy().into_owned(),
+            pid_file_name: None,
+            kernel: mvm_build::vz::KernelConfig {
+                path: "/abs/vmlinux".into(),
+                cmdline: "root=/dev/vda".into(),
+                initrd_path: None,
+            },
+            resources: mvm_build::vz::ResourceConfig {
+                cpu_count: 1,
+                memory_mib: 512,
+            },
+            disks: vec![mvm_build::vz::DiskConfig {
+                id: "rootfs".into(),
+                // Points at a path that was deleted on `mvmctl down`.
+                path: state_dir.join("rootfs.ext4").to_string_lossy().into_owned(),
+                read_only: true,
+            }],
+            virtio_fs: vec![],
+            vsock: mvm_build::vz::VsockConfig {
+                ports: vec![],
+                socket_dir: state_dir.to_string_lossy().into_owned(),
+            },
+            console_output_path: None,
+            network: None,
+            balloon: None,
+            control_socket_path: None,
+            startup_mode: mvm_build::vz::StartupMode::Boot,
+            tenant_id: None,
+            plan: None,
+            bundle: None,
+            audit_dir: None,
+            gateway_audit_socket: None,
+            signing_key_path: None,
+        };
+        let json = cfg.to_json().unwrap();
+        std::fs::write(state_dir.join("supervisor-config.json"), json).unwrap();
+
+        // VM is stopped (no pid file).
+        let err = resolve_quiesced_vm_rootfs("gone-vm").expect_err("missing rootfs must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pause") && msg.contains("gone-vm"),
+            "error should mention pause workflow and VM name: {msg}"
+        );
+        assert!(
+            msg.contains("vm-full") || msg.contains("vm_full"),
+            "error should mention vm-full alternative: {msg}"
+        );
+
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+            std::env::remove_var("MVM_SHARE_DIR");
+        }
     }
 }
