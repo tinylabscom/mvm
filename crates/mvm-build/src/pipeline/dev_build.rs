@@ -1370,6 +1370,9 @@ mod tests {
 
     #[test]
     fn test_dev_build_cached() {
+        let temp = tempfile::tempdir().expect("create temp MVM_DATA_DIR");
+        let mut process_env = mvm_core::util::test_env::TestEnv::new();
+        process_env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
         let env = TestEnv::new();
         env.stub_stdout("nix --version", "nix (Nix) 2.24.10");
 
@@ -1382,13 +1385,13 @@ mod tests {
         // Cache check returns yes
         env.stub_stdout("test -f", "yes");
 
+        let expected_dir = dev_build_dir("abc123");
         let result =
             dev_build_via_shell_env(&env, "/home/user/project", Some("minimal"), BuildMode::Dev)
                 .unwrap();
 
         assert!(result.cached);
         assert_eq!(result.revision_hash, "abc123");
-        let expected_dir = dev_build_dir("abc123");
         assert_eq!(result.build_dir, expected_dir);
         assert_eq!(result.vmlinux_path, format!("{expected_dir}/vmlinux"));
         assert_eq!(result.rootfs_path, format!("{expected_dir}/rootfs.ext4"));
@@ -1396,6 +1399,9 @@ mod tests {
 
     #[test]
     fn test_dev_build_fresh() {
+        let temp = tempfile::tempdir().expect("create temp MVM_DATA_DIR");
+        let mut process_env = mvm_core::util::test_env::TestEnv::new();
+        process_env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
         let env = TestEnv::new();
         env.stub_stdout("nix --version", "nix (Nix) 2.24.10");
 
@@ -1403,12 +1409,13 @@ mod tests {
         // Cache miss
         env.stub_stdout("test -f", "no");
 
+        let expected_dir = dev_build_dir("xyz789");
         let result =
             dev_build_via_shell_env(&env, "/tmp/flake", Some("minimal"), BuildMode::Dev).unwrap();
 
         assert!(!result.cached);
         assert_eq!(result.revision_hash, "xyz789");
-        assert_eq!(result.build_dir, dev_build_dir("xyz789"));
+        assert_eq!(result.build_dir, expected_dir);
 
         // Verify a copy script was executed
         let exec_log = env.exec_log.lock().unwrap();
