@@ -2066,42 +2066,12 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             }
         }
 
-        // Apple Container with -d: install a launchd agent instead of
-        // starting the VM in this process. The agent runs as a proper
-        // macOS service with its own RunLoop.
-        if detach && effective_hypervisor == "apple-container" {
-            // Sign the binary before installing the launchd agent so the
-            // daemon process launches with the entitlement already in place.
-            mvm_backend::codesign::ensure_signed();
-
-            // Build is already done — install launchd agent with the
-            // resolved kernel/rootfs paths (no rebuild in the daemon).
-            // Serialize port mappings for the daemon
-            let port_specs: Vec<String> = parse_port_specs(ports)
-                .unwrap_or_default()
-                .iter()
-                .map(|p| format!("{}:{}", p.host, p.guest))
-                .collect();
-
-            if let Err(e) = mvm_backend::providers::apple_container::install_launchd_direct(
-                &start_config.name,
-                start_config.kernel_path.as_deref().unwrap_or(""),
-                &start_config.rootfs_path,
-                start_config.cpus,
-                start_config.memory_mib as u64,
-                &port_specs,
-            )
-            .map_err(|e| anyhow::anyhow!("{e}"))
-            {
-                emit_failed_if(&admission_main, "launchd-install", &e);
-                return Err(e);
-            }
-            // The launchd agent is the actual VM owner now; treat
-            // install success as launch success for audit purposes.
-            emit_launched_if(&admission_main, effective_hypervisor);
-            println!("{vm_name_owned}");
-            return Ok(());
-        }
+        // The Vz supervisor detaches on its own — `backend.start()`
+        // spawns a background child that writes a PID file under the
+        // per-VM state dir and outlives this process, reaped later by
+        // `down`. So `up -d` on Vz needs no separate daemon machinery;
+        // it falls through to the normal start path below and returns
+        // (the persistent-agent wait further down is skipped for `detach`).
 
         enforce_shares_if(&admission_main, &start_config.volumes)?;
         // The Firecracker egress moat (substitution endpoint + nft TAP
@@ -2156,20 +2126,26 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
 
     mvm_core::audit_emit!(VmStart, vm: &vm_name_owned);
 
-    // libkrun / firecracker launch a detached supervisor daemon, so `up`
-    // returns after launch (unlike apple-container below, which blocks
-    // in-process). Verify the guest agent here anyway: without it, `up
-    // --hypervisor libkrun` exits 0 the instant the daemon spawns — never
+    // Vz with -d: the supervisor already detached during `start()`, so
+    // there is nothing to keep alive in this process. Print the name
+    // (scripting contract) and return without the agent-wait below.
+    if detach && effective_hypervisor == "vz" {
+        println!("{vm_name_owned}");
+        return Ok(());
+    }
+
+    // libkrun / firecracker / vz all launch a detached supervisor daemon,
+    // so `up` returns after launch. Verify the guest agent here anyway:
+    // without it, `up` exits 0 the instant the daemon spawns — never
     // checking that the guest actually booted and the agent answered —
     // so a real boot failure passes silently and `core_demo_e2e`'s
     // boot→ping proof is hollow (it only watches for this exact warning).
-    // `--detach` opts out (fire-and-forget, like the apple-container
-    // launchd path). apple-container keeps its own wait in its block.
-    // `--wait` (one-shot) skips this persistent-agent probe:
-    // the workload runs then `poweroff -f`s, so there is no agent to wait
-    // for — we wait for the VM to power off in the `wait` block below and
-    // read its captured exit code instead.
-    if matches!(effective_hypervisor, "libkrun" | "firecracker") && !detach && !wait {
+    // `--detach` opted out above (fire-and-forget). `--wait` (one-shot)
+    // skips this persistent-agent probe: the workload runs then
+    // `poweroff -f`s, so there is no agent to wait for — we wait for the
+    // VM to power off in the `wait` block below and read its captured exit
+    // code instead.
+    if matches!(effective_hypervisor, "libkrun" | "firecracker" | "vz") && !detach && !wait {
         ui::info("Waiting for guest agent...");
         record_vm_readiness(&vm_name_owned, InstanceReadiness::AgentConnecting);
         if wait_for_guest_agent(&vm_name_owned, 30) {
@@ -2282,11 +2258,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
 
             // Start host-side proxies
             for pm in &pm_list {
-                start_port_proxy(
-                    &vm_name_owned,
-                    pm.host,
-                    pm.guest,
-                );
+                start_port_proxy(&vm_name_owned, pm.host, pm.guest);
                 ui::info(&format!(
                     "Forwarding localhost:{} → guest tcp/{} (vsock)",
                     pm.host, pm.guest

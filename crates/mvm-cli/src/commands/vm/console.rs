@@ -6,9 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm::vsock_transport::{
-    FirecrackerTransport, LibkrunTransport, VsockProxyTransport, VsockTransport, VzTransport,
-};
+use mvm::vsock_transport::{FirecrackerTransport, LibkrunTransport, VsockTransport, VzTransport};
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 
@@ -18,7 +16,9 @@ use super::shared::{IN_CONSOLE_MODE, clap_vm_name};
 use crate::ui;
 
 /// Pick the right vsock transport for `name`. Priority:
-/// 1. Dev-mode mode-0700 proxy socket (cross-process daemon dispatch).
+/// 1. The dev VM's Vz guest-agent socket, when this is the dev VM and
+///    its socket is present (the dev VM lives in the builder cache, a
+///    different path than `VzTransport::for_vm` resolves).
 /// 2. libkrun per-port Unix socket.
 /// 3. Vz per-port Unix socket (`<vm_state_dir>/vsock/vsock-<port>.sock`) —
 ///    the macOS AVF path.
@@ -29,9 +29,15 @@ use crate::ui;
 /// (control + data + resize). Cloning the Arc lets the SIGWINCH handler
 /// thread reuse the same dispatch.
 fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
-    let proxy = dev_vsock_proxy_path();
-    if std::path::Path::new(&proxy).exists() {
-        return Ok(Arc::new(VsockProxyTransport::new(proxy)));
+    // The dev VM's guest-agent socket sits in the builder cache, not the
+    // data-dir path `VzTransport::for_vm` resolves. The Vz supervisor
+    // exposes it as a direct per-port socket (no proxy port prefix), so
+    // dial it through `VzTransport` rooted at the socket's parent dir.
+    let dev_sock = std::path::PathBuf::from(dev_vsock_proxy_path());
+    if dev_sock.exists()
+        && let Some(dir) = dev_sock.parent()
+    {
+        return Ok(Arc::new(VzTransport::new(dir)));
     }
     let libkrun = LibkrunTransport::for_vm(name);
     if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
