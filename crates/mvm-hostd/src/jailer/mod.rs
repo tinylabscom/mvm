@@ -87,8 +87,9 @@ impl ConfinementSpec {
     /// caller exactly as `assemble` does — config override or `~/.mvm`
     /// default) plus the TLS root + DNS resolver files the reqwest
     /// (`rustls-native-certs`) forward leg reads PER REQUEST during `serve`,
-    /// so they must stay readable AFTER confinement. The endpoint as assembled
-    /// attaches no audit recorder, so `read_write_paths` is empty.
+    /// so they must stay readable AFTER confinement. The audit recorder reads
+    /// the signer key (`keys_dir`) and appends the chain-signed substitution log
+    /// (`audit_dir`), so the key is readable and the audit dir is read-write.
     ///
     /// The syscall allowlist comes from the same canonical
     /// `seccomp::BRIDGE_SYSCALLS` table the bridge uses — extended with the
@@ -98,7 +99,12 @@ impl ConfinementSpec {
     /// reaching it). `existing_paths` filters to paths that exist on this host
     /// — `/etc/pki`, `/etc/resolv.conf`, etc. are distro-dependent, and a
     /// missing readable path makes the Landlock `open` step fail closed.
-    pub fn substitution_endpoint(secret_store_dir: PathBuf, binding_store_dir: PathBuf) -> Self {
+    pub fn substitution_endpoint(
+        secret_store_dir: PathBuf,
+        binding_store_dir: PathBuf,
+        audit_dir: PathBuf,
+        keys_dir: PathBuf,
+    ) -> Self {
         #[cfg(target_os = "linux")]
         let allowed_syscalls: Vec<&'static str> = crate::jailer::seccomp::BRIDGE_SYSCALLS
             .iter()
@@ -123,7 +129,11 @@ impl ConfinementSpec {
         .map(PathBuf::from)
         .collect();
 
-        let mut readable_paths = vec![secret_store_dir, binding_store_dir];
+        // The chain-signed audit recorder reads the host signer key (keys_dir)
+        // and appends to the per-tenant log (audit_dir). Without these grants a
+        // confined endpoint with a recorder attached couldn't sign — so the
+        // key is readable and the audit dir is read-write.
+        let mut readable_paths = vec![secret_store_dir, binding_store_dir, keys_dir];
         readable_paths.extend(tls_dns_paths);
 
         Self {
@@ -131,7 +141,7 @@ impl ConfinementSpec {
             // dependent, and Landlock's `open` on a missing path fails closed
             // (PathNotFound), which would abort an otherwise-healthy endpoint.
             readable_paths: existing_paths(readable_paths),
-            read_write_paths: Vec::new(),
+            read_write_paths: existing_paths(vec![audit_dir]),
             allowed_syscalls,
         }
     }
@@ -253,7 +263,12 @@ mod tests {
         // the binary's own crate manifest dir is guaranteed present.
         let store = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let bindings = store.clone();
-        let spec = ConfinementSpec::substitution_endpoint(store.clone(), bindings.clone());
+        let spec = ConfinementSpec::substitution_endpoint(
+            store.clone(),
+            bindings.clone(),
+            store.clone(),
+            store.clone(),
+        );
         assert!(
             spec.readable_paths.iter().any(|p| p == &store),
             "secret store dir must be readable"
@@ -265,13 +280,20 @@ mod tests {
     }
 
     #[test]
-    fn substitution_endpoint_spec_has_no_write_paths() {
-        // The endpoint as assembled attaches no audit recorder, so it needs no
-        // writable directory. If a recorder is ever wired into `assemble`, the
-        // audit dir must be added to `read_write_paths` (and this test updated).
-        let store = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let spec = ConfinementSpec::substitution_endpoint(store.clone(), store);
-        assert!(spec.read_write_paths.is_empty());
+    fn substitution_endpoint_spec_grants_audit_dir_write_and_keys_read() {
+        // The audit recorder appends to the audit dir and reads the signer key,
+        // so the audit dir is read-write and the keys dir readable.
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let spec = ConfinementSpec::substitution_endpoint(
+            dir.clone(),
+            dir.clone(),
+            dir.clone(),
+            dir.clone(),
+        );
+        assert!(
+            spec.read_write_paths.iter().any(|p| p == &dir),
+            "audit dir must be read-write"
+        );
     }
 
     #[test]
@@ -279,7 +301,12 @@ mod tests {
         // A bogus store dir is filtered out — Landlock's `open` on a missing
         // path fails closed, which would abort an otherwise-healthy endpoint.
         let missing = PathBuf::from("/definitely/not/a/real/store/dir/xyzzy");
-        let spec = ConfinementSpec::substitution_endpoint(missing.clone(), missing.clone());
+        let spec = ConfinementSpec::substitution_endpoint(
+            missing.clone(),
+            missing.clone(),
+            missing.clone(),
+            missing.clone(),
+        );
         assert!(
             !spec.readable_paths.iter().any(|p| p == &missing),
             "nonexistent store dir must be filtered out"
@@ -293,7 +320,12 @@ mod tests {
     #[test]
     fn substitution_endpoint_allowlist_covers_tls_and_runtime() {
         let store = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let spec = ConfinementSpec::substitution_endpoint(store.clone(), store);
+        let spec = ConfinementSpec::substitution_endpoint(
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            store.clone(),
+        );
         // Thread creation for tokio workers / blocking pool.
         assert!(spec.allowed_syscalls.contains(&"clone"));
         // Socket-option negotiation (incl. SO_ORIGINAL_DST on the terminator).
@@ -311,7 +343,12 @@ mod tests {
     #[test]
     fn substitution_endpoint_allowlist_empty_off_linux() {
         let store = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let spec = ConfinementSpec::substitution_endpoint(store.clone(), store);
+        let spec = ConfinementSpec::substitution_endpoint(
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            store.clone(),
+        );
         assert!(spec.allowed_syscalls.is_empty());
     }
 }
