@@ -453,8 +453,8 @@ fn agent_rules() -> Vec<HostPort> {
 ///   public internet; out of scope for egress policy.
 /// - IPv6 ULA (`fc00::/7`) — analogous to RFC1918 above.
 ///
-/// Every enforcer (iptables/nft on Linux, the L4Policy evaluator, the
-/// L7 egress proxy) should consult this list *before* the user's
+/// Every enforcer (iptables/nft on Linux, `CanonicalEgress::permits`,
+/// the L7 egress proxy) should consult this list *before* the user's
 /// allow-list.
 pub const MANDATORY_DENY_RANGES: &[&str] = &[
     // Cloud metadata first — the most consequential entry. A
@@ -492,9 +492,9 @@ pub fn mandatory_deny_ranges() -> Vec<ipnet::IpNet> {
 
 /// Returns `true` if `ip` falls within any of the mandatory
 /// deny ranges. The defense-in-depth check every egress
-/// enforcer (iptables setup, L4Policy::evaluate, the L7 proxy)
-/// should run *before* consulting the user's allow-list — a hit
-/// here means the destination is forbidden full stop, no matter
+/// enforcer (iptables setup, `CanonicalEgress::permits`, the L7
+/// proxy) should run *before* consulting the user's allow-list — a
+/// hit here means the destination is forbidden full stop, no matter
 /// how permissive the allow-list is.
 ///
 /// Allocates a small `Vec` per call today; the call site is

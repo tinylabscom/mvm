@@ -23,16 +23,24 @@ technical, verifiable, and stated explicitly.
 ADR-002 captures the threat model and the seventeen surfaces audited;
 plan 25 sequences the work into six independently-shippable workstreams.
 
-## Current Status (v0.13.0, sprint open)
+## Current Status (v0.16.1)
 
-| Metric           | Value                    |
-| ---------------- | ------------------------ |
-| Workspace crates | 7 + root facade + xtask  |
-| Total tests      | 1 068                    |
-| Clippy warnings  | 0                        |
-| Edition          | 2024 (Rust 1.85+)        |
-| MSRV             | 1.85                     |
-| Binary           | `mvmctl`                 |
+> This file is a **cumulative multi-sprint log** — it opened at Sprint 42
+> (immediately below) and has grown through **Sprint 62**. Recent active work:
+> Sprint 60 (core demo green, in flight), Sprint 61 (app-builder surface,
+> proposed), Sprint 62 (ADR-080 wasm preview → microVM ship, in flight). Read a
+> given sprint's own section for its live status; the table below is the current
+> workspace snapshot, not Sprint 42's.
+
+| Metric           | Value                                  |
+| ---------------- | -------------------------------------- |
+| Version          | v0.16.1                                |
+| Workspace crates | 15 (ADR-066 §1; Plan 121 folded 32→15) |
+| Total tests      | ~4,350 (`cargo nextest`)               |
+| Clippy warnings  | 0                                      |
+| Edition          | 2024 (Rust 1.85+)                      |
+| MSRV             | 1.85                                   |
+| Binary           | `mvmctl`                               |
 
 ## Planning updates
 
@@ -2599,10 +2607,11 @@ each has a witness. The sprint lands those preconditions incrementally.
 - **P7 — secret-scan admission** ✅ LANDED (Plan 187, #811): `scan_recording_for_secrets`
   (env/argv/decoded-file payloads via the Plan 129 `SecretsScanner`) hard-refuses
   `run --mode plan` on embedded raw secrets; `SecretRef` skipped; compile warns.
-- **P5 kernel close-out** 🔴 spec'd (Plan 190): kernel L4 egress decision converges on
-  `CanonicalEgress::permits` via a lenient `canonicalize_l4`, deleting the `L4Policy`
-  duplicate, with **zero claim-10 behaviour change** (whole-policy-fail-closed variant
-  rejected).
+- **P5 kernel close-out** ✅ LANDED (Plan 190): kernel L4 egress decision converges on
+  `CanonicalEgress::permits` via `canonicalize_l4` (lenient — mandatory-deny-overlap
+  allowed at construction; runtime `permits()` + `MandatoryDenyEgressScan` enforce it);
+  `L4Policy`/`LiveL4Gate` duplicate deleted; claim-10 witnesses migrated; zero behaviour
+  change; equivalence witness `kernel_egress_canonical_permits_agrees_with_hand_written_oracle`.
 - **ADR-002 Tier-0 note** ✅ LANDED (#816): records the `wasm-sandbox` backend off the
   isolation scale + the Tier-0 single-principal threat-model framing.
 

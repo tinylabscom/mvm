@@ -31,7 +31,7 @@ Wiring the kernel through the projection seam has a fork that touches claim-10 (
 - Modify: `crates/mvm-core/src/policy/projection.rs`
 - Modify: `crates/mvm-core/src/policy/mod.rs` (re-export `canonicalize_l4`)
 
-- [ ] **Step 1: Write failing tests** in the projection `tests` module (reuse the existing `l4`/`ip`/`net` helpers there):
+- [x] **Step 1: Write failing tests** in the projection `tests` module (reuse the existing `l4`/`ip`/`net` helpers there):
 
 ```rust
     #[test]
@@ -68,9 +68,9 @@ Wiring the kernel through the projection seam has a fork that touches claim-10 (
     }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p mvm-core projection` (compile error: `canonicalize_l4` not found).
+- [x] **Step 2: Run to verify failure** — `cargo nextest run -p mvm-core projection` (compile error: `canonicalize_l4` not found).
 
-- [ ] **Step 3: Implement.** Factor the L4 row→`CanonicalRule` conversion out of `canonicalize_effective` into a shared helper that takes a `refuse_overlap: bool` flag (so the two callers share one loop and can't drift), or add `canonicalize_l4` as a sibling that mirrors the loop minus `refuse_mandatory_overlap`. Preferred (DRY): a private `lower_l4_specs(specs, refuse_overlap) -> Result<Vec<CanonicalRule>, ProjectionError>`; `canonicalize_effective` calls it with `true`, `canonicalize_l4` with `false`:
+- [x] **Step 3: Implement.** Factor the L4 row→`CanonicalRule` conversion out of `canonicalize_effective` into a shared helper that takes a `refuse_overlap: bool` flag (so the two callers share one loop and can't drift), or add `canonicalize_l4` as a sibling that mirrors the loop minus `refuse_mandatory_overlap`. Preferred (DRY): a private `lower_l4_specs(specs, refuse_overlap) -> Result<Vec<CanonicalRule>, ProjectionError>`; `canonicalize_effective` calls it with `true`, `canonicalize_l4` with `false`:
 
 ```rust
 /// Lower L4 rule specs to canonical rules. `refuse_overlap` gates the
@@ -113,9 +113,9 @@ pub fn canonicalize_l4(
 
 Refactor `canonicalize_effective`'s L4 loop to call `lower_l4_specs(&eff.network.l4, true)` (preserving its existing behaviour + the allow-list extension). Re-export `canonicalize_l4` from `policy/mod.rs` alongside the other projection exports.
 
-- [ ] **Step 4: Verify** — `cargo nextest run -p mvm-core projection` (all prior projection tests + 4 new green; the cross-projection + clamp property witnesses must still pass — they exercise `canonicalize_effective`, which now routes through `lower_l4_specs(_, true)`).
+- [x] **Step 4: Verify** — `cargo nextest run -p mvm-core projection` (all prior projection tests + 4 new green; the cross-projection + clamp property witnesses must still pass — they exercise `canonicalize_effective`, which now routes through `lower_l4_specs(_, true)`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs crates/mvm-core/src/policy/mod.rs
@@ -129,11 +129,11 @@ git commit -m "feat(policy): canonicalize_l4 — lenient kernel-path L4 lowering
 **Files:**
 - Modify: `crates/mvm-hostd/src/supervisor/network/stages.rs`
 
-- [ ] **Step 1: Adapt the claim-10 witnesses** (write the new shape first; they should keep asserting the SAME behaviour). Change `L4PolicyScan::new` to take a `CanonicalEgress`, and the tests to build one via `canonicalize_l4` or directly. Keep the test NAMES (claim-10 witness continuity): `l4_policy_deny_all_drops_every_egress` (empty `CanonicalEgress::Rules(vec![])`), `l4_policy_allows_only_matching_proto_ip_port`, `l4_policy_ignores_ingress`. Each must assert the identical drop/pass outcomes as today.
+- [x] **Step 1: Adapt the claim-10 witnesses** (write the new shape first; they should keep asserting the SAME behaviour). Change `L4PolicyScan::new` to take a `CanonicalEgress`, and the tests to build one via `canonicalize_l4` or directly. Keep the test NAMES (claim-10 witness continuity): `l4_policy_deny_all_drops_every_egress` (empty `CanonicalEgress::Rules(vec![])`), `l4_policy_allows_only_matching_proto_ip_port`, `l4_policy_ignores_ingress`. Each must assert the identical drop/pass outcomes as today.
 
-- [ ] **Step 2: Run** to verify the tests fail to compile (signature changed).
+- [x] **Step 2: Run** to verify the tests fail to compile (signature changed).
 
-- [ ] **Step 3: Implement.** Replace the field + scan body:
+- [x] **Step 3: Implement.** Replace the field + scan body:
 
 ```rust
 use mvm_core::policy::projection::{CanonicalEgress, Proto as CanonProto};
@@ -167,9 +167,9 @@ impl ScanStage for L4PolicyScan {
 }
 ```
 
-- [ ] **Step 4: Verify** — `cargo nextest run -p mvm-hostd network::stages` (the migrated witnesses + `scan_chain_mandatory_deny_wins_over_a_permissive_policy` green).
+- [x] **Step 4: Verify** — `cargo nextest run -p mvm-hostd network::stages` (the migrated witnesses + `scan_chain_mandatory_deny_wins_over_a_permissive_policy` green).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-hostd/src/supervisor/network/stages.rs
@@ -185,9 +185,9 @@ git commit -m "refactor(hostd): L4PolicyScan decides via CanonicalEgress::permit
 - Modify: `crates/mvm-hostd/src/supervisor/gateway_bridge.rs` (the construction site)
 - Delete: the now-unused `L4Policy`/`L4Rule`/`L4Decision`/`LiveL4Gate`/`L4SpecError` in `crates/mvm-hostd/src/supervisor/proxy/l4.rs` (and its module wiring) — **only after** confirming no other consumers via `rg 'L4Policy|LiveL4Gate|L4Rule|L4Decision|L4SpecError' crates/`.
 
-- [ ] **Step 1: Adapt `build_egress_scan` tests** (`build_egress_scan_some_chains_policy_under_mandatory_deny` etc.) to pass `Option<CanonicalEgress>`. Keep names + assertions.
+- [x] **Step 1: Adapt `build_egress_scan` tests** (`build_egress_scan_some_chains_policy_under_mandatory_deny` etc.) to pass `Option<CanonicalEgress>`. Keep names + assertions.
 
-- [ ] **Step 2: Implement signature change:**
+- [x] **Step 2: Implement signature change:**
 
 ```rust
 pub fn build_egress_scan(l4: Option<CanonicalEgress>, dns_allow: Vec<String>) -> Arc<dyn ScanStage> {
@@ -205,7 +205,7 @@ pub fn build_egress_scan(l4: Option<CanonicalEgress>, dns_allow: Vec<String>) ->
 }
 ```
 
-- [ ] **Step 3: Update the gateway bridge** construction (gateway_bridge.rs ~547):
+- [x] **Step 3: Update the gateway bridge** construction (gateway_bridge.rs ~547):
 
 ```rust
 let l4 = mvm_core::policy::projection::canonicalize_l4(&eff.network.l4)
@@ -214,11 +214,11 @@ let l4 = mvm_core::policy::projection::canonicalize_l4(&eff.network.l4)
 
 (deny-all on malformed = empty `Rules`, mirroring today's `unwrap_or_else(L4Policy::deny_all())`). Pass `Some(l4)` to `build_egress_scan`. The `dns_allow` derivation and `PlanFlowPolicy::from_effective(&eff)` lines are **unchanged**.
 
-- [ ] **Step 4: Delete the duplicate.** Confirm `rg 'LiveL4Gate|L4Policy|L4Rule|L4Decision|L4SpecError' crates/` shows only the l4.rs definitions + their own tests remain, then remove them (and the `proxy/l4.rs` module decl if the file becomes empty, or trim it to whatever non-L4 content it holds — read it first). Migrate any still-valuable `from_specs_refuses_bad_cidr` / `from_specs_refuses_unknown_protocol` assertions to the `canonicalize_l4` tests in Task 1 if not already covered (they are: `canonicalize_l4_refuses_bad_cidr_and_unknown_proto_and_inverted_ports`).
+- [x] **Step 4: Delete the duplicate.** Confirm `rg 'LiveL4Gate|L4Policy|L4Rule|L4Decision|L4SpecError' crates/` shows only the l4.rs definitions + their own tests remain, then remove them (and the `proxy/l4.rs` module decl if the file becomes empty, or trim it to whatever non-L4 content it holds — read it first). Migrate any still-valuable `from_specs_refuses_bad_cidr` / `from_specs_refuses_unknown_protocol` assertions to the `canonicalize_l4` tests in Task 1 if not already covered (they are: `canonicalize_l4_refuses_bad_cidr_and_unknown_proto_and_inverted_ports`).
 
-- [ ] **Step 5: Verify** — `cargo nextest run -p mvm-hostd` (all green; especially the claim-10 witnesses) and `rg 'LiveL4Gate|L4Policy' crates/` returns nothing (or only unrelated names).
+- [x] **Step 5: Verify** — `cargo nextest run -p mvm-hostd` (all green; especially the claim-10 witnesses) and `rg 'LiveL4Gate|L4Policy' crates/` returns nothing (or only unrelated names).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/mvm-hostd/src/supervisor
@@ -235,9 +235,9 @@ git commit -m "refactor(hostd): gateway bridge builds egress scan from Canonical
 - Modify: `specs/REFACTOR-STATUS.md`, `specs/SPRINT.md`
 - Modify: `specs/plans/190-kernel-canonical-egress.md` (tick boxes)
 
-- [ ] **Step 1: No-behaviour-change equivalence test.** Add a test that builds the same policy two ways and asserts identical packet verdicts across a probe set — the canonical proof that the refactor changed nothing observable. Construct a few `L4RuleSpec`s, lower via `canonicalize_l4`, and assert `permits` agrees with a hand-written oracle (proto/CIDR/port membership + mandatory-deny-first) over: an in-rule hit, an out-of-rule miss, a port-edge miss, a proto miss, and each mandatory-deny range. (This is the kernel-side analogue of the projection cross-consistency witness.)
+- [x] **Step 1: No-behaviour-change equivalence test.** Add a test that builds the same policy two ways and asserts identical packet verdicts across a probe set — the canonical proof that the refactor changed nothing observable. Construct a few `L4RuleSpec`s, lower via `canonicalize_l4`, and assert `permits` agrees with a hand-written oracle (proto/CIDR/port membership + mandatory-deny-first) over: an in-rule hit, an out-of-rule miss, a port-edge miss, a proto miss, and each mandatory-deny range. (This is the kernel-side analogue of the projection cross-consistency witness.)
 
-- [ ] **Step 2: full gates** (per [[feedback_ci_gate_list_completeness]] — match CI exactly):
+- [x] **Step 2: full gates** (per [[feedback_ci_gate_list_completeness]] — match CI exactly):
 
 ```bash
 cargo fmt --all -- --check || rustup run nightly cargo fmt --all
@@ -250,11 +250,11 @@ cargo clippy --workspace -- -D warnings 2>&1 | tail -5
 ```
 (Environmental caveats: mvm-backend codesign SIGKILL; embedded-binary ELF test under skip-embed.)
 
-- [ ] **Step 3: ADR-080 §8 P5 row** — append that the kernel leg landed: `Kernel-side close-out (Plan 190): canonicalize_l4 (lenient — no mandatory-deny-overlap refusal, runtime permits()+MandatoryDenyEgressScan enforce it) feeds L4PolicyScan via CanonicalEgress::permits; L4Policy duplicate deleted; claim-10 witnesses migrated, no behaviour change. Remaining: WASI-context mapping (runner plan).`
+- [x] **Step 3: ADR-080 §8 P5 row** — append that the kernel leg landed: `Kernel-side close-out (Plan 190): canonicalize_l4 (lenient — no mandatory-deny-overlap refusal, runtime permits()+MandatoryDenyEgressScan enforce it) feeds L4PolicyScan via CanonicalEgress::permits; L4Policy duplicate deleted; claim-10 witnesses migrated, no behaviour change. Remaining: WASI-context mapping (runner plan).`
 
-- [ ] **Step 4: REFACTOR-STATUS + SPRINT** — record Plan 190 (kernel leg landed, no claim-10 behaviour change); bump "Last updated". In SPRINT.md, note it under the relevant in-flight section.
+- [x] **Step 4: REFACTOR-STATUS + SPRINT** — record Plan 190 (kernel leg landed, no claim-10 behaviour change); bump "Last updated". In SPRINT.md, note it under the relevant in-flight section.
 
-- [ ] **Step 5: tick boxes; commit; PR off main.**
+- [x] **Step 5: tick boxes; commit; PR off main.**
 
 ```bash
 git add crates/ specs/

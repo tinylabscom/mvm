@@ -239,46 +239,26 @@ pub(super) fn cmd_dev_vz_down() -> Result<()> {
 }
 
 /// Show dev VM status.
-pub(super) fn cmd_dev_vz_status() -> Result<()> {
+pub(super) fn cmd_dev_vz_status(json: bool) -> Result<()> {
     let running = is_vz_dev_running();
+    let state = if running { "running" } else { "stopped" };
+    let kernel = if running { probe_dev_vm_kernel() } else { None };
+
+    if json {
+        return crate::json_out::emit_json(&build_dev_status_json("vz", state, kernel));
+    }
+
     ui::info("Backend:  Vz (Apple Virtualization.framework)");
     ui::info(&format!("Dev VM:   {DEV_VM_NAME}"));
-    ui::info(&format!(
-        "Status:   {}",
-        if running { "running" } else { "stopped" }
-    ));
-
-    #[cfg(feature = "builder-vm")]
-    if running && let Ok(mut stream) = dev_vm_guest_agent_connect() {
-        // Inbound vsock RPC audit.
-        super::super::shared::emit_vsock_rpc_audit(
-            DEV_VM_NAME,
-            &mvm_guest::vsock::GuestRequest::Exec {
-                command: "uname -r".to_string(),
-                stdin: None,
-                timeout_secs: Some(5),
-            },
-        );
-        // Best-effort kernel probe via streaming exec.
-        let mut out_buf: Vec<u8> = Vec::new();
-        if mvm_guest::vsock::send_exec_streaming(&mut stream, "uname -r", None, Some(5), |event| {
-            if let mvm_guest::vsock::ExecEvent::Stdout { chunk } = event {
-                out_buf.extend_from_slice(chunk);
-            }
-        })
-        .is_ok()
-        {
-            ui::info(&format!(
-                "  Kernel:  {}",
-                String::from_utf8_lossy(&out_buf).trim()
-            ));
-        }
+    ui::info(&format!("Status:   {state}"));
+    if let Some(kernel) = &kernel {
+        ui::info(&format!("  Kernel:  {kernel}"));
     }
 
     if let Some(image) = resolve_dev_status_image() {
         ui::info("  Image:   cached");
         if let Some(kernel_path) = image.kernel_path {
-            ui::info(&format!("  Kernel:  {kernel_path}"));
+            ui::info(&format!("  Image kernel: {kernel_path}"));
         }
         ui::info(&format!("  Rootfs:  {}", image.rootfs_path));
     } else {
@@ -294,6 +274,37 @@ pub(super) fn cmd_dev_vz_status() -> Result<()> {
     ));
 
     Ok(())
+}
+
+/// Best-effort `uname -r` over the dev VM's guest agent. `None` when the
+/// agent isn't reachable (VM down/booting) or the `builder-vm` feature
+/// (which carries the guest-agent transport) is off.
+#[cfg(feature = "builder-vm")]
+fn probe_dev_vm_kernel() -> Option<String> {
+    let mut stream = dev_vm_guest_agent_connect().ok()?;
+    // Inbound vsock RPC audit.
+    super::super::shared::emit_vsock_rpc_audit(
+        DEV_VM_NAME,
+        &mvm_guest::vsock::GuestRequest::Exec {
+            command: "uname -r".to_string(),
+            stdin: None,
+            timeout_secs: Some(5),
+        },
+    );
+    let mut out_buf: Vec<u8> = Vec::new();
+    mvm_guest::vsock::send_exec_streaming(&mut stream, "uname -r", None, Some(5), |event| {
+        if let mvm_guest::vsock::ExecEvent::Stdout { chunk } = event {
+            out_buf.extend_from_slice(chunk);
+        }
+    })
+    .ok()?;
+    let kernel = String::from_utf8_lossy(&out_buf).trim().to_string();
+    (!kernel.is_empty()).then_some(kernel)
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn probe_dev_vm_kernel() -> Option<String> {
+    None
 }
 
 /// Inspect dev caches without booting, rebuilding, or exposing local
@@ -393,15 +404,15 @@ struct DevCacheInspectJson {
     builder_cache: BuilderVmCacheJson,
 }
 
-#[derive(Debug, Serialize)]
-struct DevImageCacheJson {
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(super) struct DevImageCacheJson {
     state: &'static str,
     kernel: &'static str,
     rootfs: &'static str,
 }
 
-#[derive(Debug, Serialize)]
-struct BuilderVmCacheJson {
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(super) struct BuilderVmCacheJson {
     kind: &'static str,
     state: &'static str,
     reason_code: &'static str,
@@ -436,18 +447,87 @@ fn dev_image_cache_summary(image: Option<&DevStatusImage>) -> DevImageCacheSumma
 fn dev_cache_inspect_json(summary: &DevCacheInspectSummary) -> Result<String> {
     let output = DevCacheInspectJson {
         schema_version: 1,
-        dev_image: DevImageCacheJson {
-            state: summary.dev_image.state,
-            kernel: summary.dev_image.kernel,
-            rootfs: summary.dev_image.rootfs,
-        },
-        builder_cache: BuilderVmCacheJson {
-            kind: summary.builder_cache.cache_kind,
-            state: summary.builder_cache.state.label(),
-            reason_code: summary.builder_cache.reason_code,
-        },
+        dev_image: dev_image_cache_json(&summary.dev_image),
+        builder_cache: builder_vm_cache_json(&summary.builder_cache),
     };
     serde_json::to_string_pretty(&output).context("serializing dev cache inspection JSON")
+}
+
+fn dev_image_cache_json(summary: &DevImageCacheSummary) -> DevImageCacheJson {
+    DevImageCacheJson {
+        state: summary.state,
+        kernel: summary.kernel,
+        rootfs: summary.rootfs,
+    }
+}
+
+fn builder_vm_cache_json(summary: &BuilderVmCacheStatusSummary) -> BuilderVmCacheJson {
+    BuilderVmCacheJson {
+        kind: summary.cache_kind,
+        state: summary.state.label(),
+        reason_code: summary.reason_code,
+    }
+}
+
+/// Machine-readable `mvmctl dev status --json` shape. Privacy-safe like
+/// the cache-inspect report: cache fields say `present`/`missing`/`cached`,
+/// never a local artifact path or digest. `guest_kernel` carries the
+/// running guest's probed `uname -r` (a version string, not a path) only
+/// when the VM answers — distinct from `dev_image.kernel`, which reports
+/// whether the *cached image* ships a kernel artifact.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(super) struct DevStatusJson {
+    pub schema_version: u8,
+    pub backend: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vm_name: Option<&'static str>,
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guest_kernel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dev_image: Option<DevImageCacheJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builder_cache: Option<BuilderVmCacheJson>,
+}
+
+/// Build the status report for a VM-backed dev backend (vz / libkrun):
+/// resolves the backend-agnostic dev-image + builder-VM cache state and
+/// attaches the caller-probed `kernel` (vz only; `None` elsewhere).
+pub(super) fn build_dev_status_json(
+    backend: &'static str,
+    state: &'static str,
+    guest_kernel: Option<String>,
+) -> DevStatusJson {
+    DevStatusJson {
+        schema_version: 1,
+        backend,
+        vm_name: Some(DEV_VM_NAME),
+        state,
+        guest_kernel,
+        dev_image: Some(dev_image_cache_json(&dev_image_cache_summary(
+            resolve_dev_status_image().as_ref(),
+        ))),
+        builder_cache: Some(builder_vm_cache_json(
+            &resolve_builder_vm_cache_status_summary(),
+        )),
+    }
+}
+
+/// Report for a backend with no managed dev VM (linux-native host shell,
+/// or an unsupported host): no VM, no image/builder cache.
+pub(super) fn build_dev_status_json_vmless(
+    backend: &'static str,
+    state: &'static str,
+) -> DevStatusJson {
+    DevStatusJson {
+        schema_version: 1,
+        backend,
+        vm_name: None,
+        state,
+        guest_kernel: None,
+        dev_image: None,
+        builder_cache: None,
+    }
 }
 
 fn resolve_builder_vm_cache_status_summary() -> BuilderVmCacheStatusSummary {
@@ -4272,6 +4352,59 @@ mod dev_status_image_tests {
         assert!(!json.contains("sha256"));
         assert!(!json.contains("rootfs.ext4"));
         assert!(!json.contains("vmlinux"));
+    }
+
+    #[test]
+    fn dev_status_json_is_versioned_and_privacy_safe() {
+        // A VM-backed report carries the backend, the fixed dev VM name,
+        // the state, and a guest-probed kernel version — but never a local
+        // artifact path or digest (same privacy floor as cache-inspect).
+        let report = build_dev_status_json("vz", "running", Some("6.1.0-mvm".to_string()));
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.backend, "vz");
+        assert_eq!(report.vm_name, Some(DEV_VM_NAME));
+        assert_eq!(report.state, "running");
+        assert_eq!(report.guest_kernel.as_deref(), Some("6.1.0-mvm"));
+        assert!(report.dev_image.is_some());
+        assert!(report.builder_cache.is_some());
+
+        let json = crate::json_out::to_json_string(&report).expect("serialize");
+        assert!(json.contains("\"backend\": \"vz\""));
+        assert!(json.contains("\"state\": \"running\""));
+        assert!(json.contains("\"guest_kernel\": \"6.1.0-mvm\""));
+        // No absolute paths / image filenames / digests leak.
+        assert!(!json.contains("/Users"));
+        assert!(!json.contains("/private/tmp"));
+        assert!(!json.contains("rootfs.ext4"));
+        assert!(!json.contains("vmlinux"));
+        assert!(!json.contains("sha256"));
+    }
+
+    #[test]
+    fn dev_status_json_stopped_omits_kernel() {
+        // A stopped VM has no guest to probe; `guest_kernel` is skipped, not null.
+        let report = build_dev_status_json("vz", "stopped", None);
+        assert_eq!(report.state, "stopped");
+        assert!(report.guest_kernel.is_none());
+        let json = crate::json_out::to_json_string(&report).expect("serialize");
+        assert!(!json.contains("\"guest_kernel\""));
+    }
+
+    #[test]
+    fn dev_status_json_vmless_omits_vm_and_caches() {
+        // Host-native / unsupported hosts have no managed dev VM: vm_name,
+        // dev_image, and builder_cache are absent (not null).
+        let report = build_dev_status_json_vmless("linux-native", "ready");
+        assert_eq!(report.backend, "linux-native");
+        assert_eq!(report.state, "ready");
+        assert!(report.vm_name.is_none());
+        assert!(report.dev_image.is_none());
+        assert!(report.builder_cache.is_none());
+        let json = crate::json_out::to_json_string(&report).expect("serialize");
+        assert!(json.contains("\"backend\": \"linux-native\""));
+        assert!(!json.contains("\"vm_name\""));
+        assert!(!json.contains("\"dev_image\""));
+        assert!(!json.contains("\"builder_cache\""));
     }
 }
 

@@ -18,7 +18,7 @@ pub(super) mod logs;
 pub(super) mod managed_secrets;
 pub(super) mod pause;
 pub(super) mod plan_admission;
-pub(super) mod plan_builder;
+pub(crate) mod plan_builder;
 pub(super) mod plan_persist;
 pub(super) mod policy_resolver;
 pub(super) mod proc;

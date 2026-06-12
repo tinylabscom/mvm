@@ -157,8 +157,7 @@ pub use policy_tool_gate::{
     ToolAuditSink, ToolOutcome,
 };
 pub use proxy::l4::{
-    L4Decision, L4Error, L4Gate, L4Policy, L4Rule, L4SpecError, LiveL4Gate, NoopL4Gate,
-    Protocol as L4Protocol,
+    CanonicalL4Gate, L4Decision, L4Error, L4Gate, NoopL4Gate, Protocol as L4Protocol,
 };
 pub use reaper::{
     DEFAULT_INTERVAL as REAPER_DEFAULT_INTERVAL, DEFAULT_JITTER as REAPER_DEFAULT_JITTER,

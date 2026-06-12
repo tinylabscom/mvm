@@ -15,8 +15,8 @@
 > §"Out of scope" deferred this as "the DX-parity follow-on … its own plan
 > after Plan 177 lands." Plan 177 landed 2026-06-12.
 
-> **Status: 🔴 scoped, not started.** Spun out of [Plan 177](./177-backend-consolidation.md)
-> §"deferred follow-ups".
+> **Status: 🟡 in progress.** Spun out of [Plan 177](./177-backend-consolidation.md)
+> §"deferred follow-ups". WS-3 first slice landed: `dev status --json`.
 
 **Goal:** Bring the converged single `vz` Apple-Virtualization.framework path to
 DX parity with the reference embeddable-sandbox SDK — the table-stakes floor
@@ -72,10 +72,30 @@ the vz boot surface, not just the dev image.
 Machine-readable output for the vz lifecycle verbs so the surface is scriptable
 (mirrors Plan 168's `--json` work on the bootstrap/download verbs).
 
-- [ ] inventory which vz/dev verbs lack `--json` (`dev status`, `vm save`,
-      etc.); define the JSON schema per verb.
-- [ ] wire `--json` through the same emitter Plan 168 established; serde
-      roundtrip tests per shape.
+**Inventory (audit done):** the shared emitter is `crate::json_out::{emit_json,
+to_json_string}` (pretty, newline-terminated, no envelope). `dev cache inspect`
+already has `--json` and sets the privacy floor — cache fields report
+`present`/`missing`/`cached`, never a local artifact path or digest. Dev/vz
+lifecycle verbs lacking `--json`: `dev status` (done below), `dev up`,
+`dev down`, and the snapshot/checkpoint verbs (those route through Plan 159
+WS-2 / Plan 140 — add `--json` there, don't fork).
+
+- [x] **`dev status --json`** — versioned (`schema_version: 1`), privacy-safe
+      `DevStatusJson { backend, vm_name?, state, guest_kernel?, dev_image?,
+      builder_cache? }`. `guest_kernel` is the running guest's probed `uname -r`
+      (skipped when the VM is down), deliberately distinct from
+      `dev_image.kernel` (present/missing of the cached image's kernel
+      artifact). Wired through all four dispatch arms (vz / libkrun /
+      linux-native / unsupported) via a pure `build_dev_status_json[_vmless]`
+      builder; serde + privacy + CLI-parse tests; manually verified on
+      macOS-26. Reuses the cache-inspect JSON sub-structs.
+- [ ] `dev up --json` / `dev down --json` — emit a small lifecycle result
+      (backend, vm_name, action, outcome) so scripts can branch on boot/teardown.
+- [ ] snapshot/checkpoint `--json` — add to the Plan 159/140 verbs in place
+      (don't duplicate the primitive); WS-1 (`save`/`restore`) lands its own.
+- [ ] linux-native richer `--json` — today it collapses to a single `state`
+      (`ready`/`not-ready`/`no-kvm`); surface the kvm/firecracker/assets detail
+      as a typed shape if a Linux consumer needs it.
 - [ ] acceptance: every vz lifecycle verb has a documented `--json` form with
       a stable schema + test.
 
