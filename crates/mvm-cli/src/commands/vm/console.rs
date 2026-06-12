@@ -436,38 +436,26 @@ fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<()> 
 mod accessible_gate_tests {
     use super::*;
     use mvm::vm::runtime_meta::{StartModeKind, VmRuntimeMeta, write as write_meta};
-    use std::sync::Mutex;
 
-    // Tests in this module mutate the process-global HOME env var to
-    // point at a temp dir; serialize them with a local mutex so they
-    // don't race when cargo runs the test binary with multiple threads.
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn with_home<F: FnOnce(&std::path::Path)>(f: F) {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var_os("HOME");
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        env.set("HOME", tmp.path());
         f(tmp.path());
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
     }
 
     #[test]
     fn pick_console_transport_selects_vz_when_only_vz_socket_present() {
         use std::os::unix::net::UnixListener;
         // Regression for the "console can't reach a Vz workload" gap: with a
-        // Vz workload's vsock socket present (and no apple-container / dev-proxy
-        // / libkrun / firecracker surface), the picker must select the Vz
+        // Vz workload's vsock socket present (and no dev-proxy / libkrun /
+        // firecracker surface), the picker must select the Vz
         // transport instead of erroring out on the firecracker fallback.
-        let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var_os("MVM_DATA_DIR");
-        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+        env.set("MVM_DATA_DIR", tmp.path());
 
         let name = "vz-console-probe";
         let sock =
@@ -479,13 +467,6 @@ mod accessible_gate_tests {
         transport
             .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect("selected transport should connect to the vz socket");
-
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MVM_DATA_DIR", v),
-                None => std::env::remove_var("MVM_DATA_DIR"),
-            }
-        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-12**
+**Last updated: 2026-06-12** (Plan 188 projection seam landed)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -28,11 +28,15 @@ details** below for the workstream-level state.
 - [ ] **PLAN 159** — vz-inspired macOS VZ DX · 🟡 warm pool + checkpoint/fork shipped; WS-5 D + delta-image remain
 - [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C2/C3 (FC/Vz warm-start) gated
 - [ ] **PLAN 124** — Lean guest agent · 🟡 ~65%; SDK codegen + signed on-device config remain
-- [ ] **PLAN 126** — Dependency reduction · 🟡 ~25%; sigstore/aws-lc/lock-gate remain
+- [ ] **PLAN 126** — Dependency reduction · 🟡 ~30%; duplicate-major lock-gate landed (+ supply-chain CI restored); sigstore/aws-lc/forbidden-dep-gate remain
 - [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 convergence landed (#806) — remaining: hardware smoke (host-gated) + cosmetic rename slice
+- [ ] **PLAN 182** — Trait hygiene + backend catalog · 🟡 code+docs done locally; aggregate workspace-test SIGKILL remains
+- [ ] **PLAN 184** — Backend descriptor registry · 🔴 not started
+- [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 shared TestEnv landed; mvm-core + backend marker tests migrated
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
+- [ ] **PLAN 184** — Capability projection seam (ADR-080 P5) · 🟢 seam + witnesses landed; kernel-side wiring + WASI-context mapping deferred
 
 ## Plan details
 
@@ -235,6 +239,7 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
 
 PLAN 183 — Builder-VM egress posture + net boot ✅ DONE (follow-ups tracked in plan)
   Last updated: 2026-06-12
+  [x] follow-ups: fs_quick-on-Vz (pause-aware gate) + vm_full restore (gvproxy re-spawn, idempotent cleanup)
   Diagnosis proven 2026-06-11: boot-time install_egress_lockdown (OUTPUT DROP,
   proxy-uid-only) applied to the whole builder VM and dropped every nix fetch.
   WS-A moves the lockdown to the install arm (fail-closed) + opens egress for
@@ -264,6 +269,38 @@ PLAN 124 — Lean guest agent                     🟡 ~65%
   [ ] D1.2/D1.3 SDK codegen
   [ ] E signed on-device config
 
+PLAN 184 — Backend descriptor registry          🔴 not started
+  [ ] Promote `mvm-backend`'s shipped backend catalog into a first-class
+      `BackendDescriptor` / registry API while preserving `VmBackend` as the
+      sole backend behavior trait
+  [ ] Add descriptor-driven construction for both `AnyBackend` and
+      `Arc<dyn VmBackend>` consumers
+  [ ] Migrate read-only and clearly generic backend consumers away from enum
+      dispatch where no backend-specific behavior is needed
+  [ ] Keep `AnyBackend` only for intentionally enum-specific operations
+      (`auto_select` policy, backend-specific helpers, explicit variant checks)
+
+PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
+  [x] Add `mvm_core::util::test_env::TestEnv` behind `cfg(test)` /
+      `mvm-core/test-support`; migrate `mvm-core` keystore env tests; verify
+      with focused tests + `cargo clippy -p mvm-core --all-targets -- -D warnings`
+  [x] Migrate `mvm-backend::backend` selector/started-VM marker tests to
+      `TestEnv` + `tempfile::TempDir`; keep the legacy backend env lock until
+      the rest of that crate migrates
+  [ ] Roll `TestEnv` through remaining high-risk env-mutating tests in `mvm-backend`,
+      `mvm-cli`, and `mvm-build`
+  [ ] Standardize poisoned-lock handling by distinguishing test/global
+      serialization locks from real runtime state locks
+  [ ] Rename overly generic internal traits/types where the blast radius is
+      small, including storage/backend and layer-local egress proxy names
+  [ ] Push stringly backend/provider selectors toward typed values at module
+      boundaries
+  [ ] Audit long constructors, params structs, builders, and large functions
+      only where the split adds testable structure
+  [ ] Audit unsafe/platform/feature boundaries, standardize error shapes,
+      consolidate repeated fixtures, check secret/debug exposure, and add
+      Rustdoc verification to closeout
+
 PLAN 170 — Host lifecycle convergence           ✅ mvm-side done (density → mvmd)
   [x] WS-A reconcile-on-entry — PR #688 (merged)
   [~] WS-B idle-reaper mechanism — PR #696 (merged, no consumer)
@@ -290,9 +327,18 @@ PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C1
       doctor warm-start matrix + Linux NBD/HugeTLB substrate probe
   [ ] C2 Firecracker live-memory fast-resume — carved out → Plan 175
   [ ] C3 Vz save/restore (macOS 26+) — owned by Plan 152 WS-C
-  [ ] C4 warm-start CLI/RPC wiring — carved out → Plan 175 (rides C2)
+
+PLAN 182 — Trait hygiene + backend catalog      🟡 code+docs in; aggregate workspace-test gate remains
+  [x] shared `mvm_core::time::{Clock,SystemClock}` replaces the three local copies
+  [x] duplicate `KeyProvider` retired in favor of `mvm_core::crypto::keystore`
+  [x] backend metadata catalog becomes the single source for `AnyBackend` selectors
+      and `mvmctl doctor` backend support maps
+  [x] macro scope stays narrow: land `backend_catalog!`, reject broader trait-impl/noop macros
+  [x] architecture docs now describe the current trait seams and ownership rules
+  [ ] literal `cargo test --workspace` aggregate run (package-local tests are green; workspace run hits SIGKILL on `mvm-backend` here)
 
 PLAN 175 — Firecracker live-memory warm-start    🔴 NOT STARTED (live-KVM-gated; Plan 123 C2 carve-out)
+  [ ] C4 warm-start CLI/RPC wiring — carved out → Plan 175 (rides C2)
   [ ] T1 VMGenID delivery on PostRestore (token payload + GenIdReseeder dispatch)
   [ ] T2 UFFD/NBD/hugepages fast-resume substrate (diff snapshot + lazy paging)
   [ ] T3 SIGUSR1 "primed" ready-barrier for a deterministic warm base
@@ -307,7 +353,11 @@ PLAN 126 — Dependency reduction                 🟡 ~25%
   [ ] B1 sigstore — already off default; needs cross-repo mvmd decision (relocate cosign-verify)
   [ ] B3 pgp (168) — SUPERSEDED by plan 160 (drop Alpine seed); security decision
   [ ] B4 aws-lc-rs → ring — BLOCKED upstream (oci-client hardcodes aws-lc; needs a fork)
-  [ ] C1/D1 unify reqwest majors + lock gate
+  [~] C1 reqwest unify — REJECTED/blocked on B4 (0.13 forces aws-lc + transitive 0.12 holdout; no tree collapse)
+  [x] D2 duplicate-major lock-gate — cargo-deny multiple-versions=deny + 23-crate baseline (ratchet); also
+      un-broke the red cargo-deny/cargo-audit jobs: wildcard-paths, mvm-verify license, 2 unmaintained ignores,
+      and FIXED RUSTSEC-2026-0119 (hickory-proto DoS) by bumping hickory-resolver 0.24→0.26 (collapsed its dup)
+  [ ] D1 forbidden-dep gate (check-forbidden-deps extension) — still open
 
 PLAN 153 — CLI directory split                  ✅ DONE (subsumed into Plan 178)
   [x] image.rs → image/ ; catalog.rs → catalog/ (last two flat files)
@@ -377,6 +427,22 @@ PLAN 181 — App-builder product surface           🔴 NOT STARTED  (ADR-079; m
   NOTE: deliberately rejects the sibling app-builder's isolation model — no Docker
   socket, no host-path mounts into a workload, no auth-off/caps-off defaults, no
   baked-in agents, no multi-tenant HTTP/auth in mvm (mvmd per ADR-070 §5/Plan 33).
+
+PLAN 184 — Capability projection seam (ADR-080 P5)  🟢 seam + witnesses LANDED; enforcement wiring deferred
+  [x] Proto + CanonicalRule atom (projection seam module created)
+  [x] CanonicalEgress decision set with unconditional mandatory-deny
+  [x] canonicalize_effective — L4 rules leg
+  [x] canonicalize_effective — allow-list / DNS-pin leg
+  [x] mandatory-deny overlap refusal at projection time (incl. rebinding fixture)
+  [x] to_wasi_grants + wasi_allows — hostname-keyed WASI projection (separate walk)
+  [x] clamp — intersection-only merge (requests attenuate, never widen)
+  [x] cross-projection consistency + clamp-never-widens property witnesses
+      (ADR-080 §8 P5 witness names: cross_projection_consistency_property,
+       clamp_never_widens_property, rebinding_pin_into_metadata_range_refuses)
+  [x] pub use re-exports from mvm-core::policy; ADR-080 P5 row updated
+  [ ] kernel-side wiring: LiveL4Gate/PlanFlowPolicy consume CanonicalEgress — deferred
+  [ ] WASI-context mapping: WasiEgress → WasiCtxBuilder in the wasmtime runner — deferred
+  NOTE: 41 tests (39 unit + 2 property witnesses), mutation-verified. No new dependencies.
 ```
 
 ## Security claims

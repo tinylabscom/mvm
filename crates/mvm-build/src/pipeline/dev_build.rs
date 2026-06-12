@@ -169,9 +169,9 @@ pub struct DevBuildResult {
     pub revision_hash: String,
     /// Whether the build was a cache hit (artifacts already existed).
     pub cached: bool,
-    /// Path to the microvm.nix runner directory, if the build output
+    /// Path to the microvm.nix-lineage runner directory, if the build output
     /// contains runner scripts (e.g. `bin/microvm-run`). When present,
-    /// the microvm.nix backend can be used instead of manual Firecracker
+    /// the QEMU backend can use them instead of manual Firecracker
     /// API calls.
     pub runner_dir: Option<String>,
     /// Artifact file sizes (kernel, rootfs, initrd).
@@ -1419,6 +1419,9 @@ mod tests {
     #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_vm_dev_build_uses_vm_job_shape_without_host_nix() {
+        let temp = tempfile::tempdir().expect("create temp MVM_DATA_DIR");
+        let mut process_env = mvm_core::util::test_env::TestEnv::new();
+        process_env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
         let env = TestEnv::new();
         env.stub_stdout("initrd", "0");
         env.stub_stdout("microvm-run", "no");
@@ -1484,6 +1487,9 @@ mod tests {
     #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_vm_dev_build_fails_closed_when_builder_errors() {
+        let temp = tempfile::tempdir().expect("create temp MVM_DATA_DIR");
+        let mut process_env = mvm_core::util::test_env::TestEnv::new();
+        process_env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
         let env = TestEnv::new();
         let result = dev_build_with_builder_vm(
             &env,

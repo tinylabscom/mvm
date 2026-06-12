@@ -1565,7 +1565,7 @@ fn dgram_socketpair() -> Result<(OwnedFd, OwnedFd)> {
 }
 
 /// Best-effort 1 MiB SO_SNDBUF/SO_RCVBUF so an MTU-sized datagram survives a
-/// backlog (matches cloud-hypervisor / Apple's sample).
+/// backlog (matches Apple's sample).
 fn bump_socket_buffers(fd: std::os::fd::RawFd) {
     let buf: libc::c_int = 1024 * 1024;
     let buf_ptr = std::ptr::addr_of!(buf).cast::<libc::c_void>();
@@ -1696,7 +1696,7 @@ fn sockaddr_un_from_path(path: &str) -> Result<libc::sockaddr_un> {
 
 /// Open and connect a SOCK_DGRAM AF_UNIX socket to gvproxy's vfkit listener,
 /// with 1 MiB send/recv buffers so an MTU-sized datagram survives a backlog
-/// (matches cloud-hypervisor / Apple's sample). Returns an owned fd that closes
+/// (matches Apple's sample). Returns an owned fd that closes
 /// on any early-return error path.
 ///
 /// An unbound unix-datagram socket has no return address, so gvproxy's

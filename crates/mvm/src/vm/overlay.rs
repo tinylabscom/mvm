@@ -45,11 +45,10 @@
 //! ## What this is NOT (yet)
 //!
 //! - Not encrypted. A LUKS-backed impl will wire
-//!   `mvm-security::keystore::KeyProvider` for per-overlay LUKS
+//!   `mvm_core::crypto::keystore::KeyProvider` for per-overlay LUKS
 //!   keys.
-//! - Not mounted into VMs. The firecracker / cloud-hypervisor
-//!   backends will learn to attach the overlay as a virtio block
-//!   device.
+//! - Not mounted into VMs. The firecracker / qemu backends will
+//!   learn to attach the overlay as a virtio block device.
 //! - No destruction certificate yet. Signing the
 //!   [`DestructionReceipt`] under the host identity key and emitting
 //!   it to the audit chain is wired below.
@@ -80,7 +79,7 @@ pub const DEFAULT_QUOTA_BYTES: u64 = 10 * (1 << 30);
 /// Trait every overlay consumer goes through. Ships
 /// [`FsOverlayManager`] (plain filesystem) + [`NoopOverlayManager`]
 /// (fail-closed); a future LUKS-backed impl will wire
-/// `mvm-security::keystore::KeyProvider`.
+/// `mvm_core::crypto::keystore::KeyProvider`.
 #[async_trait]
 pub trait OverlayManager: Send + Sync {
     /// Create a new overlay for `(tenant, workload)`. Idempotent —

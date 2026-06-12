@@ -1,6 +1,6 @@
 //! Signed-image verification primitive.
 //!
-//! Extends `apple_container.rs::verify_artifact_hash` by elevating the trust
+//! Extends the bare `verify_artifact` hash check below by elevating the trust
 //! anchor from "TLS-fetched checksum file" to "cosign-keyless-signed
 //! manifest." The `SignedManifest` schema records every artifact's SHA-256
 //! plus the input closure (Nix store hash, source git SHA, flake lockfile
@@ -353,9 +353,7 @@ pub fn check_revocation(
 }
 
 /// Stream `path` through SHA-256 and compare to `expected.sha256`. On
-/// mismatch, delete the file and return `DigestMismatch`. The
-/// delete-on-mismatch behaviour matches
-/// `apple_container.rs::verify_artifact_hash`.
+/// mismatch, delete the file and return `DigestMismatch`.
 ///
 /// Callers that want to keep the file for forensics should hash it
 /// directly with `sha256_file` and compare manually.

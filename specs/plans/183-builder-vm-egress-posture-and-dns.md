@@ -290,12 +290,26 @@ Two independent defects blocked `mvmctl up --flake <workload> --hypervisor vz`:
 - [ ] `mvmctl doctor` line surfacing the in-builder egress posture + last builder
   network bootstrap outcome (lease vs static vs none), so this class of failure is
   diagnosable without console archaeology.
-- [ ] fs_quick on Vz: teach the quiesce gate to recognize the Vz paused state
+- [x] fs_quick on Vz: teach the quiesce gate to recognize the Vz paused state
   (pid stays alive under pause), and/or stop deleting the per-instance CoW
   rootfs on `down` so a stopped VM remains checkpointable.
-- [ ] vm_full restore: re-provision the per-VM gvproxy sidecar before spawning
+  fixed: `pause` stamps the live supervisor pid into a `vz.paused` marker in
+  the VM state dir (`resume` removes it; a stale marker self-invalidates by
+  pid mismatch — the name registry was the wrong substrate, `up`-created VMs
+  are never in it); `vm_is_quiesced` accepts running+matching-marker.
+  Missing-rootfs arm returns an actionable error naming the pause workflow.
+  Live-validated 2026-06-12: pause → fs_quick create → resume green; vm_full
+  restore green incl. responsive control plane (pause/resume on the restored
+  VM) and restore-while-running refusal.
+- [x] vm_full restore: re-provision the per-VM gvproxy sidecar before spawning
   the restore supervisor, and make a failed restore clean up its materialized
   rootfs so the retry isn't blocked by `File exists`.
+  fixed: `snapshot_restore` spawns gvproxy via `host_gvproxy::spawn_detached`
+  when config has Gvproxy network; `restore_with_spawn` removes the cloned
+  rootfs on any post-clone failure and errors actionably on pre-existing target.
+- [ ] restore-failure leaks the freshly-spawned gvproxy (supervisor never
+  wrote its PID, the sidecar lingers; the retry orphans it) — reap the
+  sidecar on the restore error path, consistent with `start()`'s behavior.
 - [ ] Vz two-copy fork: route live forks through the fs_quick (cold-boot)
   class on Vz — VZ machine-state restore pins the saved device config
   (`VZErrorDomain:12` on a changed MAC), so memory-state forks can't change

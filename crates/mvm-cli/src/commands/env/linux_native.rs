@@ -15,7 +15,7 @@
 //! gone; the asset pipeline now runs directly on the host via the
 //! `mvm_backend::firecracker::*` functions.
 //!
-//! Apple Container hosts use `super::apple_container` instead; macOS
+//! macOS 26+ Apple Silicon hosts use `super::dev_vz` instead; macOS
 //! Intel / pre-26 / no-KVM-Linux hosts fall through to a "no dev
 //! backend" error in `super::dev::run` — those need the
 //! libkrun builder VM.

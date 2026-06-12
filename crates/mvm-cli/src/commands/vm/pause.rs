@@ -23,6 +23,7 @@ use mvm::vm::instance_snapshot::{
     signal_post_restore, verify_and_resume,
 };
 use mvm_backend::backend::AnyBackend;
+use mvm_core::config::vm_state_dir;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::VmId;
@@ -97,6 +98,23 @@ pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConf
         AnyBackend::Vz(mvm_backend::vz::VzBackend)
             .pause(&VmId::from(args.name.as_str()))
             .with_context(|| format!("pausing Vz VM {:?}", args.name))?;
+        // Stamp the live supervisor pid into a marker so the fs_quick gate
+        // can confirm the VM is quiesced without depending on the name
+        // registry (which `up`-created VMs may never have populated).
+        // The marker is only valid while the same pid is alive; a re-launched
+        // or crashed VM will have a different or absent pid, so the marker
+        // self-invalidates without any explicit cleanup on those paths.
+        let state_dir = vm_state_dir(&args.name);
+        match std::fs::read_to_string(state_dir.join("vz.pid")) {
+            Ok(pid) => {
+                if let Err(e) = std::fs::write(state_dir.join("vz.paused"), pid.trim()) {
+                    tracing::warn!(error = %e, vm = %args.name, "could not write vz.paused marker (pause succeeded)");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, vm = %args.name, "vz.pid unreadable; vz.paused marker not written (pause succeeded)");
+            }
+        }
         let registry_path = mvm::vm::name_registry::registry_path();
         if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
             let _ = registry.set_paused(&args.name, true);
@@ -136,6 +154,11 @@ pub(in crate::commands) fn run_resume(
         AnyBackend::Vz(mvm_backend::vz::VzBackend)
             .resume(&VmId::from(args.name.as_str()))
             .with_context(|| format!("resuming Vz VM {:?}", args.name))?;
+        // Remove the pause marker now that vCPUs are running again.
+        // Tolerate a missing file — it may have already been cleaned up or
+        // was never written (best-effort on the pause side).
+        let marker = vm_state_dir(&args.name).join("vz.paused");
+        let _ = std::fs::remove_file(&marker);
         let registry_path = mvm::vm::name_registry::registry_path();
         if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
             let _ = registry.set_paused(&args.name, false);
@@ -304,12 +327,12 @@ mod tests {
     #[test]
     fn is_vz_vm_true_for_vz_marker() {
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", tmp.path());
         let dir = mvm_core::config::vm_state_dir("vzvm");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("vz.pid"), "1").unwrap();
         assert!(is_vz_vm("vzvm"));
         assert!(!is_vz_vm("nope"));
-        unsafe { std::env::remove_var("HOME") };
     }
 }
