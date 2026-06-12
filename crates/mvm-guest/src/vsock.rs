@@ -35,10 +35,10 @@ pub const GUEST_CID: u32 = 3;
 /// keeps its disjoint-union shape. The "52" tail is a
 /// callback to the historical port for grep-ability.
 ///
-/// **Single source of truth.** `mvm-apple-container` and
-/// `mvm::vm::vminitd_client` re-declare this value because
-/// they cannot depend on `mvm-guest`. If you change this, update those
-/// duplicates in the same commit; the workspace tests catch drift.
+/// **Single source of truth.** `mvm::vm::vminitd_client` re-declares
+/// this value because it cannot depend on `mvm-guest`. If you change
+/// this, update that duplicate in the same commit; the workspace tests
+/// catch drift.
 pub const GUEST_AGENT_PORT: u32 = 5252;
 
 /// Control vsock port the guest's `/init` connects to (host side) to

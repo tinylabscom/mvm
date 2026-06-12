@@ -2166,6 +2166,17 @@ lockdown to the install arm, add a static-gvproxy fallback for the Vz
 builder's DHCP no-lease, make resolv.conf writable. Live bringup + fork
 semantic-A spike resume as Plan 183 WS-D.
 
+**2026-06-12: Plan 183 complete — first live Vz workload boot.** Cold
+`dev up` fetches inside the builder again (libkrun + Vz; the Vz no-reply
+link was an unbound guest-side datagram socket, fixed in WS-E), and the
+sleeper fixture booted on Vz through the full admitted path: agent on
+vsock, `vm_full` checkpoint + `pause`/`resume` round-trips green. The
+fork semantic-A spike is answered: VZ refuses machine-state restore into
+a changed device config (`VZErrorDomain:12`), so semantic B stands and a
+live two-copy Vz fork goes through the fs_quick class. fs_quick-on-Vz,
+vm_full-restore gvproxy re-spawn, and restore idempotency are tracked as
+Plan 183 follow-ups.
+
 ### Sprint 55 success criteria
 
 - Phase A acceptance: `mvm-vz-supervisor` boots the dev-shell image

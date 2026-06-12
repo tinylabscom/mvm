@@ -6,41 +6,38 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm::vsock_transport::{
-    AppleContainerTransport, FirecrackerTransport, LibkrunTransport, VsockProxyTransport,
-    VsockTransport, VzTransport,
-};
+use mvm::vsock_transport::{FirecrackerTransport, LibkrunTransport, VsockTransport, VzTransport};
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 
-use super::super::env::apple_container::dev_vsock_proxy_path;
+use super::super::env::dev_vz::dev_vsock_proxy_path;
 use super::Cli;
 use super::shared::{IN_CONSOLE_MODE, clap_vm_name};
 use crate::ui;
 
 /// Pick the right vsock transport for `name`. Priority:
-/// 1. In-process Apple Container (zero-copy `VZVirtioSocketDevice` stream).
-/// 2. Dev-mode mode-0700 proxy socket (cross-process daemon dispatch).
-/// 3. libkrun per-port Unix socket.
-/// 4. Vz per-port Unix socket (`<vm_state_dir>/vsock/vsock-<port>.sock`).
-/// 5. Firecracker UDS multiplexer (fleet/production path).
+/// 1. The dev VM's Vz guest-agent socket, when this is the dev VM and
+///    its socket is present (the dev VM lives in the builder cache, a
+///    different path than `VzTransport::for_vm` resolves).
+/// 2. libkrun per-port Unix socket.
+/// 3. Vz per-port Unix socket (`<vm_state_dir>/vsock/vsock-<port>.sock`) —
+///    the macOS AVF path.
+/// 4. Firecracker UDS multiplexer (fleet/production path).
 ///
-/// The Apple Container probe consumes one stream and drops it; the
-/// returned `Arc<dyn VsockTransport>` is then used for every real
-/// connection (control + data + resize). Cloning the Arc lets the
-/// SIGWINCH handler thread reuse the same dispatch.
+/// Each probe consumes one stream and drops it; the returned
+/// `Arc<dyn VsockTransport>` is then used for every real connection
+/// (control + data + resize). Cloning the Arc lets the SIGWINCH handler
+/// thread reuse the same dispatch.
 fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
-    if mvm_backend::providers::apple_container::vsock_connect(
-        name,
-        mvm_guest::vsock::GUEST_AGENT_PORT,
-    )
-    .is_ok()
+    // The dev VM's guest-agent socket sits in the builder cache, not the
+    // data-dir path `VzTransport::for_vm` resolves. The Vz supervisor
+    // exposes it as a direct per-port socket (no proxy port prefix), so
+    // dial it through `VzTransport` rooted at the socket's parent dir.
+    let dev_sock = std::path::PathBuf::from(dev_vsock_proxy_path());
+    if dev_sock.exists()
+        && let Some(dir) = dev_sock.parent()
     {
-        return Ok(Arc::new(AppleContainerTransport::new(name)));
-    }
-    let proxy = dev_vsock_proxy_path();
-    if std::path::Path::new(&proxy).exists() {
-        return Ok(Arc::new(VsockProxyTransport::new(proxy)));
+        return Ok(Arc::new(VzTransport::new(dir)));
     }
     let libkrun = LibkrunTransport::for_vm(name);
     if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
@@ -464,8 +461,8 @@ mod accessible_gate_tests {
     fn pick_console_transport_selects_vz_when_only_vz_socket_present() {
         use std::os::unix::net::UnixListener;
         // Regression for the "console can't reach a Vz workload" gap: with a
-        // Vz workload's vsock socket present (and no apple-container / dev-proxy
-        // / libkrun / firecracker surface), the picker must select the Vz
+        // Vz workload's vsock socket present (and no dev-proxy / libkrun /
+        // firecracker surface), the picker must select the Vz
         // transport instead of erroring out on the firecracker fallback.
         let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");

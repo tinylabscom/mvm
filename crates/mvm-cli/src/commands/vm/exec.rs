@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-use super::super::env::apple_container::ensure_default_microvm_image;
+use super::super::env::dev_vz::ensure_default_microvm_image;
 use super::Cli;
 use super::audit_chain::AuditEmitter;
 use super::host_signer::{PUBLIC_FILENAME, host_signer_id, load_or_init};

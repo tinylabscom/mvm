@@ -81,6 +81,21 @@ ignore = [
     # runtime code in the shipped binary, same class as proc-macro-error
     # above. No runtime/IO surface.
     { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; build-time proc-macro, no runtime surface; audited 2026-06-03" },
+    # `proc-macro-error2` — the maintained fork of `proc-macro-error`
+    # (RUSTSEC-2024-0370) is now itself unmaintained. Transitive via
+    # `oci-client → oci-spec → getset` (a derive-macro crate). Build-time
+    # proc-macro only: produces no runtime code in any shipped artifact,
+    # same class as the proc-macro-error v1 / paste entries above. Will
+    # resolve when oci-spec's getset dep drops it.
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; build-time-only via oci-client→oci-spec→getset; no runtime surface; audited 2026-06-12" },
+    # `rustls-pemfile` unmaintained — its PEM parsing was folded into
+    # `rustls-pki-types` upstream. Direct dep of mvm-hostd, used only to
+    # parse CA/cert/key PEM the host itself mints for the Plan 129 TLS
+    # termination path (operator-controlled material, never
+    # attacker-influenced bytes). Unmaintained, not vulnerable; the
+    # crate is a small, functionally-complete parser. Follow-up: migrate
+    # to `rustls_pki_types::pem` to drop it (tracked in plan 126).
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; parses host-minted CA/cert PEM only, no untrusted input; migrate to rustls-pki-types; audited 2026-06-12" },
 ]
 
 # ── Licenses ──────────────────────────────────────────────────────
@@ -127,14 +142,76 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 # fragment audit attention, and frequently mask transitive
 # duplication of cryptographic primitives. We deny by default and
 # add a `skip` only with a reason.
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
+# A versionless `{ path = "../x" }` dep reads as a wildcard to
+# cargo-deny, but a local path dep is first-party source, not an
+# unvetted registry `*` — it carries none of the supply-chain risk
+# the wildcard ban exists to catch. Exempt path/git deps so the ban
+# stays strict for registry crates (the real risk) without flagging
+# intra-workspace links.
+allow-wildcard-paths = true
 highlight = "all"
 
 # A "skip" allows multiple versions of a single crate; a "skip-tree"
 # allows them under a specific subtree. Use sparingly; each entry
 # is a place auditors must reason about by hand.
-skip = []
+#
+# This list is the audited *baseline* of duplicate-major crates the
+# current transitive graph already carries. Freezing it turns the
+# previously-advisory `multiple-versions` check into a ratchet: a
+# brand-new duplicated crate (the usual regression — a fresh dep that
+# drags a second major of something) now fails CI and forces a
+# conscious decision, while none of the cuts already landed (tokio
+# drop, opendal→object_store, Alpine seed removal) can silently
+# regress. Entries are grouped by why they duplicate; shrink the list
+# as upstream majors converge or a dep is replaced — never grow it
+# without a recorded reason.
+skip = [
+    # Windows host-target shim families. The windows-sys / -core /
+    # -targets umbrellas and their per-arch link shims legitimately
+    # coexist at several majors across the graph; they are host/build
+    # only and carry no runtime surface on the Linux guest path.
+    "windows-core",
+    "windows-sys",
+    "windows-targets",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_gnullvm",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
+
+    # Host syscall layer mid-migration. rustix's move to linux-raw-sys
+    # 0.12, the nix 0.29→0.31 churn, and mio/redox_syscall sit at two
+    # majors because different deps track different releases. mvm pins
+    # a single major where it depends directly; the rest is transitive.
+    "linux-raw-sys",
+    "mio",
+    "nix",
+    "redox_syscall",
+    "rustix",
+
+    # Foundational crates mid v1→v2 ecosystem migration. mvm pins one
+    # major for each it uses directly (e.g. which = 7); the other major
+    # is dragged in by deps that have not finished migrating. Not
+    # collapsible without forking those deps.
+    "bitflags",
+    "getrandom",
+    "thiserror",
+    "thiserror-impl",
+    "unicode-width",
+    "which",
+
+    # reqwest 0.12 (mvm) vs 0.13 (oci-client). Unifying was evaluated
+    # and rejected: oci-client hard-pins 0.13 (and forces aws-lc-rs —
+    # see the B4 block), a transitive 0.12 holdout remains regardless,
+    # and the bump collapses no transitive duplicates. Revisit when
+    # oci-client is forked.
+    "reqwest",
+]
 skip-tree = []
 
 deny = []

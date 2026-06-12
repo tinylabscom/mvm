@@ -319,7 +319,7 @@ fn build_flake(
         .map(|v| v.trim().is_empty())
         .unwrap_or(true)
     {
-        crate::commands::env::apple_container::bootstrap_builder_vm_image()
+        crate::commands::env::dev_vz::bootstrap_builder_vm_image()
             .context("ensuring the builder VM image before the flake build (Stage 0 bootstrap)")?;
     }
 

@@ -16,7 +16,7 @@
 //!
 //! The resolver is `Arc<HickoryDnsResolver>` so multiple proxy
 //! tasks can share one cache. Construction is sync — the actual
-//! `hickory_resolver::TokioAsyncResolver` is built lazily on first
+//! `hickory_resolver::TokioResolver` is built lazily on first
 //! `resolve` call so callers can construct in non-tokio contexts.
 //!
 //! ## What this module does NOT do
@@ -32,8 +32,9 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use tokio::sync::OnceCell;
 
 use crate::supervisor::egress::EgressError;
@@ -45,7 +46,7 @@ use crate::supervisor::l7_proxy::DnsResolver;
 pub struct HickoryDnsResolver {
     config: ResolverConfig,
     opts: ResolverOpts,
-    inner: OnceCell<TokioAsyncResolver>,
+    inner: OnceCell<TokioResolver>,
 }
 
 impl HickoryDnsResolver {
@@ -68,10 +69,18 @@ impl HickoryDnsResolver {
         }
     }
 
-    async fn ensure_resolver(&self) -> &TokioAsyncResolver {
+    async fn ensure_resolver(&self) -> Result<&TokioResolver, EgressError> {
         self.inner
-            .get_or_init(|| async {
-                TokioAsyncResolver::tokio(self.config.clone(), self.opts.clone())
+            .get_or_try_init(|| async {
+                TokioResolver::builder_with_config(
+                    self.config.clone(),
+                    TokioRuntimeProvider::default(),
+                )
+                .with_options(self.opts.clone())
+                .build()
+                .map_err(|e| {
+                    EgressError::UpstreamUnreachable(format!("hickory build resolver: {e}"))
+                })
             })
             .await
     }
@@ -86,11 +95,11 @@ impl Default for HickoryDnsResolver {
 #[async_trait]
 impl DnsResolver for HickoryDnsResolver {
     async fn resolve_one(&self, host: &str, _port: u16) -> Result<IpAddr, EgressError> {
-        let resolver = self.ensure_resolver().await;
+        let resolver = self.ensure_resolver().await?;
         let lookup = resolver.lookup_ip(host).await.map_err(|e| {
             EgressError::UpstreamUnreachable(format!("hickory lookup_ip({host}): {e}"))
         })?;
-        lookup.into_iter().next().ok_or_else(|| {
+        lookup.iter().next().ok_or_else(|| {
             EgressError::UpstreamUnreachable(format!("hickory resolved {host} to zero IPs"))
         })
     }

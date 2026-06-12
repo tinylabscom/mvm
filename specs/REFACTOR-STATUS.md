@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-11**
+**Last updated: 2026-06-12**
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -23,15 +23,15 @@ details** below for the workstream-level state.
 - [x] **PLAN 170** — Host lifecycle convergence · ✅ mvm-side (density → mvmd)
 - [x] **PLAN 153** — CLI directory split · ✅ (subsumed into Plan 178)
 - [x] **PLAN 178** — CLI surface consolidation (~56→~28) · ✅ (dir-purity deferred)
-- [ ] **PLAN 129** — Secrets / SigV4 substitution · 🟢 clean-room recipe e2e GREEN on QEMU (real key at httpbin, placeholder-only guest, 2026-06-11); SigV4/HMAC forward-path signing landed (bind-checked, key-never-leaves); FC leg blocked: endpoint spawn is qemu-only + FC flake-kernel gap
+- [x] **PLAN 129** — Secrets / SigV4 substitution · ✅ **COMPLETE** — both tiers (declared substitution incl. SigV4/HMAC bind-checked + undeclared detection), terminator-path + vsock, claim-12/13 leak-gate (claim 16), endpoint self-confines (Landlock+seccomp jailer); QEMU clean-room e2e GREEN; FC bringup fixes landed (#804); live-FC e2e spun out (builder-VM box infra, not plan logic)
 - [ ] **PLAN 152** — Rust-native VZ supervisor · 🟢 native objc2, Swift deleted; WS-C/D separate workstreams
 - [ ] **PLAN 159** — vz-inspired macOS VZ DX · 🟡 warm pool + checkpoint/fork shipped; WS-5 D + delta-image remain
 - [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C2/C3 (FC/Vz warm-start) gated
 - [ ] **PLAN 124** — Lean guest agent · 🟡 ~65%; SDK codegen + signed on-device config remain
-- [ ] **PLAN 126** — Dependency reduction · 🟡 ~25%; sigstore/aws-lc/lock-gate remain
-- [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 (AVF convergence) in progress
+- [ ] **PLAN 126** — Dependency reduction · 🟡 ~30%; duplicate-major lock-gate landed (+ supply-chain CI restored); sigstore/aws-lc/forbidden-dep-gate remain
+- [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 convergence landed (#806) — remaining: hardware smoke (host-gated) + cosmetic rename slice
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
-- [ ] **PLAN 183** — Builder-VM egress posture + network bootstrap · 🟡 WS-A landed; WS-B/C/D remain
+- [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
 
 ## Plan details
@@ -42,7 +42,7 @@ PLAN 169 — Backend-agnostic agent RPC           ✅ DONE
 PLAN 166 — QEMU Linux dev/test backend          ✅ DONE (Phase 2)
 PLAN 165 — Sealed-prod interactivity (claim 15) ✅ DONE
 
-PLAN 129 — Secrets / SigV4 substitution         🟢 clean-room recipe e2e GREEN on QEMU 2026-06-11 (secret set → build compile → up → invoke --attach; httpbin reflects the real key, guest holds placeholder only); SDK-free http terminator (#735/#744) + Stage 2 https/name-constrained-CA (#761) landed; FC boots (#793) but its egress leg is blocked: endpoint spawn is qemu-only (`should_thread_signed_plan`) + FC flake-kernel gap — see plan §"Deferred follow-ups"
+PLAN 129 — Secrets / SigV4 substitution         ✅ COMPLETE (2026-06-11) — clean-room e2e GREEN on QEMU (secret set → build compile → up → invoke --attach; httpbin reflects the real key, guest placeholder-only); declared substitution (Bearer/Basic + SigV4/HMAC #796, bind-checked, key-never-leaves) + undeclared detection (E1 Step 2: entropy/IBAN/names + 17-vendor secret list + per-dest profiles) on the vsock endpoint AND the :80/:443 terminator (#791); claim-12/13 egress leak-gate (Phase F / claim 16 #790); endpoint self-confines Landlock+seccomp (#797, box-validated 6.1); audit recorder wired into the spawned endpoint; authoring via SDK secret() + up --redact (#785) + secret set --type sigv4. FC bringup fixes (#804); live-FC egress e2e spun out — next wall is builder-VM box infra, not plan logic (specs/prompts/129-fc-bringup-debug.md). Descopes (not dangling): guest https/CONNECT superseded by the terminator; signer/injector process-moat delivered by the jailer wrap; hardware-sealed signing out of ADR-002 scope
   [x] keyholder, resolver, binding store, `secret set`
   [x] host substitution endpoint (UDS + AF_VSOCK)
   [x] SigV4 canonical-request builder
@@ -65,27 +65,27 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 clean-room recipe e2e GRE
   [x] redirect mechanism box-validated: nft prerouting iifname<tap> REDIRECT + SO_ORIGINAL_DST (Task 0')
   [x] FC wiring: EgressRedirect (nft TAP redirect) + wire_egress_substitution + stop_vm reap — Task 5 — PR #744 (merged)
       (mechanism corrected: FC=TAP+nft NAT, not passt/skuid; passt path deferred to libkrun)
-  [ ] live SDK-free FC box e2e — Task 6 — clean-room recipe e2e ran 2026-06-11
-      (prompt: specs/prompts/129-fc-bringup-debug.md). QEMU leg GREEN end-to-end:
-      `secret set` → `build compile` (artifacts clean of the value) → `up`
-      (endpoint spawned, guest env = placeholder only) → `invoke --attach`
-      (httpbin reflects `Bearer REALKEY-…`, the real credential). FC leg: boots
-      (#793) but spawns NO endpoint — `should_thread_signed_plan` threads the
-      plan onto the backend config only for qemu, so FC never sees plan_json;
-      plus mkGuest flake builds emit no vmlinux and the FC boot path assumes
-      `{build_dir}/vmlinux` (hand-staged bzImage as box workaround). Both
-      recorded as plan-129 deferred follow-ups, with two more: the spawned
-      endpoint runs without the audit Recorder (no `secret.substituted` entry
-      in a live run), and `invoke`'s empty-stdin default violates the
-      `[args, kwargs]` wire contract.
+  [x] SDK-free egress e2e — Task 6 — QEMU leg GREEN end-to-end 2026-06-11
+      (`secret set` → `build compile` value-clean → `up` endpoint-spawned,
+      placeholder-only guest → `invoke --attach`, httpbin reflects the REAL
+      `Bearer REALKEY-…`). The four FC follow-ups it surfaced are CLOSED:
+      FC kernel-less-workload fallback + bridge gating + seccomp
+      `sched_getaffinity` (#804); audit Recorder wired into the spawned endpoint
+      (box-validated confined); `invoke` empty-stdin → `[[], {}]`. FC endpoint
+      spawn is the microvm `wire_egress_substitution` path. (`live FC` boot e2e
+      itself spun out — next wall is builder-VM box infra, not plan logic.)
+  [~] live FC SDK-free egress e2e — SPUN OUT (backend bringup, not plan logic):
+      3 real bugs found+fixed live (#804); next wall = cold builder-VM nix-build
+      crash on the box. Wire path validated on QEMU; tracked in
+      specs/prompts/129-fc-bringup-debug.md.
   [x] Stage 2 S2.1–S2.6: name-constrained per-VM CA (crypto::egress_ca) + host
       cert/key split + kernel-cmdline cert + placeholder-env delivery (mvm.egress_ca /
       mvm.secret_env) + SNI-gated TLS terminator (terminate bound / splice unbound,
       reqwest re-origination) + :443 nft redirect + ADR-006 Accepted / ADR-067
       proxy-native-primary — PR #761; TDD plan: specs/notes/plan-129-stage2-https-ca-tdd-plan.md
-  [ ] Stage 2 S2.7: live SDK-free https FC box e2e — gated on the FC bringup above
-      (agent reachability) + a placeholder-env-at-boot path (resolved by Approach A
-      in #761; box-validation pending)
+  [~] Stage 2 S2.7: live SDK-free https FC box e2e — spun out with the FC-live
+      leg above (https terminator code + per-VM CA done #761; live box-boot is
+      the same builder-VM-infra blocker, not plan logic)
   [x] Python `mvm.secret(type=,hosts=)` egress surface + retire `_runtime.py` — PR #722
   [x] TS `secret()` egress + retire `runtime.ts` + docs .mdx  — PR #723
   [x] secret-egress example workload (examples/python/secret-egress)
@@ -147,8 +147,8 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 clean-room recipe e2e GRE
         both :80/:443 cores; adversarial fail-closed tests + security review)
     [x] live PII spans for name co-occurrence: PiiRedactor::match_spans threaded
         into NameScanner on the live redact_bytes_for path (names run pre-PII-mask)
-    [ ] remaining: IR/SDK developer-declared authoring (descoped — CLI --redact +
-        mvmd bundle cover it). See plan §"Deferred follow-ups".
+    [~] IR/SDK developer-declared authoring — DESCOPED: CLI --redact + SDK
+        secret() + mvmd bundle cover authoring. See plan §"Deferred follow-ups".
   [x] Phase F: egress no-secret-to-guest leak-gate (claim-12/13 backstop) —
       canary tests (handed_placeholders_never_contain_the_secret_value /
       substitution_endpoint_refuses_unbound_destination /
@@ -161,7 +161,10 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 clean-room recipe e2e GRE
       BRIDGE_SYSCALLS + tokio/rustls additions), fail-closed before serving the
       first guest byte; macOS stub no-op. Allowlist completeness box-validated
       (Linux runtime check) like the firecracker-bridge confinement
-  [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
+  [~] forward proxy https/CONNECT — DESCOPED (superseded): https is handled by
+      the host name-constrained TLS terminator (Stage 2, #761); the guest can't
+      substitute into its own TLS. HTTP_PROXY path stays http-only, fail-closed
+      for https (a placeholder, never a real secret, would be tunneled)
   [x] forward-path signing integration (SigV4 + HMAC)  — prepare_request branches
       on the resolved auth_type, routes SigV4/HMAC through the bind-checked
       endpoint.sign (claim 12, key-never-leaves) and assembles the
@@ -223,23 +226,36 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       hoisted to mvm_hostd::audit (mvmd-reachable library API); mvm-cli shimmed
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
   [ ] signed delta-image distribution (unowned — needs a home)
-  [ ] live Vz WS-2 round-trip validation + fork semantic-A spike — BLOCKED on
-      Plan 183 (builder-VM egress lockdown breaks every uncached flake build)
+  [x] live Vz WS-2 round-trip validation + fork semantic-A spike — RUN
+      2026-06-12 via Plan 183 WS-D: first live Vz workload boot; vm_full
+      create + pause/resume proven; semantic-A ANSWERED (VZ pins machine-state
+      restore to the saved device config → stay semantic B; live two-copy fork
+      goes through fs_quick). Vz checkpoint-integration gaps → Plan 183
+      follow-ups.
 
-PLAN 183 — Builder-VM egress posture + net boot 🟡 WS-A landed
+PLAN 183 — Builder-VM egress posture + net boot ✅ DONE (follow-ups tracked in plan)
+  Last updated: 2026-06-12
+  [x] follow-ups: fs_quick-on-Vz (pause-aware gate) + vm_full restore (gvproxy re-spawn, idempotent cleanup)
   Diagnosis proven 2026-06-11: boot-time install_egress_lockdown (OUTPUT DROP,
   proxy-uid-only) applied to the whole builder VM and dropped every nix fetch.
   WS-A moves the lockdown to the install arm (fail-closed) + opens egress for
   flake-build dispatches; the QEMU-only boot skip is deleted. Plus (WS-B/C):
   Vz builder gets no DHCP lease (eth0 unconfigured), and /etc/resolv.conf is a
-  read-only baked file so leased DNS never lands.
+  read-only baked file so leased DNS never lands. WS-E fixes two workload-boot
+  defects: kernel fallback for kernel-less images (vz_objc Vz supervisor) and the
+  unbound gvproxy datagram socket (root cause of the DHCP/DNS no-reply).
   [x] WS-A egress posture per arm (boot open; install-arm locked, fail-closed;
       per-job posture in persistent dispatch; drop QEMU-only boot skip) — landed
-  [ ] WS-B Vz DHCP no-lease: static gvproxy fallback (shared stage0 ioctl
-      helpers) + time-boxed datagram-path root cause
-  [ ] WS-C writable /run-bind-mounted resolv.conf seeded with gateway resolver
-  [ ] WS-D cold E2E proof on macOS + claim-11 install gate still locked +
-      resume Plan 159 live Vz validation
+  [x] WS-B static gvproxy fallback when DHCP yields no lease — static fallback
+      landed; shared guest_net module; DHCP root cause found + fixed in WS-E
+  [x] WS-C writable /run-bind-mounted resolv.conf seeded with gateway resolver
+  [x] WS-E vz workload boot: kernel fallback + bound gvproxy reply socket
+  [x] WS-D E2E proven 2026-06-12: cold dev up green (703 in-builder fetches,
+      0 resolve failures); Vz builder leases post-WS-E; claim-11 gates green;
+      FIRST live Vz workload boot (sleeper, agent on vsock) + WS-2 round-trips:
+      vm_full create ✅ pause/resume ✅; fs_quick-on-Vz, vm_full restore
+      (gvproxy re-spawn), and Vz two-copy fork (fs_quick class; semantic-A
+      answered: VZ pins restore to saved device config) → plan follow-ups
 
 PLAN 124 — Lean guest agent                     🟡 ~65%
   [x] A1/A3 drop tokio+rtnetlink (-27 crates)
@@ -292,24 +308,37 @@ PLAN 126 — Dependency reduction                 🟡 ~25%
   [ ] B1 sigstore — already off default; needs cross-repo mvmd decision (relocate cosign-verify)
   [ ] B3 pgp (168) — SUPERSEDED by plan 160 (drop Alpine seed); security decision
   [ ] B4 aws-lc-rs → ring — BLOCKED upstream (oci-client hardcodes aws-lc; needs a fork)
-  [ ] C1/D1 unify reqwest majors + lock gate
+  [~] C1 reqwest unify — REJECTED/blocked on B4 (0.13 forces aws-lc + transitive 0.12 holdout; no tree collapse)
+  [x] D2 duplicate-major lock-gate — cargo-deny multiple-versions=deny + 23-crate baseline (ratchet); also
+      un-broke the red cargo-deny/cargo-audit jobs: wildcard-paths, mvm-verify license, 2 unmaintained ignores,
+      and FIXED RUSTSEC-2026-0119 (hickory-proto DoS) by bumping hickory-resolver 0.24→0.26 (collapsed its dup)
+  [ ] D1 forbidden-dep gate (check-forbidden-deps extension) — still open
 
 PLAN 153 — CLI directory split                  ✅ DONE (subsumed into Plan 178)
   [x] image.rs → image/ ; catalog.rs → catalog/ (last two flat files)
 
-PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 in progress (gate cleared: Plan 152 WS-B + save/pause landed)  (ADR-076)
+PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 convergence LANDED (#806) — 4 backends + mock; one vz AVF path. Remaining to tick DONE: hardware smoke (host-gated) + cosmetic rename slice  (ADR-076)
   [x] Phase 1 delete docker (+ dead Tier-3 banner subsystem)
   [x] Phase 1 delete cloud_hypervisor (+ ch_runtime, ch-bootcheck)
   [x] Phase 1 fold microvm_nix → qemu
   [x] Phase 1 prune dead CI lane + Justfile setup recipe
   [x] Phase 1 verify: doctor lists {firecracker,libkrun,vz,qemu,apple-container,mock};
       4837/4837 workspace tests (excl mvm-backend SIGKILL bin); clippy/fmt clean
-  [ ] Phase 2 — AVF convergence onto supervisor vz + shared console transport
-      + drop apple-container. IN PROGRESS (gate cleared: Plan 152 WS-B + save/pause
-      landed). Branch feat/plan-177-phase2-avf: apple_container backend +
-      providers/ deleted, AnyBackend converted, macOS-26 default→vz, console/
-      transport reattached, codesign + port-proxy relocated; remaining = the
-      mvmctl dev dev-daemon + up -d launchd convergence, CoW port, hardware smoke.
+  [x] Phase 2 — AVF convergence onto supervisor vz — MERGED #806:
+      apple_container backend + providers/ deleted; AnyBackend converted; macOS-26
+      default→vz; CoW per-instance rootfs ported (#789); console/transport/codesign/
+      port-proxy relocated; `mvmctl dev` + `up -d` converged onto VzPersistentBuilderVm
+      (detached supervisor outlives CLI, `dev down` reaps by PID file — no launchd);
+      `has_apple_containers`→`is_vz_default_tier`; all `"apple-container"` selectors
+      collapsed to vz; backend.rs tests repointed; ADR-002 tier matrix pruned
+      (docker/CH/apple-container rows dropped, microvm.nix→QEMU); CLAUDE.md updated.
+  [ ] Remaining before Phase 2 ticks fully DONE: (a) live macOS-26 vz `dev up`/`up`
+      hardware smoke (host-gated — deferred while a parallel session is mid-vz-debug
+      on this host + known in-flight dev-boot bugs would confound attribution);
+      (b) cosmetic rename slice — the env module file `apple_container.rs`,
+      `AppleContainerEnv`, `MicrovmBackend::AppleContainer`, and the objc2
+      `mvm_apple_container_*` cdecl symbols still carry the old name (functional
+      path is already vz).
 
 PLAN 178 — CLI surface consolidation (~56→~28)   ✅ DONE (dir-purity deferred)  (ADR-077)
   [x] lock tree (D1–D6) + hide internal subprocess commands
