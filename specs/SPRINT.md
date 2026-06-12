@@ -2573,6 +2573,62 @@ idle-TTL/keepalive contract (W2) for its density loop (Plan 170 WS-D).
   workload; auth-off / caps-off defaults; baked-in coding agents; any
   multi-tenant HTTP listener or tenant auth in mvm (mvmd per ADR-070 §5).
 
+## Sprint 62 — ADR-080 Tier-0 wasm preview → microVM ship (in flight)  [`adrs/080-wasm-preview-promotion-and-capability-policy.md`](adrs/080-wasm-preview-promotion-and-capability-policy.md)
+
+### Why this sprint
+
+ADR-080 decides the bridge from a no-claims browser/wasm dev-preview tier (the
+ADR-069 `wasm-sandbox` backend, recorded as off-the-isolation-scale "Tier 0" in
+ADR-002) to a claims-bearing production microVM: promotion is a **trace, never a
+snapshot** (record-mode → IR → audited rebuild); one capability policy projects
+to two enforcement fidelities (WASI fine-grained / kernel coarse); and eight
+fail-closed preconditions (P1–P8 in ADR-080 §8) gate the promotion path until
+each has a witness. The sprint lands those preconditions incrementally.
+
+### Workstream breakdown
+
+- **P5 — capability projection seam** ✅ LANDED (Plan 188, #801): `mvm-core::policy::projection`
+  — `canonicalize_effective`/`to_wasi_grants`/`clamp`, mandatory-deny + rebinding
+  refusal, mutation-verified cross-projection + clamp property witnesses.
+- **P1/P3/P4 — trace hardening** ✅ LANDED (Plan 186, #809): op/size/duplicate limits +
+  fuzz harness (P1); content-digest capture + verify + `--recording-sha256` (P3);
+  `Divergence` gate on `run --mode plan` (P4). The P2 interim pin **caught + fixed a
+  live shell-injection** in the FilesWrite lowering (path now base64-encoded into the
+  hook; verified against `/bin/sh`).
+- **P7 — secret-scan admission** ✅ LANDED (Plan 187, #811): `scan_recording_for_secrets`
+  (env/argv/decoded-file payloads via the Plan 129 `SecretsScanner`) hard-refuses
+  `run --mode plan` on embedded raw secrets; `SecretRef` skipped; compile warns.
+- **P5 kernel close-out** 🔴 spec'd (Plan 190): kernel L4 egress decision converges on
+  `CanonicalEgress::permits` via a lenient `canonicalize_l4`, deleting the `L4Policy`
+  duplicate, with **zero claim-10 behaviour change** (whole-policy-fail-closed variant
+  rejected).
+- **ADR-002 Tier-0 note** ✅ LANDED (#816): records the `wasm-sandbox` backend off the
+  isolation scale + the Tier-0 single-principal threat-model framing.
+
+### Deferred (ADR-080 §8 ledger)
+
+- **P2 full** — declarative IR file-materialization field replacing the shell hook.
+- **P6** — preview-fetched component digests carried into the IR; mutable refs refused
+  under `--prod`.
+- **P8** — single-session relay primitive (websocket session-token binding + wasmtime
+  fuel/memory/wall-clock caps); multi-principal host execution must run wasmtime-in-microVM.
+- The **WASI-context mapping** (`WasiEgress` → `WasiCtxBuilder`) for the in-microVM
+  wasmtime runner.
+- Multi-tenant streaming service, sessions, auth, billing — **mvmd's**, per ADR-070.
+
+### Sprint 62 success criteria
+
+- Every ADR-080 §8 precondition that gates the promotion path either has a landed
+  witness or fails closed (promotion refused) until it does. `xtask
+  check-claim-catalog` stays green; no ADR-002 numbered claim regresses.
+
+### Non-goals (explicit)
+
+- Asserting the wasm-in-microVM "double posture" as a claim before the wasmtime
+  runner exists (the unwitnessed-claim anti-pattern ADR-002 guards against).
+- Any production isolation claim for Tier 0 — it is single-principal dev preview,
+  by design.
+
 ## Completed Sprints
 
 - [01-foundation.md](sprints/01-foundation.md)

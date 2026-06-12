@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-12** (Plan 188 projection seam landed)
+**Last updated: 2026-06-12** (ADR-080 program batch landed: Plans 188/186/187)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -37,7 +37,10 @@ details** below for the workstream-level state.
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
-- [ ] **PLAN 184** — Capability projection seam (ADR-080 P5) · 🟢 seam + witnesses landed; kernel-side wiring + WASI-context mapping deferred
+- [x] **PLAN 188** — Capability projection seam (ADR-080 P5) · ✅ LANDED (#801); kernel-side wiring spec'd as Plan 190; WASI-context mapping deferred
+- [x] **PLAN 186** — Trace hardening (ADR-080 P1/P3/P4 + hardened P2 pin) · ✅ LANDED (#809; caught + fixed a live shell-injection in the FilesWrite lowering)
+- [x] **PLAN 187** — Secret-scan admission gate (ADR-080 P7) · ✅ LANDED (#811)
+- [ ] **PLAN 190** — Kernel egress decision converges on CanonicalEgress (ADR-080 P5 close-out) · 🔴 spec'd, not started (lenient L4 lowering, zero claim-10 behaviour change)
 
 ## Plan details
 
@@ -437,7 +440,7 @@ PLAN 181 — App-builder product surface           🔴 NOT STARTED  (ADR-079; m
   socket, no host-path mounts into a workload, no auth-off/caps-off defaults, no
   baked-in agents, no multi-tenant HTTP/auth in mvm (mvmd per ADR-070 §5/Plan 33).
 
-PLAN 184 — Capability projection seam (ADR-080 P5)  🟢 seam + witnesses LANDED; enforcement wiring deferred
+PLAN 188 — Capability projection seam (ADR-080 P5)  ✅ LANDED (#801) — was numbered 184 pre-merge; renumbered when main claimed 184
   [x] Proto + CanonicalRule atom (projection seam module created)
   [x] CanonicalEgress decision set with unconditional mandatory-deny
   [x] canonicalize_effective — L4 rules leg
@@ -449,9 +452,31 @@ PLAN 184 — Capability projection seam (ADR-080 P5)  🟢 seam + witnesses LAND
       (ADR-080 §8 P5 witness names: cross_projection_consistency_property,
        clamp_never_widens_property, rebinding_pin_into_metadata_range_refuses)
   [x] pub use re-exports from mvm-core::policy; ADR-080 P5 row updated
-  [ ] kernel-side wiring: LiveL4Gate/PlanFlowPolicy consume CanonicalEgress — deferred
+  [ ] kernel-side wiring: LiveL4Gate/PlanFlowPolicy consume CanonicalEgress — spec'd as Plan 190
   [ ] WASI-context mapping: WasiEgress → WasiCtxBuilder in the wasmtime runner — deferred
   NOTE: 41 tests (39 unit + 2 property witnesses), mutation-verified. No new dependencies.
+
+PLAN 186 — Trace hardening (ADR-080 P1/P3/P4 + hardened P2 pin)  ✅ LANDED (#809)
+  [x] P1: MAX_RECORDED_OPS (1024) + 8 MiB FilesWrite cap + DuplicateFilesWritePath refusal
+  [x] P1: fuzz_runtime_recording harness in security.yml (crates/mvm-sdk/fuzz)
+  [x] P2 (interim, HARDENED): the b64-alphabet pin caught a LIVE shell-injection in the
+      FilesWrite→HookCmd::Shell lowering; fixed by base64-encoding the path too (was
+      single-quote-interpolated); verified injection-safe by executing hooks vs /bin/sh
+  [x] P3: recording_sha256_hex + verify_recording_digest + --recording-sha256; 64 MiB byte cap
+  [x] P4: Divergence vocabulary + require_acknowledged gate on `run --mode plan` (--ack-divergence)
+  [ ] P2 full (declarative IR file-materialization field, replacing the shell hook) — own plan
+  NOTE: P2-full / P6 / P8 remain open in the ADR-080 §8 ledger.
+
+PLAN 187 — Secret-scan admission gate (ADR-080 P7)  ✅ LANDED (#811)
+  [x] scan_recording_for_secrets — env literals + argv + DECODED FilesWrite payloads (Plan 129 SecretsScanner)
+  [x] refuse_embedded_secrets — HARD-refuses `run --mode plan` admission (not acknowledgeable; fix = SecretRef)
+  [x] SecretRef values skipped (Sigv4Params.access_key_id = public AKIA half, correctly not flagged); compile warns
+  [ ] paste-time detector — deferred with the browser preview tier
+
+PLAN 190 — Kernel egress decision converges on CanonicalEgress (ADR-080 P5 close-out)  🔴 spec'd, not started
+  decision: lenient canonicalize_l4 (no mandatory-deny-overlap refusal) → L4PolicyScan via
+  CanonicalEgress::permits; deletes the L4Policy/LiveL4Gate duplicate; ZERO claim-10 behaviour
+  change (rejected the whole-policy-fail-closed variant). Depends on Plan 188 (landed).
 ```
 
 ## Security claims
