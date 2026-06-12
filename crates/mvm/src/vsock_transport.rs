@@ -5,11 +5,9 @@
 //! (or its mode-0700 proxy socket) behind one trait, so callers that
 //! just need "give me a connected stream to vsock port `P` on VM `V`"
 //! don't have to know which backend the VM is running under. Before
-//! this trait, every
-//! caller open-coded the same `if let Ok(stream) =
-//! mvm_backend::providers::apple_container::vsock_connect(...) { ... } else { ... }`
-//! ladder; new backends or backend changes had to chase down every
-//! occurrence.
+//! this trait, every caller open-coded the same per-backend
+//! `vsock_connect(...)` if-ladder; new backends or backend changes had
+//! to chase down every occurrence.
 //!
 //! Each impl is stateless apart from configuration captured at
 //! construction time. `connect()` always returns a fresh stream —

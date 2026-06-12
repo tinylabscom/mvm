@@ -308,11 +308,21 @@ PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 
   [x] Phase 1 verify: doctor lists {firecracker,libkrun,vz,qemu,apple-container,mock};
       4837/4837 workspace tests (excl mvm-backend SIGKILL bin); clippy/fmt clean
   [ ] Phase 2 — AVF convergence onto supervisor vz + shared console transport
-      + drop apple-container. IN PROGRESS (gate cleared: Plan 152 WS-B + save/pause
-      landed). Branch feat/plan-177-phase2-avf: apple_container backend +
-      providers/ deleted, AnyBackend converted, macOS-26 default→vz, console/
-      transport reattached, codesign + port-proxy relocated; remaining = the
-      mvmctl dev dev-daemon + up -d launchd convergence, CoW port, hardware smoke.
+      + drop apple-container. Code COMPLETE on feat/plan-177-phase2-avf (PR open):
+      apple_container backend + providers/ deleted; AnyBackend converted; macOS-26
+      default→vz; CoW per-instance rootfs ported (#789); console/transport/codesign/
+      port-proxy relocated; `mvmctl dev` + `up -d` converged onto VzPersistentBuilderVm
+      (detached supervisor outlives CLI, `dev down` reaps by PID file — no launchd);
+      `has_apple_containers`→`is_vz_default_tier`; all `"apple-container"` selectors
+      collapsed to vz; backend.rs tests repointed. Workspace check + clippy + fmt
+      clean; mvm-cli/mvm-build nextest green (mvm-backend tests are CI-only — local
+      codesign SIGKILL). Remaining before tick: (a) live macOS-26 vz `dev up`/`up`
+      hardware smoke (deferred — a parallel session is mid-vz-debug on this host, and
+      known in-flight dev-boot bugs would confound attribution); (b) cosmetic rename
+      slice — the env module file `apple_container.rs`, `AppleContainerEnv`,
+      `MicrovmBackend::AppleContainer`, and the objc2 `mvm_apple_container_*` cdecl
+      symbols still carry the old name (functional path is already vz); (c) ADR-002
+      tier-matrix row prune.
 
 PLAN 178 — CLI surface consolidation (~56→~28)   ✅ DONE (dir-purity deferred)  (ADR-077)
   [x] lock tree (D1–D6) + hide internal subprocess commands
