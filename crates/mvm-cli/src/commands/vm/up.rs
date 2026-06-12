@@ -2103,6 +2103,20 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         }
 
         enforce_shares_if(&admission_main, &start_config.volumes)?;
+        // The Firecracker egress moat (substitution endpoint + nft TAP
+        // redirect) reads the admitted plan from the per-VM state dir
+        // *before* boot, so a secret-bearing plan must be persisted
+        // pre-start — the post-launch persist in `emit_launched_if` is
+        // too late for it. Other backends read the in-memory config.
+        // Fail closed: a secret-declaring workload must not boot without
+        // its substitution path.
+        if effective_hypervisor == "firecracker"
+            && let Some(ctx) = admission_main.as_ref()
+            && !ctx.admitted.plan.secrets.is_empty()
+        {
+            super::plan_persist::write_plan(&ctx.admitted.plan.workload.0, &ctx.admitted.plan)
+                .context("persisting admitted plan for the Firecracker egress moat")?;
+        }
         // Try a warm-pool claim first (auto-named + bridge-admitted
         // launches only; fail-open to cold boot). A claimed VM runs under its standby-id,
         // so rebind `vm_name_owned` for all downstream (agent wait, audit, readiness, stop).
