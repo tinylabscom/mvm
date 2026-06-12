@@ -62,7 +62,9 @@ ed25519-dalek = { workspace = true, features = ["rand_core"] }
 etherparse = { workspace = true }
 sysinfo = { version = "0.30", default-features = false }
 ipnet.workspace = true
-hickory-resolver = { workspace = true, features = ["tokio-runtime"], optional = true }
+# custom-dns pulls hickory 0.26 (needs Rust 1.88); the default build
+# carries no hickory and stays on the workspace 1.85 floor.
+hickory-resolver = { workspace = true, features = ["tokio"], optional = true }
 rand.workspace = true
 regex.workspace = true
 secrecy.workspace = true

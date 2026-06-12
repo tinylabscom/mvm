@@ -110,8 +110,8 @@ The mvm-repo's apparent third consumer — a local `mvm-hostd` daemon at `crates
 
 Two major versions of the same crate inflate the lock + compile time.
 
-- [ ] **Step 1:** `cargo tree -d` (duplicates) — identify the two `reqwest` (and/or `oci-client`) majors + who pulls each.
-- [ ] **Step 2:** Align on one major (bump the lagging consumer, or feature-match). Failing test — `cargo tree -d | grep -E 'reqwest|oci-client'` shows one major each; the OCI + HTTP paths still pass their tests. Commit.
+- [x] **Step 1:** `cargo tree -d` — `reqwest 0.12` is mvm's (mvm-cli/-hostd/-build, on `ring`); `reqwest 0.13` is pulled **only** by `oci-client`. `oci-client` itself splits 0.15/0.16.
+- [~] **Step 2:** **REJECTED — blocked on B4.** Bumping mvm to `reqwest 0.13` to match oci-client does **not** collapse the tree: a transitive `0.12` holdout remains, the duplicate-major count is unchanged, and 0.13's `rustls` feature forces aws-lc-rs (the B4 block). The unify only lands once `oci-client` is forked (B4 Step 0). Until then, `reqwest` is a recorded entry in the duplicate-major baseline (D2), not a free cut.
 
 ## Phase D — lock it
 
@@ -119,6 +119,20 @@ Two major versions of the same crate inflate the lock + compile time.
 
 - [ ] **Step 1:** Extend `xtask check-forbidden-deps` (exists) to fail if `sigstore`, `opendal`, `pgp`, or `aws-lc-rs` re-enter the default `mvmctl` closure (an allow-list of off-by-default features for the deliberately-gated ones), **and** if `tokio` re-enters `mvm-core`'s default closure (the B5 runtime-free-core assertion). Failing test — adding any one back trips the gate.
 - [ ] **Step 2:** Final measure — total before/after in `dep-baseline.md`; the sum of B1–B4 + C1 is the headline reduction (alongside 124's ~25–35 agent crates). Commit. Wire the gate into `ci.yml` (with 128), alongside 156's sibling `check-binary-size` gate.
+
+### Task D2: duplicate-major lock-gate (cargo-deny ratchet) — DONE
+
+The forbidden-dep gate (D1) stops the four named heavy deps re-entering;
+this complements it by freezing the *whole* duplicate-major set so no
+new second-major creeps in silently. Reuses the existing cargo-deny job
+rather than a new xtask.
+
+- [x] **Step 1:** `deny.toml` `[bans] multiple-versions` flipped `warn`→`deny` with an audited `skip` baseline (the 23 crates cargo-deny's default-feature graph already carries, grouped by why). A brand-new duplicated crate now fails CI; the existing cuts (tokio drop, opendal→object_store, Alpine seed) can't silently regress. Verified: dropping any baseline entry trips `error[duplicate]`.
+- [x] **Step 2 (restore the gate to green):** the cargo-deny + cargo-audit jobs had been red on main since ~2026-06-07 from drift unrelated to duplicates — fixed in the same change so the ratchet means something:
+  - `allow-wildcard-paths = true` — a versionless `{ path = "../mvm-verify" }` read as a wildcard; path deps are first-party source, not a registry `*`.
+  - `mvm-verify` was `unlicensed` — added `license.workspace = true`.
+  - Two new `unmaintained` advisories accepted with rationale (`RUSTSEC-2026-0173` proc-macro-error2, `RUSTSEC-2025-0134` rustls-pemfile); cargo-audit `--ignore` flags kept in sync.
+  - `RUSTSEC-2026-0119` (hickory-proto 0.24 O(n²) name-compression DoS): **fixed, not ignored** — bumped `hickory-resolver 0.24→0.26` (migrated the `custom-dns` resolver to the 0.26 `TokioResolver` builder). Also collapsed the `hickory-proto` 0.24/0.26 duplicate.
 
 ## Acceptance
 
@@ -132,6 +146,8 @@ Two major versions of the same crate inflate the lock + compile time.
 
 - [ ] The mvmd cosign-verify relocation is an **mvmd plan** (this plan only removes it from `mvmctl`).
 - [ ] Periodic `cargo tree -d` sweep as the dashboard (127) surfaces new duplicates.
+- [ ] Migrate off the unmaintained `rustls-pemfile` (RUSTSEC-2025-0134) to `rustls_pki_types::pem` and drop the advisory ignore. Direct dep of mvm-hostd (`certs.rs`, `terminator/tls.rs`).
+- [ ] Shrink the D2 baseline as upstream majors converge (e.g. the windows-* families, the rustix/linux-raw-sys split) or `oci-client` is forked (drops `reqwest`).
 
 ## Self-review
 

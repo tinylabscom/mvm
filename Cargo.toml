@@ -262,7 +262,7 @@ rtnetlink = "0.14"
 async-trait = "0.1"
 
 # Pure-Rust DNS resolver, used only by the opt-in custom-dns feature.
-hickory-resolver = "0.24"
+hickory-resolver = "0.26"
 # DNS server/protocol stack for the in-guest addon DNS resolver.
 hickory-server = "0.26"
 hickory-proto = "0.26"

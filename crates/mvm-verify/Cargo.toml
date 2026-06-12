@@ -3,6 +3,7 @@ name = "mvm-verify"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 description = "Dependency-light, wasm-clean verifier for mvm's chain-signed audit log. No filesystem, no mvm-* deps — feed it bytes and an Ed25519 public key."
 
