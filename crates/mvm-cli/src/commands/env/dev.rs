@@ -121,7 +121,7 @@ fn select_dev_backend(
     }
     // 3-6. Standard auto-detect tree. macOS 26+ → the vz supervisor
     // backend (the in-process Apple Container dev daemon converged onto
-    // it — Plan 177 AVF convergence).
+    // it).
     if has_apple_containers {
         DevBackend::Vz
     } else if matches!(plat, Platform::MacOS) && has_libkrun {

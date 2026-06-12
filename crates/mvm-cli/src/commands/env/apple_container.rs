@@ -1,7 +1,7 @@
 //! Dev-VM image plumbing + host-backed Nix store disk + stale-daemon
 //! hygiene. The dev VM itself boots on the vz supervisor backend
 //! (`dev.rs::cmd_dev_vz`); the in-process Apple Container daemon model
-//! this module once hosted is deleted (Plan 177 AVF convergence).
+//! this module once hosted is deleted.
 //!
 //! Extracted from `commands/mod.rs` as a pure mechanical refactor —
 //! no behavior changes.
