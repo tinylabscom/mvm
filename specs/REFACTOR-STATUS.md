@@ -226,7 +226,7 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
   [ ] live Vz WS-2 round-trip validation + fork semantic-A spike — BLOCKED on
       Plan 183 (builder-VM egress lockdown breaks every uncached flake build)
 
-PLAN 183 — Builder-VM egress posture + net boot 🟡 WS-A landed
+PLAN 183 — Builder-VM egress posture + net boot 🟡 WS-A/B/C landed; WS-D (E2E proof) remains
   Diagnosis proven 2026-06-11: boot-time install_egress_lockdown (OUTPUT DROP,
   proxy-uid-only) applied to the whole builder VM and dropped every nix fetch.
   WS-A moves the lockdown to the install arm (fail-closed) + opens egress for

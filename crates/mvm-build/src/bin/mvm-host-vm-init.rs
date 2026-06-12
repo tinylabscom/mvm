@@ -2209,36 +2209,14 @@ mod linux {
         }
     }
 
-    /// Encode a Linux interface name into the fixed-size `ifr_name`
-    /// byte array used by SIOCG/SIOCSIFFLAGS. Linux caps interface
-    /// names at `IFNAMSIZ` (16) bytes including the NUL terminator,
-    /// so the longest valid input is 15 bytes. Split out from
-    /// [`bring_iface_up`] so the bounds check is unit-testable
-    /// without making a real syscall.
-    fn encode_iface_name(iface: &str) -> Result<[libc::c_char; libc::IFNAMSIZ], String> {
-        let bytes = iface.as_bytes();
-        if bytes.len() >= libc::IFNAMSIZ {
-            return Err(format!(
-                "interface name '{iface}' is {} bytes; Linux IFNAMSIZ caps it at {}",
-                bytes.len(),
-                libc::IFNAMSIZ - 1,
-            ));
-        }
-        let mut buf = [0 as libc::c_char; libc::IFNAMSIZ];
-        for (i, &b) in bytes.iter().enumerate() {
-            buf[i] = b as libc::c_char;
-        }
-        Ok(buf)
-    }
-
     /// Bring a network interface administratively up via
     /// `ioctl(SIOCSIFFLAGS, IFF_UP)`. Equivalent to
     /// `ip link set dev <iface> up`, but issued directly so we
-    /// don't pin a new path-dependency in the ur-seed rootfs and
+    /// don't pin a new path-dependency in the builder rootfs and
     /// the error message names the failing ioctl. Called before
     /// `udhcpc` in [`setup_network`].
     fn bring_iface_up(iface: &str) -> Result<(), String> {
-        let name = encode_iface_name(iface)?;
+        let name = mvm_build::guest_net::encode_iface_name(iface)?;
 
         // SAFETY: socket(2) returns -1 on error (checked) or a
         // valid fd. We close it on every return path below.
@@ -2936,36 +2914,6 @@ mod linux {
             assert!(virtiofs_mount_flags("mvm-bins").contains(MsFlags::MS_RDONLY));
             assert_eq!(virtiofs_mount_flags("out"), MsFlags::empty());
             assert_eq!(virtiofs_mount_flags("job"), MsFlags::empty());
-        }
-
-        #[test]
-        fn encode_iface_name_eth0_pads_with_nul() {
-            let buf = encode_iface_name("eth0").expect("eth0 fits");
-            assert_eq!(buf[0] as u8, b'e');
-            assert_eq!(buf[1] as u8, b't');
-            assert_eq!(buf[2] as u8, b'h');
-            assert_eq!(buf[3] as u8, b'0');
-            assert_eq!(buf[4] as u8, 0, "remainder NUL-padded");
-            assert_eq!(buf[libc::IFNAMSIZ - 1] as u8, 0);
-        }
-
-        #[test]
-        fn encode_iface_name_max_length_succeeds() {
-            // 15 bytes + 1 NUL = exactly IFNAMSIZ.
-            let max = "a".repeat(libc::IFNAMSIZ - 1);
-            let buf = encode_iface_name(&max).expect("15-byte name fits");
-            for byte in buf.iter().take(libc::IFNAMSIZ - 1) {
-                assert_eq!(*byte as u8, b'a');
-            }
-            assert_eq!(buf[libc::IFNAMSIZ - 1] as u8, 0, "NUL terminator");
-        }
-
-        #[test]
-        fn encode_iface_name_too_long_errors() {
-            let over = "a".repeat(libc::IFNAMSIZ);
-            let err = encode_iface_name(&over).expect_err("IFNAMSIZ-byte name rejected");
-            assert!(err.contains("IFNAMSIZ"), "err mentions limit: {err}");
-            assert!(err.contains(&over), "err includes the offending name");
         }
 
         #[test]
