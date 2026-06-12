@@ -18,7 +18,7 @@ authors.workspace = true
 # facade-only re-export pattern.
 #
 # Lives here:
-#   - apple_container.rs   (macOS 26+ Apple Virtualization.framework)
+#   - vz.rs                (Apple Virtualization.framework, macOS 13+)
 #   - libkrun.rs           (raw libkrun shim — Linux KVM / macOS HVF)
 #
 # Stays in `mvm` (a later move will pull these out):

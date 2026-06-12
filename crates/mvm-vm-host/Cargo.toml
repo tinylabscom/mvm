@@ -50,7 +50,7 @@ path = "src/bin/mvm-vz-supervisor.rs"
 [dependencies]
 mvm-core = { workspace = true }
 mvm-hostd = { workspace = true }
-# Codesigning gate on macOS (apple_container::ensure_signed) for the
+# Codesigning gate on macOS (codesign::ensure_signed) for the
 # libkrun supervisor bin.
 mvm-backend = { workspace = true }
 # vsock port constants (WORKLOAD_EXIT_PORT) for the exit-capture thread.
@@ -77,7 +77,7 @@ tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "signal", "sync", "net", "io-util"] }
 
 # Apple Virtualization.framework objc2 stack — macOS-only, already in the
-# workspace lock (mvm-backend's apple_container path carries the same set, so
+# workspace lock (mvm-backend's vz path carries the same set, so
 # no new third-party dependency).
 [target.'cfg(target_os = "macos")'.dependencies]
 # vsock proxy: dup() the guest connection fd → AsyncFd splice.
