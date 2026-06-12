@@ -310,7 +310,7 @@ pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError>
                 // base64 tokens, which contain no shell metacharacters.
                 let path_b64 = base64::engine::general_purpose::STANDARD.encode(path.as_bytes());
                 let line = format!(
-                    "p=$(printf '%s' '{path_b64}' | base64 -d) && mkdir -p \"${{p%/*}}\" && printf '%s' '{b64}' | base64 -d > \"$p\"",
+                    "p=$(printf '%s' '{path_b64}' | base64 -d) && mkdir -p \"$(dirname \"$p\")\" && printf '%s' '{b64}' | base64 -d > \"$p\"",
                     path_b64 = path_b64,
                     b64 = bytes_b64,
                 );
@@ -765,5 +765,43 @@ mod tests {
             err.to_string().contains("stat") || err.to_string().contains("unknown"),
             "got: {err}"
         );
+    }
+
+    /// Lower a FilesWrite hook and actually run it under /bin/sh in a
+    /// temp dir, proving the generated line creates the file with the
+    /// intended bytes. `rel` is joined onto the temp dir so the test
+    /// never writes outside it.
+    #[cfg(unix)]
+    fn files_write_roundtrip_under_tempdir(rel: &str, bytes: &[u8]) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join(rel);
+        let ops = vec![
+            write_op(target.to_str().unwrap(), bytes),
+            start_op(&["/bin/true"]),
+        ];
+        let wl = compile_recording(&rec_with_ops(ops)).expect("must lower");
+        let HookCmd::Shell { line } = &wl.apps[0].hooks.before_start[0] else {
+            panic!("expected Shell hook");
+        };
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(line)
+            .status()
+            .expect("run hook");
+        assert!(status.success(), "hook failed for {rel}: {line}");
+        let got = std::fs::read(&target).expect("file must exist");
+        assert_eq!(got, bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_write_root_level_path_materializes() {
+        files_write_roundtrip_under_tempdir("topfile", b"root-level");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_write_slashless_nested_path_materializes() {
+        files_write_roundtrip_under_tempdir("sub/deep/conf.toml", b"nested");
     }
 }
