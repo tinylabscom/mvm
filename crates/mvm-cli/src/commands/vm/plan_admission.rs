@@ -436,6 +436,7 @@ mod tests {
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            audit_labels: Default::default(),
         }
     }
 
@@ -1043,5 +1044,31 @@ mod tests {
                 None => std::env::remove_var("MVM_DATA_DIR"),
             }
         }
+    }
+
+    #[test]
+    fn caller_audit_labels_flow_through_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut input = fixture_input("vm-label");
+        input.audit_labels.insert(
+            "origin.descriptor".to_string(),
+            "blake3:testvalue".to_string(),
+        );
+        let admitted = admit_for_run(
+            &input,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            None,
+        )
+        .expect("happy path");
+        assert_eq!(
+            admitted.plan.audit_labels["origin.descriptor"],
+            "blake3:testvalue"
+        );
+        // Profile-derived keys must still be present and authoritative.
+        assert!(!admitted.plan.audit_labels["intent"].is_empty());
+        assert!(!admitted.plan.audit_labels["admission_profile"].is_empty());
+        assert_eq!(admitted.plan.audit_labels["seccomp_tier"], "standard");
     }
 }

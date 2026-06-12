@@ -27,5 +27,5 @@ pub use commands::run;
 /// Synthesis produces an unsigned plan and confers no authority; signing and
 /// admission still gate execution.
 pub mod plan_builder {
-    pub use crate::commands::vm::plan_builder::{synthesize_plan, SynthesisInput};
+    pub use crate::commands::vm::plan_builder::{SynthesisInput, synthesize_plan};
 }

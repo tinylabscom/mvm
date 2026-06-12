@@ -43,11 +43,11 @@ pub use signing::{
     secrets_from_signed_json, sign_plan, tenant_from_signed_json, verify_plan,
 };
 pub use types::{
-    AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditTaxonomy,
-    DepsVolumeBinding, DepsVolumeBindingError, FsPolicyRef, HostShareGrant, KeyRotationSpec, Nonce,
-    NonceParseError, PlanId, PlanSeccompTier, PlanSeccompTierParseError, PolicyRef,
-    PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding, SecretReleasePolicy,
-    SecretSource, ShareKind, SignedImageRef, TenantId, TimeoutSpec, Variant, WorkloadId,
-    WorkloadIntent,
+    AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
+    AuditTaxonomy, DepsVolumeBinding, DepsVolumeBindingError, FsPolicyRef, HostShareGrant,
+    KeyRotationSpec, Nonce, NonceParseError, PlanId, PlanSeccompTier, PlanSeccompTierParseError,
+    PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
+    SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef, TenantId, TimeoutSpec, Variant,
+    WorkloadId, WorkloadIntent,
 };
 pub use validity::{NonceStore, PlanValidityError, check_window};
