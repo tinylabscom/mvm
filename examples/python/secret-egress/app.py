@@ -14,7 +14,7 @@ Set the secret on the host first (the value is piped, never on argv):
 
 Run it locally on a /dev/kvm host:
 
-    mvmctl compile examples/python/secret-egress/app.py --out /tmp/secret-egress
+    mvmctl build compile examples/python/secret-egress/app.py --out /tmp/secret-egress
     mvmctl up --flake /tmp/secret-egress
 
 `compile` strips the managed `SecretRef` out of the baked image (secret-free

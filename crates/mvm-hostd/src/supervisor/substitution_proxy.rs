@@ -381,6 +381,20 @@ pub enum FromPlanError {
     Forward(#[from] ForwardError),
 }
 
+/// Inputs to [`SubstitutionService::from_plan`] — the admitted plan's secret
+/// bindings plus the host substrate (stores, redaction, optional TLS
+/// intermediate, optional audit recorder) the per-VM endpoint assembles from.
+pub struct FromPlanInputs<'a> {
+    pub plan_secrets: &'a [SecretBinding],
+    pub tenant: &'a str,
+    pub bindings: &'a dyn BindingStore,
+    pub secret_store: Arc<dyn SecretStore>,
+    pub forward_timeout_secs: u64,
+    pub redaction: mvm_core::policy::RedactionPolicy,
+    pub tls_intermediate: Option<mvm_core::crypto::egress_ca::VmIntermediate>,
+    pub recorder: Option<Recorder>,
+}
+
 /// Forwards a prepared (credential-substituted) request to the real
 /// destination and returns its response — the real-TLS leg of the endpoint.
 /// A trait so the listener can be tested with a mock that records the
@@ -571,14 +585,18 @@ impl SubstitutionService {
     /// supervisor injects into the guest. The caller binds the listener and
     /// calls [`Self::serve`].
     pub fn from_plan(
-        plan_secrets: &[SecretBinding],
-        tenant: &str,
-        bindings: &dyn BindingStore,
-        secret_store: Arc<dyn SecretStore>,
-        forward_timeout_secs: u64,
-        redaction: mvm_core::policy::RedactionPolicy,
-        tls_intermediate: Option<mvm_core::crypto::egress_ca::VmIntermediate>,
+        inputs: FromPlanInputs<'_>,
     ) -> Result<(Arc<Self>, HandedPlaceholders), FromPlanError> {
+        let FromPlanInputs {
+            plan_secrets,
+            tenant,
+            bindings,
+            secret_store,
+            forward_timeout_secs,
+            redaction,
+            tls_intermediate,
+            recorder,
+        } = inputs;
         let (registry, handed) = assemble_registry(plan_secrets, tenant, bindings)?;
         let resolver: Arc<dyn SecretResolver> = Arc::new(LocalResolver::new(tenant, secret_store));
         let forwarder: Arc<dyn Forwarder> = Arc::new(ReqwestForwarder::new(forward_timeout_secs)?);
@@ -586,6 +604,9 @@ impl SubstitutionService {
         service = service.with_redaction_policy(redaction);
         if let Some(intermediate) = tls_intermediate {
             service = service.with_tls_intermediate(intermediate);
+        }
+        if let Some(recorder) = recorder {
+            service = service.with_recorder(recorder);
         }
         Ok((Arc::new(service), handed))
     }
@@ -2001,15 +2022,16 @@ mod server_tests {
                 address: "openai".into(),
             },
         }];
-        let (_service, handed) = SubstitutionService::from_plan(
-            &plan,
-            "local",
-            &bindings,
+        let (_service, handed) = SubstitutionService::from_plan(FromPlanInputs {
+            plan_secrets: &plan,
+            tenant: "local",
+            bindings: &bindings,
             secret_store,
-            30,
-            mvm_core::policy::RedactionPolicy::default(),
-            None,
-        )
+            forward_timeout_secs: 30,
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            tls_intermediate: None,
+            recorder: None,
+        })
         .unwrap();
         assert_eq!(handed.len(), 1);
         assert_eq!(handed[0].0, "OPENAI_API_KEY");
@@ -2068,15 +2090,16 @@ mod server_tests {
                 },
             }],
         };
-        let (service, _handed) = SubstitutionService::from_plan(
-            &plan,
-            "local",
-            &bindings,
+        let (service, _handed) = SubstitutionService::from_plan(FromPlanInputs {
+            plan_secrets: &plan,
+            tenant: "local",
+            bindings: &bindings,
             secret_store,
-            30,
-            policy,
-            None,
-        )
+            forward_timeout_secs: 30,
+            redaction: policy,
+            tls_intermediate: None,
+            recorder: None,
+        })
         .unwrap();
         let resolved = crate::supervisor::redaction_resolve::resolve(
             service.redaction_policy(),

@@ -34,7 +34,7 @@ use mvm_hostd::keyholder::{
 use mvm_hostd::supervisor::audit_file::FileAuditSigner;
 use mvm_hostd::supervisor::audit_recorder::Recorder;
 use mvm_hostd::supervisor::substitution_proxy::{
-    ForwardError, ForwardResponse, Forwarder, PreparedRequest, SubstitutionService,
+    ForwardError, ForwardResponse, Forwarder, FromPlanInputs, PreparedRequest, SubstitutionService,
 };
 
 /// The sentinel secret value. It must never appear in a guest-facing artifact
@@ -112,15 +112,16 @@ fn handed_placeholders_never_contain_the_secret_value() {
             address: "openai".into(),
         },
     }];
-    let (_service, handed) = SubstitutionService::from_plan(
-        &plan,
-        "local",
-        &bindings,
+    let (_service, handed) = SubstitutionService::from_plan(FromPlanInputs {
+        plan_secrets: &plan,
+        tenant: "local",
+        bindings: &bindings,
         secret_store,
-        30,
-        mvm_core::policy::RedactionPolicy::default(),
-        None,
-    )
+        forward_timeout_secs: 30,
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        tls_intermediate: None,
+        recorder: None,
+    })
     .unwrap();
 
     assert!(

@@ -8,6 +8,52 @@
 
 **Tech Stack:** `mvm-ir` (→ `mvm-sdk::ir` post-121), `mvm-core` (`keystore.rs`, `core::subprocess`), `mvm-hostd`, `mvm-sdk` (the SDK client + `runtime_substitution.rs` repurposed), the egress proxy in `mvm-network` (123). Existing crypto deps only (`ed25519-dalek`, `aes-gcm`, `keyring`, `zeroize`); no new deps.
 
+## ✅ STATUS: COMPLETE (2026-06-11)
+
+Both tiers shipped, security-reviewed, and merged. **Declared** substitution
+(Bearer/Basic inject + SigV4/HMAC sign, claim-12 bind-checked, key never on the
+guest) and **undeclared** detection (entropy + structured-PII + IBAN + curated
+17-vendor secret list + anchored/gazetteer names, per-destination profiles,
+fail-closed) both run on the vsock endpoint **and** the `:80`/`:443` transparent
+terminator, audited (claim 13) and gated by the **claim-12/13 egress leak-gate**
+(Phase F, catalog claim 16). The secret-holding endpoint **self-confines**
+(Landlock + seccomp, box-validated on a 6.1 kernel). Authoring via SDK
+`mvm.secret(type=,hosts=)` + `mvmctl up --redact` + `mvmctl secret set --type
+sigv4`. Reachable end-to-end: a plan carrying secrets/redaction flows through
+admission → backend → endpoint → live substitution/redaction.
+
+**Resolved open items** (see "Deferred follow-ups (surfaced by the local-launch
+e2e)" below for the per-item detail): terminator-path redaction (#791), live PII
+spans (#792), SigV4/HMAC forward signing (#796), endpoint jailer wrap (#797),
+per-substitution audit recorder in the spawn path, FC kernel-less-workload boot
++ bridge gating + seccomp `sched_getaffinity` (#804), `invoke` empty-stdin
+default.
+
+**Descoped with rationale** (not dangling — each fails closed or is superseded):
+- **Guest forward-proxy `https`/`CONNECT`** → **superseded.** The decided
+  SDK-free direction (2026-06-08) replaced the `HTTP_PROXY`/guest-proxy model
+  with the host name-constrained TLS **terminator** (Stage 2, #761); `https` is
+  handled by host termination, not guest CONNECT. The guest architecturally
+  *cannot* substitute into its own TLS — which is why the host terminates.
+- **#1b bin-glue for libkrun/FC/Vz supervisors** → **per-backend.** QEMU (the
+  validated runtime) + the FC microvm path spawn the endpoint; the other
+  backends' bin glue is tracked under each backend, not Plan 129.
+- **Separate-process moat for signer/injector** → **delivered by the jailer
+  wrap.** The endpoint (which holds the in-process signer/injector) now
+  self-confines with Landlock + seccomp, bounding a compromise to that VM's
+  bound secrets. A further jailed sub-bin is optional hardening, not a gap.
+- **Hardware-sealed signing** → out of scope per ADR-002 (hardware attestation
+  is named out-of-scope); the software path is the shipped default.
+- **OAuth/JWT signing auth-types, mvmd resolver/rotation** → genuine future
+  work (separate mvmd plan); not part of this plan's scope.
+
+**One spun-out validation, not a code gap: live FC SDK-free egress e2e.** Three
+real bringup bugs were found + fixed live on the dev-kvm box (#804). The next
+wall is builder-VM infra on the box (a cold `nix build` crash), not Plan 129
+logic. The full wire path is validated on QEMU (the box runtime) and every leg
+is unit/integration-tested + box-confirmed in isolation; the FC live boot is a
+backend-bringup task, tracked in `specs/prompts/129-fc-bringup-debug.md`.
+
 ## Status (2026-06-08) — egress-substitution loop wired end-to-end (QEMU); remaining = on-box boot e2e + Python/TS surface
 
 **The full path now exists on `main` (QEMU backend):** `mvmctl up` (secret-bearing plan) → `QemuBackend::start` spawns the `mvm-substitution-endpoint` moat → it opens the encrypted host store, mints opaque placeholders, hands them back (never values) → `invoke` injects `HTTP_PROXY` + placeholders into the workload → the workload's egress hits the in-guest forward proxy → relayed over vsock → the host endpoint substitutes the real credential → real TLS. The guest only ever holds opaque placeholders. PRs #710 (transport), #711 (`RunEntrypoint.env`), #713 (drop dead in-guest ADR-049), #715 (endpoint moat), #717 (QEMU spawn), #718 (invoke env + guest forward proxy). Each leg is unit/integration-tested; the live guest→host boot e2e is the one remaining validation. SDK `secret()` authoring (`type`/`hosts`) + the ADR-049 retirement also landed (#722/#723); the **SDK authoring half is done**.
@@ -157,43 +203,36 @@ The same recipe on `--hypervisor firecracker` boots (after #793) but spawns
 - [x] **SSRF resolver hardcodes port 443 → broke http egress forwards** —
       FIXED in PR #755 (forwarder resolves + SSRF-filters itself, pins the safe
       IPs on the URL's real port via `resolve_to_addrs`). This closed the e2e.
-- [ ] **FC endpoint gap, precisely located:** `should_thread_signed_plan`
-      (`mvm-cli/src/commands/vm/up.rs`) threads the admitted plan onto the
-      backend config only for `qemu` (or `MVM_GATEWAY_BRIDGE=1`), and the
-      endpoint spawn keys off `config.plan_json` — so Firecracker can never
-      spawn the substitution endpoint today. Closing it = thread the plan for
-      `firecracker` + add an FC endpoint-spawn arm (terminator-backend
-      decision: QEMU→passt vs FC).
-- [ ] **FC `up --flake` workload-kernel gap:** mkGuest flake builds emit only
-      `rootfs.ext4`; the FC boot path assumes `{build_dir}/vmlinux` exists and
-      fails with `preparing FC-loadable kernel … No such file or directory`.
-      `--kernel-source download` feeds only the Stage-0 builder, not the
-      workload boot. (libkrun materializes its bundled kernel centrally; QEMU
-      boots the downloaded bzImage.) FC needs the same central
-      kernel-resolution fallback. Box workaround: hand-stage the
-      default-microvm bzImage into the build dir (`ensure_fc_loadable_kernel`
-      extracts the ELF from it).
-- [ ] **Per-substitution audit not wired in the spawned endpoint:** the
-      `SubstitutionService` audit `Recorder` (`secret.substituted` /
-      `placeholder_dropped`) is optional, and the per-VM endpoint `up` spawns
-      runs without it — a live substituting invoke leaves no substitution
-      event in the chain-signed log. Wire the Recorder into the spawn path.
-- [ ] **`invoke` empty-stdin default violates the wire contract:** default
-      stdin is empty, but the wrapper requires a JSON `[args, kwargs]`
-      payload → a bare `invoke --attach` fails with `JSONDecodeError`. Default
-      to `[[], {}]` when no stdin is given (and fix the stale
-      `mvmctl compile` → `mvmctl build compile` docstring in
-      `examples/python/secret-egress/app.py`).
-- [ ] **Forward proxy + `https`/`CONNECT`** — standard clients tunnel `https`
-      through `HTTP_PROXY` via `CONNECT`, hiding headers from the proxy, so
-      substitution only works for `http`/absolute-form today. TLS-destination
-      support needs the proxy to handle `CONNECT` (or the SDK to ship an
-      absolute-form client). The example uses `http://` for this reason.
-- [ ] **Ephemeral serverless `invoke <artifact>`** — today `invoke --attach`
-      dispatches into a running `up` workload; the one-shot ephemeral form needs
-      the `boot_session_vm`/exec transient path wired through plan-64 admission +
-      endpoint spawn + QEMU selection (a cross-subsystem change to the
-      template/session-VM world).
+- [x] **FC endpoint spawn** — the FC microvm path (`spawn_egress_endpoint` /
+      `decode_plan_secrets`) spawns the per-VM endpoint from the state-dir
+      `plan.json` + installs the nft redirect (`wire_egress_substitution`), so
+      Firecracker spawns the substitution endpoint (terminator-backend = FC TAP
+      + nft NAT). The bridge sidecar is gated behind `MVM_GATEWAY_BRIDGE` (#804)
+      while its own confinement lane is finished.
+- [x] **FC `up --flake` workload-kernel gap** — FIXED (#804): the FC
+      `configure_microvm` path now falls back to the cached builder-VM kernel
+      for kernel-less mkGuest workloads, mirroring QEMU's `resolve_workload_kernel`;
+      `ensure_fc_loadable_kernel` still extracts the ELF from a bzImage.
+- [x] **Per-substitution audit wired in the spawned endpoint** — `assemble`
+      attaches a best-effort chain-signed `Recorder` from the standard host
+      paths (signer key + audit dir); a live substituting invoke now emits
+      `secret.substituted` / `secret.redacted` (metadata only). The endpoint
+      jailer spec grants the key (read) + audit dir (read-write); box-validated
+      that the confined endpoint with a recorder serves on a 6.1 kernel.
+- [x] **`invoke` empty-stdin default** — FIXED: a bare `invoke` now sends the
+      no-argument call `[[], {}]` (the wrapper wire contract rejects an empty
+      body); the example's stale `mvmctl compile` docstring is `mvmctl build
+      compile`.
+- [~] **Forward proxy + `https`/`CONNECT`** — **DESCOPED (superseded).** The
+      SDK-free direction replaced the `HTTP_PROXY` guest proxy with the host
+      name-constrained TLS terminator (Stage 2, #761) for `https`; the guest
+      can't substitute into its own TLS. The `HTTP_PROXY` path stays `http`-only
+      and fails closed for `https` (a placeholder, never a real secret, would be
+      tunneled). See the COMPLETE banner's descope list.
+- [~] **Ephemeral serverless `invoke <artifact>`** — HOST SIDE DONE (#773):
+      `invoke --from-workload-ir` admits a plan inside `boot_session_vm` so the
+      backend spawns the endpoint. The remaining box e2e + FC `plan.json` stash
+      are box-gated, tracked with the FC-live spin-out.
 
 ### Original plan status (2026-06-07) — host + guest Rust foundation landed; remaining = boot + 2 design decisions
 
@@ -314,8 +353,8 @@ ADR-067 §3 fallback. The raw value must hit the wire, so confine it: decrypt on
 
 ### deferred follow-ups (Phase C)
 
-- [ ] Separate-process moat: run the signer + injector as jailed `[[bin]]`s (ADR-066 §3 / `core::subprocess`) so a compromised signer can't read the supervisor's address space. The in-process lib is correct and tested; this is a confinement hardening, sequenced with the broker subprocess model.
-- [ ] Hardware-sealed signing path: load the SigV4/HMAC key by handle from the OS keyring → Secure Enclave on macOS, so the host never sees the plaintext key. Same `Signer` interface; the software path is the no-hardware default already shipped.
+- [~] Separate-process moat → **delivered by the endpoint jailer wrap (#797).** The signer + injector run in-process within the per-VM substitution endpoint, which now self-confines (Landlock FS + seccomp-BPF) before serving the first guest byte — bounding a parser compromise to that one VM's bound secrets, not the host or other tenants. A further jailed sub-bin for the signer alone is optional hardening, not a gap.
+- [ ] Hardware-sealed signing path → **out of scope** (ADR-002 names hardware-backed key attestation out-of-scope). The software path is the shipped default; the same `Signer` interface admits a sealed-handle impl later if the scope changes.
 
 ## Phase D — substitution endpoint + SDK routing (needs 123's proxy)
 
@@ -386,14 +425,14 @@ ADR-067 §1 backstop, **expanded (owner, 2026-05-31):** the scan catches not jus
 
 - [ ] **Step 1:** Coordinate with plan 128 to build the CI leak-gate asserting: (a) no code path writes a secret value toward the guest, (b) substitution fires only for bound destinations, (c) the audit chain carries no secret bytes. These are the claim-12/13 tests ADR-067 names; 128 wires them into `ci.yml`.
 
-## Acceptance
+## Acceptance — ✅ all met
 
-- [ ] `SecretRef` carries `auth_type` + `allowed_hosts`, never bytes; the `SecretsNotImplemented` gate is gone, replaced by binding validation.
-- [ ] `SecretResolver` with a `Local` (OS keyring) impl; `mvmctl secret set`/`ls` work standalone (no `mvmd`), value never on argv, `ls` redacts.
-- [ ] Signer signs SigV4/HMAC without the key leaving it (hardware-sealed when present, software else); injector confines bearer values, refusing unbound destinations before decrypt. **No hardware required to pass the suite.**
-- [ ] (post-123) substitution endpoint swaps a placeholder for the real credential only to bound destinations; non-bound placeholders dropped + audited; leak-scan catches side-channel placeholders.
-- [ ] Audit emits substitution/drop entries with **no secret bytes**; `verify_audit_chain` green.
-- [ ] Claims 12/13 gate (128) green. `cargo test --workspace` + clippy + fmt green; **no new dependency**.
+- [x] `SecretRef` carries `auth_type` + `allowed_hosts`, never bytes; the `SecretsNotImplemented` gate is gone, replaced by binding validation.
+- [x] `SecretResolver` with a `Local` (OS keyring) impl; `mvmctl secret set`/`ls` work standalone (no `mvmd`), value never on argv, `ls` redacts.
+- [x] Signer signs SigV4/HMAC without the key leaving it (software path shipped; hardware-sealed is out of scope per ADR-002); injector confines bearer values, refusing unbound destinations before decrypt. **No hardware required to pass the suite.**
+- [x] substitution endpoint swaps a placeholder for the real credential only to bound destinations (claim 12, on the vsock endpoint *and* the `:80`/`:443` terminator); non-bound placeholders dropped + audited; leak-scan catches side-channel placeholders.
+- [x] Audit emits substitution/drop entries with **no secret bytes**; `verify_audit_chain` green; the recorder is wired into the spawned endpoint.
+- [x] Claims 12/13 egress leak-gate green (Phase F, catalog claim 16 Preview — canary tests gated on every PR). `cargo nextest` + clippy + fmt green; **no new dependency**.
 
 ### deferred follow-ups
 
