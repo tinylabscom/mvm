@@ -104,8 +104,8 @@ pub struct VmStartConfig {
     /// template restore).
     pub tenant_id: Option<String>,
     /// JSON-encoded `SignedExecutionPlan` envelope. Carried as a
-    /// `String` so `mvm-core` does not depend on `mvm-plan` (avoids the
-    /// `mvm-plan → mvm-libkrun → mvm-core` cycle). **The supervisor
+    /// `String` so this wire type stays a serde seam with no typed
+    /// coupling to `mvm_core::plan`. **The supervisor
     /// re-verifies the signature** before trusting any decoded field;
     /// the host is in the TCB but the supervisor still runs Ed25519
     /// verification. **Do not log this value** — the envelope may carry

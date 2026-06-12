@@ -4,7 +4,7 @@
 //     (firecracker, libkrun, vz, qemu, microvm,
 //     image, network, backend) live in `mvm-backend`.
 //   * The leaf substrate (`ui`, `runtime_meta`, `cow`,
-//     `snapshot_integrity`) lives in `mvm-base`.
+//     `snapshot_integrity`) lives in `mvm-backend::base`.
 //
 // What's left here is the orchestration layer — instance/pool/
 // template/tenant lifecycle, name + volume registries, the egress

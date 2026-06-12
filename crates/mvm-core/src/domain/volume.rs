@@ -230,7 +230,7 @@ impl std::fmt::Display for GuestPath {
     }
 }
 
-/// Reference to a secret stored elsewhere (mvm-security secret store on
+/// Reference to a secret stored elsewhere (mvm-core::crypto secret store on
 /// dev box; mvmd's sealed-creds infrastructure on the fleet side).
 /// Never carries the secret value itself.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

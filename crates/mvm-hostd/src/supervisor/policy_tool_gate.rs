@@ -1,5 +1,5 @@
 //! `PolicyToolGate` — replaces `NoopToolGate` with a real
-//! allowlist check against `mvm-policy::ToolPolicy`.
+//! allowlist check against `mvm-core::policy::ToolPolicy`.
 //!
 //! ## Phase 1 scope (this module)
 //!

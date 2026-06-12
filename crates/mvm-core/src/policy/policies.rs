@@ -188,7 +188,7 @@ pub struct ToolPolicy {
     pub allowed: Vec<String>,
 }
 
-/// Artifact policy. Distinct from `mvm-plan::ArtifactPolicy` —
+/// Artifact policy. Distinct from `mvm-core::plan::ArtifactPolicy` —
 /// the plan field is a per-run snapshot; this is the bundle-side
 /// source of truth that the supervisor's `ArtifactCollector`
 /// consults at workload exit.

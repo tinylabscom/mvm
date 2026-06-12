@@ -43,10 +43,9 @@ tracing = "0.1"
 serde = { workspace = true }
 # `SupervisorConfig` carries the per-VM ExecutionPlan + PolicyBundle as
 # `Option<serde_json::Value>` so the bin (`mvm-libkrun-supervisor`) can
-# feed them into the bridge factory without forcing mvm-libkrun to
-# depend on mvm-plan / mvm-policy (which would close the
-# `mvm-libkrun ← mvm-core ← mvm-plan`
-# cycle). The bin crate, being a leaf, deserializes the Values into
+# feed them into the bridge factory without typed coupling to the
+# `mvm_core::plan` / `mvm_core::policy` structs at this layer; the
+# bridge stays a serde boundary. The bin crate, being a leaf, deserializes the Values into
 # typed `ExecutionPlan` / `PolicyBundle` since it can depend on
 # both. Always-on (not feature-gated) because `SupervisorConfig` is
 # always-on per the comment above.
