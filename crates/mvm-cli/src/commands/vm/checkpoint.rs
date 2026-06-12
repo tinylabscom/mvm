@@ -86,17 +86,20 @@ pub(in crate::commands) enum CheckpointCmd {
         /// Name for the new VM instance (auto-generated if omitted).
         #[arg(long, value_parser = clap_vm_name)]
         new_id: Option<String>,
-        /// Admit and boot the forked child immediately (fs_quick forks).
+        /// Admit and boot the forked child immediately. fs_quick forks only —
+        /// vm_full forks boot as part of forking and ignore this flag.
         #[arg(long)]
         boot: bool,
-        /// Hypervisor backend for `--boot` (firecracker, libkrun, qemu, vz).
+        /// Hypervisor backend for `--boot` (fs_quick forks only).
         /// Defaults to the same auto-detect order as `mvmctl up`.
         #[arg(long, default_value = "firecracker")]
         hypervisor: String,
-        /// vCPU count for the booted child. Inherits from parent plan when omitted.
+        /// vCPU count for the booted child (fs_quick `--boot` only).
+        /// Inherits from the parent plan when omitted.
         #[arg(long)]
         cpus: Option<u32>,
-        /// Memory for the booted child (e.g. 512M, 2G). Inherits from parent plan when omitted.
+        /// Memory for the booted child, e.g. 512M, 2G (fs_quick `--boot` only).
+        /// Inherits from the parent plan when omitted.
         #[arg(long)]
         memory: Option<String>,
     },
@@ -613,9 +616,10 @@ fn fork_fs_quick_arm(
         })?;
     } else {
         ui::info(&format!(
-            "child '{}' materialized; re-run with --boot to admit and launch, \
-             or remove it with: mvmctl down {child_vm_name}",
-            child_vm_name
+            "child '{child_vm_name}' materialized at {}; re-run the fork with \
+             --boot to admit and launch a child, or delete the directory to \
+             discard this one",
+            dest_dir.display()
         ));
     }
     Ok(())
@@ -685,6 +689,20 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     use mvm_core::util::parse_human_size;
 
     let effective_hypervisor = super::super::shared::resolve_effective_hypervisor(p.hypervisor);
+
+    // The fork was captured from a VZ-family VM and the no-clobber rootfs
+    // adoption relies on the VZ backend's instance-path early-return; other
+    // backends would mutate the forked copy in place or mismatch the kernel.
+    if !matches!(
+        effective_hypervisor.as_str(),
+        "vz" | "virtualization" | "apple-container"
+    ) {
+        anyhow::bail!(
+            "checkpoint fork --boot supports the VZ-family backends only \
+             (resolved hypervisor: {effective_hypervisor}); omit --hypervisor \
+             to use the platform default"
+        );
+    }
 
     // Resource shape: flag > parent plan > global defaults.
     let (parent_cpus, parent_mem) = parent_plan_resources(p.parent_checkpoint, p.store);

@@ -312,6 +312,6 @@ Two independent defects blocked `mvmctl up --flake <workload> --hypervisor vz`:
   sidecar on the restore error path, consistent with `start()`'s behavior.
 - [x] Vz two-copy fork: `checkpoint fork --boot` admits the child under a fresh
   plan (claim 8), passes the instance rootfs path so `prepare_instance_rootfs`
-  returns early (no clobber), inherits resource shape from parent plan, and
+  returns early (no clobber), resource shape: flags > parent plan > defaults, and
   dispatches the backend.  fixed: `checkpoint.rs::boot_forked_child` +
   `up::admit_plan_for_boot` reuse; `up::resolve_vz_workload_kernel` pub(super).
