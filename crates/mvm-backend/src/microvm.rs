@@ -332,6 +332,32 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
     )?;
 
     let kernel_path = format!("{}/{}", abs_dir, state.kernel);
+    // A plain mkGuest workload emits no kernel (mkGuest's `kernel` input is
+    // optional), so the build dir may carry only a rootfs. Fall back to the
+    // cached builder-VM kernel exactly like the QEMU workload path does;
+    // `ensure_fc_loadable_kernel` below extracts an FC-loadable ELF if it's
+    // a bzImage.
+    let kernel_path = if std::path::Path::new(&kernel_path).is_file() {
+        kernel_path
+    } else {
+        let arch = if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        let fallback = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir())
+            .join("builder-vm")
+            .join(arch)
+            .join("vmlinux");
+        anyhow::ensure!(
+            fallback.is_file(),
+            "firecracker workload has no bootable kernel: the build produced no \
+             {kernel_path} and no cached builder kernel exists at {}. Run a build / \
+             `mvmctl dev up` to populate the builder VM image first.",
+            fallback.display()
+        );
+        fallback.display().to_string()
+    };
     let rootfs_path = format!("{}/{}", abs_dir, state.rootfs);
 
     // Use kernel cmdline IP params (no SSH-based guest network config).
