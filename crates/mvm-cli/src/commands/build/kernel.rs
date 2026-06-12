@@ -92,7 +92,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
 
 #[cfg(feature = "builder-vm")]
 fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
-    use crate::commands::env::apple_container::KernelVariant;
+    use crate::commands::env::dev_vz::KernelVariant;
     use crate::ui;
 
     let arch = args.arch.clone().unwrap_or_else(|| host_arch().to_string());
@@ -126,7 +126,7 @@ fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
 #[cfg(feature = "builder-vm")]
 fn acquire_kernel(
     source: Source,
-    variant: crate::commands::env::apple_container::KernelVariant,
+    variant: crate::commands::env::dev_vz::KernelVariant,
     label: &str,
     arch: &str,
     verbose: bool,
@@ -151,7 +151,7 @@ fn acquire_kernel(
 /// Compile arm — host arch only (Stage 0 cannot cross-compile).
 #[cfg(feature = "builder-vm")]
 fn compile_host_arch(
-    variant: crate::commands::env::apple_container::KernelVariant,
+    variant: crate::commands::env::dev_vz::KernelVariant,
     arch: &str,
     verbose: bool,
 ) -> Result<std::path::PathBuf> {
@@ -161,7 +161,7 @@ fn compile_host_arch(
             host_arch()
         );
     }
-    crate::commands::env::apple_container::build_kernel_via_stage0(variant, verbose)
+    crate::commands::env::dev_vz::build_kernel_via_stage0(variant, verbose)
 }
 
 /// Per-arch, per-variant cached kernel path. Mirrors

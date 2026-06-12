@@ -68,7 +68,7 @@ impl LinuxEnv for NativeEnv {
     }
 }
 
-/// Decide whether `AppleContainerEnv` may auto-start the dev daemon.
+/// Decide whether `VzDevEnv` may auto-start the dev daemon.
 ///
 /// `MVM_NO_AUTO_DEV=1`             — opt-out (always wins).
 /// `MVM_AUTO_DEV=1`                — opt-in even when stdin isn't a TTY.
@@ -135,23 +135,23 @@ fn start_dev_daemon(vm_id: &str) -> Result<()> {
 /// Shell prelude that defines a no-op `sudo` function when the script
 /// already runs as root and `sudo` isn't installed.
 ///
-/// The Apple Container dev VM uses a minimal Nix-built rootfs that runs
-/// scripts as PID 1 (uid 0) with no sudo binary, while the shared
-/// network / firecracker scripts in this crate are written for Lima's
-/// non-root + passwordless-sudo model. Prepending this shim lets the
-/// same scripts run unmodified on both backends.
+/// The Vz dev VM uses a minimal Nix-built rootfs that runs scripts as
+/// PID 1 (uid 0) with no sudo binary, while the shared network /
+/// firecracker scripts in this crate assume a non-root +
+/// passwordless-sudo model. Prepending this shim lets the same scripts
+/// run unmodified on both backends.
 const SUDO_SHIM: &str =
     "if [ \"$(id -u)\" = 0 ] && ! command -v sudo >/dev/null 2>&1; then sudo() { \"$@\"; }; fi";
 
-/// Apple Container-backed Linux execution environment.
+/// Vz dev-VM-backed Linux execution environment.
 ///
 /// Routes commands through the guest agent's vsock `Exec` protocol.
-/// Used on macOS 26+ when the Apple Container dev VM is running.
-pub struct AppleContainerEnv {
+/// Used on macOS 26+ when the Vz dev VM is running.
+pub struct VzDevEnv {
     pub vm_id: String,
 }
 
-impl AppleContainerEnv {
+impl VzDevEnv {
     pub fn new(vm_id: &str) -> Self {
         Self {
             vm_id: vm_id.to_string(),
@@ -231,7 +231,7 @@ impl AppleContainerEnv {
     }
 }
 
-impl LinuxEnv for AppleContainerEnv {
+impl LinuxEnv for VzDevEnv {
     fn run(&self, script: &str) -> Result<Output> {
         if let Some(output) = crate::base::shell_mock::intercept(script) {
             return Ok(output);
@@ -284,16 +284,16 @@ impl LinuxEnv for AppleContainerEnv {
 
 /// Create the appropriate `LinuxEnv` for the current platform.
 ///
-/// Apple Container hosts (macOS 26+ Apple Silicon) route through the
-/// dev VM's guest-agent vsock channel; native Linux runs on the host.
-/// macOS Intel, Linux without KVM, WSL2, and native Windows are not
-/// supported local Linux execution boundaries today; WSL2 nested KVM
-/// and a Hyper-V managed Linux builder are future backend work.
+/// Vz dev hosts (macOS 26+ Apple Silicon) route through the dev VM's
+/// guest-agent vsock channel; native Linux runs on the host. macOS
+/// Intel, Linux without KVM, WSL2, and native Windows are not supported
+/// local Linux execution boundaries today; WSL2 nested KVM and a
+/// Hyper-V managed Linux builder are future backend work.
 pub fn create_linux_env() -> Box<dyn LinuxEnv> {
     let plat = platform::current();
 
     if plat.is_vz_default_tier() {
-        return Box::new(AppleContainerEnv::new("mvm-dev"));
+        return Box::new(VzDevEnv::new("mvm-dev"));
     }
 
     Box::new(NativeEnv)
@@ -328,8 +328,8 @@ mod tests {
     }
 
     #[test]
-    fn test_apple_container_env_name() {
-        let env = AppleContainerEnv::new("mvm-dev");
+    fn test_vz_dev_env_name() {
+        let env = VzDevEnv::new("mvm-dev");
         assert_eq!(env.vm_id, "mvm-dev");
     }
 

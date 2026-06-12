@@ -20,7 +20,7 @@
 //!    `~/.cache/mvm/builder-vm/<arch>/` — vmlinux + rootfs.ext4 +
 //!    cmdline.txt + manifest.json, the shape the builder-vm flake
 //!    emits. Populated by `bootstrap_builder_vm_image`
-//!    (`mvm-cli::commands::env::apple_container`).
+//!    (`mvm-cli::commands::env::dev_vz`).
 //! 5. Allocate / reuse the persistent `/nix-store-<arch>.img`
 //!    sparse virtio-blk image (64 GiB cap by default; idempotent
 //!    across invocations so the warm Nix store survives).
