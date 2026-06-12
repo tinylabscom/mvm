@@ -17,7 +17,7 @@
 //! nested KVM and a Hyper-V managed Linux builder are future backend
 //! projects, not supported local paths today.
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::ui;
@@ -47,8 +47,6 @@ enum DevBackend {
     /// via `--builder vz` / `MVM_BUILDER_BACKEND=vz`) so the dev VM
     /// rides the same VMM as the build path.
     Vz,
-    /// macOS 26+ Apple Silicon — Apple Container dev VM.
-    AppleContainer,
     /// Native Linux with `/dev/kvm` — host shell is the dev environment;
     /// Firecracker runs natively.
     LinuxKvm,
@@ -90,20 +88,17 @@ impl DevVmBackend {
 ///      to rule 1: an operator who asks for libkrun gets the dev VM on
 ///      libkrun even on a macOS 26+ box where Apple Container would
 ///      otherwise win rule 3.
-///   3. macOS 26+ Apple Silicon with Apple Containers → AppleContainer.
+///   3. macOS 26+ Apple Silicon (AVF available) → Vz (per-VM supervisor).
 ///   4. macOS with libkrun → Libkrun (legacy fallback).
 ///   5. Linux with KVM → LinuxKvm.
 ///   6. Otherwise → Unsupported.
 ///
-/// On the *auto-detect* path (no explicit override) Apple Container
-/// still wins over Libkrun (rule 3 vs 4) per the CLAUDE.md "Dev mode"
-/// rationale: AC is the documented Stage 0 boundary AND the build
-/// boundary `RuntimeBuildEnv::shell_exec_visible` routes through.
-/// Splitting the dev VM (Libkrun) from the build boundary
-/// (`AppleContainerEnv`) would leave each under a runtime the other
-/// never starts. An explicit `prefers_libkrun` is the one signal that
-/// overrides this — because it also moves the build boundary onto
-/// libkrun, keeping both halves on the same VMM.
+/// On the *auto-detect* path (no explicit override) Vz wins over
+/// Libkrun (rule 3 vs 4): it is the macOS-26 default workload backend,
+/// so the dev VM rides the same VMM workloads use. An explicit
+/// `prefers_libkrun` is the one signal that overrides this — it also
+/// moves the build boundary onto libkrun, keeping both halves on the
+/// same VMM.
 fn select_dev_backend(
     plat: Platform,
     prefers_vz: bool,
@@ -124,9 +119,11 @@ fn select_dev_backend(
     if prefers_libkrun && has_libkrun && matches!(plat, Platform::MacOS) {
         return DevBackend::Libkrun;
     }
-    // 3-6. Standard auto-detect tree.
+    // 3-6. Standard auto-detect tree. macOS 26+ → the vz supervisor
+    // backend (the in-process Apple Container dev daemon converged onto
+    // it — Plan 177 AVF convergence).
     if has_apple_containers {
-        DevBackend::AppleContainer
+        DevBackend::Vz
     } else if matches!(plat, Platform::MacOS) && has_libkrun {
         DevBackend::Libkrun
     } else if has_kvm && matches!(plat, Platform::LinuxNative) {
@@ -534,7 +531,37 @@ fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool, volumes: &[VmVolume]
     }
 
     ui::progress("Starting dev environment via Vz (Virtualization.framework)...");
+
+    // Hosts migrating off the old in-process launchd daemon model: unload
+    // the agent (it would keep relaunching a deleted entrypoint on login)
+    // and drop its stale state.
+    apple_container::reap_stale_ac_daemon();
+
     let (kernel, rootfs) = apple_container::ensure_dev_image()?;
+
+    // Lock ~/.mvm and ~/.cache/mvm to 0700 on every `dev up`. Idempotent.
+    mvm_core::config::ensure_data_dir().with_context(|| "locking down data dir to mode 0700")?;
+    mvm_core::config::ensure_cache_dir().with_context(|| "locking down cache dir to mode 0700")?;
+
+    // Host-backed persistent Nix store: a sparse disk the guest init
+    // formats once and overlays over /nix, so the populated build cache
+    // survives image rebuilds and `dev down` (dropped only by
+    // `dev down --reset`). Attach-only (no guest mountpoint): the dev
+    // init picks it up positionally as /dev/vdb.
+    let nix_store_disk = apple_container::nix_store_disk_path();
+    apple_container::ensure_nix_store_disk(&nix_store_disk)?;
+    apple_container::maybe_gc_host_nix_disk(&nix_store_disk);
+    let mut dev_volumes = Vec::with_capacity(volumes.len() + 1);
+    dev_volumes.push(VmVolume {
+        host: nix_store_disk,
+        guest: String::new(),
+        size: "64G".into(),
+        read_only: false,
+        kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+        encrypted: false,
+    });
+    dev_volumes.extend(volumes.iter().cloned());
+
     let memory_mib = memory_gib.saturating_mul(1024);
     let config = VmStartConfig {
         name: apple_container::DEV_VM_NAME.to_string(),
@@ -544,10 +571,21 @@ fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool, volumes: &[VmVolume]
         memory_mib,
         flake_ref: "mvm-dev".into(),
         profile: Some("dev".into()),
-        volumes: volumes.to_vec(),
+        volumes: dev_volumes,
         ..Default::default()
     };
     backend.start(&config)?;
+
+    // The supervisor is detached; "ready" means the guest agent answers,
+    // not merely that the spawn succeeded.
+    ui::info("Waiting for guest agent...");
+    if !super::super::shared::wait_for_guest_agent(apple_container::DEV_VM_NAME, 60) {
+        anyhow::bail!(
+            "Dev VM did not become reachable within 60 seconds.\n\
+             Check logs: {}/console.log",
+            mvm_core::config::vm_state_dir(apple_container::DEV_VM_NAME).display()
+        );
+    }
     ui::success("Dev environment ready (Vz).");
     if open_shell {
         console::console_interactive(apple_container::DEV_VM_NAME)?;
@@ -655,14 +693,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 DevBackend::Vz => {
                     cmd_dev_vz(effective_cpus, effective_mem, open_shell, &dev_volumes)
                 }
-                DevBackend::AppleContainer => {
-                    warn_dev_volumes_unsupported(&dev_volumes, "Apple Container");
-                    apple_container::cmd_dev_apple_container(
-                        effective_cpus,
-                        effective_mem,
-                        open_shell,
-                    )
-                }
                 DevBackend::LinuxKvm => {
                     warn_dev_volumes_unsupported(&dev_volumes, "native Linux/KVM");
                     linux_native::cmd_dev_linux_native(open_shell)
@@ -674,7 +704,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             let result = match backend {
                 DevBackend::Libkrun => cmd_dev_libkrun_down(),
                 DevBackend::Vz => cmd_dev_vz_down(),
-                DevBackend::AppleContainer => apple_container::cmd_dev_apple_container_down(),
                 DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_down(),
                 // Nothing to stop on unsupported hosts. The gc-root
                 // cleanup below still runs.
@@ -722,27 +751,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 }
                 console::console_interactive(apple_container::DEV_VM_NAME)
             }
-            DevBackend::AppleContainer => {
-                if !apple_container::is_apple_container_dev_running() {
-                    anyhow::bail!("Dev VM is not running. Start it with: mvmctl dev up");
-                }
-                // Try connecting — the VM may be in another process
-                match console::console_interactive("mvm-dev") {
-                    Ok(()) => Ok(()),
-                    Err(_) => anyhow::bail!(
-                        "Dev VM is running but owned by another process.\n\
-                         Use the terminal where you ran 'mvmctl dev up',\n\
-                         or restart with: mvmctl dev down && mvmctl dev up"
-                    ),
-                }
-            }
             DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_shell(),
             DevBackend::Unsupported => bail_no_dev_backend(),
         },
         DevAction::Status => match backend {
             DevBackend::Libkrun => cmd_dev_libkrun_status(),
             DevBackend::Vz => cmd_dev_vz_status(),
-            DevBackend::AppleContainer => apple_container::cmd_dev_apple_container_status(),
             DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_status(),
             DevBackend::Unsupported => {
                 ui::info(
@@ -774,7 +788,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             let _ = match backend {
                 DevBackend::Libkrun => cmd_dev_libkrun_down(),
                 DevBackend::Vz => cmd_dev_vz_down(),
-                DevBackend::AppleContainer => apple_container::cmd_dev_apple_container_down(),
                 DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_down(),
                 DevBackend::Unsupported => Ok(()),
             };
@@ -796,10 +809,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                     cmd_dev_libkrun(effective_cpus, effective_mem, shell, &dev_volumes)
                 }
                 DevBackend::Vz => cmd_dev_vz(effective_cpus, effective_mem, shell, &dev_volumes),
-                DevBackend::AppleContainer => {
-                    warn_dev_volumes_unsupported(&dev_volumes, "Apple Container");
-                    apple_container::cmd_dev_apple_container(effective_cpus, effective_mem, shell)
-                }
                 DevBackend::LinuxKvm => {
                     warn_dev_volumes_unsupported(&dev_volumes, "native Linux/KVM");
                     linux_native::cmd_dev_linux_native(shell)
@@ -931,7 +940,7 @@ mod tests {
                 true,
                 false,
             ),
-            DevBackend::AppleContainer,
+            DevBackend::Vz,
         );
     }
 
@@ -969,7 +978,7 @@ mod tests {
                 /* has_libkrun */ false,
                 /* has_kvm */ false,
             ),
-            DevBackend::AppleContainer,
+            DevBackend::Vz,
         );
     }
 

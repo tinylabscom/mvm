@@ -87,16 +87,17 @@ pub fn start_port_proxy(vm_id: &str, host_port: u16, guest_port: u16) {
             for stream in listener.incoming().flatten() {
                 let vm_id = vm_id.clone();
                 std::thread::spawn(move || {
-                    let upstream =
-                        match vsock_transport::for_vm(&vm_id).and_then(|t| t.connect(vsock_port)) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Port proxy: vsock connect to {vm_id} port {vsock_port} failed: {e}"
-                                );
-                                return;
-                            }
-                        };
+                    let upstream = match vsock_transport::for_vm(&vm_id)
+                        .and_then(|t| t.connect(vsock_port))
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Port proxy: vsock connect to {vm_id} port {vsock_port} failed: {e}"
+                            );
+                            return;
+                        }
+                    };
                     let downstream = stream;
                     let Ok(mut up_read) = upstream.try_clone() else {
                         tracing::warn!("Port proxy: upstream clone failed");

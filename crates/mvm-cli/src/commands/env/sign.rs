@@ -20,9 +20,7 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     if !cfg!(target_os = "macos") {
         if args.json {
-            crate::json_out::emit_json(
-                &Vec::<mvm_backend::codesign::SignReport>::new(),
-            )?;
+            crate::json_out::emit_json(&Vec::<mvm_backend::codesign::SignReport>::new())?;
         } else {
             ui::info("mvmctl sign is macOS-only (codesign entitlements); nothing to do here.");
         }

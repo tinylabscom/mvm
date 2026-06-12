@@ -2748,8 +2748,10 @@ mod tests {
         assert_eq!(r.backends.get("firecracker"), Some(&"live-memory"));
         assert_eq!(r.backends.get("libkrun"), Some(&"disk-only"));
         assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
-        // A backend with no warm-start support must not be silently dropped.
-        assert_eq!(r.backends.get("apple-container"), Some(&"unsupported"));
+        // vz must not be silently dropped. Its exact tier is platform-
+        // varying — "save-restore" on macOS 14+, "unsupported" on Linux
+        // CI / older hosts — so assert presence, not a fixed label.
+        assert!(r.backends.contains_key("vz"));
     }
 
     #[test]
@@ -2758,7 +2760,7 @@ mod tests {
         // Only libkrun implements the standby pool today; the rest
         // report honest `false` and must not be silently dropped.
         assert_eq!(r.standby_pool.get("libkrun"), Some(&true));
-        assert_eq!(r.standby_pool.get("apple-container"), Some(&false));
+        assert_eq!(r.standby_pool.get("vz"), Some(&false));
         assert_eq!(r.standby_pool.get("qemu"), Some(&false));
     }
 

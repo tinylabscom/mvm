@@ -29,7 +29,7 @@ details** below for the workstream-level state.
 - [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C2/C3 (FC/Vz warm-start) gated
 - [ ] **PLAN 124** — Lean guest agent · 🟡 ~65%; SDK codegen + signed on-device config remain
 - [ ] **PLAN 126** — Dependency reduction · 🟡 ~25%; sigstore/aws-lc/lock-gate remain
-- [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 (AVF convergence) in progress
+- [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 (AVF convergence) landing — dev-env repointed to vz, hardware smoke remains
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [ ] **PLAN 183** — Builder-VM egress posture + network bootstrap · 🟡 WS-A landed; WS-B/C/D remain
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
@@ -300,19 +300,23 @@ PLAN 126 — Dependency reduction                 🟡 ~25%
 PLAN 153 — CLI directory split                  ✅ DONE (subsumed into Plan 178)
   [x] image.rs → image/ ; catalog.rs → catalog/ (last two flat files)
 
-PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 in progress (gate cleared: Plan 152 WS-B + save/pause landed)  (ADR-076)
+PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 LANDING (gate cleared: Plan 152 WS-B + save/pause landed)  (ADR-076)
   [x] Phase 1 delete docker (+ dead Tier-3 banner subsystem)
   [x] Phase 1 delete cloud_hypervisor (+ ch_runtime, ch-bootcheck)
   [x] Phase 1 fold microvm_nix → qemu
   [x] Phase 1 prune dead CI lane + Justfile setup recipe
   [x] Phase 1 verify: doctor lists {firecracker,libkrun,vz,qemu,apple-container,mock};
       4837/4837 workspace tests (excl mvm-backend SIGKILL bin); clippy/fmt clean
-  [ ] Phase 2 — AVF convergence onto supervisor vz + shared console transport
-      + drop apple-container. IN PROGRESS (gate cleared: Plan 152 WS-B + save/pause
-      landed). Branch feat/plan-177-phase2-avf: apple_container backend +
-      providers/ deleted, AnyBackend converted, macOS-26 default→vz, console/
-      transport reattached, codesign + port-proxy relocated; remaining = the
-      mvmctl dev dev-daemon + up -d launchd convergence, CoW port, hardware smoke.
+  [x] Phase 2 — AVF convergence onto supervisor vz + shared console transport
+      + drop apple-container. LANDING (branch feat/plan-177-phase2-avf-landing):
+      apple_container backend + providers/ deleted, AnyBackend converted,
+      macOS-26 default→vz, console/transport reattached, codesign + port-proxy
+      relocated, CoW per-instance rootfs ported (#789). Dev-env repointed: mvmctl
+      dev boots on the vz supervisor (rule-3 auto-default flip), stale in-process
+      launchd daemon reaped on `dev up`, nix-store overlay disk threaded as an
+      attach-only Disk volume, agent-reachability wait gates "ready",
+      VsockProxyTransport retired. CLAUDE.md + ADR-002 tier matrix updated.
+      Remaining: macOS-26 hardware `mvmctl dev up` + `mvmctl up` smoke.
 
 PLAN 178 — CLI surface consolidation (~56→~28)   ✅ DONE (dir-purity deferred)  (ADR-077)
   [x] lock tree (D1–D6) + hide internal subprocess commands

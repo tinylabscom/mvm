@@ -187,6 +187,12 @@ pub fn encode_user_volumes_cmdline(volumes: &[VmVolume]) -> Option<String> {
     }
     let mut entries = Vec::with_capacity(volumes.len());
     for (idx, v) in volumes.iter().enumerate() {
+        // No guest mountpoint = attach-only device (the guest init handles
+        // it positionally — e.g. the dev VM's /dev/vdb nix-store overlay);
+        // putting it on the cmdline would make init mount it twice.
+        if v.guest.is_empty() {
+            continue;
+        }
         let kind = match v.kind {
             VmVolumeKind::DirShare => "fs",
             VmVolumeKind::Disk => "blk",

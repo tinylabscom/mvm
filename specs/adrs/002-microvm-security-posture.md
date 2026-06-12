@@ -330,7 +330,7 @@ The following are decided and committed for v1 of this hardening:
 ## Per-backend tier matrix
 
 Plan 53 (cross-platform roadmap) introduces multiple backends —
-Firecracker, Apple Container, libkrun, Docker, microvm.nix — each
+Firecracker, vz, libkrun, qemu — each
 with different layer coverage. A given user run carries the tier of
 its active backend, not the strongest tier the project supports. The
 following matrix is what `mvmctl doctor` reports and what the
@@ -341,7 +341,6 @@ falls below Tier 1).
 |---|---|---|---|---|---|---|
 | Firecracker (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — full ADR-002. All seven claims hold. |
 | Cloud Hypervisor (Linux + KVM) | ✅ | ✅ | ⚠️ in flight | ✅ | ✅ | **Tier 1 peer** of Firecracker — same VMM-TCB shape (rust-vmm), wider device model (VFIO, virtio-fs, larger guests). Claim 3 (verified boot) lands alongside Firecracker via the shared `mvm-verity-init` initramfs path; the CH JSON-API spawn dance is the only delta. Selected over Firecracker when a workload needs VFIO/GPU passthrough or virtio-fs. |
-| Apple Container (macOS 26+ Apple Silicon) | ✅ VZ | ✅ Containerization | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — claim 3 partial; claims 1, 2, 4, 5, 6, 7 hold. |
 | Vz / Virtualization.framework (macOS 13+) | ✅ HVF | ✅ Vz (Apple-controlled API surface on top of HVF) | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — same `Hypervisor.framework` primitive as libkrun, smaller Apple-controlled API surface, balloon + (macOS 14+) snapshots. Claim 3 partial — dm-verity pipeline targets Firecracker today; claims 1, 2, 4, 5, 6, 7 hold. Opt-in via `--backend vz` / `MVM_BACKEND=vz`; `auto_select` keeps libkrun as the macOS default (ADR-056). |
 | libkrun / libkrun (Linux KVM, macOS HVF) | ✅ | ✅ | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — claim 3 partial; comparable VMM TCB to Firecracker; shipped as the cross-platform default per ADR-013. macOS arm64/x86_64 + Linux-without-KVM hosts land here. |
 | Docker | ❌ shared host kernel | ❌ container runtime is L2=host kernel | ❌ shared with host | ✅ | ✅ | **Tier 3** — claims 1, 2, 3 do *not* hold; 4, 6, 7 hold; 5 N/A (unix socket). |

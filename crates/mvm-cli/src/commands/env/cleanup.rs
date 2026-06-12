@@ -282,7 +282,7 @@ fn confirm_tier(tier: Tier, yes_flag: bool) -> Result<bool> {
 /// a live process. Errors during the probe are conservative: a failed
 /// readdir returns None (the check is a guardrail, not a guarantee).
 fn first_running_vm() -> Option<String> {
-    if super::apple_container::is_apple_container_dev_running() {
+    if super::apple_container::is_dev_vm_running() {
         return Some("mvm-dev (Apple Container)".to_string());
     }
     let vms_root = PathBuf::from(mvm_core::config::mvm_data_dir()).join("vms");

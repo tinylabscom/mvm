@@ -1175,7 +1175,7 @@ mod tests {
     /// is process-global. Without this, a sibling test can flip
     /// `HOME` (or `MVM_LIBKRUN_SUPERVISOR_PATH`) mid-call and corrupt
     /// our assertions. Matches the same pattern in
-    /// `crate::providers::apple_container::macos::tests::with_temp_home`.
+    /// the shared `base` test-home helper.
     fn with_env<F: FnOnce()>(body: F) {
         use std::sync::Mutex;
         static ENV_LOCK: Mutex<()> = Mutex::new(());

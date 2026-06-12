@@ -1,15 +1,12 @@
 //! Backend-agnostic vsock connect dispatch.
 //!
 //! Hides the choice between Firecracker's UDS multiplexer, libkrun's
-//! per-port Unix sockets, and Apple Container's `VZVirtioSocketDevice`
-//! (or its mode-0700 proxy socket) behind one trait, so callers that
-//! just need "give me a connected stream to vsock port `P` on VM `V`"
-//! don't have to know which backend the VM is running under. Before
-//! this trait, every
-//! caller open-coded the same `if let Ok(stream) =
-//! mvm_backend::providers::apple_container::vsock_connect(...) { ... } else { ... }`
-//! ladder; new backends or backend changes had to chase down every
-//! occurrence.
+//! per-port Unix sockets, and the vz supervisor's per-port socket
+//! behind one trait, so callers that just need "give me a connected
+//! stream to vsock port `P` on VM `V`" don't have to know which backend
+//! the VM is running under. Before this trait, every caller open-coded
+//! the same per-backend connect ladder; new backends or backend changes
+//! had to chase down every occurrence.
 //!
 //! Each impl is stateless apart from configuration captured at
 //! construction time. `connect()` always returns a fresh stream —
@@ -145,36 +142,6 @@ impl VsockTransport for VzTransport {
     }
 }
 
-/// Connects through the daemon-managed mode-0700 proxy Unix socket.
-///
-/// Used for cross-process access in dev — the `mvmctl dev` daemon
-/// owns the framework-side VM and exposes a per-VM Unix socket where
-/// each new connection writes the destination vsock port as a
-/// 4-byte little-endian prefix and the daemon then forwards bytes
-/// to the framework. Mode-0700 is the security boundary.
-pub struct VsockProxyTransport {
-    proxy_path: String,
-}
-
-impl VsockProxyTransport {
-    pub fn new(proxy_path: impl Into<String>) -> Self {
-        Self {
-            proxy_path: proxy_path.into(),
-        }
-    }
-}
-
-impl VsockTransport for VsockProxyTransport {
-    fn connect(&self, port: u32) -> Result<UnixStream> {
-        let mut stream = UnixStream::connect(&self.proxy_path)
-            .with_context(|| format!("Failed to connect to vsock proxy at {}", &self.proxy_path))?;
-        stream
-            .write_all(&port.to_le_bytes())
-            .with_context(|| "Failed to write vsock proxy port prefix")?;
-        Ok(stream)
-    }
-}
-
 /// Connects through the nesting hop: the outer host
 /// reaches a workload microVM's vsock *via* the long-lived libkrun
 /// host VM. The hop socket is the host VM's libkrun UDS for
@@ -256,26 +223,6 @@ pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn proxy_transport_writes_port_prefix() {
-        // socketpair acts as a stand-in for the daemon's listening
-        // proxy socket: the "client" side of VsockProxyTransport
-        // should write the port bytes immediately on connect.
-        // We can't actually drive `connect()` here because the
-        // proxy_path needs to be a real filesystem socket; this test
-        // only exercises construction + the public surface so the
-        // factory contract has a regression net even on hosts where
-        // `tempfile` + UDS listeners would be flaky in CI.
-        let t = VsockProxyTransport::new("/tmp/mvm-proxy-does-not-exist.sock");
-        let err = t
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-            .expect_err("should fail to connect");
-        assert!(
-            err.to_string().contains("vsock proxy"),
-            "error didn't mention proxy: {err}"
-        );
-    }
 
     #[test]
     fn firecracker_transport_constructs_with_instance_dir() {

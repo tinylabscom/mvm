@@ -6,13 +6,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm::vsock_transport::{
-    FirecrackerTransport, LibkrunTransport, VsockProxyTransport, VsockTransport, VzTransport,
-};
+use mvm::vsock_transport::{FirecrackerTransport, LibkrunTransport, VsockTransport, VzTransport};
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 
-use super::super::env::apple_container::dev_vsock_proxy_path;
 use super::Cli;
 use super::shared::{IN_CONSOLE_MODE, clap_vm_name};
 use crate::ui;
@@ -29,10 +26,6 @@ use crate::ui;
 /// (control + data + resize). Cloning the Arc lets the SIGWINCH handler
 /// thread reuse the same dispatch.
 fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
-    let proxy = dev_vsock_proxy_path();
-    if std::path::Path::new(&proxy).exists() {
-        return Ok(Arc::new(VsockProxyTransport::new(proxy)));
-    }
     let libkrun = LibkrunTransport::for_vm(name);
     if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Arc::new(libkrun));

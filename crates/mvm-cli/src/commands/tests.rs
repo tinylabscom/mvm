@@ -3010,9 +3010,9 @@ fn test_dev_status_parses() {
 }
 
 #[test]
-fn test_is_apple_container_dev_running_returns_bool() {
+fn test_is_dev_vm_running_returns_bool() {
     // Just verify it doesn't panic — actual result depends on platform
-    let _ = super::env::apple_container::is_apple_container_dev_running();
+    let _ = super::env::apple_container::is_dev_vm_running();
 }
 
 // ---- RunParams compile-check (referenced for type-export verification) ----
