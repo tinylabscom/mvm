@@ -118,8 +118,10 @@ trace does *not* get to inject build-time execution: `before_build` is never
 populated from a trace, and the IR→Nix lowering is fixed, trusted code in
 this repo. But the existing lowering *does* emit in-guest boot-time steps
 from trace content — non-final `CommandStart` ops become `before_start`
-argv hooks, and `FilesWrite` currently lowers to a constructed shell line
-(`printf '%s' '<b64>' | base64 -d > <path>`). So the honest statement is:
+argv hooks. `FilesWrite` no longer touches a guest shell at all: it lowers
+to the declarative `App.files` IR field, baked into the rootfs at build time
+via `mkFunctionService` `extraFiles` (base64 decoded by the trusted build,
+never interpolated into a guest command). So the honest statement is:
 **a hostile trace can run code inside the guest it is itself defining — which
 is what a workload is — and its safety rests on the guest confinement claims
 (1, 2, 10) plus the fixed lowering, not on a pretense that no steps exist.**
@@ -130,11 +132,12 @@ guest's authority beyond what admission grants.
 - **Closed vocabulary.** `RecordedOp` stays a closed enum of declarative
   actions. No host-exec or build-exec variant exists and none may be added.
 - **Shrink the shell surface.** The `FilesWrite` shell-string lowering is
-  replaced by a declarative IR file-materialization field (bytes carried as
-  data, written by the trusted init path, no shell interpolation). Until that
-  lands, a regression test pins the b64 encoding to the `STANDARD` alphabet —
-  the property that currently keeps the interpolation injection-free — so a
-  decoder/alphabet change cannot silently reopen it.
+  gone (Plan 191): it lowers to the declarative `App.files` IR field, baked
+  into the rootfs at build time via `mkFunctionService` `extraFiles` (bytes
+  carried as data, base64 decoded by the trusted build, no shell
+  interpolation). Reserved `/etc/mvm/*` paths take precedence over user files
+  so a trace cannot clobber boot wiring. File content and paths never reach a
+  guest shell context.
 - **Untrusted input discipline.** The trace parser gets the claim-5
   treatment: `#[serde(deny_unknown_fields)]`, a fuzz target landing in
   `security.yml` beside `fuzz_supervisor_config` *in the same plan that
@@ -319,7 +322,7 @@ discipline applies: when these land, their witnesses are named in
 | # | Control (section) | Witness required |
 |---|---|---|
 | P1 | Trace parser hardening (§2) | **DONE (Plan 186).** `fuzz_runtime_recording` in `security.yml` fuzz lane (`crates/mvm-sdk/fuzz`); `too_many_ops_refuses` + `files_write_oversize_refuses` + `duplicate_files_write_path_refuses` (mvm-sdk runtime). |
-| P2 | Shell-surface shrink (§2) | **Interim pin DONE + HARDENED beyond plan (Plan 186); declarative-materialization OPEN (own plan).** The pin caught and fixed a live shell-injection in the FilesWrite lowering — the path is now base64-encoded into the hook (not single-quote-interpolated), verified injection-safe by executing generated hooks against /bin/sh. Witnesses: `files_write_b64_with_single_quote_refuses` + `files_write_b64_url_safe_alphabet_refuses` + `files_write_hostile_path_is_base64_encoded_in_hook` + `files_write_root_level_path_materializes` + `files_write_slashless_nested_path_materializes` (mvm-sdk runtime). The remaining P2 work (replace the shell hook with a declarative IR file-materialization field) is deferred to its own plan. |
+| P2 | Shell-surface shrink (§2) | **DONE (Plan 191):** `FilesWrite` lowers to the declarative `App.files` IR field, baked into the rootfs at build time via `mkFunctionService` `extraFiles` (base64 decoded at build, never in a guest shell) — the `before_start` shell hook is gone. Plan 186's interim base64-hardening superseded. |
 | P3 | Trace integrity (§2) | **DONE (Plan 186).** `recording_sha256_hex` captured at read in `load_recording`/auto-exec; `verify_recording_digest` + `--recording-sha256` on `compile --from-recording`; 64 MiB byte cap before parse; `digest_verify_match_passes_mismatch_refuses` (mvm-sdk). |
 | P4 | Divergence gate (§2) | **DONE (Plan 186).** `require_acknowledged` refuses unacknowledged findings on the `run --mode plan` admission path (`gate_passes_with_no_findings`, `gate_refuses_unacknowledged`, `gate_passes_when_all_kinds_acked`, `gate_refuses_partial_acks` — mvm-cli); `Divergence` vocabulary in `mvm_sdk::runtime`; `--ack-divergence <kind>` to acknowledge. Ship-verb wiring inherits this gate when it lands. |
 | P5 | Projection consistency (§3) | `cross_projection_consistency_property` + `clamp_never_widens_property` + `rebinding_pin_into_metadata_range_refuses` (mvm-core `policy::projection`) — landed by Plan 188. Kernel close-out (Plan 190): `canonicalize_l4` (lenient — no mandatory-deny-overlap refusal at construction time; runtime `permits()` + `MandatoryDenyEgressScan` enforce it) feeds `L4PolicyScan` via `CanonicalEgress::permits`; `L4Policy`/`LiveL4Gate` duplicate deleted; claim-10 witnesses migrated, zero behaviour change; `kernel_egress_canonical_permits_agrees_with_hand_written_oracle` is the equivalence witness. Remaining for P5 close-out: WASI-context mapping (runner plan). |

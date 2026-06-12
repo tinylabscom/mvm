@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-12** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status --json`; Plan 190 kernel egress close-out)
+**Last updated: 2026-06-12** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -41,6 +41,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 186** — Trace hardening (ADR-080 P1/P3/P4 + hardened P2 pin) · ✅ LANDED (#809; caught + fixed a live shell-injection in the FilesWrite lowering)
 - [x] **PLAN 187** — Secret-scan admission gate (ADR-080 P7) · ✅ LANDED (#811)
 - [x] **PLAN 190** — Kernel egress decision converges on CanonicalEgress (ADR-080 P5 close-out) · 🟢 LANDED (kernel leg; lenient L4 lowering; zero claim-10 behaviour change; WASI-context mapping deferred to runner plan)
+- [x] **PLAN 191** — Declarative file materialization (ADR-080 P2-full) · 🟢 P2-full LANDED (FilesWrite lowers to the declarative `App.files` IR field, baked into the rootfs at build time via `mkFunctionService` `extraFiles`; the `before_start` shell hook is removed — file content/paths never reach a guest shell)
 
 ## Plan details
 
@@ -490,6 +491,13 @@ PLAN 190 — Kernel egress decision converges on CanonicalEgress (ADR-080 P5 clo
   [x] claim-10 witnesses migrated (same names, same assertions, zero behaviour change)
   [x] equivalence witness: kernel_egress_canonical_permits_agrees_with_hand_written_oracle
   [ ] WASI-context mapping (WasiEgress → WasiCtxBuilder) — deferred to runner plan
+
+PLAN 191 — Declarative file materialization (ADR-080 P2-full)  🟢 LANDED
+  [x] App.files IR field (MaterializedFile: path + base64 content)
+  [x] FilesWrite lowers to App.files (no before_start shell hook)
+  [x] mkFunctionService extraFiles bakes App.files into the rootfs at build time
+      (base64 decoded at build; reserved /etc/mvm/* paths take precedence)
+  [x] ADR-080 §8 P2 row + §2 prose updated to build-time bake, no shell
 ```
 
 ## Security claims

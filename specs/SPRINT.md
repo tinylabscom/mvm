@@ -2614,10 +2614,13 @@ each has a witness. The sprint lands those preconditions incrementally.
   change; equivalence witness `kernel_egress_canonical_permits_agrees_with_hand_written_oracle`.
 - **ADR-002 Tier-0 note** ✅ LANDED (#816): records the `wasm-sandbox` backend off the
   isolation scale + the Tier-0 single-principal threat-model framing.
+- **P2 full** ✅ LANDED (Plan 191): `FilesWrite` lowers to the declarative `App.files` IR
+  field, baked into the rootfs at build time via `mkFunctionService` `extraFiles` (base64
+  decoded at build, never in a guest shell); the `before_start` shell hook is removed.
+  Reserved `/etc/mvm/*` paths take precedence over user files.
 
 ### Deferred (ADR-080 §8 ledger)
 
-- **P2 full** — declarative IR file-materialization field replacing the shell hook.
 - **P6** — preview-fetched component digests carried into the IR; mutable refs refused
   under `--prod`.
 - **P8** — single-session relay primitive (websocket session-token binding + wasmtime

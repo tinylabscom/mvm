@@ -33,7 +33,7 @@
 - Modify: `crates/mvm-sdk/src/ir/workload.rs` (new struct + `App.files` field)
 - Modify: `crates/mvm-sdk/src/ir/mod.rs` (export `MaterializedFile` if the module re-exports IR types — match the existing pattern)
 
-- [ ] **Step 1: failing tests** (add to workload.rs's test module, matching its existing serde/schema test style):
+- [x] **Step 1: failing tests** (add to workload.rs's test module, matching its existing serde/schema test style):
 
 ```rust
     #[test]
@@ -73,9 +73,9 @@
 
 (If no `minimal_app()` helper exists in the test module, construct an `App` inline with empty `files`; read the module first.)
 
-- [ ] **Step 2: verify failure** — `cargo nextest run -p mvm-sdk ir::workload` (or the module's path) — `MaterializedFile` not found.
+- [x] **Step 2: verify failure** — `cargo nextest run -p mvm-sdk ir::workload` (or the module's path) — `MaterializedFile` not found.
 
-- [ ] **Step 3: implement.** Add the struct + field:
+- [x] **Step 3: implement.** Add the struct + field:
 
 ```rust
 /// A file materialized into the workload's rootfs at build time.
@@ -108,9 +108,9 @@ Add to `App` (after `hooks` or near `mounts` — match field grouping):
 
 Every existing `App { .. }` construction site in NON-test code must set `files: Vec::new()` (or rely on `..Default`-style — but `App` has no Default; grep `App {` across crates/ and add `files: Vec::new(),`). The compiler will list them.
 
-- [ ] **Step 4: verify pass** — `cargo nextest run -p mvm-sdk` (new IR tests + existing green; fix all `App {` sites until it compiles). `cargo clippy -p mvm-sdk -- -D warnings`, `cargo fmt --all`.
+- [x] **Step 4: verify pass** — `cargo nextest run -p mvm-sdk` (new IR tests + existing green; fix all `App {` sites until it compiles). `cargo clippy -p mvm-sdk -- -D warnings`, `cargo fmt --all`.
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```bash
 git add crates/mvm-sdk/src/ir
@@ -125,7 +125,7 @@ git commit -m "feat(sdk): MaterializedFile IR field on App (plan 191 P2-full)"
 - Modify: `crates/mvm-sdk/src/runtime.rs`
 - Modify: `crates/mvm-sdk/tests/runtime_compile_e2e.rs`
 
-- [ ] **Step 1: rewrite the lowering tests.** The Plan-186 injection pins tested the shell form and are now obsolete. In runtime.rs's test module:
+- [x] **Step 1: rewrite the lowering tests.** The Plan-186 injection pins tested the shell form and are now obsolete. In runtime.rs's test module:
   - REPLACE `files_write_hostile_path_is_base64_encoded_in_hook` with `files_write_lowers_to_materialized_file_not_a_hook`:
 
 ```rust
@@ -158,7 +158,7 @@ git commit -m "feat(sdk): MaterializedFile IR field on App (plan 191 P2-full)"
   - DELETE the obsolete shell-form pins: `files_write_b64_with_single_quote_refuses`, `files_write_b64_url_safe_alphabet_refuses`, `files_write_root_level_path_materializes`, `files_write_slashless_nested_path_materializes` (these exercised the removed `/bin/sh` hook). KEEP any test that asserts the b64 DECODE validation / size cap / duplicate-path / `FilesWriteAfterEntrypoint` divergence — those still apply (the lowering still decodes to validate + size-check, and still records the divergence). Adapt them if they reference `before_start`.
   - Update `files_write_decoded_secret_is_flagged`-style tests in the secret scanner only if they live here (they're in mvm-cli — leave; the recording shape is unchanged).
 
-- [ ] **Step 2: verify failure**, then **Step 3: implement.** In the `FilesWrite` arm of `compile_recording_with_findings`: keep the decode (for `InvalidFilesWriteB64` validation) + the `MAX_FILES_WRITE_DECODED_BYTES` check + the `FilesWriteAfterEntrypoint` finding, but REPLACE the shell-line construction + `before_start.push(HookCmd::Shell{..})` with collecting into a `materialized_files: Vec<MaterializedFile>` accumulator:
+- [x] **Step 2: verify failure**, then **Step 3: implement.** In the `FilesWrite` arm of `compile_recording_with_findings`: keep the decode (for `InvalidFilesWriteB64` validation) + the `MAX_FILES_WRITE_DECODED_BYTES` check + the `FilesWriteAfterEntrypoint` finding, but REPLACE the shell-line construction + `before_start.push(HookCmd::Shell{..})` with collecting into a `materialized_files: Vec<MaterializedFile>` accumulator:
 
 ```rust
             RecordedOp::FilesWrite { path, bytes_b64 } => {
@@ -185,9 +185,9 @@ git commit -m "feat(sdk): MaterializedFile IR field on App (plan 191 P2-full)"
 
 Declare `let mut materialized_files: Vec<MaterializedFile> = Vec::new();` next to `before_start`, and set `files: materialized_files` in the `App { .. }` construction. Remove any now-dead helper (e.g. a `shell_single_quote` if it lingers — grep). The duplicate-path scan at the top of `compile_recording_with_findings` already prevents two writes to the same path, so `app.files` has unique paths.
 
-- [ ] **Step 4: e2e test.** In `crates/mvm-sdk/tests/runtime_compile_e2e.rs`, the assertion currently checks `app.hooks.before_start[0]` is a Shell line with the base64 path. Change it to assert `app.files` carries `/app/note.txt` with `bytes_b64 == base64("hi\n")` and `app.hooks.before_start` is empty. Keep the `compile(&workload, &out, ...)` flake-generation assertion (it now must also confirm the flake carries the file — see Task 3; for this task just assert flake.nix exists as before).
+- [x] **Step 4: e2e test.** In `crates/mvm-sdk/tests/runtime_compile_e2e.rs`, the assertion currently checks `app.hooks.before_start[0]` is a Shell line with the base64 path. Change it to assert `app.files` carries `/app/note.txt` with `bytes_b64 == base64("hi\n")` and `app.hooks.before_start` is empty. Keep the `compile(&workload, &out, ...)` flake-generation assertion (it now must also confirm the flake carries the file — see Task 3; for this task just assert flake.nix exists as before).
 
-- [ ] **Step 5: verify + commit.** `cargo nextest run -p mvm-sdk`, `cargo clippy -p mvm-sdk -- -D warnings`, `cargo fmt --all`.
+- [x] **Step 5: verify + commit.** `cargo nextest run -p mvm-sdk`, `cargo clippy -p mvm-sdk -- -D warnings`, `cargo fmt --all`.
 
 ```bash
 git add crates/mvm-sdk/src/runtime.rs crates/mvm-sdk/tests/runtime_compile_e2e.rs
@@ -204,11 +204,11 @@ git commit -m "feat(sdk): FilesWrite lowers to App.files, not a before_start she
 
 This task touches the SDK→flake→Nix seam. READ FIRST, then implement; the exact launch-JSON shape + how `mkFunctionService` is invoked from the generated flake must be matched precisely.
 
-- [ ] **Step 1: read the integration.** Read `crates/mvm-sdk/src/compile/flake.rs` fully — how the launch JSON is assembled from the `Workload`/`App`, how `hooks` is threaded into the generated `flake.nix` (line ~129), and how `mkFunctionService` is called. Read `nix/lib/factories/mkFunctionService.nix` fully — the `extraFiles` map (~157), the hook-script bake (~192), `renderHookCmd`. Confirm whether the launch data reaches Nix as a JSON file the flake reads, or is interpolated into the generated `flake.nix` string. Report the exact mechanism before writing.
+- [x] **Step 1: read the integration.** Read `crates/mvm-sdk/src/compile/flake.rs` fully — how the launch JSON is assembled from the `Workload`/`App`, how `hooks` is threaded into the generated `flake.nix` (line ~129), and how `mkFunctionService` is called. Read `nix/lib/factories/mkFunctionService.nix` fully — the `extraFiles` map (~157), the hook-script bake (~192), `renderHookCmd`. Confirm whether the launch data reaches Nix as a JSON file the flake reads, or is interpolated into the generated `flake.nix` string. Report the exact mechanism before writing.
 
-- [ ] **Step 2: thread `files` through flake.rs.** Wherever `hooks` is put into the launch data, add the app's `files` (list of `{path, bytes_b64, mode}`). Mirror the `hooks = launch.hooks or {...}` pattern: e.g. `files = launch.files or [ ];` in the generated flake, and include `files` in the serialized launch JSON the flake reads.
+- [x] **Step 2: thread `files` through flake.rs.** Wherever `hooks` is put into the launch data, add the app's `files` (list of `{path, bytes_b64, mode}`). Mirror the `hooks = launch.hooks or {...}` pattern: e.g. `files = launch.files or [ ];` in the generated flake, and include `files` in the serialized launch JSON the flake reads.
 
-- [ ] **Step 3: bake in mkFunctionService.nix.** For each entry in `launch.files`, add to the `extraFiles` map an entry that bakes the build-time-decoded bytes at the target path with the given mode. Use a base64-decode derivation (Nix decodes at build, never the guest):
+- [x] **Step 3: bake in mkFunctionService.nix.** For each entry in `launch.files`, add to the `extraFiles` map an entry that bakes the build-time-decoded bytes at the target path with the given mode. Use a base64-decode derivation (Nix decodes at build, never the guest):
 
 ```nix
   # Materialize declarative files (was: FilesWrite before_start shell hooks).
@@ -227,13 +227,13 @@ This task touches the SDK→flake→Nix seam. READ FIRST, then implement; the ex
 
 Then merge `materializedFiles` into the `extraFiles` map (e.g. `extraFiles = { ...existing... } // materializedFiles;` — check for path collisions with the `/etc/mvm/...` entries; user paths are typically `/app/...` so collisions are unlikely, but if a user file path equals a reserved `/etc/mvm/...` path, the reserved one must win — order the `//` so reserved entries override, or assert no overlap). Note: `escapeShellArg` on a STANDARD-base64 token is belt-and-suspenders (the alphabet has no shell metacharacters) but correct.
 
-- [ ] **Step 4: verify.** `nix flake check` is not runnable without the builder VM in this loop; at minimum:
+- [x] **Step 4: verify.** `nix flake check` is not runnable without the builder VM in this loop; at minimum:
   - `cargo nextest run -p mvm-sdk` (the e2e flake-generation test — extend it to assert the generated `flake.nix` / launch JSON contains the file's `bytes_b64`).
   - If `nix` is available locally: `cd <generated flake dir>` from a test fixture and `nix eval` the `extraFiles` attr to confirm it includes the materialized path (best-effort; report whether it ran).
   - Read-review the Nix for correctness (the `runCommand` decode + the `//` merge + mode).
   Report which verification levels ran.
 
-- [ ] **Step 5: commit.**
+- [x] **Step 5: commit.**
 
 ```bash
 git add crates/mvm-sdk/src/compile/flake.rs nix/lib/factories/mkFunctionService.nix crates/mvm-sdk/tests/runtime_compile_e2e.rs
@@ -249,7 +249,7 @@ git commit -m "feat(build): bake App.files into the rootfs via mkFunctionService
 - Modify: `specs/REFACTOR-STATUS.md`, `specs/SPRINT.md`
 - Modify: `specs/plans/191-declarative-file-materialization.md` (tick boxes)
 
-- [ ] **Step 1: full gates** (match CI exactly — see [[feedback_ci_gate_list_completeness]]):
+- [x] **Step 1: full gates** (match CI exactly — see [[feedback_ci_gate_list_completeness]]):
 
 ```bash
 cargo fmt --all -- --check || rustup run nightly cargo fmt --all
@@ -262,11 +262,11 @@ cargo clippy --workspace -- -D warnings 2>&1 | tail -5
 ```
 (Environmental caveats: mvm-backend codesign SIGKILL; build `cargo build -p mvmctl` first so the mvm-cli assert_cmd integration tests can locate the binary.)
 
-- [ ] **Step 2: ADR-080 §8 P2 row.** Update P2 to mark the full close-out landed: `P2 | Shell-surface shrink (§2) | DONE (Plan 191): FilesWrite lowers to the declarative App.files IR field, baked into the rootfs at build time via mkFunctionService extraFiles (base64 decoded at build, never in a guest shell) — the before_start shell hook is gone. Interim base64 hardening (Plan 186) superseded.` Also amend the §2 prose that described FilesWrite as lowering to an in-guest boot-time shell hook — note it is now a build-time bake with no shell.
+- [x] **Step 2: ADR-080 §8 P2 row.** Update P2 to mark the full close-out landed: `P2 | Shell-surface shrink (§2) | DONE (Plan 191): FilesWrite lowers to the declarative App.files IR field, baked into the rootfs at build time via mkFunctionService extraFiles (base64 decoded at build, never in a guest shell) — the before_start shell hook is gone. Interim base64 hardening (Plan 186) superseded.` Also amend the §2 prose that described FilesWrite as lowering to an in-guest boot-time shell hook — note it is now a build-time bake with no shell.
 
-- [ ] **Step 3: REFACTOR-STATUS + SPRINT.** Add Plan 191 (🟢 P2-full landed — declarative file materialization, shell hook removed); bump "Last updated". In SPRINT.md Sprint 62, move "P2 full" from the Deferred list to a landed line.
+- [x] **Step 3: REFACTOR-STATUS + SPRINT.** Add Plan 191 (🟢 P2-full landed — declarative file materialization, shell hook removed); bump "Last updated". In SPRINT.md Sprint 62, move "P2 full" from the Deferred list to a landed line.
 
-- [ ] **Step 4: tick boxes; commit; open PR (do NOT merge — use the queue).**
+- [x] **Step 4: tick boxes; commit; open PR (do NOT merge — use the queue).**
 
 ```bash
 git add crates/ nix/ specs/
