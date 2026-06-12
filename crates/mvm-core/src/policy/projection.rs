@@ -2,7 +2,7 @@
 //!
 //! One resolved [`EffectivePolicy`] projects to two enforcement
 //! shapes: the canonical CIDR-keyed grant set the kernel layer
-//! (nftables / `LiveL4Gate` / `PlanFlowPolicy`) consumes, and the
+//! (nftables / `CanonicalL4Gate` / `PlanFlowPolicy`) consumes, and the
 //! hostname-keyed outbound grant set the WASI context builder
 //! consumes. Hostnames are pinned to IPs at projection time (via
 //! the admission-time [`DnsPinRegistry`]) so both projections are
@@ -31,7 +31,7 @@ use crate::policy::resolver::EffectivePolicy;
 /// L4 protocol of a canonical rule. The string forms `"tcp"` /
 /// `"udp"` are the `L4RuleSpec.proto` wire values; anything else
 /// refuses at projection time (loud failure at admission, not a
-/// silent drop at runtime — same posture as `LiveL4Gate`).
+/// silent drop at runtime).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Proto {
     Tcp,

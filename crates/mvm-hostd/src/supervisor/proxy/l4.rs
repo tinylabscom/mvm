@@ -1,42 +1,26 @@
-//! L4 egress policy substrate.
+//! L4 egress gate — supervisor `network` slot.
 //!
-//! `(proto, dst_cidr, dst_port_range)` allow-list evaluated against
-//! `(proto, dst_ip, dst_port)` at flow-establishment time. Default-
-//! deny — an empty rule set refuses every outbound flow. Each
-//! evaluation produces an [`L4Decision`] that the eventual TUN /
-//! smoltcp consumer feeds into its `accept` / `drop + audit`
-//! branches.
+//! The *decision* is now owned by `CanonicalEgress::permits` in
+//! `mvm-core::policy::projection`. This module holds only the async
+//! `L4Gate` trait (the supervisor slot boundary), the `NoopL4Gate`
+//! fail-closed default, and `CanonicalL4Gate` — the live impl that
+//! delegates every decision to `CanonicalEgress::permits`.
 //!
 //! ## Scope of this module
 //!
-//! - **Policy only.** Pure evaluation; no networking I/O.
-//! - **Both IPv4 and IPv6** supported via `ipnet::IpNet`.
-//! - **TCP and UDP** supported via [`Protocol`]; ICMP and others
-//!   land when a workload needs them (`Other(u8)` is reserved on
-//!   the wire).
-//! - **Hot-path** — the consumer will call `evaluate` once per
-//!   flow attempt, so the implementation uses an O(rules) scan
-//!   sorted by specificity-leaning order. For typical workload
-//!   allow-lists (<50 entries) this is faster than a trie.
-//!
-//! ## What this module does NOT do
-//!
-//! - **No TUN device management.** The Linux TUN + smoltcp
-//!   integration that turns an `L4Policy::evaluate` decision into
-//!   accept/drop on a per-VM TAP lives in the per-tenant
-//!   network-namespace work.
-//! - **No audit emission.** The consumer wires
-//!   `EgressAuditSink::record` with the flow tuple + decision.
-//!   This module returns the decision; the *what to do with it*
-//!   is the consumer's concern.
-//! - **No firewall rules.** Linux nftables / macOS pf / Windows
-//!   WFP rules are additive enforcement beneath the proxy, not the
-//!   proxy itself.
+//! - **Gate interface only.** `L4Gate::evaluate` is the async slot the
+//!   supervisor's builder pattern wires; callers hold `Box<dyn L4Gate>`.
+//! - **No policy evaluation logic here.** Rule lookup, CIDR matching, and
+//!   mandatory-deny enforcement live in `mvm_core::policy::projection`.
+//! - **Both IPv4 and IPv6** are handled by `CanonicalEgress::permits` via
+//!   `ipnet::IpNet::contains`.
+//! - **TCP and UDP** are the named variants; anything else (ICMP, `Other`)
+//!   never matches `CanonicalRule::permits` and therefore denies.
 
 use std::net::IpAddr;
 
 use async_trait::async_trait;
-use ipnet::IpNet;
+use mvm_core::policy::projection::{CanonicalEgress, Proto};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -66,111 +50,14 @@ pub enum L4Decision {
     Deny { reason: String },
 }
 
-/// One row of the allow-list. Matches when ALL three components
-/// match: proto equals, dst_ip is within `dst_cidr`, and port falls
-/// in the inclusive `[port_lo, port_hi]` range.
-///
-/// `port_lo = 0 && port_hi = 0` is the "any port" wildcard for the
-/// protocol+cidr pair (matches both well-known and ephemeral
-/// ports). Otherwise `port_lo <= port <= port_hi` is the standard
-/// range check.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct L4Rule {
-    pub proto: Protocol,
-    pub dst_cidr: IpNet,
-    /// Inclusive low bound of the destination port range.
-    pub port_lo: u16,
-    /// Inclusive high bound. `port_lo == 0 && port_hi == 0` means
-    /// "any port for this (proto, cidr)".
-    pub port_hi: u16,
-}
-
-impl L4Rule {
-    /// Build a single-port rule. The most common shape; convenience
-    /// over the `port_lo`/`port_hi` field literals.
-    pub fn single_port(proto: Protocol, dst_cidr: IpNet, port: u16) -> Self {
-        Self {
-            proto,
-            dst_cidr,
-            port_lo: port,
-            port_hi: port,
-        }
-    }
-
-    /// Build an any-port rule. Useful for DNS over UDP where the
-    /// destination is a specific resolver but the source port is
-    /// ephemeral on both sides.
-    pub fn any_port(proto: Protocol, dst_cidr: IpNet) -> Self {
-        Self {
-            proto,
-            dst_cidr,
-            port_lo: 0,
-            port_hi: 0,
-        }
-    }
-
-    /// Check whether this rule matches a `(proto, ip, port)` flow.
-    pub fn matches(&self, proto: Protocol, ip: IpAddr, port: u16) -> bool {
-        if self.proto != proto {
-            return false;
-        }
-        if !self.dst_cidr.contains(&ip) {
-            return false;
-        }
-        if self.port_lo == 0 && self.port_hi == 0 {
-            return true;
-        }
-        self.port_lo <= port && port <= self.port_hi
-    }
-}
-
-/// Ordered allow-list. Default-deny when empty or when no rule
-/// matches the queried flow.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct L4Policy {
-    pub rules: Vec<L4Rule>,
-}
-
-impl L4Policy {
-    pub fn new(rules: impl IntoIterator<Item = L4Rule>) -> Self {
-        Self {
-            rules: rules.into_iter().collect(),
-        }
-    }
-
-    /// Default-deny sentinel. Useful as the resolver's fall-back
-    /// when no policy bundle is provisioned (fail closed).
-    pub fn deny_all() -> Self {
-        Self::default()
-    }
-
-    /// Evaluate `(proto, ip, port)` against the rule list. The
-    /// first matching rule wins (rules earlier in the list take
-    /// precedence; callers concerned about determinism should
-    /// pre-sort).
-    pub fn evaluate(&self, proto: Protocol, ip: IpAddr, port: u16) -> L4Decision {
-        if self.rules.iter().any(|r| r.matches(proto, ip, port)) {
-            return L4Decision::Allow;
-        }
-        L4Decision::Deny {
-            reason: format!(
-                "no L4 rule matched {proto:?} {ip}:{port} (default deny — \
-                 add a rule to the policy bundle's [network] section)"
-            ),
-        }
-    }
-}
-
 // ──────────────────────────────────────────────────────────────────────
 // L4Gate — supervisor slot consumed by the policy resolver.
 //
 // Symmetric with `EgressProxy` (L7) / `ToolGate` / `KeystoreReleaser` /
 // `ArtifactCollector`: a `Box<dyn L4Gate>` slot the supervisor consults
-// at admission. `LiveL4Gate { policy: L4Policy }` is wired from a parsed
-// bundle's `[[network.l4]]` rows; the smoltcp / TUN consumer that turns
-// an `Allow` into accept-the-connection ships separately.
+// at admission. `CanonicalL4Gate` is wired from a parsed bundle's
+// `[[network.l4]]` rows; the smoltcp / TUN consumer that turns an
+// `Allow` into accept-the-connection ships separately.
 // ──────────────────────────────────────────────────────────────────────
 
 /// Errors `L4Gate::evaluate` can return. `NotWired` is the
@@ -215,116 +102,58 @@ impl L4Gate for NoopL4Gate {
     }
 }
 
-/// Live impl backed by a concrete `L4Policy`. Constructed from a
-/// parsed policy bundle's `[[network.l4]]` rows via
-/// [`LiveL4Gate::from_specs`].
-#[derive(Debug, Default)]
-pub struct LiveL4Gate {
-    pub policy: L4Policy,
+/// Live impl backed by a `CanonicalEgress`. Constructed from a parsed
+/// bundle's `[[network.l4]]` rows via `mvm_core::policy::canonicalize_l4`.
+///
+/// Decision delegates entirely to `CanonicalEgress::permits` —
+/// the single decision function shared by every enforcement layer.
+/// `Protocol::Other` never maps to a named `Proto`, so it always denies.
+#[derive(Debug)]
+pub struct CanonicalL4Gate {
+    egress: CanonicalEgress,
 }
 
-impl LiveL4Gate {
-    pub fn new(policy: L4Policy) -> Self {
-        Self { policy }
-    }
-
-    /// Translate a slice of `mvm_core::policy::L4RuleSpec` rows into a
-    /// `LiveL4Gate`. Refuses unparseable CIDRs and unknown protocols
-    /// at *translate* time — the operator sees a loud admission
-    /// failure rather than a silent default-deny at runtime.
-    pub fn from_specs(specs: &[mvm_core::policy::L4RuleSpec]) -> Result<Self, L4SpecError> {
-        let mut rules = Vec::with_capacity(specs.len());
-        for (i, spec) in specs.iter().enumerate() {
-            let proto = match spec.proto.as_str() {
-                "tcp" => Protocol::Tcp,
-                "udp" => Protocol::Udp,
-                other => {
-                    return Err(L4SpecError::UnknownProtocol {
-                        index: i,
-                        value: other.to_string(),
-                    });
-                }
-            };
-            let dst_cidr: IpNet =
-                spec.dst_cidr
-                    .parse()
-                    .map_err(|e: ipnet::AddrParseError| L4SpecError::BadCidr {
-                        index: i,
-                        value: spec.dst_cidr.clone(),
-                        detail: e.to_string(),
-                    })?;
-            if spec.port_lo > spec.port_hi
-                // 0-0 is the explicit any-port wildcard; any other
-                // `lo > hi` row is operator error.
-                && !(spec.port_lo == 0 && spec.port_hi == 0)
-            {
-                return Err(L4SpecError::InvertedPortRange {
-                    index: i,
-                    port_lo: spec.port_lo,
-                    port_hi: spec.port_hi,
-                });
-            }
-            rules.push(L4Rule {
-                proto,
-                dst_cidr,
-                port_lo: spec.port_lo,
-                port_hi: spec.port_hi,
-            });
-        }
-        Ok(Self::new(L4Policy::new(rules)))
+impl CanonicalL4Gate {
+    pub fn new(egress: CanonicalEgress) -> Self {
+        Self { egress }
     }
 }
 
 #[async_trait]
-impl L4Gate for LiveL4Gate {
+impl L4Gate for CanonicalL4Gate {
     async fn evaluate(
         &self,
         proto: Protocol,
         ip: IpAddr,
         port: u16,
     ) -> Result<L4Decision, L4Error> {
-        Ok(self.policy.evaluate(proto, ip, port))
+        let canon_proto = match proto {
+            Protocol::Tcp => Proto::Tcp,
+            Protocol::Udp => Proto::Udp,
+            Protocol::Other(n) => {
+                return Ok(L4Decision::Deny {
+                    reason: format!("no L4 rule matched proto={n} {ip}:{port} (default deny)"),
+                });
+            }
+        };
+        if self.egress.permits(&canon_proto, ip, port) {
+            Ok(L4Decision::Allow)
+        } else {
+            Ok(L4Decision::Deny {
+                reason: format!(
+                    "no L4 rule matched {proto:?} {ip}:{port} (default deny — \
+                     add a rule to the policy bundle's [network] section)"
+                ),
+            })
+        }
     }
-}
-
-/// Translation errors from [`LiveL4Gate::from_specs`]. Each variant
-/// names the bundle row index so operators can fix the offending
-/// `[[network.l4]]` entry by `index = N` (zero-based).
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum L4SpecError {
-    #[error("L4 rule #{index}: unknown proto {value:?} (expected \"tcp\" or \"udp\")")]
-    UnknownProtocol { index: usize, value: String },
-
-    #[error("L4 rule #{index}: dst_cidr {value:?} doesn't parse as a CIDR: {detail}")]
-    BadCidr {
-        index: usize,
-        value: String,
-        detail: String,
-    },
-
-    #[error(
-        "L4 rule #{index}: inverted port range port_lo={port_lo} > port_hi={port_hi} \
-         (use port_lo == 0 && port_hi == 0 for an any-port wildcard)"
-    )]
-    InvertedPortRange {
-        index: usize,
-        port_lo: u16,
-        port_hi: u16,
-    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::policy::projection::{CanonicalRule, Proto};
     use std::net::{Ipv4Addr, Ipv6Addr};
-
-    fn v4(cidr: &str) -> IpNet {
-        cidr.parse().unwrap()
-    }
-
-    fn v6(cidr: &str) -> IpNet {
-        cidr.parse().unwrap()
-    }
 
     fn ip4(s: &str) -> IpAddr {
         IpAddr::V4(s.parse::<Ipv4Addr>().unwrap())
@@ -334,200 +163,14 @@ mod tests {
         IpAddr::V6(s.parse::<Ipv6Addr>().unwrap())
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Default-deny invariants
-    // ──────────────────────────────────────────────────────────────
-
-    #[test]
-    fn empty_policy_denies_every_flow() {
-        let p = L4Policy::deny_all();
-        let deny = p.evaluate(Protocol::Tcp, ip4("8.8.8.8"), 443);
-        assert!(
-            matches!(deny, L4Decision::Deny { .. }),
-            "empty policy must deny, got {deny:?}"
-        );
-    }
-
-    #[test]
-    fn default_deny_reason_names_proto_ip_port() {
-        let p = L4Policy::deny_all();
-        let deny = p.evaluate(Protocol::Udp, ip4("1.1.1.1"), 53);
-        match deny {
-            L4Decision::Deny { reason } => {
-                assert!(reason.contains("Udp"), "reason missing proto: {reason}");
-                assert!(reason.contains("1.1.1.1"), "reason missing ip: {reason}");
-                assert!(reason.contains("53"), "reason missing port: {reason}");
-            }
-            other => panic!("expected Deny, got {other:?}"),
+    fn rule(proto: Proto, cidr: &str, lo: u16, hi: u16) -> CanonicalRule {
+        CanonicalRule {
+            proto,
+            net: cidr.parse().unwrap(),
+            port_lo: lo,
+            port_hi: hi,
         }
     }
-
-    // ──────────────────────────────────────────────────────────────
-    // Allow paths
-    // ──────────────────────────────────────────────────────────────
-
-    #[test]
-    fn single_port_rule_matches_exact_flow() {
-        let p = L4Policy::new([L4Rule::single_port(Protocol::Tcp, v4("10.0.0.0/24"), 443)]);
-        assert_eq!(
-            p.evaluate(Protocol::Tcp, ip4("10.0.0.5"), 443),
-            L4Decision::Allow
-        );
-    }
-
-    #[test]
-    fn single_port_rule_denies_off_cidr() {
-        let p = L4Policy::new([L4Rule::single_port(Protocol::Tcp, v4("10.0.0.0/24"), 443)]);
-        let deny = p.evaluate(Protocol::Tcp, ip4("10.0.1.5"), 443);
-        assert!(matches!(deny, L4Decision::Deny { .. }));
-    }
-
-    #[test]
-    fn single_port_rule_denies_wrong_port() {
-        let p = L4Policy::new([L4Rule::single_port(Protocol::Tcp, v4("10.0.0.0/24"), 443)]);
-        let deny = p.evaluate(Protocol::Tcp, ip4("10.0.0.5"), 22);
-        assert!(matches!(deny, L4Decision::Deny { .. }));
-    }
-
-    #[test]
-    fn single_port_rule_denies_wrong_proto() {
-        let p = L4Policy::new([L4Rule::single_port(Protocol::Tcp, v4("10.0.0.0/24"), 443)]);
-        let deny = p.evaluate(Protocol::Udp, ip4("10.0.0.5"), 443);
-        assert!(matches!(deny, L4Decision::Deny { .. }));
-    }
-
-    #[test]
-    fn any_port_rule_matches_every_port() {
-        let p = L4Policy::new([L4Rule::any_port(Protocol::Udp, v4("8.8.8.8/32"))]);
-        assert_eq!(
-            p.evaluate(Protocol::Udp, ip4("8.8.8.8"), 53),
-            L4Decision::Allow
-        );
-        assert_eq!(
-            p.evaluate(Protocol::Udp, ip4("8.8.8.8"), 12345),
-            L4Decision::Allow
-        );
-        // Wrong proto still denies.
-        assert!(matches!(
-            p.evaluate(Protocol::Tcp, ip4("8.8.8.8"), 53),
-            L4Decision::Deny { .. }
-        ));
-    }
-
-    #[test]
-    fn port_range_rule_includes_endpoints() {
-        let p = L4Policy::new([L4Rule {
-            proto: Protocol::Tcp,
-            dst_cidr: v4("0.0.0.0/0"),
-            port_lo: 8000,
-            port_hi: 8010,
-        }]);
-        assert_eq!(
-            p.evaluate(Protocol::Tcp, ip4("1.2.3.4"), 8000),
-            L4Decision::Allow
-        );
-        assert_eq!(
-            p.evaluate(Protocol::Tcp, ip4("1.2.3.4"), 8005),
-            L4Decision::Allow
-        );
-        assert_eq!(
-            p.evaluate(Protocol::Tcp, ip4("1.2.3.4"), 8010),
-            L4Decision::Allow
-        );
-        assert!(matches!(
-            p.evaluate(Protocol::Tcp, ip4("1.2.3.4"), 7999),
-            L4Decision::Deny { .. }
-        ));
-        assert!(matches!(
-            p.evaluate(Protocol::Tcp, ip4("1.2.3.4"), 8011),
-            L4Decision::Deny { .. }
-        ));
-    }
-
-    #[test]
-    fn first_match_wins() {
-        // Two rules covering the same flow — the earlier one should
-        // produce Allow even if a later one would have matched
-        // differently. We can't observe ordering through Allow vs
-        // Deny here, but we can confirm Allow is reached.
-        let p = L4Policy::new([
-            L4Rule::single_port(Protocol::Tcp, v4("10.0.0.0/8"), 443),
-            L4Rule::single_port(Protocol::Tcp, v4("10.0.0.0/24"), 443),
-        ]);
-        assert_eq!(
-            p.evaluate(Protocol::Tcp, ip4("10.0.0.5"), 443),
-            L4Decision::Allow
-        );
-    }
-
-    #[test]
-    fn ipv6_cidr_matches() {
-        let p = L4Policy::new([L4Rule::single_port(
-            Protocol::Tcp,
-            v6("2606:4700::/32"),
-            443,
-        )]);
-        assert_eq!(
-            p.evaluate(Protocol::Tcp, ip6("2606:4700:4700::1111"), 443),
-            L4Decision::Allow
-        );
-        assert!(matches!(
-            p.evaluate(Protocol::Tcp, ip6("2001:db8::1"), 443),
-            L4Decision::Deny { .. }
-        ));
-    }
-
-    #[test]
-    fn v4_rule_does_not_match_v6_addr() {
-        let p = L4Policy::new([L4Rule::single_port(Protocol::Tcp, v4("0.0.0.0/0"), 443)]);
-        // A v4 0.0.0.0/0 rule is sometimes mistakenly assumed to
-        // cover v6 too; ipnet correctly treats them as separate
-        // address families.
-        assert!(matches!(
-            p.evaluate(Protocol::Tcp, ip6("2001:db8::1"), 443),
-            L4Decision::Deny { .. }
-        ));
-    }
-
-    // ──────────────────────────────────────────────────────────────
-    // Serialization (the eventual TOML policy-bundle consumer)
-    // ──────────────────────────────────────────────────────────────
-
-    #[test]
-    fn policy_round_trips_through_json() {
-        let original = L4Policy::new([
-            L4Rule::single_port(Protocol::Tcp, v4("10.0.0.0/24"), 443),
-            L4Rule::any_port(Protocol::Udp, v4("8.8.8.8/32")),
-        ]);
-        let json = serde_json::to_string(&original).unwrap();
-        let round: L4Policy = serde_json::from_str(&json).unwrap();
-        assert_eq!(round.rules.len(), 2);
-        assert_eq!(round.rules[0].port_lo, 443);
-        assert_eq!(round.rules[0].port_hi, 443);
-        assert_eq!(round.rules[1].port_lo, 0);
-        assert_eq!(round.rules[1].port_hi, 0);
-    }
-
-    #[test]
-    fn protocol_kebab_case_serializes_as_lowercase() {
-        let json = serde_json::to_string(&Protocol::Tcp).unwrap();
-        assert_eq!(json, "\"tcp\"");
-        let parsed: Protocol = serde_json::from_str("\"udp\"").unwrap();
-        assert_eq!(parsed, Protocol::Udp);
-    }
-
-    #[test]
-    fn rule_rejects_unknown_field_at_parse() {
-        // deny_unknown_fields on L4Rule — typo at parse time fails
-        // loud, doesn't silently drop the bad key.
-        let bad =
-            r#"{"proto":"tcp","dst_cidr":"10.0.0.0/24","port_lo":443,"port_hi":443,"oops":true}"#;
-        assert!(serde_json::from_str::<L4Rule>(bad).is_err());
-    }
-
-    // ──────────────────────────────────────────────────────────────
-    // L4Gate trait — supervisor slot
-    // ──────────────────────────────────────────────────────────────
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
@@ -545,108 +188,119 @@ mod tests {
     }
 
     #[test]
-    fn live_l4_gate_allows_matching_flow() {
-        let policy = L4Policy::new([L4Rule::single_port(Protocol::Tcp, v4("10.0.0.0/24"), 443)]);
-        let g = LiveL4Gate::new(policy);
+    fn canonical_l4_gate_allows_matching_flow() {
+        let egress = CanonicalEgress::Rules(vec![rule(Proto::Tcp, "10.0.0.0/24", 443, 443)]);
+        let g = CanonicalL4Gate::new(egress);
         let d = block_on(g.evaluate(Protocol::Tcp, ip4("10.0.0.5"), 443)).expect("live ok");
         assert_eq!(d, L4Decision::Allow);
     }
 
     #[test]
-    fn live_l4_gate_denies_off_policy_flow() {
-        let policy = L4Policy::new([L4Rule::single_port(Protocol::Tcp, v4("10.0.0.0/24"), 443)]);
-        let g = LiveL4Gate::new(policy);
+    fn canonical_l4_gate_denies_off_policy_flow() {
+        let egress = CanonicalEgress::Rules(vec![rule(Proto::Tcp, "10.0.0.0/24", 443, 443)]);
+        let g = CanonicalL4Gate::new(egress);
         let d = block_on(g.evaluate(Protocol::Tcp, ip4("8.8.8.8"), 443)).expect("live ok");
         assert!(matches!(d, L4Decision::Deny { .. }));
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // LiveL4Gate::from_specs — bundle spec → live gate translation
-    // ──────────────────────────────────────────────────────────────
-
-    fn spec(proto: &str, cidr: &str, port_lo: u16, port_hi: u16) -> mvm_core::policy::L4RuleSpec {
-        mvm_core::policy::L4RuleSpec {
-            proto: proto.to_string(),
-            dst_cidr: cidr.to_string(),
-            port_lo,
-            port_hi,
-        }
-    }
-
     #[test]
-    fn from_specs_translates_tcp_and_udp_rows() {
-        let specs = [
-            spec("tcp", "10.0.0.0/24", 443, 443),
-            spec("udp", "8.8.8.8/32", 0, 0),
-        ];
-        let g = LiveL4Gate::from_specs(&specs).expect("translate");
-        assert_eq!(g.policy.rules.len(), 2);
-        assert_eq!(g.policy.rules[0].proto, Protocol::Tcp);
-        assert_eq!(g.policy.rules[1].proto, Protocol::Udp);
-    }
-
-    #[test]
-    fn from_specs_refuses_unknown_protocol() {
-        let specs = [spec("icmp", "10.0.0.0/24", 0, 0)];
-        let err = LiveL4Gate::from_specs(&specs).expect_err("unknown proto");
-        match err {
-            L4SpecError::UnknownProtocol { index, value } => {
-                assert_eq!(index, 0);
-                assert_eq!(value, "icmp");
-            }
-            other => panic!("expected UnknownProtocol, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn from_specs_refuses_bad_cidr() {
-        let specs = [spec("tcp", "not-a-cidr", 443, 443)];
-        let err = LiveL4Gate::from_specs(&specs).expect_err("bad cidr");
-        match err {
-            L4SpecError::BadCidr { index, value, .. } => {
-                assert_eq!(index, 0);
-                assert_eq!(value, "not-a-cidr");
-            }
-            other => panic!("expected BadCidr, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn from_specs_refuses_inverted_port_range() {
-        let specs = [spec("tcp", "10.0.0.0/24", 500, 400)];
-        let err = LiveL4Gate::from_specs(&specs).expect_err("inverted");
-        match err {
-            L4SpecError::InvertedPortRange {
-                index,
-                port_lo,
-                port_hi,
-            } => {
-                assert_eq!(index, 0);
-                assert_eq!(port_lo, 500);
-                assert_eq!(port_hi, 400);
-            }
-            other => panic!("expected InvertedPortRange, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn from_specs_accepts_any_port_wildcard_zero_zero() {
-        // The `port_lo == 0 && port_hi == 0` wildcard is the supported
-        // shape — `from_specs` must not flag it as inverted.
-        let specs = [spec("udp", "8.8.8.8/32", 0, 0)];
-        let g = LiveL4Gate::from_specs(&specs).expect("zero-zero wildcard");
-        assert_eq!(g.policy.rules.len(), 1);
-        // Sanity-evaluate: any UDP port to that /32 should Allow.
-        let d = block_on(g.evaluate(Protocol::Udp, ip4("8.8.8.8"), 53)).unwrap();
-        assert_eq!(d, L4Decision::Allow);
-    }
-
-    #[test]
-    fn from_specs_empty_input_yields_default_deny_gate() {
-        let g = LiveL4Gate::from_specs(&[]).expect("empty ok");
-        assert!(g.policy.rules.is_empty());
-        // Every evaluate call on an empty gate should be Deny.
-        let d = block_on(g.evaluate(Protocol::Tcp, ip4("1.1.1.1"), 443)).unwrap();
+    fn canonical_l4_gate_denies_other_proto() {
+        let egress = CanonicalEgress::Unrestricted;
+        let g = CanonicalL4Gate::new(egress);
+        let d = block_on(g.evaluate(Protocol::Other(1), ip4("1.1.1.1"), 0)).expect("other");
         assert!(matches!(d, L4Decision::Deny { .. }));
     }
+
+    #[test]
+    fn canonical_l4_gate_empty_rules_denies_everything() {
+        let egress = CanonicalEgress::Rules(vec![]);
+        let g = CanonicalL4Gate::new(egress);
+        let d = block_on(g.evaluate(Protocol::Tcp, ip4("8.8.8.8"), 443)).expect("ok");
+        assert!(matches!(d, L4Decision::Deny { .. }));
+    }
+
+    #[test]
+    fn canonical_l4_gate_unrestricted_allows_tcp_and_udp() {
+        let egress = CanonicalEgress::Unrestricted;
+        let g = CanonicalL4Gate::new(egress);
+        assert_eq!(
+            block_on(g.evaluate(Protocol::Tcp, ip4("8.8.8.8"), 443)).unwrap(),
+            L4Decision::Allow
+        );
+        assert_eq!(
+            block_on(g.evaluate(Protocol::Udp, ip4("8.8.8.8"), 53)).unwrap(),
+            L4Decision::Allow
+        );
+    }
+
+    #[test]
+    fn canonical_l4_gate_ipv6_rule_matches() {
+        let egress = CanonicalEgress::Rules(vec![rule(Proto::Tcp, "2606:4700::/32", 443, 443)]);
+        let g = CanonicalL4Gate::new(egress);
+        assert_eq!(
+            block_on(g.evaluate(Protocol::Tcp, ip6("2606:4700:4700::1111"), 443)).unwrap(),
+            L4Decision::Allow
+        );
+        assert!(matches!(
+            block_on(g.evaluate(Protocol::Tcp, ip6("2001:db8::1"), 443)).unwrap(),
+            L4Decision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn canonical_l4_gate_v4_rule_does_not_match_v6_addr() {
+        let egress = CanonicalEgress::Rules(vec![rule(Proto::Tcp, "0.0.0.0/0", 443, 443)]);
+        let g = CanonicalL4Gate::new(egress);
+        assert!(matches!(
+            block_on(g.evaluate(Protocol::Tcp, ip6("2001:db8::1"), 443)).unwrap(),
+            L4Decision::Deny { .. }
+        ));
+    }
+
+    // Serialization smoke — Protocol still round-trips (used on the wire).
+    #[test]
+    fn protocol_kebab_case_serializes_as_lowercase() {
+        let json = serde_json::to_string(&Protocol::Tcp).unwrap();
+        assert_eq!(json, "\"tcp\"");
+        let parsed: Protocol = serde_json::from_str("\"udp\"").unwrap();
+        assert_eq!(parsed, Protocol::Udp);
+    }
+
+    // mandatory-deny via CanonicalEgress::permits — loopback must always deny
+    // even through Unrestricted.
+    #[test]
+    fn mandatory_deny_wins_even_through_unrestricted() {
+        let egress = CanonicalEgress::Unrestricted;
+        let g = CanonicalL4Gate::new(egress);
+        // 127.0.0.1 is loopback → mandatory-deny range.
+        let d = block_on(g.evaluate(Protocol::Tcp, ip4("127.0.0.1"), 80)).unwrap();
+        assert!(
+            matches!(d, L4Decision::Deny { .. }),
+            "mandatory-deny must fire even for Unrestricted, got {d:?}"
+        );
+    }
+
+    // Build via canonicalize_l4 — the normal resolver path.
+    #[test]
+    fn from_canonicalize_l4_allows_listed_flow() {
+        use mvm_core::policy::L4RuleSpec;
+        use mvm_core::policy::canonicalize_l4;
+        let specs = [L4RuleSpec {
+            proto: "tcp".to_string(),
+            dst_cidr: "10.0.0.0/24".to_string(),
+            port_lo: 443,
+            port_hi: 443,
+        }];
+        let eg = canonicalize_l4(&specs).expect("parse ok");
+        let g = CanonicalL4Gate::new(eg);
+        assert_eq!(
+            block_on(g.evaluate(Protocol::Tcp, ip4("10.0.0.5"), 443)).unwrap(),
+            L4Decision::Allow
+        );
+        assert!(matches!(
+            block_on(g.evaluate(Protocol::Tcp, ip4("10.0.0.5"), 22)).unwrap(),
+            L4Decision::Deny { .. }
+        ));
+    }
+
 }

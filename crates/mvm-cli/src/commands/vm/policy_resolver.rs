@@ -69,10 +69,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use mvm_core::plan::{ExecutionPlan, FsPolicyRef, PolicyRef};
+use mvm_core::policy::canonicalize_l4;
 use mvm_hostd::supervisor::{
-    ArtifactCollector, AuditPolicyValidationError, EgressPolicyValidationError, EgressProxy,
-    KeystoreReleaser, L4Gate, L4SpecError, L7EgressProxy, LiveArtifactCollector,
-    LiveKeystoreReleaser, LiveL4Gate, NoopArtifactCollector, NoopEgressAuditSink, NoopEgressProxy,
+    ArtifactCollector, AuditPolicyValidationError, CanonicalL4Gate, EgressPolicyValidationError,
+    EgressProxy, KeystoreReleaser, L4Gate, L7EgressProxy, LiveArtifactCollector,
+    LiveKeystoreReleaser, NoopArtifactCollector, NoopEgressAuditSink, NoopEgressProxy,
     NoopKeystoreReleaser, NoopL4Gate, NoopToolGate, PiiPolicyError, PolicyToolGate,
     TokioDnsResolver, ToolGate, build_inspector_chain_with_pii,
     validate_audit_policy_stream_destinations, validate_egress_policy_inspector_names,
@@ -149,10 +150,9 @@ pub enum ResolveError {
     },
 
     /// A bundle parsed but its `[[network.l4]]` rows failed to
-    /// translate into a live `LiveL4Gate` — unparseable CIDR,
-    /// unknown protocol, or inverted port range. The detail carries
-    /// the underlying `L4SpecError` so the operator knows which row
-    /// (by zero-based index) to fix.
+    /// canonicalize — unparseable CIDR, unknown protocol, or inverted
+    /// port range. The detail carries the underlying error so the
+    /// operator knows which row (by zero-based index) to fix.
     L4SpecInvalid {
         value: String,
         path: PathBuf,
@@ -443,8 +443,8 @@ fn noop_slots() -> ResolvedSlots {
 
 /// Turn a parsed `PolicyBundle` into live supervisor
 /// component slots. Egress + tool-gate ship as real `L7EgressProxy`
-/// plus `PolicyToolGate`. The `network` slot is constructed
-/// from `bundle.network.l4` rows via `LiveL4Gate::from_specs`.
+/// plus `PolicyToolGate`. The `network` slot is a `CanonicalL4Gate`
+/// constructed from `bundle.network.l4` rows via `canonicalize_l4`.
 /// Keystore + artifacts stay Noop until the mvm-hostd supervisor lift.
 ///
 /// Fallible because a bundle that parses through TOML can still
@@ -457,16 +457,15 @@ fn slots_from_bundle(
     ref_value: &str,
     path: &std::path::Path,
 ) -> Result<ResolvedSlots, ResolveError> {
-    // L4 gate: translate `[[network.l4]]` rows into a `LiveL4Gate`.
-    // The empty-rows case yields a default-deny gate (fail-closed);
-    // explicit rows are the only way to permit outbound flows.
-    let l4 = LiveL4Gate::from_specs(&bundle.network.l4).map_err(|e: L4SpecError| {
-        ResolveError::L4SpecInvalid {
-            value: ref_value.to_string(),
-            path: path.to_path_buf(),
-            detail: e.to_string(),
-        }
+    // L4 gate: lower `[[network.l4]]` rows to a `CanonicalEgress` and
+    // wrap in a `CanonicalL4Gate`. Empty rows yield default-deny
+    // (fail-closed); explicit rows are the only way to permit flows.
+    let egress = canonicalize_l4(&bundle.network.l4).map_err(|e| ResolveError::L4SpecInvalid {
+        value: ref_value.to_string(),
+        path: path.to_path_buf(),
+        detail: e.to_string(),
     })?;
+    let l4 = CanonicalL4Gate::new(egress);
 
     // Tighten `disabled_inspectors` to fail-loud on unknown names
     // *at admission*. `build_inspector_chain` itself stays lenient
@@ -1220,9 +1219,9 @@ retention_days = {retention_days}
     // live L4Gate from [[network.l4]] rows
     //
     // A parsed `<tenant>:<workload>` bundle yields a
-    // live `LiveL4Gate` in `slots.network` constructed from the
-    // bundle's `[[network.l4]]` rows. Empty rows = default-deny;
-    // non-empty rows allow the listed flows.
+    // `CanonicalL4Gate` in `slots.network` built from the bundle's
+    // `[[network.l4]]` rows. Empty rows = default-deny; non-empty
+    // rows allow the listed flows.
     // ──────────────────────────────────────────────────────────────
 
     fn fixture_bundle_with_l4_rule(proto: &str, cidr: &str, port: u16) -> String {
@@ -1337,7 +1336,7 @@ port_hi  = {port}
                     443,
                 )
                 .await
-                .expect("LiveL4Gate must not return NotWired even for empty policy");
+                .expect("CanonicalL4Gate must not return NotWired even for empty policy");
             assert!(
                 matches!(d, mvm_hostd::supervisor::L4Decision::Deny { .. }),
                 "empty L4 policy must default-deny, got {d:?}"
