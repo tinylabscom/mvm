@@ -32,12 +32,13 @@ use mvm_sdk::runtime::{
 const MAX_RECORDING_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A recording loaded from disk: the lowered workload, the divergence
-/// findings the admission path gates on, and the content digest captured
-/// at read time.
+/// findings the admission path gates on, the content digest captured
+/// at read time, and any raw-secret findings from the host-side scan.
 pub(in crate::commands) struct LoadedRecording {
     pub workload: Workload,
     pub findings: Vec<Divergence>,
     pub digest_hex: String,
+    pub secret_findings: Vec<crate::commands::build::trace_secret_scan::SecretFinding>,
 }
 
 /// Languages the auto-exec path supports.
@@ -173,6 +174,10 @@ pub(in crate::commands) fn load_recording(
     }
     let recording: RuntimeRecording = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing runtime recording JSON from {}", path.display()))?;
+    let secret_findings = crate::commands::build::trace_secret_scan::scan_recording_for_secrets(
+        &recording,
+        &mvm_hostd::supervisor::secrets_scanner::SecretsScanner::with_default_rules(),
+    );
     let (workload, findings) = compile_recording_with_findings(&recording)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("lowering runtime recording from {}", path.display()))?;
@@ -180,6 +185,7 @@ pub(in crate::commands) fn load_recording(
         workload,
         findings,
         digest_hex,
+        secret_findings,
     })
 }
 

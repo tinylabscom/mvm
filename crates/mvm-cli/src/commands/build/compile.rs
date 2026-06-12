@@ -126,6 +126,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     for finding in &loaded.findings {
         eprintln!("divergence: {finding}");
     }
+    for sf in &loaded.secret_findings {
+        eprintln!(
+            "warning: embedded secret at {} [{}]",
+            sf.location,
+            sf.rules.join(", ")
+        );
+    }
     let manifest_dir = resolve_manifest_dir(&args)?;
 
     if is_archive_output(&args.out) {
@@ -221,6 +228,7 @@ fn load_workload(args: &Args) -> Result<LoadedRecording> {
                 workload,
                 findings: Vec::new(),
                 digest_hex: String::new(),
+                secret_findings: Vec::new(),
             })
         }
         WorkloadSource::IrJsonStdin => {
@@ -234,6 +242,7 @@ fn load_workload(args: &Args) -> Result<LoadedRecording> {
                 workload,
                 findings: Vec::new(),
                 digest_hex: String::new(),
+                secret_findings: Vec::new(),
             })
         }
         WorkloadSource::RecordingPath(path) => {
@@ -247,6 +256,7 @@ fn load_workload(args: &Args) -> Result<LoadedRecording> {
                     workload,
                     findings: Vec::new(),
                     digest_hex: String::new(),
+                    secret_findings: Vec::new(),
                 }),
                 Err(ParseError::NoDecoratedFunction { .. }) => {
                     // No `@mvm.app`, so the script is record-mode.
@@ -276,6 +286,7 @@ fn load_workload(args: &Args) -> Result<LoadedRecording> {
                             workload,
                             findings: Vec::new(),
                             digest_hex: String::new(),
+                            secret_findings: Vec::new(),
                         }),
                         Err(ParseError::NoDecoratedFunction { .. }) => {
                             auto_exec_record_script(&path, ScriptLanguage::TypeScript)

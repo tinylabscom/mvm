@@ -16,9 +16,6 @@ use mvm_sdk::runtime::{RecordedOp, RuntimeRecording};
 use std::collections::BTreeMap;
 
 /// One location in a recording carrying raw secret-shaped material.
-// Task 2 wires the consumer (load_recording + run_plan.rs); dead_code
-// until then — suppress here rather than in every caller.
-#[allow(dead_code)]
 pub(in crate::commands) struct SecretFinding {
     /// Human-pointable location, e.g. `create env[AWS_ACCESS_KEY_ID]`,
     /// `op#2 argv[1]`, `op#3 file /app/.env`.
@@ -32,7 +29,6 @@ pub(in crate::commands) struct SecretFinding {
 /// `FilesWrite`. `SecretRef` values are skipped (they carry no raw
 /// value). A non-empty result refuses promotion; the fix is to use a
 /// `SecretRef`, not to acknowledge.
-#[allow(dead_code)]
 pub(in crate::commands) fn scan_recording_for_secrets(
     rec: &RuntimeRecording,
     scanner: &SecretsScanner,
@@ -67,7 +63,6 @@ pub(in crate::commands) fn scan_recording_for_secrets(
 
 /// Scan the `Literal` values of an env map; `SecretRef` values are
 /// skipped by design.
-#[allow(dead_code)]
 fn scan_env(
     scanner: &SecretsScanner,
     ctx: &str,
@@ -82,7 +77,6 @@ fn scan_env(
 }
 
 /// Run the scanner over `body`; push a finding only when it matches.
-#[allow(dead_code)]
 fn push_if_hit(
     scanner: &SecretsScanner,
     location: String,

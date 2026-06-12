@@ -59,6 +59,7 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
+use crate::commands::build::trace_secret_scan::SecretFinding;
 use mvm_sdk::ir::{App, Workload};
 
 use super::managed_secrets::lower_app_secrets;
@@ -174,6 +175,7 @@ fn run_plan_mode(args: &RunArgs) -> Result<()> {
         workload,
         findings,
         digest_hex,
+        secret_findings,
     } = auto_exec_record_script(&script, lang).with_context(|| {
         format!(
             "lowering Sandbox-shaped script {} for plan-mode admission",
@@ -182,6 +184,7 @@ fn run_plan_mode(args: &RunArgs) -> Result<()> {
     })?;
 
     eprintln!("recording sha256: {digest_hex}");
+    refuse_embedded_secrets(&secret_findings)?;
     require_acknowledged(&findings, &args.ack_divergence)?;
 
     if workload.apps.is_empty() {
@@ -238,6 +241,29 @@ fn run_plan_mode(args: &RunArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Refuse plan-mode admission when the recording carries raw secret-shaped
+/// material. Unlike divergence findings, there is no acknowledgement path —
+/// a raw secret in the workload definition defeats the host-substitution
+/// posture, and the only fix is to replace the literal with a `SecretRef`.
+fn refuse_embedded_secrets(findings: &[SecretFinding]) -> Result<()> {
+    if findings.is_empty() {
+        return Ok(());
+    }
+    for f in findings {
+        eprintln!(
+            "EMBEDDED SECRET: {} matched [{}]",
+            f.location,
+            f.rules.join(", ")
+        );
+    }
+    bail!(
+        "refusing plan-mode admission: {} location(s) carry raw secret-shaped material. \
+         Replace each literal with a SecretRef so the value substitutes host-side and never \
+         enters the workload definition. This is not acknowledgeable — remove the secret.",
+        findings.len()
+    )
 }
 
 /// Refuse admission while any divergence finding's class is not
@@ -364,8 +390,91 @@ fn placeholder_image_sha(workload_id: &str, app_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::build::trace_secret_scan::scan_recording_for_secrets;
     use crate::commands::vm::exec::{RunMode, RunProfile};
-    use mvm_sdk::runtime::Divergence;
+    use base64::Engine;
+    use mvm_hostd::supervisor::secrets_scanner::SecretsScanner;
+    use mvm_sdk::ir::EnvValue;
+    use mvm_sdk::runtime::{Divergence, RecordedOp, RuntimeRecording, SandboxCreate};
+    use std::collections::BTreeMap;
+
+    // A realistic-shaped fake OpenAI key that matches the DEFAULT_RULES
+    // openai_api_key regex (sk- + 48 alnum). Not a real credential.
+    const FAKE_OPENAI: &str = "sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUV";
+
+    #[test]
+    fn secret_gate_passes_with_no_findings() {
+        assert!(refuse_embedded_secrets(&[]).is_ok());
+    }
+
+    #[test]
+    fn secret_gate_refuses_any_finding() {
+        let findings = vec![SecretFinding {
+            location: "create env[AWS]".to_string(),
+            rules: vec!["aws_access_key_id".to_string()],
+        }];
+        let err = refuse_embedded_secrets(&findings).unwrap_err();
+        assert!(err.to_string().contains("SecretRef"));
+    }
+
+    #[test]
+    fn secret_gate_is_not_acknowledgeable() {
+        // Unlike divergence findings, there is no --ack escape hatch for
+        // embedded secrets — the message must direct to SecretRef only.
+        let findings = vec![SecretFinding {
+            location: "op#0 file /app/.env".to_string(),
+            rules: vec!["openai_api_key".to_string()],
+        }];
+        let msg = refuse_embedded_secrets(&findings).unwrap_err().to_string();
+        assert!(
+            !msg.contains("--ack"),
+            "secret refusal must not offer an ack escape hatch"
+        );
+    }
+
+    #[test]
+    fn scan_then_refuse_composition_rejects_embedded_secret() {
+        // End-to-end gate composition: build a RuntimeRecording carrying a
+        // raw secret, run the scan, feed the findings into refuse_embedded_secrets,
+        // and assert we get a hard refusal.
+        let body = format!("OPENAI_API_KEY={FAKE_OPENAI}\n");
+        let b64 = base64::engine::general_purpose::STANDARD.encode(body.as_bytes());
+
+        let recording = RuntimeRecording {
+            workload_id: "wl".to_string(),
+            create: SandboxCreate {
+                template: "minimal".to_string(),
+                env: BTreeMap::new(),
+                include: Vec::new(),
+                tags: BTreeMap::new(),
+                ttl_seconds: None,
+                resources: None,
+                network: None,
+            },
+            ops: vec![RecordedOp::FilesWrite {
+                path: "/app/.env".to_string(),
+                bytes_b64: b64,
+            }],
+        };
+
+        let findings =
+            scan_recording_for_secrets(&recording, &SecretsScanner::with_default_rules());
+        assert!(
+            !findings.is_empty(),
+            "scan must surface the embedded secret"
+        );
+
+        let err = refuse_embedded_secrets(&findings).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SecretRef"),
+            "refusal must direct to SecretRef"
+        );
+        assert!(
+            !msg.contains("--ack"),
+            "refusal must not offer an ack escape hatch"
+        );
+    }
 
     #[test]
     fn gate_passes_with_no_findings() {
