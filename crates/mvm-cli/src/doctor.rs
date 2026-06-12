@@ -330,7 +330,6 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
 
     checks.push(kvm_check(plat, false));
     checks.push(nested_kvm_check(plat));
-    checks.push(apple_container_check(plat));
     checks.push(vz_check(plat));
     checks.push(libkrun_check(plat));
     checks.push(builder_backend_check(plat));
@@ -910,33 +909,6 @@ fn kvm_check(plat: Platform, in_vm: bool) -> Check {
         category: "platform",
         ok: true,
         info: "n/a on macOS (Hypervisor.framework via libkrun / Apple Container)".to_string(),
-    }
-}
-
-fn apple_container_check(plat: Platform) -> Check {
-    if plat != Platform::MacOS {
-        return Check {
-            name: "apple containers",
-            category: "platform",
-            ok: true,
-            info: "n/a (not macOS)".to_string(),
-        };
-    }
-
-    if plat.has_apple_containers() {
-        Check {
-            name: "apple containers",
-            category: "platform",
-            ok: true,
-            info: "available (macOS 26+ on Apple Silicon)".to_string(),
-        }
-    } else {
-        Check {
-            name: "apple containers",
-            category: "platform",
-            ok: true, // Not a failure — just unavailable
-            info: "not available (requires macOS 26+ on Apple Silicon)".to_string(),
-        }
     }
 }
 

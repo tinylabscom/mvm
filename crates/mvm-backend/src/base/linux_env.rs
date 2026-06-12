@@ -292,7 +292,7 @@ impl LinuxEnv for AppleContainerEnv {
 pub fn create_linux_env() -> Box<dyn LinuxEnv> {
     let plat = platform::current();
 
-    if plat.has_apple_containers() {
+    if plat.is_vz_default_tier() {
         return Box::new(AppleContainerEnv::new("mvm-dev"));
     }
 

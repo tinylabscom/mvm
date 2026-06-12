@@ -900,7 +900,7 @@ pub(in crate::commands) struct Args {
     /// under /data, /work, or /mnt (system mounts are read-only).
     #[arg(short, long, value_parser = clap_volume_spec)]
     pub volume: Vec<String>,
-    /// Hypervisor backend (firecracker, libkrun, qemu, apple-container, vz). Default: auto-detect per host
+    /// Hypervisor backend (firecracker, libkrun, qemu, vz). Default: auto-detect per host
     #[arg(long, default_value = "firecracker")]
     pub hypervisor: String,
     /// Port mapping (format: HOST:GUEST or PORT). Repeatable
@@ -1785,7 +1785,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     };
 
     let backend_label = match effective_hypervisor {
-        "apple-container" => "Apple Container",
+        "vz" => "Apple Virtualization",
         "qemu" => "QEMU (microvm.nix)",
         _ => "Firecracker VM",
     };
@@ -2195,130 +2195,6 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         return Ok(());
     }
 
-    // Apple Virtualization VMs live in-process — the process must stay alive.
-    if effective_hypervisor == "apple-container" && !detach {
-        // Services-health: wait for the
-        // guest agent unconditionally (was previously gated on
-        // `has_ports`), then poll integration health. Every Apple
-        // Container up now records `AgentConnecting` / `AgentReady`
-        // / `ServicesStarting` / `ServicesReady`, so `mvmctl ls
-        // --json` shows a useful wait reason for every VM.
-        ui::info("Waiting for guest agent...");
-        record_vm_readiness(&vm_name_owned, InstanceReadiness::AgentConnecting);
-        // (netinit audit emission below this site, after the
-        // wait_for_guest_agent call succeeds — see the matching
-        // FC path for the same wiring.)
-        let agent_ready = wait_for_guest_agent(&vm_name_owned, 30);
-        if agent_ready {
-            record_vm_readiness(&vm_name_owned, InstanceReadiness::AgentReady);
-            // User volumes are mounted in-guest by mkGuest's /init from
-            // the `mvm.uvols=` kernel cmdline (the backend attached each
-            // as a virtio-fs tag) — no post-boot RPC needed here.
-            // Same audit-emit as the FC path. Apple
-            // Container backend captures the guest console to
-            // the same `<vm_dir>/console.log` convention; the
-            // emit_for_vm helper handles a missing log file by
-            // returning Ok(None).
-            if let Err(e) = mvm_backend::netinit_audit::emit_for_vm(&vm_name_owned) {
-                tracing::debug!(
-                    vm = %vm_name_owned,
-                    error = %e,
-                    "netinit audit emit skipped (best-effort)"
-                );
-            }
-            let timeout = std::time::Duration::from_secs(services_health_timeout_secs);
-            super::readiness::wait_for_services_ready(&vm_name_owned, timeout);
-        } else {
-            ui::warn("Guest agent not reachable.");
-        }
-
-        // Set up port forwarding via vsock (no guest IP needed) —
-        // requires the agent, so only when the wait above succeeded
-        // AND there are ports to forward.
-        if agent_ready && has_ports {
-            let pm_list = parse_port_specs(ports).unwrap_or_default();
-
-            // Tell guest agent to start vsock forwarders
-            for pm in &pm_list {
-                match request_port_forward(&vm_name_owned, pm.guest) {
-                    Ok(vsock_port) => {
-                        ui::info(&format!(
-                            "Guest forwarding vsock:{vsock_port} → tcp/{}",
-                            pm.guest
-                        ));
-                    }
-                    Err(e) => {
-                        ui::warn(&format!(
-                            "Failed to set up guest forwarder for port {}: {e}",
-                            pm.guest
-                        ));
-                    }
-                }
-            }
-
-            // Start host-side proxies
-            for pm in &pm_list {
-                start_port_proxy(&vm_name_owned, pm.host, pm.guest);
-                ui::info(&format!(
-                    "Forwarding localhost:{} → guest tcp/{} (vsock)",
-                    pm.host, pm.guest
-                ));
-            }
-
-            // Persist port mappings so `ps` can display them
-            let ports_str: Vec<String> = pm_list
-                .iter()
-                .map(|p| format!("{}:{}", p.host, p.guest))
-                .collect();
-            let ports_file = format!(
-                "{}/.mvm/vms/{}/ports",
-                std::env::var("HOME").unwrap_or_default(),
-                vm_name_owned
-            );
-            let _ = std::fs::write(&ports_file, ports_str.join(","));
-        } else if !agent_ready && has_ports {
-            ui::warn("Port forwarding unavailable — guest agent not reachable.");
-        }
-
-        ui::info(&format!(
-            "VM '{}' running. Press Ctrl+C to stop.",
-            vm_name_owned
-        ));
-
-        // Block until signaled (Ctrl+C or SIGTERM). Degraded
-        // follow-up: same periodic
-        // integration-health poll as the direct-boot wait above —
-        // every ~10 s, watch for `Active` → `Error` regressions and
-        // flip readiness to `Degraded { unhealthy }`. The monitor
-        // dedupes; identical snapshots don't thrash the registry.
-        let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        let pair2 = pair.clone();
-        let _ = ctrlc::set_handler(move || {
-            let (lock, cvar) = &*pair2;
-            *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
-            cvar.notify_all();
-        });
-
-        let (lock, cvar) = &*pair;
-        let mut stopped = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut monitor = super::readiness::ServicesHealthMonitor::new();
-        let mut next_health_poll = std::time::Instant::now() + DEGRADED_POLL_INTERVAL;
-        while !*stopped {
-            stopped = cvar
-                .wait_timeout(stopped, std::time::Duration::from_secs(1))
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
-            if !*stopped && std::time::Instant::now() >= next_health_poll {
-                let _ = monitor.observe_and_record(&vm_name_owned);
-                next_health_poll = std::time::Instant::now() + DEGRADED_POLL_INTERVAL;
-            }
-        }
-
-        ui::info(&format!("Stopping VM '{}'...", vm_name_owned));
-        let _ = backend.stop(&mvm_core::vm_backend::VmId(vm_name_owned.clone()));
-        return Ok(());
-    }
-
     if forward {
         if has_ports {
             forward_ports(&vm_name_owned, &[])?;
@@ -2520,7 +2396,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
 /// populating `VmStartConfig`'s overlay fields from the resolver's cache
 /// probe. **Firecracker-only**: it's the sole backend that attaches the
 /// overlay (a second virtio-blk + `mvm.runtime_roothash=` on the cmdline);
-/// libkrun/Vz/apple-container ignore the fields, so we skip them.
+/// libkrun/Vz ignore the fields, so we skip them.
 /// **Non-fatal**: a cold cache or a non-verity dev rootfs leaves the
 /// fields `None` and the VM boots legacy. `resolve()` is a pure cache read
 /// — no build, no download, no `nix` — so this is safe on every host.

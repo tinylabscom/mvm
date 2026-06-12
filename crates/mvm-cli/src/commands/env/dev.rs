@@ -174,7 +174,7 @@ fn current_backend() -> DevBackend {
         builder_prefers_vz(),
         builder_prefers_libkrun(),
         plat.has_vz(),
-        plat.has_apple_containers(),
+        plat.is_vz_default_tier(),
         plat.has_libkrun(),
         plat.has_kvm(),
     )
