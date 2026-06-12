@@ -335,36 +335,37 @@ mod tests {
 
     #[test]
     fn env_provider_missing_var() {
-        unsafe { std::env::remove_var("MVM_TENANT_KEY_ACME") };
+        let mut env = crate::util::test_env::TestEnv::new();
+        env.remove("MVM_TENANT_KEY_ACME");
         assert!(EnvKeyProvider.get_data_key("acme").is_err());
     }
 
     #[test]
     fn env_provider_returns_secret_key_of_right_length() {
         use secrecy::ExposeSecret;
-        unsafe { std::env::set_var("MVM_TENANT_KEY_TESTX", VALID_KEY_HEX) };
+        let mut env = crate::util::test_env::TestEnv::new();
+        env.set("MVM_TENANT_KEY_TESTX", VALID_KEY_HEX);
         let key = EnvKeyProvider.get_data_key("testx").unwrap();
         // `expose_secret()` is the only path to the bytes — that's
         // the point of SecretBox.
         assert_eq!(key.expose_secret().len(), KEY_SIZE);
-        unsafe { std::env::remove_var("MVM_TENANT_KEY_TESTX") };
     }
 
     #[test]
     fn env_provider_uppercases_and_swaps_hyphens_to_secret() {
         use secrecy::ExposeSecret;
-        unsafe { std::env::set_var("MVM_TENANT_KEY_FOO_BAR", VALID_KEY_HEX) };
+        let mut env = crate::util::test_env::TestEnv::new();
+        env.set("MVM_TENANT_KEY_FOO_BAR", VALID_KEY_HEX);
         let key = EnvKeyProvider.get_data_key("foo-bar").unwrap();
         assert_eq!(key.expose_secret().len(), KEY_SIZE);
-        unsafe { std::env::remove_var("MVM_TENANT_KEY_FOO_BAR") };
     }
 
     #[test]
     fn env_provider_rejects_wrong_length_key() {
-        unsafe { std::env::set_var("MVM_TENANT_KEY_BADLEN", "deadbeef") };
+        let mut env = crate::util::test_env::TestEnv::new();
+        env.set("MVM_TENANT_KEY_BADLEN", "deadbeef");
         let err = EnvKeyProvider.get_data_key("badlen").unwrap_err();
         assert!(err.to_string().contains("must be 32 bytes"), "got: {err}");
-        unsafe { std::env::remove_var("MVM_TENANT_KEY_BADLEN") };
     }
 
     #[test]
@@ -554,10 +555,10 @@ mod tests {
 
         let tenant = "mvm-test-env-fallback";
         let var = "MVM_TENANT_KEY_MVM_TEST_ENV_FALLBACK";
-        unsafe { std::env::set_var(var, VALID_KEY_HEX) };
+        let mut env = crate::util::test_env::TestEnv::new();
+        env.set(var, VALID_KEY_HEX);
         let key = default_provider().get_data_key(tenant).unwrap();
         assert_eq!(key.expose_secret().len(), KEY_SIZE);
-        unsafe { std::env::remove_var(var) };
     }
 
     #[test]
@@ -565,12 +566,11 @@ mod tests {
         // Pick a tenant id no test ever writes a key for. Cleanup
         // any straggler env var defensively.
         let tenant = "mvm-test-unconfigured-tenant-xyz";
-        unsafe {
-            std::env::remove_var(format!(
-                "MVM_TENANT_KEY_{}",
-                tenant.to_uppercase().replace('-', "_")
-            ));
-        }
+        let mut env = crate::util::test_env::TestEnv::new();
+        env.remove(format!(
+            "MVM_TENANT_KEY_{}",
+            tenant.to_uppercase().replace('-', "_")
+        ));
         assert!(!has_key(tenant));
     }
 }

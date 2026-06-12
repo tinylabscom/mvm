@@ -478,14 +478,9 @@ fn render_text(report: &DoctorReport) {
 /// Keyed by `&str` rather than `&'static str` so JSON serialisation
 /// gets a stable BTreeMap ordering. Names match `VmBackend::name`.
 fn collect_balloon_support() -> BTreeMap<String, bool> {
-    // Hypervisor selectors mirror `AnyBackend::from_hypervisor`. The
-    // list is hand-maintained because there's no general "iterate
-    // every backend" helper today; adding a new backend means
-    // adding it here so doctor surfaces it without lying.
-    let names = ["firecracker", "vz", "libkrun", "qemu"];
     let mut out = BTreeMap::new();
-    for name in names {
-        let backend = AnyBackend::from_hypervisor(name);
+    for entry in mvm_backend::catalog::balloon_support_entries() {
+        let backend = AnyBackend::from_hypervisor(entry.selector);
         out.insert(backend.name().to_string(), backend.capabilities().balloon);
     }
     out
@@ -516,13 +511,10 @@ fn render_balloon_support(support: &BTreeMap<String, bool>) {
 /// resumes from RAM (Firecracker live-memory, Vz save/restore) vs. reboots
 /// from a disk snapshot (libkrun) before relying on a warm start.
 fn collect_warm_start_support() -> WarmStartReport {
-    // Mirrors `collect_balloon_support`'s hand-maintained list; `vz` carries
-    // the save/restore warm-start tier worth surfacing.
-    let names = ["firecracker", "libkrun", "qemu", "vz"];
     let mut backends = BTreeMap::new();
     let mut standby_pool = BTreeMap::new();
-    for name in names {
-        let b = AnyBackend::from_hypervisor(name);
+    for entry in mvm_backend::catalog::warm_start_support_entries() {
+        let b = AnyBackend::from_hypervisor(entry.selector);
         backends.insert(b.name().to_string(), b.snapshot_capability().label());
         standby_pool.insert(b.name().to_string(), b.supports_standby_pool());
     }
@@ -2705,12 +2697,26 @@ mod tests {
     #[test]
     fn collect_balloon_support_advertises_firecracker() {
         let support = collect_balloon_support();
-        // The hand-maintained list in collect_balloon_support must
-        // include Firecracker. If a future refactor drops it, this
-        // fails loudly.
+        // The backend catalog must include Firecracker in the balloon
+        // support matrix. If a future refactor drops it, this fails
+        // loudly.
         assert_eq!(support.get("firecracker"), Some(&true));
         // And honestly-`false` backends should not be silently dropped.
         assert_eq!(support.get("qemu"), Some(&false));
+    }
+
+    #[test]
+    fn collect_balloon_support_keeps_catalog_backends_in_stable_order() {
+        let support = collect_balloon_support();
+        let ordered: Vec<_> = support.into_iter().collect();
+        assert_eq!(
+            ordered,
+            vec![
+                ("firecracker".to_string(), true),
+                ("libkrun".to_string(), false),
+                ("qemu".to_string(), false),
+            ]
+        );
     }
 
     #[test]
@@ -2728,6 +2734,35 @@ mod tests {
             r.backends.get("vz"),
             Some(&"save-restore") | Some(&"unsupported")
         ));
+    }
+
+    #[test]
+    fn collect_warm_start_support_keeps_catalog_backends_in_stable_order() {
+        let r = collect_warm_start_support();
+        let ordered_backends: Vec<_> = r.backends.into_iter().collect();
+        let ordered_standby_pool: Vec<_> = r.standby_pool.into_iter().collect();
+        let vz_warm_start = AnyBackend::from_hypervisor("vz")
+            .snapshot_capability()
+            .label();
+
+        assert_eq!(
+            ordered_backends,
+            vec![
+                ("firecracker".to_string(), "live-memory"),
+                ("libkrun".to_string(), "disk-only"),
+                ("qemu".to_string(), "disk-only"),
+                ("vz".to_string(), vz_warm_start),
+            ]
+        );
+        assert_eq!(
+            ordered_standby_pool,
+            vec![
+                ("firecracker".to_string(), false),
+                ("libkrun".to_string(), true),
+                ("qemu".to_string(), false),
+                ("vz".to_string(), false),
+            ]
+        );
     }
 
     #[test]
@@ -2861,54 +2896,29 @@ mod tests {
     //
     // These tests mutate `MVM_DATA_DIR` / `MVM_SHARE_DIR` to redirect
     // doctor's filesystem probes at a tempdir. Env-var mutation is
-    // process-wide, so a `Mutex` serializes them.
+    // process-wide, so the shared test env guard serializes and restores it.
 
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct EnvGuard {
-        _guard: std::sync::MutexGuard<'static, ()>,
-        prev_data: Option<String>,
-        prev_share: Option<String>,
+        _env: mvm_core::util::test_env::TestEnv,
         _tmp_data: Option<tempfile::TempDir>,
         _tmp_share: Option<tempfile::TempDir>,
     }
 
     impl EnvGuard {
         fn new(data: Option<tempfile::TempDir>, share: Option<tempfile::TempDir>) -> Self {
-            let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let prev_data = std::env::var("MVM_DATA_DIR").ok();
-            let prev_share = std::env::var("MVM_SHARE_DIR").ok();
-            unsafe {
-                if let Some(d) = data.as_ref() {
-                    std::env::set_var("MVM_DATA_DIR", d.path());
-                }
-                if let Some(s) = share.as_ref() {
-                    std::env::set_var("MVM_SHARE_DIR", s.path());
-                }
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            if let Some(d) = data.as_ref() {
+                env.set("MVM_DATA_DIR", d.path());
+            }
+            if let Some(s) = share.as_ref() {
+                env.set("MVM_SHARE_DIR", s.path());
             }
             EnvGuard {
-                _guard: g,
-                prev_data,
-                prev_share,
+                _env: env,
                 _tmp_data: data,
                 _tmp_share: share,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.prev_data {
-                    Some(v) => std::env::set_var("MVM_DATA_DIR", v),
-                    None => std::env::remove_var("MVM_DATA_DIR"),
-                }
-                match &self.prev_share {
-                    Some(v) => std::env::set_var("MVM_SHARE_DIR", v),
-                    None => std::env::remove_var("MVM_SHARE_DIR"),
-                }
             }
         }
     }
