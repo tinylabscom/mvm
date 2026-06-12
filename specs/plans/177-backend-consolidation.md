@@ -112,6 +112,18 @@ Modified:
 
 ## Phase 2 — AVF convergence (GATED — do not start until both land on `main`)
 
+> **STATUS (2026-06-12): the convergence LANDED in #806.** Tasks 6-9 plus
+> Task 10's docs are done: the `apple_container` backend + `providers/` are
+> deleted, `AnyBackend` resolves macOS-26 to `Vz`, CoW per-instance rootfs is
+> ported (#789), `mvmctl dev` + `up -d` run on the detached vz supervisor
+> (`VzPersistentBuilderVm`, no launchd), `has_apple_containers`→
+> `is_vz_default_tier`, every `"apple-container"` selector collapsed to vz,
+> CLAUDE.md + ADR-002 tier matrix updated. **Not yet ticked DONE:** the live
+> macOS-26 vz `dev up`/`up` hardware smoke (host-gated) and the cosmetic
+> rename slice (the env module file `apple_container.rs`, `AppleContainerEnv`,
+> `MicrovmBackend::AppleContainer`, and the objc2 `mvm_apple_container_*` cdecl
+> symbols still carry the old name — functional path is already vz).
+
 > **GATE:** `feat/plan-152-wsb-rust-vz-supervisor` (Plan 152 WS-B, native
 > objc2 VZ supervisor) **and** `feat/plan-152-fix-vz-save-pause` must be
 > merged to `main` first. They rewrite the VZ supervisor surface this phase

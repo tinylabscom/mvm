@@ -1,14 +1,18 @@
-//! Apple Container dev environment + bundled image fetching.
+//! Vz dev environment + bundled image fetching.
 //!
-//! Extracted from `commands/mod.rs` as a pure mechanical refactor —
-//! no behavior changes.
+//! The dev VM is a long-lived Vz builder guest (`/dev/vdb` nix-store
+//! overlay + `/work` share wired internally) that runs `nix build`.
+//! Both the auto-detect macOS tier and an explicit `--builder vz`
+//! route here.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use mvm::vsock_transport::{VsockProxyTransport, VsockTransport};
+#[cfg(feature = "builder-vm")]
+use mvm::vsock_transport::{VsockTransport, VzTransport};
 
+#[cfg(feature = "builder-vm")]
 use super::super::vm::console::console_interactive;
 use super::artifact_verify::{
     bump_verify_outcome, download_file, fetch_expected_hashes, url_exists, verify_artifact_hash,
@@ -16,10 +20,17 @@ use super::artifact_verify::{
 use crate::ui;
 
 // ============================================================================
-// Apple Container dev environment
+// Dev environment (Vz supervisor)
 // ============================================================================
 
 pub(super) const DEV_VM_NAME: &str = "mvm-dev";
+
+/// Stable session id for the long-lived dev builder VM. Fixed (not the
+/// random per-build id the warm pool uses) so a separate `dev down`
+/// process can locate the supervisor PID file under
+/// `~/.cache/mvm/builder-vm/vms/mvm-persistent-builder-vz-dev/` and reap it.
+#[cfg(feature = "builder-vm")]
+const DEV_VM_SESSION_ID: &str = "dev";
 const BUILDER_VM_SOURCE_FINGERPRINT_FILE: &str = ".mvm-source.sha256";
 const BUILDER_VM_ARTIFACT_DIGEST_FILE: &str = ".mvm-artifacts.sha256";
 const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
@@ -30,36 +41,69 @@ const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
 #[cfg(feature = "builder-vm")]
 const HOST_VM_INIT_ROOTFS_PATH: &str = "/sbin/mvm-host-vm-init";
 
-/// Check if the Apple Container dev VM is running *and* reachable
-/// cross-process via the vsock proxy socket.
-///
-/// A live PID file alone is not enough — the daemon may have started but
-/// failed to materialize the proxy socket, in which case `run_in_vm` calls
-/// from other processes will fail. Treating that state as "not running"
-/// keeps `dev status` honest with what `shell::run_in_vm` actually sees.
-pub(in crate::commands) fn is_apple_container_dev_running() -> bool {
-    let pid_running = mvm_backend::providers::apple_container::list_ids()
-        .iter()
-        .any(|id| id == DEV_VM_NAME);
-    if !pid_running {
-        return false;
-    }
-    let proxy = mvm_backend::providers::apple_container::vsock_proxy_path(DEV_VM_NAME);
-    proxy.exists()
+/// Host directory the dev VM binds at `/work` (the guest-side
+/// workspace mount). This is the user's CWD at `dev up` time — the
+/// same value the old daemon captured to choose the virtio-fs share —
+/// so `dev_build` paths resolve identically on both sides of the VM
+/// boundary.
+#[cfg(feature = "builder-vm")]
+fn dev_workspace_root() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
-/// Boot the Apple Container dev VM, optionally opening an interactive console.
-pub(super) fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bool) -> Result<()> {
-    let is_daemon = std::env::var("MVM_DEV_DAEMON").as_deref() == Ok("1");
-
-    // When running as the daemon process, do the actual VM boot.
-    if is_daemon {
-        return cmd_dev_apple_container_daemon(cpus, memory_gib);
+/// Cmdline for the dev rootfs override. Reuses the builder image's
+/// canonical cmdline (same flake / mkGuest shape) when the builder
+/// cache is populated, falling back to the Vz builder default. Both
+/// carry `root=/dev/vda`, `console=hvc0`, and `init=/init`; the guest
+/// init then mounts `/dev/vdb` as the persistent nix store.
+#[cfg(feature = "builder-vm")]
+fn dev_image_cmdline() -> String {
+    use mvm_build::libkrun_builder::BuilderVmImage;
+    match mvm_build::libkrun_builder::ensure_builder_vm_image() {
+        Ok(BuilderVmImage::Rootfs { cmdline, .. }) if !cmdline.trim().is_empty() => cmdline,
+        _ => mvm_build::vz_builder::DEFAULT_VZ_BUILDER_CMDLINE.to_string(),
     }
+}
 
-    ui::progress("Starting dev environment via Apple Container...");
+/// Connect to the dev VM's guest agent over its Vz per-port vsock
+/// socket. The dev VM is a persistent Vz builder; its socket lives in
+/// the builder cache (not the data-dir path `VzTransport::for_vm`
+/// resolves), so the transport is built directly from the session's
+/// vsock dir.
+#[cfg(feature = "builder-vm")]
+fn dev_vm_guest_agent_connect() -> Result<std::os::unix::net::UnixStream> {
+    let vsock_dir = mvm_build::vz_builder::persistent_vz_vsock_dir(DEV_VM_SESSION_ID);
+    VzTransport::new(vsock_dir).connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+}
 
-    if is_apple_container_dev_running() {
+/// Check if the dev VM is running *and* reachable cross-process.
+///
+/// A live supervisor PID alone isn't enough — the guest may still be
+/// booting, in which case other-process RPCs fail. Requiring the
+/// guest-agent socket to connect keeps `dev status` honest with what
+/// `dev shell` actually sees.
+pub(in crate::commands) fn is_vz_dev_running() -> bool {
+    #[cfg(feature = "builder-vm")]
+    {
+        let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
+        if !mvm_build::vz_builder::persistent_vz_supervisor_alive(&state_dir) {
+            return false;
+        }
+        dev_vm_guest_agent_connect().is_ok()
+    }
+    #[cfg(not(feature = "builder-vm"))]
+    {
+        false
+    }
+}
+
+/// Boot the dev VM via the Vz supervisor, optionally opening an
+/// interactive console.
+#[cfg(feature = "builder-vm")]
+pub(super) fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result<()> {
+    ui::progress("Starting dev environment via Vz (Virtualization.framework)...");
+
+    if is_vz_dev_running() {
         if open_shell {
             ui::progress("Dev VM already running. Opening shell...");
             return console_interactive(DEV_VM_NAME);
@@ -68,90 +112,62 @@ pub(super) fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bo
         return Ok(());
     }
 
-    // Clean up stale state from a previous process that died.
-    cleanup_stale_dev_vm();
+    // Reap a dead-but-not-reaped supervisor from a prior session so the
+    // fresh start binds a clean state dir.
+    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
+    mvm_build::vz_builder::stop_persistent_vz_by_pid_file(&state_dir);
 
-    // Ensure dev image exists (build if needed — this runs in the CLI process)
+    // Ensure dev image exists (build if needed — runs in this process).
     let (kernel, rootfs) = ensure_dev_image()?;
 
-    // Lock ~/.mvm and ~/.cache/mvm to 0700 on every `dev up`.
-    // Idempotent — a fresh install creates them locked-down, and a host
-    // that pre-dates this change gets chmod'd on the first `dev up`
-    // after the upgrade.
+    // Lock ~/.mvm and ~/.cache/mvm to 0700 on every `dev up`. Idempotent.
     mvm_core::config::ensure_data_dir().with_context(|| "locking down data dir to mode 0700")?;
     mvm_core::config::ensure_cache_dir().with_context(|| "locking down cache dir to mode 0700")?;
 
-    // Launch a background daemon process that keeps the VM alive.
-    let exe = std::env::current_exe().context("cannot find current executable")?;
-    let log_dir = format!("{}/dev", mvm_core::config::mvm_cache_dir());
-    std::fs::create_dir_all(&log_dir)?;
-
-    // Truncate previous-run daemon logs. launchd doesn't rotate, and
-    // the daemon writes every guest-agent stdout/stderr there, so
-    // these grow without bound. Each `dev up` is a logical session
-    // boundary — losing prior logs is fine; preserving them forever
-    // is the wrong default.
-    //
-    // The daemon logs capture guest output the same way console.log
-    // does — they are mode 0600 so a same-host other user can't tail
-    // them. The truncate-on-each-up cadence is unchanged.
-    use std::os::unix::fs::OpenOptionsExt as _;
-    for name in ["daemon-stdout.log", "daemon-stderr.log"] {
-        let path = format!("{log_dir}/{name}");
-        let _ = std::fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .create(true)
-            .mode(0o600)
-            .open(&path);
-    }
-
-    // Sign the binary BEFORE launching via launchd. The daemon runs with
-    // MVM_SIGNED=1 so it won't re-exec (which would lose launchd context).
-    mvm_backend::providers::apple_container::ensure_signed();
-
-    // The host-backed Nix store is a sparse ext4 file at a stable
-    // path. Apple Container attaches it as /dev/vdb; the guest's init
-    // mkfs's it once and uses it as overlayfs upper over the rootfs's
-    // /nix. Persisted under the data dir (not the cache dir) so
-    // `dev down --reset` doesn't wipe it — populated build cache
-    // survives image rebuilds, since image staleness and store
-    // staleness are independent concerns.
-    //
-    // The parent process only ensures the parent dir exists; the
-    // sparse file itself is created in start_vm if missing.
-    let nix_store_disk = nix_store_disk_path();
-    if let Some(parent) = std::path::Path::new(&nix_store_disk).parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("creating host-backed Nix store parent {}", parent.display())
-        })?;
-    }
-    maybe_gc_host_nix_disk(&nix_store_disk);
-
     ui::info(&format!(
-        "Booting dev VM ({} vCPUs, {} GiB memory)...",
-        cpus, memory_gib
+        "Booting dev VM ({cpus} vCPUs, {memory_gib} GiB memory)..."
     ));
 
-    // Install a launchd agent to run the daemon. This is a proper macOS
-    // service that is cleanly unloaded by `dev down`.
-    install_dev_launchd_agent(&exe, &kernel, &rootfs, cpus, memory_gib, &log_dir)?;
+    let memory_mib = memory_gib.saturating_mul(1024);
+    let image = mvm_build::libkrun_builder::BuilderVmImage::Rootfs {
+        kernel_path: std::path::PathBuf::from(&kernel),
+        rootfs_path: std::path::PathBuf::from(&rootfs),
+        cmdline: dev_image_cmdline(),
+    };
 
-    // Wait for the VM to become ready (vsock proxy socket + guest agent reachable)
-    let proxy_path = dev_vsock_proxy_path();
+    // The Vz supervisor detaches: `start()` spawns it as a background
+    // child that writes `builder.pid` under the stable state dir and
+    // outlives this CLI process. A later `dev down` reaps it via that
+    // PID file. The persistent builder wires the `/dev/vdb` nix store
+    // and the `/work` share internally and holds the nix-store flock
+    // for the VM's lifetime.
+    let handle = mvm_build::vz_builder::VzPersistentBuilderVm::new(dev_workspace_root())
+        .with_session_id(DEV_VM_SESSION_ID)
+        .with_guest_agent_port(true)
+        .with_vcpus(cpus.clamp(1, u32::from(u8::MAX)) as u8)
+        .with_memory_mib(memory_mib)
+        .with_image_override(image)
+        .start()
+        .map_err(|e| anyhow::anyhow!("Failed to start dev VM: {e}"))?;
+    let console_log = handle.vm_state_dir().join("console.log");
+    // Drop the handle WITHOUT killing the supervisor — the dev VM must
+    // survive this process exit. `VzPersistentVmHandle::Drop` leaves the
+    // detached supervisor running (it only owns the `Child` for an
+    // optional explicit kill, which we don't call).
+    drop(handle);
+
+    // Wait for the guest agent (≤60s), then point at the console log on
+    // timeout.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         if std::time::Instant::now() > deadline {
             anyhow::bail!(
-                "Dev VM did not start within 60 seconds.\n\
-                           Check logs: {log_dir}/daemon-stderr.log"
+                "Dev VM did not become ready within 60 seconds.\n\
+                 Check the console log: {}",
+                console_log.display()
             );
         }
-        if std::path::Path::new(&proxy_path).exists()
-            && VsockProxyTransport::new(proxy_path.clone())
-                .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-                .is_ok()
-        {
+        if dev_vm_guest_agent_connect().is_ok() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -169,298 +185,71 @@ pub(super) fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bo
     Ok(())
 }
 
-/// Path for the vsock proxy Unix socket.
+#[cfg(not(feature = "builder-vm"))]
+pub(super) fn cmd_dev_vz(_cpus: u32, _memory_gib: u32, _open_shell: bool) -> Result<()> {
+    anyhow::bail!(
+        "the dev VM is built locally via the builder VM, but this mvmctl was \
+         compiled without the `builder-vm` feature."
+    )
+}
+
+/// Host-side path of the dev VM's guest-agent vsock socket. The console
+/// picker checks this for existence before falling through to the other
+/// backend probes; a present socket means the dev VM is the target.
 pub(in crate::commands) fn dev_vsock_proxy_path() -> String {
-    mvm_backend::providers::apple_container::vsock_proxy_path(DEV_VM_NAME)
-        .to_string_lossy()
-        .into_owned()
-}
-
-/// Daemon mode: boot the VM (which also publishes the vsock proxy socket)
-/// and block forever so the in-process VZVirtualMachine stays alive.
-fn cmd_dev_apple_container_daemon(cpus: u32, memory_gib: u32) -> Result<()> {
-    let kernel = std::env::var("MVM_DEV_KERNEL")
-        .unwrap_or_else(|_| format!("{}/dev/vmlinux", mvm_core::config::mvm_cache_dir()));
-    let rootfs = std::env::var("MVM_DEV_ROOTFS")
-        .unwrap_or_else(|_| format!("{}/dev/rootfs.ext4", mvm_core::config::mvm_cache_dir()));
-
-    let memory_mib = (memory_gib as u64) * 1024;
-    mvm_backend::providers::apple_container::start(DEV_VM_NAME, &kernel, &rootfs, cpus, memory_mib)
-        .map_err(|e| anyhow::anyhow!("Failed to start dev VM: {e}"))?;
-
-    // Block forever — the VM lives in this process.
-    loop {
-        std::thread::park();
-    }
-}
-
-/// Path to the sparse ext4 file that backs the dev VM's Nix store
-/// upper layer. Lives outside the cache dir so `dev down --reset`
-/// doesn't churn it.
-fn nix_store_disk_path() -> String {
-    format!("{}/dev/nix-store.img", mvm_core::config::mvm_data_dir())
-}
-
-/// Threshold above which `dev up` invokes the in-VM GC before booting.
-/// We compare against the sparse file's *materialised* (allocated) size
-/// on the host, not its logical size — the file is provisioned at 64
-/// GiB but only consumes blocks for actual writes. 20 GiB allocated is
-/// comfortably above a typical Rust/Python toolchain closure (~3-6 GiB)
-/// and well below the point where the host disk feels strained.
-const NIX_STORE_GC_THRESHOLD_BYTES: u64 = 20 * 1024 * 1024 * 1024;
-
-/// Run `nix-collect-garbage --delete-older-than 14d` *inside* the dev
-/// VM when the backing sparse file's allocated size crosses the
-/// threshold. Running the GC inside the VM matters: the in-VM nix
-/// owns the database and knows the GC roots; running on the host with
-/// `NIX_STORE_DIR` pointed at the upper layer would skip locks and
-/// could corrupt the store mid-build. Best-effort — failure is logged
-/// and the boot proceeds.
-fn maybe_gc_host_nix_disk(disk_path: &str) {
-    let Ok(meta) = std::fs::metadata(disk_path) else {
-        return;
-    };
-    let allocated = file_allocated_bytes(&meta);
-    if allocated < NIX_STORE_GC_THRESHOLD_BYTES {
-        return;
-    }
-    let gib = allocated as f64 / (1024.0 * 1024.0 * 1024.0);
-    ui::info(&format!(
-        "Host-backed Nix store ({disk_path}) using {gib:.1} GiB; \
-         next dev VM boot will run nix-collect-garbage."
-    ));
-    // Drop a sentinel the daemon's first-build hook can spot. The
-    // actual GC runs inside the VM via the dev_build pipeline; we
-    // can't run it from the host (would race the in-VM nix daemon
-    // and skip locks). The sentinel approach keeps the host side
-    // declarative and pushes the work to where it can be done safely.
-    let sentinel = format!(
-        "{}/dev/nix-store-needs-gc",
-        mvm_core::config::mvm_data_dir()
-    );
-    let _ = std::fs::write(&sentinel, "");
-}
-
-/// Allocated (st_blocks * 512) bytes of a file, which for a sparse
-/// file is the *materialised* size — much smaller than the logical
-/// length until the file gets written into. Falls back to logical
-/// length on platforms without st_blocks.
-#[cfg(unix)]
-fn file_allocated_bytes(meta: &std::fs::Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt as _;
-    meta.blocks().saturating_mul(512)
-}
-
-#[cfg(not(unix))]
-fn file_allocated_bytes(meta: &std::fs::Metadata) -> u64 {
-    meta.len()
-}
-
-const DEV_LAUNCHD_LABEL: &str = "com.mvm.dev";
-
-fn dev_launchd_plist_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(format!(
-        "{home}/Library/LaunchAgents/{DEV_LAUNCHD_LABEL}.plist"
-    ))
-}
-
-fn install_dev_launchd_agent(
-    exe: &std::path::Path,
-    kernel: &str,
-    rootfs: &str,
-    cpus: u32,
-    memory_gib: u32,
-    log_dir: &str,
-) -> Result<()> {
-    // Unload any previous agent first
-    unload_dev_launchd_agent();
-
-    let plist = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{DEV_LAUNCHD_LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{exe}</string>
-        <string>dev</string>
-        <string>up</string>
-    </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>MVM_DEV_DAEMON</key>
-        <string>1</string>
-        <key>MVM_DEV_KERNEL</key>
-        <string>{kernel}</string>
-        <key>MVM_DEV_ROOTFS</key>
-        <string>{rootfs}</string>
-        <key>MVM_DEV_CPUS</key>
-        <string>{cpus}</string>
-        <key>MVM_DEV_MEM_GIB</key>
-        <string>{memory_gib}</string>
-        <key>MVM_HOST_WORKDIR</key>
-        <string>{host_workdir}</string>
-        <key>MVM_HOST_DATADIR</key>
-        <string>{host_datadir}</string>
-        <key>MVM_NIX_STORE_DISK</key>
-        <string>{nix_store_disk}</string>
-        <key>MVM_SIGNED</key>
-        <string>0</string>
-    </dict>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <false/>
-    <key>StandardOutPath</key>
-    <string>{log_dir}/daemon-stdout.log</string>
-    <key>StandardErrorPath</key>
-    <string>{log_dir}/daemon-stderr.log</string>
-</dict>
-</plist>"#,
-        exe = exe.display(),
-        // Capture the user's CWD here (parent CLI process). The daemon
-        // is spawned by launchd with `current_dir() == /`, so it can't
-        // recover this on its own — `start_vm()` reads this env var to
-        // decide where to bind-mount the virtiofs share inside the VM.
-        host_workdir = std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        // Persistent host-backed Nix store, sparse ext4 file. Lives
-        // outside the cache dir for the dev image (which `dev down
-        // --reset` blows away) so populated build cache survives image
-        // rebuilds. The file is created on first VM start; the guest
-        // mkfs's it the first time it sees /dev/vdb.
-        nix_store_disk = nix_store_disk_path(),
-        // The mvm data dir on the host ($HOME/.mvm/...). The VM
-        // mounts it at the same absolute path so paths the dev_build
-        // pipeline emits (e.g. ~/.mvm/dev/builds/<hash>/) resolve to
-        // the same files on both sides of the VM boundary.
-        host_datadir = mvm_core::config::mvm_data_dir(),
-    );
-
-    let plist_path = dev_launchd_plist_path();
-    let agents_dir = plist_path.parent().expect("plist path must have parent");
-    std::fs::create_dir_all(agents_dir)?;
-    std::fs::write(&plist_path, &plist)?;
-
-    let output = std::process::Command::new("launchctl")
-        .args(["load", plist_path.to_str().unwrap_or("")])
-        .output()
-        .context("Failed to run launchctl")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("launchctl load failed: {stderr}");
-    }
-
-    Ok(())
-}
-
-fn unload_dev_launchd_agent() {
-    let plist_path = dev_launchd_plist_path();
-    if plist_path.exists() {
-        let _ = std::process::Command::new("launchctl")
-            .args(["unload", plist_path.to_str().unwrap_or("")])
-            .output();
-        let _ = std::fs::remove_file(&plist_path);
-    }
-}
-
-/// Kill the process that owns the dev VM and clean up its state.
-fn stop_dev_vm_owner() {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let vm_dir = std::path::PathBuf::from(format!("{home}/.mvm/vms/{DEV_VM_NAME}"));
-    let pid_file = vm_dir.join("pid");
-
-    if let Ok(pid_str) = std::fs::read_to_string(&pid_file)
-        && let Ok(pid) = pid_str.trim().parse::<i32>()
+    #[cfg(feature = "builder-vm")]
     {
-        // Don't kill ourselves
-        if pid as u32 != std::process::id() {
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
-            // Wait briefly for it to exit
-            for _ in 0..20 {
-                if unsafe { libc::kill(pid, 0) } != 0 {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
+        mvm_build::vz_builder::persistent_vz_vsock_dir(DEV_VM_SESSION_ID)
+            .join(mvm_core::config::vsock_socket_filename(
+                mvm_guest::vsock::GUEST_AGENT_PORT,
+            ))
+            .to_string_lossy()
+            .into_owned()
+    }
+    #[cfg(not(feature = "builder-vm"))]
+    {
+        // No builder-vm feature → no dev VM; return a path that never
+        // exists so the console picker skips the dev branch.
+        String::new()
+    }
+}
+
+/// Stop the dev VM by reaping its detached Vz supervisor via the PID
+/// file under the stable state dir.
+pub(super) fn cmd_dev_vz_down() -> Result<()> {
+    #[cfg(feature = "builder-vm")]
+    {
+        let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
+        let was_running = mvm_build::vz_builder::stop_persistent_vz_by_pid_file(&state_dir);
+        // Drop the per-VM vsock dir so a stale socket can't fool the
+        // liveness probe on the next `dev status`.
+        let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
+        if was_running {
+            ui::success("Dev VM stopped.");
+        } else {
+            ui::info("Dev VM is not running.");
         }
+        Ok(())
     }
-
-    let _ = std::fs::remove_dir_all(&vm_dir);
-}
-
-/// Clean up stale persisted state from a dead dev VM process.
-fn cleanup_stale_dev_vm() {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let vm_dir = std::path::PathBuf::from(format!("{home}/.mvm/vms/{DEV_VM_NAME}"));
-    let pid_file = vm_dir.join("pid");
-
-    if !pid_file.exists() {
-        return;
-    }
-
-    let pid_str = match std::fs::read_to_string(&pid_file) {
-        Ok(s) => s.trim().to_string(),
-        Err(_) => return,
-    };
-    let pid: i32 = match pid_str.parse() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-
-    // Check if the process is still alive (signal 0 = existence check)
-    let alive = unsafe { libc::kill(pid, 0) } == 0;
-    if alive {
-        return; // process still running, not stale
-    }
-
-    ui::info("Cleaning up stale dev VM state from a previous session...");
-    let _ = std::fs::remove_dir_all(&vm_dir);
-}
-
-/// Stop the Apple Container dev VM.
-pub(super) fn cmd_dev_apple_container_down() -> Result<()> {
-    let was_running = is_apple_container_dev_running() || dev_launchd_plist_path().exists();
-
-    // Unload the launchd agent (stops the daemon process)
-    unload_dev_launchd_agent();
-    // Kill any lingering daemon process
-    stop_dev_vm_owner();
-    // Clean up state files
-    cleanup_stale_dev_vm();
-    let _ = std::fs::remove_file(dev_vsock_proxy_path());
-
-    if was_running {
-        ui::success("Dev VM stopped.");
-    } else {
+    #[cfg(not(feature = "builder-vm"))]
+    {
         ui::info("Dev VM is not running.");
+        Ok(())
     }
-    Ok(())
 }
 
-/// Show Apple Container dev VM status.
-pub(super) fn cmd_dev_apple_container_status() -> Result<()> {
-    let running = is_apple_container_dev_running();
-    ui::info("Backend:  Apple Container (Virtualization.framework)");
+/// Show dev VM status.
+pub(super) fn cmd_dev_vz_status() -> Result<()> {
+    let running = is_vz_dev_running();
+    ui::info("Backend:  Vz (Apple Virtualization.framework)");
     ui::info(&format!("Dev VM:   {DEV_VM_NAME}"));
     ui::info(&format!(
         "Status:   {}",
         if running { "running" } else { "stopped" }
     ));
 
-    if running
-        && let Ok(mut stream) = mvm_backend::providers::apple_container::vsock_connect_any(
-            DEV_VM_NAME,
-            mvm_guest::vsock::GUEST_AGENT_PORT,
-        )
-    {
+    #[cfg(feature = "builder-vm")]
+    if running && let Ok(mut stream) = dev_vm_guest_agent_connect() {
         // Inbound vsock RPC audit.
         super::super::shared::emit_vsock_rpc_audit(
             DEV_VM_NAME,
@@ -537,12 +326,6 @@ struct DevStatusImage {
 }
 
 fn resolve_dev_status_image() -> Option<DevStatusImage> {
-    if let Some(image) = dev_launchd_image_paths()
-        && std::path::Path::new(&image.rootfs_path).exists()
-    {
-        return Some(image);
-    }
-
     let version = env!("CARGO_PKG_VERSION");
     for dir in [
         format!("{}/dev/current", mvm_core::config::mvm_data_dir()),
@@ -565,30 +348,6 @@ fn resolve_dev_status_image() -> Option<DevStatusImage> {
         });
     }
 
-    None
-}
-
-fn dev_launchd_image_paths() -> Option<DevStatusImage> {
-    let plist = std::fs::read_to_string(dev_launchd_plist_path()).ok()?;
-    Some(DevStatusImage {
-        kernel_path: plist_env_string_value(&plist, "MVM_DEV_KERNEL"),
-        rootfs_path: plist_env_string_value(&plist, "MVM_DEV_ROOTFS")?,
-    })
-}
-
-fn plist_env_string_value(plist: &str, key: &str) -> Option<String> {
-    let expected_key = format!("<key>{key}</key>");
-    let mut lines = plist.lines().map(str::trim);
-    while let Some(line) = lines.next() {
-        if line != expected_key {
-            continue;
-        }
-        let value = lines.next()?.trim();
-        return value
-            .strip_prefix("<string>")?
-            .strip_suffix("</string>")
-            .map(str::to_string);
-    }
     None
 }
 
@@ -4150,9 +3909,7 @@ mod dev_status_image_tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvGuard {
-        home: Option<String>,
-        data_dir: Option<String>,
-        cache_dir: Option<String>,
+        _env: mvm_core::util::test_env::TestEnv,
     }
 
     impl EnvGuard {
@@ -4161,36 +3918,11 @@ mod dev_status_image_tests {
             data_dir: &std::path::Path,
             cache_dir: &std::path::Path,
         ) -> Self {
-            let guard = Self {
-                home: std::env::var("HOME").ok(),
-                data_dir: std::env::var("MVM_DATA_DIR").ok(),
-                cache_dir: std::env::var("MVM_CACHE_DIR").ok(),
-            };
-            unsafe {
-                std::env::set_var("HOME", home);
-                std::env::set_var("MVM_DATA_DIR", data_dir);
-                std::env::set_var("MVM_CACHE_DIR", cache_dir);
-            }
-            guard
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.home {
-                    Some(value) => std::env::set_var("HOME", value),
-                    None => std::env::remove_var("HOME"),
-                }
-                match &self.data_dir {
-                    Some(value) => std::env::set_var("MVM_DATA_DIR", value),
-                    None => std::env::remove_var("MVM_DATA_DIR"),
-                }
-                match &self.cache_dir {
-                    Some(value) => std::env::set_var("MVM_CACHE_DIR", value),
-                    None => std::env::remove_var("MVM_CACHE_DIR"),
-                }
-            }
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            env.set("HOME", home);
+            env.set("MVM_DATA_DIR", data_dir);
+            env.set("MVM_CACHE_DIR", cache_dir);
+            Self { _env: env }
         }
     }
 
@@ -4234,53 +3966,6 @@ mod dev_status_image_tests {
     fn write_builder_vm_workspace_prereqs(workspace_root: &std::path::Path) {
         std::fs::write(workspace_root.join("Cargo.lock"), "# stub Cargo.lock\n")
             .expect("write Cargo.lock");
-    }
-
-    #[test]
-    fn status_image_prefers_launchd_image_paths() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
-        let data_dir = tmp.path().join("data");
-        let cache_dir = tmp.path().join("cache");
-        let _env = EnvGuard::set(&home, &data_dir, &cache_dir);
-
-        let launchd_kernel = tmp.path().join("daemon/vmlinux");
-        let launchd_rootfs = tmp.path().join("daemon/rootfs.ext4");
-        touch(&launchd_kernel);
-        touch(&launchd_rootfs);
-        touch(&data_dir.join("dev/current/vmlinux"));
-        touch(&data_dir.join("dev/current/rootfs.ext4"));
-
-        let plist_path = dev_launchd_plist_path();
-        std::fs::create_dir_all(plist_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            plist_path,
-            format!(
-                r#"<plist version="1.0">
-<dict>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>MVM_DEV_KERNEL</key>
-        <string>{}</string>
-        <key>MVM_DEV_ROOTFS</key>
-        <string>{}</string>
-    </dict>
-</dict>
-</plist>"#,
-                launchd_kernel.display(),
-                launchd_rootfs.display()
-            ),
-        )
-        .unwrap();
-
-        assert_eq!(
-            resolve_dev_status_image(),
-            Some(DevStatusImage {
-                kernel_path: Some(launchd_kernel.to_string_lossy().into_owned()),
-                rootfs_path: launchd_rootfs.to_string_lossy().into_owned(),
-            })
-        );
     }
 
     #[test]

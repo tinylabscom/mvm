@@ -960,11 +960,8 @@ mod tests {
         // `stash_plan_for_bridge` must succeed without touching disk
         // because there's nothing to stash.
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: serialized by setting MVM_DATA_DIR scoped to this test
-        // process; no other tests in this file race with it. We restore
-        // on the way out.
-        let saved = std::env::var("MVM_DATA_DIR").ok();
-        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
 
         let cfg = VmStartConfig {
             name: "skip-me".into(),
@@ -975,14 +972,6 @@ mod tests {
             !dir.path().join("vms/skip-me/plan.json").exists(),
             "no files when plan_json is None"
         );
-
-        // SAFETY: serialized as above.
-        unsafe {
-            match saved {
-                Some(v) => std::env::set_var("MVM_DATA_DIR", v),
-                None => std::env::remove_var("MVM_DATA_DIR"),
-            }
-        }
     }
 
     #[test]
@@ -991,9 +980,8 @@ mod tests {
         use mvm_core::vm_backend::VmStartConfig;
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let saved = std::env::var("MVM_DATA_DIR").ok();
-        // SAFETY: scoped env var swap, restored below.
-        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
 
         let cfg = VmStartConfig {
             name: "with-plan".into(),
@@ -1021,13 +1009,5 @@ mod tests {
             0o600,
             "bundle.json must be mode 0600"
         );
-
-        // SAFETY: restoring the prior value (or removing).
-        unsafe {
-            match saved {
-                Some(v) => std::env::set_var("MVM_DATA_DIR", v),
-                None => std::env::remove_var("MVM_DATA_DIR"),
-            }
-        }
     }
 }

@@ -1,4 +1,3 @@
-use crate::apple_container::AppleContainerBackend;
 use crate::backend::{AnyBackend, BackendTier, FirecrackerBackend};
 use crate::libkrun::LibkrunBackend;
 use crate::mock::MockBackend;
@@ -94,18 +93,6 @@ backend_catalog![
         tier: Tier1,
         marker_file: Some("fc.pid"),
         started_vm_probe_order: Some(3),
-        list_all: true,
-        balloon_support: true,
-        warm_start_support: true
-    },
-    {
-        kind: AppleContainer,
-        selector: "apple-container",
-        aliases: [],
-        constructor: AnyBackend::AppleContainer(AppleContainerBackend),
-        tier: Tier2,
-        marker_file: None,
-        started_vm_probe_order: None,
         list_all: true,
         balloon_support: true,
         warm_start_support: true

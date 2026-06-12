@@ -172,7 +172,7 @@ any remaining callers from `rg -n 'security::keystore|default_provider\\('`.
 
 - [x] **Step 1 — encode the current matrix.** Add/expand tests that assert the
       existing canonical names, aliases, tiers, and marker-file ownership for:
-      firecracker, apple-container, libkrun, vz, qemu, mock.
+      firecracker, libkrun, vz, qemu, mock.
 - [x] **Step 2 — encode doctor parity.** Add a test that the backend names shown
       by `doctor`’s balloon and warm-start support collectors are sourced from the
       same backend set and stay in stable order.
@@ -212,8 +212,8 @@ edit `crates/mvm-backend/src/lib.rs` and `crates/mvm-backend/src/backend.rs`.
 **Files:** `crates/mvm-cli/src/doctor.rs`; any needed export in `crates/mvm-backend/src/lib.rs`
 
 - [x] **Step 1 — remove hand-maintained name arrays.** Replace the local
-      `["firecracker", "apple-container", "libkrun", "qemu"]` /
-      `["firecracker", "apple-container", "libkrun", "qemu", "vz"]` arrays with an
+      `["firecracker", "libkrun", "qemu"]` /
+      `["firecracker", "libkrun", "qemu", "vz"]` arrays with an
       iterator or slice exported from `mvm-backend`.
 - [x] **Step 2 — keep intentional filtering explicit.** If doctor should show a
       subset for a given section, make that filtering a field in the catalog or a

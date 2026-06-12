@@ -1675,10 +1675,35 @@ fn spawn_payload_tap(
     Ok(spawn_bridge_thread(endpoints, bridge_cfg))
 }
 
+/// Populate a `sockaddr_un` from `path`, checking the `sun_path` length limit.
+fn sockaddr_un_from_path(path: &str) -> Result<libc::sockaddr_un> {
+    // SAFETY: zeroed sockaddr_un is a valid starting point.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let bytes = path.as_bytes();
+    if bytes.len() >= addr.sun_path.len() {
+        bail!(
+            "unix socket path too long ({} bytes, limit {}): {path}",
+            bytes.len(),
+            addr.sun_path.len() - 1
+        );
+    }
+    for (i, &b) in bytes.iter().enumerate() {
+        addr.sun_path[i] = b as libc::c_char;
+    }
+    Ok(addr)
+}
+
 /// Open and connect a SOCK_DGRAM AF_UNIX socket to gvproxy's vfkit listener,
 /// with 1 MiB send/recv buffers so an MTU-sized datagram survives a backlog
 /// (matches cloud-hypervisor / Apple's sample). Returns an owned fd that closes
 /// on any early-return error path.
+///
+/// An unbound unix-datagram socket has no return address, so gvproxy's
+/// `sendto()` replies are dropped by the kernel. We bind to a sibling path
+/// (`<dir>/vz-net-reply.sock`) so gvproxy has an address to reply to. The
+/// state-dir removal on VM teardown cleans up the bind socket alongside the
+/// rest of the per-VM files.
 fn connect_gvproxy_dgram(path: &str) -> Result<OwnedFd> {
     // SAFETY: socket() with constant valid arguments.
     let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0) };
@@ -1700,24 +1725,44 @@ fn connect_gvproxy_dgram(path: &str) -> Result<OwnedFd> {
         unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, opt, buf_ptr, buf_len) };
     }
 
-    // SAFETY: zeroed sockaddr_un is a valid starting point.
-    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    let bytes = path.as_bytes();
-    if bytes.len() >= addr.sun_path.len() {
+    // Derive the reply-socket path: sibling to the gvproxy listener in the
+    // same VM state dir. This gives gvproxy a return address for sendto().
+    let reply_path = {
+        let parent = std::path::Path::new(path)
+            .parent()
+            .ok_or_else(|| anyhow!("gvproxy socket path has no parent dir: {path}"))?;
+        parent.join("vz-net-reply.sock")
+    };
+    let reply_path_str = reply_path
+        .to_str()
+        .ok_or_else(|| anyhow!("reply socket path is not valid UTF-8"))?;
+
+    // Remove any stale bind socket from a previous run before binding;
+    // a missing file is the normal first-boot case.
+    let _ = std::fs::remove_file(&reply_path);
+
+    let bind_addr = sockaddr_un_from_path(reply_path_str)?;
+    // SAFETY: bind() with a correctly-populated sockaddr_un and its size.
+    let ret = unsafe {
+        libc::bind(
+            fd,
+            std::ptr::addr_of!(bind_addr).cast::<libc::sockaddr>(),
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
         bail!(
-            "gvproxy socket path too long ({} bytes): {path}",
-            bytes.len()
+            "bind() gvproxy reply socket at {reply_path_str}: {}",
+            io::Error::last_os_error()
         );
     }
-    for (i, &b) in bytes.iter().enumerate() {
-        addr.sun_path[i] = b as libc::c_char;
-    }
+
+    let connect_addr = sockaddr_un_from_path(path)?;
     // SAFETY: connect() with a correctly-populated sockaddr_un and its size.
     let ret = unsafe {
         libc::connect(
             fd,
-            std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
+            std::ptr::addr_of!(connect_addr).cast::<libc::sockaddr>(),
             std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
         )
     };
@@ -1810,5 +1855,91 @@ mod tests {
             collapse_state(VZVirtualMachineState::Starting),
             RunState::Running
         );
+    }
+
+    /// Verify that `connect_gvproxy_dgram` binds a local address so gvproxy
+    /// has a return address for replies. The defect: an unbound unix-datagram
+    /// socket has no return address and all sendto() replies from gvproxy are
+    /// silently dropped by the kernel.
+    #[test]
+    fn bound_dgram_socket_receives_reply() {
+        use std::os::fd::AsRawFd;
+
+        // Use a short /tmp dir to stay well within the 104-byte sun_path limit.
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-vz-t")
+            .tempdir_in("/tmp")
+            .unwrap();
+
+        // The "gvproxy" listener side: a bound SOCK_DGRAM socket.
+        let listener_path = dir.path().join("gvproxy.sock");
+        let listener_path_str = listener_path.to_str().unwrap();
+        let listener_fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0) };
+        assert!(listener_fd >= 0, "listener socket");
+        let listener_addr = sockaddr_un_from_path(listener_path_str).unwrap();
+        let ret = unsafe {
+            libc::bind(
+                listener_fd,
+                std::ptr::addr_of!(listener_addr).cast::<libc::sockaddr>(),
+                std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(ret, 0, "listener bind");
+
+        // Connect the client fd.
+        let client_owned = connect_gvproxy_dgram(listener_path_str).unwrap();
+        let client_raw = client_owned.as_raw_fd();
+
+        // Client sends a datagram to the listener.
+        let msg = b"hello";
+        let sent = unsafe { libc::send(client_raw, msg.as_ptr().cast(), msg.len(), 0) };
+        assert_eq!(sent as usize, msg.len(), "client send");
+
+        // Listener receives it and captures the sender address.
+        let mut buf = [0u8; 64];
+        let mut src_addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        let mut src_len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        let recvd = unsafe {
+            libc::recvfrom(
+                listener_fd,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                0,
+                std::ptr::addr_of_mut!(src_addr).cast::<libc::sockaddr>(),
+                &mut src_len,
+            )
+        };
+        assert_eq!(recvd as usize, msg.len(), "listener recv");
+        assert!(&buf[..msg.len()] == msg);
+
+        // The sender address must be non-empty — the fix ensures bind() was called.
+        let sun_path_bytes =
+            unsafe { std::ffi::CStr::from_ptr(src_addr.sun_path.as_ptr()).to_bytes() };
+        assert!(
+            !sun_path_bytes.is_empty(),
+            "sender address is empty — bind() was not called on the client socket"
+        );
+
+        // Listener replies back to the sender address.
+        let reply = b"pong";
+        let replied = unsafe {
+            libc::sendto(
+                listener_fd,
+                reply.as_ptr().cast(),
+                reply.len(),
+                0,
+                std::ptr::addr_of!(src_addr).cast::<libc::sockaddr>(),
+                src_len,
+            )
+        };
+        assert_eq!(replied as usize, reply.len(), "listener sendto reply");
+
+        // Client receives the reply — this is the defect path that was broken.
+        let mut rbuf = [0u8; 64];
+        let got = unsafe { libc::recv(client_raw, rbuf.as_mut_ptr().cast(), rbuf.len(), 0) };
+        assert_eq!(got as usize, reply.len(), "client recv reply");
+        assert_eq!(&rbuf[..reply.len()], reply);
+
+        unsafe { libc::close(listener_fd) };
     }
 }

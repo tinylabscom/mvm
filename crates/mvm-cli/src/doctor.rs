@@ -330,7 +330,6 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
 
     checks.push(kvm_check(plat, false));
     checks.push(nested_kvm_check(plat));
-    checks.push(apple_container_check(plat));
     checks.push(vz_check(plat));
     checks.push(libkrun_check(plat));
     checks.push(builder_backend_check(plat));
@@ -902,33 +901,6 @@ fn kvm_check(plat: Platform, in_vm: bool) -> Check {
         category: "platform",
         ok: true,
         info: "n/a on macOS (Hypervisor.framework via libkrun / Apple Container)".to_string(),
-    }
-}
-
-fn apple_container_check(plat: Platform) -> Check {
-    if plat != Platform::MacOS {
-        return Check {
-            name: "apple containers",
-            category: "platform",
-            ok: true,
-            info: "n/a (not macOS)".to_string(),
-        };
-    }
-
-    if plat.has_apple_containers() {
-        Check {
-            name: "apple containers",
-            category: "platform",
-            ok: true,
-            info: "available (macOS 26+ on Apple Silicon)".to_string(),
-        }
-    } else {
-        Check {
-            name: "apple containers",
-            category: "platform",
-            ok: true, // Not a failure — just unavailable
-            info: "not available (requires macOS 26+ on Apple Silicon)".to_string(),
-        }
     }
 }
 
@@ -2269,7 +2241,7 @@ fn security_snapshot_dirs_check() -> Check {
 /// `collect_sign_targets` so an unsigned supervisor is not left unreported.
 /// Off macOS the check is n/a (returns the early-exit n/a `Check`).
 fn security_signing_check() -> Check {
-    use mvm_backend::providers::apple_container::{collect_sign_targets, entitlements_present};
+    use mvm_backend::codesign::{collect_sign_targets, entitlements_present};
     let targets = collect_sign_targets();
     // `entitlements_present` returns `None` off macOS for every path, so if
     // the first target gives `None` the whole check is n/a.
@@ -2730,7 +2702,7 @@ mod tests {
         // loudly.
         assert_eq!(support.get("firecracker"), Some(&true));
         // And honestly-`false` backends should not be silently dropped.
-        assert_eq!(support.get("apple-container"), Some(&false));
+        assert_eq!(support.get("qemu"), Some(&false));
     }
 
     #[test]
@@ -2740,7 +2712,6 @@ mod tests {
         assert_eq!(
             ordered,
             vec![
-                ("apple-container".to_string(), false),
                 ("firecracker".to_string(), true),
                 ("libkrun".to_string(), false),
                 ("qemu".to_string(), false),
@@ -2755,8 +2726,14 @@ mod tests {
         assert_eq!(r.backends.get("firecracker"), Some(&"live-memory"));
         assert_eq!(r.backends.get("libkrun"), Some(&"disk-only"));
         assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
-        // A backend with no warm-start support must not be silently dropped.
-        assert_eq!(r.backends.get("apple-container"), Some(&"unsupported"));
+        // Vz carries the macOS save/restore warm-start tier; it must be
+        // surfaced. The exact tier is host-gated (save-restore on a Vz
+        // host, unsupported elsewhere), so assert presence + honesty
+        // rather than a fixed value.
+        assert!(matches!(
+            r.backends.get("vz"),
+            Some(&"save-restore") | Some(&"unsupported")
+        ));
     }
 
     #[test]
@@ -2771,7 +2748,6 @@ mod tests {
         assert_eq!(
             ordered_backends,
             vec![
-                ("apple-container".to_string(), "unsupported"),
                 ("firecracker".to_string(), "live-memory"),
                 ("libkrun".to_string(), "disk-only"),
                 ("qemu".to_string(), "disk-only"),
@@ -2781,7 +2757,6 @@ mod tests {
         assert_eq!(
             ordered_standby_pool,
             vec![
-                ("apple-container".to_string(), false),
                 ("firecracker".to_string(), false),
                 ("libkrun".to_string(), true),
                 ("qemu".to_string(), false),
@@ -2796,7 +2771,7 @@ mod tests {
         // Only libkrun implements the standby pool today; the rest
         // report honest `false` and must not be silently dropped.
         assert_eq!(r.standby_pool.get("libkrun"), Some(&true));
-        assert_eq!(r.standby_pool.get("apple-container"), Some(&false));
+        assert_eq!(r.standby_pool.get("vz"), Some(&false));
         assert_eq!(r.standby_pool.get("qemu"), Some(&false));
     }
 
@@ -2921,54 +2896,29 @@ mod tests {
     //
     // These tests mutate `MVM_DATA_DIR` / `MVM_SHARE_DIR` to redirect
     // doctor's filesystem probes at a tempdir. Env-var mutation is
-    // process-wide, so a `Mutex` serializes them.
+    // process-wide, so the shared test env guard serializes and restores it.
 
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct EnvGuard {
-        _guard: std::sync::MutexGuard<'static, ()>,
-        prev_data: Option<String>,
-        prev_share: Option<String>,
+        _env: mvm_core::util::test_env::TestEnv,
         _tmp_data: Option<tempfile::TempDir>,
         _tmp_share: Option<tempfile::TempDir>,
     }
 
     impl EnvGuard {
         fn new(data: Option<tempfile::TempDir>, share: Option<tempfile::TempDir>) -> Self {
-            let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let prev_data = std::env::var("MVM_DATA_DIR").ok();
-            let prev_share = std::env::var("MVM_SHARE_DIR").ok();
-            unsafe {
-                if let Some(d) = data.as_ref() {
-                    std::env::set_var("MVM_DATA_DIR", d.path());
-                }
-                if let Some(s) = share.as_ref() {
-                    std::env::set_var("MVM_SHARE_DIR", s.path());
-                }
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            if let Some(d) = data.as_ref() {
+                env.set("MVM_DATA_DIR", d.path());
+            }
+            if let Some(s) = share.as_ref() {
+                env.set("MVM_SHARE_DIR", s.path());
             }
             EnvGuard {
-                _guard: g,
-                prev_data,
-                prev_share,
+                _env: env,
                 _tmp_data: data,
                 _tmp_share: share,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.prev_data {
-                    Some(v) => std::env::set_var("MVM_DATA_DIR", v),
-                    None => std::env::remove_var("MVM_DATA_DIR"),
-                }
-                match &self.prev_share {
-                    Some(v) => std::env::set_var("MVM_SHARE_DIR", v),
-                    None => std::env::remove_var("MVM_SHARE_DIR"),
-                }
             }
         }
     }

@@ -19,7 +19,7 @@
 //! (which spawn subprocesses), never a VM boot, never Nix. The heavier
 //! helper-PID argv sweep stays in `mvmctl cache prune --reap-orphans`. This
 //! reuses the live-vs-orphan discrimination from `mvm-cli`'s
-//! `env::apple_container` reaper rather than reinventing the policy; the bare
+//! `env::dev_vz` reaper rather than reinventing the policy; the bare
 //! syscall is restated here only because the lower `mvm` crate can't depend on
 //! `mvm-cli`.
 

@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy};
 
-use crate::commands::env::apple_container::ensure_default_microvm_image;
+use crate::commands::env::dev_vz::ensure_default_microvm_image;
 use crate::commands::vm::plan_admission::{
     AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run,
 };
@@ -217,17 +217,12 @@ mod tests {
     #[cfg(feature = "libkrun-live")]
     #[test]
     fn probe_state_dir_resolves_under_mvm_data_dir_not_xdg_state() {
-        // SAFETY: single-threaded test process; we set then restore the override.
-        let prev = std::env::var("MVM_DATA_DIR").ok();
-        unsafe { std::env::set_var("MVM_DATA_DIR", "/tmp/mvm-bench-probe-test/.mvm") };
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", "/tmp/mvm-bench-probe-test/.mvm");
         let dir = probe_state_dir("vm-x");
         assert_eq!(dir, mvm_core::config::vm_state_dir("vm-x"));
         assert!(dir.starts_with("/tmp/mvm-bench-probe-test/.mvm"));
         assert!(!dir.to_string_lossy().contains(".local/state"));
-        match prev {
-            Some(v) => unsafe { std::env::set_var("MVM_DATA_DIR", v) },
-            None => unsafe { std::env::remove_var("MVM_DATA_DIR") },
-        }
     }
 
     #[test]

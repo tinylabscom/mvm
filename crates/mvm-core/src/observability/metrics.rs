@@ -49,7 +49,7 @@ pub struct Metrics {
 
     // ── Dev/builder image verification ──────────────────────────────
     // One counter per outcome of the cosign-signed manifest +
-    // SHA-256 verification pipeline at apple_container.rs::download_dev_image.
+    // SHA-256 verification pipeline at dev_vz.rs::download_dev_image.
     // The duration gauge is the last observed wall-clock from
     // try_fetch_signed_manifest entry through verify_artifact_hash exit.
     // mvmd reads these via the prometheus exposition to alert
