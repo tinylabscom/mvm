@@ -330,7 +330,6 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
 
     checks.push(kvm_check(plat, false));
     checks.push(nested_kvm_check(plat));
-    checks.push(apple_container_check(plat));
     checks.push(vz_check(plat));
     checks.push(libkrun_check(plat));
     checks.push(builder_backend_check(plat));
@@ -483,7 +482,7 @@ fn collect_balloon_support() -> BTreeMap<String, bool> {
     // list is hand-maintained because there's no general "iterate
     // every backend" helper today; adding a new backend means
     // adding it here so doctor surfaces it without lying.
-    let names = ["firecracker", "apple-container", "libkrun", "qemu"];
+    let names = ["firecracker", "vz", "libkrun", "qemu"];
     let mut out = BTreeMap::new();
     for name in names {
         let backend = AnyBackend::from_hypervisor(name);
@@ -517,9 +516,9 @@ fn render_balloon_support(support: &BTreeMap<String, bool>) {
 /// resumes from RAM (Firecracker live-memory, Vz save/restore) vs. reboots
 /// from a disk snapshot (libkrun) before relying on a warm start.
 fn collect_warm_start_support() -> WarmStartReport {
-    // Mirrors `collect_balloon_support`'s hand-maintained list; `vz` is added
-    // because save/restore is a warm-start tier worth surfacing.
-    let names = ["firecracker", "apple-container", "libkrun", "qemu", "vz"];
+    // Mirrors `collect_balloon_support`'s hand-maintained list; `vz` carries
+    // the save/restore warm-start tier worth surfacing.
+    let names = ["firecracker", "libkrun", "qemu", "vz"];
     let mut backends = BTreeMap::new();
     let mut standby_pool = BTreeMap::new();
     for name in names {
@@ -910,33 +909,6 @@ fn kvm_check(plat: Platform, in_vm: bool) -> Check {
         category: "platform",
         ok: true,
         info: "n/a on macOS (Hypervisor.framework via libkrun / Apple Container)".to_string(),
-    }
-}
-
-fn apple_container_check(plat: Platform) -> Check {
-    if plat != Platform::MacOS {
-        return Check {
-            name: "apple containers",
-            category: "platform",
-            ok: true,
-            info: "n/a (not macOS)".to_string(),
-        };
-    }
-
-    if plat.has_apple_containers() {
-        Check {
-            name: "apple containers",
-            category: "platform",
-            ok: true,
-            info: "available (macOS 26+ on Apple Silicon)".to_string(),
-        }
-    } else {
-        Check {
-            name: "apple containers",
-            category: "platform",
-            ok: true, // Not a failure — just unavailable
-            info: "not available (requires macOS 26+ on Apple Silicon)".to_string(),
-        }
     }
 }
 
@@ -2277,7 +2249,7 @@ fn security_snapshot_dirs_check() -> Check {
 /// `collect_sign_targets` so an unsigned supervisor is not left unreported.
 /// Off macOS the check is n/a (returns the early-exit n/a `Check`).
 fn security_signing_check() -> Check {
-    use mvm_backend::providers::apple_container::{collect_sign_targets, entitlements_present};
+    use mvm_backend::codesign::{collect_sign_targets, entitlements_present};
     let targets = collect_sign_targets();
     // `entitlements_present` returns `None` off macOS for every path, so if
     // the first target gives `None` the whole check is n/a.
@@ -2738,7 +2710,7 @@ mod tests {
         // fails loudly.
         assert_eq!(support.get("firecracker"), Some(&true));
         // And honestly-`false` backends should not be silently dropped.
-        assert_eq!(support.get("apple-container"), Some(&false));
+        assert_eq!(support.get("qemu"), Some(&false));
     }
 
     #[test]
@@ -2748,8 +2720,14 @@ mod tests {
         assert_eq!(r.backends.get("firecracker"), Some(&"live-memory"));
         assert_eq!(r.backends.get("libkrun"), Some(&"disk-only"));
         assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
-        // A backend with no warm-start support must not be silently dropped.
-        assert_eq!(r.backends.get("apple-container"), Some(&"unsupported"));
+        // Vz carries the macOS save/restore warm-start tier; it must be
+        // surfaced. The exact tier is host-gated (save-restore on a Vz
+        // host, unsupported elsewhere), so assert presence + honesty
+        // rather than a fixed value.
+        assert!(matches!(
+            r.backends.get("vz"),
+            Some(&"save-restore") | Some(&"unsupported")
+        ));
     }
 
     #[test]
@@ -2758,7 +2736,7 @@ mod tests {
         // Only libkrun implements the standby pool today; the rest
         // report honest `false` and must not be silently dropped.
         assert_eq!(r.standby_pool.get("libkrun"), Some(&true));
-        assert_eq!(r.standby_pool.get("apple-container"), Some(&false));
+        assert_eq!(r.standby_pool.get("vz"), Some(&false));
         assert_eq!(r.standby_pool.get("qemu"), Some(&false));
     }
 

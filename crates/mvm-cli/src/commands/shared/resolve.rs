@@ -184,7 +184,7 @@ pub fn resolve_network_policy(
 
 /// Resolve the requested hypervisor to the effective one for this host. `firecracker`
 /// (the default `--hypervisor`) auto-detects: KVM → firecracker, macOS 26+ Apple Silicon
-/// → apple-container, macOS 13-25 + libkrun → libkrun, else firecracker (surfaces a clear
+/// → vz, macOS 13-25 + libkrun → libkrun, else firecracker (surfaces a clear
 /// "not available" error). Any explicit value is returned as-is. Single source of truth,
 /// shared by `mvmctl up` and `mvmctl pool` so they agree on the backend.
 pub fn resolve_effective_hypervisor(requested: &str) -> String {
@@ -194,8 +194,8 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
     let plat = mvm_core::platform::current();
     if plat.has_kvm() {
         "firecracker"
-    } else if plat.has_apple_containers() {
-        "apple-container"
+    } else if plat.is_vz_default_tier() {
+        "vz"
     } else if plat.has_libkrun() {
         "libkrun"
     } else {
