@@ -16,6 +16,13 @@
 //!
 //! All logging goes to **stderr** so stdout carries exactly the one handshake
 //! line. Sibling to `mvm-broker` / `mvm-host-signer` in the process moat.
+//!
+//! Self-confinement: because this process simultaneously holds plaintext
+//! secrets and parses untrusted guest bytes, it applies mvm's Landlock +
+//! seccomp-BPF confinement to itself before serving the first guest byte
+//! (Linux only — the same self-moat the firecracker-bridge uses). The
+//! confinement is fail-closed: if it cannot be applied on a supporting kernel,
+//! the endpoint exits rather than serve secrets unconfined.
 
 use std::io::{Read, Write};
 
@@ -23,7 +30,9 @@ use anyhow::{Context, Result};
 use tracing::info;
 
 use mvm_hostd::keyholder::secret_placeholder_env;
-use mvm_hostd::supervisor::substitution_endpoint::{EndpointTransport, assemble, parse};
+use mvm_hostd::supervisor::substitution_endpoint::{
+    EndpointConfig, EndpointTransport, assemble, parse,
+};
 
 fn read_stdin_blocking() -> Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(4096);
@@ -81,7 +90,57 @@ fn main() -> Result<()> {
     // One configured deadline for the forward leg AND the untrusted guest socket
     // (terminator). The UDS/vsock path already honors this via ReqwestForwarder.
     let forward_timeout = std::time::Duration::from_secs(cfg.forward_timeout_secs);
-    runtime.block_on(serve(service, bound, terminator, forward_timeout))
+
+    // Self-confine before serving any guest byte. The runtime's worker threads
+    // are already spawned (multi-thread `build()` spawns them eagerly), and the
+    // listeners are bound above — so the broad setup is done. `clone`/`clone3`
+    // stay in the allowlist anyway because tokio + reqwest spawn blocking
+    // threads lazily during serve (the vsock accept loop and the resolver run
+    // on `spawn_blocking`). We confine from inside `block_on` so the policy
+    // applies to the runtime thread that drives the accept loop. Fail-closed:
+    // any confinement error aborts before the first guest connection.
+    runtime.block_on(async move {
+        confine_endpoint(&cfg)?;
+        serve(service, bound, terminator, forward_timeout).await
+    })
+}
+
+/// Apply mvm's self-confinement (Landlock FS + seccomp-BPF) to the endpoint.
+///
+/// Linux-only effect; on macOS/Windows the jailer's `confine_self` stub errors,
+/// so we skip the call there (the bin must still compile + run on contributor
+/// hosts for tests). The store dirs granted read access are resolved exactly as
+/// `assemble` resolves them, so the confinement matches the resolver's runtime
+/// reads. Fail-closed per the jailer's partial-confinement contract: on error
+/// we return it up to `main`, which exits nonzero before serving secrets.
+#[cfg(target_os = "linux")]
+fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
+    use mvm_hostd::jailer::{ConfinementSpec, confine_self};
+    use mvm_hostd::supervisor::substitution_endpoint::resolve_store_dirs;
+
+    let (secret_dir, binding_dir) =
+        resolve_store_dirs(cfg).context("resolve substitution-endpoint store dirs")?;
+    // The audit recorder (when the host signer key is present) reads the key
+    // and appends to the per-tenant audit log; grant both so the confined
+    // endpoint can chain-sign substitution events.
+    let spec = ConfinementSpec::substitution_endpoint(
+        secret_dir,
+        binding_dir,
+        mvm_core::config::mvm_audit_dir(),
+        mvm_core::config::mvm_keys_dir(),
+    );
+    confine_self(&spec).context("confine substitution endpoint")?;
+    info!("substitution endpoint self-confined (landlock + seccomp)");
+    Ok(())
+}
+
+/// macOS/Windows: no kernel LSM. The jailer stub errors rather than run
+/// unconfined, so callers on those hosts must not reach it; we no-op so the bin
+/// (and its tests) build and run. Production endpoints only ever run on Linux.
+#[cfg(not(target_os = "linux"))]
+fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
+    let _ = cfg;
+    Ok(())
 }
 
 /// A bound, listening transport. QEMU uses an AF_VSOCK listener; the in-process

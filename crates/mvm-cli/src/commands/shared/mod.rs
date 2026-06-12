@@ -30,4 +30,6 @@ pub(super) use resolve::{
 };
 pub(super) use start::VmStartParams;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};
-pub(super) use vsock::{emit_vsock_rpc_audit, request_port_forward, wait_for_guest_agent};
+pub(super) use vsock::{
+    emit_vsock_rpc_audit, request_port_forward, start_port_proxy, wait_for_guest_agent,
+};

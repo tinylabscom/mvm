@@ -166,7 +166,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // sweeper can drop the per-VM cache dirs along with the
             // helpers that were holding their sockets/PIDs.
             if reap_orphans {
-                match super::super::env::apple_container::reap_orphaned_vm_helpers(dry_run) {
+                match super::super::env::dev_vz::reap_orphaned_vm_helpers(dry_run) {
                     Ok(o) => {
                         if o.killed == 0 && o.removed_dirs == 0 {
                             ui::info("No orphaned VM helpers.");
@@ -238,15 +238,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // takes the Stage 0 advisory lock to avoid racing a live
             // bootstrap; if the lock is held it skips silently and we
             // proceed with the temp-file sweep.
-            match super::super::env::apple_container::sweep_orphaned_stage0_staging_dirs(dry_run) {
-                Ok(super::super::env::apple_container::Stage0SweepOutcome::Swept {
+            match super::super::env::dev_vz::sweep_orphaned_stage0_staging_dirs(dry_run) {
+                Ok(super::super::env::dev_vz::Stage0SweepOutcome::Swept {
                     removed: r,
                     freed_bytes,
                 }) => {
                     removed += r;
                     freed += freed_bytes;
                 }
-                Ok(super::super::env::apple_container::Stage0SweepOutcome::SkippedLockHeld) => {
+                Ok(super::super::env::dev_vz::Stage0SweepOutcome::SkippedLockHeld) => {
                     ui::info(
                         "Stage 0 builder VM bootstrap appears to be running on this host; \
                          skipping orphan staging cleanup.",

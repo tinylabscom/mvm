@@ -332,6 +332,32 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
     )?;
 
     let kernel_path = format!("{}/{}", abs_dir, state.kernel);
+    // A plain mkGuest workload emits no kernel (mkGuest's `kernel` input is
+    // optional), so the build dir may carry only a rootfs. Fall back to the
+    // cached builder-VM kernel exactly like the QEMU workload path does;
+    // `ensure_fc_loadable_kernel` below extracts an FC-loadable ELF if it's
+    // a bzImage.
+    let kernel_path = if std::path::Path::new(&kernel_path).is_file() {
+        kernel_path
+    } else {
+        let arch = if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        let fallback = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir())
+            .join("builder-vm")
+            .join(arch)
+            .join("vmlinux");
+        anyhow::ensure!(
+            fallback.is_file(),
+            "firecracker workload has no bootable kernel: the build produced no \
+             {kernel_path} and no cached builder kernel exists at {}. Run a build / \
+             `mvmctl dev up` to populate the builder VM image first.",
+            fallback.display()
+        );
+        fallback.display().to_string()
+    };
     let rootfs_path = format!("{}/{}", abs_dir, state.rootfs);
 
     // Use kernel cmdline IP params (no SSH-based guest network config).
@@ -736,8 +762,26 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     //
     // No-op on non-Linux hosts (the bridge is Linux-only — see
     // `crates/mvm-firecracker-bridge/src/main.rs`).
+    //
+    // Opt-in via MVM_GATEWAY_BRIDGE=1, the same gate the libkrun/Vz
+    // gateway-bridge factory sits behind: the FC bridge lane is not yet
+    // working end-to-end (its confinement spec doesn't grant the
+    // observer-allowlist path it reads post-confinement), and its
+    // watchdog hard-fail policy would tear down an otherwise healthy
+    // VM. Before the egress moat landed, no producer wrote `plan.json`
+    // pre-boot on this path, so the bridge never actually spawned;
+    // the gate preserves that default while the moat (substitution
+    // endpoint + nft redirect below) runs unconditionally.
     #[cfg(target_os = "linux")]
-    let mut bridge_guard = spawn_fc_bridge(&config.slot.name, &abs_dir)?;
+    let mut bridge_guard = if std::env::var("MVM_GATEWAY_BRIDGE").as_deref() == Ok("1") {
+        spawn_fc_bridge(&config.slot.name, &abs_dir)?
+    } else {
+        tracing::debug!(
+            vm = %config.slot.name,
+            "MVM_GATEWAY_BRIDGE not set; skipping mvm-firecracker-bridge sidecar"
+        );
+        AttachedBridgeGuard { child: None }
+    };
 
     // Start Firecracker daemon in per-VM directory
     start_vm_firecracker(&abs_dir, &abs_socket)?;
@@ -2468,22 +2512,20 @@ fn decode_plan_secrets(
             ));
         }
     };
-    let secrets = match mvm_core::plan::secrets_from_signed_json(&plan_json) {
-        Ok(s) => s,
+    // Both producers land here: the pre-start persist writes the bare
+    // `ExecutionPlan` (the shape the firecracker bridge parses too) and the
+    // gateway-bridge stash writes the signed envelope. Accept either.
+    let plan = match mvm_core::plan::plan_from_admitted_json(&plan_json) {
+        Ok(p) => p,
         Err(e) => {
-            tracing::warn!(error = %e, "plan.json not a decodable signed plan; skipping egress substitution");
+            tracing::warn!(error = %e, "plan.json not a decodable admitted plan; skipping egress substitution");
             return Ok(None);
         }
     };
-    if secrets.is_empty() {
+    if plan.secrets.is_empty() {
         return Ok(None);
     }
-    // Per-destination redaction rides the same signed plan; a parse hiccup
-    // defaults to all-off rather than failing the boot.
-    let redaction = mvm_core::plan::redaction_from_signed_json(&plan_json).unwrap_or_default();
-    let tenant = mvm_core::plan::tenant_from_signed_json(&plan_json)
-        .map_err(|e| anyhow::anyhow!("extract tenant from plan.json: {e}"))?;
-    Ok(Some((secrets, redaction, tenant)))
+    Ok(Some((plan.secrets, plan.redaction, plan.tenant.0)))
 }
 
 /// Spawn the per-VM substitution endpoint **before** the guest boots,

@@ -430,12 +430,14 @@ fn deregister_invoke_session(id: Option<&mvm_core::session::SessionId>) {
 
 /// Read the stdin payload for the call.
 ///
-/// - `None`: empty payload.
+/// - `None`: the no-argument call payload `[[], {}]` — the wrapper's wire
+///   contract requires a JSON `[args, kwargs]` body, and an empty one is a
+///   decode error in the guest, so a bare `invoke` means "call with no args".
 /// - `Some("-")`: read everything from mvmctl's own stdin.
 /// - `Some(path)`: read the file at `path`.
 pub(in crate::commands) fn read_stdin_payload(spec: Option<&str>) -> Result<Vec<u8>> {
     match spec {
-        None => Ok(Vec::new()),
+        None => Ok(b"[[], {}]".to_vec()),
         Some("-") => {
             let mut buf = Vec::new();
             std::io::stdin()
@@ -722,9 +724,11 @@ mod tests {
     }
 
     #[test]
-    fn test_read_stdin_none_is_empty() {
+    fn test_read_stdin_none_is_the_no_arg_call() {
+        // The wrapper wire contract requires `[args, kwargs]`; a bare invoke
+        // sends the explicit no-argument call rather than an empty body.
         let bytes = read_stdin_payload(None).unwrap();
-        assert!(bytes.is_empty());
+        assert_eq!(bytes, b"[[], {}]");
     }
 
     #[test]

@@ -244,6 +244,10 @@ pub enum InstallError {
     /// `installer_exit_code`); a missing installer is a builder-VM
     /// configuration bug, not a user's lockfile issue.
     InstallerMissing { program: String },
+    /// iptables OUTPUT lockdown failed. A builder whose kernel can't
+    /// enforce the lockdown refuses install jobs — the deps-install
+    /// egress policy is the whole point of this arm.
+    EgressLockdown(String),
 }
 
 impl std::fmt::Display for InstallError {
@@ -253,6 +257,7 @@ impl std::fmt::Display for InstallError {
             Self::InstallerMissing { program } => {
                 write!(f, "installer `{program}` not on PATH inside the builder VM")
             }
+            Self::EgressLockdown(e) => write!(f, "egress lockdown failed: {e}"),
         }
     }
 }
@@ -276,6 +281,10 @@ pub struct InstallContext<'a> {
     /// [`crate::proxy::ChildProxyLifecycle`]; tests use
     /// [`crate::proxy::NoopProxyLifecycle`] or a fake.
     pub proxy: &'a mut dyn ProxyLifecycle,
+    /// iptables runner used to install the egress lockdown at entry.
+    /// Production passes [`crate::network::SystemIptables`]; tests inject
+    /// a recording or failing fake to verify fail-closed behavior.
+    pub iptables: &'a dyn crate::network::IptablesRunner,
 }
 
 /// Public entry point. Run the install pipeline for the spec in
@@ -310,7 +319,16 @@ pub fn run_install(ctx: InstallContext<'_>) -> Result<InstallReport, InstallErro
         runner,
         extra_path,
         proxy,
+        iptables,
     } = ctx;
+
+    // Lock egress before any dep tooling or proxy spawn. Untrusted
+    // dependency code must not reach the network except through the
+    // allowlist proxy. Fail closed: if the kernel can't enforce the
+    // lockdown, this install is refused entirely.
+    crate::network::install_egress_lockdown(iptables, crate::network::PROXY_UID)
+        .map_err(InstallError::EgressLockdown)?;
+
     fs::create_dir_all(out_dir)
         .map_err(|e| InstallError::Io(format!("create {}: {e}", out_dir.display())))?;
     let content_dir = out_dir.join(CONTENT_SUBDIR);
@@ -793,6 +811,56 @@ mod tests {
         }
     }
 
+    /// Fake iptables runner that always succeeds (no real iptables).
+    struct PassIptables;
+    impl crate::network::IptablesRunner for PassIptables {
+        fn run(&self, _args: &[&str]) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// Fake iptables runner that always fails.
+    struct FailIptables;
+    impl crate::network::IptablesRunner for FailIptables {
+        fn run(&self, _args: &[&str]) -> Result<(), String> {
+            Err("iptables not available".to_string())
+        }
+    }
+
+    /// Recording iptables runner: captures each invocation; optionally
+    /// fails at a given call index (0-based). Mirrors the pattern from
+    /// the `network` module's tests.
+    struct RecordingIptables {
+        calls: std::cell::RefCell<Vec<Vec<String>>>,
+        fail_at: Option<usize>,
+    }
+
+    impl RecordingIptables {
+        fn new() -> Self {
+            Self {
+                calls: std::cell::RefCell::new(Vec::new()),
+                fail_at: None,
+            }
+        }
+
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl crate::network::IptablesRunner for RecordingIptables {
+        fn run(&self, args: &[&str]) -> Result<(), String> {
+            let mut calls = self.calls.borrow_mut();
+            let idx = calls.len();
+            calls.push(args.iter().map(|s| s.to_string()).collect());
+            if Some(idx) == self.fail_at {
+                Err(format!("forced failure at invocation {idx}"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
     /// Convenience: run_install against the stub runner + a fake
     /// proxy, returning both the install report and the proxy's
     /// observed start/stop events. Keeps test arms readable.
@@ -802,6 +870,16 @@ mod tests {
         out_dir: &Path,
         runner: &dyn CommandRunner,
     ) -> (Result<InstallReport, InstallError>, Vec<&'static str>) {
+        run_install_with_fakes_and_iptables(spec, job_dir, out_dir, runner, &PassIptables)
+    }
+
+    fn run_install_with_fakes_and_iptables<'a>(
+        spec: &'a InstallSpec,
+        job_dir: &'a Path,
+        out_dir: &'a Path,
+        runner: &'a dyn CommandRunner,
+        iptables: &'a dyn crate::network::IptablesRunner,
+    ) -> (Result<InstallReport, InstallError>, Vec<&'static str>) {
         let mut proxy = FakeProxy::ok();
         let ctx = InstallContext {
             spec,
@@ -810,6 +888,7 @@ mod tests {
             runner,
             extra_path: None,
             proxy: &mut proxy,
+            iptables,
         };
         let report = run_install(ctx);
         let events = proxy.events();
@@ -1035,6 +1114,7 @@ mod tests {
             runner: &runner,
             extra_path: None,
             proxy: &mut proxy,
+            iptables: &PassIptables,
         };
         let err = run_install(ctx).unwrap_err();
         match err {
@@ -1081,5 +1161,62 @@ mod tests {
         assert_eq!(json_escape("a\\b"), "a\\\\b");
         assert_eq!(json_escape("a\nb"), "a\\nb");
         assert_eq!(json_escape("\x01"), "\\u0001");
+    }
+
+    #[test]
+    fn egress_lockdown_failure_refuses_install_before_proxy_or_installer() {
+        // A failing iptables runner → EgressLockdown error, and neither the
+        // proxy nor the installer must have run (fail-closed: lockdown
+        // first, nothing else if it can't be enforced).
+        let tmp = tempfile::tempdir().unwrap();
+        let runner = StubRunner::new(&["uv", "cyclonedx-py", "pip-audit"]);
+        let iptables = FailIptables;
+        let (result, events) = run_install_with_fakes_and_iptables(
+            &ok_spec(),
+            &tmp.path().join("job"),
+            tmp.path(),
+            &runner,
+            &iptables,
+        );
+        assert!(
+            matches!(result, Err(InstallError::EgressLockdown(_))),
+            "expected EgressLockdown, got {result:?}",
+        );
+        // Proxy must not have started — we refused before reaching it.
+        assert!(events.is_empty(), "proxy events must be empty: {events:?}");
+        // Installer must not have run.
+        assert!(
+            runner.calls().is_empty(),
+            "installer must not run: {:?}",
+            runner.calls()
+        );
+    }
+
+    #[test]
+    fn egress_lockdown_invoked_before_proxy_on_success() {
+        // A recording iptables runner → verify the lockdown was invoked
+        // exactly once (3 calls: loopback ACCEPT, uid-owner ACCEPT, DROP
+        // policy) before the proxy start event.
+        let tmp = tempfile::tempdir().unwrap();
+        let runner = StubRunner::new(&["uv", "cyclonedx-py", "pip-audit"]);
+        let iptables = RecordingIptables::new();
+        let (result, events) = run_install_with_fakes_and_iptables(
+            &ok_spec(),
+            &tmp.path().join("job"),
+            tmp.path(),
+            &runner,
+            &iptables,
+        );
+        assert!(result.is_ok(), "expected success, got {result:?}");
+        // Three iptables invocations from install_egress_lockdown.
+        assert_eq!(
+            iptables.calls().len(),
+            3,
+            "expected 3 lockdown rules, got {}",
+            iptables.calls().len(),
+        );
+        // Proxy and installer ran.
+        assert_eq!(events, vec!["start", "stop"]);
+        assert!(!runner.calls().is_empty());
     }
 }

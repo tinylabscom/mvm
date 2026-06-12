@@ -1,7 +1,7 @@
 // Backend/substrate split:
 //
-//   * Every concrete `VmBackend` impl + the FC support modules
-//     (apple_container, libkrun, firecracker, microvm,
+//   * Every concrete `VmBackend` impl + the support modules
+//     (firecracker, libkrun, vz, qemu, microvm,
 //     image, network, backend) live in `mvm-backend`.
 //   * The leaf substrate (`ui`, `runtime_meta`, `cow`,
 //     `snapshot_integrity`) lives in `mvm-base`.

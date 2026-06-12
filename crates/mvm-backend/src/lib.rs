@@ -5,8 +5,8 @@
 //!
 //! - **Firecracker** (`backend::FirecrackerBackend`) + the `AnyBackend`
 //!   dispatch enum + `FirecrackerConfig` — the production Tier 1 path.
-//! - **Apple Container** (`apple_container::AppleContainerBackend`) —
-//!   macOS 26+ Apple Virtualization.framework.
+//! - **Vz** (`vz::VzBackend`) — the one Apple Virtualization.framework
+//!   backend (per-VM Rust objc2 supervisor); macOS-26 auto-default.
 //! - **libkrun** (`libkrun::LibkrunBackend`) — raw libkrun shim
 //!   (Linux KVM / macOS HVF).
 //!
@@ -28,11 +28,11 @@
 //!                     mvm-cli
 //!                     (consumes us directly)
 
-pub mod apple_container;
 pub mod artifacts;
 pub mod audit_substrate;
 pub mod backend;
 pub mod checkpoint;
+pub mod codesign;
 // Shared host-side substrate (config + shell + linux_env + ui +
 // runtime_meta + cow + snapshot_integrity) — folded in from the
 // former Lima-era `mvm-base` crate. It lives here, not in `mvm`,
@@ -58,12 +58,6 @@ pub mod netinit_audit;
 pub mod network;
 /// `NetworkProvider` impl over the bridge+TAP path.
 pub mod network_provider;
-/// Apple Container / Apple Virtualization.framework runtime interface
-/// (objc2 + Swift bridge, process spawn + verity wiring) — folded in
-/// from the former `mvm-providers` crate. The
-/// `apple_container` backend dispatch (`AppleContainerBackend`) stays in
-/// `apple_container.rs`; this is the lower-level interface it drives.
-pub mod providers;
 /// QEMU workload runtime backend (dev/test).
 pub mod qemu;
 /// Backend-agnostic supervisor standby pool registry (`~/.mvm/pool/`
@@ -80,7 +74,6 @@ pub mod vz;
 // (PAUSE / RESUME / BALLOON / SAVE). Used by VzBackend.
 pub mod vz_control;
 
-pub use apple_container::AppleContainerBackend;
 pub use backend::{AnyBackend, FirecrackerBackend, FirecrackerConfig};
 pub use libkrun::LibkrunBackend;
 pub use mock::MockBackend;

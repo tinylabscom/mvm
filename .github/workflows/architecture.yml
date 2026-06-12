@@ -47,9 +47,12 @@ jobs:
   #      Both live next to the workload, not at the orchestrator
   #      tier — moving either to mvmd would force every per-VM flow
   #      through the control plane.
-  #   3. Per-VM provider plumbing — Apple Container sockets
-  #      (`crates/mvm-providers/src/apple_container/macos.rs`).
-  #      Provider-specific guest-channel transport.
+  #   3. Per-VM port-forward proxy — `start_port_proxy`
+  #      (`crates/mvm-cli/src/commands/shared/vsock.rs`). A loopback
+  #      `TcpListener` that splices `localhost:<host_port>` to the
+  #      guest's forwarded vsock port for `mvmctl up -p`. Per-VM
+  #      port-forwarding substrate; relocated here when the in-process
+  #      apple_container provider that formerly held it was deleted.
   #   4. Observability — Prometheus metrics endpoint
   #      (`crates/mvm-cli/src/metrics_server.rs`) plus per-VM gateway
   #      audit sockets in `crates/mvm-supervisor/src/gateway_bridge.rs`
@@ -196,7 +199,7 @@ jobs:
               --glob '!**/examples/**' \
               --glob '!crates/mvm/src/hostd/**' \
               --glob '!crates/mvm-build/src/egress_proxy/**' \
-              --glob '!crates/mvm-backend/src/providers/apple_container/**' \
+              --glob '!crates/mvm-cli/src/commands/shared/vsock.rs' \
               --glob '!crates/mvm-cli/src/metrics_server.rs' \
               --glob '!crates/mvm-cli/src/template_cmd.rs' \
               --glob '!crates/deps/libkrun-sys/src/gvproxy.rs' \

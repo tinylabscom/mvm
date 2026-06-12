@@ -8,9 +8,8 @@
 //! On macOS the workload microVM runs via libkrun (vsock-capable; the
 //! path the guest agent answers on). `--hypervisor libkrun` is passed
 //! explicitly so the test doesn't depend on `up`'s per-host auto-select
-//! preferring libkrun over apple-container on macOS 26+ (which is a
-//! deliberate apple-container priority for general use; the demo wants
-//! the vsock path).
+//! preferring libkrun over Vz on macOS 26+ (which is a deliberate Vz
+//! priority for general use; the demo wants the vsock path).
 //!
 //! `up` waits for the guest agent (`wait_for_guest_agent` → vsock Ping)
 //! and only prints `Guest agent not reachable.` on failure — so `up`

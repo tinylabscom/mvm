@@ -55,7 +55,7 @@ fn exe_has_virtualization_entitlement(exe: &std::path::Path) -> bool {
 
 /// Self-sign ad-hoc with the virtualization entitlement, then re-exec — we ship
 /// the bin unsigned, and VZ start is rejected without it. Mirrors
-/// `apple_container::ensure_signed` (virtualization-only). The `MVM_VZ_SIGNED`
+/// `mvm_backend::codesign::ensure_signed` (virtualization-only). The `MVM_VZ_SIGNED`
 /// guard prevents an exec loop; `exec()` preserves the pid and the stdin pipe
 /// the spawner writes the config to, so this is transparent to `mvm_backend::vz`.
 /// Best-effort: a signing failure logs and proceeds so the real entitlement

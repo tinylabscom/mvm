@@ -14,7 +14,7 @@
 //! the **best-case** Tier 2 (KVM-accelerated, comparable to the
 //! microvm.nix/qemu classification); when `/dev/kvm` is absent the boot
 //! runs under TCG software emulation and `start` emits a loud Tier-3
-//! banner (mirroring the Docker fallback). The static enum tier stays
+//! banner. The static enum tier stays
 //! Tier 2 because it's a compile-time classification consulted by the
 //! tier-sync test + `doctor`; the live KVM-vs-TCG mode is a *runtime*
 //! property surfaced through the banner and `doctor`, not the enum.
@@ -81,8 +81,8 @@ impl VmBackend for QemuBackend {
     fn capabilities(&self) -> VmCapabilities {
         VmCapabilities {
             // QEMU can pause/resume + snapshot via QMP, but mvm doesn't
-            // wire a QMP monitor today (parity with the microvm-nix
-            // backend). Declared false until the monitor lands.
+            // wire a QMP monitor today. Declared false until the
+            // monitor lands.
             pause_resume: false,
             snapshots: false,
             vsock: true,
@@ -117,7 +117,7 @@ impl VmBackend for QemuBackend {
 
         let kvm = kvm_available();
         if !kvm {
-            // Loud Tier-3 banner, mirroring the Docker fallback.
+            // Loud Tier-3 banner for the unaccelerated TCG fallback.
             ui::warn(&format!(
                 "QEMU workload '{}' is running UNACCELERATED (TCG — no /dev/kvm). \
                  This is a Tier-3 dev/test fallback: slow, and unaudited vs ADR-002. \
@@ -435,7 +435,7 @@ impl VmBackend for QemuBackend {
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
-        // Tier 2 best-case (KVM). Mirrors the microvm-nix/qemu profile:
+        // Tier 2 best-case (KVM), the microvm.nix-lineage QEMU profile:
         // QEMU's device model is much larger than Firecracker's (higher L2
         // audit cost), and claim 3 (verified boot) targets Firecracker.
         // The TCG (no-KVM) mode is a runtime Tier-3 degradation surfaced by
