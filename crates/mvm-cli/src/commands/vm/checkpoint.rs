@@ -1038,9 +1038,9 @@ mod tests {
     /// resource resolution falls through to global defaults (2 CPUs, 512 MiB).
     #[test]
     fn resource_shape_no_plan_no_flags_uses_defaults() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+        env.set("MVM_DATA_DIR", tmp.path());
 
         let store = CheckpointStore::at(tmp.path().join("store"));
         let ckpt_id = seed_checkpoint(&store, "origin-vm");
@@ -1056,8 +1056,6 @@ mod tests {
         let final_mem = None::<u32>.or(mem).unwrap_or(user_cfg.default_memory_mib);
         assert_eq!(final_cpus, 2);
         assert_eq!(final_mem, 512);
-
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     /// Explicit flags win over everything: cpus=8, memory="1024" override
