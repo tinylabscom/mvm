@@ -450,8 +450,8 @@ mod accessible_gate_tests {
     fn pick_console_transport_selects_vz_when_only_vz_socket_present() {
         use std::os::unix::net::UnixListener;
         // Regression for the "console can't reach a Vz workload" gap: with a
-        // Vz workload's vsock socket present (and no apple-container / dev-proxy
-        // / libkrun / firecracker surface), the picker must select the Vz
+        // Vz workload's vsock socket present (and no dev-proxy / libkrun /
+        // firecracker surface), the picker must select the Vz
         // transport instead of erroring out on the firecracker fallback.
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");

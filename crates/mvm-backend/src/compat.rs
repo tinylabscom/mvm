@@ -17,9 +17,6 @@
 //! - **Qemu**: no implementation yet; capabilities are conventional QEMU
 //!   defaults for the mvm workload shape (ELF/Image per arch, ext4 rootfs,
 //!   TAP networking, snapshots, no jailer). Flagged with `// assumption`.
-//! - **Vfkit**: no implementation yet; Apple Virtualization.framework thin
-//!   wrapper (same tier as Vz), aarch64/macOS only, gvproxy networking.
-//!   Flagged with `// assumption`.
 
 use mvm_core::arch::GuestArch;
 use mvm_core::kernel_format::KernelFormat;
@@ -34,7 +31,6 @@ pub enum MicrovmBackend {
     Libkrun,
     Vz,
     Qemu,
-    Vfkit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -185,22 +181,6 @@ static QEMU: BackendCompat = BackendCompat {
     networking: NetworkingModel::Tap,       // assumption: QEMU standard TAP
 };
 
-// Vfkit: no implementation yet. Apple Virtualization.framework thin wrapper
-// (same tier as Vz), aarch64/macOS only. Capabilities modelled after Vz
-// since both use the same underlying Apple VZ API.                // assumption
-static VFKIT: BackendCompat = BackendCompat {
-    backend: MicrovmBackend::Vfkit,
-    guest_arches: &[Aarch64], // assumption: Apple Silicon / macOS only
-    kernel_formats: &[
-        (Aarch64, &[K::Elf, K::Image]), // assumption: same as Vz (Apple VZ accepts both)
-    ],
-    rootfs_formats: &[R::Ext4],            // assumption
-    required_boot_args: &["console=hvc0"], // assumption: matches Vz shape
-    supports_snapshots: false, // assumption: conservative; Vfkit snapshot API unverified
-    supports_jailer: false,    // assumption: no jailer (Apple VZ path)
-    networking: NetworkingModel::Gvproxy, // assumption: mirrors Vz gvproxy path
-};
-
 // ── lookup ────────────────────────────────────────────────────────────────────
 
 pub fn compat(b: MicrovmBackend) -> &'static BackendCompat {
@@ -209,7 +189,6 @@ pub fn compat(b: MicrovmBackend) -> &'static BackendCompat {
         MicrovmBackend::Libkrun => &LIBKRUN,
         MicrovmBackend::Vz => &VZ,
         MicrovmBackend::Qemu => &QEMU,
-        MicrovmBackend::Vfkit => &VFKIT,
     }
 }
 
@@ -243,7 +222,6 @@ mod tests {
             MicrovmBackend::Libkrun,
             MicrovmBackend::Vz,
             MicrovmBackend::Qemu,
-            MicrovmBackend::Vfkit,
         ] {
             assert_eq!(compat(b).backend, b);
         }
@@ -276,7 +254,6 @@ mod tests {
             MicrovmBackend::Libkrun,
             MicrovmBackend::Vz,
             MicrovmBackend::Qemu,
-            MicrovmBackend::Vfkit,
         ] {
             assert!(!compat(b).supports_jailer, "{b:?} should not have jailer");
         }

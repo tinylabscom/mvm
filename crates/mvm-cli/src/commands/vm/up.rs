@@ -1786,7 +1786,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
 
     let backend_label = match effective_hypervisor {
         "vz" => "Apple Virtualization",
-        "qemu" => "QEMU (microvm.nix)",
+        "qemu" => "QEMU",
         _ => "Firecracker VM",
     };
     ui::step(2, 2, &format!("Booting {} '{}'", backend_label, vm_name));
@@ -2437,7 +2437,7 @@ fn resolve_vz_workload_kernel(vmlinux_path: &str, hypervisor: &str) -> anyhow::R
     // `virtualization` is the long-form alias the backend dispatcher
     // accepts for vz; missing it here would skip the fallback and hand
     // VZ a nonexistent kernel path.
-    if !matches!(hypervisor, "vz" | "virtualization" | "apple-container") {
+    if !matches!(hypervisor, "vz" | "virtualization") {
         return Ok(vmlinux_path.to_string());
     }
     let arch = if cfg!(target_arch = "aarch64") {

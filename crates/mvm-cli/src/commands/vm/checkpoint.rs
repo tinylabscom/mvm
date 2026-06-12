@@ -3,8 +3,8 @@
 //! lineage from one. Capture and fork are filesystem-only here; booting a
 //! forked child is a separate `mvmctl up` step.
 //!
-//! Only the macOS workload backends (Vz / apple_container) materialize a
-//! host-side rootfs image, so checkpointing is gated to a VM that has one.
+//! Only the macOS Vz workload backend materializes a host-side rootfs image,
+//! so checkpointing is gated to a VM that has one.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -144,23 +144,23 @@ fn now_unix() -> u64 {
 /// Resolve the host-side bootable rootfs image for a quiesced VM, or a clean
 /// error explaining why a checkpoint can't be taken.
 ///
-/// "Quiesced" means the VM is not running, OR it's marked paused in the name
-/// registry (a sealed instance snapshot exists). A live VM is refused: an
-/// fs_quick checkpoint has no memory, so the rootfs must be in a clean,
-/// deterministic state.
+/// "Quiesced" means the VM is not running, OR the pause verb has written a
+/// `vz.paused` marker that matches the live supervisor pid (vCPUs and virtio
+/// queues quiesced). A live, unpaused VM is refused: an fs_quick checkpoint has
+/// no memory, so the rootfs must be in a clean, deterministic state.
 ///
-/// Rootfs location is backend-specific but both macOS workload backends keep
+/// Rootfs location is backend-specific but the macOS Vz workload backend keeps
 /// the image under `vm_state_dir(name)`:
-///   - apple_container clones a per-instance `rootfs.ext4` there;
+///   - a per-instance `rootfs.ext4` CoW clone lands there;
 ///   - Vz boots from a supplied path but persists the launch config, whose
 ///     `rootfs` disk records that path.
 fn resolve_quiesced_vm_rootfs(name: &str) -> Result<PathBuf> {
-    if vm_is_running(name) {
+    if !vm_is_quiesced(name) {
         bail!("stop or pause VM '{name}' before checkpointing");
     }
     let state_dir = vm_state_dir(name);
 
-    // apple_container per-instance clone — deterministic, present on disk.
+    // Per-instance CoW clone — deterministic, present on disk.
     let instance_rootfs = state_dir.join("rootfs.ext4");
     if instance_rootfs.is_file() {
         return Ok(instance_rootfs);
@@ -169,6 +169,15 @@ fn resolve_quiesced_vm_rootfs(name: &str) -> Result<PathBuf> {
     // Vz persists its full supervisor config at launch; the rootfs disk's
     // path points at the bootable image.
     if let Some(path) = vz_rootfs_from_supervisor_config(&state_dir)? {
+        if !path.exists() {
+            bail!(
+                "fs_quick checkpoint needs the VM's instance rootfs ({}), which is \
+                 removed when the VM is stopped on this backend. Pause instead: \
+                 `mvmctl vm pause {name}`, checkpoint, then `mvmctl vm resume {name}` \
+                 — or use `--class vm-full` on a running VM.",
+                path.display()
+            );
+        }
         return Ok(path);
     }
 
@@ -205,6 +214,35 @@ fn vm_is_running(name: &str) -> bool {
         .filter_map(|s| s.trim().parse::<libc::pid_t>().ok())
         // SAFETY: signal 0 only probes existence; it delivers nothing.
         .any(|pid| unsafe { libc::kill(pid, 0) == 0 })
+}
+
+/// fs_quick clones the instance rootfs, so the guest must not be writing:
+/// either the VM is stopped, or it is paused (vCPUs and virtio queues quiesced
+/// — the Vz pause verb stamps the supervisor pid into `vz.paused`; resume and
+/// any path that replaces the supervisor removes or invalidates it). A
+/// running-but-paused Vz supervisor keeps its pid alive, so `vm_is_running`
+/// alone would incorrectly refuse the checkpoint without this marker check.
+fn vm_is_quiesced(name: &str) -> bool {
+    if !vm_is_running(name) {
+        return true;
+    }
+    vz_pause_marker_matches_live_pid(name)
+}
+
+/// A paused Vz VM keeps its supervisor pid alive, so pid-liveness
+/// alone reads as "running". The pause verb stamps the supervisor's
+/// pid into a marker; the marker only counts if it matches the live
+/// pid — a marker left behind by a crash or a re-launched VM names a
+/// dead or different supervisor and is ignored.
+fn vz_pause_marker_matches_live_pid(name: &str) -> bool {
+    let dir = vm_state_dir(name);
+    let (Ok(marker), Ok(pid)) = (
+        std::fs::read_to_string(dir.join("vz.paused")),
+        std::fs::read_to_string(dir.join("vz.pid")),
+    ) else {
+        return false;
+    };
+    !marker.trim().is_empty() && marker.trim() == pid.trim()
 }
 
 /// Hash the VM's persisted supervisor config so the checkpoint pins the launch
@@ -604,7 +642,13 @@ fn parent_vm_name_hint(parent: &CheckpointId) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    // Env-var mutation is process-wide; serialize tests that set MVM_DATA_DIR
+    // so they don't race each other.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn validated_checkpoint_id_accepts_normal() {
@@ -620,5 +664,163 @@ mod tests {
         assert!(validated_checkpoint_id("").is_err());
         assert!(validated_checkpoint_id("a\0b").is_err());
         assert!(validated_checkpoint_id("a\nb").is_err());
+    }
+
+    // ── vm_is_quiesced / vz_pause_marker_matches_live_pid ────────────────
+
+    /// A VM with no PID files is stopped → quiesced regardless of markers.
+    #[test]
+    fn stopped_vm_is_quiesced() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+        assert!(
+            vm_is_quiesced("no-such-vm-stopped"),
+            "stopped VM must be quiesced"
+        );
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    /// Running VM + matching `vz.paused` marker (pid matches `vz.pid`) → quiesced.
+    #[test]
+    fn running_with_matching_marker_is_quiesced() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+
+        let state_dir = mvm_core::config::vm_state_dir("pausedvm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let pid = unsafe { libc::getpid() };
+        let pid_str = pid.to_string();
+        // Both files carry the same pid — the pause verb writes it this way.
+        std::fs::write(state_dir.join("vz.pid"), &pid_str).unwrap();
+        std::fs::write(state_dir.join("vz.paused"), &pid_str).unwrap();
+
+        assert!(
+            vm_is_quiesced("pausedvm"),
+            "running VM with matching pause marker must be quiesced"
+        );
+
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    /// Running VM + no `vz.paused` marker → not quiesced.
+    #[test]
+    fn running_without_marker_is_not_quiesced() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+
+        let state_dir = mvm_core::config::vm_state_dir("livevm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let pid = unsafe { libc::getpid() };
+        std::fs::write(state_dir.join("vz.pid"), pid.to_string()).unwrap();
+        // No vz.paused written.
+
+        assert!(
+            !vm_is_quiesced("livevm"),
+            "running VM with no pause marker must not be quiesced"
+        );
+
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    /// Stale marker: `vz.paused` contains a pid that differs from `vz.pid`
+    /// (left behind by a crash or a re-launched supervisor) → not quiesced.
+    #[test]
+    fn running_with_stale_marker_is_not_quiesced() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+
+        let state_dir = mvm_core::config::vm_state_dir("relaunchedvm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let live_pid = unsafe { libc::getpid() };
+        // The marker was stamped with a different (old) pid.
+        let old_pid = live_pid.saturating_add(1);
+        std::fs::write(state_dir.join("vz.pid"), live_pid.to_string()).unwrap();
+        std::fs::write(state_dir.join("vz.paused"), old_pid.to_string()).unwrap();
+
+        assert!(
+            !vm_is_quiesced("relaunchedvm"),
+            "running VM with a stale pause marker (pid mismatch) must not be quiesced"
+        );
+
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    // ── resolve_quiesced_vm_rootfs: missing-rootfs error ─────────────────
+
+    /// When the supervisor-config rootfs path does not exist on disk after the VM
+    /// was stopped (Vz/apple_container teardown), the error explains the
+    /// pause-based workflow rather than cryptically failing on the path.
+    #[test]
+    fn missing_rootfs_produces_actionable_error() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+            std::env::set_var("MVM_SHARE_DIR", tmp.path());
+        }
+
+        let state_dir = mvm_core::config::vm_state_dir("gone-vm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Write a supervisor config pointing at a rootfs that does NOT exist.
+        let cfg = mvm_build::vz::SupervisorConfig {
+            name: "gone-vm".into(),
+            vm_state_dir: state_dir.to_string_lossy().into_owned(),
+            pid_file_name: None,
+            kernel: mvm_build::vz::KernelConfig {
+                path: "/abs/vmlinux".into(),
+                cmdline: "root=/dev/vda".into(),
+                initrd_path: None,
+            },
+            resources: mvm_build::vz::ResourceConfig {
+                cpu_count: 1,
+                memory_mib: 512,
+            },
+            disks: vec![mvm_build::vz::DiskConfig {
+                id: "rootfs".into(),
+                // Points at a path that was deleted on `mvmctl down`.
+                path: state_dir.join("rootfs.ext4").to_string_lossy().into_owned(),
+                read_only: true,
+            }],
+            virtio_fs: vec![],
+            vsock: mvm_build::vz::VsockConfig {
+                ports: vec![],
+                socket_dir: state_dir.to_string_lossy().into_owned(),
+            },
+            console_output_path: None,
+            network: None,
+            balloon: None,
+            control_socket_path: None,
+            startup_mode: mvm_build::vz::StartupMode::Boot,
+            tenant_id: None,
+            plan: None,
+            bundle: None,
+            audit_dir: None,
+            gateway_audit_socket: None,
+            signing_key_path: None,
+        };
+        let json = cfg.to_json().unwrap();
+        std::fs::write(state_dir.join("supervisor-config.json"), json).unwrap();
+
+        // VM is stopped (no pid file).
+        let err = resolve_quiesced_vm_rootfs("gone-vm").expect_err("missing rootfs must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pause") && msg.contains("gone-vm"),
+            "error should mention pause workflow and VM name: {msg}"
+        );
+        assert!(
+            msg.contains("vm-full") || msg.contains("vm_full"),
+            "error should mention vm-full alternative: {msg}"
+        );
+
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+            std::env::remove_var("MVM_SHARE_DIR");
+        }
     }
 }
