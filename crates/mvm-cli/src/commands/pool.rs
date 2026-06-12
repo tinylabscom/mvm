@@ -24,7 +24,7 @@ use mvm_core::vm_backend::{
 use sha2::{Digest, Sha256};
 
 use super::Cli;
-use super::env::apple_container::ensure_default_microvm_image;
+use super::env::dev_vz::ensure_default_microvm_image;
 use super::vm::host_signer;
 
 /// Lowercase-hex sha256 of a kernel image — part of the base-compat key.

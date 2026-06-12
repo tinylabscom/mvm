@@ -13,7 +13,7 @@ use mvm_core::user_config::MvmConfig;
 use mvm_core::util::parse_human_size;
 use mvm_core::vm_backend::VmId;
 
-use super::super::env::apple_container::ensure_default_microvm_image;
+use super::super::env::dev_vz::ensure_default_microvm_image;
 use super::Cli;
 use super::audit_chain::{AuditEmitter, default_audit_dir};
 use super::forward::forward_ports;
@@ -1042,7 +1042,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     // Reap helpers (gvproxy/supervisor) leaked by a prior killed run
     // before booting this workload's microVM. Kill-only, quiet,
     // non-fatal — see `sweep_orphaned_vm_helpers_on_startup`.
-    super::super::env::apple_container::sweep_orphaned_vm_helpers_on_startup();
+    super::super::env::dev_vz::sweep_orphaned_vm_helpers_on_startup();
 
     // Surface the backend's isolation tier
     // when it isn't Tier 1, unless the operator explicitly
