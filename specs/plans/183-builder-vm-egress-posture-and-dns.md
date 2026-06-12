@@ -178,14 +178,12 @@ Per-arm posture keeps the lockdown exactly where the threat is.
   first DHCP client `.3`), and each builder VM has its own gvproxy instance, so the
   static address cannot collide. This makes the Vz builder networked **now** without
   waiting on the datagram-path root cause.
-- [ ] **B3: root-cause the Vz DHCP loss (investigation, time-boxed).** Reproduce with
-  `host_gvproxy::spawn_detached` + `-debug` (add the flag pass-through behind an env
-  var if absent), capture whether the DHCPDISCOVER frames reach gvproxy at all on
-  the Vz unixgram socket vs libkrun's. Suspects: vfkit handshake framing on the
-  supervisor's datagram attachment, MAC mismatch between the supervisor config and
-  gvproxy's lease table. Outcome: either a fix in `vz_builder.rs` /
-  `mvm-vz-supervisor`, or a documented defer with the static fallback as the
-  steady-state (record under "deferred follow-ups" below).
+- [x] **B3: root-cause the Vz DHCP loss (investigation, time-boxed).** Root cause
+  confirmed: `connect_gvproxy_dgram` in `crates/mvm-vm-host/src/vz_objc.rs` connected
+  the AF_UNIX SOCK_DGRAM socket without first binding a local address. An unbound
+  unix-datagram socket has no return address, so every `sendto()` reply from gvproxy
+  (DHCP offer, DNS response, etc.) was silently dropped by the kernel. The fix (WS-E
+  below) binds to a sibling `vz-net-reply.sock` path before `connect()`.
 - [x] **B4: gates + commit** `fix(builder-vm): static gvproxy fallback when DHCP
   yields no lease`.
 
@@ -233,9 +231,44 @@ Per-arm posture keeps the lockdown exactly where the threat is.
   (PLAN 183 section) + `specs/SPRINT.md` (Sprint 55 live-Vz-validation note) in the
   same change as each workstream lands.
 
+## WS-E — Vz workload boot (added 2026-06-12)
+
+Two independent defects blocked `mvmctl up --flake <workload> --hypervisor vz`:
+
+- [x] **E1: kernel fallback for kernel-less workload images.**
+  `dev_build` unconditionally reports `vmlinux_path = <build_dir>/vmlinux`, but mkGuest
+  workload images ship no kernel (libkrun self-materializes its bundled libkrunfw kernel
+  and ignores the path). The Vz backend hands the nonexistent path to `VZLinuxBootLoader`
+  and gets `VZErrorDomain:2` ("boot loader invalid"). Fix: `resolve_vz_workload_kernel()`
+  helper in `crates/mvm-cli/src/commands/vm/up.rs` — called after `effective_hypervisor`
+  is resolved and before both the snapshot-restore and cold-boot arms consume
+  `vmlinux_path`. When the path is missing and the hypervisor is `vz` or
+  `apple-container`, it falls back to `<mvm_cache_dir>/builder-vm/<arch>/vmlinux` (the
+  cached builder-VM kernel that boots the same supervisor), or returns an actionable
+  error pointing to `mvmctl dev up`. Non-VZ hypervisors pass through unchanged
+  (libkrun's boot path is unaffected). Four unit tests cover all branches.
+
+- [x] **E2: bind the guest-side gvproxy datagram socket so replies route back.**
+  `connect_gvproxy_dgram` in `crates/mvm-vm-host/src/vz_objc.rs` (the Vz workload
+  supervisor's direct NIC path) opened an AF_UNIX SOCK_DGRAM socket and `connect()`ed
+  to gvproxy's vfkit listener without first `bind()`ing a local address. An unbound
+  unix-datagram socket has no return address, so every `sendto()` reply from gvproxy
+  (DHCP offer, DNS response, any guest-to-host packet reply) was silently dropped by
+  the kernel — matching the observed `udhcpc no lease` + DNS-to-192.168.127.1
+  no-reply symptoms. Fix: before `connect()`, derive a sibling reply-socket path
+  (`<dir>/vz-net-reply.sock`), unlink any stale file, and `bind()` the socket to it.
+  `sockaddr_un_from_path()` is extracted as a small shared helper to avoid duplicating
+  the `sun_path` length guard. The bind file is cleaned up by the existing VM state-dir
+  removal on teardown. One unit test (`bound_dgram_socket_receives_reply`) wires up a
+  simulated gvproxy listener, sends a datagram from the fixed client fd, and asserts
+  that a `sendto()` reply from the listener is received on the client — the exact
+  defect path.
+
 ### deferred follow-ups
 
-- [ ] Vz DHCP datagram-path root cause, if B3 ends in the documented defer.
+- [ ] Vz DHCP datagram-path root cause was resolved by WS-E2 (unbound dgram socket);
+  the static-IP fallback from WS-B2 remains as belt-and-suspenders for any residual
+  race during udhcpc startup.
 - [ ] Persistent Vz builder (`VzPersistentBuilderVm`) still runs `network: None`;
   wire gvproxy when that path leaves scaffold status.
 - [ ] `mvmctl doctor` line surfacing the in-builder egress posture + last builder

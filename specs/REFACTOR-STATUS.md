@@ -31,7 +31,7 @@ details** below for the workstream-level state.
 - [ ] **PLAN 126** — Dependency reduction · 🟡 ~25%; sigstore/aws-lc/lock-gate remain
 - [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 (AVF convergence) in progress
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
-- [ ] **PLAN 183** — Builder-VM egress posture + network bootstrap · 🟡 WS-A/B/C landed; WS-D (E2E proof) remains
+- [ ] **PLAN 183** — Builder-VM egress posture + network bootstrap · 🟡 WS-A/B/C/E landed; WS-D (E2E proof) remains
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
 
 ## Plan details
@@ -229,18 +229,22 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
   [ ] live Vz WS-2 round-trip validation + fork semantic-A spike — BLOCKED on
       Plan 183 (builder-VM egress lockdown breaks every uncached flake build)
 
-PLAN 183 — Builder-VM egress posture + net boot 🟡 WS-A/B/C landed; WS-D (E2E proof) remains
+PLAN 183 — Builder-VM egress posture + net boot 🟡 WS-A/B/C/E landed; WS-D (E2E proof) remains
+  Last updated: 2026-06-12
   Diagnosis proven 2026-06-11: boot-time install_egress_lockdown (OUTPUT DROP,
   proxy-uid-only) applied to the whole builder VM and dropped every nix fetch.
   WS-A moves the lockdown to the install arm (fail-closed) + opens egress for
   flake-build dispatches; the QEMU-only boot skip is deleted. Plus (WS-B/C):
   Vz builder gets no DHCP lease (eth0 unconfigured), and /etc/resolv.conf is a
-  read-only baked file so leased DNS never lands.
+  read-only baked file so leased DNS never lands. WS-E fixes two workload-boot
+  defects: kernel fallback for kernel-less images (vz_objc Vz supervisor) and the
+  unbound gvproxy datagram socket (root cause of the DHCP/DNS no-reply).
   [x] WS-A egress posture per arm (boot open; install-arm locked, fail-closed;
       per-job posture in persistent dispatch; drop QEMU-only boot skip) — landed
   [x] WS-B static gvproxy fallback when DHCP yields no lease — static fallback
-      landed; shared guest_net module; DHCP root cause deferred to WS-D
+      landed; shared guest_net module; DHCP root cause found + fixed in WS-E
   [x] WS-C writable /run-bind-mounted resolv.conf seeded with gateway resolver
+  [x] WS-E vz workload boot: kernel fallback + bound gvproxy reply socket
   [ ] WS-D cold E2E proof on macOS + claim-11 install gate still locked +
       resume Plan 159 live Vz validation
 
