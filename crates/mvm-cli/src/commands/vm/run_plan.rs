@@ -394,7 +394,6 @@ mod tests {
     use crate::commands::vm::exec::{RunMode, RunProfile};
     use base64::Engine;
     use mvm_hostd::supervisor::secrets_scanner::SecretsScanner;
-    use mvm_sdk::ir::EnvValue;
     use mvm_sdk::runtime::{Divergence, RecordedOp, RuntimeRecording, SandboxCreate};
     use std::collections::BTreeMap;
 
