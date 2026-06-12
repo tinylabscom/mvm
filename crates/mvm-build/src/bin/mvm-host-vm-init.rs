@@ -2107,23 +2107,11 @@ mod linux {
         // Seeding before udhcpc also means the bind-mount is in place on the
         // Vz path where DHCP fails — the static fallback below gives the IP
         // and the seed covers DNS.
-        std::fs::create_dir_all("/run/mvm").map_err(|e| format!("mkdir /run/mvm: {e}"))?;
-        std::fs::write("/run/mvm/resolv.conf", resolver_seed(&cmdline))
-            .map_err(|e| format!("seed /run/mvm/resolv.conf: {e}"))?;
-        let st = Command::new("/bin/busybox")
-            .args([
-                "mount",
-                "--bind",
-                "/run/mvm/resolv.conf",
-                "/etc/resolv.conf",
-            ])
-            .status()
-            .map_err(|e| format!("spawn mount --bind resolv.conf: {e}"))?;
-        if !st.success() {
-            return Err(format!(
-                "bind-mount resolv.conf exit {}",
-                st.code().unwrap_or(-1)
-            ));
+        // Non-fatal: a failed seed/bind-mount degrades DNS to the baked
+        // resolvers but must not block the iface-up + DHCP below — a
+        // leased-but-degraded guest beats one with no IP at all.
+        if let Err(e) = seed_resolv_conf(&cmdline) {
+            eprintln!("mvm-host-vm-init: resolv.conf seed skipped: {e} (continuing)");
         }
 
         // busybox 1.36.x udhcpc binds a PF_PACKET raw socket to
@@ -2207,6 +2195,31 @@ mod linux {
         } else {
             b"nameserver 192.168.127.1\n"
         }
+    }
+
+    /// Stage the gateway-resolver seed on tmpfs and bind-mount it over
+    /// the baked read-only `/etc/resolv.conf` so udhcpc's script (and
+    /// the lease it carries) can write DNS config through the mount.
+    fn seed_resolv_conf(cmdline: &str) -> Result<(), String> {
+        std::fs::create_dir_all("/run/mvm").map_err(|e| format!("mkdir /run/mvm: {e}"))?;
+        std::fs::write("/run/mvm/resolv.conf", resolver_seed(cmdline))
+            .map_err(|e| format!("seed /run/mvm/resolv.conf: {e}"))?;
+        let st = Command::new("/bin/busybox")
+            .args([
+                "mount",
+                "--bind",
+                "/run/mvm/resolv.conf",
+                "/etc/resolv.conf",
+            ])
+            .status()
+            .map_err(|e| format!("spawn mount --bind resolv.conf: {e}"))?;
+        if !st.success() {
+            return Err(format!(
+                "bind-mount resolv.conf exit {}",
+                st.code().unwrap_or(-1)
+            ));
+        }
+        Ok(())
     }
 
     /// Bring a network interface administratively up via
