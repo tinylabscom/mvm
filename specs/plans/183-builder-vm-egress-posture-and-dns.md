@@ -293,8 +293,14 @@ Two independent defects blocked `mvmctl up --flake <workload> --hypervisor vz`:
 - [x] fs_quick on Vz: teach the quiesce gate to recognize the Vz paused state
   (pid stays alive under pause), and/or stop deleting the per-instance CoW
   rootfs on `down` so a stopped VM remains checkpointable.
-  fixed: `vm_is_quiesced` helper checks registry `paused` flag when pid is
-  live; missing-rootfs arm now returns actionable error naming the pause workflow.
+  fixed: `pause` stamps the live supervisor pid into a `vz.paused` marker in
+  the VM state dir (`resume` removes it; a stale marker self-invalidates by
+  pid mismatch — the name registry was the wrong substrate, `up`-created VMs
+  are never in it); `vm_is_quiesced` accepts running+matching-marker.
+  Missing-rootfs arm returns an actionable error naming the pause workflow.
+  Live-validated 2026-06-12: pause → fs_quick create → resume green; vm_full
+  restore green incl. responsive control plane (pause/resume on the restored
+  VM) and restore-while-running refusal.
 - [x] vm_full restore: re-provision the per-VM gvproxy sidecar before spawning
   the restore supervisor, and make a failed restore clean up its materialized
   rootfs so the retry isn't blocked by `File exists`.
