@@ -787,6 +787,17 @@ impl VzBackend {
             machine_id_path: machine_id_path.map(|p| p.display().to_string()),
         };
 
+        // The original gvproxy sidecar died when the VM was stopped. The
+        // supervisor's connect() into the gvproxy socket must find a live
+        // listener, so spawn a fresh one before handing the config to the
+        // supervisor. Safe here because `stop` already reaped the
+        // predecessor gvproxy — `spawn_detached`'s unlink only clears
+        // stale socket/PID files, it does not kill a live process.
+        if matches!(cfg.network, Some(vz::NetworkConfig::Gvproxy { .. })) {
+            host_gvproxy::spawn_detached(&state_dir)
+                .map_err(|e| anyhow!("spawn gvproxy for restoring Vz VM '{}': {e}", id.0))?;
+        }
+
         ui::info(&format!(
             "Restoring Vz VM '{}' from {}...",
             id.0,
@@ -873,6 +884,9 @@ impl crate::checkpoint::VmFullRestore for VzBackend {
     /// Materialize the checkpoint's rootfs into place (must happen before
     /// `restoreMachineState` — the saved memory expects the exact disk it was
     /// captured with), then boot the supervisor in Restore mode.
+    ///
+    /// If the rootfs clone succeeds but `snapshot_restore` then fails, the
+    /// clone is removed so a retry isn't blocked by a pre-existing file.
     fn restore(
         &self,
         target_vm: &str,
@@ -880,16 +894,68 @@ impl crate::checkpoint::VmFullRestore for VzBackend {
         memory: &std::path::Path,
         machine_id: &std::path::Path,
     ) -> anyhow::Result<()> {
-        refuse_if_running(target_vm)?;
-        use crate::checkpoint::VmFullControl as _;
-        let target_rootfs = VzVmFullControl::new(target_vm)
-            .rootfs_path()
-            .context("resolving target VM rootfs path for restore")?;
-        crate::base::cow::clone_rootfs_for_instance(rootfs_src, &target_rootfs)
-            .context("materializing checkpoint rootfs before restore")?;
-        self.snapshot_restore(&VmId(target_vm.to_string()), memory, Some(machine_id))
-            .map(|_| ())
+        restore_with_spawn(
+            self,
+            target_vm,
+            rootfs_src,
+            memory,
+            machine_id,
+            |backend, vm, mem, mid| {
+                backend
+                    .snapshot_restore(&VmId(vm.to_string()), mem, Some(mid))
+                    .map(|_| ())
+            },
+        )
     }
+}
+
+/// Inner restore logic with an injectable spawn step so unit tests can trigger
+/// the failure-cleanup path without a real supervisor binary.
+fn restore_with_spawn(
+    backend: &VzBackend,
+    target_vm: &str,
+    rootfs_src: &std::path::Path,
+    memory: &std::path::Path,
+    machine_id: &std::path::Path,
+    do_restore: impl FnOnce(&VzBackend, &str, &std::path::Path, &std::path::Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    refuse_if_running(target_vm)?;
+    use crate::checkpoint::VmFullControl as _;
+    let target_rootfs = VzVmFullControl::new(target_vm)
+        .rootfs_path()
+        .context("resolving target VM rootfs path for restore")?;
+
+    // The clone step can collide if a previous restore was interrupted
+    // after the clone but before the supervisor wrote its PID file.
+    // Distinguish the two error shapes: if the destination already exists,
+    // we didn't create it — surface an actionable message and leave the
+    // file alone. If the clone itself creates the file and restore later
+    // fails, remove only what we created.
+    if target_rootfs.exists() {
+        anyhow::bail!(
+            "restore target rootfs already exists at {}; a previous failed \
+             restore may have left it. Remove it manually, then retry.",
+            target_rootfs.display()
+        );
+    }
+
+    crate::base::cow::clone_rootfs_for_instance(rootfs_src, &target_rootfs)
+        .context("materializing checkpoint rootfs before restore")?;
+
+    let restore_result = do_restore(backend, target_vm, memory, machine_id);
+
+    if let Err(ref e) = restore_result {
+        // The clone succeeded but restore failed — clean up what this
+        // call created so the caller can retry without the stale file.
+        tracing::warn!(
+            target_rootfs = %target_rootfs.display(),
+            error = %e,
+            "snapshot_restore failed; removing cloned rootfs to allow retry"
+        );
+        let _ = std::fs::remove_file(&target_rootfs);
+    }
+
+    restore_result
 }
 
 /// Bridges the checkpoint `VmFullControl` trait to a running Vz VM's control
@@ -2494,6 +2560,157 @@ mod tests {
         assert!(
             !target_rootfs.exists(),
             "rootfs not created by refused restore"
+        );
+
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+        }
+    }
+
+    /// Helper: write a minimal SupervisorConfig JSON into `<state_dir>/supervisor-config.json`
+    /// with the rootfs disk pointing at `rootfs_path`.
+    fn write_supervisor_config(state_dir: &Path, vm_name: &str, rootfs_path: &Path) {
+        let cfg = vz::SupervisorConfig {
+            name: vm_name.into(),
+            vm_state_dir: state_dir.to_string_lossy().into_owned(),
+            pid_file_name: None,
+            kernel: vz::KernelConfig {
+                path: "/abs/vmlinux".into(),
+                cmdline: "root=/dev/vda".into(),
+                initrd_path: None,
+            },
+            resources: vz::ResourceConfig {
+                cpu_count: 1,
+                memory_mib: 512,
+            },
+            disks: vec![vz::DiskConfig {
+                id: "rootfs".into(),
+                path: rootfs_path.to_string_lossy().into_owned(),
+                read_only: true,
+            }],
+            virtio_fs: vec![],
+            vsock: vz::VsockConfig {
+                ports: vec![],
+                socket_dir: state_dir.to_string_lossy().into_owned(),
+            },
+            console_output_path: None,
+            network: None,
+            balloon: None,
+            control_socket_path: None,
+            startup_mode: vz::StartupMode::Boot,
+            tenant_id: None,
+            plan: None,
+            bundle: None,
+            audit_dir: None,
+            gateway_audit_socket: None,
+            signing_key_path: None,
+        };
+        let json = cfg.to_json().unwrap();
+        std::fs::write(state_dir.join(SUPERVISOR_CONFIG_FILE_NAME), json).unwrap();
+    }
+
+    /// When `restore_with_spawn` succeeds at cloning the rootfs but the spawn
+    /// closure injects a failure, the cloned file must be removed so a retry
+    /// isn't blocked by `File exists`.
+    #[test]
+    fn restore_failure_removes_cloned_rootfs() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+        }
+
+        let state_dir = tmp.path().join("vms").join("restore-cleanup-vm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Source rootfs to clone from.
+        let src_rootfs = tmp.path().join("source.ext4");
+        std::fs::write(&src_rootfs, b"fake-rootfs-bytes").unwrap();
+
+        // Target rootfs path (inside the state dir).
+        let target_rootfs = state_dir.join("rootfs.ext4");
+        write_supervisor_config(&state_dir, "restore-cleanup-vm", &target_rootfs);
+
+        let backend = VzBackend;
+        let err = restore_with_spawn(
+            &backend,
+            "restore-cleanup-vm",
+            &src_rootfs,
+            Path::new("/abs/memory.bin"),
+            Path::new("/abs/machine-id"),
+            |_, _, _, _| anyhow::bail!("injected spawn failure"),
+        )
+        .expect_err("injected failure must propagate");
+
+        assert!(
+            err.to_string().contains("injected spawn failure"),
+            "original error propagated: {err}"
+        );
+        // The cloned rootfs must have been cleaned up.
+        assert!(
+            !target_rootfs.exists(),
+            "cloned rootfs must be removed after restore failure"
+        );
+
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+        }
+    }
+
+    /// When the target rootfs already exists before the restore (leftover from a
+    /// previous failed restore), the error names the path and does NOT delete it.
+    #[test]
+    fn restore_pre_existing_target_rootfs_errors_and_does_not_delete() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+        }
+
+        let state_dir = tmp.path().join("vms").join("stale-rootfs-vm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let src_rootfs = tmp.path().join("source.ext4");
+        std::fs::write(&src_rootfs, b"fake-bytes").unwrap();
+
+        // Pre-create the target to simulate a stale leftover.
+        let target_rootfs = state_dir.join("rootfs.ext4");
+        std::fs::write(&target_rootfs, b"stale-bytes").unwrap();
+        write_supervisor_config(&state_dir, "stale-rootfs-vm", &target_rootfs);
+
+        let backend = VzBackend;
+        let err = restore_with_spawn(
+            &backend,
+            "stale-rootfs-vm",
+            &src_rootfs,
+            Path::new("/abs/memory.bin"),
+            Path::new("/abs/machine-id"),
+            |_, _, _, _| panic!("spawn must not be called when target already exists"),
+        )
+        .expect_err("pre-existing target must error");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("already exists") && msg.contains(target_rootfs.to_str().unwrap()),
+            "error names the leftover path: {msg}"
+        );
+        // The stale file must not have been touched.
+        assert!(
+            target_rootfs.exists(),
+            "stale rootfs must not be deleted by the guard"
+        );
+        assert_eq!(
+            std::fs::read(&target_rootfs).unwrap(),
+            b"stale-bytes",
+            "stale rootfs content must be unchanged"
         );
 
         // SAFETY: serialized by HOME_TEST_LOCK.
