@@ -226,13 +226,61 @@ pub enum LowerError {
     DuplicateFilesWritePath { path: String },
 }
 
-/// Lower a [`RuntimeRecording`] into a `Workload`.
+/// One place the trace replay knowingly differs from what the
+/// recorded script actually did. Findings do not block lowering —
+/// they block *admission* unless explicitly acknowledged, because
+/// a preview that ran one way and a ship that behaves another is
+/// exactly the dishonesty the promotion gate exists to refuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Divergence {
+    /// A `sb.kill()` was recorded and dropped: the replayed
+    /// workload's lifetime is the orchestrator's TTL, not the
+    /// script's explicit kill point.
+    KillDropped { op_index: usize },
+    /// The script wrote this file after starting the entrypoint;
+    /// the replay writes it before boot. Anything the entrypoint
+    /// did before the write existed will behave differently.
+    FilesWriteAfterEntrypoint { op_index: usize, path: String },
+}
+
+impl Divergence {
+    /// Stable slug used by `--ack-divergence` to acknowledge a
+    /// finding class. Kept kebab-case to read naturally on a CLI.
+    pub fn kind_slug(&self) -> &'static str {
+        match self {
+            Self::KillDropped { .. } => "kill-dropped",
+            Self::FilesWriteAfterEntrypoint { .. } => "files-write-after-entrypoint",
+        }
+    }
+}
+
+impl std::fmt::Display for Divergence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KillDropped { op_index } => write!(
+                f,
+                "[kill-dropped] op #{op_index}: sb.kill() is dropped — replay lifetime is the orchestrator's TTL"
+            ),
+            Self::FilesWriteAfterEntrypoint { op_index, path } => write!(
+                f,
+                "[files-write-after-entrypoint] op #{op_index}: `{path}` was written after start; replay writes it before boot"
+            ),
+        }
+    }
+}
+
+/// Lower a [`RuntimeRecording`] into a `Workload`, collecting
+/// divergence findings in the process.
 ///
 /// The exact shape is documented at the top of the module. In one
 /// line: the *final* `CommandStart` is the entrypoint, every prior
 /// `CommandStart` and `FilesWrite` becomes a `before_start` hook in
-/// declaration order, and `Kill` ops are dropped.
-pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError> {
+/// declaration order, and `Kill` ops are dropped (emitting a
+/// [`Divergence::KillDropped`] finding). `FilesWrite` ops after the
+/// final `CommandStart` emit [`Divergence::FilesWriteAfterEntrypoint`].
+pub fn compile_recording_with_findings(
+    rec: &RuntimeRecording,
+) -> Result<(Workload, Vec<Divergence>), LowerError> {
     if rec.ops.len() > MAX_RECORDED_OPS {
         return Err(LowerError::TooManyOps {
             count: rec.ops.len(),
@@ -269,6 +317,7 @@ pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError>
     // declaration order so they fire before the entrypoint at boot.
     let mut before_start: Vec<HookCmd> = Vec::new();
     let mut entrypoint: Option<Entrypoint> = None;
+    let mut findings: Vec<Divergence> = Vec::new();
 
     for (idx, op) in rec.ops.iter().enumerate() {
         match op {
@@ -303,6 +352,12 @@ pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError>
                         max: MAX_FILES_WRITE_DECODED_BYTES,
                     });
                 }
+                if idx > final_cmd_pos {
+                    findings.push(Divergence::FilesWriteAfterEntrypoint {
+                        op_index: idx,
+                        path: path.clone(),
+                    });
+                }
                 // Emit a shell hook that materializes the file. Both
                 // the destination path and the payload are delivered
                 // via `base64 -d` so the shell line contains no
@@ -317,8 +372,10 @@ pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError>
                 before_start.push(HookCmd::Shell { line });
             }
             RecordedOp::Kill => {
-                // Dropped — see lower-error doc + module doc for the
-                // TTL/orchestrator rationale.
+                // Dropped — the workload's lifetime is the orchestrator's
+                // TTL, not the recording's kill point. Emit a finding so
+                // the admission path can refuse unless acknowledged.
+                findings.push(Divergence::KillDropped { op_index: idx });
             }
         }
     }
@@ -353,13 +410,23 @@ pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError>
         },
     };
 
-    Ok(Workload {
-        schema_version: SCHEMA_VERSION.to_string(),
-        id: rec.workload_id.clone(),
-        apps: vec![app],
-        volumes: Vec::new(),
-        extensions: BTreeMap::new(),
-    })
+    Ok((
+        Workload {
+            schema_version: SCHEMA_VERSION.to_string(),
+            id: rec.workload_id.clone(),
+            apps: vec![app],
+            volumes: Vec::new(),
+            extensions: BTreeMap::new(),
+        },
+        findings,
+    ))
+}
+
+/// Findings-agnostic wrapper kept for callers that only need the
+/// Workload (tests, tooling). Admission paths use
+/// [`compile_recording_with_findings`] and gate on the findings.
+pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError> {
+    compile_recording_with_findings(rec).map(|(wl, _)| wl)
 }
 
 #[cfg(test)]
@@ -729,6 +796,57 @@ mod tests {
         assert!(
             !line.contains("; rm -rf"),
             "bare metacharacter in line: {line}"
+        );
+    }
+
+    #[test]
+    fn kill_op_yields_divergence_finding() {
+        let ops = vec![start_op(&["/bin/true"]), RecordedOp::Kill];
+        let (_, findings) =
+            compile_recording_with_findings(&rec_with_ops(ops)).expect("must lower");
+        assert_eq!(findings.len(), 1);
+        assert!(matches!(
+            findings[0],
+            Divergence::KillDropped { op_index: 1 }
+        ));
+    }
+
+    #[test]
+    fn files_write_after_entrypoint_yields_divergence_finding() {
+        // The script wrote this file AFTER starting the workload;
+        // the replay materializes it BEFORE start. That reordering
+        // is a real preview-vs-ship behavior difference.
+        let ops = vec![
+            start_op(&["/bin/server"]),
+            write_op("/app/late.txt", b"late"),
+        ];
+        let (wl, findings) =
+            compile_recording_with_findings(&rec_with_ops(ops)).expect("must lower");
+        assert!(matches!(
+            &findings[0],
+            Divergence::FilesWriteAfterEntrypoint { op_index: 1, path } if path == "/app/late.txt"
+        ));
+        // Lowering behavior is unchanged: the hook still exists.
+        assert_eq!(wl.apps[0].hooks.before_start.len(), 1);
+    }
+
+    #[test]
+    fn clean_recording_yields_no_findings() {
+        let ops = vec![write_op("/app/a.txt", b"a"), start_op(&["/bin/true"])];
+        let (_, findings) =
+            compile_recording_with_findings(&rec_with_ops(ops)).expect("must lower");
+        assert!(findings.is_empty(), "got {findings:?}");
+    }
+
+    #[test]
+    fn compile_recording_is_findings_agnostic_back_compat() {
+        let ops = vec![start_op(&["/bin/true"]), RecordedOp::Kill];
+        let rec = rec_with_ops(ops);
+        let plain = compile_recording(&rec).expect("plain must lower");
+        let (with, _) = compile_recording_with_findings(&rec).expect("must lower");
+        assert_eq!(
+            plain, with,
+            "the two entry points must produce identical Workloads"
         );
     }
 
