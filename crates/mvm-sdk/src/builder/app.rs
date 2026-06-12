@@ -117,6 +117,7 @@ impl AppBuilder {
             // that need to declare hooks use `App::with_hooks` (or
             // the addon-aware merge path) downstream.
             hooks: Default::default(),
+            files: Vec::new(),
         })
     }
 }

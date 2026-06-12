@@ -546,6 +546,7 @@ mod tests {
                 threat_tier: Default::default(),
                 addons: vec![],
                 hooks: Default::default(),
+                files: vec![],
             }],
             volumes: vec![],
             extensions: Default::default(),

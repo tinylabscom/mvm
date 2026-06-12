@@ -28,7 +28,8 @@ pub use validate::{ValidationError, validate};
 pub use version::{IR_MAJOR, IR_MINOR, VersionError, validate_schema_version};
 pub use workload::{
     App, AuthType, Concurrency, Dependencies, Entrypoint, EnvValue, Format, HostPort, Image,
-    InProcessMode, JsonSchemaShape, Mount, MountMode, MountSource, Network, NetworkDns,
-    NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto, PythonTool, Resources,
-    SecretMount, SecretRef, Sigv4Params, Source, Volume, WarmProcessConfig, Workload, host_matches,
+    InProcessMode, JsonSchemaShape, MaterializedFile, Mount, MountMode, MountSource, Network,
+    NetworkDns, NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto, PythonTool,
+    Resources, SecretMount, SecretRef, Sigv4Params, Source, Volume, WarmProcessConfig, Workload,
+    host_matches,
 };

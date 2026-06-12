@@ -4,6 +4,24 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// A file materialized into the workload's rootfs at build time.
+/// Replaces the legacy "write a file via a before_start shell hook"
+/// path — content and destination are carried as data and baked
+/// directly, so neither ever reaches a shell line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MaterializedFile {
+    /// Absolute destination path in the guest rootfs.
+    pub path: String,
+    /// STANDARD-alphabet base64 of the file's bytes. Decoded at
+    /// build time by the Nix factory; never decoded in a guest shell.
+    pub bytes_b64: String,
+    /// Octal mode string (e.g. `"0644"`). `None` → the factory's
+    /// default (`0644`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Workload {
@@ -74,6 +92,10 @@ pub struct App {
     /// documents that don't carry `hooks` remain byte-identical.
     #[serde(default, skip_serializing_if = "Hooks::is_empty")]
     pub hooks: Hooks,
+    /// Files baked into the rootfs at build time (was: FilesWrite
+    /// before_start shell hooks).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<MaterializedFile>,
 }
 
 impl App {
@@ -644,7 +666,57 @@ mod tests {
             threat_tier: Default::default(),
             addons: vec![],
             hooks: Default::default(),
+            files: vec![],
         }
+    }
+
+    fn minimal_app() -> App {
+        app_with(vec![Entrypoint::Command {
+            command: vec!["true".into()],
+            working_dir: "/app".into(),
+            env: Default::default(),
+        }])
+    }
+
+    #[test]
+    fn materialized_file_serde_roundtrip() {
+        let f = MaterializedFile {
+            path: "/app/.env".to_string(),
+            bytes_b64: "aGk=".to_string(),
+            mode: Some("0600".to_string()),
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        let back: MaterializedFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(f, back);
+    }
+
+    #[test]
+    fn materialized_file_mode_defaults_to_none_and_is_omitted() {
+        let f = MaterializedFile {
+            path: "/app/x".to_string(),
+            bytes_b64: "eA==".to_string(),
+            mode: None,
+        };
+        let v = serde_json::to_value(&f).unwrap();
+        assert!(
+            v.get("mode").is_none(),
+            "None mode must be omitted from the wire"
+        );
+    }
+
+    #[test]
+    fn app_files_defaults_empty_and_is_omitted_when_empty() {
+        // An App with no materialized files must serialize without a `files` key
+        // (back-compat with existing workloads).
+        let json = serde_json::to_value(minimal_app()).unwrap();
+        assert!(json.get("files").is_none(), "empty files must be skipped");
+    }
+
+    #[test]
+    fn materialized_file_rejects_unknown_field() {
+        let r: Result<MaterializedFile, _> =
+            serde_json::from_str(r#"{"path":"/a","bytes_b64":"eA==","bogus":1}"#);
+        assert!(r.is_err(), "deny_unknown_fields must reject extras");
     }
 
     #[test]

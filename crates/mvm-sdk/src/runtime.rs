@@ -437,6 +437,7 @@ pub fn compile_recording_with_findings(
             after_start: Vec::new(),
             before_stop: Vec::new(),
         },
+        files: Vec::new(),
     };
 
     Ok((
