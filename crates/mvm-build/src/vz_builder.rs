@@ -1121,9 +1121,8 @@ impl VzPersistentBuilderVm {
 
         // Name-prefix isolation under the shared cache root.
         // libkrun uses `mvm-persistent-builder-vm-{session}`; Vz uses
-        // `mvm-persistent-builder-vz-{session}`. The Stage 0 reaper
-        // (`apple_container.rs`) is prefix-agnostic so both participate
-        // in cleanup without code changes.
+        // `mvm-persistent-builder-vz-{session}`. The Stage 0 reaper is
+        // prefix-agnostic so both participate in cleanup without code changes.
         let vm_name = format!("mvm-persistent-builder-vz-{session_id}");
         let vm_state_dir = builder_vm_cache_dir().join("vms").join(&vm_name);
         std::fs::create_dir_all(&vm_state_dir).map_err(|e| {

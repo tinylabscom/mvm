@@ -3,7 +3,7 @@
 //!
 //! For now this is just an abstraction so `Supervisor::launch(plan)` can
 //! be tested without a real Firecracker. An open `BackendRegistry` plus
-//! concrete `FirecrackerBackend` / `AppleContainerBackend` impls land in
+//! concrete `FirecrackerBackend` / `VzBackend` impls land in
 //! a follow-up that lifts today's `mvm/src/vm/backend.rs`
 //! `AnyBackend` enum behind this trait.
 

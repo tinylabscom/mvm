@@ -93,7 +93,7 @@ pub struct VmStartConfig {
     pub config_files: Vec<VmFile>,
     /// Secret files (written with restricted permissions).
     pub secret_files: Vec<VmFile>,
-    /// Directory containing microvm.nix runner scripts (microvm.nix backend only).
+    /// Directory containing microvm.nix-lineage runner scripts (QEMU backend only).
     pub runner_dir: Option<String>,
     /// Tenant identifier from the admitted `ExecutionPlan`
     /// (`AdmittedPlan.plan.tenant.0`). When `Some`, the libkrun/Vz

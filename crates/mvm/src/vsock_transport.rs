@@ -336,8 +336,8 @@ mod tests {
     #[test]
     fn for_vm_selects_vz_when_only_vz_socket_present() {
         use std::os::unix::net::UnixListener;
-        // With a Vz workload's socket present (and no apple-container/libkrun/
-        // firecracker surface), the picker must select the Vz transport rather
+        // With a Vz workload's socket present (and no libkrun/firecracker
+        // surface), the picker must select the Vz transport rather
         // than falling through to the firecracker error. Regression for the
         // "console can't reach a Vz workload" gap.
         let dir = tempfile::tempdir().unwrap();

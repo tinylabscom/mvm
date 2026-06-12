@@ -3,8 +3,8 @@
 //! lineage from one. Capture and fork are filesystem-only here; booting a
 //! forked child is a separate `mvmctl up` step.
 //!
-//! Only the macOS workload backends (Vz / apple_container) materialize a
-//! host-side rootfs image, so checkpointing is gated to a VM that has one.
+//! Only the macOS Vz workload backend materializes a host-side rootfs image,
+//! so checkpointing is gated to a VM that has one.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -149,9 +149,9 @@ fn now_unix() -> u64 {
 /// queues quiesced). A live, unpaused VM is refused: an fs_quick checkpoint has
 /// no memory, so the rootfs must be in a clean, deterministic state.
 ///
-/// Rootfs location is backend-specific but both macOS workload backends keep
+/// Rootfs location is backend-specific but the macOS Vz workload backend keeps
 /// the image under `vm_state_dir(name)`:
-///   - apple_container clones a per-instance `rootfs.ext4` there;
+///   - a per-instance `rootfs.ext4` CoW clone lands there;
 ///   - Vz boots from a supplied path but persists the launch config, whose
 ///     `rootfs` disk records that path.
 fn resolve_quiesced_vm_rootfs(name: &str) -> Result<PathBuf> {
@@ -160,7 +160,7 @@ fn resolve_quiesced_vm_rootfs(name: &str) -> Result<PathBuf> {
     }
     let state_dir = vm_state_dir(name);
 
-    // apple_container per-instance clone — deterministic, present on disk.
+    // Per-instance CoW clone — deterministic, present on disk.
     let instance_rootfs = state_dir.join("rootfs.ext4");
     if instance_rootfs.is_file() {
         return Ok(instance_rootfs);
