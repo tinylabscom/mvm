@@ -167,6 +167,11 @@ pub(in crate::commands) struct RunArgs {
         required_unless_present_any = ["launch_plan", "mode", "dev", "prod"]
     )]
     pub argv: Vec<String>,
+    /// Acknowledge a divergence class on the plan-mode admission
+    /// path (repeatable). Unacknowledged divergence refuses
+    /// admission: what you previewed is not what would ship.
+    #[arg(long = "ack-divergence", value_name = "KIND")]
+    pub ack_divergence: Vec<String>,
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
@@ -1023,6 +1028,7 @@ mod tests {
             dev: false,
             prod: false,
             argv: vec!["/bin/true".to_string()],
+            ack_divergence: Vec::new(),
         }
     }
 

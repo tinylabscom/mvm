@@ -64,7 +64,9 @@ use mvm_sdk::ir::{App, Workload};
 use super::managed_secrets::lower_app_secrets;
 use super::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
 use super::plan_builder::SynthesisInput;
-use crate::commands::build::sandbox_record::{auto_exec_record_script, script_language_from_path};
+use crate::commands::build::sandbox_record::{
+    LoadedRecording, auto_exec_record_script, script_language_from_path,
+};
 
 use super::exec::{RunArgs, RunMode};
 
@@ -168,12 +170,19 @@ fn run_plan_mode(args: &RunArgs) -> Result<()> {
         )
     })?;
 
-    let workload = auto_exec_record_script(&script, lang).with_context(|| {
+    let LoadedRecording {
+        workload,
+        findings,
+        digest_hex,
+    } = auto_exec_record_script(&script, lang).with_context(|| {
         format!(
             "lowering Sandbox-shaped script {} for plan-mode admission",
             script.display()
         )
     })?;
+
+    eprintln!("recording sha256: {digest_hex}");
+    require_acknowledged(&findings, &args.ack_divergence)?;
 
     if workload.apps.is_empty() {
         bail!(
@@ -229,6 +238,29 @@ fn run_plan_mode(args: &RunArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Refuse admission while any divergence finding's class is not
+/// explicitly acknowledged. The preview ran one way; the replay
+/// behaves another — shipping that silently is the failure mode
+/// this gate exists to stop.
+fn require_acknowledged(findings: &[mvm_sdk::runtime::Divergence], acks: &[String]) -> Result<()> {
+    let unacked: Vec<&mvm_sdk::runtime::Divergence> = findings
+        .iter()
+        .filter(|f| !acks.iter().any(|a| a == f.kind_slug()))
+        .collect();
+    if unacked.is_empty() {
+        return Ok(());
+    }
+    for f in &unacked {
+        eprintln!("UNACKNOWLEDGED divergence: {f}");
+    }
+    bail!(
+        "refusing plan-mode admission: {} unacknowledged divergence finding(s). Re-run with \
+         --ack-divergence <kind> for each class you accept (kinds above in brackets), or fix \
+         the script so the recording lowers cleanly.",
+        unacked.len()
+    )
 }
 
 /// Pull the script path off `args.argv`. Both `--mode plan` and
@@ -333,6 +365,55 @@ fn placeholder_image_sha(workload_id: &str, app_name: &str) -> String {
 mod tests {
     use super::*;
     use crate::commands::vm::exec::{RunMode, RunProfile};
+    use mvm_sdk::runtime::Divergence;
+
+    #[test]
+    fn gate_passes_with_no_findings() {
+        require_acknowledged(&[], &[]).expect("no findings must pass");
+    }
+
+    #[test]
+    fn gate_refuses_unacknowledged() {
+        let findings = vec![Divergence::KillDropped { op_index: 0 }];
+        let err = require_acknowledged(&findings, &[]).expect_err("unacked must refuse");
+        assert!(
+            err.to_string().contains("unacknowledged divergence"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn gate_passes_when_all_kinds_acked() {
+        let findings = vec![
+            Divergence::KillDropped { op_index: 0 },
+            Divergence::FilesWriteAfterEntrypoint {
+                op_index: 1,
+                path: "/app/x".to_string(),
+            },
+        ];
+        let acks = vec![
+            "kill-dropped".to_string(),
+            "files-write-after-entrypoint".to_string(),
+        ];
+        require_acknowledged(&findings, &acks).expect("all kinds acked must pass");
+    }
+
+    #[test]
+    fn gate_refuses_partial_acks() {
+        let findings = vec![
+            Divergence::KillDropped { op_index: 0 },
+            Divergence::FilesWriteAfterEntrypoint {
+                op_index: 1,
+                path: "/app/x".to_string(),
+            },
+        ];
+        let acks = vec!["kill-dropped".to_string()];
+        let err = require_acknowledged(&findings, &acks).expect_err("partial ack must refuse");
+        assert!(
+            err.to_string().contains("unacknowledged divergence"),
+            "got: {err}"
+        );
+    }
 
     fn base_run_args() -> RunArgs {
         RunArgs {
@@ -352,6 +433,7 @@ mod tests {
             prod: false,
             dry_run: false,
             argv: Vec::new(),
+            ack_divergence: Vec::new(),
         }
     }
 
