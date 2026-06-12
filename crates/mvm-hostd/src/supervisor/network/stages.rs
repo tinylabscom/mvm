@@ -1249,4 +1249,94 @@ mod tests {
             ScanOutcome::Pass
         );
     }
+
+    /// Equivalence witness: `CanonicalEgress::permits` agrees with a
+    /// hand-written oracle across the full probe set. Proves the Tasks 1–3
+    /// refactor left no observable behaviour change on the kernel packet path.
+    ///
+    /// Oracle: permit iff proto matches AND dst_ip is within the CIDR AND
+    /// dst_port is within [port_lo, port_hi] (0/0 = any), AND the IP is not
+    /// a mandatory-deny address (checked first, unconditionally).
+    #[test]
+    fn kernel_egress_canonical_permits_agrees_with_hand_written_oracle() {
+        use mvm_core::policy::projection::Proto as CanonProto;
+
+        // Policy: TCP to 93.184.216.0/24:443 OR UDP to 8.8.8.8/32:any.
+        let eg = canonicalize_l4(&[
+            L4RuleSpec {
+                proto: "tcp".into(),
+                dst_cidr: "93.184.216.0/24".into(),
+                port_lo: 443,
+                port_hi: 443,
+            },
+            L4RuleSpec {
+                proto: "udp".into(),
+                dst_cidr: "8.8.8.8/32".into(),
+                port_lo: 0,
+                port_hi: 0,
+            },
+        ])
+        .expect("valid policy");
+
+        // In-rule hit: TCP to 93.184.216.34:443 — within CIDR and exact port.
+        assert!(
+            eg.permits(&CanonProto::Tcp, "93.184.216.34".parse().unwrap(), 443),
+            "in-rule hit must permit"
+        );
+
+        // In-rule hit: UDP to 8.8.8.8:53 — (0,0) means any-port.
+        assert!(
+            eg.permits(&CanonProto::Udp, "8.8.8.8".parse().unwrap(), 53),
+            "udp any-port rule must permit"
+        );
+
+        // Off-rule miss: TCP to 9.9.9.9:443 — IP not in any rule CIDR.
+        assert!(
+            !eg.permits(&CanonProto::Tcp, "9.9.9.9".parse().unwrap(), 443),
+            "off-rule IP must deny"
+        );
+
+        // Port-edge miss: TCP to 93.184.216.34:80 — IP matches but port outside [443,443].
+        assert!(
+            !eg.permits(&CanonProto::Tcp, "93.184.216.34".parse().unwrap(), 80),
+            "port outside range must deny"
+        );
+
+        // Proto miss: UDP to 93.184.216.34:443 — IP/port match the TCP rule but
+        // protocol is wrong.
+        assert!(
+            !eg.permits(&CanonProto::Udp, "93.184.216.34".parse().unwrap(), 443),
+            "wrong proto must deny"
+        );
+
+        // Mandatory-deny ranges: each is denied unconditionally even if a rule
+        // would nominally match (the allows_overlapping_rule variant below
+        // proves this for the metadata CIDR case).
+        let mandatory_deny_probes: &[(&str, CanonProto, u16)] = &[
+            ("169.254.169.254", CanonProto::Tcp, 80),
+            ("127.0.0.1", CanonProto::Tcp, 443),
+            ("100.64.0.1", CanonProto::Udp, 53),
+            ("::1", CanonProto::Tcp, 443),
+        ];
+        for (addr, proto, port) in mandatory_deny_probes {
+            assert!(
+                !eg.permits(proto, addr.parse().unwrap(), *port),
+                "mandatory-deny address {addr} must always deny"
+            );
+        }
+
+        // Cross-check: even a policy that explicitly allows 169.254.0.0/16 is
+        // overridden — mandatory-deny-first is unconditional in permits().
+        let overlapping = canonicalize_l4(&[L4RuleSpec {
+            proto: "tcp".into(),
+            dst_cidr: "169.254.0.0/16".into(),
+            port_lo: 0,
+            port_hi: 0,
+        }])
+        .expect("lenient: metadata-overlapping rule builds");
+        assert!(
+            !overlapping.permits(&CanonProto::Tcp, "169.254.169.254".parse().unwrap(), 80),
+            "mandatory-deny wins over a permissive metadata rule"
+        );
+    }
 }

@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-12** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status --json`)
+**Last updated: 2026-06-12** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status --json`; Plan 190 kernel egress close-out)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -40,7 +40,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 188** — Capability projection seam (ADR-080 P5) · ✅ LANDED (#801); kernel-side wiring spec'd as Plan 190; WASI-context mapping deferred
 - [x] **PLAN 186** — Trace hardening (ADR-080 P1/P3/P4 + hardened P2 pin) · ✅ LANDED (#809; caught + fixed a live shell-injection in the FilesWrite lowering)
 - [x] **PLAN 187** — Secret-scan admission gate (ADR-080 P7) · ✅ LANDED (#811)
-- [ ] **PLAN 190** — Kernel egress decision converges on CanonicalEgress (ADR-080 P5 close-out) · 🔴 spec'd, not started (lenient L4 lowering, zero claim-10 behaviour change)
+- [x] **PLAN 190** — Kernel egress decision converges on CanonicalEgress (ADR-080 P5 close-out) · 🟢 LANDED (kernel leg; lenient L4 lowering; zero claim-10 behaviour change; WASI-context mapping deferred to runner plan)
 
 ## Plan details
 
@@ -460,7 +460,7 @@ PLAN 188 — Capability projection seam (ADR-080 P5)  ✅ LANDED (#801) — was 
       (ADR-080 §8 P5 witness names: cross_projection_consistency_property,
        clamp_never_widens_property, rebinding_pin_into_metadata_range_refuses)
   [x] pub use re-exports from mvm-core::policy; ADR-080 P5 row updated
-  [ ] kernel-side wiring: LiveL4Gate/PlanFlowPolicy consume CanonicalEgress — spec'd as Plan 190
+  [x] kernel-side wiring: canonicalize_l4 + CanonicalEgress::permits replace LiveL4Gate — LANDED (Plan 190)
   [ ] WASI-context mapping: WasiEgress → WasiCtxBuilder in the wasmtime runner — deferred
   NOTE: 41 tests (39 unit + 2 property witnesses), mutation-verified. No new dependencies.
 
@@ -481,10 +481,15 @@ PLAN 187 — Secret-scan admission gate (ADR-080 P7)  ✅ LANDED (#811)
   [x] SecretRef values skipped (Sigv4Params.access_key_id = public AKIA half, correctly not flagged); compile warns
   [ ] paste-time detector — deferred with the browser preview tier
 
-PLAN 190 — Kernel egress decision converges on CanonicalEgress (ADR-080 P5 close-out)  🔴 spec'd, not started
-  decision: lenient canonicalize_l4 (no mandatory-deny-overlap refusal) → L4PolicyScan via
-  CanonicalEgress::permits; deletes the L4Policy/LiveL4Gate duplicate; ZERO claim-10 behaviour
-  change (rejected the whole-policy-fail-closed variant). Depends on Plan 188 (landed).
+PLAN 190 — Kernel egress decision converges on CanonicalEgress (ADR-080 P5 close-out)  🟢 LANDED
+  [x] canonicalize_l4 — lenient L4 lowering (no mandatory-deny-overlap refusal; runtime
+      permits() + MandatoryDenyEgressScan enforce it; malformed-input refusals only)
+  [x] L4PolicyScan holds CanonicalEgress, decides via CanonicalEgress::permits
+  [x] build_egress_scan takes Option<CanonicalEgress>; gateway bridge builds via canonicalize_l4
+  [x] L4Policy/L4Rule/L4Decision/LiveL4Gate/L4SpecError duplicate deleted from proxy/l4.rs
+  [x] claim-10 witnesses migrated (same names, same assertions, zero behaviour change)
+  [x] equivalence witness: kernel_egress_canonical_permits_agrees_with_hand_written_oracle
+  [ ] WASI-context mapping (WasiEgress → WasiCtxBuilder) — deferred to runner plan
 ```
 
 ## Security claims

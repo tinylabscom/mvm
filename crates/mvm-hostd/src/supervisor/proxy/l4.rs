@@ -302,5 +302,4 @@ mod tests {
             L4Decision::Deny { .. }
         ));
     }
-
 }
