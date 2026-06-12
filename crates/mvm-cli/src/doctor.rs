@@ -2764,6 +2764,9 @@ mod tests {
         let r = collect_warm_start_support();
         let ordered_backends: Vec<_> = r.backends.into_iter().collect();
         let ordered_standby_pool: Vec<_> = r.standby_pool.into_iter().collect();
+        let vz_warm_start = AnyBackend::from_hypervisor("vz")
+            .snapshot_capability()
+            .label();
 
         assert_eq!(
             ordered_backends,
@@ -2772,7 +2775,7 @@ mod tests {
                 ("firecracker".to_string(), "live-memory"),
                 ("libkrun".to_string(), "disk-only"),
                 ("qemu".to_string(), "disk-only"),
-                ("vz".to_string(), "save-restore"),
+                ("vz".to_string(), vz_warm_start),
             ]
         );
         assert_eq!(
