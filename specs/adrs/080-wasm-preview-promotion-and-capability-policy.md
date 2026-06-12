@@ -278,8 +278,13 @@ detector — the enriched default secret list already in-tree, plus tenant
 defs) refuses promotion when raw secret material is embedded, and the
 Tier-0 input path runs the same detector at paste time so the refusal
 arrives early instead of at ship. This scan is a §8 precondition: the
-promotion path does not enable without it. Developers who paste a real token
-get a refusal, not a silently-promoted leak.
+promotion path does not enable without it. The `run --mode plan` admission scan
+has landed (Plan 187): `scan_recording_for_secrets` walks every env literal,
+argv token, and decoded FilesWrite payload and `refuse_embedded_secrets`
+hard-refuses admission on any match — not acknowledgeable. Paste-time detection
+(the Tier-0 input path) remains deferred with the browser preview tier.
+Developers who paste a real token into a recording get a refusal at
+promote-time, not a silently-promoted leak.
 
 ### 6. New TCB surfaces, named
 
@@ -319,7 +324,7 @@ discipline applies: when these land, their witnesses are named in
 | P4 | Divergence gate (§2) | **DONE (Plan 186).** `require_acknowledged` refuses unacknowledged findings on the `run --mode plan` admission path (`gate_passes_with_no_findings`, `gate_refuses_unacknowledged`, `gate_passes_when_all_kinds_acked`, `gate_refuses_partial_acks` — mvm-cli); `Divergence` vocabulary in `mvm_sdk::runtime`; `--ack-divergence <kind>` to acknowledge. Ship-verb wiring inherits this gate when it lands. |
 | P5 | Projection consistency (§3) | `cross_projection_consistency_property` + `clamp_never_widens_property` + `rebinding_pin_into_metadata_range_refuses` (mvm-core `policy::projection`) — landed by Plan 188. Remaining for P5 close-out: wire `LiveL4Gate`/`PlanFlowPolicy` to consume `CanonicalEgress` (kernel-side), and the WASI-context mapping (runner plan). |
 | P6 | Component digest carry (§4) | preview-fetched artifacts enter the IR as digests; mutable ref under `--prod` refused before fetch (test) |
-| P7 | Secret-scan admission (§5) | trace+IR scan refuses embedded secrets (test); paste-time detector in the preview input path |
+| P7 | Secret-scan admission (§5) | `scan_recording_for_secrets` (env literals + argv + decoded FilesWrite payloads, mvm-cli) + `refuse_embedded_secrets` hard-refuses `run --mode plan` (not acknowledgeable, no `--ack`); reuses the Plan 129 `SecretsScanner`; witnesses `create_env_literal_secret_is_flagged`, `files_write_decoded_secret_is_flagged`, `secret_ref_value_is_not_flagged`, `secret_gate_refuses_any_finding`, `scan_then_refuse_composition_rejects_embedded_secret` — landed by Plan 187. Paste-time detector deferred with the browser preview tier. |
 | P8 | Relay session binding (§1) | wrong-token refusal + second-client refusal tests; fuel/memory/wall-clock caps present in the wasmtime `Config` |
 
 ## Alternatives considered
