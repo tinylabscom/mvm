@@ -63,13 +63,19 @@ fn recording_json_round_trips_through_compile_pipeline() {
         }
         other => panic!("expected Command entrypoint, got {other:?}"),
     }
-    // FilesWrite → before_start shell hook.
+    // FilesWrite → before_start shell hook. The path and payload are
+    // both delivered via base64 so no raw path bytes appear in the
+    // generated shell line (injection hardening from P2).
     assert_eq!(app.hooks.before_start.len(), 1);
     match &app.hooks.before_start[0] {
-        mvm_sdk::ir::HookCmd::Shell { line } => assert!(
-            line.contains("/app/note.txt") && line.contains("base64 -d"),
-            "got: {line}"
-        ),
+        mvm_sdk::ir::HookCmd::Shell { line } => {
+            use base64::Engine;
+            let path_b64 = base64::engine::general_purpose::STANDARD.encode(b"/app/note.txt");
+            assert!(
+                line.contains(&path_b64) && line.contains("base64 -d"),
+                "got: {line}"
+            );
+        }
         other => panic!("expected Shell hook, got {other:?}"),
     }
 

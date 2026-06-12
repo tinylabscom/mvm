@@ -224,6 +224,10 @@ pub enum LowerError {
         "recording writes `{path}` more than once — ambiguous in a declarative scaffold; make the script write each file once"
     )]
     DuplicateFilesWritePath { path: String },
+    #[error(
+        "recording digest mismatch: expected {expected}, got {actual} — the bytes changed between capture and use"
+    )]
+    DigestMismatch { expected: String, actual: String },
 }
 
 /// One place the trace replay knowingly differs from what the
@@ -267,6 +271,36 @@ impl std::fmt::Display for Divergence {
             ),
         }
     }
+}
+
+/// SHA-256 of the raw recording bytes, lowercase hex. Captured the
+/// moment the recording is read; verified again wherever the bytes
+/// cross a tamperable boundary (a file at rest between record and
+/// ship is exactly that boundary).
+pub fn recording_sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let out = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for b in out {
+        hex.push_str(&format!("{b:02x}"));
+    }
+    hex
+}
+
+/// Refuse recording bytes whose digest does not match the expected
+/// hex (case-insensitive). Fail-closed: a mismatch means the bytes
+/// changed between capture and use.
+pub fn verify_recording_digest(bytes: &[u8], expected_hex: &str) -> Result<(), LowerError> {
+    let actual = recording_sha256_hex(bytes);
+    if !actual.eq_ignore_ascii_case(expected_hex) {
+        return Err(LowerError::DigestMismatch {
+            expected: expected_hex.to_ascii_lowercase(),
+            actual,
+        });
+    }
+    Ok(())
 }
 
 /// Lower a [`RuntimeRecording`] into a `Workload`, collecting
@@ -921,5 +955,32 @@ mod tests {
     #[test]
     fn files_write_slashless_nested_path_materializes() {
         files_write_roundtrip_under_tempdir("sub/deep/conf.toml", b"nested");
+    }
+
+    #[test]
+    fn recording_digest_is_stable_64_hex() {
+        let d = recording_sha256_hex(b"{}");
+        assert_eq!(d.len(), 64);
+        assert_eq!(d, recording_sha256_hex(b"{}"));
+        assert_ne!(d, recording_sha256_hex(b"{} "));
+    }
+
+    #[test]
+    fn digest_verify_match_passes_mismatch_refuses() {
+        let bytes = b"some recording bytes";
+        let good = recording_sha256_hex(bytes);
+        verify_recording_digest(bytes, &good).expect("matching digest must pass");
+        let err = verify_recording_digest(bytes, &recording_sha256_hex(b"other")).unwrap_err();
+        assert!(
+            matches!(err, LowerError::DigestMismatch { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn digest_verify_is_case_insensitive_on_expected() {
+        let bytes = b"case test";
+        let upper = recording_sha256_hex(bytes).to_uppercase();
+        verify_recording_digest(bytes, &upper).expect("hex case must not matter");
     }
 }
