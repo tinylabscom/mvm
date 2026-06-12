@@ -1,6 +1,6 @@
 //! Functional integration test for `mvm-seccomp-apply`.
 //!
-//! The unit tests in `mvm-security::seccomp` cover tier *structure*
+//! The unit tests in `mvm-core::crypto::seccomp` cover tier *structure*
 //! (cumulative-subset, no duplicates, manifest roundtrip). They don't
 //! exercise the BPF program at runtime. This test does:
 //!

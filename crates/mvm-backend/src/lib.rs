@@ -19,7 +19,7 @@
 //!   mvm-core              ← VmBackend trait + types
 //!   base (module)         ← config + shell + linux_env + ui +
 //!                           runtime_meta + cow (substrate, was mvm-base)
-//!   mvm-providers         ← libkrun/Apple-VZ FFI shims
+//!   providers (module)    ← libkrun/Apple-VZ FFI shims (was mvm-providers)
 //!     ↓                     ↓                     ↓
 //!     └─────── mvm-backend (this crate) ────────┘
 //!                          ↑

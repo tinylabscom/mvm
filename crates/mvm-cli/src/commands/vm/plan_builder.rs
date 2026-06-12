@@ -83,8 +83,8 @@ pub struct SynthesisInput<'a> {
     /// Resolved runtime profile (`firecracker` / `libkrun` / `vz` / `qemu`).
     pub backend_name: &'a str,
     /// Image reference for `SignedImageRef`. `sha256` is the
-    /// lowercase-hex digest of the rootfs (computed by `mvm-security::
-    /// image_verify::hash_artifact` or upstream Nix).
+    /// lowercase-hex digest of the rootfs (computed by `mvm-core::crypto::
+    /// image_verify::sha256_file` or upstream Nix).
     pub image_name: &'a str,
     pub image_sha256: &'a str,
     pub image_cosign_bundle: Option<&'a str>,

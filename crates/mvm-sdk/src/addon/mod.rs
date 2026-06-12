@@ -24,7 +24,7 @@
 //! - [`verify`] — `mvm addon verify <ref>` reproducible-build check.
 //!
 //! The consumer-side IR shape (`AddonUse`, `AddonRef`, `AddonTier`,
-//! `ThreatTier`) lives in `mvm-ir` and is re-exported through
+//! `ThreatTier`) lives in `mvm-sdk::ir` and is re-exported through
 //! `mvm_sdk::addon` for convenience.
 
 pub mod archive;

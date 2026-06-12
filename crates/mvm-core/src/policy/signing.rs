@@ -1,5 +1,5 @@
 //! `SignedPolicyBundle` — Ed25519-signed envelope around a
-//! `PolicyBundle`. Same shape `mvm-plan` uses for
+//! `PolicyBundle`. Same shape `mvm-core::plan` uses for
 //! `SignedExecutionPlan`.
 
 use crate::protocol::signing::SignedPayload;
@@ -38,7 +38,7 @@ pub fn sign_bundle(bundle: &PolicyBundle, key: &SigningKey, signer_id: &str) -> 
     })
 }
 
-/// Same verification order as `mvm-plan::verify_plan`: signature →
+/// Same verification order as `mvm-core::plan::verify_plan`: signature →
 /// schema version → JSON parse. Fail-closed on unknown signer
 /// before exposing the payload bytes.
 pub fn verify_bundle(

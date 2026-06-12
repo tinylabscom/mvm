@@ -539,7 +539,7 @@ mod tests {
 
     #[test]
     fn rewrap_dek_rejects_aes_kwp_with_clear_error() {
-        // AES-KWP lives mvmd-side — mvm-security's rewrap path must
+        // AES-KWP lives mvmd-side — mvm-core::crypto's rewrap path must
         // refuse with a clear error rather than silently mis-handling
         // the envelope.
         let wrapped = WrappedKey {

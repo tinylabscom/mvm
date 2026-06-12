@@ -10,7 +10,7 @@ use crate::policy::policies::{
 };
 
 /// Wire-format version. Same fail-closed semantics as
-/// `mvm-plan::SCHEMA_VERSION` — older verifiers reject unknown
+/// `mvm-core::plan::SCHEMA_VERSION` — older verifiers reject unknown
 /// future bundle versions before any per-field deserialisation.
 pub const SCHEMA_VERSION: u32 = 1;
 

@@ -861,7 +861,7 @@ pub struct SessionVm {
 /// backend spawns the substitution endpoint (the guest never holds a raw
 /// secret). The caller (`invoke --from-workload-ir`) admits the workload's
 /// lowered secrets and hands these JSON-serialized fields back; `boot_session_vm`
-/// threads them into the `VmStartConfig`. Strings (not typed `mvm-plan` values)
+/// threads them into the `VmStartConfig`. Strings (not typed `mvm-core::plan` values)
 /// so this module carries no admission-type dep. **Do not log `plan_json`** — the
 /// signed envelope carries secret bindings.
 pub struct SessionAuditSubstrate {
