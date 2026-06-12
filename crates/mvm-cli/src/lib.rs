@@ -20,3 +20,12 @@ pub mod update;
 pub mod watch;
 
 pub use commands::run;
+
+/// Plan synthesis for library consumers — building an
+/// [`mvm_core::plan::ExecutionPlan`] from typed inputs.
+///
+/// Synthesis produces an unsigned plan and confers no authority; signing and
+/// admission still gate execution.
+pub mod plan_builder {
+    pub use crate::commands::vm::plan_builder::{synthesize_plan, SynthesisInput};
+}
