@@ -47,9 +47,12 @@ jobs:
   #      Both live next to the workload, not at the orchestrator
   #      tier — moving either to mvmd would force every per-VM flow
   #      through the control plane.
-  #   3. Per-VM provider plumbing — Apple Container sockets
-  #      (`crates/mvm-providers/src/apple_container/macos.rs`).
-  #      Provider-specific guest-channel transport.
+  #   3. Per-VM provider plumbing — the host↔guest TCP→vsock port-forward
+  #      proxy (`crates/mvm-cli/src/commands/shared/vsock.rs`,
+  #      `start_port_proxy`). A per-VM local listener that splices an
+  #      accepted host connection to the guest's TCP port over vsock; not
+  #      an orchestration server. (Was the deleted Apple Container
+  #      provider's guest-channel transport before the AVF convergence.)
   #   4. Observability — Prometheus metrics endpoint
   #      (`crates/mvm-cli/src/metrics_server.rs`) plus per-VM gateway
   #      audit sockets in `crates/mvm-supervisor/src/gateway_bridge.rs`
@@ -196,7 +199,7 @@ jobs:
               --glob '!**/examples/**' \
               --glob '!crates/mvm/src/hostd/**' \
               --glob '!crates/mvm-build/src/egress_proxy/**' \
-              --glob '!crates/mvm-backend/src/providers/apple_container/**' \
+              --glob '!crates/mvm-cli/src/commands/shared/vsock.rs' \
               --glob '!crates/mvm-cli/src/metrics_server.rs' \
               --glob '!crates/mvm-cli/src/template_cmd.rs' \
               --glob '!crates/deps/libkrun-sys/src/gvproxy.rs' \
