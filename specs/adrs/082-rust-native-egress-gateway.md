@@ -1,6 +1,6 @@
 # ADR-082 — Rust-native egress gateway replaces the vendored Go gateway
 
-**Status:** Proposed
+**Status:** Accepted
 **Amends:** [ADR-055](055-passt-virtio-net.md) (libkrun/Vz networking via gvproxy + passt)
 **Preserves:** [ADR-058](058-claim-10-bytes-leaving-trust-boundary.md) no-bypass invariant; claim 10 (default-deny egress); Plan 141 flow observation; Plan 129 egress secret substitution
 
@@ -123,12 +123,18 @@ justification and must not be used to wave the parity gate through.
   and Vz, not Vz-only. This closes the migration's largest risk before any code
   lands in mvm.
 
-## Open questions
+## Resolved scope decisions
 
-- **Linux/passt.** Does the Rust gateway replace passt on Linux too (one gateway
-  everywhere), or is the first scope macOS-only with passt retained on Linux?
-- **mvmd coupling.** mvmd consumes the gateway audit substrate; the typed
-  control API is an opportunity to formalize that contract — needs mvmd input.
+- **Linux/passt — out of Phase 1.** Phase 1 is macOS-only (libkrun + Vz); passt
+  is retained on Linux. One-gateway-everywhere is the eventual goal, but the
+  Linux/passt replacement is a separate parity gate: passt's threat surface and
+  its nftables interaction differ enough that bundling it would put the macOS
+  cutover at risk. Tracked as a follow-on, not assumed here.
+- **mvmd coupling — formalize after the macOS cutover.** mvmd consumes the
+  gateway audit substrate, and the typed control API is the right place to
+  formalize that contract — but it needs mvmd input and must not block Phase 1.
+  The macOS Phase 1 control API stays internal/unstable; a coordination item
+  with mvmd precedes any stabilization.
 
 ## Out of scope
 
