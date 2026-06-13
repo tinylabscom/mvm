@@ -775,6 +775,11 @@ impl LayerCoverage {
 /// `notes` provides per-backend rationale shown in doctor output and is
 /// where backends explain partial claims (e.g. "claim 3 partial — verified
 /// boot for VZ-backed rootfs not yet wired up").
+///
+/// This profile is **advisory** — it describes posture for `doctor` output.
+/// The load-bearing guarantee that a non-workload backend cannot carry an
+/// untrusted workload is enforced by the `WorkloadBackend` type-bar on the
+/// admitted launch path, not by this array.
 #[derive(Debug, Clone)]
 pub struct BackendSecurityProfile {
     /// Status of claims 1..=7 (indexed 0..7).
