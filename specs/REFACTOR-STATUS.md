@@ -226,7 +226,7 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       pause/resume (native vCPU quiesce). WS-2 COMPLETE.
   [x] two-copy fork: checkpoint fork --boot (admitted child boot, fs_quick) —
       fresh claim-8 admission via boot_forked_child + admit_plan_for_boot reuse;
-      no-clobber rootfs adoption; resource shape flags > parent plan > defaults.
+      no-clobber rootfs adoption; resource shape flags > parent plan > defaults (#826).
   [x] Vz workload liveness: /init detaches sealed-workload stdin from the
       input-less console (`</dev/null`) + examples/sleeper long-lived fixture
       (unblocks live Vz validation of WS-2 + the fork semantic-A spike);
@@ -242,7 +242,7 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       goes through fs_quick). Vz checkpoint-integration gaps → Plan 183
       follow-ups.
   [x] instant memory fork: vm_full fork of a RUNNING parent → second live VM in
-      0.91s incl. claim-8 admission (same-identity clone model; recorded-sha admission; gvproxy-only invariant)
+      0.91s incl. claim-8 admission (same-identity clone model; recorded-sha admission; gvproxy-only invariant) (#833)
 
 PLAN 118 — Supervisor standby pool              🟡 libkrun + Vz done; FC follow-up open
   [x] 1a primitive + 1b-i trait seam/registry/libkrun + 1b-ii reaper/doctor/`mvmctl pool`
