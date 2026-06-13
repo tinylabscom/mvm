@@ -70,9 +70,11 @@ type) is added in **Phase 2**, together with its implementations, so the
 no-default method never exists without a body.
 
 - `FirecrackerBackend`, `LibkrunBackend`, `VzBackend` implement
-  `WorkloadBackend`; `qemu` and `mock` do **not**.
+  `WorkloadBackend`. `mock` also implements it (the ADR-045 hermetic test
+  double — it carries no real workload). `qemu` (a real dev/test VMM) does
+  **not** — it is the meaningful carve-out.
 - The admitted workload-launch dispatch takes **`&dyn WorkloadBackend`**
-  instead of `&dyn VmBackend`. `qemu`/`mock` cannot be passed to it →
+  instead of `&dyn VmBackend`. `qemu` cannot be passed to it →
   ADR-002's Tier-2 carve-out becomes a *type constraint*, not prose.
 
 **Move 2 — pull substitution into the funnel.** Lift
@@ -93,9 +95,10 @@ Why this is the whole guarantee:
    the funnel once and applies to every workload backend at once; a new
    per-backend seam is a no-default method that breaks compilation until
    every workload backend fills it in.
-3. **Tier separation is type-enforced.** `qemu`/`mock` are not
-   `WorkloadBackend`, so the type system bars them from the untrusted
-   workload path.
+3. **Tier separation is type-enforced.** `qemu` is not `WorkloadBackend`,
+   so the type system bars it from the untrusted workload path. (`mock`
+   implements it as the hermetic test double — ADR-045 — but never carries
+   a real workload.)
 
 ## Deliberately NOT built (record so it is not re-added)
 
@@ -191,12 +194,21 @@ core security features are a compile-time obligation on workload backends.
 ## Implementation outline (the companion plan expands this into TDD tasks)
 
 **Phase 1 — type-bar the funnel (executable now): ✅ IMPLEMENTED** on
-`feat/plan-197-workload-backend` (commits `5e4af04b`, `5b076601`, `0eba1624`,
-`a1c4fd4d`); spec + quality reviewed; workspace build / clippy / nightly-fmt
-green. Pending merge.
+`feat/plan-197-workload-backend`; spec + quality reviewed; workspace build /
+clippy / nightly-fmt green. Pending merge.
+
+> **Refinement during implementation:** the original plan barred *both*
+> `qemu` and `mock`. CI's Test lane caught that barring `mock` broke the
+> ADR-045 hermetic lifecycle tests (which drive the admitted launch+audit
+> path through `MockBackend`, no real VM). `mock` carries no real workload,
+> so it is now a permitted `WorkloadBackend` (the test double); `qemu` (a
+> real dev/test VMM) remains the meaningful carve-out. The bite-sized task
+> code blocks below predate this refinement (they show `mock` barred) — the
+> shipped code permits `mock` and bars only `qemu`.
+
 - [x] Define `WorkloadBackend: VmBackend` (marker, no methods yet).
-- [x] `impl WorkloadBackend` for Firecracker / libkrun / vz; deliberately
-      not for `qemu` / `mock`.
+- [x] `impl WorkloadBackend` for Firecracker / libkrun / vz + `mock` (the
+      ADR-045 test double); deliberately not for `qemu`.
 - [x] Type-bar the admitted launch path: `AnyBackend::as_workload_backend`
       (exhaustive match) + `require_workload_backend` guard wired into all
       three admitted `up.rs` launch arms; `qemu`/`mock` refused before
