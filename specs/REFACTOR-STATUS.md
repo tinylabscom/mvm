@@ -434,7 +434,7 @@ PLAN 189 — VZ DX parity (post-convergence)        🟡 in progress  (ADR-076 �
   [ ] WS-3 remaining: snapshot/checkpoint --json, linux-native richer detail
   [ ] WS-1 save/restore verbs · WS-2 cached fast-boot default · WS-4 base pinning
   [ ] WS-1 surface save/restore verbs (gated by snapshot_capability tier)
-  [ ] WS-2 cached fast-boot as the default vz boot posture
+  [~] WS-2 cached fast-boot default — who-calls audit DONE: surface already fast-boot-default (dev-image + builder-VM fingerprint fast-path, persistent-VM reuse, up cache-hit-only); Plan 195 fixed the builder-VM churn. Only remaining: live macOS-26 acceptance (converges w/ Plan 195 validation)
   [ ] WS-3 --json coverage across vz lifecycle verbs
   [ ] WS-4 base pinning (reuse artifact/template machinery, no parallel registry)
 
