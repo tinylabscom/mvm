@@ -2221,6 +2221,8 @@ are hard-refused at fork time (gvproxy-only invariant). The child's
 supervisor config carries its own plan, tenant, and audit substrate —
 the parent's plan is not reused.
 
+**2026-06-13: Vz warm pool (saved-standby) live.** `pool warm` boots a seed, captures its memory+rootfs into the pool, stops it (pid=0 saved standby); `up --warm-pool-size N` then claims a compatible standby — "Claimed a warm standby — skipping cold boot" fires, the restored VM is alive and pause/resume-responsive. Latency is workload-dependent: on the trivially-fast default image a warm claim (~2.3 s) matches a cold boot (~2.1 s) because restoring 512 MiB of memory costs about what a tiny guest's cold boot does; the reclaim materializes for heavy-init workloads. Two live-found bugs fixed: the gateway-bridge drainer now decodes the signed plan envelope (not a bare plan), and the seed supervisor-config is persisted into the pool dir (the seed's own dir is torn down at stop).
+
 ### Sprint 55 success criteria
 
 - Phase A acceptance: `mvm-vz-supervisor` boots the dev-shell image

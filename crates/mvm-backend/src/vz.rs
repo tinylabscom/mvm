@@ -146,6 +146,14 @@ pub fn supervisor_config_path(state_dir: &Path) -> PathBuf {
     state_dir.join(SUPERVISOR_CONFIG_FILE_NAME)
 }
 
+/// Where a saved Vz standby keeps its seed supervisor config: inside the POOL
+/// dir, not the seed VM's state dir. The seed's state dir is torn down when the
+/// seed is stopped after capture, so spawn copies the config here and claim
+/// (running much later) reads it from here. Both sides MUST use this path.
+fn pool_seed_config_path(pool_root: &Path, standby_id: &str) -> PathBuf {
+    supervisor_config_path(&pool_root.join(standby_id))
+}
+
 /// How long [`VzBackend::start`] waits for the supervisor to write its
 /// PID file before killing the child and bailing. Matches the libkrun
 /// path's budget.
@@ -1266,7 +1274,18 @@ fn vz_spawn_standby(
             .with_context(|| {
                 format!("vz_spawn_standby: hash supervisor-config for '{}'", spec.id)
             })?;
-    let _ = cfg_json; // only needed to ensure the file is readable
+    // Persist the seed config INTO the pool dir: stopping the seed below tears
+    // down its state dir, so `claim_standby` (which runs much later) must read
+    // the config from the pool, not the gone seed dir.
+    let pool_dir = pool_root.join(&spec.id);
+    std::fs::create_dir_all(&pool_dir)
+        .with_context(|| format!("vz_spawn_standby: create pool dir for '{}'", spec.id))?;
+    std::fs::write(pool_seed_config_path(&pool_root, &spec.id), &cfg_json).with_context(|| {
+        format!(
+            "vz_spawn_standby: persist seed supervisor-config into pool for '{}'",
+            spec.id
+        )
+    })?;
 
     let capture_params = crate::checkpoint::CaptureVmFullParams {
         id: pool_id.clone(),
@@ -1483,10 +1502,10 @@ fn vz_claim_standby(
     let memory_path = claimant_state_dir.join("memory.bin");
     let machine_id_path = claimant_state_dir.join("machine-id");
 
-    // Read the seed's persisted supervisor config (written by VzBackend::start
-    // during spawn).  The seed VM ran under the standby id, so its config is at
-    // `~/.mvm/vms/<standby-id>/supervisor-config.json`.
-    let seed_cfg_path = supervisor_config_path(&vm_state_dir(&handle.id));
+    // Read the seed config that `spawn_standby` copied into the pool dir. The
+    // seed VM's own state dir was torn down when the seed was stopped after
+    // capture, so the pool copy is the only surviving source.
+    let seed_cfg_path = pool_seed_config_path(&pool_root, &handle.id);
     let seed_cfg_bytes = std::fs::read(&seed_cfg_path).with_context(|| {
         format!(
             "vz_claim_standby: read seed supervisor config {}",
@@ -2173,6 +2192,22 @@ mod tests {
     #[test]
     fn name_is_vz() {
         assert_eq!(VzBackend.name(), "vz");
+    }
+
+    #[test]
+    fn pool_seed_config_lives_in_pool_not_seed_state_dir() {
+        // Regression: spawn once discarded the seed config and claim read it
+        // from the seed's state dir, which is gone after the seed stops. The
+        // seed config must live under the POOL dir so it survives to claim.
+        let pool_root = Path::new("/pool/root");
+        let id = "standby-abc123";
+        let p = pool_seed_config_path(pool_root, id);
+        assert_eq!(
+            p,
+            Path::new("/pool/root/standby-abc123/supervisor-config.json")
+        );
+        // Must NOT resolve into the seed's (torn-down) VM state dir.
+        assert_ne!(p, supervisor_config_path(&vm_state_dir(id)));
     }
 
     #[test]

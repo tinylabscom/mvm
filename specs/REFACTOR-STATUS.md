@@ -253,6 +253,14 @@ PLAN 118 — Supervisor standby pool              🟡 libkrun + Vz done; FC fol
       → VzChildSupervisorSpawner), image_sha256 compat key (mismatch = no-match, not
       error), TTL-only reap for pid=0 standbys, --rootfs CLI flag, doctor reports
       vz=true on macOS 14+. All libkrun pool tests untouched.
+      LIVE-VALIDATED 2026-06-13: warm 6.5s, "Claimed a warm standby — skipping
+      cold boot" FIRES, claimed VM alive + pause/resume responsive. Two bugs
+      found+fixed live: gateway-bridge drainer decoded a bare plan where up
+      threads the signed envelope (now decodes both shapes); spawn discarded the
+      seed config instead of persisting it to the pool (claim then read a
+      torn-down dir). HONEST latency: on the trivially-fast default image
+      warm-claim 2.3s ~= cold 2.1s (restoring 512 MiB costs ~a tiny guest's cold
+      boot); the reclaim is real for heavy-init workloads, marginal here.
   [ ] Firecracker standby pool (the mvmd-facing deliverable) — gated on FC standby
       follow-up; not blocking current libkrun/Vz use
 
