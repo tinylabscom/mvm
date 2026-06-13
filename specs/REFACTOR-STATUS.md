@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status/down/up --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings; Plan 195 builder-VM fingerprint narrowing planned)
+**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status/down/up --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 118: Vz saved-standby warm pool claim live-validated + pool self-replenishes via detached re-warm (#840); Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings; Plan 195 builder-VM fingerprint narrowing planned)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -262,6 +262,14 @@ PLAN 118 — Supervisor standby pool              🟡 libkrun + Vz done; FC fol
       torn-down dir). HONEST latency: on the trivially-fast default image
       warm-claim 2.3s ~= cold 2.1s (restoring 512 MiB costs ~a tiny guest's cold
       boot); the reclaim is real for heavy-init workloads, marginal here.
+  [x] Vz pool self-replenishes (#840): after a Vz claim drains the pool, `up`
+      hands the re-warm to a DETACHED `mvmctl pool warm` subprocess (own process
+      group, null stdio, inherits env, via current_exe) — `up` returns at once
+      and the child re-warms only the deficit off the hot path (no second
+      rootfs hash; try_warm_claim already hashed it). Live: claim drained 1→0,
+      detached re-warm refilled to 1. Follow-up (in-code): no pool lock →
+      concurrent claims can overshoot target by ~1 each (ages out via TTL); a
+      pool-dir flock around warm_to_target's read→spawn is the clean fix.
   [ ] Firecracker standby pool (the mvmd-facing deliverable) — gated on FC standby
       follow-up; not blocking current libkrun/Vz use
 

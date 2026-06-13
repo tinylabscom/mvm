@@ -2224,6 +2224,8 @@ the parent's plan is not reused.
 
 **2026-06-13: Vz warm pool (saved-standby) live.** `pool warm` boots a seed, captures its memory+rootfs into the pool, stops it (pid=0 saved standby); `up --warm-pool-size N` then claims a compatible standby — "Claimed a warm standby — skipping cold boot" fires, the restored VM is alive and pause/resume-responsive. Latency is workload-dependent: on the trivially-fast default image a warm claim (~2.3 s) matches a cold boot (~2.1 s) because restoring 512 MiB of memory costs about what a tiny guest's cold boot does; the reclaim materializes for heavy-init workloads. Two live-found bugs fixed: the gateway-bridge drainer now decodes the signed plan envelope (not a bare plan), and the seed supervisor-config is persisted into the pool dir (the seed's own dir is torn down at stop).
 
+**2026-06-13: warm pool self-replenishes (#840).** After a Vz claim drains the pool, `up` hands the re-warm to a detached `mvmctl pool warm` subprocess (own process group, null stdio, inherits env) so `up` returns immediately and the pool tops itself back up in the background — making the pool production-usable rather than draining to zero on first claim. The child does the idle-check + rootfs hash off `up`'s hot path. Live: claim drained the pool 1→0, the detached re-warm booted a fresh seed and refilled to 1 idle, `up` never waited. Known follow-up (documented in-code): no pool lock means concurrent claims against the same image can transiently overshoot target by ~1 each (ages out via the standby TTL); a pool-dir flock is the clean fix.
+
 ### Sprint 55 success criteria
 
 - Phase A acceptance: `mvm-vz-supervisor` boots the dev-shell image
@@ -2822,4 +2824,6 @@ a Vz compat with Some(sha) only matches a standby for the same image; libkrun No
 unaffected. `reap_stale` skips liveness for pid=0 entries (TTL-only eviction).
 `mvmctl pool warm --rootfs <path>` is the Vz entry point; doctor reports `vz=true` on
 macOS 14+. All libkrun pool tests pass untouched. 298 mvm-backend lib tests, 974 mvm-cli
-tests, 5117 workspace tests all green.
+tests, 5117 workspace tests all green. Self-replenish landed in #840: a Vz claim that
+drains the pool triggers a detached background `pool warm` re-warm so the pool is
+self-maintaining (claim returns fast; the pool tops itself back up off the hot path).
