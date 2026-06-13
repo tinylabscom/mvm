@@ -35,11 +35,11 @@ export type AddonRef =
 /**
  * Addon composition tier.
  *
- * `Separate` is the v1 shape — the addon runs as its own microVM and the consumer reaches it over the mesh. `InVm` is reserved for the future in-VM addon tier where small Nix fragments compose directly into the consumer's `mkGuest` flake (see `specs/plans/0012-in-vm-addon-tier.md`); it is rejected by the validator with `E_ADDON_TIER_NOT_IMPLEMENTED` until that plan lands.
+ * `Separate` is the v1 shape — the addon runs as its own microVM and the consumer reaches it over the mesh. `InVm` is reserved for the future in-VM addon tier where small Nix fragments compose directly into the consumer's `mkGuest` flake; it is rejected by the validator with `E_ADDON_TIER_NOT_IMPLEMENTED` until that lands.
  */
 export type AddonTier = "separate" | "in_vm";
 /**
- * Per-app dependency declaration. ADR-0009 / plan-0008.
+ * Per-app dependency declaration.
  *
  * The host validates the lockfile exists in the bundled source tree and that it's pinned (every entry carries hashes the install step can verify). The actual install runs at image build time inside the upstream-mvm Nix factory; this IR field is the *declaration* shape, not the install machinery.
  */
@@ -66,9 +66,9 @@ export type Dependencies =
 export type PythonTool = "uv" | "pip_tools";
 export type NodeTool = "pnpm" | "npm" | "yarn";
 /**
- * How the wrapper inside the microVM is dispatched. ADR-0009.
+ * How the wrapper inside the microVM is dispatched.
  *
- * `Command` is the legacy shape: an explicit argv that runs once at boot. `Function` is the function-call shape introduced by plan 0003: a long-running language wrapper baked into the image dispatches a named function whose return value is encoded back to the caller per the declared serialization format.
+ * `Command` is the legacy shape: an explicit argv that runs once at boot. `Function` is the function-call shape: a long-running language wrapper baked into the image dispatches a named function whose return value is encoded back to the caller per the declared serialization format.
  */
 export type Entrypoint =
   | {
@@ -81,24 +81,24 @@ export type Entrypoint =
     }
   | {
       /**
-       * JSON Schema for the inbound args payload. Validated at build time for secret-shaped field names; will gate per-call payloads at the wrapper once the upstream-mvm factory wires it. Shape: a strict subset of JSON Schema (object/array/string/integer/number/boolean/null/enum/oneOf). Plan-0009 / ADR-0009 §Decision §Cross-cutting.
+       * JSON Schema for the inbound args payload. Validated at build time for secret-shaped field names; will gate per-call payloads at the wrapper once the upstream-mvm factory wires it. Shape: a strict subset of JSON Schema (object/array/string/integer/number/boolean/null/enum/oneOf).
        */
       args_schema?: JsonSchemaShape | null;
       /**
-       * Opt-in concurrency model for this entrypoint (ADR-0011).
+       * Opt-in concurrency model for this entrypoint.
        *
-       * When `None`, the function runs under the cold model: a fresh wrapper process per invocation. When `Some(WarmProcess(...))`, mvm bakes a long-running wrapper that handles many sequential calls without respawning, dispatched via mvm's warm-process worker pool. Warm-process is opt-in because state can leak across calls; ADR-0011 §Decision documents the safety/perf tradeoff.
+       * When `None`, the function runs under the cold model: a fresh wrapper process per invocation. When `Some(WarmProcess(...))`, mvm bakes a long-running wrapper that handles many sequential calls without respawning, dispatched via mvm's warm-process worker pool. Warm-process is opt-in because state can leak across calls.
        */
       concurrency?: Concurrency | null;
       env?: {
         [k: string]: EnvValue;
       };
       /**
-       * Extra modules to bundle beyond what the host's reachability walker discovers from the entry module. Use for dynamic imports, plugin loaders, and other paths the static AST walk can't follow (plan-0007 §Phase 2). Each entry is a module identifier resolved relative to `working_dir` per the language's import rules.
+       * Extra modules to bundle beyond what the host's reachability walker discovers from the entry module. Use for dynamic imports, plugin loaders, and other paths the static AST walk can't follow. Each entry is a module identifier resolved relative to `working_dir` per the language's import rules.
        */
       extra_imports?: string[];
       /**
-       * Serialization format for stdin args + stdout return. Closed enum: `Json` or `Msgpack` (plan 0003 invariant — code-executing serializer formats are forbidden).
+       * Serialization format for stdin args + stdout return. Closed enum: `Json` or `Msgpack` (code-executing serializer formats are forbidden).
        */
       format: Format;
       /**
@@ -107,9 +107,9 @@ export type Entrypoint =
       function: string;
       kind: "function";
       /**
-       * Language whose shim renderer / Nix factory mvm dispatches to when compiling this entrypoint. Open string validated mvm-side; current allowlist is in `validate.rs::SUPPORTED_LANGUAGES`. Adding a language is a one-PR change in mvm — no IR schema bump. Per ADR-0010 §4. SDKs set this from their own language at registration time (`"python"` for the Python SDK, `"node"` for the TypeScript SDK); users can override for cross-language manifest authoring (e.g. authoring a Python workload from the TypeScript SDK).
+       * Language whose shim renderer / Nix factory mvm dispatches to when compiling this entrypoint. Open string validated mvm-side; current allowlist is in `validate.rs::SUPPORTED_LANGUAGES`. Adding a language is a one-PR change in mvm — no IR schema bump. SDKs set this from their own language at registration time (`"python"` for the Python SDK, `"node"` for the TypeScript SDK); users can override for cross-language manifest authoring (e.g. authoring a Python workload from the TypeScript SDK).
        *
-       * Replaces the closed-enum `runtime: Runtime` field shipped in PR #7. Pre-1.0 schema bump.
+       * Replaces the earlier closed-enum `runtime: Runtime` field. Pre-1.0 schema bump.
        */
       language: string;
       /**
@@ -117,7 +117,7 @@ export type Entrypoint =
        */
       module: string;
       /**
-       * Marks this entry as the workload's default function — the one `mvmctl invoke <id>` (no `--fn` selector) dispatches to. Multi-function apps (ADR-0014 Phase 2) require exactly one entrypoint to be primary; single-function apps mark their sole entrypoint primary by convention.
+       * Marks this entry as the workload's default function — the one `mvmctl invoke <id>` (no `--fn` selector) dispatches to. Multi-function apps require exactly one entrypoint to be primary; single-function apps mark their sole entrypoint primary by convention.
        */
       primary?: boolean;
       /**
@@ -136,7 +136,7 @@ export type EnvValue =
       ref: SecretRef;
     };
 /**
- * How a secret authenticates an outbound request, so the keyholder picks the right path: `Sigv4`/`Hmac` are *signed* (the key never leaves the signer); `Bearer`/`Basic` are *injected* credentials. Plan 129 / ADR-067 §4.
+ * How a secret authenticates an outbound request, so the keyholder picks the right path: `Sigv4`/`Hmac` are *signed* (the key never leaves the signer); `Bearer`/`Basic` are *injected* credentials.
  */
 export type AuthType = "sigv4" | "hmac" | "bearer" | "basic";
 export type SecretMount =
@@ -149,7 +149,7 @@ export type SecretMount =
       path: string;
     };
 /**
- * Concurrency model for a function-entrypoint (ADR-0011).
+ * Concurrency model for a function-entrypoint.
  *
  * Open enum tagged on `kind` so future tiers (`InProcessConcurrent`, `Pool`, …) can be added without breaking existing IR. Today the only variant is `WarmProcess` — a long-running wrapper handling many sequential calls per worker, with bounded recycling.
  */
@@ -160,7 +160,7 @@ export type Concurrency = {
   in_process: InProcessMode;
   kind: "warm_process";
   /**
-   * Recycle a worker after this many dispatches. Bounds memory growth from per-call interpreter state. Lower bound 100 per ADR-0011 — anything smaller cancels the warm-tier benefit.
+   * Recycle a worker after this many dispatches. Bounds memory growth from per-call interpreter state. Lower bound 100 — anything smaller cancels the warm-tier benefit.
    */
   max_calls_per_worker: number;
   /**
@@ -177,11 +177,11 @@ export type Concurrency = {
   pool_size: number;
 };
 /**
- * In-worker dispatch model. Per ADR-0011, only `Serial` is implemented in v0.2; `Concurrent` (multiple in-flight calls per worker via async) is rejected at parse time.
+ * In-worker dispatch model. Only `Serial` is implemented in v0.2; `Concurrent` (multiple in-flight calls per worker via async) is rejected at parse time.
  */
 export type InProcessMode = "serial" | "concurrent";
 /**
- * Serialization format for function-entrypoint stdin / stdout. ADR-0009 invariant: closed enum — adding a variant is a wire change reviewed against the no-code-execution rule.
+ * Serialization format for function-entrypoint stdin / stdout. Closed enum — adding a variant is a wire change reviewed against the no-code-execution rule.
  */
 export type Format = "json" | "msgpack";
 export type Image =
@@ -251,7 +251,7 @@ export type Source =
       reference: string;
     };
 /**
- * Threat-tier label on the *consumer* (App). Combines with the addon's `[security].trust_tier` to drive mvmd's SMT-affinity scheduler matrix per ADR-0018 §"Trust-tier labeling and SMT-affinity policy".
+ * Threat-tier label on the *consumer* (App). Combines with the addon's `[security].trust_tier` to drive mvmd's SMT-affinity scheduler matrix.
  *
  * Defaults to `Untrusted` (most protective). Workloads that run only first-party reviewed code can opt into `Trusted` for finer packing.
  */
@@ -268,13 +268,13 @@ export interface Workload {
 }
 export interface App {
   /**
-   * Composable addon-uses (ADR-0018). Each entry pulls a sha-attested addon from the registry (or a local-path during development); mvmd instantiates each addon-use as a separate microVM and bridges it to this app over the workload mesh (ADR-0020).
+   * Composable addon-uses. Each entry pulls a sha-attested addon from the registry (or a local-path during development); mvmd instantiates each addon-use as a separate microVM and bridges it to this app over the workload mesh.
    *
    * Empty list (or absent field) = no addons; preserves the v0 behavior. Each entry is validated against the lockfile by `addon::resolve_and_validate` (sibling to `compile::compile`, hermetic boundary preserved).
    */
   addons?: AddonUse[];
   /**
-   * Dependency declaration (plan-0008 / ADR-0009).
+   * Dependency declaration.
    *
    * Function-entrypoint workloads must declare this explicitly — either point at a hash-pinned lockfile or assert `kind = "none"` if the workload only needs stdlib. The host's `mvm validate` enforces existence + per-format hash-pin heuristic and rejects unpinned entries with `E_UNPINNED_DEPS`.
    *
@@ -282,14 +282,18 @@ export interface App {
    */
   dependencies?: Dependencies | null;
   /**
-   * One or more entrypoints. v0 single-function workloads have a one-element list; multi-function apps (ADR-0014 Phase 2) have multiple `Entrypoint::Function` entries with exactly one marked `primary = true`. Command-style entrypoints are always a single-element list.
+   * One or more entrypoints. v0 single-function workloads have a one-element list; multi-function apps have multiple `Entrypoint::Function` entries with exactly one marked `primary = true`. Command-style entrypoints are always a single-element list.
    */
   entrypoints: Entrypoint[];
   env?: {
     [k: string]: EnvValue;
   };
   /**
-   * Lifecycle hooks (SDK port Phase 1a — IR field reserved; consumers in Phase 10). Each phase is a `Vec<HookCmd>`; the compiler unions addon hooks (in attachment order) before the app's hooks. `Hooks::is_empty()` skip-serializes the field so v0 IR documents that don't carry `hooks` remain byte-identical.
+   * Files baked into the rootfs at build time (was: FilesWrite before_start shell hooks).
+   */
+  files?: MaterializedFile[];
+  /**
+   * Lifecycle hooks. Each phase is a `Vec<HookCmd>`; the compiler unions addon hooks (in attachment order) before the app's hooks. `Hooks::is_empty()` skip-serializes the field so v0 IR documents that don't carry `hooks` remain byte-identical.
    */
   hooks?: Hooks;
   image: Image;
@@ -299,7 +303,7 @@ export interface App {
   resources: Resources;
   source: Source;
   /**
-   * Threat tier of the consumer (this app). Combined with the `[security].trust_tier` of each addon to drive mvmd's SMT-affinity scheduler matrix per ADR-0018. Defaults to `Untrusted` (most protective). Workloads that run only first-party reviewed code can opt into `Trusted` for finer packing in mvmd's scheduler. **Skip-serialized when default (`Untrusted`)** so legacy corpus fixtures stay byte-identical; the default is the maximally-protective value.
+   * Threat tier of the consumer (this app). Combined with the `[security].trust_tier` of each addon to drive mvmd's SMT-affinity scheduler matrix. Defaults to `Untrusted` (most protective). Workloads that run only first-party reviewed code can opt into `Trusted` for finer packing in mvmd's scheduler. **Skip-serialized when default (`Untrusted`)** so legacy corpus fixtures stay byte-identical; the default is the maximally-protective value.
    */
   threat_tier?: ThreatTier;
 }
@@ -310,11 +314,11 @@ export interface App {
  */
 export interface AddonUse {
   /**
-   * Optional alias. When present, every env var the addon exports is prefixed `<ALIAS_UPPER>_` verbatim (per ADR-0018). When absent, exports use their bare names. Two `AddonUse`s with the same `name` must use distinct aliases (validated mvm-side).
+   * Optional alias. When present, every env var the addon exports is prefixed `<ALIAS_UPPER>_` verbatim. When absent, exports use their bare names. Two `AddonUse`s with the same `name` must use distinct aliases (validated mvm-side).
    */
   alias?: string | null;
   /**
-   * Hooks bundled by this addon (SDK port Phase 1a — IR field reserved; consumers in Phase 10). The compiler concatenates each addon's hook vecs in attachment order, then appends the consuming app's own hooks. Empty `Hooks` is the default and is skip-serialized so v0 addon-use entries stay byte-identical.
+   * Hooks bundled by this addon (IR field reserved ahead of consumer wiring). The compiler concatenates each addon's hook vecs in attachment order, then appends the consuming app's own hooks. Empty `Hooks` is the default and is skip-serialized so v0 addon-use entries stay byte-identical.
    */
   hooks?: Hooks;
   /**
@@ -336,7 +340,7 @@ export interface AddonUse {
    */
   sha256: string;
   /**
-   * Composition tier — currently only `Separate` (a separate addon-microVM bridged via the mesh). `InVm` is reserved by `specs/plans/0012-in-vm-addon-tier.md` and rejected by `validate.rs` until that plan lands.
+   * Composition tier — currently only `Separate` (a separate addon-microVM bridged via the mesh). `InVm` is reserved for the future in-VM addon tier and rejected by `validate.rs` until it lands.
    */
   tier: AddonTier;
 }
@@ -357,13 +361,51 @@ export interface SecretRef {
    */
   allowed_hosts: string[];
   /**
-   * How the keyholder uses the secret on egress (signer vs injector) — Plan 129 / ADR-067 §4.
+   * How the keyholder uses the secret on egress (signer vs injector).
    */
   auth_type: AuthType;
   mount: SecretMount;
   name: string;
+  /**
+   * Non-secret SigV4 parameters, present only for `auth_type = Sigv4`. The secret value is the secret-access-key; these name the credential scope (operator-set in the binding, reconstructed onto the ref at admission). `None` for every other auth type.
+   */
+  sigv4?: Sigv4Params | null;
+}
+/**
+ * The non-secret half of a SigV4 credential: the public access-key id and the credential scope (`region`/`service`). The signing key (the AWS secret-access-key) is **not** here — it lives in the secret store and never leaves the signer. Identifying but not secret, so Debug is safe.
+ */
+export interface Sigv4Params {
+  /**
+   * The AWS access-key id (e.g. `AKIA…`). Public; pairs with the secret-access-key the signer holds.
+   */
+  access_key_id: string;
+  /**
+   * Credential-scope region (e.g. `us-east-1`).
+   */
+  region: string;
+  /**
+   * Credential-scope service (e.g. `s3`, `execute-api`).
+   */
+  service: string;
 }
 export interface JsonSchemaShape {}
+/**
+ * A file materialized into the workload's rootfs at build time. Replaces the legacy "write a file via a before_start shell hook" path — content and destination are carried as data and baked directly, so neither ever reaches a shell line.
+ */
+export interface MaterializedFile {
+  /**
+   * STANDARD-alphabet base64 of the file's bytes. Decoded at build time by the Nix factory; never decoded in a guest shell.
+   */
+  bytes_b64: string;
+  /**
+   * Octal mode string (e.g. `"0644"`). `None` → the factory's default (`0644`).
+   */
+  mode?: string | null;
+  /**
+   * Absolute destination path in the guest rootfs.
+   */
+  path: string;
+}
 export interface Mount {
   mode: MountMode;
   source: MountSource;
@@ -371,11 +413,11 @@ export interface Mount {
 }
 export interface Network {
   /**
-   * DNS posture (plan-0004 §Phase 5). `Some(None_)` = no resolver; `Some(System)` = inherit substrate default; `Some(Resolver)` = pin a single host:port resolver. Default (None) means "unspecified — substrate picks based on `mode`".
+   * DNS posture. `Some(None_)` = no resolver; `Some(System)` = inherit substrate default; `Some(Resolver)` = pin a single host:port resolver. Default (None) means "unspecified — substrate picks based on `mode`".
    */
   dns?: NetworkDns | null;
   /**
-   * Granular egress allowlist (plan-0004 §Phase 5). Each entry names a `host:port` pair the guest may dial. Wildcard hosts (`*`, `0.0.0.0`, `::`, `0.0.0.0/0`, `::/0`) are rejected with `E_NETWORK_WILDCARD`.
+   * Granular egress allowlist. Each entry names a `host:port` pair the guest may dial. Wildcard hosts (`*`, `0.0.0.0`, `::`, `0.0.0.0/0`, `::/0`) are rejected with `E_NETWORK_WILDCARD`.
    */
   egress?: NetworkEgress | null;
   mode: NetworkMode;
