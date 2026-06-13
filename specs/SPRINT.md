@@ -2166,23 +2166,26 @@ ADR-046 extension with security-claim-parity language). Plan 99 PR-1
 ### Security claims under Vz
 
 Full audit lives in [`plans/97-vz-backend.md` §"Can we still make all
-nine ADR-002 security claims?"](plans/97-vz-backend.md). Summary:
-seven of nine **inherit unchanged** from existing claim-machinery
-(guest-side / host-side / hypervisor-agnostic). Two required new work,
-both now shipped:
+nine ADR-002 security claims?"](plans/97-vz-backend.md). Summary: all
+nine **inherit unchanged** from existing claim-machinery now that the
+supervisor is Rust (the Swift binary was deleted in Plan 152, so the
+two "new/extends" items below collapsed into the shared Rust pipeline):
 
-- **Claim 5** *(shipped)* — the supervisor config parser is Rust `serde`
-  with `deny_unknown_fields`, fuzzed by
-  `crates/mvm-build/fuzz/fuzz_targets/fuzz_supervisor_config.rs`. The
-  original Swift `JSONDecoder` equivalence half is retired: the Swift
-  supervisor was deleted, so the Rust parser is the sole config surface
-  and its fuzzer is the whole witness.
-- **Claim 8** *(shipped)* — `VzBackend::start*` routes through
+- **Claim 5** — the supervisor config parser is the Rust `SupervisorConfig`
+  serde struct (`#[serde(deny_unknown_fields)]`), fuzzed by
+  `crates/mvm-build/fuzz/fuzz_targets/fuzz_supervisor_config.rs` in the
+  `security.yml` `fuzz` job — the same harness that backs the libkrun
+  supervisor parser. The original Swift `JSONDecoder` / Swift↔Rust
+  equivalence criterion is **retired**: there is no Swift decoder to
+  reach equivalence with (Plan 152 deleted the Swift crate).
+- **Claim 8** — `VzBackend::start_with_mode` routes through
   `mvm_supervisor::admit_for_run`; fail-closed test asserts bypass
   refuses launch.
-- **Claim 7** *extends* an existing pipeline: the (now Rust) supervisor
-  binary is reproducibly built with no prebuilt download on the
-  contributor source-checkout path.
+- **Claim 7** — the Vz supervisor is now an ordinary workspace binary
+  (`mvm-vm-host` → `mvm-vz-supervisor`), so it rides the existing cargo
+  reproducibility double-build + `cargo-deny`/`cargo-audit` supply-chain
+  pipeline like every other crate. No separate Swift toolchain or SPM
+  `Package.resolved`; the "extends" framing is **retired**.
 
 Additional security items (kernel cmdline lockdown, resource-cap parity,
 console mode lockdown, VM identifier handling, supervisor as a security
@@ -2246,57 +2249,49 @@ the parent's plan is not reused.
 
 **2026-06-13: warm pool self-replenishes (#840).** After a Vz claim drains the pool, `up` hands the re-warm to a detached `mvmctl pool warm` subprocess (own process group, null stdio, inherits env) so `up` returns immediately and the pool tops itself back up in the background — making the pool production-usable rather than draining to zero on first claim. The child does the idle-check + rootfs hash off `up`'s hot path. Live: claim drained the pool 1→0, the detached re-warm booted a fresh seed and refilled to 1 idle, `up` never waited. Known follow-up (documented in-code): no pool lock means concurrent claims against the same image can transiently overshoot target by ~1 each (ages out via the standby TTL); a pool-dir flock is the clean fix. Companion perf (#846): the warm claim now reuses the rootfs sha claim-8 admission already computed (`ExecutionPlan.image.sha256`) instead of re-hashing the rootfs a second time on the launch hot path — byte-identical compat, chosen over coupling the key to the Plan 189 WS-2 fingerprint (which would weaken the claim-8 byte-identity guarantee).
 
-### Sprint 55 success criteria  — reconciled 2026-06-13 (post-Swift, post-convergence)
+### Sprint 55 success criteria — reconciled 2026-06-13 (post-Swift, post-convergence)
 
-- [x] Phase A acceptance: the (Rust) supervisor boots a workload image
-  end-to-end with working vsock to the guest agent. Live-proven
-  2026-06-12 (sleeper fixture, full admitted path).
-- [x] **Phase B acceptance — AMENDED.** Original: `MVM_BACKEND=vz` works +
-  ≥30% cold-boot win vs. nested libkrun→Firecracker. The vz backend works
-  live, but the ≥30% comparison is **retired**: backend consolidation
-  removed the nested macOS→libkrun→Firecracker workload path, so there is
-  no nested baseline left to beat. vz boots a single Linux guest directly.
-- [x] **Phase C acceptance — AMENDED to functional parity.** Original:
-  `MVM_BUILDER_BACKEND=vz mvmctl build` produces a rootfs whose hash
-  matches the libkrun build. ext4 image builds are non-deterministic
-  (different bytes every build), so byte-hash equality is not meetable;
-  the guarantee is same nix derivation + same boot/agent behaviour. A
-  cold `dev up --builder vz` built the image end-to-end on 2026-06-12.
-- [x] ADR-056 landed; ADR-002 backend table updated.
-- [x] Phase E (macOS 14+): `mvmctl snapshot save / restore` round-trips a
-  workload microVM. `vm_full` save/restore live-proven, restored control
-  plane responsive.
-- [x] `cargo test --workspace` + `cargo clippy --workspace -- -D warnings`
-  remain clean with vz compiled in (the lone caveat is the macOS
-  `amfid`-codesign SIGKILL on the `mvm-backend` test *binary*, an
-  environmental issue, not a vz regression).
-- [x] `mvmctl doctor` reports claims 1, 2, 3 green on a Vz-backed workload
-  microVM. Claims 1/2/3 are hypervisor-agnostic (guest-side uid/seccomp,
-  guest-side no-uid-0, kernel-side dm-verity) — they inherit on vz, and a
-  vz workload booted live through the admitted path.
+Each criterion below is marked **met**, **amended** (criterion text no
+longer matches reality; reworded + then met), or **blocked**. The
+reconciliation pass closed the Vz backend effort; see the close-out
+log under "Live Vz validation" for the evidence trail.
 
-### Closeout (2026-06-13)
-
-**Verdict: vz is at parity with the macOS libkrun baseline; Sprint 55 is
-complete.** All five phases shipped and are live-proven on macOS-26 Apple
-Silicon (full plan-level evidence + the criterion amendments live in
-[`plans/97-vz-backend.md` §"Closeout"](plans/97-vz-backend.md)).
-
-The one capability the Linux backends have that no macOS backend does is
-**egress secret substitution (Plan 129)** — it is wired only on
-Firecracker (nft TAP REDIRECT) and QEMU (slirp). **libkrun lacks it
-exactly as vz does**, so this is not a vz-vs-its-sibling gap; it is a
-macOS-wide gap, and vz is at parity. Egress *enforcement* itself (the
-deny-by-default `PlanFlowPolicy` + flow-audit substrate) **is** wired on
-vz through the in-process supervisor's `VzGvproxy` bridge, identical to
-libkrun. Porting substitution to macOS (a `Uds`-transport endpoint
-bridged through the supervisor vsock hop, plus a gateway-level :80/:443
-terminator to replace the nft REDIRECT) is tracked under **Plan 197**
-(`WorkloadBackend` type-bar), which **reclassifies it from an optional
-fast-follow to a required build**: once substitution becomes a no-default
-workload-backend seam, vz and libkrun cannot compile without it. The
-terminator design entangles with the rvproxy migration (Plan 193 /
-ADR-082) and is resolved by a Plan 197 Phase 2 design spike.
+- [x] **Phase A** — met. The Rust `mvm-vz-supervisor` boots a workload
+  image end-to-end with working vsock to the guest agent. The original
+  text said "dev-shell image"; the designated long-lived fixture is
+  `examples/sleeper` (a dev-shell PID 1 hits console EOF ~5 s after
+  boot — see WS-E). Live 2026-06-12.
+- [x] **Phase B** — met (criterion **amended**). `MVM_BACKEND=vz
+  mvmctl run` boots a workload microVM directly on macOS. The
+  "≥30% cold-boot win vs. nested libkrun→Firecracker" clause is
+  **retired**: post-Plan-177 convergence there is no nested
+  libkrun→Firecracker workload path on macOS to benchmark against —
+  both macOS backends host the Linux guest directly, so the nesting
+  collapse the 30% target proxied for is achieved by construction.
+  (On the trivially-fast default image a vz boot ~2.1 s is on par with
+  a libkrun boot; the win materializes for heavy-init workloads via the
+  warm pool, not raw cold boot.)
+- [x] **Phase C** — met (criterion **amended**). `MVM_BUILDER_BACKEND=vz
+  mvmctl build` produces a **functionally equivalent** rootfs: same Nix
+  derivation, same boot + guest-agent behavior. The original
+  "byte-identical hash" clause is **retired** as unmeetable — ext4
+  image assembly is non-deterministic (mtimes / inode ordering /
+  free-block layout differ every build), so even two libkrun builds of
+  the same derivation differ byte-for-byte. Functional parity is the
+  correct bar and it holds: the two backends consume the identical
+  `nix/images/builder-vm/` flake and the same `VzBuilderVm` /
+  `LibkrunBuilderVm` job substrate.
+- [x] **ADR-056 landed; ADR-002 backend table updated** — met.
+- [x] **Phase E (macOS 14+)** — met. `mvmctl checkpoint` (the renamed
+  snapshot surface) round-trips a workload microVM: `vm_full`
+  save/restore live-proven (Plan 159 WS-2), incl. responsive control
+  plane on the restored VM and restore-while-running refusal.
+- [x] **`cargo test --workspace` + `cargo clippy --workspace -D warnings`
+  clean with both backends compiled in** — met (the standing CI gate;
+  the lone local caveat is the `mvm-backend` test-bin macOS codesign
+  SIGKILL, an environmental amfid issue, not a code defect).
+- [x] **`mvmctl doctor` reports claims 1, 2, 3 green on a Vz-backed
+  workload microVM** — met (live-confirmed in the close-out pass).
 
 ### Non-goals (explicit)
 

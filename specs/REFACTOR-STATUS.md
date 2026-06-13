@@ -204,20 +204,26 @@ PLAN 152 — Rust-native VZ supervisor            🟢 native objc2; no Swift
   [x] SAVE pause-before-save regression fix (post-finalize) — PR #740 (merged)
   [x] post-finalize hardening: resource-cap check, self-sign codesign lock,
       terminal-error fidelity, SAFETY-comment accuracy, doc-truth — PR #772
-  [x] WS-C fork primitive — CLOSED: satisfied by #700 snapshot/restore +
-      Plan 159 `checkpoint fork --boot` (two-copy, admitted child) + the
-      instant memory fork of a RUNNING parent (0.91s, claim-8 admitted).
-      No separate fork primitive remains to build.
-  [~] WS-D nested KVM (/dev/kvm in guest) — OUT OF SCOPE for "100% vz":
-      Sprint 55 names Vz-on-Linux a non-goal and requires no nested path;
-      nested KVM is the Linux-symmetric-builder concern (Plan 100), not a
-      vz closeout item.
+  [x] WS-C fork primitive — SATISFIED by #700 snapshot/restore + the Plan 159
+      WS-2 fork stack: two-copy `checkpoint fork --boot` (admitted child) and
+      instant memory fork of a RUNNING parent (0.91s, claim-8 admitted,
+      gvproxy-only invariant). No separate fork primitive remains.
+  [~] WS-D nested KVM (/dev/kvm in guest) — OUT OF SCOPE for "100% vz". Sprint 55
+      requires no nested path; vz hosts the Linux workload guest directly (the
+      whole point of the backend). Nested KVM is a distinct future capability
+      (workload-inside-workload), not a parity gap vs libkrun/FC. Recorded, not
+      built.
   NOTE: Swift control socket self-deadlocked on async VZ ops; Rust fixes it
-  (ADR-056 addendum). Still deferred (cheap, non-blocking): VzIngest/
-  mvm-vz-drainer dead-code sweep (the live enforcing path is the in-process
-  `VzGvproxy` bridge; the standalone drainer is the legacy Swift-era
-  observe-only path); + supervisor robustness (exit-listener 2nd-conn,
-  control-verb single-flight, validateSaveRestore hard-gate for Restore).
+  (ADR-056 addendum). #772 deferred-robustness triage (2026-06-13 close-out):
+  exit-listener 2nd-conn = correct-by-design (one-shot accept; long-running
+  workloads never connect); control-verb single-flight = correct-by-design (all
+  verbs serialize on the VM's libdispatch serial queue); validateSaveRestore on
+  Restore = correct-by-design (a non-snapshotting Boot is fine, so it's a warn
+  not a gate; SAVE/Restore surface the real framework error). No code change
+  needed for these three. Still genuinely deferred (cosmetic, own PR):
+  VzIngest/mvm-vz-drainer dead-code sweep — superseded by the Rust in-process
+  `VzGvproxy` splice but not provably dead; delete in a dedicated sweep once the
+  Rust path is confirmed stable.
 
 PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice shipped
   [x] WS-3 mvmctl sign + doctor signing — PR #667 (plan-168)
@@ -433,10 +439,12 @@ PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C1
       default; libkrun disk-only (SnapshotUpper clone of golden rootfs);
       doctor warm-start matrix + Linux NBD/HugeTLB substrate probe
   [ ] C2 Firecracker live-memory fast-resume — carved out → Plan 175
-  [x] C3 Vz save/restore (macOS 26+) — MET: `vm_full` memory save/restore
-      shipped (Plan 159 WS-2, `saveMachineStateToURL`) and round-trips live
-      with a responsive restored control plane; the Plan 152 WS-C fork
-      primitive it was paired with is likewise closed.
+  [x] C3 Vz save/restore (macOS 26+) — MET via Plan 159 WS-2 `vm_full`
+      save/restore (`saveMachineStateToURL`/`restoreMachineStateFromURL`,
+      #770): live-proven incl. responsive control plane on the restored VM,
+      gvproxy re-spawn on restore, and restore-while-running refusal. The
+      "owned by Plan 152 WS-C" pointer is resolved — WS-C itself is satisfied
+      (see PLAN 152 block).
 
 PLAN 182 — Trait hygiene + backend catalog      ✅ DONE
   [x] shared `mvm_core::time::{Clock,SystemClock}` replaces the three local copies

@@ -745,25 +745,19 @@ appears on Linux hosts.
 | 2     | **Inherits** — guest-side, hypervisor-independent                        |
 | 3     | **Inherits** — dm-verity is kernel-side; `VZLinuxBootLoader` carries cmdline + roothash unchanged |
 | 4     | **Inherits** — guest-side                                                |
-| 5     | **DONE** — Rust `serde` strict struct (`deny_unknown_fields`) + cargo-fuzz target on the `SupervisorConfig` parser. The Swift `JSONDecoder` equivalence half is retired (Swift supervisor deleted): the Rust parser is the sole config surface and its fuzzer is the whole witness. |
+| 5     | **Inherits** — Rust `SupervisorConfig` serde parser (`deny_unknown_fields`), fuzzed by `crates/mvm-build/fuzz/fuzz_targets/fuzz_supervisor_config.rs`; same harness as the libkrun supervisor |
 | 6     | **Inherits** — host-side download path                                   |
-| 7     | **EXTENDS** — Swift binary reproducibly built, SPM `Package.resolved` pinned, no prebuilt download on contributor path |
+| 7     | **Inherits** — Vz supervisor is an ordinary workspace bin (`mvm-vm-host`), riding the cargo reproducibility double-build + `cargo-deny`/`cargo-audit` pipeline |
 | 8     | **NEW WORK** — `VzBackend::start_with_mode` through `admit_for_run`; fail-closed bypass test |
 | 9     | **Inherits** — `verify_sealed_volume` is hypervisor-agnostic             |
 
-Claims 5 and 8 were the "new code, new tests" items — both shipped (claim
-5 as the Rust `SupervisorConfig` fuzzer; claim 8 as `VzBackend::start*`
-routing through `admit_for_run`). Claim 7 extends an existing pipeline.
-Others come free with the backend abstraction.
-
-> **Egress secret substitution (Plan 129) is deliberately out of this
-> claim set.** It is a Linux-only feature today (Firecracker nft TAP
-> REDIRECT + QEMU slirp); neither macOS backend spawns the substitution
-> endpoint — **libkrun lacks it exactly as vz does**, so vz is at parity
-> with the macOS baseline. Porting it to macOS (a `Uds`-transport
-> endpoint bridged through the supervisor vsock hop, plus a gvproxy-level
-> :80/:443 terminator) is tracked as a fast-follow below, not a Sprint 55
-> closeout item.
+Reconciled 2026-06-13 (Swift deleted, Plan 152): all nine **inherit**
+except claim 8 (the only Vz-specific new code, and it shipped). Claims 5
+and 7 used to read "new/extends" because of the Swift supervisor — that
+binary is gone, so the strict-decoder fuzz and the reproducible-build /
+supply-chain coverage now collapse into the shared Rust pipeline. There
+is no Swift `JSONDecoder` to reach equivalence with and no separate SPM
+`Package.resolved` to pin.
 
 ## Additional considerations
 
