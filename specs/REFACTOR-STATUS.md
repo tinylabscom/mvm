@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status/down/up --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings)
+**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status/down/up --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings; Plan 195 builder-VM fingerprint narrowing planned)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -44,6 +44,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 190** — Kernel egress decision converges on CanonicalEgress (ADR-080 P5 close-out) · 🟢 LANDED (kernel leg; lenient L4 lowering; zero claim-10 behaviour change; WASI-context mapping deferred to runner plan)
 - [x] **PLAN 191** — Declarative file materialization (ADR-080 P2-full) · 🟢 P2-full LANDED (FilesWrite lowers to the declarative `App.files` IR field, baked into the rootfs at build time via `mkFunctionService` `extraFiles`; the `before_start` shell hook is removed — file content/paths never reach a guest shell)
 - [ ] **PLAN 193** — rvproxy network substrate (replace gvproxy/passt) · 🔴 proposed, cross-repo — gated on rvproxy confirming libkrun-unixgram transport; biggest win = native flow API replaces the in-line claim-10 datapath wrapper (Plan 141)
+- [ ] **PLAN 195** — Builder-VM fingerprint narrowing · 🟡 planned — drop the redundant whole-workspace `Cargo.lock` from `builder_vm_source_fingerprint` (flake forbids buildRustPackage → L3 byte-hash already authoritative) to kill the ~9s Stage 0 re-materialize churn; Commit 2 tightens build.rs rerun triggers. Build-perf only, no claim impact. (194 reserved for ADR-081 A3)
 
 ## Plan details
 
