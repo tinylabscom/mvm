@@ -436,6 +436,18 @@ if [ -z "$NIX_OUT" ]; then
 fi
 printf '%s\n' "$NIX_OUT" > /job/store-path
 
+# Pin the just-built closure as a warm GC root so the cap-triggered GC
+# below spares the kernel + runtime base it carries. That GC deletes every
+# unrooted path regardless of age, and a fresh build's kernel/base are
+# reachable only through the transient build root — so without this the next
+# build recompiles the kernel and re-pulls the base closure. A FIXED root
+# name (overwritten each build) keeps only
+# the latest closure warm, so an unchanged kernel derivation is a store hit
+# next build while the store stays bounded. Best-effort; never fails the build.
+mkdir -p /nix/var/nix/gcroots 2>/dev/null || true
+nix-store --add-root /nix/var/nix/gcroots/mvm-warm-latest --indirect -r "$NIX_OUT" >/dev/null 2>&1 \
+  || ln -sfn "$NIX_OUT" /nix/var/nix/gcroots/mvm-warm-latest 2>/dev/null || true
+
 # Copy the artifacts the host expects into /out. A plain mkGuest
 # workload image is a *bare ext4 file* ($NIX_OUT is the rootfs
 # itself; libkrun boots its bundled libkrunfw kernel, so no vmlinux
@@ -1878,6 +1890,25 @@ mod tests {
         let meta_idx = body.find("mvm-meta.json").expect("meta block present");
         let gc_idx = body.find("nix-collect-garbage").expect("gc present");
         assert!(gc_idx > meta_idx, "GC tail must follow output emission");
+
+        // A fixed-name warm gcroot must pin the just-built closure so the
+        // cap-triggered GC spares the kernel + base it contains. It must root
+        // $NIX_OUT, use the bounded fixed name, and be registered BEFORE the GC.
+        let warm_idx = body
+            .find("/nix/var/nix/gcroots/mvm-warm-latest")
+            .expect("warm gcroot present");
+        assert!(
+            body.contains("--add-root /nix/var/nix/gcroots/mvm-warm-latest"),
+            "warm gcroot must use nix-store --add-root in:\n{body}"
+        );
+        assert!(
+            body.contains("ln -sfn \"$NIX_OUT\" /nix/var/nix/gcroots/mvm-warm-latest"),
+            "warm gcroot must fall back to an ln symlink of $NIX_OUT in:\n{body}"
+        );
+        assert!(
+            warm_idx < gc_idx,
+            "warm gcroot must be registered before the GC tail"
+        );
         unsafe {
             match old {
                 Some(v) => std::env::set_var(MVM_BUILDER_STORE_GC_GIB_ENV, v),
