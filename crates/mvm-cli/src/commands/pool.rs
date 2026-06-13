@@ -59,6 +59,23 @@ pub fn kernel_identity(backend: &dyn VmBackend, kernel_path: Option<&str>) -> Re
     kernel_sha256_hex(Path::new(kernel))
 }
 
+/// The compat-key image identity. `None` for libkrun (image-agnostic standbys). For Vz
+/// the sha256 of the source rootfs image ties a saved-standby to the exact image it was
+/// captured from — only launches with the same image may claim it.
+pub fn image_identity(backend: &dyn VmBackend, rootfs_path: &str) -> Result<Option<String>> {
+    if backend.name() == "libkrun" {
+        return Ok(None);
+    }
+    if backend.name() == "vz" {
+        let sha = kernel_sha256_hex(Path::new(rootfs_path))
+            .with_context(|| format!("hashing rootfs for image identity: {rootfs_path}"))?;
+        return Ok(Some(sha));
+    }
+    // Other backends (firecracker, qemu, …) have no pool today; return None so
+    // compat_for_launch compiles without gating those paths.
+    Ok(None)
+}
+
 /// Inputs to [`build_standby_spec`] (grouped to avoid a long positional signature).
 pub struct StandbySpecParams<'a> {
     /// `~/.mvm/pool/` root — holds the control UDS.
@@ -75,6 +92,10 @@ pub struct StandbySpecParams<'a> {
     pub mem_mib: u32,
     pub signer_id: &'a str,
     pub signing_key_path: &'a Path,
+    /// Source rootfs image for Vz saved-standbys. `None` for libkrun.
+    pub image_path: Option<&'a Path>,
+    /// Sha256 hex of the image for the compat key. `None` for libkrun.
+    pub image_sha256: Option<&'a str>,
 }
 
 /// Build a `StandbySpec` from [`StandbySpecParams`]. The control UDS lives under
@@ -98,6 +119,8 @@ pub fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
         control_socket: p.pool_root.join(&id).join("control.sock"),
         vm_state_dir: p.vms_root.join(&id).to_string_lossy().into_owned(),
         binding_nonce: nonce,
+        image_path: p.image_path.map(|p| p.to_string_lossy().into_owned()),
+        image_sha256: p.image_sha256.map(str::to_string),
         id,
     })
 }
@@ -168,27 +191,51 @@ pub struct WarmParams<'a> {
     pub signer_id: &'a str,
     pub signing_key_path: &'a Path,
     pub target: u32,
+    /// Source rootfs image for Vz saved-standbys. `None` for libkrun.
+    pub image: Option<&'a Path>,
 }
 
-/// Warm the pool toward `target` idle standbys for the given kernel+resources. Best-effort:
-/// spawn failures are logged, not fatal (warm pool is an optimization). Returns how many
-/// were newly spawned.
-pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Result<u32> {
+/// Summary returned by [`warm_to_target`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct WarmResult {
+    /// Standbys newly spawned and recorded in this call.
+    pub spawned: u32,
+    /// Spawn attempts that failed (each was logged as a warning).
+    pub failed: u32,
+}
+
+/// Warm the pool toward `target` idle standbys for the given kernel+resources.
+/// Spawn failures are logged and counted; the caller decides whether to
+/// surface them as an error.  Returns a [`WarmResult`] with success and
+/// failure counts.
+pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Result<WarmResult> {
     if p.target == 0 || !p.backend.supports_standby_pool() {
-        return Ok(0);
+        return Ok(WarmResult {
+            spawned: 0,
+            failed: 0,
+        });
     }
     // The compat identity computed identically here and at claim time (a constant for
     // libkrun's bundled kernel) so a warmed standby is actually claimable.
     let kernel_sha256 = kernel_identity(p.backend, p.kernel.to_str())?;
+    let image_sha256 = match p.image {
+        Some(img) => Some(
+            kernel_sha256_hex(img)
+                .with_context(|| format!("hashing image for pool compat key: {}", img.display()))?,
+        ),
+        None => None,
+    };
     let want = StandbyCompat {
         kernel_sha256: kernel_sha256.clone(),
         vcpus: p.vcpus,
         mem_mib: p.mem_mib,
+        image_sha256: image_sha256.clone(),
     };
     let have = pool.idle_count_compatible(&want)? as u32;
     let pool_root = mvm_core::config::mvm_pool_dir()?;
     let vms_root = mvm_core::config::mvm_data_dir_strict()?.join("vms");
-    let mut spawned = 0;
+    let mut spawned = 0u32;
+    let mut failed = 0u32;
     for _ in have..p.target {
         let spec = build_standby_spec(&StandbySpecParams {
             pool_root: &pool_root,
@@ -199,27 +246,33 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
             mem_mib: p.mem_mib,
             signer_id: p.signer_id,
             signing_key_path: p.signing_key_path,
+            image_path: p.image,
+            image_sha256: image_sha256.as_deref(),
         })?;
         match p.backend.spawn_standby(&spec) {
             Ok(handle) => {
                 pool.record(&handle)?;
                 spawned += 1;
             }
-            Err(e) => tracing::warn!(error = %e, "spawn standby failed; pool stays under target"),
+            Err(e) => {
+                tracing::warn!(error = %e, "spawn standby failed; pool stays under target");
+                failed += 1;
+            }
         }
     }
-    Ok(spawned)
+    Ok(WarmResult { spawned, failed })
 }
 
-/// The base-compat key a launch needs (kernel identity + the fixed vcpus/mem). The kernel
-/// component is [`kernel_identity`] — for libkrun the bundled-kernel constant, so it's
-/// computable here pre-boot even though the mkGuest workload kernel isn't on disk yet (the
-/// claim/replenish asymmetry that previously forced fail-open-to-cold).
+/// The base-compat key a launch needs (kernel identity + fixed vcpus/mem + image sha for
+/// Vz). The kernel component is [`kernel_identity`] — for libkrun the bundled-kernel
+/// constant, so it's computable pre-boot even without an on-disk kernel.
 fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<StandbyCompat> {
+    let image_sha256 = image_identity(backend, cfg.rootfs_path.as_str())?;
     Ok(StandbyCompat {
         kernel_sha256: kernel_identity(backend, cfg.kernel_path.as_deref())?,
         vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
         mem_mib: cfg.memory_mib,
+        image_sha256,
     })
 }
 
@@ -276,8 +329,19 @@ pub fn try_warm_claim(
 
 /// Top the pool back up toward `cfg.warm_pool_size` after a launch (the no-daemon
 /// replenish-on-use maintainer). Best-effort — failures are logged, never propagated.
+///
+/// For libkrun standbys this path fires automatically after each claimed launch.
+/// For Vz saved-standbys the replenish path requires a boot + capture cycle that is
+/// expensive and may require the builder VM to resolve the kernel. Automatic replenish
+/// is skipped for Vz (pool warm is manual); `supports_standby_pool()` stays true so
+/// `try_warm_claim` still fires.
 pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Result<u32> {
     if cfg.warm_pool_size == 0 || !backend.supports_standby_pool() {
+        return Ok(0);
+    }
+    // Vz replenish requires booting a seed VM + capture: too expensive for the
+    // post-claim fast path. Replenish is manual (`mvmctl pool warm`) for Vz.
+    if backend.as_vm_backend().name() == "vz" {
         return Ok(0);
     }
     let Some(kernel) = cfg.kernel_path.as_ref() else {
@@ -285,7 +349,7 @@ pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Resu
     };
     let signer = host_signer::load_or_init()?;
     let pool = SupervisorStandbyPool::open()?;
-    warm_to_target(
+    let result = warm_to_target(
         &pool,
         &WarmParams {
             backend: backend.as_vm_backend(),
@@ -295,8 +359,10 @@ pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Resu
             signer_id: &host_signer::host_signer_id(),
             signing_key_path: &signer.secret_path,
             target: cfg.warm_pool_size,
+            image: None, // libkrun only: image-agnostic standbys
         },
-    )
+    )?;
+    Ok(result.spawned)
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -360,6 +426,8 @@ mod tests {
             mem_mib: 1024,
             signer_id: "host:test",
             signing_key_path: &tmp.path().join("key"),
+            image_path: None,
+            image_sha256: None,
         })
         .unwrap();
         // The socket lives under the nonce-derived `standby-<16hex>` dir; the filename is
@@ -494,6 +562,7 @@ mod tests {
             binding_nonce: "ab".repeat(32),
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
+            image_sha256: None,
         }
     }
 
@@ -502,6 +571,7 @@ mod tests {
             kernel_sha256: kernel.into(),
             vcpus: 2,
             mem_mib: 1024,
+            image_sha256: None,
         }
     }
 
@@ -612,6 +682,125 @@ mod tests {
         c.plan_json = None; // not the gateway-bridge/admitted path → cold-boot
         assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
     }
+
+    // A VmBackend stub whose `spawn_standby` always fails — used to exercise
+    // the warm failure path without a real VM.
+    struct FailingSpawnBackend;
+    impl VmBackend for FailingSpawnBackend {
+        fn name(&self) -> &str {
+            "stub-fail-spawn"
+        }
+        fn capabilities(&self) -> VmCapabilities {
+            VmCapabilities::default()
+        }
+        fn supports_standby_pool(&self) -> bool {
+            true
+        }
+        fn spawn_standby(
+            &self,
+            _spec: &mvm_core::vm_backend::StandbySpec,
+        ) -> std::result::Result<StandbyHandle, StandbyError> {
+            Err(StandbyError::ClaimFailed("injected spawn failure".into()))
+        }
+        fn start_with_mode(&self, _: &VmStartConfig, _: StartMode) -> anyhow::Result<VmId> {
+            unreachable!()
+        }
+        fn stop(&self, _: &VmId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn stop_all(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn pause(&self, _: &VmId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn resume(&self, _: &VmId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn status(&self, _: &VmId) -> anyhow::Result<VmStatus> {
+            Ok(VmStatus::Stopped)
+        }
+        fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
+            Ok(vec![])
+        }
+        fn logs(&self, _: &VmId, _: u32, _: bool) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn is_available(&self) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        fn install(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn warm_to_target_counts_failures_when_spawn_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"k").unwrap();
+        let key = tmp.path().join("host-signer.ed25519");
+        std::fs::write(&key, b"fake-key").unwrap();
+
+        let backend = FailingSpawnBackend;
+        let result = warm_to_target(
+            &pool,
+            &WarmParams {
+                backend: &backend,
+                kernel: &kernel,
+                vcpus: 2,
+                mem_mib: 1024,
+                signer_id: "host:test",
+                signing_key_path: &key,
+                target: 2,
+                image: None,
+            },
+        )
+        .unwrap();
+
+        // No standbys were spawned; both attempts counted as failures.
+        assert_eq!(result.spawned, 0, "no standbys should be recorded");
+        assert_eq!(
+            result.failed, 2,
+            "both spawn attempts must be counted as failures"
+        );
+    }
+
+    #[test]
+    fn warm_to_target_already_at_target_returns_zero_spawned_zero_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"k").unwrap();
+        let key = tmp.path().join("key");
+        std::fs::write(&key, b"fake-key").unwrap();
+
+        // Pre-fill the pool with 1 idle standby.
+        let mut h = idle_handle("s1", &kernel_sha256_hex(&kernel).unwrap());
+        h.kernel_sha256 = kernel_sha256_hex(&kernel).unwrap();
+        pool.record(&h).unwrap();
+
+        let backend = FailingSpawnBackend;
+        let result = warm_to_target(
+            &pool,
+            &WarmParams {
+                backend: &backend,
+                kernel: &kernel,
+                vcpus: h.vcpus,
+                mem_mib: h.mem_mib,
+                signer_id: "host:test",
+                signing_key_path: &key,
+                target: 1,
+                image: None,
+            },
+        )
+        .unwrap();
+
+        // Already at target → no spawns attempted, no failures.
+        assert_eq!(result.spawned, 0);
+        assert_eq!(result.failed, 0);
+    }
 }
 
 // ── `mvmctl pool` command ───────────────────────────────────────────────────────────
@@ -625,10 +814,18 @@ pub(in crate::commands) struct Args {
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum PoolAction {
     /// Pre-spawn idle supervisor standbys for the default-microVM launch shape so a later
-    /// `up` is fast. Default count 1. Only the libkrun backend has a standby pool today.
+    /// `up` is fast. Default count 1.
+    ///
+    /// For the Vz backend a saved-standby capture requires an image rootfs. Provide
+    /// `--rootfs <path>` or set `MVM_POOL_ROOTFS`; if absent, the command falls back to
+    /// the cached default-microVM image (same one `up` uses without `--flake`).
     Warm {
         /// How many idle standbys to warm the pool toward (default 1).
         count: Option<u32>,
+        /// Source rootfs for Vz saved-standbys (absolute path to an ext4 image).
+        /// Ignored for libkrun. Defaults to the cached default-microVM rootfs.
+        #[arg(long)]
+        rootfs: Option<String>,
     },
     /// Show the standby pool — recorded standbys and their idle/claimed state.
     Status {
@@ -645,20 +842,34 @@ struct WarmShape {
     backend: AnyBackend,
     backend_name: String,
     kernel: std::path::PathBuf,
+    /// Source rootfs for Vz saved-standbys. `None` for libkrun (image-agnostic).
+    image: Option<std::path::PathBuf>,
     vcpus: u8,
     mem_mib: u32,
 }
 
-fn resolve_warm_shape(cfg: &MvmConfig) -> Result<WarmShape> {
+fn resolve_warm_shape(cfg: &MvmConfig, rootfs_override: Option<&str>) -> Result<WarmShape> {
     let backend_name = super::shared::resolve_effective_hypervisor("firecracker");
     let backend = AnyBackend::from_hypervisor(&backend_name);
-    let (kernel, _rootfs) = ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Prod)
-        .context("resolve default-microvm kernel for the warm pool")?;
+    let (kernel, default_rootfs) =
+        ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Prod)
+            .context("resolve default-microvm kernel for the warm pool")?;
     let vcpus = u8::try_from(cfg.default_cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
+    // Vz needs an image; libkrun does not. Resolve: explicit --rootfs > env var > default.
+    let image = if backend_name == "vz" || backend_name == "virtualization" {
+        let path = rootfs_override
+            .map(str::to_string)
+            .or_else(|| std::env::var("MVM_POOL_ROOTFS").ok())
+            .unwrap_or(default_rootfs);
+        Some(std::path::PathBuf::from(path))
+    } else {
+        None
+    };
     Ok(WarmShape {
         backend,
         backend_name,
         kernel: std::path::PathBuf::from(kernel),
+        image,
         vcpus,
         mem_mib: cfg.default_memory_mib,
     })
@@ -668,23 +879,29 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     let pool = SupervisorStandbyPool::open()?;
     match args.action {
         PoolAction::Status { json } => run_status(&pool, json),
-        PoolAction::Warm { count } => run_warm(&pool, cfg, count.unwrap_or(1)),
+        PoolAction::Warm { count, rootfs } => {
+            run_warm(&pool, cfg, count.unwrap_or(1), rootfs.as_deref())
+        }
     }
 }
 
-fn run_warm(pool: &SupervisorStandbyPool, cfg: &MvmConfig, target: u32) -> Result<()> {
-    let shape = resolve_warm_shape(cfg)?;
+fn run_warm(
+    pool: &SupervisorStandbyPool,
+    cfg: &MvmConfig,
+    target: u32,
+    rootfs_override: Option<&str>,
+) -> Result<()> {
+    let shape = resolve_warm_shape(cfg, rootfs_override)?;
     if !shape.backend.supports_standby_pool() {
         crate::ui::warn(&format!(
-            "backend '{}' has no supervisor standby pool (only libkrun does today); \
-             nothing warmed.",
+            "backend '{}' has no supervisor standby pool; nothing warmed.",
             shape.backend_name
         ));
         return Ok(());
     }
     // Ensure the host signer exists — the standby re-verifies the attach plan against it.
     let signer = host_signer::load_or_init()?;
-    let spawned = warm_to_target(
+    let result = warm_to_target(
         pool,
         &WarmParams {
             backend: shape.backend.as_vm_backend(),
@@ -694,15 +911,34 @@ fn run_warm(pool: &SupervisorStandbyPool, cfg: &MvmConfig, target: u32) -> Resul
             signer_id: &host_signer::host_signer_id(),
             signing_key_path: &signer.secret_path,
             target,
+            image: shape.image.as_deref(),
         },
     )?;
     // A state-changing verb emits one audit record per attempt.
-    mvm_core::audit_emit!(PoolWarm, "spawned={spawned} target={target}");
-    if spawned == 0 {
+    mvm_core::audit_emit!(
+        PoolWarm,
+        "spawned={} failed={} target={target}",
+        result.spawned,
+        result.failed
+    );
+    let idle_after = result.spawned;
+    if result.failed > 0 && idle_after < target {
+        crate::ui::warn(&format!(
+            "{}/{} standby(s) warmed; {} spawn(s) failed — check logs for details.",
+            idle_after, target, result.failed,
+        ));
+        return Err(anyhow::anyhow!(
+            "pool warm: {}/{} standby(s) warmed, {} failed",
+            idle_after,
+            target,
+            result.failed,
+        ));
+    } else if result.spawned == 0 && result.failed == 0 {
         crate::ui::info(&format!("Pool already at or above target {target}."));
     } else {
         crate::ui::success(&format!(
-            "Warmed {spawned} standby(s) toward target {target}."
+            "Warmed {} standby(s) toward target {target}.",
+            result.spawned,
         ));
     }
     crate::ui::info(
@@ -728,6 +964,8 @@ struct PoolStatusEntry {
     kernel_sha256: String,
     vcpus: u8,
     mem_mib: u32,
+    /// Present for Vz saved-standbys; absent (null) for libkrun.
+    image_sha256: Option<String>,
 }
 
 fn run_status(pool: &SupervisorStandbyPool, json: bool) -> Result<()> {
@@ -752,6 +990,7 @@ fn run_status(pool: &SupervisorStandbyPool, json: bool) -> Result<()> {
                 kernel_sha256: h.kernel_sha256.clone(),
                 vcpus: h.vcpus,
                 mem_mib: h.mem_mib,
+                image_sha256: h.image_sha256.clone(),
             })
             .collect(),
     };
@@ -761,14 +1000,24 @@ fn run_status(pool: &SupervisorStandbyPool, json: bool) -> Result<()> {
     }
     println!("Supervisor standby pool: {idle} idle, {claimed} claimed");
     for e in &report.standbys {
+        let image_tag = e
+            .image_sha256
+            .as_deref()
+            .map(|s| format!(" · image {}", &s[..s.len().min(12)]))
+            .unwrap_or_default();
         println!(
-            "  {} · {} · pid {} · {} vcpu / {} MiB · kernel {}",
+            "  {} · {} · {} · {} vcpu / {} MiB · kernel {}{}",
             e.id,
             e.state,
-            e.pid,
+            if e.pid == 0 {
+                "saved-state".to_string()
+            } else {
+                format!("pid {}", e.pid)
+            },
             e.vcpus,
             e.mem_mib,
-            &e.kernel_sha256[..e.kernel_sha256.len().min(12)]
+            &e.kernel_sha256[..e.kernel_sha256.len().min(12)],
+            image_tag,
         );
     }
     Ok(())

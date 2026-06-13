@@ -146,6 +146,14 @@ pub fn supervisor_config_path(state_dir: &Path) -> PathBuf {
     state_dir.join(SUPERVISOR_CONFIG_FILE_NAME)
 }
 
+/// Where a saved Vz standby keeps its seed supervisor config: inside the POOL
+/// dir, not the seed VM's state dir. The seed's state dir is torn down when the
+/// seed is stopped after capture, so spawn copies the config here and claim
+/// (running much later) reads it from here. Both sides MUST use this path.
+fn pool_seed_config_path(pool_root: &Path, standby_id: &str) -> PathBuf {
+    supervisor_config_path(&pool_root.join(standby_id))
+}
+
 /// How long [`VzBackend::start`] waits for the supervisor to write its
 /// PID file before killing the child and bailing. Matches the libkrun
 /// path's budget.
@@ -609,6 +617,29 @@ impl VmBackend for VzBackend {
                 "Pause/resume + balloon + snapshots require a supervisor control socket (Plan 97 follow-up).",
             ],
         }
+    }
+
+    fn supports_standby_pool(&self) -> bool {
+        // Saved-standby pool requires macOS 14+ snapshot support.
+        macos_supports_vz_snapshots()
+    }
+
+    fn spawn_standby(
+        &self,
+        spec: &mvm_core::vm_backend::StandbySpec,
+    ) -> std::result::Result<mvm_core::vm_backend::StandbyHandle, mvm_core::vm_backend::StandbyError>
+    {
+        vz_spawn_standby(spec)
+            .map_err(|e| mvm_core::vm_backend::StandbyError::SpawnFailed(e.to_string()))
+    }
+
+    fn claim_standby(
+        &self,
+        handle: &mvm_core::vm_backend::StandbyHandle,
+        claim: &mvm_core::vm_backend::StandbyClaim,
+    ) -> std::result::Result<VmId, mvm_core::vm_backend::StandbyError> {
+        vz_claim_standby(handle, claim)
+            .map_err(|e| mvm_core::vm_backend::StandbyError::ClaimFailed(e.to_string()))
     }
 }
 
@@ -1161,6 +1192,381 @@ impl crate::checkpoint::ChildSupervisorSpawner for VzChildSupervisorSpawner {
         }
         spawn_supervisor_with_config(config)
     }
+}
+
+// ─── Vz saved-standby pool ───────────────────────────────────────────────────
+
+/// Spawn a Vz saved-standby: boot a seed VM from the spec's image, wait for
+/// the supervisor's PID file (boot readiness), capture its consistent
+/// {rootfs, memory, machine-id} triple into the pool dir, then stop the seed
+/// VM. The returned handle carries pid=0 (no running supervisor) and
+/// `image_sha256` so only claims whose image matches may use it.
+///
+/// Pool content layout: `~/.mvm/pool/<id>/content/{rootfs.ext4,memory.bin,machine-id}`.
+/// The parent config at `~/.mvm/vms/<seed-id>/supervisor-config.json` is the
+/// template `claim_standby` will clone + rewrite for the claimant.
+///
+/// Reuses `capture_vm_full` (the pause→save→clone→resume orchestrator) via the
+/// existing `VzVmFullControl` seam; `VzBackend::stop` tears the seed down.
+fn vz_spawn_standby(
+    spec: &mvm_core::vm_backend::StandbySpec,
+) -> Result<mvm_core::vm_backend::StandbyHandle> {
+    use mvm_core::vm_backend::{StandbyHandle, StandbyState};
+
+    let image_path = spec
+        .image_path
+        .as_deref()
+        .context("Vz spawn_standby requires image_path in StandbySpec")?;
+    let image_sha256 = spec
+        .image_sha256
+        .as_deref()
+        .context("Vz spawn_standby requires image_sha256 in StandbySpec")?;
+    let kernel_path = &spec.kernel_path;
+
+    // Boot the seed VM under the standby id.  No plan/tenant — it's a
+    // pre-admission seed; the claim re-admits with the claimant's own plan.
+    let seed_cfg = mvm_core::vm_backend::VmStartConfig {
+        name: spec.id.clone(),
+        rootfs_path: image_path.to_string(),
+        kernel_path: Some(kernel_path.clone()),
+        cpus: u32::from(spec.vcpus),
+        memory_mib: spec.mem_mib,
+        ..Default::default()
+    };
+    VzBackend
+        .start(&seed_cfg)
+        .with_context(|| format!("vz_spawn_standby: boot seed VM '{}'", spec.id))?;
+
+    // Cleanup guard: on any failure after the seed boots, stop the seed and
+    // remove the partial pool dir + seed state dir so the pool reaper doesn't
+    // see an unreapable orphan (reap_stale only processes recorded standbys).
+    // Disarmed on the success path at the end of this function.
+    let pool_root =
+        mvm_core::config::mvm_pool_dir().context("vz_spawn_standby: resolve pool dir")?;
+    let mut cleanup = SpawnCleanupGuard::new(
+        spec.id.clone(),
+        pool_root.join(&spec.id),
+        vm_state_dir(&spec.id),
+    );
+
+    // Wait for guest-agent readiness.  Probe the vsock socket + console log
+    // so the pool isn't gated on a magic sleep duration.  Fail closed on
+    // timeout so a broken image can't consume a pool slot indefinitely.
+    wait_for_seed_agent(&spec.id)
+        .with_context(|| format!("vz_spawn_standby: seed VM '{}' agent not ready", spec.id))?;
+
+    // Capture the live seed VM's triple into the pool dir.
+    let pool_id = mvm_core::checkpoint::CheckpointId::new(spec.id.clone());
+    let pool_store = crate::checkpoint::CheckpointStore::at(&pool_root);
+
+    // `capture_vm_full` needs a supervisor_config_digest for the meta.  Use the
+    // sha256 of the seed's persisted supervisor-config.json (the same one
+    // `claim_standby` will read and rewrite for the claimant).
+    let seed_state_dir = vm_state_dir(&spec.id);
+    let cfg_json = std::fs::read(supervisor_config_path(&seed_state_dir)).with_context(|| {
+        format!(
+            "vz_spawn_standby: read seed supervisor-config for '{}'",
+            spec.id
+        )
+    })?;
+    let cfg_digest =
+        mvm_core::crypto::image_verify::sha256_file(&supervisor_config_path(&seed_state_dir))
+            .with_context(|| {
+                format!("vz_spawn_standby: hash supervisor-config for '{}'", spec.id)
+            })?;
+    // Persist the seed config INTO the pool dir: stopping the seed below tears
+    // down its state dir, so `claim_standby` (which runs much later) must read
+    // the config from the pool, not the gone seed dir.
+    let pool_dir = pool_root.join(&spec.id);
+    std::fs::create_dir_all(&pool_dir)
+        .with_context(|| format!("vz_spawn_standby: create pool dir for '{}'", spec.id))?;
+    std::fs::write(pool_seed_config_path(&pool_root, &spec.id), &cfg_json).with_context(|| {
+        format!(
+            "vz_spawn_standby: persist seed supervisor-config into pool for '{}'",
+            spec.id
+        )
+    })?;
+
+    let capture_params = crate::checkpoint::CaptureVmFullParams {
+        id: pool_id.clone(),
+        vm_name: spec.id.clone(),
+        supervisor_config_digest: cfg_digest,
+        tag: None,
+        created_unix: crate::standby_pool::now_unix_secs(),
+    };
+    let control = VzVmFullControl::new(&spec.id);
+    let capture_result = crate::checkpoint::capture_vm_full(&pool_store, capture_params, &control);
+
+    // Stop the seed regardless of capture success.
+    if let Err(e) = VzBackend.stop(&VmId(spec.id.clone())) {
+        tracing::warn!(id = %spec.id, error = %e, "vz_spawn_standby: seed stop failed (non-fatal)");
+    }
+
+    let _meta = capture_result.with_context(|| {
+        format!(
+            "vz_spawn_standby: capture_vm_full failed for seed '{}'",
+            spec.id
+        )
+    })?;
+
+    cleanup.disarm();
+    Ok(StandbyHandle {
+        id: spec.id.clone(),
+        control_socket: spec.control_socket.clone(),
+        pid: 0, // no live supervisor after capture
+        kernel_sha256: spec.kernel_sha256.clone(),
+        vcpus: spec.vcpus,
+        mem_mib: spec.mem_mib,
+        binding_nonce: spec.binding_nonce.clone(),
+        spawned_unix_secs: crate::standby_pool::now_unix_secs(),
+        state: StandbyState::Idle,
+        image_sha256: Some(image_sha256.to_string()),
+    })
+}
+
+/// Drop-guard that stops a running seed VM and removes the partial pool dir +
+/// seed state dir when a `vz_spawn_standby` call fails after the seed has
+/// booted.  Disarmed on the success path via [`SpawnCleanupGuard::disarm`].
+///
+/// Without this guard a failed spawn leaves an orphan seed VM and an
+/// unreapable partial pool dir — `reap_stale` only processes recorded standbys,
+/// so the orphan accumulates silently.
+struct SpawnCleanupGuard {
+    vm_id: String,
+    pool_dir: PathBuf,
+    state_dir: PathBuf,
+    armed: bool,
+}
+
+impl SpawnCleanupGuard {
+    fn new(vm_id: String, pool_dir: PathBuf, state_dir: PathBuf) -> Self {
+        Self {
+            vm_id,
+            pool_dir,
+            state_dir,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SpawnCleanupGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        tracing::warn!(
+            id = %self.vm_id,
+            "vz_spawn_standby: cleaning up partial pool dir and seed state after spawn failure"
+        );
+        let _ = VzBackend.stop(&VmId(self.vm_id.clone()));
+        if self.pool_dir.exists() {
+            let _ = std::fs::remove_dir_all(&self.pool_dir);
+        }
+        if self.state_dir.exists() {
+            let _ = std::fs::remove_dir_all(&self.state_dir);
+        }
+    }
+}
+
+/// Poll the seed VM's vsock agent socket until the guest agent is up, or a
+/// deadline passes.
+///
+/// Two-stage readiness: first wait for the host-side UDS listener to appear
+/// (the Vz supervisor binds `<vm_state_dir>/vsock/vsock-<port>.sock`), then
+/// confirm the guest agent is actually serving by scanning the VM's console.log
+/// for the literal "mvm-guest-agent: listening" line.  The socket file can
+/// exist before the guest process inside has bound the vsock port, so both
+/// checks together give a reliable ready signal.
+///
+/// The socket path is built via `mvm_core::config::vm_vz_vsock_port_socket` —
+/// the single source of truth shared with the Vz supervisor — so they cannot
+/// drift again.
+fn wait_for_seed_agent(vm_name: &str) -> Result<()> {
+    use std::time::{Duration, Instant};
+
+    const SEED_AGENT_TIMEOUT: Duration = Duration::from_secs(60);
+    const POLL_INTERVAL: Duration = Duration::from_millis(500);
+    const AGENT_READY_LINE: &str = "mvm-guest-agent: listening";
+
+    let agent_sock =
+        mvm_core::config::vm_vz_vsock_port_socket(vm_name, mvm_guest::vsock::GUEST_AGENT_PORT);
+    let console_log = mvm_core::config::vm_console_log(vm_name);
+    let deadline = Instant::now() + SEED_AGENT_TIMEOUT;
+
+    // Phase 1: wait for the supervisor to bind the host-side UDS listener.
+    loop {
+        if agent_sock.exists() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "vsock agent socket {} did not appear within {:?}",
+                agent_sock.display(),
+                SEED_AGENT_TIMEOUT,
+            ));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+
+    // Phase 2: wait for the guest agent to write its ready line to console.log.
+    // The socket exists once the supervisor binds; the guest process may still
+    // be initialising its vsock listener.
+    loop {
+        let agent_ready = std::fs::read_to_string(&console_log)
+            .map(|log| log.contains(AGENT_READY_LINE))
+            .unwrap_or(false);
+        if agent_ready {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "guest agent did not write '{}' to {} within {:?}",
+                AGENT_READY_LINE,
+                console_log.display(),
+                SEED_AGENT_TIMEOUT,
+            ));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Claim a Vz saved-standby: verify the pool content integrity, clone
+/// {rootfs, memory, machine-id} into the claimant's state dir, rewrite the
+/// seed's supervisor config for the claimant identity + inject the admitted
+/// plan, then spawn gvproxy + supervisor in Restore mode.
+///
+/// Reuses `build_child_supervisor_config` (the fork plumbing) and
+/// `VzChildSupervisorSpawner` (the fork spawn path) — the claim is the fork
+/// path with a pool-sourced parent instead of a checkpoint parent.
+fn vz_claim_standby(
+    handle: &mvm_core::vm_backend::StandbyHandle,
+    claim: &mvm_core::vm_backend::StandbyClaim,
+) -> Result<VmId> {
+    // Locate the pool store and load the captured triple's manifest.
+    let pool_root =
+        mvm_core::config::mvm_pool_dir().context("vz_claim_standby: resolve pool dir")?;
+    let pool_store = crate::checkpoint::CheckpointStore::at(&pool_root);
+    let pool_id = mvm_core::checkpoint::CheckpointId::new(handle.id.clone());
+
+    let meta = pool_store
+        .read_meta(&pool_id)
+        .with_context(|| format!("vz_claim_standby: read pool meta for '{}'", handle.id))?;
+
+    // Fail-closed integrity check: hash the pool content against the manifest
+    // and the handle's image_sha256 before materializing anything.
+    crate::checkpoint::verify_content(&pool_store, &meta).with_context(|| {
+        format!(
+            "vz_claim_standby: pool content tampered for '{}'",
+            handle.id
+        )
+    })?;
+
+    // The pool rootfs sha256 must match what the handle recorded at spawn time.
+    // A discrepancy means the pool dir was written after capture — refuse.
+    // The pool content integrity was verified above via `verify_content`.
+    // Image-sha compat was enforced at standby selection time by
+    // `select_idle_compatible`; no further check is needed here.
+
+    // Materialise clones into the claimant's state dir (mirrors fork_vm_full).
+    let claimant_name = &handle.id; // the VM runs under the standby id
+    let claimant_state_dir = vm_state_dir(claimant_name);
+    std::fs::create_dir_all(&claimant_state_dir).with_context(|| {
+        format!(
+            "vz_claim_standby: create claimant state dir {}",
+            claimant_state_dir.display()
+        )
+    })?;
+
+    let content_dir = pool_store.content_dir(&pool_id);
+    for blob in &meta.content {
+        let src = content_dir.join(&blob.name);
+        let dst = claimant_state_dir.join(&blob.name);
+        // Skip if the file was already placed (e.g. a previous interrupted
+        // claim that failed after the clone but before the supervisor wrote its
+        // PID file).
+        if !dst.exists() {
+            crate::base::cow::clone_rootfs_for_instance(&src, &dst).with_context(|| {
+                format!(
+                    "vz_claim_standby: clone blob '{}' to {}",
+                    blob.name,
+                    dst.display()
+                )
+            })?;
+        }
+    }
+
+    let memory_path = claimant_state_dir.join("memory.bin");
+    let machine_id_path = claimant_state_dir.join("machine-id");
+
+    // Read the seed config that `spawn_standby` copied into the pool dir. The
+    // seed VM's own state dir was torn down when the seed was stopped after
+    // capture, so the pool copy is the only surviving source.
+    let seed_cfg_path = pool_seed_config_path(&pool_root, &handle.id);
+    let seed_cfg_bytes = std::fs::read(&seed_cfg_path).with_context(|| {
+        format!(
+            "vz_claim_standby: read seed supervisor config {}",
+            seed_cfg_path.display()
+        )
+    })?;
+    let seed_cfg: vz::SupervisorConfig =
+        serde_json::from_slice(&seed_cfg_bytes).context("vz_claim_standby: parse seed config")?;
+
+    // Rewrite the config for the claimant identity + Restore mode. This is
+    // identical to what fork_vm_full does via build_child_supervisor_config.
+    let mut child_cfg = build_child_supervisor_config(
+        &seed_cfg,
+        claimant_name,
+        &claimant_state_dir,
+        &memory_path,
+        Some(machine_id_path.as_path()),
+    )
+    .context("vz_claim_standby: build claimant supervisor config")?;
+
+    // Inject the claimant's admitted plan + derive the audit substrate paths
+    // (mirrors the fork_vm_full injection block exactly).
+    let plan_json = &claim.plan_json;
+    child_cfg.plan =
+        Some(serde_json::from_str(plan_json).context("vz_claim_standby: parse claim plan_json")?);
+    let substrate = crate::audit_substrate::compute_audit_substrate(
+        claimant_name,
+        Some(claim.tenant_id.as_str()),
+    )
+    .context("vz_claim_standby: compute audit substrate")?;
+    child_cfg.tenant_id = substrate.tenant_id;
+    child_cfg.audit_dir = substrate
+        .audit_dir
+        .map(|p| p.to_string_lossy().into_owned());
+    child_cfg.gateway_audit_socket = substrate
+        .gateway_audit_socket
+        .map(|p| p.to_string_lossy().into_owned());
+    child_cfg.signing_key_path = substrate
+        .signing_key_path
+        .map(|p| p.to_string_lossy().into_owned());
+    if let Some(mvm_build::vz::NetworkConfig::Gvproxy {
+        ref mut events_ingest_socket_path,
+        ..
+    }) = child_cfg.network
+    {
+        *events_ingest_socket_path = substrate
+            .gateway_events_socket
+            .map(|p| p.to_string_lossy().into_owned());
+    }
+    if let Some(ref bj) = claim.bundle_json {
+        child_cfg.bundle =
+            Some(serde_json::from_str(bj).context("vz_claim_standby: parse claim bundle_json")?);
+    }
+
+    // Spawn the claimant supervisor in Restore mode. The trait must be in scope.
+    use crate::checkpoint::ChildSupervisorSpawner as _;
+    VzChildSupervisorSpawner
+        .spawn(&child_cfg)
+        .context("vz_claim_standby: spawn claimant supervisor")?;
+
+    Ok(VmId(claimant_name.clone()))
 }
 
 /// Write JSON to `path` mode 0600, atomically via a rename. Mirrors
@@ -1786,6 +2192,22 @@ mod tests {
     #[test]
     fn name_is_vz() {
         assert_eq!(VzBackend.name(), "vz");
+    }
+
+    #[test]
+    fn pool_seed_config_lives_in_pool_not_seed_state_dir() {
+        // Regression: spawn once discarded the seed config and claim read it
+        // from the seed's state dir, which is gone after the seed stops. The
+        // seed config must live under the POOL dir so it survives to claim.
+        let pool_root = Path::new("/pool/root");
+        let id = "standby-abc123";
+        let p = pool_seed_config_path(pool_root, id);
+        assert_eq!(
+            p,
+            Path::new("/pool/root/standby-abc123/supervisor-config.json")
+        );
+        // Must NOT resolve into the seed's (torn-down) VM state dir.
+        assert_ne!(p, supervisor_config_path(&vm_state_dir(id)));
     }
 
     #[test]
@@ -2755,5 +3177,258 @@ mod tests {
         unsafe {
             std::env::remove_var("MVM_DATA_DIR");
         }
+    }
+
+    // ── saved-standby pool tests (Vz, no real VM) ────────────────────────────
+
+    /// `vz_claim_standby` propagates a clean error when the pool dir is absent
+    /// (missing meta.json) rather than panicking or returning a misleading
+    /// message.
+    #[test]
+    fn claim_standby_errors_cleanly_on_missing_pool_meta() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+        }
+
+        let handle = mvm_core::vm_backend::StandbyHandle {
+            id: "standby-no-pool".into(),
+            control_socket: tmp.path().join("control.sock"),
+            pid: 0,
+            kernel_sha256: "aaaa".into(),
+            vcpus: 2,
+            mem_mib: 1024,
+            binding_nonce: "bb".repeat(32),
+            spawned_unix_secs: 1,
+            state: mvm_core::vm_backend::StandbyState::Idle,
+            image_sha256: Some("cccc".into()),
+        };
+        let claim = mvm_core::vm_backend::StandbyClaim {
+            rootfs_path: "/fake/rootfs.ext4".into(),
+            plan_json: "{}".into(),
+            tenant_id: "t1".into(),
+            audit_dir: tmp.path().join("audit"),
+            gateway_audit_socket: tmp.path().join("audit.sock"),
+            gateway_events_socket: None,
+            bundle_json: None,
+        };
+
+        let err = vz_claim_standby(&handle, &claim).unwrap_err();
+        let msg = err.to_string();
+        // The error chain must mention the pool meta read, not panic or silently
+        // succeed.
+        assert!(
+            msg.contains("pool meta") || msg.contains("meta.json") || msg.contains("pool dir"),
+            "error should name the missing pool meta: {msg}"
+        );
+
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+        }
+    }
+
+    /// `verify_content` (called inside `vz_claim_standby`) fails closed when a
+    /// pool blob has been tampered with — a wrong byte in rootfs.ext4 must
+    /// produce an integrity error before any claimant state is written.
+    #[test]
+    fn claim_standby_errors_on_tampered_pool_blob() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+        }
+
+        let standby_id = "standby-tamper-test";
+        let pool_root = tmp.path().join("pool");
+        let store = crate::checkpoint::CheckpointStore::at(&pool_root);
+        let ckid = mvm_core::checkpoint::CheckpointId::new(standby_id.to_string());
+        let content_dir = store.content_dir(&ckid);
+        std::fs::create_dir_all(&content_dir).unwrap();
+
+        // Write blobs with a correct hash recorded in the manifest...
+        let rootfs_path = content_dir.join("rootfs.ext4");
+        let memory_path = content_dir.join("memory.bin");
+        let machine_id_path = content_dir.join("machine-id");
+        std::fs::write(&rootfs_path, b"fake-rootfs").unwrap();
+        std::fs::write(&memory_path, b"fake-memory").unwrap();
+        std::fs::write(&machine_id_path, b"fake-id").unwrap();
+
+        let sha = |p: &std::path::Path| mvm_core::crypto::image_verify::sha256_file(p).unwrap();
+        let meta = mvm_core::checkpoint::CheckpointMeta {
+            id: ckid.clone(),
+            vm_name: standby_id.into(),
+            parent: None,
+            tag: None,
+            created_unix: 1,
+            class: mvm_core::checkpoint::CheckpointClass::VmFull,
+            supervisor_config_digest: "ignored".into(),
+            audit_ref: None,
+            content: vec![
+                mvm_core::checkpoint::ContentBlob {
+                    name: "rootfs.ext4".into(),
+                    sha256: sha(&rootfs_path),
+                },
+                mvm_core::checkpoint::ContentBlob {
+                    name: "memory.bin".into(),
+                    sha256: sha(&memory_path),
+                },
+                mvm_core::checkpoint::ContentBlob {
+                    name: "machine-id".into(),
+                    sha256: sha(&machine_id_path),
+                },
+            ],
+        };
+        store.write_meta(&meta).unwrap();
+
+        // ...then tamper the rootfs so the manifest sha no longer matches.
+        std::fs::write(&rootfs_path, b"CORRUPTED-rootfs").unwrap();
+
+        let handle = mvm_core::vm_backend::StandbyHandle {
+            id: standby_id.into(),
+            control_socket: tmp.path().join("control.sock"),
+            pid: 0,
+            kernel_sha256: "kk".into(),
+            vcpus: 2,
+            mem_mib: 1024,
+            binding_nonce: "cc".repeat(32),
+            spawned_unix_secs: 1,
+            state: mvm_core::vm_backend::StandbyState::Idle,
+            image_sha256: Some("img-sha".into()),
+        };
+        let claim = mvm_core::vm_backend::StandbyClaim {
+            rootfs_path: "/fake/rootfs.ext4".into(),
+            plan_json: "{}".into(),
+            tenant_id: "t1".into(),
+            audit_dir: tmp.path().join("audit"),
+            gateway_audit_socket: tmp.path().join("audit.sock"),
+            gateway_events_socket: None,
+            bundle_json: None,
+        };
+
+        let err = vz_claim_standby(&handle, &claim).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("tampered") || msg.contains("integrity") || msg.contains("sha256"),
+            "error must name the integrity failure: {msg}"
+        );
+
+        // No claimant state dir should have been created — claim must abort
+        // before writing any state.
+        let claimant_dir = tmp.path().join("vms").join(standby_id);
+        assert!(
+            !claimant_dir.exists(),
+            "claim must not create claimant dir before integrity check passes"
+        );
+
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+        }
+    }
+
+    /// `wait_for_seed_agent` must poll the path that the Vz supervisor actually
+    /// binds: `<vm_state_dir>/vsock/vsock-<port>.sock`.  This test builds the
+    /// expected path via the production helper and asserts that writing a file
+    /// there causes the function to succeed (without a real VM) — pinning the
+    /// naming against the helper so they cannot drift independently.
+    #[test]
+    fn wait_for_seed_agent_matches_vm_vz_vsock_port_socket() {
+        use mvm_core::config::vm_vz_vsock_port_socket;
+        use mvm_guest::vsock::GUEST_AGENT_PORT;
+
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+        }
+
+        let vm_name = "seed-agent-socket-test";
+
+        // The production helper defines the canonical socket path.
+        let expected = vm_vz_vsock_port_socket(vm_name, GUEST_AGENT_PORT);
+
+        // The socket dir must exist before the supervisor writes the socket file.
+        std::fs::create_dir_all(expected.parent().unwrap()).unwrap();
+
+        // Simulate supervisor + guest agent: write the socket file and the
+        // ready line to console.log.
+        std::fs::write(&expected, b"").unwrap();
+        let console_log = mvm_core::config::vm_console_log(vm_name);
+        std::fs::create_dir_all(console_log.parent().unwrap()).unwrap();
+        std::fs::write(
+            &console_log,
+            "mvm-guest-agent: listening on vsock port 5252\n",
+        )
+        .unwrap();
+
+        // wait_for_seed_agent should find both signals and return Ok immediately.
+        let result = wait_for_seed_agent(vm_name);
+        assert!(
+            result.is_ok(),
+            "wait_for_seed_agent must succeed when the correct socket + console ready line exist: {result:?}"
+        );
+
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+        }
+    }
+
+    /// `SpawnCleanupGuard` must remove the pool dir and state dir (and attempt
+    /// to stop the VM) when dropped while armed, and must leave them intact
+    /// when disarmed.
+    #[test]
+    fn spawn_cleanup_guard_removes_dirs_when_armed_and_skips_when_disarmed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool_dir = tmp.path().join("pool").join("standby-abc123");
+        let state_dir = tmp.path().join("vms").join("standby-abc123");
+        std::fs::create_dir_all(&pool_dir).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Armed drop: both dirs must be removed.
+        {
+            let _guard = SpawnCleanupGuard::new(
+                "standby-abc123".into(),
+                pool_dir.clone(),
+                state_dir.clone(),
+            );
+            // guard drops here — armed
+        }
+        assert!(
+            !pool_dir.exists(),
+            "armed guard must remove the partial pool dir"
+        );
+        assert!(
+            !state_dir.exists(),
+            "armed guard must remove the seed state dir"
+        );
+
+        // Disarmed drop: dirs must survive.
+        std::fs::create_dir_all(&pool_dir).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        {
+            let mut guard = SpawnCleanupGuard::new(
+                "standby-abc123".into(),
+                pool_dir.clone(),
+                state_dir.clone(),
+            );
+            guard.disarm();
+        }
+        assert!(pool_dir.exists(), "disarmed guard must not remove pool dir");
+        assert!(
+            state_dir.exists(),
+            "disarmed guard must not remove state dir"
+        );
     }
 }

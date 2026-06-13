@@ -2221,6 +2221,8 @@ are hard-refused at fork time (gvproxy-only invariant). The child's
 supervisor config carries its own plan, tenant, and audit substrate —
 the parent's plan is not reused.
 
+**2026-06-13: Vz warm pool (saved-standby) live.** `pool warm` boots a seed, captures its memory+rootfs into the pool, stops it (pid=0 saved standby); `up --warm-pool-size N` then claims a compatible standby — "Claimed a warm standby — skipping cold boot" fires, the restored VM is alive and pause/resume-responsive. Latency is workload-dependent: on the trivially-fast default image a warm claim (~2.3 s) matches a cold boot (~2.1 s) because restoring 512 MiB of memory costs about what a tiny guest's cold boot does; the reclaim materializes for heavy-init workloads. Two live-found bugs fixed: the gateway-bridge drainer now decodes the signed plan envelope (not a bare plan), and the seed supervisor-config is persisted into the pool dir (the seed's own dir is torn down at stop).
+
 ### Sprint 55 success criteria
 
 - Phase A acceptance: `mvm-vz-supervisor` boots the dev-shell image
@@ -2808,3 +2810,15 @@ broken" comment is STALE — `run_with_bridge` boots end-to-end today). Two real
 - [ ] Independent bug: `libkrun_sys::home_mvm_keys_dir()` hardcodes `$HOME/.mvm/keys` and
   ignores `MVM_DATA_DIR`, so `validate_audit_substrate` rejects an isolated data dir. Route
   it through `mvm_core::config`.
+
+### Plan 118 WS-1 — Vz saved-standby warm pool (item 3) — DONE
+
+Vz arm of the standby pool ships saved-standby (frozen {rootfs, memory, machine-id} triple
+captured via `capture_vm_full`). No live supervisor after capture — pid=0 sentinel. Claim
+path reuses `build_child_supervisor_config` + `VzChildSupervisorSpawner` (same fork plumbing,
+pool-sourced blobs instead of checkpoint-sourced). Compat key adds `image_sha256: Option<String>` —
+a Vz compat with Some(sha) only matches a standby for the same image; libkrun None is
+unaffected. `reap_stale` skips liveness for pid=0 entries (TTL-only eviction).
+`mvmctl pool warm --rootfs <path>` is the Vz entry point; doctor reports `vz=true` on
+macOS 14+. All libkrun pool tests pass untouched. 298 mvm-backend lib tests, 974 mvm-cli
+tests, 5117 workspace tests all green.

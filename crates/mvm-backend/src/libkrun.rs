@@ -661,6 +661,7 @@ impl VmBackend for LibkrunBackend {
             binding_nonce: spec.binding_nonce.clone(),
             spawned_unix_secs: now_unix_secs(),
             state: StandbyState::Idle,
+            image_sha256: None, // libkrun standbys are image-agnostic
         })
     }
 
@@ -915,6 +916,8 @@ mod tests {
             binding_nonce: "ab".repeat(32),
             control_socket: "/p/standby-x/control-ab.sock".into(),
             vm_state_dir: "/vms/standby-x".into(),
+            image_path: None,
+            image_sha256: None,
         }
     }
 

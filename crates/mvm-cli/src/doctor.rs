@@ -2754,13 +2754,14 @@ mod tests {
                 ("vz".to_string(), vz_warm_start),
             ]
         );
+        let vz_standby = AnyBackend::from_hypervisor("vz").supports_standby_pool();
         assert_eq!(
             ordered_standby_pool,
             vec![
                 ("firecracker".to_string(), false),
                 ("libkrun".to_string(), true),
                 ("qemu".to_string(), false),
-                ("vz".to_string(), false),
+                ("vz".to_string(), vz_standby),
             ]
         );
     }
@@ -2768,10 +2769,11 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_standby_pool_per_backend() {
         let r = collect_warm_start_support();
-        // Only libkrun implements the standby pool today; the rest
-        // report honest `false` and must not be silently dropped.
+        // libkrun and Vz (on macOS 14+) implement the standby pool; FC and QEMU do not.
+        // Report honest values for every backend; none may be silently dropped.
         assert_eq!(r.standby_pool.get("libkrun"), Some(&true));
-        assert_eq!(r.standby_pool.get("vz"), Some(&false));
+        let vz_standby = AnyBackend::from_hypervisor("vz").supports_standby_pool();
+        assert_eq!(r.standby_pool.get("vz"), Some(&vz_standby));
         assert_eq!(r.standby_pool.get("qemu"), Some(&false));
     }
 

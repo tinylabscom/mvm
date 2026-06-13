@@ -25,6 +25,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 178** — CLI surface consolidation (~56→~28) · ✅ (dir-purity deferred)
 - [x] **PLAN 129** — Secrets / SigV4 substitution · ✅ **COMPLETE** — both tiers (declared substitution incl. SigV4/HMAC bind-checked + undeclared detection), terminator-path + vsock, claim-12/13 leak-gate (claim 16), endpoint self-confines (Landlock+seccomp jailer); QEMU clean-room e2e GREEN; FC bringup fixes landed (#804); live-FC e2e spun out (builder-VM box infra, not plan logic)
 - [ ] **PLAN 152** — Rust-native VZ supervisor · 🟢 native objc2, Swift deleted; WS-C/D separate workstreams
+- [ ] **PLAN 118** — Supervisor standby pool · 🟡 libkrun + Vz done; FC follow-up open
 - [ ] **PLAN 159** — vz-inspired macOS VZ DX · 🟡 warm pool + checkpoint/fork shipped; WS-5 D + delta-image remain
 - [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C2/C3 (FC/Vz warm-start) gated
 - [ ] **PLAN 124** — Lean guest agent · 🟡 ~65%; SDK codegen + signed on-device config remain
@@ -213,14 +214,8 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
   [x] WS-4 resumable + honest-cost dev-image download — PR #667
   [x] WS-5 E streamed exec (ExecEvent) — PR #712 (plan-172)
   [x] WS-5 E follow-up: enforce exec timeout_secs — plan-173
-  [x] WS-1 warm pool (Plan 118): 1a primitive + 1b-i trait seam/registry/libkrun
-      + 1b-ii reaper/doctor/`mvmctl pool`/bench-fix + 1b-iii up auto-claim
-      (try_warm_claim/replenish/--warm-pool-size, fail-open) + bundled-kernel
-      compat key — libkrun mkGuest warm claim FIRES end-to-end (#757/#758,
-      live-validated "Claimed a warm standby"). Bridge boot also live-validated
-      (exit 7; up.rs "bridge broken" comment stale). Follow-ups (non-blocking,
-      SPRINT.md): multi-kernel keying; pool-status liveness filter;
-      home_mvm_keys_dir MVM_DATA_DIR; committed bench delta
+  [x] WS-1 warm pool (Plan 118): libkrun + Vz saved-standby — see PLAN 118 block
+      for the full workstream detail
   [x] WS-2 checkpoint+fork — fs_quick (#762) + vm_full (#770): mvmctl checkpoint
       create/ls/rm/fork + APFS-CoW capture + integrity-checked fork + lineage +
       checkpoint.created/forked/restored audit + fs_quick+vm_full capability +
@@ -247,6 +242,27 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       follow-ups.
   [x] instant memory fork: vm_full fork of a RUNNING parent → second live VM in
       0.91s incl. claim-8 admission (same-identity clone model; recorded-sha admission; gvproxy-only invariant)
+
+PLAN 118 — Supervisor standby pool              🟡 libkrun + Vz done; FC follow-up open
+  [x] 1a primitive + 1b-i trait seam/registry/libkrun + 1b-ii reaper/doctor/`mvmctl pool`
+      /bench-fix + 1b-iii up auto-claim (try_warm_claim/replenish/--warm-pool-size,
+      fail-open) + bundled-kernel compat key — libkrun mkGuest warm claim FIRES
+      end-to-end (live-validated "Claimed a warm standby")
+  [x] Vz saved-standby warm pool: per-image spawn (seed boot → capture_vm_full →
+      pid=0 handle), claim (verify_content → clone blobs → build_child_supervisor_config
+      → VzChildSupervisorSpawner), image_sha256 compat key (mismatch = no-match, not
+      error), TTL-only reap for pid=0 standbys, --rootfs CLI flag, doctor reports
+      vz=true on macOS 14+. All libkrun pool tests untouched.
+      LIVE-VALIDATED 2026-06-13: warm 6.5s, "Claimed a warm standby — skipping
+      cold boot" FIRES, claimed VM alive + pause/resume responsive. Two bugs
+      found+fixed live: gateway-bridge drainer decoded a bare plan where up
+      threads the signed envelope (now decodes both shapes); spawn discarded the
+      seed config instead of persisting it to the pool (claim then read a
+      torn-down dir). HONEST latency: on the trivially-fast default image
+      warm-claim 2.3s ~= cold 2.1s (restoring 512 MiB costs ~a tiny guest's cold
+      boot); the reclaim is real for heavy-init workloads, marginal here.
+  [ ] Firecracker standby pool (the mvmd-facing deliverable) — gated on FC standby
+      follow-up; not blocking current libkrun/Vz use
 
 PLAN 183 — Builder-VM egress posture + net boot ✅ DONE (follow-ups tracked in plan)
   Last updated: 2026-06-12
