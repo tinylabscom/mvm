@@ -190,16 +190,22 @@ core security features are a compile-time obligation on workload backends.
 
 ## Implementation outline (the companion plan expands this into TDD tasks)
 
-**Phase 1 — type-bar the funnel (executable now):**
-- [ ] Define `WorkloadBackend: VmBackend` (marker, no methods yet).
-- [ ] `impl WorkloadBackend` for Firecracker / libkrun / vz; deliberately
+**Phase 1 — type-bar the funnel (executable now): ✅ IMPLEMENTED** on
+`feat/plan-197-workload-backend` (commits `5e4af04b`, `5b076601`, `0eba1624`,
+`a1c4fd4d`); spec + quality reviewed; workspace build / clippy / nightly-fmt
+green. Pending merge.
+- [x] Define `WorkloadBackend: VmBackend` (marker, no methods yet).
+- [x] `impl WorkloadBackend` for Firecracker / libkrun / vz; deliberately
       not for `qemu` / `mock`.
-- [ ] Retype the admitted workload-launch dispatch to `&dyn WorkloadBackend`;
-      confirm `qemu`/`mock` no longer satisfy the workload path (compile-fail
-      demonstration).
-- [ ] Decide `BackendSecurityProfile`'s frozen claim array: repoint doctor
-      at the trait/tier or leave as advisory; record the decision.
-- [ ] ADR amendment for the type-enforced tier split.
+- [x] Type-bar the admitted launch path: `AnyBackend::as_workload_backend`
+      (exhaustive match) + `require_workload_backend` guard wired into all
+      three admitted `up.rs` launch arms; `qemu`/`mock` refused before
+      `.start()`. (Coverage verified incl. the warm-claim path, which is
+      structurally workload-only.) Note: the "compile-fail" guarantee is the
+      `as_workload_backend` `None` arm + the marker bound, not a trybuild case.
+- [x] `BackendSecurityProfile` decision: kept **advisory** (drives `doctor`
+      posture); enforcement is the type-bar. Recorded in its doc comment.
+- [x] ADR amendment: ADR-083 added; ADR-002 tier matrix cross-refs it.
 
 **Phase 2 — funnel-ize substitution + macOS build (design spike first):**
 - [ ] Design spike: resolve the macOS terminator (rvproxy vs. standalone)
