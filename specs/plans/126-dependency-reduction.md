@@ -136,7 +136,7 @@ rather than a new xtask.
 
 ## Acceptance
 
-- [ ] `dep-baseline.md` records the method + the 735 baseline + each task's delta (no asserted numbers — measured).
+- [x] `dep-baseline.md` records the method + the baseline + the Phase D final measure (all numbers measured, never asserted): default binary closure 407→347 (−60), lockfile 722→683 (−39); per-target outcomes (sigstore/opendal/pgp out of the default closure, aws-lc-rs still in / B4 blocked) and the four ratchets that hold the cut.
 - [ ] `sigstore` out of the `mvmctl` default (cosign verify relocated to mvmd; claim 14's audit-label path intact); `opendal`→`object_store`; `pgp`→`minisign`; `aws-lc-rs` gone (`cargo tree -i aws-lc-rs` empty, C/cmake build removed).
 - [ ] One major each for `reqwest`/`oci-client` (`cargo tree -d` clean for them).
 - [ ] `check-forbidden-deps` trips if any of the four re-enter the default closure.

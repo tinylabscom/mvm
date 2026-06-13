@@ -166,3 +166,52 @@ remaining work, honestly scoped:
    sequenced with 123.
 4. **D1** — the forbidden-dep gate (sibling of `check-core-runtime-free`
    from B5).
+
+## Final measure (plan 126 Phase D close-out)
+
+Re-measured 2026-06-13 on `main`, with the **same canonical commands** as
+the A1 baseline above (apples-to-apples):
+
+| Metric | A1 (`bb1cbcbe`) | Now | Delta |
+|---|---|---|---|
+| Default binary closure (method 1) | 407 | **347** | **−60** (~15%) |
+| Full lockfile (method 2) | 722 | **683** | **−39** |
+
+Per-target final state in the default closure:
+
+| Target | A1 | Now | What happened |
+|---|---|---|---|
+| `sigstore` | out (feature-gated) | **out** | unchanged — only a `manifest-verify` build pays for it (that build's closure is 442). |
+| `opendal` | out (feature-gated) | **out** | unchanged — only a `template-registry-s3` build pays. |
+| `pgp` (rpgp) | **in** (168-crate subtree) | **out** | removed not via this plan's B3 options but by **plan 160** — the Stage-0 seed moved off the Alpine minirootfs (busybox tarball, no upstream-PGP-signed artifact), so `verify_alpine_pgp_signature` and its rpgp closure are gone. This is the bulk of the −60. |
+| `aws-lc-rs` | **in** (16 + a C build) | **in** | still the sole heavy default-closure target — **B4 remains blocked** (`oci-client` hardcodes aws-lc in its only rustls option; needs a fork/replace + reqwest-major unify + a TLS smoke, not a config change). |
+
+The −60 is **not** all plan 126: the dominant contributor is plan 160's
+Alpine→busybox Stage-0 seed (pgp), with the duplicate-major dedup (D2)
+and the confirmed-stable `sigstore`/`opendal` gating accounting for the
+rest. Honestly attributed rather than claimed.
+
+### What now keeps it cut (the ratchets)
+
+The reduction is held by four CI-runnable gates, so a regression fails
+rather than silently creeping back:
+
+- **`check-forbidden-deps`** (D1) — `sea-*`/`mysql` banned from
+  `Cargo.lock`, and `sigstore`/`opendal`/`pgp` banned from `mvmctl`'s
+  default-feature closure (closure-based, since they legitimately remain
+  in the lock behind off-by-default features). `aws-lc-rs` is
+  deliberately *not* banned while B4 is blocked.
+- **`check-core-runtime-free`** (B5) — `tokio` stays out of `mvm-core`'s
+  default closure.
+- **cargo-deny `multiple-versions = deny`** (D2) — the duplicate-major set
+  is frozen behind an audited skip baseline.
+- **cargo-deny / cargo-audit** (D2) — advisory + license drift.
+
+### Remaining work (unchanged, decision-gated)
+
+- **B4 + C1** (`aws-lc-rs`, −16 + a C build): blocked upstream by
+  `oci-client`; needs the reqwest-major unify + a fork/feature that avoids
+  `rustls-platform-verifier`, plus a TLS-connect smoke.
+- **B1 / B2**: no default-build benefit left; only the cross-repo sigstore
+  relocation + the `opendal`→`object_store` feature-build swap remain,
+  sequenced with plan 123.
