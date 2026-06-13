@@ -953,6 +953,11 @@ fn restore_with_spawn(
             "snapshot_restore failed; removing cloned rootfs to allow retry"
         );
         let _ = std::fs::remove_file(&target_rootfs);
+        // `snapshot_restore` spawns a fresh gvproxy before the supervisor; a
+        // restore that dies after that spawn leaves the sidecar running with
+        // its PID file in place, which the next retry's spawn would orphan.
+        // Reap it here so a failed restore frees its own resources.
+        let _ = host_gvproxy::stop_by_pid_file(&vm_state_dir(target_vm));
     }
 
     restore_result
@@ -2673,6 +2678,12 @@ mod tests {
         let target_rootfs = state_dir.join("rootfs.ext4");
         write_supervisor_config(&state_dir, "restore-cleanup-vm", &target_rootfs);
 
+        // Stand in for the gvproxy `snapshot_restore` spawns before the
+        // supervisor: a PID file naming a dead process. A failed restore must
+        // reap it so a retry doesn't orphan the sidecar.
+        let gvproxy_pid = state_dir.join("host-gvproxy.pid");
+        std::fs::write(&gvproxy_pid, "2147483647").unwrap();
+
         let backend = VzBackend;
         let err = restore_with_spawn(
             &backend,
@@ -2692,6 +2703,11 @@ mod tests {
         assert!(
             !target_rootfs.exists(),
             "cloned rootfs must be removed after restore failure"
+        );
+        // The orphaned gvproxy PID file must have been reaped.
+        assert!(
+            !gvproxy_pid.exists(),
+            "gvproxy pid file must be reaped after restore failure"
         );
 
         // SAFETY: serialized by HOME_TEST_LOCK.
