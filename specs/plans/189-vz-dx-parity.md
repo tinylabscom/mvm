@@ -59,13 +59,32 @@ The dev-image fingerprint fast-path exists (`ensure_dev_image` skips the builder
 VM on a fingerprint match). Make cached fast-boot the *default* posture across
 the vz boot surface, not just the dev image.
 
-- [ ] who-calls audit: enumerate every vz boot entry (`dev up`, `up`,
-      `VzPersistentBuilderVm`) and where each does/doesn't honor a cached
-      artifact fast-path.
-- [ ] make fingerprint-match fast-boot the default; loud, observable cache
-      decision when it misses (reuse the existing `cache decision` reason-code).
+- [x] **who-calls audit** — enumerated every vz boot entry; each already honors
+      a fast-path or is cache-hit-only:
+      - `dev up` → dev-image (`ensure_dev_image`): fingerprint fast-path
+        ("Fix A") for the source checkout + version-keyed cache for the
+        published prebuilt. ✅
+      - `dev up` → builder-VM bootstrap (`resolve_builder_vm_bootstrap_action`
+        → `UseCached`): fingerprint fast-path. Plan 195 removed the
+        whole-`Cargo.lock` churn that made this miss on most runs. ✅
+      - `dev up` → persistent dev VM (`VzPersistentBuilderVm`): reuse-if-alive
+        via PID-liveness → `already-running` (the running-VM-reuse dimension,
+        adjacent to the Plan 118 warm pool). ✅
+      - `mvmctl up` (workload): cache-hit-only (`driver = None`) — never spawns
+        the builder VM; deps-volume + runtime-overlay resolution are pure cache
+        reads that fall back to a legacy boot on a cold cache. ✅
+      Finding: **the surface is already fast-boot-default**; the gap this
+      workstream was written against (only the dev image had the fast-path)
+      was closed by prior incremental work, and Plan 195 made the builder-VM
+      leg reliably *hit*.
+- [x] **observable cache decision** — the dev-image and builder-VM legs already
+      log the `cache decision` reason-code via `ui::progress`, and a dev-image
+      hit logs a success line. No entry rebuilds silently.
 - [ ] acceptance: a warm `dev up` on macOS-26 skips the builder VM and reaches
-      guest-agent-ready in the fast-path budget.
+      guest-agent-ready in the fast-path budget. **Converges with the Plan 195
+      live validation** (a warm `dev up` hitting the cache) — run both in one
+      pass on a quiet box. Only remaining WS-2 item; no new implementation
+      required.
 
 ## WS-3: `--json` coverage
 
