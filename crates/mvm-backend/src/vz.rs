@@ -142,7 +142,7 @@ const SUPERVISOR_CONFIG_FILE_NAME: &str = "supervisor-config.json";
 /// Canonical path to a VM's persisted supervisor config inside its state dir.
 /// The single source of truth for the file name so callers (e.g. the
 /// checkpoint fork path) never re-spell the literal.
-pub(crate) fn supervisor_config_path(state_dir: &Path) -> PathBuf {
+pub fn supervisor_config_path(state_dir: &Path) -> PathBuf {
     state_dir.join(SUPERVISOR_CONFIG_FILE_NAME)
 }
 
@@ -1015,10 +1015,11 @@ impl crate::checkpoint::VmFullControl for VzVmFullControl {
 /// Pure (no I/O, no spawn): the caller passes the already-parsed parent config
 /// and the child's cloned blob paths; this rewrites identity + restore mode.
 ///
-/// - `name` → `child_vm_name` (the new identity), which also re-derives the
-///   gvproxy MAC so the forked guest doesn't collide with the parent on the
-///   network. The MAC is an explicit field on `NetworkConfig::Gvproxy`, so it
-///   must be rewritten here — setting `name` alone is not enough.
+/// - `name` → `child_vm_name` (the new identity).
+/// - MAC stays the parent's: VZ validates the restored machine state against the
+///   saved device configuration and refuses a changed MAC. The clone model is
+///   safe because every VM runs behind its own per-VM gvproxy with no shared L2
+///   segment (the gvproxy-only invariant enforced by `fork_vm_full`).
 /// - `vm_state_dir` → the child's state dir, and every disk `path` is rebased
 ///   into that dir (keeping each disk's basename) so the child boots from its
 ///   OWN cloned rootfs, never the parent's live image.
@@ -1028,19 +1029,19 @@ impl crate::checkpoint::VmFullControl for VzVmFullControl {
 ///
 /// Every per-VM *runtime* path (the sockets/dirs/logs `build_supervisor_config`
 /// derives from `state_dir` or from `name`) is rebased onto the child so the
-/// fork writes its own control/vsock/console and connects its own live gvproxy
-/// — never the parent's (which is dead, since the parent is required stopped):
+/// fork writes its own control/vsock/console and connects its own live gvproxy:
 ///
 /// - `vsock.socket_dir`, `control_socket_path`, `console_output_path`, and the
 ///   gvproxy `socket_path` are rebased onto `child_state_dir`, reusing the same
 ///   basename/sub-path layout the normal builder uses.
-/// - the audit-substrate sockets that key off the VM *name* (gvproxy
-///   `events_ingest_socket_path`, `gateway_audit_socket`) are re-derived for
-///   `child_vm_name` under `~/.mvm/audit/`.
+/// - the audit-substrate sockets that key off the VM *name* (`gateway_audit_socket`)
+///   are re-derived for `child_vm_name` under `~/.mvm/audit/`.
 ///
-/// Identity/claim-8 wiring is INHERITED untouched (`tenant_id`, `plan`,
-/// `bundle`, `audit_dir`, `signing_key_path`): the child is the same tenant's
-/// forked workload, not a new admission.
+/// Claim-8 wiring (`tenant_id`, `plan`, `bundle`, `audit_dir`,
+/// `signing_key_path`, `events_ingest_socket_path`) is CLEARED on the returned
+/// config. The caller (`fork_vm_full`) injects the child's own admitted plan
+/// after this function returns. The child must carry ITS OWN plan, not the
+/// parent's — the supervisor re-verifies the plan under the child's identity.
 pub fn build_child_supervisor_config(
     parent_cfg: &vz::SupervisorConfig,
     child_vm_name: &str,
@@ -1110,6 +1111,30 @@ pub fn build_child_supervisor_config(
         snapshot_path: memory_path.display().to_string(),
         machine_id_path: machine_id_path.map(|p| p.display().to_string()),
     };
+
+    // Clear all claim-8 / audit-substrate fields inherited from the parent.
+    // The caller (`fork_vm_full`) injects the child's own admitted plan after
+    // this function returns; a supervisor that re-verifies with the parent's
+    // plan and child's identity would fail the workload-id check.
+    cfg.tenant_id = None;
+    cfg.plan = None;
+    cfg.bundle = None;
+    cfg.audit_dir = None;
+    cfg.signing_key_path = None;
+    // gateway_audit_socket keys off the VM name — clear so the caller derives
+    // the correct child path from the child's audit substrate.
+    cfg.gateway_audit_socket = None;
+    // events_ingest_socket_path is set on the gvproxy attachment when there is
+    // an admitted plan+tenant; clear now and let fork_vm_full re-enable it once
+    // the child plan is injected.
+    if let Some(vz::NetworkConfig::Gvproxy {
+        ref mut events_ingest_socket_path,
+        ..
+    }) = cfg.network
+    {
+        *events_ingest_socket_path = None;
+    }
+
     Ok(cfg)
 }
 
@@ -2416,7 +2441,8 @@ mod tests {
             balloon: None,
             control_socket_path: Some("/parent/state/parentvm/control.sock".into()),
             startup_mode: vz::StartupMode::Boot,
-            // Identity/claim-8 wiring — inherited untouched by the child builder.
+            // Claim-8 fields present on the parent; build_child_supervisor_config
+            // clears all of them so fork_vm_full can inject the child's own plan.
             tenant_id: Some("tenant-x".into()),
             plan: None,
             bundle: None,
@@ -2459,11 +2485,13 @@ mod tests {
                     "gvproxy socket_path not rebased: {socket_path}"
                 );
                 assert!(!socket_path.contains("/parent/"));
-                // Audit ingest socket re-keyed onto the child name (it keys off
-                // the VM name under ~/.mvm/audit/, not the state dir).
-                let ev = events_ingest_socket_path.as_deref().unwrap();
-                assert_eq!(ev, self::events_ingest_socket_path("childvm"));
-                assert!(!ev.contains("parentvm"));
+                // Claim-8 bridge ingest socket cleared — fork_vm_full re-enables
+                // it after injecting the child's own admitted plan + tenant.
+                assert!(
+                    events_ingest_socket_path.is_none(),
+                    "events_ingest_socket_path must be cleared by build_child_supervisor_config \
+                     so fork_vm_full can re-enable it with the child's identity"
+                );
             }
         }
         // Every per-VM runtime socket/dir/log now lives under the child state
@@ -2491,24 +2519,29 @@ mod tests {
                 "runtime path leaks parent: {field}"
             );
         }
-        // Gateway audit socket re-keyed onto the child name.
-        assert_eq!(
-            child.gateway_audit_socket.as_deref(),
-            Some(gateway_audit_socket_path("childvm").as_str())
+        // Claim-8 / audit-substrate fields cleared — fork_vm_full injects the
+        // child's own plan after this function returns. The child must NOT carry
+        // the parent's plan (the supervisor re-verifies under the child identity).
+        assert!(
+            child.tenant_id.is_none(),
+            "tenant_id must be cleared so fork_vm_full injects the child's identity"
         );
         assert!(
-            !child
-                .gateway_audit_socket
-                .as_deref()
-                .unwrap()
-                .contains("parentvm")
+            child.plan.is_none(),
+            "plan must be cleared so fork_vm_full injects the child's admitted plan"
         );
-        // Identity / claim-8 wiring INHERITED untouched.
-        assert_eq!(child.tenant_id.as_deref(), Some("tenant-x"));
-        assert_eq!(child.audit_dir.as_deref(), Some("/parent/audit"));
-        assert_eq!(
-            child.signing_key_path.as_deref(),
-            Some("/parent/keys/host-signer.ed25519")
+        assert!(
+            child.audit_dir.is_none(),
+            "audit_dir must be cleared so fork_vm_full re-derives it for the child"
+        );
+        assert!(
+            child.signing_key_path.is_none(),
+            "signing_key_path must be cleared so fork_vm_full re-derives it"
+        );
+        assert!(
+            child.gateway_audit_socket.is_none(),
+            "gateway_audit_socket must be cleared; it keys off VM name and is re-derived \
+             by fork_vm_full with the child's identity"
         );
         // Restore mode pointing at the child's memory + inherited machine-id.
         match &child.startup_mode {

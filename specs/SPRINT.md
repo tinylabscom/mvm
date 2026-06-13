@@ -2205,6 +2205,21 @@ Sidecar propagation made instance dirs self-describing (mvm-meta.json
 travels with rootfs clones and checkpoint content), which is what lets
 checkpoint-derived rootfs trees pass the runtime-meta boot gate.
 
+**2026-06-13: instant memory fork productized.** The vm_full fork arm now
+admits a fresh claim-8 plan for the forked child before spawning it.
+The working model is semantic B without the stopped-parent constraint:
+VZ validates the restored machine state against the saved device
+configuration, so MAC and machine-id are fixed by the snapshot — the
+child keeps them, which is safe because every VM runs behind its own
+per-VM gvproxy with no shared L2 segment. Forking a RUNNING parent
+(the spike result: 0.87 s wall-time to a second live VM with both
+control planes responsive) is now the production contract.
+`--cpus`/`--memory` are refused on vm_full forks with a clear error
+pointing to fs_quick for resize; bridge-style non-gvproxy attachments
+are hard-refused at fork time (gvproxy-only invariant). The child's
+supervisor config carries its own plan, tenant, and audit substrate —
+the parent's plan is not reused.
+
 ### Sprint 55 success criteria
 
 - Phase A acceptance: `mvm-vz-supervisor` boots the dev-shell image

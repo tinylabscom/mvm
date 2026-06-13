@@ -193,10 +193,11 @@ snapshots to the `apple_container` runtime tier (currently
       the backend can't honor it. `snapshot save`/`snapshot restore` retired.
 - [x] `restore_checkpoint` — same-identity resume from `vm_full` state;
       re-hashes blobs, records `checkpoint.restored` audit entry.
-- [x] `vm_full` **fork arm** — new-identity restore (rewrite config,
-      fresh audit lineage, `checkpoint.forked` entry). First-class **fork**:
-      branch a new sandbox lineage from a checkpoint (`fork <ckpt> [--new-id]`),
-      reusing the per-instance CoW clone we already do.
+- [x] `vm_full` **fork arm** — clone-identity restore (new vm_name, inherited
+      MAC/machine-id, own admitted `ExecutionPlan`, `checkpoint.forked` entry).
+      Parent may be running at fork time (sources sealed checkpoint content, not
+      live disks). Gvproxy-only network invariant enforced; `--cpus`/`--memory`
+      refused (use `fs_quick` to resize). Measured at ~0.87 s second-VM boot.
 - [ ] `checkpoint diff <a> <b>` — versioned diff between two checkpoints
       (the reference's `diff` verb), for inspecting what a fork changed.
       **(PR3)**

@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-12** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full)
+**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -244,6 +244,8 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       restore to the saved device config → stay semantic B; live two-copy fork
       goes through fs_quick). Vz checkpoint-integration gaps → Plan 183
       follow-ups.
+  [x] instant memory fork: vm_full fork of a RUNNING parent → second live VM in
+      0.87s (same-identity clone model; admitted child; gvproxy-only invariant)
 
 PLAN 183 — Builder-VM egress posture + net boot ✅ DONE (follow-ups tracked in plan)
   Last updated: 2026-06-12
