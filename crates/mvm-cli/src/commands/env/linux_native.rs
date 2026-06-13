@@ -33,7 +33,7 @@ use mvm_backend::firecracker;
 /// Bootstraps the host-side Firecracker prerequisites and prints a
 /// summary. With `open_shell`, spawns a fresh `bash -i` after setup
 /// so the user lands in a shell with the dev environment ready.
-pub(super) fn cmd_dev_linux_native(open_shell: bool) -> Result<()> {
+pub(super) fn cmd_dev_linux_native(open_shell: bool) -> Result<&'static str> {
     if !firecracker::is_installed()? {
         ui::info("Firecracker not installed — installing...");
         firecracker::install()?;
@@ -58,7 +58,9 @@ pub(super) fn cmd_dev_linux_native(open_shell: bool) -> Result<()> {
     if open_shell {
         spawn_subshell()?;
     }
-    Ok(())
+    // The host shell is the dev environment on native Linux/KVM; there is
+    // no managed VM to "start".
+    Ok("host-native")
 }
 
 /// `mvmctl dev down` on Linux+KVM.
