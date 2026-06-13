@@ -307,9 +307,18 @@ Two independent defects blocked `mvmctl up --flake <workload> --hypervisor vz`:
   fixed: `snapshot_restore` spawns gvproxy via `host_gvproxy::spawn_detached`
   when config has Gvproxy network; `restore_with_spawn` removes the cloned
   rootfs on any post-clone failure and errors actionably on pre-existing target.
-- [ ] restore-failure leaks the freshly-spawned gvproxy (supervisor never
+- [x] restore-failure leaks the freshly-spawned gvproxy (supervisor never
   wrote its PID, the sidecar lingers; the retry orphans it) — reap the
   sidecar on the restore error path, consistent with `start()`'s behavior.
+  fixed: `restore_with_spawn`'s error arm now also calls
+  `host_gvproxy::stop_by_pid_file` after removing the cloned rootfs.
+- [x] Vz template memory snapshots (Plan 123 C2/C3) — SUBSUMED by the Plan 118
+  Vz warm pool, not built separately. A warm saved-standby IS a per-image memory
+  snapshot pre-warmed and instantly claimed; `up`'s legacy
+  `restore_from_template_snapshot` arm stays Firecracker-only and is unreachable
+  on Vz (no Vz template-snapshot *save* path exists, so `snapshot_info` is always
+  `None` there → the arm never fires). Building a parallel Vz template-restore
+  path would duplicate the warm pool for marginal benefit.
 - [x] Vz two-copy fork: `checkpoint fork --boot` admits the child under a fresh
   plan (claim 8), passes the instance rootfs path so `prepare_instance_rootfs`
   returns early (no clobber), resource shape: flags > parent plan > defaults, and
