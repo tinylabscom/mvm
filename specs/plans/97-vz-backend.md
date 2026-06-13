@@ -1,72 +1,48 @@
 # Plan 97 — `Virtualization.framework` backend (`vz`)
 
-> **Status (2026-05-22):** Phases A, B, D, E complete. Workload microVM
-> path is end-to-end functional on macOS 13+: `MVM_BACKEND=vz mvmctl
-> up` admits, builds the `SupervisorConfig`, spawns the codesigned
-> Swift supervisor, runs the VM, manages its PID/lifecycle, and
-> `mvmctl doctor` surfaces availability + supervisor-binary presence.
-> CI lane `vz-macos` matrices the build over macos-13 + macos-latest.
-> Rust supervisor-JSON fuzz target wired into `security.yml`.
+> **Status (2026-06-13): COMPLETE — see the "Closeout" section at the
+> end of this file.** All five phases (A/B/C/D/E) shipped and are
+> live-proven on macOS-26 Apple Silicon: build→admit→boot→run,
+> checkpoint/fork/warm pool, snapshot save/restore, pause/resume, and the
+> Rust-native objc2 supervisor (the Swift `mvm-vz-supervisor` crate was
+> deleted under the supervisor-rewrite work — the JSON config surface and
+> vsock bridges are unchanged). Claims 1–9 hold under vz. Egress secret
+> substitution (Plan 129) is a Linux-only feature; vz is at parity with
+> the macOS libkrun baseline and the macOS port is a tracked fast-follow,
+> not a closeout item.
 >
-> **Phase E (closed)** — supervisor control socket + pause / resume /
-> balloon / snapshot SAVE + RESTORE all landed.
-> `crates/mvm-vz-supervisor/Sources/mvm-vz-supervisor/ControlSocket.swift`
-> handles SAVE (also writes a `<snapshot_path>.machine-id` sidecar
-> so the restored guest preserves its `VZGenericMachineIdentifier`).
-> `Supervisor.swift` branches on `startup_mode: Boot | Restore` to
-> call `restoreMachineStateFrom(url:) + resume()` instead of
-> `start()` when restoring (macOS 14+). `VzBackend::start` persists
-> its assembled `SupervisorConfig` at
-> `~/.mvm/vms/<vm>/supervisor-config.json` so `VzBackend::snapshot_restore`
-> can replay the same shape with only `startup_mode` flipped to
-> Restore. `mvmctl snapshot save <vm>` / `mvmctl snapshot restore
-> <vm>` round-trip with SHA-256 audit binding: restore re-hashes
-> the file, looks it up in the tenant's audit chain, and emits
-> `vm.snapshot_restored` with a `chain_match` label of `verified`
-> / `mismatch` / `not_in_chain`.
+> The banner below this line is historical (the original 2026-05-22
+> Swift-era status); the Closeout section is the current source of truth.
+> The narrative and changelog that follow are preserved as history.
 >
-> **CI macOS 26 lane** wired as `vz-macos-26` in
-> `.github/workflows/ci.yml`. Gated on `vars.MACOS_26_AVAILABLE` so
-> the job is inert until a self-hosted Apple Silicon runner is
-> registered with labels `[self-hosted, macOS, ARM64, macos-26]`.
-> `continue-on-error: true` keeps a flaky self-hosted runner from
-> gating PRs while the lane is observational.
->
-> **Parked as multi-session follow-ups:**
-> - **Phase C** (Vz as a builder-VM backend) — `VzBuilderVm` impl
->   landed (`crates/mvm-build/src/vz_builder.rs`, commit 510cd968) on
->   the shared `builder_vm_runtime` seam. Stage 0 audit + cache-prune
->   contract participation is pinned by
->   `reap_picks_up_orphaned_vz_builder_state_dir` (Plan 99 PR-1). The
->   only remaining blocker on Phase C acceptance is the
->   kernel-direct-boot path — the libkrun image's kernel won't boot
->   under `VZLinuxBootLoader`. Plan 92's slim builder-VM kernel
->   already includes everything Vz needs (`VIRTIO_PCI=y`, `PCI=y`,
->   no TSI patches); landing plan 92 + a host-side Vz smoke flip
->   Phase C green. Tracked under Plan 99 PR-2.
->
-> Pick-up command for fresh sessions: read this file top to bottom, then
-> jump to the next unchecked item in the **Progress checklist** below.
+> Pick-up command for fresh sessions: read the **Closeout** section at the
+> end of this file first; the body below is background.
 
 ## Progress checklist
 
 Top-level phases:
 
-- [x] **Phase A** — `mvm-vz-supervisor` Swift binary
+- [x] **Phase A** — supervisor binary. *Originally a Swift
+      `mvm-vz-supervisor`; replaced by the Rust-native objc2 supervisor
+      (the Swift crate was deleted) — the JSON config surface and vsock
+      bridges are unchanged. Live-proven 2026-06-12: first Vz workload
+      boot with the guest agent reachable on vsock.*
 - [x] **Phase B** — `VzBackend` impl in `crates/mvm-backend/src/vz.rs`
-- 🟡 **Phase C** — Vz as a builder-VM backend. *Primitive landed
-      (`VzBackend::run_attached`); orchestration layer
-      (`VzBuilderVm` impl of `BuilderVm`) is its own slice gated on
-      either mirroring or refactoring `LibkrunBuilderVm`'s ~3,300
-      lines of substrate.*
+- [x] **Phase C** — Vz as a builder-VM backend. *Primitive
+      (`VzBackend::run_attached`) plus the full persistent driver
+      (`VzPersistentBuilderVm`) shipped: backend consolidation converged
+      `mvmctl dev` + `up -d` onto it, and a cold `dev up --builder vz`
+      built the image end-to-end (703 in-builder fetches, 0 resolve
+      failures, claim-11 gates green) on 2026-06-12.*
 - [x] **Phase D** — ADR-056 lands + ADR-002 backend table update
-- [x] **Phase E** — Snapshot save + pause/resume/balloon via
+- [x] **Phase E** — Snapshot save/restore + pause/resume/balloon via
       supervisor control socket (macOS 14+ for SAVE).
       `<vm_state_dir>/control.sock` mode 0700; newline-framed
       PAUSE / RESUME / STATUS / BALLOON / SAVE protocol; Rust
       `vz_control::send_command` + `VzBackend::{pause,resume,
-      balloon_set_target,snapshot_save}` wired through. RESTORE
-      stays a follow-up (different supervisor startup mode).
+      balloon_set_target,snapshot_save}` wired through. RESTORE shipped:
+      `vm_full` memory save/restore (`saveMachineStateToURL`) round-trips
+      live, including a responsive control plane on the restored VM.
 
 Phase A sub-tasks:
 
@@ -86,16 +62,16 @@ Phase A sub-tasks:
       (SOCK_DGRAM unix connect to gvproxy's `--listen-vfkit` socket)
 - [x] Ad-hoc code-signing with `com.apple.security.virtualization`
       entitlement (`Entitlements.plist` + `tools/build.sh`)
-- [ ] Phase A acceptance: `mvm-vz-supervisor < config.json` boots the
-      dev-shell image and host-side `vsock-connect 3:5252` succeeds
-      *(deferred — needs Phase B's `VzBackend` to produce the JSON
-      against real artifact paths)*
-- [x] Rust fuzz target `crates/mvm-vz/fuzz/fuzz_supervisor_config.rs`
+- [x] Phase A acceptance: the Rust supervisor boots a workload image and
+      the guest agent answers on vsock. Live-proven 2026-06-12 (sleeper
+      fixture, full admitted path, agent reachable).
+- [x] Rust fuzz target `crates/mvm-build/fuzz/fuzz_targets/fuzz_supervisor_config.rs`
       driving `serde_json::from_slice::<SupervisorConfig>`; wired into
-      `.github/workflows/security.yml` alongside the libkrun
-      equivalent; corpus artifacts upload on failure. The full
-      Swift-side equivalence assertion is a follow-up that runs the
-      same corpus through the Swift decoder.
+      `.github/workflows/security.yml` alongside the libkrun-sys
+      equivalent; corpus artifacts upload on failure. The original
+      Swift-decoder equivalence assertion is retired — the Swift
+      supervisor no longer exists, so the Rust parser is the sole config
+      surface and its fuzzer is the whole witness.
 
 Phase B sub-tasks:
 
@@ -769,14 +745,25 @@ appears on Linux hosts.
 | 2     | **Inherits** — guest-side, hypervisor-independent                        |
 | 3     | **Inherits** — dm-verity is kernel-side; `VZLinuxBootLoader` carries cmdline + roothash unchanged |
 | 4     | **Inherits** — guest-side                                                |
-| 5     | **NEW WORK** — Swift `JSONDecoder` strict struct + Rust-driven fuzz corpus equivalence test |
+| 5     | **DONE** — Rust `serde` strict struct (`deny_unknown_fields`) + cargo-fuzz target on the `SupervisorConfig` parser. The Swift `JSONDecoder` equivalence half is retired (Swift supervisor deleted): the Rust parser is the sole config surface and its fuzzer is the whole witness. |
 | 6     | **Inherits** — host-side download path                                   |
 | 7     | **EXTENDS** — Swift binary reproducibly built, SPM `Package.resolved` pinned, no prebuilt download on contributor path |
 | 8     | **NEW WORK** — `VzBackend::start_with_mode` through `admit_for_run`; fail-closed bypass test |
 | 9     | **Inherits** — `verify_sealed_volume` is hypervisor-agnostic             |
 
-Claims 5 and 8 are the "new code, new tests" items. Claim 7 extends an
-existing pipeline. Others come free with the backend abstraction.
+Claims 5 and 8 were the "new code, new tests" items — both shipped (claim
+5 as the Rust `SupervisorConfig` fuzzer; claim 8 as `VzBackend::start*`
+routing through `admit_for_run`). Claim 7 extends an existing pipeline.
+Others come free with the backend abstraction.
+
+> **Egress secret substitution (Plan 129) is deliberately out of this
+> claim set.** It is a Linux-only feature today (Firecracker nft TAP
+> REDIRECT + QEMU slirp); neither macOS backend spawns the substitution
+> endpoint — **libkrun lacks it exactly as vz does**, so vz is at parity
+> with the macOS baseline. Porting it to macOS (a `Uds`-transport
+> endpoint bridged through the supervisor vsock hop, plus a gvproxy-level
+> :80/:443 terminator) is tracked as a fast-follow below, not a Sprint 55
+> closeout item.
 
 ## Additional considerations
 
@@ -1085,3 +1072,40 @@ Each session that touches this plan appends an entry below.
   Remaining Phase A: end-to-end boot acceptance (gated on Phase B's
   Rust JSON producer) and the Rust-side fuzz corpus (gated on the
   Phase B `mvm-vz` crate).
+
+## Closeout — 2026-06-13
+
+Sprint 55 verdict: **vz is at parity with the macOS libkrun baseline and
+the plan is complete.** All five phases shipped and are live-proven on
+macOS-26 Apple Silicon: build→admit→boot→run (sleeper fixture, agent on
+vsock), checkpoint/fork/warm pool, snapshot save/restore, pause/resume,
+and the Rust-native objc2 supervisor (Swift deleted). Claims 1–9 hold
+under vz (claims 5 and 8 were the new-work items; both shipped). Success
+criteria reconciled to post-Swift, post-convergence reality:
+
+- **Phase C "rootfs hash matches libkrun"** — amended to *functional*
+  parity. ext4 image builds are non-deterministic (different bytes every
+  build), so byte-hash equality is not a meetable criterion; the real
+  guarantee is same nix derivation + same boot/agent behaviour, which a
+  cold `dev up --builder vz` demonstrated.
+- **Phase B "≥30% cold-boot win vs nested libkrun→Firecracker"** — the
+  comparison is obsolete: backend consolidation removed the nested
+  macOS→libkrun→Firecracker workload path, so there is no nested baseline
+  left to beat. vz boots a single Linux guest directly; the criterion is
+  retired rather than measured.
+- **Claim 5** — Swift `JSONDecoder` equivalence retired (Swift deleted);
+  the Rust `SupervisorConfig` cargo-fuzz target is the sole witness.
+
+### Follow-on (NOT a Sprint 55 closeout item) — now tracked as Plan 197
+
+- [ ] **macOS egress secret substitution (Plan 129 on libkrun + vz)** →
+  **Plan 197** (`specs/plans/197-workload-backend-core-trait.md`).
+  Substitution is Linux-only today (FC nft TAP REDIRECT + QEMU slirp);
+  neither macOS backend spawns the endpoint. Plan 197 makes it a
+  no-default `WorkloadBackend` seam — **reclassifying it from an optional
+  fast-follow to a required build** (vz/libkrun won't compile without it).
+  Porting needs a `Uds`-transport endpoint bridged through the supervisor
+  vsock hop (the portable `HTTP_PROXY` channel) plus a gateway-level
+  :80/:443 terminator replacing the nft REDIRECT — the latter entangles
+  with the rvproxy migration (Plan 193 / ADR-082) and is resolved by a
+  Plan 197 Phase 2 design spike. vz is not behind its macOS sibling here.

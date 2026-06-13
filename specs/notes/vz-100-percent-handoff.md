@@ -1,7 +1,22 @@
 # Vz (Apple Virtualization.framework) — 100% support + close-out handoff
 
+> **ACTIONED 2026-06-13 — CLOSED.** Verdict: vz is at parity with the
+> macOS libkrun baseline; Sprint 55 flipped to COMPLETE. The full chain
+> (build→admit→boot→run, checkpoint/fork/warm pool, snapshot save/restore,
+> Rust supervisor) is live-proven per the records cited below. Criteria
+> reconciled: Phase B ≥30%-win retired (nested baseline removed by backend
+> consolidation), Phase C hash-match → functional parity (ext4 builds are
+> non-deterministic), claim-5 Swift-equivalence retired (Swift deleted).
+> Plan 152 WS-C fork primitive closed; WS-D nested-KVM out of scope.
+> Plan 123 C3 met. The one real finding: **egress secret substitution
+> (Plan 129, leg 4) is Linux-only (FC/QEMU) — libkrun lacks it exactly as
+> vz does**, so it is not a vz gap; egress *enforcement* (deny-by-default
+> + flow audit) IS wired on vz via the in-process `VzGvproxy` bridge. The
+> macOS substitution port is a tracked fast-follow (Plan 97 §"Closeout").
+> See SPRINT.md §"Sprint 55 → Closeout" + Plan 97 §"Closeout".
+
 **Date:** 2026-06-13
-**Status:** handoff prompt for a fresh session
+**Status:** ACTIONED — closeout landed (was: handoff prompt for a fresh session)
 **Goal:** confirm and complete 100% Vz support — the full user stack, live-proven on
 this macOS-26 Apple-Silicon host — then formally close the VZ backend effort.
 

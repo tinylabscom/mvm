@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status/down/up --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 118: Vz saved-standby warm pool claim live-validated + pool self-replenishes via detached re-warm (#840) + claim reuses admission image sha (#846); Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings; Plan 195 builder-VM fingerprint narrowing planned; Plan 161 OCI-unpacker openat2 TOCTTOU fix landed (Plan 143 R2/R3 done) — writes resolve through `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)`, follow-up routes whiteout removal through openat2 too; Plan 126 D1 forbidden-dep gate landed — closure ban on sigstore/opendal/pgp; Plan 124 D1.2a protocol type stubs — `protocol-v0.json` wired into `gen-stubs`/`check-stubs`, Python/TS protocol types generated + drift-checked; Plan 128 C3 Step 2 — `check-stubs` drift gate wired into ci.yml + ci-full.yml Lint, Linux codegen determinism verified)
+**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status/down/up --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 118: Vz saved-standby warm pool claim live-validated + pool self-replenishes via detached re-warm (#840) + claim reuses admission image sha (#846); Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings; Plan 195 builder-VM fingerprint narrowing planned; Plan 161 OCI-unpacker openat2 TOCTTOU fix landed (Plan 143 R2/R3 done) — writes resolve through `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)`, follow-up routes whiteout removal through openat2 too; Plan 126 D1 forbidden-dep gate landed — closure ban on sigstore/opendal/pgp; Plan 124 D1.2a protocol type stubs — `protocol-v0.json` wired into `gen-stubs`/`check-stubs`, Python/TS protocol types generated + drift-checked; Plan 128 C3 Step 2 — `check-stubs` drift gate wired into ci.yml + ci-full.yml Lint, Linux codegen determinism verified; Sprint 55 (Plan 97) CLOSED — vz at parity with the macOS libkrun baseline, all criteria met-or-amended (Phase B ≥30%-win retired post-convergence, Phase C hash-match → functional parity, claim 5 Swift-equiv retired); Plan 152 WS-C fork primitive closed + WS-D nested-KVM out-of-scope; Plan 123 C3 met; egress secret substitution is Linux-only (FC/QEMU) — vz lacks it exactly as libkrun does; macOS port now tracked as Plan 197 (WorkloadBackend type-bar) which reclassifies it from optional fast-follow to a required build)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -24,10 +24,10 @@ details** below for the workstream-level state.
 - [x] **PLAN 153** — CLI directory split · ✅ (subsumed into Plan 178)
 - [x] **PLAN 178** — CLI surface consolidation (~56→~28) · ✅ (dir-purity deferred)
 - [x] **PLAN 129** — Secrets / SigV4 substitution · ✅ **COMPLETE** — both tiers (declared substitution incl. SigV4/HMAC bind-checked + undeclared detection), terminator-path + vsock, claim-12/13 leak-gate (claim 16), endpoint self-confines (Landlock+seccomp jailer); QEMU clean-room e2e GREEN; FC bringup fixes landed (#804); live-FC e2e spun out (builder-VM box infra, not plan logic)
-- [ ] **PLAN 152** — Rust-native VZ supervisor · 🟢 native objc2, Swift deleted; WS-C/D separate workstreams
+- [ ] **PLAN 152** — Rust-native VZ supervisor · 🟢 native objc2, Swift deleted; WS-C fork primitive CLOSED (satisfied by #700 + 159 fork --boot + instant memory fork), WS-D nested-KVM out of scope for vz
 - [ ] **PLAN 118** — Supervisor standby pool · 🟡 libkrun + Vz done; FC follow-up open
 - [ ] **PLAN 159** — vz-inspired macOS VZ DX · 🟡 warm pool + checkpoint/fork shipped; WS-5 D + delta-image remain
-- [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C2/C3 (FC/Vz warm-start) gated
+- [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C3 (Vz save/restore) MET via 159 WS-2; C2 (FC live-memory) gated → Plan 175
 - [ ] **PLAN 124** — Lean guest agent · 🟡 ~65%; D1.2a protocol type stubs landed (protocol-v0.json → Python/TS, drift-checked) + check-stubs now CI-gated (Plan 128 C3 Step 2); RPC method surface + signed on-device config remain
 - [ ] **PLAN 126** — Dependency reduction · 🟡 ~30%; duplicate-major lock-gate landed (+ supply-chain CI restored); D1 forbidden-dep-gate landed (closure ban on sigstore/opendal/pgp); aws-lc-rs ban still blocked by oci-client; dep-baseline.md write-up remains
 - [x] **PLAN 177** — Backend consolidation (8→4) · ✅ both phases merged (#806/#789/#812/#814/#817); DX-parity → Plan 189; lone caveat = host-gated hardware smoke
@@ -45,6 +45,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 191** — Declarative file materialization (ADR-080 P2-full) · 🟢 P2-full LANDED (FilesWrite lowers to the declarative `App.files` IR field, baked into the rootfs at build time via `mkFunctionService` `extraFiles`; the `before_start` shell hook is removed — file content/paths never reach a guest shell)
 - [ ] **PLAN 193** — rvproxy network substrate (replace gvproxy/passt) · 🔴 proposed, cross-repo — gated on rvproxy confirming libkrun-unixgram transport; biggest win = native flow API replaces the in-line claim-10 datapath wrapper (Plan 141)
 - [ ] **PLAN 195** — Builder-VM fingerprint narrowing · 🟡 planned — drop the redundant whole-workspace `Cargo.lock` from `builder_vm_source_fingerprint` (flake forbids buildRustPackage → L3 byte-hash already authoritative) to kill the ~9s Stage 0 re-materialize churn; Commit 2 tightens build.rs rerun triggers. Build-perf only, no claim impact. (194 reserved for ADR-081 A3)
+- [ ] **PLAN 197** — `WorkloadBackend` type-bar (core security features non-skippable) · 🔴 design approved, not started — marker trait gates the admitted launch path so a non-workload backend (qemu/mock) is type-barred and a new backend can't reach the funnel without the shared enforcement; Phase 2 funnel-izes egress substitution + builds it on macOS (reclassifies the vz/libkrun substitution gap from optional to a required build). Arose from the Sprint 55 vz closeout finding.
 
 ## Plan details
 
@@ -201,12 +202,20 @@ PLAN 152 — Rust-native VZ supervisor            🟢 native objc2; no Swift
   [x] SAVE pause-before-save regression fix (post-finalize) — PR #740 (merged)
   [x] post-finalize hardening: resource-cap check, self-sign codesign lock,
       terminal-error fidelity, SAFETY-comment accuracy, doc-truth — PR #772
-  [ ] WS-C fork primitive (snapshot/restore done in #700) — separate workstream
-  [ ] WS-D nested KVM (/dev/kvm in guest) — separate workstream
+  [x] WS-C fork primitive — CLOSED: satisfied by #700 snapshot/restore +
+      Plan 159 `checkpoint fork --boot` (two-copy, admitted child) + the
+      instant memory fork of a RUNNING parent (0.91s, claim-8 admitted).
+      No separate fork primitive remains to build.
+  [~] WS-D nested KVM (/dev/kvm in guest) — OUT OF SCOPE for "100% vz":
+      Sprint 55 names Vz-on-Linux a non-goal and requires no nested path;
+      nested KVM is the Linux-symmetric-builder concern (Plan 100), not a
+      vz closeout item.
   NOTE: Swift control socket self-deadlocked on async VZ ops; Rust fixes it
-  (ADR-056 addendum). Deferred: VzIngest/mvm-vz-drainer dead-code sweep; +
-  lower-priority supervisor robustness (exit-listener 2nd-conn, control-verb
-  single-flight, validateSaveRestore hard-gate for Restore) noted in #772.
+  (ADR-056 addendum). Still deferred (cheap, non-blocking): VzIngest/
+  mvm-vz-drainer dead-code sweep (the live enforcing path is the in-process
+  `VzGvproxy` bridge; the standalone drainer is the legacy Swift-era
+  observe-only path); + supervisor robustness (exit-listener 2nd-conn,
+  control-verb single-flight, validateSaveRestore hard-gate for Restore).
 
 PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice shipped
   [x] WS-3 mvmctl sign + doctor signing — PR #667 (plan-168)
@@ -374,7 +383,10 @@ PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C1
       default; libkrun disk-only (SnapshotUpper clone of golden rootfs);
       doctor warm-start matrix + Linux NBD/HugeTLB substrate probe
   [ ] C2 Firecracker live-memory fast-resume — carved out → Plan 175
-  [ ] C3 Vz save/restore (macOS 26+) — owned by Plan 152 WS-C
+  [x] C3 Vz save/restore (macOS 26+) — MET: `vm_full` memory save/restore
+      shipped (Plan 159 WS-2, `saveMachineStateToURL`) and round-trips live
+      with a responsive restored control plane; the Plan 152 WS-C fork
+      primitive it was paired with is likewise closed.
 
 PLAN 182 — Trait hygiene + backend catalog      🟡 code+docs in; aggregate workspace-test gate remains
   [x] shared `mvm_core::time::{Clock,SystemClock}` replaces the three local copies
@@ -553,6 +565,23 @@ PLAN 193 — rvproxy network substrate (replace gvproxy/passt)  🔴 proposed, c
   libkrun-unixgram transport (mvm's default macOS backend). Not-a-fix findings recorded in the
   plan (gvproxy has no log-level flag; nix-seed already cached for normal use; build slowness is
   the base-VM fingerprint churn, a separate change). Plan: specs/plans/193-rvproxy-network-substrate.md
+
+PLAN 197 — WorkloadBackend type-bar (core security features non-skippable)  🔴 design approved
+  Arose from the Sprint 55 vz closeout: egress secret substitution (Plan 129) silently never
+  reached libkrun/vz because it was a free function called ad-hoc in per-backend start paths.
+  Fix is structural, not a capability matrix (rejected — documents holes, doesn't prevent them).
+  Two moves:
+  [ ] Phase 1 — type-bar the funnel (executable now, no behavior change): `WorkloadBackend: VmBackend`
+      marker; impl for FC/libkrun/vz only; `AnyBackend::as_workload_backend` + `require_workload_backend`
+      guard; the admitted launch arms in up.rs route through it so qemu/mock are TYPE-BARRED from the
+      untrusted-workload path (ADR-002 Tier-2 carve-out becomes a type constraint, not prose). ADR-083.
+      NOTE: Task 4 touches up.rs admitted-launch arms — coordinate with the Plan 189 owner (shared file).
+  [ ] Phase 2 — funnel-ize substitution + build it on macOS (design-spike-gated): lift
+      spawn_substitution_endpoint into the shared funnel; add no-default `egress_substitution_transport()`
+      seam; implement for FC (nft) + libkrun/vz (macOS transport). Spike must first resolve the macOS
+      :80/:443 terminator, which ENTANGLES with rvproxy (Plan 193 / ADR-082 — likely lives in rvproxy,
+      not gvproxy). Reclassifies the vz/libkrun substitution gap from optional fast-follow to required build.
+  Design + bite-sized plan: specs/plans/197-workload-backend-core-trait.md
 ```
 
 ## Security claims
