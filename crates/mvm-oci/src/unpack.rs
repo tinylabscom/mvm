@@ -94,25 +94,26 @@
 //!      that the resolved path is still under root. Catches edge
 //!      cases the prior two checks miss (NUL-byte paths, platform-
 //!      quirky separators, etc.).
-//! 2. **Writes resolve atomically inside the root (Linux).** Every
-//!    file / dir / symlink / hardlink / device-node materializes by
-//!    resolving the entry's parent directory through
-//!    `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)` and issuing the
-//!    leaf creation with `*at` calls against the returned directory
-//!    handle — never against a re-derived host path. Resolution and
-//!    write therefore share one kernel-checked handle, so a parent
-//!    component swapped to a symlink *after* a check can no longer
-//!    redirect the write outside the root: the kernel refuses to
-//!    traverse the symlink (`ELOOP`) or to escape the root (`EXDEV`).
-//!    This closes the check-then-use window that a bare
-//!    `symlink_metadata` walk followed by a later `open(2)` leaves
-//!    open. [`parent_chain_has_symlink`] is retained as a cheap,
-//!    cross-platform fail-fast pre-filter (and as the guard for the
-//!    still-path-based whiteout-removal walk); on Linux the `openat2`
-//!    handle is the load-bearing authority for writes. On non-Linux
-//!    targets (test/dev builds only — the unpacker runs only in the
-//!    Linux builder VM in production) writes fall back to path-based
-//!    creation with `O_NOFOLLOW` on the leaf.
+//! 2. **Filesystem mutations resolve atomically inside the root
+//!    (Linux).** Every file / dir / symlink / hardlink / device-node
+//!    materialization *and* every whiteout removal resolves the entry's
+//!    parent directory through `openat2(RESOLVE_IN_ROOT |
+//!    RESOLVE_NO_SYMLINKS)` and issues the leaf operation with `*at`
+//!    calls (`openat2`/`mkdirat`/`symlinkat`/`linkat`/`mknodat`/
+//!    `unlinkat`) against the returned directory handle — never against
+//!    a re-derived host path. Resolution and mutation therefore share
+//!    one kernel-checked handle, so a parent component swapped to a
+//!    symlink *after* a check can no longer redirect the operation
+//!    outside the root: the kernel refuses to traverse the symlink
+//!    (`ELOOP`) or to escape the root (`EXDEV`). This closes the
+//!    check-then-use window that a bare `symlink_metadata` walk
+//!    followed by a later `open(2)` / `remove_*` leaves open.
+//!    [`parent_chain_has_symlink`] is retained as a cheap,
+//!    cross-platform fail-fast pre-filter; on Linux the `openat2`
+//!    handle is the load-bearing authority. On non-Linux targets
+//!    (test/dev builds only — the unpacker runs only in the Linux
+//!    builder VM in production) the operations fall back to path-based
+//!    creation/removal with `O_NOFOLLOW` on the leaf.
 //! 3. **Leaf opens use `O_NOFOLLOW` + `O_EXCL`** so a symlink or a
 //!    pre-existing file planted *at the leaf* is refused (`ELOOP` /
 //!    `EEXIST`) rather than followed or overwritten.
@@ -750,6 +751,213 @@ impl<'a> Rooted<'a> {
         }
         Ok(HardlinkAction::Copied)
     }
+
+    /// `openat2`-walk to the directory named by `rel` (every component
+    /// resolved with `RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS`). Raw
+    /// `Errno` so callers can treat `ENOENT` as "nothing to remove".
+    fn open_dir(&self, rel: &Path) -> Result<std::os::fd::OwnedFd, rustix::io::Errno> {
+        use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+        use std::os::fd::AsFd;
+        let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS;
+        let (parent, leaf) = self.open_parent(rel, false)?;
+        openat2(
+            parent.as_fd(),
+            &leaf,
+            OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+            resolve,
+        )
+    }
+
+    /// Apply a `.wh.<name>` whiteout by resolving the sibling's parent
+    /// through `openat2` and removing the sibling via `*at` calls — so a
+    /// parent component swapped to a symlink after the fail-fast scan
+    /// can't redirect the removal outside the root.
+    fn apply_regular_whiteout(
+        &self,
+        target_rel: &Path,
+        current_layer_paths: &HashSet<PathBuf>,
+    ) -> Result<(), RefusalReason> {
+        use rustix::fs::{
+            AtFlags, FileType, Mode, OFlags, ResolveFlags, openat2, statat, unlinkat,
+        };
+        use rustix::io::Errno;
+        use std::os::fd::AsFd;
+
+        let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS;
+        // A missing parent means the sibling can't exist — a whiteout of
+        // an absent target is an idempotent no-op (OCI is declarative).
+        let (parent, leaf) = match self.open_parent(target_rel, false) {
+            Ok(v) => v,
+            Err(e) if e == Errno::NOENT => return Ok(()),
+            Err(e) => return Err(map_resolve_errno(e)),
+        };
+
+        let st = match statat(parent.as_fd(), &leaf, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(s) => s,
+            Err(e) if e == Errno::NOENT => return Ok(()),
+            Err(_) => return Err(RefusalReason::MalformedHeader),
+        };
+
+        if FileType::from_raw_mode(st.st_mode) == FileType::Directory {
+            let dir_fd = openat2(
+                parent.as_fd(),
+                &leaf,
+                OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+                resolve,
+            )
+            .map_err(map_resolve_errno)?;
+            remove_children_in_dir(&dir_fd, target_rel, current_layer_paths)?;
+            // Remove the now-cleared directory itself unless the current
+            // layer wrote something at or below it.
+            if !has_current_layer_path_at_or_below(target_rel, current_layer_paths) {
+                unlinkat(parent.as_fd(), &leaf, AtFlags::REMOVEDIR)
+                    .map_err(|_| RefusalReason::MalformedHeader)?;
+            }
+            Ok(())
+        } else {
+            // File or symlink: same-layer entries survive regardless of
+            // marker ordering.
+            if current_layer_paths.contains(target_rel) {
+                return Ok(());
+            }
+            unlinkat(parent.as_fd(), &leaf, AtFlags::empty())
+                .map_err(|_| RefusalReason::MalformedHeader)
+        }
+    }
+
+    /// Apply a `.wh..wh..opq` opaque whiteout: clear the directory's
+    /// lower-layer contents (preserving same-layer entries and the
+    /// directory itself), resolved through `openat2`.
+    fn apply_opaque_whiteout(
+        &self,
+        target_dir_rel: &Path,
+        current_layer_paths: &HashSet<PathBuf>,
+    ) -> Result<(), RefusalReason> {
+        use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+        use rustix::io::Errno;
+        use std::os::fd::AsFd;
+
+        let dir_fd = if target_dir_rel.as_os_str().is_empty() {
+            let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS;
+            openat2(
+                self.root_fd.as_fd(),
+                ".",
+                OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+                resolve,
+            )
+            .map_err(map_resolve_errno)?
+        } else {
+            match self.open_dir(target_dir_rel) {
+                Ok(fd) => fd,
+                Err(e) if e == Errno::NOENT => return Ok(()),
+                Err(e) => return Err(map_resolve_errno(e)),
+            }
+        };
+        remove_children_in_dir(&dir_fd, target_dir_rel, current_layer_paths)
+    }
+}
+
+/// Recursively remove the children of `dir_fd` that are *not* part of
+/// the current layer, descending through directory handles (never a
+/// re-derived host path) so the walk can't be redirected by a symlink
+/// swap. Mirrors `remove_children_except_current_layer` over `*at`
+/// calls. `dir_rel` is the path of `dir_fd` relative to the root, used
+/// only to test current-layer membership.
+#[cfg(target_os = "linux")]
+fn remove_children_in_dir(
+    dir_fd: &std::os::fd::OwnedFd,
+    dir_rel: &Path,
+    current_layer_paths: &HashSet<PathBuf>,
+) -> Result<(), RefusalReason> {
+    use rustix::fs::{
+        AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags, openat2, statat, unlinkat,
+    };
+    use std::os::fd::AsFd;
+
+    let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS;
+    let child_dir_oflags = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+
+    // Snapshot entries before mutating: removing during readdir can
+    // skip or repeat directory entries.
+    let mut children: Vec<(std::ffi::OsString, bool)> = Vec::new();
+    let dir = Dir::read_from(dir_fd.as_fd()).map_err(|_| RefusalReason::MalformedHeader)?;
+    for entry in dir {
+        let entry = entry.map_err(|_| RefusalReason::MalformedHeader)?;
+        let name_bytes = entry.file_name().to_bytes();
+        if name_bytes == b"." || name_bytes == b".." {
+            continue;
+        }
+        let name = OsStr::from_bytes(name_bytes).to_os_string();
+        let is_dir = match entry.file_type() {
+            FileType::Directory => true,
+            // `d_type` not populated by this filesystem — lstat to
+            // classify (a symlink stays a symlink, removed as a file).
+            FileType::Unknown => match statat(dir_fd.as_fd(), &name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(st) => FileType::from_raw_mode(st.st_mode) == FileType::Directory,
+                Err(_) => false,
+            },
+            _ => false,
+        };
+        children.push((name, is_dir));
+    }
+
+    for (name, is_dir) in children {
+        let child_rel = dir_rel.join(&name);
+
+        // Same-layer entry: keep it. If it's a directory, still descend
+        // to clear any lower-layer children beneath it.
+        if current_layer_paths.contains(&child_rel) {
+            if is_dir {
+                let child_fd = openat2(
+                    dir_fd.as_fd(),
+                    &name,
+                    child_dir_oflags,
+                    Mode::empty(),
+                    resolve,
+                )
+                .map_err(map_resolve_errno)?;
+                remove_children_in_dir(&child_fd, &child_rel, current_layer_paths)?;
+            }
+            continue;
+        }
+
+        // Lower-layer directory that still holds a same-layer descendant:
+        // keep the directory, clear the rest beneath it.
+        if is_dir && has_current_layer_path_below(&child_rel, current_layer_paths) {
+            let child_fd = openat2(
+                dir_fd.as_fd(),
+                &name,
+                child_dir_oflags,
+                Mode::empty(),
+                resolve,
+            )
+            .map_err(map_resolve_errno)?;
+            remove_children_in_dir(&child_fd, &child_rel, current_layer_paths)?;
+            continue;
+        }
+
+        // Otherwise remove it outright.
+        if is_dir {
+            let child_fd = openat2(
+                dir_fd.as_fd(),
+                &name,
+                child_dir_oflags,
+                Mode::empty(),
+                resolve,
+            )
+            .map_err(map_resolve_errno)?;
+            remove_children_in_dir(&child_fd, &child_rel, current_layer_paths)?;
+            unlinkat(dir_fd.as_fd(), &name, AtFlags::REMOVEDIR)
+                .map_err(|_| RefusalReason::MalformedHeader)?;
+        } else {
+            unlinkat(dir_fd.as_fd(), &name, AtFlags::empty())
+                .map_err(|_| RefusalReason::MalformedHeader)?;
+        }
+    }
+    Ok(())
 }
 
 /// Map an `openat2`/`*at` failure to the unpacker's refusal taxonomy.
@@ -820,6 +1028,32 @@ impl<'a> Rooted<'a> {
             options,
             current_layer_paths,
         )
+    }
+
+    fn apply_regular_whiteout(
+        &self,
+        target_rel: &Path,
+        current_layer_paths: &HashSet<PathBuf>,
+    ) -> Result<(), RefusalReason> {
+        apply_regular_whiteout(
+            &self.root.join(target_rel),
+            target_rel,
+            self.root,
+            current_layer_paths,
+        )
+    }
+
+    fn apply_opaque_whiteout(
+        &self,
+        target_dir_rel: &Path,
+        current_layer_paths: &HashSet<PathBuf>,
+    ) -> Result<(), RefusalReason> {
+        let dir = if target_dir_rel.as_os_str().is_empty() {
+            self.root.to_path_buf()
+        } else {
+            self.root.join(target_dir_rel)
+        };
+        apply_opaque_whiteout(&dir, target_dir_rel, self.root, current_layer_paths)
     }
 }
 
@@ -999,17 +1233,9 @@ pub fn unpack_layer<R: Read>(
                     },
                     WhiteoutKind::Opaque => {
                         // Parent-of-marker is the directory we're
-                        // clearing. `target` already points at the
-                        // marker file, so we strip the marker leaf
-                        // to get the parent dir.
-                        let parent = target.parent().unwrap_or(output_root);
+                        // clearing.
                         let parent_rel = rel_path.parent().unwrap_or_else(|| Path::new(""));
-                        match apply_opaque_whiteout(
-                            parent,
-                            parent_rel,
-                            output_root,
-                            &current_layer_paths,
-                        ) {
+                        match rooted.apply_opaque_whiteout(parent_rel, &current_layer_paths) {
                             Ok(()) => report.opaque_markers_applied += 1,
                             Err(refuse) => report.refused.push(RefusedEntry {
                                 raw_path: raw_path.clone(),
@@ -1019,16 +1245,9 @@ pub fn unpack_layer<R: Read>(
                     }
                     WhiteoutKind::Regular(name_suffix) => {
                         // Sibling target = `<parent_of_marker>/<name_suffix>`.
-                        let parent = target.parent().unwrap_or(output_root);
                         let parent_rel = rel_path.parent().unwrap_or_else(|| Path::new(""));
                         let sibling_rel = parent_rel.join(OsStr::from_bytes(name_suffix));
-                        let sibling = parent.join(OsStr::from_bytes(name_suffix));
-                        match apply_regular_whiteout(
-                            &sibling,
-                            &sibling_rel,
-                            output_root,
-                            &current_layer_paths,
-                        ) {
+                        match rooted.apply_regular_whiteout(&sibling_rel, &current_layer_paths) {
                             Ok(()) => report.whiteouts_applied += 1,
                             Err(refuse) => report.refused.push(RefusedEntry {
                                 raw_path: raw_path.clone(),
@@ -1663,6 +1882,7 @@ fn classify_whiteout(raw_path: &[u8]) -> WhiteoutKind<'_> {
 /// path already passed every A.1 safety check, and the sibling
 /// shares the same parent chain, so this branch should be
 /// unreachable for any non-malicious caller wiring.
+#[cfg(not(target_os = "linux"))]
 fn apply_regular_whiteout(
     target: &Path,
     target_rel: &Path,
@@ -1701,6 +1921,7 @@ fn apply_regular_whiteout(
 ///
 /// Same `output_root` defense-in-depth check as the regular
 /// whiteout: re-assert the target dir lives under root.
+#[cfg(not(target_os = "linux"))]
 fn apply_opaque_whiteout(
     target_dir: &Path,
     target_rel: &Path,
@@ -1714,6 +1935,7 @@ fn apply_opaque_whiteout(
     remove_children_except_current_layer(target_dir, target_rel, current_layer_paths)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn remove_tree_except_current_layer(
     target: &Path,
     target_rel: &Path,
@@ -1726,6 +1948,7 @@ fn remove_tree_except_current_layer(
     remove_children_except_current_layer(target, target_rel, current_layer_paths)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn remove_children_except_current_layer(
     target_dir: &Path,
     target_rel: &Path,
@@ -3136,8 +3359,13 @@ mod tests {
             add_file(b, "p/q/secret", b"leaked");
         });
 
+        // Race for a bounded wall-clock budget, stopping early the
+        // instant an escape is observed. Time-bounded (not a fixed
+        // iteration count) so heavy swapper contention can't blow up CI
+        // wall-clock; thousands of attempts still run on a fast host.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
         let mut escaped = false;
-        for _ in 0..6000 {
+        while !escaped && std::time::Instant::now() < deadline {
             let _ = std::fs::create_dir_all(root_path.join("p"));
             let _ = unpack_layer(
                 Cursor::new(tar.clone()),
@@ -3146,7 +3374,6 @@ mod tests {
             );
             if escape_secret.exists() {
                 escaped = true;
-                let _ = std::fs::remove_file(&escape_secret);
             }
             // Reset the in-root subtree for the next iteration;
             // best-effort, since the swapper is racing it too.
@@ -3160,6 +3387,82 @@ mod tests {
             !escaped,
             "a regular-file write escaped output_root through a parent component swapped \
              to a symlink — openat2(RESOLVE_NO_SYMLINKS) must refuse it atomically",
+        );
+    }
+
+    /// TOCTTOU witness (Linux) for the **removal** path: a parent
+    /// component of a whiteout target swapped to an out-of-root symlink
+    /// in the check→remove window must never let the removal delete a
+    /// file outside the root. Fails against the pre-openat2 removal
+    /// (where `symlink_metadata` + `remove_file` follow the swapped
+    /// parent) and passes once removal resolves through openat2.
+    ///
+    /// Like the write witness, it inspects only the out-of-root victim,
+    /// so the racing swapper can't make it flaky post-fix.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_symlink_swap_during_whiteout_removal_never_escapes_root() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let root = TempDir::new().unwrap();
+        let escape = TempDir::new().unwrap();
+        let root_path = root.path().to_path_buf();
+        let escape_path = escape.path().to_path_buf();
+        let d = root_path.join("d");
+        let victim = escape_path.join("victim");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let stop = stop.clone();
+            let d = d.clone();
+            let escape_path = escape_path.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = std::fs::remove_dir_all(&d);
+                    let _ = std::fs::remove_file(&d);
+                    let _ = std::os::unix::fs::symlink(&escape_path, &d);
+                    let _ = std::fs::remove_file(&d);
+                    let _ = std::fs::create_dir_all(&d);
+                }
+            })
+        };
+
+        // A `.wh.victim` whiteout removes the sibling `d/victim`. If a
+        // write lands while `d` is the attacker symlink, the removal
+        // deletes `<escape>/victim`.
+        let tar = build_tar(|b| {
+            add_file(b, "d/.wh.victim", b"");
+        });
+
+        // Bounded wall-clock race, stopping early on the first escape
+        // (see the write witness for the rationale).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        let mut escaped = false;
+        while !escaped && std::time::Instant::now() < deadline {
+            // The out-of-root victim must exist for the removal to have
+            // something to (wrongly) delete; recreate it each round.
+            std::fs::create_dir_all(&escape_path).unwrap();
+            let _ = std::fs::write(&victim, b"keep");
+            let _ = std::fs::create_dir_all(&d);
+            let _ = unpack_layer(
+                Cursor::new(tar.clone()),
+                &root_path,
+                &UnpackOptions::default(),
+            );
+            if !victim.exists() {
+                escaped = true;
+            }
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+
+        assert!(
+            !escaped,
+            "a whiteout removal escaped output_root through a parent component swapped \
+             to a symlink and deleted an out-of-root file — openat2 must refuse it",
         );
     }
 }
