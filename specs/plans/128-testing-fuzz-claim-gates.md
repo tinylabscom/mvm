@@ -51,9 +51,9 @@ The §8 note said "build against the `host.audit.v1` reality (the dropped `host.
 
 ### Task C3: wire the gates the other plans deferred here
 
-- [ ] **Step 1:** `check-guest-agent-in-all-images` (124 B2) → `ci.yml`.
-- [ ] **Step 2:** the SDK **no-drift** check (124 D1 — `xtask gen-sdk` diff) → `ci.yml`.
-- [ ] **Step 3:** `check-forbidden-deps` extended for the pruned deps (126 D1) → `ci.yml`.
+- [x] **Step 1:** `check-guest-agent-in-all-images` (124 B2) → `ci.yml` (live in the Lint job).
+- [x] **Step 2:** the SDK **no-drift** check (124 D1) → `ci.yml`. Wired as `cargo run -p xtask -- check-stubs` in the Lint job of both `ci.yml` + `ci-full.yml` (the command is `check-stubs`, not the old `gen-sdk` name; it now covers both the workload-IR and host↔guest-protocol *type* stubs after 124 D1.2a). The Lint job gained `astral-sh/setup-uv` + `actions/setup-node` so `uvx`/`npx` are available. Cross-platform determinism verified before landing: `check-stubs` is byte-clean on Linux (node18/py3.11) against the macOS-committed stubs (node22/py3.12) — the pinned generator versions, not the host toolchain, fix the output. The *method-surface* no-drift (124 D1.2 Step 2's `gen-sdk`) folds into the same gate once that generator lands.
+- [x] **Step 3:** `check-forbidden-deps` extended for the pruned deps (126 D1) → `ci.yml` (live in the Lint job).
 - [ ] **Step 4:** the `xtask budget` job (127 C1) → `ci.yml` as **informational** (warns, never fails — ADR-066 §7).
 - [ ] **Step 5:** the docs-drift gate (130) → `ci.yml`. Commit each as it lands.
 

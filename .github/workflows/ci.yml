@@ -38,6 +38,18 @@ jobs:
       - name: Install system build deps
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
 
+      # SDK stub codegen (check-stubs) shells out to `uvx datamodel-codegen`
+      # (Python) + `npx json-schema-to-typescript` (TS). The pinned generator
+      # versions live in xtask, so the host node/python versions don't change
+      # the output (verified byte-identical macOS node22/py3.12 vs Linux
+      # node18/py3.11) — these just provide the runners.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
       - uses: ./.github/actions/install-zigbuild
 
       - name: Cache cargo
@@ -103,6 +115,9 @@ jobs:
 
       - name: runtime-overlay version pinned to workspace
         run: cargo run -p xtask -- check-runtime-overlay-version
+
+      - name: SDK stubs match the Rust schemas (no drift)
+        run: cargo run -p xtask -- check-stubs
 
   test:
     name: Test
