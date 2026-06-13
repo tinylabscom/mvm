@@ -123,6 +123,31 @@ let
     # Storage / device classes that have no virtio path.
     "MTD" "PARPORT" "ATA" "SCSI" "INFINIBAND"
     "STAGING" "MEDIA_SUPPORT"
+
+    # Device-driver *menus* with no hardware behind them under libkrun /
+    # Firecracker. defconfig enables each as a whole menu, and disabling
+    # the protocol stack alone (SOUND/WIRELESS/USB above) leaves the
+    # device subtree compiling — the umbrella menu symbol gates the
+    # drivers/<x>/ directory, so it must go too. Each parent cascades its
+    # vendor subtree via olddefconfig. We carry only VIRTIO_NET; every
+    # vendor NIC, WLAN, WWAN, and CAN driver is dead weight.
+    "ETHERNET"             # drivers/net/ethernet — keep NETDEVICES + VIRTIO_NET
+    "WLAN" "WWAN" "CAN"    # drivers/net/{wireless,wwan,can}
+    "USB_SUPPORT"          # USB host + gadget umbrella (CONFIG_USB only hit hosts)
+    "HID_SUPPORT"          # no virtio-input/HID; console is hvc0 + vsock
+    "RC_CORE"              # remote-control core + the keymap blob it builds
+    "IIO"                  # industrial-I/O sensors
+    "XEN"                  # never a Xen guest
+    "MMC" "MMC_BLOCK"      # no SD/eMMC behind virtio
+    "REGULATOR" "POWER_SUPPLY" "THERMAL"  # SoC power plumbing defconfig drags in
+    "NEW_LEDS" "LEDS_CLASS"
+  ] ++ pkgs.lib.optionals (kernelArch == "arm64") [
+    # arm64 boots from the FDT libkrun / Firecracker hand us; ACPI is
+    # never consulted, so drop the ACPICA interpreter and the whole
+    # drivers/acpi tree (~390 files). x86 keeps ACPI deliberately — it
+    # has no devicetree fallback and the hypervisor presents an ACPI/MADT
+    # for SMP bringup, so disabling it there would not boot.
+    "ACPI"
   ];
 
   # Realize a `.config` from base + the caller's deltas. `runCommandCC`
