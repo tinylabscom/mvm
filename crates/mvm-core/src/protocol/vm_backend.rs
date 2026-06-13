@@ -545,7 +545,8 @@ impl std::error::Error for WarmStartError {}
 
 /// How a prelaunched standby is to be set up. Backend-agnostic:
 /// the caller (the launch path) fills this in; the backend's [`VmBackend::spawn_standby`]
-/// translates it to its own wire config (libkrun → `SupervisorBaseConfig`).
+/// translates it to its own wire config (libkrun → `SupervisorBaseConfig`; Vz → boots a
+/// seed VM, captures its memory state, and stops the supervisor).
 #[derive(Debug, Clone)]
 pub struct StandbySpec {
     /// Stable id for this standby (also the `~/.mvm/pool/<id>/` dir name).
@@ -569,21 +570,36 @@ pub struct StandbySpec {
     pub control_socket: std::path::PathBuf,
     /// Per-VM state dir the standby writes its pid into.
     pub vm_state_dir: String,
+    /// Source rootfs image path for Vz saved-standbys. `None` for libkrun (no rootfs
+    /// is baked in at spawn; any workload rootfs attaches at claim time).
+    pub image_path: Option<String>,
+    /// Sha256 hex of `image_path` for the compat key. `None` for libkrun.
+    pub image_sha256: Option<String>,
 }
 
-/// The base-compat key — everything a libkrun standby fixes at spawn and therefore must
-/// match the workload exactly, else the launch cold-boots. v1 is default-kernel +
-/// default-resources only; multi-kernel/multi-shape keying is deferred (SPRINT.md). The
-/// "no extra volumes" half of compat is enforced at the launch path (a standby declares
-/// none), not here.
+/// The base-compat key — everything a standby fixes at spawn and must therefore match the
+/// workload exactly, else the launch cold-boots.
+///
+/// `image_sha256` is `None` for libkrun (any image attaches; libkrun standbys carry no
+/// rootfs) and `Some(sha)` for Vz saved-standbys (which are image-specific; a Vz standby
+/// is a frozen {rootfs, memory, machine-id} triple captured from one particular image).
+/// Two standbys are compatible only when both image fields are identical — `None == None`
+/// (libkrun) and `Some(a) == Some(b)` iff `a == b`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StandbyCompat {
     pub kernel_sha256: String,
     pub vcpus: u8,
     pub mem_mib: u32,
+    /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for Vz (image-bound).
+    pub image_sha256: Option<String>,
 }
 
-/// A recorded, live standby (persisted as `~/.mvm/pool/<id>/standby.json`).
+/// A recorded standby (persisted as `~/.mvm/pool/<id>/standby.json`).
+///
+/// `pid` is 0 for saved-state standbys (Vz): the supervisor that booted the seed VM was
+/// stopped at capture time; no process is running. `reap_stale` and the liveness checks
+/// treat pid=0 as "TTL-only" — the standby is never pruned for a dead process, only for
+/// expiry. No real process has pid 0.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StandbyHandle {
     pub id: String,
@@ -595,6 +611,9 @@ pub struct StandbyHandle {
     pub binding_nonce: String,
     pub spawned_unix_secs: u64,
     pub state: StandbyState,
+    /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for Vz saved-standbys.
+    #[serde(default)]
+    pub image_sha256: Option<String>,
 }
 
 impl StandbyHandle {
@@ -604,13 +623,20 @@ impl StandbyHandle {
             kernel_sha256: self.kernel_sha256.clone(),
             vcpus: self.vcpus,
             mem_mib: self.mem_mib,
+            image_sha256: self.image_sha256.clone(),
         }
     }
 
-    /// A launch may claim this standby only if its kernel **and** fixed resources match
-    /// exactly — no silent wrong-kernel or wrong-size boot.
+    /// A launch may claim this standby only if its kernel, fixed resources, and image
+    /// sha256 all match exactly — no silent wrong-kernel, wrong-size, or wrong-image boot.
     pub fn is_compatible(&self, want: &StandbyCompat) -> bool {
         &self.compat() == want
+    }
+
+    /// True if this standby holds a captured memory state rather than a live supervisor.
+    /// Saved standbys carry pid=0 (no running process) and are reaped by TTL only.
+    pub fn is_saved_state(&self) -> bool {
+        self.pid == 0
     }
 }
 
@@ -1107,6 +1133,7 @@ mod tests {
             binding_nonce: "deadbeef".repeat(8),
             spawned_unix_secs: 1_700_000_000,
             state: StandbyState::Idle,
+            image_sha256: None,
         };
         let json = serde_json::to_string(&h).unwrap();
         let back: StandbyHandle = serde_json::from_str(&json).unwrap();
@@ -1116,6 +1143,7 @@ mod tests {
             kernel_sha256: "a".repeat(64),
             vcpus: 2,
             mem_mib: 1024,
+            image_sha256: None,
         };
         assert!(back.is_compatible(&want));
         // wrong kernel, wrong cpus, and wrong mem each break compat.
@@ -1129,6 +1157,21 @@ mod tests {
         }));
         assert!(!back.is_compatible(&StandbyCompat {
             mem_mib: 2048,
+            ..want.clone()
+        }));
+        // Vz image sha must match exactly: Some(a) ≠ None, Some(a) ≠ Some(b).
+        let vz_handle = StandbyHandle {
+            image_sha256: Some("c".repeat(64)),
+            ..h.clone()
+        };
+        let vz_want = StandbyCompat {
+            image_sha256: Some("c".repeat(64)),
+            ..want.clone()
+        };
+        assert!(vz_handle.is_compatible(&vz_want));
+        assert!(!vz_handle.is_compatible(&want)); // None ≠ Some
+        assert!(!vz_handle.is_compatible(&StandbyCompat {
+            image_sha256: Some("d".repeat(64)),
             ..want
         }));
     }
@@ -1153,6 +1196,8 @@ mod tests {
             binding_nonce: "ab".repeat(32),
             control_socket: "/p/standby-x/control.sock".into(),
             vm_state_dir: "/p/standby-x".into(),
+            image_path: None,
+            image_sha256: None,
         }
     }
 
@@ -1188,6 +1233,7 @@ mod tests {
                 binding_nonce: "ab".repeat(32),
                 spawned_unix_secs: 1,
                 state: StandbyState::Idle,
+                image_sha256: None,
             },
             &sample_standby_claim(),
         ) {
@@ -1199,6 +1245,58 @@ mod tests {
     #[test]
     fn warm_pool_size_defaults_to_zero() {
         assert_eq!(VmStartConfig::default().warm_pool_size, 0);
+    }
+
+    /// Old standby.json records written before the image_sha256 field was added
+    /// must still deserialise cleanly via `#[serde(default)]`.
+    #[test]
+    fn standby_handle_old_record_without_image_sha_deserialises_as_none() {
+        let old_json = r#"{
+            "id": "standby-old",
+            "control_socket": "/p/standby-old/control.sock",
+            "pid": 9999,
+            "kernel_sha256": "aabbcc",
+            "vcpus": 2,
+            "mem_mib": 1024,
+            "binding_nonce": "deadbeef",
+            "spawned_unix_secs": 1000,
+            "state": "idle"
+        }"#;
+        let h: StandbyHandle = serde_json::from_str(old_json).unwrap();
+        assert_eq!(h.image_sha256, None, "absent field must default to None");
+        assert!(!h.is_saved_state(), "pid != 0 → live standby");
+        // An old libkrun standby is compatible with a libkrun launch (both None).
+        let want = StandbyCompat {
+            kernel_sha256: "aabbcc".into(),
+            vcpus: 2,
+            mem_mib: 1024,
+            image_sha256: None,
+        };
+        assert!(h.is_compatible(&want));
+    }
+
+    /// A Vz saved-standby uses pid=0 (no running supervisor) and must be treated
+    /// as TTL-only by the liveness path (is_saved_state()).
+    #[test]
+    fn standby_handle_saved_state_pid_zero_flag() {
+        let saved = StandbyHandle {
+            id: "standby-vz".into(),
+            control_socket: "/p/standby-vz/control.sock".into(),
+            pid: 0,
+            kernel_sha256: "cc".repeat(32),
+            vcpus: 2,
+            mem_mib: 1024,
+            binding_nonce: "ab".repeat(32),
+            spawned_unix_secs: 1,
+            state: StandbyState::Idle,
+            image_sha256: Some("dd".repeat(32)),
+        };
+        assert!(saved.is_saved_state());
+        // serde roundtrip preserves the image sha and pid=0.
+        let json = serde_json::to_string(&saved).unwrap();
+        let back: StandbyHandle = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.image_sha256, Some("dd".repeat(32)));
+        assert_eq!(back.pid, 0);
     }
 
     #[test]
