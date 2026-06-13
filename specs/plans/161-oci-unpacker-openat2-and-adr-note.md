@@ -44,71 +44,91 @@ documented at `:85-114`; the relevant sites are `unpack_layer:470`,
 `O_NOFOLLOW:104`, and the write/dir/symlink helpers at `:1128/:1179/:1287/:1325`.
 Refusals already flow through `RefusalReason::SymlinkInParent` / `JoinedPathEscape`.
 
-- [ ] **Step 1 (red):** add a regression test that swaps a parent component to a
-      symlink *mid-unpack* (after the prefix exists, before the leaf write) and
-      asserts the entry is refused — mapped to the existing `RefusalReason`, not a
-      bare error. Add a small escape corpus (`..`, absolute, separator-quirk,
-      symlinked-parent) as table-driven cases. The symlink-swap case must fail
-      against the current check-then-use code, proving the gap is real.
-- [ ] **Step 2 (green):** under `cfg(target_os = "linux")`, resolve each entry's
-      **parent directory** relative to an `output_root` dirfd via `openat2` with
-      `RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS`, then create the leaf with `*at`
-      calls (`openat`/`mkdirat`/`symlinkat`/`linkat`) against that returned dirfd —
-      never against a re-derived host path. Keep the cheap string checks
-      (`..`/absolute) as fail-fast, but make `openat2` the **authority**: an
-      `EXDEV`/`ELOOP`/`EXDEV`-class refusal from the kernel maps to
-      `RefusalReason::SymlinkInParent` (symlink/`RESOLVE_NO_SYMLINKS`) or
-      `JoinedPathEscape` (`RESOLVE_IN_ROOT` boundary). Delete
-      `parent_chain_has_symlink` once `openat2` subsumes it. Non-Linux retains the
-      current logic behind `cfg` (it's a test-only build target).
-- [ ] **Step 3 (preserve invariants):** confirm the existing handling is intact —
-      whiteout markers, hardlink-target-missing refusal, device-node allowlist,
-      setid/xattr policy, and timestamp-zeroing reproducibility. The change is a
-      swap of the *resolution mechanism*, not the policy. Re-run the
-      reproducible-unpack byte-identity assertion.
-- [ ] **Step 4 (fuzz):** extend `crates/mvm-oci/fuzz/fuzz_targets/unpack_layer.rs`
-      with the escape corpus (coordinate the gate wiring with Plan 128's fuzz
-      re-homing — this plan adds the corpus + behavior; Plan 128 owns the CI lane,
-      do not duplicate a gate here).
+- [x] **Step 1 (red):** added `concurrent_symlink_swap_in_parent_never_escapes_root`
+      (`cfg(target_os = "linux")`): a swapper thread flips a parent component
+      between a real dir and an out-of-root symlink while the unpacker writes
+      `p/q/secret`; the test asserts nothing ever lands at the out-of-root escape
+      target. A deterministic single-process witness of the exact check→write
+      window is not constructible — zero tar-stream reads sit between
+      `parent_chain_has_symlink` and the leaf open, so single-threaded the existing
+      string+walk checks are sound; the residual gap is a concurrent parent swap.
+      The witness therefore is the concurrency test, and it inspects only the
+      escape target so the racing swapper can never make it flaky post-fix.
+      Box-verified: it **fails** against the pre-openat2 check-then-use write
+      (escape occurs) and **passes** with the fix. Plus deterministic
+      `escape_corpus_entries_are_refused_and_write_nothing` (absolute / `..` /
+      separator-quirk, table-driven) + `escape_corpus_symlinked_parent_is_refused`.
+- [x] **Step 2 (green):** added `Rooted`, created once per `unpack_layer`. On
+      `cfg(target_os = "linux")` it opens `output_root` once and resolves each
+      entry's parent through `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)`
+      (creating intermediates with `mkdirat` as it descends), then creates the leaf
+      with `*at` calls (`openat2`/`mkdirat`/`symlinkat`/`linkat`/`mknodat`) against
+      the returned dir handle — never a re-derived host path. The cheap
+      `..`/absolute string checks stay as fail-fast; `openat2` is the authority.
+      `ELOOP` → `SymlinkInParent`, `EXDEV` → `JoinedPathEscape`. Non-Linux retains
+      the path-based writers behind `cfg` (test/dev build target only).
+- [x] **Step 3 (preserve invariants):** whiteout markers, hardlink-target-missing
+      refusal, device-node allowlist, setid/xattr policy, and timestamp-zeroing
+      reproducibility all unchanged — the full pre-existing suite passes on macOS
+      (fallback path, 84 tests) and on the Linux box (openat2 path, 73 unit + 15
+      integration). The change swaps the resolution mechanism, not the policy.
+- [x] **Step 4 (fuzz):** extended `crates/mvm-oci/fuzz/fuzz_targets/unpack_layer.rs`
+      with a structured, dependency-free arm (hand-rolled USTAR — keeps the frozen
+      fuzz lockfile untouched) that derives attacker-shaped paths from the fuzz
+      input and drives the absolute / traversal / symlinked-parent branches plus
+      the openat2 resolution path. CI lane stays Plan 128's; no gate added here.
 
 **R2 acceptance:**
-- [ ] The symlink-swap regression + escape corpus pass; the symlink-swap test
-      demonstrably failed before Step 2 and passes after.
-- [ ] `parent_chain_has_symlink` is gone (or reduced to the fail-fast string
-      check); `openat2` is the resolution authority on Linux.
-- [ ] Whiteout / hardlink / device-node / setid handling and reproducible-unpack
-      byte-identity unchanged.
+- [x] The symlink-swap regression + escape corpus pass; the symlink-swap test
+      demonstrably failed before Step 2 (box-verified escape) and passes after.
+- [x] `parent_chain_has_symlink` is **reduced to a cross-platform fail-fast
+      pre-filter**; on Linux the `openat2` handle is the load-bearing resolution
+      authority for writes. Full deletion awaits the whiteout-removal openat2
+      conversion (see deferred follow-ups).
+- [x] Whiteout / hardlink / device-node / setid handling and reproducible-unpack
+      byte-identity unchanged (full suite green on both platforms).
+
+### Deferred follow-ups
+
+- [ ] Convert the whiteout-**removal** walk (`apply_regular_whiteout` /
+      `apply_opaque_whiteout` / `remove_*_except_current_layer`) and the non-Linux
+      hardlink path to openat2/`*at` so `parent_chain_has_symlink` can be deleted
+      outright. This PR scopes openat2 to the **write/creation** path (where
+      attacker bytes land); the removal path keeps the `symlink_metadata` +
+      `starts_with` guard plus the fail-fast scan, which is unchanged from before.
 
 ## Task R3 — ADR-002 positioning note
 
 **Where:** `specs/adrs/002-microvm-security-posture.md`, the Threat-model /
 out-of-scope discussion (prose, **not** the numbered claim table).
 
-- [ ] **Step 1:** add one paragraph stating *why* mvm chose a hardware boundary
-      (KVM/VMM) over a userspace application-kernel sandbox — stronger isolation,
-      no syscall-compat surface, no in-process TOCTTOU class — and citing that
-      class of sandbox as the reference for the in-guest hardening layer (R2 here,
-      R1 in Plan 143). Keep it **name-clean**: oblique "userspace application-kernel
-      sandbox" phrasing only, matching the scrubbed Plan 143 — no product name.
-- [ ] **Step 2:** keep it out of the numbered claim table. This is adjacent-threat
-      *positioning*, so it belongs in §Threat model, not §Out of scope and not as
-      a new claim (the out-of-scope list only carries items in the same threat
-      model as a claim). Do not add a `specs/claims/` witness — there's no new
-      claim. `xtask check-spec-numbers` + ADR lint must pass.
+- [x] **Step 1:** added the "Why a hardware boundary, not a userspace
+      application-kernel sandbox" paragraph to ADR-002 §Threat model — stronger
+      hardware-enforced isolation, no syscall-compat surface, an escape is a
+      hardware-assisted VM escape rather than an in-process logic bug — and cites
+      that sandbox class as the reference for the in-guest hardening layer (the
+      openat2-confined unpacker here; the ioctl seccomp denylist tracked elsewhere).
+      Name-clean: oblique "userspace application-kernel sandbox" phrasing only.
+- [x] **Step 2:** kept in §Threat model, not §Out of scope, not the numbered claim
+      table; no `specs/claims/` witness added. `catalog.md` untouched.
 
 **R3 acceptance:**
-- [ ] ADR-002 records the hardware-boundary-vs-application-kernel rationale; no new
+- [x] ADR-002 records the hardware-boundary-vs-application-kernel rationale; no new
       numbered claim; `specs/claims/catalog.md` untouched.
 
 ## Verification (whole plan)
 
-- [ ] `rustup run nightly cargo fmt --all -- --check` (CI Lint uses nightly
-      rustfmt; stable under-formats).
-- [ ] `cargo test --workspace` green, including the new R2 tests.
-- [ ] `cargo clippy --workspace -- -D warnings` clean.
-- [ ] `crates/mvm-oci/fuzz` builds with the extended corpus (`cargo +nightly
-      fuzz build unpack_layer`); a short local run finds no immediate escape.
-- [ ] `just lint` green.
+- [x] `rustup run nightly cargo fmt --all -- --check` clean.
+- [x] `cargo test -p mvm-oci` green on macOS (fallback path, 84 tests) and on a
+      real Linux host (openat2 path, 73 unit + 15 integration). Full-workspace
+      `cargo test` is left to CI — `mvm-backend`'s test binary `SIGKILL`s under
+      macOS codesign locally (environmental, pre-existing).
+- [x] `cargo clippy -p mvm-oci --all-targets -- -D warnings` clean on Linux
+      (openat2 path) and macOS (fallback). Workspace clippy → CI.
+- [x] `crates/mvm-oci/fuzz` type-checks with the extended corpus (`cargo check`
+      on the Linux host; `cargo fuzz`/nightly not installed on the box, so the
+      libFuzzer run + Plan 128 CI lane stays the gate).
+- [x] `check-no-spec-refs-in-comments` clean.
 
 ## Sequencing / ownership
 

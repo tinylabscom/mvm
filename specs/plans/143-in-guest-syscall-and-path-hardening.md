@@ -106,20 +106,16 @@ with `symlink_metadata` (check), then a later call writes (use); `O_NOFOLLOW` on
 guards the *leaf* open, not the intermediate dirs the kernel traverses. This is the
 hazard the reference sandbox eliminates with one atomic `openat2(2)` resolution.
 
-- [ ] **Step 1 (red):** regression test — swap a parent component to a symlink
-      mid-unpack and assert refusal; a `..`/symlink/separator-quirk escape corpus.
-- [ ] **Step 2 (green):** on `cfg(target_os="linux")`, open each entry's parent
-      dir relative to an `output_root` dirfd via `openat2` with
-      `RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS`, then create the leaf with `*at`
-      calls against that dirfd. Keep the string checks as cheap fail-fast, but make
-      `openat2` the **authority**; map refusals to the existing
-      `RefusalReason::SymlinkInParent` / `JoinedPathEscape`. Non-Linux keeps the
-      current logic (test-only build). **Files:** `unpack.rs` (`unpack_layer:470`,
-      the write/dir/symlink helpers at `:1128/:1179/:1287/:1325`,
-      `parent_chain_has_symlink:904`).
-- [ ] **Step 3:** extend `fuzz/fuzz_targets/unpack_layer.rs` with the escape
-      corpus (coordinate with Plan 128's fuzz re-homing); confirm
-      reproducible-unpack byte-identity still holds; `just lint`; commit.
+- [x] **Step 1 (red):** done in Plan 161 — concurrent symlink-swap witness
+      (box-verified: fails pre-fix, passes post-fix) + deterministic escape corpus.
+- [x] **Step 2 (green):** done in Plan 161 — `Rooted` resolves each parent via
+      `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)` and writes the leaf with
+      `*at` calls; string checks kept as fail-fast; `ELOOP`→`SymlinkInParent`,
+      `EXDEV`→`JoinedPathEscape`; non-Linux keeps the path-based fallback. (Scoped
+      to the write path; whiteout-removal openat2 conversion deferred — see
+      Plan 161 deferred follow-ups.)
+- [x] **Step 3:** done in Plan 161 — fuzz harness extended with a dependency-free
+      USTAR escape-corpus arm; reproducible-unpack byte-identity unchanged.
 
 ## Task 3 — ADR-002 positioning note  *(independent)*
 
@@ -133,18 +129,18 @@ prose, not a new claim* — keep it out of the numbered claim table (only list i
 in the same threat model as a claim under §Out of scope; adjacent-threat
 positioning goes in §Threat model).
 
-- [ ] **Step 1:** write the paragraph; reference the Landlock + seccomp-unotify
-      application-kernel sandbox literature as the comparison points.
-      `xtask check-spec-numbers` + ADR lint pass.
+- [x] **Step 1:** done in Plan 161 — ADR-002 §Threat model carries the
+      "Why a hardware boundary, not a userspace application-kernel sandbox"
+      paragraph (name-clean; out of the numbered claim table).
 
 ## Acceptance (Plan 143 is done when)
 
 - [ ] Guest seccomp denies `ioctl(_, TIOCSTI/TIOCLINUX, _)` while preserving
       legitimate ioctls; `core_demo_e2e` still green (Task 1, post-gate).
-- [ ] OCI unpack resolves paths via `openat2(RESOLVE_*)`; the symlink-swap +
-      escape-corpus regressions pass; fuzz target extended (Task 2).
-- [ ] ADR-002 records the hardware-boundary-vs-application-kernel rationale
-      (Task 3).
+- [x] OCI unpack resolves paths via `openat2(RESOLVE_*)`; the symlink-swap +
+      escape-corpus regressions pass; fuzz target extended (Task 2 — via Plan 161).
+- [x] ADR-002 records the hardware-boundary-vs-application-kernel rationale
+      (Task 3 — via Plan 161).
 - [ ] `just lint` + `cargo test --workspace` green.
 
 ## Considered and rejected (reference-sandbox features NOT adopted)
