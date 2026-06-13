@@ -4,6 +4,7 @@
 //! only, so a non-workload backend cannot reach it.
 use crate::backend::{AnyBackend, FirecrackerBackend};
 use crate::libkrun::LibkrunBackend;
+use crate::mock::MockBackend;
 use crate::vz::VzBackend;
 use anyhow::{Result, anyhow};
 use mvm_core::vm_backend::VmBackend;
@@ -14,6 +15,11 @@ pub trait WorkloadBackend: VmBackend {}
 impl WorkloadBackend for FirecrackerBackend {}
 impl WorkloadBackend for LibkrunBackend {}
 impl WorkloadBackend for VzBackend {}
+// `MockBackend` is the hermetic lifecycle test double — it carries no real
+// workload, so it stands in for a workload backend on the admitted path in
+// tests. `QemuBackend` (a real dev/test VMM) is deliberately NOT a
+// `WorkloadBackend`: it is the meaningful Tier-2 carve-out.
+impl WorkloadBackend for MockBackend {}
 
 /// The single boundary the admitted launch path goes through. Returns the
 /// backend as `&dyn WorkloadBackend`, or a typed refusal for backends not
@@ -33,7 +39,8 @@ pub fn require_workload_backend(backend: &AnyBackend) -> Result<&dyn WorkloadBac
 mod tests {
     use super::*;
 
-    // Compile-time proof the three workload backends implement the marker.
+    // Compile-time proof the workload backends implement the marker (incl. the
+    // mock test double; qemu is intentionally absent).
     fn assert_is_workload_backend<T: WorkloadBackend>() {}
 
     #[test]
@@ -41,6 +48,7 @@ mod tests {
         assert_is_workload_backend::<FirecrackerBackend>();
         assert_is_workload_backend::<LibkrunBackend>();
         assert_is_workload_backend::<VzBackend>();
+        assert_is_workload_backend::<MockBackend>();
     }
 
     #[test]

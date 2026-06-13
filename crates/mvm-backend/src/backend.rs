@@ -487,13 +487,17 @@ impl AnyBackend {
     /// Borrow as `&dyn WorkloadBackend` — `Some` only for backends permitted
     /// to carry an untrusted workload. The exhaustive match means a new
     /// `AnyBackend` variant forces an explicit workload/non-workload decision
-    /// here (compile error otherwise).
+    /// here (compile error otherwise). `Qemu` is barred (a real VMM scoped to
+    /// dev/test); `Mock` is permitted as the hermetic lifecycle test double —
+    /// it carries no real workload, so it is the stand-in tests drive through
+    /// the admitted path.
     pub fn as_workload_backend(&self) -> Option<&dyn crate::workload_backend::WorkloadBackend> {
         match self {
             AnyBackend::Firecracker(b) => Some(b),
             AnyBackend::Libkrun(b) => Some(b),
             AnyBackend::Vz(b) => Some(b),
-            AnyBackend::Qemu(_) | AnyBackend::Mock(_) => None,
+            AnyBackend::Mock(b) => Some(b),
+            AnyBackend::Qemu(_) => None,
         }
     }
 
@@ -1081,7 +1085,9 @@ mod tests {
 
     #[test]
     fn as_workload_backend_some_for_workload_variants() {
-        for name in ["firecracker", "libkrun", "vz"] {
+        // mock is included: it is the hermetic lifecycle test double that
+        // stands in for a workload backend on the admitted path (ADR-045).
+        for name in ["firecracker", "libkrun", "vz", "mock"] {
             let backend = AnyBackend::from_hypervisor(name);
             assert!(
                 backend.as_workload_backend().is_some(),
@@ -1091,14 +1097,14 @@ mod tests {
     }
 
     #[test]
-    fn as_workload_backend_none_for_non_workload_variants() {
-        for name in ["qemu", "mock"] {
-            let backend = AnyBackend::from_hypervisor(name);
-            assert!(
-                backend.as_workload_backend().is_none(),
-                "{name}: Tier-2/test backend must not be a workload backend"
-            );
-        }
+    fn as_workload_backend_none_for_qemu() {
+        // qemu is the meaningful carve-out: a real dev/test VMM that must not
+        // carry an untrusted workload.
+        let backend = AnyBackend::from_hypervisor("qemu");
+        assert!(
+            backend.as_workload_backend().is_none(),
+            "qemu: dev/test VMM must not be a workload backend"
+        );
     }
 
     #[test]
