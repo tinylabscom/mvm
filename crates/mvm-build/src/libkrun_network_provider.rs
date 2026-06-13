@@ -52,6 +52,10 @@ impl LibkrunNetworkProvider {
         match pref {
             NetworkingPreference::Gvproxy => "gvproxy",
             NetworkingPreference::Passt => "passt",
+            // Native shares the gvproxy vfkit spawn path — it differs only in
+            // the binary (via MVM_GATEWAY_BIN) — so the supervisor config keys
+            // on the same "gvproxy" kind.
+            NetworkingPreference::Native => "gvproxy",
         }
     }
 }
@@ -120,6 +124,11 @@ mod tests {
         assert_eq!(
             LibkrunNetworkProvider::gateway_kind(NetworkingPreference::Passt),
             "passt"
+        );
+        // Native reuses the gvproxy vfkit kind; the binary swap is orthogonal.
+        assert_eq!(
+            LibkrunNetworkProvider::gateway_kind(NetworkingPreference::Native),
+            "gvproxy"
         );
     }
 

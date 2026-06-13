@@ -147,6 +147,14 @@ pub enum NetworkingPreference {
     /// supervisor spawns gvproxy with `-listen-vfkit unixgram://…`
     /// and libkrun connects to the listener path.
     Gvproxy,
+    /// virtio-net via the in-house native gateway. Opt-in only
+    /// (`MVM_NETWORKING=native`); the default never selects it. The
+    /// native gateway speaks the same `-listen-vfkit` unixgram protocol
+    /// as gvproxy, so it reuses the gvproxy vfkit backend wholesale —
+    /// the only difference is the binary, located via `MVM_GATEWAY_BIN`.
+    /// `resolve_networking_mode` falls back to the per-OS default when
+    /// `native` is requested without `MVM_GATEWAY_BIN`.
+    Native,
 }
 
 /// Apply the resolved [`NetworkingPreference`] to a [`KrunContext`].
@@ -163,6 +171,12 @@ fn apply_networking_mode(
             krun.with_passt(libkrun_sys::passt::DEFAULT_GUEST_MAC, scratch)
         }
         NetworkingPreference::Gvproxy => {
+            krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
+        }
+        // Drop-in: the native gateway speaks the gvproxy vfkit unixgram
+        // protocol, so reuse `with_gvproxy`. The binary swap happens in
+        // `gvproxy::locate_gvproxy` via `MVM_GATEWAY_BIN`.
+        NetworkingPreference::Native => {
             krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
         }
     })
@@ -182,10 +196,11 @@ pub fn default_networking_mode() -> NetworkingPreference {
     }
 }
 
-/// Read `MVM_NETWORKING` from the env. Accepts `passt` and
-/// `gvproxy` (case-insensitive); anything else falls back to the
+/// Read `MVM_NETWORKING` from the env. Accepts `passt`, `gvproxy`,
+/// and `native` (case-insensitive); anything else falls back to the
 /// per-OS default and emits a warning so a typo is visible without
-/// aborting.
+/// aborting. `native` additionally requires `MVM_GATEWAY_BIN` to name
+/// the gateway binary, or it falls back to the per-OS default too.
 ///
 /// Per-OS dispatch is macOS → gvproxy, Linux → passt. TSI was
 /// removed entirely — it bypassed virtio-net (no host fd to splice),
@@ -220,6 +235,23 @@ pub fn resolve_networking_mode() -> NetworkingPreference {
             }
         }
         Some("gvproxy") => NetworkingPreference::Gvproxy,
+        // The native gateway is located via `MVM_GATEWAY_BIN`. Without it
+        // there is no binary to spawn, so fall back to the per-OS default
+        // with a warning rather than silently spawning the wrong gateway —
+        // same fail-safe shape as the passt-on-macOS fallback above.
+        Some("native") => {
+            if std::env::var_os("MVM_GATEWAY_BIN").is_some_and(|v| !v.is_empty()) {
+                NetworkingPreference::Native
+            } else {
+                let fallback = default_networking_mode();
+                tracing::warn!(
+                    fallback = ?fallback,
+                    "MVM_NETWORKING=native requires MVM_GATEWAY_BIN to point at the \
+                     gateway binary; falling back to per-OS default"
+                );
+                fallback
+            }
+        }
         None | Some("") => default_networking_mode(),
         Some(other) => {
             let fallback = default_networking_mode();
@@ -234,7 +266,7 @@ pub fn resolve_networking_mode() -> NetworkingPreference {
                 tracing::warn!(
                     value = other,
                     fallback = ?fallback,
-                    "MVM_NETWORKING unrecognised; falling back to per-OS default (accepted: passt, gvproxy)"
+                    "MVM_NETWORKING unrecognised; falling back to per-OS default (accepted: passt, gvproxy, native)"
                 );
             }
             fallback
@@ -2220,6 +2252,23 @@ mod tests {
             // Unknown value falls back to the per-OS default without panic.
             std::env::set_var("MVM_NETWORKING", "vmnet-helper");
             assert_eq!(resolve_networking_mode(), default_networking_mode());
+
+            // `native` requires MVM_GATEWAY_BIN to name the gateway binary;
+            // without it, it falls back (fail-safe, no wrong-gateway spawn).
+            std::env::remove_var("MVM_GATEWAY_BIN");
+            std::env::set_var("MVM_NETWORKING", "native");
+            assert_eq!(
+                resolve_networking_mode(),
+                default_networking_mode(),
+                "native without MVM_GATEWAY_BIN must fall back to the per-OS default"
+            );
+            // With MVM_GATEWAY_BIN set, `native` resolves (case- and
+            // whitespace-insensitive like the other accepted values).
+            std::env::set_var("MVM_GATEWAY_BIN", "/path/to/gateway");
+            assert_eq!(resolve_networking_mode(), NetworkingPreference::Native);
+            std::env::set_var("MVM_NETWORKING", " NATIVE ");
+            assert_eq!(resolve_networking_mode(), NetworkingPreference::Native);
+            std::env::remove_var("MVM_GATEWAY_BIN");
 
             std::env::remove_var("MVM_NETWORKING");
         }

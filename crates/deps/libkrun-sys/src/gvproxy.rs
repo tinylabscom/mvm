@@ -137,8 +137,21 @@ pub fn install_hint() -> &'static str {
     }
 }
 
-/// Probe `$PATH` for `gvproxy`. Returns the absolute path on success.
+/// Locate the host-side vfkit gateway binary to spawn.
+///
+/// `MVM_GATEWAY_BIN`, when set to a non-empty value, overrides the
+/// default — the seam for running an alternate gateway that speaks the
+/// same `-listen-vfkit` unixgram protocol gvproxy does (the in-house
+/// native gateway, selected via `MVM_NETWORKING=native`). The path is
+/// used verbatim; a bad path surfaces as a clear spawn error rather
+/// than silently falling back to `gvproxy`. Unset → probe `$PATH` for
+/// `gvproxy`.
 pub fn locate_gvproxy() -> Option<PathBuf> {
+    if let Some(bin) = std::env::var_os("MVM_GATEWAY_BIN")
+        && !bin.is_empty()
+    {
+        return Some(PathBuf::from(bin));
+    }
     which::which("gvproxy").ok()
 }
 
@@ -456,6 +469,27 @@ mod tests {
     #[test]
     fn locate_gvproxy_is_optional() {
         let _ = locate_gvproxy();
+    }
+
+    /// `MVM_GATEWAY_BIN` overrides the default `gvproxy` lookup — the seam an
+    /// alternate vfkit gateway (the native gateway) is spawned through. An
+    /// empty value is ignored so it falls back to the `$PATH` probe.
+    #[test]
+    fn locate_gvproxy_honors_gateway_bin_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: env mutation serialized by the crate-wide TEST_ENV_LOCK.
+        unsafe {
+            std::env::set_var("MVM_GATEWAY_BIN", "/opt/mvm/native-gateway");
+            assert_eq!(
+                locate_gvproxy(),
+                Some(PathBuf::from("/opt/mvm/native-gateway")),
+                "MVM_GATEWAY_BIN must override the default gvproxy lookup"
+            );
+            std::env::set_var("MVM_GATEWAY_BIN", "");
+            // Empty → ignored; must not return an empty path.
+            assert_ne!(locate_gvproxy(), Some(PathBuf::new()));
+            std::env::remove_var("MVM_GATEWAY_BIN");
+        }
     }
 
     /// A reserved port is in gvproxy's accepted `-ssh-port` range

@@ -138,6 +138,11 @@ fn krun_context_base(
         mvm_build::libkrun_builder::NetworkingPreference::Passt => {
             krun.with_passt(libkrun_sys::passt::DEFAULT_GUEST_MAC, scratch)
         }
+        // Native reuses the gvproxy vfkit backend; the binary swap happens
+        // in gvproxy::locate_gvproxy via MVM_GATEWAY_BIN.
+        mvm_build::libkrun_builder::NetworkingPreference::Native => {
+            krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
+        }
     }
 }
 
