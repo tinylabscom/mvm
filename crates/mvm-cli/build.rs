@@ -106,6 +106,18 @@ fn main() {
             .join("crates/mvm-cli/src/host_binaries/manifest.rs")
             .display()
     );
+    // The embedded binaries' bytes are the authoritative builder-VM
+    // fingerprint input, so they must rebuild when their real inputs change —
+    // not just their `src/bin/` entrypoints. Watch the workspace lockfile (a
+    // dep bump in their closure) and the whole `mvm-build` lib they link.
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("Cargo.lock").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("crates/mvm-build/src").display()
+    );
 }
 
 struct Pin {
