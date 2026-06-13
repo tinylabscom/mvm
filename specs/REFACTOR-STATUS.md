@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status/down/up --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 118: Vz saved-standby warm pool claim live-validated + pool self-replenishes via detached re-warm (#840) + claim reuses admission image sha (#846); Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings; Plan 195 builder-VM fingerprint narrowing planned; Plan 161 OCI-unpacker openat2 TOCTTOU fix landed (Plan 143 R2/R3 done) — writes resolve through `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)`; follow-up routes whiteout removal through openat2 too)
+**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status/down/up --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 118: Vz saved-standby warm pool claim live-validated + pool self-replenishes via detached re-warm (#840) + claim reuses admission image sha (#846); Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings; Plan 195 builder-VM fingerprint narrowing planned; Plan 161 OCI-unpacker openat2 TOCTTOU fix landed (Plan 143 R2/R3 done) — writes resolve through `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)`, follow-up routes whiteout removal through openat2 too; Plan 126 D1 forbidden-dep gate landed — closure ban on sigstore/opendal/pgp)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -29,7 +29,7 @@ details** below for the workstream-level state.
 - [ ] **PLAN 159** — vz-inspired macOS VZ DX · 🟡 warm pool + checkpoint/fork shipped; WS-5 D + delta-image remain
 - [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C2/C3 (FC/Vz warm-start) gated
 - [ ] **PLAN 124** — Lean guest agent · 🟡 ~65%; SDK codegen + signed on-device config remain
-- [ ] **PLAN 126** — Dependency reduction · 🟡 ~30%; duplicate-major lock-gate landed (+ supply-chain CI restored); sigstore/aws-lc/forbidden-dep-gate remain
+- [ ] **PLAN 126** — Dependency reduction · 🟡 ~30%; duplicate-major lock-gate landed (+ supply-chain CI restored); D1 forbidden-dep-gate landed (closure ban on sigstore/opendal/pgp); aws-lc-rs ban still blocked by oci-client; dep-baseline.md write-up remains
 - [x] **PLAN 177** — Backend consolidation (8→4) · ✅ both phases merged (#806/#789/#812/#814/#817); DX-parity → Plan 189; lone caveat = host-gated hardware smoke
 - [ ] **PLAN 182** — Trait hygiene + backend catalog · 🟡 code+docs done locally; aggregate workspace-test SIGKILL remains
 - [ ] **PLAN 184** — Backend descriptor registry · 🔴 not started

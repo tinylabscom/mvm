@@ -117,8 +117,24 @@ Two major versions of the same crate inflate the lock + compile time.
 
 ### Task D1: the forbidden-dep gate
 
-- [ ] **Step 1:** Extend `xtask check-forbidden-deps` (exists) to fail if `sigstore`, `opendal`, `pgp`, or `aws-lc-rs` re-enter the default `mvmctl` closure (an allow-list of off-by-default features for the deliberately-gated ones), **and** if `tokio` re-enters `mvm-core`'s default closure (the B5 runtime-free-core assertion). Failing test — adding any one back trips the gate.
-- [ ] **Step 2:** Final measure — total before/after in `dep-baseline.md`; the sum of B1–B4 + C1 is the headline reduction (alongside 124's ~25–35 agent crates). Commit. Wire the gate into `ci.yml` (with 128), alongside 156's sibling `check-binary-size` gate.
+- [x] **Step 1:** Extended `xtask check-forbidden-deps` with a default-closure
+      ban: it now resolves `mvmctl`'s default-feature normal-edge closure via
+      `cargo tree` and fails if `sigstore`, `opendal`, or `pgp` appear there
+      (exact package-name match, so siblings like `sigstore-protobuf-specs` don't
+      false-trip). The lockfile-name ban (`sea-*`/`mysql`) stays — those must not
+      appear at all; the new deps are checked against the *closure*, not the lock,
+      because `sigstore` legitimately remains in `Cargo.lock` behind the
+      off-by-default `manifest-verify` feature. The gate is already wired into
+      `ci.yml` + `ci-full.yml`, so no new CI step is needed. Unit tests cover the
+      matcher (exact-match, no-substring, sort/dedup) and an end-to-end run was
+      box-free-verified to **trip** when a present crate is added to the ban list
+      and pass after revert.
+      - `aws-lc-rs` is **deliberately not gated**: it is in the default closure
+        today via `oci-client → rustls` (B4 is blocked upstream), so banning it
+        would false-fail. Recorded here as the remaining blocker.
+      - `tokio`-in-`mvm-core` is already enforced by the separate
+        `check-core-runtime-free` gate (B5); not duplicated here.
+- [ ] **Step 2:** Final measure — total before/after in `dep-baseline.md`; the sum of B1–B4 + C1 is the headline reduction (alongside 124's ~25–35 agent crates). (Gate + CI wiring done in Step 1; only the `dep-baseline.md` measurement write-up remains.)
 
 ### Task D2: duplicate-major lock-gate (cargo-deny ratchet) — DONE
 
@@ -139,7 +155,7 @@ rather than a new xtask.
 - [x] `dep-baseline.md` records the method + the baseline + the Phase D final measure (all numbers measured, never asserted): default binary closure 407→347 (−60), lockfile 722→683 (−39); per-target outcomes (sigstore/opendal/pgp out of the default closure, aws-lc-rs still in / B4 blocked) and the four ratchets that hold the cut.
 - [ ] `sigstore` out of the `mvmctl` default (cosign verify relocated to mvmd; claim 14's audit-label path intact); `opendal`→`object_store`; `pgp`→`minisign`; `aws-lc-rs` gone (`cargo tree -i aws-lc-rs` empty, C/cmake build removed).
 - [ ] One major each for `reqwest`/`oci-client` (`cargo tree -d` clean for them).
-- [ ] `check-forbidden-deps` trips if any of the four re-enter the default closure.
+- [x] `check-forbidden-deps` trips if `sigstore`/`opendal`/`pgp` re-enter the default closure (`aws-lc-rs` deferred — still in the closure via `oci-client`).
 - [ ] `cargo test --workspace` + clippy + fmt green; the OCI / template-registry / release-signing / TLS paths still pass.
 
 ### deferred follow-ups

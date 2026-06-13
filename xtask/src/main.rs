@@ -137,7 +137,7 @@ fn main() -> Result<()> {
                 "  check-doc-claims                        Plan 74 W0 lint: reject gated marketing phrases in public docs"
             );
             eprintln!(
-                "  check-forbidden-deps                    Reject sea-* and mysql crates in Cargo.lock"
+                "  check-forbidden-deps                    Reject sea-*/mysql in Cargo.lock + sigstore/opendal/pgp in mvmctl's default closure"
             );
             eprintln!(
                 "  check-core-runtime-free                 Plan 126 B5: assert mvm-core's default build pulls no tokio"
