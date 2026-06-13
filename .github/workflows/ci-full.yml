@@ -67,6 +67,16 @@ jobs:
         # for linux-gnu targets — see the comment in that file.
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
 
+      # check-stubs shells out to `uvx datamodel-codegen` + `npx
+      # json-schema-to-typescript`; the pinned generator versions live in
+      # xtask so host node/python versions don't change the output.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
       # Plan 115 / ADR-065 — mvm-cli's build.rs cross-compiles
       # mvm-host-vm-init + mvm-egress-proxy for aarch64-unknown-linux-gnu
       # via cargo-zigbuild and embeds the binaries via include_bytes!.
@@ -135,6 +145,9 @@ jobs:
       # nix/lib/mvm-host-binaries.nix in the same PR.
       - name: host-binaries manifest parity (Plan 115 / ADR-065)
         run: cargo run -p xtask -- check-mvm-host-binaries-sync
+
+      - name: SDK stubs match the Rust schemas (no drift)
+        run: cargo run -p xtask -- check-stubs
 
   test:
     name: Test
