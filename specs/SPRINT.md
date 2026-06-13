@@ -2212,7 +2212,7 @@ VZ validates the restored machine state against the saved device
 configuration, so MAC and machine-id are fixed by the snapshot — the
 child keeps them, which is safe because every VM runs behind its own
 per-VM gvproxy with no shared L2 segment. Forking a RUNNING parent
-(the spike result: 0.87 s wall-time to a second live VM with both
+(the spike result: 0.91 s (with full claim-8 admission) wall-time to a second live VM with both
 control planes responsive) is now the production contract.
 `--cpus`/`--memory` are refused on vm_full forks with a clear error
 pointing to fs_quick for resize; bridge-style non-gvproxy attachments

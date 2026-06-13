@@ -276,6 +276,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                             vm_name,
                             backend_name: &backend_name,
                             rootfs_path: rootfs,
+                            precomputed_image_sha256: None,
                             cpus,
                             mem_mib: mem,
                             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,

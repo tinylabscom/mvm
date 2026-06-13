@@ -112,6 +112,12 @@ pub(super) struct AdmitPlanForBootParams<'a> {
     pub vm_name: &'a str,
     pub backend_name: &'a str,
     pub rootfs_path: &'a std::path::Path,
+    /// Skip re-hashing `rootfs_path` and admit with this sha256 instead.
+    /// Only sound when a fail-closed integrity check re-hashes the same
+    /// bytes before boot (the checkpoint fork path: `verify_content`
+    /// refuses a tampered blob before any supervisor spawns) — a
+    /// mismatch then aborts the launch, never boots a mis-admitted image.
+    pub precomputed_image_sha256: Option<String>,
     pub cpus: u32,
     pub mem_mib: u64,
     pub seccomp_tier: mvm_core::plan::PlanSeccompTier,
@@ -246,12 +252,15 @@ pub(super) fn admit_plan_for_boot(
     if p.no_supervisor {
         return Ok(None);
     }
-    let sha = mvm_core::crypto::image_verify::sha256_file(p.rootfs_path).with_context(|| {
-        format!(
-            "hashing rootfs at {} for plan admission",
-            p.rootfs_path.display()
-        )
-    })?;
+    let sha = match p.precomputed_image_sha256 {
+        Some(sha) => sha,
+        None => mvm_core::crypto::image_verify::sha256_file(p.rootfs_path).with_context(|| {
+            format!(
+                "hashing rootfs at {} for plan admission",
+                p.rootfs_path.display()
+            )
+        })?,
+    };
 
     // Claim 9 — bundle pin (when supplied).
     //
@@ -1535,6 +1544,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             vm_name: &vm_name,
             backend_name: effective_hypervisor,
             rootfs_path: std::path::Path::new(&rootfs),
+            precomputed_image_sha256: None,
             cpus: direct_cpus,
             mem_mib: direct_mem as u64,
             seccomp_tier: plan_seccomp_tier,
@@ -1953,6 +1963,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         vm_name: &vm_name,
         backend_name: effective_hypervisor,
         rootfs_path: std::path::Path::new(&rootfs_path),
+        precomputed_image_sha256: None,
         cpus: final_cpus,
         mem_mib: final_memory as u64,
         seccomp_tier: plan_seccomp_tier,
@@ -2334,6 +2345,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 vm_name: &vm_name_owned,
                 backend_name: effective_hypervisor,
                 rootfs_path: std::path::Path::new(&result.rootfs_path),
+                precomputed_image_sha256: None,
                 cpus: final_cpus,
                 mem_mib: final_memory as u64,
                 seccomp_tier: plan_seccomp_tier,
@@ -2747,6 +2759,7 @@ mod admit_plan_tests {
             vm_name: "vm-skip",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
             cpus: 2,
             mem_mib: 512,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -2778,6 +2791,7 @@ mod admit_plan_tests {
             vm_name: "vm-happy",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
             cpus: 2,
             mem_mib: 512,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Network,
@@ -2830,6 +2844,7 @@ mod admit_plan_tests {
             vm_name: "vm-missing",
             backend_name: "firecracker",
             rootfs_path: std::path::Path::new("/nonexistent/rootfs.ext4"),
+            precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -2868,6 +2883,7 @@ mod admit_plan_tests {
             vm_name: "vm-1",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -2890,6 +2906,7 @@ mod admit_plan_tests {
             vm_name: "vm-2",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -2954,6 +2971,7 @@ mod admit_plan_tests {
             vm_name: "vm-local-default",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,

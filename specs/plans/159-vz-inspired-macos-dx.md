@@ -197,7 +197,7 @@ snapshots to the `apple_container` runtime tier (currently
       MAC/machine-id, own admitted `ExecutionPlan`, `checkpoint.forked` entry).
       Parent may be running at fork time (sources sealed checkpoint content, not
       live disks). Gvproxy-only network invariant enforced; `--cpus`/`--memory`
-      refused (use `fs_quick` to resize). Measured at ~0.87 s second-VM boot.
+      refused (use `fs_quick` to resize). Measured live: 0.87 s bare restore; 0.91 s with full claim-8 admission (the admitted plan reuses the checkpoint's recorded rootfs sha — `verify_content` re-hashes the blob fail-closed before boot, so a tampered blob aborts rather than boots mis-admitted).
 - [ ] `checkpoint diff <a> <b>` — versioned diff between two checkpoints
       (the reference's `diff` verb), for inspecting what a fork changed.
       **(PR3)**

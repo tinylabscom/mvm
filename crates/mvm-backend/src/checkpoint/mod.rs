@@ -268,19 +268,6 @@ pub fn fork_vm_full(
         );
     }
 
-    // Clone the captured triple into the child's state dir, then boot the child
-    // from its OWN copies — never the parent's live blobs.
-    std::fs::create_dir_all(&params.dest_dir)
-        .with_context(|| format!("creating {}", params.dest_dir.display()))?;
-    let content_dir = store.content_dir(&parent.id);
-    for blob in &parent.content {
-        crate::base::cow::clone_rootfs_for_instance(
-            &content_dir.join(&blob.name),
-            &params.dest_dir.join(&blob.name),
-        )
-        .with_context(|| format!("cloning checkpoint blob {}", blob.name))?;
-    }
-
     let parent_cfg_path =
         crate::vz::supervisor_config_path(&mvm_core::config::vm_state_dir(&parent.vm_name));
     let parent_cfg_bytes = std::fs::read(&parent_cfg_path).with_context(|| {
@@ -292,10 +279,11 @@ pub fn fork_vm_full(
     let parent_cfg: mvm_build::vz::SupervisorConfig = serde_json::from_slice(&parent_cfg_bytes)
         .with_context(|| format!("parsing {}", parent_cfg_path.display()))?;
 
-    // Gvproxy-only invariant: an inherited MAC is collision-free only when
-    // both VMs run behind separate gvproxy instances with no shared L2 segment.
-    // A non-gvproxy network config (future bridge variant) would violate this;
-    // refuse now so the invariant is hard, not advisory.
+    // Gvproxy-only invariant, checked BEFORE any materialization so a refusal
+    // leaves no half-built child state dir: an inherited MAC is collision-free
+    // only when both VMs run behind separate gvproxy instances with no shared
+    // L2 segment. A non-gvproxy network config (future bridge variant) would
+    // violate this; refuse hard, not advisory.
     if let Some(ref net) = parent_cfg.network {
         anyhow::ensure!(
             matches!(net, mvm_build::vz::NetworkConfig::Gvproxy { .. }),
@@ -304,6 +292,19 @@ pub fn fork_vm_full(
              when each VM runs behind its own per-VM gvproxy",
             parent.vm_name
         );
+    }
+
+    // Clone the captured triple into the child's state dir, then boot the child
+    // from its OWN copies — never the parent's live blobs.
+    std::fs::create_dir_all(&params.dest_dir)
+        .with_context(|| format!("creating {}", params.dest_dir.display()))?;
+    let content_dir = store.content_dir(&parent.id);
+    for blob in &parent.content {
+        crate::base::cow::clone_rootfs_for_instance(
+            &content_dir.join(&blob.name),
+            &params.dest_dir.join(&blob.name),
+        )
+        .with_context(|| format!("cloning checkpoint blob {}", blob.name))?;
     }
 
     let memory_path = params.dest_dir.join("memory.bin");
@@ -1524,11 +1525,12 @@ mod tests {
 
     // ── vm_full fork: gvproxy-only invariant ─────────────────────────────────
 
-    /// fork_vm_full refuses a parent config whose network is not gvproxy.
-    /// The inherited MAC is safe only when every VM sits behind its own
-    /// per-VM gvproxy with no shared L2 segment.
+    /// `network: None` passes the gvproxy-only gate (no NIC = no MAC to
+    /// collide). The refusal arm is unreachable today — `NetworkConfig` has
+    /// only the `Gvproxy` variant — so this pins the accept side; the gate
+    /// exists to fail hard if a bridge-style variant is ever added.
     #[test]
-    fn fork_vm_full_refuses_non_gvproxy_network() {
+    fn fork_vm_full_accepts_none_network() {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());

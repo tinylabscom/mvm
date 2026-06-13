@@ -708,11 +708,19 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
     let cpus = parent_cfg.resources.cpu_count;
     let mem_mib = parent_cfg.resources.memory_mib;
 
-    // Admit a fresh plan for the child under the child's identity, hashing the
-    // parent checkpoint's rootfs blob (the child's materialized rootfs will be
-    // a clone of this — same bytes, same sha256). The hash is computed from the
-    // checkpoint content dir because the child's state dir doesn't exist yet.
+    // Admit a fresh plan for the child under the child's identity using the
+    // checkpoint's RECORDED rootfs sha (the child's materialized rootfs is a
+    // clone of that blob — same bytes). Re-hashing the multi-hundred-MB image
+    // here would double the fork latency for nothing: `fork_vm_full` runs
+    // `verify_content` over the same blob fail-closed before any supervisor
+    // spawns, so a tampered blob aborts the launch instead of booting
+    // mis-admitted.
     let rootfs_blob = p.store.content_dir(p.checkpoint).join("rootfs.ext4");
+    let recorded_sha = parent_meta
+        .content
+        .iter()
+        .find(|b| b.name == "rootfs.ext4")
+        .map(|b| b.sha256.clone());
     let tenant = super::tenant_resolution::resolve_tenant(None);
     let ledger = super::plan_admission::InMemoryNonceLedger::new();
     let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
@@ -720,6 +728,7 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
         vm_name: &child_vm_name,
         backend_name: "vz",
         rootfs_path: &rootfs_blob,
+        precomputed_image_sha256: recorded_sha,
         cpus,
         mem_mib,
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -851,6 +860,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         vm_name: p.child_vm_name,
         backend_name: &effective_hypervisor,
         rootfs_path: p.instance_rootfs,
+        precomputed_image_sha256: None,
         cpus,
         mem_mib,
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,

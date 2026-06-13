@@ -245,7 +245,7 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       goes through fs_quick). Vz checkpoint-integration gaps → Plan 183
       follow-ups.
   [x] instant memory fork: vm_full fork of a RUNNING parent → second live VM in
-      0.87s (same-identity clone model; admitted child; gvproxy-only invariant)
+      0.91s incl. claim-8 admission (same-identity clone model; recorded-sha admission; gvproxy-only invariant)
 
 PLAN 183 — Builder-VM egress posture + net boot ✅ DONE (follow-ups tracked in plan)
   Last updated: 2026-06-12
