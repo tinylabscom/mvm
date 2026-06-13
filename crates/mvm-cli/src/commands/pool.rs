@@ -266,8 +266,21 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
 /// The base-compat key a launch needs (kernel identity + fixed vcpus/mem + image sha for
 /// Vz). The kernel component is [`kernel_identity`] — for libkrun the bundled-kernel
 /// constant, so it's computable pre-boot even without an on-disk kernel.
-fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<StandbyCompat> {
-    let image_sha256 = image_identity(backend, cfg.rootfs_path.as_str())?;
+/// Build the compat key for a launch. `image_sha256_override` lets the caller
+/// hand in a rootfs sha already computed elsewhere (claim-8 admission hashes
+/// the rootfs to mint `ExecutionPlan.image.sha256` — the exact same bytes), so
+/// the image-bound backends skip a redundant full-rootfs hash on the launch hot
+/// path. It is the identical value `image_identity` would produce; `None` falls
+/// back to hashing. libkrun is image-agnostic and ignores the override.
+fn compat_for_launch(
+    backend: &dyn VmBackend,
+    cfg: &VmStartConfig,
+    image_sha256_override: Option<&str>,
+) -> Result<StandbyCompat> {
+    let image_sha256 = match image_sha256_override {
+        Some(sha) if backend.name() == "vz" => Some(sha.to_string()),
+        _ => image_identity(backend, cfg.rootfs_path.as_str())?,
+    };
     Ok(StandbyCompat {
         kernel_sha256: kernel_identity(backend, cfg.kernel_path.as_deref())?,
         vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
@@ -289,6 +302,7 @@ pub fn try_warm_claim(
     backend: &AnyBackend,
     cfg: &VmStartConfig,
     user_named: bool,
+    admitted_image_sha256: Option<&str>,
 ) -> Result<Option<VmId>> {
     if cfg.warm_pool_size == 0
         || user_named
@@ -301,7 +315,9 @@ pub fn try_warm_claim(
         // No admitted plan threaded in → not the bridge path → cold-boot.
         return Ok(None);
     };
-    let want = compat_for_launch(backend.as_vm_backend(), cfg)?;
+    // Reuse the rootfs sha claim-8 admission already computed (same bytes) so
+    // the claim decision doesn't re-hash the whole rootfs on the launch path.
+    let want = compat_for_launch(backend.as_vm_backend(), cfg, admitted_image_sha256)?;
     let rootfs = cfg.rootfs_path.clone();
     let bundle_json = cfg.bundle_json.clone();
     let pool = SupervisorStandbyPool::open()?;
@@ -682,13 +698,16 @@ mod tests {
         let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
         c.warm_pool_size = 0;
-        assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
+        assert_eq!(try_warm_claim(&b, &c, false, None).unwrap(), None);
     }
 
     #[test]
     fn try_warm_claim_cold_when_user_named() {
         let b = AnyBackend::from_hypervisor("libkrun");
-        assert_eq!(try_warm_claim(&b, &eligible_cfg(), true).unwrap(), None);
+        assert_eq!(
+            try_warm_claim(&b, &eligible_cfg(), true, None).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -704,7 +723,7 @@ mod tests {
             kind: VmVolumeKind::DirShare,
             encrypted: false,
         }];
-        assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
+        assert_eq!(try_warm_claim(&b, &c, false, None).unwrap(), None);
     }
 
     #[test]
@@ -712,7 +731,7 @@ mod tests {
         let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
         c.plan_json = None; // not the gateway-bridge/admitted path → cold-boot
-        assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
+        assert_eq!(try_warm_claim(&b, &c, false, None).unwrap(), None);
     }
 
     // A VmBackend stub whose `spawn_standby` always fails — used to exercise
