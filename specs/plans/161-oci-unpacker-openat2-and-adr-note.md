@@ -83,19 +83,29 @@ Refusals already flow through `RefusalReason::SymlinkInParent` / `JoinedPathEsca
       demonstrably failed before Step 2 (box-verified escape) and passes after.
 - [x] `parent_chain_has_symlink` is **reduced to a cross-platform fail-fast
       pre-filter**; on Linux the `openat2` handle is the load-bearing resolution
-      authority for writes. Full deletion awaits the whiteout-removal openat2
-      conversion (see deferred follow-ups).
+      authority for both writes and whiteout removals.
 - [x] Whiteout / hardlink / device-node / setid handling and reproducible-unpack
       byte-identity unchanged (full suite green on both platforms).
 
 ### Deferred follow-ups
 
-- [ ] Convert the whiteout-**removal** walk (`apply_regular_whiteout` /
-      `apply_opaque_whiteout` / `remove_*_except_current_layer`) and the non-Linux
-      hardlink path to openat2/`*at` so `parent_chain_has_symlink` can be deleted
-      outright. This PR scopes openat2 to the **write/creation** path (where
-      attacker bytes land); the removal path keeps the `symlink_metadata` +
-      `starts_with` guard plus the fail-fast scan, which is unchanged from before.
+- [x] **Done (follow-up PR):** the whiteout-**removal** path
+      (`Rooted::apply_regular_whiteout` / `apply_opaque_whiteout` +
+      `remove_children_in_dir`) now resolves the target's parent through `openat2`
+      and removes via `*at` (`unlinkat`/`statat` + dirfd recursion over
+      `rustix::fs::Dir`) on Linux, closing the same check-then-use TOCTTOU on the
+      removal side. A second concurrent-swap witness
+      (`concurrent_symlink_swap_during_whiteout_removal_never_escapes_root`) is
+      box-verified to delete an out-of-root file against the pre-openat2 removal
+      and to hold with the fix.
+  - `parent_chain_has_symlink` is **kept** (not deleted) as the cross-platform
+    fail-fast pre-filter and the non-Linux self-guard — deleting it would drop the
+    only guard on the non-Linux fallback path for no Linux benefit (openat2 is
+    already the authority there). `std::fs::remove_dir_all`'s own within-tree
+    race-safety (CVE-2022-21658) means the residual this closes was the
+    parent-chain swap specifically.
+- [ ] Convert the **non-Linux** hardlink/whiteout fallbacks similarly if a
+      non-Linux production target ever appears (today they are test/dev only).
 
 ## Task R3 — ADR-002 positioning note
 
