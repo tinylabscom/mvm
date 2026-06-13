@@ -51,38 +51,34 @@ crossing the 24 GiB cap (or with `MVM_BUILDER_STORE_GC_GIB` lowered to force the
 GC); confirm the kernel is a store hit on the second build (no
 `CC`/`LD vmlinux` lines in `~/.cache/mvm/builder-vm/jobs/<id>/nix-stderr.log`).
 
-## WS-2 — Hash-keyed kernel prebuilt outside the nix store (robust + cross-worktree)
+## WS-2 — Hash-keyed kernel prebuilt outside the nix store — DESCOPED (redundant)
 
-Defense-in-depth: a content-addressed kernel artifact at
-`~/.cache/mvm/kernels/<config-hash>/<arch>/vmlinux`, **outside** any nix store,
-so the kernel survives a full store wipe/GC and is shared across worktrees and
-machines. Key = `hash(base.nix .config + builder delta + arch + kernel-source-rev)`;
-the builder-vm flake already exposes standalone `builder-kernel` /
-`workload-kernel` / `kernel-configfile` outputs to derive it from.
+**Original idea:** a content-addressed kernel artifact at
+`~/.cache/mvm/kernels/<config-hash>/<arch>/vmlinux` outside any nix store, so the
+kernel survives a store wipe/GC and is shared across worktrees.
 
-**Open design fork (needs a call before building):** how the prebuilt kernel is
-*injected* back into a build.
-- (i) **Separate-file load** — keep loading `vmlinux` as a host file path
-  (workload microVMs already do this) and source it from the prebuilt cache,
-  bypassing the in-VM kernel derivation entirely. Cleanest, but only applies
-  where the kernel is loaded separately (not the libkrun bundled-kernel path).
-- (ii) **Store seed** — `nix-store --import` the prebuilt kernel closure into the
-  in-VM store before the build so nix sees it as already-realised. Works
-  everywhere but reintroduces a store dependency (and the closure must carry a
-  valid signature or be imported with `--no-check-sigs`).
+**Why descoped — it duplicates caching that already exists.** Tracing the loader:
 
-WS-1 makes the *steady-state* kernel recompile go away on its own; WS-2 is the
-cross-worktree / post-wipe win. Sequence WS-2 after WS-1 lands and the fork is
-decided.
+- **Builder-VM kernel** is *already* a host-file prebuilt. `ensure_builder_vm_image`
+  (`crates/mvm-build/src/libkrun_builder.rs:1231`) loads `vmlinux` directly from
+  `~/.cache/mvm/builder-vm/<arch>/vmlinux` — compiled once in Stage 0, cached as a
+  host file, shared across worktrees (one `~/.cache/mvm`), loaded at VM launch, never
+  recompiled at runtime. That cache *is* WS-2 mechanism (i) for the builder kernel.
+- **Workload kernel** (realized inside the builder VM for user image builds) is
+  covered by WS-1: the warm gcroot keeps it from the cap-GC, so an unchanged
+  derivation is a store hit.
 
-- [ ] Decide injection mechanism (i) vs (ii).
-- [ ] Derive + plumb the config-hash key (`nix/images/builder-vm/flake.nix`,
-      `crates/mvm-backend/src/artifacts/artifact.rs` already carries a kernel hash).
-- [ ] Copy-out after realise; lookup + inject before build
-      (`crates/mvm-build/src/libkrun_builder.rs` `ensure_builder_vm_image` /
-      `krun_context_for_image`).
-- [ ] Cache-dir helper via `mvm-core::config` (never inline `$HOME`).
-- [ ] Tests: key stability, hit/miss, injection roundtrip.
+A separate `~/.cache/mvm/kernels/` nar cache would re-implement these. Reuse-first /
+YAGNI (CLAUDE.md) says don't.
+
+**Residual gap (only build if measured):** a *fresh or `rm -rf`-wiped* builder store
+rebuilds the workload kernel once and re-pulls the base closure. If that specific
+cost is shown to bite (e.g. the degraded-store recovery path,
+[[reference_degraded_builder_store_dev_up_loops]]), the minimal fix is seeding a
+fresh store from the artifacts already on the host — not a new kernel-nar cache.
+Defer until WS-1 is live-verified and a real gap is measured.
+
+- [x] ~~Decide injection mechanism~~ → descoped; existing caches cover both kernels.
 
 ## Out of scope
 
