@@ -152,19 +152,21 @@ pub fn verify_content(store: &CheckpointStore, meta: &CheckpointMeta) -> Result<
 /// machine-id continuity) rather than minting a fresh one. The forked memory
 /// state was captured WITH that identity, so restoring it demands the same id.
 ///
-/// COUPLED with [`FORK_ALLOW_PARENT_RUNNING`]: inheriting the machine-id is safe
-/// ONLY because the parent is required stopped. If you ever flip this to mint a
-/// fresh id you must keep the parent stopped (the memory snapshot's id would no
-/// longer match); if you ever allow a running parent you must flip this to a
-/// fresh id. Two live VMs on the same machine-id is the failure mode — never
-/// change one of these without the other.
+/// COUPLED with [`FORK_ALLOW_PARENT_RUNNING`]: a fresh id cannot work for a
+/// memory restore — VZ validates the machine identifier against the saved
+/// state, and the restored memory was captured under the parent's id. Two
+/// live VMs sharing a machine-id (and MAC) is the clone model: harmless
+/// while every VM sits behind its own gvproxy with no shared L2 segment,
+/// which is the invariant that makes the running-parent fork sound.
 const FORK_FRESH_MACHINE_ID: bool = false;
 
-/// Fork requires the parent VM stopped — a live supervisor would race the new
-/// child over the source disks while we clone them, and (see
-/// [`FORK_FRESH_MACHINE_ID`]) the child inherits the parent's machine-id, which
-/// is only collision-free while the parent isn't running.
-const FORK_ALLOW_PARENT_RUNNING: bool = false;
+/// The fork's source is the sealed checkpoint content (cloned at capture
+/// time), never the parent's live disks, so a running parent races nothing.
+/// The child duplicates the parent's machine-id and MAC by construction —
+/// the restored memory embodies them and VZ validates the device config
+/// against the saved state — which is collision-free because every VM runs
+/// behind its own gvproxy instance with no shared L2 segment.
+const FORK_ALLOW_PARENT_RUNNING: bool = true;
 
 /// Spawns a forked child's supervisor in restore mode from its rewritten
 /// `SupervisorConfig`. Abstracted so `fork_vm_full` is testable without booting

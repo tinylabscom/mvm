@@ -1078,13 +1078,16 @@ pub fn build_child_supervisor_config(
     );
 
     if let Some(vz::NetworkConfig::Gvproxy {
-        mac,
+        mac: _,
         socket_path,
         events_ingest_socket_path,
     }) = cfg.network.as_mut()
     {
-        // Re-derive the gvproxy MAC for the new identity (explicit field).
-        *mac = host_gvproxy::derive_mac(child_vm_name);
+        // The MAC stays the parent's: VZ validates restored machine state
+        // against the saved device configuration and refuses a changed MAC
+        // outright. Keeping it is safe — every VM talks to its own gvproxy
+        // instance, so two live copies with the same MAC never share an L2
+        // segment on the host side.
         // The child boots its OWN gvproxy in its state dir (the spawner starts
         // it); point the supervisor at that listener, not the parent's dead one.
         *socket_path = child_state_dir
@@ -2438,15 +2441,17 @@ mod tests {
         // rootfs disk now lives in the child dir, basename preserved.
         let rootfs = child.disks.iter().find(|d| d.id == "rootfs").unwrap();
         assert_eq!(rootfs.path, "/child/state/childvm/rootfs.ext4");
-        // MAC re-derived for the new identity (not the parent's).
+        // MAC stays the parent's: VZ refuses a machine-state restore whose
+        // device config differs from the saved one, and per-VM gvproxy
+        // instances make a duplicate MAC harmless.
         match child.network.as_ref().unwrap() {
             vz::NetworkConfig::Gvproxy {
                 mac,
                 socket_path,
                 events_ingest_socket_path,
             } => {
-                assert_eq!(mac, &host_gvproxy::derive_mac("childvm"));
-                assert_ne!(mac, &host_gvproxy::derive_mac("parentvm"));
+                assert_eq!(mac, &host_gvproxy::derive_mac("parentvm"));
+                assert_ne!(mac, &host_gvproxy::derive_mac("childvm"));
                 // gvproxy listener rebased into the child state dir — the child
                 // boots its own gvproxy there, not the parent's dead one.
                 assert!(
