@@ -2808,3 +2808,15 @@ broken" comment is STALE — `run_with_bridge` boots end-to-end today). Two real
 - [ ] Independent bug: `libkrun_sys::home_mvm_keys_dir()` hardcodes `$HOME/.mvm/keys` and
   ignores `MVM_DATA_DIR`, so `validate_audit_substrate` rejects an isolated data dir. Route
   it through `mvm_core::config`.
+
+### Plan 118 WS-1 — Vz saved-standby warm pool (item 3) — DONE
+
+Vz arm of the standby pool ships saved-standby (frozen {rootfs, memory, machine-id} triple
+captured via `capture_vm_full`). No live supervisor after capture — pid=0 sentinel. Claim
+path reuses `build_child_supervisor_config` + `VzChildSupervisorSpawner` (same fork plumbing,
+pool-sourced blobs instead of checkpoint-sourced). Compat key adds `image_sha256: Option<String>` —
+a Vz compat with Some(sha) only matches a standby for the same image; libkrun None is
+unaffected. `reap_stale` skips liveness for pid=0 entries (TTL-only eviction).
+`mvmctl pool warm --rootfs <path>` is the Vz entry point; doctor reports `vz=true` on
+macOS 14+. All libkrun pool tests pass untouched. 298 mvm-backend lib tests, 974 mvm-cli
+tests, 5117 workspace tests all green.

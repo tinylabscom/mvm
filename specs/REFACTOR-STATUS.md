@@ -247,6 +247,11 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       follow-ups.
   [x] instant memory fork: vm_full fork of a RUNNING parent → second live VM in
       0.91s incl. claim-8 admission (same-identity clone model; recorded-sha admission; gvproxy-only invariant)
+  [x] Vz saved-standby warm pool: per-image spawn (seed boot → capture_vm_full →
+      pid=0 handle), claim (verify_content → clone blobs → build_child_supervisor_config
+      → VzChildSupervisorSpawner), image_sha256 compat key (mismatch = no-match, not
+      error), TTL-only reap for pid=0 standbys, --rootfs CLI flag, doctor reports
+      vz=true on macOS 14+. All libkrun pool tests untouched.
 
 PLAN 183 — Builder-VM egress posture + net boot ✅ DONE (follow-ups tracked in plan)
   Last updated: 2026-06-12

@@ -2780,7 +2780,7 @@ fn test_pool_warm_parses_optional_count() {
     let cli = Cli::try_parse_from(["mvmctl", "pool", "warm", "3"]).unwrap();
     match cli.command {
         Commands::Pool(pool::Args {
-            action: pool::PoolAction::Warm { count },
+            action: pool::PoolAction::Warm { count, .. },
         }) => assert_eq!(count, Some(3)),
         _ => panic!("Expected Pool Warm command"),
     }

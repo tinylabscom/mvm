@@ -418,7 +418,7 @@ process-spawn delta, not the headline number.
 - [ ] mvmd sizing hookup: once a Firecracker standby exists, mvmd
       sets `warm_pool_size` per host + fleet-level instance
       pre-warming — designed in the mvmd repo when it firms up.
-- [ ] Vz / Apple-Container standby pools (different process models).
+- [x] Vz saved-standby pool: per-image spawn (capture_vm_full) + claim (clone + restore), `image_sha256` compat key, pid=0 sentinel, TTL-only reap, `--rootfs` CLI flag, doctor reports `vz=true`.
 - [ ] Optional decoupled attach credential via `host.secrets.v1`
       pattern, if attach validity must be shorter than plan validity.
 
