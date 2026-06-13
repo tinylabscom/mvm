@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant)
+**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -42,6 +42,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 187** — Secret-scan admission gate (ADR-080 P7) · ✅ LANDED (#811)
 - [x] **PLAN 190** — Kernel egress decision converges on CanonicalEgress (ADR-080 P5 close-out) · 🟢 LANDED (kernel leg; lenient L4 lowering; zero claim-10 behaviour change; WASI-context mapping deferred to runner plan)
 - [x] **PLAN 191** — Declarative file materialization (ADR-080 P2-full) · 🟢 P2-full LANDED (FilesWrite lowers to the declarative `App.files` IR field, baked into the rootfs at build time via `mkFunctionService` `extraFiles`; the `before_start` shell hook is removed — file content/paths never reach a guest shell)
+- [ ] **PLAN 193** — rvproxy network substrate (replace gvproxy/passt) · 🔴 proposed, cross-repo — gated on rvproxy confirming libkrun-unixgram transport; biggest win = native flow API replaces the in-line claim-10 datapath wrapper (Plan 141)
 
 ## Plan details
 
@@ -503,6 +504,21 @@ PLAN 191 — Declarative file materialization (ADR-080 P2-full)  🟢 LANDED
   [x] mkFunctionService extraFiles bakes App.files into the rootfs at build time
       (base64 decoded at build; reserved /etc/mvm/* paths take precedence)
   [x] ADR-080 §8 P2 row + §2 prose updated to build-time bake, no shell
+
+PLAN 193 — rvproxy network substrate (replace gvproxy/passt)  🔴 proposed, cross-repo
+  Replace the external gvproxy (macOS libkrun-unixgram + Vz vfkit) + passt (Linux FC) gateways
+  with the sibling-repo Rust-native `rvproxy` daemon (typed control API + native flow/audit
+  pipeline). Three problems it removes: (1) BIGGEST — claim-10 egress + Plan 129 substitution +
+  Plan 141 packet-observer currently WRAP the datapath in-line (splice + etherparse, per-backend)
+  because gvproxy/passt have no native flow API; rvproxy exposes flow decisions/audit natively →
+  collapses gateway_bridge.rs's PlanFlowPolicy into a contract. (2) gvproxy(macOS)/passt(Linux)
+  divergence → one substrate. (3) Tracked bug: gvproxy logs ERROR-level "use of closed network
+  connection / gvproxy exiting" on every one-shot builder-VM poweroff (benign, unfixable in the
+  gvproxy model — VM self-exits before SIGTERM lands). Requirements authored into the rvproxy repo
+  at specs/plans/014-mvm-adoption-requirements.md. Gated on WS-1: rvproxy confirming the
+  libkrun-unixgram transport (mvm's default macOS backend). Not-a-fix findings recorded in the
+  plan (gvproxy has no log-level flag; nix-seed already cached for normal use; build slowness is
+  the base-VM fingerprint churn, a separate change). Plan: specs/plans/193-rvproxy-network-substrate.md
 ```
 
 ## Security claims
