@@ -55,8 +55,9 @@ replacing the vendored Go gateway. Do it as a flag-gated, parity-tested
 migration — the playbook used for the Swift→Rust supervisor cutover (Plan 152),
 not a blind swap of the security seam.
 
-- Add an `Rvproxy` variant to `NetworkingPreference` (`MVM_NETWORKING=rvproxy`).
-  gvproxy/passt remain selectable until the parity gate passes.
+- Add a `Native` variant to `NetworkingPreference` (`MVM_NETWORKING=native`).
+  gvproxy/passt remain selectable until the parity gate passes. The variant
+  and flag are named generically — the source carries no project slug.
 - The native gateway must terminate the **same** `-listen-vfkit` unixgram
   protocol libkrun (`krun_add_net_unixgram`) and Vz (vfkit) already speak, so
   the backend dispatch (`apply_networking`, `host_gvproxy`) changes only which
@@ -72,8 +73,8 @@ not a blind swap of the security seam.
 
 ## Migration plan (parity-gated)
 
-1. **Wire the flag.** `Rvproxy` variant + `apply_networking` dispatch + spawn
-   path; daemon behind `MVM_NETWORKING=rvproxy`, default unchanged.
+1. **Wire the flag.** `Native` variant + `apply_networking` dispatch + spawn
+   path; daemon behind `MVM_NETWORKING=native`, default unchanged.
 2. **Connectivity parity.** Builder + Stage 0 cold build over the Rust gateway
    reaches cache.nixos.org and completes byte-identical artifacts on libkrun and
    Vz. (Linux/passt parity tracked separately.)
