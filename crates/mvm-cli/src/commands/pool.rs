@@ -66,7 +66,7 @@ pub fn image_identity(backend: &dyn VmBackend, rootfs_path: &str) -> Result<Opti
     if backend.name() == "libkrun" {
         return Ok(None);
     }
-    if backend.name() == "vz" || backend.name() == "virtualization" {
+    if backend.name() == "vz" {
         let sha = kernel_sha256_hex(Path::new(rootfs_path))
             .with_context(|| format!("hashing rootfs for image identity: {rootfs_path}"))?;
         return Ok(Some(sha));
@@ -195,12 +195,25 @@ pub struct WarmParams<'a> {
     pub image: Option<&'a Path>,
 }
 
-/// Warm the pool toward `target` idle standbys for the given kernel+resources. Best-effort:
-/// spawn failures are logged, not fatal (warm pool is an optimization). Returns how many
-/// were newly spawned.
-pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Result<u32> {
+/// Summary returned by [`warm_to_target`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct WarmResult {
+    /// Standbys newly spawned and recorded in this call.
+    pub spawned: u32,
+    /// Spawn attempts that failed (each was logged as a warning).
+    pub failed: u32,
+}
+
+/// Warm the pool toward `target` idle standbys for the given kernel+resources.
+/// Spawn failures are logged and counted; the caller decides whether to
+/// surface them as an error.  Returns a [`WarmResult`] with success and
+/// failure counts.
+pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Result<WarmResult> {
     if p.target == 0 || !p.backend.supports_standby_pool() {
-        return Ok(0);
+        return Ok(WarmResult {
+            spawned: 0,
+            failed: 0,
+        });
     }
     // The compat identity computed identically here and at claim time (a constant for
     // libkrun's bundled kernel) so a warmed standby is actually claimable.
@@ -221,7 +234,8 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     let have = pool.idle_count_compatible(&want)? as u32;
     let pool_root = mvm_core::config::mvm_pool_dir()?;
     let vms_root = mvm_core::config::mvm_data_dir_strict()?.join("vms");
-    let mut spawned = 0;
+    let mut spawned = 0u32;
+    let mut failed = 0u32;
     for _ in have..p.target {
         let spec = build_standby_spec(&StandbySpecParams {
             pool_root: &pool_root,
@@ -240,10 +254,13 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                 pool.record(&handle)?;
                 spawned += 1;
             }
-            Err(e) => tracing::warn!(error = %e, "spawn standby failed; pool stays under target"),
+            Err(e) => {
+                tracing::warn!(error = %e, "spawn standby failed; pool stays under target");
+                failed += 1;
+            }
         }
     }
-    Ok(spawned)
+    Ok(WarmResult { spawned, failed })
 }
 
 /// The base-compat key a launch needs (kernel identity + fixed vcpus/mem + image sha for
@@ -332,7 +349,7 @@ pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Resu
     };
     let signer = host_signer::load_or_init()?;
     let pool = SupervisorStandbyPool::open()?;
-    warm_to_target(
+    let result = warm_to_target(
         &pool,
         &WarmParams {
             backend: backend.as_vm_backend(),
@@ -344,7 +361,8 @@ pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Resu
             target: cfg.warm_pool_size,
             image: None, // libkrun only: image-agnostic standbys
         },
-    )
+    )?;
+    Ok(result.spawned)
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -664,6 +682,125 @@ mod tests {
         c.plan_json = None; // not the gateway-bridge/admitted path → cold-boot
         assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
     }
+
+    // A VmBackend stub whose `spawn_standby` always fails — used to exercise
+    // the warm failure path without a real VM.
+    struct FailingSpawnBackend;
+    impl VmBackend for FailingSpawnBackend {
+        fn name(&self) -> &str {
+            "stub-fail-spawn"
+        }
+        fn capabilities(&self) -> VmCapabilities {
+            VmCapabilities::default()
+        }
+        fn supports_standby_pool(&self) -> bool {
+            true
+        }
+        fn spawn_standby(
+            &self,
+            _spec: &mvm_core::vm_backend::StandbySpec,
+        ) -> std::result::Result<StandbyHandle, StandbyError> {
+            Err(StandbyError::ClaimFailed("injected spawn failure".into()))
+        }
+        fn start_with_mode(&self, _: &VmStartConfig, _: StartMode) -> anyhow::Result<VmId> {
+            unreachable!()
+        }
+        fn stop(&self, _: &VmId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn stop_all(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn pause(&self, _: &VmId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn resume(&self, _: &VmId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn status(&self, _: &VmId) -> anyhow::Result<VmStatus> {
+            Ok(VmStatus::Stopped)
+        }
+        fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
+            Ok(vec![])
+        }
+        fn logs(&self, _: &VmId, _: u32, _: bool) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn is_available(&self) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        fn install(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn warm_to_target_counts_failures_when_spawn_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"k").unwrap();
+        let key = tmp.path().join("host-signer.ed25519");
+        std::fs::write(&key, b"fake-key").unwrap();
+
+        let backend = FailingSpawnBackend;
+        let result = warm_to_target(
+            &pool,
+            &WarmParams {
+                backend: &backend,
+                kernel: &kernel,
+                vcpus: 2,
+                mem_mib: 1024,
+                signer_id: "host:test",
+                signing_key_path: &key,
+                target: 2,
+                image: None,
+            },
+        )
+        .unwrap();
+
+        // No standbys were spawned; both attempts counted as failures.
+        assert_eq!(result.spawned, 0, "no standbys should be recorded");
+        assert_eq!(
+            result.failed, 2,
+            "both spawn attempts must be counted as failures"
+        );
+    }
+
+    #[test]
+    fn warm_to_target_already_at_target_returns_zero_spawned_zero_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"k").unwrap();
+        let key = tmp.path().join("key");
+        std::fs::write(&key, b"fake-key").unwrap();
+
+        // Pre-fill the pool with 1 idle standby.
+        let mut h = idle_handle("s1", &kernel_sha256_hex(&kernel).unwrap());
+        h.kernel_sha256 = kernel_sha256_hex(&kernel).unwrap();
+        pool.record(&h).unwrap();
+
+        let backend = FailingSpawnBackend;
+        let result = warm_to_target(
+            &pool,
+            &WarmParams {
+                backend: &backend,
+                kernel: &kernel,
+                vcpus: h.vcpus,
+                mem_mib: h.mem_mib,
+                signer_id: "host:test",
+                signing_key_path: &key,
+                target: 1,
+                image: None,
+            },
+        )
+        .unwrap();
+
+        // Already at target → no spawns attempted, no failures.
+        assert_eq!(result.spawned, 0);
+        assert_eq!(result.failed, 0);
+    }
 }
 
 // ── `mvmctl pool` command ───────────────────────────────────────────────────────────
@@ -764,7 +901,7 @@ fn run_warm(
     }
     // Ensure the host signer exists — the standby re-verifies the attach plan against it.
     let signer = host_signer::load_or_init()?;
-    let spawned = warm_to_target(
+    let result = warm_to_target(
         pool,
         &WarmParams {
             backend: shape.backend.as_vm_backend(),
@@ -778,12 +915,30 @@ fn run_warm(
         },
     )?;
     // A state-changing verb emits one audit record per attempt.
-    mvm_core::audit_emit!(PoolWarm, "spawned={spawned} target={target}");
-    if spawned == 0 {
+    mvm_core::audit_emit!(
+        PoolWarm,
+        "spawned={} failed={} target={target}",
+        result.spawned,
+        result.failed
+    );
+    let idle_after = result.spawned;
+    if result.failed > 0 && idle_after < target {
+        crate::ui::warn(&format!(
+            "{}/{} standby(s) warmed; {} spawn(s) failed — check logs for details.",
+            idle_after, target, result.failed,
+        ));
+        return Err(anyhow::anyhow!(
+            "pool warm: {}/{} standby(s) warmed, {} failed",
+            idle_after,
+            target,
+            result.failed,
+        ));
+    } else if result.spawned == 0 && result.failed == 0 {
         crate::ui::info(&format!("Pool already at or above target {target}."));
     } else {
         crate::ui::success(&format!(
-            "Warmed {spawned} standby(s) toward target {target}."
+            "Warmed {} standby(s) toward target {target}.",
+            result.spawned,
         ));
     }
     crate::ui::info(

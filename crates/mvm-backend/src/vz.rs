@@ -1229,27 +1229,26 @@ fn vz_spawn_standby(
         .start(&seed_cfg)
         .with_context(|| format!("vz_spawn_standby: boot seed VM '{}'", spec.id))?;
 
-    // Wait for guest-agent readiness.  The seed VM is a standard boot; the
-    // same settle approach the warm-start path uses: probe the vsock agent
-    // port rather than a fixed sleep so the pool isn't gated on a magic
-    // duration.  Fail closed on timeout so a broken image can't consume a
-    // pool slot indefinitely.
-    let agent_ready = wait_for_seed_agent(&spec.id);
-    if let Err(ref e) = agent_ready {
-        // Best-effort stop to clean up a stuck seed before returning the
-        // error so the caller doesn't have to.
-        tracing::warn!(id = %spec.id, error = %e, "seed agent never ready; stopping seed");
-        let _ = VzBackend.stop(&VmId(spec.id.clone()));
-        return Err(anyhow!(
-            "vz_spawn_standby: seed VM '{}' agent not ready: {e}",
-            spec.id
-        ));
-    }
+    // Cleanup guard: on any failure after the seed boots, stop the seed and
+    // remove the partial pool dir + seed state dir so the pool reaper doesn't
+    // see an unreapable orphan (reap_stale only processes recorded standbys).
+    // Disarmed on the success path at the end of this function.
+    let pool_root =
+        mvm_core::config::mvm_pool_dir().context("vz_spawn_standby: resolve pool dir")?;
+    let mut cleanup = SpawnCleanupGuard::new(
+        spec.id.clone(),
+        pool_root.join(&spec.id),
+        vm_state_dir(&spec.id),
+    );
+
+    // Wait for guest-agent readiness.  Probe the vsock socket + console log
+    // so the pool isn't gated on a magic sleep duration.  Fail closed on
+    // timeout so a broken image can't consume a pool slot indefinitely.
+    wait_for_seed_agent(&spec.id)
+        .with_context(|| format!("vz_spawn_standby: seed VM '{}' agent not ready", spec.id))?;
 
     // Capture the live seed VM's triple into the pool dir.
     let pool_id = mvm_core::checkpoint::CheckpointId::new(spec.id.clone());
-    let pool_root =
-        mvm_core::config::mvm_pool_dir().context("vz_spawn_standby: resolve pool dir")?;
     let pool_store = crate::checkpoint::CheckpointStore::at(&pool_root);
 
     // `capture_vm_full` needs a supervisor_config_digest for the meta.  Use the
@@ -1291,6 +1290,7 @@ fn vz_spawn_standby(
         )
     })?;
 
+    cleanup.disarm();
     Ok(StandbyHandle {
         id: spec.id.clone(),
         control_socket: spec.control_socket.clone(),
@@ -1305,29 +1305,109 @@ fn vz_spawn_standby(
     })
 }
 
-/// Poll the seed VM's vsock agent port until it responds or a deadline passes.
-/// Reuses `mvm_guest::vsock::poll_agent_ready` if available, otherwise a
-/// bounded sleep-poll on the vsock control socket.
+/// Drop-guard that stops a running seed VM and removes the partial pool dir +
+/// seed state dir when a `vz_spawn_standby` call fails after the seed has
+/// booted.  Disarmed on the success path via [`SpawnCleanupGuard::disarm`].
+///
+/// Without this guard a failed spawn leaves an orphan seed VM and an
+/// unreapable partial pool dir — `reap_stale` only processes recorded standbys,
+/// so the orphan accumulates silently.
+struct SpawnCleanupGuard {
+    vm_id: String,
+    pool_dir: PathBuf,
+    state_dir: PathBuf,
+    armed: bool,
+}
+
+impl SpawnCleanupGuard {
+    fn new(vm_id: String, pool_dir: PathBuf, state_dir: PathBuf) -> Self {
+        Self {
+            vm_id,
+            pool_dir,
+            state_dir,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SpawnCleanupGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        tracing::warn!(
+            id = %self.vm_id,
+            "vz_spawn_standby: cleaning up partial pool dir and seed state after spawn failure"
+        );
+        let _ = VzBackend.stop(&VmId(self.vm_id.clone()));
+        if self.pool_dir.exists() {
+            let _ = std::fs::remove_dir_all(&self.pool_dir);
+        }
+        if self.state_dir.exists() {
+            let _ = std::fs::remove_dir_all(&self.state_dir);
+        }
+    }
+}
+
+/// Poll the seed VM's vsock agent socket until the guest agent is up, or a
+/// deadline passes.
+///
+/// Two-stage readiness: first wait for the host-side UDS listener to appear
+/// (the Vz supervisor binds `<vm_state_dir>/vsock/vsock-<port>.sock`), then
+/// confirm the guest agent is actually serving by scanning the VM's console.log
+/// for the literal "mvm-guest-agent: listening" line.  The socket file can
+/// exist before the guest process inside has bound the vsock port, so both
+/// checks together give a reliable ready signal.
+///
+/// The socket path is built via `mvm_core::config::vm_vz_vsock_port_socket` —
+/// the single source of truth shared with the Vz supervisor — so they cannot
+/// drift again.
 fn wait_for_seed_agent(vm_name: &str) -> Result<()> {
     use std::time::{Duration, Instant};
 
     const SEED_AGENT_TIMEOUT: Duration = Duration::from_secs(60);
     const POLL_INTERVAL: Duration = Duration::from_millis(500);
+    const AGENT_READY_LINE: &str = "mvm-guest-agent: listening";
 
-    let vsock_dir = vm_state_dir(vm_name).join("vsock");
-    // The Vz supervisor creates one UDS per vsock port under the vsock dir.
-    // Agent port 52 → `vsock/<port>.sock` (matches `GuestChannelInfo::Vsock`
-    // CID/port layout; the UDS path is how the host side knows the guest bound).
-    let agent_sock = vsock_dir.join(format!("{}.sock", mvm_guest::vsock::GUEST_AGENT_PORT));
+    let agent_sock =
+        mvm_core::config::vm_vz_vsock_port_socket(vm_name, mvm_guest::vsock::GUEST_AGENT_PORT);
+    let console_log = mvm_core::config::vm_console_log(vm_name);
     let deadline = Instant::now() + SEED_AGENT_TIMEOUT;
+
+    // Phase 1: wait for the supervisor to bind the host-side UDS listener.
     loop {
         if agent_sock.exists() {
-            return Ok(());
+            break;
         }
         if Instant::now() >= deadline {
             return Err(anyhow!(
                 "vsock agent socket {} did not appear within {:?}",
                 agent_sock.display(),
+                SEED_AGENT_TIMEOUT,
+            ));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+
+    // Phase 2: wait for the guest agent to write its ready line to console.log.
+    // The socket exists once the supervisor binds; the guest process may still
+    // be initialising its vsock listener.
+    loop {
+        let agent_ready = std::fs::read_to_string(&console_log)
+            .map(|log| log.contains(AGENT_READY_LINE))
+            .unwrap_or(false);
+        if agent_ready {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "guest agent did not write '{}' to {} within {:?}",
+                AGENT_READY_LINE,
+                console_log.display(),
                 SEED_AGENT_TIMEOUT,
             ));
         }
@@ -1368,23 +1448,9 @@ fn vz_claim_standby(
 
     // The pool rootfs sha256 must match what the handle recorded at spawn time.
     // A discrepancy means the pool dir was written after capture — refuse.
-    let pool_rootfs_blob = meta
-        .content
-        .iter()
-        .find(|b| b.name == "rootfs.ext4")
-        .context("vz_claim_standby: no rootfs.ext4 in pool manifest")?;
-    if let Some(ref expected) = handle.image_sha256 {
-        // The handle's image_sha256 is the sha of the *source* rootfs used at
-        // spawn time; the pool blob sha is of the captured (potentially CoW-
-        // different) clone. They may differ when APFS CoW diverges, so we check
-        // the handle field only when the caller's compat matched it — that
-        // guarantee came from `select_idle_compatible`. What we actually verify
-        // here is that `verify_content` passed (above), which covers the pool
-        // blob against the manifest. A separate check ensures the image the
-        // claimant launched with matches the standby's image identity.
-        let _ = expected; // compat already enforced by select_idle_compatible
-    }
-    let _ = pool_rootfs_blob;
+    // The pool content integrity was verified above via `verify_content`.
+    // Image-sha compat was enforced at standby selection time by
+    // `select_idle_compatible`; no further check is needed here.
 
     // Materialise clones into the claimant's state dir (mirrors fork_vm_full).
     let claimant_name = &handle.id; // the VM runs under the standby id
@@ -3231,5 +3297,103 @@ mod tests {
         unsafe {
             std::env::remove_var("MVM_DATA_DIR");
         }
+    }
+
+    /// `wait_for_seed_agent` must poll the path that the Vz supervisor actually
+    /// binds: `<vm_state_dir>/vsock/vsock-<port>.sock`.  This test builds the
+    /// expected path via the production helper and asserts that writing a file
+    /// there causes the function to succeed (without a real VM) — pinning the
+    /// naming against the helper so they cannot drift independently.
+    #[test]
+    fn wait_for_seed_agent_matches_vm_vz_vsock_port_socket() {
+        use mvm_core::config::vm_vz_vsock_port_socket;
+        use mvm_guest::vsock::GUEST_AGENT_PORT;
+
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+        }
+
+        let vm_name = "seed-agent-socket-test";
+
+        // The production helper defines the canonical socket path.
+        let expected = vm_vz_vsock_port_socket(vm_name, GUEST_AGENT_PORT);
+
+        // The socket dir must exist before the supervisor writes the socket file.
+        std::fs::create_dir_all(expected.parent().unwrap()).unwrap();
+
+        // Simulate supervisor + guest agent: write the socket file and the
+        // ready line to console.log.
+        std::fs::write(&expected, b"").unwrap();
+        let console_log = mvm_core::config::vm_console_log(vm_name);
+        std::fs::create_dir_all(console_log.parent().unwrap()).unwrap();
+        std::fs::write(
+            &console_log,
+            "mvm-guest-agent: listening on vsock port 5252\n",
+        )
+        .unwrap();
+
+        // wait_for_seed_agent should find both signals and return Ok immediately.
+        let result = wait_for_seed_agent(vm_name);
+        assert!(
+            result.is_ok(),
+            "wait_for_seed_agent must succeed when the correct socket + console ready line exist: {result:?}"
+        );
+
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+        }
+    }
+
+    /// `SpawnCleanupGuard` must remove the pool dir and state dir (and attempt
+    /// to stop the VM) when dropped while armed, and must leave them intact
+    /// when disarmed.
+    #[test]
+    fn spawn_cleanup_guard_removes_dirs_when_armed_and_skips_when_disarmed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool_dir = tmp.path().join("pool").join("standby-abc123");
+        let state_dir = tmp.path().join("vms").join("standby-abc123");
+        std::fs::create_dir_all(&pool_dir).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Armed drop: both dirs must be removed.
+        {
+            let _guard = SpawnCleanupGuard::new(
+                "standby-abc123".into(),
+                pool_dir.clone(),
+                state_dir.clone(),
+            );
+            // guard drops here — armed
+        }
+        assert!(
+            !pool_dir.exists(),
+            "armed guard must remove the partial pool dir"
+        );
+        assert!(
+            !state_dir.exists(),
+            "armed guard must remove the seed state dir"
+        );
+
+        // Disarmed drop: dirs must survive.
+        std::fs::create_dir_all(&pool_dir).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        {
+            let mut guard = SpawnCleanupGuard::new(
+                "standby-abc123".into(),
+                pool_dir.clone(),
+                state_dir.clone(),
+            );
+            guard.disarm();
+        }
+        assert!(pool_dir.exists(), "disarmed guard must not remove pool dir");
+        assert!(
+            state_dir.exists(),
+            "disarmed guard must not remove state dir"
+        );
     }
 }
