@@ -2635,8 +2635,28 @@ each has a witness. The sprint lands those preconditions incrementally.
 - **P8** — single-session relay primitive (websocket session-token binding + wasmtime
   fuel/memory/wall-clock caps); multi-principal host execution must run wasmtime-in-microVM.
 - The **WASI-context mapping** (`WasiEgress` → `WasiCtxBuilder`) for the in-microVM
-  wasmtime runner.
+  wasmtime runner — now designed under ADR-081 (below).
 - Multi-tenant streaming service, sessions, auth, billing — **mvmd's**, per ADR-070.
+
+### Wasm-component runner (ADR-081) — design + A1 plan only; implementation NOT started
+
+[`adrs/081-wasm-component-runner.md`](adrs/081-wasm-component-runner.md) decides the
+prod-tier execution for ADR-080 §4's WASM-component regime: wasmtime as an in-guest
+binary (never a host dep); a `.wasm` admitted as a content-addressed artifact (claim
+8/9); fs/env capabilities clamp-authored by extending the Plan 188 projection seam
+from network to fs/env; AOT-compile at build for prod (no in-guest JIT → guest seccomp
+forbids `PROT_EXEC`), JIT for preview; WASI P1 v1 with a P2-ready seam. Decomposes into
+three plans:
+
+- **A1 — WASI capability projection (fs/env)** 📋 PLAN WRITTEN, not started
+  ([`plans/192-wasi-capability-projection-fs-env.md`](plans/192-wasi-capability-projection-fs-env.md)):
+  pure-logic `mvm-core` extension (`CanonicalFs`/`CanonicalEnv`, `clamp_fs`/`clamp_env`
+  intersection-only, WASI preopen/env-name generator, `WasiCapPolicy` bound,
+  clamp-never-widens witnesses). Foundation for A2/A3.
+- **A2 — `.wasm` artifact admission** 🔲 plan not yet written (queued as Plan 193).
+- **A3 — guest runner + Nix bake + AOT** 🔲 plan not yet written (queued as Plan 194).
+
+Owner-gated: docs land now; **no implementation is to begin** until explicitly directed.
 
 ### Sprint 62 success criteria
 
