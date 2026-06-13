@@ -12,11 +12,10 @@ description = "OCI image distribution client for mvm — registry resolution, ma
 [dependencies]
 async-trait = "0.1"
 hex.workspace = true
-# `libc::O_NOFOLLOW` for the O_NOFOLLOW open flag. Used in
-# `unpack::write_regular_file` so a tar entry whose target
-# parent chain *appears* clean still can't be redirected through a
-# concurrently-planted symlink between the parent-chain check and
-# the open(2) call.
+# `libc::O_NOFOLLOW` for the leaf open flag on the non-Linux unpack
+# fallback. On Linux the unpacker resolves and writes through an
+# `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)` handle (rustix), so a
+# parent component swapped to a symlink can't redirect the write.
 libc = { workspace = true }
 oci-client = { version = "0.16", default-features = false, features = ["rustls-tls"] }
 rustix = { version = "1.1", features = ["fs"] }

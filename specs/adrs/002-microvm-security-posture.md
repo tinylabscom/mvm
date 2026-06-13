@@ -62,6 +62,29 @@ is **explicitly out of scope**. mvmctl trusts the host with the
 hypervisor, the GC roots, the launchd plists, the user's secrets in
 `/mnt/secrets`, and the private build keys.
 
+### Why a hardware boundary, not a userspace application-kernel sandbox
+
+A recurring review question is why mvm isolates the workload behind a
+hardware boundary (a VMM over KVM / Hypervisor.framework) rather than a
+userspace application-kernel sandbox — the class of sandbox that
+intercepts guest syscalls in a host-side process and re-implements a
+kernel ABI on top of seccomp + namespaces. mvm chose the hardware
+boundary deliberately: the isolation is enforced by the CPU (rings,
+EPT, IOMMU) rather than by the correctness of a syscall-emulation
+layer, there is no host-side syscall-compatibility surface to keep in
+lockstep with the upstream kernel, and a bug in the boundary is a VM
+escape (rare, hardware-assisted) rather than an in-process logic error
+in an emulated `openat`/`mount`/`ptrace`. The userspace
+application-kernel sandbox remains the reference point for mvm's
+*in-guest* hardening layer (L4/L5), where the threat model is
+narrower: an `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)`-confined
+OCI-layer unpacker that closes the path-resolution TOCTTOU class, and
+an ioctl-syscall denylist on the guest agent. Those measures borrow
+the application-kernel sandbox's syscall-discipline ideas without
+adopting it as the primary isolation boundary. This is adjacent-threat
+positioning, not a new numbered claim — it does not appear in the
+claim table below.
+
 ## Trust layers (Matryoshka model)
 
 mvm's defense-in-depth is structured as five trust layers nested like a

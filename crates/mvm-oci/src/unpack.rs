@@ -94,16 +94,28 @@
 //!      that the resolved path is still under root. Catches edge
 //!      cases the prior two checks miss (NUL-byte paths, platform-
 //!      quirky separators, etc.).
-//! 2. **No write follows a symlink that the unpacker itself wrote.**
-//!    Before writing under a non-empty parent prefix, we walk every
-//!    parent component of the target and refuse if any of them is a
-//!    symlink. This blocks the "write `bin -> /tmp` in entry N, then
-//!    write `bin/escape` in entry N+1" escape vector. We use
-//!    [`std::fs::symlink_metadata`] (which does *not* dereference)
-//!    rather than [`std::fs::metadata`] for the check.
-//! 3. **Files open with `O_NOFOLLOW`** so even if the symlink-parent
-//!    check above missed something, the `open(2)` call itself fails
-//!    with `ELOOP` rather than following the symlink.
+//! 2. **Writes resolve atomically inside the root (Linux).** Every
+//!    file / dir / symlink / hardlink / device-node materializes by
+//!    resolving the entry's parent directory through
+//!    `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)` and issuing the
+//!    leaf creation with `*at` calls against the returned directory
+//!    handle — never against a re-derived host path. Resolution and
+//!    write therefore share one kernel-checked handle, so a parent
+//!    component swapped to a symlink *after* a check can no longer
+//!    redirect the write outside the root: the kernel refuses to
+//!    traverse the symlink (`ELOOP`) or to escape the root (`EXDEV`).
+//!    This closes the check-then-use window that a bare
+//!    `symlink_metadata` walk followed by a later `open(2)` leaves
+//!    open. [`parent_chain_has_symlink`] is retained as a cheap,
+//!    cross-platform fail-fast pre-filter (and as the guard for the
+//!    still-path-based whiteout-removal walk); on Linux the `openat2`
+//!    handle is the load-bearing authority for writes. On non-Linux
+//!    targets (test/dev builds only — the unpacker runs only in the
+//!    Linux builder VM in production) writes fall back to path-based
+//!    creation with `O_NOFOLLOW` on the leaf.
+//! 3. **Leaf opens use `O_NOFOLLOW` + `O_EXCL`** so a symlink or a
+//!    pre-existing file planted *at the leaf* is refused (`ELOOP` /
+//!    `EEXIST`) rather than followed or overwritten.
 //! 4. **Timestamps zeroed by default.** OCI layer tarballs are
 //!    notoriously timestamp-dependent; the same image pulled twice
 //!    can produce non-byte-identical rootfs trees if mtime is
@@ -451,6 +463,366 @@ pub enum UnpackError {
     OutputRootNotADir(PathBuf),
 }
 
+/// Root-confined materialization surface, created once per
+/// [`unpack_layer`] call.
+///
+/// On Linux every file/dir/symlink/hardlink/device-node is written by
+/// resolving the entry's parent directory through
+/// `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)` and issuing the
+/// leaf `*at` call against the returned directory handle — never
+/// against a re-derived host path. Resolution and write share one
+/// kernel-checked handle, so a parent component swapped to a symlink
+/// after the up-front [`parent_chain_has_symlink`] fail-fast scan can
+/// no longer redirect the write outside the root: the kernel refuses
+/// to traverse the symlink (`ELOOP`) or to escape the root (`EXDEV`).
+///
+/// On non-Linux targets (test/dev builds only — the unpacker runs only
+/// in the Linux builder VM in production) the methods fall back to the
+/// path-based writers with `O_NOFOLLOW` on the leaf.
+struct Rooted<'a> {
+    root: &'a Path,
+    #[cfg(target_os = "linux")]
+    root_fd: std::os::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+impl<'a> Rooted<'a> {
+    fn open(root: &'a Path) -> std::io::Result<Self> {
+        use rustix::fs::{Mode, OFlags};
+        // The root is caller-supplied and trusted; allow it to itself
+        // be a symlink-to-dir (mirrors the `is_dir()` precheck) by not
+        // setting `NOFOLLOW` on this open only.
+        let root_fd = rustix::fs::open(root, OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())?;
+        Ok(Self { root, root_fd })
+    }
+
+    /// Open the parent directory of `rel` relative to the root handle,
+    /// refusing any symlinked component atomically. When `create` is
+    /// set the intermediate directories are created with `mkdirat` as
+    /// the walk descends. Returns the parent directory handle and the
+    /// leaf name. Errors are returned as the raw `Errno` so callers can
+    /// distinguish a missing component (hardlink source) from a symlink
+    /// trap.
+    fn open_parent(
+        &self,
+        rel: &Path,
+        create: bool,
+    ) -> Result<(std::os::fd::OwnedFd, std::ffi::OsString), rustix::io::Errno> {
+        use rustix::fs::{Mode, OFlags, ResolveFlags, mkdirat, openat2};
+        use rustix::io::Errno;
+        use std::os::fd::AsFd;
+
+        let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS;
+        let dir_oflags = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+
+        let mut names: Vec<&OsStr> = Vec::new();
+        for comp in rel.components() {
+            // `..`/`/`/`.` are refused or stripped upstream; only the
+            // Normal segments name real path components.
+            if let Component::Normal(seg) = comp {
+                names.push(seg);
+            }
+        }
+        let leaf = names.pop().ok_or(Errno::NOENT)?.to_os_string();
+
+        let mut cur: Option<std::os::fd::OwnedFd> = None;
+        for name in names {
+            let dir = cur.as_ref().map_or(self.root_fd.as_fd(), |f| f.as_fd());
+            if create {
+                if let Err(e) = mkdirat(dir, name, Mode::from_raw_mode(0o755)) {
+                    if e != Errno::EXIST {
+                        return Err(e);
+                    }
+                }
+            }
+            cur = Some(openat2(dir, name, dir_oflags, Mode::empty(), resolve)?);
+        }
+
+        let parent = match cur {
+            Some(fd) => fd,
+            // Leaf sits directly under the root.
+            None => openat2(
+                self.root_fd.as_fd(),
+                ".",
+                OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+                resolve,
+            )?,
+        };
+        Ok((parent, leaf))
+    }
+
+    fn write_regular_file<R: Read>(
+        &self,
+        rel: &Path,
+        entry: &mut tar::Entry<R>,
+        raw_path: &[u8],
+        options: &UnpackOptions,
+        report: &mut UnpackReport,
+    ) -> Result<(), RefusalReason> {
+        use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+        use std::io::Write;
+        use std::os::fd::AsFd;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::SystemTime;
+
+        let mode = classify_regular_file_mode(entry.header().mode().unwrap_or(0o644), options)?;
+        let (parent, leaf) = self.open_parent(rel, true).map_err(map_resolve_errno)?;
+        let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS;
+        let flags =
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let fd = openat2(
+            parent.as_fd(),
+            &leaf,
+            flags,
+            Mode::from_raw_mode(mode),
+            resolve,
+        )
+        .map_err(map_resolve_errno)?;
+        let mut file = std::fs::File::from(fd);
+
+        if std::io::copy(entry, &mut file).is_err() {
+            return Err(RefusalReason::MalformedHeader);
+        }
+        if file.flush().is_err() {
+            return Err(RefusalReason::MalformedHeader);
+        }
+        // `open(2)` honors umask and may clear setid bits on write, so
+        // reassert the policy-classified mode through the fd.
+        if file
+            .set_permissions(std::fs::Permissions::from_mode(mode))
+            .is_err()
+        {
+            return Err(RefusalReason::MalformedHeader);
+        }
+        record_setid_entry(report, raw_path, mode, options.setid_policy);
+        if options.strip_timestamps {
+            let _ = file.set_modified(SystemTime::UNIX_EPOCH);
+        }
+        Ok(())
+    }
+
+    fn create_directory(&self, rel: &Path) -> Result<bool, RefusalReason> {
+        use rustix::fs::{Mode, mkdirat};
+        use rustix::io::Errno;
+        use std::os::fd::AsFd;
+
+        let (parent, leaf) = self.open_parent(rel, true).map_err(map_resolve_errno)?;
+        match mkdirat(parent.as_fd(), &leaf, Mode::from_raw_mode(0o755)) {
+            Ok(()) => Ok(true),
+            Err(e) if e == Errno::EXIST => Ok(false),
+            Err(e) => Err(map_resolve_errno(e)),
+        }
+    }
+
+    fn write_symlink(
+        &self,
+        rel: &Path,
+        link_target_bytes: Option<&[u8]>,
+    ) -> Result<(), RefusalReason> {
+        use rustix::fs::symlinkat;
+        use std::os::fd::AsFd;
+
+        let link_target = match link_target_bytes {
+            Some(b) if !b.is_empty() && !b.contains(&0) => b,
+            _ => return Err(RefusalReason::MalformedHeader),
+        };
+        let (parent, leaf) = self.open_parent(rel, true).map_err(map_resolve_errno)?;
+        symlinkat(OsStr::from_bytes(link_target), parent.as_fd(), &leaf)
+            .map_err(|_| RefusalReason::MalformedHeader)
+    }
+
+    fn materialize_device_node<R: Read>(
+        &self,
+        entry: &tar::Entry<R>,
+        rel: &Path,
+        raw_path: &[u8],
+    ) -> Result<(), RefusalReason> {
+        use rustix::fs::{FileType, Mode, makedev, mknodat};
+        use std::os::fd::AsFd;
+
+        let major = entry
+            .header()
+            .device_major()
+            .map_err(|_| RefusalReason::MalformedHeader)?;
+        let minor = entry
+            .header()
+            .device_minor()
+            .map_err(|_| RefusalReason::MalformedHeader)?;
+        let allowed = classify_device_node(entry.header().entry_type(), raw_path, major, minor)?;
+
+        let (parent, leaf) = self.open_parent(rel, true).map_err(map_resolve_errno)?;
+        mknodat(
+            parent.as_fd(),
+            &leaf,
+            FileType::CharacterDevice,
+            Mode::from_raw_mode(0o666),
+            makedev(allowed.major, allowed.minor),
+        )
+        .map_err(|_| RefusalReason::MalformedHeader)
+    }
+
+    fn materialize_hardlink(
+        &self,
+        link_target_bytes: Option<&[u8]>,
+        target_rel: &Path,
+        options: &UnpackOptions,
+        current_layer_paths: &HashSet<PathBuf>,
+    ) -> Result<HardlinkAction, RefusalReason> {
+        use rustix::fs::{AtFlags, FileType, Mode, OFlags, ResolveFlags, linkat, openat2, statat};
+        use rustix::io::Errno;
+        use std::io::Write;
+        use std::os::fd::AsFd;
+        use std::os::unix::fs::PermissionsExt;
+
+        let src_rel = validate_hardlink_target(link_target_bytes, self.root, options)?;
+        let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS;
+
+        // The source's parent must already exist; a missing component
+        // is the CVE-2019-14271 guard, not a symlink trap.
+        let (src_parent, src_leaf) = self.open_parent(&src_rel, false).map_err(|e| {
+            if e == Errno::NOENT {
+                RefusalReason::HardlinkTargetMissing
+            } else {
+                map_resolve_errno(e)
+            }
+        })?;
+
+        // Source must be an existing regular file; never dereference a
+        // symlink target (mirrors the lstat-based check on non-Linux).
+        let st = statat(src_parent.as_fd(), &src_leaf, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| {
+            if e == Errno::NOENT {
+                RefusalReason::HardlinkTargetMissing
+            } else {
+                RefusalReason::MalformedHeader
+            }
+        })?;
+        if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
+            return Err(RefusalReason::MalformedHeader);
+        }
+
+        let (dst_parent, dst_leaf) = self
+            .open_parent(target_rel, true)
+            .map_err(map_resolve_errno)?;
+
+        if current_layer_paths.contains(&src_rel) {
+            linkat(
+                src_parent.as_fd(),
+                &src_leaf,
+                dst_parent.as_fd(),
+                &dst_leaf,
+                AtFlags::empty(),
+            )
+            .map_err(|_| RefusalReason::MalformedHeader)?;
+            return Ok(HardlinkAction::Linked);
+        }
+
+        // Cross-layer: copy so the current layer never aliases mutable
+        // lower-layer inode state.
+        let src_fd = openat2(
+            src_parent.as_fd(),
+            &src_leaf,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+            resolve,
+        )
+        .map_err(map_resolve_errno)?;
+        let mut src = std::fs::File::from(src_fd);
+        let mode = src
+            .metadata()
+            .map_err(|_| RefusalReason::MalformedHeader)?
+            .permissions()
+            .mode()
+            & 0o777;
+        let dst_fd = openat2(
+            dst_parent.as_fd(),
+            &dst_leaf,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(mode),
+            resolve,
+        )
+        .map_err(map_resolve_errno)?;
+        let mut dst = std::fs::File::from(dst_fd);
+        std::io::copy(&mut src, &mut dst).map_err(|_| RefusalReason::MalformedHeader)?;
+        dst.flush().map_err(|_| RefusalReason::MalformedHeader)?;
+        if options.strip_timestamps {
+            let _ = dst.set_modified(std::time::SystemTime::UNIX_EPOCH);
+        }
+        Ok(HardlinkAction::Copied)
+    }
+}
+
+/// Map an `openat2`/`*at` failure to the unpacker's refusal taxonomy.
+/// `ELOOP` is a `RESOLVE_NO_SYMLINKS` hit on a symlinked component;
+/// `EXDEV` is a `RESOLVE_IN_ROOT` boundary escape. Everything else is
+/// an opaque per-entry failure.
+#[cfg(target_os = "linux")]
+fn map_resolve_errno(e: rustix::io::Errno) -> RefusalReason {
+    use rustix::io::Errno;
+    if e == Errno::LOOP {
+        RefusalReason::SymlinkInParent
+    } else if e == Errno::XDEV {
+        RefusalReason::JoinedPathEscape
+    } else {
+        RefusalReason::MalformedHeader
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl<'a> Rooted<'a> {
+    fn open(root: &'a Path) -> std::io::Result<Self> {
+        Ok(Self { root })
+    }
+
+    fn write_regular_file<R: Read>(
+        &self,
+        rel: &Path,
+        entry: &mut tar::Entry<R>,
+        raw_path: &[u8],
+        options: &UnpackOptions,
+        report: &mut UnpackReport,
+    ) -> Result<(), RefusalReason> {
+        write_regular_file(entry, &self.root.join(rel), raw_path, options, report)
+    }
+
+    fn create_directory(&self, rel: &Path) -> Result<bool, RefusalReason> {
+        create_directory(&self.root.join(rel))
+    }
+
+    fn write_symlink(
+        &self,
+        rel: &Path,
+        link_target_bytes: Option<&[u8]>,
+    ) -> Result<(), RefusalReason> {
+        write_symlink(link_target_bytes, &self.root.join(rel))
+    }
+
+    fn materialize_device_node<R: Read>(
+        &self,
+        entry: &tar::Entry<R>,
+        rel: &Path,
+        raw_path: &[u8],
+    ) -> Result<(), RefusalReason> {
+        materialize_device_node(entry, &self.root.join(rel), raw_path)
+    }
+
+    fn materialize_hardlink(
+        &self,
+        link_target_bytes: Option<&[u8]>,
+        target_rel: &Path,
+        options: &UnpackOptions,
+        current_layer_paths: &HashSet<PathBuf>,
+    ) -> Result<HardlinkAction, RefusalReason> {
+        materialize_hardlink(
+            link_target_bytes,
+            &self.root.join(target_rel),
+            self.root,
+            options,
+            current_layer_paths,
+        )
+    }
+}
+
 /// Unpack a single layer tarball under `output_root`, applying the
 /// safety policies described at module level.
 ///
@@ -479,6 +851,13 @@ pub fn unpack_layer<R: Read>(
     if !output_root.is_dir() {
         return Err(UnpackError::OutputRootNotADir(output_root.to_path_buf()));
     }
+
+    // Open the root once. On Linux every materialization resolves and
+    // writes through this handle via `openat2(RESOLVE_IN_ROOT |
+    // RESOLVE_NO_SYMLINKS)`, so the resolve-then-write is atomic
+    // against a concurrently-planted symlink parent.
+    let rooted = Rooted::open(output_root)
+        .map_err(|_| UnpackError::OutputRootNotADir(output_root.to_path_buf()))?;
 
     // We feed the raw reader to `tar::Archive`; the crate handles
     // sub-entry framing. The `set_*` knobs below disable the tar
@@ -566,12 +945,13 @@ pub fn unpack_layer<R: Read>(
             continue;
         }
 
-        // Safety check 5 — no symlink in any parent of the target.
-        // Walks each existing prefix; if any component is a symlink
-        // we refuse this entry. (The first non-existent prefix
-        // ends the walk; we're not asking "does the full path
-        // exist?", we're asking "does the existing prefix contain
-        // a symlink we'd have to follow to write under?")
+        // Safety check 5 — fail-fast scan for an already-present
+        // symlink in any parent of the target. Walks each existing
+        // prefix; if any component is a symlink we refuse this entry.
+        // On Linux this is a cheap pre-filter only: the openat2 write
+        // path (`Rooted`) is the load-bearing authority that closes
+        // the check-then-use race. It still guards the path-based
+        // whiteout-removal walk on every platform.
         if parent_chain_has_symlink(output_root, &rel_path) {
             report.refused.push(RefusedEntry {
                 raw_path,
@@ -600,9 +980,9 @@ pub fn unpack_layer<R: Read>(
         match entry_type {
             tar::EntryType::Regular | tar::EntryType::Continuous => {
                 match classify_whiteout(&raw_path) {
-                    WhiteoutKind::None => match write_regular_file(
+                    WhiteoutKind::None => match rooted.write_regular_file(
+                        &rel_path,
                         &mut entry,
-                        &target,
                         &raw_path,
                         options,
                         &mut report,
@@ -664,7 +1044,7 @@ pub fn unpack_layer<R: Read>(
                     }
                 }
             }
-            tar::EntryType::Directory => match create_directory(&target) {
+            tar::EntryType::Directory => match rooted.create_directory(&rel_path) {
                 Ok(created) => {
                     if created {
                         report.dirs_created += 1;
@@ -679,7 +1059,7 @@ pub fn unpack_layer<R: Read>(
             },
             tar::EntryType::Symlink => {
                 let link_target = entry.link_name_bytes().map(|b| b.into_owned());
-                match write_symlink(link_target.as_deref(), &target) {
+                match rooted.write_symlink(&rel_path, link_target.as_deref()) {
                     Ok(()) => {
                         report.symlinks_written += 1;
                         apply_collected_xattrs(&target, &raw_path, entry_xattrs, &mut report);
@@ -693,10 +1073,9 @@ pub fn unpack_layer<R: Read>(
             }
             tar::EntryType::Link => {
                 let link_target = entry.link_name_bytes().map(|b| b.into_owned());
-                match materialize_hardlink(
+                match rooted.materialize_hardlink(
                     link_target.as_deref(),
-                    &target,
-                    output_root,
+                    &rel_path,
                     options,
                     &current_layer_paths,
                 ) {
@@ -717,7 +1096,7 @@ pub fn unpack_layer<R: Read>(
                 }
             }
             tar::EntryType::Char | tar::EntryType::Block => {
-                match materialize_device_node(&entry, &target, &raw_path) {
+                match rooted.materialize_device_node(&entry, &rel_path, &raw_path) {
                     Ok(()) => {
                         report.device_nodes_written += 1;
                         apply_collected_xattrs(&target, &raw_path, entry_xattrs, &mut report);
@@ -794,6 +1173,7 @@ fn classify_xattr_name(policy: XattrPolicy, name: &[u8]) -> Result<(), XattrWarn
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn materialize_device_node<R: Read>(
     entry: &tar::Entry<R>,
     target: &Path,
@@ -839,19 +1219,8 @@ fn classify_device_node(
         .ok_or(RefusalReason::DeviceNodeRefused)
 }
 
-#[cfg(target_os = "linux")]
-fn create_allowed_device_node(
-    target: &Path,
-    allowed: AllowedDeviceNode,
-) -> Result<(), RefusalReason> {
-    use rustix::fs::{CWD, FileType, Mode, makedev, mknodat};
-
-    let mode = Mode::from_raw_mode(0o666);
-    let dev = makedev(allowed.major, allowed.minor);
-    mknodat(CWD, target, FileType::CharacterDevice, mode, dev)
-        .map_err(|_| RefusalReason::MalformedHeader)
-}
-
+/// Non-Linux fallback only — Linux device nodes are created via
+/// [`Rooted::materialize_device_node`] (openat2-resolved `mknodat`).
 #[cfg(not(target_os = "linux"))]
 fn create_allowed_device_node(
     _target: &Path,
@@ -944,6 +1313,10 @@ fn parent_chain_has_symlink(output_root: &Path, rel: &Path) -> bool {
 /// sub-phase may grow a distinct `IoError` variant if the
 /// granularity matters for audit, but A.1's caller treats all
 /// per-entry failures equivalently.
+///
+/// Non-Linux fallback only — on Linux writes route through
+/// [`Rooted::write_regular_file`] (openat2-resolved).
+#[cfg(not(target_os = "linux"))]
 fn write_regular_file<R: Read>(
     entry: &mut tar::Entry<R>,
     target: &Path,
@@ -1054,6 +1427,10 @@ fn record_setid_entry(report: &mut UnpackReport, raw_path: &[u8], mode: u32, pol
 /// archives commonly list a directory entry both before its
 /// children and as part of every parent chain, so coalescing
 /// is correct and not a refusal.
+///
+/// Non-Linux fallback only — on Linux this routes through
+/// [`Rooted::create_directory`] (openat2-resolved).
+#[cfg(not(target_os = "linux"))]
 fn create_directory(target: &Path) -> Result<bool, RefusalReason> {
     match std::fs::create_dir(target) {
         Ok(()) => Ok(true),
@@ -1077,6 +1454,10 @@ fn create_directory(target: &Path) -> Result<bool, RefusalReason> {
 /// - Link target bytes empty.
 /// - Link target bytes contain a NUL.
 /// - `symlink(2)` returns `EEXIST` (we don't overwrite).
+///
+/// Non-Linux fallback only — on Linux this routes through
+/// [`Rooted::write_symlink`] (openat2-resolved `symlinkat`).
+#[cfg(not(target_os = "linux"))]
 fn write_symlink(link_target_bytes: Option<&[u8]>, target: &Path) -> Result<(), RefusalReason> {
     use std::os::unix::fs::symlink;
 
@@ -1111,6 +1492,10 @@ enum HardlinkAction {
 /// Lower-layer targets become full copies because aliasing a new
 /// current-layer path to prior-layer inode state would make later
 /// whiteout / mutation reasoning depend on host filesystem identity.
+///
+/// Non-Linux fallback only — on Linux this routes through
+/// [`Rooted::materialize_hardlink`] (openat2-resolved `linkat`).
+#[cfg(not(target_os = "linux"))]
 fn materialize_hardlink(
     link_target_bytes: Option<&[u8]>,
     target: &Path,
@@ -1181,6 +1566,7 @@ fn validate_hardlink_target(
     Ok(rel)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn copy_existing_regular_file(
     source: &Path,
     target: &Path,
@@ -2628,5 +3014,152 @@ mod tests {
         assert_eq!(report.hardlink_copies_written, 0);
         assert_eq!(report.refused.len(), 1, "{:?}", report.refused);
         assert_eq!(report.refused[0].reason, RefusalReason::MalformedHeader);
+    }
+
+    // ── path-escape corpus ────────────────────────────
+
+    #[test]
+    fn escape_corpus_entries_are_refused_and_write_nothing() {
+        // Deterministic single-entry adversarial paths. Each must be
+        // refused with the expected reason and leave the output tree
+        // untouched. These guard the cheap string fail-fast checks
+        // that front the openat2 resolution authority.
+        let cases: &[(&[u8], RefusalReason)] = &[
+            (b"/etc/passwd", RefusalReason::AbsolutePath),
+            (b"/", RefusalReason::AbsolutePath),
+            (b"a/../b", RefusalReason::TraversalSegment),
+            (b"../escape", RefusalReason::TraversalSegment),
+            (b"a/b/../../../escape", RefusalReason::TraversalSegment),
+            (b"a/../../escape", RefusalReason::TraversalSegment),
+        ];
+
+        for (path, expected) in cases {
+            let tar_bytes = handrolled_tar_with_path(path, b'0');
+            let tmp = TempDir::new().unwrap();
+            let report = unpack_layer(
+                Cursor::new(tar_bytes),
+                tmp.path(),
+                &UnpackOptions::default(),
+            )
+            .expect("unpack should refuse, not error");
+
+            let rendered = String::from_utf8_lossy(path).into_owned();
+            assert_eq!(report.files_written, 0, "{rendered:?} wrote a file");
+            assert_eq!(
+                report.refused.len(),
+                1,
+                "{rendered:?}: {:?}",
+                report.refused
+            );
+            assert_eq!(
+                report.refused[0].reason, *expected,
+                "{rendered:?} mapped to the wrong refusal",
+            );
+            // Nothing landed under the (empty) root.
+            assert_eq!(
+                std::fs::read_dir(tmp.path()).unwrap().count(),
+                0,
+                "{rendered:?} mutated the output tree",
+            );
+        }
+    }
+
+    #[test]
+    fn escape_corpus_symlinked_parent_is_refused() {
+        // The already-present symlinked-parent case: `bin -> /tmp`
+        // then a write under `bin/`. Refused with SymlinkInParent and
+        // nothing is written through the symlink.
+        let tar_bytes = build_tar(|b| {
+            add_symlink(b, "bin", "/tmp");
+            add_file(b, "bin/escape", b"do not write");
+        });
+
+        let tmp = TempDir::new().unwrap();
+        let report = unpack_layer(
+            Cursor::new(tar_bytes),
+            tmp.path(),
+            &UnpackOptions::default(),
+        )
+        .expect("unpack ok");
+
+        assert_eq!(report.symlinks_written, 1);
+        assert_eq!(report.files_written, 0);
+        assert_eq!(report.refused.len(), 1, "{:?}", report.refused);
+        assert_eq!(report.refused[0].reason, RefusalReason::SymlinkInParent);
+        assert!(!std::path::Path::new("/tmp/escape").exists());
+    }
+
+    /// TOCTTOU witness (Linux): a parent component swapped to a symlink
+    /// in the check→write window must never let a write escape the
+    /// root. This fails against the pre-openat2 check-then-use code
+    /// (where `create_dir_all` follows the swapped symlink and the
+    /// leaf `O_NOFOLLOW` only guards the final component) and passes
+    /// once writes resolve through `openat2(RESOLVE_NO_SYMLINKS)`.
+    ///
+    /// The assertion only inspects the out-of-root escape target, so
+    /// the racing swapper can never make it flaky post-fix: an escape
+    /// is simply impossible, churn or not.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_symlink_swap_in_parent_never_escapes_root() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let root = TempDir::new().unwrap();
+        let escape = TempDir::new().unwrap();
+        let root_path = root.path().to_path_buf();
+        let escape_path = escape.path().to_path_buf();
+        let q = root_path.join("p/q");
+        let escape_secret = escape_path.join("secret");
+
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let swapper = {
+            let stop = stop.clone();
+            let q = q.clone();
+            let escape_path = escape_path.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = std::fs::remove_dir_all(&q);
+                    let _ = std::fs::remove_file(&q);
+                    let _ = std::os::unix::fs::symlink(&escape_path, &q);
+                    let _ = std::fs::remove_file(&q);
+                    let _ = std::fs::create_dir_all(&q);
+                }
+            })
+        };
+
+        // The unpacker writes `p/q/secret`. If a write lands while
+        // `p/q` is the attacker symlink, the bytes escape to
+        // `<escape>/secret`.
+        let tar = build_tar(|b| {
+            add_file(b, "p/q/secret", b"leaked");
+        });
+
+        let mut escaped = false;
+        for _ in 0..6000 {
+            let _ = std::fs::create_dir_all(root_path.join("p"));
+            let _ = unpack_layer(
+                Cursor::new(tar.clone()),
+                &root_path,
+                &UnpackOptions::default(),
+            );
+            if escape_secret.exists() {
+                escaped = true;
+                let _ = std::fs::remove_file(&escape_secret);
+            }
+            // Reset the in-root subtree for the next iteration;
+            // best-effort, since the swapper is racing it too.
+            let _ = std::fs::remove_dir_all(root_path.join("p"));
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+
+        assert!(
+            !escaped,
+            "a regular-file write escaped output_root through a parent component swapped \
+             to a symlink — openat2(RESOLVE_NO_SYMLINKS) must refuse it atomically",
+        );
     }
 }
