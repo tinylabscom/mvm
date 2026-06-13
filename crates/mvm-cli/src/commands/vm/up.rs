@@ -2123,22 +2123,31 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // Try a warm-pool claim first (auto-named + bridge-admitted
         // launches only; fail-open to cold boot). A claimed VM runs under its standby-id,
         // so rebind `vm_name_owned` for all downstream (agent wait, audit, readiness, stop).
-        let claimed: Option<String> =
-            match super::super::pool::try_warm_claim(&backend, &start_config, name.is_some()) {
-                Ok(Some(id)) => {
-                    ui::info(&format!(
-                        "Claimed a warm standby ({}) — skipping cold boot.",
-                        id.0
-                    ));
-                    Some(id.0)
-                }
-                Ok(None) => None,
-                Err(e) => {
-                    // try_warm_claim itself erroring (pool I/O, etc.) must not fail the launch.
-                    tracing::warn!(error = %e, "warm-claim attempt errored; cold-booting");
-                    None
-                }
-            };
+        // Hand the claim the rootfs sha admission already computed so it doesn't
+        // re-hash the rootfs to build the image compat key.
+        let admitted_image_sha = admission_main
+            .as_ref()
+            .map(|ctx| ctx.admitted.plan.image.sha256.clone());
+        let claimed: Option<String> = match super::super::pool::try_warm_claim(
+            &backend,
+            &start_config,
+            name.is_some(),
+            admitted_image_sha.as_deref(),
+        ) {
+            Ok(Some(id)) => {
+                ui::info(&format!(
+                    "Claimed a warm standby ({}) — skipping cold boot.",
+                    id.0
+                ));
+                Some(id.0)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                // try_warm_claim itself erroring (pool I/O, etc.) must not fail the launch.
+                tracing::warn!(error = %e, "warm-claim attempt errored; cold-booting");
+                None
+            }
+        };
         match claimed {
             Some(name) => vm_name_owned = name,
             None => {
