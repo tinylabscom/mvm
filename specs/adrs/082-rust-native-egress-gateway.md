@@ -100,8 +100,9 @@ limit-dependencies posture).
 **Costs / risks:** the gateway is the security chokepoint — a regression is a
 claim-10 regression, which is why the parity gate gates the default. Two
 gateways coexist during migration. The Rust gateway's current signed-off scope
-is VZ/vfkit, Firecracker on `/dev/kvm`, and host-local QEMU; libkrun-unixgram
-and Linux/passt-replacement parity are open items (below), not assumed.
+is VZ/vfkit, Firecracker on `/dev/kvm`, and host-local QEMU. libkrun-unixgram
+interop is **already proven** (see §Validation); Linux/passt-replacement
+parity remains an open item (below), not assumed.
 
 **Explicitly not a performance decision.** This does not target bring-up time.
 Cold bring-up is dominated by source compilation (kernel + guest agents),
@@ -110,11 +111,20 @@ a cache hit. The kernel prebuilt + store persistence own bring-up speed. The
 Rust gateway *enables* future transport tuning (MTU), but speed is not the
 justification and must not be used to wave the parity gate through.
 
+## Validation
+
+- **libkrun `krun_add_net_unixgram` interop — proven.** The gateway implements
+  the vfkit unixgram listener (SOCK_DGRAM, the `VFKT` handshake datagram, one
+  ethernet frame per datagram with no length prefix, the `-listen-vfkit
+  unixgram://` flag surface). mvm's own libkrun acceptance gate —
+  `run_libkrun_gvproxy_bridge`, the DHCP `DISCOVER → OFFER` round-trip through
+  the bridge — passes with the gateway binary as `MVM_GATEWAY_BIN` (verified
+  unsandboxed, 2026-06-05). So the first macOS cutover covers **both** libkrun
+  and Vz, not Vz-only. This closes the migration's largest risk before any code
+  lands in mvm.
+
 ## Open questions
 
-- **libkrun `krun_add_net_unixgram` interop.** macOS default + the Stage 0 cold
-  path are libkrun. Confirm the gateway's vfkit unixgram transport interoperates
-  with libkrun's listener, or scope the first cutover to Vz only.
 - **Linux/passt.** Does the Rust gateway replace passt on Linux too (one gateway
   everywhere), or is the first scope macOS-only with passt retained on Linux?
 - **mvmd coupling.** mvmd consumes the gateway audit substrate; the typed
