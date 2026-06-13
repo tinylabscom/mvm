@@ -23,7 +23,7 @@ brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy
 
 - `libkrun` — the in-process VMM. `mvm-libkrun-supervisor` links against it.
 - `libkrunfw` — bundles the TSI-patched Linux kernel libkrun's guests boot. Plan 86 / Plan 72 W5.D bullet 10 — `mvm-libkrun::extract_bundled_kernel()` pulls the kernel out of the dylib's `.rodata` at runtime.
-- `gvproxy` — userspace virtio-net gateway. Plan 88 / ADR-055 §"Cross-platform backends" — passt is Linux-only, so macOS dispatches to gvproxy via libkrun's `krun_add_net_unixgram` path. `MVM_NETWORKING` unset → per-OS default (macOS=gvproxy, Linux=passt); only `passt` and `gvproxy` are accepted. Plan 102 W6.A removed the `tsi` mode (TSI bypassed virtio-net entirely, violating the claim-10 no-bypass invariant — see ADR-058).
+- `gvproxy` — userspace virtio-net gateway. Plan 88 / ADR-055 §"Cross-platform backends" — passt is Linux-only, so macOS dispatches to gvproxy via libkrun's `krun_add_net_unixgram` path. `MVM_NETWORKING` unset → per-OS default (macOS=gvproxy, Linux=passt); `passt`, `gvproxy`, and the opt-in `native` are accepted. `native` (ADR-082 — the in-house Rust gateway) requires `MVM_GATEWAY_BIN` to name the gateway binary and falls back to the per-OS default without it; it is parity-gated and not yet validated end-to-end, so the default never selects it. Plan 102 W6.A removed the `tsi` mode (TSI bypassed virtio-net entirely, violating the claim-10 no-bypass invariant — see ADR-058).
 
 On Linux contributor hosts swap `gvproxy` for `passt` from the distro
 package manager (or build passt from source — see ADR-055 references).
