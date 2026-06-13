@@ -287,9 +287,20 @@ Two independent defects blocked `mvmctl up --flake <workload> --hypervisor vz`:
   race during udhcpc startup.
 - [ ] Persistent Vz builder (`VzPersistentBuilderVm`) still runs `network: None`;
   wire gvproxy when that path leaves scaffold status.
+  Close-out triage (2026-06-13): DEFERRED by design — the one-shot Vz builder
+  already spawns gvproxy (`host_gvproxy::spawn_detached`), which is what the
+  proven cold `dev up`/`build` path uses; the persistent path is still scaffold,
+  so wiring gvproxy there (~50-70 LOC copy of the one-shot pattern) can't be
+  live-validated until that path is exercised. Not a vz close-out blocker.
 - [ ] `mvmctl doctor` line surfacing the in-builder egress posture + last builder
   network bootstrap outcome (lease vs static vs none), so this class of failure is
   diagnosable without console archaeology.
+  Close-out triage (2026-06-13): DEFERRED — the "last net-bootstrap outcome
+  (lease|static|none)" is not recorded in any audit/state substrate today, so the
+  line needs new plumbing first (record the bootstrap result at builder boot, then
+  surface it). The static per-arm egress posture alone (boot=open, install=locked)
+  is already documented; the diagnostic value is in the *outcome*, which is the
+  part that needs the substrate. Not a vz close-out blocker.
 - [x] fs_quick on Vz: teach the quiesce gate to recognize the Vz paused state
   (pid stays alive under pause), and/or stop deleting the per-instance CoW
   rootfs on `down` so a stopped VM remains checkpointable.

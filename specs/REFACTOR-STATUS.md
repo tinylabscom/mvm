@@ -24,7 +24,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 153** — CLI directory split · ✅ (subsumed into Plan 178)
 - [x] **PLAN 178** — CLI surface consolidation (~56→~28) · ✅ (dir-purity deferred)
 - [x] **PLAN 129** — Secrets / SigV4 substitution · ✅ **COMPLETE** — both tiers (declared substitution incl. SigV4/HMAC bind-checked + undeclared detection), terminator-path + vsock, claim-12/13 leak-gate (claim 16), endpoint self-confines (Landlock+seccomp jailer); QEMU clean-room e2e GREEN; FC bringup fixes landed (#804); live-FC e2e spun out (builder-VM box infra, not plan logic)
-- [ ] **PLAN 152** — Rust-native VZ supervisor · 🟢 native objc2, Swift deleted; WS-C fork primitive CLOSED (satisfied by #700 + 159 fork --boot + instant memory fork), WS-D nested-KVM out of scope for vz
+- [x] **PLAN 152** — Rust-native VZ supervisor · ✅ native objc2, Swift deleted; WS-C fork primitive satisfied (snapshot/restore + fork stack), WS-D nested-KVM out-of-scope for vz parity
 - [ ] **PLAN 118** — Supervisor standby pool · 🟡 libkrun + Vz done; FC follow-up open
 - [ ] **PLAN 159** — vz-inspired macOS VZ DX · 🟡 warm pool + checkpoint/fork shipped; WS-5 D + delta-image remain
 - [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C3 (Vz save/restore) MET via 159 WS-2; C2 (FC live-memory) gated → Plan 175
@@ -284,13 +284,11 @@ PLAN 118 — Supervisor standby pool              🟡 libkrun + Vz done; FC fol
       group, null stdio, inherits env, via current_exe) — `up` returns at once
       and the child re-warms only the deficit off the hot path. Live: claim
       drained 1→0, detached re-warm refilled to 1.
-  [x] Pool-dir warm flock: `warm_to_target` now takes an exclusive `FileLock`
-      (reused `mvm_core::atomic_io::FileLock`) on `<pool>/warm.lock` spanning the
-      idle-count read → spawn loop, so concurrent launches no longer both observe
-      an empty pool and each spawn to target (the prior ~1-per-claim overshoot
-      that aged out via TTL). `SupervisorStandbyPool::root()` accessor added;
-      no-overshoot witness is a 2-thread test (TDD-verified: 5/5 overshoot
-      without the lock, 2 == target with it).
+  [x] warm-pool overshoot flock — CLOSED in the vz close-out: `warm_to_target`
+      now holds a `FileLock` on the pool dir across the read→decide→spawn region,
+      so a second concurrent warmer blocks, re-reads the updated count, and
+      spawns only the remainder (no more transient ~1 overshoot). Deterministic
+      test verifies it (fails as 2×target without the lock).
   [x] Warm claim reuses the admission image sha (#846): the claim's compat key
       threads `ExecutionPlan.image.sha256` (already computed by claim-8
       admission) instead of re-hashing the rootfs a second time on the launch
