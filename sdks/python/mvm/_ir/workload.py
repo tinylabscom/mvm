@@ -175,6 +175,13 @@ class JsonSchemaShape:
     pass
 
 
+@dataclass
+class MaterializedFile:
+    bytes_b64: str
+    path: str
+    mode: Optional[str] = None
+
+
 class MountMode(Enum):
     ro = 'ro'
     rw = 'rw'
@@ -343,11 +350,10 @@ SecretMount = Union[SecretMount1, SecretMount2]
 
 
 @dataclass
-class SecretRef:
-    allowed_hosts: List[str]
-    auth_type: AuthType
-    mount: SecretMount
-    name: str
+class Sigv4Params:
+    access_key_id: str
+    region: str
+    service: str
 
 
 class Kind23(Enum):
@@ -446,15 +452,6 @@ Dependencies = Union[Dependencies1, Dependencies2, Dependencies3]
 
 
 @dataclass
-class EnvValue2:
-    kind: Kind9
-    ref: SecretRef
-
-
-EnvValue = Union[EnvValue1, EnvValue2]
-
-
-@dataclass
 class Mount:
     mode: MountMode
     source: MountSource
@@ -466,6 +463,33 @@ class PortForward:
     guest: int
     host: int
     proto: PortProto
+
+
+@dataclass
+class SecretRef:
+    allowed_hosts: List[str]
+    auth_type: AuthType
+    mount: SecretMount
+    name: str
+    sigv4: Optional[Sigv4Params] = None
+
+
+@dataclass
+class EnvValue2:
+    kind: Kind9
+    ref: SecretRef
+
+
+EnvValue = Union[EnvValue1, EnvValue2]
+
+
+@dataclass
+class Network:
+    mode: NetworkMode
+    dns: Optional[NetworkDns] = None
+    egress: Optional[NetworkEgress] = None
+    peers: Optional[List[str]] = None
+    ports: Optional[List[PortForward]] = field(default_factory=lambda: [])
 
 
 @dataclass
@@ -496,15 +520,6 @@ Entrypoint = Union[Entrypoint1, Entrypoint2]
 
 
 @dataclass
-class Network:
-    mode: NetworkMode
-    dns: Optional[NetworkDns] = None
-    egress: Optional[NetworkEgress] = None
-    peers: Optional[List[str]] = None
-    ports: Optional[List[PortForward]] = field(default_factory=lambda: [])
-
-
-@dataclass
 class App:
     entrypoints: List[Entrypoint]
     image: Image
@@ -514,6 +529,7 @@ class App:
     addons: Optional[List[AddonUse]] = None
     dependencies: Optional[Dependencies] = None
     env: Optional[Dict[str, EnvValue]] = field(default_factory=lambda: {})
+    files: Optional[List[MaterializedFile]] = None
     hooks: Optional[Hooks] = None
     mounts: Optional[List[Mount]] = field(default_factory=lambda: [])
     network: Optional[Network] = None

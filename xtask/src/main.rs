@@ -173,10 +173,10 @@ fn main() -> Result<()> {
                 "  build-dev-image [--arch <arch>]         Build the dev VM image and drop it into nix/images/dev-prebuilt/<arch>/"
             );
             eprintln!(
-                "  gen-stubs                               Plan 60 Phase 5: regenerate schema/workload-ir-v0.json + Python/TS IR types from mvm-ir"
+                "  gen-stubs                               Regenerate the workload-IR + host↔guest-protocol JSON schemas and their Python/TS SDK types"
             );
             eprintln!(
-                "  check-stubs                             Plan 60 Phase 5: CI gate — fail if generated stubs are stale"
+                "  check-stubs                             CI gate — fail if any generated schema/stub is stale"
             );
             std::process::exit(1);
         }
