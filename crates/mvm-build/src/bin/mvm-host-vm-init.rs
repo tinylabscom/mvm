@@ -2096,6 +2096,20 @@ mod linux {
     fn setup_network() -> Result<(), String> {
         let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
 
+        // The kernel creates `lo` administratively DOWN. Until it's up,
+        // 127.0.0.0/8 has no route and every guest-internal loopback
+        // service — the egress forward proxy, addon-dns — fails to bind
+        // with EADDRNOTAVAIL. Bring it up first, independent of eth0/DHCP:
+        // a network:None builder VM has no eth0 at all yet still needs
+        // working loopback. Non-fatal, mirroring the eth0 bring-up below.
+        if let Err(e) = bring_iface_up("lo") {
+            eprintln!(
+                "mvm-host-vm-init: bring_iface_up lo failed: {e} \
+                 (continuing — guest-internal loopback services \
+                 will be unreachable)"
+            );
+        }
+
         // The rootfs mounts ro and /etc/resolv.conf is a baked regular file,
         // not a /run symlink. busybox's DHCP script writes /etc/resolv.conf
         // directly and gets EROFS, so leased DNS never lands. Mount a tmpfs-
