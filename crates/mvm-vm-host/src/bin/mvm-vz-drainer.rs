@@ -25,13 +25,16 @@
 //! `mvm-libkrun-supervisor`'s `SupervisorConfig` contract: the
 //! producer (`mvm-backend`) is trusted and has already verified the
 //! signed plan envelope via `mvm-cli`'s `admit_for_run` path before
-//! launch. The drainer parses the plan JSON directly into an
-//! [`ExecutionPlan`] without an additional envelope check —
-//! mirroring the libkrun supervisor's pattern. Re-verification of
-//! the plan envelope at the supervisor leaf would require host
-//! signer state (`mvm-cli::host_signer`) which the drainer cannot
-//! reach without closing a cycle (`mvm-cli → mvm-supervisor →
-//! mvm-cli`).
+//! launch. `plan_json` carries a `SignedExecutionPlan` envelope;
+//! `decode_plan_json` unwraps it with `plan_from_admitted_json`, which
+//! accepts both the signed envelope shape and the bare `ExecutionPlan`
+//! shape (the on-disk form used by lifecycle verbs). No re-verification
+//! of the Ed25519 signature: the host verified it at admission, and the
+//! host is in the TCB. Re-verification here would require the
+//! host-signer state managed by `mvm-cli`, which the drainer cannot
+//! reach without introducing a dep cycle (`mvm-cli → mvm-supervisor →
+//! mvm-cli`). This matches the `secrets_from_signed_json` and
+//! `redaction_from_signed_json` helpers used on every other backend path.
 //!
 //! ## Capability profile
 //!
@@ -49,7 +52,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use ed25519_dalek::SigningKey;
-use mvm_core::plan::ExecutionPlan;
+use mvm_core::plan::{ExecutionPlan, plan_from_admitted_json};
 use mvm_core::policy::PolicyBundle;
 use mvm_hostd::supervisor::audit::AuditSigner;
 use mvm_hostd::supervisor::audit_file::FileAuditSigner;
@@ -90,10 +93,9 @@ struct DrainerConfig {
     events_socket_path: PathBuf,
 
     /// Serialised `SignedExecutionPlan` envelope as produced by
-    /// `mvm-cli::plan_admission::populate_audit_substrate`. The
-    /// drainer trusts its parent (see "Trust model" in the module
-    /// doc) and parses the inner `ExecutionPlan` body directly —
-    /// mirroring `mvm-libkrun-supervisor`'s pattern.
+    /// `mvm-cli::plan_admission::populate_audit_substrate`.
+    /// `decode_plan_json` unwraps it via `plan_from_admitted_json` —
+    /// see "Trust model" in the module doc for the signature-skip rationale.
     plan_json: String,
 
     /// Optional serialised `PolicyBundle` (the resolved bundle pin
@@ -127,12 +129,7 @@ fn run() -> Result<()> {
         .context("read DrainerConfig from stdin")?;
     let cfg: DrainerConfig = serde_json::from_str(&json).context("parse DrainerConfig JSON")?;
 
-    // Plan is a serialised `SignedExecutionPlan` envelope. The
-    // libkrun supervisor's pattern is to decode `cfg.plan` (a
-    // `serde_json::Value` carrier from `SupervisorConfig`) into an
-    // `ExecutionPlan` directly; we mirror that by parsing the
-    // string with `from_str`. See module-doc "Trust model".
-    let plan: ExecutionPlan = serde_json::from_str(&cfg.plan_json)
+    let plan = decode_plan_json(&cfg.plan_json)
         .context("decode DrainerConfig.plan_json into ExecutionPlan")?;
 
     let bundle: Option<PolicyBundle> = match &cfg.bundle_json {
@@ -218,5 +215,57 @@ fn run() -> Result<()> {
     // FlowEvent arrives. A loop guards against spurious unparks.
     loop {
         std::thread::park();
+    }
+}
+
+/// Decode a `plan_json` string into an `ExecutionPlan`.
+///
+/// Accepts both the `SignedExecutionPlan` envelope shape (what
+/// `populate_audit_substrate` threads in, serialised from
+/// `admitted.signed`) and the bare `ExecutionPlan` shape (the on-disk
+/// form written by lifecycle verbs). The signature is not re-verified:
+/// the host checked it at admission; the host is in the TCB. This is
+/// the same trust posture as `plan_from_admitted_json`, the shared
+/// helper used by the Firecracker bridge and QEMU paths.
+pub(crate) fn decode_plan_json(plan_json: &str) -> Result<ExecutionPlan, serde_json::Error> {
+    plan_from_admitted_json(plan_json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+    use mvm_core::plan::signing::{sign_plan, test_support::sample_plan};
+
+    fn test_key() -> SigningKey {
+        // Deterministic 32-byte key for tests — no OsRng dep.
+        SigningKey::from_bytes(&[0xdd; 32])
+    }
+
+    #[test]
+    fn decode_signed_envelope_yields_inner_plan() {
+        let plan = sample_plan();
+        let signed = sign_plan(&plan, &test_key(), "test-drainer-key");
+        let json = serde_json::to_string(&signed).expect("signed plan serialises");
+
+        let decoded = decode_plan_json(&json).expect("signed envelope decodes");
+        assert_eq!(decoded.plan_id, plan.plan_id);
+        assert_eq!(decoded.tenant, plan.tenant);
+        assert_eq!(decoded.workload, plan.workload);
+    }
+
+    #[test]
+    fn decode_bare_plan_still_works() {
+        let plan = sample_plan();
+        let json = serde_json::to_string(&plan).expect("bare plan serialises");
+
+        let decoded = decode_plan_json(&json).expect("bare ExecutionPlan decodes");
+        assert_eq!(decoded.plan_id, plan.plan_id);
+    }
+
+    #[test]
+    fn decode_garbage_returns_err() {
+        assert!(decode_plan_json("not json at all").is_err());
+        assert!(decode_plan_json(r#"{"unknown_field": 42}"#).is_err());
     }
 }
