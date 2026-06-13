@@ -1194,10 +1194,10 @@ mod tests {
 
         let user_cfg = mvm_core::user_config::load(None);
         let final_cpus = flag_cpus.or(plan_cpus).unwrap_or(user_cfg.default_cpus);
-        let final_mem_mib = match flag_mem {
-            Some(s) => mvm_core::util::parse_human_size(s).unwrap(),
-            None => plan_mem.unwrap_or(user_cfg.default_memory_mib),
-        };
+        let final_mem_mib = flag_mem
+            .map(|s| mvm_core::util::parse_human_size(s).unwrap())
+            .or(plan_mem)
+            .unwrap_or(user_cfg.default_memory_mib);
         assert_eq!(final_cpus, 8);
         assert_eq!(final_mem_mib, 1024);
     }
