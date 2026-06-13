@@ -2427,7 +2427,9 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             let w_backend = AnyBackend::from_hypervisor(effective_hypervisor);
             if let Err(e) = mvm_backend::workload_backend::require_workload_backend(&w_backend) {
                 emit_failed_if(&watch_admission, "backend-start", &e);
-                ui::warn(&format!("Could not start VM: {e}; waiting for next change..."));
+                ui::warn(&format!(
+                    "Could not start VM: {e}; waiting for next change..."
+                ));
                 continue;
             }
             if let Err(e) = w_backend.start(&w_start_config) {
