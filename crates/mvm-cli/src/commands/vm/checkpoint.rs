@@ -16,6 +16,7 @@ use mvm_backend::checkpoint::{
     CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, RestoreParams,
     capture_fs_quick, capture_vm_full, fork_checkpoint, fork_vm_full, restore_checkpoint,
 };
+use mvm_backend::vz::supervisor_config_path;
 use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
 use mvm_core::config::vm_state_dir;
 use mvm_hostd::audit::bind::class_str;
@@ -554,7 +555,7 @@ fn fork(
     // a rootfs-only clone that the operator can optionally boot with `--boot`.
     let parent = store.read_meta(&checkpoint)?;
     match parent.class {
-        CheckpointClass::VmFull => fork_vm_full_arm(&store, &checkpoint, new_id),
+        CheckpointClass::VmFull => fork_vm_full_arm(&store, &checkpoint, new_id, cpus, memory),
         CheckpointClass::FsQuick => {
             fork_fs_quick_arm(&store, &checkpoint, new_id, boot, hypervisor, cpus, memory)
         }
@@ -587,6 +588,8 @@ fn fork_fs_quick_arm(
             child_vm_name: child_vm_name.clone(),
             dest_dir: dest_dir.clone(),
             created_unix: now,
+            child_plan_json: None,
+            child_tenant_id: None,
         },
     )
     .with_context(|| format!("forking checkpoint {:?}", checkpoint.as_str()))?;
@@ -625,37 +628,158 @@ fn fork_fs_quick_arm(
     Ok(())
 }
 
-/// vm_full fork: clone the captured triple into a new identity, rewrite the
-/// supervisor config, and boot the child in restore mode (auto-boot).
+/// Inputs for [`fork_vm_full_arm`]. Grouped to stay under the
+/// `clippy::too_many_arguments` workspace ceiling.
+struct ForkVmFullArmParams<'a> {
+    store: &'a CheckpointStore,
+    checkpoint: &'a CheckpointId,
+    new_id: Option<String>,
+    /// Refused with a user-visible error: a vm_full fork restores the saved
+    /// machine state (cpu/mem baked into the snapshot), so the shape is fixed.
+    /// Use an fs_quick fork to boot a resized child.
+    cpus_override: Option<u32>,
+    /// Refused with a user-visible error for the same reason as `cpus_override`.
+    memory_override: Option<&'a str>,
+}
+
+/// vm_full fork: clone the captured triple into a new child identity, admit a
+/// fresh claim-8 plan for the child (using the parent's saved cpu/mem — the
+/// restore shape is fixed), rewrite the supervisor config, and boot the child
+/// in restore mode. The child's admitted plan is distinct from the parent's.
 fn fork_vm_full_arm(
     store: &CheckpointStore,
     checkpoint: &CheckpointId,
     new_id: Option<String>,
+    cpus_override: Option<u32>,
+    memory_override: Option<&str>,
 ) -> Result<()> {
+    fork_vm_full_arm_inner(ForkVmFullArmParams {
+        store,
+        checkpoint,
+        new_id,
+        cpus_override,
+        memory_override,
+    })
+}
+
+fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
+    // A vm_full fork restores a saved machine state whose cpu/mem are baked
+    // into the snapshot; Vz validates device config against the saved state
+    // and refuses a mismatch. Accepting these flags would silently fail at
+    // restore time with a confusing hypervisor error — refuse early.
+    if p.cpus_override.is_some() {
+        anyhow::bail!(
+            "--cpus is not valid for a vm_full fork: a memory restore resumes the saved \
+             machine shape; use an fs_quick fork to resize"
+        );
+    }
+    if p.memory_override.is_some() {
+        anyhow::bail!(
+            "--memory is not valid for a vm_full fork: a memory restore resumes the saved \
+             machine shape; use an fs_quick fork to resize"
+        );
+    }
+
     let now = now_unix();
-    let child_vm_name = new_id.unwrap_or_else(|| format!("{}-fork-{now}", checkpoint.as_str()));
+    let child_vm_name = p
+        .new_id
+        .unwrap_or_else(|| format!("{}-fork-{now}", p.checkpoint.as_str()));
     let dest_dir = vm_state_dir(&child_vm_name);
     let child_id = CheckpointId::new(format!("fork-{child_vm_name}-{now}"));
 
+    // Read the parent supervisor config to extract the saved machine shape
+    // (cpu_count / memory_mib). The restore must match these exactly.
+    let parent_meta = p.store.read_meta(p.checkpoint)?;
+    let parent_cfg_path =
+        supervisor_config_path(&mvm_core::config::vm_state_dir(&parent_meta.vm_name));
+    let parent_cfg_bytes = std::fs::read(&parent_cfg_path).with_context(|| {
+        format!(
+            "reading parent supervisor config {}",
+            parent_cfg_path.display()
+        )
+    })?;
+    let parent_cfg: mvm_build::vz::SupervisorConfig = serde_json::from_slice(&parent_cfg_bytes)
+        .with_context(|| {
+            format!(
+                "parsing parent supervisor config {}",
+                parent_cfg_path.display()
+            )
+        })?;
+    let cpus = parent_cfg.resources.cpu_count;
+    let mem_mib = parent_cfg.resources.memory_mib;
+
+    // Admit a fresh plan for the child under the child's identity using the
+    // checkpoint's RECORDED rootfs sha (the child's materialized rootfs is a
+    // clone of that blob — same bytes). Re-hashing the multi-hundred-MB image
+    // here would double the fork latency for nothing: `fork_vm_full` runs
+    // `verify_content` over the same blob fail-closed before any supervisor
+    // spawns, so a tampered blob aborts the launch instead of booting
+    // mis-admitted.
+    let rootfs_blob = p.store.content_dir(p.checkpoint).join("rootfs.ext4");
+    let recorded_sha = parent_meta
+        .content
+        .iter()
+        .find(|b| b.name == "rootfs.ext4")
+        .map(|b| b.sha256.clone());
+    let tenant = super::tenant_resolution::resolve_tenant(None);
+    let ledger = super::plan_admission::InMemoryNonceLedger::new();
+    let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+        tenant: &tenant,
+        vm_name: &child_vm_name,
+        backend_name: "vz",
+        rootfs_path: &rootfs_blob,
+        precomputed_image_sha256: recorded_sha,
+        cpus,
+        mem_mib,
+        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+        secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+        secrets: Vec::new(),
+        no_supervisor: false,
+        ledger: &ledger,
+        keys_dir: None,
+        audit_dir: None,
+        policy_dir: None,
+        bundle_pin: None,
+        deps_volume: None,
+        shares: Vec::new(),
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+    })?;
+
+    // Serialize the admitted plan envelope so the backend can inject it into
+    // the child's SupervisorConfig before spawning.
+    let child_plan_json = admission.as_ref().map(|ctx| {
+        serde_json::to_string(&ctx.admitted.signed).expect("admitted plan is always serializable")
+    });
+    let child_tenant_id = admission
+        .as_ref()
+        .map(|ctx| ctx.admitted.plan.tenant.0.clone());
+
     let spawner = mvm_backend::vz::VzChildSupervisorSpawner;
-    let meta = fork_vm_full(
-        store,
+    let fork_result = fork_vm_full(
+        p.store,
         ForkParams {
-            checkpoint: checkpoint.clone(),
+            checkpoint: p.checkpoint.clone(),
             child_id,
             child_vm_name: child_vm_name.clone(),
             dest_dir,
             created_unix: now,
+            child_plan_json,
+            child_tenant_id,
         },
         &spawner,
-    )
-    .with_context(|| format!("forking vm_full checkpoint {:?}", checkpoint.as_str()))?;
+    );
+    if let Err(ref e) = fork_result {
+        super::up::emit_failed_if(&admission, "fork-vm-full", e);
+    }
+    let meta = fork_result
+        .with_context(|| format!("forking vm_full checkpoint {:?}", p.checkpoint.as_str()))?;
 
-    bind_checkpoint_forked(checkpoint, &meta, &child_vm_name, store)?;
+    bind_checkpoint_forked(p.checkpoint, &meta, &child_vm_name, p.store)?;
+    super::up::emit_launched_if(&admission, "vz");
 
     ui::success(&format!(
         "forked {} -> checkpoint {} (vm '{}', auto-booted)",
-        checkpoint.as_str(),
+        p.checkpoint.as_str(),
         meta.id.as_str(),
         child_vm_name
     ));
@@ -736,6 +860,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         vm_name: p.child_vm_name,
         backend_name: &effective_hypervisor,
         rootfs_path: p.instance_rootfs,
+        precomputed_image_sha256: None,
         cpus,
         mem_mib,
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -1152,6 +1277,50 @@ mod tests {
             recovered.vm_name,
             parent_id.as_str(),
             "checkpoint id and vm_name are different; the old heuristic was wrong"
+        );
+    }
+
+    // ── vm_full fork: --cpus/--memory refused ────────────────────────────────
+
+    /// Passing --cpus to a vm_full fork is refused with a clear error message
+    /// that explains the memory-restore constraint and names the fs_quick
+    /// alternative.
+    #[test]
+    fn vm_full_fork_refuses_cpus_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = fork_vm_full_arm_inner(ForkVmFullArmParams {
+            store: &CheckpointStore::at(tmp.path()),
+            checkpoint: &CheckpointId::new("ck-unused"),
+            new_id: None,
+            cpus_override: Some(8),
+            memory_override: None,
+        })
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--cpus"), "error must name --cpus: {msg}");
+        assert!(
+            msg.contains("fs_quick") || msg.contains("fs-quick"),
+            "error must name the fs_quick alternative: {msg}"
+        );
+    }
+
+    /// Passing --memory to a vm_full fork is refused with a clear error message.
+    #[test]
+    fn vm_full_fork_refuses_memory_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = fork_vm_full_arm_inner(ForkVmFullArmParams {
+            store: &CheckpointStore::at(tmp.path()),
+            checkpoint: &CheckpointId::new("ck-unused"),
+            new_id: None,
+            cpus_override: None,
+            memory_override: Some("2G"),
+        })
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--memory"), "error must name --memory: {msg}");
+        assert!(
+            msg.contains("fs_quick") || msg.contains("fs-quick"),
+            "error must name the fs_quick alternative: {msg}"
         );
     }
 }
