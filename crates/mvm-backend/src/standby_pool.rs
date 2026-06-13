@@ -66,14 +66,16 @@ impl SupervisorStandbyPool {
         Ok(out)
     }
 
-    /// Pick a live, idle standby compatible with `want` (kernel + fixed resources) — the
-    /// claim candidate. `None` means "no compatible warm standby; cold-boot." Skips
-    /// claimed and dead entries.
+    /// Pick a live, idle standby compatible with `want` (kernel + fixed resources + image)
+    /// — the claim candidate. `None` means "no compatible warm standby; cold-boot." Skips
+    /// claimed and dead entries. Saved-state standbys (pid=0) are considered live: their
+    /// TTL controls expiry, not a process liveness check.
     pub fn select_idle_compatible(&self, want: &StandbyCompat) -> Result<Option<StandbyHandle>> {
-        Ok(self
-            .list()?
-            .into_iter()
-            .find(|h| h.state == StandbyState::Idle && h.is_compatible(want) && pid_alive(h.pid)))
+        Ok(self.list()?.into_iter().find(|h| {
+            h.state == StandbyState::Idle
+                && h.is_compatible(want)
+                && (h.is_saved_state() || pid_alive(h.pid))
+        }))
     }
 
     /// Count of live idle standbys compatible with `want` — drives replenish-to-target.
@@ -81,7 +83,11 @@ impl SupervisorStandbyPool {
         Ok(self
             .list()?
             .into_iter()
-            .filter(|h| h.state == StandbyState::Idle && h.is_compatible(want) && pid_alive(h.pid))
+            .filter(|h| {
+                h.state == StandbyState::Idle
+                    && h.is_compatible(want)
+                    && (h.is_saved_state() || pid_alive(h.pid))
+            })
             .count())
     }
 
@@ -102,24 +108,33 @@ impl SupervisorStandbyPool {
         }
     }
 
-    /// Reap standbys that are dead (pid gone) or expired (`now - spawned > ttl`). For a
-    /// still-live expired standby, SIGTERM the supervisor first, then remove its dir.
-    /// Returns the reaped ids. Idle entitled processes must never accumulate —
-    /// `cache prune` calls this on a timer.
+    /// Reap standbys that are dead (pid gone) or expired (`now - spawned > ttl`).
+    ///
+    /// Saved-state standbys (pid=0) have no running supervisor; they are reaped by TTL
+    /// only, never by dead-process detection. Live-supervisor standbys are SIGTERMed
+    /// before their dir is removed when they expire while still running.
     pub fn reap_stale(&self, ttl: std::time::Duration, now: u64) -> Result<Vec<String>> {
         let ttl_secs = ttl.as_secs();
         let mut reaped = Vec::new();
         for h in self.list()? {
-            let alive = pid_alive(h.pid);
             let expired = now.saturating_sub(h.spawned_unix_secs) > ttl_secs;
-            if !alive || expired {
-                if alive {
-                    // Live but expired — stop the entitled supervisor before dropping state.
-                    // SAFETY: SIGTERM to a pid this host spawned; a stale pid is a no-op.
-                    unsafe { libc::kill(h.pid as libc::pid_t, libc::SIGTERM) };
+            if h.is_saved_state() {
+                // No live process; TTL controls expiry exclusively.
+                if expired {
+                    self.remove(&h.id)?;
+                    reaped.push(h.id);
                 }
-                self.remove(&h.id)?;
-                reaped.push(h.id);
+            } else {
+                let alive = pid_alive(h.pid);
+                if !alive || expired {
+                    if alive {
+                        // Live but expired — SIGTERM before removing state.
+                        // SAFETY: SIGTERM to a pid this host spawned; a stale pid is a no-op.
+                        unsafe { libc::kill(h.pid as libc::pid_t, libc::SIGTERM) };
+                    }
+                    self.remove(&h.id)?;
+                    reaped.push(h.id);
+                }
             }
         }
         Ok(reaped)
@@ -162,6 +177,7 @@ mod tests {
             binding_nonce: "ab".repeat(32),
             spawned_unix_secs: 1,
             state,
+            image_sha256: None,
         }
     }
 
@@ -170,6 +186,7 @@ mod tests {
             kernel_sha256: kernel.into(),
             vcpus: 2,
             mem_mib: 1024,
+            image_sha256: None,
         }
     }
 
@@ -278,5 +295,90 @@ mod tests {
         pool.record(&handle("b", "aa", StandbyState::Claimed))
             .unwrap();
         assert_eq!(pool.idle_count_compatible(&compat("aa")).unwrap(), 1);
+    }
+
+    // ── saved-state standby tests (Vz) ───────────────────────────────────────────
+
+    fn saved_handle(id: &str, kernel: &str, image: &str, state: StandbyState) -> StandbyHandle {
+        StandbyHandle {
+            id: id.into(),
+            control_socket: format!("/p/{id}/control.sock").into(),
+            pid: 0, // no live supervisor for saved-state standbys
+            kernel_sha256: kernel.into(),
+            vcpus: 2,
+            mem_mib: 1024,
+            binding_nonce: "ab".repeat(32),
+            spawned_unix_secs: 1,
+            state,
+            image_sha256: Some(image.into()),
+        }
+    }
+
+    fn vz_compat(kernel: &str, image: &str) -> StandbyCompat {
+        StandbyCompat {
+            kernel_sha256: kernel.into(),
+            vcpus: 2,
+            mem_mib: 1024,
+            image_sha256: Some(image.into()),
+        }
+    }
+
+    /// A saved-state standby (pid=0) is selected despite having no live process.
+    #[test]
+    fn select_idle_finds_saved_state_standby_without_live_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        pool.record(&saved_handle("vz1", "kk", "img-aa", StandbyState::Idle))
+            .unwrap();
+        let picked = pool
+            .select_idle_compatible(&vz_compat("kk", "img-aa"))
+            .unwrap();
+        assert_eq!(picked.unwrap().id, "vz1");
+    }
+
+    /// Image sha must match exactly — wrong image returns None.
+    #[test]
+    fn select_idle_rejects_saved_standby_on_image_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        pool.record(&saved_handle("vz1", "kk", "img-aa", StandbyState::Idle))
+            .unwrap();
+        // libkrun compat (None) does not match a Vz standby (Some).
+        assert!(
+            pool.select_idle_compatible(&compat("kk"))
+                .unwrap()
+                .is_none()
+        );
+        // Different image sha also misses.
+        assert!(
+            pool.select_idle_compatible(&vz_compat("kk", "img-bb"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Saved standbys (pid=0) are kept while recent and reaped only when TTL expires.
+    #[test]
+    fn reap_keeps_recent_saved_standby_and_reaps_expired_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let now = now_unix_secs();
+
+        let mut recent = saved_handle("vz-keep", "kk", "img", StandbyState::Idle);
+        recent.spawned_unix_secs = now;
+        pool.record(&recent).unwrap();
+
+        let mut old = saved_handle("vz-old", "kk", "img", StandbyState::Idle);
+        old.spawned_unix_secs = 1; // ancient
+        pool.record(&old).unwrap();
+
+        let reaped = pool
+            .reap_stale(std::time::Duration::from_secs(3600), now)
+            .unwrap();
+
+        assert!(!reaped.contains(&"vz-keep".to_string()));
+        assert!(reaped.contains(&"vz-old".to_string()));
+        assert!(pool.load("vz-keep").is_ok());
+        assert!(pool.load("vz-old").is_err());
     }
 }
