@@ -89,8 +89,14 @@ WS-2 / Plan 140 — add `--json` there, don't fork).
       linux-native / unsupported) via a pure `build_dev_status_json[_vmless]`
       builder; serde + privacy + CLI-parse tests; manually verified on
       macOS-26. Reuses the cache-inspect JSON sub-structs.
-- [ ] `dev up --json` / `dev down --json` — emit a small lifecycle result
-      (backend, vm_name, action, outcome) so scripts can branch on boot/teardown.
+- [x] **`dev down --json`** — `DevLifecycleJson { schema_version, backend,
+      action, outcome, reset? }`; `outcome` is `stopped`/`not-running`, `reset`
+      appears only when `--reset` actually dropped the Nix-store overlay. The
+      down handlers now return `was_running` (presentation moved to the
+      dispatch); serde + CLI-parse tests; verified on macOS-26.
+- [ ] `dev up --json` — emit `{action: "up", outcome: started/already-running}`
+      after boot; implies `--no-shell` (the default path is interactive). Its
+      own slice (the up path is heavier + branches through build/boot/shell).
 - [ ] snapshot/checkpoint `--json` — add to the Plan 159/140 verbs in place
       (don't duplicate the primitive); WS-1 (`save`/`restore`) lands its own.
 - [ ] linux-native richer `--json` — today it collapses to a single `state`

@@ -216,7 +216,9 @@ pub(in crate::commands) fn dev_vsock_proxy_path() -> String {
 
 /// Stop the dev VM by reaping its detached Vz supervisor via the PID
 /// file under the stable state dir.
-pub(super) fn cmd_dev_vz_down() -> Result<()> {
+/// Stop the Vz dev VM. Returns whether a live VM was reaped. Prints the
+/// human result line only when `!json` (the dispatch emits the JSON form).
+pub(super) fn cmd_dev_vz_down(json: bool) -> Result<bool> {
     #[cfg(feature = "builder-vm")]
     {
         let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
@@ -224,17 +226,21 @@ pub(super) fn cmd_dev_vz_down() -> Result<()> {
         // Drop the per-VM vsock dir so a stale socket can't fool the
         // liveness probe on the next `dev status`.
         let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
-        if was_running {
-            ui::success("Dev VM stopped.");
-        } else {
-            ui::info("Dev VM is not running.");
+        if !json {
+            if was_running {
+                ui::success("Dev VM stopped.");
+            } else {
+                ui::info("Dev VM is not running.");
+            }
         }
-        Ok(())
+        Ok(was_running)
     }
     #[cfg(not(feature = "builder-vm"))]
     {
-        ui::info("Dev VM is not running.");
-        Ok(())
+        if !json {
+            ui::info("Dev VM is not running.");
+        }
+        Ok(false)
     }
 }
 
@@ -527,6 +533,38 @@ pub(super) fn build_dev_status_json_vmless(
         guest_kernel: None,
         dev_image: None,
         builder_cache: None,
+    }
+}
+
+/// Machine-readable result of a `dev down` (and, later, `dev up`)
+/// lifecycle mutation, so scripts can branch on the outcome.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(super) struct DevLifecycleJson {
+    pub schema_version: u8,
+    pub backend: &'static str,
+    pub action: &'static str,
+    /// `stopped` (a live VM was reaped) or `not-running` (nothing to stop).
+    pub outcome: &'static str,
+    /// `true` only when `dev down --reset` also dropped the Nix-store overlay.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub reset: bool,
+}
+
+pub(super) fn build_dev_down_json(
+    backend: &'static str,
+    was_running: bool,
+    reset: bool,
+) -> DevLifecycleJson {
+    DevLifecycleJson {
+        schema_version: 1,
+        backend,
+        action: "down",
+        outcome: if was_running {
+            "stopped"
+        } else {
+            "not-running"
+        },
+        reset,
     }
 }
 
@@ -4405,6 +4443,30 @@ mod dev_status_image_tests {
         assert!(!json.contains("\"vm_name\""));
         assert!(!json.contains("\"dev_image\""));
         assert!(!json.contains("\"builder_cache\""));
+    }
+
+    #[test]
+    fn dev_down_json_reports_stopped_and_omits_reset_when_false() {
+        let report = build_dev_down_json("vz", true, false);
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.backend, "vz");
+        assert_eq!(report.action, "down");
+        assert_eq!(report.outcome, "stopped");
+        let json = crate::json_out::to_json_string(&report).expect("serialize");
+        assert!(json.contains("\"action\": \"down\""));
+        assert!(json.contains("\"outcome\": \"stopped\""));
+        // `reset` defaults false and is skipped, not serialized as false.
+        assert!(!json.contains("\"reset\""));
+    }
+
+    #[test]
+    fn dev_down_json_reports_not_running_and_reset() {
+        let report = build_dev_down_json("libkrun", false, true);
+        assert_eq!(report.outcome, "not-running");
+        assert!(report.reset);
+        let json = crate::json_out::to_json_string(&report).expect("serialize");
+        assert!(json.contains("\"outcome\": \"not-running\""));
+        assert!(json.contains("\"reset\": true"));
     }
 }
 

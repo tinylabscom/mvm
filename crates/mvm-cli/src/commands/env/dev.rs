@@ -209,6 +209,9 @@ pub(in crate::commands) enum DevAction {
         /// next `dev up` rebuilds from local source.
         #[arg(long)]
         reset: bool,
+        /// Emit a machine-readable JSON result instead of text.
+        #[arg(long)]
+        json: bool,
     },
     /// Open a shell in the running dev VM.
     Shell {
@@ -433,8 +436,12 @@ fn cmd_dev_libkrun(
 /// recover cleanly. The current-backend stop is the primary
 /// surface; the other-backend stop is best-effort (logged but not
 /// surfaced as a hard error).
-fn cmd_dev_libkrun_down() -> Result<()> {
+fn cmd_dev_libkrun_down(json: bool) -> Result<bool> {
     let id = VmId(dev_vz::DEV_VM_NAME.to_string());
+    let was_running = matches!(
+        LibkrunBackend.status(&id),
+        Ok(VmStatus::Running | VmStatus::Starting | VmStatus::Paused)
+    );
     // Best-effort stop of the Vz side too (no-op if not running;
     // status check + stop is cheap).
     if let Ok(VmStatus::Running | VmStatus::Starting | VmStatus::Paused) = VzBackend.status(&id)
@@ -442,7 +449,43 @@ fn cmd_dev_libkrun_down() -> Result<()> {
     {
         tracing::warn!(error = %e, "best-effort Vz dev VM stop failed during libkrun dev down");
     }
-    LibkrunBackend.stop(&id)
+    LibkrunBackend.stop(&id)?;
+    if !json && was_running {
+        ui::success("Dev VM stopped.");
+    }
+    Ok(was_running)
+}
+
+/// Stable backend identifier for the JSON lifecycle reports.
+fn dev_backend_report_name(backend: DevBackend) -> &'static str {
+    match backend {
+        DevBackend::Vz => "vz",
+        DevBackend::Libkrun => "libkrun",
+        DevBackend::LinuxKvm => "linux-native",
+        DevBackend::Unsupported => "unsupported",
+    }
+}
+
+/// `dev down --reset`: drop the host-backed Nix-store overlay disk so the
+/// next `dev up` starts from an empty store. Returns whether a disk was
+/// actually removed. Prints human notes only when `!json`.
+fn reset_nix_store_overlay(json: bool) -> bool {
+    let nix_disk = format!("{}/dev/nix-store.img", mvm_core::config::mvm_data_dir());
+    match std::fs::remove_file(&nix_disk) {
+        Ok(()) => {
+            if !json {
+                ui::info("Cleared host-backed Nix store; next `dev up` will mkfs a fresh one.");
+            }
+            true
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            if !json {
+                ui::warn(&format!("Could not remove {nix_disk}: {e}"));
+            }
+            false
+        }
+    }
 }
 
 fn cmd_dev_libkrun_status(json: bool) -> Result<()> {
@@ -546,37 +589,28 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 DevBackend::Unsupported => bail_no_dev_backend(),
             }
         }
-        DevAction::Down { reset } => {
-            let result = match backend {
-                DevBackend::Libkrun => cmd_dev_libkrun_down(),
-                DevBackend::Vz => dev_vz::cmd_dev_vz_down(),
-                DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_down(),
+        DevAction::Down { reset, json } => {
+            let was_running = match backend {
+                DevBackend::Libkrun => cmd_dev_libkrun_down(json),
+                DevBackend::Vz => dev_vz::cmd_dev_vz_down(json),
+                DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_down(json),
                 // Nothing to stop on unsupported hosts. The gc-root
                 // cleanup below still runs.
-                DevBackend::Unsupported => Ok(()),
+                DevBackend::Unsupported => Ok(false),
+            }?;
+            let reset_done = if reset {
+                reset_nix_store_overlay(json)
+            } else {
+                false
             };
-            if reset {
-                // `--reset` additionally drops the host-backed Nix
-                // store overlay disk. Useful for "make `dev up` start
-                // from a truly empty store" — e.g. after a corrupting
-                // crash, or to reproduce a first-boot scenario.
-                // Without this flag, the build cache survives `down`,
-                // which is the right default (rebuilds are cheap, the
-                // closure isn't).
-                let nix_disk = format!("{}/dev/nix-store.img", mvm_core::config::mvm_data_dir());
-                match std::fs::remove_file(&nix_disk) {
-                    Ok(()) => {
-                        ui::info(
-                            "Cleared host-backed Nix store; next `dev up` will mkfs a fresh one.",
-                        );
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => {
-                        ui::warn(&format!("Could not remove {nix_disk}: {e}"));
-                    }
-                }
+            if json {
+                return crate::json_out::emit_json(&dev_vz::build_dev_down_json(
+                    dev_backend_report_name(backend),
+                    was_running,
+                    reset_done,
+                ));
             }
-            result
+            Ok(())
         }
         DevAction::Shell { project: _project } => match backend {
             DevBackend::Libkrun => {
@@ -643,10 +677,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             // start over," so a stop failure here shouldn't block the
             // re-up).
             let _ = match backend {
-                DevBackend::Libkrun => cmd_dev_libkrun_down(),
-                DevBackend::Vz => dev_vz::cmd_dev_vz_down(),
-                DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_down(),
-                DevBackend::Unsupported => Ok(()),
+                DevBackend::Libkrun => cmd_dev_libkrun_down(false),
+                DevBackend::Vz => dev_vz::cmd_dev_vz_down(false),
+                DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_down(false),
+                DevBackend::Unsupported => Ok(false),
             };
 
             // Clear cached dev image
