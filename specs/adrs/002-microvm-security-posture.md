@@ -403,10 +403,11 @@ through its start path first (`VmStartConfig` carries no egress-policy field
 today); that is a deliberate future decision, not a Phase A gap. This refines
 the "Network policy enforcement at hypervisor level" non-goal below, which
 predates Plan 123's host-side enforcement. As of [ADR-083](083-workload-backend-type-bar.md)
-this exclusion is **type-enforced**: QEMU and the mock backend do not
-implement the `WorkloadBackend` marker, so they cannot reach the admitted
-workload-launch path at all — the carve-out is a compile-time constraint,
-not only prose.
+this exclusion is **type-enforced**: QEMU does not implement the
+`WorkloadBackend` marker, so it cannot reach the admitted workload-launch
+path at all — the carve-out is a compile-time constraint, not only prose.
+(The mock backend implements the marker as the hermetic lifecycle test
+double per ADR-045; it never carries a real workload.)
 
 **Tier-0 preview substrate (a naming bridge).** The `wasm-sandbox` backend
 above asserts none of the numbered claims by design, so it sits *outside* the

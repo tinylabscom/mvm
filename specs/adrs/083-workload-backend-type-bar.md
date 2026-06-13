@@ -41,8 +41,11 @@ Introduce a marker trait and type-bar the admitted workload-launch path.
 pub trait WorkloadBackend: VmBackend {}
 ```
 
-- `FirecrackerBackend`, `LibkrunBackend`, `VzBackend` implement it. `qemu`
-  (Tier-2 dev/test) and `mock` (test double) do **not**.
+- `FirecrackerBackend`, `LibkrunBackend`, `VzBackend` implement it. `mock`
+  also implements it — it is the hermetic lifecycle test double (ADR-045)
+  that stands in for a workload backend on the admitted path in tests and
+  carries no real workload, so permitting it has no security cost. `qemu`
+  (a real Tier-2 dev/test VMM) does **not** — it is the meaningful carve-out.
 - `AnyBackend::as_workload_backend(&self) -> Option<&dyn WorkloadBackend>`
   converts via an **exhaustive match** — a new `AnyBackend` variant cannot
   compile without an explicit workload / non-workload decision.
@@ -68,7 +71,8 @@ in a follow-on phase, so it cannot be omitted either.
 - **ADR-002's Tier-2 carve-out is now a type constraint.** QEMU's exclusion
   from claim-10 egress enforcement was previously prose ("dev/test only, not
   wired"); it is now enforced by types — `qemu` is not a `WorkloadBackend`,
-  so it cannot be passed to the admitted launch path. `mock` likewise.
+  so it cannot be passed to the admitted launch path. (`mock` is permitted —
+  the hermetic test double — but it never carries a real workload.)
 - **Egress secret substitution on macOS becomes a required build.** When the
   substitution transport becomes a no-default `WorkloadBackend` method,
   libkrun and vz will not compile without implementing it. This reclassifies
