@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings)
+**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status/down/up --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -403,9 +403,10 @@ PLAN 177 — Backend consolidation (8→4)           ✅ DONE — both phases me
 PLAN 189 — VZ DX parity (post-convergence)        🟡 in progress  (ADR-076 §"Out of scope")
   Spun out of Plan 177's deferred DX-parity follow-on; sibling of Plan 159 (owns
   only the additive parity slice, cross-refs 159/140/148 for primitives).
-  [x] WS-3: `dev status --json` + `dev down --json` (versioned, privacy-safe;
-      all dispatch arms; down handlers return was_running; serde + CLI-parse tests)
-  [ ] WS-3 remaining: dev up --json, snapshot/checkpoint --json, linux-native detail
+  [x] WS-3: `dev status/down/up --json` (versioned, privacy-safe; all dispatch
+      arms; lifecycle handlers return outcome; up forces chrome→stderr +
+      conflicts_with shell; serde + CLI-parse + conflict tests)
+  [ ] WS-3 remaining: snapshot/checkpoint --json, linux-native richer detail
   [ ] WS-1 save/restore verbs · WS-2 cached fast-boot default · WS-4 base pinning
   [ ] WS-1 surface save/restore verbs (gated by snapshot_capability tier)
   [ ] WS-2 cached fast-boot as the default vz boot posture

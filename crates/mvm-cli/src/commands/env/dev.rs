@@ -202,6 +202,10 @@ pub(in crate::commands) enum DevAction {
         /// or /mnt (system mounts stay read-only).
         #[arg(long, short = 'v', value_parser = clap_volume_spec)]
         volume: Vec<String>,
+        /// Emit a machine-readable JSON result after boot instead of text.
+        /// Implies non-interactive (`--no-shell`); chrome goes to stderr.
+        #[arg(long, conflicts_with = "shell")]
+        json: bool,
     },
     /// Stop the development VM.
     Down {
@@ -394,7 +398,7 @@ fn cmd_dev_libkrun(
     memory_gib: u32,
     open_shell: bool,
     volumes: &[VmVolume],
-) -> Result<()> {
+) -> Result<&'static str> {
     let backend = LibkrunBackend;
     let id = VmId(dev_vz::DEV_VM_NAME.to_string());
 
@@ -406,7 +410,7 @@ fn cmd_dev_libkrun(
         if open_shell {
             console::console_interactive(dev_vz::DEV_VM_NAME)?;
         }
-        return Ok(());
+        return Ok("already-running");
     }
 
     ui::progress("Starting dev environment via libkrun...");
@@ -428,7 +432,7 @@ fn cmd_dev_libkrun(
     if open_shell {
         console::console_interactive(dev_vz::DEV_VM_NAME)?;
     }
-    Ok(())
+    Ok("started")
 }
 
 /// `dev down` is best-effort over both backends so a user who switched
@@ -530,6 +534,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         shell: true,
         no_shell: false,
         volume: Vec::new(),
+        json: false,
     });
 
     // `current_backend()` honours `MVM_BUILDER_BACKEND=vz` / `--builder vz`
@@ -546,7 +551,16 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             shell,
             no_shell,
             volume,
+            json,
         } => {
+            // `--json` emits a machine-readable result on stdout, so route
+            // all `[mvm]` chrome (incl. the deep build progress) to stderr
+            // and never open an interactive shell.
+            if json {
+                // Process-global flag; both `mvm::ui` and the `crate::ui`
+                // mirror honor it, so all chrome routes to stderr.
+                mvm::ui::set_chrome_to_stderr(true);
+            }
             // CLI flag wins; otherwise fall back to per-user config defaults.
             let effective_cpus = if cpus == 8 { cfg.dev_vm_cpus } else { cpus };
             let effective_mem = if memory == 16 {
@@ -558,8 +572,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             // which needs a real terminal. Without one (CI, scripts, the
             // core_demo test — stdin is redirected) `console_interactive`'s
             // openpty() fails. Boot the VM and return instead; `dev shell`
-            // attaches later once a TTY is present.
-            let want_shell = effective_up_shell(shell, no_shell);
+            // attaches later once a TTY is present. `--json` forces this off.
+            let want_shell = !json && effective_up_shell(shell, no_shell);
             let open_shell = want_shell && std::io::IsTerminal::is_terminal(&std::io::stdin());
             if want_shell && !open_shell {
                 ui::info(
@@ -574,7 +588,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             // non-fatal — see `sweep_orphaned_vm_helpers_on_startup`.
             dev_vz::sweep_orphaned_vm_helpers_on_startup();
 
-            match backend {
+            let outcome = match backend {
                 DevBackend::Libkrun => {
                     cmd_dev_libkrun(effective_cpus, effective_mem, open_shell, &dev_volumes)
                 }
@@ -586,8 +600,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                     warn_dev_volumes_unsupported(&dev_volumes, "native Linux/KVM");
                     linux_native::cmd_dev_linux_native(open_shell)
                 }
-                DevBackend::Unsupported => bail_no_dev_backend(),
+                DevBackend::Unsupported => return bail_no_dev_backend(),
+            }?;
+            if json {
+                return crate::json_out::emit_json(&dev_vz::build_dev_up_json(
+                    dev_backend_report_name(backend),
+                    outcome,
+                ));
             }
+            Ok(())
         }
         DevAction::Down { reset, json } => {
             let was_running = match backend {
@@ -697,15 +718,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             let dev_volumes = resolve_dev_volumes(&volume)?;
             match backend {
                 DevBackend::Libkrun => {
-                    cmd_dev_libkrun(effective_cpus, effective_mem, shell, &dev_volumes)
+                    cmd_dev_libkrun(effective_cpus, effective_mem, shell, &dev_volumes).map(|_| ())
                 }
                 DevBackend::Vz => {
                     warn_dev_volumes_unsupported(&dev_volumes, "Vz");
-                    dev_vz::cmd_dev_vz(effective_cpus, effective_mem, shell)
+                    dev_vz::cmd_dev_vz(effective_cpus, effective_mem, shell).map(|_| ())
                 }
                 DevBackend::LinuxKvm => {
                     warn_dev_volumes_unsupported(&dev_volumes, "native Linux/KVM");
-                    linux_native::cmd_dev_linux_native(shell)
+                    linux_native::cmd_dev_linux_native(shell).map(|_| ())
                 }
                 DevBackend::Unsupported => bail_no_dev_backend(),
             }

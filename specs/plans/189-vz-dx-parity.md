@@ -16,7 +16,7 @@
 > after Plan 177 lands." Plan 177 landed 2026-06-12.
 
 > **Status: 🟡 in progress.** Spun out of [Plan 177](./177-backend-consolidation.md)
-> §"deferred follow-ups". WS-3 first slice landed: `dev status --json`.
+> §"deferred follow-ups". WS-3 lifecycle verbs landed: `dev status/down/up --json`.
 
 **Goal:** Bring the converged single `vz` Apple-Virtualization.framework path to
 DX parity with the reference embeddable-sandbox SDK — the table-stakes floor
@@ -94,9 +94,14 @@ WS-2 / Plan 140 — add `--json` there, don't fork).
       appears only when `--reset` actually dropped the Nix-store overlay. The
       down handlers now return `was_running` (presentation moved to the
       dispatch); serde + CLI-parse tests; verified on macOS-26.
-- [ ] `dev up --json` — emit `{action: "up", outcome: started/already-running}`
-      after boot; implies `--no-shell` (the default path is interactive). Its
-      own slice (the up path is heavier + branches through build/boot/shell).
+- [x] **`dev up --json`** — `DevLifecycleJson { schema_version, backend,
+      action: "up", outcome, reset: false }`; `outcome` is
+      `started`/`already-running` (vz/libkrun) or `host-native` (linux-KVM,
+      where the host *is* the dev env). `--json` is non-interactive: it forces
+      chrome to stderr, suppresses the shell, and `conflicts_with = "shell"`.
+      The up handlers now return the outcome string (presentation moved to the
+      dispatch, mirroring `dev down`); serde + CLI-parse + conflict tests;
+      verified on macOS-26 via the Plan 177 cold-build smoke.
 - [ ] snapshot/checkpoint `--json` — add to the Plan 159/140 verbs in place
       (don't duplicate the primitive); WS-1 (`save`/`restore`) lands its own.
 - [ ] linux-native richer `--json` — today it collapses to a single `state`

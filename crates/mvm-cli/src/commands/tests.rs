@@ -3025,6 +3025,24 @@ fn test_dev_down_json_and_reset_flags_parse() {
 }
 
 #[test]
+fn test_dev_up_json_flag_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "up", "--json"]).unwrap();
+    match cli.command {
+        Commands::Dev(dev::Args {
+            action: Some(DevAction::Up { json, .. }),
+        }) => assert!(json),
+        _ => panic!("Expected Dev Up command"),
+    }
+}
+
+#[test]
+fn test_dev_up_json_conflicts_with_shell() {
+    // `--json` is non-interactive by definition; `--shell` must be rejected.
+    let res = Cli::try_parse_from(["mvmctl", "dev", "up", "--json", "--shell"]);
+    assert!(res.is_err(), "`dev up --json --shell` must conflict");
+}
+
+#[test]
 fn test_dev_shell_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "dev", "shell"]);
     assert!(cli.is_ok());

@@ -100,16 +100,17 @@ pub(in crate::commands) fn is_vz_dev_running() -> bool {
 /// Boot the dev VM via the Vz supervisor, optionally opening an
 /// interactive console.
 #[cfg(feature = "builder-vm")]
-pub(super) fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result<()> {
+pub(super) fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result<&'static str> {
     ui::progress("Starting dev environment via Vz (Virtualization.framework)...");
 
     if is_vz_dev_running() {
         if open_shell {
             ui::progress("Dev VM already running. Opening shell...");
-            return console_interactive(DEV_VM_NAME);
+            console_interactive(DEV_VM_NAME)?;
+        } else {
+            ui::progress("Dev VM already running.");
         }
-        ui::progress("Dev VM already running.");
-        return Ok(());
+        return Ok("already-running");
     }
 
     // Reap a dead-but-not-reaped supervisor from a prior session so the
@@ -182,11 +183,11 @@ pub(super) fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result
         let _ = console_interactive(DEV_VM_NAME);
     }
 
-    Ok(())
+    Ok("started")
 }
 
 #[cfg(not(feature = "builder-vm"))]
-pub(super) fn cmd_dev_vz(_cpus: u32, _memory_gib: u32, _open_shell: bool) -> Result<()> {
+pub(super) fn cmd_dev_vz(_cpus: u32, _memory_gib: u32, _open_shell: bool) -> Result<&'static str> {
     anyhow::bail!(
         "the dev VM is built locally via the builder VM, but this mvmctl was \
          compiled without the `builder-vm` feature."
@@ -548,6 +549,18 @@ pub(super) struct DevLifecycleJson {
     /// `true` only when `dev down --reset` also dropped the Nix-store overlay.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub reset: bool,
+}
+
+pub(super) fn build_dev_up_json(backend: &'static str, outcome: &'static str) -> DevLifecycleJson {
+    DevLifecycleJson {
+        schema_version: 1,
+        backend,
+        action: "up",
+        // `started` (booted + agent reachable), `already-running`, or
+        // `host-native` (Linux KVM: the host shell is the dev env).
+        outcome,
+        reset: false,
+    }
 }
 
 pub(super) fn build_dev_down_json(
@@ -4467,6 +4480,22 @@ mod dev_status_image_tests {
         let json = crate::json_out::to_json_string(&report).expect("serialize");
         assert!(json.contains("\"outcome\": \"not-running\""));
         assert!(json.contains("\"reset\": true"));
+    }
+
+    #[test]
+    fn dev_up_json_reports_outcome_and_omits_reset() {
+        let started = build_dev_up_json("vz", "started");
+        assert_eq!(started.action, "up");
+        assert_eq!(started.outcome, "started");
+        assert_eq!(started.backend, "vz");
+        let json = crate::json_out::to_json_string(&started).expect("serialize");
+        assert!(json.contains("\"action\": \"up\""));
+        assert!(json.contains("\"outcome\": \"started\""));
+        // `reset` is down-only; the up shape never emits it.
+        assert!(!json.contains("\"reset\""));
+
+        let already = build_dev_up_json("libkrun", "already-running");
+        assert_eq!(already.outcome, "already-running");
     }
 }
 
