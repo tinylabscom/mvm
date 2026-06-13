@@ -3053,36 +3053,24 @@ fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<String> {
         hash_named_file(&mut hasher, name, &path)?;
     }
 
-    // Layer 2: workspace Cargo.lock. `rustPlatform.buildRustPackage`
-    // consumes it for every Rust binary baked into the rootfs.
-    let cargo_lock = workspace_root.join("Cargo.lock");
-    if !cargo_lock.is_file() {
-        anyhow::bail!(
-            "builder VM source fingerprint missing {} \
-             (workspace root resolved from flake dir as {})",
-            cargo_lock.display(),
-            workspace_root.display()
-        );
-    }
-    hash_named_file(&mut hasher, "Cargo.lock", &cargo_lock)?;
-
-    // Layer 3: the embedded host-binary identity — the authoritative
-    // fingerprint of the in-VM Rust binaries (`mvm-host-vm-init`,
-    // `mvm-egress-proxy`). `build.rs` cross-compiles them with
-    // `cargo build -p mvm-build --bin <name>` and embeds the bytes in
-    // mvmctl; they are injected into the rootfs at boot
-    // (`host_binaries::extract`), NOT built by the flake (which forbids
-    // `rustPlatform.buildRustPackage`). Hashing the bytes captures the bin
-    // source, the `mvm-build` lib, its deps, AND the cross-compile
-    // toolchain (a gnu→musl switch yields different bytes from identical
-    // source) in one shot — strictly more than the per-crate `src/` hash
-    // this replaced, which also broke when the two former top-level
-    // `crates/<name>/` crates were folded into `crates/mvm-build/src/bin/`.
+    // Layer 2: the embedded host-binary identity — the authoritative
+    // fingerprint of every Rust binary baked into the builder VM
+    // (`mvm-host-vm-init`, `mvm-egress-proxy`). `build.rs` cross-compiles
+    // them and embeds the bytes in mvmctl; Stage 0 installs those bytes into
+    // the rootfs. The builder-VM flake forbids `rustPlatform.buildRustPackage`,
+    // so no flake artifact consumes the workspace `Cargo.lock` — hashing the
+    // embedded bytes already captures the bin source, the `mvm-build` lib,
+    // its dep closure, AND the cross-compile toolchain (a gnu→musl switch
+    // yields different bytes from identical source) in one shot. The
+    // workspace `Cargo.lock` is therefore deliberately NOT hashed: it gates
+    // nothing here, and folding it in busts this cache on unrelated
+    // workspace-wide dep bumps. (`build.rs` reruns the cross-compile when its
+    // real inputs change, so a rebuilt binary's bytes shift this layer.)
     for bin in crate::host_binaries::embedded::EMBEDDED.iter() {
         fold_embedded_binary_identity(&mut hasher, bin.name, bin.sha256_hex);
     }
 
-    // Layer 5: the shared Nix library the flake imports. The builder-vm
+    // Layer 3: the shared Nix library the flake imports. The builder-vm
     // flake pulls in `nix/lib` (mkGuest, the workspace filter, the
     // host-binaries manifest), so a change there — e.g. a new rootfs
     // mount-point dir — changes the built image. Hashing only the flake
@@ -5169,14 +5157,16 @@ mod builder_vm_bootstrap_tests {
     }
 
     #[test]
-    fn builder_vm_source_fingerprint_changes_with_cargo_lock() {
+    fn builder_vm_source_fingerprint_is_unaffected_by_cargo_lock() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let flake = write_builder_vm_workspace(tmp.path());
         let first = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
 
-        // Mutating Cargo.lock simulates a `cargo update` that bumps
-        // a transitive crate version. The dep closure of every
-        // rootfs Rust binary changes → rootfs must rebuild.
+        // The builder-VM flake forbids `buildRustPackage`; no flake artifact
+        // consumes the workspace lockfile. The only baked Rust is the
+        // embedded host binaries, whose identity rides on the byte-hash layer
+        // (a rebuilt binary changes its sha256). A `cargo update` therefore
+        // must NOT invalidate the builder-VM cache key.
         std::fs::write(
             tmp.path().join("Cargo.lock"),
             "# stub Cargo.lock — updated\n",
@@ -5184,9 +5174,9 @@ mod builder_vm_bootstrap_tests {
         .expect("rewrite Cargo.lock");
         let second = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
 
-        assert_ne!(
+        assert_eq!(
             first, second,
-            "Cargo.lock edit must invalidate the builder-vm cache key"
+            "a workspace Cargo.lock edit must not invalidate the builder-vm cache key"
         );
     }
 
@@ -5297,20 +5287,6 @@ mod builder_vm_bootstrap_tests {
         assert_eq!(
             baseline, after,
             "hidden entries / swap files must not affect the cache key"
-        );
-    }
-
-    #[test]
-    fn builder_vm_source_fingerprint_errors_when_cargo_lock_missing() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let flake = write_builder_vm_workspace(tmp.path());
-        std::fs::remove_file(tmp.path().join("Cargo.lock")).expect("rm Cargo.lock");
-
-        let err = builder_vm_source_fingerprint(flake.to_str().unwrap())
-            .expect_err("missing Cargo.lock must be a hard error");
-        assert!(
-            err.to_string().contains("Cargo.lock"),
-            "error must name the missing path: {err}"
         );
     }
 
