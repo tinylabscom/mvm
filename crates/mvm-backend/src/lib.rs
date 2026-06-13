@@ -74,12 +74,17 @@ pub mod vz;
 // Rust client for the Vz supervisor's control socket
 // (PAUSE / RESUME / BALLOON / SAVE). Used by VzBackend.
 pub mod vz_control;
+/// `WorkloadBackend` marker trait — the type-level permission to carry an
+/// untrusted workload. The admitted launch path accepts `&dyn WorkloadBackend`
+/// only, so a non-workload backend (QEMU dev/test, mock) cannot reach it.
+pub mod workload_backend;
 
 pub use backend::{AnyBackend, FirecrackerBackend, FirecrackerConfig};
 pub use libkrun::LibkrunBackend;
 pub use mock::MockBackend;
 pub use qemu::QemuBackend;
 pub use vz::VzBackend;
+pub use workload_backend::WorkloadBackend;
 
 /// The per-VM egress-TLS cert/key split helper. `mvmctl up`
 /// (mvm-cli) calls this while assembling the guest secrets drive: the cert is

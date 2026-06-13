@@ -484,6 +484,19 @@ impl AnyBackend {
         self.inner()
     }
 
+    /// Borrow as `&dyn WorkloadBackend` — `Some` only for backends permitted
+    /// to carry an untrusted workload. The exhaustive match means a new
+    /// `AnyBackend` variant forces an explicit workload/non-workload decision
+    /// here (compile error otherwise).
+    pub fn as_workload_backend(&self) -> Option<&dyn crate::workload_backend::WorkloadBackend> {
+        match self {
+            AnyBackend::Firecracker(b) => Some(b),
+            AnyBackend::Libkrun(b) => Some(b),
+            AnyBackend::Vz(b) => Some(b),
+            AnyBackend::Qemu(_) | AnyBackend::Mock(_) => None,
+        }
+    }
+
     /// Does this backend support a prelaunched-supervisor standby
     /// pool? See [`VmBackend::supports_standby_pool`]. Only libkrun does today.
     pub fn supports_standby_pool(&self) -> bool {
@@ -1062,6 +1075,28 @@ mod tests {
                  update one to match the other.",
                 enum_tier,
                 profile_tier
+            );
+        }
+    }
+
+    #[test]
+    fn as_workload_backend_some_for_workload_variants() {
+        for name in ["firecracker", "libkrun", "vz"] {
+            let backend = AnyBackend::from_hypervisor(name);
+            assert!(
+                backend.as_workload_backend().is_some(),
+                "{name}: must be a workload backend"
+            );
+        }
+    }
+
+    #[test]
+    fn as_workload_backend_none_for_non_workload_variants() {
+        for name in ["qemu", "mock"] {
+            let backend = AnyBackend::from_hypervisor(name);
+            assert!(
+                backend.as_workload_backend().is_none(),
+                "{name}: Tier-2/test backend must not be a workload backend"
             );
         }
     }
