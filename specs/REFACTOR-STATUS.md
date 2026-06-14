@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status/down/up --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 118: Vz saved-standby warm pool claim live-validated + pool self-replenishes via detached re-warm (#840) + claim reuses admission image sha (#846); Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings; Plan 195 builder-VM fingerprint narrowing planned; Plan 161 OCI-unpacker openat2 TOCTTOU fix landed (Plan 143 R2/R3 done) — writes resolve through `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)`, follow-up routes whiteout removal through openat2 too; Plan 126 D1 forbidden-dep gate landed — closure ban on sigstore/opendal/pgp; Plan 124 D1.2a protocol type stubs — `protocol-v0.json` wired into `gen-stubs`/`check-stubs`, Python/TS protocol types generated + drift-checked; Plan 128 C3 Step 2 — `check-stubs` drift gate wired into ci.yml + ci-full.yml Lint, Linux codegen determinism verified; Sprint 55 (Plan 97) CLOSED — vz at parity with the macOS libkrun baseline, all criteria met-or-amended (Phase B ≥30%-win retired post-convergence, Phase C hash-match → functional parity, claim 5 Swift-equiv retired); Plan 152 WS-C fork primitive closed + WS-D nested-KVM out-of-scope; Plan 123 C3 met; egress secret substitution is Linux-only (FC/QEMU) — vz lacks it exactly as libkrun does; macOS port now tracked as Plan 197 (WorkloadBackend type-bar) which reclassifies it from optional fast-follow to a required build — Plan 197 Phase 1 (type-bar + qemu type-barred; mock kept as the ADR-045 hermetic test double + ADR-083) IMPLEMENTED on feat/plan-197-workload-backend, pending merge; Phase 2 substitution build is design-spike-gated)
+**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status/down/up --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 118: Vz saved-standby warm pool claim live-validated + pool self-replenishes via detached re-warm (#840) + claim reuses admission image sha (#846); Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings; Plan 195 builder-VM fingerprint narrowing planned; Plan 161 OCI-unpacker openat2 TOCTTOU fix landed (Plan 143 R2/R3 done) — writes resolve through `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)`, follow-up routes whiteout removal through openat2 too; Plan 126 D1 forbidden-dep gate landed — closure ban on sigstore/opendal/pgp; Plan 124 D1.2a protocol type stubs — `protocol-v0.json` wired into `gen-stubs`/`check-stubs`, Python/TS protocol types generated + drift-checked; Plan 128 C3 Step 2 — `check-stubs` drift gate wired into ci.yml + ci-full.yml Lint, Linux codegen determinism verified; Sprint 55 (Plan 97) CLOSED — vz at parity with the macOS libkrun baseline, all criteria met-or-amended (Phase B ≥30%-win retired post-convergence, Phase C hash-match → functional parity, claim 5 Swift-equiv retired); Plan 152 WS-C fork primitive closed + WS-D nested-KVM out-of-scope; Plan 123 C3 met; egress secret substitution is Linux-only (FC/QEMU) — vz lacks it exactly as libkrun does; macOS port now tracked as Plan 197 (WorkloadBackend type-bar) which reclassifies it from optional fast-follow to a required build — Plan 197 Phase 1 (type-bar + qemu type-barred; mock kept as the ADR-045 hermetic test double + ADR-083) MERGED (#860/#861); Phase 2 spike DONE → 2a vsock substitution channel mvm-ready, 2b transparent :80/:443 terminator rvproxy-gated (Plan 193/ADR-082))
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -45,7 +45,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 191** — Declarative file materialization (ADR-080 P2-full) · 🟢 P2-full LANDED (FilesWrite lowers to the declarative `App.files` IR field, baked into the rootfs at build time via `mkFunctionService` `extraFiles`; the `before_start` shell hook is removed — file content/paths never reach a guest shell)
 - [ ] **PLAN 193** — rvproxy network substrate (replace gvproxy/passt) · 🔴 proposed, cross-repo — gated on rvproxy confirming libkrun-unixgram transport; biggest win = native flow API replaces the in-line claim-10 datapath wrapper (Plan 141)
 - [ ] **PLAN 195** — Builder-VM fingerprint narrowing · 🟡 planned — drop the redundant whole-workspace `Cargo.lock` from `builder_vm_source_fingerprint` (flake forbids buildRustPackage → L3 byte-hash already authoritative) to kill the ~9s Stage 0 re-materialize churn; Commit 2 tightens build.rs rerun triggers. Build-perf only, no claim impact. (194 reserved for ADR-081 A3)
-- [ ] **PLAN 197** — `WorkloadBackend` type-bar (core security features non-skippable) · 🟡 Phase 1 IMPLEMENTED (feat/plan-197-workload-backend, pending merge), Phase 2 spike-gated — marker trait gates the admitted launch path so qemu (a real dev/test VMM) is type-barred and a new backend can't reach the funnel without the shared enforcement (mock is permitted as the ADR-045 hermetic test double — carries no real workload); Phase 2 funnel-izes egress substitution + builds it on macOS (reclassifies the vz/libkrun substitution gap from optional to a required build). Arose from the Sprint 55 vz closeout finding.
+- [ ] **PLAN 197** — `WorkloadBackend` type-bar (core security features non-skippable) · 🟡 Phase 1 MERGED (#860); Phase 2 spike DONE → 2a (vsock substitution channel) mvm-ready, 2b (transparent :80/:443 terminator) rvproxy-gated — marker trait gates the admitted launch path so qemu (a real dev/test VMM) is type-barred and a new backend can't reach the funnel without the shared enforcement (mock is permitted as the ADR-045 hermetic test double — carries no real workload). Arose from the Sprint 55 vz closeout finding.
 
 ## Plan details
 
@@ -564,9 +564,14 @@ PLAN 193 — rvproxy network substrate (replace gvproxy/passt)  🔴 proposed, c
   at specs/plans/014-mvm-adoption-requirements.md. Gated on WS-1: rvproxy confirming the
   libkrun-unixgram transport (mvm's default macOS backend). Not-a-fix findings recorded in the
   plan (gvproxy has no log-level flag; nix-seed already cached for normal use; build slowness is
-  the base-VM fingerprint churn, a separate change). Plan: specs/plans/193-rvproxy-network-substrate.md
+  the base-VM fingerprint churn, a separate change).
+  NEW REQUIREMENT (Plan 197 Phase 2b): rvproxy must add transparent :80/:443 interception → a host
+  terminator port (the macOS analogue of FC's nft PREROUTING REDIRECT) so egress secret substitution's
+  transparent half works on libkrun/vz — macOS has no nft and the in-process bridge sees only
+  post-gateway frames, so this can only live in the gateway. Add to rvproxy's mvm-adoption requirements.
+  Plan: specs/plans/193-rvproxy-network-substrate.md
 
-PLAN 197 — WorkloadBackend type-bar (core security features non-skippable)  🟡 Phase 1 IMPLEMENTED
+PLAN 197 — WorkloadBackend type-bar (core security features non-skippable)  🟡 Phase 1 MERGED; Phase 2 spike DONE
   Arose from the Sprint 55 vz closeout: egress secret substitution (Plan 129) silently never
   reached libkrun/vz because it was a free function called ad-hoc in per-backend start paths.
   Fix is structural, not a capability matrix (rejected — documents holes, doesn't prevent them).
@@ -578,14 +583,16 @@ PLAN 197 — WorkloadBackend type-bar (core security features non-skippable)  �
       untrusted-workload path (ADR-002 Tier-2 carve-out is now a type constraint — ADR-083 + ADR-002
       cross-ref). BackendSecurityProfile kept advisory. Spec+quality reviewed; CI Test lane caught that
       barring mock broke the ADR-045 hermetic lifecycle tests → mock permitted; workspace build/clippy/
-      nightly-fmt green. Branch feat/plan-197-workload-backend,
-      pending merge. (Landed against up.rs without a Plan 189 collision — that PR had not touched up.rs.)
-  [ ] Phase 2 — funnel-ize substitution + build it on macOS (design-spike-gated): lift
-      spawn_substitution_endpoint into the shared funnel; add no-default `egress_substitution_transport()`
-      seam; implement for FC (nft) + libkrun/vz (macOS transport). Spike must first resolve the macOS
-      :80/:443 terminator, which ENTANGLES with rvproxy (Plan 193 / ADR-082 — likely lives in rvproxy,
-      not gvproxy). Reclassifies the vz/libkrun substitution gap from optional fast-follow to required build.
-  Design + bite-sized plan: specs/plans/197-workload-backend-core-trait.md
+      nightly-fmt green. MERGED #860 (code+ADR) / #861 (docs closeout+plan). (Landed against up.rs
+      without a Plan 189 collision — that PR had not touched up.rs.)
+  [x] Phase 2 design spike DONE: terminator → rvproxy (not gvproxy/standalone). Phase 2 SPLIT into:
+  [ ] 2a (mvm-side, ready): register SUBSTITUTION_PORT 5253 on libkrun+vz supervisors; add no-default
+      `egress_substitution_transport()` seam (FC=nft/TCP terminator, macOS=Uds vsock-5253 channel); lift
+      spawn_substitution_endpoint into the funnel. Delivers explicit-HTTP_PROXY substitution on macOS.
+  [ ] 2b (rvproxy-gated, cross-repo): transparent :80/:443 terminator must live in rvproxy (no nft on
+      macOS; the in-process bridge sees only post-gateway frames). Add to rvproxy's mvm-adoption
+      requirements (Plan 193 / ADR-082); gated on the rvproxy migration.
+  Design + spike output + bite-sized plan: specs/plans/197-workload-backend-core-trait.md
 ```
 
 ## Security claims

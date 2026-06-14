@@ -219,14 +219,15 @@ clippy / nightly-fmt green. Pending merge.
       posture); enforcement is the type-bar. Recorded in its doc comment.
 - [x] ADR amendment: ADR-083 added; ADR-002 tier matrix cross-refs it.
 
-**Phase 2 — funnel-ize substitution + macOS build (design spike first):**
-- [ ] Design spike: resolve the macOS terminator (rvproxy vs. standalone)
-      and the `SUBSTITUTION_PORT` vsock-bridge hop; output the task list.
-- [ ] Lift `spawn_substitution_endpoint`/`reap_substitution_endpoint` out of
-      `qemu.rs`/`microvm.rs` `start()` into the shared funnel.
-- [ ] Add the no-default `egress_substitution_transport()` seam; implement
-      for Firecracker (existing nft terminator) and libkrun/vz (new macOS
-      transport) in the same change.
+**Phase 2 — funnel-ize substitution + macOS build (spike ✅ done — see Task 7):**
+- [x] Design spike: resolved. Terminator → rvproxy (not gvproxy/standalone);
+      Phase 2 splits into **2a** (vsock substitution channel, mvm-side, ready)
+      and **2b** (transparent :80/:443 terminator, rvproxy-gated, cross-repo).
+- [ ] **Phase 2a (Task 8):** register `SUBSTITUTION_PORT` 5253 on libkrun + vz
+      supervisors; add `egress_substitution_transport()` seam (FC = nft/TCP,
+      macOS = `Uds` vsock-5253 channel); lift substitution into the funnel.
+- [ ] **Phase 2b (Task 9):** rvproxy gains transparent :80/:443 interception
+      (cross-repo requirement); then wire the macOS terminator transport.
 
 ## Testing
 
@@ -453,27 +454,61 @@ let _workload = mvm_backend::workload_backend::require_workload_backend(&backend
 
 ## Phase 2 — funnel-ize substitution + macOS build
 
-> Phase 2 is **gated on a design spike** — the macOS :80/:443 terminator is
-> not yet designed and entangles with the rvproxy migration (ADR-082).
-> Executable code steps for the terminator are produced BY the spike; writing
-> them before the spike would be fabrication. The spike is the first task.
+### Task 7: design spike — ✅ DONE
 
-### Task 7: design spike (no production code)
+The spike resolved both questions and **splits Phase 2 into a mvm-buildable
+half (2a) and an rvproxy-gated half (2b).** Findings:
 
-- [ ] Resolve and write up (append to this plan): (a) terminator placement —
-      in the rvproxy gateway vs. a standalone macOS terminator — and how guest
-      `:80`/`:443` is steered to it without nft; (b) the `SUBSTITUTION_PORT`
-      (5253) vsock→Uds bridge hop in `vz_objc.rs` / the libkrun supervisor,
-      reusing `EndpointTransport::Uds`. Output: the concrete Task 8+ list.
-- [ ] Gate check: do not start Task 8 until the spike output is reviewed.
+**The substitution mechanism has two halves; only one is mvm-side.**
+- **Explicit channel (the vsock substitution channel).** The guest receives
+  `HTTP_PROXY` + placeholders and dials `SUBSTITUTION_PORT` (5253) over
+  AF_VSOCK; the host endpoint injects the real credential. This is fully
+  buildable in mvm on macOS:
+  - The endpoint already supports `EndpointTransport::Uds { path }`
+    (`substitution_endpoint.rs`); on Linux/QEMU it uses `Vsock`, FC uses the
+    per-port vsock→Uds proxy.
+  - macOS supervisors already bridge each guest vsock port to a host unix
+    socket at the `<vm_state_dir>/vsock-<port>.sock` convention
+    (`mvm_core::config`), e.g. the agent on 5252.
+  - **The only gap:** neither the libkrun nor vz supervisor registers port
+    **5253**, and the backend never spawns the endpoint with the `Uds`
+    transport pointing at `vsock-5253.sock`. That is the whole Phase 2a wiring.
+- **Transparent :80/:443 terminator.** On Linux this is an nft PREROUTING
+  REDIRECT (`egress_redirect.rs`, per-VM table, `iifname`-scoped) → a host
+  TCP terminator on `0.0.0.0:<18080+slot>`. **macOS has no nftables, and the
+  in-process bridge only sees post-gateway L2 frames — so the terminator
+  cannot live mvm-side.** It must live in the userspace gateway's TCP/IP
+  stack. gvproxy is vendored Go being retired, so the terminator belongs in
+  **rvproxy** (the in-house Rust gateway — ADR-082 / Plan 193), where it also
+  composes with rvproxy's native flow API. This is Phase 2b and is gated on
+  rvproxy + a cross-repo requirement.
 
-### Task 8+ (expanded by the spike)
+**Decision:** terminator → rvproxy (not gvproxy, not a standalone macOS
+process). The explicit vsock channel ships first, independently.
 
-- [ ] Lift `spawn_substitution_endpoint` / `reap_substitution_endpoint` from
-      `qemu.rs` + `microvm.rs` `start()` into the shared admitted-launch funnel.
+### Task 8 (Phase 2a — vsock substitution channel; mvm-side, ready)
+
+- [ ] Register `SUBSTITUTION_PORT` (5253) on the libkrun supervisor
+      (`.add_vsock_port`) and the vz supervisor (`vz_objc.rs` bridge hop) so
+      the guest→host channel lands at `<vm_state_dir>/vsock-5253.sock`.
 - [ ] Add the no-default `egress_substitution_transport()` seam to
-      `WorkloadBackend`; implement for Firecracker (existing nft terminator)
-      and libkrun/vz (the macOS transport from the spike) in one change so the
-      no-default method never exists without an implementation.
+      `WorkloadBackend`; Firecracker returns its existing nft/TCP terminator
+      transport, libkrun/vz return the `Uds { path: vsock-5253.sock }` channel
+      transport (terminator absent until Phase 2b).
+- [ ] Lift `spawn_substitution_endpoint` / `reap_substitution_endpoint` from
+      `qemu.rs` + `microvm.rs` `start()` into the shared admitted-launch funnel;
+      the funnel reads `egress_substitution_transport()` per backend.
 - [ ] Live-validate on macOS-26: a `SecretRef` workload on `--hypervisor vz`
-      sees only the placeholder; the host endpoint injects the real credential.
+      with an explicit `HTTP_PROXY` sees only the placeholder; the host
+      endpoint injects the real credential over the vsock channel.
+
+### Task 9 (Phase 2b — transparent :80/:443 terminator; rvproxy-gated, cross-repo)
+
+- [ ] **rvproxy requirement (separate repo):** rvproxy must support a
+      transparent :80/:443 interception → host terminator port (the macOS
+      analogue of the nft REDIRECT). Add this to rvproxy's mvm-adoption
+      requirements; it is gated on the rvproxy migration (Plan 193 / ADR-082).
+- [ ] Once rvproxy lands it: extend the macOS `egress_substitution_transport()`
+      to carry the terminator endpoint, and wire the gateway to steer guest
+      :80/:443 to it. Live-validate transparent (non-proxy-aware) egress
+      substitution on vz/libkrun.
