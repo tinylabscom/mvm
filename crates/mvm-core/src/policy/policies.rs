@@ -167,6 +167,27 @@ pub struct EgressPolicy {
 /// image uploads). Configurable per workload via the policy field.
 pub const DEFAULT_BODY_CAP_BYTES: u64 = 16 * 1024 * 1024;
 
+/// One filesystem-preopen grant in a policy bound. `access` is the
+/// wire string `"ro"` / `"rw"`; anything else refuses at projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FsGrantSpec {
+    pub guest_path: String,
+    pub access: String,
+}
+
+/// The tenant bound on a wasm-component's WASI capabilities: which
+/// filesystem preopens and env-var names it may receive. Deny-by-
+/// default — an empty policy grants nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WasiCapPolicy {
+    #[serde(default)]
+    pub fs: Vec<FsGrantSpec>,
+    #[serde(default)]
+    pub env: Vec<String>,
+}
+
 /// PII redaction policy.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

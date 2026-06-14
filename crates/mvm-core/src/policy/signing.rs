@@ -120,6 +120,7 @@ mod tests {
                 chain_signing: true,
                 stream_destinations: vec!["audit://tenant-a".to_string()],
             },
+            wasi: Default::default(),
             tenant_overlays: BTreeMap::from([(
                 TenantId("tenant-a".to_string()),
                 TenantOverlay {
