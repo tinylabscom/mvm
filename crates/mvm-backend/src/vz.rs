@@ -363,7 +363,9 @@ impl VmBackend for VzBackend {
                     console_log.display(),
                 );
             }
-            std::thread::sleep(Duration::from_millis(50));
+            // Tight poll: the pid file lands a few hundred ms in, and a coarse
+            // cadence rounds every `up` up by that much. Cheap to spin finer.
+            std::thread::sleep(Duration::from_millis(5));
         }
 
         // Vz supervisor booted cleanly. Detach the
@@ -438,7 +440,10 @@ impl VmBackend for VzBackend {
             if !pid_alive(pid) {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            // Tight poll: the supervisor owns the graceful→forced escalation
+            // and exits in a few hundred ms, so detect its exit promptly
+            // rather than rounding `down` up by a coarse cadence.
+            std::thread::sleep(Duration::from_millis(25));
         }
         if pid_alive(pid) {
             ui::info(&format!(

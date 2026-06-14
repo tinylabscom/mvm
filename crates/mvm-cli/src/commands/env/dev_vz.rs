@@ -2774,6 +2774,14 @@ fn reap_orphaned_vm_helpers_at(
         return Ok(outcome);
     }
 
+    // One process-table snapshot for the whole sweep. macOS has no
+    // `/proc`, so the former code shelled out to `pgrep -f <basename>`
+    // once per dir plus `ps -o ppid=` once per candidate PID. With a
+    // cache of hundreds of builder scratch dirs that turned the `up`
+    // hot path into a multi-second storm of subprocess spawns. One
+    // `ps` up front collapses it to a single call.
+    let snapshot = ProcSnapshot::capture();
+
     for entry in std::fs::read_dir(vms_root)?.flatten() {
         let dir = entry.path();
         if !dir.is_dir() {
@@ -2796,7 +2804,7 @@ fn reap_orphaned_vm_helpers_at(
             if !seen_pids.insert(pid) {
                 continue;
             }
-            match classify_pid(pid) {
+            match classify_pid(pid, &snapshot) {
                 PidClassification::Dead => {}
                 PidClassification::LiveOwned => dir_has_live_owner = true,
                 PidClassification::Orphan => {
@@ -2818,11 +2826,11 @@ fn reap_orphaned_vm_helpers_at(
             Some(s) => s.to_string(),
             None => continue,
         };
-        for pid in pids_referencing(&dir_basename) {
+        for pid in snapshot.pids_referencing(&dir_basename) {
             if !seen_pids.insert(pid) {
                 continue;
             }
-            match classify_pid(pid) {
+            match classify_pid(pid, &snapshot) {
                 PidClassification::Dead => {}
                 PidClassification::LiveOwned => dir_has_live_owner = true,
                 PidClassification::Orphan => {
@@ -2858,36 +2866,86 @@ enum PidClassification {
     Orphan,    // alive, parent is launchd PID 1 → SIGTERM-able
 }
 
-fn classify_pid(pid: i32) -> PidClassification {
+fn classify_pid(pid: i32, snapshot: &ProcSnapshot) -> PidClassification {
     if !pid_is_alive(pid) {
         return PidClassification::Dead;
     }
-    match pid_parent(pid) {
+    match snapshot.parent(pid) {
         Some(1) => PidClassification::Orphan,
         _ => PidClassification::LiveOwned,
     }
 }
 
-/// Find all PIDs whose argv contains `needle`. Used by the argv-scan
-/// pass to catch grandchildren (gvproxy, console-tail) that don't
-/// write a sidecar file. macOS has no `/proc`, so the portable path
-/// is `pgrep -f <needle>` — argv-substring match.
-fn pids_referencing(needle: &str) -> Vec<i32> {
-    let out = match std::process::Command::new("pgrep")
-        .args(["-f", needle])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    if !out.status.success() {
-        return Vec::new();
+/// One-shot snapshot of the host process table, taken once per sweep.
+/// macOS has no `/proc`, so the portable source for (pid, ppid, argv)
+/// is `ps`. This replaces the former per-dir `pgrep -f` + per-PID
+/// `ps -o ppid=` fan-out: with hundreds of cached builder scratch
+/// dirs that fan-out cost seconds of serial subprocess spawns on the
+/// `up` startup path. `ps -axww` (no column truncation) is a single
+/// call serving both the argv-substring scan and the parent lookup.
+struct ProcSnapshot {
+    /// pid → ppid for every process visible to this user.
+    parents: std::collections::HashMap<i32, i32>,
+    /// (pid, full argv) for every real process (pid > 1), scanned for
+    /// VM-dir-basename substrings.
+    cmds: Vec<(i32, String)>,
+}
+
+impl ProcSnapshot {
+    fn capture() -> Self {
+        let mut parents = std::collections::HashMap::new();
+        let mut cmds = Vec::new();
+        let Ok(out) = std::process::Command::new("ps")
+            .args(["-axww", "-o", "pid=,ppid=,command="])
+            .output()
+        else {
+            return Self { parents, cmds };
+        };
+        if !out.status.success() {
+            return Self { parents, cmds };
+        }
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            // `  501  1234 /path/to/cmd --flag` — leading pad, then
+            // pid and ppid columns (variable width), then the full
+            // command. Peel pid, then ppid, then keep the rest verbatim.
+            let rest = line.trim_start();
+            let Some((pid_s, rest)) = rest.split_once(char::is_whitespace) else {
+                continue;
+            };
+            let Ok(pid) = pid_s.parse::<i32>() else {
+                continue;
+            };
+            let rest = rest.trim_start();
+            let Some((ppid_s, cmd)) = rest.split_once(char::is_whitespace) else {
+                continue;
+            };
+            let Ok(ppid) = ppid_s.parse::<i32>() else {
+                continue;
+            };
+            parents.insert(pid, ppid);
+            if pid > 1 {
+                cmds.push((pid, cmd.trim_start().to_string()));
+            }
+        }
+        Self { parents, cmds }
     }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|s| s.trim().parse::<i32>().ok())
-        .filter(|&p| p > 1)
-        .collect()
+
+    /// Parent PID of `pid`, or `None` if it's not in the snapshot
+    /// (exited, or spawned after the snapshot was taken).
+    fn parent(&self, pid: i32) -> Option<i32> {
+        self.parents.get(&pid).copied()
+    }
+
+    /// All real PIDs whose argv contains `needle` — the argv-substring
+    /// match the old `pgrep -f <needle>` performed, served from the
+    /// snapshot instead of a fresh subprocess per call.
+    fn pids_referencing(&self, needle: &str) -> Vec<i32> {
+        self.cmds
+            .iter()
+            .filter(|(_, cmd)| cmd.contains(needle))
+            .map(|(pid, _)| *pid)
+            .collect()
+    }
 }
 
 fn read_pid_file(path: &std::path::Path) -> Option<i32> {
@@ -2902,25 +2960,6 @@ fn read_pid_file(path: &std::path::Path) -> Option<i32> {
 fn pid_is_alive(pid: i32) -> bool {
     // Signal 0 = existence check, doesn't deliver a signal.
     unsafe { libc::kill(pid, 0) == 0 }
-}
-
-/// Returns the parent PID, or `None` if the process is gone or its
-/// PPID can't be read. macOS has no `/proc`; the portable path is
-/// `ps -o ppid= -p <pid>`. Shelling out adds ~5 ms per call, which
-/// is acceptable for a pruner that runs a handful of times per
-/// session (and not on a hot path).
-fn pid_parent(pid: i32) -> Option<i32> {
-    let out = std::process::Command::new("ps")
-        .args(["-o", "ppid=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse::<i32>()
-        .ok()
 }
 
 fn dir_size_bytes(path: &std::path::Path) -> u64 {
