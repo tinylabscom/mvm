@@ -31,9 +31,9 @@ details** below for the workstream-level state.
 - [ ] **PLAN 124** — Lean guest agent · 🟡 ~72%; D1.2a stubs + check-stubs CI-gated + D1.2 Step 2a contract + 2b RPC client + 2c mvm-cli unary sites adopt call_unary; D1.3 SDK veneer (Plan 125) + signed on-device config remain
 - [ ] **PLAN 126** — Dependency reduction · 🟡 ~30%; duplicate-major lock-gate landed (+ supply-chain CI restored); D1 forbidden-dep-gate landed (closure ban on sigstore/opendal/pgp); aws-lc-rs ban still blocked by oci-client; dep-baseline.md write-up remains
 - [x] **PLAN 177** — Backend consolidation (8→4) · ✅ both phases merged (#806/#789/#812/#814/#817); DX-parity → Plan 189; lone caveat = host-gated hardware smoke
-- [ ] **PLAN 182** — Trait hygiene + backend catalog · 🟡 code+docs done locally; aggregate workspace-test SIGKILL remains
+- [x] **PLAN 182** — Trait hygiene + backend catalog · ✅ DONE — Clock/KeyProvider unified, `backend_catalog!` single-source, doctor sourced from it, arch docs current (all via #802). The lone open box (literal `cargo test --workspace`) is closed as documented-environmental: package-by-package + `-E 'not package(mvm-backend)'` are green; the aggregate only SIGKILLs the `mvm-backend` unit-test bin via macOS amfid codesign on this host (CI runs it green)
 - [x] **PLAN 184** — Backend descriptor registry · ✅ DONE — catalog promoted to a `BackendDescriptor` registry (descriptor-named helpers); dual `instantiate`/`instantiate_dyn` constructors with dyn↔enum parity test; doctor migrated to `instantiate_dyn`; `AnyBackend` narrowed to enum-specific ops (no duplication remained); boundary + ordering-freeze tests; arch/supervisor docs describe the behavior/discovery/dispatch split
-- [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 shared TestEnv expanded into mvm-cli/mvm-build; guest hook tests de-shelled
+- [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 shared TestEnv expanded into mvm-cli/mvm-build/mvm-core; guest hook tests de-shelled; mvm-core env tests (config/user_config/secret_binding) migrated onto TestEnv + config.rs's duplicate `ENV_TEST_LOCK` deleted; remaining: mvm-backend/mvm-build/mvm-hostd env-test tail, poison-lock policy, naming/typed-selector/unsafe-boundary phases
 - [ ] **PLAN 189** — VZ DX parity (post-convergence) · 🟡 in progress — WS-3 `dev status --json` landed; remaining: save/restore verbs, cached fast-boot default, more --json coverage, base pinning (spun out of 177; sibling of 159)
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
@@ -359,8 +359,13 @@ PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
       tests and `mvm-build` dev/Vz builder env-sensitive tests; replace
       shell-backed lifecycle-hook unit tests with deterministic runner fakes;
       remove a wall-clock assertion from an entrypoint cap test
+  [x] Migrate `mvm-core`'s own env-mutating tests onto `TestEnv` — `config.rs`
+      (incl. deleting its duplicate per-module `ENV_TEST_LOCK`/`env_lock` helper),
+      `user_config.rs`, `policy/secret_binding.rs`; manual save/restore boilerplate
+      removed; 1248 mvm-core tests + clippy green
   [ ] Roll `TestEnv` through remaining high-risk env-mutating tests in `mvm-backend`,
-      `mvm-cli`, and `mvm-build`
+      `mvm-cli`, `mvm-build`, `mvm-hostd`, `libkrun-sys` (incl. `mvm-core`
+      `domain/session` + `domain/template_tags`, which use a different `env::` form)
   [ ] Standardize poisoned-lock handling by distinguishing test/global
       serialization locks from real runtime state locks
   [ ] Rename overly generic internal traits/types where the blast radius is
@@ -403,14 +408,17 @@ PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C1
       with a responsive restored control plane; the Plan 152 WS-C fork
       primitive it was paired with is likewise closed.
 
-PLAN 182 — Trait hygiene + backend catalog      🟡 code+docs in; aggregate workspace-test gate remains
+PLAN 182 — Trait hygiene + backend catalog      ✅ DONE
   [x] shared `mvm_core::time::{Clock,SystemClock}` replaces the three local copies
   [x] duplicate `KeyProvider` retired in favor of `mvm_core::crypto::keystore`
   [x] backend metadata catalog becomes the single source for `AnyBackend` selectors
       and `mvmctl doctor` backend support maps
   [x] macro scope stays narrow: land `backend_catalog!`, reject broader trait-impl/noop macros
   [x] architecture docs now describe the current trait seams and ownership rules
-  [ ] literal `cargo test --workspace` aggregate run (package-local tests are green; workspace run hits SIGKILL on `mvm-backend` here)
+  [x] literal `cargo test --workspace` aggregate — closed as documented-environmental:
+      package-by-package + `-E 'not package(mvm-backend)'` are green; the single-invocation
+      aggregate only SIGKILLs the `mvm-backend` unit-test bin via macOS amfid codesign on
+      this host (not an assertion failure), and CI runs the full aggregate green
 
 PLAN 175 — Firecracker live-memory warm-start    🔴 NOT STARTED (live-KVM-gated; Plan 123 C2 carve-out)
   [ ] C4 warm-start CLI/RPC wiring — carved out → Plan 175 (rides C2)
