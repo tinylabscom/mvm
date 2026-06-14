@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-13** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status/down/up --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 118: Vz saved-standby warm pool claim live-validated + pool self-replenishes via detached re-warm (#840) + claim reuses admission image sha (#846); Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings; Plan 195 builder-VM fingerprint narrowing planned; Plan 161 OCI-unpacker openat2 TOCTTOU fix landed (Plan 143 R2/R3 done) — writes resolve through `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)`, follow-up routes whiteout removal through openat2 too; Plan 126 D1 forbidden-dep gate landed — closure ban on sigstore/opendal/pgp; Plan 124 D1.2a protocol type stubs — `protocol-v0.json` wired into `gen-stubs`/`check-stubs`, Python/TS protocol types generated + drift-checked; Plan 128 C3 Step 2 — `check-stubs` drift gate wired into ci.yml + ci-full.yml Lint, Linux codegen determinism verified; Sprint 55 (Plan 97) CLOSED — vz at parity with the macOS libkrun baseline, all criteria met-or-amended (Phase B ≥30%-win retired post-convergence, Phase C hash-match → functional parity, claim 5 Swift-equiv retired); Plan 152 WS-C fork primitive closed + WS-D nested-KVM out-of-scope; Plan 123 C3 met; egress secret substitution is Linux-only (FC/QEMU) — vz lacks it exactly as libkrun does; macOS port now tracked as Plan 197 (WorkloadBackend type-bar) which reclassifies it from optional fast-follow to a required build — Plan 197 Phase 1 (type-bar + qemu type-barred; mock kept as the ADR-045 hermetic test double + ADR-083) MERGED (#860/#861); Phase 2 spike DONE → 2a vsock substitution channel mvm-ready, 2b transparent :80/:443 terminator rvproxy-gated (Plan 193/ADR-082); Plan 124 D1.2 Step 2a — machine-readable RPC req→resp contract (Verb/ResponseVariant/response_contract in vsock.rs, drift-guarded), prereq for the typed RPC-client generator; found the SDKs shell to mvmctl not vsock, so Step 2b is a host-side Rust client; Plan 124 D1.2 Step 2b — contract-checked host-side RPC client (`call_unary`/`call_streaming`/`check_response` + `RpcError::OffContract` guard in vsock.rs; PostRestore call site migrated as proof-of-use), a generic contract-driven client not per-verb codegen; Plan 192 (ADR-081 A1) LANDED — WASI fs/env capability projection in `mvm-core::policy::projection_fs_env` (deny-by-default, intersection-only clamp, backend-agnostic WASI shapes) + `WasiCapPolicy` bound + 2 clamp-never-widens witnesses, no new deps)
+**Last updated: 2026-06-14** (Plan 185 test-isolation sweep advanced; ADR-080 program batch landed: Plans 188/186/187; Plan 189 WS-3 `dev status/down/up --json`; Plan 190 kernel egress close-out; Plan 191 declarative file materialization — ADR-080 P2-full; Plan 159: instant memory fork vm_full productized — admitted child, gvproxy-only invariant; Plan 118: Vz saved-standby warm pool claim live-validated + pool self-replenishes via detached re-warm (#840) + claim reuses admission image sha (#846); Plan 193 rvproxy network substrate proposed + gvproxy teardown/build-perf findings; Plan 195 builder-VM fingerprint narrowing planned; Plan 161 OCI-unpacker openat2 TOCTTOU fix landed (Plan 143 R2/R3 done) — writes resolve through `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)`, follow-up routes whiteout removal through openat2 too; Plan 126 D1 forbidden-dep gate landed — closure ban on sigstore/opendal/pgp; Plan 124 D1.2a protocol type stubs — `protocol-v0.json` wired into `gen-stubs`/`check-stubs`, Python/TS protocol types generated + drift-checked; Plan 128 C3 Step 2 — `check-stubs` drift gate wired into ci.yml + ci-full.yml Lint, Linux codegen determinism verified; Sprint 55 (Plan 97) CLOSED — vz at parity with the macOS libkrun baseline, all criteria met-or-amended (Phase B ≥30%-win retired post-convergence, Phase C hash-match → functional parity, claim 5 Swift-equiv retired); Plan 152 WS-C fork primitive closed + WS-D nested-KVM out-of-scope; Plan 123 C3 met; egress secret substitution is Linux-only (FC/QEMU) — vz lacks it exactly as libkrun does; macOS port now tracked as Plan 197 (WorkloadBackend type-bar) which reclassifies it from optional fast-follow to a required build — Plan 197 Phase 1 (type-bar + qemu type-barred; mock kept as the ADR-045 hermetic test double + ADR-083) MERGED (#860/#861); Phase 2 spike DONE → 2a vsock substitution channel mvm-ready, 2b transparent :80/:443 terminator rvproxy-gated (Plan 193/ADR-082); Plan 124 D1.2 Step 2a — machine-readable RPC req→resp contract (Verb/ResponseVariant/response_contract in vsock.rs, drift-guarded), prereq for the typed RPC-client generator; found the SDKs shell to mvmctl not vsock, so Step 2b is a host-side Rust client; Plan 124 D1.2 Step 2b — contract-checked host-side RPC client (`call_unary`/`call_streaming`/`check_response` + `RpcError::OffContract` guard in vsock.rs; PostRestore call site migrated as proof-of-use), a generic contract-driven client not per-verb codegen; Plan 192 (ADR-081 A1) LANDED — WASI fs/env capability projection in `mvm-core::policy::projection_fs_env` (deny-by-default, intersection-only clamp, backend-agnostic WASI shapes) + `WasiCapPolicy` bound + 2 clamp-never-widens witnesses, no new deps; Plan 184 (backend descriptor registry) DONE — catalog promoted to a first-class `BackendDescriptor` registry with dual `instantiate`/`instantiate_dyn` constructors (dyn↔enum parity), doctor migrated to the trait-object path, `AnyBackend` narrowed to enum-specific ops, behavior/discovery/dispatch ownership documented)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -32,7 +32,7 @@ details** below for the workstream-level state.
 - [ ] **PLAN 126** — Dependency reduction · 🟡 ~30%; duplicate-major lock-gate landed (+ supply-chain CI restored); D1 forbidden-dep-gate landed (closure ban on sigstore/opendal/pgp); aws-lc-rs ban still blocked by oci-client; dep-baseline.md write-up remains
 - [x] **PLAN 177** — Backend consolidation (8→4) · ✅ both phases merged (#806/#789/#812/#814/#817); DX-parity → Plan 189; lone caveat = host-gated hardware smoke
 - [ ] **PLAN 182** — Trait hygiene + backend catalog · 🟡 code+docs done locally; aggregate workspace-test SIGKILL remains
-- [ ] **PLAN 184** — Backend descriptor registry · 🔴 not started
+- [x] **PLAN 184** — Backend descriptor registry · ✅ DONE — catalog promoted to a `BackendDescriptor` registry (descriptor-named helpers); dual `instantiate`/`instantiate_dyn` constructors with dyn↔enum parity test; doctor migrated to `instantiate_dyn`; `AnyBackend` narrowed to enum-specific ops (no duplication remained); boundary + ordering-freeze tests; arch/supervisor docs describe the behavior/discovery/dispatch split
 - [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 shared TestEnv expanded into mvm-cli/mvm-build; guest hook tests de-shelled
 - [ ] **PLAN 189** — VZ DX parity (post-convergence) · 🟡 in progress — WS-3 `dev status --json` landed; remaining: save/restore verbs, cached fast-boot default, more --json coverage, base pinning (spun out of 177; sibling of 159)
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
@@ -330,16 +330,23 @@ PLAN 124 — Lean guest agent                     🟡 ~65%
   [ ] D1.2 Step 2c migrate remaining mvm-cli send_request call sites (gated on Plan 189 hot files)
   [ ] D1.3 SDK ergonomics veneer (Plan 125) + E signed on-device config
 
-PLAN 184 — Backend descriptor registry          🔴 not started
-  [ ] Promote `mvm-backend`'s shipped backend catalog into a first-class
-      `BackendDescriptor` / registry API while preserving `VmBackend` as the
-      sole backend behavior trait
-  [ ] Add descriptor-driven construction for both `AnyBackend` and
-      `Arc<dyn VmBackend>` consumers
-  [ ] Migrate read-only and clearly generic backend consumers away from enum
-      dispatch where no backend-specific behavior is needed
-  [ ] Keep `AnyBackend` only for intentionally enum-specific operations
-      (`auto_select` policy, backend-specific helpers, explicit variant checks)
+PLAN 184 — Backend descriptor registry          ✅ DONE
+  [x] Promoted the catalog into a first-class `BackendDescriptor` registry
+      (`descriptors`/`descriptor`/`descriptor_for_selector`/`_for_marker_file`/
+      `started_vm_probe_descriptors`/`list_all`/`balloon`/`warm_start`
+      `_descriptors`); macro stays one flat table; `VmBackend` untouched
+  [x] Descriptor-driven construction for both consumers: `instantiate`
+      (`AnyBackend`) + `into_dyn`/`instantiate_dyn` (`Arc<dyn VmBackend>`),
+      with a dyn-vs-enum parity test across every backend
+  [x] Migrated the clean generic site: doctor's balloon/warm-start collectors
+      build via `descriptor.instantiate_dyn()` (no selector re-lookup, trait
+      object). build.rs/exec.rs `auto_select()` sites stay on the enum (policy
+      result + trivial `.name()`/`.stop()` — into_dyn would only add an Arc)
+  [x] `AnyBackend` kept only for enum-specific ops (`auto_select`,
+      `from_build_output`, `start_firecracker`, variant checks); no descriptor-
+      shaped duplication remained to remove (182 + Task 1 already routed it);
+      boundary test + ordering-freeze test added; supervisor comment + arch doc
+      describe the shipped ownership split (behavior / discovery / dispatch)
 
 PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
   [x] Add `mvm_core::util::test_env::TestEnv` behind `cfg(test)` /
