@@ -1,4 +1,4 @@
-use crate::catalog::{self, BackendKind};
+use crate::catalog;
 use anyhow::Result;
 use mvm_core::vm_backend::{
     BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, StartMode, VmBackend,
@@ -372,8 +372,8 @@ impl AnyBackend {
     /// `"vz"` (Apple Virtualization.framework, macOS), `"libkrun"`
     /// (Linux KVM / macOS HVF). Unknown names fall back to Firecracker.
     pub fn from_hypervisor(name: &str) -> Self {
-        catalog::kind_for_selector(name)
-            .map(BackendKind::instantiate)
+        catalog::descriptor_for_selector(name)
+            .map(|descriptor| descriptor.instantiate())
             .unwrap_or_else(Self::default_backend)
     }
 
@@ -429,12 +429,12 @@ impl AnyBackend {
     /// default in that case.
     pub fn for_started_vm(name: &str) -> Option<Self> {
         let dir = mvm_core::config::vm_state_dir(name);
-        catalog::started_vm_probe_entries()
+        catalog::started_vm_probe_descriptors()
             .into_iter()
-            .filter_map(|entry| entry.marker_file)
+            .filter_map(|descriptor| descriptor.marker_file)
             .find(|marker_file| dir.join(marker_file).is_file())
-            .and_then(catalog::kind_for_marker_file)
-            .map(BackendKind::instantiate)
+            .and_then(catalog::descriptor_for_marker_file)
+            .map(|descriptor| descriptor.instantiate())
     }
 
     /// Aggregate the running-VM listing across every backend that can be
@@ -444,7 +444,7 @@ impl AnyBackend {
     /// and stoppable, not just whichever backend the CLI defaulted to.
     pub fn list_all() -> Vec<VmInfo> {
         let mut vms = Vec::new();
-        for backend in catalog::list_all_entries().map(|entry| entry.kind.instantiate()) {
+        for backend in catalog::list_all_descriptors().map(|descriptor| descriptor.instantiate()) {
             if let Ok(found) = backend.list() {
                 vms.extend(found);
             }
@@ -463,7 +463,7 @@ impl AnyBackend {
     /// asserts the two stay in sync; bumping one without the other
     /// fails CI.
     pub fn tier(&self) -> BackendTier {
-        catalog::entry(self.kind()).tier
+        catalog::descriptor(self.kind()).tier
     }
 
     pub fn name(&self) -> &str {
@@ -824,18 +824,18 @@ mod tests {
 
     #[test]
     fn backend_catalog_matrix_is_stable() {
-        let actual: Vec<_> = catalog::entries()
+        let actual: Vec<_> = catalog::descriptors()
             .iter()
-            .map(|entry| {
+            .map(|descriptor| {
                 (
-                    entry.selector,
-                    entry.aliases.to_vec(),
-                    entry.tier,
-                    entry.marker_file,
-                    entry.started_vm_probe_order,
-                    entry.include_in_list_all,
-                    entry.include_in_balloon_support,
-                    entry.include_in_warm_start_support,
+                    descriptor.selector,
+                    descriptor.aliases.to_vec(),
+                    descriptor.tier,
+                    descriptor.marker_file,
+                    descriptor.started_vm_probe_order,
+                    descriptor.include_in_list_all,
+                    descriptor.include_in_balloon_support,
+                    descriptor.include_in_warm_start_support,
                 )
             })
             .collect();
