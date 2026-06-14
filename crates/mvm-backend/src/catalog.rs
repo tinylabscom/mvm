@@ -286,4 +286,33 @@ mod tests {
             );
         }
     }
+
+    fn selectors<'a>(it: impl Iterator<Item = &'a BackendDescriptor>) -> Vec<&'a str> {
+        it.map(|descriptor| descriptor.selector).collect()
+    }
+
+    /// The descriptor-filtered surfaces feed user-visible ordering in
+    /// `mvmctl doctor` (balloon + warm-start matrices), `mvmctl ls`
+    /// (list-all), and the started-VM probe. Freeze those orders so a table
+    /// reshuffle can't silently change what users see or the probe priority.
+    #[test]
+    fn descriptor_surface_ordering_is_frozen() {
+        assert_eq!(
+            selectors(balloon_support_descriptors()),
+            ["firecracker", "libkrun", "qemu"]
+        );
+        assert_eq!(
+            selectors(warm_start_support_descriptors()),
+            ["firecracker", "libkrun", "vz", "qemu"]
+        );
+        assert_eq!(
+            selectors(list_all_descriptors()),
+            ["firecracker", "libkrun", "qemu"]
+        );
+        // Started-VM probe is sorted by probe order, not declaration order.
+        assert_eq!(
+            selectors(started_vm_probe_descriptors().into_iter()),
+            ["qemu", "libkrun", "firecracker", "vz"]
+        );
+    }
 }
