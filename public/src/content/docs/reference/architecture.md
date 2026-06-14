@@ -17,9 +17,11 @@ on launcher and service traits.
 
 ## Multi-Backend Runtime Design
 
-Concrete runtime backends implement
-`mvm_core::vm_backend::VmBackend`. The closed enum
-`mvm_backend::backend::AnyBackend` is the dispatch layer that:
+Concrete runtime backends implement `mvm_core::vm_backend::VmBackend` — the one runtime
+behavior contract. Backend *discovery* (which backends exist and their metadata) lives in the
+compile-time descriptor registry described below; the closed enum
+`mvm_backend::backend::AnyBackend` is the dispatch layer for the operations that are still
+genuinely backend-specific:
 
 - applies platform auto-selection policy,
 - preserves explicit backend selection (`--hypervisor ...`),
@@ -36,8 +38,11 @@ Concrete runtime backends implement
 | QEMU | Explicit opt-in (`--hypervisor qemu`) | Linux dev/test backend |
 | Mock | Explicit opt-in (`--hypervisor mock`) | Test-only in-memory backend |
 
-The backend catalog in `crates/mvm-backend/src/catalog.rs` is the single source of truth for
-backend names, aliases, tiers, marker files, and doctor-facing support sets.
+The backend descriptor registry in `crates/mvm-backend/src/catalog.rs` is the single source of
+truth for backend discovery: each `BackendDescriptor` carries the selector, aliases, isolation
+tier, per-VM marker file, started-VM probe order, and the listing/support sets that `mvmctl
+doctor` and `mvmctl ls` read. Both enum (`AnyBackend`) and trait-object (`Arc<dyn VmBackend>`)
+consumers construct from the same descriptors via `instantiate` / `instantiate_dyn`.
 
 ## Workspace Structure
 
@@ -124,9 +129,12 @@ Runtime launch is layered:
 3. `mvm-backend` selects a concrete `VmBackend` implementation.
 4. The selected backend boots the Nix-built artifacts.
 
-`AnyBackend` is intentionally a closed enum rather than a dynamic plugin registry. The runtime
-seam is the `VmBackend` trait; the enum is the current policy/dispatch wrapper around known
-backends.
+The ownership split is deliberate: `VmBackend` owns runtime behavior, the compile-time backend
+descriptor registry owns backend discovery metadata and constructor wiring, and `AnyBackend`
+remains a closed enum for the operations that are genuinely backend-specific (auto-selection
+policy, explicit-variant handling). The registry is static, not a runtime plugin system — there
+is no dynamic registration or dylib discovery. Generic consumers that only need behavior
+construct an `Arc<dyn VmBackend>` straight from a descriptor instead of matching the enum.
 
 ## Build Pipeline
 
