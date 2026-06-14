@@ -556,15 +556,11 @@ fn dispatch_update_idle_timeout(vm_name: &str, secs: u64) -> Result<(u64, u64)> 
     let req = mvm_guest::vsock::GuestRequest::UpdateIdleTimeout { secs };
     // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(vm_name, &req);
-    let resp = mvm_guest::vsock::send_request(&mut stream, &req)?;
-    match resp {
+    match mvm_guest::vsock::call_unary(&mut stream, &req)? {
         mvm_guest::vsock::GuestResponse::UpdateIdleTimeoutAck {
             previous_secs,
             applied_secs,
         } => Ok((previous_secs, applied_secs)),
-        mvm_guest::vsock::GuestResponse::Error { message } => {
-            anyhow::bail!("guest agent error: {message}")
-        }
         other => anyhow::bail!("unexpected response to UpdateIdleTimeout: {other:?}"),
     }
 }

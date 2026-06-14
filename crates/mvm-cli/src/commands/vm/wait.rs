@@ -21,7 +21,7 @@ use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 use mvm_guest::vsock::{
     ComponentState, GUEST_AGENT_PORT, GuestCapability, GuestRequest, GuestResponse,
-    ReadinessReport, negotiate_protocol, send_request,
+    ReadinessReport, call_unary, negotiate_protocol,
 };
 
 use super::Cli;
@@ -219,14 +219,11 @@ pub(in crate::commands::vm) fn fetch_readiness(vm_name: &str) -> Result<Readines
     let transport: Box<dyn VsockTransport> = vsock_transport::for_vm(vm_name)?;
     let mut stream = transport.connect(GUEST_AGENT_PORT)?;
     let _ = negotiate_protocol(&mut stream, vec![GuestCapability::Readiness])?;
-    let resp = send_request(&mut stream, &GuestRequest::ReadinessStatus)?;
-    match resp {
+    // `call_unary` enforces ReadinessStatus's contract — agent `Error`,
+    // profile refusal, and off-contract frames all surface as a typed
+    // `RpcError`, so the only `Ok` variant is the contracted report.
+    match call_unary(&mut stream, &GuestRequest::ReadinessStatus)? {
         GuestResponse::ReadinessStatusReport(report) => Ok(report),
-        GuestResponse::Error { message } => bail!("guest readiness error: {message}"),
-        GuestResponse::UnsupportedInProfile { profile, verb } => bail!(
-            "agent refused {verb} in profile {:?} — this should be impossible for ReadinessStatus",
-            profile
-        ),
         other => bail!("unexpected response to ReadinessStatus: {other:?}"),
     }
 }
