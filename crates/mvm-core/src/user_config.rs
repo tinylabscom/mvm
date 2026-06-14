@@ -206,6 +206,7 @@ pub fn set_key(cfg: &mut MvmConfig, key: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::test_env::TestEnv;
 
     #[test]
     fn test_default_values() {
@@ -222,12 +223,10 @@ mod tests {
 
     #[test]
     fn test_effective_services_health_timeout_honors_env_var_override() {
-        // Save + restore the env var so the test doesn't leak state.
-        let saved = std::env::var("MVM_SERVICES_HEALTH_TIMEOUT_SECS").ok();
+        let mut env = TestEnv::new();
 
         // Clean slate: with no override, the config field wins.
-        // SAFETY: tests are serial in this module and we restore below.
-        unsafe { std::env::remove_var("MVM_SERVICES_HEALTH_TIMEOUT_SECS") };
+        env.remove("MVM_SERVICES_HEALTH_TIMEOUT_SECS");
         let cfg = MvmConfig {
             services_health_timeout_secs: 7,
             ..MvmConfig::default()
@@ -235,19 +234,14 @@ mod tests {
         assert_eq!(cfg.effective_services_health_timeout_secs(), 7);
 
         // With a valid override, the env-var value wins.
-        unsafe { std::env::set_var("MVM_SERVICES_HEALTH_TIMEOUT_SECS", "120") };
+        env.set("MVM_SERVICES_HEALTH_TIMEOUT_SECS", "120");
         assert_eq!(cfg.effective_services_health_timeout_secs(), 120);
 
         // Garbage in the env var falls back to the config field
         // rather than panicking — operator typos do not break boot.
-        unsafe { std::env::set_var("MVM_SERVICES_HEALTH_TIMEOUT_SECS", "not-a-number") };
+        env.set("MVM_SERVICES_HEALTH_TIMEOUT_SECS", "not-a-number");
         assert_eq!(cfg.effective_services_health_timeout_secs(), 7);
-
-        // Restore the original env value.
-        match saved {
-            Some(v) => unsafe { std::env::set_var("MVM_SERVICES_HEALTH_TIMEOUT_SECS", v) },
-            None => unsafe { std::env::remove_var("MVM_SERVICES_HEALTH_TIMEOUT_SECS") },
-        }
+        // `env` restores the original value on drop.
     }
 
     #[test]

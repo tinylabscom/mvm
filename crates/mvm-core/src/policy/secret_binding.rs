@@ -257,6 +257,7 @@ impl ResolvedSecrets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::test_env::TestEnv;
 
     #[test]
     fn parse_simple_binding() {
@@ -350,10 +351,11 @@ mod tests {
 
     #[test]
     fn resolve_value_from_env() {
-        unsafe { std::env::set_var("MVM_TEST_SECRET_42", "from-env") };
+        let mut env = TestEnv::new();
+        env.set("MVM_TEST_SECRET_42", "from-env");
         let b = SecretBinding::new("MVM_TEST_SECRET_42", "host.com");
         assert_eq!(b.resolve_value().unwrap(), "from-env");
-        unsafe { std::env::remove_var("MVM_TEST_SECRET_42") };
+        // `env` restores the prior value on drop.
     }
 
     #[test]
