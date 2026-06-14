@@ -1,11 +1,14 @@
 //! Backend launcher slot — what the supervisor calls to actually
 //! start a VM once it's verified the plan.
 //!
-//! For now this is just an abstraction so `Supervisor::launch(plan)` can
-//! be tested without a real Firecracker. An open `BackendRegistry` plus
-//! concrete `FirecrackerBackend` / `VzBackend` impls land in
-//! a follow-up that lifts today's `mvm/src/vm/backend.rs`
-//! `AnyBackend` enum behind this trait.
+//! This `BackendLauncher` trait is the supervisor's own seam, kept so
+//! `Supervisor::launch(plan)` is testable without a real Firecracker. It is
+//! deliberately separate from the runtime backend stack: runtime behavior is
+//! `mvm_core::vm_backend::VmBackend`, backend discovery is the compile-time
+//! descriptor registry in `mvm_backend::catalog`, and
+//! `mvm_backend::backend::AnyBackend` is the closed enum for backend-specific
+//! dispatch. There is no dynamic backend registry — the descriptor table is
+//! static.
 
 use async_trait::async_trait;
 use mvm_backend::base::config::VmSlot;
