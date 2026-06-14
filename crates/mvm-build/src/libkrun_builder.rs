@@ -2180,10 +2180,8 @@ impl PersistentVmHandle {
 mod tests {
     use super::*;
     use crate::builder_vm_runtime::{INSTALL_SPEC_FILENAME, shell_single_quote_escape};
-    use std::sync::{LazyLock, Mutex};
+    use mvm_core::util::test_env::TestEnv;
     use tempfile::TempDir;
-
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn ok_mounts(scratch: &TempDir) -> BuilderMounts {
         let flake = scratch.path().join("flake");
@@ -2221,57 +2219,53 @@ mod tests {
 
     #[test]
     fn resolve_networking_mode_parses_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: tests guarded by ENV_LOCK; env mutation in test
-        // process is fine when serialized.
-        unsafe {
-            // Default is per-OS — macOS → Gvproxy, others → Passt.
-            std::env::remove_var("MVM_NETWORKING");
-            assert_eq!(resolve_networking_mode(), default_networking_mode());
+        let mut env = TestEnv::new();
+        // Default is per-OS — macOS → Gvproxy, others → Passt.
+        env.remove("MVM_NETWORKING");
+        assert_eq!(resolve_networking_mode(), default_networking_mode());
 
-            std::env::set_var("MVM_NETWORKING", " passt ");
-            // passt is Linux-only (the Homebrew formula refuses to build it on
-            // macOS), so an explicit passt pin is macOS-safe: resolve falls back
-            // to gvproxy with a warning rather than handing the supervisor a
-            // gateway it can't spawn.
-            if cfg!(target_os = "macos") {
-                assert_eq!(resolve_networking_mode(), NetworkingPreference::Gvproxy);
-            } else {
-                assert_eq!(resolve_networking_mode(), NetworkingPreference::Passt);
-            }
-
-            std::env::set_var("MVM_NETWORKING", "GVPROXY");
+        env.set("MVM_NETWORKING", " passt ");
+        // passt is Linux-only (the Homebrew formula refuses to build it on
+        // macOS), so an explicit passt pin is macOS-safe: resolve falls back
+        // to gvproxy with a warning rather than handing the supervisor a
+        // gateway it can't spawn.
+        if cfg!(target_os = "macos") {
             assert_eq!(resolve_networking_mode(), NetworkingPreference::Gvproxy);
-
-            std::env::set_var("MVM_NETWORKING", " gvproxy ");
-            assert_eq!(resolve_networking_mode(), NetworkingPreference::Gvproxy);
-
-            std::env::set_var("MVM_NETWORKING", "");
-            assert_eq!(resolve_networking_mode(), default_networking_mode());
-
-            // Unknown value falls back to the per-OS default without panic.
-            std::env::set_var("MVM_NETWORKING", "vmnet-helper");
-            assert_eq!(resolve_networking_mode(), default_networking_mode());
-
-            // `native` requires MVM_GATEWAY_BIN to name the gateway binary;
-            // without it, it falls back (fail-safe, no wrong-gateway spawn).
-            std::env::remove_var("MVM_GATEWAY_BIN");
-            std::env::set_var("MVM_NETWORKING", "native");
-            assert_eq!(
-                resolve_networking_mode(),
-                default_networking_mode(),
-                "native without MVM_GATEWAY_BIN must fall back to the per-OS default"
-            );
-            // With MVM_GATEWAY_BIN set, `native` resolves (case- and
-            // whitespace-insensitive like the other accepted values).
-            std::env::set_var("MVM_GATEWAY_BIN", "/path/to/gateway");
-            assert_eq!(resolve_networking_mode(), NetworkingPreference::Native);
-            std::env::set_var("MVM_NETWORKING", " NATIVE ");
-            assert_eq!(resolve_networking_mode(), NetworkingPreference::Native);
-            std::env::remove_var("MVM_GATEWAY_BIN");
-
-            std::env::remove_var("MVM_NETWORKING");
+        } else {
+            assert_eq!(resolve_networking_mode(), NetworkingPreference::Passt);
         }
+
+        env.set("MVM_NETWORKING", "GVPROXY");
+        assert_eq!(resolve_networking_mode(), NetworkingPreference::Gvproxy);
+
+        env.set("MVM_NETWORKING", " gvproxy ");
+        assert_eq!(resolve_networking_mode(), NetworkingPreference::Gvproxy);
+
+        env.set("MVM_NETWORKING", "");
+        assert_eq!(resolve_networking_mode(), default_networking_mode());
+
+        // Unknown value falls back to the per-OS default without panic.
+        env.set("MVM_NETWORKING", "vmnet-helper");
+        assert_eq!(resolve_networking_mode(), default_networking_mode());
+
+        // `native` requires MVM_GATEWAY_BIN to name the gateway binary;
+        // without it, it falls back (fail-safe, no wrong-gateway spawn).
+        env.remove("MVM_GATEWAY_BIN");
+        env.set("MVM_NETWORKING", "native");
+        assert_eq!(
+            resolve_networking_mode(),
+            default_networking_mode(),
+            "native without MVM_GATEWAY_BIN must fall back to the per-OS default"
+        );
+        // With MVM_GATEWAY_BIN set, `native` resolves (case- and
+        // whitespace-insensitive like the other accepted values).
+        env.set("MVM_GATEWAY_BIN", "/path/to/gateway");
+        assert_eq!(resolve_networking_mode(), NetworkingPreference::Native);
+        env.set("MVM_NETWORKING", " NATIVE ");
+        assert_eq!(resolve_networking_mode(), NetworkingPreference::Native);
+        env.remove("MVM_GATEWAY_BIN");
+
+        env.remove("MVM_NETWORKING");
     }
 
     #[test]
@@ -2280,20 +2274,17 @@ mod tests {
         // resolve to a TSI mode — it falls back to the
         // per-OS gateway default with a warning. This guards the
         // claim-10 no-bypass invariant at the env-var surface.
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: ENV_LOCK serializes env mutation across tests.
-        unsafe {
-            for variant in ["tsi", "TSI", "Tsi", " tsi ", "tSi"] {
-                std::env::set_var("MVM_NETWORKING", variant);
-                assert_eq!(
-                    resolve_networking_mode(),
-                    default_networking_mode(),
-                    "MVM_NETWORKING={variant} must fall back to per-OS default \
-                     (TSI was removed in Plan 102 W6.A)"
-                );
-            }
-            std::env::remove_var("MVM_NETWORKING");
+        let mut env = TestEnv::new();
+        for variant in ["tsi", "TSI", "Tsi", " tsi ", "tSi"] {
+            env.set("MVM_NETWORKING", variant);
+            assert_eq!(
+                resolve_networking_mode(),
+                default_networking_mode(),
+                "MVM_NETWORKING={variant} must fall back to per-OS default \
+                 (TSI was removed)"
+            );
         }
+        env.remove("MVM_NETWORKING");
     }
 
     #[test]
@@ -2715,12 +2706,9 @@ mod tests {
 
     #[test]
     fn ensure_builder_vm_image_requires_cmdline_txt() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
-        let old = std::env::var("XDG_CACHE_HOME").ok();
-        unsafe {
-            std::env::set_var("XDG_CACHE_HOME", scratch.path());
-        }
+        env.set("XDG_CACHE_HOME", scratch.path());
 
         let arch_dir = scratch
             .path()
@@ -2736,13 +2724,6 @@ mod tests {
             format!("{err}").contains("cmdline.txt missing or unreadable"),
             "got {err}"
         );
-
-        unsafe {
-            match old {
-                Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
-                None => std::env::remove_var("XDG_CACHE_HOME"),
-            }
-        }
     }
 
     // `builder_vm_timeout_*` tests migrated to `builder_vm_runtime`

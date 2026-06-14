@@ -1092,6 +1092,7 @@ pub fn builder_vm_timeout() -> Result<Duration, BuilderVmError> {
 mod tests {
     use super::*;
     use crate::builder_vm::{BuilderVmDisk, BuilderVmExitInfo, BuilderVmMount, BuilderVmRunConfig};
+    use mvm_core::util::test_env::TestEnv;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -1775,106 +1776,56 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // builder_vm_timeout — reads
-    // MVM_BUILDER_VM_TIMEOUT_SECS from the process env; mutation is
-    // serialised through TIMEOUT_ENV_LOCK so concurrent test threads
-    // don't observe each other's writes.
+    // builder_vm_timeout — reads MVM_BUILDER_VM_TIMEOUT_SECS from the process
+    // env; `TestEnv` serializes env mutation across tests and restores it.
     // -----------------------------------------------------------------
-
-    use std::sync::{LazyLock, Mutex};
-
-    static TIMEOUT_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn builder_vm_timeout_defaults_when_unset() {
-        let _lock = TIMEOUT_ENV_LOCK.lock().unwrap();
-        let old = std::env::var_os(MVM_BUILDER_VM_TIMEOUT_SECS_ENV);
-        // SAFETY: tests serialise env mutation via TIMEOUT_ENV_LOCK.
-        unsafe {
-            std::env::remove_var(MVM_BUILDER_VM_TIMEOUT_SECS_ENV);
-        }
+        let mut env = TestEnv::new();
+        env.remove(MVM_BUILDER_VM_TIMEOUT_SECS_ENV);
         assert_eq!(builder_vm_timeout().unwrap(), DEFAULT_BUILDER_VM_TIMEOUT);
-        unsafe {
-            match old {
-                Some(v) => std::env::set_var(MVM_BUILDER_VM_TIMEOUT_SECS_ENV, v),
-                None => std::env::remove_var(MVM_BUILDER_VM_TIMEOUT_SECS_ENV),
-            }
-        }
     }
 
     #[test]
     fn builder_vm_timeout_parses_positive_seconds() {
-        let _lock = TIMEOUT_ENV_LOCK.lock().unwrap();
-        let old = std::env::var_os(MVM_BUILDER_VM_TIMEOUT_SECS_ENV);
-        unsafe {
-            std::env::set_var(MVM_BUILDER_VM_TIMEOUT_SECS_ENV, "120");
-        }
+        let mut env = TestEnv::new();
+        env.set(MVM_BUILDER_VM_TIMEOUT_SECS_ENV, "120");
         assert_eq!(
             builder_vm_timeout().unwrap(),
             std::time::Duration::from_secs(120)
         );
-        unsafe {
-            match old {
-                Some(v) => std::env::set_var(MVM_BUILDER_VM_TIMEOUT_SECS_ENV, v),
-                None => std::env::remove_var(MVM_BUILDER_VM_TIMEOUT_SECS_ENV),
-            }
-        }
     }
 
     #[test]
     fn builder_vm_timeout_rejects_zero() {
-        let _lock = TIMEOUT_ENV_LOCK.lock().unwrap();
-        let old = std::env::var_os(MVM_BUILDER_VM_TIMEOUT_SECS_ENV);
-        unsafe {
-            std::env::set_var(MVM_BUILDER_VM_TIMEOUT_SECS_ENV, "0");
-        }
+        let mut env = TestEnv::new();
+        env.set(MVM_BUILDER_VM_TIMEOUT_SECS_ENV, "0");
         let err = builder_vm_timeout().unwrap_err();
         assert!(format!("{err}").contains("greater than zero"), "got {err}");
-        unsafe {
-            match old {
-                Some(v) => std::env::set_var(MVM_BUILDER_VM_TIMEOUT_SECS_ENV, v),
-                None => std::env::remove_var(MVM_BUILDER_VM_TIMEOUT_SECS_ENV),
-            }
-        }
     }
 
     #[test]
     fn builder_vm_timeout_rejects_non_integer() {
-        let _lock = TIMEOUT_ENV_LOCK.lock().unwrap();
-        let old = std::env::var_os(MVM_BUILDER_VM_TIMEOUT_SECS_ENV);
-        unsafe {
-            std::env::set_var(MVM_BUILDER_VM_TIMEOUT_SECS_ENV, "not-an-integer");
-        }
+        let mut env = TestEnv::new();
+        env.set(MVM_BUILDER_VM_TIMEOUT_SECS_ENV, "not-an-integer");
         let err = builder_vm_timeout().unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("must be an integer"), "got: {msg}");
         // The bad value surfaces in the message so the operator
         // doesn't have to re-check their env to find the typo.
         assert!(msg.contains("not-an-integer"), "got: {msg}");
-        unsafe {
-            match old {
-                Some(v) => std::env::set_var(MVM_BUILDER_VM_TIMEOUT_SECS_ENV, v),
-                None => std::env::remove_var(MVM_BUILDER_VM_TIMEOUT_SECS_ENV),
-            }
-        }
     }
 
     // -----------------------------------------------------------------
-    // Builder persistent /nix store auto-GC. The cap is resolved
-    // on the host and baked into the rendered cmd.sh; env mutation is
-    // serialised through GC_ENV_LOCK like the timeout tests above.
+    // Builder persistent /nix store auto-GC. The cap is resolved on the host
+    // and baked into the rendered cmd.sh; `TestEnv` serializes env mutation.
     // -----------------------------------------------------------------
-
-    static GC_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn render_flake_cmd_sh_embeds_gc_tail_with_default_cap() {
-        let _lock = GC_ENV_LOCK.lock().unwrap();
-        let old = std::env::var_os(MVM_BUILDER_STORE_GC_GIB_ENV);
-        // SAFETY: tests serialise env mutation via GC_ENV_LOCK.
-        unsafe {
-            std::env::remove_var(MVM_BUILDER_STORE_GC_GIB_ENV);
-        }
+        let mut env = TestEnv::new();
+        env.remove(MVM_BUILDER_STORE_GC_GIB_ENV);
         let body = render_flake_cmd_sh(".", "default", false);
         // Age-based GC is required (keeps the just-built closure warm).
         assert!(
@@ -1909,24 +1860,14 @@ mod tests {
             warm_idx < gc_idx,
             "warm gcroot must be registered before the GC tail"
         );
-        unsafe {
-            match old {
-                Some(v) => std::env::set_var(MVM_BUILDER_STORE_GC_GIB_ENV, v),
-                None => std::env::remove_var(MVM_BUILDER_STORE_GC_GIB_ENV),
-            }
-        }
     }
 
     #[test]
     fn builder_store_gc_cap_kib_default_override_and_garbage() {
-        let _lock = GC_ENV_LOCK.lock().unwrap();
-        let old = std::env::var_os(MVM_BUILDER_STORE_GC_GIB_ENV);
+        let mut env = TestEnv::new();
 
         // Unset → default 24 GiB in KiB.
-        // SAFETY: tests serialise env mutation via GC_ENV_LOCK.
-        unsafe {
-            std::env::remove_var(MVM_BUILDER_STORE_GC_GIB_ENV);
-        }
+        env.remove(MVM_BUILDER_STORE_GC_GIB_ENV);
         assert_eq!(
             builder_store_gc_cap_kib(),
             u64::from(DEFAULT_BUILDER_STORE_GC_GIB) * 1024 * 1024
@@ -1934,28 +1875,15 @@ mod tests {
         assert_eq!(builder_store_gc_cap_kib(), 25_165_824);
 
         // Valid override → that many GiB in KiB.
-        unsafe {
-            std::env::set_var(MVM_BUILDER_STORE_GC_GIB_ENV, "8");
-        }
+        env.set(MVM_BUILDER_STORE_GC_GIB_ENV, "8");
         assert_eq!(builder_store_gc_cap_kib(), 8 * 1024 * 1024);
 
         // Garbage → fall back to default (best-effort cap, never disabled).
-        unsafe {
-            std::env::set_var(MVM_BUILDER_STORE_GC_GIB_ENV, "not-a-number");
-        }
+        env.set(MVM_BUILDER_STORE_GC_GIB_ENV, "not-a-number");
         assert_eq!(builder_store_gc_cap_kib(), 25_165_824);
 
         // Zero → also falls back (zero would GC the just-built closure).
-        unsafe {
-            std::env::set_var(MVM_BUILDER_STORE_GC_GIB_ENV, "0");
-        }
+        env.set(MVM_BUILDER_STORE_GC_GIB_ENV, "0");
         assert_eq!(builder_store_gc_cap_kib(), 25_165_824);
-
-        unsafe {
-            match old {
-                Some(v) => std::env::set_var(MVM_BUILDER_STORE_GC_GIB_ENV, v),
-                None => std::env::remove_var(MVM_BUILDER_STORE_GC_GIB_ENV),
-            }
-        }
     }
 }
