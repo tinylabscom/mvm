@@ -676,43 +676,57 @@ impl GuestRequest {
     /// `UnsupportedInProfile` rejection response. Wire-stable —
     /// renaming a verb is a breaking change.
     pub fn verb_name(&self) -> &'static str {
+        self.verb().name()
+    }
+
+    /// Typed projection of this request's verb. Exhaustive — adding a
+    /// `GuestRequest` variant fails to compile until mapped here, keeping
+    /// `Verb` in lockstep with the wire enum.
+    pub fn verb(&self) -> Verb {
         match self {
-            GuestRequest::ProtocolHello { .. } => "ProtocolHello",
-            GuestRequest::WorkerStatus => "WorkerStatus",
-            GuestRequest::SleepPrep { .. } => "SleepPrep",
-            GuestRequest::Wake => "Wake",
-            GuestRequest::Ping => "Ping",
-            GuestRequest::IntegrationStatus => "IntegrationStatus",
-            GuestRequest::CheckpointIntegrations { .. } => "CheckpointIntegrations",
-            GuestRequest::ProbeStatus => "ProbeStatus",
-            GuestRequest::Exec { .. } => "Exec",
-            GuestRequest::RunEntrypoint { .. } => "RunEntrypoint",
-            GuestRequest::PostRestore => "PostRestore",
-            GuestRequest::FsDiff => "FsDiff",
-            GuestRequest::StartPortForward { .. } => "StartPortForward",
-            GuestRequest::ConsoleOpen { .. } => "ConsoleOpen",
-            GuestRequest::ConsoleClose { .. } => "ConsoleClose",
-            GuestRequest::ConsoleResize { .. } => "ConsoleResize",
-            GuestRequest::EntrypointStatus => "EntrypointStatus",
-            GuestRequest::ReadinessStatus => "ReadinessStatus",
-            GuestRequest::FsRead { .. } => "FsRead",
-            GuestRequest::FsWrite { .. } => "FsWrite",
-            GuestRequest::FsList { .. } => "FsList",
-            GuestRequest::FsStat { .. } => "FsStat",
-            GuestRequest::FsMkdir { .. } => "FsMkdir",
-            GuestRequest::FsRemove { .. } => "FsRemove",
-            GuestRequest::FsMove { .. } => "FsMove",
-            GuestRequest::ProcStart { .. } => "ProcStart",
-            GuestRequest::ProcList => "ProcList",
-            GuestRequest::ProcSignal { .. } => "ProcSignal",
-            GuestRequest::ProcSendInput { .. } => "ProcSendInput",
-            GuestRequest::ProcWait { .. } => "ProcWait",
-            GuestRequest::ProcKill { .. } => "ProcKill",
-            GuestRequest::MountVolume { .. } => "MountVolume",
-            GuestRequest::UnmountVolume { .. } => "UnmountVolume",
-            GuestRequest::UpdateIdleTimeout { .. } => "UpdateIdleTimeout",
-            GuestRequest::RunCode { .. } => "RunCode",
+            GuestRequest::ProtocolHello { .. } => Verb::ProtocolHello,
+            GuestRequest::WorkerStatus => Verb::WorkerStatus,
+            GuestRequest::SleepPrep { .. } => Verb::SleepPrep,
+            GuestRequest::Wake => Verb::Wake,
+            GuestRequest::Ping => Verb::Ping,
+            GuestRequest::IntegrationStatus => Verb::IntegrationStatus,
+            GuestRequest::CheckpointIntegrations { .. } => Verb::CheckpointIntegrations,
+            GuestRequest::ProbeStatus => Verb::ProbeStatus,
+            GuestRequest::Exec { .. } => Verb::Exec,
+            GuestRequest::RunEntrypoint { .. } => Verb::RunEntrypoint,
+            GuestRequest::PostRestore => Verb::PostRestore,
+            GuestRequest::FsDiff => Verb::FsDiff,
+            GuestRequest::StartPortForward { .. } => Verb::StartPortForward,
+            GuestRequest::ConsoleOpen { .. } => Verb::ConsoleOpen,
+            GuestRequest::ConsoleClose { .. } => Verb::ConsoleClose,
+            GuestRequest::ConsoleResize { .. } => Verb::ConsoleResize,
+            GuestRequest::EntrypointStatus => Verb::EntrypointStatus,
+            GuestRequest::ReadinessStatus => Verb::ReadinessStatus,
+            GuestRequest::FsRead { .. } => Verb::FsRead,
+            GuestRequest::FsWrite { .. } => Verb::FsWrite,
+            GuestRequest::FsList { .. } => Verb::FsList,
+            GuestRequest::FsStat { .. } => Verb::FsStat,
+            GuestRequest::FsMkdir { .. } => Verb::FsMkdir,
+            GuestRequest::FsRemove { .. } => Verb::FsRemove,
+            GuestRequest::FsMove { .. } => Verb::FsMove,
+            GuestRequest::ProcStart { .. } => Verb::ProcStart,
+            GuestRequest::ProcList => Verb::ProcList,
+            GuestRequest::ProcSignal { .. } => Verb::ProcSignal,
+            GuestRequest::ProcSendInput { .. } => Verb::ProcSendInput,
+            GuestRequest::ProcWait { .. } => Verb::ProcWait,
+            GuestRequest::ProcKill { .. } => Verb::ProcKill,
+            GuestRequest::MountVolume { .. } => Verb::MountVolume,
+            GuestRequest::UnmountVolume { .. } => Verb::UnmountVolume,
+            GuestRequest::UpdateIdleTimeout { .. } => Verb::UpdateIdleTimeout,
+            GuestRequest::RunCode { .. } => Verb::RunCode,
         }
+    }
+
+    /// The declared response contract for this request — which
+    /// `GuestResponse` variant(s) answer it, unary vs streamed. See
+    /// [`Verb::response_contract`].
+    pub fn response_contract(&self) -> ResponseContract {
+        self.verb().response_contract()
     }
 
     /// Profile class of this request. Exhaustive match — adding a new
@@ -928,6 +942,196 @@ pub enum GuestResponse {
         previous_secs: u64,
         applied_secs: u64,
     },
+}
+
+// ============================================================================
+// Machine-readable RPC contract.
+//
+// The pairing "which `GuestResponse` answers which `GuestRequest`" used to live
+// only in the agent's dispatch `match`, scattered across ~35 arms. Declaring it
+// here makes it the single source of truth a typed RPC-client generator (host
+// or SDK) can consume, and lets a unit test assert no response variant is
+// orphaned. `Verb` / `ResponseVariant` are typed name-only projections of the
+// two wire enums so the contract references them by a compiler-checked
+// identifier, never a stringly name.
+// ============================================================================
+
+/// Declares a unit enum that is the name-only projection of a wire enum,
+/// with a `ALL` slice (every variant, declaration order) and a `name()`
+/// returning the variant's identifier. `ALL` is generated from the same
+/// variant list as the enum, so the two can't drift.
+macro_rules! name_enum {
+    ($(#[$m:meta])* $vis:vis enum $name:ident { $($v:ident),+ $(,)? }) => {
+        $(#[$m])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        $vis enum $name { $($v),+ }
+
+        impl $name {
+            /// Every variant, in declaration order.
+            pub const ALL: &'static [$name] = &[$($name::$v),+];
+
+            /// The variant's wire-stable identifier (its Rust ident).
+            pub fn name(self) -> &'static str {
+                match self { $($name::$v => stringify!($v)),+ }
+            }
+        }
+    };
+}
+
+name_enum! {
+    /// Typed projection of every `GuestRequest` verb. Enumerable (`ALL`) so
+    /// the contract can be iterated; `GuestRequest::verb()` keeps it in
+    /// lockstep with the wire enum (exhaustive match).
+    pub enum Verb {
+        ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, IntegrationStatus,
+        CheckpointIntegrations, ProbeStatus, Exec, RunEntrypoint, PostRestore,
+        FsDiff, StartPortForward, ConsoleOpen, ConsoleClose, ConsoleResize,
+        EntrypointStatus, ReadinessStatus, FsRead, FsWrite, FsList, FsStat,
+        FsMkdir, FsRemove, FsMove, ProcStart, ProcList, ProcSignal,
+        ProcSendInput, ProcWait, ProcKill, MountVolume, UnmountVolume,
+        UpdateIdleTimeout, RunCode,
+    }
+}
+
+name_enum! {
+    /// Typed projection of every `GuestResponse` variant.
+    /// `GuestResponse::variant()` keeps it in lockstep with the wire enum
+    /// (exhaustive match).
+    pub enum ResponseVariant {
+        ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
+        Pong, Error, UnsupportedInProfile, IntegrationStatusReport,
+        CheckpointResult, ProbeStatusReport, EntrypointEvent, ExecEvent,
+        PostRestoreAck, FsDiffResult, PortForwardStarted, ConsoleOpened,
+        ConsoleExited, ConsoleResized, EntrypointStatusReport,
+        ReadinessStatusReport, FsResult, ProcResult, ProcWaitEvent,
+        VolumeMountResult, UpdateIdleTimeoutAck,
+    }
+}
+
+impl ResponseVariant {
+    /// Universal responses any request may receive instead of its
+    /// request-specific answer: a protocol-layer profile rejection
+    /// (`UnsupportedInProfile`) or a generic agent `Error`. Excluded from
+    /// per-request contracts — a typed client handles them globally.
+    pub fn is_universal(self) -> bool {
+        matches!(
+            self,
+            ResponseVariant::Error | ResponseVariant::UnsupportedInProfile
+        )
+    }
+}
+
+/// Whether a request is answered by a single response frame, or by a stream
+/// of frames terminated by a terminal event (`is_terminal()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseKind {
+    /// Exactly one `GuestResponse` frame.
+    Unary,
+    /// A sequence of `GuestResponse` frames, read until terminal.
+    Stream,
+}
+
+/// The declared response contract for a request verb: which `GuestResponse`
+/// variant(s) answer it, and whether the answer is a single frame or a
+/// terminal-terminated stream. The universal responses (`Error`,
+/// `UnsupportedInProfile`) are not listed — they may answer any request.
+#[derive(Debug, Clone, Copy)]
+pub struct ResponseContract {
+    /// The request-specific response variant(s) this verb may produce.
+    pub responses: &'static [ResponseVariant],
+    /// Single-frame vs streamed.
+    pub kind: ResponseKind,
+}
+
+impl Verb {
+    /// The declared host↔guest response contract for this verb — the
+    /// machine-readable pairing previously implicit in the agent dispatch.
+    pub fn response_contract(self) -> ResponseContract {
+        use ResponseKind::{Stream, Unary};
+        use ResponseVariant as R;
+        let unary = |responses: &'static [R]| ResponseContract {
+            responses,
+            kind: Unary,
+        };
+        let stream = |responses: &'static [R]| ResponseContract {
+            responses,
+            kind: Stream,
+        };
+        match self {
+            Verb::ProtocolHello => unary(&[R::ProtocolHelloAck, R::ProtocolMismatch]),
+            Verb::WorkerStatus => unary(&[R::WorkerStatus]),
+            Verb::SleepPrep => unary(&[R::SleepPrepAck]),
+            Verb::Wake => unary(&[R::WakeAck]),
+            Verb::Ping => unary(&[R::Pong]),
+            Verb::IntegrationStatus => unary(&[R::IntegrationStatusReport]),
+            Verb::CheckpointIntegrations => unary(&[R::CheckpointResult]),
+            Verb::ProbeStatus => unary(&[R::ProbeStatusReport]),
+            Verb::Exec => stream(&[R::ExecEvent]),
+            Verb::RunEntrypoint => stream(&[R::EntrypointEvent]),
+            Verb::PostRestore => unary(&[R::PostRestoreAck]),
+            Verb::FsDiff => unary(&[R::FsDiffResult]),
+            Verb::StartPortForward => unary(&[R::PortForwardStarted]),
+            Verb::ConsoleOpen => unary(&[R::ConsoleOpened]),
+            Verb::ConsoleClose => unary(&[R::ConsoleExited]),
+            Verb::ConsoleResize => unary(&[R::ConsoleResized]),
+            Verb::EntrypointStatus => unary(&[R::EntrypointStatusReport]),
+            Verb::ReadinessStatus => unary(&[R::ReadinessStatusReport]),
+            Verb::FsRead
+            | Verb::FsWrite
+            | Verb::FsList
+            | Verb::FsStat
+            | Verb::FsMkdir
+            | Verb::FsRemove
+            | Verb::FsMove => unary(&[R::FsResult]),
+            Verb::ProcStart
+            | Verb::ProcList
+            | Verb::ProcSignal
+            | Verb::ProcSendInput
+            | Verb::ProcKill => unary(&[R::ProcResult]),
+            Verb::ProcWait => stream(&[R::ProcWaitEvent]),
+            Verb::MountVolume | Verb::UnmountVolume => unary(&[R::VolumeMountResult]),
+            Verb::UpdateIdleTimeout => unary(&[R::UpdateIdleTimeoutAck]),
+            Verb::RunCode => stream(&[R::ExecEvent]),
+        }
+    }
+}
+
+impl GuestResponse {
+    /// Name-only projection. Exhaustive — adding a `GuestResponse` variant
+    /// fails to compile until mapped here, keeping `ResponseVariant` in
+    /// lockstep with the wire enum.
+    pub fn variant(&self) -> ResponseVariant {
+        match self {
+            GuestResponse::ProtocolHelloAck { .. } => ResponseVariant::ProtocolHelloAck,
+            GuestResponse::ProtocolMismatch { .. } => ResponseVariant::ProtocolMismatch,
+            GuestResponse::WorkerStatus { .. } => ResponseVariant::WorkerStatus,
+            GuestResponse::SleepPrepAck { .. } => ResponseVariant::SleepPrepAck,
+            GuestResponse::WakeAck { .. } => ResponseVariant::WakeAck,
+            GuestResponse::Pong => ResponseVariant::Pong,
+            GuestResponse::Error { .. } => ResponseVariant::Error,
+            GuestResponse::UnsupportedInProfile { .. } => ResponseVariant::UnsupportedInProfile,
+            GuestResponse::IntegrationStatusReport { .. } => {
+                ResponseVariant::IntegrationStatusReport
+            }
+            GuestResponse::CheckpointResult { .. } => ResponseVariant::CheckpointResult,
+            GuestResponse::ProbeStatusReport { .. } => ResponseVariant::ProbeStatusReport,
+            GuestResponse::EntrypointEvent(_) => ResponseVariant::EntrypointEvent,
+            GuestResponse::ExecEvent(_) => ResponseVariant::ExecEvent,
+            GuestResponse::PostRestoreAck { .. } => ResponseVariant::PostRestoreAck,
+            GuestResponse::FsDiffResult { .. } => ResponseVariant::FsDiffResult,
+            GuestResponse::PortForwardStarted { .. } => ResponseVariant::PortForwardStarted,
+            GuestResponse::ConsoleOpened { .. } => ResponseVariant::ConsoleOpened,
+            GuestResponse::ConsoleExited { .. } => ResponseVariant::ConsoleExited,
+            GuestResponse::ConsoleResized { .. } => ResponseVariant::ConsoleResized,
+            GuestResponse::EntrypointStatusReport { .. } => ResponseVariant::EntrypointStatusReport,
+            GuestResponse::ReadinessStatusReport(_) => ResponseVariant::ReadinessStatusReport,
+            GuestResponse::FsResult(_) => ResponseVariant::FsResult,
+            GuestResponse::ProcResult(_) => ResponseVariant::ProcResult,
+            GuestResponse::ProcWaitEvent(_) => ResponseVariant::ProcWaitEvent,
+            GuestResponse::VolumeMountResult(_) => ResponseVariant::VolumeMountResult,
+            GuestResponse::UpdateIdleTimeoutAck { .. } => ResponseVariant::UpdateIdleTimeoutAck,
+        }
+    }
 }
 
 /// Guest-agent control protocol capability. Closed enum so host and
@@ -5460,5 +5664,94 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert!(matches!(got[0], ExecEvent::Stderr { ref chunk } if chunk == b"e"));
         assert!(matches!(term, ExecEvent::Exit { code: 2 }));
+    }
+}
+
+#[cfg(test)]
+mod rpc_contract_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn ping_is_unary_pong() {
+        let c = Verb::Ping.response_contract();
+        assert_eq!(c.kind, ResponseKind::Unary);
+        assert_eq!(c.responses, &[ResponseVariant::Pong]);
+    }
+
+    #[test]
+    fn run_entrypoint_streams_entrypoint_event() {
+        let c = Verb::RunEntrypoint.response_contract();
+        assert_eq!(c.kind, ResponseKind::Stream);
+        assert_eq!(c.responses, &[ResponseVariant::EntrypointEvent]);
+    }
+
+    #[test]
+    fn protocol_hello_lists_both_outcomes() {
+        let c = Verb::ProtocolHello.response_contract();
+        assert_eq!(c.kind, ResponseKind::Unary);
+        let got: BTreeSet<_> = c.responses.iter().map(|r| r.name()).collect();
+        assert_eq!(
+            got,
+            BTreeSet::from(["ProtocolHelloAck", "ProtocolMismatch"])
+        );
+    }
+
+    #[test]
+    fn streaming_verbs_are_exactly_the_four() {
+        let streaming: BTreeSet<_> = Verb::ALL
+            .iter()
+            .filter(|v| v.response_contract().kind == ResponseKind::Stream)
+            .map(|v| v.name())
+            .collect();
+        assert_eq!(
+            streaming,
+            BTreeSet::from(["Exec", "ProcWait", "RunCode", "RunEntrypoint"])
+        );
+    }
+
+    // Drift guard: every GuestResponse variant must be answered by some
+    // request's contract, or be a universal (Error / UnsupportedInProfile).
+    // Adding a GuestResponse variant without wiring it fails this test.
+    #[test]
+    fn every_response_variant_is_contracted_or_universal() {
+        let mut covered: BTreeSet<&'static str> = BTreeSet::new();
+        for v in Verb::ALL {
+            for r in v.response_contract().responses {
+                covered.insert(r.name());
+            }
+        }
+        for r in ResponseVariant::ALL.iter().filter(|r| r.is_universal()) {
+            covered.insert(r.name());
+        }
+        let all: BTreeSet<_> = ResponseVariant::ALL.iter().map(|r| r.name()).collect();
+        assert_eq!(covered, all);
+    }
+
+    #[test]
+    fn contracts_never_list_universal_responses() {
+        for v in Verb::ALL {
+            for r in v.response_contract().responses {
+                assert!(
+                    !r.is_universal(),
+                    "{} lists universal response {}",
+                    v.name(),
+                    r.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn verb_projection_matches_wire_verb_name() {
+        let req = GuestRequest::Ping;
+        assert_eq!(req.verb(), Verb::Ping);
+        assert_eq!(req.verb().name(), req.verb_name());
+    }
+
+    #[test]
+    fn response_variant_projection_round_trips() {
+        assert_eq!(GuestResponse::Pong.variant(), ResponseVariant::Pong);
+        assert_eq!(GuestResponse::Pong.variant().name(), "Pong");
     }
 }
