@@ -13,8 +13,7 @@ use mvm::vsock_transport::{self, VsockTransport};
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_guest::integrations::{IntegrationStateReport, IntegrationStatus};
 use mvm_guest::vsock::{
-    GUEST_AGENT_PORT, GuestCapability, GuestRequest, GuestResponse, negotiate_protocol,
-    send_request,
+    GUEST_AGENT_PORT, GuestCapability, GuestRequest, GuestResponse, call_unary, negotiate_protocol,
 };
 
 /// Persist a host-observed readiness milestone on the VM's registry
@@ -91,12 +90,8 @@ fn query_services_via_transport(vm_name: &str) -> anyhow::Result<Vec<Integration
     let transport: Box<dyn VsockTransport> = vsock_transport::for_vm(vm_name)?;
     let mut stream = transport.connect(GUEST_AGENT_PORT)?;
     let _ = negotiate_protocol(&mut stream, vec![GuestCapability::IntegrationStatus])?;
-    let resp = send_request(&mut stream, &GuestRequest::IntegrationStatus)?;
-    match resp {
+    match call_unary(&mut stream, &GuestRequest::IntegrationStatus)? {
         GuestResponse::IntegrationStatusReport { integrations } => Ok(integrations),
-        GuestResponse::Error { message } => {
-            anyhow::bail!("guest integration status error: {message}")
-        }
         other => anyhow::bail!("unexpected response to IntegrationStatus: {other:?}"),
     }
 }

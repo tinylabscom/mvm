@@ -184,16 +184,11 @@ pub(in crate::commands) fn console_interactive(name: &str) -> Result<()> {
     let req = mvm_guest::vsock::GuestRequest::ConsoleOpen { cols, rows };
     // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
-    let resp = mvm_guest::vsock::send_request(&mut stream, &req)?;
-
-    let (session_id, data_port) = match resp {
+    let (session_id, data_port) = match mvm_guest::vsock::call_unary(&mut stream, &req)? {
         mvm_guest::vsock::GuestResponse::ConsoleOpened {
             session_id,
             data_port,
         } => (session_id, data_port),
-        mvm_guest::vsock::GuestResponse::Error { message } => {
-            anyhow::bail!("Console open failed: {message}");
-        }
         other => {
             anyhow::bail!("Unexpected response: {other:?}");
         }
