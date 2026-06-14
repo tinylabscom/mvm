@@ -768,6 +768,26 @@ class _LiveTransport:
                 stderr=result.stderr.decode("utf-8", errors="replace"),
             )
 
+    def cp(self, source: str, destination: str) -> None:
+        """Shell ``mvmctl cp <source> <destination>``. Endpoints use
+        ``VM:/absolute/path`` for the guest side; `mvmctl cp` reads the
+        host file and streams it over the agent fs RPC (and back)."""
+        shell = [self.mvm_cli_bin, "cp", source, destination]
+        try:
+            result = subprocess.run(shell, check=False, capture_output=True)
+        except FileNotFoundError as exc:
+            raise SandboxLiveError(
+                f"`{self.mvm_cli_bin}` not found on disk; check MVM_CLI_BIN",
+                argv=shell,
+            ) from exc
+        if result.returncode != 0:
+            raise SandboxLiveError(
+                f"`mvmctl cp` failed with exit code {result.returncode}",
+                argv=shell,
+                exit_code=result.returncode,
+                stderr=result.stderr.decode("utf-8", errors="replace"),
+            )
+
     def kill(self) -> None:
         """Shell ``mvmctl down <vm>``. Idempotent — repeated kills
         from the context manager + an explicit `sb.kill()` are
@@ -1039,6 +1059,49 @@ class Sandbox:
                 "the recording is lowered, not at call time)."
             )
         return self._live.commands_exec(list(argv), env, timeout=timeout, cwd=cwd)
+
+    def copy_in(self, host_path: str, guest_path: str) -> None:
+        """Copy a host file into the running sandbox at ``guest_path``.
+
+        Shells ``mvmctl cp <host_path> <vm>:<guest_path>`` — the host
+        file streams into the guest over the agent fs RPC.
+
+        Live mode only: in record mode this raises
+        :class:`SandboxModeError`. To stage a file declaratively for a
+        recorded workload, use ``files.write(guest_path, content)``.
+        """
+        if not isinstance(host_path, str) or not host_path:
+            raise ValueError("host_path must be a non-empty str")
+        if not isinstance(guest_path, str) or not guest_path:
+            raise ValueError("guest_path must be a non-empty str")
+        if self._live is None:
+            raise SandboxModeError(
+                "`Sandbox.copy_in` is a live-mode operation; under "
+                "MVM_SDK_MODE=record use `files.write(path, content)` to "
+                "stage a file declaratively."
+            )
+        self._live.cp(host_path, f"{self._live.vm_id}:{guest_path}")
+
+    def copy_out(self, guest_path: str, host_path: str) -> None:
+        """Copy a file out of the running sandbox to ``host_path``.
+
+        Shells ``mvmctl cp <vm>:<guest_path> <host_path>`` — the guest
+        file streams back over the agent fs RPC.
+
+        Live mode only: pulling a file out of a running VM has no
+        record-mode meaning, so in record mode this raises
+        :class:`SandboxModeError`.
+        """
+        if not isinstance(guest_path, str) or not guest_path:
+            raise ValueError("guest_path must be a non-empty str")
+        if not isinstance(host_path, str) or not host_path:
+            raise ValueError("host_path must be a non-empty str")
+        if self._live is None:
+            raise SandboxModeError(
+                "`Sandbox.copy_out` is a live-mode operation; it pulls a "
+                "file from a running VM and has no record-mode meaning."
+            )
+        self._live.cp(f"{self._live.vm_id}:{guest_path}", host_path)
 
     def kill(self) -> None:
         """Issue a ``kill`` against the active transport.

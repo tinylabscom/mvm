@@ -500,6 +500,36 @@ export class LiveTransport {
     }
   }
 
+  cp(source: string, destination: string): void {
+    const shell = [this.mvmCliBin, "cp", source, destination];
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const child = require("node:child_process") as typeof import("node:child_process");
+    let result;
+    try {
+      result = child.spawnSync(shell[0], shell.slice(1));
+    } catch (err) {
+      throw new SandboxLiveError(
+        `\`${this.mvmCliBin}\` not found on disk; check MVM_CLI_BIN: ${String(err)}`,
+        { argv: shell },
+      );
+    }
+    if (result.error) {
+      throw new SandboxLiveError(`failed to spawn: ${result.error.message}`, {
+        argv: shell,
+      });
+    }
+    if (result.status !== 0) {
+      throw new SandboxLiveError(
+        `\`mvmctl cp\` failed with exit code ${result.status}`,
+        {
+          argv: shell,
+          exitCode: result.status,
+          stderr: result.stderr ? result.stderr.toString("utf-8") : "",
+        },
+      );
+    }
+  }
+
   kill(): void {
     if (this.killed) return;
     this.killed = true;
@@ -691,6 +721,53 @@ export class Sandbox {
       ops: [],
     };
     return new Sandbox(wid, null);
+  }
+
+  /** Copy a host file into the running sandbox at `guestPath`.
+   *
+   *  Shells `mvmctl cp <hostPath> <vm>:<guestPath>` — the host file
+   *  streams into the guest over the agent fs RPC.
+   *
+   *  Live mode only: in record mode this throws `SandboxModeError`. To
+   *  stage a file declaratively for a recorded workload, use
+   *  `files.write(guestPath, content)`. */
+  copyIn(hostPath: string, guestPath: string): void {
+    if (typeof hostPath !== "string" || hostPath.length === 0) {
+      throw new TypeError("hostPath must be a non-empty string");
+    }
+    if (typeof guestPath !== "string" || guestPath.length === 0) {
+      throw new TypeError("guestPath must be a non-empty string");
+    }
+    if (this._live === null) {
+      throw new SandboxModeError(
+        "`Sandbox.copyIn` is a live-mode operation; under MVM_SDK_MODE=record " +
+          "use `files.write(path, content)` to stage a file declaratively.",
+      );
+    }
+    this._live.cp(hostPath, `${this._live.vmId}:${guestPath}`);
+  }
+
+  /** Copy a file out of the running sandbox to `hostPath`.
+   *
+   *  Shells `mvmctl cp <vm>:<guestPath> <hostPath>` — the guest file
+   *  streams back over the agent fs RPC.
+   *
+   *  Live mode only: pulling a file from a running VM has no record-mode
+   *  meaning, so in record mode this throws `SandboxModeError`. */
+  copyOut(guestPath: string, hostPath: string): void {
+    if (typeof guestPath !== "string" || guestPath.length === 0) {
+      throw new TypeError("guestPath must be a non-empty string");
+    }
+    if (typeof hostPath !== "string" || hostPath.length === 0) {
+      throw new TypeError("hostPath must be a non-empty string");
+    }
+    if (this._live === null) {
+      throw new SandboxModeError(
+        "`Sandbox.copyOut` is a live-mode operation; it pulls a file from a " +
+          "running VM and has no record-mode meaning.",
+      );
+    }
+    this._live.cp(`${this._live.vmId}:${guestPath}`, hostPath);
   }
 
   kill(): void {

@@ -52,6 +52,7 @@ def _write_fixture_mvmctl(
     up_exit: int = 0,
     proc_exit: int = 0,
     fs_exit: int = 0,
+    cp_exit: int = 0,
     down_exit: int = 0,
 ) -> Path:
     """Write a shell script that pretends to be `mvmctl`. It
@@ -95,6 +96,9 @@ case "$verb" in
       cat > {stdin_dir!s}/fs-write-stdin.bin
     fi
     exit {fs_exit}
+    ;;
+  cp)
+    exit {cp_exit}
     ;;
   down)
     exit {down_exit}
@@ -342,3 +346,68 @@ def test_one_sandbox_per_process_in_live_mode(tmp_path: Path) -> None:
     mvm.Sandbox.create("python-dev")
     with pytest.raises(RuntimeError, match="already active"):
         mvm.Sandbox.create("python-dev")
+
+
+# ── copy_in / copy_out (Plan 125 B1) ─────────────────────────────────
+
+
+def test_copy_in_shells_to_mvmctl_cp(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-cp-vm", "build_mode": "dev"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    host_file = tmp_path / "local.txt"
+    host_file.write_text("hello")
+
+    sb = mvm.Sandbox.create("python-dev")
+    sb.copy_in(str(host_file), "/app/local.txt")
+
+    calls = _read_fixture_log(tmp_path)
+    assert any(
+        c.startswith(f"cp {host_file} sb-cp-vm:/app/local.txt") for c in calls
+    ), calls
+
+
+def test_copy_out_shells_to_mvmctl_cp(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-cp-vm", "build_mode": "dev"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    dest = tmp_path / "out.txt"
+
+    sb = mvm.Sandbox.create("python-dev")
+    sb.copy_out("/app/out.txt", str(dest))
+
+    calls = _read_fixture_log(tmp_path)
+    assert any(
+        c.startswith(f"cp sb-cp-vm:/app/out.txt {dest}") for c in calls
+    ), calls
+
+
+def test_copy_in_propagates_mvmctl_failure(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-cp-vm", "build_mode": "dev"},
+        cp_exit=4,
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    host_file = tmp_path / "local.txt"
+    host_file.write_text("x")
+
+    sb = mvm.Sandbox.create("python-dev")
+    with pytest.raises(mvm.SandboxLiveError):
+        sb.copy_in(str(host_file), "/app/local.txt")
+
+
+def test_copy_in_refused_in_record_mode() -> None:
+    # Live-only, like exec — record mode has no return-value materialisation
+    # for a host→guest copy; declarative staging uses files.write.
+    os.environ["MVM_SDK_MODE"] = "record"
+    sb = mvm.Sandbox.create("python-dev")
+    with pytest.raises(mvm.SandboxModeError):
+        sb.copy_in("/tmp/x", "/app/x")
