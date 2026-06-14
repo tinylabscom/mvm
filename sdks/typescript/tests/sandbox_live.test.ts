@@ -20,6 +20,7 @@ interface FixtureOptions {
   upExit?: number;
   procExit?: number;
   fsExit?: number;
+  cpExit?: number;
   downExit?: number;
 }
 
@@ -32,6 +33,7 @@ function writeFixtureMvmctl(opts: FixtureOptions): string {
   const upExit = opts.upExit ?? 0;
   const procExit = opts.procExit ?? 0;
   const fsExit = opts.fsExit ?? 0;
+  const cpExit = opts.cpExit ?? 0;
   const downExit = opts.downExit ?? 0;
 
   const script = path.join(tmpDir, "fake-mvmctl");
@@ -64,6 +66,9 @@ case "$verb" in
       cat > ${JSON.stringify(path.join(stdinDir, "fs-write-stdin.bin"))}
     fi
     exit ${fsExit}
+    ;;
+  cp)
+    exit ${cpExit}
     ;;
   down)
     exit ${downExit}
@@ -307,5 +312,66 @@ describe("Sandbox.kill (live mode)", () => {
 
     const downCalls = readFixtureLog().filter((c) => c.startsWith("down "));
     expect(downCalls.length).toBe(1);
+  });
+});
+
+// ── copyIn / copyOut (Plan 125 B1) ───────────────────────────────────
+
+describe("Sandbox.copyIn / copyOut (live mode)", () => {
+  it("copyIn shells to mvmctl cp host -> vm:guest", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-cp-vm", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    const hostFile = path.join(tmpDir, "local.txt");
+    fs.writeFileSync(hostFile, "hello");
+
+    const sb = mvm.Sandbox.create("python-dev");
+    sb.copyIn(hostFile, "/app/local.txt");
+
+    const calls = readFixtureLog();
+    expect(
+      calls.some((c) => c.startsWith(`cp ${hostFile} sb-cp-vm:/app/local.txt`)),
+    ).toBe(true);
+  });
+
+  it("copyOut shells to mvmctl cp vm:guest -> host", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-cp-vm", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    const dest = path.join(tmpDir, "out.txt");
+
+    const sb = mvm.Sandbox.create("python-dev");
+    sb.copyOut("/app/out.txt", dest);
+
+    const calls = readFixtureLog();
+    expect(
+      calls.some((c) => c.startsWith(`cp sb-cp-vm:/app/out.txt ${dest}`)),
+    ).toBe(true);
+  });
+
+  it("copyIn propagates a mvmctl cp failure", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-cp-vm", build_mode: "dev" },
+      cpExit: 4,
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    const hostFile = path.join(tmpDir, "local.txt");
+    fs.writeFileSync(hostFile, "x");
+
+    const sb = mvm.Sandbox.create("python-dev");
+    expect(() => sb.copyIn(hostFile, "/app/local.txt")).toThrow(
+      mvm.SandboxLiveError,
+    );
+  });
+
+  it("copyIn is refused in record mode", () => {
+    process.env.MVM_SDK_MODE = "record";
+    const sb = mvm.Sandbox.create("python-dev");
+    expect(() => sb.copyIn("/tmp/x", "/app/x")).toThrow(mvm.SandboxModeError);
   });
 });

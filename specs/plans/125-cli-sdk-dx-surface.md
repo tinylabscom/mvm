@@ -45,9 +45,10 @@
 
 120 shipped the minimal `Sandbox.exec`. Finish the surface on the same class.
 
-**Files:** `sdks/python/mvm/_sandbox.py`; tests `sdks/python/tests/`.
+**Files:** `sdks/python/mvm/_sandbox.py` **and `sdks/typescript/src/_sandbox.ts`** (the two SDKs are mirrors and must stay in lockstep — the capability lives in `mvmctl`, both are thin wrappers; build both per task, not Python-then-TS-later).
 
-- [ ] **Task B1 — copy + ports.** Failing tests: `sb.copy_in(host, guest)` / `sb.copy_out(guest, host)` round-trip a file (over the agent `fs_rpc`); `sb.forward(host_port, guest_port)` exposes a port. Implement over the existing fs/forward RPC. Commit.
+- [x] **Task B1a — copy (both SDKs).** `sb.copy_in(host, guest)` / `sb.copy_out(guest, host)` (Python) + `sb.copyIn` / `sb.copyOut` (TS) shell `mvmctl cp <host> <vm>:<guest>` / `mvmctl cp <vm>:<guest> <host>` — the existing `mvmctl cp` already round-trips a file host↔guest over the agent fs RPC, so the SDKs are thin wrappers (`_LiveTransport.cp` / `LiveTransport.cp`). Live-mode only (like `exec`): record mode raises `SandboxModeError` (declarative staging uses `files.write`). Tests via the fixture-`mvmctl` harness assert the shelled argv + failure propagation + record-mode refusal — Python (4 tests, full suite 138 green) + TS (4 tests, full suite 71 green, `tsc`/typecheck clean).
+- [ ] **Task B1b — ports/forward (both SDKs).** `sb.forward(host_port, guest_port)`. Deferred from B1a because **`mvmctl forward` blocks** — it spawns socat proxies and waits until Ctrl-C (`forward.rs`), so the SDK can't shell-and-wait; it needs detached background-process spawn + lifecycle tracking + teardown wiring into `Sandbox.kill`/`__exit__`, in both SDKs. A distinct pattern from `cp`'s request/response, hence its own task.
 - [ ] **Task B2 — async surface.** Failing test: `async with Sandbox.create(image=…) as sb: r = await sb.exec(...)` works; the sync surface (greenlet or thread-bridged) stays for `Sandbox.create(...).exec(...)`. Implement `__aenter__`/`__aexit__` + `async def exec` alongside the sync ones (one impl, two faces). Keep `SandboxDevOnly` on both. Commit.
 - [ ] **Task B3 — lifecycle polish.** `info()`, `id`, context-manager teardown, the one-live-process invariant (already in `_sandbox.py`). Tests for double-create refusal + clean teardown. Commit.
 
