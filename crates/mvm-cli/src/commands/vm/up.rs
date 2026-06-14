@@ -1586,6 +1586,10 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
 
         enforce_shares_if(&admission, &start_config.volumes)?;
         let backend = AnyBackend::from_hypervisor(effective_hypervisor);
+        if let Err(e) = mvm_backend::workload_backend::require_workload_backend(&backend) {
+            emit_failed_if(&admission, "backend-start", &e);
+            return Err(e);
+        }
         if let Err(e) = backend.start(&start_config) {
             emit_failed_if(&admission, "backend-start", &e);
             return Err(e);
@@ -2151,6 +2155,10 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         match claimed {
             Some(name) => vm_name_owned = name,
             None => {
+                if let Err(e) = mvm_backend::workload_backend::require_workload_backend(&backend) {
+                    emit_failed_if(&admission_main, "backend-start", &e);
+                    return Err(e);
+                }
                 if let Err(e) = backend.start(&start_config) {
                     emit_failed_if(&admission_main, "backend-start", &e);
                     return Err(e);
@@ -2417,6 +2425,13 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             }
             enforce_shares_if(&watch_admission, &w_start_config.volumes)?;
             let w_backend = AnyBackend::from_hypervisor(effective_hypervisor);
+            if let Err(e) = mvm_backend::workload_backend::require_workload_backend(&w_backend) {
+                emit_failed_if(&watch_admission, "backend-start", &e);
+                ui::warn(&format!(
+                    "Could not start VM: {e}; waiting for next change..."
+                ));
+                continue;
+            }
             if let Err(e) = w_backend.start(&w_start_config) {
                 emit_failed_if(&watch_admission, "backend-start", &e);
                 ui::warn(&format!(
