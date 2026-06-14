@@ -254,15 +254,20 @@ impl VmBackend for QemuBackend {
                     // to install, so `terminator_listen: None`. The vsock
                     // substitution channel alone is unchanged.
                     if let Err(e) = spawn_substitution_endpoint(
-                        &config.name,
-                        &state_dir,
-                        tenant,
-                        &secrets,
-                        &redaction,
-                        None,
-                        // No transparent terminator on slirp ⇒ no TLS leg, so no
-                        // per-VM intermediate (https termination is FC-scoped).
-                        None,
+                        crate::substitution_spawn::SubstitutionSpawnParams {
+                            vm_name: &config.name,
+                            state_dir: &state_dir,
+                            tenant,
+                            secrets: &secrets,
+                            redaction: &redaction,
+                            transport: crate::substitution_spawn::EndpointTransport::Vsock {
+                                port: mvm_guest::vsock::SUBSTITUTION_PORT,
+                            },
+                            terminator_listen: None,
+                            // No transparent terminator on slirp ⇒ no TLS leg, so
+                            // no per-VM intermediate (https is FC-scoped).
+                            tls_intermediate: None,
+                        },
                     ) {
                         rollback_qemu(&state_dir, &pid_file);
                         return Err(e);

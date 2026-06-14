@@ -46,6 +46,79 @@ use std::time::{Duration, Instant, SystemTime};
 /// libkrun backend (Linux KVM / macOS Hypervisor.framework).
 pub struct LibkrunBackend;
 
+/// RAII reaper for the per-VM substitution endpoint, armed during `start`
+/// while the VM is being wired and dropped on any early-return so the
+/// decrypted-secret process can't outlive a failed launch. Defused once the
+/// VM is fully up (the normal `stop` path then owns teardown). Mirrors the FC
+/// `EndpointGuard` in `microvm.rs`.
+struct EndpointGuard {
+    vm_name: Option<String>,
+}
+
+impl EndpointGuard {
+    fn new(vm_name: &str) -> Self {
+        Self {
+            vm_name: Some(vm_name.to_string()),
+        }
+    }
+    /// A guard for a VM that spawned no endpoint (no secrets) — Drop is a no-op.
+    fn defused() -> Self {
+        Self { vm_name: None }
+    }
+    fn defuse(&mut self) {
+        self.vm_name = None;
+    }
+}
+
+impl Drop for EndpointGuard {
+    fn drop(&mut self) {
+        if let Some(ref name) = self.vm_name {
+            tracing::warn!(vm = %name, "EndpointGuard: reaping orphaned substitution endpoint");
+            crate::substitution_spawn::reap_substitution_endpoint(
+                &mvm_core::config::vm_state_dir(name),
+                name,
+            );
+        }
+    }
+}
+
+/// Spawn the per-VM substitution endpoint when the admitted plan carries egress
+/// secrets, returning an armed [`EndpointGuard`]; a secret-free plan (or no
+/// `plan.json`) yields a defused no-op guard. The libkrun guest reaches the
+/// endpoint by dialing `connect_host_vsock(SUBSTITUTION_PORT)`; libkrun proxies
+/// that to the per-VM UDS the endpoint binds, so the transport is `Uds`. No
+/// transparent terminator on this path (`terminator_listen: None`), hence no
+/// per-VM TLS intermediate.
+fn spawn_libkrun_egress_endpoint_if_needed(
+    vm_name: &str,
+    state_dir: &Path,
+) -> Result<EndpointGuard> {
+    use crate::substitution_spawn::{
+        EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
+    };
+    let Some((secrets, redaction, tenant)) =
+        crate::egress_shared::decode_plan_secrets_from_state(state_dir)?
+    else {
+        return Ok(EndpointGuard::defused());
+    };
+    spawn_substitution_endpoint(SubstitutionSpawnParams {
+        vm_name,
+        state_dir,
+        tenant: &tenant,
+        secrets: &secrets,
+        redaction: &redaction,
+        transport: EndpointTransport::Uds {
+            path: mvm_core::config::vm_vsock_port_socket(
+                vm_name,
+                mvm_guest::vsock::SUBSTITUTION_PORT,
+            ),
+        },
+        terminator_listen: None,
+        tls_intermediate: None,
+    })?;
+    Ok(EndpointGuard::new(vm_name))
+}
+
 /// How long [`LibkrunBackend::start`] waits for the supervisor to
 /// write its PID file before giving up and killing the child.
 const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -125,7 +198,11 @@ fn krun_context_base(
         .with_vsock_socket_dir(state_dir.to_string_lossy().into_owned())
         .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT)
         // Workload exit-code capture (listen=false → host binds).
-        .add_host_listen_port(mvm_guest::vsock::WORKLOAD_EXIT_PORT);
+        .add_host_listen_port(mvm_guest::vsock::WORKLOAD_EXIT_PORT)
+        // Egress substitution channel (listen=false → host binds). Registered
+        // unconditionally; fail-closed: when the plan carries no secrets nothing
+        // binds the UDS, so a stray guest dial gets ECONNREFUSED.
+        .add_host_listen_port(mvm_guest::vsock::SUBSTITUTION_PORT);
     krun.rootfs_path = None;
     // Select the gateway through the same
     // `resolve_networking_mode` the builder VM + cold path use (TSI is rejected by the
@@ -476,15 +553,30 @@ impl VmBackend for LibkrunBackend {
             std::thread::sleep(Duration::from_millis(50));
         }
 
+        // The supervisor is up and its vsock listeners are bound. Spawn the
+        // egress substitution endpoint if the admitted plan carries secrets so
+        // the guest's egress can resolve placeholders host-side (the guest never
+        // holds the real secret). Armed via the guard until the VM is fully up;
+        // a spawn failure rolls the launch back (fail closed). When the plan has
+        // no secrets this is a defused no-op.
+        let mut endpoint_guard = spawn_libkrun_egress_endpoint_if_needed(&config.name, &state_dir)?;
+
         ui::success(&format!(
             "libkrun VM '{}' started (pid file: {}).",
             config.name,
             pid_file.display()
         ));
+        endpoint_guard.defuse();
         Ok(VmId(config.name.clone()))
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
+        // Reap the per-VM substitution endpoint first (no-op when none was
+        // spawned) so a crashed VM's decrypted-secret process can't outlive the
+        // guest. Mirrors the FC `stop_vm` ordering — safe because reap is a
+        // no-op when nothing exists, even before the not-running early return.
+        crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+
         let pid_path = vm_libkrun_pid(&id.0);
         let pid = match read_pid(&pid_path) {
             Some(p) => p,
@@ -1300,6 +1392,57 @@ mod tests {
                 .vsock_ports
                 .contains(&mvm_guest::vsock::WORKLOAD_EXIT_PORT),
             "WORKLOAD_EXIT_PORT must not appear in vsock_ports"
+        );
+    }
+
+    #[test]
+    fn build_supervisor_config_registers_substitution_port() {
+        // The egress substitution port is a host-listen port (the endpoint
+        // binds the UDS, the guest dials it) — registered unconditionally so
+        // libkrun proxies the guest's connect. Fail-closed: nothing binds the
+        // UDS unless the plan carries secrets.
+        let config = VmStartConfig {
+            name: "subst-port-test".into(),
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            kernel_path: Some("/tmp/vmlinux".into()),
+            cpus: 1,
+            memory_mib: 256,
+            ..Default::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = build_supervisor_config(&config, tmp.path()).expect("build");
+        assert!(
+            cfg.krun
+                .host_listen_ports
+                .contains(&mvm_guest::vsock::SUBSTITUTION_PORT),
+            "SUBSTITUTION_PORT must be in host_listen_ports"
+        );
+        assert!(
+            !cfg.krun
+                .vsock_ports
+                .contains(&mvm_guest::vsock::SUBSTITUTION_PORT),
+            "SUBSTITUTION_PORT must not appear in vsock_ports"
+        );
+    }
+
+    /// No `plan.json` (or a secret-free plan) ⇒ no endpoint is spawned and the
+    /// returned guard is defused (its Drop is a no-op, so an early return can't
+    /// reap a process that was never started).
+    #[test]
+    fn libkrun_substitution_not_spawned_when_no_secrets() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Empty state dir: no plan.json at all.
+        let guard = spawn_libkrun_egress_endpoint_if_needed("no-secrets-vm", tmp.path())
+            .expect("no-secrets path must succeed");
+        assert!(
+            guard.vm_name.is_none(),
+            "a secret-free plan must yield a defused (no-op) guard"
+        );
+        // No pidfile was written (nothing spawned).
+        assert!(
+            !tmp.path()
+                .join(crate::substitution_spawn::SUBST_PID_FILE)
+                .exists()
         );
     }
 }

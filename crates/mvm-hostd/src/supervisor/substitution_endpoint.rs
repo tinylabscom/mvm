@@ -32,19 +32,11 @@ fn default_forward_timeout_secs() -> u64 {
     30
 }
 
-/// How the guest reaches this endpoint. Backend-shaped: QEMU's `vhost-vsock`
-/// gives a real guest→host AF_VSOCK path, so the host binds an AF_VSOCK
-/// listener; Firecracker/libkrun route guest→host through a per-port UDS the
-/// in-process VMM proxies, so the host binds that UDS.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum EndpointTransport {
-    /// Host AF_VSOCK listener on this port (QEMU). The guest dials
-    /// `connect_host_vsock(SUBSTITUTION_PORT)`.
-    Vsock { port: u32 },
-    /// Host UDS the per-port vsock proxy forwards to (Firecracker/libkrun).
-    Uds { path: PathBuf },
-}
+/// How the guest reaches this endpoint. Defined in `mvm-backend` (next to the
+/// `spawn_substitution_endpoint` writer) and re-exported here so the bin, its
+/// tests, and `EndpointConfig` share one wire definition without a dependency
+/// cycle (mvm-hostd → mvm-backend, never the reverse).
+pub use mvm_backend::EndpointTransport;
 
 /// The per-VM name-constrained intermediate the terminator
 /// terminates bound-host TLS under. The guest trusts the matching cert (delivered

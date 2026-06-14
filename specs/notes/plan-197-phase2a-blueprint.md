@@ -53,6 +53,11 @@ param + update FC/QEMU callers (no behavior change); shared
 **live vz boot** — a `SecretRef` workload on `--hypervisor vz` with explicit
 `HTTP_PROXY` sees only the placeholder, host endpoint injects the real credential.
 
+**Commit-2 cleanup (reuse-first):** collapse FC's Linux-gated
+`microvm.rs::decode_plan_secrets` into `egress_shared::decode_plan_secrets_from_state`
+(repoint FC's two callsites, delete the dup). It edits Linux-only code, so verify
+with a Linux-target `cargo clippy --target` cross-check, not just the macOS build.
+
 ## Risks (from the spike + architect review)
 
 - libkrun: endpoint (not supervisor) binds `vsock-5253.sock`; supervisor must not

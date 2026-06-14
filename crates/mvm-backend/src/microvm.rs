@@ -2557,15 +2557,18 @@ fn spawn_egress_endpoint(config: &FlakeRunConfig) -> Result<EndpointGuard> {
     // the sidecar. Hand the KEY to the endpoint so the `https` terminator can
     // mint per-SNI leaves; it never reaches the guest. Absent ⇒ `http`-only.
     let tls_intermediate = read_egress_intermediate(&state_dir)?;
-    spawn_substitution_endpoint(
-        name,
-        &state_dir,
-        &tenant,
-        &secrets,
-        &redaction,
-        Some(listen),
+    spawn_substitution_endpoint(crate::substitution_spawn::SubstitutionSpawnParams {
+        vm_name: name,
+        state_dir: &state_dir,
+        tenant: &tenant,
+        secrets: &secrets,
+        redaction: &redaction,
+        transport: crate::substitution_spawn::EndpointTransport::Vsock {
+            port: mvm_guest::vsock::SUBSTITUTION_PORT,
+        },
+        terminator_listen: Some(listen),
         tls_intermediate,
-    )?;
+    })?;
     Ok(EndpointGuard::new(name))
 }
 

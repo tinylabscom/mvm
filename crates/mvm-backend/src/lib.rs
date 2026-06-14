@@ -48,6 +48,9 @@ pub mod compat;
 /// to the guest TAP) steering guest :80 to the host-side substitution
 /// terminator. Linux-only mechanism; consumed by the FC path.
 pub mod egress_redirect;
+/// Cfg-free decode of the admitted plan's egress secret bindings, shared by
+/// the libkrun + Firecracker substitution-endpoint spawn paths.
+pub(crate) mod egress_shared;
 pub mod firecracker;
 pub mod handle_registry;
 pub mod image;
@@ -91,7 +94,7 @@ pub use workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 /// pushed onto the drive, the key is persisted host-side for the terminator
 /// endpoint. See [`substitution_spawn::build_egress_tls_delivery`].
 pub use substitution_spawn::{
-    EGRESS_CERT_DRIVE_NAME, EgressTlsDelivery, build_egress_tls_delivery,
+    EGRESS_CERT_DRIVE_NAME, EgressTlsDelivery, EndpointTransport, build_egress_tls_delivery,
 };
 
 /// Crate-wide test serialization for tests that mutate `HOME` or
