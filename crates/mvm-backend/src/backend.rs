@@ -1086,7 +1086,7 @@ mod tests {
     #[test]
     fn as_workload_backend_some_for_workload_variants() {
         // mock is included: it is the hermetic lifecycle test double that
-        // stands in for a workload backend on the admitted path (ADR-045).
+        // stands in for a workload backend on the admitted path.
         for name in ["firecracker", "libkrun", "vz", "mock"] {
             let backend = AnyBackend::from_hypervisor(name);
             assert!(
