@@ -120,16 +120,34 @@ Owner requirement: the SDKs are **generated from one schema**, not hand-maintain
 - [x] **Step 2c (D1.2) — `mvm-cli` unary call sites adopt the client.** Migrated every unary `send_request` site in `mvm-cli` onto `call_unary`: `commands/vm/wait.rs` (ReadinessStatus), `readiness.rs` (IntegrationStatus), `session.rs` (UpdateIdleTimeout), `console.rs` (ConsoleOpen). Each shed its hand-rolled `Error` / `UnsupportedInProfile` / unexpected-variant arms — the contract guard now maps those to typed `RpcError` at the boundary (net −17 lines). The `commands/vm/` files turned out **uncontended** by the in-flight Plan 189 worktrees (they touch `commands/env/*`), so this didn't need to wait. Left on raw `send_request`: the fire-and-forget `ConsoleResize` (`.ok()` discards the result, so contract validation buys nothing); the `exec` / `proc` / `cp` streaming paths already use dedicated `send_*_streaming` helpers, not `send_request`. Behavior preserved (257 `commands::vm` tests green, no error-message asserted in any test); clippy + nightly fmt clean; `cargo check --workspace --all-targets` green. The live "agent dispatch honors the contract" assertion still rides on the existing real-guest e2e exercising these paths (`mvmctl wait` / `console` / `session`).
 - [ ] **Step 3 (D1.3):** SDK ergonomics veneer (Plan 125) over the generated `_protocol` types + typed mvmctl-subprocess methods; not a vsock client. Commit.
 
-## Phase E — config-on-a-device init handoff
+## Phase E — config-on-a-device init handoff — ❌ DESCOPED (premise superseded)
 
-### Task E1: signed runtime config as a read-only device
+### Task E1: signed runtime config as a read-only device — DESCOPED
 
-ADR-066 §"survey" — deliver the signed-plan-derived runtime config to the guest as a read-only JSON device (composes with dm-verity), read at init **before** vsock is up, instead of negotiating it over vsock.
+**Why descoped (2026-06-14):** the task's premise no longer matches the
+implementation. Phase E was specified to deliver runtime config "as a device,
+read at init **instead of negotiating it over vsock**" and to "remove a vsock
+round-trip." But there is no such vsock round-trip: the agent reads runtime
+config exactly once, at boot, from the **build-time-baked** `/etc/mvm/runtime.json`
+(`mvm-guest-agent.rs` → `runtime_config::load()`; the file is baked by
+`mkFunctionService.nix`, not "mvmforge" — that attribution is stale, it's
+`mvm-sdk/src/compile/flake.rs` now). That baked file's integrity already comes
+from the **dm-verity seal (claim 3)** — a tampered rootfs fails the roothash
+before userspace. So a signed config device would *duplicate* the integrity
+dm-verity already provides, replace a negotiation that does not exist, and add a
+new device-parser + signature-verify attack surface (also enlarging the claim-5
+fuzz surface) for no realized benefit.
 
-**Files:** `crates/mvm-guest/src/runtime_config.rs`, `entrypoint.rs`; the backend's device attach.
+A signed-config-device only earns its keep under two futures, neither realized
+today: (a) a **generic sealed image specialized per-launch** (e.g. warm-pool VMs
+that cannot bake workload config), or (b) **config integrity on libkrun/Vz**,
+where dm-verity does not map cleanly (that is the separate libkrun/Vz overlay
+plan, see the "libkrun + Vz overlay attach" item above). Revisit Phase E only if
+one of those lands — and design it then against the real need, not this stale
+spec.
 
-- [ ] **Step 1:** Failing test — the guest reads its runtime config from the config device at init (before any vsock round-trip) and refuses to boot if the device is missing/unsigned (the config is derived from the signed `ExecutionPlan`, claim 8).
-- [ ] **Step 2:** Attach the config as a read-only virtio-blk device (host side); `runtime_config.rs` reads + verifies it pre-vsock. Removes a vsock round-trip from the boot path (helps §7 boot budget). Commit.
+- [x] **Step 1 — DESCOPED.** (Guest-side signed-config verify — see rationale above.)
+- [x] **Step 2 — DESCOPED.** (Host-side device attach — see rationale above.)
 
 ## Acceptance
 
@@ -137,8 +155,8 @@ ADR-066 §"survey" — deliver the signed-plan-derived runtime config to the gue
 - [ ] Claim 4 (`prod-agent-no-exec`) and claim 5 (vsock fuzz, repointed) stay green; claim 10's netinit audit marker preserved.
 - [ ] The same `mvm-guest-agent` runs in builder/dev (forked by `mvm-host-vm-init`) and workload VMs; `check-guest-agent-in-all-images` enforces it.
 - [ ] The agent runs from the verity-sealed `/mvm/runtime` overlay; a tampered overlay fails the roothash.
-- [ ] The SDK data/IR types + the RPC client surface (Python/TS/Rust) are generated from one schema (`xtask gen-sdk` → `sdks/*/_generated/`) with a no-drift CI check; the 125 veneer sits over the generated core.
-- [ ] Runtime config arrives on a read-only device, verified pre-vsock; missing/unsigned refuses boot.
+- [x] The SDK data/IR + protocol types are generated from one schema (`xtask gen-stubs` → `sdks/{python,typescript}/_ir` + `_protocol`) with a no-drift CI gate (`check-stubs` in the Lint job). The host↔guest RPC surface is the contract-checked Rust client (`mvm_guest::vsock::{Verb, response_contract, call_unary, call_streaming}`), now adopted at the `mvm-cli` call sites. **Correction:** the original "RPC client surface into `sdks/*/_generated/`" is dropped — the Python/TS SDKs shell to `mvmctl` (ADR-0010), they do not speak vsock, so a generated vsock client there would be dead code. The Plan 125 veneer sits over the generated **types** + the `mvmctl`-subprocess transport.
+- [x] ~~Runtime config arrives on a read-only device, verified pre-vsock; missing/unsigned refuses boot.~~ **DESCOPED** — runtime config is build-time-baked into the dm-verity-sealed rootfs; integrity is the verity seal (claim 3), and there is no vsock config round-trip to replace. See Phase E descope note.
 - [ ] `cargo test --workspace` + clippy + fmt green.
 
 ### deferred follow-ups
