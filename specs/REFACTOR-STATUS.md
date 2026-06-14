@@ -275,9 +275,14 @@ PLAN 118 — Supervisor standby pool              🟡 libkrun + Vz done; FC fol
       hands the re-warm to a DETACHED `mvmctl pool warm` subprocess (own process
       group, null stdio, inherits env, via current_exe) — `up` returns at once
       and the child re-warms only the deficit off the hot path. Live: claim
-      drained 1→0, detached re-warm refilled to 1. Follow-up (in-code): no pool
-      lock → concurrent claims can overshoot target by ~1 each (ages out via
-      TTL); a pool-dir flock around warm_to_target's read→spawn is the clean fix.
+      drained 1→0, detached re-warm refilled to 1.
+  [x] Pool-dir warm flock: `warm_to_target` now takes an exclusive `FileLock`
+      (reused `mvm_core::atomic_io::FileLock`) on `<pool>/warm.lock` spanning the
+      idle-count read → spawn loop, so concurrent launches no longer both observe
+      an empty pool and each spawn to target (the prior ~1-per-claim overshoot
+      that aged out via TTL). `SupervisorStandbyPool::root()` accessor added;
+      no-overshoot witness is a 2-thread test (TDD-verified: 5/5 overshoot
+      without the lock, 2 == target with it).
   [x] Warm claim reuses the admission image sha (#846): the claim's compat key
       threads `ExecutionPlan.image.sha256` (already computed by claim-8
       admission) instead of re-hashing the rootfs a second time on the launch
