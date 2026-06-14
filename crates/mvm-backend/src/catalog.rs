@@ -46,6 +46,13 @@ impl BackendDescriptor {
     pub fn instantiate(self) -> AnyBackend {
         self.kind.instantiate()
     }
+
+    /// Construct a shared `VmBackend` trait object directly from the
+    /// descriptor, for consumers that only need the behavior surface and not
+    /// enum-specific branching.
+    pub fn instantiate_dyn(self) -> std::sync::Arc<dyn VmBackend> {
+        self.kind.instantiate().into_dyn()
+    }
 }
 
 macro_rules! backend_catalog {
@@ -102,6 +109,15 @@ macro_rules! backend_catalog {
             pub(crate) fn inner(&self) -> &dyn VmBackend {
                 match self {
                     $(Self::$kind(backend) => backend),*
+                }
+            }
+
+            /// Consume the enum into a shared `VmBackend` trait object for
+            /// generic consumers that only need the behavior surface.
+            pub fn into_dyn(self) -> std::sync::Arc<dyn VmBackend> {
+                match self {
+                    $(Self::$kind(backend) =>
+                        std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>),*
                 }
             }
         }
@@ -233,4 +249,41 @@ pub fn warm_start_support_descriptors() -> impl Iterator<Item = &'static Backend
     BACKEND_DESCRIPTORS
         .iter()
         .filter(|descriptor| descriptor.include_in_warm_start_support)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The descriptor-driven trait-object constructor must produce a backend
+    /// behaviorally identical to the enum constructor for every registered
+    /// backend — same name, capabilities, and security tier. This guards the
+    /// macro wiring: a variant mapped to the wrong backend would diverge here.
+    /// Every backend constructs without I/O, so the comparison is side-effect
+    /// free.
+    #[test]
+    fn descriptor_dyn_construction_matches_enum_for_every_backend() {
+        for descriptor in descriptors() {
+            let via_enum = descriptor.instantiate();
+            let via_dyn = descriptor.instantiate_dyn();
+            assert_eq!(
+                via_enum.name(),
+                via_dyn.name(),
+                "name mismatch for {:?}",
+                descriptor.kind
+            );
+            assert_eq!(
+                format!("{:?}", via_enum.capabilities()),
+                format!("{:?}", via_dyn.capabilities()),
+                "capabilities mismatch for {:?}",
+                descriptor.kind
+            );
+            assert_eq!(
+                via_enum.security_profile().tier,
+                via_dyn.security_profile().tier,
+                "tier mismatch for {:?}",
+                descriptor.kind
+            );
+        }
+    }
 }
