@@ -1134,6 +1134,116 @@ impl GuestResponse {
     }
 }
 
+// ============================================================================
+// Contract-checked RPC client (host side).
+//
+// Thin layer over `send_request` / `read_frame` that enforces the declared
+// `response_contract()`: it maps the universal `Error` / `UnsupportedInProfile`
+// responses to typed errors and rejects any frame whose variant isn't in the
+// verb's contract — so an agent that dishonors the protocol is caught at the
+// boundary instead of mis-deserialized at a call site.
+// ============================================================================
+
+/// Failure of a contract-checked guest RPC call.
+#[derive(Debug, thiserror::Error)]
+pub enum RpcError {
+    /// Transport / framing / serialization failure.
+    #[error("guest agent transport error: {0}")]
+    Transport(#[from] anyhow::Error),
+    /// The agent answered with the universal `Error { message }`.
+    #[error("guest agent returned error: {0}")]
+    Agent(String),
+    /// The agent refused the verb for its active profile (e.g. a dev-only
+    /// verb on a sealed-prod agent).
+    #[error("verb {verb} unsupported in agent profile {profile:?}")]
+    UnsupportedInProfile {
+        /// Profile the agent is running under.
+        profile: AgentProfile,
+        /// `verb_name()` of the rejected request.
+        verb: String,
+    },
+    /// The agent returned a response variant not in the verb's
+    /// `response_contract()` — a protocol violation.
+    #[error("guest agent returned {got:?} for {verb}, not in its contract {expected:?}")]
+    OffContract {
+        /// The request verb whose contract was violated.
+        verb: &'static str,
+        /// The variant the agent actually sent.
+        got: ResponseVariant,
+        /// The variant(s) the contract permits.
+        expected: &'static [ResponseVariant],
+    },
+}
+
+impl GuestResponse {
+    /// Whether this frame ends a streaming response. Only the streaming
+    /// variants can be non-terminal (their inner event decides); any other
+    /// frame is a complete answer and ends the read.
+    pub fn is_stream_terminal(&self) -> bool {
+        match self {
+            GuestResponse::EntrypointEvent(e) => e.is_terminal(),
+            GuestResponse::ExecEvent(e) => e.is_terminal(),
+            GuestResponse::ProcWaitEvent(e) => e.is_terminal(),
+            _ => true,
+        }
+    }
+}
+
+/// Enforce `req`'s response contract on a received frame. Returns the frame
+/// unchanged when it satisfies the contract; maps the universal `Error` /
+/// `UnsupportedInProfile` responses and any off-contract variant to
+/// [`RpcError`].
+pub fn check_response(req: &GuestRequest, resp: GuestResponse) -> Result<GuestResponse, RpcError> {
+    match resp {
+        GuestResponse::Error { message } => Err(RpcError::Agent(message)),
+        GuestResponse::UnsupportedInProfile { profile, verb } => {
+            Err(RpcError::UnsupportedInProfile { profile, verb })
+        }
+        other => {
+            let got = other.variant();
+            let contract = req.response_contract();
+            if contract.responses.contains(&got) {
+                Ok(other)
+            } else {
+                Err(RpcError::OffContract {
+                    verb: req.verb().name(),
+                    got,
+                    expected: contract.responses,
+                })
+            }
+        }
+    }
+}
+
+/// Send a unary request and return its contract-checked response. Use for
+/// verbs whose [`ResponseKind`] is `Unary`; streaming verbs use
+/// [`call_streaming`].
+pub fn call_unary(stream: &mut UnixStream, req: &GuestRequest) -> Result<GuestResponse, RpcError> {
+    let resp = send_request(stream, req)?;
+    check_response(req, resp)
+}
+
+/// Drive a streaming request: send `req`, then invoke `on_event` for each
+/// contract-checked response frame until a terminal one
+/// ([`GuestResponse::is_stream_terminal`]) arrives. A universal `Error` /
+/// `UnsupportedInProfile` frame ends the stream as an `Err`.
+pub fn call_streaming(
+    stream: &mut UnixStream,
+    req: &GuestRequest,
+    mut on_event: impl FnMut(&GuestResponse),
+) -> Result<(), RpcError> {
+    // `send_request` writes the request and reads the first frame; subsequent
+    // frames come from `read_frame`.
+    let mut frame = check_response(req, send_request(stream, req)?)?;
+    loop {
+        on_event(&frame);
+        if frame.is_stream_terminal() {
+            return Ok(());
+        }
+        frame = check_response(req, read_frame::<GuestResponse>(stream)?)?;
+    }
+}
+
 /// Guest-agent control protocol capability. Closed enum so host and
 /// guest fail loudly on drift instead of accepting arbitrary strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -5753,5 +5863,139 @@ mod rpc_contract_tests {
     fn response_variant_projection_round_trips() {
         assert_eq!(GuestResponse::Pong.variant(), ResponseVariant::Pong);
         assert_eq!(GuestResponse::Pong.variant().name(), "Pong");
+    }
+}
+
+#[cfg(test)]
+mod rpc_client_tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+
+    // ---- check_response: the pure contract enforcer ----
+
+    #[test]
+    fn check_accepts_contracted_unary_response() {
+        let ok = check_response(&GuestRequest::Ping, GuestResponse::Pong);
+        assert!(matches!(ok, Ok(GuestResponse::Pong)));
+    }
+
+    #[test]
+    fn check_accepts_either_protocol_hello_outcome() {
+        let req = GuestRequest::ProtocolHello {
+            host_protocol_version: 1,
+            min_supported_version: 1,
+            host_version: "t".into(),
+            requested_capabilities: vec![],
+        };
+        let mismatch = GuestResponse::ProtocolMismatch {
+            host_protocol_version: 1,
+            agent_protocol_version: 2,
+            required_action: ProtocolUpgradeAction::UpgradeHost,
+            message: "x".into(),
+        };
+        assert!(check_response(&req, mismatch).is_ok());
+    }
+
+    #[test]
+    fn check_maps_agent_error() {
+        let err = check_response(
+            &GuestRequest::Ping,
+            GuestResponse::Error {
+                message: "boom".into(),
+            },
+        );
+        assert!(matches!(err, Err(RpcError::Agent(m)) if m == "boom"));
+    }
+
+    #[test]
+    fn check_maps_unsupported_in_profile() {
+        let resp = GuestResponse::UnsupportedInProfile {
+            profile: AgentProfile::SealedProd,
+            verb: "Exec".into(),
+        };
+        let err = check_response(&GuestRequest::Ping, resp);
+        assert!(matches!(err, Err(RpcError::UnsupportedInProfile { verb, .. }) if verb == "Exec"));
+    }
+
+    #[test]
+    fn check_rejects_off_contract_response() {
+        // Ping's contract is [Pong]; a WorkerStatus answer is a protocol violation.
+        let resp = GuestResponse::WorkerStatus {
+            status: "idle".into(),
+            last_busy_at: None,
+        };
+        let err = check_response(&GuestRequest::Ping, resp);
+        assert!(matches!(
+            err,
+            Err(RpcError::OffContract {
+                verb: "Ping",
+                got: ResponseVariant::WorkerStatus,
+                ..
+            })
+        ));
+    }
+
+    // ---- is_stream_terminal ----
+
+    #[test]
+    fn entrypoint_exit_is_stream_terminal_but_stdout_is_not() {
+        let term = GuestResponse::EntrypointEvent(EntrypointEvent::Exit { code: 0 });
+        let mid = GuestResponse::EntrypointEvent(EntrypointEvent::Stdout {
+            chunk: b"x".to_vec(),
+        });
+        assert!(term.is_stream_terminal());
+        assert!(!mid.is_stream_terminal());
+    }
+
+    // ---- call_unary / call_streaming round-trip over a socket pair ----
+
+    #[test]
+    fn call_unary_round_trips_and_validates() {
+        let (mut client, mut agent) = UnixStream::pair().unwrap();
+        // Pre-write the agent's response; call_unary writes the request
+        // (ignored on the agent side) then reads this frame back.
+        write_frame(&mut agent, &GuestResponse::Pong).unwrap();
+        let resp = call_unary(&mut client, &GuestRequest::Ping).unwrap();
+        assert!(matches!(resp, GuestResponse::Pong));
+    }
+
+    #[test]
+    fn call_unary_rejects_off_contract_agent() {
+        let (mut client, mut agent) = UnixStream::pair().unwrap();
+        write_frame(
+            &mut agent,
+            &GuestResponse::WorkerStatus {
+                status: "idle".into(),
+                last_busy_at: None,
+            },
+        )
+        .unwrap();
+        let err = call_unary(&mut client, &GuestRequest::Ping).unwrap_err();
+        assert!(matches!(err, RpcError::OffContract { verb: "Ping", .. }));
+    }
+
+    #[test]
+    fn call_streaming_yields_frames_until_terminal() {
+        let (mut client, mut agent) = UnixStream::pair().unwrap();
+        write_frame(
+            &mut agent,
+            &GuestResponse::EntrypointEvent(EntrypointEvent::Stdout {
+                chunk: b"hi".to_vec(),
+            }),
+        )
+        .unwrap();
+        write_frame(
+            &mut agent,
+            &GuestResponse::EntrypointEvent(EntrypointEvent::Exit { code: 0 }),
+        )
+        .unwrap();
+        let req = GuestRequest::RunEntrypoint {
+            stdin: vec![],
+            timeout_secs: 5,
+            env: vec![],
+        };
+        let mut events = 0usize;
+        call_streaming(&mut client, &req, |_e| events += 1).unwrap();
+        assert_eq!(events, 2);
     }
 }

@@ -275,18 +275,20 @@ pub struct VsockPostRestoreSignal;
 
 impl PostRestoreSignal for VsockPostRestoreSignal {
     fn post_restore(&self, vm_name: &str) -> Result<PostRestoreOutcome> {
-        use mvm_guest::vsock::{GUEST_AGENT_PORT, GuestRequest, GuestResponse, send_request};
+        use mvm_guest::vsock::{GUEST_AGENT_PORT, GuestRequest, GuestResponse, call_unary};
         let transport = crate::vsock_transport::for_vm(vm_name)
             .with_context(|| format!("resolving vsock transport for {vm_name}"))?;
         let mut stream = transport
             .connect(GUEST_AGENT_PORT)
             .with_context(|| format!("connecting to guest agent on {vm_name}"))?;
-        match send_request(&mut stream, &GuestRequest::PostRestore)? {
+        // `call_unary` enforces PostRestore's response contract — the agent
+        // `Error` / off-contract cases surface as a typed `RpcError`, so the
+        // only `Ok` variant here is the contracted `PostRestoreAck`.
+        match call_unary(&mut stream, &GuestRequest::PostRestore)? {
             GuestResponse::PostRestoreAck { success, detail } => Ok(PostRestoreOutcome {
                 acknowledged: success,
                 detail,
             }),
-            GuestResponse::Error { message } => bail!("guest post-restore error: {message}"),
             other => bail!("unexpected response to PostRestore: {other:?}"),
         }
     }
