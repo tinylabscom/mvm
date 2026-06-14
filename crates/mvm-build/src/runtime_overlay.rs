@@ -1003,6 +1003,7 @@ fn validate_roothash_shape(s: &str) -> Result<(), RuntimeOverlayError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
     use tempfile::TempDir;
 
     const FAKE_ROOTHASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -1771,29 +1772,19 @@ mod tests {
     /// mutex so concurrent tests don't fight over the env var.
     #[test]
     fn release_base_url_honors_env_override() {
-        // SAFETY: tests in this module that touch env vars must run
-        // serially. The harness runs each #[test] in its own thread;
-        // setting an env in one test and unsetting in another can
-        // race. Use a process-local mutex to serialize.
-        let _g = env_test_mutex().lock().unwrap();
-        // SAFETY: env mutation is serialized by the mutex above;
-        // no other thread can observe the inconsistent state.
-        unsafe {
-            std::env::set_var("MVM_OVERLAY_BASE_URL", "https://mirror.example.com/mvm");
-        }
+        // `TestEnv` serializes env-mutating tests in this process behind a
+        // shared lock and restores the prior value on drop.
+        let mut env = TestEnv::new();
+        env.set("MVM_OVERLAY_BASE_URL", "https://mirror.example.com/mvm");
         let url = release_base_url("9.9.9");
         assert_eq!(url, "https://mirror.example.com/mvm/v9.9.9");
-        unsafe {
-            std::env::remove_var("MVM_OVERLAY_BASE_URL");
-        }
+        env.remove("MVM_OVERLAY_BASE_URL");
     }
 
     #[test]
     fn release_base_url_falls_back_to_default_without_env() {
-        let _g = env_test_mutex().lock().unwrap();
-        unsafe {
-            std::env::remove_var("MVM_OVERLAY_BASE_URL");
-        }
+        let mut env = TestEnv::new();
+        env.remove("MVM_OVERLAY_BASE_URL");
         let url = release_base_url("0.14.0");
         assert_eq!(
             url,
@@ -1803,20 +1794,11 @@ mod tests {
 
     #[test]
     fn release_base_url_strips_trailing_slash_on_override() {
-        let _g = env_test_mutex().lock().unwrap();
-        unsafe {
-            std::env::set_var("MVM_OVERLAY_BASE_URL", "https://mirror.example.com/mvm/");
-        }
+        let mut env = TestEnv::new();
+        env.set("MVM_OVERLAY_BASE_URL", "https://mirror.example.com/mvm/");
         let url = release_base_url("9.9.9");
         assert_eq!(url, "https://mirror.example.com/mvm/v9.9.9");
-        unsafe {
-            std::env::remove_var("MVM_OVERLAY_BASE_URL");
-        }
-    }
-
-    fn env_test_mutex() -> &'static std::sync::Mutex<()> {
-        static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        M.get_or_init(|| std::sync::Mutex::new(()))
+        env.remove("MVM_OVERLAY_BASE_URL");
     }
 
     #[test]
@@ -1918,7 +1900,7 @@ short  bar.ext4
     fn download_runtime_overlay_end_to_end_against_file_url_fixture() {
         // SAFETY: must serialize against other env-touching tests
         // in this module.
-        let _g = env_test_mutex().lock().unwrap();
+        let mut env = TestEnv::new();
 
         let upstream = TempDir::new().unwrap();
         let release_dir = upstream.path().join("v9.9.9");
@@ -1960,16 +1942,12 @@ short  bar.ext4
         );
 
         let base_url = format!("file://{}", upstream.path().display());
-        unsafe {
-            std::env::set_var("MVM_OVERLAY_BASE_URL", &base_url);
-        }
+        env.set("MVM_OVERLAY_BASE_URL", &base_url);
 
         let cache = TempDir::new().unwrap();
         let result = download_runtime_overlay("9.9.9", GuestArch::Aarch64, cache.path());
 
-        unsafe {
-            std::env::remove_var("MVM_OVERLAY_BASE_URL");
-        }
+        env.remove("MVM_OVERLAY_BASE_URL");
 
         let installed = result.expect("download + install must succeed against fixture");
         assert_eq!(installed.arch, GuestArch::Aarch64);
@@ -1998,7 +1976,7 @@ short  bar.ext4
     /// unchanged. This is the fail-closed integrity contract.
     #[test]
     fn download_runtime_overlay_rejects_checksum_mismatch() {
-        let _g = env_test_mutex().lock().unwrap();
+        let mut env = TestEnv::new();
 
         let upstream = TempDir::new().unwrap();
         let release_dir = upstream.path().join("v9.9.9");
@@ -2033,14 +2011,10 @@ short  bar.ext4
         );
 
         let base_url = format!("file://{}", upstream.path().display());
-        unsafe {
-            std::env::set_var("MVM_OVERLAY_BASE_URL", &base_url);
-        }
+        env.set("MVM_OVERLAY_BASE_URL", &base_url);
         let cache = TempDir::new().unwrap();
         let result = download_runtime_overlay("9.9.9", GuestArch::Aarch64, cache.path());
-        unsafe {
-            std::env::remove_var("MVM_OVERLAY_BASE_URL");
-        }
+        env.remove("MVM_OVERLAY_BASE_URL");
 
         let err = result.expect_err("tampered ext4 must reject");
         match err {
@@ -2057,7 +2031,7 @@ short  bar.ext4
     /// aborts before any artifact is fetched.
     #[test]
     fn download_runtime_overlay_rejects_missing_checksum_entry() {
-        let _g = env_test_mutex().lock().unwrap();
+        let mut env = TestEnv::new();
 
         let upstream = TempDir::new().unwrap();
         let release_dir = upstream.path().join("v9.9.9");
@@ -2075,14 +2049,10 @@ short  bar.ext4
         );
 
         let base_url = format!("file://{}", upstream.path().display());
-        unsafe {
-            std::env::set_var("MVM_OVERLAY_BASE_URL", &base_url);
-        }
+        env.set("MVM_OVERLAY_BASE_URL", &base_url);
         let cache = TempDir::new().unwrap();
         let result = download_runtime_overlay("9.9.9", GuestArch::Aarch64, cache.path());
-        unsafe {
-            std::env::remove_var("MVM_OVERLAY_BASE_URL");
-        }
+        env.remove("MVM_OVERLAY_BASE_URL");
 
         let err = result.expect_err("missing VERSION entry must reject");
         match err {
