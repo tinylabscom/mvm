@@ -947,6 +947,12 @@ pub(in crate::commands) struct Args {
     /// (one-shot workloads).
     #[arg(long, conflicts_with_all = ["detach", "up_json"])]
     pub wait: bool,
+    /// After boot, drop into an interactive PTY console in the guest
+    /// (like `docker run -it`). Implies the dev image for the bundled
+    /// default microVM — a sealed prod image ships no console agent.
+    /// The VM keeps running after the shell exits; `down` stops it.
+    #[arg(long, conflicts_with_all = ["detach", "up_json", "wait", "forward"])]
+    pub console: bool,
     /// Network preset (unrestricted, none, registries, dev)
     #[arg(long)]
     pub network_preset: Option<String>,
@@ -1179,7 +1185,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         .transpose()
         .context("Invalid --ttl value")?;
     let auto_resume = !args.no_auto_resume;
-    let build_mode = args.build_mode.resolve();
+    let mut build_mode = args.build_mode.resolve();
+    if args.console && matches!(build_mode, mvm_build::pipeline::BuildMode::Prod) {
+        // The interactive console is served only by the accessible dev
+        // agent; a sealed prod image ships none (claim 15). Boot the dev
+        // variant so `up --console` lands in a shell instead of being
+        // refused at attach.
+        ui::info("--console implies the dev image (prod ships no console agent); using dev.");
+        build_mode = mvm_build::pipeline::BuildMode::Dev;
+    }
 
     if args.no_supervisor {
         ui::warn(
@@ -1263,6 +1277,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         up_json: args.up_json,
         services_health_timeout_secs: cfg.effective_services_health_timeout_secs(),
         wait: args.wait,
+        console: args.console,
     })?;
 
     // After a successful boot, emit a
@@ -1381,6 +1396,10 @@ pub(in crate::commands) struct RunParams<'a> {
     /// confirms the workload booted, block until it powers off and
     /// propagate its exit code.
     pub(super) wait: bool,
+    /// `true` when `--console` was set. After the agent-ready check,
+    /// attach an interactive PTY console to the guest and return when
+    /// the shell exits (the VM stays running).
+    pub(super) console: bool,
 }
 
 pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
@@ -1420,6 +1439,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         up_json: _up_json,
         services_health_timeout_secs,
         wait,
+        console,
     } = params;
     let _span =
         tracing::info_span!("cmd_run", name = ?name, cpus = ?cpus, memory_mib = ?memory).entered();
@@ -2222,6 +2242,16 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             emit_failed_if(&admission_main, "agent-unreachable", &err);
             return Err(err);
         }
+    }
+
+    // `--console`: drop straight into an interactive PTY in the
+    // just-booted guest, reusing the same PTY-over-vsock transport as
+    // `mvmctl console`. Only the dev agent serves it (a sealed prod image
+    // ships none — claim 15), which is why `--console` forced the dev
+    // image upstream. The VM keeps running after the shell exits;
+    // `mvmctl down <name>` stops it.
+    if console {
+        return super::console::console_interactive(&vm_name_owned);
     }
 
     // Block until the workload powers off and propagate its
