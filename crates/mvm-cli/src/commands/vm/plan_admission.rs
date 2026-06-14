@@ -889,6 +889,7 @@ mod tests {
             artifact: Default::default(),
             keys: Default::default(),
             audit: Default::default(),
+            wasi: Default::default(),
             tenant_overlays: std::collections::BTreeMap::new(),
         };
 

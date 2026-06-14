@@ -37,6 +37,7 @@ use crate::plan::TenantId;
 use crate::policy::bundle::PolicyBundle;
 use crate::policy::policies::{
     ArtifactPolicy, AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy,
+    WasiCapPolicy,
 };
 
 /// An out-of-band deny instruction with bounded lifetime. Emergency
@@ -92,6 +93,8 @@ pub struct EffectivePolicy {
     pub artifact: ArtifactPolicy,
     pub keys: KeyPolicy,
     pub audit: AuditPolicy,
+    #[serde(default)]
+    pub wasi: WasiCapPolicy,
 }
 
 /// Resolve `bundle` for `tenant` at `now`, with `emergency` applied
@@ -118,6 +121,7 @@ pub fn resolve(
         artifact: pick(overlay.and_then(|o| o.artifact.clone()), &bundle.artifact),
         keys: pick(overlay.and_then(|o| o.keys.clone()), &bundle.keys),
         audit: pick(overlay.and_then(|o| o.audit.clone()), &bundle.audit),
+        wasi: pick(overlay.and_then(|o| o.wasi.clone()), &bundle.wasi),
     };
 
     if emergency.is_active(now) {
@@ -184,6 +188,7 @@ mod tests {
                 chain_signing: true,
                 stream_destinations: vec!["audit://base".to_string()],
             },
+            wasi: Default::default(),
             tenant_overlays: BTreeMap::new(),
         }
     }

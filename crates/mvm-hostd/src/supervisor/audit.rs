@@ -376,6 +376,7 @@ mod tests {
             artifact: mvm_core::policy::policies::ArtifactPolicy::default(),
             keys: KeyPolicy::default(),
             audit: AuditPolicy::default(),
+            wasi: Default::default(),
             tenant_overlays: BTreeMap::new(),
         }
     }

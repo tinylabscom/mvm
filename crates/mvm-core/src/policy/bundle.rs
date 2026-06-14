@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::policy::policies::{
     ArtifactPolicy, AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy,
+    WasiCapPolicy,
 };
 
 /// Wire-format version. Same fail-closed semantics as
@@ -39,6 +40,8 @@ pub struct PolicyBundle {
     pub artifact: ArtifactPolicy,
     pub keys: KeyPolicy,
     pub audit: AuditPolicy,
+    #[serde(default)]
+    pub wasi: WasiCapPolicy,
 
     /// Per-tenant overlays. Resolved by composing the bundle's
     /// base policy with the matching tenant overlay (overlay wins
@@ -59,4 +62,6 @@ pub struct TenantOverlay {
     pub artifact: Option<ArtifactPolicy>,
     pub keys: Option<KeyPolicy>,
     pub audit: Option<AuditPolicy>,
+    #[serde(default)]
+    pub wasi: Option<WasiCapPolicy>,
 }

@@ -2716,15 +2716,19 @@ from network to fs/env; AOT-compile at build for prod (no in-guest JIT → guest
 forbids `PROT_EXEC`), JIT for preview; WASI P1 v1 with a P2-ready seam. Decomposes into
 three plans:
 
-- **A1 — WASI capability projection (fs/env)** 📋 PLAN WRITTEN, not started
+- **A1 — WASI capability projection (fs/env)** ✅ IMPLEMENTED (pending review on
+  `feat/plan-192-wasi-fs-env-projection`)
   ([`plans/192-wasi-capability-projection-fs-env.md`](plans/192-wasi-capability-projection-fs-env.md)):
   pure-logic `mvm-core` extension (`CanonicalFs`/`CanonicalEnv`, `clamp_fs`/`clamp_env`
   intersection-only, WASI preopen/env-name generator, `WasiCapPolicy` bound,
-  clamp-never-widens witnesses). Foundation for A2/A3.
+  clamp-never-widens witnesses). Foundation for A2/A3. Decision logic only — no wasmtime,
+  no I/O, no enforcement; zero new deps; runtime-free gate green.
 - **A2 — `.wasm` artifact admission** 🔲 plan not yet written (queued as Plan 193).
 - **A3 — guest runner + Nix bake + AOT** 🔲 plan not yet written (queued as Plan 194).
 
-Owner-gated: docs land now; **no implementation is to begin** until explicitly directed.
+Owner-gated: A1 is pure decision logic with no runtime/enforcement surface; A2/A3 (the
+`.wasm` admission + the in-guest runner that actually executes wasm) **must not begin**
+until explicitly directed.
 
 ### Sprint 62 success criteria
 
