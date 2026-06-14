@@ -379,16 +379,32 @@ impl VmBackend for VzBackend {
             );
         }
 
+        // The supervisor is up (PID file written) and its host-listen proxy is
+        // bound. Spawn the egress substitution endpoint if the admitted plan
+        // carries secrets so the guest's egress can resolve placeholders
+        // host-side (the guest never holds the real secret). The guard reaps the
+        // endpoint on any early return below; defused once the VM is confirmed up
+        // (the `stop` path then owns teardown). A secret-free plan is a defused
+        // no-op.
+        let mut endpoint_guard = spawn_vz_egress_endpoint_if_needed(&config.name, &state_dir)?;
+
         ui::success(&format!(
             "Vz VM '{}' started (pid file: {}, console log: {}).",
             config.name,
             pid_file.display(),
             console_log.display()
         ));
+        endpoint_guard.defuse();
         Ok(VmId(config.name.clone()))
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
+        // Reap the per-VM substitution endpoint first (no-op when none was
+        // spawned) so a crashed VM's decrypted-secret process can't outlive the
+        // guest. Mirrors the libkrun / FC stop ordering — safe because reap is a
+        // no-op when nothing exists, even before the not-running early return.
+        crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+
         let pid_path = vm_state_dir(&id.0).join(PID_FILE_NAME);
         let pid = match read_pid(&pid_path) {
             Some(p) => p,
@@ -1720,6 +1736,45 @@ fn remove_instance_rootfs(vm_name: &str) {
     }
 }
 
+/// Spawn the per-VM substitution endpoint when the admitted plan carries egress
+/// secrets, returning an armed [`EndpointGuard`]; a secret-free plan (or no
+/// `plan.json`) yields a defused no-op guard. The Vz guest reaches the endpoint
+/// by dialing `connect_host_vsock(SUBSTITUTION_PORT)`; the supervisor's
+/// host-listen proxy splices that to the per-VM `vsock/` UDS the endpoint binds,
+/// so the transport is `Uds`. No transparent terminator on this path
+/// (`terminator_listen: None`), hence no per-VM TLS intermediate.
+fn spawn_vz_egress_endpoint_if_needed(
+    vm_name: &str,
+    state_dir: &Path,
+) -> Result<crate::substitution_spawn::EndpointGuard> {
+    use crate::substitution_spawn::{
+        EndpointGuard, EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
+    };
+    let Some((secrets, redaction, tenant)) =
+        crate::egress_shared::decode_plan_secrets_from_state(state_dir)?
+    else {
+        return Ok(EndpointGuard::defused());
+    };
+    spawn_substitution_endpoint(SubstitutionSpawnParams {
+        vm_name,
+        state_dir,
+        tenant: &tenant,
+        secrets: &secrets,
+        redaction: &redaction,
+        // Vz routes guest→host through the per-VM UDS the supervisor's
+        // host-listen proxy forwards into; the endpoint binds it under `vsock/`.
+        transport: EndpointTransport::Uds {
+            path: mvm_core::config::vm_vz_vsock_port_socket(
+                vm_name,
+                mvm_guest::vsock::SUBSTITUTION_PORT,
+            ),
+        },
+        terminator_listen: None,
+        tls_intermediate: None,
+    })?;
+    Ok(EndpointGuard::new(vm_name))
+}
+
 fn build_supervisor_config(
     config: &VmStartConfig,
     kernel: &str,
@@ -1807,6 +1862,12 @@ fn build_supervisor_config(
         vsock: vz::VsockConfig {
             ports: vec![mvm_guest::vsock::GUEST_AGENT_PORT],
             socket_dir: vsock_dir,
+            // Host-listens / guest-connects channel for egress substitution: the
+            // guest dials SUBSTITUTION_PORT, the supervisor accepts and splices to
+            // the per-VM UDS the substitution endpoint binds. Unconditional —
+            // fail-closed: nothing binds that UDS unless the plan has secrets, so a
+            // stray guest dial gets refused.
+            host_listen_ports: vec![mvm_guest::vsock::SUBSTITUTION_PORT],
         },
         console_output_path: Some(console_log),
         // gvproxy backend with claim-10 audit bridge ingest hookup.
@@ -2406,6 +2467,23 @@ mod tests {
         assert!(built.disks[0].read_only);
         assert!(built.virtio_fs.is_empty());
         assert_eq!(built.vsock.ports, vec![mvm_guest::vsock::GUEST_AGENT_PORT]);
+        // The egress-substitution channel is host-listens / guest-connects: the
+        // supervisor must listen on SUBSTITUTION_PORT so the guest can dial it.
+        assert!(
+            built
+                .vsock
+                .host_listen_ports
+                .contains(&mvm_guest::vsock::SUBSTITUTION_PORT),
+            "SUBSTITUTION_PORT must be in vsock.host_listen_ports"
+        );
+        // ...and it must NOT appear in the host-dials-guest proxy port set.
+        assert!(
+            !built
+                .vsock
+                .ports
+                .contains(&mvm_guest::vsock::SUBSTITUTION_PORT),
+            "SUBSTITUTION_PORT must not appear in vsock.ports"
+        );
         assert_eq!(built.pid_file_name.as_deref(), Some(PID_FILE_NAME));
         // Console capture goes to a file under state_dir; never `None`
         // — capture-only is the workload contract.
@@ -2436,6 +2514,28 @@ mod tests {
             }
             None => panic!("network should be Some(Gvproxy {{ .. }}) after W6.A.5"),
         }
+    }
+
+    /// No `plan.json` (or a secret-free plan) ⇒ no Vz egress endpoint is spawned
+    /// and the returned guard is defused (its Drop is a no-op, so an early return
+    /// can't reap a process that was never started). Mirrors the libkrun no-op
+    /// test.
+    #[test]
+    fn vz_substitution_not_spawned_when_no_secrets() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Empty state dir: no plan.json at all.
+        let guard = spawn_vz_egress_endpoint_if_needed("vz-no-secrets-vm", tmp.path())
+            .expect("no-secrets path must succeed");
+        assert!(
+            guard.vm_name.is_none(),
+            "a secret-free plan must yield a defused (no-op) guard"
+        );
+        // No pidfile was written (nothing spawned).
+        assert!(
+            !tmp.path()
+                .join(crate::substitution_spawn::SUBST_PID_FILE)
+                .exists()
+        );
     }
 
     #[test]
@@ -2782,6 +2882,7 @@ mod tests {
             vsock: mvm_build::vz::VsockConfig {
                 ports: vec![],
                 socket_dir: state_dir.to_string_lossy().into_owned(),
+                host_listen_ports: vec![],
             },
             console_output_path: None,
             network: None,
@@ -2856,6 +2957,7 @@ mod tests {
             vsock: vz::VsockConfig {
                 ports: vec![],
                 socket_dir: "/parent/state/parentvm/vsock".into(),
+                host_listen_ports: vec![],
             },
             console_output_path: Some("/parent/state/parentvm/console.log".into()),
             network: Some(vz::NetworkConfig::Gvproxy {
@@ -3058,6 +3160,7 @@ mod tests {
             vsock: vz::VsockConfig {
                 ports: vec![],
                 socket_dir: state_dir.to_string_lossy().into_owned(),
+                host_listen_ports: vec![],
             },
             console_output_path: None,
             network: None,

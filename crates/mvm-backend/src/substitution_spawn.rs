@@ -293,6 +293,41 @@ fn read_handshake_line(
     }
 }
 
+/// RAII reaper for the per-VM substitution endpoint, armed while a backend's
+/// `start` is wiring the VM and dropped on any early-return so the
+/// decrypted-secret process can't outlive a failed launch. Defused once the VM
+/// is fully up (the normal `stop` path then owns teardown). Shared by the
+/// libkrun and vz backends — one definition so the spawn/reap moat can't drift.
+pub(crate) struct EndpointGuard {
+    /// `Some(name)` while armed; `None` once defused. Read by backend tests to
+    /// assert the no-secrets path yields a no-op guard.
+    pub(crate) vm_name: Option<String>,
+}
+
+impl EndpointGuard {
+    pub(crate) fn new(vm_name: &str) -> Self {
+        Self {
+            vm_name: Some(vm_name.to_string()),
+        }
+    }
+    /// A guard for a VM that spawned no endpoint (no secrets) — Drop is a no-op.
+    pub(crate) fn defused() -> Self {
+        Self { vm_name: None }
+    }
+    pub(crate) fn defuse(&mut self) {
+        self.vm_name = None;
+    }
+}
+
+impl Drop for EndpointGuard {
+    fn drop(&mut self) {
+        if let Some(ref name) = self.vm_name {
+            tracing::warn!(vm = %name, "EndpointGuard: reaping orphaned substitution endpoint");
+            reap_substitution_endpoint(&mvm_core::config::vm_state_dir(name), name);
+        }
+    }
+}
+
 /// Reap the per-VM substitution endpoint (if this VM spawned one) so its
 /// decrypted secrets don't outlive the guest, and drop the pid + env sidecars.
 /// Best-effort + idempotent: a VM with no endpoint (no secrets) is a no-op. The

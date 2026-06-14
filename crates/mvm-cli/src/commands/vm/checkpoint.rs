@@ -1103,6 +1103,7 @@ mod tests {
             vsock: mvm_build::vz::VsockConfig {
                 ports: vec![],
                 socket_dir: state_dir.to_string_lossy().into_owned(),
+                host_listen_ports: vec![],
             },
             console_output_path: None,
             network: None,

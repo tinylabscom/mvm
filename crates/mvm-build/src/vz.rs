@@ -263,6 +263,14 @@ pub struct VsockConfig {
     /// Per-VM directory the supervisor creates mode 0700 and binds
     /// the per-port unix sockets inside.
     pub socket_dir: String,
+    /// Guest ports the supervisor must *listen* on for guest-initiated
+    /// connections (host-listens / guest-connects). Each installs a
+    /// `VZVirtioSocketListener` on the VM's socket device; an accepted guest
+    /// connection is spliced to `<socket_dir>/vsock-<port>.sock`, which a
+    /// separate host process (the egress substitution endpoint) binds. Opposite
+    /// direction from `ports` (those the supervisor dials into the guest).
+    #[serde(default)]
+    pub host_listen_ports: Vec<u32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -433,6 +441,7 @@ mod tests {
             vsock: VsockConfig {
                 ports: vec![5252],
                 socket_dir: "/tmp/vz-smoke/vsock".into(),
+                host_listen_ports: vec![],
             },
             console_output_path: None,
             network: None,
@@ -456,6 +465,31 @@ mod tests {
         assert_eq!(back.name, cfg.name);
         assert_eq!(back.disks.len(), 1);
         assert_eq!(back.vsock.ports, vec![5252]);
+    }
+
+    #[test]
+    fn vsock_host_listen_ports_roundtrips() {
+        let mut cfg = minimal_config();
+        cfg.vsock.host_listen_ports = vec![5253];
+        let json = cfg.to_json().expect("serialize");
+        let back: SupervisorConfig = serde_json::from_str(&json).expect("roundtrip parses");
+        assert_eq!(back.vsock.host_listen_ports, vec![5253]);
+    }
+
+    #[test]
+    fn vsock_host_listen_ports_defaults_empty_when_absent() {
+        // Backward-compat: a config JSON produced before host_listen_ports
+        // existed (the field is `#[serde(default)]`) still decodes, with the
+        // new field defaulting to an empty Vec.
+        let mut value = serde_json::to_value(minimal_config()).unwrap();
+        value
+            .get_mut("vsock")
+            .and_then(|v| v.as_object_mut())
+            .unwrap()
+            .remove("host_listen_ports");
+        let json = serde_json::to_string(&value).unwrap();
+        let back: SupervisorConfig = serde_json::from_str(&json).expect("decode without field");
+        assert!(back.vsock.host_listen_ports.is_empty());
     }
 
     #[test]
