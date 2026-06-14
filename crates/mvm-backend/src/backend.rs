@@ -897,6 +897,22 @@ mod tests {
         );
     }
 
+    /// Boundary between the descriptor registry and the `AnyBackend` enum:
+    /// a generic consumer constructs and uses every backend straight from the
+    /// registry as a trait object, with no variant matching; the enum remains
+    /// only for backend-specific flows — `auto_select` (platform policy) and
+    /// the `as_vm_backend` bridge for callers that already hold an enum.
+    #[test]
+    fn descriptor_registry_serves_generic_consumers_without_the_enum() {
+        for descriptor in catalog::descriptors() {
+            let backend = descriptor.instantiate_dyn();
+            assert!(!backend.name().is_empty(), "{:?}", descriptor.kind);
+        }
+
+        let selected = AnyBackend::auto_select();
+        assert!(!selected.as_vm_backend().name().is_empty());
+    }
+
     // ------------------------------------------------------------------
     // pause/resume coverage
     //
