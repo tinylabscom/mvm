@@ -69,10 +69,28 @@ own internal default).
 
 ## Workstreams (proposed)
 
-- [ ] **WS-1 — transport spike (gate).** Confirm rvproxy serves mvm's host
-      transports, especially **libkrun `krun_add_net_unixgram`** (mvm's default
-      macOS backend), Vz `vfkit`, and a Firecracker passt replacement. Owner:
-      coordinate with the rvproxy session (their Plan 014 R3).
+- [x] **WS-1 — transport spike (gate).** libkrun `krun_add_net_unixgram`
+      **proven 2026-06-14**: a live `mvmctl dev up` through rvproxy on macOS
+      built the builder-VM rootfs cold (~540k egress connections relayed, DHCP +
+      DNS + sustained download) and reached "Dev environment ready". Took three
+      rvproxy fixes — DNS reply sourced from the gateway IP (#38), guest-bound
+      TCP segmented to the MTU (#42, was EMSGSIZE-tearing the transport), and
+      read/write timeouts cut to per-poll budgets (#53, a 30s read timeout froze
+      the single-threaded pump). Vz `vfkit` + Firecracker `passt` replacements
+      still pending. Owner: coordinated with the rvproxy session (their Plan 014
+      R3).
+- [ ] **WS-1.5 — parity-gate scaffold.** `scripts/rvproxy-gateway-parity.sh`
+      runs the claim-10 / flow-audit / Plan-129-substitution witness families
+      plus the binary-discriminating conformance gate
+      (`gvproxy_dhcp_offer_roundtrips_through_bridge`) against both gvproxy
+      (control) and rvproxy (candidate via `MVM_GATEWAY_BIN`), refusing the flip
+      unless rvproxy genuinely runs and passes. Validated head-to-head on macOS
+      (both PASS) and negatively (a non-gateway binary is REFUSED). Note: the
+      enforcement witnesses are bridge-side and binary-agnostic *today*, so this
+      proves transport/conformance parity; the enforcement arm becomes
+      binary-discriminating only once WS-2 moves enforcement onto rvproxy's
+      native flow API. CI wiring is gated on provisioning an rvproxy binary in
+      the mvm CI (cross-repo).
 - [ ] **WS-2 — flow-decision + audit seam.** Port `gateway_bridge`'s
       `PlanFlowPolicy` deny-by-default gate + flow-audit onto rvproxy's native
       flow API; delete the in-line splice/`etherparse` wrapper (Plan 141) and the
