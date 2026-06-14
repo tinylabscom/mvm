@@ -480,7 +480,7 @@ fn render_text(report: &DoctorReport) {
 fn collect_balloon_support() -> BTreeMap<String, bool> {
     let mut out = BTreeMap::new();
     for descriptor in mvm_backend::catalog::balloon_support_descriptors() {
-        let backend = AnyBackend::from_hypervisor(descriptor.selector);
+        let backend = descriptor.instantiate_dyn();
         out.insert(backend.name().to_string(), backend.capabilities().balloon);
     }
     out
@@ -514,7 +514,7 @@ fn collect_warm_start_support() -> WarmStartReport {
     let mut backends = BTreeMap::new();
     let mut standby_pool = BTreeMap::new();
     for descriptor in mvm_backend::catalog::warm_start_support_descriptors() {
-        let b = AnyBackend::from_hypervisor(descriptor.selector);
+        let b = descriptor.instantiate_dyn();
         backends.insert(b.name().to_string(), b.snapshot_capability().label());
         standby_pool.insert(b.name().to_string(), b.supports_standby_pool());
     }
