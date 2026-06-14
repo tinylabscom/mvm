@@ -207,6 +207,7 @@ mod tests {
     use super::*;
     use crate::keyholder::{BindingStore, SecretBindingMeta};
     use mvm_core::plan::SecretSource;
+    use mvm_core::util::test_env::TestEnv;
     use mvm_sdk::ir::AuthType;
     use secrecy::SecretBox;
     use tempfile::tempdir;
@@ -215,9 +216,8 @@ mod tests {
     fn build_audit_recorder_attaches_when_signer_key_present() {
         // No host signer key under a fresh data dir → no recorder (best-effort).
         let dir = tempdir().unwrap();
-        // SAFETY: single-threaded test; restored at scope end is unnecessary —
-        // each test process is isolated and this only steers the config helper.
-        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
         assert!(
             build_audit_recorder("local").is_none(),
             "no signer key ⇒ no recorder"
@@ -230,7 +230,6 @@ mod tests {
             build_audit_recorder("local").is_some(),
             "signer key present ⇒ recorder attaches"
         );
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     fn vsock_cfg(secrets: Vec<SecretBinding>, dir: &std::path::Path) -> EndpointConfig {

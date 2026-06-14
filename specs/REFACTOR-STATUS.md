@@ -33,7 +33,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 177** — Backend consolidation (8→4) · ✅ both phases merged (#806/#789/#812/#814/#817); DX-parity → Plan 189; lone caveat = host-gated hardware smoke
 - [x] **PLAN 182** — Trait hygiene + backend catalog · ✅ DONE — Clock/KeyProvider unified, `backend_catalog!` single-source, doctor sourced from it, arch docs current (all via #802). The lone open box (literal `cargo test --workspace`) is closed as documented-environmental: package-by-package + `-E 'not package(mvm-backend)'` are green; the aggregate only SIGKILLs the `mvm-backend` unit-test bin via macOS amfid codesign on this host (CI runs it green)
 - [x] **PLAN 184** — Backend descriptor registry · ✅ DONE — catalog promoted to a `BackendDescriptor` registry (descriptor-named helpers); dual `instantiate`/`instantiate_dyn` constructors with dyn↔enum parity test; doctor migrated to `instantiate_dyn`; `AnyBackend` narrowed to enum-specific ops (no duplication remained); boundary + ordering-freeze tests; arch/supervisor docs describe the behavior/discovery/dispatch split
-- [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 shared TestEnv expanded into mvm-cli/mvm-build/mvm-core; guest hook tests de-shelled; mvm-core env tests (config/user_config/secret_binding) migrated onto TestEnv + config.rs's duplicate `ENV_TEST_LOCK` deleted; remaining: mvm-backend/mvm-build/mvm-hostd env-test tail, poison-lock policy, naming/typed-selector/unsafe-boundary phases
+- [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 TestEnv migration advancing: mvm-core (config/user_config/secret_binding, `ENV_TEST_LOCK` deleted) + mvm-hostd (reaper/substitution_endpoint) + mvm-build `runtime_overlay` (`env_test_mutex` deleted) now on TestEnv; remaining: mvm-backend (host-gated SIGKILL), mvm-build libkrun_builder/builder_vm_runtime, mvm-cli, libkrun-sys; then poison-lock policy + naming/typed-selector/unsafe-boundary phases
 - [ ] **PLAN 189** — VZ DX parity (post-convergence) · 🟡 in progress — WS-3 `dev status --json` landed; remaining: save/restore verbs, cached fast-boot default, more --json coverage, base pinning (spun out of 177; sibling of 159)
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
@@ -363,9 +363,15 @@ PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
       (incl. deleting its duplicate per-module `ENV_TEST_LOCK`/`env_lock` helper),
       `user_config.rs`, `policy/secret_binding.rs`; manual save/restore boilerplate
       removed; 1248 mvm-core tests + clippy green
-  [ ] Roll `TestEnv` through remaining high-risk env-mutating tests in `mvm-backend`,
-      `mvm-cli`, `mvm-build`, `mvm-hostd`, `libkrun-sys` (incl. `mvm-core`
-      `domain/session` + `domain/template_tags`, which use a different `env::` form)
+  [x] Migrate `mvm-hostd` (reaper idle-timeout env + substitution_endpoint
+      MVM_DATA_DIR; added the `test-support` feature to its mvm-core dev-dep) and
+      `mvm-build` `runtime_overlay` (MVM_OVERLAY_BASE_URL; deleted its local
+      duplicate `env_test_mutex` OnceLock)
+  [ ] Roll `TestEnv` through the remaining env-mutating tests: `mvm-backend`
+      (host-gated: its test bin SIGKILLs under macOS amfid — migrate where CI/Linux
+      runs them), `mvm-build` `libkrun_builder`/`builder_vm_runtime` (each with a
+      local lock to fold), `mvm-cli`, `libkrun-sys`, + `mvm-core`
+      `domain/session` + `domain/template_tags` (different `env::` form)
   [ ] Standardize poisoned-lock handling by distinguishing test/global
       serialization locks from real runtime state locks
   [ ] Rename overly generic internal traits/types where the blast radius is

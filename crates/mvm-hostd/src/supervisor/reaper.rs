@@ -291,6 +291,7 @@ pub fn deregister_only_teardown() -> TeardownFn {
 mod tests {
     use super::*;
     use mvm::vm::name_registry::RegisterParams;
+    use mvm_core::util::test_env::TestEnv;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use std::sync::Arc;
@@ -694,17 +695,17 @@ mod tests {
 
     #[test]
     fn global_idle_timeout_from_env_parses_and_treats_zero_as_off() {
-        // SAFETY: process-isolated under nextest; set + clear within the test.
-        unsafe { std::env::set_var(IDLE_TIMEOUT_ENV, "45") };
+        let mut env = TestEnv::new();
+        env.set(IDLE_TIMEOUT_ENV, "45");
         assert_eq!(
             global_idle_timeout_from_env(),
             Some(Duration::from_secs(45))
         );
-        unsafe { std::env::set_var(IDLE_TIMEOUT_ENV, "0") };
+        env.set(IDLE_TIMEOUT_ENV, "0");
         assert_eq!(global_idle_timeout_from_env(), None);
-        unsafe { std::env::set_var(IDLE_TIMEOUT_ENV, "garbage") };
+        env.set(IDLE_TIMEOUT_ENV, "garbage");
         assert_eq!(global_idle_timeout_from_env(), None);
-        unsafe { std::env::remove_var(IDLE_TIMEOUT_ENV) };
+        env.remove(IDLE_TIMEOUT_ENV);
         assert_eq!(global_idle_timeout_from_env(), None);
     }
 }
