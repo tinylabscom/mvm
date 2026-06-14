@@ -13,10 +13,28 @@ use crate::microvm::DriveFile;
 use anyhow::{Result, anyhow, bail};
 use mvm_core::crypto::egress_ca::EgressCa;
 use mvm_core::plan::SecretBinding;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+
+/// How the guest reaches the substitution endpoint. Backend-shaped: QEMU's
+/// `vhost-vsock` gives a real guest→host AF_VSOCK path, so the host binds an
+/// AF_VSOCK listener; Firecracker/libkrun route guest→host through a per-port
+/// UDS the in-process VMM proxies, so the host binds that UDS.
+///
+/// This is the wire contract the `mvm-substitution-endpoint` bin parses on
+/// stdin; mvm-hostd re-exports it so the bin and its tests keep one definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EndpointTransport {
+    /// Host AF_VSOCK listener on this port (QEMU). The guest dials
+    /// `connect_host_vsock(SUBSTITUTION_PORT)`.
+    Vsock { port: u32 },
+    /// Host UDS the per-port vsock proxy forwards to (Firecracker/libkrun).
+    Uds { path: PathBuf },
+}
 
 /// The per-VM egress intermediate cert lands in the guest's `mvm-secrets`
 /// drive under this filename; the mkGuest boot step appends it to the guest
@@ -121,27 +139,54 @@ fn resolve_substitution_endpoint_path() -> Result<PathBuf> {
     bail!("could not locate the {BIN} binary (set MVM_SUBSTITUTION_ENDPOINT_PATH)")
 }
 
+/// Inputs to [`spawn_substitution_endpoint`]. Grouped into a struct (rather
+/// than threading bare positional args) so the backend-shaped fields —
+/// `transport` (vsock vs UDS), `terminator_listen`, `tls_intermediate` — read
+/// at the callsite and stay under the argument-count lint.
+pub struct SubstitutionSpawnParams<'a> {
+    /// VM name; keys the per-VM substitution env path.
+    pub vm_name: &'a str,
+    /// Per-VM state dir; holds the endpoint PID file.
+    pub state_dir: &'a Path,
+    /// Tenant id stamped into the endpoint config.
+    pub tenant: &'a str,
+    /// The admitted plan's secret bindings handed to the endpoint on stdin.
+    pub secrets: &'a [SecretBinding],
+    /// Per-destination redaction policy from the signed plan.
+    pub redaction: &'a mvm_core::policy::RedactionPolicy,
+    /// Backend-shaped guest→host channel: `Vsock` (FC/QEMU) or `Uds`
+    /// (libkrun/vz, the per-VM socket the VMM proxies).
+    pub transport: EndpointTransport,
+    /// `Some(addr)` ⇒ also run the transparent HTTP terminator on that host TCP
+    /// addr (FC nft REDIRECT feeds it). `None` on slirp / in-process VMMs.
+    pub terminator_listen: Option<SocketAddr>,
+    /// `(cert_pem, key_pem)` of the per-VM intermediate for the `https`
+    /// terminator; the key never reaches the guest. `None` ⇒ `http`-only.
+    pub tls_intermediate: Option<(String, String)>,
+}
+
 /// Spawn the per-VM `mvm-substitution-endpoint` moat. Hands it the
 /// plan's secret bindings on stdin, reads back the minted `(guest var,
 /// placeholder)` handshake line, and persists it to the per-VM substitution env
 /// file for the invoke path to inject (`HTTP_PROXY` + placeholder vars). The
-/// endpoint binds a host AF_VSOCK listener on `SUBSTITUTION_PORT` (the guest→
-/// host substitution channel); when `terminator_listen` is `Some`, it *also*
-/// runs the transparent HTTP terminator on that host TCP addr — the FC
-/// nft TAP REDIRECT steers guest :80 there. Detached via `setsid` so it
-/// outlives `mvmctl up`; the stop path reaps it via [`SUBST_PID_FILE`]. The real
-/// secret values never leave the endpoint's address space — only the opaque
-/// placeholders are persisted/handed out.
-pub fn spawn_substitution_endpoint(
-    vm_name: &str,
-    state_dir: &Path,
-    tenant: &str,
-    secrets: &[SecretBinding],
-    redaction: &mvm_core::policy::RedactionPolicy,
-    terminator_listen: Option<SocketAddr>,
-    tls_intermediate: Option<(String, String)>,
-) -> Result<()> {
+/// endpoint serves the guest→host substitution channel over `transport`; when
+/// `terminator_listen` is `Some`, it *also* runs the transparent HTTP
+/// terminator on that host TCP addr — the FC nft TAP REDIRECT steers guest :80
+/// there. Detached via `setsid` so it outlives `mvmctl up`; the stop path reaps
+/// it via [`SUBST_PID_FILE`]. The real secret values never leave the endpoint's
+/// address space — only the opaque placeholders are persisted/handed out.
+pub fn spawn_substitution_endpoint(params: SubstitutionSpawnParams<'_>) -> Result<()> {
     use std::io::Write;
+    let SubstitutionSpawnParams {
+        vm_name,
+        state_dir,
+        tenant,
+        secrets,
+        redaction,
+        transport,
+        terminator_listen,
+        tls_intermediate,
+    } = params;
 
     let bin = resolve_substitution_endpoint_path()?;
     let mut cfg = serde_json::json!({
@@ -151,7 +196,10 @@ pub fn spawn_substitution_endpoint(
         // applies it to the cleartext it forwards. Default (all-off) is harmless.
         "redaction": serde_json::to_value(redaction)
             .expect("RedactionPolicy serializes to JSON"),
-        "transport": { "kind": "vsock", "port": mvm_guest::vsock::SUBSTITUTION_PORT },
+        // Backend-shaped guest→host channel: FC/QEMU dial the per-port vsock
+        // (Vsock); libkrun/vz route through the per-VM UDS the VMM proxies (Uds).
+        "transport": serde_json::to_value(&transport)
+            .expect("EndpointTransport serializes to JSON"),
     });
     if let Some(addr) = terminator_listen {
         // `EndpointConfig.terminator_listen: Option<SocketAddr>`:
@@ -245,6 +293,41 @@ fn read_handshake_line(
     }
 }
 
+/// RAII reaper for the per-VM substitution endpoint, armed while a backend's
+/// `start` is wiring the VM and dropped on any early-return so the
+/// decrypted-secret process can't outlive a failed launch. Defused once the VM
+/// is fully up (the normal `stop` path then owns teardown). Shared by the
+/// libkrun and vz backends — one definition so the spawn/reap moat can't drift.
+pub(crate) struct EndpointGuard {
+    /// `Some(name)` while armed; `None` once defused. Read by backend tests to
+    /// assert the no-secrets path yields a no-op guard.
+    pub(crate) vm_name: Option<String>,
+}
+
+impl EndpointGuard {
+    pub(crate) fn new(vm_name: &str) -> Self {
+        Self {
+            vm_name: Some(vm_name.to_string()),
+        }
+    }
+    /// A guard for a VM that spawned no endpoint (no secrets) — Drop is a no-op.
+    pub(crate) fn defused() -> Self {
+        Self { vm_name: None }
+    }
+    pub(crate) fn defuse(&mut self) {
+        self.vm_name = None;
+    }
+}
+
+impl Drop for EndpointGuard {
+    fn drop(&mut self) {
+        if let Some(ref name) = self.vm_name {
+            tracing::warn!(vm = %name, "EndpointGuard: reaping orphaned substitution endpoint");
+            reap_substitution_endpoint(&mvm_core::config::vm_state_dir(name), name);
+        }
+    }
+}
+
 /// Reap the per-VM substitution endpoint (if this VM spawned one) so its
 /// decrypted secrets don't outlive the guest, and drop the pid + env sidecars.
 /// Best-effort + idempotent: a VM with no endpoint (no secrets) is a no-op. The
@@ -289,6 +372,84 @@ mod tests {
         reap_substitution_endpoint(&dir, "nonexistent-vm");
         // Idempotent: a second call on the same empty dir is still clean.
         reap_substitution_endpoint(&dir, "nonexistent-vm");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // The libkrun/vz transport: `spawn_substitution_endpoint` must serialize the
+    // `Uds` variant into the config JSON the endpoint bin parses
+    // (`{"kind":"uds","path":...}`). Drive it with a stub bin (via
+    // `MVM_SUBSTITUTION_ENDPOINT_PATH`) that copies its stdin config to a file
+    // for inspection and prints a one-line ready handshake.
+    #[test]
+    fn spawn_substitution_endpoint_emits_uds_transport() {
+        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("mvm-subst-uds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved_home = std::env::var_os("HOME");
+        // Route vm_substitution_env_path under our temp HOME so the write lands
+        // somewhere disposable.
+        // SAFETY: serialised by HOME_TEST_LOCK.
+        unsafe { std::env::set_var("HOME", &dir) };
+
+        // Stub endpoint: dump stdin (the config JSON) to a file, then emit one
+        // handshake line so the spawn helper's read_handshake_line succeeds.
+        let cfg_out = dir.join("captured-config.json");
+        let stub = dir.join("stub-endpoint.sh");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\ncat > {}\necho 'ready handshake'\n",
+                cfg_out.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let saved_bin = std::env::var_os("MVM_SUBSTITUTION_ENDPOINT_PATH");
+        // SAFETY: serialised by HOME_TEST_LOCK.
+        unsafe { std::env::set_var("MVM_SUBSTITUTION_ENDPOINT_PATH", &stub) };
+
+        // The spawn helper writes the minted (var→placeholder) handshake to
+        // `vm_substitution_env_path` — ensure its parent dir exists under HOME.
+        if let Some(parent) = mvm_core::config::vm_substitution_env_path("uds-xport-vm").parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+
+        let sock = dir.join("vsock-5253.sock");
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let res = spawn_substitution_endpoint(SubstitutionSpawnParams {
+            vm_name: "uds-xport-vm",
+            state_dir: &dir,
+            tenant: "tenant-x",
+            secrets: &[],
+            redaction: &redaction,
+            transport: EndpointTransport::Uds { path: sock.clone() },
+            terminator_listen: None,
+            tls_intermediate: None,
+        });
+
+        // Restore env before asserting so a failure can't leak it.
+        unsafe {
+            match saved_bin {
+                Some(v) => std::env::set_var("MVM_SUBSTITUTION_ENDPOINT_PATH", v),
+                None => std::env::remove_var("MVM_SUBSTITUTION_ENDPOINT_PATH"),
+            }
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        res.expect("spawn with stub endpoint should succeed");
+
+        let captured = std::fs::read_to_string(&cfg_out).expect("stub wrote config");
+        let v: serde_json::Value = serde_json::from_str(&captured).expect("config is JSON");
+        assert_eq!(v["transport"]["kind"], "uds");
+        assert_eq!(v["transport"]["path"], sock.to_string_lossy().as_ref());
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

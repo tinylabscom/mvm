@@ -315,6 +315,9 @@ fn build_vz_supervisor_config(
         vsock: crate::vz::VsockConfig {
             ports: config.vsock_ports.clone(),
             socket_dir: vsock_dir,
+            // The builder VM has no egress-substitution endpoint; no host-listen
+            // ports.
+            host_listen_ports: vec![],
         },
         console_output_path: Some(console_log),
         // gvproxy gives a cold `nix build` egress to fetch nixpkgs.
@@ -1313,6 +1316,9 @@ fn build_vz_persistent_supervisor_config(
                 ports
             },
             socket_dir: vsock_dir,
+            // The builder VM has no egress-substitution endpoint; no host-listen
+            // ports.
+            host_listen_ports: vec![],
         },
         console_output_path: Some(console_log),
         // No virtio-net on the persistent driver yet. gvproxy is wired

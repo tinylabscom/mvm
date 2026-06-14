@@ -100,6 +100,7 @@ fn build_boot_config(name: &str, kernel: &str, rootfs: &str, state_dir: &Path) -
         vsock: VsockConfig {
             ports: vec![5252],
             socket_dir: state_dir.join("vsock").to_string_lossy().into_owned(),
+            host_listen_ports: vec![],
         },
         console_output_path: Some(state_dir.join("console.log").to_string_lossy().into_owned()),
         network: None,

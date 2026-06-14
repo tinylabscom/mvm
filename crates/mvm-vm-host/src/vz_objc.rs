@@ -53,7 +53,7 @@ use objc2_virtualization::{
 };
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::net::UnixListener;
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
@@ -766,6 +766,12 @@ pub struct VzSupervisor {
     exit_task: Option<JoinHandle<()>>,
     /// Retains the exit-port `VZVirtioSocketListener` for the VM's lifetime.
     _exit_listener: Option<ExitListenerHandle>,
+    /// Host-listen (guest→host) proxy accept loops for the egress-substitution
+    /// channel; aborted on [`shutdown`](Self::shutdown).
+    host_listen_tasks: Vec<JoinHandle<()>>,
+    /// Retains each host-listen port's `VZVirtioSocketListener` for the VM's
+    /// lifetime (the framework drops accepts once the listener is released).
+    _host_listen_listeners: Vec<ExitListenerHandle>,
     /// In-process flow-audited gvproxy bridge thread.
     /// Held for its lifetime; process exit reaps it. `None` when no audit
     /// substrate (direct gvproxy attach) or no network.
@@ -797,6 +803,10 @@ impl VzSupervisor {
             .filter(|&p| p != WORKLOAD_EXIT_PORT)
             .collect();
         let capture_exit = config.vsock.ports.contains(&WORKLOAD_EXIT_PORT);
+        // Guest→host host-listen ports (egress substitution): the supervisor
+        // installs a VZVirtioSocketListener per port and splices each accepted
+        // guest connection to the per-VM UDS the endpoint binds.
+        let host_listen_ports = config.vsock.host_listen_ports.clone();
         let vm_state_dir = config.vm_state_dir.clone();
         let control_path = config.control_socket_path.clone();
         let mem_total_bytes = mib_to_bytes(config.resources.memory_mib);
@@ -849,6 +859,8 @@ impl VzSupervisor {
             captured_exit: Arc::new(Mutex::new(None)),
             exit_task: None,
             _exit_listener: None,
+            host_listen_tasks: Vec::new(),
+            _host_listen_listeners: Vec::new(),
             _bridge: None,
         };
         // Bind the host-side vsock proxy + control socket + workload-exit
@@ -862,6 +874,13 @@ impl VzSupervisor {
         }
         if capture_exit {
             this.start_exit_listener(&vm_state_dir).await?;
+        }
+        // Host-listen (guest→host) proxy for the egress-substitution channel.
+        // The listener must be installed before the guest can dial it, so this
+        // runs before start()/restore_and_resume().
+        if !host_listen_ports.is_empty() {
+            this.start_host_listen_proxy(&vsock_dir, &host_listen_ports)
+                .await?;
         }
         // Flow-audited networking: spawn the in-process gvproxy bridge before
         // start so it is splicing before the guest brings its NIC up. Fail-closed
@@ -1004,6 +1023,62 @@ impl VzSupervisor {
         Ok(())
     }
 
+    /// Install a guest→host `VZVirtioSocketListener` per host-listen port and
+    /// spawn an accept loop that splices each accepted guest connection to the
+    /// per-VM `<socket_dir>/vsock-<port>.sock` a separate host process binds (the
+    /// egress substitution endpoint). Opposite direction from
+    /// [`start_vsock_proxy`](Self::start_vsock_proxy) (host dials guest); here the
+    /// guest dials the port and the host forwards into the endpoint's UDS. The
+    /// listener must be installed before boot so the guest's first dial is
+    /// accepted. We do NOT bind the UDS — the endpoint owns it; if it hasn't bound
+    /// yet (no secrets in the plan) the connect fails and the guest dial is
+    /// refused, fail-closed.
+    async fn start_host_listen_proxy(&mut self, socket_dir: &str, ports: &[u32]) -> Result<()> {
+        if ports.is_empty() {
+            return Ok(());
+        }
+        let dir = PathBuf::from(socket_dir);
+        for &port in ports {
+            let (tx, rx) = mpsc::unbounded_channel::<SendableConnection>();
+            let handle = Arc::clone(&self.handle);
+            let listener_handle = self
+                .queue
+                .dispatch(move || -> Result<ExitListenerHandle> {
+                    // SAFETY: socketDevices() is a queue-bound accessor.
+                    let devices = unsafe { handle.vm.socketDevices() };
+                    let device = devices
+                        .to_vec()
+                        .into_iter()
+                        .next()
+                        .and_then(|d| Retained::downcast::<VZVirtioSocketDevice>(d).ok())
+                        .ok_or_else(|| {
+                            anyhow!("VM has no virtio-socket device for host-listen proxy")
+                        })?;
+                    let delegate = VsockListenerDelegate::new(tx);
+                    // SAFETY: new() returns a default socket listener.
+                    let listener = unsafe { VZVirtioSocketListener::new() };
+                    // SAFETY: setDelegate installs our accept delegate.
+                    unsafe { listener.setDelegate(Some(delegate.as_protocol())) };
+                    // SAFETY: setSocketListener_forPort must run on the VM's queue.
+                    unsafe { device.setSocketListener_forPort(&listener, port) };
+                    Ok(ExitListenerHandle {
+                        _listener: listener,
+                        _delegate: delegate,
+                    })
+                })
+                .await??;
+            let endpoint_sock = dir.join(format!("vsock-{port}.sock"));
+            self.host_listen_tasks
+                .push(tokio::spawn(run_host_listen_port_proxy(
+                    rx,
+                    endpoint_sock,
+                    port,
+                )));
+            self._host_listen_listeners.push(listener_handle);
+        }
+        Ok(())
+    }
+
     /// Abort the vsock proxy + control + exit accept loops and unlink their
     /// sockets. Best-effort; process exit would reap them anyway, but this keeps
     /// the state dir clean.
@@ -1011,9 +1086,15 @@ impl VzSupervisor {
         for task in &self.vsock_tasks {
             task.abort();
         }
+        for task in &self.host_listen_tasks {
+            task.abort();
+        }
         for task in self.control_task.iter().chain(self.exit_task.iter()) {
             task.abort();
         }
+        // NB: the host-listen `vsock-<port>.sock` paths are deliberately NOT
+        // unlinked here — the egress substitution endpoint process binds and owns
+        // them, so removing them would yank a live listener out from under it.
         for path in self.vsock_paths.iter().chain(self.control_path.iter()) {
             let _ = std::fs::remove_file(path);
         }
@@ -1127,6 +1208,49 @@ async fn run_port_proxy(conn: VmConn, listener: UnixListener, port: u32) {
                     }
                 }
                 Err(e) => tracing::warn!(port, error = %e, "vsock connect to guest failed"),
+            }
+        });
+    }
+}
+
+/// Accept loop for one host-listen (guest→host) port: each guest connection
+/// the listener accepted (forwarded over `rx`) is built into a `VsockStream`,
+/// then spliced to the per-VM `endpoint_sock` UDS the egress substitution
+/// endpoint binds. Per-connection failures are logged and dropped; the loop ends
+/// when the listener delegate's sender is dropped (VM teardown). When no endpoint
+/// is bound (a secret-free plan), `UnixStream::connect` fails and the guest's
+/// dial is refused — fail-closed.
+async fn run_host_listen_port_proxy(
+    mut rx: mpsc::UnboundedReceiver<SendableConnection>,
+    endpoint_sock: PathBuf,
+    port: u32,
+) {
+    while let Some(conn) = rx.recv().await {
+        let guest = match VsockStream::from_connection(conn.0) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(port, error = %e, "host-listen: build guest stream failed");
+                continue;
+            }
+        };
+        let endpoint_sock = endpoint_sock.clone();
+        tokio::spawn(async move {
+            let host = match UnixStream::connect(&endpoint_sock).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        port,
+                        socket = %endpoint_sock.display(),
+                        error = %e,
+                        "host-listen: connect to substitution endpoint socket failed"
+                    );
+                    return;
+                }
+            };
+            let mut guest = guest;
+            let mut host = host;
+            if let Err(e) = tokio::io::copy_bidirectional(&mut host, &mut guest).await {
+                tracing::debug!(port, error = %e, "host-listen bridge closed with error");
             }
         });
     }
