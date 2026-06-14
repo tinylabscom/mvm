@@ -30,6 +30,12 @@ impl SupervisorStandbyPool {
         Self { root: root.into() }
     }
 
+    /// The pool's root directory. Callers that need to serialize across the
+    /// whole pool (e.g. an exclusive warm lock) anchor on this.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Persist (or update) a standby's handle under `<root>/<id>/standby.json`,
     /// creating the dir `0700`.
     pub fn record(&self, h: &StandbyHandle) -> Result<()> {

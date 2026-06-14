@@ -215,6 +215,12 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
             failed: 0,
         });
     }
+    // Serialize concurrent warms on the pool directory. Without this lock two
+    // launches can both read an empty pool and each spawn up to `target`,
+    // overshooting it; the standbys then age out via TTL but waste a boot each.
+    // The lock spans the idle-count read through the spawn loop and releases on
+    // return.
+    let _warm_guard = mvm_core::atomic_io::FileLock::acquire(&pool.root().join("warm"))?;
     // The compat identity computed identically here and at claim time (a constant for
     // libkrun's bundled kernel) so a warmed standby is actually claimable.
     let kernel_sha256 = kernel_identity(p.backend, p.kernel.to_str())?;
@@ -851,6 +857,125 @@ mod tests {
         // Already at target → no spawns attempted, no failures.
         assert_eq!(result.spawned, 0);
         assert_eq!(result.failed, 0);
+    }
+
+    // A VmBackend stub whose `spawn_standby` always succeeds, echoing the spec's
+    // compat fields into the handle so the spawned standby is counted as idle.
+    // Stateless → Send + Sync, shareable across threads.
+    struct SpawnOkBackend;
+    impl VmBackend for SpawnOkBackend {
+        fn name(&self) -> &str {
+            "stub-spawn-ok"
+        }
+        fn capabilities(&self) -> VmCapabilities {
+            VmCapabilities::default()
+        }
+        fn supports_standby_pool(&self) -> bool {
+            true
+        }
+        fn spawn_standby(
+            &self,
+            spec: &mvm_core::vm_backend::StandbySpec,
+        ) -> std::result::Result<StandbyHandle, StandbyError> {
+            Ok(StandbyHandle {
+                id: spec.id.clone(),
+                control_socket: spec.control_socket.clone(),
+                pid: std::process::id(),
+                kernel_sha256: spec.kernel_sha256.clone(),
+                vcpus: spec.vcpus,
+                mem_mib: spec.mem_mib,
+                binding_nonce: spec.binding_nonce.clone(),
+                spawned_unix_secs: 1,
+                state: StandbyState::Idle,
+                image_sha256: spec.image_sha256.clone(),
+            })
+        }
+        fn start_with_mode(&self, _: &VmStartConfig, _: StartMode) -> anyhow::Result<VmId> {
+            unreachable!()
+        }
+        fn stop(&self, _: &VmId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn stop_all(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn pause(&self, _: &VmId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn resume(&self, _: &VmId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn status(&self, _: &VmId) -> anyhow::Result<VmStatus> {
+            Ok(VmStatus::Stopped)
+        }
+        fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
+            Ok(vec![])
+        }
+        fn logs(&self, _: &VmId, _: u32, _: bool) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn is_available(&self) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        fn install(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    // Two launches warming the same pool to the same target concurrently must
+    // not overshoot it: the pool-dir flock serializes the idle-count read →
+    // spawn loop, so the second warmer observes the first's standbys and spawns
+    // nothing. Without the lock both read an empty pool and each spawn `target`.
+    #[test]
+    fn warm_to_target_concurrent_calls_do_not_overshoot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"k").unwrap();
+        let key = tmp.path().join("key");
+        std::fs::write(&key, b"fake-key").unwrap();
+
+        let backend = SpawnOkBackend;
+        fn warm_once(
+            pool: &SupervisorStandbyPool,
+            backend: &dyn VmBackend,
+            kernel: &std::path::Path,
+            key: &std::path::Path,
+        ) {
+            warm_to_target(
+                pool,
+                &WarmParams {
+                    backend,
+                    kernel,
+                    vcpus: 2,
+                    mem_mib: 1024,
+                    signer_id: "host:test",
+                    signing_key_path: key,
+                    target: 2,
+                    image: None,
+                },
+            )
+            .unwrap();
+        }
+
+        std::thread::scope(|s| {
+            let a = s.spawn(|| warm_once(&pool, &backend, &kernel, &key));
+            let b = s.spawn(|| warm_once(&pool, &backend, &kernel, &key));
+            a.join().unwrap();
+            b.join().unwrap();
+        });
+
+        let want = StandbyCompat {
+            kernel_sha256: kernel_sha256_hex(&kernel).unwrap(),
+            vcpus: 2,
+            mem_mib: 1024,
+            image_sha256: None,
+        };
+        assert_eq!(
+            pool.idle_count_compatible(&want).unwrap(),
+            2,
+            "concurrent warms overshot the target — the read→spawn lock is missing or not held"
+        );
     }
 }
 
