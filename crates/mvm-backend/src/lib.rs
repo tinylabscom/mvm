@@ -84,7 +84,7 @@ pub use libkrun::LibkrunBackend;
 pub use mock::MockBackend;
 pub use qemu::QemuBackend;
 pub use vz::VzBackend;
-pub use workload_backend::WorkloadBackend;
+pub use workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 
 /// The per-VM egress-TLS cert/key split helper. `mvmctl up`
 /// (mvm-cli) calls this while assembling the guest secrets drive: the cert is
