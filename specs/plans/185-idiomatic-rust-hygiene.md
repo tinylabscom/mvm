@@ -166,17 +166,21 @@ Priority order:
 `crates/mvm/src/vm/egress_proxy.rs`,
 `crates/mvm-hostd/src/supervisor/egress.rs`.
 
-- [ ] **Step 1 - classify names before editing.** Separate public/user-facing
+- [x] **Step 1 - classify names before editing.** Separate public/user-facing
       names from internal Rust names. Only internal names are candidates here.
-- [ ] **Step 2 - rename `storage::Backend` if call sites stay manageable.**
-      Candidate: `DeviceMapperBackend` or `ThinDeviceBackend`, depending on what
-      the surrounding module actually models.
+      `storage::Backend` is internal-only (re-exported within the `storage`
+      module; CLI consumes `ThinPool`/`ThinPoolImpl`, never the trait).
+- [x] **Step 2 - rename `storage::Backend` if call sites stay manageable.**
+      Renamed to `DeviceMapperBackend` (the module models dmsetup/device-mapper
+      thin-pool ops; impls are `DmsetupBackend` + `MockBackend`). Blast radius
+      was three files: `storage/backend.rs`, `storage/mod.rs`, `storage/pool.rs`.
 - [ ] **Step 3 - clarify the two `EgressProxy` traits without unifying them.**
       Candidate names should reflect layer ownership, for example runtime VM
       egress vs supervisor policy egress.
-- [ ] **Step 4 - update docs/comments only where they reference Rust type names.**
-      Do not churn user docs for internal-only renames.
-- [ ] **Step 5 - green.** Run targeted tests and clippy for each touched crate.
+- [~] **Step 4 - update docs/comments only where they reference Rust type names.**
+      Done for the `storage::Backend` rename; `EgressProxy` doc pass pending Step 3.
+- [~] **Step 5 - green.** `mvm` lib+tests clippy clean, 14 storage tests pass;
+      `EgressProxy` crates pending Step 3.
 
 ### Task 5 - Push stringly selectors toward typed values at module boundaries
 

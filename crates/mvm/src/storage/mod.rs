@@ -35,7 +35,7 @@ pub mod backend;
 pub mod pool;
 pub mod thin;
 
-pub use backend::{Backend, DmsetupBackend, MockBackend};
+pub use backend::{DeviceMapperBackend, DmsetupBackend, MockBackend};
 pub use pool::{PoolConfig, PoolStats, ThinPool, ThinPoolImpl};
 pub use thin::{ThinVolume, VolumeId, VolumeStats};
 

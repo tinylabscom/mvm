@@ -404,8 +404,12 @@ PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
       `with_supervisor_env`) into TestEnv; audited runtime `.lock().unwrap()` sites
       as intentionally fail-closed. Remaining: `mvm-cli::dev_vz` (hot) + mvm-backend
       test locks (host-gated)
-  [ ] Rename overly generic internal traits/types where the blast radius is
-      small, including storage/backend and layer-local egress proxy names
+  [~] Phase 3 (naming/typed-selectors): Task 4 Step 2 DONE — renamed
+      `storage::Backend` → `DeviceMapperBackend` (internal-only trait; CLI uses
+      `ThinPool`/`ThinPoolImpl`, not the trait; 3-file blast radius:
+      backend.rs/mod.rs/pool.rs; mvm lib+tests clippy clean, 14 storage tests
+      pass). Remaining: Step 3 (clarify the two layer-local `EgressProxy` traits)
+      + Task 5 (push stringly backend/provider selectors toward typed values)
   [ ] Push stringly backend/provider selectors toward typed values at module
       boundaries
   [ ] Audit long constructors, params structs, builders, and large functions
