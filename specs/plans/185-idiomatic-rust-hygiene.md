@@ -236,8 +236,27 @@ Priority order:
 **Files:** start from clippy pressure and manual inspection of functions that
 thread many related values through runtime/build/CLI layers.
 
-- [ ] **Step 1 - prefer params structs over long argument lists.** Add a named
+- [~] **Step 1 - prefer params structs over long argument lists.** Add a named
       struct when multiple call sites pass the same conceptual bundle.
+
+      Audit anchored on the `#[allow(clippy::too_many_arguments)]` suppressions
+      (CLAUDE.md forbids that attribute outright). Findings:
+      - **`mvm-build::firecracker::boot_builder_vsock`** (9 args) — live (the
+        vsock builder backend boots through it). Grouped the eight non-env args
+        into a `BuilderVsockBoot` params struct, destructured by-ref at the top
+        so the body is byte-identical; `#[allow]` removed. **Done.**
+      - **`mvm::vm::instance::fc_config::generate` + `mvm::security::jailer::
+        launch_jailed`** — NOT refactored: the `mvm` Firecracker instance/pool
+        lifecycle subtree (`vm/instance/`, `vm/pool/`) is **dead code** — not
+        wired into `vm/mod.rs` (no `mod instance`/`mod pool`), confirmed with a
+        `compile_error!` probe. `fc_config`'s suppression is stale-on-dead;
+        `jailer::launch_jailed` compiles but its only caller is in that dead
+        subtree. These belong to a separate dead-code-removal pass, not a params
+        refactor. (`libkrun-sys/src/sys.rs`'s module-level allow is
+        bindgen-generated FFI and legitimate.)
+      - **Remaining live candidates** (deferred — claim-12 security paths needing
+        careful treatment): `mvm-hostd::supervisor::substitution_proxy::
+        sign_into_headers` and `terminator::tls::terminate_and_substitute`.
 - [ ] **Step 2 - prefer builders for multi-field optional construction.** Use a
       builder when construction mixes required and optional fields or when tests
       repeatedly create the same large fixture.
