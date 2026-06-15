@@ -101,6 +101,19 @@ class ExecResult:
     stderr: str
 
 
+@dataclass(frozen=True)
+class SandboxInfo:
+    """Snapshot of a :class:`Sandbox`'s identity + mode (local; no VM round-trip).
+
+    ``id`` is the live VM id when live, else the workload id. ``build_mode``
+    is ``"dev"`` / ``"prod"`` when live and ``None`` in record mode."""
+
+    id: str
+    workload_id: str
+    build_mode: str | None
+    live: bool
+
+
 MVM_SDK_MODE_ENV = "MVM_SDK_MODE"
 
 #: When set in the environment, the SDK writes the wire-shape
@@ -1040,6 +1053,20 @@ class Sandbox:
     @property
     def workload_id(self) -> str:
         return self._workload_id
+
+    @property
+    def id(self) -> str:
+        """Stable identifier: the live VM id when live, else the workload id."""
+        return self._live.vm_id if self._live is not None else self._workload_id
+
+    def info(self) -> SandboxInfo:
+        """Local snapshot of this sandbox's identity + mode (no VM round-trip)."""
+        return SandboxInfo(
+            id=self.id,
+            workload_id=self._workload_id,
+            build_mode=self._live.build_mode if self._live is not None else None,
+            live=self._live is not None,
+        )
 
     @property
     def commands(self) -> _Commands:

@@ -549,3 +549,48 @@ def test_aexec_refused_in_record_mode() -> None:
             await sb.aexec("python")
 
     asyncio.run(body())
+
+
+# ── lifecycle: id + info (Plan 125 B3) ───────────────────────────────
+
+
+def test_id_is_vm_id_when_live(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-id-vm", "build_mode": "dev"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    sb = mvm.Sandbox.create("python-dev", workload_id="wl-1")
+    assert sb.id == "sb-id-vm"
+
+
+def test_id_is_workload_id_in_record_mode() -> None:
+    os.environ["MVM_SDK_MODE"] = "record"
+    sb = mvm.Sandbox.create("python-dev", workload_id="wl-1")
+    assert sb.id == "wl-1"
+
+
+def test_info_reflects_live_state(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-id-vm", "build_mode": "dev"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    sb = mvm.Sandbox.create("python-dev", workload_id="wl-1")
+    info = sb.info()
+    assert info.id == "sb-id-vm"
+    assert info.workload_id == "wl-1"
+    assert info.build_mode == "dev"
+    assert info.live is True
+
+
+def test_info_reflects_record_state() -> None:
+    os.environ["MVM_SDK_MODE"] = "record"
+    sb = mvm.Sandbox.create("python-dev", workload_id="wl-1")
+    info = sb.info()
+    assert info.id == "wl-1"
+    assert info.workload_id == "wl-1"
+    assert info.build_mode is None
+    assert info.live is False
