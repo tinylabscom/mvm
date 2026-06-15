@@ -189,6 +189,48 @@ fn plan_seccomp_tier(
         .context("converting runtime seccomp tier into plan seccomp tier")
 }
 
+/// Effective seccomp tier name: an explicit `--seccomp` wins, otherwise the
+/// chosen security profile's tier. Pure so the precedence is unit-testable.
+fn effective_seccomp_name(
+    profile: mvm_core::policy::security_profile::SecurityProfile,
+    seccomp_flag: Option<&str>,
+) -> String {
+    seccomp_flag
+        .map(str::to_string)
+        .unwrap_or_else(|| profile.seccomp.to_string())
+}
+
+/// The egress preset a security profile contributes to network resolution.
+/// Only an *explicitly named* profile whose egress isn't already deny-all
+/// contributes one — a defaulted (or `production`) profile returns `None` so
+/// the existing default/template network path is preserved byte-for-byte. The
+/// returned string, when `Some`, is fed in exactly where `--network-preset`
+/// would be.
+fn profile_egress_preset(
+    profile: mvm_core::policy::security_profile::SecurityProfile,
+    profile_was_named: bool,
+) -> Option<String> {
+    use mvm_core::network_policy::NetworkPreset;
+    (profile_was_named && profile.egress != NetworkPreset::None).then(|| profile.egress.to_string())
+}
+
+/// Refuse a non-deployable security profile on the prod build path: the `dev`
+/// profile is development-only and must never reach a sealed/production image.
+/// Pure (mode in, result out) so the gate is unit-testable without a VM.
+fn enforce_profile_deployable(
+    profile: mvm_core::policy::security_profile::SecurityProfile,
+    build_mode: mvm_build::pipeline::BuildMode,
+) -> Result<()> {
+    if matches!(build_mode, mvm_build::pipeline::BuildMode::Prod) && !profile.deployable {
+        anyhow::bail!(
+            "security profile `{}` is development-only and cannot be deployed; \
+             omit `--security-profile` (defaults to production) or drop `--prod`",
+            profile.name
+        );
+    }
+    Ok(())
+}
+
 /// Bundle of artifacts produced by a successful admission: the
 /// admitted plan + the audit emitter wired against the host signer.
 /// Callers thread this through `cmd_run` so the `plan.launched` and
@@ -999,12 +1041,20 @@ pub(in crate::commands) struct Args {
     /// Network allowlist entry (format: HOST:PORT). Repeatable
     #[arg(long)]
     pub network_allow: Vec<String>,
+    /// Named security profile selecting the per-seam capability matrix
+    /// (seccomp tier + egress posture). Defaults to `production`: the
+    /// highest-security, deployable posture (seccomp floor + deny-all egress).
+    /// The only alternative is `dev` — looser for development and never
+    /// deployable (refused under `--prod`). Explicit `--seccomp` /
+    /// `--network-preset` override the profile.
+    #[arg(long = "security-profile")]
+    pub security_profile: Option<String>,
     /// Seccomp profile tier (essential, minimal, standard, network, unrestricted).
     ///
-    /// Default: `standard`. `unrestricted` is opt-in only; the project's
-    /// posture is "defaults must be safe."
-    #[arg(long, default_value = "standard")]
-    pub seccomp: String,
+    /// Overrides the `--security-profile` seccomp tier. `unrestricted` is
+    /// opt-in only; the project's posture is "defaults must be safe."
+    #[arg(long)]
+    pub seccomp: Option<String>,
     /// Named dev network to attach VM to (default: "default")
     #[arg(long, default_value = "default")]
     pub network: String,
@@ -1152,9 +1202,39 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     // this field; manifest-keyed slots don't — runtime policy moves
     // to `mvmctl up` flags / `~/.mvm/config.toml` / mvmd). Explicit
     // CLI flags always win.
-    let explicit_cli_network = args.network_preset.is_some() || !args.network_allow.is_empty();
+    // Resolve the named security profile (default: production). Fail closed on
+    // an unknown name. Its seam values become the defaults for `--seccomp` and
+    // the egress posture; explicit per-seam flags still win.
+    let security_profile = mvm_core::policy::security_profile::resolve_security_profile(
+        args.security_profile.as_deref().unwrap_or("production"),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // The `dev` profile is development-only — it must never deploy. Refuse it
+    // up front on the prod build path (sealed / dm-verity image).
+    enforce_profile_deployable(security_profile, args.build_mode.resolve())?;
+    crate::ui::info(&format!(
+        "Security profile: {} (seccomp={}, egress={}, snapshot={})",
+        security_profile.name,
+        security_profile.seccomp,
+        security_profile.egress,
+        if security_profile.snapshot_allowed {
+            "allowed"
+        } else {
+            "forbidden"
+        },
+    ));
+
+    // An explicitly-named profile with non-deny-all egress (today: `dev`)
+    // contributes an egress preset in the same slot `--network-preset`
+    // occupies; `--network-preset` itself still wins. A defaulted/`production`
+    // profile contributes nothing, so the existing default/template path is
+    // unchanged.
+    let profile_egress = profile_egress_preset(security_profile, args.security_profile.is_some());
+    let effective_network_preset = args.network_preset.clone().or(profile_egress);
+
+    let explicit_cli_network = effective_network_preset.is_some() || !args.network_allow.is_empty();
     let network_policy = if explicit_cli_network {
-        resolve_network_policy(args.network_preset.as_deref(), &args.network_allow)?
+        resolve_network_policy(effective_network_preset.as_deref(), &args.network_allow)?
     } else if let Some(id_or_slot) = resolved_template_arg.as_deref()
         && let Ok(spec) = mvm::vm::template::lifecycle::template_load_dispatched(id_or_slot)
         && let Some(default_policy) = spec.default_network_policy.clone()
@@ -1194,7 +1274,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         ));
     }
     let seccomp_tier: mvm_core::crypto::seccomp::SeccompTier =
-        args.seccomp.parse().context("Invalid --seccomp value")?;
+        effective_seccomp_name(security_profile, args.seccomp.as_deref())
+            .parse()
+            .context("Invalid --seccomp value")?;
     let plan_seccomp_tier = plan_seccomp_tier(seccomp_tier)?;
     // `--from-workload-ir`, or the `workload.json` a compiled `--flake`
     // artifact carries. Resolved once, used for both
@@ -4197,5 +4279,59 @@ mod resolve_deps_volume_tests {
             v["cert_pem"].as_str().unwrap().trim(),
             cert_file.content.trim()
         );
+    }
+}
+
+#[cfg(test)]
+mod security_profile_wiring_tests {
+    use super::*;
+    use mvm_core::network_policy::NetworkPreset;
+    use mvm_core::policy::security_profile::{DEV, PRODUCTION, resolve_security_profile};
+
+    #[test]
+    fn seccomp_defaults_to_profile_then_explicit_flag_wins() {
+        // No --seccomp → the profile's tier.
+        assert_eq!(effective_seccomp_name(PRODUCTION, None), "standard");
+        assert_eq!(effective_seccomp_name(DEV, None), "unrestricted");
+        // --seccomp overrides the profile.
+        assert_eq!(effective_seccomp_name(DEV, Some("essential")), "essential");
+    }
+
+    #[test]
+    fn only_an_explicitly_named_non_production_profile_contributes_egress() {
+        // Defaulted production (profile_was_named = false): no override — the
+        // existing default/template network path is preserved.
+        assert_eq!(profile_egress_preset(PRODUCTION, false), None);
+        // Explicit `--security-profile production`: still deny-all, no override.
+        assert_eq!(profile_egress_preset(PRODUCTION, true), None);
+        // Explicit `--security-profile dev`: its egress flows in.
+        assert_eq!(
+            profile_egress_preset(DEV, true).as_deref(),
+            Some("unrestricted")
+        );
+        // dev's egress preset round-trips to the real NetworkPreset.
+        let preset: NetworkPreset = profile_egress_preset(DEV, true).unwrap().parse().unwrap();
+        assert_eq!(preset, NetworkPreset::Unrestricted);
+    }
+
+    #[test]
+    fn production_default_is_byte_identical_to_todays_seams() {
+        // The default profile must not change today's behavior: seccomp floor
+        // `standard`, and no egress override (deny-all default path).
+        let p = resolve_security_profile("production").unwrap();
+        assert_eq!(effective_seccomp_name(p, None), "standard");
+        assert_eq!(profile_egress_preset(p, false), None);
+    }
+
+    #[test]
+    fn dev_profile_is_refused_on_the_prod_path_only() {
+        use mvm_build::pipeline::BuildMode;
+        // dev under --prod: refused.
+        assert!(enforce_profile_deployable(DEV, BuildMode::Prod).is_err());
+        // dev in dev mode: fine (that's its purpose).
+        assert!(enforce_profile_deployable(DEV, BuildMode::Dev).is_ok());
+        // production deploys in either mode.
+        assert!(enforce_profile_deployable(PRODUCTION, BuildMode::Prod).is_ok());
+        assert!(enforce_profile_deployable(PRODUCTION, BuildMode::Dev).is_ok());
     }
 }
