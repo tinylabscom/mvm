@@ -2656,31 +2656,39 @@ pub(in crate::commands) struct ReapOutcome {
 /// future refactor that narrows the traversal or renames the sidecar
 /// must update that test.
 ///
-/// Two scans per VM dir:
+/// A microVM is several processes — the supervisor (the VMM-host that
+/// owns the guest) plus dependent helpers (a host gvproxy for egress, a
+/// `tail -F console.log` reader). The supervisor is the authoritative
+/// liveness signal, so the sweep runs in two phases per dir:
 ///
-/// 1. **Sidecar PID scan.** Each dir carries a `{builder.pid,
-///    stage0.pid}` sidecar with the supervisor's PID. (Earlier
-///    versions of this function looked for the wrong names
-///    (`supervisor.pid`/`gvproxy.pid`); the actual sidecar names
-///    are `builder.pid` for steady-state and `stage0.pid` for
-///    Stage 0 — fixed after smoke-testing on accumulated state
-///    showed `0` PIDs killed despite live orphans.)
-/// 2. **Argv scan.** `gvproxy` is the supervisor's GRANDCHILD and
-///    writes no sidecar of its own — its argv references the VM
-///    dir's `gvproxy.sock`. The argv scan catches those grandchildren
-///    even after the supervisor is gone. Same for `tail -F` readers
-///    of `console.log`.
+/// 1. **Supervisor phase.** Read the supervisor sidecars (`builder.pid` /
+///    `stage0.pid` / `vz.pid` / `libkrun.pid` — see
+///    [`is_supervisor_sidecar`]). On a *managed* dir (the persistent dev
+///    builder `mvm-persistent-builder-*`, or any named workload under
+///    `~/.mvm/vms/`) an alive supervisor is the running VM, spared:
+///    those supervisors are detached under launchd *by design* to
+///    outlive the spawning CLI, so `parent == launchd` is their steady
+///    state, not an orphan signal — they are stopped only by explicit
+///    `dev down` / `stop <name>`. On an *ephemeral* per-job builder dir,
+///    an alive launchd-parented supervisor is a build whose `mvmctl`
+///    crashed → SIGTERM. (Without the managed carve-out the startup
+///    sweep killed the live dev VM on every `up` / `dev up` / `ls`.)
+/// 2. **Helper phase.** The gvproxy sidecars (`gvproxy.pid` /
+///    `host-gvproxy.pid`) plus argv-scanned grandchildren (gvproxy's
+///    `gvproxy.sock`, `tail -F console.log`) whose argv carries the
+///    dir's unique basename. A helper's fate *follows its supervisor*:
+///    if Phase 1 found the VM live every helper is spared; once the
+///    supervisor is gone a still-running launchd-parented helper is a
+///    leak → SIGTERM. So a live VM keeps all its PIDs, while a stopped
+///    VM's stray gvproxy is still reaped.
 ///
-/// For each PID found by either scan:
-/// - dead → ignore
-/// - alive with a non-launchd parent → in-flight dev up; mark dir
-///   as "has a live owner", skip dir removal
-/// - alive with launchd as parent → SIGTERM and count
+/// Per PID the verdict ([`classify_pid_for_dir`]) is: dead → ignore;
+/// alive non-launchd parent → live owner (in-flight), spared; alive
+/// launchd parent → leak, SIGTERM — unless `protected` for that phase.
 ///
-/// Then if no helper in the dir had a live non-launchd parent, the
-/// dir is removed. This avoids the over-aggressive `rm -rf $vm/` of an
-/// earlier prototype, which during validation nuked a live mvmctl's
-/// state dir.
+/// Then if no PID in the dir had a live owner, the dir is removed.
+/// This avoids the over-aggressive `rm -rf $vm/` of an earlier
+/// prototype, which during validation nuked a live mvmctl's state dir.
 pub(in crate::commands) fn reap_orphaned_vm_helpers(dry_run: bool) -> Result<ReapOutcome> {
     reap_orphaned_vm_helpers_both_roots(/* remove_builder_dirs = */ true, dry_run)
 }
@@ -2724,6 +2732,16 @@ const BUILDER_SIDECARS: &[&str] = &["builder.pid", "stage0.pid"];
 /// supervisor that the argv scan might miss.
 const WORKLOAD_SIDECARS: &[&str] = &["libkrun.pid", "vz.pid", "gvproxy.pid", "host-gvproxy.pid"];
 
+/// Dir-name prefix of the **persistent** dev builder VM
+/// (`mvm-persistent-builder-vz-dev`, fixed session id "dev"). Unlike an
+/// ephemeral per-job `mvm-builder-v{m,z}-<job_id>` scratch dir, this VM
+/// is long-lived: its supervisor is detached and reparented to launchd
+/// *by design* so it outlives the spawning CLI. So a live PID recorded
+/// here is the running dev VM, not a leak — `parent == launchd` is the
+/// normal steady state, not an orphan signal. The startup sweep must
+/// spare it; it is torn down only by explicit `dev down`.
+const PERSISTENT_BUILDER_DIR_PREFIX: &str = "mvm-persistent-builder-";
+
 /// Scan both VM-state roots: the ephemeral builder cache
 /// (`~/.cache/mvm/builder-vm/vms/`) and the workload VM tree
 /// (`~/.mvm/vms/`). `remove_builder_dirs` deletes dead builder scratch
@@ -2738,17 +2756,34 @@ fn reap_orphaned_vm_helpers_both_roots(
         std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("builder-vm/vms");
     let workload_root = std::path::PathBuf::from(mvm_core::config::mvm_data_dir()).join("vms");
 
-    let mut out = reap_orphaned_vm_helpers_at(
+    // One process-table snapshot serves both roots: parent lookups and
+    // the argv-substring scan all read from it, so we never shell out
+    // more than once per sweep.
+    let snapshot = ProcSnapshot::capture();
+
+    let mut out = reap_orphaned_vm_helpers_at_with_snapshot(
         &builder_root,
         BUILDER_SIDECARS,
         remove_builder_dirs,
+        // Builder root mixes ephemeral per-job scratch dirs (reapable)
+        // with the persistent dev VM dir (spared); the per-dir prefix
+        // check distinguishes them, so this root is not "all managed".
+        /* all_dirs_managed = */
+        false,
         dry_run,
+        &snapshot,
     )?;
-    let workload = reap_orphaned_vm_helpers_at(
+    let workload = reap_orphaned_vm_helpers_at_with_snapshot(
         &workload_root,
         WORKLOAD_SIDECARS,
         /* remove_dead_dirs = */ false,
+        // Every `~/.mvm/vms/<name>/` dir is a user-managed named VM whose
+        // supervisor is a detached daemon (parent == launchd in steady
+        // state) — never an orphan to sweep. It is stopped via `stop`.
+        /* all_dirs_managed = */
+        true,
         dry_run,
+        &snapshot,
     )?;
     out.killed += workload.killed;
     out.removed_dirs += workload.removed_dirs;
@@ -2756,14 +2791,53 @@ fn reap_orphaned_vm_helpers_both_roots(
     Ok(out)
 }
 
-/// Inner form taking an explicit `vms_root`, the sidecar names to look
-/// for in each dir, and whether dead dirs may be removed. Exists for
-/// tests against a tempdir without mutating `MVM_CACHE_DIR`.
+/// Snapshot-capturing single-root wrapper over
+/// [`reap_orphaned_vm_helpers_at_with_snapshot`]. Production sweeps go
+/// through `_both_roots` (which captures one snapshot and shares it
+/// across both roots); this form captures its own and is the entry the
+/// reaper tests drive against a tempdir without mutating `MVM_CACHE_DIR`.
+#[cfg(test)]
 fn reap_orphaned_vm_helpers_at(
     vms_root: &std::path::Path,
     sidecars: &[&str],
     remove_dead_dirs: bool,
+    all_dirs_managed: bool,
     dry_run: bool,
+) -> Result<ReapOutcome> {
+    // One process-table snapshot for the whole sweep. macOS has no
+    // `/proc`, so the former code shelled out to `pgrep -f <basename>`
+    // once per dir plus `ps -o ppid=` once per candidate PID. With a
+    // cache of hundreds of builder scratch dirs that turned the `up`
+    // hot path into a multi-second storm of subprocess spawns. One
+    // `ps` up front collapses it to a single call.
+    let snapshot = ProcSnapshot::capture();
+    reap_orphaned_vm_helpers_at_with_snapshot(
+        vms_root,
+        sidecars,
+        remove_dead_dirs,
+        all_dirs_managed,
+        dry_run,
+        &snapshot,
+    )
+}
+
+/// Inner form taking an explicit, already-captured [`ProcSnapshot`] so
+/// `_both_roots` shares one snapshot across both roots and tests can
+/// inject a synthetic process table.
+///
+/// `all_dirs_managed` marks a root where *every* dir holds a long-lived,
+/// user-managed VM whose supervisor is a detached daemon (the workload
+/// root). On the builder root it is `false`, and the persistent dev VM
+/// is recognised per-dir by [`PERSISTENT_BUILDER_DIR_PREFIX`]. For a
+/// managed dir a live PID is the running VM, never an orphan — see
+/// [`classify_pid_for_dir`].
+fn reap_orphaned_vm_helpers_at_with_snapshot(
+    vms_root: &std::path::Path,
+    sidecars: &[&str],
+    remove_dead_dirs: bool,
+    all_dirs_managed: bool,
+    dry_run: bool,
+    snapshot: &ProcSnapshot,
 ) -> Result<ReapOutcome> {
     let mut outcome = ReapOutcome {
         killed: 0,
@@ -2774,74 +2848,76 @@ fn reap_orphaned_vm_helpers_at(
         return Ok(outcome);
     }
 
-    // One process-table snapshot for the whole sweep. macOS has no
-    // `/proc`, so the former code shelled out to `pgrep -f <basename>`
-    // once per dir plus `ps -o ppid=` once per candidate PID. With a
-    // cache of hundreds of builder scratch dirs that turned the `up`
-    // hot path into a multi-second storm of subprocess spawns. One
-    // `ps` up front collapses it to a single call.
-    let snapshot = ProcSnapshot::capture();
-
     for entry in std::fs::read_dir(vms_root)?.flatten() {
         let dir = entry.path();
         if !dir.is_dir() {
             continue;
         }
+        let dir_basename = match dir.file_name().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        // A managed dir holds a long-lived, explicitly-stopped VM (the
+        // persistent dev builder, or — on the workload root — any named
+        // VM). Its supervisor is detached under launchd by design, so on
+        // such a dir `parent == launchd` is the steady state, not a leak.
+        let managed = all_dirs_managed || dir_basename.starts_with(PERSISTENT_BUILDER_DIR_PREFIX);
 
         let mut dir_has_live_owner = false;
         let mut killed_in_dir = 0u64;
         let mut seen_pids: std::collections::HashSet<i32> = std::collections::HashSet::new();
 
-        // Scan 1 — sidecar files. Builder dirs write `builder.pid` /
-        // `stage0.pid`; workload dirs write `libkrun.pid` / `vz.pid` /
-        // the gvproxy sidecars. `sidecars` is the per-root set; a
-        // missing file is skipped.
-        for sidecar in sidecars {
-            let pid_file = dir.join(sidecar);
-            let Some(pid) = read_pid_file(&pid_file) else {
+        // Phase 1 — supervisors. The supervisor (`builder.pid` /
+        // `stage0.pid` / `vz.pid` / `libkrun.pid`) is the authoritative
+        // per-VM liveness signal: while it lives the VM is up. On a
+        // managed dir an alive supervisor is the running VM (spared); on
+        // an ephemeral per-job dir an alive *launchd-parented* supervisor
+        // is a build whose `mvmctl` crashed (reaped). A live supervisor
+        // here flips `dir_has_live_owner`, which gates Phase 2.
+        for sidecar in sidecars.iter().filter(|s| is_supervisor_sidecar(s)) {
+            let Some(pid) = read_pid_file(&dir.join(sidecar)) else {
                 continue;
             };
             if !seen_pids.insert(pid) {
                 continue;
             }
-            match classify_pid(pid, &snapshot) {
-                PidClassification::Dead => {}
-                PidClassification::LiveOwned => dir_has_live_owner = true,
-                PidClassification::Orphan => {
-                    if !dry_run {
-                        unsafe {
-                            libc::kill(pid, libc::SIGTERM);
-                        }
-                    }
-                    killed_in_dir += 1;
-                }
-            }
+            reap_or_track(
+                pid,
+                managed,
+                dry_run,
+                snapshot,
+                &mut dir_has_live_owner,
+                &mut killed_in_dir,
+            );
         }
 
-        // Scan 2 — argv scan for grandchildren (gvproxy, tail -F …
-        // console.log). They don't write sidecars but their argv
-        // contains the VM dir basename (the `mvm-stage0-…` or
-        // `mvm-builder-vm-…` id), which is unique on this host.
-        let dir_basename = match dir.file_name().and_then(|s| s.to_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        for pid in snapshot.pids_referencing(&dir_basename) {
+        // Phase 2 — dependent helpers: the gvproxy sidecars
+        // (`gvproxy.pid` / `host-gvproxy.pid`) plus argv-scanned
+        // grandchildren (gvproxy, `tail -F … console.log`) whose argv
+        // carries this dir's unique basename. A helper's fate follows the
+        // supervisor's: if the VM is live (`dir_has_live_owner`) every
+        // helper is spared; once the supervisor is gone a still-running
+        // launchd-parented helper is a leak to reap. This is why a live
+        // VM keeps *all* its PIDs while a stopped VM's stray gvproxy is
+        // still cleaned up.
+        let protect_helpers = dir_has_live_owner;
+        let helper_pids = sidecars
+            .iter()
+            .filter(|s| !is_supervisor_sidecar(s))
+            .filter_map(|s| read_pid_file(&dir.join(s)))
+            .chain(snapshot.pids_referencing(&dir_basename));
+        for pid in helper_pids {
             if !seen_pids.insert(pid) {
                 continue;
             }
-            match classify_pid(pid, &snapshot) {
-                PidClassification::Dead => {}
-                PidClassification::LiveOwned => dir_has_live_owner = true,
-                PidClassification::Orphan => {
-                    if !dry_run {
-                        unsafe {
-                            libc::kill(pid, libc::SIGTERM);
-                        }
-                    }
-                    killed_in_dir += 1;
-                }
-            }
+            reap_or_track(
+                pid,
+                protect_helpers,
+                dry_run,
+                snapshot,
+                &mut dir_has_live_owner,
+                &mut killed_in_dir,
+            );
         }
 
         outcome.killed += killed_in_dir;
@@ -2874,6 +2950,60 @@ fn classify_pid(pid: i32, snapshot: &ProcSnapshot) -> PidClassification {
         Some(1) => PidClassification::Orphan,
         _ => PidClassification::LiveOwned,
     }
+}
+
+/// [`classify_pid`] with a `protected` guard. When `protected`, an
+/// `Orphan` verdict (alive under launchd) is downgraded to `LiveOwned`
+/// and the process is spared. Phase 1 passes `managed` (a detached
+/// supervisor on a managed dir is the running VM, not a leak); Phase 2
+/// passes `dir_has_live_owner` (a helper of a live VM is spared, a
+/// helper of a stopped VM is a leak). Without this the startup sweep
+/// SIGTERMs the live dev VM on every `up` / `dev up` / `ls`.
+fn classify_pid_for_dir(pid: i32, protected: bool, snapshot: &ProcSnapshot) -> PidClassification {
+    match classify_pid(pid, snapshot) {
+        PidClassification::Orphan if protected => PidClassification::LiveOwned,
+        other => other,
+    }
+}
+
+/// Classify `pid` for a dir and act on the verdict: a spared live owner
+/// flips `dir_has_live_owner`; a leaked orphan is SIGTERM'd (outside
+/// `dry_run`) and counted. Shared by both reap phases so the kill/track
+/// bookkeeping has exactly one implementation.
+fn reap_or_track(
+    pid: i32,
+    protected: bool,
+    dry_run: bool,
+    snapshot: &ProcSnapshot,
+    dir_has_live_owner: &mut bool,
+    killed_in_dir: &mut u64,
+) {
+    match classify_pid_for_dir(pid, protected, snapshot) {
+        PidClassification::Dead => {}
+        PidClassification::LiveOwned => *dir_has_live_owner = true,
+        PidClassification::Orphan => {
+            if !dry_run {
+                // SAFETY: pid was just probed alive; a SIGTERM racing a
+                // natural exit returns ESRCH, which is benign.
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
+                }
+            }
+            *killed_in_dir += 1;
+        }
+    }
+}
+
+/// Whether a sidecar PID file names the VM's *supervisor* (the VMM-host
+/// process whose liveness is the VM's liveness) rather than a dependent
+/// helper like gvproxy. The supervisor is the authoritative per-VM
+/// liveness signal that gates whether a dir's helpers are spared (live
+/// VM) or reaped as leaks (stopped VM).
+fn is_supervisor_sidecar(name: &str) -> bool {
+    matches!(
+        name,
+        "builder.pid" | "stage0.pid" | "vz.pid" | "libkrun.pid"
+    )
 }
 
 /// One-shot snapshot of the host process table, taken once per sweep.
@@ -2927,6 +3057,14 @@ impl ProcSnapshot {
                 cmds.push((pid, cmd.trim_start().to_string()));
             }
         }
+        Self { parents, cmds }
+    }
+
+    /// Build a snapshot from explicit (pid → ppid) and (pid, argv) data.
+    /// Tests use this to stage a process whose recorded parent is launchd
+    /// without actually reparenting a real process to PID 1.
+    #[cfg(test)]
+    fn from_parts(parents: std::collections::HashMap<i32, i32>, cmds: Vec<(i32, String)>) -> Self {
         Self { parents, cmds }
     }
 
@@ -4534,8 +4672,8 @@ mod reap_orphans_tests {
     fn missing_vms_root_is_empty_outcome() {
         let dir = tempfile::tempdir().expect("tempdir");
         let vms_root = dir.path().join("does-not-exist");
-        let out =
-            reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false).expect("reap");
+        let out = reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false, false)
+            .expect("reap");
         assert_eq!(out.killed, 0);
         assert_eq!(out.removed_dirs, 0);
         assert_eq!(out.freed_bytes, 0);
@@ -4557,8 +4695,8 @@ mod reap_orphans_tests {
         std::fs::write(vm.join("builder.pid"), "2147483646\n").expect("write pid");
         std::fs::write(vm.join("payload"), vec![0u8; 1024]).expect("write payload");
 
-        let out =
-            reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false).expect("reap");
+        let out = reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false, false)
+            .expect("reap");
         assert_eq!(out.killed, 0, "no live PID, so nothing to kill");
         assert_eq!(out.removed_dirs, 1, "dir should be removed");
         assert!(out.freed_bytes >= 1024, "payload size counted");
@@ -4578,8 +4716,8 @@ mod reap_orphans_tests {
         let my_pid = std::process::id() as i32;
         std::fs::write(vm.join("builder.pid"), format!("{my_pid}\n")).expect("write pid");
 
-        let out =
-            reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false).expect("reap");
+        let out = reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false, false)
+            .expect("reap");
         assert_eq!(out.killed, 0, "live owner should not be killed");
         assert_eq!(out.removed_dirs, 0, "dir preserved while owner alive");
         assert!(vm.exists(), "dir should still be on disk");
@@ -4604,7 +4742,7 @@ mod reap_orphans_tests {
         std::fs::write(vm.join("libkrun.pid"), "2147483646\n").expect("write pid");
         std::fs::write(vm.join("config"), vec![0u8; 512]).expect("write state");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, WORKLOAD_SIDECARS, false, false)
+        let out = reap_orphaned_vm_helpers_at(&vms_root, WORKLOAD_SIDECARS, false, true, false)
             .expect("reap workload root");
         assert_eq!(out.killed, 0, "dead PID, nothing to kill");
         assert_eq!(out.removed_dirs, 0, "workload dir must never be removed");
@@ -4621,12 +4759,225 @@ mod reap_orphans_tests {
         std::fs::write(vm.join("builder.pid"), "2147483646\n").expect("write pid");
         std::fs::write(vm.join("payload"), vec![0u8; 256]).expect("write payload");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, true)
+        let out = reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false, true)
             .expect("dry-run reap");
         // Dry-run still *counts* what it would do, but doesn't mutate.
         assert_eq!(out.removed_dirs, 1);
         assert!(vm.exists(), "dry-run must not remove the dir");
         assert!(vm.join("builder.pid").exists(), "pid file untouched");
+    }
+
+    /// Spawn a real, alive stand-in process whose *recorded* parent is
+    /// launchd (PID 1) — exactly how a detached persistent dev VM
+    /// supervisor or a named-workload daemon looks. Returns the child
+    /// handle (caller must reap) and a snapshot that reports it under
+    /// launchd. `pid_is_alive` reads the real process table, so the
+    /// child must be genuinely running; only the parent edge is faked.
+    fn alive_child_under_launchd() -> (std::process::Child, i32, ProcSnapshot) {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn stand-in supervisor");
+        let pid = child.id() as i32;
+        let snapshot = ProcSnapshot::from_parts([(pid, 1)].into_iter().collect(), Vec::new());
+        (child, pid, snapshot)
+    }
+
+    /// The startup sweep must NOT signal the live persistent dev VM. Its
+    /// supervisor is detached to launchd by design, so `parent == 1` is
+    /// the steady state, not an orphan signal. Regression guard for the
+    /// bug where every `up` / `dev up` / `ls` SIGTERM'd the running dev
+    /// VM out from under the user.
+    #[test]
+    fn reap_spares_live_persistent_dev_vm_under_launchd() {
+        let (mut child, pid, snapshot) = alive_child_under_launchd();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        // The fixed persistent dev VM dir name (session id "dev").
+        let vm = vms_root.join("mvm-persistent-builder-vz-dev");
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        std::fs::write(vm.join("builder.pid"), format!("{pid}\n")).expect("write pid");
+
+        let out = reap_orphaned_vm_helpers_at_with_snapshot(
+            &vms_root,
+            BUILDER_SIDECARS,
+            /* remove_dead_dirs = */ true,
+            /* all_dirs_managed = */ false,
+            /* dry_run = */ false,
+            &snapshot,
+        )
+        .expect("reap");
+
+        assert_eq!(
+            out.killed, 0,
+            "live dev VM supervisor must not be signalled"
+        );
+        assert_eq!(out.removed_dirs, 0, "live dev VM dir must be preserved");
+        assert!(
+            pid_is_alive(pid),
+            "live dev VM supervisor was wrongly killed"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Sibling to the above for the workload root: a live named-VM daemon
+    /// (parent == launchd) is the running VM, not a leak — the sweep
+    /// leaves it alone.
+    #[test]
+    fn reap_spares_live_named_workload_under_launchd() {
+        let (mut child, pid, snapshot) = alive_child_under_launchd();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        let vm = vms_root.join("mvm-workload-livetest-3b1f-running");
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        std::fs::write(vm.join("vz.pid"), format!("{pid}\n")).expect("write pid");
+
+        let out = reap_orphaned_vm_helpers_at_with_snapshot(
+            &vms_root,
+            WORKLOAD_SIDECARS,
+            /* remove_dead_dirs = */ false,
+            /* all_dirs_managed = */ true,
+            /* dry_run = */ false,
+            &snapshot,
+        )
+        .expect("reap");
+
+        assert_eq!(out.killed, 0, "live named workload must not be signalled");
+        assert!(pid_is_alive(pid), "live named workload was wrongly killed");
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// The guard is scoped to managed dirs only: an ephemeral per-job
+    /// builder scratch dir (`mvm-builder-vz-<job>`) with a live,
+    /// launchd-parented supervisor is a genuine leak from a crashed
+    /// `mvmctl` and is still SIGTERM'd. Proves the fix didn't blunt the
+    /// reaper's real job.
+    #[test]
+    fn reap_still_kills_orphaned_ephemeral_builder_under_launchd() {
+        let (mut child, pid, snapshot) = alive_child_under_launchd();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        let vm = vms_root.join("mvm-builder-vz-abc12345");
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        std::fs::write(vm.join("builder.pid"), format!("{pid}\n")).expect("write pid");
+
+        let out = reap_orphaned_vm_helpers_at_with_snapshot(
+            &vms_root,
+            BUILDER_SIDECARS,
+            /* remove_dead_dirs = */ true,
+            /* all_dirs_managed = */ false,
+            /* dry_run = */ false,
+            &snapshot,
+        )
+        .expect("reap");
+
+        assert_eq!(out.killed, 1, "orphaned ephemeral builder must be reaped");
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// A live named workload keeps *all* its PIDs: the supervisor
+    /// (`vz.pid`) is alive, so its gvproxy helper (`host-gvproxy.pid`,
+    /// also launchd-parented) is spared too. Pins that the helper phase
+    /// follows the supervisor's liveness, not the helper's own parent.
+    #[test]
+    fn reap_spares_gvproxy_of_live_workload() {
+        let mut sup = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn stand-in supervisor");
+        let sup_pid = sup.id() as i32;
+        let mut gv = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn stand-in gvproxy");
+        let gv_pid = gv.id() as i32;
+        // Both detached under launchd, as a running daemon's helpers are.
+        let snapshot = ProcSnapshot::from_parts(
+            [(sup_pid, 1), (gv_pid, 1)].into_iter().collect(),
+            Vec::new(),
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        let vm = vms_root.join("mvm-workload-livegv-9c2a-running");
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        std::fs::write(vm.join("vz.pid"), format!("{sup_pid}\n")).expect("write sup pid");
+        std::fs::write(vm.join("host-gvproxy.pid"), format!("{gv_pid}\n")).expect("write gv pid");
+
+        let out = reap_orphaned_vm_helpers_at_with_snapshot(
+            &vms_root,
+            WORKLOAD_SIDECARS,
+            /* remove_dead_dirs = */ false,
+            /* all_dirs_managed = */ true,
+            /* dry_run = */ false,
+            &snapshot,
+        )
+        .expect("reap");
+
+        assert_eq!(
+            out.killed, 0,
+            "live VM's supervisor and gvproxy both spared"
+        );
+        assert!(
+            pid_is_alive(gv_pid),
+            "gvproxy of a live VM was wrongly killed"
+        );
+
+        let _ = sup.kill();
+        let _ = sup.wait();
+        let _ = gv.kill();
+        let _ = gv.wait();
+    }
+
+    /// The refinement the supervisor-liveness gate buys: once the
+    /// supervisor is gone the VM is down, so a still-running
+    /// launchd-parented gvproxy is a genuine leak and IS reaped — even on
+    /// the managed workload root. A blanket "managed → spare everything"
+    /// rule would miss this.
+    #[test]
+    fn reap_kills_leaked_gvproxy_of_dead_workload() {
+        // Only the gvproxy is alive; the supervisor PID is long dead.
+        let mut gv = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn stand-in gvproxy");
+        let gv_pid = gv.id() as i32;
+        let dead_sup = i32::MAX; // guaranteed not alive → VM is down
+        let snapshot = ProcSnapshot::from_parts([(gv_pid, 1)].into_iter().collect(), Vec::new());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        let vm = vms_root.join("mvm-workload-deadgv-4e7b-stopped");
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        std::fs::write(vm.join("vz.pid"), format!("{dead_sup}\n")).expect("write dead sup pid");
+        std::fs::write(vm.join("host-gvproxy.pid"), format!("{gv_pid}\n")).expect("write gv pid");
+
+        let out = reap_orphaned_vm_helpers_at_with_snapshot(
+            &vms_root,
+            WORKLOAD_SIDECARS,
+            /* remove_dead_dirs = */ false,
+            /* all_dirs_managed = */ true,
+            /* dry_run = */ false,
+            &snapshot,
+        )
+        .expect("reap");
+
+        assert_eq!(
+            out.killed, 1,
+            "leaked gvproxy of a stopped VM must be reaped"
+        );
+
+        let _ = gv.kill();
+        let _ = gv.wait();
     }
 }
 
@@ -5063,9 +5414,14 @@ mod builder_vm_bootstrap_tests {
         // live owner and is eligible for removal.
         std::fs::write(vz_dir.join("builder.pid"), format!("{}\n", i32::MAX)).unwrap();
 
-        let outcome =
-            reap_orphaned_vm_helpers_at(vms, BUILDER_SIDECARS, true, /* dry_run = */ false)
-                .expect("reap should succeed");
+        let outcome = reap_orphaned_vm_helpers_at(
+            vms,
+            BUILDER_SIDECARS,
+            true,
+            /* all_dirs_managed = */ false,
+            /* dry_run = */ false,
+        )
+        .expect("reap should succeed");
 
         assert_eq!(
             outcome.removed_dirs, 1,
