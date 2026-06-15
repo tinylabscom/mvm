@@ -11,7 +11,7 @@ use crate::build::{
     BUILDER_OUTPUT_DISK_MIB, BUILDER_VCPUS, PoolBuildOpts, create_builder_input_disk,
     create_builder_output_disk,
 };
-use crate::firecracker::{boot_builder_vsock, teardown_builder_for_retry};
+use crate::firecracker::{BuilderVsockBoot, boot_builder_vsock, teardown_builder_for_retry};
 use crate::vsock_builder::build_via_vsock;
 
 pub(crate) struct VsockBackend<'a> {
@@ -70,16 +70,19 @@ impl BuilderBackend for VsockBackend<'_> {
             .ok_or_else(|| anyhow!("missing vsock uds before boot"))?;
         let pid = boot_builder_vsock(
             env,
-            self.build_run_dir,
-            self.builder_net,
-            self.tenant_net,
-            self.opts.builder_vcpus.unwrap_or(BUILDER_VCPUS),
-            self.opts
-                .builder_mem_mib
-                .unwrap_or(crate::build::BUILDER_MEM_MIB),
-            out_disk,
-            self.in_disk.as_deref(),
-            vsock_uds,
+            &BuilderVsockBoot {
+                run_dir: self.build_run_dir,
+                builder_net: self.builder_net,
+                tenant_net: self.tenant_net,
+                vcpus: self.opts.builder_vcpus.unwrap_or(BUILDER_VCPUS),
+                mem_mib: self
+                    .opts
+                    .builder_mem_mib
+                    .unwrap_or(crate::build::BUILDER_MEM_MIB),
+                out_disk,
+                in_disk: self.in_disk.as_deref(),
+                vsock_uds,
+            },
         )?;
         self.builder_pid = Some(pid);
         Ok(())

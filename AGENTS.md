@@ -170,8 +170,9 @@ Privacy and security are **critical priorities** for this project and must be co
 Rules:
 
 - **Never suppress a lint with `#[allow(...)]`** — fix the underlying issue instead. If you think a suppression is genuinely necessary, explain why in a comment and get explicit approval.
+- **`#[allow(clippy::too_many_arguments)]` is banned outright — no exceptions, anywhere.** This one has *no* "explain and get approval" escape hatch. The instant a function trips the lint, introduce a **dedicated struct with a builder** (the Rust best practice) that carries those arguments, and pass the built value instead of the loose list. Give the struct a `::builder()` entry point (or `#[derive(Default)]` + `with_*` setters) with one setter per field and a `build()` that returns the validated value, then thread that single value through. A plain positional params struct is the bare minimum; the standing preference is the builder. The *only* legitimate suppression for this lint is on **bindgen-generated FFI** (e.g. `crates/deps/libkrun-sys/src/sys.rs`), which we never hand-edit. If you find an existing suppression in hand-written code, convert it to a builder as part of your change.
 - **Fix warnings immediately** — do not accumulate clippy debt. A warning introduced now becomes harder to diagnose later.
-- **Common findings to watch for**: `clippy::too_many_arguments` (refactor into a params struct), `clippy::redundant_closure`, `clippy::needless_pass_by_value`, `clippy::single_match` → `if let`, unused imports/variables.
+- **Common findings to watch for**: `clippy::too_many_arguments` (build a params struct + builder — see the hard rule above), `clippy::redundant_closure`, `clippy::needless_pass_by_value`, `clippy::single_match` → `if let`, unused imports/variables.
 - **After adding new code**, run clippy before moving on — don't wait until the end of a task.
 
 ## No `unwrap()` in Production Code

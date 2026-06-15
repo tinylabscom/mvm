@@ -1,7 +1,7 @@
-//! Pool-level operations on top of a [`Backend`]. The trait exposes
+//! Pool-level operations on top of a [`DeviceMapperBackend`]. The trait exposes
 //! the user-facing surface: bootstrap, info, gc, capacity gating.
 
-use super::backend::{Backend, BackendPoolStats};
+use super::backend::{BackendPoolStats, DeviceMapperBackend};
 use super::thin::{ThinVolume, VolumeId};
 use super::{
     DEFAULT_BLOCK_SIZE_BYTES, DEFAULT_POOL_NAME, DEFAULT_POOL_SIZE_BYTES, Result, StorageError,
@@ -58,7 +58,7 @@ impl From<BackendPoolStats> for PoolStats {
     }
 }
 
-/// User-facing pool API. Hides the Backend so callers don't need to
+/// User-facing pool API. Hides the DeviceMapperBackend so callers don't need to
 /// know whether they're talking to dmsetup or a mock.
 pub trait ThinPool {
     fn config(&self) -> &PoolConfig;
@@ -115,14 +115,14 @@ pub trait ThinPool {
     }
 }
 
-/// Default `ThinPool` implementation backed by any `Backend`.
+/// Default `ThinPool` implementation backed by any `DeviceMapperBackend`.
 pub struct ThinPoolImpl {
     config: PoolConfig,
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn DeviceMapperBackend>,
 }
 
 impl ThinPoolImpl {
-    pub fn new(config: PoolConfig, backend: Arc<dyn Backend>) -> Self {
+    pub fn new(config: PoolConfig, backend: Arc<dyn DeviceMapperBackend>) -> Self {
         Self { config, backend }
     }
 
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn pool_full_rejects_new_volumes() {
         // Build a concrete-typed mock so the test can drive used-bytes
-        // (the production trait object is `dyn Backend`, which can't
+        // (the production trait object is `dyn DeviceMapperBackend`, which can't
         // be downcast in stable Rust without `Any`).
         let backend = Arc::new(MockBackend::new());
         let cfg = PoolConfig {

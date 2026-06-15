@@ -855,6 +855,7 @@ fn audit_call_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn truncate_under_cap_passes_through() {
@@ -975,14 +976,10 @@ mod tests {
     fn resolve_credential_returns_direct_env_var_when_set() {
         let direct = "MVM_TEST_CRED_DIRECT_RETURNED";
         let secret = "MVM_TEST_CRED_DIRECT_RETURNED_FROM_SECRET";
-        unsafe {
-            std::env::set_var(direct, "direct-value");
-        }
+        let mut env = TestEnv::new();
+        env.set(direct, "direct-value");
         let (_dir, store) = tempdir_store();
         let resolved = resolve_provider_credential(direct, secret, &store);
-        unsafe {
-            std::env::remove_var(direct);
-        }
         assert_eq!(exposed(resolved).as_deref(), Some("direct-value"));
     }
 
@@ -990,9 +987,8 @@ mod tests {
     fn resolve_credential_returns_secret_store_value_when_direct_unset() {
         let direct = "MVM_TEST_CRED_FALLBACK_DIRECT";
         let secret_ref = "MVM_TEST_CRED_FALLBACK_FROM_SECRET";
-        unsafe {
-            std::env::set_var(secret_ref, "my-stored-key");
-        }
+        let mut env = TestEnv::new();
+        env.set(secret_ref, "my-stored-key");
         let (_dir, store) = tempdir_store();
         store
             .put(
@@ -1002,9 +998,6 @@ mod tests {
             )
             .unwrap();
         let resolved = resolve_provider_credential(direct, secret_ref, &store);
-        unsafe {
-            std::env::remove_var(secret_ref);
-        }
         assert_eq!(exposed(resolved).as_deref(), Some("from-store"));
     }
 
@@ -1014,10 +1007,9 @@ mod tests {
         // operator has both env vars set.
         let direct = "MVM_TEST_CRED_PRIORITY_DIRECT";
         let secret_ref = "MVM_TEST_CRED_PRIORITY_FROM_SECRET";
-        unsafe {
-            std::env::set_var(direct, "direct-wins");
-            std::env::set_var(secret_ref, "stored-name");
-        }
+        let mut env = TestEnv::new();
+        env.set(direct, "direct-wins");
+        env.set(secret_ref, "stored-name");
         let (_dir, store) = tempdir_store();
         store
             .put(
@@ -1027,10 +1019,6 @@ mod tests {
             )
             .unwrap();
         let resolved = resolve_provider_credential(direct, secret_ref, &store);
-        unsafe {
-            std::env::remove_var(direct);
-            std::env::remove_var(secret_ref);
-        }
         assert_eq!(exposed(resolved).as_deref(), Some("direct-wins"));
     }
 
@@ -1051,10 +1039,9 @@ mod tests {
         // the secret-store lookup.
         let direct = "MVM_TEST_CRED_EMPTY_DIRECT";
         let secret_ref = "MVM_TEST_CRED_EMPTY_FROM_SECRET";
-        unsafe {
-            std::env::set_var(direct, "");
-            std::env::set_var(secret_ref, "actual-name");
-        }
+        let mut env = TestEnv::new();
+        env.set(direct, "");
+        env.set(secret_ref, "actual-name");
         let (_dir, store) = tempdir_store();
         store
             .put(
@@ -1064,10 +1051,6 @@ mod tests {
             )
             .unwrap();
         let resolved = resolve_provider_credential(direct, secret_ref, &store);
-        unsafe {
-            std::env::remove_var(direct);
-            std::env::remove_var(secret_ref);
-        }
         assert_eq!(exposed(resolved).as_deref(), Some("from-store-fallback"));
     }
 
@@ -1079,15 +1062,11 @@ mod tests {
         // config-drift path fires; a tracing::warn surfaces the
         // miss to the operator at boot time.
         let secret_ref = "MVM_TEST_CRED_MISS_FROM_SECRET";
-        unsafe {
-            std::env::set_var(secret_ref, "no-such-name");
-        }
+        let mut env = TestEnv::new();
+        env.set(secret_ref, "no-such-name");
         let (_dir, store) = tempdir_store();
         let resolved =
             resolve_provider_credential("MVM_TEST_CRED_MISS_DIRECT_UNSET", secret_ref, &store);
-        unsafe {
-            std::env::remove_var(secret_ref);
-        }
         assert!(resolved.is_none());
     }
 }

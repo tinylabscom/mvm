@@ -2126,13 +2126,56 @@ fn secret_get_rejects_force_flag() {
 }
 
 #[test]
-fn up_rejects_removed_secret_flag() {
-    let err = Cli::try_parse_from(["mvmctl", "up", "--secret", "API_KEY:api.example.com"])
-        .expect_err("up --secret must be rejected");
-    assert!(
-        err.to_string().contains("unexpected argument '--secret'"),
-        "got: {err}"
-    );
+fn up_accepts_repeatable_secret_flag() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "up",
+        "--flake",
+        ".",
+        "--secret",
+        "openai:api.openai.com",
+        "--secret",
+        "aws:s3.amazonaws.com,sts.amazonaws.com",
+    ])
+    .unwrap();
+    match cli.command {
+        Commands::Up(up::Args { secret, .. }) => {
+            assert_eq!(
+                secret,
+                vec![
+                    "openai:api.openai.com".to_string(),
+                    "aws:s3.amazonaws.com,sts.amazonaws.com".to_string(),
+                ]
+            );
+        }
+        _ => panic!("Expected Up command"),
+    }
+}
+
+#[test]
+fn up_accepts_security_profile_flag_and_defaults_to_none() {
+    // Explicitly named.
+    let cli =
+        Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--security-profile", "dev"]).unwrap();
+    match cli.command {
+        Commands::Up(up::Args {
+            security_profile, ..
+        }) => assert_eq!(security_profile.as_deref(), Some("dev")),
+        _ => panic!("Expected Up command"),
+    }
+    // Unset → None (the runtime then defaults it to `production`).
+    let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", "."]).unwrap();
+    match cli.command {
+        Commands::Up(up::Args {
+            security_profile,
+            seccomp,
+            ..
+        }) => {
+            assert_eq!(security_profile, None);
+            assert_eq!(seccomp, None, "no --seccomp default; profile supplies it");
+        }
+        _ => panic!("Expected Up command"),
+    }
 }
 
 // --- Run (transient runner; absorbed the former exec) CLI tests ---

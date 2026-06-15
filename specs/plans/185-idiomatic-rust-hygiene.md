@@ -116,19 +116,44 @@ Priority order:
 **Files:** start from
 `rg -n 'expect\\(\".*poison|mutex poisoned|lock poisoned|unwrap_or_else\\(.*into_inner' crates tests`.
 
-- [ ] **Step 1 - write the policy into this plan.** Runtime state locks return an
+- [x] **Step 1 - write the policy into this plan.** Runtime state locks return an
       error or fail closed when poisoning means state may be corrupt. Test/global
       serialization locks recover with `into_inner()` so one failed test does not
       poison the rest of the test binary.
-- [ ] **Step 2 - add a tiny helper if it pays for itself.** If repeated recovery
-      code remains noisy, add a focused helper for test locks rather than a broad
-      mutex wrapper.
-- [ ] **Step 3 - migrate known test/global locks.** Start with the env/test locks
-      and helper-style mutexes discovered during Plan 182 and this plan.
-- [ ] **Step 4 - keep runtime fail-closed paths explicit.** Do not blanket-recover
-      locks that protect real runtime state such as worker pools, backend launch
-      maps, or audit cursors unless the local invariant proves recovery is safe.
-- [ ] **Step 5 - green.** Run targeted tests and clippy for each touched crate.
+
+      **POLICY (decided):**
+      - **Test/global serialization locks** (locks whose only job is to serialize
+        env/cwd/fixture mutation across the test binary's threads — they guard *no*
+        real state, just ordering) **recover from poison via `into_inner()`**: a
+        panic in one test must not cascade-poison the lock and fail every sibling
+        test. The shared `mvm_core::util::test_env::TestEnv` guard already encodes
+        this (`ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())`), so the
+        preferred form is to *fold env-serialization locks into `TestEnv`* and let
+        non-env serializers (cwd, signal) use the same `unwrap_or_else(into_inner)`.
+      - **Runtime state locks** (worker/standby pools, backend launch/handle maps,
+        audit cursors, the broker registry, anything guarding data a later reader
+        trusts) **fail closed**: poison means a writer panicked mid-mutation and the
+        guarded state may be torn, so propagate the error / bail rather than hand a
+        caller a half-written value. Do **not** blanket-`into_inner()` these.
+- [x] **Step 2 - add a tiny helper if it pays for itself.** N/A — `TestEnv` *is*
+      the focused test-lock helper (it owns the recovery + restore). Non-env test
+      serializers use the one-line `unwrap_or_else(|p| p.into_inner())` directly;
+      a second wrapper would not pay for itself.
+- [~] **Step 3 - migrate known test/global locks.** Done for the env serializers:
+      every env-mutating test lock is folded into `TestEnv` (mvm-core/mvm-hostd/
+      mvm-build incl. `builder_backend_select` + `vz_builder`/libkrun-sys/mvm-cli).
+      Non-env test serializers already recover (`ts_runner::CWD_LOCK`,
+      `runtime_meta::HOME_TEST_LOCK`). Remaining: `mvm-cli::dev_vz` env lock (hot
+      file — other sessions) + the `mvm-backend` test env locks (host-gated build),
+      to land where CI/Linux runs them.
+- [x] **Step 4 - keep runtime fail-closed paths explicit.** Audited the
+      `.lock().unwrap()` sites: the runtime ones (e.g. the guest-agent
+      `RUN_ENTRYPOINT_LOCK`, supervisor pool/registry mutexes) are intentionally
+      left fail-closed (a panic-poisoned runtime lock means torn state). Only
+      serialization-only test locks were touched.
+- [x] **Step 5 - green.** `cargo nextest run -p mvm-build [--features builder-vm]`
+      + `cargo clippy -p mvm-build --features builder-vm --all-targets -- -D warnings`
+      green for the folded locks.
 
 ---
 
@@ -141,17 +166,27 @@ Priority order:
 `crates/mvm/src/vm/egress_proxy.rs`,
 `crates/mvm-hostd/src/supervisor/egress.rs`.
 
-- [ ] **Step 1 - classify names before editing.** Separate public/user-facing
+- [x] **Step 1 - classify names before editing.** Separate public/user-facing
       names from internal Rust names. Only internal names are candidates here.
-- [ ] **Step 2 - rename `storage::Backend` if call sites stay manageable.**
-      Candidate: `DeviceMapperBackend` or `ThinDeviceBackend`, depending on what
-      the surrounding module actually models.
-- [ ] **Step 3 - clarify the two `EgressProxy` traits without unifying them.**
-      Candidate names should reflect layer ownership, for example runtime VM
-      egress vs supervisor policy egress.
-- [ ] **Step 4 - update docs/comments only where they reference Rust type names.**
-      Do not churn user docs for internal-only renames.
-- [ ] **Step 5 - green.** Run targeted tests and clippy for each touched crate.
+      `storage::Backend` is internal-only (re-exported within the `storage`
+      module; CLI consumes `ThinPool`/`ThinPoolImpl`, never the trait).
+- [x] **Step 2 - rename `storage::Backend` if call sites stay manageable.**
+      Renamed to `DeviceMapperBackend` (the module models dmsetup/device-mapper
+      thin-pool ops; impls are `DmsetupBackend` + `MockBackend`). Blast radius
+      was three files: `storage/backend.rs`, `storage/mod.rs`, `storage/pool.rs`.
+- [x] **Step 3 - clarify the two `EgressProxy` traits without unifying them.**
+      Renamed by layer ownership: the runtime per-VM lifecycle stub in
+      `mvm/src/vm/egress_proxy.rs` → `VmEgressProxy` (zero external callers), and
+      the supervisor's L7 payload-inspecting decision trait in
+      `mvm-hostd/src/supervisor/egress.rs` → `SupervisorEgressProxy` (~25 refs
+      across mvm-hostd/mvm-cli/mvm-core). Concrete impls `StubEgressProxy`,
+      `NoopEgressProxy`, `L7EgressProxy` keep their names.
+- [x] **Step 4 - update docs/comments only where they reference Rust type names.**
+      Done for both the `storage::Backend` and `EgressProxy` renames; no user-doc
+      churn (internal-only names).
+- [x] **Step 5 - green.** storage: `mvm` lib+tests clippy clean + 14 storage tests;
+      egress: `mvm-core`/`mvm`/`mvm-hostd`/`mvm-cli` clippy clean + 773 supervisor
+      tests pass.
 
 ### Task 5 - Push stringly selectors toward typed values at module boundaries
 
@@ -161,14 +196,36 @@ Priority order:
 `crates/mvm-network/src/registry.rs`,
 `crates/mvm-storage/src/mount_provider.rs`.
 
-- [ ] **Step 1 - keep strings at CLI/config edges.** Parsing raw user input stays
-      close to Clap/config decoding.
-- [ ] **Step 2 - use typed selectors internally.** Prefer `BackendKind` and
-      descriptor APIs inside backend code; prefer provider-specific enums where
-      network/storage mode is already structured.
-- [ ] **Step 3 - avoid duplicate registries.** If a descriptor/registry already
-      owns a selector table, reuse it instead of creating another string list.
-- [ ] **Step 4 - green.** Run targeted tests and clippy for touched crates.
+- [x] **Step 1 - keep strings at CLI/config edges.** Confirmed: backend selection
+      already funnels raw `--hypervisor`/config strings through the single edge
+      parser `AnyBackend::from_hypervisor(&str)` → `catalog::descriptor_for_selector`.
+      Network/storage providers register by a `kind()` string *on purpose* — it's
+      the documented open-registry extension point (external S3/NFS/custom providers
+      join without a core-enum edit), so those strings are left as-is.
+- [~] **Step 2 - use typed selectors internally.** The typed foundation already
+      exists from the backend descriptor registry: `BackendKind` enum +
+      `AnyBackend::kind()`. Exposed `kind()` as `pub` (was needlessly `pub(crate)`
+      while `BackendKind` was already `pub`) and migrated the `&AnyBackend`-in-hand
+      call sites in `mvm-cli/pool.rs` from `name() == "vz"` to
+      `kind() == BackendKind::Vz`. Deferred: the `kernel_identity`/`image_identity`/
+      `compat_for_launch` sites still take `&dyn VmBackend` (the mvm-core trait,
+      which cannot expose `BackendKind` without a layer inversion) — typing those
+      needs a `&dyn VmBackend → &AnyBackend` signature ripple through pool.rs,
+      scoped as a follow-up to avoid churning that hot file here.
+- [x] **Step 3 - avoid duplicate registries.** Removed the duplicated alias literal
+      `backend_name == "vz" || backend_name == "virtualization"` in pool.rs in favor
+      of `backend.kind() == BackendKind::Vz` — the descriptor registry already owns
+      the vz alias table, so the call site no longer re-lists it.
+- [x] **Step 4 - green.** `mvm-backend`/`mvm-cli` clippy clean; 14 pool tests pass.
+
+#### Task 5 deferred follow-ups
+
+- [ ] Convert `kernel_identity`/`image_identity`/`compat_for_launch` (and the
+      `StandbyCompatParams.backend` field at the call-chain root) from
+      `&dyn VmBackend` to `&AnyBackend`, then replace their `name() == "..."`
+      comparisons with `kind()` checks. Held back from the Task 5 slice because
+      pool.rs is a hot file (warm-pool work) and the signature ripple is best
+      landed when that area is quiet.
 
 ---
 
@@ -179,15 +236,47 @@ Priority order:
 **Files:** start from clippy pressure and manual inspection of functions that
 thread many related values through runtime/build/CLI layers.
 
-- [ ] **Step 1 - prefer params structs over long argument lists.** Add a named
+- [x] **Step 1 - prefer params structs over long argument lists.** Add a named
       struct when multiple call sites pass the same conceptual bundle.
-- [ ] **Step 2 - prefer builders for multi-field optional construction.** Use a
-      builder when construction mixes required and optional fields or when tests
-      repeatedly create the same large fixture.
-- [ ] **Step 3 - keep builders local.** Do not introduce a generic builder
-      framework; use plain structs/impls matching local style.
-- [ ] **Step 4 - green.** Add or update tests for any extracted construction
-      logic and run clippy for touched crates.
+
+      Audit anchored on the `#[allow(clippy::too_many_arguments)]` suppressions
+      (AGENTS.md §"Clippy" bans that attribute outright — builder-struct is the
+      fix; only bindgen FFI like `libkrun-sys/src/sys.rs` is exempt). Findings,
+      all now resolved:
+      - **`mvm-build::firecracker::boot_builder_vsock`** (9 args) — grouped the
+        eight non-env args into a `BuilderVsockBoot` params struct, body
+        byte-identical; `#[allow]` removed. **Done.**
+      - **`mvm::vm::instance::fc_config::generate` + `mvm::security::jailer::
+        launch_jailed`** — the `mvm` Firecracker instance/pool/tenant lifecycle
+        subtree was **dead code** (unwired from `vm/mod.rs`, `compile_error!`-
+        confirmed). Deleted the whole orphaned cluster (`vm/instance/`,
+        `vm/pool/`, `vm/tenant/`, `bridge.rs`, `disk_manager.rs`) and trimmed
+        `security/jailer.rs` to its one live `jailer_available()` probe, which
+        also removed `launch_jailed`'s suppression by deletion (#931). The last
+        hand-written `too_many_arguments` allow in the tree is gone.
+      - **The two claim-12 security paths** — `substitution_proxy::
+        sign_into_headers` (#926, `SignRequest` builder) and `terminator::tls::
+        terminate_and_substitute` (#927, `TlsTermination` builder). Each
+        destructures the built value at its top so the signing / TLS-terminate
+        bodies are byte-for-byte unchanged.
+      With those three PRs there are **zero** hand-written
+      `#[allow(clippy::too_many_arguments)]` left in the workspace.
+- [x] **Step 2 - prefer builders for multi-field optional construction.** The two
+      claim-12 refactors use the `::builder()` + `with_*()` + `build()` shape
+      (the AGENTS.md standing preference over a plain params struct, #923).
+- [x] **Step 3 - keep builders local.** Plain local structs + `with_*`/`build()`
+      impls matching the existing `RequestCtx`/`InspectorReporter` style; no
+      generic builder framework.
+- [x] **Step 4 - green.** Per-PR: `cargo clippy -p mvm-hostd`/`-p mvm`/`-p mvm-cli`
+      `--all-targets -- -D warnings`, the touched sign/terminator/substitution
+      lib tests (85 + 66) and `mvm` lib tests (203), nightly `fmt --all --check`,
+      and the `check-no-spec-refs-in-comments` + `check-spec-numbers` gates.
+
+  **Deferred (optional polish, not a lint violation):** the functions that
+  already carry a params struct via a `too_many_arguments`-explaining comment
+  (`gateway_bridge`, `checkpoint`, `up`, `plan_builder`, `firecracker`,
+  `install`) are lint-clean today; upgrading them from plain params structs to
+  full `::builder()` shapes is style polish, tracked but not required.
 
 ### Task 7 - Split large functions only when the split buys tests or clarity
 
@@ -208,35 +297,103 @@ thread many related values through runtime/build/CLI layers.
 **Files:** start from
 `rg -n 'unsafe \\{|unsafe fn|SAFETY:|cfg\\(|target_os|target_arch' crates`.
 
-- [ ] **Step 1 - require local `SAFETY:` invariants.** Every `unsafe` block that
+- [~] **Step 1 - require local `SAFETY:` invariants.** Every `unsafe` block that
       remains must explain the concrete invariant that makes it sound. Generic
       comments such as "required by Rust 2024" are not enough unless they also
       state the synchronization or ownership guarantee.
-- [ ] **Step 2 - isolate platform/FFI unsafe behind small safe wrappers.** VZ,
+
+      First pass: the simple-syscall `mvm-guest` files — `entrypoint.rs` (fcntl,
+      setrlimit, kill-pgroup), `volume.rs` (mount/umount2 with owned CStrings),
+      `exec_stream.rs` (kill-pgroup, kill-sig-0 probe), `process_rpc.rs` (pre_exec
+      async-signal-safe closure, kill-pgroup), `netinit.rs` (zeroed POD
+      `sockaddr_nl`), `worker_pool.rs` (sysconf) — now carry a per-block `SAFETY:`
+      naming the ownership/async-signal-safety/POD invariant. Verified host clippy
+      **and** `--target aarch64-unknown-linux-musl` clippy (the mount/netlink/
+      setrlimit blocks are Linux-gated). Audit baseline at the time: ~454 `unsafe`
+      sites vs ~261 `SAFETY:` comments workspace-wide.
+
+      Second pass: the `mvm-verity-init` bin (13 blocks — dm-verity ioctls, the
+      `copy_nonoverlapping` payload assembly, and the mount/chdir/chroot/execv
+      syscalls). Each block now names its concrete invariant; `do_ioctl` gained a
+      `# Safety` doc spelling out the fd/`data_size` contract its callers uphold.
+
+      Console pass: `mvm-guest/console.rs` — every `unsafe` block
+      (openpty/fork/dup2/close/ioctl/socket/bind/listen/accept/shutdown/kill/
+      waitpid/from_raw_fd) now states its concrete fd-ownership /
+      pointer-validity / async-signal-safety invariant, replacing the prior
+      generic one-liners.
+
+      Agent pass: the `mvm-guest-agent` bin — the four `unsafe` blocks that
+      still lacked an invariant (two post-bind `close(fd)` cleanups + two test
+      bodies calling the async-signal-safe signal handlers directly) now carry
+      one; the `install_signal_handlers` block already had a solid note.
+- [~] **Step 2 - isolate platform/FFI unsafe behind small safe wrappers.** VZ,
       libkrun, libc/syscall, and env-mutation code should expose narrow safe
       functions to the rest of the crate wherever practical.
+
+      `mvm-verity-init`: the three fixed-payload dm ioctls (VERSION/DEV_CREATE/
+      DEV_SUSPEND) now route through a safe `dm_ioctl_fixed(fd, cmd, &mut DmIoctl)`
+      wrapper — a `const _` assertion pins `DM_IOCTL_STRUCT_SIZE ==
+      size_of::<DmIoctl>()` so the "a `&mut DmIoctl` fully backs the kernel access"
+      argument can't silently rot. The redundant typed deref that re-set
+      `DM_READONLY_FLAG` on the (only u8-aligned) `Vec` pointer was dropped — the
+      flag is already set in the payload bytes — leaving one documented raw-pointer
+      ioctl for the variable-length TABLE_LOAD path.
+
+      `console.rs`: the post-fork child was calling `putenv` (which can
+      `malloc` and mutates the global `environ`) and `execvp` between `fork()`
+      and exec — but the guest agent is multithreaded by the time it serves a
+      ConsoleOpen request, so the child may call only async-signal-safe
+      functions or risk an allocator-lock deadlock. Fixed by assembling the
+      child's environment in the parent before the fork and `execve`-ing a
+      fixed array (the shell path is absolute, so no PATH search). The pure
+      core, `build_shell_env_from`, is unit-tested without touching
+      process-global state.
 - [ ] **Step 3 - keep platform cfgs narrow.** Linux/macOS-only behavior should be
       gated at the smallest useful module/function boundary, while host-side
       cargo builds continue to compile on non-target platforms.
 - [ ] **Step 4 - green.** Run targeted tests for touched code and clippy for each
       touched crate.
 
+#### Task 8 deferred follow-ups
+
+- [x] `mvm-verity-init` bin (dm-verity ioctls) — done in the Step 1 second pass
+      above; fixed-payload ioctls isolated behind `dm_ioctl_fixed`.
+- [x] `mvm-guest/console.rs` (PTY/termios) — done in the Step 1 console pass
+      above; also dropped the post-fork malloc path (Step 2).
+- [x] `mvm-guest-agent` bin — done in the Step 1 agent pass above (the four
+      remaining `close(fd)` / signal-handler-test blocks).
+- [ ] Annotate the remaining deeper `unsafe` cluster with `SAFETY:`
+      invariants, one reviewed file at a time (it needs genuine soundness
+      reasoning, not a formula): the `mvm-vm-host/vz_objc.rs` objc2 FFI (~100)
+      — best done while the Plan-152 vz work is quiet.
+
 ### Task 9 - Audit feature and dependency boundaries
 
 **Files:** crate `Cargo.toml` files plus feature-gated modules.
 
-- [ ] **Step 1 - keep test helpers out of production builds.** Confirm
-      `mvm-core/test-support` and any future test-support features are only used
-      from tests/dev surfaces.
-- [ ] **Step 2 - check optional heavy deps.** Ensure optional stacks such as
-      schema generation, manifest verification, egress CA, platform bindings,
-      and live-test helpers stay feature-gated or target-gated as intended.
-- [ ] **Step 3 - avoid accidental workspace feature widening.** When a crate adds
-      a workspace dependency, document why any extra features are needed and run
-      a targeted `cargo tree -p <crate> -e features` check if the feature set is
-      nontrivial.
-- [ ] **Step 4 - green.** Run `cargo check -p <crate>` and clippy for touched
-      crates; defer broad dependency-count work to Plan 126.
+- [x] **Step 1 - keep test helpers out of production builds.** Verified clean: all
+      six `test-support` consumers (mvm-backend, mvm-hostd, mvm-build, mvm-cli,
+      mvm-vm-host, libkrun-sys) request `mvm-core = { features = ["test-support"] }`
+      only under `[dev-dependencies]`, and mvm-core defines `test-support = []` (an
+      empty feature — no transitive activation) with an inline comment documenting
+      its dev/test-only intent. A production (non-dev) build of any crate never
+      enables it, and `TestEnv` is gated `cfg(any(test, feature = "test-support"))`.
+- [x] **Step 2 - check optional heavy deps.** Verified clean: mvm-core's optional
+      stacks are each `dep:`-gated behind a feature *and* documented inline —
+      `egress-ca`→`rcgen` (sync, no tokio), `hostd-transport`/`manifest-verify`→
+      `tokio` (the only async surfaces), `schemars` JsonSchema derive (off by
+      default, build-time codegen only), and the `attestation-*` provider stubs.
+      The `check-core-runtime-free` xtask gate (a Lint job) already enforces that
+      the default closure carries no tokio, so a regression fails CI.
+- [x] **Step 3 - avoid accidental workspace feature widening.** Verified clean: the
+      Phase-1 dev-deps added `features = ["test-support"]` and nothing else; no crate
+      pulls an mvm-core feature it doesn't use. `cargo tree -p mvm-core -e features`
+      shows the runtime-free default; the heavy features only appear when explicitly
+      requested by the hostd-transport / manifest-verify / egress-ca consumers.
+- [x] **Step 4 - green.** Audit-only — no code change needed (the boundaries already
+      hold). Manifest audit + `cargo tree -e features` confirm the gating; broad
+      dependency-count work stays deferred to Plan 126.
 
 ---
 

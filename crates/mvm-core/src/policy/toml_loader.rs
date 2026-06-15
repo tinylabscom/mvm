@@ -6,7 +6,7 @@
 //! `ExecutionPlan` onto a single bundle file: a workload's
 //! `(network_policy, fs_policy, egress_policy, tool_policy)` refs
 //! all point at one TOML, which carries the per-policy sections
-//! the supervisor's component slots (`EgressProxy`, `ToolGate`,
+//! the supervisor's component slots (`SupervisorEgressProxy`, `ToolGate`,
 //! `KeystoreReleaser`, `ArtifactCollector`) consume at admission.
 //!
 //! ## Schema
@@ -58,7 +58,7 @@
 //!   This loader reads bare TOML for the single-host posture —
 //!   suitable for `local` tenant; mvmd-signed bundles layer on
 //!   later via the same parse + then verify-against-trusted-keys.
-//! - **Construct concrete `EgressProxy` / `ToolGate` impls.** That
+//! - **Construct concrete `SupervisorEgressProxy` / `ToolGate` impls.** That
 //!   wiring is the consumer's job (the L4/L7 proxies are built
 //!   elsewhere; this loader returns the parsed bundle). Until
 //!   those proxies ship, the resolver returns Noops even for

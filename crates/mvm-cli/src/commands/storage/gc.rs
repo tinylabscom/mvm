@@ -5,7 +5,9 @@ use clap::Args as ClapArgs;
 use std::sync::Arc;
 
 use super::Cli;
-use mvm::storage::{Backend, DmsetupBackend, MockBackend, PoolConfig, ThinPool, ThinPoolImpl};
+use mvm::storage::{
+    DeviceMapperBackend, DmsetupBackend, MockBackend, PoolConfig, ThinPool, ThinPoolImpl,
+};
 use mvm_core::user_config::MvmConfig;
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -26,7 +28,7 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let backend: Arc<dyn Backend> = if args.mock {
+    let backend: Arc<dyn DeviceMapperBackend> = if args.mock {
         Arc::new(MockBackend::new())
     } else {
         Arc::new(DmsetupBackend::new())

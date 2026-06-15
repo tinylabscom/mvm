@@ -244,6 +244,9 @@ fn build_command(
     #[cfg(unix)]
     cmd.process_group(0);
 
+    // SAFETY: pre_exec's closure runs post-fork/pre-exec, where only async-
+    // signal-safe calls are allowed. It calls only setrlimit (async-signal-safe),
+    // allocates nothing, and touches no shared Rust state.
     #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {
@@ -383,6 +386,8 @@ pub fn handle_proc_signal(registry: &Registry, pid_token: &str, signum: i32) -> 
             message: "child already reaped".to_string(),
         };
     };
+    // SAFETY: kill performs no memory access; the negated pgid signals the
+    // child's process group (group leader via process_group(0)).
     #[cfg(unix)]
     unsafe {
         let pgid = child.id() as libc::pid_t;

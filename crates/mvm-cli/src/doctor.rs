@@ -163,6 +163,10 @@ struct DoctorReport {
     /// save/restore, libkrun disk-only — so a user can predict which backend
     /// resumes from RAM vs. reboots from disk.
     warm_start: WarmStartReport,
+    /// Per-backend capability matrix — snapshot tier, network/storage
+    /// disposition, and the boot-latency (standby-pool) axis — the
+    /// tradeoffs behind `--hypervisor`, aggregated from `VmBackend`.
+    capability_table: Vec<BackendCapabilityRow>,
     all_ok: bool,
 }
 
@@ -375,6 +379,9 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     // ── Warm-start capability per backend ───────
     let warm_start = collect_warm_start_support();
 
+    // ── Per-backend capability matrix ─────────────────────────────
+    let capability_table = collect_capability_table();
+
     // ── Workflow filter ──────────────────────────────
     // When `--workflow <name>` is set, drop checks whose category
     // is not in the workflow's relevant set. The filter is applied
@@ -399,6 +406,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
         security_posture,
         balloon_support,
         warm_start,
+        capability_table,
         all_ok,
     };
 
@@ -467,6 +475,7 @@ fn render_text(report: &DoctorReport) {
     render_security_posture(&report.security_posture);
     render_balloon_support(&report.balloon_support);
     render_warm_start_support(&report.warm_start);
+    render_capability_table(&report.capability_table);
 }
 
 /// Enumerate every backend's `capabilities().balloon`. The doctor
@@ -505,6 +514,76 @@ fn render_balloon_support(support: &BTreeMap<String, bool>) {
 }
 
 // ── Warm-start capability ──────────────────────
+
+/// One row of the per-backend capability matrix — the security/perf
+/// tradeoffs a user weighs when picking `--hypervisor`. Every field is
+/// read straight off `VmBackend`, so the table can never drift from
+/// runtime behavior.
+#[derive(Debug, Clone, Serialize)]
+struct BackendCapabilityRow {
+    /// Backend name, matching `VmBackend::name`.
+    backend: String,
+    /// `SnapshotCapability::label` — warm-start fidelity (RAM resume vs disk reboot).
+    snapshot_tier: &'static str,
+    /// Host TAP device (vs a userspace gateway / slirp).
+    tap_networking: bool,
+    /// vsock guest control channel.
+    vsock: bool,
+    /// virtio-balloon runtime memory reclaim.
+    balloon: bool,
+    /// Copy-on-write fs checkpoint (APFS `clonefile`), independent of memory snapshots.
+    fs_quick_checkpoint: bool,
+    /// Pre-warmed standby pool that pre-pays spawn/codesign latency — the boot-latency axis.
+    standby_pool: bool,
+}
+
+/// Build the per-backend capability matrix from the catalog's real backends
+/// (the Tier 3 `mock` double is excluded via the warm-start descriptor set).
+/// Each row reads off `VmBackend` so doctor's table is the runtime truth, not
+/// a hand-maintained copy. Sorted by name for deterministic output.
+fn collect_capability_table() -> Vec<BackendCapabilityRow> {
+    let mut rows: Vec<BackendCapabilityRow> =
+        mvm_backend::catalog::warm_start_support_descriptors()
+            .map(|descriptor| {
+                let b = descriptor.instantiate_dyn();
+                let caps = b.capabilities();
+                BackendCapabilityRow {
+                    backend: b.name().to_string(),
+                    snapshot_tier: b.snapshot_capability().label(),
+                    tap_networking: caps.tap_networking,
+                    vsock: caps.vsock,
+                    balloon: caps.balloon,
+                    fs_quick_checkpoint: caps.fs_quick_checkpoint,
+                    standby_pool: b.supports_standby_pool(),
+                }
+            })
+            .collect();
+    rows.sort_by(|a, b| a.backend.cmp(&b.backend));
+    rows
+}
+
+/// Render the per-backend capability matrix in text mode — the at-a-glance
+/// tradeoff table behind `--hypervisor`. One line per backend.
+fn render_capability_table(rows: &[BackendCapabilityRow]) {
+    let title = "Backend capability matrix (per backend)";
+    println!("\n{}", title);
+    println!("{}", "-".repeat(title.len()));
+    let yn = |b: bool| if b { "yes" } else { "—" };
+    for r in rows {
+        ui::status_line(
+            &format!("  {}:", r.backend),
+            &format!(
+                "snapshot {} · tap-net {} · vsock {} · balloon {} · fs-checkpoint {} · standby-pool {}",
+                r.snapshot_tier,
+                yn(r.tap_networking),
+                yn(r.vsock),
+                yn(r.balloon),
+                yn(r.fs_quick_checkpoint),
+                yn(r.standby_pool),
+            ),
+        );
+    }
+}
 
 /// Enumerate every backend's `snapshot_capability()` tier and, on Linux,
 /// probe the fast-resume substrate. Surfaced so a user knows which backend
@@ -2778,6 +2857,65 @@ mod tests {
     }
 
     #[test]
+    fn collect_capability_table_reports_per_backend_dispositions() {
+        let rows = collect_capability_table();
+        let by = |name: &str| rows.iter().find(|r| r.backend == name).cloned();
+
+        // The Tier 3 `mock` test double is excluded; the four real
+        // backends are present, in stable name order.
+        let names: Vec<_> = rows.iter().map(|r| r.backend.as_str()).collect();
+        assert_eq!(names, vec!["firecracker", "libkrun", "qemu", "vz"]);
+
+        let fc = by("firecracker").unwrap();
+        assert_eq!(fc.snapshot_tier, "live-memory");
+        assert!(fc.tap_networking, "firecracker uses a host TAP device");
+        assert!(fc.vsock);
+        assert!(fc.balloon);
+        assert!(!fc.standby_pool);
+
+        let krun = by("libkrun").unwrap();
+        assert_eq!(krun.snapshot_tier, "disk-only");
+        assert!(
+            !krun.tap_networking,
+            "libkrun uses a userspace gateway, not a host TAP"
+        );
+        assert!(krun.vsock);
+        assert!(
+            krun.standby_pool,
+            "only libkrun pre-pays spawn latency today"
+        );
+
+        let qemu = by("qemu").unwrap();
+        assert_eq!(qemu.snapshot_tier, "disk-only");
+        assert!(
+            !qemu.tap_networking,
+            "qemu uses user-mode slirp, not a host TAP"
+        );
+        assert!(qemu.vsock);
+
+        // Vz dispositions are host-gated (macOS version); assert only the
+        // platform-stable invariant — the vsock control channel is always present.
+        let vz = by("vz").unwrap();
+        assert!(vz.vsock);
+    }
+
+    #[test]
+    fn doctor_report_serializes_capability_table() {
+        let json = serde_json::to_string(&DoctorReport {
+            workflow: None,
+            checks: vec![],
+            security_posture: collect_security_posture(),
+            balloon_support: collect_balloon_support(),
+            warm_start: collect_warm_start_support(),
+            capability_table: collect_capability_table(),
+            all_ok: true,
+        })
+        .unwrap();
+        assert!(json.contains("\"capability_table\""), "{json}");
+        assert!(json.contains("\"snapshot_tier\""), "{json}");
+    }
+
+    #[test]
     #[cfg(not(target_os = "linux"))]
     fn warm_start_substrate_is_none_off_linux() {
         // The NBD/HugeTLB fast-resume substrate is Linux-only; macOS reports
@@ -2817,6 +2955,7 @@ mod tests {
             security_posture: collect_security_posture(),
             balloon_support: collect_balloon_support(),
             warm_start: collect_warm_start_support(),
+            capability_table: collect_capability_table(),
             all_ok: true,
         })
         .unwrap();
@@ -2851,6 +2990,7 @@ mod tests {
             security_posture: collect_security_posture(),
             balloon_support: collect_balloon_support(),
             warm_start: collect_warm_start_support(),
+            capability_table: collect_capability_table(),
             all_ok: true,
         };
         let json = serde_json::to_string(&report).unwrap();
@@ -2874,6 +3014,7 @@ mod tests {
             security_posture: collect_security_posture(),
             balloon_support: collect_balloon_support(),
             warm_start: collect_warm_start_support(),
+            capability_table: collect_capability_table(),
             all_ok: true,
         };
         let json = serde_json::to_string(&report).unwrap();

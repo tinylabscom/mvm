@@ -1,7 +1,7 @@
 //! Inspector trait + InspectorChain — the L7 egress security backbone.
 //!
 //! Every outbound HTTP request the workload makes is mediated by the
-//! supervisor's `EgressProxy`. The proxy threads the request through
+//! supervisor's `SupervisorEgressProxy`. The proxy threads the request through
 //! an ordered chain of `Inspector`s, each of which can:
 //!   - allow the request through (default verdict)
 //!   - deny it with a reason that's surfaced to the workload + audit

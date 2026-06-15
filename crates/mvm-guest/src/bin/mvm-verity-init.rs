@@ -375,6 +375,13 @@ mod linux {
         }
     }
 
+    // The fixed-payload ioctls report `data_size = DM_IOCTL_STRUCT_SIZE` and
+    // the kernel reads/writes exactly that many bytes from the header. Pin the
+    // constant to the real struct size so the `dm_ioctl_fixed` soundness
+    // argument (a `&mut DmIoctl` fully backs the access) can't silently rot if
+    // the layout changes.
+    const _: () = assert!(DM_IOCTL_STRUCT_SIZE as usize == std::mem::size_of::<DmIoctl>());
+
     #[repr(C)]
     struct DmTargetSpec {
         sector_start: u64,
@@ -452,9 +459,7 @@ mod linux {
 
         // 4a. DM_VERSION — sanity-check the kernel speaks the same protocol.
         let mut io = base_ioctl();
-        unsafe {
-            do_ioctl(fd, iowr(DM_VERSION_CMD), &mut io).map_err(|e| format!("DM_VERSION: {e}"))?;
-        }
+        dm_ioctl_fixed(fd, DM_VERSION_CMD, &mut io).map_err(|e| format!("DM_VERSION: {e}"))?;
         msg(&format!(
             "mvm-verity-init: dm-ioctl kernel version {}.{}.{}",
             io.version[0], io.version[1], io.version[2]
@@ -600,19 +605,24 @@ mod linux {
         // DM_DEV_CREATE — register the device by name (no table yet).
         let mut io = base_ioctl();
         write_name(&mut io.name, device_name);
-        unsafe {
-            do_ioctl(fd, iowr(DM_DEV_CREATE_CMD), &mut io)
-                .map_err(|e| format!("DM_DEV_CREATE({device_name}): {e}"))?;
-        }
+        dm_ioctl_fixed(fd, DM_DEV_CREATE_CMD, &mut io)
+            .map_err(|e| format!("DM_DEV_CREATE({device_name}): {e}"))?;
         msg(&format!("mvm-verity-init: DM_DEV_CREATE({device_name}) ok"));
 
         // DM_TABLE_LOAD — push the verity target into the inactive table.
+        // `build_table_payload` already sets DM_READONLY_FLAG in the header
+        // bytes, so we pass the buffer straight to the kernel — no typed
+        // deref through the (only u8-aligned) `Vec` pointer is needed.
         let payload = build_table_payload(device_name, num_sectors, "verity", &table_args)?;
         let mut buf = vec![0u8; payload.len()];
         buf.copy_from_slice(&payload);
         let header_ptr = buf.as_mut_ptr().cast::<DmIoctl>();
+        // SAFETY: `header_ptr` is the start of `buf`, whose bytes are the
+        // header + target-spec + params payload `build_table_payload` wrote;
+        // its `data_size` field spans the whole buffer, bounding the kernel's
+        // copy. The kernel copies bytes from userspace, so the u8-aligned
+        // pointer is a valid ioctl argument. `fd` is the open control fd.
         unsafe {
-            (*header_ptr).flags |= DM_READONLY_FLAG;
             do_ioctl(fd, iowr(DM_TABLE_LOAD_CMD), header_ptr)
                 .map_err(|e| format!("DM_TABLE_LOAD({device_name}): {e}"))?;
         }
@@ -621,10 +631,8 @@ mod linux {
         // DM_DEV_SUSPEND with flags=0 → resume = activate the loaded table.
         let mut io = base_ioctl();
         write_name(&mut io.name, device_name);
-        unsafe {
-            do_ioctl(fd, iowr(DM_DEV_SUSPEND_CMD), &mut io)
-                .map_err(|e| format!("DM_DEV_SUSPEND(resume, {device_name}): {e}"))?;
-        }
+        dm_ioctl_fixed(fd, DM_DEV_SUSPEND_CMD, &mut io)
+            .map_err(|e| format!("DM_DEV_SUSPEND(resume, {device_name}): {e}"))?;
         msg(&format!("mvm-verity-init: dm-verity {device_name} active"));
         Ok(())
     }
@@ -690,6 +698,10 @@ mod linux {
             uuid: [0u8; DM_UUID_LEN],
             data: [0u8; DM_DATA_LEN],
         };
+        // SAFETY: `header` is a live `DmIoctl`, so the source is valid for
+        // `header_size` bytes; `buf` is `aligned_total >= header_size` bytes,
+        // so the destination is too. The stack value and the heap buffer are
+        // distinct allocations, and a byte copy imposes no alignment.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 (&header as *const DmIoctl).cast::<u8>(),
@@ -712,6 +724,10 @@ mod linux {
             next: (aligned_total - header_size) as u32,
             target_type: tt,
         };
+        // SAFETY: `spec` is a live `DmTargetSpec`, valid for `spec_size`
+        // bytes; `buf` reserves `header_size + spec_size + params_nul` bytes,
+        // so the region at offset `header_size` holds `spec_size` bytes
+        // in-bounds. Distinct allocations; a byte copy needs no alignment.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 (&spec as *const DmTargetSpec).cast::<u8>(),
@@ -738,6 +754,8 @@ mod linux {
         const BLKGETSIZE64: u64 = 0x80081272;
         let f = fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
         let mut size: u64 = 0;
+        // SAFETY: `f` is an open file for `path`; BLKGETSIZE64 writes one
+        // `u64` into `size`, a live, aligned out-param valid for the call.
         let rc = unsafe { libc::ioctl(f.as_raw_fd(), BLKGETSIZE64 as libc::Ioctl, &mut size) };
         if rc != 0 {
             return Err(format!(
@@ -748,15 +766,39 @@ mod linux {
         Ok(size)
     }
 
+    /// Issue a device-mapper ioctl on the `/dev/mapper/control` fd.
+    ///
+    /// # Safety
+    ///
+    /// `fd` must be an open file descriptor for `/dev/mapper/control`, and
+    /// `arg` must point to an initialized value laid out as `request`
+    /// expects: a `DmIoctl` header whose `data_size` field covers every byte
+    /// the kernel reads or writes — the fixed struct for VERSION/CREATE/
+    /// SUSPEND, or the header + target-spec + params payload for TABLE_LOAD.
+    /// The pointee must stay valid for the duration of the call.
     unsafe fn do_ioctl<T>(fd: libc::c_int, request: u64, arg: *mut T) -> Result<i32, String> {
-        // Same Ioctl-type discrepancy as block_device_size; cast at
-        // the boundary to whatever libc says is correct for this
-        // target.
+        // SAFETY: the caller upholds the fd/arg contract above; `request`
+        // encodes the size the kernel copies. The Ioctl-type discrepancy is
+        // the same as block_device_size — cast at the boundary to whatever
+        // libc says is correct for this target.
         let rc = unsafe { libc::ioctl(fd, request as libc::Ioctl, arg) };
         if rc < 0 {
             return Err(io::Error::last_os_error().to_string());
         }
         Ok(rc)
+    }
+
+    /// Safe wrapper for the fixed-payload dm ioctls (VERSION, DEV_CREATE,
+    /// DEV_SUSPEND). For these the kernel reads and writes exactly
+    /// `size_of::<DmIoctl>()` bytes — `base_ioctl` sets `data_size =
+    /// DM_IOCTL_STRUCT_SIZE`, pinned equal to the struct size by the
+    /// `const _` assertion above — so a `&mut DmIoctl` fully backs the access.
+    fn dm_ioctl_fixed(fd: i32, cmd: u32, io: &mut DmIoctl) -> Result<(), String> {
+        // SAFETY: `fd` is the open /dev/mapper/control descriptor; `io` is a
+        // live, aligned `DmIoctl` whose `data_size` bounds the kernel's access
+        // to the struct itself.
+        unsafe { do_ioctl(fd, iowr(cmd), io as *mut DmIoctl) }?;
+        Ok(())
     }
 
     fn do_mount(
@@ -773,6 +815,9 @@ mod linux {
         let tgt = CString::new(target).map_err(|_| "target has NUL".to_string())?;
         let typ = CString::new(fstype).map_err(|_| "fstype has NUL".to_string())?;
         let dat = CString::new(data).map_err(|_| "data has NUL".to_string())?;
+        // SAFETY: all four arguments are NUL-terminated C strings whose
+        // backing CStrings live to the end of this function; libc::mount reads
+        // them and does not retain them past the call.
         let rc = unsafe {
             libc::mount(
                 src.as_ptr(),
@@ -797,6 +842,7 @@ mod linux {
 
     fn do_chdir(path: &str) -> Result<(), String> {
         let p = CString::new(path).map_err(|_| "chdir path has NUL".to_string())?;
+        // SAFETY: `p` is a valid NUL-terminated C string that outlives the call.
         let rc = unsafe { libc::chdir(p.as_ptr()) };
         if rc != 0 {
             return Err(format!("chdir({path}): {}", io::Error::last_os_error()));
@@ -806,6 +852,7 @@ mod linux {
 
     fn do_chroot(path: &str) -> Result<(), String> {
         let p = CString::new(path).map_err(|_| "chroot path has NUL".to_string())?;
+        // SAFETY: `p` is a valid NUL-terminated C string that outlives the call.
         let rc = unsafe { libc::chroot(p.as_ptr()) };
         if rc != 0 {
             return Err(format!("chroot({path}): {}", io::Error::last_os_error()));
@@ -821,6 +868,10 @@ mod linux {
             .collect();
         let mut argv_ptrs: Vec<*const libc::c_char> = cargs.iter().map(|c| c.as_ptr()).collect();
         argv_ptrs.push(std::ptr::null());
+        // SAFETY: `cprog` is a NUL-terminated program path; `argv_ptrs` is a
+        // NULL-terminated array of pointers into `cargs`, all of which outlive
+        // the call. On success execv replaces the process image and never
+        // returns; on failure it returns and leaves the strings valid.
         let rc = unsafe { libc::execv(cprog.as_ptr(), argv_ptrs.as_ptr()) };
         if rc != 0 {
             return Err(format!("execv({prog}): {}", io::Error::last_os_error()));

@@ -138,6 +138,9 @@ impl MountFs for OsMountFs {
         if read_only {
             flags |= libc::MS_RDONLY;
         }
+        // SAFETY: source/target/fstype are owned CStrings borrowed for the call,
+        // so the NUL-terminated pointers stay valid; the fs-data pointer is null
+        // (no virtiofs-specific options). mount(2) only reads these strings.
         let rc = unsafe {
             libc::mount(
                 source.as_ptr(),
@@ -159,6 +162,8 @@ impl MountFs for OsMountFs {
         let target = CString::new(path.as_os_str().to_string_lossy().as_bytes())
             .map_err(std::io::Error::other)?;
         let flags: libc::c_int = if force { libc::MNT_DETACH } else { 0 };
+        // SAFETY: `target` is an owned CString alive across the call; umount2(2)
+        // reads the NUL-terminated path plus an int flag, with no writeback.
         let rc = unsafe { libc::umount2(target.as_ptr(), flags) };
         if rc == 0 {
             return Ok(true);

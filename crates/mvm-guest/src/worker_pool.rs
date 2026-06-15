@@ -783,6 +783,8 @@ fn sample_rss_bytes(pid: u32) -> Option<u64> {
     let path = format!("/proc/{pid}/statm");
     let raw = std::fs::read_to_string(path).ok()?;
     let pages: u64 = raw.split_whitespace().nth(1)?.parse().ok()?;
+    // SAFETY: sysconf takes an int name and returns a long; no pointers or
+    // memory access. The result is range-checked below.
     let pagesize = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     if pagesize <= 0 {
         return None;

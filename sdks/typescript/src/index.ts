@@ -85,6 +85,10 @@ export type {
   SandboxInfo,
 } from "./_sandbox.js";
 
+// Typed Sandbox presets (Phase C).
+export { BrowserSandbox, CodeError, CodeSandbox } from "./_helpers.js";
+export type { BrowserSandboxOptions } from "./_helpers.js";
+
 // ────────────────────────────────────────────────────────────────────
 // Module state
 // ────────────────────────────────────────────────────────────────────
