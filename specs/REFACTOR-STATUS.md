@@ -379,7 +379,7 @@ PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
       `libkrun-sys` `gvproxy`/`passt` (PATH + MVM_GATEWAY_BIN tests; deleted the
       crate-wide `TEST_ENV_LOCK`, added the mvm-core `test-support` dev-dep;
       lock-only reap tests keep a bare `TestEnv` guard)
-  [~] `mvm-cli` batch (in progress): `env/artifact_verify` (ENV_LOCK),
+  [x] `mvm-cli` batch (COMPLETE): `env/artifact_verify` (ENV_LOCK),
       `build/sandbox_record` (TsxGuard/ENV_LOCK), `vm/session`
       (RuntimeDirGuard/ENV_LOCK — added a `RuntimeDirGuard::set` helper so the
       guard-holding creator-pid tests mutate a 2nd var without a deadlocking
@@ -387,11 +387,13 @@ PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
       MVM_CACHE_DIR tests), and `template_cmd` (probe_test_lock + `clear_llm_env`
       now thread a `&mut TestEnv`), and `doctor` ts-runner tests (folded the
       holdout `ENV_LOCK` onto the shared TestEnv the EnvGuard already used —
-      fixing a latent two-lock race) migrated. **All mvm-cli local test locks
-      are now folded.** Remaining = consistency-only / gated leftovers:
-      `vm/tenant_resolution`, `ops/mcp` (unique-name tests), `commands/mod`,
-      `build/build`, and doctor's `builder_backend`/`nested-kvm` tests (Linux +
-      `builder-vm`-gated — not compilable on macOS, go with the mvm-backend batch)
+      fixing a latent two-lock race), and `vm/tenant_resolution` (4 MVM_TENANT
+      tests — also a no-lock latent race, now serialized) + `ops/mcp`
+      (unique-name credential tests) migrated. **mvm-cli test env migration
+      COMPLETE** — every remaining raw `std::env::set_var` in mvm-cli is
+      production CLI-flag plumbing (`commands/mod.rs`, `build/build.rs`) or
+      Linux+`builder-vm`-gated (doctor's `builder_backend`/`nested-kvm`, which go
+      with the mvm-backend batch)
   [ ] `mvm-backend` env tests (host-gated: its test bin SIGKILLs under macOS
       amfid — migrate where CI/Linux runs them)
   [ ] Standardize poisoned-lock handling by distinguishing test/global

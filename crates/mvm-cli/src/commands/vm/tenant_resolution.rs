@@ -56,40 +56,40 @@ fn read_config_tenant() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
-    // SAFETY notes: these tests mutate process env. Run with
-    // `--test-threads=1` if collisions show up; the resolver itself
-    // is read-only against env so concurrent reads are fine, but
-    // overlapping set/remove between tests is not.
+    // These tests mutate MVM_TENANT (process-global). `TestEnv` serializes
+    // them behind a shared lock and restores the prior value on drop, so
+    // they're safe under the default multi-threaded test runner.
 
     #[test]
     fn flag_beats_env() {
-        unsafe { std::env::set_var("MVM_TENANT", "from-env") };
+        let mut env = TestEnv::new();
+        env.set("MVM_TENANT", "from-env");
         assert_eq!(resolve_tenant(Some("from-flag")), "from-flag");
-        unsafe { std::env::remove_var("MVM_TENANT") };
     }
 
     #[test]
     fn env_beats_default_when_no_flag() {
-        unsafe { std::env::set_var("MVM_TENANT", "from-env") };
+        let mut env = TestEnv::new();
+        env.set("MVM_TENANT", "from-env");
         assert_eq!(resolve_tenant(None), "from-env");
-        unsafe { std::env::remove_var("MVM_TENANT") };
     }
 
     #[test]
     fn empty_flag_falls_through_to_env() {
-        unsafe { std::env::set_var("MVM_TENANT", "from-env") };
+        let mut env = TestEnv::new();
+        env.set("MVM_TENANT", "from-env");
         assert_eq!(resolve_tenant(Some("")), "from-env");
-        unsafe { std::env::remove_var("MVM_TENANT") };
     }
 
     #[test]
     fn empty_env_falls_through_to_default() {
-        unsafe { std::env::set_var("MVM_TENANT", "") };
+        let mut env = TestEnv::new();
+        env.set("MVM_TENANT", "");
         // Either default or whatever ~/.mvm/config.toml says; both
         // are non-empty. The empty MVM_TENANT must NOT come through.
         let resolved = resolve_tenant(None);
         assert!(!resolved.is_empty());
-        unsafe { std::env::remove_var("MVM_TENANT") };
     }
 }
