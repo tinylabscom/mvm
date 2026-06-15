@@ -13,7 +13,7 @@ from typing import Any
 
 from mvm._sandbox import Sandbox
 
-__all__ = ["CodeError", "CodeSandbox"]
+__all__ = ["BrowserSandbox", "CodeError", "CodeSandbox"]
 
 
 class CodeError(RuntimeError):
@@ -110,3 +110,66 @@ class CodeSandbox:
                 stderr=result.stderr,
             )
         return result.stdout
+
+
+# Browser → (image, default CDP/remote-debugging port). Chromium-family
+# browsers expose the Chrome DevTools Protocol on 9222.
+_BROWSERS: dict[str, tuple[str, int]] = {
+    "chromium": ("chromium", 9222),
+    "chrome": ("chrome", 9222),
+}
+
+
+class BrowserSandbox:
+    """A `Sandbox` preset for a headless browser: a baked browser image with
+    its CDP port forwarded to the host. Image + port preset only — no new
+    mechanism (the forward is `Sandbox.forward`, the protocol is the
+    browser's own CDP).
+
+    `endpoint()` returns the host-side CDP HTTP base; pass it to a CDP client
+    (Playwright/Puppeteer `connectOverCDP` / `browserURL`), which discovers
+    the per-session WebSocket URL from `/json/version`.
+
+    Example::
+
+        with mvm.BrowserSandbox("chromium") as bs:
+            page = await playwright.chromium.connect_over_cdp(bs.endpoint())
+    """
+
+    def __init__(
+        self,
+        browser: str = "chromium",
+        *,
+        host_port: int | None = None,
+        workload_id: str | None = None,
+        **create_kwargs: Any,
+    ) -> None:
+        if browser not in _BROWSERS:
+            raise ValueError(
+                f"unknown browser {browser!r}; supported: {sorted(_BROWSERS)}"
+            )
+        image, cdp_port = _BROWSERS[browser]
+        self._cdp_port = cdp_port
+        self._host_port = host_port if host_port is not None else cdp_port
+        self._sandbox = Sandbox.create(
+            image=image, workload_id=workload_id, **create_kwargs
+        )
+        self._sandbox.forward(self._host_port, cdp_port)
+
+    @property
+    def sandbox(self) -> Sandbox:
+        """The underlying `Sandbox` for direct access."""
+        return self._sandbox
+
+    def endpoint(self) -> str:
+        """Host-side CDP HTTP endpoint (e.g. ``http://localhost:9222``)."""
+        return f"http://localhost:{self._host_port}"
+
+    def kill(self) -> None:
+        self._sandbox.kill()
+
+    def __enter__(self) -> "BrowserSandbox":
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.kill()

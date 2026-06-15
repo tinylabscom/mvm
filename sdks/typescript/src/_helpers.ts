@@ -110,3 +110,64 @@ export class CodeSandbox {
     this.kill();
   }
 }
+
+// Browser → image + default CDP port. Chromium-family browsers expose the
+// Chrome DevTools Protocol on 9222.
+const BROWSERS: Record<string, { image: string; cdpPort: number }> = {
+  chromium: { image: "chromium", cdpPort: 9222 },
+  chrome: { image: "chrome", cdpPort: 9222 },
+};
+
+/** Options for {@link BrowserSandbox} — `Sandbox.create` options plus an
+ *  optional host port override for the forwarded CDP port. */
+export interface BrowserSandboxOptions extends SandboxCreateOptions {
+  hostPort?: number;
+}
+
+/** A `Sandbox` preset for a headless browser: a baked browser image with its
+ *  CDP port forwarded to the host. Image + port preset only — no new
+ *  mechanism (the forward is `Sandbox.forward`, the protocol is the browser's
+ *  own CDP).
+ *
+ *  `endpoint()` returns the host-side CDP HTTP base; pass it to a CDP client
+ *  (Playwright/Puppeteer `connectOverCDP` / `browserURL`), which discovers the
+ *  per-session WebSocket URL from `/json/version`. */
+export class BrowserSandbox {
+  private readonly _sandbox: Sandbox;
+  private readonly hostPort: number;
+
+  constructor(browser = "chromium", options: BrowserSandboxOptions = {}) {
+    const preset = BROWSERS[browser];
+    if (preset === undefined) {
+      throw new RangeError(
+        `unknown browser ${JSON.stringify(browser)}; supported: ${Object.keys(BROWSERS).join(", ")}`,
+      );
+    }
+    const { hostPort, ...createOptions } = options;
+    this.hostPort = hostPort ?? preset.cdpPort;
+    this._sandbox = Sandbox.create(preset.image, createOptions);
+    this._sandbox.forward(this.hostPort, preset.cdpPort);
+  }
+
+  /** The underlying `Sandbox` for direct access. */
+  get sandbox(): Sandbox {
+    return this._sandbox;
+  }
+
+  /** Host-side CDP HTTP endpoint (e.g. `http://localhost:9222`). */
+  endpoint(): string {
+    return `http://localhost:${this.hostPort}`;
+  }
+
+  kill(): void {
+    this._sandbox.kill();
+  }
+
+  [Symbol.dispose](): void {
+    this.kill();
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    this.kill();
+  }
+}

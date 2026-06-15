@@ -678,3 +678,47 @@ def test_code_sandbox_node_uses_node_runner(tmp_path: Path) -> None:
 
     calls = _read_fixture_log(tmp_path)
     assert any("-- node -e" in c for c in calls), calls
+
+
+# ── BrowserSandbox typed helper (Plan 125 C2) ────────────────────────
+
+
+def test_browser_sandbox_forwards_cdp_and_endpoint(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-br-vm", "build_mode": "dev"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    bs = mvm.BrowserSandbox("chromium")
+    try:
+        assert bs.endpoint() == "http://localhost:9222"
+        bs.sandbox._live._forwards[0].wait(timeout=5)
+        calls = _read_fixture_log(tmp_path)
+        assert any(c.startswith("forward sb-br-vm --port 9222:9222") for c in calls), calls
+    finally:
+        bs.kill()
+
+
+def test_browser_sandbox_custom_host_port(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-br-vm", "build_mode": "dev"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    bs = mvm.BrowserSandbox("chromium", host_port=18222)
+    try:
+        assert bs.endpoint() == "http://localhost:18222"
+        bs.sandbox._live._forwards[0].wait(timeout=5)
+        calls = _read_fixture_log(tmp_path)
+        assert any(c.startswith("forward sb-br-vm --port 18222:9222") for c in calls), calls
+    finally:
+        bs.kill()
+
+
+def test_browser_sandbox_unknown_browser_raises() -> None:
+    with pytest.raises(ValueError, match="browser"):
+        mvm.BrowserSandbox("safari")

@@ -672,3 +672,47 @@ describe("CodeSandbox", () => {
     }
   });
 });
+
+// ── BrowserSandbox typed helper — Plan 125 C2 ────────────────────────
+
+describe("BrowserSandbox", () => {
+  it("forwards the CDP port and endpoint() returns the host URL", async () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-br-vm", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const bs = new mvm.BrowserSandbox("chromium");
+    try {
+      expect(bs.endpoint()).toBe("http://localhost:9222");
+      const live = bs.sandbox._live as unknown as ForwardsPeek;
+      await new Promise<void>((resolve) => live.forwards[0].on("exit", () => resolve()));
+      expect(readFixtureLog().some((c) => c.startsWith("forward sb-br-vm --port 9222:9222"))).toBe(true);
+    } finally {
+      bs.kill();
+    }
+  });
+
+  it("honours a custom host port", async () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-br-vm", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const bs = new mvm.BrowserSandbox("chromium", { hostPort: 18222 });
+    try {
+      expect(bs.endpoint()).toBe("http://localhost:18222");
+      const live = bs.sandbox._live as unknown as ForwardsPeek;
+      await new Promise<void>((resolve) => live.forwards[0].on("exit", () => resolve()));
+      expect(readFixtureLog().some((c) => c.startsWith("forward sb-br-vm --port 18222:9222"))).toBe(true);
+    } finally {
+      bs.kill();
+    }
+  });
+
+  it("throws on an unknown browser", () => {
+    expect(() => new mvm.BrowserSandbox("safari")).toThrow(/unknown browser/);
+  });
+});
