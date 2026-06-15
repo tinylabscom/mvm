@@ -53,7 +53,7 @@ pub enum L4Decision {
 // ──────────────────────────────────────────────────────────────────────
 // L4Gate — supervisor slot consumed by the policy resolver.
 //
-// Symmetric with `EgressProxy` (L7) / `ToolGate` / `KeystoreReleaser` /
+// Symmetric with `SupervisorEgressProxy` (L7) / `ToolGate` / `KeystoreReleaser` /
 // `ArtifactCollector`: a `Box<dyn L4Gate>` slot the supervisor consults
 // at admission. `CanonicalL4Gate` is wired from a parsed bundle's
 // `[[network.l4]]` rows; the smoltcp / TUN consumer that turns an

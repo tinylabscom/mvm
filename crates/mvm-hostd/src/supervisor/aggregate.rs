@@ -35,7 +35,7 @@ use crate::supervisor::audit::{AuditSigner, NoopAuditSigner};
 use crate::supervisor::backend::{BackendError, BackendLauncher, NoopBackendLauncher};
 use crate::supervisor::circuit_breaker::{CircuitBreaker, InspectorReporter};
 use crate::supervisor::destination::DestinationPolicy;
-use crate::supervisor::egress::{EgressProxy, NoopEgressProxy};
+use crate::supervisor::egress::{NoopEgressProxy, SupervisorEgressProxy};
 use crate::supervisor::firewall::seam::SupervisorEgressEnforcer;
 use crate::supervisor::firewall::{
     FirewallEnforcer, FirewallError, FirewallSpec, NoopFirewallEnforcer,
@@ -134,7 +134,7 @@ pub enum SupervisorError {
 }
 
 pub struct Supervisor {
-    pub egress: Arc<dyn EgressProxy>,
+    pub egress: Arc<dyn SupervisorEgressProxy>,
     pub tool_gate: Arc<dyn ToolGate>,
     pub keystore: Arc<dyn KeystoreReleaser>,
     pub audit: Arc<dyn AuditSigner>,
@@ -215,7 +215,7 @@ impl Supervisor {
     }
 
     /// Wire a prebuilt egress proxy slot.
-    pub fn with_egress_proxy(mut self, egress: Arc<dyn EgressProxy>) -> Self {
+    pub fn with_egress_proxy(mut self, egress: Arc<dyn SupervisorEgressProxy>) -> Self {
         self.egress = egress;
         self
     }
@@ -745,7 +745,7 @@ impl Supervisor {
     /// `with_l7_egress` (the egress builder reads `self.circuit_breakers`
     /// at chain-build time). Calling it after has no effect on an
     /// already-built chain — the inspectors live inside the
-    /// `Arc<dyn EgressProxy>` and aren't reachable for re-wrapping.
+    /// `Arc<dyn SupervisorEgressProxy>` and aren't reachable for re-wrapping.
     pub fn with_circuit_breakers(mut self, reporter: Arc<InspectorReporter>) -> Self {
         self.circuit_breakers = Some(reporter);
         self
@@ -2308,7 +2308,7 @@ mod tests {
             )
             .expect("wire ok");
 
-        // The legacy `EgressProxy::inspect(host, path)` runs the
+        // The legacy `SupervisorEgressProxy::inspect(host, path)` runs the
         // chain. Because destination_policy's breaker is open, the
         // verdict is the chain's downstream "Allow" rather than the
         // `Deny` destination_policy would have produced.

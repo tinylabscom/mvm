@@ -12,7 +12,7 @@
 //! single-tenant local dev posture, or `"<tenant>:<workload>"` for a
 //! mvmd-managed policy bundle on disk at
 //! `~/.mvm/policies/<tenant>/<workload>.toml`. The supervisor needs
-//! four trait objects (`EgressProxy`, `ToolGate`, `KeystoreReleaser`,
+//! four trait objects (`SupervisorEgressProxy`, `ToolGate`, `KeystoreReleaser`,
 //! `ArtifactCollector`) to make admission decisions; this resolver
 //! is the function that turns a plan's refs into those objects.
 //!
@@ -72,11 +72,11 @@ use mvm_core::plan::{ExecutionPlan, FsPolicyRef, PolicyRef};
 use mvm_core::policy::canonicalize_l4;
 use mvm_hostd::supervisor::{
     ArtifactCollector, AuditPolicyValidationError, CanonicalL4Gate, EgressPolicyValidationError,
-    EgressProxy, KeystoreReleaser, L4Gate, L7EgressProxy, LiveArtifactCollector,
-    LiveKeystoreReleaser, NoopArtifactCollector, NoopEgressAuditSink, NoopEgressProxy,
-    NoopKeystoreReleaser, NoopL4Gate, NoopToolGate, PiiPolicyError, PolicyToolGate,
-    TokioDnsResolver, ToolGate, build_inspector_chain_with_pii,
-    validate_audit_policy_stream_destinations, validate_egress_policy_inspector_names,
+    KeystoreReleaser, L4Gate, L7EgressProxy, LiveArtifactCollector, LiveKeystoreReleaser,
+    NoopArtifactCollector, NoopEgressAuditSink, NoopEgressProxy, NoopKeystoreReleaser, NoopL4Gate,
+    NoopToolGate, PiiPolicyError, PolicyToolGate, SupervisorEgressProxy, TokioDnsResolver,
+    ToolGate, build_inspector_chain_with_pii, validate_audit_policy_stream_destinations,
+    validate_egress_policy_inspector_names,
 };
 
 /// The fixed identifier for the local-dev policy bundle. Any
@@ -99,7 +99,7 @@ pub const LOCAL_DEFAULT: &str = "local-default";
 /// supervisor lift in mvm-hostd.
 pub struct ResolvedSlots {
     pub network: Box<dyn L4Gate>,
-    pub egress: Box<dyn EgressProxy>,
+    pub egress: Box<dyn SupervisorEgressProxy>,
     pub tool_gate: Box<dyn ToolGate>,
     pub keystore: Box<dyn KeystoreReleaser>,
     pub artifacts: Box<dyn ArtifactCollector>,
@@ -799,12 +799,12 @@ mod tests {
     fn policy_resolver_signature_returns_box_dyn_trait_objects() {
         // Compile-time check: the slots inside ResolvedSlots can be
         // moved into builder functions that accept
-        // `Box<dyn EgressProxy>`, etc. This proves the eventual
-        // `Supervisor::with_egress(self, Box<dyn EgressProxy>)` lift
+        // `Box<dyn SupervisorEgressProxy>`, etc. This proves the eventual
+        // `Supervisor::with_egress(self, Box<dyn SupervisorEgressProxy>)` lift
         // is just a `.with_egress(slots.egress)` call away — no
         // adapter layer needed.
         fn take_network(_: Box<dyn L4Gate>) {}
-        fn take_egress(_: Box<dyn EgressProxy>) {}
+        fn take_egress(_: Box<dyn SupervisorEgressProxy>) {}
         fn take_tool_gate(_: Box<dyn ToolGate>) {}
         fn take_keystore(_: Box<dyn KeystoreReleaser>) {}
         fn take_artifacts(_: Box<dyn ArtifactCollector>) {}

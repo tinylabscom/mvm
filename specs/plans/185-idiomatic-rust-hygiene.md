@@ -174,13 +174,19 @@ Priority order:
       Renamed to `DeviceMapperBackend` (the module models dmsetup/device-mapper
       thin-pool ops; impls are `DmsetupBackend` + `MockBackend`). Blast radius
       was three files: `storage/backend.rs`, `storage/mod.rs`, `storage/pool.rs`.
-- [ ] **Step 3 - clarify the two `EgressProxy` traits without unifying them.**
-      Candidate names should reflect layer ownership, for example runtime VM
-      egress vs supervisor policy egress.
-- [~] **Step 4 - update docs/comments only where they reference Rust type names.**
-      Done for the `storage::Backend` rename; `EgressProxy` doc pass pending Step 3.
-- [~] **Step 5 - green.** `mvm` lib+tests clippy clean, 14 storage tests pass;
-      `EgressProxy` crates pending Step 3.
+- [x] **Step 3 - clarify the two `EgressProxy` traits without unifying them.**
+      Renamed by layer ownership: the runtime per-VM lifecycle stub in
+      `mvm/src/vm/egress_proxy.rs` → `VmEgressProxy` (zero external callers), and
+      the supervisor's L7 payload-inspecting decision trait in
+      `mvm-hostd/src/supervisor/egress.rs` → `SupervisorEgressProxy` (~25 refs
+      across mvm-hostd/mvm-cli/mvm-core). Concrete impls `StubEgressProxy`,
+      `NoopEgressProxy`, `L7EgressProxy` keep their names.
+- [x] **Step 4 - update docs/comments only where they reference Rust type names.**
+      Done for both the `storage::Backend` and `EgressProxy` renames; no user-doc
+      churn (internal-only names).
+- [x] **Step 5 - green.** storage: `mvm` lib+tests clippy clean + 14 storage tests;
+      egress: `mvm-core`/`mvm`/`mvm-hostd`/`mvm-cli` clippy clean + 773 supervisor
+      tests pass.
 
 ### Task 5 - Push stringly selectors toward typed values at module boundaries
 

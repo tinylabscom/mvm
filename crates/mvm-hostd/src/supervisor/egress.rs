@@ -37,7 +37,7 @@ pub enum EgressError {
 /// header-time, then have its body redacted by `PiiRedactor`
 /// mid-stream, all under one `inspect` call.
 #[async_trait]
-pub trait EgressProxy: Send + Sync {
+pub trait SupervisorEgressProxy: Send + Sync {
     /// Inspect an outbound HTTP request. The signature is intentionally
     /// loose at this stage — the concrete `EgressRequest` +
     /// `EgressResponse` shapes arrive once the inspector chain is wired.
@@ -54,7 +54,7 @@ pub trait EgressProxy: Send + Sync {
 pub struct NoopEgressProxy;
 
 #[async_trait]
-impl EgressProxy for NoopEgressProxy {
+impl SupervisorEgressProxy for NoopEgressProxy {
     async fn inspect(&self, _host: &str, _path: &str) -> Result<EgressDecision, EgressError> {
         Err(EgressError::NotWired)
     }
@@ -72,6 +72,6 @@ mod tests {
     // it runs.
     #[test]
     fn noop_egress_proxy_is_constructable() {
-        let _: Box<dyn EgressProxy> = Box::new(NoopEgressProxy);
+        let _: Box<dyn SupervisorEgressProxy> = Box::new(NoopEgressProxy);
     }
 }
