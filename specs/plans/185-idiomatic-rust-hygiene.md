@@ -436,16 +436,29 @@ edges that currently wrap them.
 `rg -n 'derive\\(.*Debug|println!|eprintln!|tracing::|log::|format!' crates`
 plus secret-bearing modules.
 
-- [ ] **Step 1 - identify secret-bearing types.** Keys, tokens, signed secrets,
-      tenant data, placeholder values, credential names, and redaction payloads
-      must not expose raw values through `Debug`, `Display`, logs, or panic text.
-- [ ] **Step 2 - use secrecy/zeroize wrappers consistently.** Prefer existing
-      `secrecy` and `zeroize` patterns over local redaction wrappers unless the
-      local type needs a domain-specific display.
-- [ ] **Step 3 - add negative tests for secret formatting where practical.** Tests
-      should prove debug/log-facing output redacts or omits raw secret material.
-- [ ] **Step 4 - green.** Run targeted security/crypto/policy tests and clippy
-      for touched crates.
+- [x] **Step 1 - identify secret-bearing types.** Audit conclusion: the
+      codebase already enforces this well. The name-based
+      `check-no-display-on-secret-types` gate is clean; a field-name sweep for
+      raw secret fields (`secret`/`password`/`api_key`/`private_key`/`token` of
+      `String`/`Vec<u8>`) on non-`SecretBox` types surfaced **no unprotected
+      types** — the only hits are an opaque `pid_token` CLI arg and the
+      already-hand-redacted `vmgenid::GenerationToken`.
+- [x] **Step 2 - use secrecy/zeroize wrappers consistently.** Already the
+      pattern: raw credential values live in zeroizing `secrecy::SecretBox`
+      (e.g. the keyholder resolver returns `SecretBox<Vec<u8>>`), and
+      secret-bearing structs carry hand-written redacting `Debug` impls with
+      `// allow(secret-debug)` notes. No new wrappers needed.
+- [x] **Step 3 - add negative tests for secret formatting where practical.**
+      Added the missing ones — types that had a redacting `Debug` but no test
+      pinning it, so a future edit dropping the impl can't silently start
+      leaking (the name-gate only checks an impl *exists*, not that it
+      *redacts*): `HostSigner` (mvm-hostd), `ResolvedBinding`/`ResolvedSecrets`
+      and `EgressCa` (mvm-core). `identity::SecretBytes`, the TLS intermediate,
+      and the web-search provider already had equivalent tests.
+- [x] **Step 4 - green.** The 3 new tests + existing redaction tests pass;
+      `cargo clippy -p mvm-core --features egress-ca -p mvm-hostd --all-targets
+      -- -D warnings`, nightly fmt, and the `check-no-display-on-secret-types` /
+      spec gates clean. (PR for the tests is tracked in SPRINT.)
 
 ### Task 13 - Add documentation verification to closeout
 
@@ -466,16 +479,36 @@ plus secret-bearing modules.
       (`[`SecretStore::list`]`, `[`crate::crypto::snapshot_hmac`]`,
       `[`std::str::FromStr`]`, the `SIG_ALG_*` consts), private/test/prose items
       were backticked, and `cargo doc -p mvm-core --no-deps` is now clean under
-      `-D rustdoc::broken_intra_doc_links`. The remaining crates are tracked
-      below and must be cleared before Phase 7's workspace `cargo doc` gate.
-- [x] **Step 3 - document any doc-generation blocker.** No host/platform
-      blocker — `cargo doc` runs on this host; the only obstacle to a green
-      workspace doc build is the pre-existing broken-link debt inventoried in
-      Step 2, which is fixable (not a waiver).
+      `-D rustdoc::broken_intra_doc_links`.
+      **`mvm-build` partially cleared** (45 → 32 under `--all-features`): fixed
+      the *unconditional* path bugs — `vz_builder.rs` dropped the `crate::`
+      prefix on 10 `libkrun_builder::…` links the code itself qualifies;
+      `vz.rs` `Boot`/`Restore` → `StartupMode::{Boot,Restore}`; `builder_vm.rs`
+      `LibkrunBuilderVm` → `crate::libkrun_builder::LibkrunBuilderVm`; private
+      consts + external objc2 types backticked. This pass also **refined the
+      finding** (see Step 3): the count is feature- and platform-sensitive.
+- [~] **Step 3 - document the doc-generation conditions.** Not a host/platform
+      *blocker* (`cargo doc` runs here), but the workspace doc build is
+      **feature- and platform-conditional**, which the initial `~115` count hid:
+      (a) many links target `#[cfg(feature = …)]` modules (e.g.
+      `crate::libkrun_builder::*`) that are absent unless docs run with
+      `--all-features`; (b) a cluster targets `#[cfg(target_os = "linux")]`
+      builder-VM bins (`mvm-host-vm-init`, egress-proxy internals) that simply
+      aren't in the doc graph on a **macOS** host — they resolve on a **Linux**
+      doc build, and backticking them to satisfy macOS would *degrade* the
+      valid Linux docs. So the Phase 7 doc gate must run **on Linux with
+      `--all-features`, per-crate**; only links that are broken *there* are real
+      bugs. mvm-core + the unconditional mvm-build bugs are fixed; the rest is
+      tracked below.
 
-  **Deferred (tracked) — clear the remaining broken intra-doc links before Phase 7:**
+  **Deferred (tracked) — clear the remaining broken intra-doc links before
+  Phase 7 (counts are the macOS-host default-feature run; re-measure on Linux
+  with `--all-features`, which is the real gate — many are feature/platform
+  artifacts, not bugs):**
   - [ ] mvm-hostd (26)
-  - [ ] mvm-build (26)
+  - [~] mvm-build (32 left under `--all-features`; unconditional path bugs fixed —
+        remainder is module-doc `//!` qualification + `cfg(linux)` builder-VM bins
+        that resolve only on a Linux doc build)
   - [ ] mvm-backend (16)
   - [ ] mvm-guest (13)
   - [ ] libkrun-sys / deps (8)
