@@ -190,14 +190,36 @@ Priority order:
 `crates/mvm-network/src/registry.rs`,
 `crates/mvm-storage/src/mount_provider.rs`.
 
-- [ ] **Step 1 - keep strings at CLI/config edges.** Parsing raw user input stays
-      close to Clap/config decoding.
-- [ ] **Step 2 - use typed selectors internally.** Prefer `BackendKind` and
-      descriptor APIs inside backend code; prefer provider-specific enums where
-      network/storage mode is already structured.
-- [ ] **Step 3 - avoid duplicate registries.** If a descriptor/registry already
-      owns a selector table, reuse it instead of creating another string list.
-- [ ] **Step 4 - green.** Run targeted tests and clippy for touched crates.
+- [x] **Step 1 - keep strings at CLI/config edges.** Confirmed: backend selection
+      already funnels raw `--hypervisor`/config strings through the single edge
+      parser `AnyBackend::from_hypervisor(&str)` → `catalog::descriptor_for_selector`.
+      Network/storage providers register by a `kind()` string *on purpose* — it's
+      the documented open-registry extension point (external S3/NFS/custom providers
+      join without a core-enum edit), so those strings are left as-is.
+- [~] **Step 2 - use typed selectors internally.** The typed foundation already
+      exists from the backend descriptor registry: `BackendKind` enum +
+      `AnyBackend::kind()`. Exposed `kind()` as `pub` (was needlessly `pub(crate)`
+      while `BackendKind` was already `pub`) and migrated the `&AnyBackend`-in-hand
+      call sites in `mvm-cli/pool.rs` from `name() == "vz"` to
+      `kind() == BackendKind::Vz`. Deferred: the `kernel_identity`/`image_identity`/
+      `compat_for_launch` sites still take `&dyn VmBackend` (the mvm-core trait,
+      which cannot expose `BackendKind` without a layer inversion) — typing those
+      needs a `&dyn VmBackend → &AnyBackend` signature ripple through pool.rs,
+      scoped as a follow-up to avoid churning that hot file here.
+- [x] **Step 3 - avoid duplicate registries.** Removed the duplicated alias literal
+      `backend_name == "vz" || backend_name == "virtualization"` in pool.rs in favor
+      of `backend.kind() == BackendKind::Vz` — the descriptor registry already owns
+      the vz alias table, so the call site no longer re-lists it.
+- [x] **Step 4 - green.** `mvm-backend`/`mvm-cli` clippy clean; 14 pool tests pass.
+
+#### Task 5 deferred follow-ups
+
+- [ ] Convert `kernel_identity`/`image_identity`/`compat_for_launch` (and the
+      `StandbyCompatParams.backend` field at the call-chain root) from
+      `&dyn VmBackend` to `&AnyBackend`, then replace their `name() == "..."`
+      comparisons with `kind()` checks. Held back from the Task 5 slice because
+      pool.rs is a hot file (warm-pool work) and the signature ripple is best
+      landed when that area is quiet.
 
 ---
 

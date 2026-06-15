@@ -15,6 +15,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use mvm_backend::backend::AnyBackend;
+use mvm_backend::catalog::BackendKind;
 use mvm_backend::standby_pool::SupervisorStandbyPool;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
@@ -370,7 +371,7 @@ pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Resu
     // against an already-full pool is a cheap no-op, not an over-warm. Two
     // races against the same image can still transiently overshoot target by
     // one per concurrent launch; the surplus ages out via the standby TTL.
-    if backend.as_vm_backend().name() == "vz" {
+    if backend.kind() == BackendKind::Vz {
         spawn_detached_rewarm(&cfg.rootfs_path, cfg.warm_pool_size)?;
         return Ok(0);
     }
@@ -1032,7 +1033,7 @@ fn resolve_warm_shape(cfg: &MvmConfig, rootfs_override: Option<&str>) -> Result<
             .context("resolve default-microvm kernel for the warm pool")?;
     let vcpus = u8::try_from(cfg.default_cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
     // Vz needs an image; libkrun does not. Resolve: explicit --rootfs > env var > default.
-    let image = if backend_name == "vz" || backend_name == "virtualization" {
+    let image = if backend.kind() == BackendKind::Vz {
         let path = rootfs_override
             .map(str::to_string)
             .or_else(|| std::env::var("MVM_POOL_ROOTFS").ok())
