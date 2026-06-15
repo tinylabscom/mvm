@@ -1203,6 +1203,31 @@ pub fn balloon_state(name: &str) -> Result<u32> {
     Ok(amount as u32)
 }
 
+/// Wait for a Firecracker guest to power down on its own after an ACPI
+/// shutdown request, polling `is_running` every `poll_interval` until it
+/// reports the VM gone or `max_wait` elapses. Returns `true` when the
+/// guest exited within the window (no hard kill needed), `false` on
+/// timeout. The liveness probe, clock, and sleep are injected so the
+/// escalation decision — "did the guest honor the ACPI request before we
+/// fall back to SIGKILL?" — is unit-testable without a live guest or
+/// real-time waits.
+fn await_graceful_exit(
+    max_wait: std::time::Duration,
+    poll_interval: std::time::Duration,
+    mut is_running: impl FnMut() -> Result<bool>,
+    mut now: impl FnMut() -> std::time::Instant,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> Result<bool> {
+    let deadline = now() + max_wait;
+    while now() < deadline {
+        if !is_running()? {
+            return Ok(true);
+        }
+        sleep(poll_interval);
+    }
+    Ok(false)
+}
+
 pub fn stop_vm(name: &str) -> Result<()> {
     require_linux_env()?;
 
@@ -1249,15 +1274,13 @@ pub fn stop_vm(name: &str) -> Result<()> {
         warn!("failed to send graceful shutdown to VM: {e}");
     }
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
-    let mut exited_gracefully = false;
-    while std::time::Instant::now() < deadline {
-        if !firecracker::is_vm_running(&pid_file)? {
-            exited_gracefully = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
+    let exited_gracefully = await_graceful_exit(
+        std::time::Duration::from_millis(250),
+        std::time::Duration::from_millis(25),
+        || firecracker::is_vm_running(&pid_file),
+        std::time::Instant::now,
+        std::thread::sleep,
+    )?;
 
     // Clean up the API socket either way; only fall back to a hard kill when
     // the guest ignored the ACPI request within the graceful window.
@@ -3640,5 +3663,88 @@ mod tests {
                 None => std::env::remove_var("MVM_PASST_PATH"),
             }
         }
+    }
+
+    // ---- await_graceful_exit (Firecracker `stop_vm` shutdown escalation) ----
+    //
+    // The probe, clock, and sleep are injected, so these exercise the real
+    // escalation decision with no VM and no wall-clock waits (sleep is a
+    // no-op; the clock is a deterministic tick where it matters).
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn await_graceful_exit_true_when_guest_exits_in_window() {
+        // Guest is still up on the first probe, gone on the second.
+        let probes = Cell::new(0u32);
+        let is_running = || {
+            let n = probes.get();
+            probes.set(n + 1);
+            Ok(n < 1)
+        };
+        // Generous window with a slow-ticking clock so the deadline is never
+        // the reason the loop ends — the guest exiting is.
+        let base = Instant::now();
+        let tick = Cell::new(0u64);
+        let now = || {
+            let n = tick.get();
+            tick.set(n + 1);
+            base + Duration::from_millis(n)
+        };
+        let exited = await_graceful_exit(
+            Duration::from_secs(10),
+            Duration::from_millis(25),
+            is_running,
+            now,
+            |_| {},
+        )
+        .expect("probe never errors");
+        assert!(exited, "guest exited within the window → no hard kill");
+        assert_eq!(probes.get(), 2, "polled until the guest reported gone");
+    }
+
+    #[test]
+    fn await_graceful_exit_false_on_timeout_with_bounded_polls() {
+        // Guest never powers down.
+        let probes = Cell::new(0u32);
+        let is_running = || {
+            probes.set(probes.get() + 1);
+            Ok(true)
+        };
+        // Clock jumps 100ms per call; with a 250ms window the loop runs twice
+        // before `now()` passes the deadline (calls at 0/100/200/300ms).
+        let base = Instant::now();
+        let tick = Cell::new(0u64);
+        let now = || {
+            let n = tick.get();
+            tick.set(n + 1);
+            base + Duration::from_millis(n * 100)
+        };
+        let slept = Cell::new(0u32);
+        let sleep = |_| slept.set(slept.get() + 1);
+        let exited = await_graceful_exit(
+            Duration::from_millis(250),
+            Duration::from_millis(25),
+            is_running,
+            now,
+            sleep,
+        )
+        .expect("probe never errors");
+        assert!(!exited, "guest ignored ACPI → caller must hard-kill");
+        assert_eq!(probes.get(), 2, "polled only within the graceful window");
+        assert_eq!(slept.get(), 2, "slept once per poll, never past the deadline");
+    }
+
+    #[test]
+    fn await_graceful_exit_propagates_probe_error() {
+        let is_running = || Err(anyhow::anyhow!("liveness probe failed"));
+        let result = await_graceful_exit(
+            Duration::from_secs(1),
+            Duration::from_millis(25),
+            is_running,
+            Instant::now,
+            |_| {},
+        );
+        assert!(result.is_err(), "a failing liveness probe must surface, not be swallowed");
     }
 }
