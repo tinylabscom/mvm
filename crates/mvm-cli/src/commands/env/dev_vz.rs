@@ -23,7 +23,7 @@ use crate::ui;
 // Dev environment (Vz supervisor)
 // ============================================================================
 
-pub(super) const DEV_VM_NAME: &str = "mvm-dev";
+pub(in crate::commands) const DEV_VM_NAME: &str = "mvm-dev";
 
 /// Stable session id for the long-lived dev builder VM. Fixed (not the
 /// random per-build id the warm pool uses) so a separate `dev down`
