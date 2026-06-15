@@ -100,7 +100,9 @@ macro_rules! backend_catalog {
         }
 
         impl AnyBackend {
-            pub(crate) fn kind(&self) -> BackendKind {
+            /// The typed discriminant for this backend. Lets callers branch on
+            /// `BackendKind::Vz` etc. instead of string-matching `name()`.
+            pub fn kind(&self) -> BackendKind {
                 match self {
                     $(Self::$kind(_) => BackendKind::$kind),*
                 }
