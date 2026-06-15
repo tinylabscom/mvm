@@ -19,6 +19,21 @@ remaining ~1 s is admit + 2 config/secrets drives + the ~70 ms firecracker boot)
 The flake-edit bust validates soundness end-to-end; the workspace-source axis is
 covered by `fingerprint_changes_when_workspace_source_changes`.
 
+Also validated on the **macOS 26 Apple-Silicon host** (`build image --flake
+examples/sleeper`, libkrun builder — the cache short-circuit fires *before*
+builder selection, so it's backend-independent):
+
+| `build image` | wall-clock | builder VM | cache hit |
+|---|---|---|---|
+| cold | 121 s | booted | no — records revision |
+| **warm** | **1.80 s** | **skipped** | **yes** |
+| after a flake edit | 24 s | rebuilt | no — correctly busted |
+
+121 s → **1.80 s** warm with the builder VM skipped. (The vz *builder* itself hit
+an unrelated environmental boot error on the stale default cache — `VZErrorDomain:2`
+storage-attachment — so this run used the libkrun builder; the cache path is
+identical for either builder. Backends proven: qemu (Linux box), libkrun (Mac).)
+
 ## Context
 
 `mvmctl up --flake <dir>` couples two phases: **build** (produce kernel + rootfs
