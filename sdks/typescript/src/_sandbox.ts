@@ -356,6 +356,9 @@ export class LiveTransport {
   readonly vmId: string;
   readonly buildMode: "dev" | "prod";
   private killed = false;
+  // Long-running `mvmctl forward` proxies spawned by `forward()`. Torn
+  // down in `kill()` so a port forwarder never outlives the VM.
+  private forwards: import("node:child_process").ChildProcess[] = [];
 
   constructor(opts: { mvmCliBin: string; vmId: string; buildMode: "dev" | "prod" }) {
     this.mvmCliBin = opts.mvmCliBin;
@@ -530,9 +533,37 @@ export class LiveTransport {
     }
   }
 
+  forward(hostPort: number, guestPort: number): void {
+    const spec = `${hostPort}:${guestPort}`;
+    const shell = [this.mvmCliBin, "forward", this.vmId, "--port", spec];
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const child = require("node:child_process") as typeof import("node:child_process");
+    // `mvmctl forward` blocks (runs the proxy until signalled), so spawn
+    // it detached + tracked; `kill()` terminates it.
+    let proc;
+    try {
+      proc = child.spawn(shell[0], shell.slice(1), { stdio: "ignore" });
+    } catch (err) {
+      throw new SandboxLiveError(
+        `\`${this.mvmCliBin}\` not found on disk; check MVM_CLI_BIN: ${String(err)}`,
+        { argv: shell },
+      );
+    }
+    this.forwards.push(proc);
+  }
+
   kill(): void {
     if (this.killed) return;
     this.killed = true;
+    // Tear down any port forwarders before the VM goes away.
+    for (const proc of this.forwards) {
+      try {
+        proc.kill();
+      } catch {
+        // best-effort cleanup
+      }
+    }
+    this.forwards = [];
     const shell = [this.mvmCliBin, "down", this.vmId];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const child = require("node:child_process") as typeof import("node:child_process");
@@ -768,6 +799,33 @@ export class Sandbox {
       );
     }
     this._live.cp(`${this._live.vmId}:${guestPath}`, hostPath);
+  }
+
+  /** Forward `hostPort` on the host to `guestPort` in the sandbox.
+   *
+   *  Spawns `mvmctl forward <vm> --port <host>:<guest>` as a background
+   *  proxy that runs until the sandbox is torn down (`kill` /
+   *  `[Symbol.dispose]` terminate it).
+   *
+   *  Live mode only: exposing a port is a runtime action, so in record
+   *  mode this throws `SandboxModeError`. To declare a port mapping for a
+   *  recorded workload, use `mvm.network({ ports: [...] })`. */
+  forward(hostPort: number, guestPort: number): void {
+    for (const [label, p] of [
+      ["hostPort", hostPort],
+      ["guestPort", guestPort],
+    ] as const) {
+      if (!Number.isInteger(p) || p <= 0 || p >= 65536) {
+        throw new RangeError(`${label} must be an integer in 1..65535`);
+      }
+    }
+    if (this._live === null) {
+      throw new SandboxModeError(
+        "`Sandbox.forward` is a live-mode operation; under MVM_SDK_MODE=record " +
+          "declare ports with `mvm.network({ ports: [...] })`.",
+      );
+    }
+    this._live.forward(hostPort, guestPort);
   }
 
   kill(): void {

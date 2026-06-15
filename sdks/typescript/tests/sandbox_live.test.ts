@@ -21,6 +21,7 @@ interface FixtureOptions {
   procExit?: number;
   fsExit?: number;
   cpExit?: number;
+  forwardSleep?: number;
   downExit?: number;
 }
 
@@ -34,6 +35,7 @@ function writeFixtureMvmctl(opts: FixtureOptions): string {
   const procExit = opts.procExit ?? 0;
   const fsExit = opts.fsExit ?? 0;
   const cpExit = opts.cpExit ?? 0;
+  const forwardSleep = opts.forwardSleep ?? 0;
   const downExit = opts.downExit ?? 0;
 
   const script = path.join(tmpDir, "fake-mvmctl");
@@ -69,6 +71,10 @@ case "$verb" in
     ;;
   cp)
     exit ${cpExit}
+    ;;
+  forward)
+    sleep ${forwardSleep}
+    exit 0
     ;;
   down)
     exit ${downExit}
@@ -373,5 +379,57 @@ describe("Sandbox.copyIn / copyOut (live mode)", () => {
     process.env.MVM_SDK_MODE = "record";
     const sb = mvm.Sandbox.create("python-dev");
     expect(() => sb.copyIn("/tmp/x", "/app/x")).toThrow(mvm.SandboxModeError);
+  });
+});
+
+// ── forward / ports (Plan 125 B1b) ───────────────────────────────────
+
+type ForwardsPeek = { forwards: import("node:child_process").ChildProcess[] };
+
+describe("Sandbox.forward (live mode)", () => {
+  it("spawns mvmctl forward --port host:guest", async () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-fwd-vm", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const sb = mvm.Sandbox.create("python-dev");
+    sb.forward(8080, 80);
+
+    // The fixture `forward` exits immediately (sleep 0); await its exit so
+    // its log line is flushed before we assert.
+    const live = sb._live as unknown as ForwardsPeek;
+    await new Promise<void>((resolve) =>
+      live.forwards[0].on("exit", () => resolve()),
+    );
+    const calls = readFixtureLog();
+    expect(
+      calls.some((c) => c.startsWith("forward sb-fwd-vm --port 8080:80")),
+    ).toBe(true);
+  });
+
+  it("terminates the forwarder on kill", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-fwd-vm", build_mode: "dev" },
+      forwardSleep: 30,
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const sb = mvm.Sandbox.create("python-dev");
+    sb.forward(8080, 80);
+    const live = sb._live as unknown as ForwardsPeek;
+    const proc = live.forwards[0];
+    expect(proc.killed).toBe(false); // running (blocked on sleep)
+
+    sb.kill();
+    expect(proc.killed).toBe(true); // terminated by teardown
+  });
+
+  it("is refused in record mode", () => {
+    process.env.MVM_SDK_MODE = "record";
+    const sb = mvm.Sandbox.create("python-dev");
+    expect(() => sb.forward(8080, 80)).toThrow(mvm.SandboxModeError);
   });
 });
