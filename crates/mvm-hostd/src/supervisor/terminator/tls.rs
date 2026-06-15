@@ -103,10 +103,73 @@ pub fn server_config_for_sni(
         .context("rustls server config from minted leaf")
 }
 
-/// Terminate the guest's TLS on `stream` under `config`, read the one decrypted
-/// HTTP/1.1 request, substitute placeholders against `endpoint` (claim-12
-/// bind-checked — refused before `forward` runs), forward via `forward`
-/// (the upstream-https leg), and write the response back encrypted.
+/// The per-connection inputs to [`terminate_and_substitute`] that aren't the
+/// live socket, the forwarder, or the out-flag: the minted-leaf TLS `config`,
+/// the original destination, and the substitution/redaction machinery
+/// (`endpoint`, `redactor`, `action`). Bundled so the call doesn't thread five
+/// loose arguments; built via [`TlsTermination::builder`].
+pub struct TlsTermination<'a> {
+    config: Arc<rustls::ServerConfig>,
+    orig_dst: SocketAddr,
+    endpoint: &'a SubstitutionEndpoint<'a>,
+    redactor: &'a RedactingSubstitution,
+    action: &'a RedactionAction,
+}
+
+impl<'a> TlsTermination<'a> {
+    pub fn builder() -> TlsTerminationBuilder<'a> {
+        TlsTerminationBuilder::default()
+    }
+}
+
+/// Builder for [`TlsTermination`]: one setter per field, `build()` returns the
+/// value. Every field is required; `build()` panics if a setter was skipped,
+/// which is unreachable from the call sites that set them all.
+#[derive(Default)]
+pub struct TlsTerminationBuilder<'a> {
+    config: Option<Arc<rustls::ServerConfig>>,
+    orig_dst: Option<SocketAddr>,
+    endpoint: Option<&'a SubstitutionEndpoint<'a>>,
+    redactor: Option<&'a RedactingSubstitution>,
+    action: Option<&'a RedactionAction>,
+}
+
+impl<'a> TlsTerminationBuilder<'a> {
+    pub fn with_config(mut self, config: Arc<rustls::ServerConfig>) -> Self {
+        self.config = Some(config);
+        self
+    }
+    pub fn with_orig_dst(mut self, orig_dst: SocketAddr) -> Self {
+        self.orig_dst = Some(orig_dst);
+        self
+    }
+    pub fn with_endpoint(mut self, endpoint: &'a SubstitutionEndpoint<'a>) -> Self {
+        self.endpoint = Some(endpoint);
+        self
+    }
+    pub fn with_redactor(mut self, redactor: &'a RedactingSubstitution) -> Self {
+        self.redactor = Some(redactor);
+        self
+    }
+    pub fn with_action(mut self, action: &'a RedactionAction) -> Self {
+        self.action = Some(action);
+        self
+    }
+    pub fn build(self) -> TlsTermination<'a> {
+        TlsTermination {
+            config: self.config.expect("tls termination config"),
+            orig_dst: self.orig_dst.expect("tls termination orig_dst"),
+            endpoint: self.endpoint.expect("tls termination endpoint"),
+            redactor: self.redactor.expect("tls termination redactor"),
+            action: self.action.expect("tls termination action"),
+        }
+    }
+}
+
+/// Terminate the guest's TLS on `stream` under `term.config`, read the one
+/// decrypted HTTP/1.1 request, substitute placeholders against `term.endpoint`
+/// (claim-12 bind-checked — refused before `forward` runs), forward via
+/// `forward` (the upstream-https leg), and write the response back encrypted.
 ///
 /// `forward` is injected so the substitution + termination core stays testable
 /// with a mock upstream; production passes the reused reqwest forwarder. A
@@ -117,14 +180,9 @@ pub fn server_config_for_sni(
 /// them — the request was peeked as ciphertext) so that on a [`TerminatorError::
 /// Refused`] the caller can tell a claim-12 placeholder-drop (audit it) from a
 /// plain bad request, mirroring the `:80` core exactly.
-#[allow(clippy::too_many_arguments)]
 pub fn terminate_and_substitute<S, F>(
     stream: S,
-    config: Arc<rustls::ServerConfig>,
-    orig_dst: SocketAddr,
-    endpoint: &SubstitutionEndpoint<'_>,
-    redactor: &RedactingSubstitution,
-    action: &RedactionAction,
+    term: TlsTermination<'_>,
     carried_placeholder: &mut bool,
     forward: F,
 ) -> Result<TerminateOutcome, TerminatorError>
@@ -132,6 +190,13 @@ where
     S: Read + Write,
     F: Fn(&PreparedRequest) -> Result<Vec<u8>>,
 {
+    let TlsTermination {
+        config,
+        orig_dst,
+        endpoint,
+        redactor,
+        action,
+    } = term;
     let conn = rustls::ServerConnection::new(config)
         .map_err(|e| TerminatorError::Parse(format!("new rustls server connection: {e}")))?;
     let mut tls = rustls::StreamOwned::new(conn, stream);
@@ -535,11 +600,13 @@ mod tests {
             let mut carried = false;
             terminate_and_substitute(
                 sock,
-                cfg,
-                orig_dst,
-                &endpoint,
-                &redactor,
-                &action,
+                TlsTermination::builder()
+                    .with_config(cfg)
+                    .with_orig_dst(orig_dst)
+                    .with_endpoint(&endpoint)
+                    .with_redactor(&redactor)
+                    .with_action(&action)
+                    .build(),
                 &mut carried,
                 |prepared| {
                     *cap.lock().unwrap() = Some(prepared.clone());
@@ -719,11 +786,13 @@ mod tests {
             let mut carried = false;
             terminate_and_substitute(
                 sock,
-                cfg,
-                orig_dst,
-                &endpoint,
-                &redactor,
-                &action,
+                TlsTermination::builder()
+                    .with_config(cfg)
+                    .with_orig_dst(orig_dst)
+                    .with_endpoint(&endpoint)
+                    .with_redactor(&redactor)
+                    .with_action(&action)
+                    .build(),
                 &mut carried,
                 |prepared| {
                     *fwd.lock().unwrap() = true;
