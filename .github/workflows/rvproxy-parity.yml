@@ -18,15 +18,27 @@ name: rvproxy gateway parity (manual)
 # fails closed (a parity claim with no candidate is not a pass).
 
 on:
+  # Paths-filtered PR trigger: re-validate the gateway contract whenever the
+  # claim-10 chokepoint or the gate itself changes. macos-latest is ~10x ubuntu
+  # cost (ADR-038), so the filter keeps it off unrelated PRs. Same-repo branches
+  # see the RVPROXY_CHECKOUT_TOKEN secret; fork PRs do not and would fail closed
+  # (mvm is internal — no external forks). Making this a required check is a
+  # separate branch-protection decision.
+  pull_request:
+    paths:
+      - "scripts/rvproxy-gateway-parity.sh"
+      - ".github/workflows/rvproxy-parity.yml"
+      - "crates/mvm-hostd/src/supervisor/gateway_bridge.rs"
+      - "crates/mvm-hostd/src/supervisor/network/**"
+      - "crates/mvm-hostd/tests/egress_secret_leak_gate.rs"
+      - "crates/deps/libkrun-sys/src/gvproxy.rs"
+      - "crates/mvm-build/src/libkrun_builder.rs"
+      - "crates/mvm-build/src/libkrun_network_provider.rs"
   workflow_dispatch:
     inputs:
       rvproxy_ref:
-        description: "rvproxy git ref to build the candidate gateway from"
+        description: "Override the rvproxy ref to build the candidate from (blank = pinned default)"
         required: false
-        # rvproxy main carrying the R3 fixes (#38 DNS source-IP, #42 EMSGSIZE
-        # MTU-segmentation, #53 read-timeout). Bump deliberately as rvproxy lands
-        # gateway changes; a moving ref would make the gate non-reproducible.
-        default: "520a5dc6cc1fa5453979bba2fe9b7dc1a4c7aeb7"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -34,6 +46,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # rvproxy main carrying the R3 fixes (#38 DNS source-IP, #42 EMSGSIZE
+  # MTU-segmentation, #53 read-timeout). Single source for the pin; bump
+  # deliberately — a moving ref would make the gate non-reproducible.
+  RVPROXY_DEFAULT_REF: "520a5dc6cc1fa5453979bba2fe9b7dc1a4c7aeb7"
 
 jobs:
   parity:
@@ -65,7 +81,7 @@ jobs:
       - name: Build candidate rvproxy from pinned rev
         env:
           RVPROXY_TOKEN: ${{ secrets.RVPROXY_CHECKOUT_TOKEN }}
-          RVPROXY_REF: ${{ github.event.inputs.rvproxy_ref }}
+          RVPROXY_REF: ${{ github.event.inputs.rvproxy_ref || env.RVPROXY_DEFAULT_REF }}
         run: |
           set -euo pipefail
           if [ -z "${RVPROXY_TOKEN:-}" ]; then
