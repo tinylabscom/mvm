@@ -47,7 +47,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 192** — WASI capability projection (fs/env, ADR-081 A1) · ✅ LANDED — `mvm-core::policy::projection_fs_env` (`CanonicalFs`/`CanonicalEnv`, traversal-refusing canonicalizers, intersection-only `clamp_fs`/`clamp_env`, backend-agnostic WASI preopen/env-name shapes) + `WasiCapPolicy` bound on `EffectivePolicy` + 2 clamp-never-widens property witnesses; no new deps, runtime-free gate green. A2 (`.wasm` admission) + A3 (guest runner) are follow-on plans
 - [ ] **PLAN 193** — rvproxy network substrate (replace gvproxy/passt) · 🟡 WS-1 PROVEN (libkrun-unixgram live `dev up` through rvproxy, ~540k connections relayed, builder rootfs built — rvproxy #38/#42/#53) + WS-1.5 parity-gate scaffold `scripts/rvproxy-gateway-parity.sh` (gvproxy↔rvproxy conformance, refuses non-conforming binary) + CI lane LIVE `.github/workflows/rvproxy-parity.yml` (macos-latest, pinned-rev candidate via `RVPROXY_CHECKOUT_TOKEN`, fail-closed) — validated green in CI 2026-06-15 (gvproxy+rvproxy PASS) + paths-filtered `pull_request` trigger; WS-2 native-flow port (the biggest win — replaces the in-line claim-10 datapath wrapper, Plan 141) DESIGNED (Plan 193 §"WS-2 design" + R2 contract authored into rvproxy `specs/plans/014` R2) but 🔴 BLOCKED on rvproxy building R2 (survey 2026-06-15: no native flow-decision API yet — static config policy + packet `ByteTransform` + audit *export* only) + WS-3/4 + making the lane a required check (branch protection) remain, cross-repo
 - [ ] **PLAN 195** — Builder-VM fingerprint narrowing · 🟡 planned — drop the redundant whole-workspace `Cargo.lock` from `builder_vm_source_fingerprint` (flake forbids buildRustPackage → L3 byte-hash already authoritative) to kill the ~9s Stage 0 re-materialize churn; Commit 2 tightens build.rs rerun triggers. Build-perf only, no claim impact. (194 reserved for ADR-081 A3)
-- [ ] **PLAN 197** — `WorkloadBackend` type-bar (core security features non-skippable) · 🟡 Phase 1 MERGED (#860); Phase 2 spike DONE → 2a (vsock substitution channel) mvm-ready, 2b (transparent :80/:443 terminator) rvproxy-gated — marker trait gates the admitted launch path so qemu (a real dev/test VMM) is type-barred and a new backend can't reach the funnel without the shared enforcement (mock is permitted as the ADR-045 hermetic test double — carries no real workload). Arose from the Sprint 55 vz closeout finding.
+- [ ] **PLAN 197** — `WorkloadBackend` type-bar (core security features non-skippable) · 🟡 Phase 1 MERGED (#860); Phase 2a (vsock substitution channel) MERGED (#866) + **default-path plan-persist gap closed (#909)** so the substitution endpoint now actually spawns on a plain `up`/`invoke --hypervisor vz`/`libkrun` with secrets (no `MVM_GATEWAY_BRIDGE` needed) — control plane live-proven on vz; data-plane e2e still gated on the separate Vz host→guest 5252 early-boot vsock race. 2b (transparent :80/:443 terminator) rvproxy-gated — marker trait gates the admitted launch path so qemu (a real dev/test VMM) is type-barred and a new backend can't reach the funnel without the shared enforcement (mock is permitted as the ADR-045 hermetic test double — carries no real workload). Arose from the Sprint 55 vz closeout finding.
 
 ## Plan details
 
@@ -696,9 +696,16 @@ PLAN 197 — WorkloadBackend type-bar (core security features non-skippable)  �
       nightly-fmt green. MERGED #860 (code+ADR) / #861 (docs closeout+plan). (Landed against up.rs
       without a Plan 189 collision — that PR had not touched up.rs.)
   [x] Phase 2 design spike DONE: terminator → rvproxy (not gvproxy/standalone). Phase 2 SPLIT into:
-  [ ] 2a (mvm-side, ready): register SUBSTITUTION_PORT 5253 on libkrun+vz supervisors; add no-default
+  [x] 2a (mvm-side): register SUBSTITUTION_PORT 5253 on libkrun+vz supervisors; add no-default
       `egress_substitution_transport()` seam (FC=nft/TCP terminator, macOS=Uds vsock-5253 channel); lift
       spawn_substitution_endpoint into the funnel. Delivers explicit-HTTP_PROXY substitution on macOS.
+      MERGED #866. Default-path plan-persist gap fixed #909: the endpoint reads `<state_dir>/plan.json`
+      inside `start()`, but the CLI persisted it pre-start only for firecracker — so on a plain
+      `up`/`invoke --hypervisor vz`/`libkrun` it silently no-opped without `MVM_GATEWAY_BRIDGE=1`. Now
+      gated by `persists_plan_before_start(hyp) = matches!(hyp,"firecracker"|"vz"|"libkrun")` on both the
+      `up` (up.rs) and `invoke`/`run` (invoke.rs admit-closure) launch arms; QEMU stays excluded
+      (in-memory config). Control plane live-proven on vz (endpoint spawns, guest gets placeholder only);
+      data-plane e2e blocked by the separate Vz host→guest 5252 early-boot vsock race, not this code.
   [ ] 2b (rvproxy-gated, cross-repo): transparent :80/:443 terminator must live in rvproxy (no nft on
       macOS; the in-process bridge sees only post-gateway frames). Add to rvproxy's mvm-adoption
       requirements (Plan 193 / ADR-082); gated on the rvproxy migration.
