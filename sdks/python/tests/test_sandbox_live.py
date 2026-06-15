@@ -51,6 +51,8 @@ def _write_fixture_mvmctl(
     up_envelope: dict[str, str | int] | None,
     up_exit: int = 0,
     proc_exit: int = 0,
+    proc_wait_stdout: str = "",
+    proc_wait_exit: int = 0,
     fs_exit: int = 0,
     cp_exit: int = 0,
     forward_sleep: int = 0,
@@ -86,8 +88,12 @@ case "$verb" in
   proc)
     sub=$1
     if [ -t 0 ]; then :; else cat > {stdin_dir!s}/proc-stdin.bin || true; fi
-    if [ "{proc_exit}" -eq 0 ] && [ "$sub" = "start" ]; then
-      echo "pid-token-abc123"
+    if [ "$sub" = "start" ]; then
+      if [ "{proc_exit}" -eq 0 ]; then echo "pid-token-abc123"; fi
+      exit {proc_exit}
+    elif [ "$sub" = "wait" ]; then
+      printf '%s' '{proc_wait_stdout}'
+      exit {proc_wait_exit}
     fi
     exit {proc_exit}
     ;;
@@ -467,3 +473,79 @@ def test_forward_refused_in_record_mode() -> None:
     sb = mvm.Sandbox.create("python-dev")
     with pytest.raises(mvm.SandboxModeError):
         sb.forward(8080, 80)
+
+
+# ── async surface: aexec + `async with` (Plan 125 B2) ────────────────
+
+
+def test_aexec_runs_and_returns_result(tmp_path: Path) -> None:
+    import asyncio
+
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-aex-vm", "build_mode": "dev"},
+        proc_wait_stdout="4",
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    async def body() -> None:
+        async with mvm.Sandbox.create("python-dev") as sb:
+            r = await sb.aexec("python", "-c", "print(2 + 2)")
+            assert r.exit_code == 0
+            assert r.stdout == "4"
+
+    asyncio.run(body())
+    calls = _read_fixture_log(tmp_path)
+    assert any(c.startswith("proc start sb-aex-vm") for c in calls), calls
+    assert any(c.startswith("proc wait sb-aex-vm pid-token-abc123") for c in calls), calls
+
+
+def test_async_context_manager_kills_on_exit(tmp_path: Path) -> None:
+    import asyncio
+
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-aex-vm", "build_mode": "dev"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    async def body() -> None:
+        async with mvm.Sandbox.create("python-dev"):
+            pass
+
+    asyncio.run(body())
+    calls = _read_fixture_log(tmp_path)
+    assert sum(1 for c in calls if c.startswith("down ")) == 1, calls
+
+
+def test_aexec_dev_only_on_prod_template(tmp_path: Path) -> None:
+    import asyncio
+
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-prod-vm", "build_mode": "prod"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    async def body() -> None:
+        async with mvm.Sandbox.create("python-prod") as sb:
+            with pytest.raises(mvm.SandboxDevOnly):
+                await sb.aexec("python", "-c", "x")
+
+    asyncio.run(body())
+
+
+def test_aexec_refused_in_record_mode() -> None:
+    import asyncio
+
+    os.environ["MVM_SDK_MODE"] = "record"
+
+    async def body() -> None:
+        sb = mvm.Sandbox.create("python-dev")
+        with pytest.raises(mvm.SandboxModeError):
+            await sb.aexec("python")
+
+    asyncio.run(body())

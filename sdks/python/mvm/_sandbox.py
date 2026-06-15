@@ -55,6 +55,7 @@ closed at the Rust boundary)::
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import base64
 import dataclasses
@@ -1088,6 +1089,22 @@ class Sandbox:
             )
         return self._live.commands_exec(list(argv), env, timeout=timeout, cwd=cwd)
 
+    async def aexec(
+        self,
+        *argv: str,
+        timeout: float | None = None,
+        cwd: str | None = None,
+        env: dict[str, Any] | None = None,
+    ) -> ExecResult:
+        """Async face of :meth:`exec` — same one-shot semantics, awaitable
+        for use inside ``async with Sandbox.create(...) as sb``. One impl,
+        two faces: it runs the blocking :meth:`exec` in a worker thread
+        (``asyncio.to_thread``), so `SandboxDevOnly` / `SandboxModeError` /
+        the captured `ExecResult` all behave identically."""
+        return await asyncio.to_thread(
+            self.exec, *argv, timeout=timeout, cwd=cwd, env=env
+        )
+
     def copy_in(self, host_path: str, guest_path: str) -> None:
         """Copy a host file into the running sandbox at ``guest_path``.
 
@@ -1174,6 +1191,14 @@ class Sandbox:
 
     def __exit__(self, *_exc: Any) -> None:
         self.kill()
+
+    async def __aenter__(self) -> "Sandbox":
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        # Same teardown as `__exit__`, off the event loop so a slow
+        # `mvmctl down` doesn't block the caller's loop.
+        await asyncio.to_thread(self.kill)
 
 
 def _require_recording() -> None:

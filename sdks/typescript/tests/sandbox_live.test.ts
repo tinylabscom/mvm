@@ -515,3 +515,33 @@ describe("Sandbox.exec (live mode)", () => {
     expect(() => sb.exec(["python"])).toThrow(mvm.SandboxModeError);
   });
 });
+
+// ── async surface — Plan 125 B2 (await sb.exec + await using) ─────────
+
+describe("Sandbox async surface", () => {
+  it("await sb.exec(...) works (await passthrough on sync exec)", async () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-ae-vm", build_mode: "dev" },
+      procWaitStdout: "4",
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const sb = mvm.Sandbox.create("python-dev");
+    const r = await sb.exec(["python", "-c", "print(2 + 2)"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("4");
+  });
+
+  it("[Symbol.asyncDispose] tears down (await using parity)", async () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-ae-vm", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const sb = mvm.Sandbox.create("python-dev");
+    await sb[Symbol.asyncDispose]();
+    expect(readFixtureLog().some((c) => c.startsWith("down "))).toBe(true);
+  });
+});
