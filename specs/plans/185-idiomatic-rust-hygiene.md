@@ -301,18 +301,28 @@ thread many related values through runtime/build/CLI layers.
 
 **Files:** crate `Cargo.toml` files plus feature-gated modules.
 
-- [ ] **Step 1 - keep test helpers out of production builds.** Confirm
-      `mvm-core/test-support` and any future test-support features are only used
-      from tests/dev surfaces.
-- [ ] **Step 2 - check optional heavy deps.** Ensure optional stacks such as
-      schema generation, manifest verification, egress CA, platform bindings,
-      and live-test helpers stay feature-gated or target-gated as intended.
-- [ ] **Step 3 - avoid accidental workspace feature widening.** When a crate adds
-      a workspace dependency, document why any extra features are needed and run
-      a targeted `cargo tree -p <crate> -e features` check if the feature set is
-      nontrivial.
-- [ ] **Step 4 - green.** Run `cargo check -p <crate>` and clippy for touched
-      crates; defer broad dependency-count work to Plan 126.
+- [x] **Step 1 - keep test helpers out of production builds.** Verified clean: all
+      six `test-support` consumers (mvm-backend, mvm-hostd, mvm-build, mvm-cli,
+      mvm-vm-host, libkrun-sys) request `mvm-core = { features = ["test-support"] }`
+      only under `[dev-dependencies]`, and mvm-core defines `test-support = []` (an
+      empty feature — no transitive activation) with an inline comment documenting
+      its dev/test-only intent. A production (non-dev) build of any crate never
+      enables it, and `TestEnv` is gated `cfg(any(test, feature = "test-support"))`.
+- [x] **Step 2 - check optional heavy deps.** Verified clean: mvm-core's optional
+      stacks are each `dep:`-gated behind a feature *and* documented inline —
+      `egress-ca`→`rcgen` (sync, no tokio), `hostd-transport`/`manifest-verify`→
+      `tokio` (the only async surfaces), `schemars` JsonSchema derive (off by
+      default, build-time codegen only), and the `attestation-*` provider stubs.
+      The `check-core-runtime-free` xtask gate (a Lint job) already enforces that
+      the default closure carries no tokio, so a regression fails CI.
+- [x] **Step 3 - avoid accidental workspace feature widening.** Verified clean: the
+      Phase-1 dev-deps added `features = ["test-support"]` and nothing else; no crate
+      pulls an mvm-core feature it doesn't use. `cargo tree -p mvm-core -e features`
+      shows the runtime-free default; the heavy features only appear when explicitly
+      requested by the hostd-transport / manifest-verify / egress-ca consumers.
+- [x] **Step 4 - green.** Audit-only — no code change needed (the boundaries already
+      hold). Manifest audit + `cargo tree -e features` confirm the gating; broad
+      dependency-count work stays deferred to Plan 126.
 
 ---
 
