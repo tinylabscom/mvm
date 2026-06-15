@@ -668,6 +668,21 @@ fn should_thread_signed_plan(gateway_bridge_enabled: bool, hypervisor: &str) -> 
     gateway_bridge_enabled || hypervisor == "qemu"
 }
 
+/// Whether the admitted plan must be persisted to `<state_dir>/plan.json`
+/// *before* `backend.start()`. Every backend whose `start()` reads that file
+/// off disk to decide whether to stand up its egress moat needs the pre-start
+/// persist:
+///
+/// - **Firecracker**: the nft TAP-redirect moat reads the plan at spawn time.
+/// - **vz / libkrun (macOS)**: the substitution endpoint reads
+///   `<state_dir>/plan.json` inside `start()` to decide whether to spawn.
+///
+/// QEMU is excluded: it reads the in-memory config and must not overwrite the
+/// persisted plan.
+fn persists_plan_before_start(hypervisor: &str) -> bool {
+    matches!(hypervisor, "firecracker" | "vz" | "libkrun")
+}
+
 fn should_wait_for_direct_boot_agent(detach: bool, ports_env: Option<&str>) -> bool {
     !detach || ports_env.is_some_and(|ports| !ports.is_empty())
 }
@@ -2182,19 +2197,20 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // (the persistent-agent wait further down is skipped for `detach`).
 
         enforce_shares_if(&admission_main, &start_config.volumes)?;
-        // The Firecracker egress moat (substitution endpoint + nft TAP
-        // redirect) reads the admitted plan from the per-VM state dir
-        // *before* boot, so a secret-bearing plan must be persisted
-        // pre-start — the post-launch persist in `emit_launched_if` is
-        // too late for it. Other backends read the in-memory config.
-        // Fail closed: a secret-declaring workload must not boot without
-        // its substitution path.
-        if effective_hypervisor == "firecracker"
+        // The disk-reading egress moats read the admitted plan from the per-VM
+        // state dir *before* boot: Firecracker's nft TAP-redirect moat, and the
+        // vz/libkrun macOS substitution endpoints (which read
+        // `<state_dir>/plan.json` inside `start()`). So a secret-bearing plan
+        // must be persisted pre-start — the post-launch persist in
+        // `emit_launched_if` is too late for them. Only QEMU reads the
+        // in-memory config and is excluded. Fail closed: a secret-declaring
+        // workload must not boot without its substitution path.
+        if persists_plan_before_start(effective_hypervisor)
             && let Some(ctx) = admission_main.as_ref()
             && !ctx.admitted.plan.secrets.is_empty()
         {
             super::plan_persist::write_plan(&ctx.admitted.plan.workload.0, &ctx.admitted.plan)
-                .context("persisting admitted plan for the Firecracker egress moat")?;
+                .context("persisting admitted plan for the pre-start egress moat")?;
         }
         // Try a warm-pool claim first (auto-named + bridge-admitted
         // launches only; fail-open to cold boot). A claimed VM runs under its standby-id,
@@ -3815,6 +3831,19 @@ mod resolve_deps_volume_tests {
         assert!(!should_thread_signed_plan(false, "libkrun"));
         assert!(!should_thread_signed_plan(false, "vz"));
         assert!(should_thread_signed_plan(true, "libkrun"));
+    }
+
+    #[test]
+    fn pre_start_persist_covers_every_disk_reading_egress_moat() {
+        // Firecracker's nft TAP-redirect moat and the vz/libkrun substitution
+        // endpoints all read `<state_dir>/plan.json` inside `start()`, so the
+        // plan must be persisted before boot for each of them.
+        assert!(persists_plan_before_start("firecracker"));
+        assert!(persists_plan_before_start("vz"));
+        assert!(persists_plan_before_start("libkrun"));
+        // QEMU reads the in-memory config and must not overwrite the persisted
+        // plan, so it stays out of the pre-start persist.
+        assert!(!persists_plan_before_start("qemu"));
     }
 
     #[test]
