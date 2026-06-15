@@ -2316,6 +2316,19 @@ socket shipped). Persistent-builder gvproxy + the `doctor` builder-egress line
 remain deferred-with-reason (Plan 183 follow-ups); VzIngest/`mvm-vz-drainer`
 dead-code sweep stays a dedicated follow-up (Plan 152 block).
 
+Post-closeout dev-loop polish (2026-06-15): vz `up`/`down` taken sub-second.
+The startup orphan-helper sweep was collapsed from a per-VM-dir `pgrep -f` +
+per-pid `ps` storm (seconds across hundreds of cached builder scratch dirs)
+into a single `ps -axww` snapshot matched in-process (#868). The plan's image
+digest is cached on a `<rootfs>.sha256cache` size+mtime sidecar instead of
+re-hashing ~230 MB on every boot (#868). `down` no longer waits out the host
+SIGKILL grace: the supervisor escalates the graceful ACPI stop to a forced
+`stopWithCompletionHandler` after a short window and exits clean (#868).
+`up --console` boots straight into the PTY-over-vsock console, forcing the dev
+image since a sealed prod image ships no console agent (#870). A companion fix
+stops the startup sweep from reaping live managed/dev VMs reparented to launchd
+(#868). Net: warm `up` ~0.45 s, `down` ~0.45 s with no SIGKILL.
+
 ### Sprint 55 success criteria — reconciled 2026-06-13 (post-Swift, post-convergence)
 
 Each criterion below is marked **met**, **amended** (criterion text no
