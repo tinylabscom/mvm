@@ -9,16 +9,16 @@
 //! to L3.
 //!
 //! The trait surface here is the integration point: when the mitmdump
-//! supervisor lands, it implements `EgressProxy` and `tap_create` calls
+//! supervisor lands, it implements `VmEgressProxy` and `tap_create` calls
 //! `start_for_vm` after the L3 rules are installed. See
-//! `EgressProxy::start_for_vm` for the contract.
+//! `VmEgressProxy::start_for_vm` for the contract.
 
 use std::fmt;
 
 use mvm_core::network_policy::{EgressMode, NetworkPolicy};
 
-/// Per-VM proxy handle. Returned by [`EgressProxy::start_for_vm`]
-/// and consumed by [`EgressProxy::stop_for_vm`]. The real implementation
+/// Per-VM proxy handle. Returned by [`VmEgressProxy::start_for_vm`]
+/// and consumed by [`VmEgressProxy::stop_for_vm`]. The real implementation
 /// fills in the actual fields (PID, listening port, allowlist hash).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyHandle {
@@ -71,7 +71,7 @@ impl From<anyhow::Error> for EgressProxyError {
 ///   HTTPS/HTTP from the VM to itself.
 /// - `stop_for_vm`: stop the proxy and remove its iptables rules.
 ///   Idempotent — safe to call for a vm_name that was never started.
-pub trait EgressProxy: Send + Sync {
+pub trait VmEgressProxy: Send + Sync {
     fn start_for_vm(
         &self,
         vm_name: &str,
@@ -85,7 +85,7 @@ pub trait EgressProxy: Send + Sync {
 /// with a `MitmdumpSupervisor` that wraps `mitmdump` from nixpkgs.
 pub struct StubEgressProxy;
 
-impl EgressProxy for StubEgressProxy {
+impl VmEgressProxy for StubEgressProxy {
     fn start_for_vm(
         &self,
         _vm_name: &str,

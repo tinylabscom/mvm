@@ -1,4 +1,4 @@
-//! `L7EgressProxy` — the real `EgressProxy` impl that wires the
+//! `L7EgressProxy` — the real `SupervisorEgressProxy` impl that wires the
 //! inspector chain into outbound HTTP traffic.
 //!
 //! ## Phase 1 scope (this module)
@@ -35,7 +35,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::supervisor::audit::AuditError;
-use crate::supervisor::egress::{EgressDecision, EgressError, EgressProxy};
+use crate::supervisor::egress::{EgressDecision, EgressError, SupervisorEgressProxy};
 use crate::supervisor::inspector::{InspectorChain, InspectorVerdict, RequestCtx};
 
 /// Async DNS resolver, abstracted so tests can inject mock IPs and
@@ -606,9 +606,9 @@ async fn write_status(client: &mut TcpStream, status: u16, msg: &str) -> std::io
 }
 
 #[async_trait]
-impl EgressProxy for L7EgressProxy {
+impl SupervisorEgressProxy for L7EgressProxy {
     async fn inspect(&self, host: &str, path: &str) -> Result<EgressDecision, EgressError> {
-        // The original `EgressProxy` trait predates the (host, port,
+        // The original `SupervisorEgressProxy` trait predates the (host, port,
         // body) shape. Until the trait widening, this method
         // delegates to `evaluate` with port=443 (the HTTPS default
         // — the host-only signature is never going to be the
@@ -823,7 +823,7 @@ mod tests {
         // The legacy 2-arg `inspect(host, path)` should delegate
         // through `evaluate` cleanly. Used by older callers until
         // the trait is widened.
-        let r: &dyn EgressProxy = &proxy;
+        let r: &dyn SupervisorEgressProxy = &proxy;
         let dec = r
             .inspect("api.openai.com", "/v1/chat")
             .await

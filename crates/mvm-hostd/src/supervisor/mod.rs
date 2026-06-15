@@ -20,7 +20,7 @@
 //! Structure:
 //! - `state` — `PlanState` + `PlanStateMachine` (transition rules
 //!   for the supervisor's plan lifecycle).
-//! - `egress` — `EgressProxy` trait + `NoopEgressProxy`.
+//! - `egress` — `SupervisorEgressProxy` trait + `NoopEgressProxy`.
 //! - `tool_gate` — `ToolGate` trait + `NoopToolGate`.
 //! - `keystore` — `KeystoreReleaser` trait + `NoopKeystoreReleaser`.
 //! - `audit` — `AuditSigner` trait + `NoopAuditSigner`.
@@ -130,7 +130,7 @@ pub use circuit_breaker::{
     InspectorReporter, SystemClock as CircuitBreakerSystemClock,
 };
 pub use destination::DestinationPolicy;
-pub use egress::{EgressDecision, EgressError, EgressProxy, NoopEgressProxy};
+pub use egress::{EgressDecision, EgressError, NoopEgressProxy, SupervisorEgressProxy};
 pub use event_bus::{DEFAULT_CAPACITY as EVENT_BUS_DEFAULT_CAPACITY, EventBus, LifecycleEvent};
 #[cfg(any(target_os = "linux", test))]
 pub use firewall::linux_nft::{CommandNftApplier, LinuxNftFirewall, NftApplier, NftError};

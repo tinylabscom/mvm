@@ -31,7 +31,7 @@
 //!   the `AdmittedPlan`'s `plan_id`; this module is silent on audit.
 //!
 //! - **Resolve component slots.** A later step maps `PolicyRef →
-//!   concrete EgressProxy/ToolGate/...`. This module returns the
+//!   concrete SupervisorEgressProxy/ToolGate/...`. This module returns the
 //!   plan with refs unresolved.
 //!
 //! ## Test seam

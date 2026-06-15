@@ -88,7 +88,7 @@ pub struct ExecutionPlan {
     pub admission_profile: AdmissionProfile,
 
     /// Network policy reference. Wired to `mvm-core::policy::EgressPolicy`
-    /// (L7 + PII rules) via the supervisor's `EgressProxy`.
+    /// (L7 + PII rules) via the supervisor's `SupervisorEgressProxy`.
     pub network_policy: PolicyRef,
 
     /// Filesystem policy reference.
