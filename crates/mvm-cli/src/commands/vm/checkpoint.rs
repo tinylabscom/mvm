@@ -849,7 +849,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("vmlinux");
-    let vmlinux_path = super::up::resolve_vz_workload_kernel(
+    let vmlinux_path = super::up::resolve_workload_kernel(
         vmlinux_placeholder.to_str().unwrap_or(""),
         &effective_hypervisor,
     )?;
