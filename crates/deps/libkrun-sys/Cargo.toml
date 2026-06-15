@@ -92,6 +92,8 @@ libkrun-sys = []
 [dev-dependencies]
 # passt supervisor tests stage scratch dirs.
 tempfile.workspace = true
+# `TestEnv` env-var guard for the passt/gvproxy PATH + MVM_GATEWAY_BIN tests.
+mvm-core = { workspace = true, features = ["test-support"] }
 # The smoke example shares `GUEST_AGENT_PORT` with the production vsock
 # plumbing.
 mvm-guest.workspace = true

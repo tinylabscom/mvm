@@ -599,44 +599,18 @@ mod tests {
     /// lock for the duration so parallel tests don't race the env var.
     struct RuntimeDirGuard {
         _temp: tempfile::TempDir,
-        _lock: std::sync::MutexGuard<'static, ()>,
-        prev: Option<String>,
+        _env: crate::util::test_env::TestEnv,
     }
-
-    impl Drop for RuntimeDirGuard {
-        fn drop(&mut self) {
-            // SAFETY: the static mutex guarantees only one test at a time
-            // mutates the env vars these helpers consult.
-            unsafe {
-                match self.prev.take() {
-                    Some(prev) => std::env::set_var("MVM_RUNTIME_DIR", prev),
-                    None => std::env::remove_var("MVM_RUNTIME_DIR"),
-                }
-            }
-        }
-    }
-
-    /// Serializes env-mutating tests within this module. `cargo test` runs
-    /// tests across threads by default, but `std::env::set_var` is
-    /// process-global — without this lock, two tests setting different
-    /// runtime dirs race each other.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn isolated_runtime_dir() -> RuntimeDirGuard {
-        let lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var("MVM_RUNTIME_DIR").ok();
-        // SAFETY: the lock above ensures no other test in this module is
-        // touching `MVM_RUNTIME_DIR` concurrently.
-        unsafe {
-            std::env::set_var("MVM_RUNTIME_DIR", temp.path());
-        }
+        // `TestEnv` serializes env-mutating tests behind a process-wide lock
+        // and restores `MVM_RUNTIME_DIR` to its prior value on drop.
+        let mut env = crate::util::test_env::TestEnv::new();
+        env.set("MVM_RUNTIME_DIR", temp.path());
         RuntimeDirGuard {
             _temp: temp,
-            _lock: lock,
-            prev,
+            _env: env,
         }
     }
 

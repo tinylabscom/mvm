@@ -215,41 +215,24 @@ fn validate_revision_hash(s: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     /// Test guard that overrides `MVM_DATA_DIR` to a tempdir so
     /// concurrent tests don't share `~/.mvm/templates/...` state.
     struct DataDirGuard {
-        _guard: std::sync::MutexGuard<'static, ()>,
-        prev: Option<String>,
+        _env: crate::util::test_env::TestEnv,
         _tmp: tempfile::TempDir,
     }
 
-    static DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
-
     impl DataDirGuard {
         fn new() -> Self {
-            let g = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let tmp = tempfile::tempdir().expect("tempdir");
-            let prev = std::env::var("MVM_DATA_DIR").ok();
-            unsafe {
-                std::env::set_var("MVM_DATA_DIR", tmp.path());
-            }
+            // `TestEnv` serializes env-mutating tests behind a process-wide
+            // lock and restores `MVM_DATA_DIR` on drop.
+            let mut env = crate::util::test_env::TestEnv::new();
+            env.set("MVM_DATA_DIR", tmp.path());
             DataDirGuard {
-                _guard: g,
-                prev,
+                _env: env,
                 _tmp: tmp,
-            }
-        }
-    }
-
-    impl Drop for DataDirGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.prev {
-                    Some(v) => std::env::set_var("MVM_DATA_DIR", v),
-                    None => std::env::remove_var("MVM_DATA_DIR"),
-                }
             }
         }
     }

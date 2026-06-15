@@ -455,7 +455,7 @@ fn pid_alive(pid: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TEST_ENV_LOCK as ENV_LOCK;
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn install_hint_is_platform_specific() {
@@ -476,20 +476,17 @@ mod tests {
     /// empty value is ignored so it falls back to the `$PATH` probe.
     #[test]
     fn locate_gvproxy_honors_gateway_bin_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: env mutation serialized by the crate-wide TEST_ENV_LOCK.
-        unsafe {
-            std::env::set_var("MVM_GATEWAY_BIN", "/opt/mvm/native-gateway");
-            assert_eq!(
-                locate_gvproxy(),
-                Some(PathBuf::from("/opt/mvm/native-gateway")),
-                "MVM_GATEWAY_BIN must override the default gvproxy lookup"
-            );
-            std::env::set_var("MVM_GATEWAY_BIN", "");
-            // Empty → ignored; must not return an empty path.
-            assert_ne!(locate_gvproxy(), Some(PathBuf::new()));
-            std::env::remove_var("MVM_GATEWAY_BIN");
-        }
+        let mut env = TestEnv::new();
+        env.set("MVM_GATEWAY_BIN", "/opt/mvm/native-gateway");
+        assert_eq!(
+            locate_gvproxy(),
+            Some(PathBuf::from("/opt/mvm/native-gateway")),
+            "MVM_GATEWAY_BIN must override the default gvproxy lookup"
+        );
+        env.set("MVM_GATEWAY_BIN", "");
+        // Empty → ignored; must not return an empty path.
+        assert_ne!(locate_gvproxy(), Some(PathBuf::new()));
+        env.remove("MVM_GATEWAY_BIN");
     }
 
     /// A reserved port is in gvproxy's accepted `-ssh-port` range
@@ -508,20 +505,10 @@ mod tests {
 
     #[test]
     fn spawn_without_gvproxy_returns_not_installed() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        let original_path = std::env::var_os("PATH");
-        // SAFETY: tests are single-threaded; serialize env mutation.
-        unsafe {
-            std::env::set_var("PATH", tmp.path());
-        }
+        env.set("PATH", tmp.path());
         let result = spawn(tmp.path());
-        unsafe {
-            match original_path {
-                Some(v) => std::env::set_var("PATH", v),
-                None => std::env::remove_var("PATH"),
-            }
-        }
         match result {
             Err(GvproxyError::NotInstalled { install_hint }) => {
                 assert!(!install_hint.is_empty());
@@ -567,13 +554,13 @@ mod tests {
 
     /// `reap_by_pid_file` SIGTERMs the pid named in the sidecar and
     /// removes the sidecar + socket. Uses a real `sleep` child as the
-    /// stand-in daemon — no gvproxy needed. Holds `ENV_LOCK` so the
-    /// PATH-mutating `spawn_without_gvproxy_*` test can't make our
+    /// stand-in daemon — no gvproxy needed. Holds the shared `TestEnv` guard
+    /// so the PATH-mutating `spawn_without_gvproxy_*` test can't make our
     /// `sleep` lookup miss.
     #[test]
     fn reap_by_pid_file_kills_live_pid_and_cleans_files() {
         use std::os::unix::process::ExitStatusExt;
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         let mut child = Command::new("sleep")
             .arg("30")
@@ -610,7 +597,9 @@ mod tests {
     /// (no panic, stale files swept).
     #[test]
     fn reap_by_pid_file_missing_or_stale_is_noop() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        // No env mutation here, but hold the shared guard so a PATH-mutating
+        // test can't hide `sleep` from this test's `Command::new` mid-run.
+        let _env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         // Missing sidecar — must not panic.
         reap_by_pid_file(tmp.path());
