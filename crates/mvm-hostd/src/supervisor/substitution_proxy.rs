@@ -144,16 +144,15 @@ pub fn prepare_request(
     // header. The signing key never leaves the signer; the bind-check is
     // enforced inside `endpoint.sign` (claim 12). Any failure is fail-closed.
     if let Some((ph, auth_type)) = signing {
-        sign_into_headers(
-            endpoint,
-            &ph,
-            auth_type,
-            &dest,
-            &req.method,
-            &req.url,
-            &req.body,
-            &mut headers,
-        )?;
+        let sign_req = SignRequest::builder()
+            .with_placeholder(&ph)
+            .with_auth_type(auth_type)
+            .with_dest(&dest)
+            .with_method(&req.method)
+            .with_url(&req.url)
+            .with_body(&req.body)
+            .build();
+        sign_into_headers(endpoint, &sign_req, &mut headers)?;
     }
 
     Ok(PreparedRequest {
@@ -169,21 +168,93 @@ fn amz_date_now() -> String {
     chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
 }
 
+/// The request to sign, under one signing credential. Borrowed — built once per
+/// request just before [`sign_into_headers`]. `placeholder` names the SigV4/HMAC
+/// secret (its header value was already dropped); `dest` is the bound destination
+/// host; `method`/`url`/`body` are the request line and payload that get signed.
+#[derive(Clone, Copy)]
+struct SignRequest<'a> {
+    placeholder: &'a str,
+    auth_type: AuthType,
+    dest: &'a str,
+    method: &'a str,
+    url: &'a str,
+    body: &'a [u8],
+}
+
+impl<'a> SignRequest<'a> {
+    fn builder() -> SignRequestBuilder<'a> {
+        SignRequestBuilder::default()
+    }
+}
+
+/// Builder for [`SignRequest`]: one setter per field, `build()` returns the
+/// value. Every field is required; `build()` panics if a setter was skipped,
+/// which is unreachable from the single internal call site that sets them all.
+#[derive(Default)]
+struct SignRequestBuilder<'a> {
+    placeholder: Option<&'a str>,
+    auth_type: Option<AuthType>,
+    dest: Option<&'a str>,
+    method: Option<&'a str>,
+    url: Option<&'a str>,
+    body: Option<&'a [u8]>,
+}
+
+impl<'a> SignRequestBuilder<'a> {
+    fn with_placeholder(mut self, placeholder: &'a str) -> Self {
+        self.placeholder = Some(placeholder);
+        self
+    }
+    fn with_auth_type(mut self, auth_type: AuthType) -> Self {
+        self.auth_type = Some(auth_type);
+        self
+    }
+    fn with_dest(mut self, dest: &'a str) -> Self {
+        self.dest = Some(dest);
+        self
+    }
+    fn with_method(mut self, method: &'a str) -> Self {
+        self.method = Some(method);
+        self
+    }
+    fn with_url(mut self, url: &'a str) -> Self {
+        self.url = Some(url);
+        self
+    }
+    fn with_body(mut self, body: &'a [u8]) -> Self {
+        self.body = Some(body);
+        self
+    }
+    fn build(self) -> SignRequest<'a> {
+        SignRequest {
+            placeholder: self.placeholder.expect("sign request placeholder"),
+            auth_type: self.auth_type.expect("sign request auth_type"),
+            dest: self.dest.expect("sign request dest"),
+            method: self.method.expect("sign request method"),
+            url: self.url.expect("sign request url"),
+            body: self.body.expect("sign request body"),
+        }
+    }
+}
+
 /// Sign the request for a SigV4/HMAC secret and append the signature header,
 /// routing through the bind-checked `endpoint.sign` (claim 12, key-never-leaves).
 /// Fail-closed: a missing SigV4 binding, a bad request, or a refused/failed sign
 /// returns `Err` and the caller forwards nothing.
-#[allow(clippy::too_many_arguments)]
 fn sign_into_headers(
     endpoint: &SubstitutionEndpoint<'_>,
-    placeholder: &str,
-    auth_type: AuthType,
-    dest: &str,
-    method: &str,
-    url: &str,
-    body: &[u8],
+    req: &SignRequest<'_>,
     headers: &mut Vec<(String, String)>,
 ) -> Result<(), ProxyError> {
+    let SignRequest {
+        placeholder,
+        auth_type,
+        dest,
+        method,
+        url,
+        body,
+    } = *req;
     match auth_type {
         AuthType::Sigv4 => {
             // The non-secret scope (access_key_id/region/service) is operator-set
