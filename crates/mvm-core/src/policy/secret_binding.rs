@@ -422,4 +422,49 @@ mod tests {
         // Manifest should NOT contain the actual secret value
         assert!(parsed[0].get("value").is_none());
     }
+
+    #[test]
+    fn debug_redacts_resolved_binding_value() {
+        let secret = "super-secret-token-value";
+        let binding = ResolvedBinding {
+            env_var: "API_KEY".to_string(),
+            target_host: "api.example.com".to_string(),
+            header: "authorization".to_string(),
+            value: secret.to_string(),
+        };
+        let dbg = format!("{binding:?}");
+        // The plaintext value must never reach a `{:?}` site.
+        assert!(
+            !dbg.contains(secret),
+            "ResolvedBinding Debug leaked the secret value: {dbg}"
+        );
+        // Addressing metadata is not secret and must stay visible.
+        assert!(dbg.contains("API_KEY"));
+        assert!(dbg.contains("api.example.com"));
+        // The value is redacted to its byte length.
+        assert!(
+            dbg.contains(&format!("<{} bytes>", secret.len())),
+            "expected byte-length redaction, got: {dbg}"
+        );
+    }
+
+    #[test]
+    fn debug_redacts_resolved_secrets_values() {
+        let secret = "another-secret-0xDEADBEEF";
+        let resolved = ResolvedSecrets {
+            bindings: vec![ResolvedBinding {
+                env_var: "TOKEN".to_string(),
+                target_host: "host.com".to_string(),
+                header: "x-token".to_string(),
+                value: secret.to_string(),
+            }],
+        };
+        // `ResolvedSecrets` Debug delegates to each binding's redacting Debug.
+        let dbg = format!("{resolved:?}");
+        assert!(
+            !dbg.contains(secret),
+            "ResolvedSecrets Debug leaked a secret value: {dbg}"
+        );
+        assert!(dbg.contains(&format!("<{} bytes>", secret.len())));
+    }
 }

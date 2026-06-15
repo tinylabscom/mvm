@@ -287,6 +287,31 @@ mod tests {
     }
 
     #[test]
+    fn debug_redacts_signing_key() {
+        let dir = fresh_keys_dir();
+        let signer = load_or_init_at(dir.path()).expect("init");
+        let dbg = format!("{signer:?}");
+        // The Ed25519 secret bytes must never reach a `{:?}` site, in any
+        // encoding the derived Debug might have produced.
+        let secret_hex: String = signer
+            .signing
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert!(
+            !dbg.contains(&secret_hex),
+            "HostSigner Debug leaked the signing key: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "signing key must be redacted: {dbg}"
+        );
+        // The public-key prefix is non-secret and stays visible for diagnostics.
+        assert!(dbg.contains("verifying_pubkey_prefix"));
+    }
+
+    #[test]
     fn refuses_loose_perms_above_0600() {
         let dir = fresh_keys_dir();
         load_or_init_at(dir.path()).expect("init");
