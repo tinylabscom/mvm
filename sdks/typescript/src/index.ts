@@ -75,11 +75,13 @@ export {
   resetRecording,
 } from "./_sandbox.js";
 export type {
+  ExecResult,
   RecordedOpWire,
   RuntimeRecordingWire,
   SandboxCommandsStartOptions,
   SandboxCreateOptions,
   SandboxCreateWire,
+  SandboxExecOptions,
 } from "./_sandbox.js";
 
 // ────────────────────────────────────────────────────────────────────

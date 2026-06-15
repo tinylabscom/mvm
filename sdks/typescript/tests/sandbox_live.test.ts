@@ -19,6 +19,8 @@ interface FixtureOptions {
   upEnvelope: Record<string, unknown> | null;
   upExit?: number;
   procExit?: number;
+  procWaitStdout?: string;
+  procWaitExit?: number;
   fsExit?: number;
   cpExit?: number;
   forwardSleep?: number;
@@ -33,6 +35,8 @@ function writeFixtureMvmctl(opts: FixtureOptions): string {
   const envelopeJson = opts.upEnvelope === null ? "" : JSON.stringify(opts.upEnvelope);
   const upExit = opts.upExit ?? 0;
   const procExit = opts.procExit ?? 0;
+  const procWaitStdout = opts.procWaitStdout ?? "";
+  const procWaitExit = opts.procWaitExit ?? 0;
   const fsExit = opts.fsExit ?? 0;
   const cpExit = opts.cpExit ?? 0;
   const forwardSleep = opts.forwardSleep ?? 0;
@@ -57,8 +61,12 @@ case "$verb" in
   proc)
     sub=$1
     if [ -t 0 ]; then :; else cat > ${JSON.stringify(path.join(stdinDir, "proc-stdin.bin"))} || true; fi
-    if [ "${procExit}" -eq 0 ] && [ "$sub" = "start" ]; then
-      echo "pid-token-abc123"
+    if [ "$sub" = "start" ]; then
+      if [ "${procExit}" -eq 0 ]; then echo "pid-token-abc123"; fi
+      exit ${procExit}
+    elif [ "$sub" = "wait" ]; then
+      printf '%s' ${JSON.stringify(procWaitStdout)}
+      exit ${procWaitExit}
     fi
     exit ${procExit}
     ;;
@@ -431,5 +439,79 @@ describe("Sandbox.forward (live mode)", () => {
     process.env.MVM_SDK_MODE = "record";
     const sb = mvm.Sandbox.create("python-dev");
     expect(() => sb.forward(8080, 80)).toThrow(mvm.SandboxModeError);
+  });
+});
+
+// ── exec (live mode, dev-only) — Plan 125 D1 TS parity ───────────────
+
+describe("Sandbox.exec (live mode)", () => {
+  it("runs argv and returns captured stdout + exit", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-exec-vm", build_mode: "dev" },
+      procWaitStdout: "4",
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const sb = mvm.Sandbox.create("python-dev");
+    const r = sb.exec(["python", "-c", "print(2 + 2)"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("4");
+    const calls = readFixtureLog();
+    expect(calls.some((c) => c.startsWith("proc start sb-exec-vm"))).toBe(true);
+    expect(
+      calls.some((c) =>
+        c.startsWith("proc wait sb-exec-vm pid-token-abc123"),
+      ),
+    ).toBe(true);
+  });
+
+  it("surfaces a non-zero exit code", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-exec-vm", build_mode: "dev" },
+      procWaitExit: 3,
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const sb = mvm.Sandbox.create("python-dev");
+    expect(sb.exec(["false"]).exitCode).toBe(3);
+  });
+
+  it("forwards literal env as -e KEY=VAL", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-exec-vm", build_mode: "dev" },
+      procWaitStdout: "ok",
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const sb = mvm.Sandbox.create("python-dev");
+    sb.exec(["env"], { env: { MODE: "test" } });
+
+    const calls = readFixtureLog();
+    const start = calls.find((c) => c.startsWith("proc start"));
+    expect(start).toContain("-e MODE=test");
+    expect(start).toContain("-- env");
+  });
+
+  it("raises SandboxDevOnly against a prod template (no proc traffic)", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-prod-vm", build_mode: "prod" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const sb = mvm.Sandbox.create("python-prod");
+    expect(() => sb.exec(["python", "-c", "x"])).toThrow(mvm.SandboxDevOnly);
+    // Claim 4: must not have shelled `mvmctl proc start`.
+    expect(readFixtureLog().some((c) => c.startsWith("proc"))).toBe(false);
+  });
+
+  it("is refused in record mode", () => {
+    process.env.MVM_SDK_MODE = "record";
+    const sb = mvm.Sandbox.create("python-dev");
+    expect(() => sb.exec(["python"])).toThrow(mvm.SandboxModeError);
   });
 });
