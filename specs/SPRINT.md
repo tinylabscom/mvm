@@ -2296,15 +2296,16 @@ Sprint 55 / Plan 97 criterion (see "success criteria" above). Evidence by leg:
   vz launch — `doctor` reports `claim 10 holds (deny_all)` and the booted guest's
   netinit installed the deny CIDRs (cloud-metadata / link-local / cgnat /
   loopback); the chain-signed audit recorder is active (chain written + verifies).
-  Secret **substitution (claim 13)** is the one carve-out: `spawn_substitution_endpoint`
-  is wired only into the Linux-host QEMU/FC backends (it binds host AF_VSOCK);
-  it is absent on **both** macOS backends (libkrun and vz). The endpoint binary
-  already carries the `Uds` transport for the in-process VMMs, so the macOS port
-  is a shared follow-up (a per-VM supervisor `SUBSTITUTION_PORT` guest→host UDS
-  bridge + a UDS spawn variant + invoke injection), tracked as Plan 129 macOS
-  continuation — not a vz gap. The transparent :80/:443 terminator (claim 16) is
+  Secret **substitution (claim 13)** has since been ported to macOS via the `Uds`
+  vsock-5253 channel and is **DATA-PLANE PROVEN LIVE on vz** (2026-06-15, Plan 197
+  Phase 2a; the `up --name -d` → `vm wait` → `invoke --attach` driver sidesteps the
+  5252 early-boot race): httpbin reflects the real Bearer credential while the guest
+  holds only the `mvm-secret-…` placeholder (claim 13), a non-allowed host is refused
+  by the endpoint (claim 12), and repeated dials keep the 5253 listener accepting.
+  Endpoint spawn is gated by the #909 pre-start `plan.json` persist on both the `up`
+  and `invoke`/`run` arms. The transparent :80/:443 terminator (claim 16) is
   Linux-only by architecture (`SO_ORIGINAL_DST` + nft TAP REDIRECT) and is `None`
-  on QEMU too.
+  on QEMU too — its macOS form is Plan 197 Phase 2b (rvproxy-gated).
 - **Audit (leg 5):** `trust audit verify --tenant local` on the vz workload's
   chain exits 0 ("verifies clean: 8 entries"); a one-byte tamper of the
   `plan.admitted` entry makes it exit 1 ("audit chain verify failed: signature
