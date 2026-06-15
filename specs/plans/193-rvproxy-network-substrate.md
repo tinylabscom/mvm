@@ -102,7 +102,12 @@ own internal default).
       `PlanFlowPolicy` deny-by-default gate + flow-audit onto rvproxy's native
       flow API; delete the in-line splice/`etherparse` wrapper (Plan 141) and the
       per-backend `on_packet` hooks once parity is proven. Keep claim-10/12/13
-      witnesses green throughout.
+      witnesses green throughout. **🔴 BLOCKED on rvproxy R2** (the native
+      flow-decision API does not exist yet — only static config policy + a
+      packet-level `ByteTransform` + an audit *export* sink). Design + the R2
+      contract this needs are in "## WS-2 design" below; mvm authors the
+      requirements into rvproxy `specs/plans/014` R2, the rvproxy session builds
+      it, then mvm does the port.
 - [ ] **WS-3 — backend cutover.** Replace the gvproxy spawn
       (`mvm-build/host_gvproxy.rs`, `libkrun-sys/gvproxy.rs`) + passt with
       `rvproxy run --config` per the integration contract; drop the Homebrew
@@ -110,6 +115,119 @@ own internal default).
       noise on one-shot builder-VM completion.
 - [ ] **WS-4 — `mvm net` verbs.** `mvm net stats/leases/forward` over rvproxy's
       control API (per `docs/mvm-integration.md`); `mvm run --net rvproxy`.
+
+## WS-2 design — port claim-10 enforcement onto rvproxy's native flow API
+
+Operates under ADR-082 (the decision to adopt rvproxy is already made); this is
+the *how*, so it lives here, not in a new ADR. Status: design + contract; the
+implementation is blocked on rvproxy R2.
+
+### Where enforcement lives today (what WS-2 must reproduce)
+
+Every guest packet traverses the in-line splice in
+`crates/mvm-hostd/src/supervisor/gateway_bridge.rs`
+(`run_{libkrun_gvproxy,vz_gvproxy,passt}_bridge`) before egress. The splice is
+mechanical (datagram/stream copy); the *enforcement* is the load-bearing part,
+in three families, all fail-closed:
+
+1. **Coarse deny-by-default gate** — `PlanFlowPolicy: FlowPolicy` evaluates each
+   flow at open (`FlowDecisionCtx{direction,dest_ip,dest_port,sni,url_path}` →
+   `FlowAction::{Allow,Drop{reason}}`); egress denied unless the admitted policy
+   opens it; a Drop emits `FlowClosed{PolicyDropped}` and forwards no bytes.
+2. **Per-packet scan + observer pipeline** (Plan 141) — `run_packet_pipeline`
+   runs egress scans (`MandatoryDenyEgressScan` link-local/metadata,
+   `PlaceholderLeakScan`, `L4PolicyScan`, `DnsSinkholeScan`) then the observer
+   chain (`on_packet → Verdict::{Forward,Drop,Modify}`); first Drop kills the
+   flow (sticky `killed_flows` set), Modify-over-MTU/unserializable kills
+   fail-closed.
+3. **Egress secret handling** (Plan 129) — split, and the split matters:
+   *declared* substitution (inject a real credential the guest never sees) is a
+   **host-side vsock/:80/:443 terminator, not a gateway transform** and STAYS
+   there (putting live credentials in the data-plane gateway widens the secret's
+   blast radius); only *undeclared* redaction (`RedactingSubstitution`) + the
+   `PlaceholderLeakScan` backstop ride the egress path and are in scope for the
+   gateway.
+
+Audit is structural: the per-VM `signer_task` is the sole writer, fans every
+`FlowOpened/FlowClosed/ObserverFault` to observers *before* chain-signing, and
+cannot be displaced by tenant policy. No-bypass (ADR-058): there is no
+raw-egress path; a bridge panic `exit(1)`s.
+
+### The R2 contract mvm needs from rvproxy
+
+rvproxy must expose, as a stable documented seam:
+
+- **Flow-open decision** — deny-by-default; for each new flow rvproxy yields a
+  verdict `Allow | Deny{reason}` *before* any byte egresses. Two viable shapes;
+  the contract should support both and we adopt them in order:
+  - **(A, primary) config-declared policy** rvproxy enforces natively — extend
+    its existing static `PolicyConfig` to cover mvm's deny-by-default + L4 rules
+    + DNS allow-list + the always-on mandatory-deny set + placeholder-leak
+    backstop. This covers ~all of today's claim-10 and avoids per-flow IPC.
+  - **(B, reserved) a synchronous host callback** over the control seam, for
+    decisions not expressible as static config (SNI / url-path / binding-aware).
+    Reserved until a real need appears; fail-closed if the callback is slow/down.
+- **Flow-lifecycle + decision events** — `FlowOpened`/`FlowClosed{reason}`/
+  drop/allowed records (5-tuple, verdict, reason, byte counts) emitted to a sink
+  mvm subscribes to and folds into its chain-signed audit. rvproxy's
+  `PluginDecisionEvent` JSONL/UDS export plumbing is the right carrier; it needs
+  *flow* events generated, not only plugin events.
+- **Per-packet observe/modify/drop** — a hook returning Allow/Modify/Drop where
+  Drop kills the flow (rvproxy's `ByteTransform` can drop a packet but not yet
+  *deny a flow*; `DecisionEmitter` is declared but unimplemented). The undeclared
+  **redaction** stage maps to a `Mutator` plugin (rvproxy already ships
+  `secret-redaction-filter`) — but it is static find/replace today and mvm's
+  redactor is rule/region-based, so the plugin contract must carry mvm's rules,
+  not just literal pairs.
+- **Fail-closed + no-bypass guarantees, contractually**: if the event sink or a
+  required plugin is unavailable, deny; rvproxy must guarantee every guest packet
+  passes policy+scan before egress (it is the gateway, but the contract must say
+  so, mirroring ADR-058).
+
+Explicitly **out of the gateway**: declared-credential substitution stays in
+mvm's host-side terminator. (This corrects rvproxy `014` R2's "move it onto the
+gateway" aside.)
+
+### How mvm consumes it
+
+rvproxy runs as a supervised subprocess (`rvproxy run --config`, local UDS
+control API — `docs/mvm-integration.md`), so the binding is **config + event
+sink**, not an in-process trait. mvm: (1) lowers the admitted `NetworkPolicy`
+into the rvproxy config (the policy ENGINE moves into rvproxy for shape (A));
+(2) subscribes to the flow/decision event sink and re-emits into the chain-signed
+audit (claim-10 audit stays mvm's source of truth); (3) keeps the parity gate
+(WS-1.5) as the cross-check that rvproxy's engine matches mvm's verdicts before
+the splice is deleted. The splice (`gateway_bridge` + the Plan 141 per-backend
+`on_packet` hooks) is deleted only after parity holds on the *native* path.
+
+### Who-calls (to flesh out before implementation, Plan 177-style)
+
+- `PlanFlowPolicy` / `FlowPolicy::evaluate` callers — all inside the three
+  `run_*_bridge` fns; no external consumers, so the trait can be retired with the
+  splice.
+- `run_packet_pipeline` / `build_egress_scan` / `RedactingSubstitution` callers
+  — same; the scan/redaction *logic* must be re-expressed as rvproxy config/rules
+  (or a plugin), not deleted.
+- `signer_task` / `AuditEmitter` flow entries — the audit chain is NOT retired;
+  it gets re-fed from the rvproxy event sink. Confirm no other writer.
+- mvmd consumers of `mvmctl::runtime::*` gateway types — audit before changing
+  any public shape.
+
+### Failing-test plan (parity-first, witnesses stay green)
+
+1. Stand up the rvproxy native-policy path behind a flag; keep the splice.
+2. Extend the WS-1.5 parity gate so the claim-10 / flow-audit / substitution
+   witness families run against the **native** rvproxy path and assert identical
+   verdicts to the bridge path (today they are bridge-side and binary-agnostic;
+   this is what makes them binary-discriminating).
+3. Only when the native path is green on every witness do we delete the splice
+   and the per-backend `on_packet` hooks (Plan 141).
+
+### Dependency
+
+Hard-blocked on rvproxy R2. mvm authors these requirements into rvproxy
+`specs/plans/014` R2 (done in lockstep with this design); the rvproxy session
+owns building the substrate.
 
 ## Cross-repo dependency
 rvproxy `specs/plans/014-mvm-adoption-requirements.md` (mvm-authored requirements)
