@@ -1,5 +1,24 @@
 # Plan 198 — Host-side workload-flake build cache (skip the nix-eval round-trip on an unchanged flake)
 
+## Status — IMPLEMENTED + box-validated (2026-06-15)
+
+Shipped on `feat/vz-up-down-sub-second`: `crates/mvm-build/src/pipeline/build_cache.rs`
+(fingerprint + record), the short-circuit in `dev_build`, and the `mkfs.ext4 -d`
+drive change in `microvm.rs`. 13 unit tests; `cargo clippy` + nightly fmt clean.
+
+Live result on the x86_64 Linux/KVM box (Firecracker v1.14.1, `examples/sleeper`):
+
+| `up` | wall-clock | builder VM booted | cache hit |
+|---|---|---|---|
+| cold (no record) | 268 s | yes | no — records fingerprint |
+| **warm** | **1.01 s** | **no — skipped** | **yes** |
+| after a flake edit | 32 s | yes (rebuild) | no — correctly busted |
+
+Warm `up` dropped ~30 s → **1.01 s** (builder VM + nix eval skipped entirely; the
+remaining ~1 s is admit + 2 config/secrets drives + the ~70 ms firecracker boot).
+The flake-edit bust validates soundness end-to-end; the workspace-source axis is
+covered by `fingerprint_changes_when_workspace_source_changes`.
+
 ## Context
 
 `mvmctl up --flake <dir>` couples two phases: **build** (produce kernel + rootfs
@@ -107,22 +126,26 @@ drops from ~0.6 s toward ~0.15 s.
 
 ## Tasks
 
-- [ ] Add `workload_build_fingerprint(flake_dir, profile, mode, mvm_workspace,
-      mvmctl_version)` in `mvm-build` — deterministic recursive walk, unit-tested
-      for: same inputs → same hash; a touched flake file → different hash; a
-      touched `nix/` file → different hash; `flake.lock` change → different hash.
-- [ ] Add the `~/.mvm/dev/build-cache/` record (read/write, atomic) via
-      `mvm_core::config` path helpers (never inline `$HOME`).
-- [ ] Wire the host-side short-circuit into `dev_build` *before*
-      `dev_build_via_builder_vm`, with the artifact-completeness re-check and the
-      impure / `MVM_NO_BUILD_CACHE` disables. Record-on-success in both the
-      cache-hit and fresh-build arms.
-- [ ] Drive creation: `mkfs.ext4 -d` populate-at-format for config + secrets
-      drives; keep the labels (`mvm-config` / `mvm-secrets`) and permissions.
-- [ ] Box validation (x86_64 KVM): `up` cold (records fingerprint) → `up` warm
-      (short-circuits, no builder VM in the log) measured ≤ ~1 s; then **edit the
-      flake** and confirm the next `up` rebuilds (fingerprint miss). Capture the
-      `MVM_BOOT_PROFILE` breakdown.
+- [x] Add `workload_build_fingerprint(user_flake, profile, mode, mvm_workspace)`
+      in `mvm-build` (`build_cache.rs`) — deterministic walk hashing the whole
+      filtered workspace tree (covers `nix/` + the buildRustPackage src +
+      `flake.lock`). Unit-tested: determinism, user-flake change, workspace-source
+      change, profile/mode distinction, excluded-dir invariance, and a drift guard
+      binding `EXCLUDED_BASENAMES` ⊆ `workspace-filter.nix`.
+- [x] Add the `~/.mvm/dev/build-cache/` record (read/write, atomic temp+rename)
+      via `mvm_core::config` path helpers; path-traversal-guarded on read/write.
+- [x] Wire the host-side short-circuit into `dev_build` *before* the builder VM
+      dispatch, with the `rootfs.ext4` completeness re-check and the
+      `MVM_NO_BUILD_CACHE` disable. Record-on-success. (Impure: the builder-VM dev
+      build always runs `--impure`, but only to admit the three `path:` inputs the
+      fingerprint already covers — so the cache is sound despite `--impure`, and a
+      blanket impure-disable would make it never fire.)
+- [x] Drive creation: `mkfs.ext4 -d` populate-at-format for config + secrets
+      drives; labels + permissions preserved (firecracker runs as root, so file
+      ownership matches the old `sudo tee` path).
+- [x] Box validation (x86_64 KVM): cold `up` records the fingerprint; warm `up`
+      short-circuits with **no builder VM in the log** at **1.01 s**; a flake edit
+      busts the cache and the next `up` rebuilds (32 s). See Status table above.
 
 ## Non-goals
 
