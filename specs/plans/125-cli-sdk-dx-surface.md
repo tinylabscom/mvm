@@ -93,10 +93,19 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
     out, `ServiceResponse` back, typed `BrokerError`. Mock-I/O unit tests:
     Ok-payload roundtrip + exact-envelope, `Err`→typed error, oversize
     frame, truncated frame, malformed body.
-  - [ ] **E5.2** — typed `host.audit.v1` method; tests: request shape sets
-    `workload_audit` (the *host handler* forces it — claim 8), >4 KiB →
-    `BadRequest`, 20/s rate-limit → typed error. Flag the host-side
-    log-injection + covert-egress (claim 10 / Plan 111-A) seam in the PR.
+  - [x] **E5.2** — typed `host.audit.v1` methods in `mvm-guest::host_audit`
+    (`emit`/`emit_batch` + `_on` stream variants), reusing the shared
+    `mvm-core::protocol::host_audit` wire types. The host handler is already
+    built + tested (`mvm-hostd` `HostAuditV1Handler`), so this is the guest
+    half: build the `ServiceCall`, map the host's typed `ServiceErrorCode`
+    onto `AuditError` (`RateLimited` / `BadRequest` / `Unavailable` /
+    `Service` / `Transport`). Claim 8 is structural here — `EmitRequest`
+    carries no `category`, so the guest cannot express a host category, and
+    the host stamps `workload_audit` regardless. 4 KiB cap + 20/s rate
+    limit stay host-enforced; the client only surfaces them. 7 RED-first
+    unit tests. (Host-side log-injection + covert-egress seam — claim 10 /
+    Plan 111-A — is the host handler's concern; the guest record is opaque
+    workload bytes.)
   - [ ] **E5.3** — PyO3/napi veneer (`mvm.audit.emit`/`emit_batch`) + the
     live-VM E2E (dev-kvm box): a `workload_audit` entry lands in `mvmctl
     audit verify`, host-stamped + workload-originated; no host-category

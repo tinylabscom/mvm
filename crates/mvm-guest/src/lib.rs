@@ -23,6 +23,9 @@ pub mod fs_rpc;
 /// normal wake) the guest reseeds its CSPRNG so two clones don't generate
 /// identical key material.
 pub mod genid;
+/// In-guest `host.audit.v1` typed methods: `emit` / `emit_batch` over the
+/// broker transport, letting a workload append to the chain-signed audit log.
+pub mod host_audit;
 pub mod integrations;
 pub mod lifecycle_hooks;
 /// Guest-side network defense. The `mvm-guest-netinit`
