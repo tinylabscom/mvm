@@ -10,7 +10,7 @@ use mvm::vsock_transport::{FirecrackerTransport, LibkrunTransport, VsockTranspor
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 
-use super::super::env::dev_vz::dev_vsock_proxy_path;
+use super::super::env::dev_vz::{DEV_VM_NAME, dev_vsock_proxy_path};
 use super::Cli;
 use super::shared::{IN_CONSOLE_MODE, clap_vm_name};
 use crate::ui;
@@ -33,11 +33,20 @@ fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
     // data-dir path `VzTransport::for_vm` resolves. The Vz supervisor
     // exposes it as a direct per-port socket (no proxy port prefix), so
     // dial it through `VzTransport` rooted at the socket's parent dir.
-    let dev_sock = std::path::PathBuf::from(dev_vsock_proxy_path());
-    if dev_sock.exists()
-        && let Some(dir) = dev_sock.parent()
-    {
-        return Ok(Arc::new(VzTransport::new(dir)));
+    //
+    // Gate this on the requested name being the dev VM. The dev socket is
+    // present whenever the persistent dev/builder VM is up (e.g. after an
+    // image-ensure step), so an unconditional check would route every
+    // workload's console onto the builder — which must stay free to build
+    // other microVMs, and whose per-port data socket the workload's session
+    // never created anyway. A workload falls through to its own transport.
+    if name == DEV_VM_NAME {
+        let dev_sock = std::path::PathBuf::from(dev_vsock_proxy_path());
+        if dev_sock.exists()
+            && let Some(dir) = dev_sock.parent()
+        {
+            return Ok(Arc::new(VzTransport::new(dir)));
+        }
     }
     let libkrun = LibkrunTransport::for_vm(name);
     if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
@@ -464,6 +473,63 @@ mod accessible_gate_tests {
         transport
             .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect("selected transport should connect to the vz socket");
+    }
+
+    // The dev VM's vsock socket is present whenever the persistent
+    // dev/builder VM is up. A workload's console request must NOT be
+    // routed onto it (the builder must stay free to build other microVMs,
+    // and its session never created the workload's per-port data socket).
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn pick_console_transport_does_not_route_workload_to_dev_socket() {
+        use std::os::unix::net::UnixListener;
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        // Root under /tmp: the dev socket path includes a long
+        // `mvm-persistent-builder-vz-dev` component that overruns the
+        // ~104-char AF_UNIX SUN_LEN limit when rooted in the default $TMPDIR.
+        let cache = tempfile::tempdir_in("/tmp").expect("cache tempdir");
+        let data = tempfile::tempdir_in("/tmp").expect("data tempdir");
+        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_DATA_DIR", data.path());
+
+        // Dev VM socket present and live, but the requested name is a workload.
+        let dev_sock = std::path::PathBuf::from(dev_vsock_proxy_path());
+        std::fs::create_dir_all(dev_sock.parent().unwrap()).unwrap();
+        let _dev_listener = UnixListener::bind(&dev_sock).unwrap();
+
+        // No socket for the workload, so the only way to "succeed" is the
+        // buggy short-circuit onto the dev socket. An Err (no transport
+        // resolved) is fine too — just not the dev VM.
+        if let Ok(transport) = pick_console_transport("workload-1") {
+            assert!(
+                transport
+                    .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+                    .is_err(),
+                "a workload console must not be routed onto the dev/builder VM socket"
+            );
+        }
+    }
+
+    // The dev shell path (`console_interactive(DEV_VM_NAME)`) must still
+    // resolve to the dev VM's builder-cache socket.
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn pick_console_transport_selects_dev_socket_for_dev_vm() {
+        use std::os::unix::net::UnixListener;
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        // /tmp root — see SUN_LEN note in the sibling test above.
+        let cache = tempfile::tempdir_in("/tmp").expect("cache tempdir");
+        env.set("MVM_CACHE_DIR", cache.path());
+
+        let dev_sock = std::path::PathBuf::from(dev_vsock_proxy_path());
+        std::fs::create_dir_all(dev_sock.parent().unwrap()).unwrap();
+        let _dev_listener = UnixListener::bind(&dev_sock).unwrap();
+
+        let transport =
+            pick_console_transport(DEV_VM_NAME).expect("picker should find the dev VM transport");
+        transport
+            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .expect("dev VM console must connect to the builder-cache socket");
     }
 
     #[test]
