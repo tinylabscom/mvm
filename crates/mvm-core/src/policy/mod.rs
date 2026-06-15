@@ -9,6 +9,7 @@ pub mod dns_pin;
 pub mod network_policy;
 pub mod secret_binding;
 pub mod security;
+pub mod security_profile;
 
 // Tenant policy bundles — authoring, resolution, signing, TOML loading.
 // Folded in from the former `mvm-policy` crate. mvmd consumes the
