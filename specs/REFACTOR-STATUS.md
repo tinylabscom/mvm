@@ -34,7 +34,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 177** — Backend consolidation (8→4) · ✅ both phases merged (#806/#789/#812/#814/#817); DX-parity → Plan 189; lone caveat = host-gated hardware smoke
 - [x] **PLAN 182** — Trait hygiene + backend catalog · ✅ DONE — Clock/KeyProvider unified, `backend_catalog!` single-source, doctor sourced from it, arch docs current (all via #802). The lone open box (literal `cargo test --workspace`) is closed as documented-environmental: package-by-package + `-E 'not package(mvm-backend)'` are green; the aggregate only SIGKILLs the `mvm-backend` unit-test bin via macOS amfid codesign on this host (CI runs it green)
 - [x] **PLAN 184** — Backend descriptor registry · ✅ DONE — catalog promoted to a `BackendDescriptor` registry (descriptor-named helpers); dual `instantiate`/`instantiate_dyn` constructors with dyn↔enum parity test; doctor migrated to `instantiate_dyn`; `AnyBackend` narrowed to enum-specific ops (no duplication remained); boundary + ordering-freeze tests; arch/supervisor docs describe the behavior/discovery/dispatch split
-- [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 Phases 1–3 DONE: Phase 1 TestEnv migration (mvm-core/mvm-hostd/mvm-build/libkrun-sys/**mvm-cli complete** — duplicate local env-test locks deleted; only host-gated mvm-backend env tests remain for CI/Linux); Phase 2 poison-lock policy decided + applied (env serializers folded into TestEnv, runtime state locks fail-closed); Phase 3 naming/typed-selectors COMPLETE (#892 `DeviceMapperBackend` + #894 `VmEgressProxy`/`SupervisorEgressProxy` + #895 typed `BackendKind` selectors). Phase 5 Task 8 started (SAFETY invariants added to the 12 simple-syscall mvm-guest blocks; deeper console/verity/objc2 clusters deferred). Remaining: Phase 4 function shape, Phase 5 Task 9, Phase 6 error/fixtures/docs, Phase 7 closeout
+- [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 Phases 1–3 DONE: Phase 1 TestEnv migration (mvm-core/mvm-hostd/mvm-build/libkrun-sys/**mvm-cli complete** — duplicate local env-test locks deleted; only host-gated mvm-backend env tests remain for CI/Linux); Phase 2 poison-lock policy decided + applied (env serializers folded into TestEnv, runtime state locks fail-closed); Phase 3 naming/typed-selectors COMPLETE (#892 `DeviceMapperBackend` + #894 `VmEgressProxy`/`SupervisorEgressProxy` + #895 typed `BackendKind` selectors). Phase 5 Task 8 started (SAFETY invariants added to the 12 simple-syscall mvm-guest blocks; deeper console/verity/objc2 clusters deferred). Phase 5 Task 9 DONE-by-verification (test-support dev-only + optional stacks gated/documented, check-core-runtime-free enforced). Remaining: Phase 4 function shape, Task 8 deeper unsafe clusters (console/verity/objc2, deferred), Phase 6 error/fixtures/docs, Phase 7 closeout
 - [ ] **PLAN 189** — VZ DX parity (post-convergence) · 🟡 in progress — WS-3 `dev status --json` landed; remaining: save/restore verbs, cached fast-boot default, more --json coverage, base pinning (spun out of 177; sibling of 159)
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
@@ -428,8 +428,15 @@ PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
       Deferred (logged in plan): the deeper clusters — console.rs PTY/termios (~16),
       mvm-verity-init dm-verity ioctls (~13), guest-agent (~5), and vz_objc.rs
       objc2 FFI (~100, do while Plan-152 vz is quiet).
-  [ ] Phase 4+ remain: function shape (Task 6/7), Task 9 feature/dep boundaries,
-      error shapes/fixtures/docs (Task 10-13), closeout (Task 14)
+  [x] Phase 5 Task 9 (feature/dep boundaries) — DONE by verification (no code
+      change): `test-support` is dev-only across all 6 consumers + empty feature
+      def; optional heavy stacks (egress-ca/hostd-transport/manifest-verify/
+      schemars/attestation-*) are `dep:`-gated + documented inline; `cargo tree
+      -p mvm-core -e no-dev` is tokio-free (with or without test-support) and the
+      `check-core-runtime-free` Lint gate enforces it.
+  [ ] Phase 4+ remain: function shape (Task 6/7), error shapes/fixtures/docs
+      (Task 10-13), closeout (Task 14); Task 8 deeper unsafe clusters
+      (console/verity/objc2) deferred — see plan follow-ups
   [ ] Audit long constructors, params structs, builders, and large functions
       only where the split adds testable structure
   [ ] Audit unsafe/platform/feature boundaries, standardize error shapes,
