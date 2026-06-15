@@ -7,7 +7,7 @@ use std::path::PathBuf;
 /// One concrete `dmsetup`-style operation. Implementations either
 /// shell out to the real binary (`DmsetupBackend`) or record the
 /// invocation in memory for tests (`MockBackend`).
-pub trait Backend: Send + Sync {
+pub trait DeviceMapperBackend: Send + Sync {
     /// Create the thin pool device. Idempotent: returns Ok if the
     /// pool already exists.
     fn create_pool(&self, name: &str, size_bytes: u64, block_size: u32) -> Result<()>;
@@ -103,7 +103,7 @@ mod dmsetup_linux {
     }
 }
 
-impl Backend for DmsetupBackend {
+impl DeviceMapperBackend for DmsetupBackend {
     #[cfg(target_os = "linux")]
     fn create_pool(&self, _name: &str, _size_bytes: u64, _block_size: u32) -> Result<()> {
         dmsetup_linux::check_available()?;
@@ -260,7 +260,7 @@ impl Default for MockBackend {
     }
 }
 
-impl Backend for MockBackend {
+impl DeviceMapperBackend for MockBackend {
     fn create_pool(&self, name: &str, size_bytes: u64, block_size: u32) -> Result<()> {
         let mut s = self.state.lock().expect("MockBackend state mutex poisoned");
         s.log.push(format!(
