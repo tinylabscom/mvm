@@ -2470,64 +2470,6 @@ fn resolve_fc_bridge_path() -> Result<std::path::PathBuf> {
     )
 }
 
-/// Stand up this VM's transparent egress substitution moat (endpoint +
-/// terminator + nft TAP REDIRECT) when the admitted plan carries
-/// secret bindings. Called after the FC guest is healthy.
-///
-/// The plan lives at `vm_state_dir(name)/plan.json` (the same file
-/// `spawn_fc_bridge` parses — `mvm_data_dir()/vms/<name>`, NOT the `abs_dir`
-/// VMS_DIR tree). The substitution pid + env sidecars also land under
-/// `vm_state_dir` so the invoke path's `vm_substitution_env_path` lookup
-/// resolves identically to the QEMU backend.
-///
-/// Fail-closed: any error propagates so the caller rolls back the VM. A
-/// missing/unsigned `plan.json` (legacy / non-admitted boot) or a plan with no
-/// secrets is a clean no-op — there's nothing to substitute.
-///
-/// The installed [`EgressRedirect`] is `persist`ed (not dropped): the VM keeps
-/// running after this returns, and `stop_vm` removes the nft table by name.
-///
-/// Shared plan decode: `Some((secrets, tenant))` when the admitted
-/// plan carries egress secrets, else `None` (legacy / non-admitted / no-secret
-/// boot — nothing to wire). A missing `plan.json` or an undecodable placeholder
-/// plan is the no-op path, not an error.
-#[cfg(target_os = "linux")]
-fn decode_plan_secrets(
-    state_dir: &std::path::Path,
-) -> Result<
-    Option<(
-        Vec<mvm_core::plan::SecretBinding>,
-        mvm_core::policy::RedactionPolicy,
-        String,
-    )>,
-> {
-    let plan_path = state_dir.join("plan.json");
-    let plan_json = match std::fs::read_to_string(&plan_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "read plan.json at {} for egress substitution: {e}",
-                plan_path.display()
-            ));
-        }
-    };
-    // Both producers land here: the pre-start persist writes the bare
-    // `ExecutionPlan` (the shape the firecracker bridge parses too) and the
-    // gateway-bridge stash writes the signed envelope. Accept either.
-    let plan = match mvm_core::plan::plan_from_admitted_json(&plan_json) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "plan.json not a decodable admitted plan; skipping egress substitution");
-            return Ok(None);
-        }
-    };
-    if plan.secrets.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some((plan.secrets, plan.redaction, plan.tenant.0)))
-}
-
 /// Spawn the per-VM substitution endpoint **before** the guest boots,
 /// so the `(var → placeholder)` pairs it mints (and
 /// writes to `vm_substitution_env_path`) are available when `boot_args` is built
@@ -2544,7 +2486,9 @@ fn spawn_egress_endpoint(config: &FlakeRunConfig) -> Result<EndpointGuard> {
 
     let name = &config.slot.name;
     let state_dir = mvm_core::config::vm_state_dir(name);
-    let Some((secrets, redaction, tenant)) = decode_plan_secrets(&state_dir)? else {
+    let Some((secrets, redaction, tenant)) =
+        crate::egress_shared::decode_plan_secrets_from_state(&state_dir)?
+    else {
         return Ok(EndpointGuard { vm_name: None });
     };
 
@@ -2582,7 +2526,7 @@ fn install_egress_redirect(config: &FlakeRunConfig) -> Result<()> {
 
     let name = &config.slot.name;
     let state_dir = mvm_core::config::vm_state_dir(name);
-    if decode_plan_secrets(&state_dir)?.is_none() {
+    if crate::egress_shared::decode_plan_secrets_from_state(&state_dir)?.is_none() {
         return Ok(());
     }
     let term_port = terminator_port_for(config.slot.index);
