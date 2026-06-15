@@ -93,10 +93,19 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
     out, `ServiceResponse` back, typed `BrokerError`. Mock-I/O unit tests:
     Ok-payload roundtrip + exact-envelope, `Err`→typed error, oversize
     frame, truncated frame, malformed body.
-  - [ ] **E5.2** — typed `host.audit.v1` method; tests: request shape sets
-    `workload_audit` (the *host handler* forces it — claim 8), >4 KiB →
-    `BadRequest`, 20/s rate-limit → typed error. Flag the host-side
-    log-injection + covert-egress (claim 10 / Plan 111-A) seam in the PR.
+  - [x] **E5.2** — typed `host.audit.v1` methods in `mvm-guest::host_audit`
+    (`emit`/`emit_batch` + `_on` stream variants), reusing the shared
+    `mvm-core::protocol::host_audit` wire types. The host handler is already
+    built + tested (`mvm-hostd` `HostAuditV1Handler`), so this is the guest
+    half: build the `ServiceCall`, map the host's typed `ServiceErrorCode`
+    onto `AuditError` (`RateLimited` / `BadRequest` / `Unavailable` /
+    `Service` / `Transport`). Claim 8 is structural here — `EmitRequest`
+    carries no `category`, so the guest cannot express a host category, and
+    the host stamps `workload_audit` regardless. 4 KiB cap + 20/s rate
+    limit stay host-enforced; the client only surfaces them. 7 RED-first
+    unit tests. (Host-side log-injection + covert-egress seam — claim 10 /
+    Plan 111-A — is the host handler's concern; the guest record is opaque
+    workload bytes.)
   - **E5.3** split on grounding — the live path needs the broker-services
     subprocess lifecycle, which is unbuilt (nothing spawns `mvm-broker` /
     `mvm-audit-signer` per VM; both proxies + the broker `serve` are
@@ -112,8 +121,23 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
       hardening, the PyO3/napi veneer, and the live-VM E2E (box). Scoped in
       `specs/notes/plan-125-e5-3b-broker-services-lifecycle-scoping.md`;
       recommend tracking as its own workstream (process-moat, not SDK DX).
-  - [ ] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods + veneer,
-    riding the same transport.
+  - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
+    `mvm-guest::host_time` + `mvm-guest::host_cost` (`now` / `workload` +
+    `tenant`, each with an `_on` stream variant), riding the same
+    `broker_client` transport as E5.2. The host handlers are not built yet
+    (only `HostAuditV1Handler` exists; the time/cost scaffolds land later),
+    so the wire contract is established here in `mvm-core::protocol::host_time`
+    (`TimeNowResponse { wall_ms }`) + `mvm-core::protocol::host_cost`
+    (`CostReport { spent_micros_usd }`) — int-only money/clock per the broker
+    contract, `deny_unknown_fields`; the future host handler reuses these
+    types unchanged. Each method maps the host's typed `ServiceErrorCode`
+    onto a typed `TimeError` / `CostError` (`NotBound` / `Unavailable` /
+    `Service` / `Transport`, plus `NotImplemented` for the mvmd-delegated
+    `host.cost.v1::tenant` verb). The scope is the verb, so the request body
+    is empty — a workload cannot ask for another scope's spend. 18 RED-first
+    unit tests (4 core serde + 14 guest mock-I/O). The PyO3/napi veneer for
+    all three services rides E5.3b-3 (the veneer for `host.audit.v1` +
+    `host.time.v1`/`host.cost.v1` lands together there).
 
 ## Acceptance
 
