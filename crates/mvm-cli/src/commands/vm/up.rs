@@ -2630,8 +2630,7 @@ mod runtime_overlay_attach_tests {
 #[cfg(test)]
 mod resolve_vz_workload_kernel_tests {
     use super::*;
-
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn existing_path_passes_through_unchanged() {
@@ -2644,17 +2643,16 @@ mod resolve_vz_workload_kernel_tests {
 
     #[test]
     fn non_vz_hypervisor_passes_through_even_when_missing() {
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MVM_CACHE_DIR", tmp.path()) };
+        env.set("MVM_CACHE_DIR", tmp.path());
         let result = resolve_vz_workload_kernel("/nonexistent/vmlinux", "libkrun").unwrap();
         assert_eq!(result, "/nonexistent/vmlinux");
-        unsafe { std::env::remove_var("MVM_CACHE_DIR") };
     }
 
     #[test]
     fn vz_missing_kernel_falls_back_to_builder_vm_cache() {
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         let arch = if cfg!(target_arch = "aarch64") {
             "aarch64"
@@ -2665,22 +2663,20 @@ mod resolve_vz_workload_kernel_tests {
         std::fs::create_dir_all(&fallback_dir).unwrap();
         let fallback = fallback_dir.join("vmlinux");
         std::fs::write(&fallback, b"builder-kernel").unwrap();
-        unsafe { std::env::set_var("MVM_CACHE_DIR", tmp.path()) };
+        env.set("MVM_CACHE_DIR", tmp.path());
         let result = resolve_vz_workload_kernel("/nonexistent/vmlinux", "vz").unwrap();
         assert_eq!(result, fallback.to_str().unwrap());
-        unsafe { std::env::remove_var("MVM_CACHE_DIR") };
     }
 
     #[test]
     fn vz_both_missing_returns_error_mentioning_dev_up() {
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MVM_CACHE_DIR", tmp.path()) };
+        env.set("MVM_CACHE_DIR", tmp.path());
         let err = resolve_vz_workload_kernel("/nonexistent/vmlinux", "vz").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("dev up"), "expected 'dev up' in: {msg}");
         assert!(msg.contains("vz"), "expected hypervisor name in: {msg}");
-        unsafe { std::env::remove_var("MVM_CACHE_DIR") };
     }
 }
 
