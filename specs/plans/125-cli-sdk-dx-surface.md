@@ -121,13 +121,44 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
       on both workload backends (libkrun + vz), the fail-closed staging
       `SUBSTITUTION_PORT` uses (nothing binds the UDS until E5.3b spawns the
       broker → stray dial `ECONNREFUSED`). Disjoint-union assertion tests.
-    - [ ] **E5.3b** — the broker-services subprocess lifecycle: spawn +
+    - **E5.3b** — the broker-services subprocess lifecycle: spawn +
       supervise `mvm-audit-signer` + `mvm-broker` per VM, bind
       `vm_vsock_port_socket(name, BROKER_PORT)`, enrich `ServiceCallCtx`
       (correlation rewrite / profile / session), the spawn process-moat
       hardening, the PyO3/napi veneer, and the live-VM E2E (box). Scoped in
       `specs/notes/plan-125-e5-3b-broker-services-lifecycle-scoping.md`;
-      recommend tracking as its own workstream (process-moat, not SDK DX).
+      tracked as its own workstream (process-moat, not SDK DX).
+      **Chain-format decision (open-question 4 → Option A, per-VM):** the
+      `mvm-audit-signer` writes `OnDiskEntry`/JCS — a different format + signing
+      scheme from the shipped claim-8 `SignedEnvelope`/`AuditEntry` chain
+      `mvmctl audit verify` reads (`AuditEntry` is plan-bound with string-only
+      labels + `deny_unknown_fields`, can't carry a workload record's
+      `category` + JSON `fields`). So workload audit is a **separate, per-VM**
+      chain `<tenant>.<vm>.workload.jsonl`, host-key-signed (one trust root),
+      verified additively. **Per-VM, not per-tenant**, because that signer's
+      `Chain` is single-writer (in-memory head, `O_APPEND`, no flock) — two VMs
+      of one tenant must not co-write one file. The naming convention lives in
+      `mvm-core::config` (`workload_audit_path` / `workload_audit_vm_name`) so
+      the writer (backend spawn) and verifier can't drift.
+      - [x] **E5.3b-0** — workload-chain verifier: `verify_workload_chain`
+        (`mvm-hostd::audit_signer::verify`) for the `OnDiskEntry`/JCS format
+        (re-derive `entry_hash`, check the `prev_hash` link, re-canonicalize to
+        confirm JCS, verify the Ed25519 sig over the canonical bytes, gate the
+        category allow-list, reject non-Ed25519 `sig_alg`), wired into
+        `mvmctl audit verify` so it verifies the per-tenant lifecycle chain
+        **and** every `<tenant>.<vm>.workload.jsonl` against the host pubkey.
+        Shared `compute_entry_hash` extracted so writer + verifier can't drift;
+        per-VM path convention in `mvm-core::config`. 10 RED-first verifier
+        tests + 2 path-helper tests.
+      - [ ] **E5.3b-1** — per-VM `mvm-audit-signer` spawn + chain wiring
+        (`software_chain_key_path` = host-signer key, `audit_jsonl_path` =
+        `workload_audit_path(tenant, vm)`), gated on an admitted plan, mirroring
+        `spawn_libkrun_egress_endpoint_if_needed` (libkrun + vz).
+      - [ ] **E5.3b-2** — per-VM `mvm-broker` spawn binding
+        `vm_vsock_port_socket(name, BROKER_PORT)` + `ServiceCallCtx`
+        enrichment. Unblocks the round-trip.
+      - [ ] **E5.3b-3** — PyO3/napi veneer.
+      - [ ] **E5.3b-4** — live-VM E2E on the dev-kvm box.
   - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
     `mvm-guest::host_time` + `mvm-guest::host_cost` (`now` / `workload` +
     `tenant`, each with an `_on` stream variant), riding the same

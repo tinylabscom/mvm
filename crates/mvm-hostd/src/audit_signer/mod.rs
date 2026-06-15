@@ -43,3 +43,4 @@ pub mod category;
 pub mod chain;
 pub mod config;
 pub mod server;
+pub mod verify;
