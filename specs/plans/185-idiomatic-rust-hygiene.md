@@ -279,9 +279,23 @@ thread many related values through runtime/build/CLI layers.
       **and** `--target aarch64-unknown-linux-musl` clippy (the mount/netlink/
       setrlimit blocks are Linux-gated). Audit baseline at the time: ~454 `unsafe`
       sites vs ~261 `SAFETY:` comments workspace-wide.
-- [ ] **Step 2 - isolate platform/FFI unsafe behind small safe wrappers.** VZ,
+
+      Second pass: the `mvm-verity-init` bin (13 blocks — dm-verity ioctls, the
+      `copy_nonoverlapping` payload assembly, and the mount/chdir/chroot/execv
+      syscalls). Each block now names its concrete invariant; `do_ioctl` gained a
+      `# Safety` doc spelling out the fd/`data_size` contract its callers uphold.
+- [~] **Step 2 - isolate platform/FFI unsafe behind small safe wrappers.** VZ,
       libkrun, libc/syscall, and env-mutation code should expose narrow safe
       functions to the rest of the crate wherever practical.
+
+      `mvm-verity-init`: the three fixed-payload dm ioctls (VERSION/DEV_CREATE/
+      DEV_SUSPEND) now route through a safe `dm_ioctl_fixed(fd, cmd, &mut DmIoctl)`
+      wrapper — a `const _` assertion pins `DM_IOCTL_STRUCT_SIZE ==
+      size_of::<DmIoctl>()` so the "a `&mut DmIoctl` fully backs the kernel access"
+      argument can't silently rot. The redundant typed deref that re-set
+      `DM_READONLY_FLAG` on the (only u8-aligned) `Vec` pointer was dropped — the
+      flag is already set in the payload bytes — leaving one documented raw-pointer
+      ioctl for the variable-length TABLE_LOAD path.
 - [ ] **Step 3 - keep platform cfgs narrow.** Linux/macOS-only behavior should be
       gated at the smallest useful module/function boundary, while host-side
       cargo builds continue to compile on non-target platforms.
@@ -290,12 +304,14 @@ thread many related values through runtime/build/CLI layers.
 
 #### Task 8 deferred follow-ups
 
-- [ ] Annotate the deeper `unsafe` clusters with `SAFETY:` invariants, one
-      reviewed file at a time (each needs genuine soundness reasoning, not a
-      formula): `mvm-guest/console.rs` (~16, PTY/termios), the `mvm-verity-init`
-      bin (~13, dm-verity ioctls), `mvm-guest-agent` bin (~5), and the
-      `mvm-vm-host/vz_objc.rs` objc2 FFI (~100) — the last best done while the
-      Plan-152 vz work is quiet.
+- [x] `mvm-verity-init` bin (dm-verity ioctls) — done in the Step 1 second pass
+      above; fixed-payload ioctls isolated behind `dm_ioctl_fixed`.
+- [ ] Annotate the remaining deeper `unsafe` clusters with `SAFETY:` invariants,
+      one reviewed file at a time (each needs genuine soundness reasoning, not a
+      formula): `mvm-guest/console.rs` (~16, PTY/termios — verify the post-fork
+      single-threaded assumption before annotating the `putenv` block),
+      `mvm-guest-agent` bin (~5), and the `mvm-vm-host/vz_objc.rs` objc2 FFI
+      (~100) — the last best done while the Plan-152 vz work is quiet.
 
 ### Task 9 - Audit feature and dependency boundaries
 
