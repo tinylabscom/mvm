@@ -43,6 +43,9 @@ pub mod codesign;
 // paths so the mvmd `mvmctl::runtime::{shell,ui,shell_mock}` contract
 // surface keeps resolving.
 pub mod base;
+/// Per-VM broker-services (`mvm-broker` / `mvm-audit-signer`) subprocess
+/// spawn/reap helpers, mirroring [`substitution_spawn`].
+pub(crate) mod broker_services_spawn;
 pub mod compat;
 /// Per-VM transparent egress redirect (nft prerouting REDIRECT scoped
 /// to the guest TAP) steering guest :80 to the host-side substitution
@@ -95,6 +98,12 @@ pub use workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 /// endpoint. See [`substitution_spawn::build_egress_tls_delivery`].
 pub use substitution_spawn::{
     EGRESS_CERT_DRIVE_NAME, EgressTlsDelivery, EndpointTransport, build_egress_tls_delivery,
+};
+
+/// Per-VM broker-services spawn/reap, called from the workload backends' launch
+/// path (E5.3b-2 wiring). Exposed so the backends and tests share one impl.
+pub use broker_services_spawn::{
+    AuditSignerHandle, AuditSignerSpawnParams, reap_audit_signer, spawn_audit_signer,
 };
 
 /// Crate-wide test serialization for tests that mutate `HOME` or

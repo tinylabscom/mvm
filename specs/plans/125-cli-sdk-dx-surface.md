@@ -150,13 +150,20 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
         Shared `compute_entry_hash` extracted so writer + verifier can't drift;
         per-VM path convention in `mvm-core::config`. 10 RED-first verifier
         tests + 2 path-helper tests.
-      - [ ] **E5.3b-1** — per-VM `mvm-audit-signer` spawn + chain wiring
-        (`software_chain_key_path` = host-signer key, `audit_jsonl_path` =
-        `workload_audit_path(tenant, vm)`), gated on an admitted plan, mirroring
-        `spawn_libkrun_egress_endpoint_if_needed` (libkrun + vz).
+      - [x] **E5.3b-1** — per-VM `mvm-audit-signer` spawn helper
+        (`mvm-backend::broker_services_spawn`, mirror `substitution_spawn`):
+        emit the JSON config (`software_chain_key_path` = host-signer key,
+        `audit_jsonl_path` = `workload_audit_path(tenant, vm)` — the per-VM
+        chain the b0 verifier checks), `setsid` detach, UDS-poll readiness (no
+        stdout handshake), PID file + `reap_audit_signer`; stub-bin tested incl.
+        fail-closed-on-no-bind. The gated `start()`/stop() wiring moves to b2,
+        wired alongside the broker (so no idle audit-signer spawns before a
+        consumer exists).
       - [ ] **E5.3b-2** — per-VM `mvm-broker` spawn binding
         `vm_vsock_port_socket(name, BROKER_PORT)` + `ServiceCallCtx`
-        enrichment. Unblocks the round-trip.
+        enrichment + the gated `start()`/stop() wiring for **both** subprocesses
+        (mirroring `spawn_libkrun_egress_endpoint_if_needed`, libkrun + vz).
+        Unblocks the round-trip.
       - [ ] **E5.3b-3** — PyO3/napi veneer.
       - [ ] **E5.3b-4** — live-VM E2E on the dev-kvm box.
   - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
