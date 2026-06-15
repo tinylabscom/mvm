@@ -449,14 +449,37 @@ plus secret-bearing modules.
 
 ### Task 13 - Add documentation verification to closeout
 
-- [ ] **Step 1 - run doc generation after type renames.** Use
-      `cargo doc --workspace --no-deps` or a narrower crate set if workspace docs
-      hit a host/platform blocker.
-- [ ] **Step 2 - fix broken intra-doc links introduced by renames.** Prefer real
-      Rustdoc links for type names that are part of the public crate API.
-- [ ] **Step 3 - document any doc-generation blocker.** If workspace docs cannot
-      run on the host, record the exact crate and error in this plan and the
-      rollup before closeout.
+- [x] **Step 1 - run doc generation after type renames.** Ran
+      `RUSTDOCFLAGS="-W rustdoc::broken_intra_doc_links" cargo doc --workspace
+      --no-deps`. Finding: **the Phase 3 renames introduced zero broken links** —
+      grepping the unresolved-link set for `Backend`/`EgressProxy`/
+      `DeviceMapperBackend`/`BackendKind` returns nothing, so #892/#894/#895
+      updated their own doc links cleanly.
+- [~] **Step 2 - fix broken intra-doc links.** The doc run surfaced ~115
+      *pre-existing* broken intra-doc links (not introduced by this plan),
+      spread across every crate (mvm-hostd 26, mvm-build 26, mvm-backend 16,
+      mvm-core 15, mvm-guest 13, libkrun-sys 8, others ≤4). These are general
+      doc-hygiene debt — private-item links, std-trait links written bare
+      (`[`FromStr`]`), test-fn links, prose that should be backticked, and a few
+      module-doc `//!` links that don't resolve even fully-qualified.
+      **`mvm-core` cleared** (16 sites): public API got real qualified links
+      (`[`SecretStore::list`]`, `[`crate::crypto::snapshot_hmac`]`,
+      `[`std::str::FromStr`]`, the `SIG_ALG_*` consts), private/test/prose items
+      were backticked, and `cargo doc -p mvm-core --no-deps` is now clean under
+      `-D rustdoc::broken_intra_doc_links`. The remaining crates are tracked
+      below and must be cleared before Phase 7's workspace `cargo doc` gate.
+- [x] **Step 3 - document any doc-generation blocker.** No host/platform
+      blocker — `cargo doc` runs on this host; the only obstacle to a green
+      workspace doc build is the pre-existing broken-link debt inventoried in
+      Step 2, which is fixable (not a waiver).
+
+  **Deferred (tracked) — clear the remaining broken intra-doc links before Phase 7:**
+  - [ ] mvm-hostd (26)
+  - [ ] mvm-build (26)
+  - [ ] mvm-backend (16)
+  - [ ] mvm-guest (13)
+  - [ ] libkrun-sys / deps (8)
+  - [ ] mvm-cli (4), mvm-vm-host (3), mvm (2), mvm-sdk (1), mvm-oci (1)
 
 ---
 

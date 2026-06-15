@@ -7,7 +7,7 @@
 //! the others' runtime crates. The supervisor's UDS proxies invoke
 //! handlers across the process boundary via the
 //! [`crate::protocol::broker::ServiceCall`] envelope; in-process
-//! composition uses [`ServiceCallCtx::invoke`] for handler-to-handler
+//! composition uses `ServiceCallCtx::invoke` for handler-to-handler
 //! calls inside the same subprocess.
 //!
 //! The three-subprocess architecture this trait carves the seam for,

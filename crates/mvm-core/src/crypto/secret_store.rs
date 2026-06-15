@@ -409,7 +409,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 /// OS-native keystore backend. Each secret entry lives at
 /// `(KEYRING_SERVICE, "<tenant>:<name>")`. Names are mirrored to a
-/// sidecar JSON index at `<index_dir>/<tenant>.json` so [`list`]
+/// sidecar JSON index at `<index_dir>/<tenant>.json` so [`SecretStore::list`]
 /// returns a deterministic answer independent of backend-specific
 /// enumeration behavior.
 pub struct KeyringSecretStore {
