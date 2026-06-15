@@ -54,6 +54,22 @@ pub const WORKLOAD_EXIT_PORT: u32 = 5251;
 /// host-side proxy port-allowlist to admit it — part of the bin glue.
 pub const SUBSTITUTION_PORT: u32 = 5253;
 
+/// vsock port the host-services broker is exposed on. The in-guest broker
+/// client ([`crate::broker_client`]) dials this to reach the supervisor's
+/// guest-facing broker listener, which derives the workload identity from the
+/// connection, enforces the `ExecutionPlan.services` binding, and proxies the
+/// `ServiceCall` to the `mvm-broker` subprocess. The host admits it via its
+/// `host_listen_ports` allowlist — a one-port, audited widening, the same
+/// mechanism [`SUBSTITUTION_PORT`] uses.
+///
+/// 5300 sits above the privileged range and above 5251/5252/5253, and below
+/// the port-forward range ([`PORT_FORWARD_BASE`] = 10_000) and the
+/// console-data range ([`CONSOLE_PORT_BASE`] = 20_000), so the host-side proxy
+/// allowlist keeps its disjoint-union shape. It reuses the number the
+/// pre-broker secrets channel once held (that channel was removed), so there
+/// is no live collision.
+pub const BROKER_PORT: u32 = 5300;
+
 /// Base vsock port for TCP port forwarding.
 /// The forwarded vsock port = `PORT_FORWARD_BASE + guest_tcp_port`.
 pub const PORT_FORWARD_BASE: u32 = 10000;

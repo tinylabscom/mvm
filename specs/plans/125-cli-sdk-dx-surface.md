@@ -76,6 +76,34 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
 
 - [ ] **Task E5 — host-services SDK surface (the workload calls the broker).** The host exposes broker services over vsock — **`host.audit.v1`** (workload-emitted audit entries: the handler forces `category: workload_audit`, stamps the host-authoritative IDs, rate/size-caps, and chain-signs via `mvm-audit-signer` — claim 8 preserved), plus `host.time.v1` / `host.cost.v1`. **The host side is built (Plan 104); the workload-facing client + ergonomic is the gap** (no guest-side broker caller exists in `mvm-guest`/`mvm-sdk` today). Failing test — `mvm.audit.emit({...})` from inside a `Sandbox` lands a `workload_audit` entry in the chain (`mvmctl audit verify` shows it, marked workload-originated + host-stamped); a >4 KiB record is refused (`BadRequest`); the 20/s rate limit trips; a workload can **never** write a host-category entry (the handler forces `workload_audit`). Implement in three layers: **(1) the guest-side broker client** — the SDK-runtime transport that opens the broker's vsock UDS, frames the `ServiceCall` envelope over `core::framing`'s authenticated frame, and carries the plan-bound session (claim 12). **None exists today** (`mvm-guest`/`mvm-sdk` have no broker caller) — this is the foundational piece all broker services ride on. Lives in `mvm-sdk`'s runtime (exposed to Python/TS via PyO3/napi). **(2) the typed service methods** — generated from 124 D's `gen-sdk` (`host.audit.v1`/`host.time.v1`/`host.cost.v1`), sitting on the transport. **(3) the SDK veneer** — `mvm.audit.emit/emit_batch`, `mvm.host.time()`, `mvm.host.cost()`. Binding-gated dispatch + no-payload-in-errors are gated in 128 (claims 12/13). Commit.
 
+  Sliced for delivery (each its own PR, TDD RED-first). Resolved scope:
+  - Layer 1 homes in **`mvm-guest`** (`broker_client.rs`), sibling to
+    `substitution_client.rs` — that is the in-guest crate baked into the
+    image, already carrying the vsock + framing primitives and the
+    `mvm-core` broker types; `mvm-sdk` has neither as a runtime dep. The
+    broker path carries a **bare `ServiceCall`, not an authenticated
+    frame**: session binding is enforced host-side from the connection
+    identity (the supervisor builds `ServiceCallCtx`), so the guest client
+    holds no key/secret and is advisory-only — every gate (binding, audit
+    category-forcing, size/rate caps, correlation-id assignment) is
+    host-side. Guest-facing port = `BROKER_PORT` (5300), admitted via the
+    host `host_listen_ports` allowlist like `SUBSTITUTION_PORT`.
+  - [x] **E5.1** — Layer 1 transport in `mvm-guest::broker_client`
+    (`call`/`broker_call` over `mvm_guest::vsock`): framed `ServiceCall`
+    out, `ServiceResponse` back, typed `BrokerError`. Mock-I/O unit tests:
+    Ok-payload roundtrip + exact-envelope, `Err`→typed error, oversize
+    frame, truncated frame, malformed body.
+  - [ ] **E5.2** — typed `host.audit.v1` method; tests: request shape sets
+    `workload_audit` (the *host handler* forces it — claim 8), >4 KiB →
+    `BadRequest`, 20/s rate-limit → typed error. Flag the host-side
+    log-injection + covert-egress (claim 10 / Plan 111-A) seam in the PR.
+  - [ ] **E5.3** — PyO3/napi veneer (`mvm.audit.emit`/`emit_batch`) + the
+    live-VM E2E (dev-kvm box): a `workload_audit` entry lands in `mvmctl
+    audit verify`, host-stamped + workload-originated; no host-category
+    spoofing.
+  - [ ] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods + veneer,
+    riding the same transport.
+
 ## Acceptance
 
 - [ ] A workload can append to the chain-signed audit log via `mvm.audit.emit` (`host.audit.v1`); the entry is `workload_audit`-categorized, host-stamped, and visible in `mvmctl audit verify`; oversize/rate-limit refused; no host-category spoofing.
