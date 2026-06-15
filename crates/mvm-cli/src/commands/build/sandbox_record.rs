@@ -250,41 +250,23 @@ fn env_override(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use mvm_core::util::test_env::TestEnv;
 
-    /// Serializes tests that mutate `MVM_TSX` (process-wide).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Restore-on-drop guard for `MVM_TSX`. Used to exercise the
-    /// env-override short-circuit in `resolve_interpreter` without
-    /// leaking state into sibling tests.
+    /// Restore-on-drop guard for `MVM_TSX`, built on the shared `TestEnv`
+    /// (serializes env-mutating tests and restores the prior value on drop),
+    /// to exercise the env-override short-circuit in `resolve_interpreter`.
     struct TsxGuard {
-        _guard: std::sync::MutexGuard<'static, ()>,
-        prev: Option<String>,
+        _env: TestEnv,
     }
 
     impl TsxGuard {
         fn set(value: Option<&str>) -> Self {
-            let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let prev = std::env::var("MVM_TSX").ok();
-            unsafe {
-                match value {
-                    Some(v) => std::env::set_var("MVM_TSX", v),
-                    None => std::env::remove_var("MVM_TSX"),
-                }
+            let mut env = TestEnv::new();
+            match value {
+                Some(v) => env.set("MVM_TSX", v),
+                None => env.remove("MVM_TSX"),
             }
-            TsxGuard { _guard: g, prev }
-        }
-    }
-
-    impl Drop for TsxGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.prev {
-                    Some(v) => std::env::set_var("MVM_TSX", v),
-                    None => std::env::remove_var("MVM_TSX"),
-                }
-            }
+            TsxGuard { _env: env }
         }
     }
 

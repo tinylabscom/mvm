@@ -379,10 +379,15 @@ PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
       `libkrun-sys` `gvproxy`/`passt` (PATH + MVM_GATEWAY_BIN tests; deleted the
       crate-wide `TEST_ENV_LOCK`, added the mvm-core `test-support` dev-dep;
       lock-only reap tests keep a bare `TestEnv` guard)
-  [ ] Roll `TestEnv` through the remaining env-mutating tests: `mvm-cli` (the last
-      big batch — doctor/up/session/tenant_resolution/template_cmd/ops·mcp/build·*)
-      and `mvm-backend` (host-gated: its test bin SIGKILLs under macOS amfid —
-      migrate where CI/Linux runs them)
+  [~] `mvm-cli` batch (in progress): `env/artifact_verify` (ENV_LOCK) +
+      `build/sandbox_record` (TsxGuard/ENV_LOCK) migrated. Remaining mvm-cli:
+      `vm/session` (RuntimeDirGuard — note: tests holding the guard + mutating a
+      2nd var need a guard-set helper, not a nested `TestEnv::new()` which would
+      deadlock on the shared lock), `vm/up`, `doctor`, `template_cmd`,
+      `vm/tenant_resolution`, `ops/mcp` (unique-name tests), `commands/mod`,
+      `build/build`
+  [ ] `mvm-backend` env tests (host-gated: its test bin SIGKILLs under macOS
+      amfid — migrate where CI/Linux runs them)
   [ ] Standardize poisoned-lock handling by distinguishing test/global
       serialization locks from real runtime state locks
   [ ] Rename overly generic internal traits/types where the blast radius is
