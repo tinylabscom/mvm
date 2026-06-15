@@ -382,12 +382,117 @@ pub fn sha256_file(path: &Path) -> io::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// SHA-256 of a file, cached in a `<path>.sha256cache` sidecar keyed on the
+/// file's size + mtime. Returns the cached digest when the sidecar matches the
+/// file's current size/mtime; otherwise hashes the file, writes the sidecar
+/// (best-effort), and returns the fresh digest.
+///
+/// Admission re-hashes the rootfs on every boot to bind the plan's image
+/// digest (claim 8). For an immutable cached image that hundreds-of-MB hash is
+/// identical every time, and re-reading it each boot dominates `up`. Keying on
+/// size+mtime keeps the cache sound: any rewrite of the file (different
+/// content) moves its mtime and forces a re-hash, so a stale digest can never
+/// be admitted. A read-only cache dir simply means the next boot re-hashes.
+pub fn sha256_file_cached(path: &Path) -> io::Result<String> {
+    let meta = fs::metadata(path)?;
+    let size = meta.len();
+    let mtime_nanos = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos());
+
+    let sidecar = sha256_sidecar_path(path);
+    if let Some(mtime) = mtime_nanos
+        && let Ok(contents) = fs::read_to_string(&sidecar)
+        && let Some(hex) = parse_sha256_sidecar(&contents, size, mtime)
+    {
+        return Ok(hex);
+    }
+
+    let hex = sha256_file(path)?;
+    if let Some(mtime) = mtime_nanos {
+        let _ = write_sha256_sidecar(&sidecar, &hex, size, mtime);
+    }
+    Ok(hex)
+}
+
+fn sha256_sidecar_path(path: &Path) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(".sha256cache");
+    std::path::PathBuf::from(s)
+}
+
+/// Parse a `"<hex> <size> <mtime_nanos>"` sidecar, returning the digest only
+/// when its size+mtime still match the file being hashed.
+fn parse_sha256_sidecar(contents: &str, size: u64, mtime_nanos: u128) -> Option<String> {
+    let mut it = contents.split_whitespace();
+    let hex = it.next()?;
+    let cached_size: u64 = it.next()?.parse().ok()?;
+    let cached_mtime: u128 = it.next()?.parse().ok()?;
+    (cached_size == size && cached_mtime == mtime_nanos && hex.len() == 64).then(|| hex.to_string())
+}
+
+/// Write the sidecar atomically (temp + rename) so a concurrent boot never
+/// reads a torn line. Best-effort; the caller ignores failure.
+fn write_sha256_sidecar(sidecar: &Path, hex: &str, size: u64, mtime_nanos: u128) -> io::Result<()> {
+    let mut tmp_os = sidecar.as_os_str().to_os_string();
+    tmp_os.push(format!(".{}.tmp", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp_os);
+    fs::write(&tmp, format!("{hex} {size} {mtime_nanos}\n"))?;
+    fs::rename(&tmp, sidecar)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn sha256_file_cached_matches_uncached_and_invalidates_on_change() {
+        let mut f = NamedTempFile::new().expect("tempfile");
+        f.write_all(b"hello").expect("write");
+        f.flush().expect("flush");
+        let p = f.path().to_path_buf();
+        let sidecar = sha256_sidecar_path(&p);
+
+        let direct = sha256_file(&p).expect("direct hash");
+        // First cached call computes + writes the sidecar.
+        assert_eq!(sha256_file_cached(&p).expect("cached1"), direct);
+        assert!(sidecar.exists(), "sidecar written");
+        // Second call serves from the sidecar (same digest).
+        assert_eq!(sha256_file_cached(&p).expect("cached2"), direct);
+
+        // Mutating the file (size + mtime change) invalidates the cache.
+        f.write_all(b" world").expect("append");
+        f.flush().expect("flush");
+        let direct2 = sha256_file(&p).expect("direct hash 2");
+        assert_ne!(direct2, direct, "content changed");
+        assert_eq!(
+            sha256_file_cached(&p).expect("cached3"),
+            direct2,
+            "stale digest must never be served after a content change"
+        );
+
+        let _ = fs::remove_file(&sidecar);
+    }
+
+    #[test]
+    fn parse_sha256_sidecar_rejects_size_or_mtime_drift() {
+        let hex = "a".repeat(64);
+        let line = format!("{hex} 100 200");
+        assert_eq!(parse_sha256_sidecar(&line, 100, 200), Some(hex.clone()));
+        assert_eq!(parse_sha256_sidecar(&line, 101, 200), None, "size drift");
+        assert_eq!(parse_sha256_sidecar(&line, 100, 201), None, "mtime drift");
+        assert_eq!(parse_sha256_sidecar("garbage", 100, 200), None);
+        assert_eq!(
+            parse_sha256_sidecar("short 100 200", 100, 200),
+            None,
+            "non-64-char digest rejected"
+        );
+    }
 
     fn sample_manifest() -> SignedManifest {
         SignedManifest {

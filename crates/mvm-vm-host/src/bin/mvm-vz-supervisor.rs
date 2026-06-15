@@ -172,21 +172,48 @@ fn main() -> anyhow::Result<()> {
             tokio::spawn(async move { s.wait().await })
         };
 
-        // Race the guest's terminal transition against a stop signal. A signal
-        // requests a graceful shutdown and keeps waiting — the guest still
-        // drives the exit code via the delegate.
-        let code = loop {
-            tokio::select! {
-                joined = &mut waiter => {
-                    break joined.context("supervisor wait task panicked")??;
+        // Race the guest's own terminal transition against a stop signal. On a
+        // signal we ask for a graceful ACPI stop, then escalate to a forced
+        // stop if the guest doesn't honor it within a short grace. Without the
+        // escalation a guest that ignores ACPI (e.g. a minimal headless image
+        // with no power-button handler) leaves `wait()` — and the caller's
+        // `down` — hanging until an external SIGKILL.
+        use std::time::Duration;
+        // Ceiling on the graceful ACPI window before we force-stop. A guest
+        // that honors ACPI returns the instant it stops (this is a ceiling,
+        // not a floor); a headless image with no power-button handler never
+        // moves, so keep it short so `down` stays well under a second. Tunable.
+        const STOP_GRACE: Duration = Duration::from_millis(250);
+        let code = tokio::select! {
+            joined = &mut waiter => joined.context("supervisor wait task panicked")??,
+            _ = async {
+                tokio::select! {
+                    _ = sigterm.recv() => {}
+                    _ = sigint.recv() => {}
                 }
-                _ = sigterm.recv() => {
-                    tracing::info!("SIGTERM received — requesting graceful guest stop");
-                    let _ = supervisor.request_stop().await;
-                }
-                _ = sigint.recv() => {
-                    tracing::info!("SIGINT received — requesting graceful guest stop");
-                    let _ = supervisor.request_stop().await;
+            } => {
+                tracing::info!("stop signal received — requesting graceful guest stop");
+                let _ = supervisor.request_stop().await;
+                match tokio::time::timeout(STOP_GRACE, &mut waiter).await {
+                    Ok(joined) => joined.context("supervisor wait task panicked")??,
+                    Err(_) => {
+                        tracing::info!(
+                            "guest did not honor ACPI stop within {STOP_GRACE:?} — forcing stop"
+                        );
+                        // A forced stop fires no `guestDidStop` delegate
+                        // callback, so `waiter` would hang here — the
+                        // `stopWithCompletionHandler` completion returning IS
+                        // the "stopped" signal. Bound it so a wedged framework
+                        // can't hold the process open; the subsequent
+                        // `shutdown()` + process exit tears the VM down anyway.
+                        if let Err(e) =
+                            tokio::time::timeout(Duration::from_millis(500), supervisor.force_stop())
+                                .await
+                        {
+                            tracing::warn!(error = %e, "forced stop did not complete in time");
+                        }
+                        0
+                    }
                 }
             }
         };

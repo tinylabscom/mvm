@@ -254,12 +254,17 @@ pub(super) fn admit_plan_for_boot(
     }
     let sha = match p.precomputed_image_sha256 {
         Some(sha) => sha,
-        None => mvm_core::crypto::image_verify::sha256_file(p.rootfs_path).with_context(|| {
-            format!(
-                "hashing rootfs at {} for plan admission",
-                p.rootfs_path.display()
-            )
-        })?,
+        // Cached on a `<rootfs>.sha256cache` sidecar keyed on size+mtime: the
+        // rootfs is immutable across boots of the same image, so re-hashing
+        // ~100MB every `up` is the single biggest cost left on the boot path.
+        None => mvm_core::crypto::image_verify::sha256_file_cached(p.rootfs_path).with_context(
+            || {
+                format!(
+                    "hashing rootfs at {} for plan admission",
+                    p.rootfs_path.display()
+                )
+            },
+        )?,
     };
 
     // Claim 9 — bundle pin (when supplied).

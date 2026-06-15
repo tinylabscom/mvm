@@ -1157,6 +1157,33 @@ impl VzSupervisor {
             .await?
     }
 
+    /// Force an immediate guest stop — the framework's hard stop, akin to
+    /// cutting power. Escalation for when a graceful [`request_stop`] ACPI
+    /// request goes unanswered, so a guest that ignores ACPI doesn't leave
+    /// `wait()` (and the caller's `down`) hanging until an external SIGKILL.
+    /// Guarded on `canStop`: a VM already transitioning to a terminal state
+    /// can't be stopped again, so we resolve cleanly rather than message it.
+    ///
+    /// [`request_stop`]: Self::request_stop
+    pub async fn force_stop(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let handle = Arc::clone(&self.handle);
+        self.queue
+            .dispatch(move || {
+                // SAFETY: `canStop` + `stopWithCompletionHandler` are
+                // queue-bound; the dispatch runs this on the VM's own queue.
+                if unsafe { handle.vm.canStop() } {
+                    let block = completion_block(tx);
+                    unsafe { handle.vm.stopWithCompletionHandler(&block) };
+                } else {
+                    let _ = tx.send(Ok(()));
+                }
+            })
+            .await?;
+        rx.await
+            .map_err(|_| anyhow!("stop completion handler was never called"))?
+    }
+
     /// Block until the guest reaches a terminal state. Returns the captured
     /// one-shot workload exit code if the guest reported one over the exit port
     /// (the guest acks that report before powering off, so it is durably set by
