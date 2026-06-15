@@ -1016,40 +1016,30 @@ fn cmd_console(args: ConsoleArgs) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Same env-var serialization as the on-disk store tests in mvm-core.
-    /// Two tests in this module mutate `MVM_RUNTIME_DIR`; the lock keeps
-    /// them from racing each other.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use mvm_core::util::test_env::TestEnv;
 
     struct RuntimeDirGuard {
         _temp: tempfile::TempDir,
-        _lock: std::sync::MutexGuard<'static, ()>,
-        prev: Option<String>,
+        env: TestEnv,
     }
 
-    impl Drop for RuntimeDirGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match self.prev.take() {
-                    Some(prev) => std::env::set_var("MVM_RUNTIME_DIR", prev),
-                    None => std::env::remove_var("MVM_RUNTIME_DIR"),
-                }
-            }
+    impl RuntimeDirGuard {
+        /// Set an additional env var on this guard's `TestEnv`. Tests that
+        /// already hold the guard must mutate through it rather than create a
+        /// second `TestEnv`, which would deadlock on the shared env lock.
+        fn set(&mut self, key: &str, value: &str) {
+            self.env.set(key, value);
         }
     }
 
     fn isolated_runtime_dir() -> RuntimeDirGuard {
-        let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let temp = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var("MVM_RUNTIME_DIR").ok();
-        unsafe {
-            std::env::set_var("MVM_RUNTIME_DIR", temp.path());
-        }
-        RuntimeDirGuard {
-            _temp: temp,
-            _lock: lock,
-            prev,
-        }
+        // `TestEnv` serializes env-mutating tests behind a process-wide lock
+        // and restores `MVM_RUNTIME_DIR` (and anything else set via the guard)
+        // on drop.
+        let mut env = TestEnv::new();
+        env.set("MVM_RUNTIME_DIR", temp.path());
+        RuntimeDirGuard { _temp: temp, env }
     }
 
     #[test]
@@ -1161,22 +1151,13 @@ mod tests {
         // Records written before the field existed have
         // creator_pid=0; the gate is implicitly disabled for them
         // even when the env var is set, so old records keep working.
-        let _guard = isolated_runtime_dir();
+        let mut guard = isolated_runtime_dir();
         let mut rec = session::SessionRecord::new_running("vm-1", "wl", session::SessionMode::Prod);
         rec.creator_pid = 0;
         let id = rec.id.clone();
 
-        let prev = std::env::var(session::STRICT_CREATOR_PID_ENV).ok();
-        unsafe {
-            std::env::set_var(session::STRICT_CREATOR_PID_ENV, "1");
-        }
+        guard.set(session::STRICT_CREATOR_PID_ENV, "1");
         let result = enforce_creator_pid_gate(&id, &rec);
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var(session::STRICT_CREATOR_PID_ENV, v),
-                None => std::env::remove_var(session::STRICT_CREATOR_PID_ENV),
-            }
-        }
         result.expect("creator_pid=0 records bypass the gate");
     }
 
@@ -1184,22 +1165,13 @@ mod tests {
     fn creator_pid_gate_rejects_different_pid_when_enabled() {
         // With the env var on AND a non-zero creator_pid that
         // differs from the caller's, the gate must refuse.
-        let _guard = isolated_runtime_dir();
+        let mut guard = isolated_runtime_dir();
         let mut rec = session::SessionRecord::new_running("vm-1", "wl", session::SessionMode::Prod);
         rec.creator_pid = std::process::id().wrapping_add(1); // definitely not us
         let id = rec.id.clone();
 
-        let prev = std::env::var(session::STRICT_CREATOR_PID_ENV).ok();
-        unsafe {
-            std::env::set_var(session::STRICT_CREATOR_PID_ENV, "1");
-        }
+        guard.set(session::STRICT_CREATOR_PID_ENV, "1");
         let result = enforce_creator_pid_gate(&id, &rec);
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var(session::STRICT_CREATOR_PID_ENV, v),
-                None => std::env::remove_var(session::STRICT_CREATOR_PID_ENV),
-            }
-        }
         let err = result.expect_err("different PID should be refused");
         assert!(
             err.to_string().contains("created by pid"),
@@ -1210,23 +1182,14 @@ mod tests {
     #[test]
     fn creator_pid_gate_accepts_same_pid_when_enabled() {
         // The common case: caller IS the creator. Gate accepts.
-        let _guard = isolated_runtime_dir();
+        let mut guard = isolated_runtime_dir();
         let rec = session::SessionRecord::new_running("vm-1", "wl", session::SessionMode::Prod);
         // `new_running` captures std::process::id() into creator_pid,
         // so the caller (this test) is by construction the creator.
         let id = rec.id.clone();
 
-        let prev = std::env::var(session::STRICT_CREATOR_PID_ENV).ok();
-        unsafe {
-            std::env::set_var(session::STRICT_CREATOR_PID_ENV, "1");
-        }
+        guard.set(session::STRICT_CREATOR_PID_ENV, "1");
         let result = enforce_creator_pid_gate(&id, &rec);
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var(session::STRICT_CREATOR_PID_ENV, v),
-                None => std::env::remove_var(session::STRICT_CREATOR_PID_ENV),
-            }
-        }
         result.expect("same-pid call should pass the gate");
     }
 

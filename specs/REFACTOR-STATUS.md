@@ -379,13 +379,14 @@ PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
       `libkrun-sys` `gvproxy`/`passt` (PATH + MVM_GATEWAY_BIN tests; deleted the
       crate-wide `TEST_ENV_LOCK`, added the mvm-core `test-support` dev-dep;
       lock-only reap tests keep a bare `TestEnv` guard)
-  [~] `mvm-cli` batch (in progress): `env/artifact_verify` (ENV_LOCK) +
-      `build/sandbox_record` (TsxGuard/ENV_LOCK) migrated. Remaining mvm-cli:
-      `vm/session` (RuntimeDirGuard — note: tests holding the guard + mutating a
-      2nd var need a guard-set helper, not a nested `TestEnv::new()` which would
-      deadlock on the shared lock), `vm/up`, `doctor`, `template_cmd`,
-      `vm/tenant_resolution`, `ops/mcp` (unique-name tests), `commands/mod`,
-      `build/build`
+  [~] `mvm-cli` batch (in progress): `env/artifact_verify` (ENV_LOCK),
+      `build/sandbox_record` (TsxGuard/ENV_LOCK), `vm/session`
+      (RuntimeDirGuard/ENV_LOCK — added a `RuntimeDirGuard::set` helper so the
+      guard-holding creator-pid tests mutate a 2nd var without a deadlocking
+      nested `TestEnv::new()`), and `vm/up` (LOCK; `resolve_vz_workload_kernel`
+      MVM_CACHE_DIR tests) migrated. Remaining mvm-cli: `doctor`, `template_cmd`
+      (each a holdout lock), `vm/tenant_resolution`, `ops/mcp` (unique-name
+      tests — consistency-only), `commands/mod`, `build/build`
   [ ] `mvm-backend` env tests (host-gated: its test bin SIGKILLs under macOS
       amfid — migrate where CI/Linux runs them)
   [ ] Standardize poisoned-lock handling by distinguishing test/global
