@@ -293,6 +293,17 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                             redaction: mvm_core::policy::RedactionPolicy::default(),
                         })?;
                         let Some(c) = ctx else { return Ok(None) };
+                        // Persist the bare admitted plan to the per-VM state dir
+                        // before boot. The macOS substitution endpoint decodes
+                        // its secret bindings from `<state_dir>/plan.json` inside
+                        // `backend.start()`; `boot_session_vm` only threads the
+                        // plan in-memory, so without this on-disk copy the
+                        // endpoint silently no-ops on vz/libkrun (the in-memory
+                        // thread alone never reaches the disk-reading decode).
+                        if super::up::persists_plan_before_start(&backend_name) {
+                            super::plan_persist::write_plan(vm_name, &c.admitted.plan)
+                                .context("persisting admitted plan for the pre-start egress moat")?;
+                        }
                         let plan_json = serde_json::to_string(&c.admitted.signed)
                             .context("serializing admitted plan for the session VM")?;
                         Ok(Some(crate::exec::SessionAuditSubstrate {

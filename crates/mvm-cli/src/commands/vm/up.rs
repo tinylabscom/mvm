@@ -679,7 +679,7 @@ fn should_thread_signed_plan(gateway_bridge_enabled: bool, hypervisor: &str) -> 
 ///
 /// QEMU is excluded: it reads the in-memory config and must not overwrite the
 /// persisted plan.
-fn persists_plan_before_start(hypervisor: &str) -> bool {
+pub(super) fn persists_plan_before_start(hypervisor: &str) -> bool {
     matches!(hypervisor, "firecracker" | "vz" | "libkrun")
 }
 
