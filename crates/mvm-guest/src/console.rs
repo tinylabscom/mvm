@@ -61,7 +61,7 @@ unsafe extern "C" {
     ) -> i32;
     fn setsid() -> i32;
     fn dup2(oldfd: i32, newfd: i32) -> i32;
-    fn execvp(file: *const u8, argv: *const *const u8) -> i32;
+    fn execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32;
     fn fork() -> i32;
     fn close(fd: i32) -> i32;
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
@@ -129,7 +129,9 @@ pub fn open_session(cols: u16, rows: u16) -> Result<ConsoleSession, ConsoleError
     let mut master_fd: i32 = -1;
     let mut slave_fd: i32 = -1;
 
-    // SAFETY: openpty with valid pointers
+    // SAFETY: `master_fd`/`slave_fd` are live `i32` out-params openpty fills;
+    // `name`/`termp` may be NULL (we want defaults), and `&ws` is a valid
+    // `Winsize` read for the initial window size.
     let rc = unsafe {
         openpty(
             &mut master_fd,
@@ -144,9 +146,22 @@ pub fn open_session(cols: u16, rows: u16) -> Result<ConsoleSession, ConsoleError
         return Err(ConsoleError::OpenPtyFailed);
     }
 
-    // SAFETY: fork()
+    // Assemble the child's environment block *before* forking. The guest
+    // agent is multithreaded by the time it serves a ConsoleOpen request
+    // (monitoring, probe, integration, and forward-proxy threads are all
+    // live), so the post-fork child may call only async-signal-safe
+    // functions. `putenv`/`execvp` can `malloc` — if another thread held the
+    // allocator lock at fork time the child would deadlock — so we build a
+    // fixed `envp` here and hand it to `execve` (async-signal-safe) instead.
+    let shell_env = build_shell_env();
+    let mut envp: Vec<*const u8> = shell_env.iter().map(|c| c.as_ptr().cast::<u8>()).collect();
+    envp.push(std::ptr::null());
+
+    // SAFETY: fork() takes no arguments and has no preconditions; it returns
+    // twice (0 in the child, the child pid in the parent).
     let pid = unsafe { fork() };
     if pid < 0 {
+        // SAFETY: both fds were just returned valid by openpty.
         unsafe {
             close(master_fd);
             close(slave_fd);
@@ -156,11 +171,21 @@ pub fn open_session(cols: u16, rows: u16) -> Result<ConsoleSession, ConsoleError
     }
 
     if pid == 0 {
-        // Child process — attach to PTY slave and exec shell
+        // Child process — attach to the PTY slave and exec the shell. Only
+        // async-signal-safe calls are permitted here (see the env note
+        // above): close/setsid/dup2/chdir/execve all qualify; the prior
+        // putenv/execvp path did not.
+        //
+        // SAFETY: `slave_fd`/`master_fd` are valid fds from openpty; dup2's
+        // target fds 0/1/2 are always valid; `argv` and `envp` are
+        // NUL-/NULL-terminated arrays whose backing storage (`shell_env`,
+        // the byte literals) was allocated in the parent before the fork and
+        // is unmodified in the child's copy-on-write image. `execve` replaces
+        // the process image and only returns on error.
         unsafe {
             close(master_fd);
             setsid();
-            // Redirect stdin/stdout/stderr to the PTY slave
+            // Redirect stdin/stdout/stderr to the PTY slave.
             dup2(slave_fd, 0);
             dup2(slave_fd, 1);
             dup2(slave_fd, 2);
@@ -168,27 +193,24 @@ pub fn open_session(cols: u16, rows: u16) -> Result<ConsoleSession, ConsoleError
                 close(slave_fd);
             }
 
-            // Set environment variables
-            let term = b"TERM=xterm-256color\0";
-            libc_putenv(term.as_ptr());
-            let home = b"HOME=/root\0";
-            libc_putenv(home.as_ptr());
-
-            // Start in $HOME
+            // Start in $HOME.
             let _ = chdir(c"/root".as_ptr().cast());
 
-            // Exec /bin/sh
+            // Exec /bin/sh with the prepared environment. The path is
+            // absolute, so there is no PATH search (and thus no execvp
+            // allocation) to perform.
             let shell = b"/bin/sh\0";
             let dash_i = b"-i\0";
             let argv: [*const u8; 3] = [shell.as_ptr(), dash_i.as_ptr(), std::ptr::null()];
-            execvp(shell.as_ptr(), argv.as_ptr());
+            execve(shell.as_ptr(), argv.as_ptr(), envp.as_ptr());
 
-            // execvp only returns on error
             std::process::exit(127);
         }
     }
 
-    // Parent — close slave fd, store master fd for resize
+    // Parent — close slave fd, store master fd for resize.
+    // SAFETY: `slave_fd` is the valid fd from openpty; the child has its own
+    // copy, so closing the parent's does not affect it.
     unsafe {
         close(slave_fd);
     }
@@ -223,7 +245,8 @@ pub fn resize_pty(master_fd: RawFd, cols: u16, rows: u16) {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    // SAFETY: ioctl with valid fd and pointer
+    // SAFETY: `master_fd` is a PTY master fd; TIOCSWINSZ reads one `Winsize`
+    // through the `&ws` pointer, which is a live, aligned `Winsize`.
     unsafe {
         ioctl(master_fd, TIOCSWINSZ, &ws);
     }
@@ -231,16 +254,22 @@ pub fn resize_pty(master_fd: RawFd, cols: u16, rows: u16) {
 
 /// Close a console session — kill the shell and clean up.
 pub fn close_session(session: &ConsoleSession) -> i32 {
-    // Kill the shell process
+    // Kill the shell process.
+    // SAFETY: `child_pid` is the pid open_session forked; kill takes no
+    // pointers. A stale pid at worst returns ESRCH, which we ignore.
     unsafe {
         kill(session.child_pid, SIGTERM);
     }
 
-    // Wait for it to exit
+    // Wait for it to exit.
     let mut status: i32 = 0;
+    // SAFETY: `status` is a live `i32` out-param waitpid writes the exit
+    // status into; `child_pid` is the forked child.
     let _ = unsafe { waitpid(session.child_pid, &mut status, 0) };
 
-    // Close the master fd
+    // Close the master fd.
+    // SAFETY: `master_fd` is the PTY master openpty returned and that no
+    // owning `File` has taken over in this path.
     unsafe {
         close(session.master_fd);
     }
@@ -264,7 +293,8 @@ pub fn close_session(session: &ConsoleSession) -> i32 {
 ///
 /// Returns the shell exit code.
 pub fn run_console_relay(session: &ConsoleSession) -> i32 {
-    // Bind vsock listener on data_port
+    // Bind vsock listener on data_port.
+    // SAFETY: socket takes only integer arguments and returns a fd or -1.
     let listen_fd = unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) };
     if listen_fd < 0 {
         eprintln!("console: failed to create vsock socket");
@@ -279,6 +309,8 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
         svm_zero: [0; 4],
     };
 
+    // SAFETY: `listen_fd` is the socket just created; `addr` points to the
+    // live `SockAddrVm` and the length matches its size.
     let rc = unsafe {
         bind(
             listen_fd,
@@ -288,17 +320,20 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
     };
     if rc != 0 {
         eprintln!("console: failed to bind vsock port {}", session.data_port);
+        // SAFETY: `listen_fd` is the open socket; no owning wrapper holds it.
         unsafe {
             close(listen_fd);
         }
         return close_session(session);
     }
 
+    // SAFETY: `listen_fd` is the bound socket fd; listen takes no pointers.
     if unsafe { listen(listen_fd, 1) } != 0 {
         eprintln!(
             "console: failed to listen on vsock port {}",
             session.data_port
         );
+        // SAFETY: `listen_fd` is the open socket; no owning wrapper holds it.
         unsafe {
             close(listen_fd);
         }
@@ -310,11 +345,15 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
         session.data_port
     );
 
-    // Accept one connection
+    // Accept one connection.
+    // SAFETY: `listen_fd` is the listening socket; NULL addr/len out-params
+    // are allowed when the peer address is not needed.
     let conn_fd = unsafe { accept(listen_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+    // SAFETY: `listen_fd` is the open listening socket; no owning wrapper
+    // holds it. Closing it stops further connections.
     unsafe {
         close(listen_fd);
-    } // Don't accept more connections
+    }
     if conn_fd < 0 {
         eprintln!("console: accept failed");
         return close_session(session);
@@ -327,7 +366,8 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
     let master_fd = session.master_fd;
     let child_pid = session.child_pid;
 
-    // SAFETY: valid fd from accept
+    // SAFETY: `conn_fd` is the connected socket accept just returned; we
+    // transfer sole ownership of it to this UnixStream.
     let mut vsock_read = unsafe { std::os::unix::net::UnixStream::from_raw_fd(conn_fd as RawFd) };
     let Ok(mut vsock_write) = vsock_read.try_clone() else {
         eprintln!("console: failed to clone vsock stream");
@@ -338,7 +378,8 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
     let idle_timeout = std::time::Duration::from_secs(15 * 60);
     let _ = vsock_read.set_read_timeout(Some(idle_timeout));
 
-    // SAFETY: valid fd from openpty
+    // SAFETY: `master_fd` is the PTY master from openpty; we transfer sole
+    // ownership of it to this File.
     let mut pty_read = unsafe { std::fs::File::from_raw_fd(master_fd) };
     let Ok(mut pty_write) = pty_read.try_clone() else {
         eprintln!("console: failed to clone PTY fd");
@@ -400,13 +441,18 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
     // Wait for PTY output to end (shell exited), then shut down the vsock
     // so the host sees EOF and h1 stops waiting for input.
     let _ = h2.join();
+    // SAFETY: `conn_fd` is still open — the UnixStream that owns it lives in
+    // the `h1` thread, which has not yet returned. shutdown only wakes its
+    // blocked read; closing remains the stream's job on drop.
     unsafe {
         shutdown(conn_fd, SHUT_RDWR);
     }
     let _ = h1.join();
 
-    // Wait for child and get exit code
+    // Wait for child and get exit code.
     let mut status: i32 = 0;
+    // SAFETY: `child_pid` is the forked shell; `status` is a live `i32`
+    // out-param waitpid writes into. kill takes no pointers.
     unsafe {
         kill(child_pid, SIGTERM);
         waitpid(child_pid, &mut status, 0);
@@ -429,17 +475,48 @@ pub fn is_active() -> bool {
     CONSOLE_ACTIVE.load(Ordering::SeqCst)
 }
 
-// FFI for putenv / chdir / shutdown
+// FFI for chdir / shutdown
 unsafe extern "C" {
-    fn putenv(string: *const u8) -> i32;
     fn chdir(path: *const u8) -> i32;
     fn shutdown(sockfd: i32, how: i32) -> i32;
 }
 
 const SHUT_RDWR: i32 = 2;
 
-unsafe fn libc_putenv(s: *const u8) {
-    unsafe { putenv(s) };
+/// Build the shell's environment block as owned NUL-terminated C strings,
+/// inheriting the agent's current environment but overriding `HOME` and
+/// `TERM`. Constructed in the parent before `fork()` so the post-fork child
+/// can `execve` a fixed array without any allocation (see the async-signal
+/// safety note in `open_session`).
+fn build_shell_env() -> Vec<std::ffi::CString> {
+    build_shell_env_from(std::env::vars_os())
+}
+
+/// Pure core of [`build_shell_env`], parameterized over the source vars so it
+/// is testable without mutating process-global state.
+fn build_shell_env_from<I>(vars: I) -> Vec<std::ffi::CString>
+where
+    I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+{
+    use std::os::unix::ffi::OsStrExt;
+    let mut env: Vec<std::ffi::CString> = Vec::new();
+    for (key, val) in vars {
+        // HOME/TERM are forced below; drop any inherited copy so the shell
+        // sees exactly one of each.
+        if key == "HOME" || key == "TERM" {
+            continue;
+        }
+        let mut kv = key.as_bytes().to_vec();
+        kv.push(b'=');
+        kv.extend_from_slice(val.as_bytes());
+        // Skip any var carrying an interior NUL — it can't cross the C ABI.
+        if let Ok(c) = std::ffi::CString::new(kv) {
+            env.push(c);
+        }
+    }
+    env.push(std::ffi::CString::new("HOME=/root").expect("no interior NUL"));
+    env.push(std::ffi::CString::new("TERM=xterm-256color").expect("no interior NUL"));
+    env
 }
 
 #[cfg(test)]
@@ -463,6 +540,43 @@ mod tests {
             ConsoleError::BindFailed(20001).to_string(),
             "failed to bind vsock port 20001"
         );
+    }
+
+    fn oss(s: &str) -> std::ffi::OsString {
+        std::ffi::OsString::from(s)
+    }
+
+    #[test]
+    fn build_shell_env_overrides_home_and_term() {
+        // Inherited HOME/TERM are dropped; the forced values are appended once.
+        let out = build_shell_env_from([
+            (oss("HOME"), oss("/somewhere/else")),
+            (oss("TERM"), oss("dumb")),
+            (oss("PATH"), oss("/usr/bin")),
+        ]);
+        let strs: Vec<&str> = out.iter().filter_map(|c| c.to_str().ok()).collect();
+        assert!(
+            strs.contains(&"PATH=/usr/bin"),
+            "inherited PATH kept: {strs:?}"
+        );
+        assert_eq!(strs.iter().filter(|s| s.starts_with("HOME=")).count(), 1);
+        assert_eq!(strs.iter().filter(|s| s.starts_with("TERM=")).count(), 1);
+        assert!(strs.contains(&"HOME=/root"), "{strs:?}");
+        assert!(strs.contains(&"TERM=xterm-256color"), "{strs:?}");
+        assert!(!strs.contains(&"HOME=/somewhere/else"));
+    }
+
+    #[test]
+    fn build_shell_env_skips_interior_nul_vars() {
+        use std::os::unix::ffi::OsStringExt;
+        // A value with an embedded NUL can't cross the C ABI — it's dropped,
+        // but the forced HOME/TERM still come through.
+        let bad = std::ffi::OsString::from_vec(b"a\0b".to_vec());
+        let out = build_shell_env_from([(oss("WEIRD"), bad)]);
+        let strs: Vec<&str> = out.iter().filter_map(|c| c.to_str().ok()).collect();
+        assert!(!strs.iter().any(|s| s.starts_with("WEIRD=")), "{strs:?}");
+        assert!(strs.contains(&"HOME=/root"));
+        assert!(strs.contains(&"TERM=xterm-256color"));
     }
 
     #[test]
