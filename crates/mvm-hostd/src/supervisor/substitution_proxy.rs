@@ -886,11 +886,13 @@ impl SubstitutionService {
             let mut carried = false;
             let outcome = tls::terminate_and_substitute(
                 std_stream,
-                config,
-                orig_dst,
-                &endpoint,
-                &redactor,
-                &action,
+                tls::TlsTermination::builder()
+                    .with_config(config)
+                    .with_orig_dst(orig_dst)
+                    .with_endpoint(&endpoint)
+                    .with_redactor(&redactor)
+                    .with_action(&action)
+                    .build(),
                 &mut carried,
                 |prepared| {
                     // The upstream leg reuses the hardened reqwest forwarder (TLS
