@@ -1172,24 +1172,18 @@ mod tests {
     // ----- Local-LLM probe tests ---------------------------
     //
     // These tests mutate process-global env vars (MVM_TEMPLATE_*,
-    // OPENAI_API_KEY) so they must serialize via probe_test_lock().
-    // Each test exercises multiple phases inside one #[test] body so
-    // env-state transitions are explicit instead of relying on cargo's
-    // parallel scheduler.
+    // OPENAI_API_KEY); the shared `TestEnv` guard serializes them and
+    // restores the prior values on drop. Each test exercises multiple
+    // phases inside one #[test] body so env-state transitions are explicit.
 
     use super::{
         LlmProvider, llm_generation_config_from_env, local_generation_config_with_probe,
         probe_local_openai_endpoint,
     };
+    use mvm_core::util::test_env::TestEnv;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::{Mutex, OnceLock};
     use std::thread;
-
-    fn probe_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     /// Spawn a one-shot TCP server that responds to a single HTTP request
     /// with `200 OK` and the given JSON body. Returns the bound `host:port`.
@@ -1212,49 +1206,45 @@ mod tests {
         addr
     }
 
-    /// Restore env vars to a known baseline before/after each probe scenario.
-    fn clear_llm_env() {
-        // SAFETY: tests serialize via probe_test_lock(); the process is
-        // single-threaded with respect to env access while the lock is held.
-        unsafe {
-            std::env::remove_var("MVM_TEMPLATE_PROVIDER");
-            std::env::remove_var("MVM_TEMPLATE_LOCAL_BASE_URL");
-            std::env::remove_var("LOCALAI_BASE_URL");
-            std::env::remove_var("MVM_TEMPLATE_LOCAL_MODEL");
-            std::env::remove_var("LOCALAI_MODEL");
-            std::env::remove_var("MVM_TEMPLATE_LOCAL_API_KEY");
-            std::env::remove_var("LOCALAI_API_KEY");
-            std::env::remove_var("MVM_TEMPLATE_LOCAL_PROBE_TARGETS");
-            std::env::remove_var("MVM_TEMPLATE_NO_LOCAL_PROBE");
-            std::env::remove_var("OPENAI_API_KEY");
-            std::env::remove_var("MVM_TEMPLATE_OPENAI_BASE_URL");
-            std::env::remove_var("OPENAI_BASE_URL");
-            std::env::remove_var("MVM_TEMPLATE_OPENAI_MODEL");
+    /// Clear the LLM-related env vars on the test's `TestEnv` so each probe
+    /// scenario starts from a known baseline. The guard restores the prior
+    /// values on drop.
+    fn clear_llm_env(env: &mut TestEnv) {
+        for var in [
+            "MVM_TEMPLATE_PROVIDER",
+            "MVM_TEMPLATE_LOCAL_BASE_URL",
+            "LOCALAI_BASE_URL",
+            "MVM_TEMPLATE_LOCAL_MODEL",
+            "LOCALAI_MODEL",
+            "MVM_TEMPLATE_LOCAL_API_KEY",
+            "LOCALAI_API_KEY",
+            "MVM_TEMPLATE_LOCAL_PROBE_TARGETS",
+            "MVM_TEMPLATE_NO_LOCAL_PROBE",
+            "OPENAI_API_KEY",
+            "MVM_TEMPLATE_OPENAI_BASE_URL",
+            "OPENAI_BASE_URL",
+            "MVM_TEMPLATE_OPENAI_MODEL",
+        ] {
+            env.remove(var);
         }
     }
 
     #[test]
     fn test_local_probe_scenarios() {
-        let _guard = probe_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
 
         // Phase 1: probe target reachable → returns base_url; auto picks Local.
-        clear_llm_env();
+        clear_llm_env(&mut env);
         let addr = spawn_one_shot_http_ok(r#"{"data":[]}"#);
         let target = format!("http://{}", addr);
-        // SAFETY: serialised by probe_test_lock; see clear_llm_env doc.
-        unsafe {
-            std::env::set_var("MVM_TEMPLATE_LOCAL_PROBE_TARGETS", &target);
-        }
+        env.set("MVM_TEMPLATE_LOCAL_PROBE_TARGETS", &target);
         let probed = probe_local_openai_endpoint();
         assert_eq!(probed.as_deref(), Some(target.as_str()));
 
         // The one-shot server is consumed; respawn for the auto path.
         let addr2 = spawn_one_shot_http_ok(r#"{"data":[]}"#);
         let target2 = format!("http://{}", addr2);
-        // SAFETY: serialised by probe_test_lock.
-        unsafe {
-            std::env::set_var("MVM_TEMPLATE_LOCAL_PROBE_TARGETS", &target2);
-        }
+        env.set("MVM_TEMPLATE_LOCAL_PROBE_TARGETS", &target2);
         let cfg = llm_generation_config_from_env()
             .expect("auto with probe should not error")
             .expect("auto picks Local when probe succeeds");
@@ -1262,13 +1252,10 @@ mod tests {
         assert_eq!(cfg.base_url, target2);
 
         // Phase 2: probe targets unreachable → falls through to OpenAI.
-        clear_llm_env();
-        // SAFETY: serialised by probe_test_lock.
-        unsafe {
-            // Port 1 is privileged + nothing listens; near-instant ECONNREFUSED.
-            std::env::set_var("MVM_TEMPLATE_LOCAL_PROBE_TARGETS", "http://127.0.0.1:1");
-            std::env::set_var("OPENAI_API_KEY", "test-key-fallthrough");
-        }
+        clear_llm_env(&mut env);
+        // Port 1 is privileged + nothing listens; near-instant ECONNREFUSED.
+        env.set("MVM_TEMPLATE_LOCAL_PROBE_TARGETS", "http://127.0.0.1:1");
+        env.set("OPENAI_API_KEY", "test-key-fallthrough");
         let cfg = llm_generation_config_from_env()
             .expect("auto with no local should not error")
             .expect("auto falls through to OpenAI");
@@ -1276,14 +1263,11 @@ mod tests {
 
         // Phase 3: MVM_TEMPLATE_NO_LOCAL_PROBE=1 skips the probe even when
         // a target is reachable. Without OPENAI_API_KEY, auto returns None.
-        clear_llm_env();
+        clear_llm_env(&mut env);
         let addr3 = spawn_one_shot_http_ok(r#"{"data":[]}"#);
         let target3 = format!("http://{}", addr3);
-        // SAFETY: serialised by probe_test_lock.
-        unsafe {
-            std::env::set_var("MVM_TEMPLATE_LOCAL_PROBE_TARGETS", &target3);
-            std::env::set_var("MVM_TEMPLATE_NO_LOCAL_PROBE", "1");
-        }
+        env.set("MVM_TEMPLATE_LOCAL_PROBE_TARGETS", &target3);
+        env.set("MVM_TEMPLATE_NO_LOCAL_PROBE", "1");
         assert!(local_generation_config_with_probe().is_none());
         let cfg = llm_generation_config_from_env().expect("auto with no probe + no openai");
         assert!(
@@ -1292,32 +1276,26 @@ mod tests {
         );
 
         // Phase 4: explicit MVM_TEMPLATE_LOCAL_BASE_URL bypasses the probe.
-        clear_llm_env();
-        // SAFETY: serialised by probe_test_lock.
-        unsafe {
-            // Use a non-listening URL: env-driven path doesn't validate
-            // reachability, only the probe path does.
-            std::env::set_var("MVM_TEMPLATE_LOCAL_BASE_URL", "http://127.0.0.1:1");
-        }
+        clear_llm_env(&mut env);
+        // Use a non-listening URL: env-driven path doesn't validate
+        // reachability, only the probe path does.
+        env.set("MVM_TEMPLATE_LOCAL_BASE_URL", "http://127.0.0.1:1");
         let cfg =
             local_generation_config_with_probe().expect("env-driven local config skips probe");
         assert_eq!(cfg.provider, LlmProvider::Local);
         assert_eq!(cfg.base_url, "http://127.0.0.1:1");
 
-        clear_llm_env();
+        clear_llm_env(&mut env);
     }
 
     #[test]
     fn test_explicit_provider_modes_unchanged_by_probe() {
-        let _guard = probe_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
 
         // explicit "openai" without OPENAI_API_KEY errors; the probe path
         // is not consulted (would otherwise trigger when in `auto`).
-        clear_llm_env();
-        // SAFETY: serialised by probe_test_lock.
-        unsafe {
-            std::env::set_var("MVM_TEMPLATE_PROVIDER", "openai");
-        }
+        clear_llm_env(&mut env);
+        env.set("MVM_TEMPLATE_PROVIDER", "openai");
         let err = llm_generation_config_from_env().unwrap_err();
         assert!(
             format!("{err:#}").contains("OPENAI_API_KEY"),
@@ -1326,11 +1304,8 @@ mod tests {
 
         // explicit "local" without any base_url errors; the probe path
         // is not consulted in `local` mode either.
-        clear_llm_env();
-        // SAFETY: serialised by probe_test_lock.
-        unsafe {
-            std::env::set_var("MVM_TEMPLATE_PROVIDER", "local");
-        }
+        clear_llm_env(&mut env);
+        env.set("MVM_TEMPLATE_PROVIDER", "local");
         let err = llm_generation_config_from_env().unwrap_err();
         assert!(
             format!("{err:#}").contains("local model"),
@@ -1338,16 +1313,13 @@ mod tests {
         );
 
         // "heuristic" returns Ok(None) regardless of env state.
-        clear_llm_env();
-        // SAFETY: serialised by probe_test_lock.
-        unsafe {
-            std::env::set_var("MVM_TEMPLATE_PROVIDER", "heuristic");
-            std::env::set_var("OPENAI_API_KEY", "ignored");
-        }
+        clear_llm_env(&mut env);
+        env.set("MVM_TEMPLATE_PROVIDER", "heuristic");
+        env.set("OPENAI_API_KEY", "ignored");
         let cfg = llm_generation_config_from_env().expect("heuristic always Ok");
         assert!(cfg.is_none());
 
-        clear_llm_env();
+        clear_llm_env(&mut env);
     }
 
     // ---------------- next_steps_lines ----------------
