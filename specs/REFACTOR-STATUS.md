@@ -34,7 +34,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 177** — Backend consolidation (8→4) · ✅ both phases merged (#806/#789/#812/#814/#817); DX-parity → Plan 189; lone caveat = host-gated hardware smoke
 - [x] **PLAN 182** — Trait hygiene + backend catalog · ✅ DONE — Clock/KeyProvider unified, `backend_catalog!` single-source, doctor sourced from it, arch docs current (all via #802). The lone open box (literal `cargo test --workspace`) is closed as documented-environmental: package-by-package + `-E 'not package(mvm-backend)'` are green; the aggregate only SIGKILLs the `mvm-backend` unit-test bin via macOS amfid codesign on this host (CI runs it green)
 - [x] **PLAN 184** — Backend descriptor registry · ✅ DONE — catalog promoted to a `BackendDescriptor` registry (descriptor-named helpers); dual `instantiate`/`instantiate_dyn` constructors with dyn↔enum parity test; doctor migrated to `instantiate_dyn`; `AnyBackend` narrowed to enum-specific ops (no duplication remained); boundary + ordering-freeze tests; arch/supervisor docs describe the behavior/discovery/dispatch split
-- [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 TestEnv migration advancing: mvm-core (config/user_config/secret_binding + domain/session+template_tags) + mvm-hostd (reaper/substitution_endpoint) + mvm-build (runtime_overlay, libkrun_builder, builder_vm_runtime) + libkrun-sys (gvproxy/passt) now on TestEnv — **9 duplicate local test locks deleted** (`ENV_TEST_LOCK`, `env_test_mutex`, `ENV_LOCK`×2, `TIMEOUT_ENV_LOCK`, `GC_ENV_LOCK`, `DATA_DIR_LOCK`, `TEST_ENV_LOCK`, …); remaining: **mvm-cli** (last big batch) + mvm-backend (host-gated amfid SIGKILL — best on CI/Linux); then poison-lock policy + naming/typed-selector/unsafe-boundary phases
+- [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 Phases 1–3 DONE: Phase 1 TestEnv migration (mvm-core/mvm-hostd/mvm-build/libkrun-sys/**mvm-cli complete** — duplicate local env-test locks deleted; only host-gated mvm-backend env tests remain for CI/Linux); Phase 2 poison-lock policy decided + applied (env serializers folded into TestEnv, runtime state locks fail-closed); Phase 3 naming/typed-selectors COMPLETE (#892 `DeviceMapperBackend` + #894 `VmEgressProxy`/`SupervisorEgressProxy` + #895 typed `BackendKind` selectors). Remaining: Phase 4 function shape, Phase 5 unsafe/platform boundaries (~48 missing-SAFETY blocks in mvm-guest — correctness-heavy, own pass), Phase 6 error/fixtures/docs, Phase 7 closeout
 - [ ] **PLAN 189** — VZ DX parity (post-convergence) · 🟡 in progress — WS-3 `dev status --json` landed; remaining: save/restore verbs, cached fast-boot default, more --json coverage, base pinning (spun out of 177; sibling of 159)
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
@@ -404,14 +404,22 @@ PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
       `with_supervisor_env`) into TestEnv; audited runtime `.lock().unwrap()` sites
       as intentionally fail-closed. Remaining: `mvm-cli::dev_vz` (hot) + mvm-backend
       test locks (host-gated)
-  [~] Phase 3 (naming/typed-selectors): Task 4 Step 2 DONE — renamed
-      `storage::Backend` → `DeviceMapperBackend` (internal-only trait; CLI uses
-      `ThinPool`/`ThinPoolImpl`, not the trait; 3-file blast radius:
-      backend.rs/mod.rs/pool.rs; mvm lib+tests clippy clean, 14 storage tests
-      pass). Remaining: Step 3 (clarify the two layer-local `EgressProxy` traits)
-      + Task 5 (push stringly backend/provider selectors toward typed values)
-  [ ] Push stringly backend/provider selectors toward typed values at module
-      boundaries
+  [x] Phase 3 (naming/typed-selectors) COMPLETE — Task 4 + Task 5 merged:
+      • Task 4 renames: `storage::Backend` → `DeviceMapperBackend` (#892, models
+        dmsetup thin-pool ops; also fixed a missed mvm-cli call site) and the two
+        collided `EgressProxy` traits split by layer — runtime `VmEgressProxy` +
+        supervisor `SupervisorEgressProxy` (#894, 773 supervisor tests pass).
+      • Task 5 typed selectors: exposed `AnyBackend::kind()` `pub` and migrated
+        pool.rs `name() == "vz"` → `kind() == BackendKind::Vz`, dropping the
+        duplicated `"vz"||"virtualization"` alias literal the descriptor registry
+        already owns (#895). The typed foundation (BackendKind + catalog registry)
+        was already in place from Plan 184; network/storage `kind()` strings are a
+        deliberate open-registry extension point, left as-is. Deferred follow-up
+        (logged in the plan): the `&dyn VmBackend → &AnyBackend` signature ripple
+        for the `kernel_identity`/`image_identity` sites in the hot pool.rs.
+  [ ] Phase 4+ remain: function shape (Task 6/7), unsafe/platform boundaries
+      (Task 8/9 — ~48 missing-SAFETY blocks in mvm-guest alone; correctness-heavy,
+      own focused pass), error shapes/fixtures/docs (Task 10-13), closeout (Task 14)
   [ ] Audit long constructors, params structs, builders, and large functions
       only where the split adds testable structure
   [ ] Audit unsafe/platform/feature boundaries, standardize error shapes,
