@@ -1,15 +1,25 @@
 # Plan 97 — `Virtualization.framework` backend (`vz`)
 
-> **Status (2026-06-13): COMPLETE — see the "Closeout" section at the
-> end of this file.** All five phases (A/B/C/D/E) shipped and are
-> live-proven on macOS-26 Apple Silicon: build→admit→boot→run,
-> checkpoint/fork/warm pool, snapshot save/restore, pause/resume, and the
-> Rust-native objc2 supervisor (the Swift `mvm-vz-supervisor` crate was
-> deleted under the supervisor-rewrite work — the JSON config surface and
-> vsock bridges are unchanged). Claims 1–9 hold under vz. Egress secret
-> substitution (Plan 129) is a Linux-only feature; vz is at parity with
-> the macOS libkrun baseline and the macOS port is a tracked fast-follow,
-> not a closeout item.
+> **✅ CLOSED (2026-06-13): Vz at full macOS-libkrun parity.** The full
+> user stack composes on `--hypervisor vz`, live-proven on macOS-26
+> Apple Silicon: build→admit→boot→agent, checkpoint/fork/warm pool,
+> Rust-native supervisor (Swift deleted, Plan 152), deny-by-default
+> egress + chain-signed audit, `trust audit verify` (+ tamper→nonzero),
+> and `doctor` claims posture. The nine-claim table is reconciled below
+> (all inherit except claim 8, which shipped). The two macOS carve-outs
+> — secret substitution (claim 13) and dm-verity verified boot (claim 3)
+> — are absent on the macOS default (libkrun) identically and are shared
+> cross-backend follow-ups, not vz gaps. Phase C's "byte-identical hash"
+> acceptance is amended to functional parity (ext4 is non-deterministic).
+> See Sprint 55 close-out for the per-leg evidence trail.
+>
+> **Status (2026-05-22):** Phases A, B, D, E complete. Workload microVM
+> path is end-to-end functional on macOS 13+: `MVM_BACKEND=vz mvmctl
+> up` admits, builds the `SupervisorConfig`, spawns the codesigned
+> Swift supervisor, runs the VM, manages its PID/lifecycle, and
+> `mvmctl doctor` surfaces availability + supervisor-binary presence.
+> CI lane `vz-macos` matrices the build over macos-13 + macos-latest.
+> Rust supervisor-JSON fuzz target wired into `security.yml`.
 >
 > The banner below this line is historical (the original 2026-05-22
 > Swift-era status); the Closeout section is the current source of truth.
@@ -28,12 +38,12 @@ Top-level phases:
       bridges are unchanged. Live-proven 2026-06-12: first Vz workload
       boot with the guest agent reachable on vsock.*
 - [x] **Phase B** — `VzBackend` impl in `crates/mvm-backend/src/vz.rs`
-- [x] **Phase C** — Vz as a builder-VM backend. *Primitive
-      (`VzBackend::run_attached`) plus the full persistent driver
-      (`VzPersistentBuilderVm`) shipped: backend consolidation converged
-      `mvmctl dev` + `up -d` onto it, and a cold `dev up --builder vz`
-      built the image end-to-end (703 in-builder fetches, 0 resolve
-      failures, claim-11 gates green) on 2026-06-12.*
+- [x] **Phase C** — Vz as a builder-VM backend. `VzBuilderVm` impl of
+      `BuilderVm` shipped (`crates/mvm-build/src/vz_builder.rs`), mirroring
+      `LibkrunBuilderVm` against the shared `builder_vm_runtime` seam.
+      Acceptance amended from "byte-identical rootfs" to **functional
+      parity** (ext4 assembly is non-deterministic; same flake + same job
+      substrate is the bar) — see Sprint 55 success criteria.
 - [x] **Phase D** — ADR-056 lands + ADR-002 backend table update
 - [x] **Phase E** — Snapshot save/restore + pause/resume/balloon via
       supervisor control socket (macOS 14+ for SAVE).
@@ -745,25 +755,19 @@ appears on Linux hosts.
 | 2     | **Inherits** — guest-side, hypervisor-independent                        |
 | 3     | **Inherits** — dm-verity is kernel-side; `VZLinuxBootLoader` carries cmdline + roothash unchanged |
 | 4     | **Inherits** — guest-side                                                |
-| 5     | **DONE** — Rust `serde` strict struct (`deny_unknown_fields`) + cargo-fuzz target on the `SupervisorConfig` parser. The Swift `JSONDecoder` equivalence half is retired (Swift supervisor deleted): the Rust parser is the sole config surface and its fuzzer is the whole witness. |
+| 5     | **Inherits** — Rust `SupervisorConfig` serde parser (`deny_unknown_fields`), fuzzed by `crates/mvm-build/fuzz/fuzz_targets/fuzz_supervisor_config.rs`; same harness as the libkrun supervisor |
 | 6     | **Inherits** — host-side download path                                   |
-| 7     | **EXTENDS** — Swift binary reproducibly built, SPM `Package.resolved` pinned, no prebuilt download on contributor path |
+| 7     | **Inherits** — Vz supervisor is an ordinary workspace bin (`mvm-vm-host`), riding the cargo reproducibility double-build + `cargo-deny`/`cargo-audit` pipeline |
 | 8     | **NEW WORK** — `VzBackend::start_with_mode` through `admit_for_run`; fail-closed bypass test |
 | 9     | **Inherits** — `verify_sealed_volume` is hypervisor-agnostic             |
 
-Claims 5 and 8 were the "new code, new tests" items — both shipped (claim
-5 as the Rust `SupervisorConfig` fuzzer; claim 8 as `VzBackend::start*`
-routing through `admit_for_run`). Claim 7 extends an existing pipeline.
-Others come free with the backend abstraction.
-
-> **Egress secret substitution (Plan 129) is deliberately out of this
-> claim set.** It is a Linux-only feature today (Firecracker nft TAP
-> REDIRECT + QEMU slirp); neither macOS backend spawns the substitution
-> endpoint — **libkrun lacks it exactly as vz does**, so vz is at parity
-> with the macOS baseline. Porting it to macOS (a `Uds`-transport
-> endpoint bridged through the supervisor vsock hop, plus a gvproxy-level
-> :80/:443 terminator) is tracked as a fast-follow below, not a Sprint 55
-> closeout item.
+Reconciled 2026-06-13 (Swift deleted, Plan 152): all nine **inherit**
+except claim 8 (the only Vz-specific new code, and it shipped). Claims 5
+and 7 used to read "new/extends" because of the Swift supervisor — that
+binary is gone, so the strict-decoder fuzz and the reproducible-build /
+supply-chain coverage now collapse into the shared Rust pipeline. There
+is no Swift `JSONDecoder` to reach equivalence with and no separate SPM
+`Package.resolved` to pin.
 
 ## Additional considerations
 
