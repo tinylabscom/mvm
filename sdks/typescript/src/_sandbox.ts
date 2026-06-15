@@ -988,6 +988,13 @@ export class Sandbox {
   [Symbol.dispose](): void {
     this.kill();
   }
+
+  // `await using sb = Sandbox.create(...)` — the async-scope counterpart,
+  // mirroring Python's `async with`. (`await sb.exec(...)` already works:
+  // exec is synchronous, and awaiting a non-promise is a passthrough.)
+  async [Symbol.asyncDispose](): Promise<void> {
+    this.kill();
+  }
 }
 
 export class SandboxCommands {
