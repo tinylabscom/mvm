@@ -10,6 +10,12 @@
 
 **Prereqs:** None hard, but **126 is the primary size driver** — sequence 156 to re-measure after each 126 task (B1–B4, C1) lands. Coordinates with 127 (the dashboard reads `binary-size-baseline.md` alongside `dep-baseline.md`) and 128 (CI gate wiring).
 
+> **Priority update 2026-06-15:** Plan 200 adds the product requirement that the
+> default `mvmctl machine run --image ...` path stay lean. This plan still owns
+> binary-size measurement, release-profile tuning, and the binary-size CI gate
+> unless a successor replaces it. Do not create a second binary-size gate in
+> Plan 200; feed this gate with the default-machine-path budget.
+
 **Grounded findings (measured 2026-06-03):**
 - Root `[profile.release]` is **already size-conscious except `opt-level`**: `lto = true` (fat LTO), `codegen-units = 1`, `strip = true` (== `strip = "symbols"`) are all maxed. The one remaining profile lever is `opt-level = 3` → `"s"`/`"z"`.
 - **`panic = "abort"` is off the table for the shared profile.** `crates/mvm-supervisor/src/gateway_bridge.rs` isolates panicking audit observers via `catch_unwind` so siblings continue and chain-signing isn't disrupted (Plan 113 / ADR-064); `mvm-libkrun-supervisor` + `mvm-vz-drainer` mains rely on the bridge's `catch_unwind → exit(1)` fail-closed path. Cargo's `panic` setting is profile-wide (unlike `opt-level`, it has no per-package override), and those subprocess binaries share the workspace `[profile.release]`. A blanket `panic=abort` would break a security-isolation mechanism — record the investigation, do not flip it.

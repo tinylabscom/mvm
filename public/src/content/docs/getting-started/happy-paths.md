@@ -1,9 +1,9 @@
 ---
 title: First-Use Happy Paths
-description: Three-command paths to get a microVM running for each of mvm's five audiences.
+description: Three-command paths to get a microVM running for each mvm audience.
 ---
 
-mvm has five primary audiences. Each one has a **three-command happy
+mvm has six primary audiences. Each one has a **three-command happy
 path** that takes you from "I have a thing to run" to "it's running
 under mvm." Pair each path with `mvmctl doctor --workflow <name>` to
 preflight only the host requirements that matter for your audience —
@@ -11,6 +11,7 @@ nothing more, nothing less.
 
 | Audience | Preflight | What you're doing |
 |---|---|---|
+| [CLI user with an OCI image](#cli-image-user) | `--workflow cli-run` | Run a command in a transient image-backed microVM. |
 | [CLI user with a flake](#cli-user) | `--workflow cli-run` | Boot a microVM from a Nix flake. |
 | [Python SDK user](#python-sdk) | `--workflow python-sdk` | Run a `@mvm.app()`-decorated Python script. |
 | [TypeScript / Node SDK user](#typescript-sdk) | `--workflow typescript-sdk` | Run an `mvm.app()` TypeScript app. |
@@ -21,6 +22,32 @@ The preflight filter (plan 74 W5 / ADR-050 §1) only fails on missing
 prerequisites your workflow actually needs. A bundle operator no
 longer sees a "missing `cargo`" failure they don't care about; a
 `mvmctl dev` user no longer needs host rustup.
+
+## <a id="cli-image-user"></a>CLI user with an OCI image
+
+You have an OCI image reference and want to run one command in a fresh
+microVM without writing a flake or installing host Nix.
+
+```bash
+mvmctl doctor --workflow cli-run                # preflight
+mvmctl run --image alpine -- uname -a           # pull/cache, boot, run, tear down
+mvmctl image inspect alpine                     # inspect cached provenance
+```
+
+The first run may pull and materialize the image. Subsequent runs reuse the
+cache when the resolved image and policy inputs still match. Production image
+runs should use digest-pinned refs and the existing OCI policy verification
+path.
+
+**Failure recovery:**
+
+- `image verification failed` → use a digest-pinned image and configure the OCI
+  policy expected by your environment.
+- `host nix not required` errors → none expected. Image-backed one-shot runs do
+  not require host Nix.
+- Network failures from inside the guest → current one-shot image networking is
+  governed by the runtime network policy. The planned `machine` UX will expose
+  a simpler explicit `--net` / `--allow-host` surface.
 
 ## <a id="cli-user"></a>CLI user with a flake
 

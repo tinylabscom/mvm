@@ -12,6 +12,12 @@
 
 **Baseline (A1 DONE 2026-06-05, `main` @ `bb1cbcbe`):** default binary closure = **407** unique packages; full lockfile = **722**. Method + per-target table in `docs/investigations/dep-baseline.md`. **A1 corrected the Phase-B premises:** `sigstore` + `opendal` are already gated out of the default binary (no default-build cut left); the only default-closure targets are **`pgp` (168)** and **`aws-lc-rs` (16 + a C build)**; and `pgp` is Alpine-tarball verification, not release signing (B3 re-scoped). **Recommended order: B4 first** (cleanest default cut), then the B3 decision.
 
+> **Priority update 2026-06-15:** Plan 200 depends on this plan for the
+> mechanical default-closure cuts. Keep ownership here: `oci-client` replacement
+> / `reqwest` unification / `aws-lc-rs` removal are Plan 126 work, while Plan
+> 200 only sets the product requirement that the default `machine run --image`
+> path stay lean. Do not duplicate dependency measurement or gates in Plan 200.
+
 ---
 
 ## Phase A — re-baseline the methodology

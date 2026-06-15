@@ -12,6 +12,13 @@
 
 **Constraint:** no back-compat shims (first version — hard rename). The 52→nested move is a clean break; the most-used verbs stay reachable as real top-level entries, not alias stubs.
 
+> **Priority update 2026-06-15:** Plan 200 is now the product-facing beginner
+> CLI owner. Do not prioritize this plan's broad 52→nested CLI regrouping ahead
+> of `mvmctl machine run/create/start/exec/shell/stop/pack`. The completed
+> `Sandbox` work remains useful substrate; future SDK lifecycle work should
+> feed Plan 200's machine wrappers rather than create a competing beginner
+> vocabulary.
+
 ---
 
 ## Phase A — CLI: 52 flat verbs → `≤15` nested groups

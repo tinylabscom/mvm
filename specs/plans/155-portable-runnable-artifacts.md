@@ -4,6 +4,13 @@ Status: proposed (no code lands yet). Sequenced after Plan 120 `core_demo_e2e`
 green and the Plan 134 artifact-model slices, both of which this depends on for
 a working boot path and the typed artifact model.
 
+> **Priority update 2026-06-15:** Plan 200 now owns the product-facing portable
+> artifact UX: `mvmctl machine pack` and `mvmctl machine run <artifact>`. This
+> plan remains the lower-level verify-then-extract and admitted-boot
+> implementation reference. Do not ship a second beginner-facing artifact story;
+> if `artifact run` is implemented, document it as advanced/internal plumbing
+> behind the machine workflow.
+
 ## Goal
 
 Close the one missing leg in the `.mvm` packed-artifact story: **execution**.
