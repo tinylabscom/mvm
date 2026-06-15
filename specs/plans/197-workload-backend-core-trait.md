@@ -6,6 +6,11 @@
 (vz closeout), Plan 129 (egress secret substitution), Plan 177 / ADR-076
 (backend consolidation)
 
+> **Priority update 2026-06-15:** Plan 200's machine UX must launch through this
+> admitted workload-backend funnel. Do not add `machine run/start` paths that
+> talk directly to a backend and skip `WorkloadBackend`, substitution transport,
+> admission, audit, or policy visibility.
+
 ## Problem
 
 Egress secret substitution (Plan 129) shipped on Firecracker and QEMU but

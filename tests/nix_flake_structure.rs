@@ -24,6 +24,16 @@ fn nix_dir() -> PathBuf {
     PathBuf::from(manifest).join("nix")
 }
 
+fn repo_dir() -> PathBuf {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR is set by cargo for integration tests");
+    PathBuf::from(manifest)
+}
+
+fn normalized_whitespace(content: &str) -> String {
+    content.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[test]
 fn flake_nix_exists_and_imports_microvm_nix() {
     let path = nix_dir().join("flake.nix");
@@ -70,6 +80,211 @@ fn flake_nix_exists_and_imports_microvm_nix() {
         content.contains("internal-minimal"),
         "nix/flake.nix must expose internal fixtures under the \
          internal-* namespace; bare names suggest user-facing API"
+    );
+}
+
+#[test]
+fn flake_exposes_source_built_host_package_without_changing_mk_guest_contract() {
+    let path = nix_dir().join("flake.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("nix/flake.nix must be present: {e}"));
+
+    assert!(
+        content.contains("overlays.default"),
+        "nix/flake.nix must expose the source-built host package overlay"
+    );
+    assert!(
+        content.contains("hostSystems")
+            && content.contains("\"aarch64-darwin\"")
+            && content.contains("\"x86_64-linux\""),
+        "nix/flake.nix must separate host package systems from Linux-only image systems"
+    );
+    assert!(
+        content.contains("mvmctl = hostPackages.mvmctl")
+            && content.contains("default = hostPackages.mvmctl"),
+        "nix/flake.nix must expose packages.<system>.mvmctl and make it the default package"
+    );
+    assert!(
+        content.contains("lib = forAllSystems"),
+        "the user-facing mkGuest library must remain restricted to the Linux image systems"
+    );
+}
+
+#[test]
+fn host_mvmctl_package_is_source_only() {
+    let path = nix_dir().join("packages").join("mvmctl.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/packages/mvmctl.nix must be present: {e}"));
+
+    assert!(
+        content.contains("rustPlatform.buildRustPackage"),
+        "mvmctl package must build from source with rustPlatform.buildRustPackage"
+    );
+    assert!(
+        content.contains("src = mvmSrc")
+            && content.contains("cargoLock.lockFile = mvmSrc + \"/Cargo.lock\""),
+        "mvmctl package must use the source checkout and committed Cargo.lock"
+    );
+    assert!(
+        content.contains("\"--package\"") && content.contains("\"mvmctl\""),
+        "mvmctl package must explicitly build the root CLI package"
+    );
+
+    let forbidden = [
+        "fetchurl",
+        "fetchzip",
+        "releases/download",
+        "github.com/tinylabscom/mvm/releases",
+        "binaryNativeCode",
+    ];
+    for needle in forbidden {
+        assert!(
+            !content.contains(needle),
+            "nix/packages/mvmctl.nix must not use {needle:?}; host packages \
+             must be source-built rather than project-published binaries"
+        );
+    }
+}
+
+#[test]
+fn host_mvmctl_package_keeps_native_vmm_linkage_explicit() {
+    let path = nix_dir().join("packages").join("mvmctl.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/packages/mvmctl.nix must be present: {e}"));
+
+    assert!(
+        content.contains("withNativeLibkrun ? false"),
+        "native libkrun FFI must be opt-in in the host package"
+    );
+    assert!(
+        content.contains("assert withNativeLibkrun -> libkrun != null"),
+        "enabling native libkrun FFI must require an explicit Nix libkrun package"
+    );
+    assert!(
+        content.contains("assert withNativeLibkrun -> withBuilderVm")
+            && content.contains("\"mvmctl/builder-vm\""),
+        "feature flags must stay package-qualified when mvmctl and sidecars build together"
+    );
+    assert!(
+        content.contains("\"mvm-cli/libkrun-sys\"")
+            && content.contains("\"mvm-vm-host/libkrun-sys\""),
+        "the native libkrun feature must enable both CLI probing and the supervisor binary"
+    );
+    assert!(
+        content.contains("MVM_LIBKRUN_HEADER"),
+        "the Nix package must pass an explicit libkrun.h path to bindgen"
+    );
+}
+
+#[test]
+fn installation_docs_keep_host_nix_optional() {
+    let path = repo_dir()
+        .join("public")
+        .join("src")
+        .join("content")
+        .join("docs")
+        .join("getting-started")
+        .join("installation.md");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("installation guide must be present: {e}"));
+    let normalized = normalized_whitespace(&content);
+
+    assert!(
+        content.contains("## Optional Nix Package"),
+        "the Nix install path must be explicitly documented as optional"
+    );
+    assert!(
+        normalized.contains("mvm does not require Nix on the host for normal use")
+            && normalized.contains("You don't need Nix on the host"),
+        "installation docs must preserve the no-host-Nix default UX"
+    );
+    assert!(
+        content.contains("Linux image builds still\nrun inside the builder VM"),
+        "installation docs must keep Linux Nix work assigned to the builder VM"
+    );
+}
+
+#[test]
+fn installation_docs_keep_binary_install_primary() {
+    let path = repo_dir()
+        .join("public")
+        .join("src")
+        .join("content")
+        .join("docs")
+        .join("getting-started")
+        .join("installation.md");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("installation guide must be present: {e}"));
+    let normalized = normalized_whitespace(&content);
+
+    assert!(
+        content.contains("The default install model is binary-first"),
+        "installation docs must lead with the release-binary install model"
+    );
+    assert!(
+        content.contains("mvmctl run --image alpine -- uname -a"),
+        "installation docs must show the current image-backed one-shot path"
+    );
+    assert!(
+        normalized.contains("future package-manager expression installs release binaries")
+            && normalized.contains("separate from this source-built package"),
+        "installation docs must keep release-binary packaging separate from source-built Nix"
+    );
+}
+
+#[test]
+fn quickstart_docs_lead_with_image_backed_run() {
+    let path = repo_dir()
+        .join("public")
+        .join("src")
+        .join("content")
+        .join("docs")
+        .join("getting-started")
+        .join("quickstart.md");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("quickstart must be present: {e}"));
+    let normalized = normalized_whitespace(&content);
+
+    let image_heading = content
+        .find("## 1. Run an OCI Image")
+        .expect("quickstart must lead with an OCI image run section");
+    let dev_heading = content
+        .find("## 2. Launch the Dev Environment")
+        .expect("quickstart must still document the dev environment");
+
+    assert!(
+        image_heading < dev_heading,
+        "quickstart must put the image-backed one-shot path before dev/flake workflows"
+    );
+    assert!(
+        content.contains("mvmctl run --image alpine -- uname -a")
+            && normalized.contains("You do not need host Nix for this path"),
+        "quickstart must preserve the no-host-Nix image-backed command"
+    );
+}
+
+#[test]
+fn happy_paths_include_oci_image_audience() {
+    let path = repo_dir()
+        .join("public")
+        .join("src")
+        .join("content")
+        .join("docs")
+        .join("getting-started")
+        .join("happy-paths.md");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("happy paths must be present: {e}"));
+    let normalized = normalized_whitespace(&content);
+
+    assert!(
+        content.contains("mvm has six primary audiences"),
+        "happy paths must count the OCI-image path as a first-class audience"
+    );
+    assert!(
+        content.contains("CLI user with an OCI image")
+            && content.contains("mvmctl run --image alpine -- uname -a")
+            && normalized.contains("Image-backed one-shot runs do not require host Nix"),
+        "happy paths must document the image-backed no-host-Nix audience"
     );
 }
 
