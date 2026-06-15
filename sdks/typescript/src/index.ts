@@ -82,6 +82,7 @@ export type {
   SandboxCreateOptions,
   SandboxCreateWire,
   SandboxExecOptions,
+  SandboxInfo,
 } from "./_sandbox.js";
 
 // ────────────────────────────────────────────────────────────────────

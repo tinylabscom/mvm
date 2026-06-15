@@ -545,3 +545,36 @@ describe("Sandbox async surface", () => {
     expect(readFixtureLog().some((c) => c.startsWith("down "))).toBe(true);
   });
 });
+
+// ── lifecycle: id + info — Plan 125 B3 ───────────────────────────────
+
+describe("Sandbox id + info", () => {
+  it("id is the vmId when live, info reflects live state", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-id-vm", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const sb = mvm.Sandbox.create("python-dev", { workloadId: "wl-1" });
+    expect(sb.id).toBe("sb-id-vm");
+    expect(sb.info()).toEqual({
+      id: "sb-id-vm",
+      workloadId: "wl-1",
+      buildMode: "dev",
+      live: true,
+    });
+  });
+
+  it("id is the workloadId in record mode, info reflects record state", () => {
+    process.env.MVM_SDK_MODE = "record";
+    const sb = mvm.Sandbox.create("python-dev", { workloadId: "wl-1" });
+    expect(sb.id).toBe("wl-1");
+    expect(sb.info()).toEqual({
+      id: "wl-1",
+      workloadId: "wl-1",
+      buildMode: null,
+      live: false,
+    });
+  });
+});

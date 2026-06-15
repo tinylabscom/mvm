@@ -352,6 +352,16 @@ export interface ExecResult {
   stderr: string;
 }
 
+/** Snapshot of a {@link Sandbox}'s identity + mode (local; no VM round-trip).
+ *  `id` is the live VM id when live, else the workload id; `buildMode` is
+ *  `"dev"`/`"prod"` when live and `null` in record mode. */
+export interface SandboxInfo {
+  id: string;
+  workloadId: string;
+  buildMode: "dev" | "prod" | null;
+  live: boolean;
+}
+
 function requireRecording(): RuntimeRecordingWire {
   if (recording === null) {
     throw new RecordingNotActiveError(
@@ -826,6 +836,21 @@ export class Sandbox {
     this._live = live;
     this.commands = new SandboxCommands(this);
     this.files = new SandboxFiles(this);
+  }
+
+  /** Stable identifier: the live VM id when live, else the workload id. */
+  get id(): string {
+    return this._live !== null ? this._live.vmId : this.workloadId;
+  }
+
+  /** Local snapshot of this sandbox's identity + mode (no VM round-trip). */
+  info(): SandboxInfo {
+    return {
+      id: this.id,
+      workloadId: this.workloadId,
+      buildMode: this._live !== null ? this._live.buildMode : null,
+      live: this._live !== null,
+    };
   }
 
   static create(template: string, options: SandboxCreateOptions = {}): Sandbox {
