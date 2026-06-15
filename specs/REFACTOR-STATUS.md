@@ -384,9 +384,12 @@ PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
       (RuntimeDirGuard/ENV_LOCK — added a `RuntimeDirGuard::set` helper so the
       guard-holding creator-pid tests mutate a 2nd var without a deadlocking
       nested `TestEnv::new()`), and `vm/up` (LOCK; `resolve_vz_workload_kernel`
-      MVM_CACHE_DIR tests) migrated. Remaining mvm-cli: `doctor`, `template_cmd`
-      (each a holdout lock), `vm/tenant_resolution`, `ops/mcp` (unique-name
-      tests — consistency-only), `commands/mod`, `build/build`
+      MVM_CACHE_DIR tests), and `template_cmd` (probe_test_lock + `clear_llm_env`
+      now thread a `&mut TestEnv`) migrated. Remaining mvm-cli: `doctor` (the one
+      messy/partially-migrated file — a TestEnv guard + a holdout `ENV_LOCK` +
+      lock-less save/restore tests, best done as a dedicated pass),
+      `vm/tenant_resolution`, `ops/mcp` (unique-name tests — consistency-only),
+      `commands/mod`, `build/build`
   [ ] `mvm-backend` env tests (host-gated: its test bin SIGKILLs under macOS
       amfid — migrate where CI/Linux runs them)
   [ ] Standardize poisoned-lock handling by distinguishing test/global
