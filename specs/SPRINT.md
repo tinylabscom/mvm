@@ -2731,6 +2731,10 @@ URL on one box.
 - [ ] Local single-machine dev ingress: tiny first-party reverse proxy mapping
   `http://s-<id>-<port>.preview.localhost` → published host port + wake hook;
   `up`/`run` prints the URL(s). No auth/TLS/wildcard-DNS (mvmd owns those).
+- Note: a DX benchmark vs a peer self-hosted sandbox backend confirmed preview URL is
+  the *only* local-DX gap to close here (idle-sleep/wake + HTTP control plane are mvmd's;
+  warm pool 118 + sub-second up/down 198 obviate its lazy-wake) and validated the L4 +
+  local-proxy-first shape over an ambient per-route HTTP proxy — see Plan 181 WS-A.
 
 ### W4 (Plan 181 WS-C) — Streamable task + files protocol  🟡 proposed
 - [ ] Async task protocol over agent-RPC (Plan 169) reusing `ExecEvent` streaming
