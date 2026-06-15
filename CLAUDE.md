@@ -489,6 +489,12 @@ macOS / Linux Host
 - Active sprint spec: `specs/SPRINT.md`
 - Completed sprints archived to: `specs/backlog/` (e.g. `specs/backlog/01-foundation.md`)
 - When a sprint is completed, rename `specs/SPRINT.md` to `specs/backlog/<NN>-<name>.md` and create a new `specs/SPRINT.md` for the next sprint
+- **Keep `specs/SPRINT.md` current as you work.** After completing any phase, task,
+  or sub-task, reflect it in the active sprint spec in the SAME change: check off
+  items (`- [x]`), update status labels (e.g. `**Status: COMPLETE**`), and add new
+  test counts or notes. The sprint spec must always match what is actually
+  implemented — see AGENTS.md §"Definition of Done" items 5–7, which bind
+  `specs/SPRINT.md`, the plan checkboxes, and `specs/REFACTOR-STATUS.md` together.
 
 ## Refactor status
 
@@ -498,4 +504,5 @@ is the hand-maintained rollup of every in-flight plan's workstream checkboxes.
 plan, tick/strike the matching box in `specs/REFACTOR-STATUS.md` in the SAME
 change and bump its "Last updated" date. It is a quick index, not the source of
 truth — if it disagrees with a `specs/plans/` doc, the plan doc wins; fix the
-rollup.
+rollup. `specs/REFACTOR-STATUS.md` and `specs/SPRINT.md` move together with the
+plan checkboxes — updating one and leaving the others stale is not done.

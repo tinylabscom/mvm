@@ -140,6 +140,7 @@ No task is complete without tests. Every feature, bug fix, or refactor must incl
 4. **Compiling workspace**: Run `cargo check --workspace` (or full `cargo test`/`cargo build`) and fix any errors before you finish. Never leave the workspace in a non-compiling state.
 5. **Update sprint spec**: After completing any phase, task, or sub-task, update `specs/SPRINT.md` to reflect the current status. Check off completed items (`- [x]`), update phase status labels (e.g. `**Status: COMPLETE**`), and add any new test counts or notes. The sprint spec must always accurately reflect what has been implemented.
 6. **Tick the plan checkboxes**: as you complete each task or sub-task, check it off (`- [x]`) in the active plan under `specs/plans/<N>-*.md`. **The plan's checkboxes are the source of truth for progress** — a resumed or parallel session reads the last unchecked box to know exactly where to pick the work back up. Never mark a box done before its tests are green. Keep the plan and `specs/SPRINT.md` in sync.
+7. **Update the refactor rollup**: when you land, merge, or descope a workstream in any in-flight plan, tick/strike the matching box in `specs/REFACTOR-STATUS.md` in the **same** change and bump its "Last updated" date. It is a quick cross-plan index, not the source of truth — if it disagrees with a `specs/plans/` doc, the plan doc wins; fix the rollup. The plan checkboxes (item 6), `specs/SPRINT.md` (item 5), and `specs/REFACTOR-STATUS.md` move together — never update one and leave the others stale.
 
 ## Test Expectations
 
