@@ -111,11 +111,11 @@ pub struct SupervisorConfig {
 
 /// How the supervisor brings the VM up.
 ///
-/// The supervisor branches on this tagged enum: [`Boot`] is the original
-/// kernel-and-cmdline path; [`Restore`] loads the VM state from a
-/// previously saved snapshot blob (macOS 14+).
+/// The supervisor branches on this tagged enum: [`StartupMode::Boot`] is the
+/// original kernel-and-cmdline path; [`StartupMode::Restore`] loads the VM
+/// state from a previously saved snapshot blob (macOS 14+).
 ///
-/// Default is [`Boot`] so old JSON corpora without this field keep
+/// Default is [`StartupMode::Boot`] so old JSON corpora without this field keep
 /// the original behaviour, which keeps the fuzz corpus valid and lets
 /// every caller that doesn't care about restore (almost everyone) skip
 /// the field.
@@ -129,7 +129,7 @@ pub enum StartupMode {
     /// Restore from a previously saved Vz machine-state file. The
     /// supervisor:
     ///
-    /// 1. Constructs a [`VZVirtualMachineConfiguration`] from the
+    /// 1. Constructs a `VZVirtualMachineConfiguration` from the
     ///    same disks / cpu / memory / vsock / network / balloon
     ///    fields a `Boot` mode would, **omitting** the boot loader.
     /// 2. If `machine_id_path` is set and the sidecar exists, parses
