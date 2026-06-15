@@ -97,10 +97,21 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
     `workload_audit` (the *host handler* forces it — claim 8), >4 KiB →
     `BadRequest`, 20/s rate-limit → typed error. Flag the host-side
     log-injection + covert-egress (claim 10 / Plan 111-A) seam in the PR.
-  - [ ] **E5.3** — PyO3/napi veneer (`mvm.audit.emit`/`emit_batch`) + the
-    live-VM E2E (dev-kvm box): a `workload_audit` entry lands in `mvmctl
-    audit verify`, host-stamped + workload-originated; no host-category
-    spoofing.
+  - **E5.3** split on grounding — the live path needs the broker-services
+    subprocess lifecycle, which is unbuilt (nothing spawns `mvm-broker` /
+    `mvm-audit-signer` per VM; both proxies + the broker `serve` are
+    test-only today). That's a large, security-critical workstream, so:
+    - [x] **E5.3a** — reserve `BROKER_PORT` (5300) in `host_listen_ports`
+      on both workload backends (libkrun + vz), the fail-closed staging
+      `SUBSTITUTION_PORT` uses (nothing binds the UDS until E5.3b spawns the
+      broker → stray dial `ECONNREFUSED`). Disjoint-union assertion tests.
+    - [ ] **E5.3b** — the broker-services subprocess lifecycle: spawn +
+      supervise `mvm-audit-signer` + `mvm-broker` per VM, bind
+      `vm_vsock_port_socket(name, BROKER_PORT)`, enrich `ServiceCallCtx`
+      (correlation rewrite / profile / session), the spawn process-moat
+      hardening, the PyO3/napi veneer, and the live-VM E2E (box). Scoped in
+      `specs/notes/plan-125-e5-3b-broker-services-lifecycle-scoping.md`;
+      recommend tracking as its own workstream (process-moat, not SDK DX).
   - [ ] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods + veneer,
     riding the same transport.
 
