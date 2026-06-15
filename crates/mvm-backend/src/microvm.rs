@@ -1235,7 +1235,11 @@ pub fn stop_vm(name: &str) -> Result<()> {
 
     ui::info(&format!("Stopping VM '{}'...", name));
 
-    // Try graceful shutdown
+    // Ask the guest to power down via ACPI (SendCtrlAltDel), then poll for a
+    // clean exit on a tight cadence. A headless workload guest has no
+    // power-button handler, so the former unconditional 2s sleep-then-kill made
+    // every `down` cost two seconds for nothing — escalate to a hard kill the
+    // moment the short graceful window lapses instead of always waiting it out.
     if let Err(e) = run_in_vm(&format!(
         r#"sudo curl -s -X PUT --unix-socket {socket} \
             --data '{{"action_type": "SendCtrlAltDel"}}' \
@@ -1245,19 +1249,32 @@ pub fn stop_vm(name: &str) -> Result<()> {
         warn!("failed to send graceful shutdown to VM: {e}");
     }
 
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    let mut exited_gracefully = false;
+    while std::time::Instant::now() < deadline {
+        if !firecracker::is_vm_running(&pid_file)? {
+            exited_gracefully = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 
-    // Force kill and clean up
-    run_in_vm(&format!(
-        r#"
-        if [ -f {pid} ]; then
-            sudo kill $(cat {pid}) 2>/dev/null || true
-        fi
-        sudo rm -f {socket}
-        "#,
-        pid = pid_file,
-        socket = socket,
-    ))?;
+    // Clean up the API socket either way; only fall back to a hard kill when
+    // the guest ignored the ACPI request within the graceful window.
+    if exited_gracefully {
+        run_in_vm(&format!("sudo rm -f {socket}", socket = socket))?;
+    } else {
+        run_in_vm(&format!(
+            r#"
+            if [ -f {pid} ]; then
+                sudo kill $(cat {pid}) 2>/dev/null || true
+            fi
+            sudo rm -f {socket}
+            "#,
+            pid = pid_file,
+            socket = socket,
+        ))?;
+    }
 
     // Read run info to find the TAP device to destroy
     if let Some(info) = read_vm_run_info_from(&abs_dir)
