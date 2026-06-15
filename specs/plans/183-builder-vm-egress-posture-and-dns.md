@@ -282,9 +282,10 @@ Two independent defects blocked `mvmctl up --flake <workload> --hypervisor vz`:
 
 ### deferred follow-ups
 
-- [ ] Vz DHCP datagram-path root cause was resolved by WS-E2 (unbound dgram socket);
-  the static-IP fallback from WS-B2 remains as belt-and-suspenders for any residual
-  race during udhcpc startup.
+- [x] Vz DHCP datagram-path root cause was resolved by WS-E2 (unbound dgram socket).
+  No pending action: the static-IP fallback from WS-B2 is a deliberate keep
+  (belt-and-suspenders for any residual race during udhcpc startup), not a TODO to
+  remove. Closed 2026-06-15.
 - [ ] Persistent Vz builder (`VzPersistentBuilderVm`) still runs `network: None`;
   wire gvproxy when that path leaves scaffold status.
   Close-out triage (2026-06-13): DEFERRED by design — the one-shot Vz builder
@@ -292,6 +293,14 @@ Two independent defects blocked `mvmctl up --flake <workload> --hypervisor vz`:
   proven cold `dev up`/`build` path uses; the persistent path is still scaffold,
   so wiring gvproxy there (~50-70 LOC copy of the one-shot pattern) can't be
   live-validated until that path is exercised. Not a vz close-out blocker.
+  Re-confirmed 2026-06-15: the persistent driver is **not selected** —
+  `builder_backend_select` picks the one-shot `run_build` path, and
+  `build_persistent_supervisor_config` (vz_builder.rs `network: None`) documents
+  in-code that it "stays offline until it is [selected] — at which point it gets
+  the same trusted-builder gvproxy as the one-shot path." So wiring it now is
+  speculative + dead-on-arrival; do it as part of making the persistent driver
+  the selected path, not before. (The caller, `commands/env/dev_vz.rs`, is also in
+  the Plan 189 boundary — coordinate there.)
 - [ ] `mvmctl doctor` line surfacing the in-builder egress posture + last builder
   network bootstrap outcome (lease vs static vs none), so this class of failure is
   diagnosable without console archaeology.
@@ -301,6 +310,13 @@ Two independent defects blocked `mvmctl up --flake <workload> --hypervisor vz`:
   surface it). The static per-arm egress posture alone (boot=open, install=locked)
   is already documented; the diagnostic value is in the *outcome*, which is the
   part that needs the substrate. Not a vz close-out blocker.
+  Re-confirmed 2026-06-15: the per-arm posture is enforced **in-guest**
+  (`mvm-host-vm-init/network.rs::install_egress_lockdown`, applied inside the
+  builder VM on Linux), so the host-side `doctor` can't read the live state — a
+  doctor line would either restate a fixed design constant (low value) or need
+  the builder boot to record its lease/static/none outcome to a host-readable
+  sidecar first (the plumbing). Either way it edits Linux-gated builder-boot code,
+  not a host-only doctor tweak.
 - [x] fs_quick on Vz: teach the quiesce gate to recognize the Vz paused state
   (pid stays alive under pause), and/or stop deleting the per-instance CoW
   rootfs on `down` so a stopped VM remains checkpointable.
