@@ -236,34 +236,47 @@ Priority order:
 **Files:** start from clippy pressure and manual inspection of functions that
 thread many related values through runtime/build/CLI layers.
 
-- [~] **Step 1 - prefer params structs over long argument lists.** Add a named
+- [x] **Step 1 - prefer params structs over long argument lists.** Add a named
       struct when multiple call sites pass the same conceptual bundle.
 
       Audit anchored on the `#[allow(clippy::too_many_arguments)]` suppressions
-      (CLAUDE.md forbids that attribute outright). Findings:
-      - **`mvm-build::firecracker::boot_builder_vsock`** (9 args) — live (the
-        vsock builder backend boots through it). Grouped the eight non-env args
-        into a `BuilderVsockBoot` params struct, destructured by-ref at the top
-        so the body is byte-identical; `#[allow]` removed. **Done.**
+      (AGENTS.md §"Clippy" bans that attribute outright — builder-struct is the
+      fix; only bindgen FFI like `libkrun-sys/src/sys.rs` is exempt). Findings,
+      all now resolved:
+      - **`mvm-build::firecracker::boot_builder_vsock`** (9 args) — grouped the
+        eight non-env args into a `BuilderVsockBoot` params struct, body
+        byte-identical; `#[allow]` removed. **Done.**
       - **`mvm::vm::instance::fc_config::generate` + `mvm::security::jailer::
-        launch_jailed`** — NOT refactored: the `mvm` Firecracker instance/pool
-        lifecycle subtree (`vm/instance/`, `vm/pool/`) is **dead code** — not
-        wired into `vm/mod.rs` (no `mod instance`/`mod pool`), confirmed with a
-        `compile_error!` probe. `fc_config`'s suppression is stale-on-dead;
-        `jailer::launch_jailed` compiles but its only caller is in that dead
-        subtree. These belong to a separate dead-code-removal pass, not a params
-        refactor. (`libkrun-sys/src/sys.rs`'s module-level allow is
-        bindgen-generated FFI and legitimate.)
-      - **Remaining live candidates** (deferred — claim-12 security paths needing
-        careful treatment): `mvm-hostd::supervisor::substitution_proxy::
-        sign_into_headers` and `terminator::tls::terminate_and_substitute`.
-- [ ] **Step 2 - prefer builders for multi-field optional construction.** Use a
-      builder when construction mixes required and optional fields or when tests
-      repeatedly create the same large fixture.
-- [ ] **Step 3 - keep builders local.** Do not introduce a generic builder
-      framework; use plain structs/impls matching local style.
-- [ ] **Step 4 - green.** Add or update tests for any extracted construction
-      logic and run clippy for touched crates.
+        launch_jailed`** — the `mvm` Firecracker instance/pool/tenant lifecycle
+        subtree was **dead code** (unwired from `vm/mod.rs`, `compile_error!`-
+        confirmed). Deleted the whole orphaned cluster (`vm/instance/`,
+        `vm/pool/`, `vm/tenant/`, `bridge.rs`, `disk_manager.rs`) and trimmed
+        `security/jailer.rs` to its one live `jailer_available()` probe, which
+        also removed `launch_jailed`'s suppression by deletion (#931). The last
+        hand-written `too_many_arguments` allow in the tree is gone.
+      - **The two claim-12 security paths** — `substitution_proxy::
+        sign_into_headers` (#926, `SignRequest` builder) and `terminator::tls::
+        terminate_and_substitute` (#927, `TlsTermination` builder). Each
+        destructures the built value at its top so the signing / TLS-terminate
+        bodies are byte-for-byte unchanged.
+      With those three PRs there are **zero** hand-written
+      `#[allow(clippy::too_many_arguments)]` left in the workspace.
+- [x] **Step 2 - prefer builders for multi-field optional construction.** The two
+      claim-12 refactors use the `::builder()` + `with_*()` + `build()` shape
+      (the AGENTS.md standing preference over a plain params struct, #923).
+- [x] **Step 3 - keep builders local.** Plain local structs + `with_*`/`build()`
+      impls matching the existing `RequestCtx`/`InspectorReporter` style; no
+      generic builder framework.
+- [x] **Step 4 - green.** Per-PR: `cargo clippy -p mvm-hostd`/`-p mvm`/`-p mvm-cli`
+      `--all-targets -- -D warnings`, the touched sign/terminator/substitution
+      lib tests (85 + 66) and `mvm` lib tests (203), nightly `fmt --all --check`,
+      and the `check-no-spec-refs-in-comments` + `check-spec-numbers` gates.
+
+  **Deferred (optional polish, not a lint violation):** the functions that
+  already carry a params struct via a `too_many_arguments`-explaining comment
+  (`gateway_bridge`, `checkpoint`, `up`, `plan_builder`, `firecracker`,
+  `install`) are lint-clean today; upgrading them from plain params structs to
+  full `::builder()` shapes is style polish, tracked but not required.
 
 ### Task 7 - Split large functions only when the split buys tests or clarity
 
