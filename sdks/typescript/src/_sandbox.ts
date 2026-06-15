@@ -332,6 +332,26 @@ export interface SandboxCommandsStartOptions {
   env?: Record<string, EnvValue | string>;
 }
 
+/** Options for the one-shot {@link Sandbox.exec}. */
+export interface SandboxExecOptions {
+  env?: Record<string, EnvValue | string>;
+  /** Wall-clock timeout in seconds; the agent kills the process on overrun. */
+  timeout?: number;
+  /** Working directory for the spawned process. */
+  cwd?: string;
+}
+
+/** Result of a one-shot {@link Sandbox.exec} call.
+ *
+ *  `exitCode` is the child's exit code (0 on success). `stdout`/`stderr`
+ *  are captured strings — exec is a one-shot that *captures* the streams,
+ *  the distinction from `commands.start` + `mvmctl proc wait`. */
+export interface ExecResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
 function requireRecording(): RuntimeRecordingWire {
   if (recording === null) {
     throw new RecordingNotActiveError(
@@ -447,28 +467,129 @@ export class LiveTransport {
       );
     }
     const shell = [this.mvmCliBin, "proc", "start", this.vmId];
-    if (env) {
-      for (const [key, value] of Object.entries(env)) {
-        if (typeof value === "string") {
-          shell.push("-e", `${key}=${value}`);
-        } else if (
-          typeof value === "object" &&
-          value !== null &&
-          (value as { kind?: string }).kind === "literal"
-        ) {
-          shell.push("-e", `${key}=${(value as { value: string }).value}`);
-        } else {
-          throw new SandboxLiveError(
-            `\`commands.start\` env ${JSON.stringify(key)} carries a non-literal value; ` +
-              "live mode only forwards literal env vars (secrets must be injected via " +
-              "the host keystore + `--secret` on `mvmctl up`).",
-            { argv: shell },
-          );
-        }
-      }
-    }
+    shell.push(...this.encodeEnvFlags(env, shell));
     shell.push("--", ...argv);
     this.runShell(shell);
+  }
+
+  /** Encode `env` into `-e KEY=VALUE` flags for `mvmctl proc start`,
+   *  rejecting non-literal (secret) values — live mode forwards only
+   *  literals; secrets are injected host-side via `--secret` on `up`. */
+  private encodeEnvFlags(
+    env: Record<string, EnvValue | string> | undefined,
+    shellForErr: string[],
+  ): string[] {
+    const flags: string[] = [];
+    if (!env) return flags;
+    for (const [key, value] of Object.entries(env)) {
+      if (typeof value === "string") {
+        flags.push("-e", `${key}=${value}`);
+      } else if (
+        typeof value === "object" &&
+        value !== null &&
+        (value as { kind?: string }).kind === "literal"
+      ) {
+        flags.push("-e", `${key}=${(value as { value: string }).value}`);
+      } else {
+        throw new SandboxLiveError(
+          `env ${JSON.stringify(key)} carries a non-literal value; live mode only ` +
+            "forwards literal env vars (secrets must be injected via the host keystore " +
+            "+ `--secret` on `mvmctl up`).",
+          { argv: shellForErr },
+        );
+      }
+    }
+    return flags;
+  }
+
+  /** One-shot exec: `mvmctl proc start ... -- argv` → pid_token, then
+   *  `mvmctl proc wait <token>` to capture stdout/stderr/exit. Refuses
+   *  with {@link SandboxDevOnly} on a prod template (claim 4). */
+  commandsExec(argv: string[], options: SandboxExecOptions = {}): ExecResult {
+    if (this.buildMode !== "dev") {
+      throw new SandboxDevOnly(
+        `\`exec\` requires a dev-mode template; resolved template ` +
+          `build_mode=${JSON.stringify(this.buildMode)}. ADR-002 §W4.3 (security ` +
+          `claim 4) strips the agent's \`do_exec\` handler in prod builds — ` +
+          `re-build the template with \`mvmctl template build --dev <name>\`, ` +
+          `or use \`files.write\` to stage inputs into the running VM instead.`,
+        { argv: ["proc", "start", this.vmId, ...argv] },
+      );
+    }
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const child = require("node:child_process") as typeof import("node:child_process");
+
+    // 1) `proc start` → pid_token on stdout.
+    const startShell = [this.mvmCliBin, "proc", "start", this.vmId];
+    startShell.push(...this.encodeEnvFlags(options.env, startShell));
+    if (options.cwd !== undefined) startShell.push("--cwd", options.cwd);
+    startShell.push("--", ...argv);
+
+    let startResult;
+    try {
+      startResult = child.spawnSync(startShell[0], startShell.slice(1), {
+        encoding: "utf-8",
+      });
+    } catch (err) {
+      throw new SandboxLiveError(
+        `\`${this.mvmCliBin}\` not found on disk; check MVM_CLI_BIN: ${String(err)}`,
+        { argv: startShell },
+      );
+    }
+    if (startResult.error) {
+      throw new SandboxLiveError(`failed to spawn: ${startResult.error.message}`, {
+        argv: startShell,
+      });
+    }
+    if (startResult.status !== 0) {
+      throw new SandboxLiveError(
+        `\`mvmctl proc start\` failed with exit code ${startResult.status}`,
+        {
+          argv: startShell,
+          exitCode: startResult.status,
+          stderr: startResult.stderr ?? "",
+        },
+      );
+    }
+    const pidToken = (startResult.stdout ?? "").trim();
+    if (!pidToken) {
+      throw new SandboxLiveError(
+        "`mvmctl proc start` produced no pid_token on stdout",
+        { argv: startShell, stderr: startResult.stderr ?? "" },
+      );
+    }
+
+    // 2) `proc wait <token>` → captured stdout/stderr/exit.
+    const waitShell = [this.mvmCliBin, "proc", "wait", this.vmId, pidToken];
+    if (options.timeout !== undefined) {
+      waitShell.push("--timeout", String(Math.trunc(options.timeout)));
+    }
+    let waitResult;
+    try {
+      waitResult = child.spawnSync(waitShell[0], waitShell.slice(1), {
+        encoding: "utf-8",
+        // +5s slack so the agent's pgroup-kill (on --timeout overrun) lands
+        // before spawnSync gives up; the agent enforces first.
+        timeout:
+          options.timeout !== undefined ? (options.timeout + 5) * 1000 : undefined,
+      });
+    } catch (err) {
+      throw new SandboxLiveError(
+        `\`${this.mvmCliBin}\` not found on disk; check MVM_CLI_BIN: ${String(err)}`,
+        { argv: waitShell },
+      );
+    }
+    if (waitResult.error) {
+      throw new SandboxLiveError(
+        `\`mvmctl proc wait\` failed: ${waitResult.error.message}`,
+        { argv: waitShell },
+      );
+    }
+    return {
+      exitCode: waitResult.status ?? -1,
+      stdout: waitResult.stdout ?? "",
+      stderr: waitResult.stderr ?? "",
+    };
   }
 
   filesWrite(path: string, data: Uint8Array): void {
@@ -752,6 +873,31 @@ export class Sandbox {
       ops: [],
     };
     return new Sandbox(wid, null);
+  }
+
+  /** One-shot: run `argv` inside the sandbox, capturing stdout / stderr /
+   *  exit into an {@link ExecResult}. Convenience over `commands.start` +
+   *  `mvmctl proc wait`. Refuses with `SandboxDevOnly` on a prod template
+   *  (claim 4).
+   *
+   *  Live mode only: in record mode this throws `SandboxModeError` — the
+   *  recording's lowering doesn't materialise return values, so use
+   *  `commands.start(argv)` to append an op instead. */
+  exec(argv: string[], options: SandboxExecOptions = {}): ExecResult {
+    if (!Array.isArray(argv) || !argv.every((a) => typeof a === "string")) {
+      throw new TypeError("exec argv must be a string[]");
+    }
+    if (argv.length === 0) {
+      throw new RangeError("exec argv must be non-empty");
+    }
+    if (this._live === null) {
+      throw new SandboxModeError(
+        "`Sandbox.exec` is a live-mode operation; under MVM_SDK_MODE=record use " +
+          "`commands.start(argv)` to append an op (return values are materialised " +
+          "when the recording is lowered, not at call time).",
+      );
+    }
+    return this._live.commandsExec(argv, options);
   }
 
   /** Copy a host file into the running sandbox at `guestPath`.
