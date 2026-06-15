@@ -22,7 +22,7 @@ pub(super) use hints::with_hints;
 pub(super) use parse::{
     VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
     materialize_disk_volume, materialize_disk_volumes, merge_volume_specs, parse_port_spec,
-    parse_port_specs, parse_volume_spec, vm_volume_from_spec_validated,
+    parse_port_specs, parse_secret_bindings, parse_volume_spec, vm_volume_from_spec_validated,
 };
 pub(super) use resolve::{
     ManifestArgRef, resolve_effective_hypervisor, resolve_flake_ref, resolve_manifest_arg,
