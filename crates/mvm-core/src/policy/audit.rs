@@ -501,7 +501,7 @@ impl LocalAuditLog {
     }
 
     /// Append one JSONL line.  Rotates to `audit.jsonl.1` when the file
-    /// exceeds [`ROTATE_THRESHOLD_BYTES`].
+    /// exceeds `ROTATE_THRESHOLD_BYTES`.
     pub fn append(&self, event: &LocalAuditEvent) -> Result<()> {
         self.maybe_rotate()?;
 

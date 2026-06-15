@@ -64,8 +64,8 @@ impl SignRequest {
 pub enum SignResponse {
     Ok {
         request_id: String,
-        /// Signature algorithm — one of [`SIG_ALG_ED25519`] or
-        /// [`SIG_ALG_ECDSA_P256`]. Future PQC schemes assign new
+        /// Signature algorithm — one of [`crate::policy::security::SIG_ALG_ED25519`]
+        /// or [`crate::policy::security::SIG_ALG_ECDSA_P256`]. Future PQC schemes assign new
         /// constants without a wire-format hard fork.
         sig_alg: u8,
         /// Raw signature bytes (length depends on `sig_alg`: 64 for
