@@ -531,6 +531,9 @@ class _LiveTransport:
         self.vm_id = vm_id
         self.build_mode = build_mode
         self._killed = False
+        # Long-running `mvmctl forward` proxies spawned by `forward()`.
+        # Torn down in `kill()` so a port forwarder never outlives the VM.
+        self._forwards: list[subprocess.Popen[bytes]] = []
 
     @classmethod
     def for_template(
@@ -788,6 +791,26 @@ class _LiveTransport:
                 stderr=result.stderr.decode("utf-8", errors="replace"),
             )
 
+    def forward(self, host_port: int, guest_port: int) -> None:
+        """Spawn ``mvmctl forward <vm> --port <host>:<guest>`` in the
+        background. `mvmctl forward` blocks (it runs the proxy until
+        signalled), so it is launched detached and tracked; `kill()`
+        terminates every forwarder so none outlives the sandbox."""
+        spec = f"{host_port}:{guest_port}"
+        shell = [self.mvm_cli_bin, "forward", self.vm_id, "--port", spec]
+        try:
+            proc = subprocess.Popen(
+                shell,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError as exc:
+            raise SandboxLiveError(
+                f"`{self.mvm_cli_bin}` not found on disk; check MVM_CLI_BIN",
+                argv=shell,
+            ) from exc
+        self._forwards.append(proc)
+
     def kill(self) -> None:
         """Shell ``mvmctl down <vm>``. Idempotent — repeated kills
         from the context manager + an explicit `sb.kill()` are
@@ -795,6 +818,11 @@ class _LiveTransport:
         if self._killed:
             return
         self._killed = True
+        # Tear down any port forwarders before the VM goes away.
+        for proc in self._forwards:
+            if proc.poll() is None:
+                proc.terminate()
+        self._forwards.clear()
         shell = [self.mvm_cli_bin, "down", self.vm_id]
         try:
             result = subprocess.run(
@@ -1102,6 +1130,29 @@ class Sandbox:
                 "file from a running VM and has no record-mode meaning."
             )
         self._live.cp(f"{self._live.vm_id}:{guest_path}", host_path)
+
+    def forward(self, host_port: int, guest_port: int) -> None:
+        """Forward ``host_port`` on the host to ``guest_port`` in the
+        sandbox. Spawns ``mvmctl forward <vm> --port <host>:<guest>`` as
+        a background proxy that runs until the sandbox is torn down
+        (``kill`` / ``__exit__`` terminate it).
+
+        Live mode only: exposing a port is a runtime action, so in record
+        mode this raises :class:`SandboxModeError`. To declare a port
+        mapping for a recorded workload, use ``mvm.network(ports=...)``.
+        """
+        if not isinstance(host_port, int) or isinstance(host_port, bool):
+            raise TypeError("host_port must be an int")
+        if not isinstance(guest_port, int) or isinstance(guest_port, bool):
+            raise TypeError("guest_port must be an int")
+        if not (0 < host_port < 65536) or not (0 < guest_port < 65536):
+            raise ValueError("ports must be in 1..65535")
+        if self._live is None:
+            raise SandboxModeError(
+                "`Sandbox.forward` is a live-mode operation; under "
+                "MVM_SDK_MODE=record declare ports with `mvm.network(ports=...)`."
+            )
+        self._live.forward(host_port, guest_port)
 
     def kill(self) -> None:
         """Issue a ``kill`` against the active transport.

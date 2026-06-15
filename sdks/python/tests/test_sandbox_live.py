@@ -53,6 +53,7 @@ def _write_fixture_mvmctl(
     proc_exit: int = 0,
     fs_exit: int = 0,
     cp_exit: int = 0,
+    forward_sleep: int = 0,
     down_exit: int = 0,
 ) -> Path:
     """Write a shell script that pretends to be `mvmctl`. It
@@ -99,6 +100,12 @@ case "$verb" in
     ;;
   cp)
     exit {cp_exit}
+    ;;
+  forward)
+    # `mvmctl forward` blocks in real use; the fixture optionally sleeps
+    # so a test can assert the SDK terminates it on teardown.
+    sleep {forward_sleep}
+    exit 0
     ;;
   down)
     exit {down_exit}
@@ -411,3 +418,52 @@ def test_copy_in_refused_in_record_mode() -> None:
     sb = mvm.Sandbox.create("python-dev")
     with pytest.raises(mvm.SandboxModeError):
         sb.copy_in("/tmp/x", "/app/x")
+
+
+# ── forward / ports (Plan 125 B1b) ───────────────────────────────────
+
+
+def test_forward_shells_to_mvmctl_forward(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-fwd-vm", "build_mode": "dev"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    sb = mvm.Sandbox.create("python-dev")
+    sb.forward(8080, 80)
+
+    # The fixture `forward` exits immediately (sleep 0); wait for it so its
+    # log line is flushed before we assert.
+    sb._live._forwards[0].wait(timeout=5)
+    calls = _read_fixture_log(tmp_path)
+    assert any(
+        c.startswith("forward sb-fwd-vm --port 8080:80") for c in calls
+    ), calls
+
+
+def test_forward_process_terminated_on_kill(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-fwd-vm", "build_mode": "dev"},
+        forward_sleep=30,
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    sb = mvm.Sandbox.create("python-dev")
+    sb.forward(8080, 80)
+    proc = sb._live._forwards[0]
+    assert proc.poll() is None  # still running (blocked on sleep)
+
+    sb.kill()
+    proc.wait(timeout=5)
+    assert proc.returncode is not None  # terminated by teardown
+
+
+def test_forward_refused_in_record_mode() -> None:
+    os.environ["MVM_SDK_MODE"] = "record"
+    sb = mvm.Sandbox.create("python-dev")
+    with pytest.raises(mvm.SandboxModeError):
+        sb.forward(8080, 80)
