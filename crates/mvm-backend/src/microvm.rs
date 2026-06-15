@@ -3732,7 +3732,11 @@ mod tests {
         .expect("probe never errors");
         assert!(!exited, "guest ignored ACPI → caller must hard-kill");
         assert_eq!(probes.get(), 2, "polled only within the graceful window");
-        assert_eq!(slept.get(), 2, "slept once per poll, never past the deadline");
+        assert_eq!(
+            slept.get(),
+            2,
+            "slept once per poll, never past the deadline"
+        );
     }
 
     #[test]
@@ -3745,6 +3749,9 @@ mod tests {
             Instant::now,
             |_| {},
         );
-        assert!(result.is_err(), "a failing liveness probe must surface, not be swallowed");
+        assert!(
+            result.is_err(),
+            "a failing liveness probe must surface, not be swallowed"
+        );
     }
 }
