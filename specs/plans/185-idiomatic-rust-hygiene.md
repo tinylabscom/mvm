@@ -290,6 +290,11 @@ thread many related values through runtime/build/CLI layers.
       waitpid/from_raw_fd) now states its concrete fd-ownership /
       pointer-validity / async-signal-safety invariant, replacing the prior
       generic one-liners.
+
+      Agent pass: the `mvm-guest-agent` bin — the four `unsafe` blocks that
+      still lacked an invariant (two post-bind `close(fd)` cleanups + two test
+      bodies calling the async-signal-safe signal handlers directly) now carry
+      one; the `install_signal_handlers` block already had a solid note.
 - [~] **Step 2 - isolate platform/FFI unsafe behind small safe wrappers.** VZ,
       libkrun, libc/syscall, and env-mutation code should expose narrow safe
       functions to the rest of the crate wherever practical.
@@ -324,11 +329,12 @@ thread many related values through runtime/build/CLI layers.
       above; fixed-payload ioctls isolated behind `dm_ioctl_fixed`.
 - [x] `mvm-guest/console.rs` (PTY/termios) — done in the Step 1 console pass
       above; also dropped the post-fork malloc path (Step 2).
-- [ ] Annotate the remaining deeper `unsafe` clusters with `SAFETY:`
-      invariants, one reviewed file at a time (each needs genuine soundness
-      reasoning, not a formula): `mvm-guest-agent` bin (~5), and the
-      `mvm-vm-host/vz_objc.rs` objc2 FFI (~100) — the last best done while the
-      Plan-152 vz work is quiet.
+- [x] `mvm-guest-agent` bin — done in the Step 1 agent pass above (the four
+      remaining `close(fd)` / signal-handler-test blocks).
+- [ ] Annotate the remaining deeper `unsafe` cluster with `SAFETY:`
+      invariants, one reviewed file at a time (it needs genuine soundness
+      reasoning, not a formula): the `mvm-vm-host/vz_objc.rs` objc2 FFI (~100)
+      — best done while the Plan-152 vz work is quiet.
 
 ### Task 9 - Audit feature and dependency boundaries
 
