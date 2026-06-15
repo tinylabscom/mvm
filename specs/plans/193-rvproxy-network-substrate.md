@@ -89,8 +89,15 @@ own internal default).
       enforcement witnesses are bridge-side and binary-agnostic *today*, so this
       proves transport/conformance parity; the enforcement arm becomes
       binary-discriminating only once WS-2 moves enforcement onto rvproxy's
-      native flow API. CI wiring is gated on provisioning an rvproxy binary in
-      the mvm CI (cross-repo).
+      native flow API. CI lane drafted: `.github/workflows/rvproxy-parity.yml`
+      runs the script on `macos-latest`, building the candidate from a pinned
+      rvproxy rev (default `520a5dc`, overridable via `workflow_dispatch` input)
+      cloned with the `RVPROXY_CHECKOUT_TOKEN` secret, gvproxy as the control.
+      Kept manual (`workflow_dispatch`) and fail-closed without the secret —
+      macos-latest is ~10× ubuntu cost (ADR-038), so it stays off the day-to-day
+      surface. Activation = provision `RVPROXY_CHECKOUT_TOKEN` + promote to a
+      paths-filtered `pull_request` trigger once the default flip is on the
+      table (cross-repo decision).
 - [ ] **WS-2 — flow-decision + audit seam.** Port `gateway_bridge`'s
       `PlanFlowPolicy` deny-by-default gate + flow-audit onto rvproxy's native
       flow API; delete the in-line splice/`etherparse` wrapper (Plan 141) and the
