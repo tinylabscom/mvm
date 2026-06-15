@@ -2126,13 +2126,30 @@ fn secret_get_rejects_force_flag() {
 }
 
 #[test]
-fn up_rejects_removed_secret_flag() {
-    let err = Cli::try_parse_from(["mvmctl", "up", "--secret", "API_KEY:api.example.com"])
-        .expect_err("up --secret must be rejected");
-    assert!(
-        err.to_string().contains("unexpected argument '--secret'"),
-        "got: {err}"
-    );
+fn up_accepts_repeatable_secret_flag() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "up",
+        "--flake",
+        ".",
+        "--secret",
+        "openai:api.openai.com",
+        "--secret",
+        "aws:s3.amazonaws.com,sts.amazonaws.com",
+    ])
+    .unwrap();
+    match cli.command {
+        Commands::Up(up::Args { secret, .. }) => {
+            assert_eq!(
+                secret,
+                vec![
+                    "openai:api.openai.com".to_string(),
+                    "aws:s3.amazonaws.com,sts.amazonaws.com".to_string(),
+                ]
+            );
+        }
+        _ => panic!("Expected Up command"),
+    }
 }
 
 // --- Run (transient runner; absorbed the former exec) CLI tests ---
