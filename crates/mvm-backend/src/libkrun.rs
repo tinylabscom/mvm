@@ -168,7 +168,12 @@ fn krun_context_base(
         // Egress substitution channel (listen=false → host binds). Registered
         // unconditionally; fail-closed: when the plan carries no secrets nothing
         // binds the UDS, so a stray guest dial gets ECONNREFUSED.
-        .add_host_listen_port(mvm_guest::vsock::SUBSTITUTION_PORT);
+        .add_host_listen_port(mvm_guest::vsock::SUBSTITUTION_PORT)
+        // Host-services broker channel (listen=false → host binds). Registered
+        // unconditionally so libkrun proxies the guest's connect; fail-closed:
+        // nothing binds the UDS until the per-VM broker subprocess is spawned,
+        // so a stray guest dial gets ECONNREFUSED.
+        .add_host_listen_port(mvm_guest::vsock::BROKER_PORT);
     krun.rootfs_path = None;
     // Select the gateway through the same
     // `resolve_networking_mode` the builder VM + cold path use (TSI is rejected by the
@@ -1388,6 +1393,37 @@ mod tests {
                 .vsock_ports
                 .contains(&mvm_guest::vsock::SUBSTITUTION_PORT),
             "SUBSTITUTION_PORT must not appear in vsock_ports"
+        );
+    }
+
+    #[test]
+    fn build_supervisor_config_registers_broker_port() {
+        // The host-services broker port is a host-listen port (the broker
+        // subprocess binds the UDS, the guest dials it) — registered
+        // unconditionally so libkrun proxies the guest's connect. Fail-closed:
+        // nothing binds the UDS until the per-VM broker subprocess is spawned,
+        // so a stray guest dial gets ECONNREFUSED.
+        let config = VmStartConfig {
+            name: "broker-port-test".into(),
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            kernel_path: Some("/tmp/vmlinux".into()),
+            cpus: 1,
+            memory_mib: 256,
+            ..Default::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = build_supervisor_config(&config, tmp.path()).expect("build");
+        assert!(
+            cfg.krun
+                .host_listen_ports
+                .contains(&mvm_guest::vsock::BROKER_PORT),
+            "BROKER_PORT must be in host_listen_ports"
+        );
+        assert!(
+            !cfg.krun
+                .vsock_ports
+                .contains(&mvm_guest::vsock::BROKER_PORT),
+            "BROKER_PORT must not appear in vsock_ports"
         );
     }
 

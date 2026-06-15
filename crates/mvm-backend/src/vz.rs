@@ -1867,12 +1867,17 @@ fn build_supervisor_config(
         vsock: vz::VsockConfig {
             ports: vec![mvm_guest::vsock::GUEST_AGENT_PORT],
             socket_dir: vsock_dir,
-            // Host-listens / guest-connects channel for egress substitution: the
+            // Host-listens / guest-connects channels. Egress substitution: the
             // guest dials SUBSTITUTION_PORT, the supervisor accepts and splices to
-            // the per-VM UDS the substitution endpoint binds. Unconditional —
-            // fail-closed: nothing binds that UDS unless the plan has secrets, so a
-            // stray guest dial gets refused.
-            host_listen_ports: vec![mvm_guest::vsock::SUBSTITUTION_PORT],
+            // the per-VM UDS the substitution endpoint binds. Host-services
+            // broker: the guest dials BROKER_PORT, the supervisor splices to the
+            // per-VM broker subprocess UDS. Both unconditional — fail-closed:
+            // nothing binds those UDS until the respective endpoint/subprocess is
+            // spawned, so a stray guest dial gets refused.
+            host_listen_ports: vec![
+                mvm_guest::vsock::SUBSTITUTION_PORT,
+                mvm_guest::vsock::BROKER_PORT,
+            ],
         },
         console_output_path: Some(console_log),
         // gvproxy backend with claim-10 audit bridge ingest hookup.
@@ -2488,6 +2493,20 @@ mod tests {
                 .ports
                 .contains(&mvm_guest::vsock::SUBSTITUTION_PORT),
             "SUBSTITUTION_PORT must not appear in vsock.ports"
+        );
+        // The host-services broker port is host-listens / guest-connects too:
+        // the supervisor must listen on BROKER_PORT so the guest can dial it
+        // (the broker subprocess binds the UDS the supervisor splices to).
+        assert!(
+            built
+                .vsock
+                .host_listen_ports
+                .contains(&mvm_guest::vsock::BROKER_PORT),
+            "BROKER_PORT must be in vsock.host_listen_ports"
+        );
+        assert!(
+            !built.vsock.ports.contains(&mvm_guest::vsock::BROKER_PORT),
+            "BROKER_PORT must not appear in vsock.ports"
         );
         assert_eq!(built.pid_file_name.as_deref(), Some(PID_FILE_NAME));
         // Console capture goes to a file under state_dir; never `None`
