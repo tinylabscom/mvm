@@ -89,15 +89,18 @@ own internal default).
       enforcement witnesses are bridge-side and binary-agnostic *today*, so this
       proves transport/conformance parity; the enforcement arm becomes
       binary-discriminating only once WS-2 moves enforcement onto rvproxy's
-      native flow API. CI lane drafted: `.github/workflows/rvproxy-parity.yml`
+      native flow API. CI lane LIVE: `.github/workflows/rvproxy-parity.yml`
       runs the script on `macos-latest`, building the candidate from a pinned
-      rvproxy rev (default `520a5dc`, overridable via `workflow_dispatch` input)
-      cloned with the `RVPROXY_CHECKOUT_TOKEN` secret, gvproxy as the control.
-      Kept manual (`workflow_dispatch`) and fail-closed without the secret —
-      macos-latest is ~10× ubuntu cost (ADR-038), so it stays off the day-to-day
-      surface. Activation = provision `RVPROXY_CHECKOUT_TOKEN` + promote to a
-      paths-filtered `pull_request` trigger once the default flip is on the
-      table (cross-repo decision).
+      rvproxy rev (`RVPROXY_DEFAULT_REF`=`520a5dc`, overridable via the
+      `workflow_dispatch` input) cloned with the `RVPROXY_CHECKOUT_TOKEN` repo
+      secret, gvproxy as the control; fail-closed without the secret.
+      Validated green end-to-end in CI 2026-06-15 (gvproxy PASS + rvproxy PASS +
+      enforcement witnesses green). Triggers: `workflow_dispatch` + a
+      paths-filtered `pull_request` (gateway-contract files; macos-latest is
+      ~10× ubuntu cost per ADR-038, so the filter keeps it off unrelated PRs).
+      Remaining activation = make it a **required** check in branch protection
+      (a settings decision, not code), and bump `RVPROXY_DEFAULT_REF` as rvproxy
+      lands gateway changes.
 - [ ] **WS-2 — flow-decision + audit seam.** Port `gateway_bridge`'s
       `PlanFlowPolicy` deny-by-default gate + flow-audit onto rvproxy's native
       flow API; delete the in-line splice/`etherparse` wrapper (Plan 141) and the
