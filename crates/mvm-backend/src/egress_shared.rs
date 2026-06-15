@@ -1,10 +1,8 @@
-//! Cfg-free egress-substitution plan decode for the macOS workload backends.
+//! Cfg-free egress-substitution plan decode shared by every workload backend.
 //!
-//! libkrun (and vz, next commit) decode the admitted plan's secret bindings
-//! with no OS gate. The Firecracker path still has its own Linux-gated copy in
-//! `microvm.rs`; collapsing that into this function is a tracked cleanup (it
-//! edits Linux-only code and wants a Linux-target check) — until then this is
-//! the macOS-side copy, not yet the single shared one.
+//! libkrun, vz, and the Linux-gated Firecracker path (`microvm.rs`) all decode
+//! the admitted plan's secret bindings through this one function — no OS gate,
+//! no per-backend copy.
 
 use anyhow::Result;
 use std::path::Path;
