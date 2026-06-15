@@ -1,6 +1,10 @@
 // mvm-guest: vsock protocol and openclaw connector mapping for mvm
 // Depends on mvm-core
 
+/// In-guest host-services broker client: dials the supervisor's guest-facing
+/// broker port over vsock and exchanges a framed `ServiceCall` for a framed
+/// `ServiceResponse`. The workload→host call half of the broker path.
+pub mod broker_client;
 pub mod builder_agent;
 /// PTY-over-vsock interactive console — the single dev-only interactive path
 /// into a guest. Gated behind `dev-shell` so the relay symbols are absent from
