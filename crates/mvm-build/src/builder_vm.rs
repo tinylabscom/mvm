@@ -522,7 +522,7 @@ fn dir_size_bytes(dir: &std::path::Path) -> u64 {
 /// Stub implementation. Every method returns
 /// [`BuilderVmError::NotYetImplemented`]. Kept around for tests that
 /// want a `BuilderVm` impl with deterministic error behavior;
-/// production code uses [`LibkrunBuilderVm`].
+/// production code uses [`crate::libkrun_builder::LibkrunBuilderVm`].
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StubBuilderVm;
 

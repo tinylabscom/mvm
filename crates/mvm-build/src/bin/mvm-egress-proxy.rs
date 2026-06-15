@@ -3,10 +3,10 @@
 //!
 //! The binary:
 //!
-//! 1. Builds an [`Allowlist`] (production hostnames by default;
+//! 1. Builds an `Allowlist` (production hostnames by default;
 //!    `MVM_EGRESS_ALLOWLIST` env-var override gated behind the
 //!    `dev-shell` Cargo feature for tests).
-//! 2. Binds the proxy at [`crate::proxy::DEFAULT_BIND`] (or
+//! 2. Binds the proxy at `DEFAULT_BIND` (or
 //!    `MVM_EGRESS_BIND` if set — gated the same way for tests).
 //! 3. Prints `mvm-egress-proxy: listening on <addr>` to stdout so
 //!    the parent (mvm-host-vm-init) can scrape the addr if it
