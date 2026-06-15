@@ -213,6 +213,14 @@ PLAN 152 — Rust-native VZ supervisor            🟢 native objc2; no Swift
       whole point of the backend). Nested KVM is a distinct future capability
       (workload-inside-workload), not a parity gap vs libkrun/FC. Recorded, not
       built.
+  [x] Post-closeout dev-loop polish (#868/#870) — vz `up`/`down` taken sub-second
+      (~0.45s each): startup orphan-sweep collapsed from a per-VM-dir `pgrep` +
+      per-pid `ps` storm into one `ps -axww` snapshot, rootfs digest sidecar-cached
+      on size+mtime (no ~230 MB re-hash per boot), and the supervisor escalates a
+      graceful ACPI stop to a forced `stopWithCompletionHandler` so `down` exits
+      clean instead of waiting out the host SIGKILL grace. `up --console` boots
+      straight into the PTY-over-vsock console (dev image forced). Companion fix:
+      the startup sweep no longer reaps live managed/dev VMs reparented to launchd.
   NOTE: Swift control socket self-deadlocked on async VZ ops; Rust fixes it
   (ADR-056 addendum). #772 deferred-robustness triage (2026-06-13 close-out):
   exit-listener 2nd-conn = correct-by-design (one-shot accept; long-running
