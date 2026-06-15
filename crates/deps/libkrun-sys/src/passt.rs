@@ -328,7 +328,7 @@ fn clear_cloexec(fd: RawFd) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TEST_ENV_LOCK as ENV_LOCK;
+    use mvm_core::util::test_env::TestEnv;
     use std::path::Path;
 
     #[test]
@@ -349,25 +349,11 @@ mod tests {
 
     #[test]
     fn spawn_without_passt_returns_not_installed() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Hide passt from PATH for this test by setting PATH to
-        // an empty dir.
+        let mut env = TestEnv::new();
+        // Hide passt from PATH for this test by setting PATH to an empty dir.
         let tmp = tempfile::tempdir().unwrap();
-        let original_path = std::env::var_os("PATH");
-        // SAFETY: tests are single-threaded by default in Rust;
-        // set_var is fine here as long as we restore.
-        unsafe {
-            std::env::set_var("PATH", tmp.path());
-        }
+        env.set("PATH", tmp.path());
         let result = spawn(tmp.path());
-        unsafe {
-            match original_path {
-                Some(v) => std::env::set_var("PATH", v),
-                None => std::env::remove_var("PATH"),
-            }
-        }
         match result {
             Err(PasstError::NotInstalled { install_hint }) => {
                 assert!(!install_hint.is_empty());

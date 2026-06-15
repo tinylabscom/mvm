@@ -57,15 +57,6 @@ pub mod gvproxy;
 // a dependency cycle (`mvm-backend` can't depend on `mvm-hostd`).
 pub mod framing;
 
-/// Cross-module env mutation serializer. Both `passt::tests` and
-/// `gvproxy::tests` mutate `$PATH` to verify their `NotInstalled`
-/// error paths; `cargo test`'s default parallelism would race them
-/// otherwise and leak the "set PATH to a tmp dir" state across the
-/// two tests, making one's spawn call see the other's modified env.
-#[cfg(test)]
-pub(crate) static TEST_ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
-
 /// Errors returned by this crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {

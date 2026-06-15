@@ -34,7 +34,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 177** — Backend consolidation (8→4) · ✅ both phases merged (#806/#789/#812/#814/#817); DX-parity → Plan 189; lone caveat = host-gated hardware smoke
 - [x] **PLAN 182** — Trait hygiene + backend catalog · ✅ DONE — Clock/KeyProvider unified, `backend_catalog!` single-source, doctor sourced from it, arch docs current (all via #802). The lone open box (literal `cargo test --workspace`) is closed as documented-environmental: package-by-package + `-E 'not package(mvm-backend)'` are green; the aggregate only SIGKILLs the `mvm-backend` unit-test bin via macOS amfid codesign on this host (CI runs it green)
 - [x] **PLAN 184** — Backend descriptor registry · ✅ DONE — catalog promoted to a `BackendDescriptor` registry (descriptor-named helpers); dual `instantiate`/`instantiate_dyn` constructors with dyn↔enum parity test; doctor migrated to `instantiate_dyn`; `AnyBackend` narrowed to enum-specific ops (no duplication remained); boundary + ordering-freeze tests; arch/supervisor docs describe the behavior/discovery/dispatch split
-- [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 TestEnv migration advancing: mvm-core (config/user_config/secret_binding) + mvm-hostd (reaper/substitution_endpoint) + mvm-build (runtime_overlay, libkrun_builder, builder_vm_runtime) now on TestEnv — **6 duplicate local test locks deleted** (`ENV_TEST_LOCK`, `env_test_mutex`, `ENV_LOCK`, `TIMEOUT_ENV_LOCK`, `GC_ENV_LOCK`, …); remaining: mvm-backend (host-gated SIGKILL), mvm-cli, libkrun-sys, mvm-core domain/session+template_tags; then poison-lock policy + naming/typed-selector/unsafe-boundary phases
+- [ ] **PLAN 185** — Idiomatic Rust hygiene audit · 🟢 TestEnv migration advancing: mvm-core (config/user_config/secret_binding + domain/session+template_tags) + mvm-hostd (reaper/substitution_endpoint) + mvm-build (runtime_overlay, libkrun_builder, builder_vm_runtime) + libkrun-sys (gvproxy/passt) now on TestEnv — **9 duplicate local test locks deleted** (`ENV_TEST_LOCK`, `env_test_mutex`, `ENV_LOCK`×2, `TIMEOUT_ENV_LOCK`, `GC_ENV_LOCK`, `DATA_DIR_LOCK`, `TEST_ENV_LOCK`, …); remaining: **mvm-cli** (last big batch) + mvm-backend (host-gated amfid SIGKILL — best on CI/Linux); then poison-lock policy + naming/typed-selector/unsafe-boundary phases
 - [ ] **PLAN 189** — VZ DX parity (post-convergence) · 🟡 in progress — WS-3 `dev status --json` landed; remaining: save/restore verbs, cached fast-boot default, more --json coverage, base pinning (spun out of 177; sibling of 159)
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [x] **PLAN 183** — Builder-VM egress posture + network bootstrap · ✅ (E2E-proven 2026-06-12; Vz checkpoint-integration follow-ups tracked in the plan)
@@ -374,10 +374,15 @@ PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
       MVM_GATEWAY_BIN/XDG_CACHE_HOME tests — green under `--features builder-vm`)
       and `builder_vm_runtime` (`TIMEOUT_ENV_LOCK` + `GC_ENV_LOCK`; timeout +
       /nix-store GC-cap tests, dropping the let-old/match-old restore boilerplate)
-  [ ] Roll `TestEnv` through the remaining env-mutating tests: `mvm-backend`
-      (host-gated: its test bin SIGKILLs under macOS amfid — migrate where CI/Linux
-      runs them), `mvm-cli`, `libkrun-sys`, + `mvm-core`
-      `domain/session` + `domain/template_tags` (different `env::` form)
+  [x] Migrate `mvm-core` `domain/session` (`RuntimeDirGuard`→TestEnv, `ENV_LOCK`)
+      + `domain/template_tags` (`DataDirGuard`→TestEnv, `DATA_DIR_LOCK`) and
+      `libkrun-sys` `gvproxy`/`passt` (PATH + MVM_GATEWAY_BIN tests; deleted the
+      crate-wide `TEST_ENV_LOCK`, added the mvm-core `test-support` dev-dep;
+      lock-only reap tests keep a bare `TestEnv` guard)
+  [ ] Roll `TestEnv` through the remaining env-mutating tests: `mvm-cli` (the last
+      big batch — doctor/up/session/tenant_resolution/template_cmd/ops·mcp/build·*)
+      and `mvm-backend` (host-gated: its test bin SIGKILLs under macOS amfid —
+      migrate where CI/Linux runs them)
   [ ] Standardize poisoned-lock handling by distinguishing test/global
       serialization locks from real runtime state locks
   [ ] Rename overly generic internal traits/types where the blast radius is
