@@ -31,13 +31,14 @@ and the pickup prompt for the remaining R2 build. rvproxy sibling repo:
   egress-secret substitution stays in mvm's host-side vsock/`:443` terminator,
   NOT a gateway plugin — only undeclared redaction + the placeholder-leak drop
   move to the gateway.
-- **R2 slice 1 (deny-by-default flow decision): PR'd, OPEN for review.**
-  rvproxy #97 (branch `feat/r2-flow-decision-api`). `[policy] default_egress_deny`
-  → `build_gateway_config` → `GatewayConfig` → enforced at `policy_destination_reason`
-  (covers TCP/UDP/DNS-resolver), reason `"deny-by-default"`. Backward-compatible
-  (defaults false). Tests + fmt + clippy -D warnings clean
-  (transport 170 / cli 89 / policy 2 / config 79). **Not auto-merged** — it's
-  rvproxy's security-critical core; left for the maintainers.
+- **R2 slice 1 (deny-by-default flow decision): MERGED to rvproxy main (rvproxy #97).**
+  `[policy] default_egress_deny` → `build_gateway_config` → `GatewayConfig` →
+  enforced at `policy_destination_reason` (covers TCP/UDP/DNS-resolver), reason
+  `"deny-by-default"`. Backward-compatible (defaults false). Tests + fmt + clippy
+  -D warnings clean (transport 170 / cli 89 / policy 2 / config 79).
+- **R2 slice 2 (flow-lifecycle events): IN FLIGHT by a PARALLEL session — do not
+  race it.** A fresh session should NOT start slice 2; pick up slices 3–4 *after*
+  slice 2 PRs (they stack on it), or coordinate with that session first.
 
 ## Retained for the next session
 
@@ -61,7 +62,14 @@ and the pickup prompt for the remaining R2 build. rvproxy sibling repo:
 
 ## Next: R2 slices 2–4 — pickup prompt
 
-Paste into a fresh session once #97's direction is confirmed.
+> ⚠️ **UPDATE (2026-06-15):** slice 1 (#97) is MERGED, and **slice 2
+> (flow-lifecycle events) is now IN FLIGHT by a parallel session — do not race
+> it.** The prompt below still names slice 2 first for completeness; a fresh
+> session should instead confirm slice 2's PR status, then pick up slices 3–4
+> (they stack on slice 2) or coordinate. Build slice 2 only if that session has
+> stood down.
+
+Paste into a fresh session.
 
 ```
 Continue building rvproxy R2 (the native flow-decision + audit API that lets mvm delete
