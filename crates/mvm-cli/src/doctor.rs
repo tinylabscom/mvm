@@ -2896,11 +2896,13 @@ mod tests {
 
     // ── Dev-VM gating + data-dir-mode routing tests ─────────────────
     //
-    // These tests mutate `MVM_DATA_DIR` / `MVM_SHARE_DIR` to redirect
-    // doctor's filesystem probes at a tempdir. Env-var mutation is
-    // process-wide, so the shared test env guard serializes and restores it.
+    // These tests mutate `MVM_DATA_DIR` / `MVM_SHARE_DIR` (and the ts-runner
+    // tests below, PATH / MVM_TSX) to redirect doctor's probes at a tempdir.
+    // Env-var mutation is process-wide, so they all go through the shared
+    // `TestEnv` guard, which serializes them behind one lock and restores the
+    // prior values on drop.
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use mvm_core::util::test_env::TestEnv;
 
     struct EnvGuard {
         _env: mvm_core::util::test_env::TestEnv,
@@ -2997,32 +2999,19 @@ mod tests {
         // flaky. The probe must still return `ok: true` (WARN, not
         // FAIL) so `mvmctl doctor` exits 0 on a host without a TS
         // runner.
-        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev_path = std::env::var("PATH").ok();
-        let prev_tsx = std::env::var("MVM_TSX").ok();
+        let mut env = TestEnv::new();
         let prev_cwd = std::env::current_dir().expect("cwd");
         let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("PATH", "");
-            std::env::remove_var("MVM_TSX");
-        }
+        env.set("PATH", "");
+        env.remove("MVM_TSX");
         std::env::set_current_dir(tmp.path()).expect("chdir");
 
         let c = ts_runner_check();
 
-        // Restore before any assert can fail the test.
+        // Restore cwd before any assert can fail (TestEnv restores PATH /
+        // MVM_TSX on drop; cwd is restored manually).
         let _ = std::env::set_current_dir(&prev_cwd);
-        unsafe {
-            match prev_path {
-                Some(v) => std::env::set_var("PATH", v),
-                None => std::env::remove_var("PATH"),
-            }
-            match prev_tsx {
-                Some(v) => std::env::set_var("MVM_TSX", v),
-                None => std::env::remove_var("MVM_TSX"),
-            }
-        }
-        drop(g);
+        drop(env);
 
         assert_eq!(c.name, "TypeScript runner");
         assert_eq!(c.category, "tools");
@@ -3047,30 +3036,21 @@ mod tests {
     #[test]
     fn ts_runner_check_reports_pass_when_project_local_present() {
         use std::os::unix::fs::PermissionsExt;
-        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
         let prev_cwd = std::env::current_dir().expect("cwd");
-        let prev_tsx = std::env::var("MVM_TSX").ok();
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("node_modules").join(".bin");
         std::fs::create_dir_all(&bin).unwrap();
         let tsx = bin.join("tsx");
         std::fs::write(&tsx, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&tsx, std::fs::Permissions::from_mode(0o755)).unwrap();
-        unsafe {
-            std::env::remove_var("MVM_TSX");
-        }
+        env.remove("MVM_TSX");
         std::env::set_current_dir(tmp.path()).expect("chdir");
 
         let c = ts_runner_check();
 
         let _ = std::env::set_current_dir(&prev_cwd);
-        unsafe {
-            match prev_tsx {
-                Some(v) => std::env::set_var("MVM_TSX", v),
-                None => std::env::remove_var("MVM_TSX"),
-            }
-        }
-        drop(g);
+        drop(env);
 
         assert!(c.ok);
         assert!(
