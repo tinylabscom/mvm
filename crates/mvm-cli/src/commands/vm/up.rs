@@ -31,9 +31,9 @@ use super::policy_resolver::{
 use super::shared::{
     VmStartParams, VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
     env_vars_to_drive_file, materialize_disk_volume, merge_volume_specs, parse_port_specs,
-    parse_volume_spec, ports_to_drive_file, read_dir_to_drive_files, request_port_forward,
-    resolve_flake_ref, resolve_network_policy, start_port_proxy, vm_volume_from_spec_validated,
-    wait_for_guest_agent,
+    parse_secret_bindings, parse_volume_spec, ports_to_drive_file, read_dir_to_drive_files,
+    request_port_forward, resolve_flake_ref, resolve_network_policy, start_port_proxy,
+    vm_volume_from_spec_validated, wait_for_guest_agent,
 };
 use mvm_core::policy::PolicyBundle;
 
@@ -685,6 +685,33 @@ pub(super) fn load_workload_ir(
     Ok(Some(workload))
 }
 
+/// Inject CLI `--secret` bindings into the workload's first app env as
+/// `EnvValue::SecretRef`, so they lower through `lower_workload_secrets` just
+/// like baked secrets. The guest only ever sees a placeholder env var; the host
+/// substitutes the real credential on egress.
+fn inject_cli_secrets(
+    workload: &mut mvm_sdk::ir::Workload,
+    secrets: Vec<mvm_sdk::ir::SecretRef>,
+) -> Result<()> {
+    if secrets.is_empty() {
+        return Ok(());
+    }
+    let app = workload.apps.first_mut().ok_or_else(|| {
+        anyhow::anyhow!("--secret given but the workload declares no app to attach it to")
+    })?;
+    for secret in secrets {
+        let var = match &secret.mount {
+            mvm_sdk::ir::SecretMount::Env { var } => var.clone(),
+            mvm_sdk::ir::SecretMount::File { .. } => {
+                anyhow::bail!("--secret only supports env-var mounts")
+            }
+        };
+        app.env
+            .insert(var, mvm_sdk::ir::EnvValue::SecretRef { reference: secret });
+    }
+    Ok(())
+}
+
 /// Cache-root-overridable form of [`resolve_deps_volume_binding`].
 /// Tests inject a per-tempdir override so they don't touch the user's
 /// `~/.mvm/volumes/deps/` and don't race each other through the
@@ -928,6 +955,14 @@ pub(in crate::commands) struct Args {
     /// Environment variable to inject (format: KEY=VALUE). Repeatable
     #[arg(short, long)]
     pub env: Vec<String>,
+    /// Bind a named secret to an egress destination (format:
+    /// NAME:HOST[,HOST...]). Adds a `SecretRef` to the workload — the guest
+    /// only ever sees a placeholder; the host substitutes the real credential
+    /// on outbound requests to the allow-listed hosts. Bearer auth +
+    /// env-var mount by default; use `mvmctl secret set` for sigv4/hmac/file.
+    /// Repeatable.
+    #[arg(long = "secret")]
+    pub secret: Vec<String>,
     /// Auto-forward declared ports after boot (blocks until Ctrl-C)
     #[arg(long)]
     pub forward: bool,
@@ -1166,9 +1201,21 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     // secret lowering and the deps-volume binding below.
     let effective_workload_ir =
         resolve_workload_ir_path(args.from_workload_ir.as_deref(), args.flake.as_deref());
-    let lowered_plan_secrets = load_workload_ir(effective_workload_ir.as_deref())?
-        .map(|workload| lower_workload_secrets(&workload))
-        .unwrap_or_default();
+    // Terse `--secret NAME:HOST` bindings are injected into the workload IR's
+    // env before lowering, so they ride the same `lower_workload_secrets` path
+    // as baked `SecretRef`s.
+    let cli_secrets = parse_secret_bindings(&args.secret)?;
+    let lowered_plan_secrets = match load_workload_ir(effective_workload_ir.as_deref())? {
+        Some(mut workload) => {
+            inject_cli_secrets(&mut workload, cli_secrets)?;
+            lower_workload_secrets(&workload)
+        }
+        None if cli_secrets.is_empty() => Default::default(),
+        None => anyhow::bail!(
+            "--secret requires a workload (pass `--flake` or `--from-workload-ir`); \
+             there is no workload IR to attach the binding to"
+        ),
+    };
     let plan_secret_release = lowered_plan_secrets.secret_release;
     // Sandbox metadata. Tag charset/length
     // validation happens in the security crate so audit-event emission

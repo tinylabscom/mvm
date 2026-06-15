@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 
 use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+use mvm_sdk::ir::{AuthType, SecretMount, SecretRef};
 
 /// Validate a VM name at Clap parse time.
 pub fn clap_vm_name(s: &str) -> Result<String, String> {
@@ -449,6 +450,99 @@ pub fn vm_volume_from_spec_validated(spec: &VolumeSpec) -> Result<VmVolume> {
     let expect_dir = matches!(vmv.kind, VmVolumeKind::DirShare);
     vmv.host = validate_host_path(&vmv.host, expect_dir)?;
     Ok(vmv)
+}
+
+/// Parse a terse `--secret NAME:HOST[,HOST...]` binding into a [`SecretRef`].
+///
+/// Auth type defaults to `Bearer` (the common injected-credential case) and the
+/// secret mounts as the env var `NAME`. `HOST`s are the claim-12 egress
+/// allow-list (at least one required — an unbound secret is rejected). For
+/// richer bindings (sigv4/hmac, a file mount, a distinct env var) use `mvmctl
+/// secret set` + the SDK `secret()` helper.
+pub fn parse_secret_binding(spec: &str) -> Result<SecretRef> {
+    let (name, hosts) = spec.split_once(':').ok_or_else(|| {
+        anyhow::anyhow!("invalid --secret '{spec}' — expected NAME:HOST[,HOST...]")
+    })?;
+    if name.is_empty() {
+        anyhow::bail!("invalid --secret '{spec}' — empty secret name");
+    }
+    let allowed_hosts: Vec<String> = hosts
+        .split(',')
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(str::to_string)
+        .collect();
+    if allowed_hosts.is_empty() {
+        anyhow::bail!(
+            "invalid --secret '{spec}' — at least one host is required \
+             (claim 12: a secret must be bound to a destination)"
+        );
+    }
+    Ok(SecretRef {
+        name: name.to_string(),
+        mount: SecretMount::Env {
+            var: name.to_string(),
+        },
+        auth_type: AuthType::Bearer,
+        allowed_hosts,
+        sigv4: None,
+    })
+}
+
+/// Parse every `--secret` spec into a `SecretRef`, failing on the first bad one.
+pub fn parse_secret_bindings(specs: &[String]) -> Result<Vec<SecretRef>> {
+    specs.iter().map(|s| parse_secret_binding(s)).collect()
+}
+
+#[cfg(test)]
+mod secret_binding_tests {
+    use super::*;
+
+    #[test]
+    fn parses_name_and_single_host_as_bearer_env() {
+        let s = parse_secret_binding("openai:api.openai.com").unwrap();
+        assert_eq!(s.name, "openai");
+        assert_eq!(s.allowed_hosts, vec!["api.openai.com".to_string()]);
+        assert_eq!(s.auth_type, AuthType::Bearer);
+        assert_eq!(
+            s.mount,
+            SecretMount::Env {
+                var: "openai".into()
+            }
+        );
+        assert!(s.sigv4.is_none());
+    }
+
+    #[test]
+    fn parses_multiple_comma_separated_hosts() {
+        let s = parse_secret_binding("tok:a.example.com,b.example.com").unwrap();
+        assert_eq!(
+            s.allowed_hosts,
+            vec!["a.example.com".to_string(), "b.example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn rejects_missing_colon() {
+        assert!(parse_secret_binding("openai").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_name() {
+        assert!(parse_secret_binding(":api.openai.com").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_host_list() {
+        assert!(parse_secret_binding("openai:").is_err());
+        assert!(parse_secret_binding("openai: , ").is_err());
+    }
+
+    #[test]
+    fn parse_many_fails_on_first_bad_spec() {
+        let specs = vec!["ok:a.com".to_string(), "bad".to_string()];
+        assert!(parse_secret_bindings(&specs).is_err());
+    }
 }
 
 #[cfg(test)]
