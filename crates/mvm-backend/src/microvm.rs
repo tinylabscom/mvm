@@ -1706,8 +1706,11 @@ fn drive_file_inject_commands(files: &[DriveFile]) -> String {
     for f in files {
         let escaped = f.content.replace('\'', "'\\''");
         let mode = format!("{:04o}", f.mode);
+        // Stage the file into `$STAGE`; `mkfs.ext4 -d` copies the staged
+        // tree into the image at format time (preserving mode), so no
+        // loop mount / sudo is needed on the drive-build hot path.
         cmds.push_str(&format!(
-            "echo '{content}' | sudo tee \"$MOUNT_DIR/{name}\" >/dev/null\nsudo chmod {mode} \"$MOUNT_DIR/{name}\"\n",
+            "echo '{content}' > \"$STAGE/{name}\"\nchmod {mode} \"$STAGE/{name}\"\n",
             content = escaped,
             name = f.name,
             mode = mode,
@@ -1737,20 +1740,22 @@ pub fn create_dev_config_drive(abs_dir: &str, config: &FlakeRunConfig) -> Result
     // Build injection commands for custom config files
     let extra_cmds = drive_file_inject_commands(&config.config_files);
 
+    // Populate-at-format via `mkfs.ext4 -d`: stage the files on the host,
+    // then format the image directly from the staging dir. This replaces a
+    // `mkfs` + loop `mount`/`tee`/`umount` round-trip (a sudo round-trip
+    // that cost hundreds of ms per drive) with a single mkfs call.
     run_in_vm(&format!(
         r#"
+        set -e
+        STAGE=$(mktemp -d)
+        echo '{json}' > "$STAGE/config.json"
+        echo '{toml}' > "$STAGE/{toml_name}"
+        chmod 0444 "$STAGE/config.json" "$STAGE/{toml_name}"
+        {extra}
         rm -f {path}
         truncate -s 4M {path}
-        mkfs.ext4 -q -L mvm-config {path}
-
-        MOUNT_DIR=$(mktemp -d)
-        sudo mount {path} "$MOUNT_DIR"
-        echo '{json}' | sudo tee "$MOUNT_DIR/config.json" >/dev/null
-        echo '{toml}' | sudo tee "$MOUNT_DIR/{toml_name}" >/dev/null
-        sudo chmod 0444 "$MOUNT_DIR/config.json" "$MOUNT_DIR/{toml_name}"
-        {extra}
-        sudo umount "$MOUNT_DIR"
-        rmdir "$MOUNT_DIR"
+        mkfs.ext4 -q -L mvm-config -d "$STAGE" {path}
+        rm -rf "$STAGE"
         chmod 0644 {path}
         "#,
         path = path,
@@ -1768,19 +1773,20 @@ pub fn create_dev_secrets_drive(abs_dir: &str, secret_files: &[DriveFile]) -> Re
 
     let extra_cmds = drive_file_inject_commands(secret_files);
 
+    // Populate-at-format via `mkfs.ext4 -d` (see `create_dev_config_drive`):
+    // no loop mount, so a no-secrets workload no longer pays a sudo
+    // mount/umount round-trip for an empty drive.
     run_in_vm(&format!(
         r#"
+        set -e
+        STAGE=$(mktemp -d)
+        echo '{{}}' > "$STAGE/secrets.json"
+        chmod 0400 "$STAGE/secrets.json"
+        {extra}
         rm -f {path}
         truncate -s 4M {path}
-        mkfs.ext4 -q -L mvm-secrets {path}
-
-        MOUNT_DIR=$(mktemp -d)
-        sudo mount {path} "$MOUNT_DIR"
-        echo '{{}}' | sudo tee "$MOUNT_DIR/secrets.json" >/dev/null
-        sudo chmod 0400 "$MOUNT_DIR/secrets.json"
-        {extra}
-        sudo umount "$MOUNT_DIR"
-        rmdir "$MOUNT_DIR"
+        mkfs.ext4 -q -L mvm-secrets -d "$STAGE" {path}
+        rm -rf "$STAGE"
         chmod 0600 {path}
         "#,
         path = path,
