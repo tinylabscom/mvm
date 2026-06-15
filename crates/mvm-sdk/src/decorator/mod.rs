@@ -18,6 +18,9 @@ pub mod python;
 pub mod typescript;
 mod value;
 
+#[cfg(test)]
+mod coherence;
+
 pub use python::parse_python;
 pub use typescript::parse_typescript;
 pub use value::HELPER_ALLOWLIST;
