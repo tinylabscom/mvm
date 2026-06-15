@@ -236,9 +236,9 @@ pub(super) fn download_file(url: &str, dest: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
     use sha2::{Digest, Sha256};
     use std::io::Write;
-    use std::sync::Mutex;
 
     #[test]
     fn curl_download_args_request_resume() {
@@ -255,13 +255,6 @@ mod tests {
         assert_eq!(args.last().unwrap(), "https://example/x");
     }
 
-    /// Cargo test runs tests in parallel within a single binary. Two
-    /// of these tests touch `MVM_SKIP_HASH_VERIFY` (the global env-var
-    /// escape hatch), so they have to be serialised
-    /// against each other and against any other test that hashes a
-    /// real artifact. Static mutex held for the test's lifetime.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     /// Compute the canonical lowercase-hex SHA-256 of a byte slice. Tests
     /// use this to derive matching expected values without rebuilding
     /// the production hash path.
@@ -271,7 +264,7 @@ mod tests {
 
     #[test]
     fn verify_hash_accepts_matching_artifact() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("artifact");
         let bytes = b"hello world\n";
@@ -291,7 +284,7 @@ mod tests {
 
     #[test]
     fn verify_hash_rejects_mismatched_artifact_and_deletes() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("artifact");
         std::fs::write(&path, b"actual contents").unwrap();
@@ -311,24 +304,15 @@ mod tests {
 
     #[test]
     fn verify_hash_skip_env_var_bypasses_check() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let mut env = TestEnv::new();
         // Ensure the file exists even though we'll set a "wrong" hash.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("artifact");
         std::fs::write(&path, b"contents").unwrap();
         let wrong = hex_sha256(b"definitely not the contents");
 
-        // SAFETY: ENV_LOCK serialises every test that touches this env
-        // var, so no concurrent reader observes a half-set value. The
-        // unsafe block is only required by edition-2024's set_var /
-        // remove_var signatures; behaviour is unchanged.
-        unsafe {
-            std::env::set_var("MVM_SKIP_HASH_VERIFY", "1");
-        }
+        env.set("MVM_SKIP_HASH_VERIFY", "1");
         let result = verify_artifact_hash(path.to_str().unwrap(), "artifact", Some(&wrong));
-        unsafe {
-            std::env::remove_var("MVM_SKIP_HASH_VERIFY");
-        }
         assert!(result.is_ok(), "skip-env should bypass check: {result:?}");
     }
 
