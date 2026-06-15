@@ -645,6 +645,9 @@ fn make_fd3_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedF
 
     // On non-Linux, set FD_CLOEXEC on both ends now (a brief window
     // between pipe(2) and fcntl is non-atomic — see doc-comment above).
+    // SAFETY: fcntl(F_GETFD/F_SETFD) takes a raw fd and an int; `fds` were
+    // just returned by pipe(2) above and are valid here, and the F_GETFD
+    // result is checked (`flags >= 0`) before reuse. No memory is dereferenced.
     #[cfg(not(target_os = "linux"))]
     unsafe {
         for fd in fds {
@@ -697,6 +700,9 @@ fn install_fd3_in_child(write_raw: libc::c_int) -> std::io::Result<()> {
 /// rlimit at fork+exec, so a wrapper crash doesn't dump core. Best-effort:
 /// we log but don't fail the call if the syscall is denied.
 pub(crate) fn set_no_core_dumps() {
+    // SAFETY: setrlimit reads one `rlimit` through the pointer for the duration
+    // of the call; `&zero` is a fully-initialized stack value that outlives it,
+    // and the return code is checked below.
     unsafe {
         let zero = libc::rlimit {
             rlim_cur: 0,
@@ -821,6 +827,8 @@ pub(crate) fn kill_and_reap(child: &mut Child, grace: Duration) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    // SAFETY: kill performs no memory access; the negated pgid signals the
+    // child's process group (it is the group leader via process_group(0)).
     unsafe {
         libc::kill(-pgid, libc::SIGKILL);
     }

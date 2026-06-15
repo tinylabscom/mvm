@@ -75,6 +75,8 @@ fn drain_into<F: FnMut(ExecEvent)>(
 #[cfg(unix)]
 fn kill_pgroup(child: &Child) {
     let pgid = child.id() as libc::pid_t;
+    // SAFETY: kill performs no memory access; the negated pgid signals the
+    // child's process group (group leader via process_group(0), see above).
     unsafe {
         let _ = libc::kill(-pgid, libc::SIGKILL);
     }
@@ -299,6 +301,8 @@ mod tests {
             .expect("pid");
         let _ = std::fs::remove_file(&pidfile);
         // kill(pid, 0) returns -1/ESRCH when the process is gone.
+        // SAFETY: signal 0 delivers nothing — it only probes existence; the
+        // call takes an int pid and accesses no memory.
         let alive = unsafe { libc::kill(pid, 0) } == 0;
         assert!(!alive, "grandchild {pid} survived the pgroup kill");
     }

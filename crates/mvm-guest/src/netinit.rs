@@ -420,6 +420,8 @@ mod linux {
             // Bind with nl_pid = 0 so the kernel assigns a unique port
             // id; nl_groups = 0 (we send unicast requests, want no
             // multicast). zeroed() gives nl_pad = 0 as required.
+            // SAFETY: sockaddr_nl is a plain-data struct of integer fields, so
+            // an all-zero bit pattern is a valid, fully-initialized value.
             let mut addr: libc::sockaddr_nl = unsafe { zeroed() };
             addr.nl_family = libc::AF_NETLINK as u16;
             // SAFETY: addr is a valid sockaddr_nl for the bind's len.
@@ -447,6 +449,8 @@ mod linux {
         /// success, otherwise the positive errno.
         fn send_and_ack(&self, msg: &[u8]) -> Result<i32, String> {
             let fd = self.fd.as_raw_fd();
+            // SAFETY: sockaddr_nl is a plain-data struct of integer fields, so
+            // an all-zero bit pattern is a valid, fully-initialized value.
             let mut dst: libc::sockaddr_nl = unsafe { zeroed() };
             dst.nl_family = libc::AF_NETLINK as u16; // nl_pid = 0 → the kernel
             // SAFETY: msg is a valid slice; dst is a valid sockaddr_nl.

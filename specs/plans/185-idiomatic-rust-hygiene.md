@@ -265,10 +265,20 @@ thread many related values through runtime/build/CLI layers.
 **Files:** start from
 `rg -n 'unsafe \\{|unsafe fn|SAFETY:|cfg\\(|target_os|target_arch' crates`.
 
-- [ ] **Step 1 - require local `SAFETY:` invariants.** Every `unsafe` block that
+- [~] **Step 1 - require local `SAFETY:` invariants.** Every `unsafe` block that
       remains must explain the concrete invariant that makes it sound. Generic
       comments such as "required by Rust 2024" are not enough unless they also
       state the synchronization or ownership guarantee.
+
+      First pass: the simple-syscall `mvm-guest` files — `entrypoint.rs` (fcntl,
+      setrlimit, kill-pgroup), `volume.rs` (mount/umount2 with owned CStrings),
+      `exec_stream.rs` (kill-pgroup, kill-sig-0 probe), `process_rpc.rs` (pre_exec
+      async-signal-safe closure, kill-pgroup), `netinit.rs` (zeroed POD
+      `sockaddr_nl`), `worker_pool.rs` (sysconf) — now carry a per-block `SAFETY:`
+      naming the ownership/async-signal-safety/POD invariant. Verified host clippy
+      **and** `--target aarch64-unknown-linux-musl` clippy (the mount/netlink/
+      setrlimit blocks are Linux-gated). Audit baseline at the time: ~454 `unsafe`
+      sites vs ~261 `SAFETY:` comments workspace-wide.
 - [ ] **Step 2 - isolate platform/FFI unsafe behind small safe wrappers.** VZ,
       libkrun, libc/syscall, and env-mutation code should expose narrow safe
       functions to the rest of the crate wherever practical.
@@ -277,6 +287,15 @@ thread many related values through runtime/build/CLI layers.
       cargo builds continue to compile on non-target platforms.
 - [ ] **Step 4 - green.** Run targeted tests for touched code and clippy for each
       touched crate.
+
+#### Task 8 deferred follow-ups
+
+- [ ] Annotate the deeper `unsafe` clusters with `SAFETY:` invariants, one
+      reviewed file at a time (each needs genuine soundness reasoning, not a
+      formula): `mvm-guest/console.rs` (~16, PTY/termios), the `mvm-verity-init`
+      bin (~13, dm-verity ioctls), `mvm-guest-agent` bin (~5), and the
+      `mvm-vm-host/vz_objc.rs` objc2 FFI (~100) — the last best done while the
+      Plan-152 vz work is quiet.
 
 ### Task 9 - Audit feature and dependency boundaries
 
