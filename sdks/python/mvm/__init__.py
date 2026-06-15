@@ -62,6 +62,7 @@ from mvm._dsl import (
     workload,
     workload_ref,
 )
+from mvm._helpers import CodeError, CodeSandbox
 from mvm._sandbox import (
     DEFAULT_TTL_SECONDS,
     MVM_CLI_BIN_ENV,
@@ -82,6 +83,8 @@ __all__ = [
     "DEFAULT_TTL_SECONDS",
     "MVM_CLI_BIN_ENV",
     "SCHEMA_VERSION",
+    "CodeError",
+    "CodeSandbox",
     "EmittingContextError",
     "ExecResult",
     "MsgpackUnavailable",

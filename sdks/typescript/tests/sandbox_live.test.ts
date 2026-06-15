@@ -578,3 +578,97 @@ describe("Sandbox id + info", () => {
     });
   });
 });
+
+// ── CodeSandbox typed helper — Plan 125 C1 ───────────────────────────
+
+describe("CodeSandbox", () => {
+  it("run() returns stdout via python -c", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-cs-vm", build_mode: "dev" },
+      procWaitStdout: "4",
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const cs = new mvm.CodeSandbox("python:slim");
+    try {
+      expect(cs.run("print(2 + 2)")).toBe("4");
+      const calls = readFixtureLog();
+      expect(
+        calls.some((c) => c.startsWith("proc start sb-cs-vm") && c.includes("-- python -c")),
+      ).toBe(true);
+    } finally {
+      cs.kill();
+    }
+  });
+
+  it("run() throws CodeError on a non-zero exit", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-cs-vm", build_mode: "dev" },
+      procWaitExit: 1,
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const cs = new mvm.CodeSandbox("python:slim");
+    try {
+      expect(() => cs.run("import sys; sys.exit(1)")).toThrow(mvm.CodeError);
+    } finally {
+      cs.kill();
+    }
+  });
+
+  it("installPackage() shells the package manager", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-cs-vm", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const cs = new mvm.CodeSandbox("python:slim");
+    try {
+      cs.installPackage("requests");
+      expect(readFixtureLog().some((c) => c.includes("-- pip install requests"))).toBe(true);
+    } finally {
+      cs.kill();
+    }
+  });
+
+  it("runScript() copies then execs the script", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-cs-vm", build_mode: "dev" },
+      procWaitStdout: "ok",
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    const hostScript = path.join(tmpDir, "job.py");
+    fs.writeFileSync(hostScript, "print('ok')");
+
+    const cs = new mvm.CodeSandbox("python:slim");
+    try {
+      expect(cs.runScript(hostScript)).toBe("ok");
+      const calls = readFixtureLog();
+      expect(calls.some((c) => c.startsWith("cp ") && c.includes("sb-cs-vm:/tmp/job.py"))).toBe(true);
+      expect(calls.some((c) => c.includes("-- python /tmp/job.py"))).toBe(true);
+    } finally {
+      cs.kill();
+    }
+  });
+
+  it("a node image uses the node runner", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-cs-vm", build_mode: "dev" },
+      procWaitStdout: "4",
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+
+    const cs = new mvm.CodeSandbox("node:22");
+    try {
+      cs.run("console.log(2 + 2)");
+      expect(readFixtureLog().some((c) => c.includes("-- node -e"))).toBe(true);
+    } finally {
+      cs.kill();
+    }
+  });
+});

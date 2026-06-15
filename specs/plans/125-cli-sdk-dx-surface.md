@@ -58,7 +58,7 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
 
 **Files:** `sdks/python/mvm/{_code.py,_browser.py}` (new), re-exported from `mvm`.
 
-- [ ] **Task C1 — code-runner.** `CodeSandbox(image="python:slim")` with `run(code)->stdout`, `run_script(path)`, `install_package(pkg)`. Failing test: `run("print(2+2)")=="4"`. Implement over `Sandbox.exec`. Commit.
+- [x] **Task C1 — code-runner (both SDKs).** `CodeSandbox(image="python:slim")` with `run(code)->stdout`, `run_script(host_path)` (copy_in + run), `install_package(pkg)` — a thin typed preset over the imperative `Sandbox` (`exec`/`copy_in`), no new mechanism. Picks the runner from the image (`node*` → `node`/`-e`/`npm install`, else `python`/`-c`/`pip install`); raises a typed `CodeError` (carrying exit_code/stdout/stderr) on a non-zero exit. Lives in new `sdks/python/mvm/_helpers.py` + `sdks/typescript/src/_helpers.ts` (where C2's `BrowserSandbox` will join), exported from each package. Context-manager / `kill` delegate to the underlying Sandbox. 5 new Python tests + 5 new TS tests via the fixture harness (run-returns-stdout, raises-on-nonzero, install_package, run_script-copies-then-execs, node-runner) — Python suite 154 green (new file ruff-clean), TS suite 88 green (`tsc` build + `typecheck` clean). `sdks/`-only.
 - [ ] **Task C2 — browser/desktop presets.** `BrowserSandbox(browser="chromium")` = a `Sandbox` with a baked browser image + a forwarded CDP port + an `endpoint()` returning the ws URL. Just image + port presets; no new mechanism. Failing test: `endpoint()` returns a reachable URL (gated). Commit.
 
 ## Phase D — Node / TS parity

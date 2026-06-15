@@ -594,3 +594,87 @@ def test_info_reflects_record_state() -> None:
     assert info.workload_id == "wl-1"
     assert info.build_mode is None
     assert info.live is False
+
+
+# ── CodeSandbox typed helper (Plan 125 C1) ───────────────────────────
+
+
+def test_code_sandbox_run_returns_stdout(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-cs-vm", "build_mode": "dev"},
+        proc_wait_stdout="4",
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    with mvm.CodeSandbox(image="python:slim") as cs:
+        assert cs.run("print(2 + 2)") == "4"
+
+    calls = _read_fixture_log(tmp_path)
+    assert any(c.startswith("proc start sb-cs-vm") and "-- python -c" in c for c in calls), calls
+    assert any(c.startswith("proc wait sb-cs-vm") for c in calls), calls
+
+
+def test_code_sandbox_run_raises_on_nonzero(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-cs-vm", "build_mode": "dev"},
+        proc_wait_exit=1,
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    with mvm.CodeSandbox(image="python:slim") as cs:
+        with pytest.raises(mvm.CodeError):
+            cs.run("raise SystemExit(1)")
+
+
+def test_code_sandbox_install_package(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-cs-vm", "build_mode": "dev"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    with mvm.CodeSandbox(image="python:slim") as cs:
+        cs.install_package("requests")
+
+    calls = _read_fixture_log(tmp_path)
+    assert any("-- pip install requests" in c for c in calls), calls
+
+
+def test_code_sandbox_run_script_copies_then_execs(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-cs-vm", "build_mode": "dev"},
+        proc_wait_stdout="ok",
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    host_script = tmp_path / "job.py"
+    host_script.write_text("print('ok')")
+
+    with mvm.CodeSandbox(image="python:slim") as cs:
+        assert cs.run_script(str(host_script)) == "ok"
+
+    calls = _read_fixture_log(tmp_path)
+    assert any(c.startswith("cp ") and "sb-cs-vm:/tmp/job.py" in c for c in calls), calls
+    assert any("-- python /tmp/job.py" in c for c in calls), calls
+
+
+def test_code_sandbox_node_uses_node_runner(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-cs-vm", "build_mode": "dev"},
+        proc_wait_stdout="4",
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    with mvm.CodeSandbox(image="node:22") as cs:
+        cs.run("console.log(2 + 2)")
+
+    calls = _read_fixture_log(tmp_path)
+    assert any("-- node -e" in c for c in calls), calls
