@@ -271,31 +271,17 @@ pub fn linux_builder_vm_readiness() -> Result<(), BuilderVmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{LazyLock, Mutex};
-
-    /// Process-wide lock for env mutation. Same pattern the
-    /// `builder_vm_timeout` tests use; serialises tests so concurrent
-    /// threads don't observe each other's writes.
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    use mvm_core::util::test_env::TestEnv;
 
     fn with_env<F: FnOnce() -> R, R>(value: Option<&str>, f: F) -> R {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let prev = std::env::var_os(MVM_BUILDER_BACKEND_ENV);
-        // SAFETY: tests serialise env mutation via ENV_LOCK.
-        unsafe {
-            match value {
-                Some(v) => std::env::set_var(MVM_BUILDER_BACKEND_ENV, v),
-                None => std::env::remove_var(MVM_BUILDER_BACKEND_ENV),
-            }
+        // `TestEnv` serializes env-mutating tests behind a shared lock and
+        // restores MVM_BUILDER_BACKEND_ENV on drop (after `f` returns).
+        let mut env = TestEnv::new();
+        match value {
+            Some(v) => env.set(MVM_BUILDER_BACKEND_ENV, v),
+            None => env.remove(MVM_BUILDER_BACKEND_ENV),
         }
-        let result = f();
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var(MVM_BUILDER_BACKEND_ENV, v),
-                None => std::env::remove_var(MVM_BUILDER_BACKEND_ENV),
-            }
-        }
-        result
+        f()
     }
 
     // ── Auto-detect (pure, hermetic — no env / OS / arch sensitivity) ──
@@ -316,7 +302,7 @@ mod tests {
         );
     }
 
-    // ── Env-var parsing (hermetic via ENV_LOCK + explicit values) ──
+    // ── Env-var parsing (hermetic via the shared TestEnv guard + explicit values) ──
 
     #[test]
     fn resolve_env_override_returns_none_when_unset() {

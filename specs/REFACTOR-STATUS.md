@@ -396,8 +396,14 @@ PLAN 185 — Idiomatic Rust hygiene audit         🟢 started
       with the mvm-backend batch)
   [ ] `mvm-backend` env tests (host-gated: its test bin SIGKILLs under macOS
       amfid — migrate where CI/Linux runs them)
-  [ ] Standardize poisoned-lock handling by distinguishing test/global
-      serialization locks from real runtime state locks
+  [~] Phase 2 (poison-lock policy): policy decided + written into the plan —
+      test/global *serialization* locks recover via `into_inner()` (fold env ones
+      into TestEnv; cwd/signal ones use `unwrap_or_else(into_inner)`), runtime
+      *state* locks stay fail-closed. Applied: folded the last two mvm-build env
+      serializers (`builder_backend_select` `with_env`, `vz_builder`
+      `with_supervisor_env`) into TestEnv; audited runtime `.lock().unwrap()` sites
+      as intentionally fail-closed. Remaining: `mvm-cli::dev_vz` (hot) + mvm-backend
+      test locks (host-gated)
   [ ] Rename overly generic internal traits/types where the blast radius is
       small, including storage/backend and layer-local egress proxy names
   [ ] Push stringly backend/provider selectors toward typed values at module

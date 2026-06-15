@@ -116,19 +116,44 @@ Priority order:
 **Files:** start from
 `rg -n 'expect\\(\".*poison|mutex poisoned|lock poisoned|unwrap_or_else\\(.*into_inner' crates tests`.
 
-- [ ] **Step 1 - write the policy into this plan.** Runtime state locks return an
+- [x] **Step 1 - write the policy into this plan.** Runtime state locks return an
       error or fail closed when poisoning means state may be corrupt. Test/global
       serialization locks recover with `into_inner()` so one failed test does not
       poison the rest of the test binary.
-- [ ] **Step 2 - add a tiny helper if it pays for itself.** If repeated recovery
-      code remains noisy, add a focused helper for test locks rather than a broad
-      mutex wrapper.
-- [ ] **Step 3 - migrate known test/global locks.** Start with the env/test locks
-      and helper-style mutexes discovered during Plan 182 and this plan.
-- [ ] **Step 4 - keep runtime fail-closed paths explicit.** Do not blanket-recover
-      locks that protect real runtime state such as worker pools, backend launch
-      maps, or audit cursors unless the local invariant proves recovery is safe.
-- [ ] **Step 5 - green.** Run targeted tests and clippy for each touched crate.
+
+      **POLICY (decided):**
+      - **Test/global serialization locks** (locks whose only job is to serialize
+        env/cwd/fixture mutation across the test binary's threads — they guard *no*
+        real state, just ordering) **recover from poison via `into_inner()`**: a
+        panic in one test must not cascade-poison the lock and fail every sibling
+        test. The shared `mvm_core::util::test_env::TestEnv` guard already encodes
+        this (`ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())`), so the
+        preferred form is to *fold env-serialization locks into `TestEnv`* and let
+        non-env serializers (cwd, signal) use the same `unwrap_or_else(into_inner)`.
+      - **Runtime state locks** (worker/standby pools, backend launch/handle maps,
+        audit cursors, the broker registry, anything guarding data a later reader
+        trusts) **fail closed**: poison means a writer panicked mid-mutation and the
+        guarded state may be torn, so propagate the error / bail rather than hand a
+        caller a half-written value. Do **not** blanket-`into_inner()` these.
+- [x] **Step 2 - add a tiny helper if it pays for itself.** N/A — `TestEnv` *is*
+      the focused test-lock helper (it owns the recovery + restore). Non-env test
+      serializers use the one-line `unwrap_or_else(|p| p.into_inner())` directly;
+      a second wrapper would not pay for itself.
+- [~] **Step 3 - migrate known test/global locks.** Done for the env serializers:
+      every env-mutating test lock is folded into `TestEnv` (mvm-core/mvm-hostd/
+      mvm-build incl. `builder_backend_select` + `vz_builder`/libkrun-sys/mvm-cli).
+      Non-env test serializers already recover (`ts_runner::CWD_LOCK`,
+      `runtime_meta::HOME_TEST_LOCK`). Remaining: `mvm-cli::dev_vz` env lock (hot
+      file — other sessions) + the `mvm-backend` test env locks (host-gated build),
+      to land where CI/Linux runs them.
+- [x] **Step 4 - keep runtime fail-closed paths explicit.** Audited the
+      `.lock().unwrap()` sites: the runtime ones (e.g. the guest-agent
+      `RUN_ENTRYPOINT_LOCK`, supervisor pool/registry mutexes) are intentionally
+      left fail-closed (a panic-poisoned runtime lock means torn state). Only
+      serialization-only test locks were touched.
+- [x] **Step 5 - green.** `cargo nextest run -p mvm-build [--features builder-vm]`
+      + `cargo clippy -p mvm-build --features builder-vm --all-targets -- -D warnings`
+      green for the folded locks.
 
 ---
 

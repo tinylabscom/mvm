@@ -1943,33 +1943,15 @@ mod tests {
         );
     }
 
-    /// Process-wide lock for `MVM_VZ_SUPERVISOR_PATH` mutation. Same
-    /// pattern as the env-mutating tests in
-    /// `builder_backend_select` + `builder_vm_runtime`; without it
-    /// the two resolver tests race on the env var and one observes
-    /// the other's value.
-    static SUPERVISOR_ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
-        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
-
     fn with_supervisor_env<F: FnOnce() -> R, R>(value: Option<&Path>, f: F) -> R {
-        let _guard = SUPERVISOR_ENV_LOCK.lock().unwrap();
-        let prev = std::env::var_os("MVM_VZ_SUPERVISOR_PATH");
-        // SAFETY: SUPERVISOR_ENV_LOCK serialises every test that
-        // mutates MVM_VZ_SUPERVISOR_PATH.
-        unsafe {
-            match value {
-                Some(v) => std::env::set_var("MVM_VZ_SUPERVISOR_PATH", v),
-                None => std::env::remove_var("MVM_VZ_SUPERVISOR_PATH"),
-            }
+        // `TestEnv` serializes env-mutating tests behind a shared lock and
+        // restores MVM_VZ_SUPERVISOR_PATH on drop (after `f` returns).
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        match value {
+            Some(v) => env.set("MVM_VZ_SUPERVISOR_PATH", v),
+            None => env.remove("MVM_VZ_SUPERVISOR_PATH"),
         }
-        let result = f();
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MVM_VZ_SUPERVISOR_PATH", v),
-                None => std::env::remove_var("MVM_VZ_SUPERVISOR_PATH"),
-            }
-        }
-        result
+        f()
     }
 
     #[test]
