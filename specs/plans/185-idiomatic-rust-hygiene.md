@@ -546,15 +546,17 @@ plus secret-bearing modules.
       artifact, green in a real-embed CI build.
 - [x] `cargo check --workspace` green (the test build above compiled the whole
       workspace + all test targets on Linux).
-- [~] `cargo clippy --workspace --all-targets -- -D warnings` green in the
-      **required env (macOS CI)** — verified for all Plan 185 changes. A Linux
-      clippy run additionally surfaced **pre-existing** lints in the `cfg(linux)`
-      `mvm-build` bin `mvm-host-vm-init` (same clippy 0.1.96 both hosts; macOS
-      never lints that bin because it's `cfg`-excluded): 9 `doc list item without
-      indentation`, 1 `empty line after doc comment`, 1 `collapsible if`. These
-      are unrelated to Plan 185 and predate it; tracked as a separate Linux-clippy
-      follow-up (chasing "Linux clippy green" risks a cascade through dependent
-      crates — out of this plan's scope).
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` green in the
+      **required env (macOS CI)** for all Plan 185 changes. A Linux clippy run
+      additionally surfaced **pre-existing** lints in the `cfg(linux)` `mvm-build`
+      bin `mvm-host-vm-init` (macOS never lints that bin because it's
+      `cfg`-excluded; the per-PR root `clippy --all-targets` doesn't lint a
+      dependency's bin, but the `ci-full` `clippy -p mvm-build -p mvm-backend
+      --all-targets` Linux lane does): 9 `doc_lazy_continuation`, 1 `empty line
+      after doc comment`, 1 collapsible `if let`. Now **fixed** (collapsible
+      if-let collapsed, dangling `///` overview → `//`, list continuations
+      re-indented); `cargo clippy -p mvm-build -p mvm-backend --all-targets --
+      -D warnings` is green on the Linux box. No cascade — the lane is clean.
 - [x] `cargo doc --workspace --all-features --no-deps` — **green on Linux** under
       `-D rustdoc::broken_intra_doc_links` (exit 0, zero unresolved). Task 13
       proved the renames introduced zero broken links; the Linux `--all-features`
@@ -574,7 +576,11 @@ plus secret-bearing modules.
          intra-doc links (Linux `--all-features`) fixed; `cargo doc --workspace
          --all-features --no-deps` is clean under `-D broken_intra_doc_links` on
          the Linux box. (No longer deferred.)
-      3. **Pre-existing Linux-only clippy lints in `mvm-host-vm-init`** (11, doc
-         formatting + collapsible-if). Surfaced by the Phase 7 Linux clippy run;
-         orthogonal to Plan 185; deferred to avoid a cross-crate Linux-clippy
-         cascade inside this closeout.
+      3. **Pre-existing Linux-only clippy lints in `mvm-host-vm-init`: DONE.**
+         The 12 lints (`doc_lazy_continuation`, empty-line-after-doc, collapsible
+         if-let) the Phase 7 Linux clippy run surfaced are fixed; the
+         `ci-full` `clippy -p mvm-build -p mvm-backend --all-targets` Linux lane
+         is green on the box, no cascade. (No longer deferred.)
+
+      **Net: the only remaining Plan 185 item is Task 8 (`vz_objc.rs`), parked
+      until the vz work quiets.**
