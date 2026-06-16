@@ -1,6 +1,8 @@
 # Plan 200 — machine UX/DX layer
 
-**Status:** planned  
+**Status:** in progress — `mvmctl machine run` shipped (Workstream A/B kickoff);
+persistent verbs (`create/start/exec/shell/stop`), `--net`/`--allow-host`, local
+image sources, `mvm.toml` schema v2, SDK parity, and `pack` pending  
 **Owner:** mvm  
 **Date:** 2026-06-15
 
@@ -701,8 +703,10 @@ Required behavior:
       first-use happy-path docs before flake/manifests.
 - [ ] Add `mvmctl machine --help` with `run`, `create`, `start`, `exec`,
       `shell`, `stop`, `ls`, `inspect`, and `rm` subcommands.
+      (`run` shipped — `commands/machine/`; create/start/exec/shell/stop/ls/inspect/rm remain.)
 - [ ] Add parser tests for every target command shown in this plan.
-- [ ] Add the future `mvmctl machine run --image ...` quickstart to README and
+      (`machine run` parser + translation tests shipped; remaining verbs pending.)
+- [x] Add the future `mvmctl machine run --image ...` quickstart to README and
       public docs after the command is implemented.
 - [ ] Rewrite install docs so the primary path is binary install + `mvmctl
       machine run`; until then, keep binary install + `mvmctl run --image ...`
@@ -729,7 +733,7 @@ Required behavior:
       extraction shortcut for DX.
 - [ ] Thread transient run network policy through `ExecRequest` and
       `VmStartConfig`.
-- [ ] Make `mvmctl machine run` translate into `mvmctl run` internals.
+- [x] Make `mvmctl machine run` translate into `mvmctl run` internals.
 - [ ] Add receipt/dry-run output for effective network posture.
 - [ ] Add unit tests for deny-all, `--net`, allow-list parsing, conflict
       handling, and dry-run redaction.
