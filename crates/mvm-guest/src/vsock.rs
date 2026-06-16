@@ -112,7 +112,7 @@ const ADAPTIVE_BACKOFF_CAP_MS: u64 = 500;
 /// Adaptive backoff delay for the `mvmctl up` readiness poll.
 /// `attempt` is 0-based: attempt 0 waits the
 /// base, each subsequent attempt doubles, capped at
-/// [`ADAPTIVE_BACKOFF_CAP_MS`]. This replaces a fixed 500 ms sleep that
+/// `ADAPTIVE_BACKOFF_CAP_MS`. This replaces a fixed 500 ms sleep that
 /// cost up to ~480 ms of dead time after a fast-binding guest was
 /// already reachable; the cap preserves the old steady-state cadence
 /// for a slow guest. Pure — the schedule is unit-tested. This changes
@@ -488,7 +488,7 @@ impl GuestRequest {
     ///
     /// The strings are wire-stable — a rename here is also a
     /// detail-format wire-format change. Pinned by
-    /// [`tests::kind_name_covers_every_variant`].
+    /// `tests::kind_name_covers_every_variant`.
     pub fn kind_name(&self) -> &'static str {
         match self {
             Self::ProtocolHello { .. } => "protocol-hello",
@@ -2283,7 +2283,7 @@ fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<Unix
 /// 3. Read `OK <port>\n`.
 /// 4. Then exchange length-prefixed JSON frames.
 ///
-/// Retries up to [`CONNECT_RETRIES`] times on timeout errors, skipping retries
+/// Retries up to `CONNECT_RETRIES` times on timeout errors, skipping retries
 /// for definitive failures (connection refused, socket not found).
 pub fn connect_to_port(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
     let mut last_err = None;

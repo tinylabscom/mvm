@@ -1,13 +1,13 @@
 //! `mvm-substitution-endpoint` — the per-VM secret-substitution moat.
 //! Spawned per-VM by the backend, it is the one process that holds
 //! the workload's secrets in the clear: it opens the host's encrypted secret +
-//! binding stores, builds the per-VM [`SubstitutionService`], and serves the
+//! binding stores, builds the per-VM `SubstitutionService`, and serves the
 //! guest→host substitution channel. The guest only ever holds the opaque
 //! `mvm-secret-<hex>` placeholder; the real credential is substituted here and
 //! reaches the wire via the host forward leg — never the guest.
 //!
 //! Process contract:
-//! 1. The backend writes an [`EndpointConfig`] JSON on stdin and closes it.
+//! 1. The backend writes an `EndpointConfig` JSON on stdin and closes it.
 //! 2. The endpoint opens the stores, mints placeholders, and writes ONE JSON
 //!    line to **stdout** — the `[(guest var, placeholder)]` pairs the backend
 //!    injects into the guest launch env — then flushes. This is the ready

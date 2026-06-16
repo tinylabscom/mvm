@@ -69,7 +69,7 @@ impl AuditEmitter {
     }
 
     /// Test seam — caller supplies the audit directory. Production
-    /// callers use [`new`]. The directory is created if missing;
+    /// callers use `new`. The directory is created if missing;
     /// `FileAuditSigner::open` enforces mode 0700-ish via the
     /// OS-default umask, but for hard guarantees the caller should
     /// pre-create it.

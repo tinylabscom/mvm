@@ -1,8 +1,8 @@
 //! Host-side secret keyholder.
 //!
 //! The keyholder owns the boundary where a workload's `SecretRef`
-//! becomes a real credential. The value source is the [`SecretResolver`]
-//! trait + the single-host [`LocalResolver`]; the signer/injector then
+//! becomes a real credential. The value source is the `SecretResolver`
+//! trait + the single-host `LocalResolver`; the signer/injector then
 //! uses a resolved value on egress without ever handing it to the guest
 //! (claims 12/13).
 

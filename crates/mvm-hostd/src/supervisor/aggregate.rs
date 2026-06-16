@@ -974,7 +974,7 @@ pub fn build_inspector_chain(
 /// operator-natural `pii.mode` field.
 ///
 /// Refuses unknown `pii.mode` / `pii.categories[i]` values via
-/// [`PiiPolicyError`] so a typo fails the boot loudly at admission
+/// `PiiPolicyError` so a typo fails the boot loudly at admission
 /// rather than silently scanning fewer categories than intended.
 pub fn build_inspector_chain_with_pii(
     egress: &EgressPolicy,

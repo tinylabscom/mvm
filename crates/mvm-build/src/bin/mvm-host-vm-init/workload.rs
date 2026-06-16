@@ -4,8 +4,8 @@
 //! ## No VMM lock-in
 //!
 //! Everything VMM-specific (the config-file format, the binary
-//! path, the spawn argv) lives behind the [`WorkloadVmm`] trait.
-//! [`FirecrackerVmm`] is the only impl today and the only type that
+//! path, the spawn argv) lives behind the `WorkloadVmm` trait.
+//! `FirecrackerVmm` is the only impl today and the only type that
 //! names Firecracker; the dispatch loop, the wire protocol, and the
 //! state-dir / process lifecycle are all VMM-agnostic. A second
 //! backend (qemu) is a pure addition: a
@@ -17,7 +17,7 @@
 //! Same rationale as [`crate::dispatch_response`] /
 //! [`crate::builder_request`]: the ≤ 1.5 MiB rootfs budget
 //! keeps `serde_json` out of the production rootfs, so
-//! [`FirecrackerVmm::render_config`] hand-rolls the Firecracker
+//! `FirecrackerVmm::render_config` hand-rolls the Firecracker
 //! `--config-file` JSON. The `render_config_is_valid_json` test
 //! parses the output with a dev-only `serde_json` to keep it honest.
 

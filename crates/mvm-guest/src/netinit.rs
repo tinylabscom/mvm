@@ -35,7 +35,7 @@
 //!
 //! ## Audit emission
 //!
-//! [`install_mandatory_deny`] returns a [`Report`] describing what
+//! `install_mandatory_deny` returns a `Report` describing what
 //! was installed (and what failed). The caller — typically the
 //! `mvm-guest-netinit` binary running from `/init` — writes the
 //! report as a single JSON line to stdout, which the kernel

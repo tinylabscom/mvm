@@ -4,8 +4,8 @@
 //! a library module so its pub API stays dead-code-clean cross-platform
 //! and the unit tests run everywhere. The `mvm-egress-proxy` binary
 //! (`src/bin/mvm-egress-proxy.rs`, Linux-only at runtime) is a thin
-//! wrapper that constructs an [`allowlist::Allowlist`], binds the proxy
-//! with [`proxy::start`], and waits for SIGTERM.
+//! wrapper that constructs an `allowlist::Allowlist`, binds the proxy
+//! with `proxy::start`, and waits for SIGTERM.
 //!
 //! Consumer: `mvm-host-vm-init`'s `run_install` spawns the proxy + sets
 //! `HTTPS_PROXY` / `HTTP_PROXY` on the installer's env before invoking

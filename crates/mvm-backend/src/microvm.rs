@@ -710,7 +710,7 @@ impl FlakeRunConfig {
 
 /// Boot a Firecracker VM from flake-built artifacts (headless).
 ///
-/// Each VM gets its own directory under ~/microvm/vms/<name>/ with a
+/// Each VM gets its own directory under `~/microvm/vms/<name>/` with a
 /// separate Firecracker socket, PID file, and log.  The bridge network
 /// is shared, but each VM has its own TAP device and guest IP.
 #[instrument(skip_all, fields(name = %config.name))]

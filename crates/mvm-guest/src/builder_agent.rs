@@ -30,7 +30,7 @@ pub const BUILDER_AGENT_PORT: u32 = 21470;
 /// This port is added to the libkrun builder VM's vsock config; the
 /// host opens the corresponding Unix-socket-proxy at
 /// `<vm_state_dir>/vsock-21471.sock` to receive
-/// [`mvm_build::builder_protocol::HostVmResponse`] frames from the
+/// `mvm_build::builder_protocol::HostVmResponse` frames from the
 /// guest.
 pub const BUILDER_DISPATCH_PORT: u32 = 21471;
 

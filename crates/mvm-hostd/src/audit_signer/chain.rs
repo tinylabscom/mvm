@@ -2,8 +2,8 @@
 //!
 //! Holds the chain-signing key (software in-memory) + the
 //! `O_APPEND`-only FD on the JSONL + the latest chain head. The single
-//! entry point is [`Chain::append_entry`]: takes a typed
-//! [`AppendEntryRequest::AppendEntry`], synthesizes a `CanonicalEntry`
+//! entry point is `Chain::append_entry`: takes a typed
+//! `AppendEntryRequest::AppendEntry`, synthesizes a `CanonicalEntry`
 //! with the current `prev_hash`, JCS-canonicalizes, signs, appends,
 //! fsyncs, updates head, persists secondary, returns the new head.
 

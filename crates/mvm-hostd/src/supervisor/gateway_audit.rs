@@ -19,7 +19,7 @@
 //! - Same-UID processes are documented as accepted (they can already
 //!   read the audit chain file directly).
 //! - `exit()` skips Drop; the socket file is pre-unlinked on
-//!   [`Self::bind`] so a fresh boot rebinds cleanly even after an
+//!   `Self::bind` so a fresh boot rebinds cleanly even after an
 //!   ungraceful supervisor exit.
 
 use std::io;
