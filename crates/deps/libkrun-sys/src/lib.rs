@@ -349,6 +349,14 @@ pub enum NetworkingMode {
         /// listener socket (`<scratch_dir>/gvproxy.sock`) + log
         /// file (`<scratch_dir>/gvproxy.log`).
         scratch_dir: String,
+        /// When set, launch the gateway natively as
+        /// `<MVM_GATEWAY_BIN> run --config <path>` instead of the
+        /// gvproxy-compat `-listen-vfkit` arg set. The config's
+        /// `[transport].path` must be `<scratch_dir>/gvproxy.sock` so
+        /// libkrun's `add_net_unixgram` connects to the same unixgram
+        /// socket either path creates. Absent → gvproxy-compat (default).
+        #[serde(default)]
+        native_config: Option<String>,
     },
 }
 
@@ -496,7 +504,19 @@ impl KrunContext {
         self.networking = NetworkingMode::Gvproxy {
             mac,
             scratch_dir: scratch_dir.into(),
+            native_config: None,
         };
+        self
+    }
+
+    /// Point an already-`with_gvproxy`'d context at a pre-rendered native
+    /// gateway config, so the supervisor launches `<MVM_GATEWAY_BIN> run
+    /// --config <path>` rather than the gvproxy-compat arg set. No-op if
+    /// networking isn't `Gvproxy`.
+    pub fn with_gvproxy_native_config(mut self, config_path: impl Into<String>) -> Self {
+        if let NetworkingMode::Gvproxy { native_config, .. } = &mut self.networking {
+            *native_config = Some(config_path.into());
+        }
         self
     }
 
@@ -692,11 +712,18 @@ fn configure_with_gateway(ctx: &KrunContext) -> Result<(sys::Context, GatewayHan
             )?;
             GatewayHandle::Passt(handle)
         }
-        NetworkingMode::Gvproxy { mac, scratch_dir } => {
-            let handle =
-                gvproxy::spawn(std::path::Path::new(scratch_dir)).map_err(|e| Error::Io {
-                    context: format!("spawning gvproxy for NetworkingMode::Gvproxy: {e}"),
-                })?;
+        NetworkingMode::Gvproxy {
+            mac,
+            scratch_dir,
+            native_config,
+        } => {
+            let handle = gvproxy::spawn(
+                std::path::Path::new(scratch_dir),
+                native_config.as_deref().map(std::path::Path::new),
+            )
+            .map_err(|e| Error::Io {
+                context: format!("spawning gvproxy for NetworkingMode::Gvproxy: {e}"),
+            })?;
             // gvproxy speaks libkrun's "vfkit mode" framing on the
             // unixgram socket; NET_FLAG_VFKIT (see sys::NET_FLAG_VFKIT)
             // is libkrun's required signal to emit the magic-byte
@@ -837,11 +864,18 @@ fn configure_with_gateway_for_bridge(
                 },
             )
         }
-        NetworkingMode::Gvproxy { mac, scratch_dir } => {
-            let handle =
-                gvproxy::spawn(std::path::Path::new(scratch_dir)).map_err(|e| Error::Io {
-                    context: format!("spawning gvproxy for bridged NetworkingMode::Gvproxy: {e}"),
-                })?;
+        NetworkingMode::Gvproxy {
+            mac,
+            scratch_dir,
+            native_config,
+        } => {
+            let handle = gvproxy::spawn(
+                std::path::Path::new(scratch_dir),
+                native_config.as_deref().map(std::path::Path::new),
+            )
+            .map_err(|e| Error::Io {
+                context: format!("spawning gvproxy for bridged NetworkingMode::Gvproxy: {e}"),
+            })?;
             // Snapshot gvproxy's bind path before moving the handle
             // into GatewayHandle::Gvproxy — the bridge needs it to
             // connect for the egress direction.
