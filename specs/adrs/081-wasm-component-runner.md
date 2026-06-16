@@ -185,6 +185,26 @@ guest seccomp, output returns, provenance recorded.
   a `.wasm` is just another content-addressed artifact.
 - **WASI P2 / Component Model for v1**: deferred — the scaffold is P1 and P1
   modules cover the v1 target; Decision 1's seam keeps P2 a later swap.
+- **A kernel-less, library-embedded Wasm VMM with snapshot-per-call** (prior
+  art): a CNCF-sandbox embedded Virtual Machine Manager runs a purpose-built
+  `no_std` Wasm guest — no guest kernel, no OS — linked *in-process* as a
+  library, with typed function calls across the boundary and a clean snapshot
+  restored before every guest invocation. Its existence is a useful
+  existence-proof: a `no_std` Wasm guest with a hardware boundary boots in
+  milliseconds, calls complete in microseconds, and snapshot-per-call is cheap
+  enough to run on every step of an agent loop — concrete evidence for the
+  dependency-budget review that gates pulling a Wasm engine in (Plan 144's
+  `wasm-sandbox` follow-up) and for the preview tier's fast author-loop
+  (ADR-080 P8). It is **rejected as the production shape here** for two
+  reasons: (1) it collapses the VMM into the orchestrator's address space,
+  abandoning the supervisor/jailer/broker **process moat** mvm relies on; and
+  (2) a kernel-less guest forgoes the Linux microVM boundary that earns claims
+  1–3, 10, 13, 15. The takeaway is the *guest model and snapshot cadence*, not
+  the embedding: mvm keeps the full microVM and the moat, and runs wasmtime as
+  an in-guest subprocess (Decisions 4–5), while the snapshot-per-call cadence
+  is worth considering for the preview tier and for a per-invocation reset DX
+  mode (evaluate against the Plan 159 checkpoint/fork primitive first — it may
+  already provide a clean per-invoke baseline).
 
 ## Consequences
 

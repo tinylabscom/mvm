@@ -248,7 +248,10 @@ heavy deps in slice 1 (see "Considered and rejected": `wasmtime` is deferred).
 ### deferred follow-ups
 
 - [ ] Real WASI execution via `wasmtime` (WASI preview), replacing the mocked
-  command runner — gated behind a dependency-budget review.
+  command runner — gated behind a dependency-budget review. Prior art for that
+  review: ADR-081 §"Alternatives considered" records a kernel-less,
+  library-embedded Wasm VMM (`no_std` Wasm guest, snapshot-per-call) as an
+  existence-proof that the Wasm-guest model boots in ms / calls in µs.
 - [ ] Live `websocket` and `MessageChannel` control-plane transports (browser /
   worker wire protocols), beyond the slice-1 `in_memory` shim.
 - [ ] A `wasm32-*` build target so the backend ships as an actual browser bundle.
