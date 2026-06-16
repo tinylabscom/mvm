@@ -262,6 +262,7 @@ fn builder_store_check() -> Check {
 /// builder-egress line as an affirmation. The builder VM locks egress on
 /// the deps-install arm (proxy-uid-only, fail-closed) and opens it for
 /// flake-build fetches — a fixed design, not a runtime decision.
+#[cfg(feature = "builder-vm")]
 const BUILDER_EGRESS_POSTURE: &str = "egress is locked on the deps-install arm (proxy-uid-only, fail-closed) \
      and open for flake-build fetches";
 
