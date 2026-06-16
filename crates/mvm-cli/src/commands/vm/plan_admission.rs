@@ -229,12 +229,27 @@ const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// The signed envelope may contain secret bindings, environment
 /// variables, or policy refs that resolve to credentials. Treat as
 /// opaque transport bytes.
+/// Thread *only* the admitted tenant label onto the `VmStartConfig`.
+///
+/// The per-VM host-services broker (`host.audit.v1` / `host.time.v1` /
+/// `host.cost.v1`) keys its spawn off `config.tenant_id`, so any admitted
+/// workload must carry it — `host.audit.v1` is implicitly available to any
+/// admitted workload (ADR-084). This is decoupled from
+/// [`populate_audit_substrate`]: the broker needs the tenant string, **not**
+/// the signed `plan_json`, whose presence flips libkrun/Vz onto the
+/// (opt-in, `~/.mvm/keys`-anchored) gateway-bridge supervisor path. Call this
+/// unconditionally; call `populate_audit_substrate` only when the bridge path
+/// is wanted.
+pub fn thread_tenant_id(cfg: &mut mvm_core::vm_backend::VmStartConfig, admitted: &AdmittedPlan) {
+    cfg.tenant_id = Some(admitted.plan.tenant.0.clone());
+}
+
 pub fn populate_audit_substrate(
     cfg: &mut mvm_core::vm_backend::VmStartConfig,
     admitted: &AdmittedPlan,
     policy_bundle: Option<&PolicyBundle>,
 ) -> Result<()> {
-    cfg.tenant_id = Some(admitted.plan.tenant.0.clone());
+    thread_tenant_id(cfg, admitted);
 
     let plan_json = serde_json::to_string(&admitted.signed)
         .context("serializing SignedExecutionPlan for VmStartConfig.plan_json")?;
@@ -820,6 +835,40 @@ mod tests {
         assert!(
             err.chain().any(|e| e.to_string().contains("sha256")),
             "expected sha256 mismatch chain; got {err:#}"
+        );
+    }
+
+    #[test]
+    fn thread_tenant_id_sets_only_tenant_label_not_the_bridge_plan() {
+        use mvm_core::vm_backend::VmStartConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let admitted = admit_for_run(
+            &fixture_input("vm-tenant-only"),
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            None,
+        )
+        .expect("happy admit");
+
+        let mut cfg = VmStartConfig::default();
+        thread_tenant_id(&mut cfg, &admitted);
+
+        // The broker spawn keys off this label.
+        assert_eq!(
+            cfg.tenant_id.as_deref(),
+            Some(admitted.plan.tenant.0.as_str())
+        );
+        // It must NOT thread the signed plan / policy bundle — that flips
+        // libkrun/Vz onto the gateway-bridge supervisor (+ its ~/.mvm/keys
+        // substrate validation), which is a separate opt-in concern.
+        assert!(
+            cfg.plan_json.is_none(),
+            "thread_tenant_id must not set plan_json"
+        );
+        assert!(
+            cfg.bundle_json.is_none(),
+            "thread_tenant_id must not set bundle_json"
         );
     }
 

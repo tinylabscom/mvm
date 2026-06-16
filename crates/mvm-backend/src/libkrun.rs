@@ -317,13 +317,18 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         };
     }
 
-    // Resolve the audit substrate (paths + tenant
-    // validation). When the producer threaded an AdmittedPlan in
-    // (`tenant_id` Some), the AuditSubstrate carries the five resolved
-    // paths; otherwise it's all-None and the supervisor takes the
-    // legacy `run_supervisor` path.
-    let substrate =
-        crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?;
+    // Resolve the gateway-bridge audit substrate (paths + tenant validation).
+    // Gated on `plan_json` — the bridge supervisor's actual input — NOT on
+    // `tenant_id`: a substrate without a plan is what the supervisor rejects as
+    // "cfg.plan missing on bridge path". An admitted workload always carries
+    // `tenant_id` (so the per-VM host-services broker spawns below), but only
+    // the opt-in bridge path threads `plan_json`; without it the supervisor
+    // stays on the legacy `run_supervisor` path and the substrate is all-None.
+    let substrate = if config.plan_json.is_some() {
+        crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?
+    } else {
+        crate::audit_substrate::AuditSubstrate::default()
+    };
 
     // Parse the signed-plan + bundle envelopes from VmStartConfig.
     // libkrun_sys::SupervisorConfig carries them as Option<serde_json::Value>

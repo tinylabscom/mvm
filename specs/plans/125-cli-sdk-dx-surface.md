@@ -243,10 +243,15 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
         - [x] **E5.3b-3a** — codegen foundation: feature-gated `#[derive(JsonSchema)]` on broker wire types (`ServiceCall`/`ServiceResponse`/`ServiceErrorCode` plus `host_audit`/`host_time`/`host_cost` payloads), `mvm-core` `emit_broker_schema`, `schema/broker-services-v0.json`, generated `sdks/python/mvm/_broker/services.py` and `sdks/typescript/src/broker/services.ts`; `check-stubs` drift-gated and default closure schemars-free.
         - [x] **E5.3b-3b (Python)** — pure-Python veneer over the generated types: `mvm.audit.emit`/`emit_batch`, `mvm.host.time()`, and `mvm.host.cost()` via lazy `AF_VSOCK(HOST_CID:BROKER_PORT)` length-framed `ServiceCall`; typed service exceptions; injectable `connect` for tests over an `AF_UNIX` socket-pair mock broker. Full Python suite: 167 passed / 7 skipped, ruff clean.
         - [ ] **E5.3b-3c (TypeScript)** — deferred for cause: Node has no native `AF_VSOCK` and the in-guest bridge is TCP↔vsock per configured binding, not a generic path. Pick a transport first (native vsock addon weighed under ADR-002, or a broker TCP↔vsock bridge binding baked into the image), then mirror the Python veneer.
-      - [ ] **E5.3b-4** — live-VM E2E. Venues: vz on this Mac (broker-capable;
-        pre-existing init-EOF boot issues to clear first) or libkrun on the
-        Linux box (`88.99.197.234` is FC today — no broker — so it'd need
-        libkrun stood up). Needs b3 for the headline `mvm.audit.emit` test.
+      - [x] **E5.3b-4** — live-VM E2E. **PROVEN on libkrun (this Mac)**: an
+        admitted `mvmctl up --tenant local` boots a sealed workload whose
+        in-guest `host_audit::emit` reaches the per-VM broker over BROKER_PORT,
+        and the chain-signed `local.<vm>.workload.jsonl` verifies clean via
+        `mvmctl trust audit verify` (host-stamped `category: workload_audit`,
+        server-authoritative `brk-*` correlation id). The Rust audit-probe is the
+        in-guest driver (option a); the Python/cdylib `mvm.audit.emit` over the
+        same wire (option b) is the productized path under b3. The broker-spawn
+        wiring gap that blocked a plain launch is fixed (see below).
         - [x] **in-guest driver (audit-probe)** — `crates/mvm-guest/src/bin/audit-probe.rs`
           calls `mvm_guest::host_audit::emit` from inside the guest; the opt-in
           `withAuditProbe` mkGuest flag bakes it at `/usr/local/bin/audit-probe`
@@ -270,11 +275,20 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
           against real `~/.mvm` trips on a pre-existing corrupt shared
           lifecycle chain — the workload chain itself verifies clean in
           isolation.
-        - [ ] **follow-up: decouple broker-spawn from `MVM_GATEWAY_BRIDGE`** —
-          today a plain admitted `mvmctl up --tenant local` does not spawn the
-          per-VM broker (tenant_id is only threaded when the egress bridge is
-          on), so `host.audit.v1` is silently unavailable on a normal launch.
-          Thread `tenant_id` for the broker independently of the bridge.
+        - [x] **decoupled broker-spawn from `MVM_GATEWAY_BRIDGE`** — a plain
+          admitted `mvmctl up --tenant local` now spawns the per-VM broker, so
+          `host.audit.v1` is available to any admitted workload (the ADR-084
+          model). Two-part fix: (1) `up.rs` threads `tenant_id` onto the backend
+          `VmStartConfig` unconditionally (new `plan_admission::thread_tenant_id`,
+          decoupled from the bridge `plan_json` path); (2) `libkrun.rs` + `vz.rs`
+          gate the gateway-bridge `compute_audit_substrate` on `plan_json`
+          presence (the bridge's real input) rather than `tenant_id`, so
+          `tenant_id`-without-`plan` stays on the legacy supervisor while the
+          broker still spawns (it reads `config.tenant_id` directly). **PROVEN
+          live on a plain libkrun launch in a fully isolated `MVM_DATA_DIR`** (no
+          `MVM_GATEWAY_BRIDGE`, no real `~/.mvm`): `up --wait` exits 0, the probe
+          emits, `local.<vm>.workload.jsonl` (22 entries) is written, and
+          `mvmctl trust audit verify` reports both chains clean.
         - [ ] **follow-up: workload-chain verify is unreachable when the
           lifecycle chain is corrupt** — `audit_verify` checks the lifecycle
           chain first and bails, never reaching `verify_workload_chain`. Verify
