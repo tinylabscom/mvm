@@ -247,6 +247,15 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
           against real `~/.mvm` trips on a pre-existing corrupt shared
           lifecycle chain — the workload chain itself verifies clean in
           isolation.
+        - [ ] **follow-up: decouple broker-spawn from `MVM_GATEWAY_BRIDGE`** —
+          today a plain admitted `mvmctl up --tenant local` does not spawn the
+          per-VM broker (tenant_id is only threaded when the egress bridge is
+          on), so `host.audit.v1` is silently unavailable on a normal launch.
+          Thread `tenant_id` for the broker independently of the bridge.
+        - [ ] **follow-up: workload-chain verify is unreachable when the
+          lifecycle chain is corrupt** — `audit_verify` checks the lifecycle
+          chain first and bails, never reaching `verify_workload_chain`. Verify
+          each chain independently (report per-chain, don't short-circuit).
   - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
     `mvm-guest::host_time` + `mvm-guest::host_cost` (`now` / `workload` +
     `tenant`, each with an `_on` stream variant), riding the same
