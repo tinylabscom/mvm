@@ -9,7 +9,7 @@
 //! Given a populated builder VM image cache and `mvm-libkrun-supervisor`
 //! on PATH, `run_build` runs a one-shot `nix build` against the
 //! caller's `BuilderJob` and returns `BuilderArtifacts`. The
-//! pipeline (in [`BuilderVm::run_build`]):
+//! pipeline (in `BuilderVm::run_build`):
 //!
 //! 1. Validate mounts + job (`validate_mounts`, `validate_job`).
 //! 2. Check `libkrun_sys::is_available()` — bail with install hint

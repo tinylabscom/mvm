@@ -1,6 +1,10 @@
 // mvm-guest: vsock protocol and openclaw connector mapping for mvm
 // Depends on mvm-core
 
+/// In-guest host-services broker client: dials the supervisor's guest-facing
+/// broker port over vsock and exchanges a framed `ServiceCall` for a framed
+/// `ServiceResponse`. The workload→host call half of the broker path.
+pub mod broker_client;
 pub mod builder_agent;
 /// PTY-over-vsock interactive console — the single dev-only interactive path
 /// into a guest. Gated behind `dev-shell` so the relay symbols are absent from
@@ -19,6 +23,15 @@ pub mod fs_rpc;
 /// normal wake) the guest reseeds its CSPRNG so two clones don't generate
 /// identical key material.
 pub mod genid;
+/// In-guest `host.audit.v1` typed methods: `emit` / `emit_batch` over the
+/// broker transport, letting a workload append to the chain-signed audit log.
+pub mod host_audit;
+/// In-guest `host.cost.v1` typed methods: `workload` / `tenant` spend queries
+/// over the broker transport.
+pub mod host_cost;
+/// In-guest `host.time.v1` typed method: `now` host wall-clock query over the
+/// broker transport.
+pub mod host_time;
 pub mod integrations;
 pub mod lifecycle_hooks;
 /// Guest-side network defense. The `mvm-guest-netinit`

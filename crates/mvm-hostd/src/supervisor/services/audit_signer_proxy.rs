@@ -40,7 +40,7 @@ pub struct AppendErr {
 /// Typed audit entry the supervisor wants chain-signed and appended.
 ///
 /// Maps 1:1 to the `AppendEntry` variant of
-/// [`AppendEntryRequest`](mvm_core::protocol::audit_signer::AppendEntryRequest)
+/// `AppendEntryRequest`
 /// but keeps the supervisor-side caller free of the wire enum's
 /// `verb`-tagged discriminator.
 #[derive(Debug, Clone)]

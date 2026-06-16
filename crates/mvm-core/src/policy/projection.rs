@@ -5,7 +5,7 @@
 //! (nftables / `CanonicalL4Gate` / `PlanFlowPolicy`) consumes, and the
 //! hostname-keyed outbound grant set the WASI context builder
 //! consumes. Hostnames are pinned to IPs at projection time (via
-//! the admission-time [`DnsPinRegistry`]) so both projections are
+//! the admission-time `DnsPinRegistry`) so both projections are
 //! compared and enforced over the same pinned address space —
 //! live DNS never widens reach. Mandatory-deny ranges refuse at
 //! projection time, unconditionally: a grant that resolves into a
@@ -17,7 +17,6 @@
 //! identically for every probe.
 //!
 //! [`EffectivePolicy`]: crate::policy::resolver::EffectivePolicy
-//! [`DnsPinRegistry`]: crate::policy::dns_pin::DnsPinRegistry
 
 use std::net::IpAddr;
 
@@ -53,7 +52,7 @@ impl std::str::FromStr for Proto {
 }
 
 impl Proto {
-    /// Named alias for [`FromStr`] used by the lowering code.
+    /// Named alias for [`std::str::FromStr`] used by the lowering code.
     pub fn parse(s: &str) -> Result<Self, ProjectionError> {
         s.parse()
     }

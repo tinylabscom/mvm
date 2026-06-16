@@ -5,36 +5,36 @@
 //!
 //! Phase 2a (this commit) lands the source-bundling primitives:
 //!
-//! - [`archive`] — deterministic gzipped-tar of a staging directory.
+//! - `archive` — deterministic gzipped-tar of a staging directory.
 //!   Sorted entries, mtime = 0, normalized modes, gzip with no
 //!   filename header. Output is byte-reproducible across runs.
-//! - [`source`] — walks `app.source.path`, applies include/exclude
+//! - `source` — walks `app.source.path`, applies include/exclude
 //!   globs, copies files into `<staging>/src/`, and computes a stable
 //!   `tree_hash` over the resulting tree. Symlinks preserved in-tree,
 //!   rejected out-of-tree.
-//! - [`reachability`] — bundler reachability scoping for
+//! - `reachability` — bundler reachability scoping for
 //!   function-entrypoint workloads. Tree-sitter-backed AST walks for
 //!   Python and Node/TypeScript prune unreachable files from the
 //!   staged source before archiving.
-//! - [`data`] — tiny helper for parsing curated word lists (used by
-//!   [`reachability`] to load the language-extension lists).
+//! - `data` — tiny helper for parsing curated word lists (used by
+//!   `reachability` to load the language-extension lists).
 //!
 //! Phase 2b adds the orchestration layer:
 //!
-//! - [`deps`] — host-level dependency-lockfile validation (hash-pin
+//! - `deps` — host-level dependency-lockfile validation (hash-pin
 //!   heuristics for `uv.lock`, `requirements.txt`, `pnpm-lock.yaml`,
 //!   `package-lock.json`, `yarn.lock`).
-//! - [`func_describe`] — tree-sitter function-presence check for
+//! - `func_describe` — tree-sitter function-presence check for
 //!   function-entrypoint workloads.
-//! - [`flake`] — renderer for the generated `flake.nix`.
-//! - [`launch`] — builder for `launch.json` (a sidecar the generated
+//! - `flake` — renderer for the generated `flake.nix`.
+//! - `launch` — builder for `launch.json` (a sidecar the generated
 //!   flake reads at evaluation time; an inlining rewrite is planned
 //!   but deferred).
-//! - [`mvm_pin`] — pinned mvm flake input baked into every generated
+//! - `mvm_pin` — pinned mvm flake input baked into every generated
 //!   `flake.nix`. Override via `MVM_FLAKE_URL`.
 //! - [`compile`] — top-level orchestrator that ties everything
 //!   together.
-//! - [`explain`] — diagnostic surface for `mvmctl compile --explain`.
+//! - `explain` — diagnostic surface for `mvmctl compile --explain`.
 //!
 //! Phase 2c wires `mvmctl compile <entry>` as the CLI verb.
 

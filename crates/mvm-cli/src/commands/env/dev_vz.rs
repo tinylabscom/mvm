@@ -23,7 +23,7 @@ use crate::ui;
 // Dev environment (Vz supervisor)
 // ============================================================================
 
-pub(super) const DEV_VM_NAME: &str = "mvm-dev";
+pub(in crate::commands) const DEV_VM_NAME: &str = "mvm-dev";
 
 /// Stable session id for the long-lived dev builder VM. Fixed (not the
 /// random per-build id the warm pool uses) so a separate `dev down`
@@ -2686,8 +2686,12 @@ pub(in crate::commands) struct ReapOutcome {
 /// alive non-launchd parent → live owner (in-flight), spared; alive
 /// launchd parent → leak, SIGTERM — unless `protected` for that phase.
 ///
-/// Then if no PID in the dir had a live owner, the dir is removed.
-/// This avoids the over-aggressive `rm -rf $vm/` of an earlier
+/// Then an *ephemeral* per-job builder dir with no live owner is
+/// removed (cache-prune semantics). A *managed* dir is never auto-
+/// removed — the persistent dev builder's dir is its warm Nix store and
+/// a named workload's dir is restartable state; both are torn down only
+/// by explicit `dev down` / `stop` / manual rm, not a routine prune.
+/// This also avoids the over-aggressive `rm -rf $vm/` of an earlier
 /// prototype, which during validation nuked a live mvmctl's state dir.
 pub(in crate::commands) fn reap_orphaned_vm_helpers(dry_run: bool) -> Result<ReapOutcome> {
     reap_orphaned_vm_helpers_both_roots(/* remove_builder_dirs = */ true, dry_run)
@@ -2921,7 +2925,15 @@ fn reap_orphaned_vm_helpers_at_with_snapshot(
         }
 
         outcome.killed += killed_in_dir;
-        if dir_has_live_owner || !remove_dead_dirs {
+        // Never auto-remove a managed dir, even with a dead supervisor.
+        // The persistent dev builder's dir is its warm Nix store and a
+        // named workload's dir is restartable state — both are long-lived
+        // and torn down only by explicit `dev down` / `stop` / manual rm,
+        // not by a routine `cache prune`. Only ephemeral per-job builder
+        // scratch dirs are reclaimable here. (Workload dirs already pass
+        // `remove_dead_dirs = false`; this also covers the persistent
+        // builder, which shares the reclaimable builder root.)
+        if dir_has_live_owner || !remove_dead_dirs || managed {
             continue;
         }
 
@@ -4978,6 +4990,71 @@ mod reap_orphans_tests {
 
         let _ = gv.kill();
         let _ = gv.wait();
+    }
+
+    /// `cache prune` (`remove_dead_dirs = true`) must NOT delete the
+    /// persistent dev builder dir even when its supervisor is dead — that
+    /// dir is the warm Nix store, not reclaimable scratch. Only explicit
+    /// `dev down` / manual rm clears it. Pins the managed-dir removal
+    /// guard against a regression that would nuke the store on a routine
+    /// prune, forcing a full nixpkgs re-fetch on the next `dev up`.
+    #[test]
+    fn prune_spares_stopped_persistent_builder_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        let vm = vms_root.join("mvm-persistent-builder-vz-dev");
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        // Dead supervisor → VM is stopped. i32::MAX is never alive.
+        std::fs::write(vm.join("builder.pid"), format!("{}\n", i32::MAX)).expect("write pid");
+        std::fs::write(vm.join("store"), vec![0u8; 4096]).expect("write store payload");
+
+        let out = reap_orphaned_vm_helpers_at_with_snapshot(
+            &vms_root,
+            BUILDER_SIDECARS,
+            /* remove_dead_dirs = */ true,
+            /* all_dirs_managed = */ false,
+            /* dry_run = */ false,
+            &ProcSnapshot::from_parts(std::collections::HashMap::new(), Vec::new()),
+        )
+        .expect("reap");
+
+        assert_eq!(
+            out.removed_dirs, 0,
+            "persistent builder dir must not be pruned"
+        );
+        assert!(
+            vm.exists(),
+            "persistent builder store dir must survive prune"
+        );
+        assert!(vm.join("store").exists(), "warm store payload untouched");
+    }
+
+    /// Control for the guard above: an *ephemeral* per-job builder dir
+    /// with a dead supervisor is still reclaimed by prune, so the managed
+    /// carve-out didn't blunt cache cleanup.
+    #[test]
+    fn prune_still_reclaims_dead_ephemeral_builder() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        let vm = vms_root.join("mvm-builder-vz-deadjob1");
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        std::fs::write(vm.join("builder.pid"), format!("{}\n", i32::MAX)).expect("write pid");
+
+        let out = reap_orphaned_vm_helpers_at_with_snapshot(
+            &vms_root,
+            BUILDER_SIDECARS,
+            /* remove_dead_dirs = */ true,
+            /* all_dirs_managed = */ false,
+            /* dry_run = */ false,
+            &ProcSnapshot::from_parts(std::collections::HashMap::new(), Vec::new()),
+        )
+        .expect("reap");
+
+        assert_eq!(
+            out.removed_dirs, 1,
+            "dead ephemeral builder dir must be reclaimed"
+        );
+        assert!(!vm.exists(), "ephemeral builder dir should be gone");
     }
 }
 

@@ -122,6 +122,29 @@ local proxy) and leave HTTP-aware routing to mvmd, vs. ship a fuller local HTTP
 router now. Recommendation: L4 + local proxy first (cheap, owns nothing we don't
 already own); richer routing rides mvmd.
 
+**External-benchmark datapoint (supports L4-first).** A DX comparison against a
+peer self-hosted sandbox backend — whose pitch is the same create→agent→live
+preview URL loop — found the preview URL is the *only* local-DX gap worth
+closing here; the rest of its surface is either already matched (one-command
+bring-up, live output streaming) or correctly mvmd's:
+
+- Its idle-sleep + wake-on-request density and its HTTP control plane sit on the
+  mvmd side of ADR-070, not in mvm. The wake-on-access *seam* above is the mvm
+  primitive; the detector/router stays in mvmd (fleet) or the local proxy (dev).
+- Its lazy-wake exists to hide slow cold starts. Our warm pool (Plan 118) +
+  sub-second up/down (Plan 198) already cover that, so the local proxy can dial
+  the wake hook synchronously without a "waking…" UX of its own.
+- That peer buys the DX with Docker-socket isolation, host-path mounts, and
+  auth/caps off — the posture §Non-goals already rejects. The takeaway is the
+  *shape* of the URL, not the trust model.
+
+This validates shipping L4 + local proxy first and resisting an ambient,
+per-route HTTP proxy with its own port registry (the cheap-but-weaker shape the
+peer uses): keep ports signed into the `ExecutionPlan` and route at the gateway
+seam. Note publication is **not** claim-15-gated — a sealed prod workload
+*serving its published port* is the intended behavior, distinct from interactive
+console access; only ambient (unpublished) ports stay default-deny.
+
 ## WS-B — Lifecycle verb taxonomy (instance vs. workspace)
 
 Adopt the sibling's clean split between *instance* lifecycle and *workspace-data*

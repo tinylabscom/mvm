@@ -14,12 +14,12 @@
 //! - `start` writes `~/.mvm/vms/<name>/{rootfs.ref,kernel.ref}` runtime
 //!   metadata (so `mvmctl console` can find the artifacts), serializes a
 //!   [`SupervisorConfig`], spawns `mvm-libkrun-supervisor` with the JSON
-//!   on stdin, and waits up to [`PID_FILE_TIMEOUT`] for the supervisor
+//!   on stdin, and waits up to `PID_FILE_TIMEOUT` for the supervisor
 //!   to write its PID file. Returns once the supervisor is running or
 //!   exits with an error if the spawn fails or PID file never appears.
 //! - `stop` reads `<vm_state_dir>/libkrun.pid`, sends `SIGTERM`, polls
 //!   for the process to exit, and falls back to `SIGKILL` if it doesn't
-//!   die within [`STOP_TIMEOUT`].
+//!   die within `STOP_TIMEOUT`.
 //! - `status` reads the PID file and probes with `kill(pid, 0)`.
 //! - `list` walks `~/.mvm/vms/*/libkrun.pid`.
 
@@ -168,7 +168,12 @@ fn krun_context_base(
         // Egress substitution channel (listen=false → host binds). Registered
         // unconditionally; fail-closed: when the plan carries no secrets nothing
         // binds the UDS, so a stray guest dial gets ECONNREFUSED.
-        .add_host_listen_port(mvm_guest::vsock::SUBSTITUTION_PORT);
+        .add_host_listen_port(mvm_guest::vsock::SUBSTITUTION_PORT)
+        // Host-services broker channel (listen=false → host binds). Registered
+        // unconditionally so libkrun proxies the guest's connect; fail-closed:
+        // nothing binds the UDS until the per-VM broker subprocess is spawned,
+        // so a stray guest dial gets ECONNREFUSED.
+        .add_host_listen_port(mvm_guest::vsock::BROKER_PORT);
     krun.rootfs_path = None;
     // Select the gateway through the same
     // `resolve_networking_mode` the builder VM + cold path use (TSI is rejected by the
@@ -527,12 +532,36 @@ impl VmBackend for LibkrunBackend {
         // no secrets this is a defused no-op.
         let mut endpoint_guard = spawn_libkrun_egress_endpoint_if_needed(&config.name, &state_dir)?;
 
+        // Spawn the per-VM host-services broker (+ its audit-signer) for an
+        // admitted workload so the guest can reach `host.audit.v1` over
+        // BROKER_PORT. Best-effort: an absent broker only disables that one
+        // service — the guest's emit fails, but the workload still runs and the
+        // system audit chain (written host-side, not via the broker) is intact.
+        // So a spawn failure is logged, never a launch rollback. On success the
+        // guard reaps both subprocesses if a later start step fails; it's
+        // defused once the VM is up and the `stop` path owns teardown.
+        let mut broker_guard = match crate::broker_services_spawn::spawn_broker_services_if_admitted(
+            crate::broker_services_spawn::BrokerServicesSpawnParams {
+                workload_id: &config.name,
+                tenant_id: config.tenant_id.as_deref(),
+                vm_name: &config.name,
+                state_dir: &state_dir,
+            },
+        ) {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::warn!(vm = %config.name, error = %e, "host-services broker spawn failed; host.audit.v1 unavailable for this VM");
+                crate::broker_services_spawn::BrokerServicesGuard::defused()
+            }
+        };
+
         ui::success(&format!(
             "libkrun VM '{}' started (pid file: {}).",
             config.name,
             pid_file.display()
         ));
         endpoint_guard.defuse();
+        broker_guard.defuse();
         Ok(VmId(config.name.clone()))
     }
 
@@ -542,6 +571,9 @@ impl VmBackend for LibkrunBackend {
         // guest. Mirrors the FC `stop_vm` ordering — safe because reap is a
         // no-op when nothing exists, even before the not-running early return.
         crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        // Reap the per-VM broker + audit-signer too (no-op when none spawned),
+        // so they can't outlive the guest.
+        crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
 
         let pid_path = vm_libkrun_pid(&id.0);
         let pid = match read_pid(&pid_path) {
@@ -1388,6 +1420,37 @@ mod tests {
                 .vsock_ports
                 .contains(&mvm_guest::vsock::SUBSTITUTION_PORT),
             "SUBSTITUTION_PORT must not appear in vsock_ports"
+        );
+    }
+
+    #[test]
+    fn build_supervisor_config_registers_broker_port() {
+        // The host-services broker port is a host-listen port (the broker
+        // subprocess binds the UDS, the guest dials it) — registered
+        // unconditionally so libkrun proxies the guest's connect. Fail-closed:
+        // nothing binds the UDS until the per-VM broker subprocess is spawned,
+        // so a stray guest dial gets ECONNREFUSED.
+        let config = VmStartConfig {
+            name: "broker-port-test".into(),
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            kernel_path: Some("/tmp/vmlinux".into()),
+            cpus: 1,
+            memory_mib: 256,
+            ..Default::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = build_supervisor_config(&config, tmp.path()).expect("build");
+        assert!(
+            cfg.krun
+                .host_listen_ports
+                .contains(&mvm_guest::vsock::BROKER_PORT),
+            "BROKER_PORT must be in host_listen_ports"
+        );
+        assert!(
+            !cfg.krun
+                .vsock_ports
+                .contains(&mvm_guest::vsock::BROKER_PORT),
+            "BROKER_PORT must not appear in vsock_ports"
         );
     }
 

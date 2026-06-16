@@ -11,6 +11,12 @@ requirements doc lives in the sibling repo at
 contract. Do not start the mvm cutover (WS-3) until rvproxy confirms the
 libkrun-`unixgram` transport (WS-1 finding below).
 
+> **Priority update 2026-06-15:** Plan 200 consumes this plan as security/network
+> substrate. `mvmctl machine --net` and `allow-host` must use the current
+> admitted network path until rvproxy is ready; do not block the initial machine
+> UX on rvproxy unless a feature requires native rvproxy flow decisions. Do not
+> bypass Plan 193/197 guarantees for UX.
+
 **Goal:** replace the external **gvproxy** (macOS: libkrun `unixgram` + Vz
 `vfkit`) and **passt** (Linux Firecracker) host-side gateways with a single
 embeddable/supervised **`rvproxy`** substrate — a Rust-native virtual network

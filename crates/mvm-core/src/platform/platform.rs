@@ -79,7 +79,7 @@ impl Platform {
     /// default backend (macOS 26+ — the Apple Silicon arch half is
     /// asserted by callers via `cfg!(target_arch = "aarch64")`).
     ///
-    /// Distinct from [`has_vz`], which reports mere Vz *availability*
+    /// Distinct from [`Self::has_vz`], which reports mere Vz *availability*
     /// from macOS 13 up. Vz is opt-in on macOS 13-25 and only the
     /// default from 26 on, so the selection paths gate on this.
     pub fn is_vz_default_tier(self) -> bool {

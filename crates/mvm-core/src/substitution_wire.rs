@@ -1,8 +1,8 @@
 //! The guest↔host substitution-endpoint wire contract.
 //!
 //! The guest's SDK routes a secret-bearing request to the host substitution
-//! endpoint over a host-local socket as a length-prefixed JSON [`WireRequest`];
-//! the endpoint replies with a [`WireResponse`]. The contract lives in
+//! endpoint over a host-local socket as a length-prefixed JSON `WireRequest`;
+//! the endpoint replies with a `WireResponse`. The contract lives in
 //! `mvm-core` so the in-guest client (`mvm-guest`) and the host server
 //! (`mvm-hostd`) serialize the **exact same** bytes — a drifted copy on either
 //! side would silently break substitution.

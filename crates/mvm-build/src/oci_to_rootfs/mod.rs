@@ -1,6 +1,6 @@
 //! OCI layer unpack to a staging rootfs directory.
 //!
-//! [`ImageStaging`] orchestrates the unpack:
+//! `ImageStaging` orchestrates the unpack:
 //!
 //! 1. Caller creates an `ImageStaging` rooted at a directory.
 //! 2. Caller calls `apply_layer` once per OCI layer, in the order
@@ -10,12 +10,12 @@
 //!    reserved-path collision, size caps, unsupported entry
 //!    types).
 //! 3. Caller calls `finalize` to release the staging directory and
-//!    get a [`StagedRootfs`] descriptor pointing at it.
-//! 4. Caller hands the descriptor to [`materialize_to_ext4`]
+//!    get a `StagedRootfs` descriptor pointing at it.
+//! 4. Caller hands the descriptor to `materialize_to_ext4`
 //!    (Linux-only at runtime; non-Linux routes through the libkrun
 //!    builder VM), which produces a byte-deterministic ext4 image.
-//! 5. Caller hands the [`MaterializedRootfs`] to
-//!    [`seal_with_verity`] (also Linux-only) to generate the
+//! 5. Caller hands the `MaterializedRootfs` to
+//!    `seal_with_verity` (also Linux-only) to generate the
 //!    dm-verity sidecar + root hash. Two runs against byte-identical
 //!    ext4 input produce
 //!    byte-identical sidecars + the same root hash; this is the
@@ -41,7 +41,7 @@
 //!
 //! The integration tests under `mvm-build/tests/oci_unpack_*` are
 //! the canonical mitigation evidence. Every variant in
-//! [`OciUnpackError`] has at least one negative test that proves
+//! `OciUnpackError` has at least one negative test that proves
 //! the corresponding attack class is rejected without a partial
 //! write landing in staging.
 

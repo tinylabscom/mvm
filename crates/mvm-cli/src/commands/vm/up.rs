@@ -189,6 +189,48 @@ fn plan_seccomp_tier(
         .context("converting runtime seccomp tier into plan seccomp tier")
 }
 
+/// Effective seccomp tier name: an explicit `--seccomp` wins, otherwise the
+/// chosen security profile's tier. Pure so the precedence is unit-testable.
+fn effective_seccomp_name(
+    profile: mvm_core::policy::security_profile::SecurityProfile,
+    seccomp_flag: Option<&str>,
+) -> String {
+    seccomp_flag
+        .map(str::to_string)
+        .unwrap_or_else(|| profile.seccomp.to_string())
+}
+
+/// The egress preset a security profile contributes to network resolution.
+/// Only an *explicitly named* profile whose egress isn't already deny-all
+/// contributes one — a defaulted (or `production`) profile returns `None` so
+/// the existing default/template network path is preserved byte-for-byte. The
+/// returned string, when `Some`, is fed in exactly where `--network-preset`
+/// would be.
+fn profile_egress_preset(
+    profile: mvm_core::policy::security_profile::SecurityProfile,
+    profile_was_named: bool,
+) -> Option<String> {
+    use mvm_core::network_policy::NetworkPreset;
+    (profile_was_named && profile.egress != NetworkPreset::None).then(|| profile.egress.to_string())
+}
+
+/// Refuse a non-deployable security profile on the prod build path: the `dev`
+/// profile is development-only and must never reach a sealed/production image.
+/// Pure (mode in, result out) so the gate is unit-testable without a VM.
+fn enforce_profile_deployable(
+    profile: mvm_core::policy::security_profile::SecurityProfile,
+    build_mode: mvm_build::pipeline::BuildMode,
+) -> Result<()> {
+    if matches!(build_mode, mvm_build::pipeline::BuildMode::Prod) && !profile.deployable {
+        anyhow::bail!(
+            "security profile `{}` is development-only and cannot be deployed; \
+             omit `--security-profile` (defaults to production) or drop `--prod`",
+            profile.name
+        );
+    }
+    Ok(())
+}
+
 /// Bundle of artifacts produced by a successful admission: the
 /// admitted plan + the audit emitter wired against the host signer.
 /// Callers thread this through `cmd_run` so the `plan.launched` and
@@ -668,6 +710,21 @@ fn should_thread_signed_plan(gateway_bridge_enabled: bool, hypervisor: &str) -> 
     gateway_bridge_enabled || hypervisor == "qemu"
 }
 
+/// Whether the admitted plan must be persisted to `<state_dir>/plan.json`
+/// *before* `backend.start()`. Every backend whose `start()` reads that file
+/// off disk to decide whether to stand up its egress moat needs the pre-start
+/// persist:
+///
+/// - **Firecracker**: the nft TAP-redirect moat reads the plan at spawn time.
+/// - **vz / libkrun (macOS)**: the substitution endpoint reads
+///   `<state_dir>/plan.json` inside `start()` to decide whether to spawn.
+///
+/// QEMU is excluded: it reads the in-memory config and must not overwrite the
+/// persisted plan.
+pub(super) fn persists_plan_before_start(hypervisor: &str) -> bool {
+    matches!(hypervisor, "firecracker" | "vz" | "libkrun")
+}
+
 fn should_wait_for_direct_boot_agent(detach: bool, ports_env: Option<&str>) -> bool {
     !detach || ports_env.is_some_and(|ports| !ports.is_empty())
 }
@@ -999,12 +1056,20 @@ pub(in crate::commands) struct Args {
     /// Network allowlist entry (format: HOST:PORT). Repeatable
     #[arg(long)]
     pub network_allow: Vec<String>,
+    /// Named security profile selecting the per-seam capability matrix
+    /// (seccomp tier + egress posture). Defaults to `production`: the
+    /// highest-security, deployable posture (seccomp floor + deny-all egress).
+    /// The only alternative is `dev` — looser for development and never
+    /// deployable (refused under `--prod`). Explicit `--seccomp` /
+    /// `--network-preset` override the profile.
+    #[arg(long = "security-profile")]
+    pub security_profile: Option<String>,
     /// Seccomp profile tier (essential, minimal, standard, network, unrestricted).
     ///
-    /// Default: `standard`. `unrestricted` is opt-in only; the project's
-    /// posture is "defaults must be safe."
-    #[arg(long, default_value = "standard")]
-    pub seccomp: String,
+    /// Overrides the `--security-profile` seccomp tier. `unrestricted` is
+    /// opt-in only; the project's posture is "defaults must be safe."
+    #[arg(long)]
+    pub seccomp: Option<String>,
     /// Named dev network to attach VM to (default: "default")
     #[arg(long, default_value = "default")]
     pub network: String,
@@ -1152,9 +1217,39 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     // this field; manifest-keyed slots don't — runtime policy moves
     // to `mvmctl up` flags / `~/.mvm/config.toml` / mvmd). Explicit
     // CLI flags always win.
-    let explicit_cli_network = args.network_preset.is_some() || !args.network_allow.is_empty();
+    // Resolve the named security profile (default: production). Fail closed on
+    // an unknown name. Its seam values become the defaults for `--seccomp` and
+    // the egress posture; explicit per-seam flags still win.
+    let security_profile = mvm_core::policy::security_profile::resolve_security_profile(
+        args.security_profile.as_deref().unwrap_or("production"),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // The `dev` profile is development-only — it must never deploy. Refuse it
+    // up front on the prod build path (sealed / dm-verity image).
+    enforce_profile_deployable(security_profile, args.build_mode.resolve())?;
+    crate::ui::info(&format!(
+        "Security profile: {} (seccomp={}, egress={}, snapshot={})",
+        security_profile.name,
+        security_profile.seccomp,
+        security_profile.egress,
+        if security_profile.snapshot_allowed {
+            "allowed"
+        } else {
+            "forbidden"
+        },
+    ));
+
+    // An explicitly-named profile with non-deny-all egress (today: `dev`)
+    // contributes an egress preset in the same slot `--network-preset`
+    // occupies; `--network-preset` itself still wins. A defaulted/`production`
+    // profile contributes nothing, so the existing default/template path is
+    // unchanged.
+    let profile_egress = profile_egress_preset(security_profile, args.security_profile.is_some());
+    let effective_network_preset = args.network_preset.clone().or(profile_egress);
+
+    let explicit_cli_network = effective_network_preset.is_some() || !args.network_allow.is_empty();
     let network_policy = if explicit_cli_network {
-        resolve_network_policy(args.network_preset.as_deref(), &args.network_allow)?
+        resolve_network_policy(effective_network_preset.as_deref(), &args.network_allow)?
     } else if let Some(id_or_slot) = resolved_template_arg.as_deref()
         && let Ok(spec) = mvm::vm::template::lifecycle::template_load_dispatched(id_or_slot)
         && let Some(default_policy) = spec.default_network_policy.clone()
@@ -1194,7 +1289,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         ));
     }
     let seccomp_tier: mvm_core::crypto::seccomp::SeccompTier =
-        args.seccomp.parse().context("Invalid --seccomp value")?;
+        effective_seccomp_name(security_profile, args.seccomp.as_deref())
+            .parse()
+            .context("Invalid --seccomp value")?;
     let plan_seccomp_tier = plan_seccomp_tier(seccomp_tier)?;
     // `--from-workload-ir`, or the `workload.json` a compiled `--flake`
     // artifact carries. Resolved once, used for both
@@ -2059,7 +2156,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // Vz-family backends need a real kernel file; mkGuest workload images ship
     // none (libkrun self-materializes its bundled kernel). Resolve the fallback
     // before either the snapshot-restore or cold-boot arm consumes vmlinux_path.
-    let vmlinux_path = resolve_vz_workload_kernel(&vmlinux_path, effective_hypervisor)?;
+    let vmlinux_path = resolve_workload_kernel(&vmlinux_path, effective_hypervisor)?;
 
     // If a template snapshot exists AND the backend supports snapshots,
     // restore from it instead of cold-booting.
@@ -2182,19 +2279,20 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // (the persistent-agent wait further down is skipped for `detach`).
 
         enforce_shares_if(&admission_main, &start_config.volumes)?;
-        // The Firecracker egress moat (substitution endpoint + nft TAP
-        // redirect) reads the admitted plan from the per-VM state dir
-        // *before* boot, so a secret-bearing plan must be persisted
-        // pre-start — the post-launch persist in `emit_launched_if` is
-        // too late for it. Other backends read the in-memory config.
-        // Fail closed: a secret-declaring workload must not boot without
-        // its substitution path.
-        if effective_hypervisor == "firecracker"
+        // The disk-reading egress moats read the admitted plan from the per-VM
+        // state dir *before* boot: Firecracker's nft TAP-redirect moat, and the
+        // vz/libkrun macOS substitution endpoints (which read
+        // `<state_dir>/plan.json` inside `start()`). So a secret-bearing plan
+        // must be persisted pre-start — the post-launch persist in
+        // `emit_launched_if` is too late for them. Only QEMU reads the
+        // in-memory config and is excluded. Fail closed: a secret-declaring
+        // workload must not boot without its substitution path.
+        if persists_plan_before_start(effective_hypervisor)
             && let Some(ctx) = admission_main.as_ref()
             && !ctx.admitted.plan.secrets.is_empty()
         {
             super::plan_persist::write_plan(&ctx.admitted.plan.workload.0, &ctx.admitted.plan)
-                .context("persisting admitted plan for the Firecracker egress moat")?;
+                .context("persisting admitted plan for the pre-start egress moat")?;
         }
         // Try a warm-pool claim first (auto-named + bridge-admitted
         // launches only; fail-open to cold boot). A claimed VM runs under its standby-id,
@@ -2561,10 +2659,14 @@ fn attach_runtime_overlay(
 
 /// Kernel-less images (mkGuest ships no kernel) boot fine on libkrun,
 /// which materializes its own bundled kernel and ignores this path. The
-/// VZ-family backends need a real kernel file; fall back to the cached
-/// builder-VM kernel (an ARM64 boot Image, the same kernel the Vz builder
-/// and dev VMs boot) rather than handing VZ a missing path.
-pub(super) fn resolve_vz_workload_kernel(
+/// out-of-process backends (vz and firecracker) need a real kernel file;
+/// fall back to the cached builder-VM kernel — the same kernel the builder
+/// and dev VMs boot — rather than handing them a missing path.
+///
+/// Firecracker's direct/manifest boot path already performs this same
+/// fallback; without it here the flake path would refuse a kernel-less
+/// mkGuest workload that the manifest path boots fine.
+pub(super) fn resolve_workload_kernel(
     vmlinux_path: &str,
     hypervisor: &str,
 ) -> anyhow::Result<String> {
@@ -2573,8 +2675,9 @@ pub(super) fn resolve_vz_workload_kernel(
     }
     // `virtualization` is the long-form alias the backend dispatcher
     // accepts for vz; missing it here would skip the fallback and hand
-    // VZ a nonexistent kernel path.
-    if !matches!(hypervisor, "vz" | "virtualization") {
+    // the backend a nonexistent kernel path. libkrun supplies its own
+    // bundled kernel, so it never needs the fallback.
+    if !matches!(hypervisor, "vz" | "virtualization" | "firecracker") {
         return Ok(vmlinux_path.to_string());
     }
     let arch = if cfg!(target_arch = "aarch64") {
@@ -2680,7 +2783,7 @@ mod runtime_overlay_attach_tests {
 }
 
 #[cfg(test)]
-mod resolve_vz_workload_kernel_tests {
+mod resolve_workload_kernel_tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
 
@@ -2689,7 +2792,7 @@ mod resolve_vz_workload_kernel_tests {
         let tmp = tempfile::tempdir().unwrap();
         let vmlinux = tmp.path().join("vmlinux");
         std::fs::write(&vmlinux, b"kernel").unwrap();
-        let result = resolve_vz_workload_kernel(vmlinux.to_str().unwrap(), "vz").unwrap();
+        let result = resolve_workload_kernel(vmlinux.to_str().unwrap(), "vz").unwrap();
         assert_eq!(result, vmlinux.to_str().unwrap());
     }
 
@@ -2698,7 +2801,7 @@ mod resolve_vz_workload_kernel_tests {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         env.set("MVM_CACHE_DIR", tmp.path());
-        let result = resolve_vz_workload_kernel("/nonexistent/vmlinux", "libkrun").unwrap();
+        let result = resolve_workload_kernel("/nonexistent/vmlinux", "libkrun").unwrap();
         assert_eq!(result, "/nonexistent/vmlinux");
     }
 
@@ -2716,7 +2819,29 @@ mod resolve_vz_workload_kernel_tests {
         let fallback = fallback_dir.join("vmlinux");
         std::fs::write(&fallback, b"builder-kernel").unwrap();
         env.set("MVM_CACHE_DIR", tmp.path());
-        let result = resolve_vz_workload_kernel("/nonexistent/vmlinux", "vz").unwrap();
+        let result = resolve_workload_kernel("/nonexistent/vmlinux", "vz").unwrap();
+        assert_eq!(result, fallback.to_str().unwrap());
+    }
+
+    #[test]
+    fn firecracker_missing_kernel_falls_back_to_builder_vm_cache() {
+        // The firecracker flake path must reuse the cached builder-VM
+        // kernel for a kernel-less mkGuest workload, exactly as the
+        // firecracker manifest path does — otherwise a `sleeper`-style
+        // image (no emitted vmlinux) can't boot under firecracker.
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let arch = if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        let fallback_dir = tmp.path().join("builder-vm").join(arch);
+        std::fs::create_dir_all(&fallback_dir).unwrap();
+        let fallback = fallback_dir.join("vmlinux");
+        std::fs::write(&fallback, b"builder-kernel").unwrap();
+        env.set("MVM_CACHE_DIR", tmp.path());
+        let result = resolve_workload_kernel("/nonexistent/vmlinux", "firecracker").unwrap();
         assert_eq!(result, fallback.to_str().unwrap());
     }
 
@@ -2725,7 +2850,7 @@ mod resolve_vz_workload_kernel_tests {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         env.set("MVM_CACHE_DIR", tmp.path());
-        let err = resolve_vz_workload_kernel("/nonexistent/vmlinux", "vz").unwrap_err();
+        let err = resolve_workload_kernel("/nonexistent/vmlinux", "vz").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("dev up"), "expected 'dev up' in: {msg}");
         assert!(msg.contains("vz"), "expected hypervisor name in: {msg}");
@@ -3818,6 +3943,19 @@ mod resolve_deps_volume_tests {
     }
 
     #[test]
+    fn pre_start_persist_covers_every_disk_reading_egress_moat() {
+        // Firecracker's nft TAP-redirect moat and the vz/libkrun substitution
+        // endpoints all read `<state_dir>/plan.json` inside `start()`, so the
+        // plan must be persisted before boot for each of them.
+        assert!(persists_plan_before_start("firecracker"));
+        assert!(persists_plan_before_start("vz"));
+        assert!(persists_plan_before_start("libkrun"));
+        // QEMU reads the in-memory config and must not overwrite the persisted
+        // plan, so it stays out of the pre-start persist.
+        assert!(!persists_plan_before_start("qemu"));
+    }
+
+    #[test]
     fn direct_boot_detach_without_ports_skips_agent_wait() {
         assert!(!should_wait_for_direct_boot_agent(true, None));
         assert!(!should_wait_for_direct_boot_agent(true, Some("")));
@@ -4197,5 +4335,59 @@ mod resolve_deps_volume_tests {
             v["cert_pem"].as_str().unwrap().trim(),
             cert_file.content.trim()
         );
+    }
+}
+
+#[cfg(test)]
+mod security_profile_wiring_tests {
+    use super::*;
+    use mvm_core::network_policy::NetworkPreset;
+    use mvm_core::policy::security_profile::{DEV, PRODUCTION, resolve_security_profile};
+
+    #[test]
+    fn seccomp_defaults_to_profile_then_explicit_flag_wins() {
+        // No --seccomp → the profile's tier.
+        assert_eq!(effective_seccomp_name(PRODUCTION, None), "standard");
+        assert_eq!(effective_seccomp_name(DEV, None), "unrestricted");
+        // --seccomp overrides the profile.
+        assert_eq!(effective_seccomp_name(DEV, Some("essential")), "essential");
+    }
+
+    #[test]
+    fn only_an_explicitly_named_non_production_profile_contributes_egress() {
+        // Defaulted production (profile_was_named = false): no override — the
+        // existing default/template network path is preserved.
+        assert_eq!(profile_egress_preset(PRODUCTION, false), None);
+        // Explicit `--security-profile production`: still deny-all, no override.
+        assert_eq!(profile_egress_preset(PRODUCTION, true), None);
+        // Explicit `--security-profile dev`: its egress flows in.
+        assert_eq!(
+            profile_egress_preset(DEV, true).as_deref(),
+            Some("unrestricted")
+        );
+        // dev's egress preset round-trips to the real NetworkPreset.
+        let preset: NetworkPreset = profile_egress_preset(DEV, true).unwrap().parse().unwrap();
+        assert_eq!(preset, NetworkPreset::Unrestricted);
+    }
+
+    #[test]
+    fn production_default_is_byte_identical_to_todays_seams() {
+        // The default profile must not change today's behavior: seccomp floor
+        // `standard`, and no egress override (deny-all default path).
+        let p = resolve_security_profile("production").unwrap();
+        assert_eq!(effective_seccomp_name(p, None), "standard");
+        assert_eq!(profile_egress_preset(p, false), None);
+    }
+
+    #[test]
+    fn dev_profile_is_refused_on_the_prod_path_only() {
+        use mvm_build::pipeline::BuildMode;
+        // dev under --prod: refused.
+        assert!(enforce_profile_deployable(DEV, BuildMode::Prod).is_err());
+        // dev in dev mode: fine (that's its purpose).
+        assert!(enforce_profile_deployable(DEV, BuildMode::Dev).is_ok());
+        // production deploys in either mode.
+        assert!(enforce_profile_deployable(PRODUCTION, BuildMode::Prod).is_ok());
+        assert!(enforce_profile_deployable(PRODUCTION, BuildMode::Dev).is_ok());
     }
 }

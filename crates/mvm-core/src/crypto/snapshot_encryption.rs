@@ -41,7 +41,7 @@
 //! ## What this module does NOT do
 //!
 //! - **Authenticate the header.** The header's integrity is the
-//!   responsibility of [`snapshot_hmac`] — which already HMACs the
+//!   responsibility of [`crate::crypto::snapshot_hmac`] — which already HMACs the
 //!   whole sealed bundle.
 //! - **Manage the DEK.** Caller supplies a 32-byte key; key
 //!   provisioning is `KeyProvider`'s job.
@@ -283,7 +283,7 @@ pub fn decrypt_file_in_place(path: &Path, key: &[u8]) -> Result<()> {
     }
 }
 
-/// Snapshot encryption header — what [`read_header`] returns.
+/// Snapshot encryption header — what `read_header` returns.
 #[derive(Debug, Clone, Copy)]
 pub struct EncryptionHeader {
     pub version: u8,

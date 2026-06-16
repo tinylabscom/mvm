@@ -144,18 +144,35 @@ pub(crate) fn boot_builder(
     Ok(pid)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Inputs for [`boot_builder_vsock`]: the run dir, the builder/tenant network
+/// identities, resource sizing, the in/out build disks, and the vsock UDS the
+/// host agent connects on. Grouped so the boot call stays under the workspace
+/// `too_many_arguments` ceiling.
+pub(crate) struct BuilderVsockBoot<'a> {
+    pub run_dir: &'a str,
+    pub builder_net: &'a InstanceNet,
+    pub tenant_net: &'a TenantNet,
+    pub vcpus: u8,
+    pub mem_mib: u32,
+    pub out_disk: &'a str,
+    pub in_disk: Option<&'a str>,
+    pub vsock_uds: &'a str,
+}
+
 pub(crate) fn boot_builder_vsock(
     env: &dyn BuildEnvironment,
-    run_dir: &str,
-    builder_net: &InstanceNet,
-    tenant_net: &TenantNet,
-    vcpus: u8,
-    mem_mib: u32,
-    out_disk: &str,
-    in_disk: Option<&str>,
-    vsock_uds: &str,
+    boot: &BuilderVsockBoot<'_>,
 ) -> Result<u32> {
+    let &BuilderVsockBoot {
+        run_dir,
+        builder_net,
+        tenant_net,
+        vcpus,
+        mem_mib,
+        out_disk,
+        in_disk,
+        vsock_uds,
+    } = boot;
     env.log_info("Booting builder VM (vsock)...");
     env.setup_tap(builder_net, &tenant_net.bridge_name)?;
     env.shell_exec(&format!(

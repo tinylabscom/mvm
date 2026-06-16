@@ -14,8 +14,8 @@
 //! Cmdline contract (set by the host's start_vm path):
 //!
 //!   mvm.roothash=<64-hex>          required; rootfs dm-verity root hash
-//!   mvm.data=<dev-path>            defaults to /dev/vda
-//!   mvm.hash=<dev-path>            defaults to /dev/vdb
+//!   `mvm.data=<dev-path>`            defaults to /dev/vda
+//!   `mvm.hash=<dev-path>`            defaults to /dev/vdb
 //!
 //!   mvm.runtime_roothash=<64-hex>  optional; mvm runtime overlay
 //!                                  dm-verity root hash. When present
@@ -29,8 +29,8 @@
 //!                                  existing Nix-built images that
 //!                                  haven't been refactored for the
 //!                                  overlay continue to boot unchanged.
-//!   mvm.runtime_data=<dev-path>    defaults to /dev/vdc
-//!   mvm.runtime_hash=<dev-path>    defaults to /dev/vdd
+//!   `mvm.runtime_data=<dev-path>`    defaults to /dev/vdc
+//!   `mvm.runtime_hash=<dev-path>`    defaults to /dev/vdd
 //!
 //! On any failure this binary panics — kernel re-init isn't safe from
 //! PID 1 in the initramfs, and panic'ing surfaces the failure on the

@@ -2608,6 +2608,8 @@ fn run_port_forwarder(vsock_port: u32, tcp_port: u16) {
     };
     if rc != 0 {
         eprintln!("port-fwd: failed to bind vsock port {vsock_port} for tcp/{tcp_port}");
+        // SAFETY: `fd` is the vsock socket created above, not yet wrapped in an
+        // owning type; close takes no pointers.
         unsafe {
             close(fd);
         }
@@ -2720,6 +2722,8 @@ fn main() {
     };
     if bind_rc != 0 {
         eprintln!("failed to bind vsock port {}", cfg.port);
+        // SAFETY: `fd` is the vsock socket created above, not yet wrapped in an
+        // owning type; close takes no pointers.
         unsafe {
             close(fd);
         }
@@ -2952,6 +2956,9 @@ mod tests {
             .lock()
             .expect("signal-test mutex not poisoned");
         reset_shutdown_state();
+        // SAFETY: the handler only performs async-signal-safe atomic stores;
+        // calling it directly (not from a real signal) with a valid signal
+        // number is sound, and one call stays below the second-signal `_exit`.
         unsafe {
             on_shutdown_signal(libc::SIGINT);
         }
@@ -2997,6 +3004,8 @@ mod tests {
             .lock()
             .expect("signal-test mutex not poisoned");
         reset_reload_state();
+        // SAFETY: the SIGHUP handler only does an atomic store and never
+        // escalates; calling it directly with a valid signal number is sound.
         unsafe {
             on_reload_signal(libc::SIGHUP);
             on_reload_signal(libc::SIGHUP);

@@ -15,6 +15,26 @@ curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm/main/install.sh | s
 MVM_VERSION=v0.7.0 curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm/main/install.sh | sh
 ```
 
+## Install Model
+
+The default install model is binary-first: install `mvmctl`, then run workloads
+from your normal terminal. You do **not** need Nix on the host for normal use.
+
+After installation, the shortest current image-backed path is:
+
+```bash
+mvmctl run --image alpine -- uname -a
+```
+
+For flake-backed builds, `mvmctl` starts or reuses the project builder VM and
+runs Linux Nix work inside that VM. The host CLI stays the user-facing entry
+point.
+
+Portable artifacts are also intended to be host-Nix-free. A signed `.mvmpkg`
+bundle can be verified and launched without rebuilding from source; source
+checkouts and Nix flakes remain contributor/build inputs, not runtime
+requirements for bundle operators.
+
 ## From Source
 
 ```bash
@@ -29,6 +49,34 @@ cp target/release/mvmctl ~/.local/bin/
 ```bash
 cargo install mvmctl
 ```
+
+## Optional Nix Package
+
+This is only for users who already choose to use Nix as an install
+frontend. It is not the beginner path, and mvm does not require Nix on
+the host for normal use.
+
+The repo flake exposes a source-built host package:
+
+```bash
+nix run github:tinylabscom/mvm?dir=nix
+```
+
+For a local checkout:
+
+```bash
+cd mvm/nix
+nix run .#mvmctl
+```
+
+The Nix package builds from the checkout and its committed `Cargo.lock`.
+It does not download a project-published binary. Linux image builds still
+run inside the builder VM; the optional Nix package is only a host CLI
+install surface.
+
+If a future package-manager expression installs release binaries, it must stay
+separate from this source-built package and preserve release signature/checksum
+verification.
 
 ## Self-Update
 

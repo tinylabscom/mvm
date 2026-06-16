@@ -157,7 +157,7 @@ fn run_gc_if_requested(env: &dyn ShellEnvironment) {
 /// Result of a dev build via `nix build` in the Lima VM.
 #[derive(Debug, Clone)]
 pub struct DevBuildResult {
-    /// Directory containing artifacts: ~/.mvm/dev/builds/<hash>/
+    /// Directory containing artifacts: `~/.mvm/dev/builds/<hash>/`
     pub build_dir: String,
     /// Path to the kernel image.
     pub vmlinux_path: String,
@@ -189,7 +189,7 @@ pub struct DevBuildCleanupReport {
 
 /// Remove old cached dev builds, keeping the newest `keep` revisions.
 ///
-/// Operates directly on the host filesystem under [`dev_builds_dir`]
+/// Operates directly on the host filesystem under `dev_builds_dir`
 /// (`~/.mvm/dev/builds/`). Lima-era versions of this function shelled
 /// through `ShellEnvironment` so the `ls`/`rm` ran inside the dev VM,
 /// but the dev VM only ever bind-mounted the same host directory —
@@ -479,6 +479,112 @@ fn dev_build_via_builder_vm(
     profile: Option<&str>,
     mode: BuildMode,
 ) -> Result<DevBuildResult> {
+    // Host-side build cache: when the resolved build inputs match a prior
+    // build whose artifacts still exist, skip the builder VM + nix eval
+    // entirely. The fingerprint covers every nix input (user flake +
+    // workspace + profile + mode + mvmctl version), so a hit means the
+    // image would be byte-identical — see `build_cache`'s soundness note.
+    let fingerprint = build_cache_fingerprint(flake_ref, profile, mode);
+    if let Some(fp) = fingerprint.as_deref()
+        && let Some(hit) = cached_build_result(env, fp)
+    {
+        env.log_success(&format!(
+            "Build cache hit — reusing {} (skipped builder VM + nix eval)",
+            hit.build_dir
+        ));
+        return Ok(hit);
+    }
+
+    let result = dev_build_via_builder_vm_uncached(env, flake_ref, profile, mode)?;
+
+    // Record the fingerprint → revision mapping so the next identical
+    // build short-circuits. Best-effort: a read-only cache dir just means
+    // the next build re-evaluates.
+    if let Some(fp) = fingerprint.as_deref() {
+        let _ = crate::pipeline::build_cache::write_cached_revision(fp, &result.revision_hash);
+    }
+    Ok(result)
+}
+
+/// Compute the host-side build fingerprint for the cache, or `None` when
+/// the cache is disabled (`MVM_NO_BUILD_CACHE`) or the inputs can't be
+/// fingerprinted (in which case we fall through to a normal build).
+#[cfg(feature = "builder-vm")]
+fn build_cache_fingerprint(
+    flake_ref: &str,
+    profile: Option<&str>,
+    mode: BuildMode,
+) -> Option<String> {
+    if std::env::var_os("MVM_NO_BUILD_CACHE").is_some_and(|v| !v.is_empty()) {
+        return None;
+    }
+    let user_flake = resolve_user_flake(flake_ref);
+    let mvm_workspace = local_mvm_workspace(&user_flake);
+    match crate::pipeline::build_cache::workload_build_fingerprint(
+        &user_flake,
+        profile,
+        mode,
+        mvm_workspace.as_deref(),
+    ) {
+        Ok(fp) => Some(fp),
+        Err(e) => {
+            tracing::debug!(error = %e, "build-cache fingerprint unavailable; building normally");
+            None
+        }
+    }
+}
+
+/// Reconstruct a cache-hit [`DevBuildResult`] from a recorded revision,
+/// or `None` when there is no record or its artifacts are incomplete.
+/// The completeness gate is `rootfs.ext4` — the one universal artifact;
+/// a kernel-less mkGuest image carries no `vmlinux` and relies on the
+/// cached-builder-kernel fallback resolved at boot.
+#[cfg(feature = "builder-vm")]
+fn cached_build_result(env: &dyn ShellEnvironment, fingerprint: &str) -> Option<DevBuildResult> {
+    let revision_hash = crate::pipeline::build_cache::read_cached_revision(fingerprint)?;
+    let build_dir = dev_build_dir(&revision_hash);
+    let rootfs_path = format!("{build_dir}/rootfs.ext4");
+    if !std::path::Path::new(&rootfs_path).is_file() {
+        return None;
+    }
+    let initrd_path = detect_initrd(env, &build_dir);
+    let runner_dir = detect_runner(env, &build_dir);
+    let artifact_sizes = measure_artifact_sizes(env, &build_dir, initrd_path.is_some());
+    Some(DevBuildResult {
+        vmlinux_path: format!("{build_dir}/vmlinux"),
+        rootfs_path,
+        initrd_path,
+        runner_dir,
+        artifact_sizes,
+        revision_hash,
+        cached: true,
+        build_dir,
+    })
+}
+
+/// Resolve a flake-ref argument to a concrete directory path (`.` →
+/// current dir). Shared by the cache fingerprint and the build dispatch
+/// so both reason about the same user flake.
+#[cfg(feature = "builder-vm")]
+fn resolve_user_flake(flake_ref: &str) -> std::path::PathBuf {
+    if flake_ref == "." {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    } else {
+        std::path::PathBuf::from(flake_ref)
+    }
+}
+
+/// The builder-VM build dispatch (persistent supervisor when one is live,
+/// else a single-shot builder VM). Split out from
+/// [`dev_build_via_builder_vm`] so the host-side cache short-circuit wraps
+/// it without entangling the dispatch logic.
+#[cfg(feature = "builder-vm")]
+fn dev_build_via_builder_vm_uncached(
+    env: &dyn ShellEnvironment,
+    flake_ref: &str,
+    profile: Option<&str>,
+    mode: BuildMode,
+) -> Result<DevBuildResult> {
     // When a persistent-builder session is alive AND the user
     // hasn't opted out via `MVM_NO_PERSISTENT_BUILDER=1`, route
     // through the persistent supervisor. Any error here (incl.
@@ -572,13 +678,7 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     };
     let _ = mode;
 
-    let user_flake = std::path::PathBuf::from(if flake_ref == "." {
-        std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| ".".to_string())
-    } else {
-        flake_ref.to_string()
-    });
+    let user_flake = resolve_user_flake(flake_ref);
 
     // Source-checkout invariant: a compiled flake pins
     // `mvm` to GitHub for portability, but when mvmctl runs from a source

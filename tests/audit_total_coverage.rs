@@ -189,6 +189,12 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("rm", AuditPosture::Emits("CachePrune")),
 ];
 
+// Plan 200 — beginner machine UX. `machine run` translates into the same
+// transient-runner path as top-level `run`, so it shares `run`'s
+// `InteractiveOrControl` posture (it streams guest output; the admitted
+// execution path emits via the inner plan/run protocol).
+const MACHINE_SUB: &[(&str, AuditPosture)] = &[("run", AuditPosture::InteractiveOrControl)];
+
 const VOLUME_SUB: &[(&str, AuditPosture)] = &[
     ("create", AuditPosture::Emits("VolumeCreate")),
     ("unlock", AuditPosture::Emits("VolumeOpen")),
@@ -354,6 +360,8 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("__qemu-vsock-bridge", AuditPosture::InteractiveOrControl),
     ("catalog", AuditPosture::ReadOnly),
     ("image", AuditPosture::DelegatesToSub(IMAGE_SUB)),
+    // Plan 200 — beginner microVM workflows.
+    ("machine", AuditPosture::DelegatesToSub(MACHINE_SUB)),
     // Operational surfaces.
     // Plan 178 — metrics/bench/config/mcp grouped under `ops <sub>`.
     ("ops", AuditPosture::DelegatesToSub(OPS_SUB)),

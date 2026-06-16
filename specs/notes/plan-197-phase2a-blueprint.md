@@ -1,9 +1,51 @@
 # Plan 197 Phase 2a — macOS egress substitution: implementation blueprint
 
 **Date:** 2026-06-13
-**Status:** design accepted; implementing in 2 commits
+**Status:** ✅ COMPLETE on vz — control plane + DATA PLANE proven live on macOS-26 (2026-06-15).
 **Scope:** wire the egress-substitution **vsock channel** (explicit `HTTP_PROXY`)
 onto libkrun + vz. The transparent :80/:443 terminator is Phase 2b (rvproxy).
+
+## Live data-plane proof (vz, macOS-26 Apple Silicon, 2026-06-15)
+
+Both 2a commits merged via #909 (the pre-start `plan.json` persist on the `up`
+AND `invoke`/`session` paths — the gate that made the endpoint actually spawn).
+Data plane validated end-to-end on a clean origin/main worktree.
+
+**Driver (sidesteps the pre-existing 5252 early-boot reset race):** don't lean on
+`up` to fire the entrypoint. Boot detached, settle the agent, then dispatch:
+
+```
+mvmctl up --flake <compiled-out> --name N --hypervisor vz -d
+mvmctl vm wait N --for all          # agent settles past the early-boot reset window
+mvmctl invoke N --attach            # RunEntrypoint into the running VM
+```
+
+`invoke --attach` reads the boot-minted `substitution-env.json` and injects
+`HTTP_PROXY=http://127.0.0.1:18080` + the placeholder vars — so the sealed-prod
+function runs with live substitution and **no `vm proc` exec** (claims 4/15 intact).
+No `--from-workload-ir` is needed in attach mode (placeholders already minted at `up`).
+
+**Evidence:** endpoint pid alive, `vsock/vsock-5253.sock` bound, supervisor
+`host_listen_ports:[5253]`, `substitution-env.json = [["API_KEY","mvm-secret-…"]]`
+(real key absent from guest env). httpbin.org/get reflected the **real** Bearer
+credential (it reached the destination) while the guest held only the placeholder
+(claim 13); `example.com` (not in `allowed_hosts`) was refused with
+`HTTP 502: substitution refused: destination example.com is not in the secret's
+allowed_hosts` (claim 12).
+
+**Repeated-dial risk (the unproven crux) — DISPROVEN.** A single call issues 3
+sequential dials; ran `invoke --attach` twice ⇒ 6 guest→host dials on the 5253
+`VZVirtioSocketListener`, endpoint + supervisor alive throughout. The one-shot
+`if let Some(rx.recv())` is ONLY on the exit port 5251 (`run_exit_listener`); the
+5253 host-listen proxy is `while let Some(conn)=rx.recv()`
+(`run_host_listen_port_proxy`) with a re-arming `VsockListenerDelegate::should_accept`
+(`tx.set(Some(tx))`), and the endpoint UDS `serve` is `loop { accept }`. Every hop
+loops — no supervisor bug, no code change required (pure verification).
+
+Remaining 2a cleanup (non-blocking): remove QEMU's dead substitution call and
+collapse FC's Linux-gated `decode_plan_secrets` into
+`egress_shared::decode_plan_secrets_from_state` (verify with a Linux-target
+cross-check). Phase 2b = rvproxy transparent terminator.
 
 ## Key decision — port 5253 direction
 

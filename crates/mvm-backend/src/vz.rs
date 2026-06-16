@@ -21,11 +21,11 @@
 //!   `mvmctl console` can find the artifacts), constructs a
 //!   [`mvm_build::vz::SupervisorConfig`] from the `VmStartConfig`, spawns
 //!   `mvm-vz-supervisor` with the JSON on stdin, and waits up to
-//!   [`PID_FILE_TIMEOUT`] for the supervisor to write its PID file.
+//!   `PID_FILE_TIMEOUT` for the supervisor to write its PID file.
 //! - `stop` reads `<vm_state_dir>/vz.pid`, sends `SIGTERM` (the
 //!   supervisor forwards to `VZVirtualMachine.requestStop()`), polls
 //!   for the process to exit, and falls back to `SIGKILL` after
-//!   [`STOP_TIMEOUT`].
+//!   `STOP_TIMEOUT`.
 //! - `status` reads the PID file and probes with `kill(pid, 0)`.
 //! - `list` walks `~/.mvm/vms/*/vz.pid`.
 //! - `logs` tails `<vm_state_dir>/console.log` (capture-only console).
@@ -390,6 +390,28 @@ impl VmBackend for VzBackend {
         // no-op.
         let mut endpoint_guard = spawn_vz_egress_endpoint_if_needed(&config.name, &state_dir)?;
 
+        // Spawn the per-VM host-services broker (+ its audit-signer) for an
+        // admitted workload so the guest can reach `host.audit.v1` over
+        // BROKER_PORT. Best-effort (same rationale as libkrun): an absent broker
+        // only disables that one service — the workload still runs and the
+        // system audit chain is intact — so a spawn failure is logged, never a
+        // launch rollback. On success the guard reaps both if a later start step
+        // fails; defused once the VM is up.
+        let mut broker_guard = match crate::broker_services_spawn::spawn_broker_services_if_admitted(
+            crate::broker_services_spawn::BrokerServicesSpawnParams {
+                workload_id: &config.name,
+                tenant_id: config.tenant_id.as_deref(),
+                vm_name: &config.name,
+                state_dir: &state_dir,
+            },
+        ) {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::warn!(vm = %config.name, error = %e, "host-services broker spawn failed; host.audit.v1 unavailable for this VM");
+                crate::broker_services_spawn::BrokerServicesGuard::defused()
+            }
+        };
+
         ui::success(&format!(
             "Vz VM '{}' started (pid file: {}, console log: {}).",
             config.name,
@@ -397,6 +419,7 @@ impl VmBackend for VzBackend {
             console_log.display()
         ));
         endpoint_guard.defuse();
+        broker_guard.defuse();
         Ok(VmId(config.name.clone()))
     }
 
@@ -406,6 +429,8 @@ impl VmBackend for VzBackend {
         // guest. Mirrors the libkrun / FC stop ordering — safe because reap is a
         // no-op when nothing exists, even before the not-running early return.
         crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        // Reap the per-VM broker + audit-signer too (no-op when none spawned).
+        crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
 
         let pid_path = vm_state_dir(&id.0).join(PID_FILE_NAME);
         let pid = match read_pid(&pid_path) {
@@ -1867,12 +1892,17 @@ fn build_supervisor_config(
         vsock: vz::VsockConfig {
             ports: vec![mvm_guest::vsock::GUEST_AGENT_PORT],
             socket_dir: vsock_dir,
-            // Host-listens / guest-connects channel for egress substitution: the
+            // Host-listens / guest-connects channels. Egress substitution: the
             // guest dials SUBSTITUTION_PORT, the supervisor accepts and splices to
-            // the per-VM UDS the substitution endpoint binds. Unconditional —
-            // fail-closed: nothing binds that UDS unless the plan has secrets, so a
-            // stray guest dial gets refused.
-            host_listen_ports: vec![mvm_guest::vsock::SUBSTITUTION_PORT],
+            // the per-VM UDS the substitution endpoint binds. Host-services
+            // broker: the guest dials BROKER_PORT, the supervisor splices to the
+            // per-VM broker subprocess UDS. Both unconditional — fail-closed:
+            // nothing binds those UDS until the respective endpoint/subprocess is
+            // spawned, so a stray guest dial gets refused.
+            host_listen_ports: vec![
+                mvm_guest::vsock::SUBSTITUTION_PORT,
+                mvm_guest::vsock::BROKER_PORT,
+            ],
         },
         console_output_path: Some(console_log),
         // gvproxy backend with claim-10 audit bridge ingest hookup.
@@ -2488,6 +2518,20 @@ mod tests {
                 .ports
                 .contains(&mvm_guest::vsock::SUBSTITUTION_PORT),
             "SUBSTITUTION_PORT must not appear in vsock.ports"
+        );
+        // The host-services broker port is host-listens / guest-connects too:
+        // the supervisor must listen on BROKER_PORT so the guest can dial it
+        // (the broker subprocess binds the UDS the supervisor splices to).
+        assert!(
+            built
+                .vsock
+                .host_listen_ports
+                .contains(&mvm_guest::vsock::BROKER_PORT),
+            "BROKER_PORT must be in vsock.host_listen_ports"
+        );
+        assert!(
+            !built.vsock.ports.contains(&mvm_guest::vsock::BROKER_PORT),
+            "BROKER_PORT must not appear in vsock.ports"
         );
         assert_eq!(built.pid_file_name.as_deref(), Some(PID_FILE_NAME));
         // Console capture goes to a file under state_dir; never `None`

@@ -281,6 +281,22 @@ mod tests {
         assert!(cert.tbs_certificate.is_ca());
     }
 
+    #[test]
+    fn debug_redacts_ca_key_and_cert() {
+        let dir = tempdir().unwrap();
+        let ca = EgressCa::load_or_init_at(dir.path()).unwrap();
+        let dbg = format!("{ca:?}");
+        // The private key PEM must never reach a `{:?}` site.
+        assert!(
+            !dbg.contains("PRIVATE KEY") && !dbg.contains(&ca.key.serialize_pem()),
+            "EgressCa Debug leaked private key material: {dbg}"
+        );
+        // The cert PEM is redacted too (it's not secret, but Debug should stay
+        // terse rather than dump a multi-line PEM).
+        assert!(!dbg.contains("BEGIN CERTIFICATE"));
+        assert!(dbg.contains("<redacted>"), "expected key redaction: {dbg}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn ca_key_is_mode_0400() {

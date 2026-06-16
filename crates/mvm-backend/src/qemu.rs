@@ -45,7 +45,6 @@ use std::time::{Duration, Instant};
 
 use crate::base::ui;
 use crate::libkrun::open_console_capture;
-use crate::substitution_spawn::{reap_substitution_endpoint, spawn_substitution_endpoint};
 
 /// QEMU workload backend (Linux dev/test; KVM where present, TCG fallback).
 pub struct QemuBackend;
@@ -235,52 +234,9 @@ impl VmBackend for QemuBackend {
             return Err(e);
         }
 
-        // When the admitted plan carries secret bindings, spawn the per-VM
-        // substitution endpoint moat so the guest's egress can resolve
-        // placeholders host-side (the guest never holds the real secret). Fail
-        // closed: a secret-bearing workload whose endpoint can't come up is
-        // rolled back rather than run with its secrets unavailable.
-        if let (Some(tenant), Some(plan_json)) =
-            (config.tenant_id.as_deref(), config.plan_json.as_deref())
-        {
-            match mvm_core::plan::secrets_from_signed_json(plan_json) {
-                Ok(secrets) if !secrets.is_empty() => {
-                    // Per-destination redaction rides the same signed plan; a
-                    // parse hiccup defaults to all-off rather than failing the
-                    // boot (secrets already gate that).
-                    let redaction =
-                        mvm_core::plan::redaction_from_signed_json(plan_json).unwrap_or_default();
-                    // QEMU is slirp (no host TAP) — no transparent terminator
-                    // to install, so `terminator_listen: None`. The vsock
-                    // substitution channel alone is unchanged.
-                    if let Err(e) = spawn_substitution_endpoint(
-                        crate::substitution_spawn::SubstitutionSpawnParams {
-                            vm_name: &config.name,
-                            state_dir: &state_dir,
-                            tenant,
-                            secrets: &secrets,
-                            redaction: &redaction,
-                            transport: crate::substitution_spawn::EndpointTransport::Vsock {
-                                port: mvm_guest::vsock::SUBSTITUTION_PORT,
-                            },
-                            terminator_listen: None,
-                            // No transparent terminator on slirp ⇒ no TLS leg, so
-                            // no per-VM intermediate (https is FC-scoped).
-                            tls_intermediate: None,
-                        },
-                    ) {
-                        rollback_qemu(&state_dir, &pid_file);
-                        return Err(e);
-                    }
-                }
-                Ok(_) => {} // plan has no egress secrets — no endpoint needed.
-                Err(e) => {
-                    // Not a decodable signed plan (legacy / test callers that
-                    // pass a placeholder plan_json). No secrets ⇒ no endpoint.
-                    tracing::warn!(error = %e, "plan_json not a decodable signed plan; skipping substitution endpoint");
-                }
-            }
-        }
+        // No egress substitution moat here: QEMU is type-barred from carrying
+        // an untrusted (secret-bearing) workload, so a signed plan with secrets
+        // never reaches this backend.
 
         ui::success(&format!(
             "QEMU workload '{}' started (pid: {}).",
@@ -301,10 +257,6 @@ impl VmBackend for QemuBackend {
             send_signal(bpid, libc::SIGTERM);
         }
         let _ = std::fs::remove_file(state_dir.join(BRIDGE_PID_FILE));
-
-        // Reap the substitution endpoint moat (if this VM had one) so its
-        // decrypted secrets don't outlive the guest.
-        reap_substitution_endpoint(&state_dir, &id.0);
 
         let pid_path = state_dir.join(QEMU_PID_FILE);
         let Some(pid) = read_pid(&pid_path) else {
@@ -677,21 +629,6 @@ fn spawn_vsock_bridge(name: &str, cid: u32, state_dir: &Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     Ok(())
-}
-
-/// Kill the just-started qemu + bridge and drop their sidecars — used when a
-/// later step of `start` fails so a failed `start` (not followed by `stop`)
-/// doesn't orphan a daemonized qemu.
-fn rollback_qemu(state_dir: &Path, pid_file: &Path) {
-    if let Some(bpid) = read_pid(&state_dir.join(BRIDGE_PID_FILE)) {
-        send_signal(bpid, libc::SIGTERM);
-    }
-    if let Some(pid) = read_pid(pid_file) {
-        send_signal(pid, libc::SIGTERM);
-    }
-    let _ = std::fs::remove_file(pid_file);
-    let _ = std::fs::remove_file(state_dir.join(QEMU_CID_FILE));
-    let _ = std::fs::remove_file(state_dir.join(BRIDGE_PID_FILE));
 }
 
 /// Body of the `mvmctl __qemu-vsock-bridge` subcommand. Listens on the

@@ -16,8 +16,8 @@
 //! Framing reuses [`mvm_guest::vsock::read_frame`] /
 //! [`mvm_guest::vsock::write_frame`], which enforce a pre-deserialize
 //! `MAX_FRAME_SIZE` of 256 KiB (`crates/mvm-guest/src/vsock.rs:65`).
-//! That bound is amply sufficient for [`HostVmRequest`] — its
-//! largest variant ([`HostVmRequest::Run`]) carries a
+//! That bound is amply sufficient for `HostVmRequest` — its
+//! largest variant (`HostVmRequest::Run`) carries a
 //! [`crate::builder_vm::BuilderJob`] whose variants are tiny
 //! (`Flake { flake_ref: String, attr_path: String }` and
 //! `Install { spec_path: PathBuf }`, both fitting in a few hundred

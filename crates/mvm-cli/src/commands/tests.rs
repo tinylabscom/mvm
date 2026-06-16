@@ -2152,6 +2152,32 @@ fn up_accepts_repeatable_secret_flag() {
     }
 }
 
+#[test]
+fn up_accepts_security_profile_flag_and_defaults_to_none() {
+    // Explicitly named.
+    let cli =
+        Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--security-profile", "dev"]).unwrap();
+    match cli.command {
+        Commands::Up(up::Args {
+            security_profile, ..
+        }) => assert_eq!(security_profile.as_deref(), Some("dev")),
+        _ => panic!("Expected Up command"),
+    }
+    // Unset → None (the runtime then defaults it to `production`).
+    let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", "."]).unwrap();
+    match cli.command {
+        Commands::Up(up::Args {
+            security_profile,
+            seccomp,
+            ..
+        }) => {
+            assert_eq!(security_profile, None);
+            assert_eq!(seccomp, None, "no --seccomp default; profile supplies it");
+        }
+        _ => panic!("Expected Up command"),
+    }
+}
+
 // --- Run (transient runner; absorbed the former exec) CLI tests ---
 
 #[test]

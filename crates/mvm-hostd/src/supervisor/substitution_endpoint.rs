@@ -4,13 +4,13 @@
 //! workload's secrets in the clear. It is spawned per-VM as its own process
 //! (a moat, sibling to `mvm-broker` / `mvm-host-signer`): the backend hands it
 //! the workload's secret bindings on stdin, it opens the host's encrypted
-//! secret + binding stores, builds a [`SubstitutionService`], and serves the
+//! secret + binding stores, builds a `SubstitutionService`, and serves the
 //! guest→host substitution channel. Raw secrets exist only in this process's
 //! address space and reach the wire via the egress substitution — never the
 //! guest (which only ever holds the opaque `mvm-secret-<hex>` placeholder).
 //!
 //! This module is the bin's library half: the stdin config contract
-//! ([`EndpointConfig`]) and [`assemble`] (open stores + build the service).
+//! (`EndpointConfig`) and `assemble` (open stores + build the service).
 //! The `mvm-substitution-endpoint` bin is the thin process wrapper that parses
 //! the config, reports the minted placeholders, and runs the serve loop.
 

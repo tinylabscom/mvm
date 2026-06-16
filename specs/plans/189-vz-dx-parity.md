@@ -17,6 +17,11 @@
 
 > **Status: 🟡 in progress.** Spun out of [Plan 177](./177-backend-consolidation.md)
 > §"deferred follow-ups". WS-3 lifecycle verbs landed: `dev status/down/up --json`.
+>
+> **Priority update 2026-06-15:** Plan 200 owns the new beginner-facing
+> `mvmctl machine` lifecycle. This plan should stay limited to VZ-specific
+> parity and scriptability (`--json`, save/restore capability surfacing, base
+> pinning). Do not add a parallel beginner lifecycle surface here.
 
 **Goal:** Bring the converged single `vz` Apple-Virtualization.framework path to
 DX parity with the reference embeddable-sandbox SDK — the table-stakes floor
@@ -26,7 +31,7 @@ existing primitives as ergonomic, scriptable user-facing verbs.
 
 **Relationship to [Plan 159](./159-vz-inspired-macos-dx.md):** 159 owns the
 broader VZ-DX feature clone (warm pool WS-1, checkpoint/fork WS-2 — both merged).
-**182 owns only the additive parity slice ADR-076 named** and cross-references
+**Plan 189 owns only the additive parity slice ADR-076 named** and cross-references
 159 for the underlying primitives; where 159 (or Plan 140 snapshot
 productionization / Plan 148 fork-fanout) already owns a primitive, the
 workstream here is the CLI/UX layer on top, not a reimplementation.

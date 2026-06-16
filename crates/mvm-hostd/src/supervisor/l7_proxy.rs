@@ -15,7 +15,7 @@
 //!   on Allow splices bytes via `tokio::io::copy_bidirectional` to
 //!   the pinned upstream IP.
 //! - TCP listener loop in [`L7EgressProxy::serve`].
-//! - Audit emission via [`AuditSigner`] for every request.
+//! - Audit emission via `AuditSigner` for every request.
 //!
 //! ## Out of scope (later)
 //!
@@ -51,7 +51,7 @@ pub trait DnsResolver: Send + Sync {
 /// Production resolver — wraps `tokio::net::lookup_host`. Returns
 /// the first resolved address (IPv4 preferred when both are
 /// returned by the OS resolver, but no explicit ordering is
-/// guaranteed). Tests use a [`MockDnsResolver`] instead.
+/// guaranteed). Tests use a `MockDnsResolver` instead.
 pub struct TokioDnsResolver;
 
 #[async_trait]
@@ -112,7 +112,7 @@ pub struct EvaluationResult {
 }
 
 /// Sink the proxy hands [`AuditFields`] to. The supervisor's
-/// production wiring wraps this around an [`AuditSigner`] +
+/// production wiring wraps this around an `AuditSigner` +
 /// plan/bundle binding, building proper `AuditEntry` records.
 /// Tests use [`CapturingEgressAuditSink`] directly.
 #[async_trait]
@@ -298,7 +298,7 @@ impl L7EgressProxy {
     }
 
     /// Serve one accepted client connection: read the CONNECT
-    /// request line, run [`evaluate`], write the `200`/`403`
+    /// request line, run `evaluate`, write the `200`/`403`
     /// response, and on Allow splice bytes to the pinned upstream.
     pub async fn serve_connection(
         self: Arc<Self>,

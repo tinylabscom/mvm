@@ -17,7 +17,7 @@
 //! dm-verity's domain (claim 3), a separate path. So the tamper test here is
 //! "wrong key fails to open", the guarantee LUKS2 actually makes.
 //!
-//! Like [`mvm_core::rotate_luks_slot`], the live path needs a real `cryptsetup`
+//! Like `mvm_core::rotate_luks_slot`, the live path needs a real `cryptsetup`
 //! binary, loop devices, and root, so the full lifecycle test is gated behind
 //! `MVM_LIVE_LUKS=1`; the non-gated test covers the fail-closed path that runs
 //! on any host. The DEK's binding to the artifact hash + signed plan + audit
@@ -56,7 +56,7 @@ pub struct EncryptedStorage {
 impl EncryptedStorage {
     /// Same signature as the non-Linux arm so callers don't branch. Per-volume
     /// size comes from [`VolumeSpec::with_size_mib`], falling back to
-    /// [`DEFAULT_VOLUME_MIB`].
+    /// `DEFAULT_VOLUME_MIB`.
     pub fn new(root: impl Into<PathBuf>, key: [u8; DEK_BYTES]) -> Self {
         Self {
             root: root.into(),

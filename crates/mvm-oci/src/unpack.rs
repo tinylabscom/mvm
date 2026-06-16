@@ -108,7 +108,7 @@
 //!    (`ELOOP`) or to escape the root (`EXDEV`). This closes the
 //!    check-then-use window that a bare `symlink_metadata` walk
 //!    followed by a later `open(2)` / `remove_*` leaves open.
-//!    [`parent_chain_has_symlink`] is retained as a cheap,
+//!    `parent_chain_has_symlink` is retained as a cheap,
 //!    cross-platform fail-fast pre-filter; on Linux the `openat2`
 //!    handle is the load-bearing authority. On non-Linux targets
 //!    (test/dev builds only — the unpacker runs only in the Linux

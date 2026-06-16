@@ -140,6 +140,7 @@ No task is complete without tests. Every feature, bug fix, or refactor must incl
 4. **Compiling workspace**: Run `cargo check --workspace` (or full `cargo test`/`cargo build`) and fix any errors before you finish. Never leave the workspace in a non-compiling state.
 5. **Update sprint spec**: After completing any phase, task, or sub-task, update `specs/SPRINT.md` to reflect the current status. Check off completed items (`- [x]`), update phase status labels (e.g. `**Status: COMPLETE**`), and add any new test counts or notes. The sprint spec must always accurately reflect what has been implemented.
 6. **Tick the plan checkboxes**: as you complete each task or sub-task, check it off (`- [x]`) in the active plan under `specs/plans/<N>-*.md`. **The plan's checkboxes are the source of truth for progress** — a resumed or parallel session reads the last unchecked box to know exactly where to pick the work back up. Never mark a box done before its tests are green. Keep the plan and `specs/SPRINT.md` in sync.
+7. **Update the refactor rollup**: when you land, merge, or descope a workstream in any in-flight plan, tick/strike the matching box in `specs/REFACTOR-STATUS.md` in the **same** change and bump its "Last updated" date. It is a quick cross-plan index, not the source of truth — if it disagrees with a `specs/plans/` doc, the plan doc wins; fix the rollup. The plan checkboxes (item 6), `specs/SPRINT.md` (item 5), and `specs/REFACTOR-STATUS.md` move together — never update one and leave the others stale.
 
 ## Test Expectations
 
@@ -169,8 +170,9 @@ Privacy and security are **critical priorities** for this project and must be co
 Rules:
 
 - **Never suppress a lint with `#[allow(...)]`** — fix the underlying issue instead. If you think a suppression is genuinely necessary, explain why in a comment and get explicit approval.
+- **`#[allow(clippy::too_many_arguments)]` is banned outright — no exceptions, anywhere.** This one has *no* "explain and get approval" escape hatch. The instant a function trips the lint, introduce a **dedicated struct with a builder** (the Rust best practice) that carries those arguments, and pass the built value instead of the loose list. Give the struct a `::builder()` entry point (or `#[derive(Default)]` + `with_*` setters) with one setter per field and a `build()` that returns the validated value, then thread that single value through. A plain positional params struct is the bare minimum; the standing preference is the builder. The *only* legitimate suppression for this lint is on **bindgen-generated FFI** (e.g. `crates/deps/libkrun-sys/src/sys.rs`), which we never hand-edit. If you find an existing suppression in hand-written code, convert it to a builder as part of your change.
 - **Fix warnings immediately** — do not accumulate clippy debt. A warning introduced now becomes harder to diagnose later.
-- **Common findings to watch for**: `clippy::too_many_arguments` (refactor into a params struct), `clippy::redundant_closure`, `clippy::needless_pass_by_value`, `clippy::single_match` → `if let`, unused imports/variables.
+- **Common findings to watch for**: `clippy::too_many_arguments` (build a params struct + builder — see the hard rule above), `clippy::redundant_closure`, `clippy::needless_pass_by_value`, `clippy::single_match` → `if let`, unused imports/variables.
 - **After adding new code**, run clippy before moving on — don't wait until the end of a task.
 
 ## No `unwrap()` in Production Code

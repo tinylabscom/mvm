@@ -31,7 +31,7 @@ pub enum Language {
 }
 
 impl Language {
-    /// Argv[0] of the language interpreter (or runtime). Resolved via
+    /// `Argv[0]` of the language interpreter (or runtime). Resolved via
     /// PATH on the guest; the Nix factories ensure the relevant
     /// binary is on PATH inside the rootfs.
     pub fn interpreter(self) -> &'static str {

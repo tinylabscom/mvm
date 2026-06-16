@@ -980,7 +980,7 @@ pub trait VmBackend: Send + Sync {
     /// Block until a VM exits and return its exit status.
     ///
     /// Only meaningful for VMs started with [`StartMode::Attached`]
-    /// (or freshly attached via [`reattach`](Self::reattach), if/when
+    /// (or freshly attached via `reattach`, if/when
     /// that gets implemented). Backends that lack a wait surface
     /// (e.g., a detached daemon with no PID handle) return an error
     /// pointing at the limitation; the default impl bails with a

@@ -3,7 +3,7 @@
 //! When a workload's [`NetworkPolicy`] permits a host
 //! destination (e.g. `api.openai.com:443`), the supervisor
 //! resolves that host *once* at admission time and records the
-//! resulting IP set in a [`DnsPinRegistry`] keyed by the
+//! resulting IP set in a `DnsPinRegistry` keyed by the
 //! destination. The L7 egress proxy and the L4 substrate
 //! consult the registry on every outbound flow:
 //!

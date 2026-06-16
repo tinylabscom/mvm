@@ -54,6 +54,22 @@ pub const WORKLOAD_EXIT_PORT: u32 = 5251;
 /// host-side proxy port-allowlist to admit it — part of the bin glue.
 pub const SUBSTITUTION_PORT: u32 = 5253;
 
+/// vsock port the host-services broker is exposed on. The in-guest broker
+/// client ([`crate::broker_client`]) dials this to reach the supervisor's
+/// guest-facing broker listener, which derives the workload identity from the
+/// connection, enforces the `ExecutionPlan.services` binding, and proxies the
+/// `ServiceCall` to the `mvm-broker` subprocess. The host admits it via its
+/// `host_listen_ports` allowlist — a one-port, audited widening, the same
+/// mechanism [`SUBSTITUTION_PORT`] uses.
+///
+/// 5300 sits above the privileged range and above 5251/5252/5253, and below
+/// the port-forward range ([`PORT_FORWARD_BASE`] = 10_000) and the
+/// console-data range ([`CONSOLE_PORT_BASE`] = 20_000), so the host-side proxy
+/// allowlist keeps its disjoint-union shape. It reuses the number the
+/// pre-broker secrets channel once held (that channel was removed), so there
+/// is no live collision.
+pub const BROKER_PORT: u32 = 5300;
+
 /// Base vsock port for TCP port forwarding.
 /// The forwarded vsock port = `PORT_FORWARD_BASE + guest_tcp_port`.
 pub const PORT_FORWARD_BASE: u32 = 10000;
@@ -96,7 +112,7 @@ const ADAPTIVE_BACKOFF_CAP_MS: u64 = 500;
 /// Adaptive backoff delay for the `mvmctl up` readiness poll.
 /// `attempt` is 0-based: attempt 0 waits the
 /// base, each subsequent attempt doubles, capped at
-/// [`ADAPTIVE_BACKOFF_CAP_MS`]. This replaces a fixed 500 ms sleep that
+/// `ADAPTIVE_BACKOFF_CAP_MS`. This replaces a fixed 500 ms sleep that
 /// cost up to ~480 ms of dead time after a fast-binding guest was
 /// already reachable; the cap preserves the old steady-state cadence
 /// for a slow guest. Pure — the schedule is unit-tested. This changes
@@ -472,7 +488,7 @@ impl GuestRequest {
     ///
     /// The strings are wire-stable — a rename here is also a
     /// detail-format wire-format change. Pinned by
-    /// [`tests::kind_name_covers_every_variant`].
+    /// `tests::kind_name_covers_every_variant`.
     pub fn kind_name(&self) -> &'static str {
         match self {
             Self::ProtocolHello { .. } => "protocol-hello",
@@ -2267,7 +2283,7 @@ fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<Unix
 /// 3. Read `OK <port>\n`.
 /// 4. Then exchange length-prefixed JSON frames.
 ///
-/// Retries up to [`CONNECT_RETRIES`] times on timeout errors, skipping retries
+/// Retries up to `CONNECT_RETRIES` times on timeout errors, skipping retries
 /// for definitive failures (connection refused, socket not found).
 pub fn connect_to_port(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
     let mut last_err = None;

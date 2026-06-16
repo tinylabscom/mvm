@@ -312,6 +312,34 @@ the default image, start a VM, execute the command, or write a receipt.
 code, but the JSON does not include raw argv, env values, stdout, stderr, or host
 paths.
 
+## Machine (beginner UX)
+
+`mvmctl machine` is the beginner-facing command group. It is a thin UX layer
+over the existing runtime verbs, not a parallel runtime — every `machine`
+subcommand translates into the same signed-`ExecutionPlan`, audited, OCI-provenance
+execution path as the lower-level commands, so the security posture is identical.
+
+The flagship verb is `machine run`: boot a fresh microVM from an OCI image, run a
+command, and tear the VM down. It routes into the same code path as
+`mvmctl run --image`, so it inherits **deny-all networking by default** and the
+same `--profile`, `--add-dir`, `--receipt`, `--json`, and `--dry-run` semantics.
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl machine run --image <ref> -- <cmd>...` | Boot an OCI image, run `<cmd>` with no network, tear down |
+| `mvmctl machine run --image <ref> --profile dev --add-dir .:/work:rw -- <cmd>` | Same, with a writable host share under the dev profile |
+| `mvmctl machine run --image <ref> --cpus <n> --memory <size> -- <cmd>` | Resize the transient VM |
+| `mvmctl machine run --image <ref> --dry-run -- <cmd>` | Validate and explain the run plan without booting a VM |
+| `mvmctl machine run --image <ref> --json -- <cmd>` | Print a redacted JSON execution summary |
+| `mvmctl machine run --image <ref> --receipt <path> -- <cmd>` | Write a signed execution receipt |
+
+Ergonomic opt-in egress (`--net` / `--allow-host`), persistent named machines
+(`machine create/start/exec/shell/stop`), and `machine pack` for portable signed
+artifacts are planned follow-ups; they are intentionally not yet present rather
+than stubbed. Until `--net` lands, image-backed machine runs are network-isolated;
+use `mvmctl up` for the manifest/flake path that already exposes named networks
+and policy bundles.
+
 ## Sandbox State
 
 | Command | Description |

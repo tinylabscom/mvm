@@ -29,7 +29,7 @@
 //!
 //! ## Two ways to land an artifact in the cache
 //!
-//! 1. **Build from the flake.** [`build_overlay_with_nix`]
+//! 1. **Build from the flake.** `build_overlay_with_nix`
 //!    shells out to `nix build` against
 //!    `<workspace>/nix/images/runtime-overlay/`
 //!    and returns paths into the nix store. Linux-only — `nix`
@@ -51,7 +51,7 @@
 //!   from per-image closures.
 //!
 //! The resolver and the build-spec construction are pure file
-//! I/O + string parsing; only [`build_overlay_with_nix`] gates
+//! I/O + string parsing; only `build_overlay_with_nix` gates
 //! on Linux.
 
 use mvm_core::arch::GuestArch;
