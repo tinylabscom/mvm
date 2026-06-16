@@ -190,7 +190,9 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
             reaps both. On success the guard still reaps if a *later* start step
             fails. Compile/clippy-checked; the call site is exercised by the b4
             live E2E.
-          - [ ] **vz** — the same wiring in the vz `start()`/stop()`.
+          - [x] **vz** — the same best-effort wiring in `VzBackend::start()`
+            (after the substitution-endpoint guard) / `stop()` (reap both).
+            Identical pattern; E5.3b-2b-wire complete (both workload backends).
         - [ ] **E5.3b-2c** — `ServiceCallCtx` enrichment (correlation rewrite /
           profile / session) in the broker server (`mvm-hostd`).
       - [ ] **E5.3b-3** — PyO3/napi veneer.
