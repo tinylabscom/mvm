@@ -170,9 +170,29 @@ own internal default).
           (off-tree), `rvproxy run --config` binds the vfkit + API sockets on
           macOS, and `native_spawn_then_drop_reaps_child` boots a real binary
           through `spawn(.., Some(cfg))`.
-    - [ ] **native launch — live guest boot.** A `dev up`-through-rvproxy boot
-          with a real microVM (`MVM_NETWORKING=native` + a deployed rvproxy
-          binary) — the final integration gate before 2d deletes the splice.
+    - [x] **native launch — proven live on a real libkrun workload boot.**
+          `mvmctl up --flake examples/sleeper --hypervisor libkrun -d` with
+          `MVM_NETWORKING=native` + `MVM_GATEWAY_BIN=<macOS rvproxy>` +
+          `MVM_GATEWAY_BRIDGE=1`: the workload took the bridge path
+          (`tenant_id=Some`), the supervisor's native block fired and rendered
+          the correct policy config (`<vm>/rvproxy.toml` — deny-by-default + the
+          6-entry mandatory-deny denylist + vfkit transport + flow-audit export),
+          and the gateway launched as `rvproxy run --config` (native — no
+          `gvproxy.log`, vs gvproxy-compat). Two findings: (1) the bridge is
+          off-by-default — `populate_audit_substrate` (which sets `tenant_id`) is
+          gated behind `MVM_GATEWAY_BRIDGE=1` (the old gvproxy bridge "vfkit
+          socket address is empty" issue; the native `run --config` path does not
+          hit it, so this work helps un-gate it); (2) the bridge path is
+          incompatible with `MVM_DATA_DIR` test isolation — `validate_audit_substrate`
+          pins the signing key to `$HOME/.mvm/keys` (intentional claim-8
+          trust-boundary; `home_mvm_keys_dir`) while `compute_audit_substrate`
+          builds it from `mvm_data_dir()/keys`; they agree in normal use, diverge
+          only under isolation (orthogonal to this WS).
+    - [ ] **native launch — guest-packet-flow final mile.** Confirm guest egress
+          actually transits the native rvproxy enforcing the rendered policy
+          (needs a non-`MVM_DATA_DIR`-isolated boot, or the audit-substrate
+          key-dir reconciliation above) — the last check before 2d deletes the
+          splice.
   - [ ] **2c — flow-event sink → audit re-emission.** Subscribe to rvproxy's
         `FlowEvent` export (needs the rvproxy JSONL/UDS export followup) and
         re-feed `signer_task`'s chain so the claim-10 audit stays mvm's source of
