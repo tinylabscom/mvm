@@ -114,7 +114,10 @@ impl PlanFixture {
                     exec_secs: 0,
                 },
             },
-            admission_profile: AdmissionProfile::local_default("vm:boot", PlanSeccompTier::Standard),
+            admission_profile: AdmissionProfile::local_default(
+                "vm:boot",
+                PlanSeccompTier::Standard,
+            ),
             network_policy: PolicyRef("local-default".to_string()),
             fs_policy: FsPolicyRef("local-default".to_string()),
             secrets: self.secrets,
