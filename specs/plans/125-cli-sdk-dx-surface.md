@@ -212,12 +212,23 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
           `sdks/typescript/src/broker/services.ts` (+ `_broker/__init__.py`).
           `check-stubs` drift-gated; default closure stays schemars-free
           (runtime-free gate green).
-        - [ ] **E5.3b-3b** — the thin pure-Python/TS veneer over the generated
-          types: `mvm.audit.emit`/`emit_batch`, `mvm.host.time()`,
-          `mvm.host.cost()` — open `AF_VSOCK(BROKER_PORT)`, length-frame a
-          `ServiceCall`, parse the `ServiceResponse`, map `ServiceErrorCode` →
-          typed exceptions. Injectable transport for tests (mirror the Rust
-          `_on` stream variants).
+        - [x] **E5.3b-3b (Python)** — the thin pure-Python veneer over the
+          generated types: `mvm.audit.emit`/`emit_batch`, `mvm.host.time()`,
+          `mvm.host.cost()` (`mvm/_broker/transport.py` + `mvm/audit.py` +
+          `mvm/host.py`, surfaced on the `mvm` package). Opens `AF_VSOCK`
+          (`HOST_CID`:`BROKER_PORT`, resolved lazily so host-side imports never
+          touch it), length-frames a `ServiceCall`, parses the `ServiceResponse`,
+          maps `ServiceErrorCode` → typed exceptions (`AuditBadRequest` /
+          `AuditRateLimited` / `HostServiceError` / …). Injectable `connect` for
+          tests (mirror the Rust `_on` stream variants); 10 tests over an
+          `AF_UNIX` socket-pair mock broker.
+        - [ ] **E5.3b-3c (TypeScript)** — deferred for cause: **Node has no
+          native `AF_VSOCK`** (and the in-guest `mvm-addon-vsock-bridge` is
+          TCP↔vsock *per configured binding*, not a generic path). The TS veneer
+          needs a transport first — either a native vsock addon (new dep, weigh
+          under ADR-002) or a TCP↔vsock bridge binding for `BROKER_PORT` baked
+          into the image (both languages then dial a localhost TCP port). Pick
+          the transport, then the veneer mirrors the Python one.
       - [ ] **E5.3b-4** — live-VM E2E on the dev-kvm box.
   - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
     `mvm-guest::host_time` + `mvm-guest::host_cost` (`now` / `workload` +
