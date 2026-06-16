@@ -274,7 +274,7 @@ impl Variant {
 #[serde(deny_unknown_fields)]
 pub struct SecretBinding {
     /// Name as the workload sees it (e.g. env var name or
-    /// /run/mvm-secrets/<name> file).
+    /// `/run/mvm-secrets/<name>` file).
     pub name: String,
     pub source: SecretSource,
 }

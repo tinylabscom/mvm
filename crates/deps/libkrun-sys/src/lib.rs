@@ -13,7 +13,7 @@
 //!   on hosts without libkrun installed.
 //! - **`libkrun-sys`** — bindgen-generated FFI from `libkrun.h` plus
 //!   `-lkrun` linking. [`start`] and [`stop`] dispatch through
-//!   [`sys::Context`] into real libkrun calls.
+//!   `sys::Context` into real libkrun calls.
 //!
 //! This crate stays narrowly focused on the FFI; backend dispatch and
 //! lifecycle live in `mvm-backend` and `mvm-cli`.
@@ -216,7 +216,7 @@ pub struct KrunVirtioFs {
 /// Configuration for a libkrun guest VM.
 ///
 /// Pure data — no I/O until [`start`] / [`start_enter`] consume it.
-/// The FFI calls that consume each field live in [`sys`] under the
+/// The FFI calls that consume each field live in `sys` under the
 /// `libkrun-sys` feature.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct KrunContext {
@@ -282,7 +282,7 @@ pub struct KrunContext {
     /// `vsock-<port>.sock` inside this directory; a sibling host
     /// process (e.g. `mvmctl console <vm>` or the guest-agent
     /// vsock client in mvm-supervisor) speaks to the guest by
-    /// opening the unix socket. When `None`, [`vsock_socket_path`]
+    /// opening the unix socket. When `None`, `vsock_socket_path`
     /// falls back to `/tmp/mvm-libkrun-<name>-vsock-<port>.sock`
     /// — fine for the spike smoke binary, but real consumers
     /// (the supervisor, the builder-VM launcher) should always set a
@@ -725,7 +725,7 @@ fn configure_with_gateway(ctx: &KrunContext) -> Result<(sys::Context, GatewayHan
 /// Endpoint fds the gateway audit bridge needs to splice between
 /// libkrun and the userspace network gateway (`passt` / `gvproxy`).
 ///
-/// Constructed by [`configure_with_gateway_for_bridge`] alongside
+/// Constructed by `configure_with_gateway_for_bridge` alongside
 /// the libkrun `sys::Context` and a [`GatewayHandle`] that keeps
 /// the gateway child process alive. Consumed by the bridge factory
 /// closure passed to [`run_supervisor_with_bridge`], which builds
@@ -1310,7 +1310,7 @@ pub struct SupervisorConfig {
     #[serde(default)]
     pub audit_dir: Option<std::path::PathBuf>,
     /// `~/.mvm/audit/gateway-<vm>.sock` — per-VM subscriber socket
-    /// the [`mvm_hostd::supervisor::gateway_audit::GatewayAuditSink`] binds.
+    /// the `mvm_hostd::supervisor::gateway_audit::GatewayAuditSink` binds.
     #[serde(default)]
     pub gateway_audit_socket: Option<std::path::PathBuf>,
     /// `~/.mvm/audit/gateway-events-<vm>.sock` — per-VM ingest

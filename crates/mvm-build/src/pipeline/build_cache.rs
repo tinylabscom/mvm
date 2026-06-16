@@ -30,7 +30,7 @@
 //! workspace tree with the same basename excludes as
 //! `workspace-filter.nix`. Hashing a *superset* of nix's inputs is always
 //! sound (we bust the cache at least as often as nix would); the only
-//! unsound move is excluding a basename nix includes, so [`EXCLUDED_BASENAMES`]
+//! unsound move is excluding a basename nix includes, so `EXCLUDED_BASENAMES`
 //! must stay a subset of the nix filter's excludes.
 
 use std::path::{Path, PathBuf};

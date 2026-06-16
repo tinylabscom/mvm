@@ -710,7 +710,7 @@ impl FlakeRunConfig {
 
 /// Boot a Firecracker VM from flake-built artifacts (headless).
 ///
-/// Each VM gets its own directory under ~/microvm/vms/<name>/ with a
+/// Each VM gets its own directory under `~/microvm/vms/<name>/` with a
 /// separate Firecracker socket, PID file, and log.  The bridge network
 /// is shared, but each VM has its own TAP device and guest IP.
 #[instrument(skip_all, fields(name = %config.name))]
@@ -1203,6 +1203,31 @@ pub fn balloon_state(name: &str) -> Result<u32> {
     Ok(amount as u32)
 }
 
+/// Wait for a Firecracker guest to power down on its own after an ACPI
+/// shutdown request, polling `is_running` every `poll_interval` until it
+/// reports the VM gone or `max_wait` elapses. Returns `true` when the
+/// guest exited within the window (no hard kill needed), `false` on
+/// timeout. The liveness probe, clock, and sleep are injected so the
+/// escalation decision — "did the guest honor the ACPI request before we
+/// fall back to SIGKILL?" — is unit-testable without a live guest or
+/// real-time waits.
+fn await_graceful_exit(
+    max_wait: std::time::Duration,
+    poll_interval: std::time::Duration,
+    mut is_running: impl FnMut() -> Result<bool>,
+    mut now: impl FnMut() -> std::time::Instant,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> Result<bool> {
+    let deadline = now() + max_wait;
+    while now() < deadline {
+        if !is_running()? {
+            return Ok(true);
+        }
+        sleep(poll_interval);
+    }
+    Ok(false)
+}
+
 pub fn stop_vm(name: &str) -> Result<()> {
     require_linux_env()?;
 
@@ -1235,7 +1260,11 @@ pub fn stop_vm(name: &str) -> Result<()> {
 
     ui::info(&format!("Stopping VM '{}'...", name));
 
-    // Try graceful shutdown
+    // Ask the guest to power down via ACPI (SendCtrlAltDel), then poll for a
+    // clean exit on a tight cadence. A headless workload guest has no
+    // power-button handler, so the former unconditional 2s sleep-then-kill made
+    // every `down` cost two seconds for nothing — escalate to a hard kill the
+    // moment the short graceful window lapses instead of always waiting it out.
     if let Err(e) = run_in_vm(&format!(
         r#"sudo curl -s -X PUT --unix-socket {socket} \
             --data '{{"action_type": "SendCtrlAltDel"}}' \
@@ -1245,19 +1274,30 @@ pub fn stop_vm(name: &str) -> Result<()> {
         warn!("failed to send graceful shutdown to VM: {e}");
     }
 
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    let exited_gracefully = await_graceful_exit(
+        std::time::Duration::from_millis(250),
+        std::time::Duration::from_millis(25),
+        || firecracker::is_vm_running(&pid_file),
+        std::time::Instant::now,
+        std::thread::sleep,
+    )?;
 
-    // Force kill and clean up
-    run_in_vm(&format!(
-        r#"
-        if [ -f {pid} ]; then
-            sudo kill $(cat {pid}) 2>/dev/null || true
-        fi
-        sudo rm -f {socket}
-        "#,
-        pid = pid_file,
-        socket = socket,
-    ))?;
+    // Clean up the API socket either way; only fall back to a hard kill when
+    // the guest ignored the ACPI request within the graceful window.
+    if exited_gracefully {
+        run_in_vm(&format!("sudo rm -f {socket}", socket = socket))?;
+    } else {
+        run_in_vm(&format!(
+            r#"
+            if [ -f {pid} ]; then
+                sudo kill $(cat {pid}) 2>/dev/null || true
+            fi
+            sudo rm -f {socket}
+            "#,
+            pid = pid_file,
+            socket = socket,
+        ))?;
+    }
 
     // Read run info to find the TAP device to destroy
     if let Some(info) = read_vm_run_info_from(&abs_dir)
@@ -2067,17 +2107,26 @@ pub fn configure_flake_microvm_with_drives_dir(
         ),
     )?;
 
-    // Create and attach mvm-secrets drive (stub secrets.json + extra secret files)
-    ui::info("Creating secrets drive...");
-    let secrets_drive = create_dev_secrets_drive(drives_dir, &config.secret_files)?;
-    api_put_socket(
-        socket,
-        "/drives/secrets",
-        &format!(
-            r#"{{"drive_id": "secrets", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
-            path = secrets_drive,
-        ),
-    )?;
+    // Attach the mvm-secrets drive ONLY when there is something to put on it.
+    // The workload guest never mounts this drive — `/init` reads the egress CA
+    // cert and the secret PLACEHOLDERS from the kernel cmdline (`mvm.egress_ca=`
+    // / `mvm.secret_env=`), and raw secrets never enter the guest (they are
+    // substituted at egress, claim 13). So for the common no-secret-binding
+    // workload the drive carries only a stub `{}` and is dead weight; skip the
+    // `mkfs` + attach entirely. It is still built when `secret_files` is
+    // non-empty (an explicit `--volume <host>:/mnt/secrets` share).
+    if !config.secret_files.is_empty() {
+        ui::info("Creating secrets drive...");
+        let secrets_drive = create_dev_secrets_drive(drives_dir, &config.secret_files)?;
+        api_put_socket(
+            socket,
+            "/drives/secrets",
+            &format!(
+                r#"{{"drive_id": "secrets", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
+                path = secrets_drive,
+            ),
+        )?;
+    }
 
     for (idx, vol) in config.volumes.iter().enumerate() {
         let drive_id = format!("vol{}", idx);
@@ -2476,64 +2525,6 @@ fn resolve_fc_bridge_path() -> Result<std::path::PathBuf> {
     )
 }
 
-/// Stand up this VM's transparent egress substitution moat (endpoint +
-/// terminator + nft TAP REDIRECT) when the admitted plan carries
-/// secret bindings. Called after the FC guest is healthy.
-///
-/// The plan lives at `vm_state_dir(name)/plan.json` (the same file
-/// `spawn_fc_bridge` parses — `mvm_data_dir()/vms/<name>`, NOT the `abs_dir`
-/// VMS_DIR tree). The substitution pid + env sidecars also land under
-/// `vm_state_dir` so the invoke path's `vm_substitution_env_path` lookup
-/// resolves identically to the QEMU backend.
-///
-/// Fail-closed: any error propagates so the caller rolls back the VM. A
-/// missing/unsigned `plan.json` (legacy / non-admitted boot) or a plan with no
-/// secrets is a clean no-op — there's nothing to substitute.
-///
-/// The installed [`EgressRedirect`] is `persist`ed (not dropped): the VM keeps
-/// running after this returns, and `stop_vm` removes the nft table by name.
-///
-/// Shared plan decode: `Some((secrets, tenant))` when the admitted
-/// plan carries egress secrets, else `None` (legacy / non-admitted / no-secret
-/// boot — nothing to wire). A missing `plan.json` or an undecodable placeholder
-/// plan is the no-op path, not an error.
-#[cfg(target_os = "linux")]
-fn decode_plan_secrets(
-    state_dir: &std::path::Path,
-) -> Result<
-    Option<(
-        Vec<mvm_core::plan::SecretBinding>,
-        mvm_core::policy::RedactionPolicy,
-        String,
-    )>,
-> {
-    let plan_path = state_dir.join("plan.json");
-    let plan_json = match std::fs::read_to_string(&plan_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "read plan.json at {} for egress substitution: {e}",
-                plan_path.display()
-            ));
-        }
-    };
-    // Both producers land here: the pre-start persist writes the bare
-    // `ExecutionPlan` (the shape the firecracker bridge parses too) and the
-    // gateway-bridge stash writes the signed envelope. Accept either.
-    let plan = match mvm_core::plan::plan_from_admitted_json(&plan_json) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "plan.json not a decodable admitted plan; skipping egress substitution");
-            return Ok(None);
-        }
-    };
-    if plan.secrets.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some((plan.secrets, plan.redaction, plan.tenant.0)))
-}
-
 /// Spawn the per-VM substitution endpoint **before** the guest boots,
 /// so the `(var → placeholder)` pairs it mints (and
 /// writes to `vm_substitution_env_path`) are available when `boot_args` is built
@@ -2550,7 +2541,9 @@ fn spawn_egress_endpoint(config: &FlakeRunConfig) -> Result<EndpointGuard> {
 
     let name = &config.slot.name;
     let state_dir = mvm_core::config::vm_state_dir(name);
-    let Some((secrets, redaction, tenant)) = decode_plan_secrets(&state_dir)? else {
+    let Some((secrets, redaction, tenant)) =
+        crate::egress_shared::decode_plan_secrets_from_state(&state_dir)?
+    else {
         return Ok(EndpointGuard { vm_name: None });
     };
 
@@ -2588,7 +2581,7 @@ fn install_egress_redirect(config: &FlakeRunConfig) -> Result<()> {
 
     let name = &config.slot.name;
     let state_dir = mvm_core::config::vm_state_dir(name);
-    if decode_plan_secrets(&state_dir)?.is_none() {
+    if crate::egress_shared::decode_plan_secrets_from_state(&state_dir)?.is_none() {
         return Ok(());
     }
     let term_port = terminator_port_for(config.slot.index);
@@ -3629,5 +3622,95 @@ mod tests {
                 None => std::env::remove_var("MVM_PASST_PATH"),
             }
         }
+    }
+
+    // ---- await_graceful_exit (Firecracker `stop_vm` shutdown escalation) ----
+    //
+    // The probe, clock, and sleep are injected, so these exercise the real
+    // escalation decision with no VM and no wall-clock waits (sleep is a
+    // no-op; the clock is a deterministic tick where it matters).
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn await_graceful_exit_true_when_guest_exits_in_window() {
+        // Guest is still up on the first probe, gone on the second.
+        let probes = Cell::new(0u32);
+        let is_running = || {
+            let n = probes.get();
+            probes.set(n + 1);
+            Ok(n < 1)
+        };
+        // Generous window with a slow-ticking clock so the deadline is never
+        // the reason the loop ends — the guest exiting is.
+        let base = Instant::now();
+        let tick = Cell::new(0u64);
+        let now = || {
+            let n = tick.get();
+            tick.set(n + 1);
+            base + Duration::from_millis(n)
+        };
+        let exited = await_graceful_exit(
+            Duration::from_secs(10),
+            Duration::from_millis(25),
+            is_running,
+            now,
+            |_| {},
+        )
+        .expect("probe never errors");
+        assert!(exited, "guest exited within the window → no hard kill");
+        assert_eq!(probes.get(), 2, "polled until the guest reported gone");
+    }
+
+    #[test]
+    fn await_graceful_exit_false_on_timeout_with_bounded_polls() {
+        // Guest never powers down.
+        let probes = Cell::new(0u32);
+        let is_running = || {
+            probes.set(probes.get() + 1);
+            Ok(true)
+        };
+        // Clock jumps 100ms per call; with a 250ms window the loop runs twice
+        // before `now()` passes the deadline (calls at 0/100/200/300ms).
+        let base = Instant::now();
+        let tick = Cell::new(0u64);
+        let now = || {
+            let n = tick.get();
+            tick.set(n + 1);
+            base + Duration::from_millis(n * 100)
+        };
+        let slept = Cell::new(0u32);
+        let sleep = |_| slept.set(slept.get() + 1);
+        let exited = await_graceful_exit(
+            Duration::from_millis(250),
+            Duration::from_millis(25),
+            is_running,
+            now,
+            sleep,
+        )
+        .expect("probe never errors");
+        assert!(!exited, "guest ignored ACPI → caller must hard-kill");
+        assert_eq!(probes.get(), 2, "polled only within the graceful window");
+        assert_eq!(
+            slept.get(),
+            2,
+            "slept once per poll, never past the deadline"
+        );
+    }
+
+    #[test]
+    fn await_graceful_exit_propagates_probe_error() {
+        let is_running = || Err(anyhow::anyhow!("liveness probe failed"));
+        let result = await_graceful_exit(
+            Duration::from_secs(1),
+            Duration::from_millis(25),
+            is_running,
+            Instant::now,
+            |_| {},
+        );
+        assert!(
+            result.is_err(),
+            "a failing liveness probe must surface, not be swallowed"
+        );
     }
 }

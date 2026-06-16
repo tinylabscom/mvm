@@ -8,18 +8,18 @@
 //!
 //! Append pipeline:
 //!
-//! 1. Supervisor sends typed [`AppendEntryRequest::AppendEntry`].
-//! 2. This subprocess [`canonical::canonicalize`]s the entry bytes
+//! 1. Supervisor sends typed `AppendEntryRequest::AppendEntry`.
+//! 2. This subprocess `canonical::canonicalize`s the entry bytes
 //!    via JCS (RFC 8785).
 //! 3. Computes the new entry hash as `SHA256(prev_hash || canonical)`,
 //!    signs it with the chain key, writes the
 //!    `{canonical, sig, prev_hash, sig_alg}` line to the JSONL via the
 //!    `O_APPEND`-only FD.
-//! 4. Fsyncs. On `fsync` failure → [`AuditSignerErrorCode::FsyncFailed`]
+//! 4. Fsyncs. On `fsync` failure → `AuditSignerErrorCode::FsyncFailed`
 //!    (supervisor must pause the workload).
 //! 5. Updates the in-memory chain head + persists it to the secondary
 //!    location. On secondary-mismatch detect →
-//!    [`AuditSignerErrorCode::ChainDriftDetected`].
+//!    `AuditSignerErrorCode::ChainDriftDetected`.
 //! 6. Returns the new `chain_head` so the supervisor can record it
 //!    against its own correlation table.
 //!
@@ -43,3 +43,4 @@ pub mod category;
 pub mod chain;
 pub mod config;
 pub mod server;
+pub mod verify;

@@ -8,7 +8,7 @@
 //! KVM, no VMM, and no Nix builder VM.
 //!
 //! Selected via `mvmctl up --hypervisor mock` (matches the
-//! [`AnyBackend::from_hypervisor`] selector). Production callers don't
+//! `AnyBackend::from_hypervisor` selector). Production callers don't
 //! pick it explicitly — `AnyBackend::auto_select` never falls through
 //! to it. Treat as test infrastructure; never trust it for anything
 //! state-changing.

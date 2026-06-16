@@ -5,13 +5,30 @@ description: Get a microVM running in under 5 minutes.
 
 :::tip[Looking for the shortest path to "it's running"?]
 [First-Use Happy Paths](/getting-started/happy-paths/) lists a
-three-command sequence for each of mvm's five audiences (CLI user,
-Python SDK, TypeScript SDK, prebuilt bundle, `mvmctl dev`). Each
-path is paired with `mvmctl doctor --workflow <name>` so the
-preflight only flags blockers your audience actually has.
+three-command sequence for each mvm audience: OCI-image CLI users,
+flake CLI users, Python SDK users, TypeScript SDK users, prebuilt bundle
+operators, and `mvmctl dev` users. Each path is paired with
+`mvmctl doctor --workflow <name>` so the preflight only flags blockers
+your audience actually has.
 :::
 
-## 1. Launch the Dev Environment
+## 1. Run an OCI Image
+
+The shortest current path is a one-shot microVM from an OCI image:
+
+```bash
+mvmctl run --image alpine -- uname -a
+```
+
+This pulls or reuses the cached image, records OCI provenance, boots a transient
+microVM, runs the command, and tears the VM down. You do not need host Nix for
+this path.
+
+Use this when you want "run this command in a fresh microVM." Use the flake,
+manifest, and dev-shell flows below when you are building a custom image or a
+repeatable project environment.
+
+## 2. Launch the Dev Environment
 
 ```bash
 mvmctl dev
@@ -43,7 +60,7 @@ Inside the dev shell your project directory is bind-mounted at `/work`. Exit wit
 Release binaries download the builder image (~200MB) and dev microVM image on first run. From a source checkout, `mvmctl dev up` builds from the in-repo flakes.
 :::
 
-## 2. Day-to-Day Commands
+## 3. Day-to-Day Commands
 
 ```bash
 mvmctl ls         # List running VMs (aliases: ps, status)
@@ -53,7 +70,7 @@ mvmctl doctor     # Check system dependencies and configuration
 mvmctl console vm # Interactive shell into a running VM (PTY-over-vsock)
 ```
 
-## 3. Build and Run
+## 4. Build and Run
 
 Build a microVM image and run it in one command:
 
@@ -74,7 +91,7 @@ mvmctl build --flake . --profile minimal
 mvmctl up --flake .
 ```
 
-## 4. Manifests
+## 5. Manifests
 
 A manifest is the project-local build contract. It sits next to `flake.nix`
 and records the flake target plus runtime sizing:
@@ -90,7 +107,7 @@ mvmctl up
 Use `mvmctl manifest ls` and `mvmctl manifest info` to inspect built
 manifest slots. See [Manifests](/guides/manifests/) for the full flow.
 
-## 5. Image Catalog
+## 6. Image Catalog
 
 Browse the bundled catalog and scaffold from a curated entry:
 
@@ -101,7 +118,7 @@ mvmctl build my-app                       # Build the manifest
 mvmctl up my-app                          # Boot the VM
 ```
 
-## 6. Interactive Console
+## 7. Interactive Console
 
 Access a running VM without SSH -- uses PTY-over-vsock:
 
@@ -110,7 +127,7 @@ mvmctl console myvm                    # Interactive shell
 mvmctl console myvm --command "ls -la" # One-shot command
 ```
 
-## 7. Sandboxed One-Shot Commands
+## 8. Sandboxed One-Shot Commands
 
 `mvmctl exec` boots a fresh transient microVM, runs a single command, and tears
 it down on exit -- like `docker run --rm`, but with a Firecracker microVM as
@@ -128,7 +145,7 @@ When you reuse a registered template that has a captured snapshot, exec
 restores from the snapshot instead of cold-booting -- typically sub-second.
 See the [Sandboxed Exec](/guides/exec/) guide for details.
 
-## 8. Named Networks
+## 9. Named Networks
 
 Create isolated networks for different projects:
 
@@ -138,7 +155,7 @@ mvmctl up --flake . --network myproject
 mvmctl network list
 ```
 
-## 9. Diagnostics & Security
+## 10. Diagnostics & Security
 
 ```bash
 mvmctl doctor           # Deps, available backends, and security posture (one report)

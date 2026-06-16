@@ -287,6 +287,31 @@ mod tests {
     }
 
     #[test]
+    fn debug_redacts_signing_key() {
+        let dir = fresh_keys_dir();
+        let signer = load_or_init_at(dir.path()).expect("init");
+        let dbg = format!("{signer:?}");
+        // The Ed25519 secret bytes must never reach a `{:?}` site, in any
+        // encoding the derived Debug might have produced.
+        let secret_hex: String = signer
+            .signing
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert!(
+            !dbg.contains(&secret_hex),
+            "HostSigner Debug leaked the signing key: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "signing key must be redacted: {dbg}"
+        );
+        // The public-key prefix is non-secret and stays visible for diagnostics.
+        assert!(dbg.contains("verifying_pubkey_prefix"));
+    }
+
+    #[test]
     fn refuses_loose_perms_above_0600() {
         let dir = fresh_keys_dir();
         load_or_init_at(dir.path()).expect("init");
@@ -339,69 +364,10 @@ mod tests {
     }
 
     fn fixture_plan() -> mvm_core::plan::ExecutionPlan {
-        use mvm_core::plan::{
-            AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
-            KeyRotationSpec, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle,
-            Resources, RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TenantId, TimeoutSpec,
-            WorkloadId,
-        };
-        use std::collections::BTreeMap;
-
-        let now = chrono::Utc::now();
-        mvm_core::plan::ExecutionPlan {
-            schema_version: SCHEMA_VERSION,
-            plan_id: PlanId("host-keypair-test".to_string()),
-            plan_version: 1,
-            tenant: TenantId("local".to_string()),
-            workload: WorkloadId("test-vm".to_string()),
-            runtime_profile: RuntimeProfileRef("firecracker".to_string()),
-            image: SignedImageRef {
-                name: "img".to_string(),
-                sha256: "a".repeat(64),
-                cosign_bundle: None,
-                entrypoint_present: true,
-            },
-            resources: Resources {
-                cpus: 1,
-                mem_mib: 256,
-                disk_mib: 0,
-                timeouts: TimeoutSpec {
-                    boot_secs: 30,
-                    exec_secs: 0,
-                },
-            },
-            admission_profile: AdmissionProfile::local_default(
-                "vm:boot",
-                PlanSeccompTier::Standard,
-            ),
-            network_policy: PolicyRef("local-default".to_string()),
-            fs_policy: FsPolicyRef("local-default".to_string()),
-            secrets: Vec::new(),
-            egress_policy: PolicyRef("local-default".to_string()),
-            redaction: Default::default(),
-            tool_policy: PolicyRef("local-default".to_string()),
-            artifact_policy: ArtifactPolicy {
-                capture_paths: Vec::new(),
-                retention_days: 0,
-            },
-            audit_labels: BTreeMap::new(),
-            key_rotation: KeyRotationSpec { interval_days: 0 },
-            attestation: AttestationRequirement {
-                mode: AttestationMode::Noop,
-            },
-            release_pin: None,
-            post_run: PostRunLifecycle {
-                destroy_on_exit: true,
-                snapshot_on_idle: false,
-                idle_secs: 0,
-            },
-            valid_from: now,
-            valid_until: now + chrono::Duration::minutes(10),
-            nonce: Nonce::from_bytes([0u8; 16]),
-            bundle: None,
-            deps_volume: None,
-            shares: Vec::new(),
-        }
+        mvm_core::plan::test_support::PlanFixture::new()
+            .plan_id("host-keypair-test")
+            .workload("test-vm")
+            .build()
     }
 
     #[test]

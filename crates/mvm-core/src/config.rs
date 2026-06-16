@@ -436,6 +436,36 @@ pub fn mvm_audit_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_data_dir()).join("audit")
 }
 
+/// Filename suffix for a per-VM workload audit chain.
+pub const WORKLOAD_AUDIT_SUFFIX: &str = ".workload.jsonl";
+
+/// Per-VM workload audit-chain file:
+/// `<mvm_data_dir>/audit/<tenant>.<vm>.workload.jsonl`.
+///
+/// Distinct from the per-tenant *lifecycle* chain (`<tenant>.jsonl`, written
+/// in-process by `FileAuditSigner`). The workload chain carries the
+/// `workload_audit` entries the per-VM `mvm-audit-signer` writes. It is keyed
+/// **per VM, not per tenant**, because that signer's chain writer is
+/// single-writer (in-memory head, `O_APPEND`, no flock) — two VMs of one tenant
+/// must not co-write one file, so each signer owns its own. Shared by the writer
+/// (the backend spawn) and the verifier (`mvmctl audit verify`) so the path
+/// can't drift between them.
+pub fn workload_audit_path(tenant: &str, vm_name: &str) -> std::path::PathBuf {
+    mvm_audit_dir().join(format!("{tenant}.{vm_name}{WORKLOAD_AUDIT_SUFFIX}"))
+}
+
+/// If `file_name` is a workload audit chain for `tenant`
+/// (`<tenant>.<vm>{WORKLOAD_AUDIT_SUFFIX}`), return its VM name. Lets
+/// `mvmctl audit verify` enumerate a tenant's per-VM workload chains from a
+/// directory listing without re-deriving the naming convention.
+pub fn workload_audit_vm_name<'a>(file_name: &'a str, tenant: &str) -> Option<&'a str> {
+    let prefix = format!("{tenant}.");
+    file_name
+        .strip_prefix(&prefix)?
+        .strip_suffix(WORKLOAD_AUDIT_SUFFIX)
+        .filter(|vm| !vm.is_empty())
+}
+
 /// Overlay receipts / destruction certificates: `<mvm_data_dir>/overlays/`.
 pub fn mvm_overlays_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_data_dir()).join("overlays")
@@ -480,6 +510,34 @@ pub fn is_dev_mode() -> bool {
 mod tests {
     use super::*;
     use crate::util::test_env::TestEnv;
+
+    #[test]
+    fn workload_audit_path_roundtrips_with_vm_name_matcher() {
+        // The writer (backend spawn) builds the path; the verifier
+        // (`mvmctl audit verify`) recovers the VM name from a dir listing.
+        // They must agree — assert on the file name (env-independent).
+        let path = workload_audit_path("local", "vm-7");
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(name, "local.vm-7.workload.jsonl");
+        assert_eq!(workload_audit_vm_name(name, "local"), Some("vm-7"));
+    }
+
+    #[test]
+    fn workload_audit_vm_name_rejects_other_tenants_and_shapes() {
+        assert_eq!(
+            workload_audit_vm_name("local.vm-1.workload.jsonl", "other"),
+            None
+        );
+        // The per-tenant lifecycle chain is not a workload chain.
+        assert_eq!(workload_audit_vm_name("local.jsonl", "local"), None);
+        // Empty VM segment is rejected.
+        assert_eq!(
+            workload_audit_vm_name("local..workload.jsonl", "local"),
+            None
+        );
+        // Wrong suffix.
+        assert_eq!(workload_audit_vm_name("local.vm.jsonl", "local"), None);
+    }
 
     // Tests here mutate process-global env vars (`MVM_*`, `XDG_*_HOME`, `HOME`).
     // Each grabs a `TestEnv` guard, which serializes env-mutating tests behind a

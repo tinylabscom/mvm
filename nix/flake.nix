@@ -97,6 +97,13 @@
         "aarch64-linux"
       ];
 
+      hostSystems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+        "x86_64-darwin"
+      ];
+
       # Helper: construct a NixOS configuration for the named profile.
       mkProfile = system: profileName: nixpkgs.lib.nixosSystem {
         inherit system;
@@ -123,8 +130,32 @@
       # stages the workspace into the store as a regular input
       # snapshot.
       libFor = import ./lib { inherit nixpkgs microvm; mvmSrc = mvm-workspace; };
+
+      hostPackagesFor = system:
+        import ./packages {
+          pkgs = nixpkgs.legacyPackages.${system};
+          mvmSrc = mvm-workspace;
+        };
     in
     {
+      # ── Host-installable package overlay ──────────────────────────
+      #
+      # This is separate from the image-building library below:
+      # `overlays.default` exposes source-built host tools only, while
+      # `lib.<system>.mkGuest` remains the user image API. The package
+      # recipes are intentionally source-only; they do not download
+      # mvm-published release artifacts.
+      overlays.default = final: _prev:
+        let
+          hostPackages = import ./packages {
+            pkgs = final;
+            mvmSrc = mvm-workspace;
+          };
+        in
+        {
+          inherit (hostPackages) mvmctl;
+        };
+
       # ── User-facing: lib.<system>.mkGuest ────────────────────────
       #
       # User flakes import this as `inputs.mvm.lib.<system>.mkGuest`
@@ -148,9 +179,17 @@
       # runners. Same INTERNAL boundary — not consumed by user
       # flakes; if you find yourself running this command, you're
       # working on mvm itself, not a user project.
-      packages = forAllSystems (system: {
-        internal-minimal-runner =
-          (mkProfile system "minimal").config.microvm.declaredRunner;
-      });
+      packages = nixpkgs.lib.genAttrs hostSystems (system:
+        let
+          hostPackages = hostPackagesFor system;
+        in
+        {
+          mvmctl = hostPackages.mvmctl;
+          default = hostPackages.mvmctl;
+        }
+        // nixpkgs.lib.optionalAttrs (builtins.elem system systems) {
+          internal-minimal-runner =
+            (mkProfile system "minimal").config.microvm.declaredRunner;
+        });
     };
 }

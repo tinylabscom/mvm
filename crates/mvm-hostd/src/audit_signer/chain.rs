@@ -2,8 +2,8 @@
 //!
 //! Holds the chain-signing key (software in-memory) + the
 //! `O_APPEND`-only FD on the JSONL + the latest chain head. The single
-//! entry point is [`Chain::append_entry`]: takes a typed
-//! [`AppendEntryRequest::AppendEntry`], synthesizes a `CanonicalEntry`
+//! entry point is `Chain::append_entry`: takes a typed
+//! `AppendEntryRequest::AppendEntry`, synthesizes a `CanonicalEntry`
 //! with the current `prev_hash`, JCS-canonicalizes, signs, appends,
 //! fsyncs, updates head, persists secondary, returns the new head.
 
@@ -152,12 +152,7 @@ impl Chain {
             .jcs_bytes()
             .map_err(|_| AuditSignerErrorCode::InternalError)?;
         // entry_hash = SHA256(prev_hash || canonical_bytes).
-        let entry_hash = {
-            let mut hasher = Sha256::new();
-            hasher.update(entry.prev_hash.as_bytes());
-            hasher.update(&canonical_bytes);
-            hex::encode(hasher.finalize())
-        };
+        let entry_hash = compute_entry_hash(&entry.prev_hash, &canonical_bytes);
         // Sign the canonical bytes.
         let sig = self.signing_key.sign(&canonical_bytes);
         let on_disk = OnDiskEntry {
@@ -183,6 +178,17 @@ impl Chain {
         entry.prev_hash = self.head.clone(); // unused but keeps the value tidy
         Ok(entry_hash)
     }
+}
+
+/// `entry_hash = hex(SHA256(prev_hash_ascii || canonical_bytes))` — the
+/// chain link. Each entry commits to the previous head plus its own JCS
+/// canonical bytes. Shared by the writer ([`Chain::append`]) and the
+/// verifier (`super::verify`) so the two computations can't drift.
+pub(crate) fn compute_entry_hash(prev_hash: &str, canonical_bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(prev_hash.as_bytes());
+    hasher.update(canonical_bytes);
+    hex::encode(hasher.finalize())
 }
 
 // hex + base64 — kept tiny so we don't pull in extra workspace deps.

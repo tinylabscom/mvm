@@ -12,6 +12,13 @@
 
 **Constraint:** no back-compat shims (first version — hard rename). The 52→nested move is a clean break; the most-used verbs stay reachable as real top-level entries, not alias stubs.
 
+> **Priority update 2026-06-15:** Plan 200 is now the product-facing beginner
+> CLI owner. Do not prioritize this plan's broad 52→nested CLI regrouping ahead
+> of `mvmctl machine run/create/start/exec/shell/stop/pack`. The completed
+> `Sandbox` work remains useful substrate; future SDK lifecycle work should
+> feed Plan 200's machine wrappers rather than create a competing beginner
+> vocabulary.
+
 ---
 
 ## Phase A — CLI: 52 flat verbs → `≤15` nested groups
@@ -93,10 +100,19 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
     out, `ServiceResponse` back, typed `BrokerError`. Mock-I/O unit tests:
     Ok-payload roundtrip + exact-envelope, `Err`→typed error, oversize
     frame, truncated frame, malformed body.
-  - [ ] **E5.2** — typed `host.audit.v1` method; tests: request shape sets
-    `workload_audit` (the *host handler* forces it — claim 8), >4 KiB →
-    `BadRequest`, 20/s rate-limit → typed error. Flag the host-side
-    log-injection + covert-egress (claim 10 / Plan 111-A) seam in the PR.
+  - [x] **E5.2** — typed `host.audit.v1` methods in `mvm-guest::host_audit`
+    (`emit`/`emit_batch` + `_on` stream variants), reusing the shared
+    `mvm-core::protocol::host_audit` wire types. The host handler is already
+    built + tested (`mvm-hostd` `HostAuditV1Handler`), so this is the guest
+    half: build the `ServiceCall`, map the host's typed `ServiceErrorCode`
+    onto `AuditError` (`RateLimited` / `BadRequest` / `Unavailable` /
+    `Service` / `Transport`). Claim 8 is structural here — `EmitRequest`
+    carries no `category`, so the guest cannot express a host category, and
+    the host stamps `workload_audit` regardless. 4 KiB cap + 20/s rate
+    limit stay host-enforced; the client only surfaces them. 7 RED-first
+    unit tests. (Host-side log-injection + covert-egress seam — claim 10 /
+    Plan 111-A — is the host handler's concern; the guest record is opaque
+    workload bytes.)
   - **E5.3** split on grounding — the live path needs the broker-services
     subprocess lifecycle, which is unbuilt (nothing spawns `mvm-broker` /
     `mvm-audit-signer` per VM; both proxies + the broker `serve` are
@@ -105,15 +121,126 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
       on both workload backends (libkrun + vz), the fail-closed staging
       `SUBSTITUTION_PORT` uses (nothing binds the UDS until E5.3b spawns the
       broker → stray dial `ECONNREFUSED`). Disjoint-union assertion tests.
-    - [ ] **E5.3b** — the broker-services subprocess lifecycle: spawn +
+    - **E5.3b** — the broker-services subprocess lifecycle: spawn +
       supervise `mvm-audit-signer` + `mvm-broker` per VM, bind
       `vm_vsock_port_socket(name, BROKER_PORT)`, enrich `ServiceCallCtx`
       (correlation rewrite / profile / session), the spawn process-moat
       hardening, the PyO3/napi veneer, and the live-VM E2E (box). Scoped in
       `specs/notes/plan-125-e5-3b-broker-services-lifecycle-scoping.md`;
-      recommend tracking as its own workstream (process-moat, not SDK DX).
-  - [ ] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods + veneer,
-    riding the same transport.
+      tracked as its own workstream (process-moat, not SDK DX).
+      **Chain-format decision (open-question 4 → Option A, per-VM):** the
+      `mvm-audit-signer` writes `OnDiskEntry`/JCS — a different format + signing
+      scheme from the shipped claim-8 `SignedEnvelope`/`AuditEntry` chain
+      `mvmctl audit verify` reads (`AuditEntry` is plan-bound with string-only
+      labels + `deny_unknown_fields`, can't carry a workload record's
+      `category` + JSON `fields`). So workload audit is a **separate, per-VM**
+      chain `<tenant>.<vm>.workload.jsonl`, host-key-signed (one trust root),
+      verified additively. **Per-VM, not per-tenant**, because that signer's
+      `Chain` is single-writer (in-memory head, `O_APPEND`, no flock) — two VMs
+      of one tenant must not co-write one file. The naming convention lives in
+      `mvm-core::config` (`workload_audit_path` / `workload_audit_vm_name`) so
+      the writer (backend spawn) and verifier can't drift.
+      - [x] **E5.3b-0** — workload-chain verifier: `verify_workload_chain`
+        (`mvm-hostd::audit_signer::verify`) for the `OnDiskEntry`/JCS format
+        (re-derive `entry_hash`, check the `prev_hash` link, re-canonicalize to
+        confirm JCS, verify the Ed25519 sig over the canonical bytes, gate the
+        category allow-list, reject non-Ed25519 `sig_alg`), wired into
+        `mvmctl audit verify` so it verifies the per-tenant lifecycle chain
+        **and** every `<tenant>.<vm>.workload.jsonl` against the host pubkey.
+        Shared `compute_entry_hash` extracted so writer + verifier can't drift;
+        per-VM path convention in `mvm-core::config`. 10 RED-first verifier
+        tests + 2 path-helper tests.
+      - [x] **E5.3b-1** — per-VM `mvm-audit-signer` spawn helper
+        (`mvm-backend::broker_services_spawn`, mirror `substitution_spawn`):
+        emit the JSON config (`software_chain_key_path` = host-signer key,
+        `audit_jsonl_path` = `workload_audit_path(tenant, vm)` — the per-VM
+        chain the b0 verifier checks), `setsid` detach, UDS-poll readiness (no
+        stdout handshake), PID file + `reap_audit_signer`; stub-bin tested incl.
+        fail-closed-on-no-bind. The gated `start()`/stop() wiring moves to b2,
+        wired alongside the broker (so no idle audit-signer spawns before a
+        consumer exists).
+      - **E5.3b-2** — per-VM `mvm-broker` spawn + wiring. Unblocks the round-trip.
+        - [x] **E5.3b-2a** — `spawn_broker` in `broker_services_spawn` (mirror
+          `spawn_audit_signer`): binds `vm_vsock_port_socket(name, BROKER_PORT)`
+          (the per-VM socket the VMM forwards the guest's dial to); config
+          carries the `audit_signer_uds_path` (from b1's handle, gates
+          `host.audit.v1`) + the host-signer pubkey; UDS-poll readiness, PID
+          file, `reap_broker`. Shared `spawn_detached_with_config` extracted so
+          the two spawns can't drift. Stub-bin tested.
+        - [x] **E5.3b-2b-core** — the gated spawn + RAII reaper:
+          `spawn_broker_services_if_admitted` (gate on `tenant_id` present —
+          unadmitted VM → defused no-op; admitted → spawn audit-signer **then**
+          broker, ordered so the audit UDS exists first; guard armed before the
+          broker spawn so a failure reaps the audit-signer — fail closed) +
+          `BrokerServicesGuard` (holds the `state_dir`, reaps both on drop until
+          `defuse`) + `reap_broker_services`. Stub-bin tested (admitted spawns
+          both; unadmitted spawns nothing). Mirrors `EndpointGuard`.
+        - **E5.3b-2b-wire** — call the gate from the backends' `start()`/stop().
+          **Grounded the two open questions:** the bins are workspace `[[bin]]`s
+          (in `target/` for any source checkout, where the live E2E runs) but
+          have no confirmed release-shipping — same status as the substitution
+          endpoint. Resolved to **best-effort, not fail-closed**: an absent
+          broker only disables `host.audit.v1` (the guest's emit fails), while
+          the workload still runs and the system audit chain (written host-side,
+          not via the broker) is intact — so a spawn failure is logged, never a
+          launch rollback. (Unlike the substitution endpoint, whose fail-closed
+          posture is right because a missing endpoint *with secrets* is a leak.)
+          - [x] **libkrun** — `start()` spawns the gate (best-effort: `Err` →
+            warn + defused guard, no rollback), `defuse()` once up, `stop()`
+            reaps both. On success the guard still reaps if a *later* start step
+            fails. Compile/clippy-checked; the call site is exercised by the b4
+            live E2E.
+          - [x] **vz** — the same best-effort wiring in `VzBackend::start()`
+            (after the substitution-endpoint guard) / `stop()` (reap both).
+            Identical pattern; E5.3b-2b-wire complete (both workload backends).
+        - **E5.3b-2c** — `ServiceCallCtx` enrichment in the broker server
+          (`mvm-hostd`).
+          - [x] **correlation rewrite** — `mvm-broker`'s `handle_connection`
+            mints a server-authoritative `correlation_id` at ingress
+            (`mint_correlation_id`, process-id + monotonic counter) and uses it
+            for the ctx (hence the audit entry) and the response; the
+            guest-supplied value is never trusted/echoed (a workload could
+            otherwise pick an id that collides with / impersonates another
+            chain entry). The integrity-relevant field.
+          - [ ] **session_id + profile** — deferred: threading a real per-VM
+            session + the admitted profile needs a `SubprocessConfig` +
+            serve-signature + backend-spawn cascade, and neither gates the only
+            registered handler (`host.audit.v1`), so it rides when the
+            time/cost handlers that *do* gate on profile land.
+      - [x] **E5.3b host-spine integration test** — `crates/mvm-hostd/tests/
+        broker_audit_round_trip.rs` spawns the real `mvm-broker` +
+        `mvm-audit-signer` bins (resolved via `CARGO_BIN_EXE_*`, so `cargo test
+        -p mvm-hostd` builds them), connects to the broker UDS, sends a
+        `host.audit.v1::emit`, and `verify_workload_chain`s the result against
+        the host-signer pubkey — proving spawn → dispatch → chain-sign →
+        verifiable per-VM `workload_audit` entry (b1→b2c) end-to-end, real
+        processes, no VM, no veneer. Deterministic / CI-runnable.
+      - **E5.3b-3** — the in-guest `mvm.audit.emit` veneer. **In-process
+        library call, NOT a subprocess** (owner: a shell command is an
+        injection + cross-platform-consistency hazard): the language SDK builds
+        the typed request (the IR) and calls a linked library function. Binding
+        mechanism TBD at build (PyO3 / napi / a `cdylib` + `ctypes`).
+      - [ ] **E5.3b-4** — live-VM E2E. Venues: vz on this Mac (broker-capable;
+        pre-existing init-EOF boot issues to clear first) or libkrun on the
+        Linux box (`88.99.197.234` is FC today — no broker — so it'd need
+        libkrun stood up). Needs b3 for the headline `mvm.audit.emit` test.
+  - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
+    `mvm-guest::host_time` + `mvm-guest::host_cost` (`now` / `workload` +
+    `tenant`, each with an `_on` stream variant), riding the same
+    `broker_client` transport as E5.2. The host handlers are not built yet
+    (only `HostAuditV1Handler` exists; the time/cost scaffolds land later),
+    so the wire contract is established here in `mvm-core::protocol::host_time`
+    (`TimeNowResponse { wall_ms }`) + `mvm-core::protocol::host_cost`
+    (`CostReport { spent_micros_usd }`) — int-only money/clock per the broker
+    contract, `deny_unknown_fields`; the future host handler reuses these
+    types unchanged. Each method maps the host's typed `ServiceErrorCode`
+    onto a typed `TimeError` / `CostError` (`NotBound` / `Unavailable` /
+    `Service` / `Transport`, plus `NotImplemented` for the mvmd-delegated
+    `host.cost.v1::tenant` verb). The scope is the verb, so the request body
+    is empty — a workload cannot ask for another scope's spend. 18 RED-first
+    unit tests (4 core serde + 14 guest mock-I/O). The PyO3/napi veneer for
+    all three services rides E5.3b-3 (the veneer for `host.audit.v1` +
+    `host.time.v1`/`host.cost.v1` lands together there).
 
 ## Acceptance
 

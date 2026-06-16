@@ -1,10 +1,10 @@
 //! Apple Virtualization.framework (Vz) backend for the builder VM,
-//! parallel to [`libkrun_builder::LibkrunBuilderBackend`].
+//! parallel to [`crate::libkrun_builder::LibkrunBuilderBackend`].
 //!
 //! Second `VmBackendForBuilder` impl. Owns the
 //! Vz-specific spawn (`mvm-vz-supervisor` binary with
 //! [`crate::vz::SupervisorConfig`] JSON on stdin) and surfaces the
-//! resulting [`BuilderVmExitInfo`] back to the seam.
+//! resulting `BuilderVmExitInfo` back to the seam.
 //!
 //! ## Scope
 //!
@@ -47,7 +47,7 @@ use crate::libkrun_builder::{
 
 /// Standard kernel cmdline the Vz supervisor pairs with the builder
 /// VM's rootfs. Matches `mvm_backend::vz::DEFAULT_CMDLINE`'s shape —
-/// console on the virtio-hvc port (so [`Self::console_log_path`]
+/// console on the virtio-hvc port (so `Self::console_log_path`
 /// captures it), rootfs as the first virtio-blk device, builder VM
 /// init at `/init`.
 ///
@@ -76,7 +76,7 @@ impl Drop for BuilderGvproxyGuard {
     }
 }
 
-/// Vz parallel of [`libkrun_builder::LibkrunBuilderBackend`]. Holds
+/// Vz parallel of [`crate::libkrun_builder::LibkrunBuilderBackend`]. Holds
 /// the resolved supervisor binary path + cached builder VM image so
 /// a missing prerequisite surfaces at `new()`-time, not mid-build.
 ///
@@ -94,7 +94,7 @@ pub struct VzBuilderBackend {
 impl VzBuilderBackend {
     /// Construct over an already-resolved supervisor path + image.
     /// Refuses [`BuilderVmImage::RootDir`] — that variant is
-    /// libkrun-only. Used by [`Self::new`] and by tests that want to
+    /// libkrun-only. Used by `Self::new` and by tests that want to
     /// inject a fake supervisor without touching the filesystem.
     pub fn new_with_rootfs_image(
         supervisor_path: PathBuf,
@@ -435,24 +435,24 @@ fn path_to_string(p: &Path, field: &str) -> Result<String, BuilderVmError> {
 // ─────────────────────────────────────────────────────────────────
 
 /// Default vCPU count for Vz builder VM runs. Same value as
-/// [`libkrun_builder::DEFAULT_VCPUS`] — nix builds parallelise at
+/// [`crate::libkrun_builder::DEFAULT_VCPUS`] — nix builds parallelise at
 /// the derivation level, so 4 cores keeps a build saturated without
 /// pinning the host.
 pub const VZ_BUILDER_DEFAULT_VCPUS: u8 = crate::libkrun_builder::DEFAULT_VCPUS;
 
 /// Default guest RAM (MiB) for Vz builder VM runs. Same value as
-/// [`libkrun_builder::DEFAULT_MEMORY_MIB`] for parity with the
+/// [`crate::libkrun_builder::DEFAULT_MEMORY_MIB`] for parity with the
 /// libkrun path; the Stage 0 tmpfs cap inside the builder VM rootfs
 /// is what actually limits build memory, not the VM-level cap.
 pub const VZ_BUILDER_DEFAULT_MEMORY_MIB: u32 = crate::libkrun_builder::DEFAULT_MEMORY_MIB;
 
 /// Default persistent `/nix-store` sparse-image cap (MiB) for Vz
 /// builder VM runs. Same value as
-/// [`libkrun_builder::DEFAULT_NIX_STORE_MIB`] so swapping backends
+/// [`crate::libkrun_builder::DEFAULT_NIX_STORE_MIB`] so swapping backends
 /// doesn't change the on-disk cache footprint.
 pub const VZ_BUILDER_DEFAULT_NIX_STORE_MIB: u32 = crate::libkrun_builder::DEFAULT_NIX_STORE_MIB;
 
-/// Vz parallel of [`libkrun_builder::LibkrunBuilderVm`]. Implements
+/// Vz parallel of [`crate::libkrun_builder::LibkrunBuilderVm`]. Implements
 /// [`BuilderVm::run_build`] against the [`VzBuilderBackend`] seam,
 /// sharing every bit of substrate orchestration with the libkrun
 /// driver via the shared `builder_vm_runtime` helpers.
@@ -475,7 +475,7 @@ pub struct VzBuilderVm {
     /// [`Self::run_build`] boots from this kernel/rootfs/cmdline
     /// instead of resolving the builder VM image from
     /// `~/.cache/mvm/builder-vm/<arch>/`. Same shape as the libkrun
-    /// driver's [`libkrun_builder::LibkrunBuilderVm::image_override`].
+    /// driver's [`crate::libkrun_builder::LibkrunBuilderVm::image_override`].
     pub image_override: Option<BuilderVmImage>,
     /// Optional supervisor binary path override. When `None`,
     /// [`resolve_vz_supervisor_path`] is consulted. Useful for tests
@@ -526,7 +526,7 @@ impl VzBuilderVm {
         self
     }
 
-    /// Mirror of [`libkrun_builder::LibkrunBuilderVm::validate_mounts`].
+    /// Mirror of [`crate::libkrun_builder::LibkrunBuilderVm::validate_mounts`].
     /// Same shape — the validation is hypervisor-agnostic so we
     /// reuse the wording but keep the function private so each
     /// backend can evolve its own surface (e.g. Vz refusing a
@@ -566,7 +566,7 @@ impl VzBuilderVm {
     }
 
     /// Same shape as
-    /// [`libkrun_builder::LibkrunBuilderVm::validate_job`].
+    /// [`crate::libkrun_builder::LibkrunBuilderVm::validate_job`].
     fn validate_job(&self, job: &BuilderJob) -> Result<(), BuilderVmError> {
         match job {
             BuilderJob::Flake {
@@ -951,7 +951,7 @@ fn workspace_root_from_crate_manifest_dir(manifest_dir: &Path) -> Option<PathBuf
 // VzPersistentBuilderVm
 // ──────────────────────────────────────────────────────────────────
 //
-// Parallel of [`libkrun_builder::LibkrunPersistentHostVm`]. Same
+// Parallel of [`crate::libkrun_builder::LibkrunPersistentHostVm`]. Same
 // dispatch-loop semantics (vsock-framed `HostVmRequest::Run` from the
 // host-side [`crate::persistent_builder::PersistentBuilderSupervisor`]
 // → in-guest `mvm-host-vm-init` runs cmd.sh / install_spec.json →
@@ -1067,7 +1067,7 @@ impl VzPersistentBuilderVm {
     /// through the dispatch socket that
     /// [`VzPersistentVmHandle::dispatch_socket_path`] points at.
     ///
-    /// Layered like [`LibkrunPersistentHostVm::start`]:
+    /// Layered like `LibkrunPersistentHostVm::start`:
     /// pre-flight checks (Vz available, workspace dir exists,
     /// supervisor binary resolvable) → image + nix-store lock
     /// acquisition → state dir + job dir staging →
@@ -1497,7 +1497,7 @@ pub fn persistent_vz_vsock_dir(session_id: &str) -> PathBuf {
 }
 
 /// Read the supervisor PID file under `state_dir` and SIGTERM the
-/// process, escalating to SIGKILL after [`PERSISTENT_VZ_STOP_TIMEOUT`].
+/// process, escalating to SIGKILL after `PERSISTENT_VZ_STOP_TIMEOUT`.
 /// Idempotent: a missing PID file or an already-dead process is a
 /// clean no-op (the file is unlinked either way). Returns whether a
 /// live supervisor was actually signalled. Mirrors the

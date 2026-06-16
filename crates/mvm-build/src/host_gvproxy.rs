@@ -192,7 +192,7 @@ pub fn spawn_detached(scratch_dir: &Path) -> Result<HostGvproxyInfo> {
 }
 
 /// Read the PID file under `scratch_dir`, SIGTERM the gvproxy
-/// process, wait up to [`STOP_TIMEOUT`] for it to exit, and fall
+/// process, wait up to `STOP_TIMEOUT` for it to exit, and fall
 /// back to SIGKILL. Removes the PID file + socket file on success
 /// or on a clean already-gone state. Idempotent — no-op when the
 /// PID file is missing or the named process is already gone.

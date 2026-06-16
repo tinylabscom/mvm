@@ -3162,31 +3162,23 @@ mod linux {
             let cmd_path = dir.path().join("cmd.sh");
             std::fs::write(&cmd_path, "echo \"tmpdir=${TMPDIR-UNSET}\" >&2\nexit 0\n")
                 .expect("write cmd.sh");
-            // SAFETY: this test runs single-threaded in cargo
-            // test's default scheduler for this binary; we set the
-            // env var briefly to a known value and then assert the
-            // subprocess saw exactly that (not some `/scratch/...`
-            // override). Restoring afterward.
+            // The assertion: with `tmpdir = None`, `run_job_streaming` doesn't
+            // call `.env("TMPDIR", _)` — it leaves the parent's env alone, so
+            // the subprocess sees whatever TMPDIR the parent has.
             //
-            // The point of the assertion: with `tmpdir = None`,
-            // `run_job_streaming` doesn't call `.env("TMPDIR", _)`
-            // — it leaves the parent's env alone.
-            let prior = std::env::var("TMPDIR").ok();
-            unsafe {
-                std::env::set_var("TMPDIR", "/inherited-from-parent");
-            }
+            // `TestEnv` sets it under the shared process-env lock and restores
+            // on drop (even on panic). cargo runs this binary's tests
+            // multi-threaded, so a sibling test's `tempfile::tempdir()` may
+            // observe this TMPDIR during the window — point it at a *valid*
+            // directory (the test's own tempdir) so that stays harmless instead
+            // of handing siblings a non-existent path.
+            let sentinel = dir.path().to_str().expect("utf-8 tempdir").to_string();
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            env.set("TMPDIR", &sentinel);
             let (code, tail) =
                 run_job_streaming(cmd_path.to_str().unwrap(), None, Isolation::Inherit, |_| {});
-            // Restore TMPDIR before the assert so a panic still
-            // leaves the parent env clean for other tests.
-            unsafe {
-                match prior {
-                    Some(v) => std::env::set_var("TMPDIR", v),
-                    None => std::env::remove_var("TMPDIR"),
-                }
-            }
             assert_eq!(code, 0);
-            assert_eq!(tail, "tmpdir=/inherited-from-parent");
+            assert_eq!(tail, format!("tmpdir={sentinel}"));
         }
 
         /// `Isolation::Unshared` mode wraps

@@ -24,6 +24,12 @@
 > multi-crate Rust-native VZ runtime" / "the DX reference") per repo
 > naming policy. Oblique-reference key is in auto-memory
 > (`reference_objc2_vz_external_references`).
+>
+> **Priority update 2026-06-15:** Plan 200 now owns the beginner machine UX and
+> command vocabulary. Keep this plan focused on VZ/macOS primitives and
+> backend-specific polish. Do not implement broad user-facing verb renames,
+> installer shape, or beginner workflow changes here if they overlap
+> `mvmctl machine`; feed them into Plan 199/200 instead.
 
 ## Context
 

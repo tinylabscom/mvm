@@ -14,11 +14,12 @@ outside world, no secret ever lives inside a running workload — and sensitive
 data, including personally identifiable information, is stripped from traffic in
 both directions, whether you declared it or we detected it.
 
-We run on many backends — libkrun and Apple Virtualization.framework on macOS,
-Firecracker on Linux KVM, with Apple Container, cloud-hypervisor, and a WASM
-sandbox alongside — and we support the operations people already expect: pull,
-build, run, snapshot, pause/resume, stop, and clean up, plus host-mediated
-service interactions. It runs on both Arm and x86-64 hardware.
+We run on multiple backends — libkrun and Apple Virtualization.framework on
+macOS, Firecracker on Linux KVM, and QEMU as the development/test backend —
+with WASM preview and promotion work tracked separately. We support the
+operations people already expect: pull, build, run, snapshot, pause/resume,
+stop, and clean up, plus host-mediated service interactions. It runs on both Arm
+and x86-64 hardware.
 
 Because security is the point, every piece of data is encrypted on the host.
 We don't expose the guest on a raw network socket: we carry its tun/tap traffic

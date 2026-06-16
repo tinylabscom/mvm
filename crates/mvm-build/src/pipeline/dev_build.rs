@@ -157,7 +157,7 @@ fn run_gc_if_requested(env: &dyn ShellEnvironment) {
 /// Result of a dev build via `nix build` in the Lima VM.
 #[derive(Debug, Clone)]
 pub struct DevBuildResult {
-    /// Directory containing artifacts: ~/.mvm/dev/builds/<hash>/
+    /// Directory containing artifacts: `~/.mvm/dev/builds/<hash>/`
     pub build_dir: String,
     /// Path to the kernel image.
     pub vmlinux_path: String,
@@ -189,7 +189,7 @@ pub struct DevBuildCleanupReport {
 
 /// Remove old cached dev builds, keeping the newest `keep` revisions.
 ///
-/// Operates directly on the host filesystem under [`dev_builds_dir`]
+/// Operates directly on the host filesystem under `dev_builds_dir`
 /// (`~/.mvm/dev/builds/`). Lima-era versions of this function shelled
 /// through `ShellEnvironment` so the `ls`/`rm` ran inside the dev VM,
 /// but the dev VM only ever bind-mounted the same host directory —

@@ -4,7 +4,9 @@ pub mod audit_signer;
 pub mod broker;
 pub mod handler;
 pub mod host_audit;
+pub mod host_cost;
 pub mod host_signer;
+pub mod host_time;
 #[allow(clippy::module_inception)]
 pub mod protocol;
 pub mod routing;

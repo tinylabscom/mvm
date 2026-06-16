@@ -48,7 +48,7 @@ pub struct Mke2fsOptions {
     pub label: String,
     /// `-U` filesystem UUID. Default
     /// `00000000-0000-0000-0000-000000000001` — pinned for
-    /// determinism. Override via [`with_random_uuid`] if a
+    /// determinism. Override via `with_random_uuid` if a
     /// caller specifically wants a fresh UUID.
     pub uuid: String,
     /// Hash seed for htree dirent ordering. Default

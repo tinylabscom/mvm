@@ -472,7 +472,7 @@ pub const MANDATORY_DENY_RANGES: &[&str] = &[
 /// Done at call time (no `lazy_static` / `OnceLock`) — the list
 /// is small (<10 entries) and parse cost is dominated by the
 /// `Vec` allocation. A malformed entry is a programmer bug, not
-/// a runtime failure; the [`mandatory_deny_ranges_const_parses`]
+/// a runtime failure; the `mandatory_deny_ranges_const_parses`
 /// test catches typos before they ship.
 ///
 /// Note: panics if any entry fails to parse. The single test

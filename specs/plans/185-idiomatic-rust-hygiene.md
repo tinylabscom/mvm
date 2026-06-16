@@ -236,34 +236,47 @@ Priority order:
 **Files:** start from clippy pressure and manual inspection of functions that
 thread many related values through runtime/build/CLI layers.
 
-- [~] **Step 1 - prefer params structs over long argument lists.** Add a named
+- [x] **Step 1 - prefer params structs over long argument lists.** Add a named
       struct when multiple call sites pass the same conceptual bundle.
 
       Audit anchored on the `#[allow(clippy::too_many_arguments)]` suppressions
-      (CLAUDE.md forbids that attribute outright). Findings:
-      - **`mvm-build::firecracker::boot_builder_vsock`** (9 args) — live (the
-        vsock builder backend boots through it). Grouped the eight non-env args
-        into a `BuilderVsockBoot` params struct, destructured by-ref at the top
-        so the body is byte-identical; `#[allow]` removed. **Done.**
+      (AGENTS.md §"Clippy" bans that attribute outright — builder-struct is the
+      fix; only bindgen FFI like `libkrun-sys/src/sys.rs` is exempt). Findings,
+      all now resolved:
+      - **`mvm-build::firecracker::boot_builder_vsock`** (9 args) — grouped the
+        eight non-env args into a `BuilderVsockBoot` params struct, body
+        byte-identical; `#[allow]` removed. **Done.**
       - **`mvm::vm::instance::fc_config::generate` + `mvm::security::jailer::
-        launch_jailed`** — NOT refactored: the `mvm` Firecracker instance/pool
-        lifecycle subtree (`vm/instance/`, `vm/pool/`) is **dead code** — not
-        wired into `vm/mod.rs` (no `mod instance`/`mod pool`), confirmed with a
-        `compile_error!` probe. `fc_config`'s suppression is stale-on-dead;
-        `jailer::launch_jailed` compiles but its only caller is in that dead
-        subtree. These belong to a separate dead-code-removal pass, not a params
-        refactor. (`libkrun-sys/src/sys.rs`'s module-level allow is
-        bindgen-generated FFI and legitimate.)
-      - **Remaining live candidates** (deferred — claim-12 security paths needing
-        careful treatment): `mvm-hostd::supervisor::substitution_proxy::
-        sign_into_headers` and `terminator::tls::terminate_and_substitute`.
-- [ ] **Step 2 - prefer builders for multi-field optional construction.** Use a
-      builder when construction mixes required and optional fields or when tests
-      repeatedly create the same large fixture.
-- [ ] **Step 3 - keep builders local.** Do not introduce a generic builder
-      framework; use plain structs/impls matching local style.
-- [ ] **Step 4 - green.** Add or update tests for any extracted construction
-      logic and run clippy for touched crates.
+        launch_jailed`** — the `mvm` Firecracker instance/pool/tenant lifecycle
+        subtree was **dead code** (unwired from `vm/mod.rs`, `compile_error!`-
+        confirmed). Deleted the whole orphaned cluster (`vm/instance/`,
+        `vm/pool/`, `vm/tenant/`, `bridge.rs`, `disk_manager.rs`) and trimmed
+        `security/jailer.rs` to its one live `jailer_available()` probe, which
+        also removed `launch_jailed`'s suppression by deletion (#931). The last
+        hand-written `too_many_arguments` allow in the tree is gone.
+      - **The two claim-12 security paths** — `substitution_proxy::
+        sign_into_headers` (#926, `SignRequest` builder) and `terminator::tls::
+        terminate_and_substitute` (#927, `TlsTermination` builder). Each
+        destructures the built value at its top so the signing / TLS-terminate
+        bodies are byte-for-byte unchanged.
+      With those three PRs there are **zero** hand-written
+      `#[allow(clippy::too_many_arguments)]` left in the workspace.
+- [x] **Step 2 - prefer builders for multi-field optional construction.** The two
+      claim-12 refactors use the `::builder()` + `with_*()` + `build()` shape
+      (the AGENTS.md standing preference over a plain params struct, #923).
+- [x] **Step 3 - keep builders local.** Plain local structs + `with_*`/`build()`
+      impls matching the existing `RequestCtx`/`InspectorReporter` style; no
+      generic builder framework.
+- [x] **Step 4 - green.** Per-PR: `cargo clippy -p mvm-hostd`/`-p mvm`/`-p mvm-cli`
+      `--all-targets -- -D warnings`, the touched sign/terminator/substitution
+      lib tests (85 + 66) and `mvm` lib tests (203), nightly `fmt --all --check`,
+      and the `check-no-spec-refs-in-comments` + `check-spec-numbers` gates.
+
+  **Deferred (optional polish, not a lint violation):** the functions that
+  already carry a params struct via a `too_many_arguments`-explaining comment
+  (`gateway_bridge`, `checkpoint`, `up`, `plan_builder`, `firecracker`,
+  `install`) are lint-clean today; upgrading them from plain params structs to
+  full `::builder()` shapes is style polish, tracked but not required.
 
 ### Task 7 - Split large functions only when the split buys tests or clarity
 
@@ -391,31 +404,57 @@ thread many related values through runtime/build/CLI layers.
 **Files:** start from library modules that expose public errors and CLI/binary
 edges that currently wrap them.
 
-- [ ] **Step 1 - clarify `thiserror` vs `anyhow`.** Library/domain crates expose
-      typed errors when callers can react programmatically; CLI and binary edges
-      add `anyhow::Context` for operator-facing messages.
-- [ ] **Step 2 - stop matching error strings in tests where typed errors exist.**
-      Prefer enum variants, error kinds, or structured fields. Keep substring
-      assertions only for final user-facing CLI text.
-- [ ] **Step 3 - add context at process and filesystem boundaries.** File, socket,
-      command, and config errors should include the path/operation without
-      leaking secrets.
-- [ ] **Step 4 - green.** Run targeted tests and clippy for touched crates.
+- [x] **Step 1 - clarify `thiserror` vs `anyhow`.** Audit confirms the boundary
+      is already the intended one: domain/library surfaces that callers react to
+      programmatically expose typed `thiserror` enums (the hostd keyholder
+      `ProxyError`/`TerminatorError`/`SignDispatchError`, `RotationError`,
+      `OciUnpackError`, plan/bundle errors), while the bulk of fallible
+      operations use `anyhow` with `.context()`/`bail!` for operator-facing
+      messages. No reshaping needed.
+- [x] **Step 2 - stop matching error strings in tests where typed errors exist.**
+      Finding: the actionable surface is **tiny**. Where a typed enum exists and
+      callers react, the tests already use `matches!` (the hostd security paths).
+      Almost every `unwrap_err().to_string().contains(...)` in the tree is on an
+      `anyhow` error (e.g. `mock::start`, `capture_fs_quick`, `AddDir::parse`,
+      `migrate_wrapped_keys`' version `bail!`s) or a `serde_json` parse error —
+      where the rendered string is the only handle and is the correct thing to
+      assert. The one genuine candidate was `load_master_key`, which surfaces an
+      anyhow-wrapped `RotationError::KeyFilePerms { mode }`; its test now
+      `downcast_ref::<RotationError>()`s and matches the structured `mode` field
+      instead of substring-matching `"0644"` (robust to message rewording).
+- [x] **Step 3 - add context at process and filesystem boundaries.** Spot-check
+      confirms FS/command/config errors already carry the path/operation via
+      `.with_context(|| format!("…{}", path.display()))` (e.g. the host-signer
+      keypair, key-rotation, secret-store paths) without leaking secret values.
+- [x] **Step 4 - green.** `cargo test -p mvm-core load_master_key` +
+      `cargo clippy -p mvm-core --all-targets -- -D warnings`.
 
 ### Task 11 - Consolidate repeated fixtures and builders
 
 **Files:** initial candidates include tests constructing `ExecutionPlan`,
 `FlakeRunConfig`, backend configs, admission inputs, and large CLI fixtures.
 
-- [ ] **Step 1 - identify repeated fixture constructors.** Start with structs
-      copied across three or more tests or crates.
-- [ ] **Step 2 - move shared fixtures to the owning crate's test-support module.**
-      Keep fixtures close to the type owner; expose cross-crate fixtures through
-      explicit test-support features only when needed.
-- [ ] **Step 3 - prefer fixture builders over partially valid literals.** Builders
-      should produce valid defaults and make invalid-test mutations explicit.
-- [ ] **Step 4 - green.** Add tests for fixture helpers if they carry logic, then
-      run targeted tests and clippy.
+- [x] **Step 1 - identify repeated fixture constructors.** The clearest
+      duplication: **six** near-identical ~40-line minimal `ExecutionPlan`
+      fixtures across the mvm-hostd audit/admission cluster
+      (`audit/{emitter,bind,host_keypair,plan_persist}`,
+      `supervisor/{lifecycle_hooks,audit_recorder}`). The realistic-shape
+      fixtures (`signing::sample_plan`, supervisor `aggregate`/`audit`, mvm-cli
+      `policy_resolver`) are a *materially different* plan and were left alone.
+- [x] **Step 2 - move shared fixtures to the owning crate's test-support module.**
+      Added `mvm_core::plan::test_support::PlanFixture`, gated
+      `cfg(any(test, feature = "test-support"))` so it never reaches production;
+      both mvm-hostd and mvm-cli already enable `mvm-core/test-support` in
+      dev-deps. Adds no deps — `check-core-runtime-free` stays green (#953).
+- [x] **Step 3 - prefer fixture builders over partially valid literals.**
+      `PlanFixture` produces a valid minimal local plan by default and exposes
+      `with`-style overrides (`tenant`/`plan_id`/`workload`/`runtime_profile`/
+      `nonce`/`secrets`/`validity`) so each migrated site states only what it
+      pins; the six `fixture_plan` fns are now thin wrappers (call sites
+      unchanged). Net −156 lines.
+- [x] **Step 4 - green.** 2 new `PlanFixture` unit tests + 83 migrated
+      mvm-hostd audit/supervisor tests pass; `cargo clippy -p mvm-core
+      --features test-support -p mvm-hostd --all-targets -- -D warnings`.
 
 ### Task 12 - Audit secret/debug exposure
 
@@ -423,27 +462,68 @@ edges that currently wrap them.
 `rg -n 'derive\\(.*Debug|println!|eprintln!|tracing::|log::|format!' crates`
 plus secret-bearing modules.
 
-- [ ] **Step 1 - identify secret-bearing types.** Keys, tokens, signed secrets,
-      tenant data, placeholder values, credential names, and redaction payloads
-      must not expose raw values through `Debug`, `Display`, logs, or panic text.
-- [ ] **Step 2 - use secrecy/zeroize wrappers consistently.** Prefer existing
-      `secrecy` and `zeroize` patterns over local redaction wrappers unless the
-      local type needs a domain-specific display.
-- [ ] **Step 3 - add negative tests for secret formatting where practical.** Tests
-      should prove debug/log-facing output redacts or omits raw secret material.
-- [ ] **Step 4 - green.** Run targeted security/crypto/policy tests and clippy
-      for touched crates.
+- [x] **Step 1 - identify secret-bearing types.** Audit conclusion: the
+      codebase already enforces this well. The name-based
+      `check-no-display-on-secret-types` gate is clean; a field-name sweep for
+      raw secret fields (`secret`/`password`/`api_key`/`private_key`/`token` of
+      `String`/`Vec<u8>`) on non-`SecretBox` types surfaced **no unprotected
+      types** — the only hits are an opaque `pid_token` CLI arg and the
+      already-hand-redacted `vmgenid::GenerationToken`.
+- [x] **Step 2 - use secrecy/zeroize wrappers consistently.** Already the
+      pattern: raw credential values live in zeroizing `secrecy::SecretBox`
+      (e.g. the keyholder resolver returns `SecretBox<Vec<u8>>`), and
+      secret-bearing structs carry hand-written redacting `Debug` impls with
+      `// allow(secret-debug)` notes. No new wrappers needed.
+- [x] **Step 3 - add negative tests for secret formatting where practical.**
+      Added the missing ones — types that had a redacting `Debug` but no test
+      pinning it, so a future edit dropping the impl can't silently start
+      leaking (the name-gate only checks an impl *exists*, not that it
+      *redacts*): `HostSigner` (mvm-hostd), `ResolvedBinding`/`ResolvedSecrets`
+      and `EgressCa` (mvm-core). `identity::SecretBytes`, the TLS intermediate,
+      and the web-search provider already had equivalent tests.
+- [x] **Step 4 - green.** The 3 new tests + existing redaction tests pass;
+      `cargo clippy -p mvm-core --features egress-ca -p mvm-hostd --all-targets
+      -- -D warnings`, nightly fmt, and the `check-no-display-on-secret-types` /
+      spec gates clean. (PR for the tests is tracked in SPRINT.)
 
 ### Task 13 - Add documentation verification to closeout
 
-- [ ] **Step 1 - run doc generation after type renames.** Use
-      `cargo doc --workspace --no-deps` or a narrower crate set if workspace docs
-      hit a host/platform blocker.
-- [ ] **Step 2 - fix broken intra-doc links introduced by renames.** Prefer real
-      Rustdoc links for type names that are part of the public crate API.
-- [ ] **Step 3 - document any doc-generation blocker.** If workspace docs cannot
-      run on the host, record the exact crate and error in this plan and the
-      rollup before closeout.
+- [x] **Step 1 - run doc generation after type renames.** Ran
+      `RUSTDOCFLAGS="-W rustdoc::broken_intra_doc_links" cargo doc --workspace
+      --no-deps`. Finding: **the Phase 3 renames introduced zero broken links** —
+      grepping the unresolved-link set for `Backend`/`EgressProxy`/
+      `DeviceMapperBackend`/`BackendKind` returns nothing, so #892/#894/#895
+      updated their own doc links cleanly.
+- [x] **Step 2 - fix broken intra-doc links. DONE.** The Linux `--all-features`
+      doc run surfaced **122** *pre-existing* broken intra-doc links (not
+      introduced by this plan — the renames were clean) across every crate.
+      **All 122 are now fixed**: `cargo doc --workspace --all-features --no-deps`
+      is clean under `-D rustdoc::broken_intra_doc_links` on the x86_64 Linux box
+      (exit 0, zero unresolved). Fixes (doc-comment only, no logic): public-API
+      refs got real qualified links where the path was obvious; the rest —
+      `<placeholder>` paths, literal `[bracket]` prose (`[mvm]`, `[error]`,
+      `argv[0]`), private/test/method links, cross-crate refs (broken under
+      `--no-deps`), and module-doc `//!` submodule/type-overview lists — were
+      backticked to inline code. Valid `///` item-doc links and type-defining-file
+      links were left intact. Landed as three batches on `docs/plan-185-task13-doclinks`.
+- [~] **Step 3 - document the doc-generation conditions.** Not a host/platform
+      *blocker* (`cargo doc` runs here), but the workspace doc build is
+      **feature- and platform-conditional**, which the initial `~115` count hid:
+      (a) many links target `#[cfg(feature = …)]` modules (e.g.
+      `crate::libkrun_builder::*`) that are absent unless docs run with
+      `--all-features`; (b) a cluster targets `#[cfg(target_os = "linux")]`
+      builder-VM bins (`mvm-host-vm-init`, egress-proxy internals) that simply
+      aren't in the doc graph on a **macOS** host — they resolve on a **Linux**
+      doc build, and backticking them to satisfy macOS would *degrade* the
+      valid Linux docs. So the Phase 7 doc gate must run **on Linux with
+      `--all-features`, per-crate**; only links that are broken *there* are real
+      bugs. mvm-core + the unconditional mvm-build bugs are fixed; the rest is
+      tracked below.
+
+  **All crates cleared** (measured on Linux with `--all-features`, the real
+  gate): mvm-core, mvm-build, mvm-hostd, mvm-backend, mvm-guest, libkrun-sys,
+  mvm-cli, mvm-vm-host, mvm, mvm-sdk, mvm-oci, and xtask — all green under
+  `-D rustdoc::broken_intra_doc_links`.
 
 ---
 
@@ -451,13 +531,50 @@ plus secret-bearing modules.
 
 ### Task 14 - Final verification and index updates
 
-- [ ] `cargo test --workspace` green.
-- [ ] `cargo check --workspace` green.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` green in the
-      required environment(s).
-- [ ] `cargo doc --workspace --no-deps` green, or a documented host/platform
-      blocker explains why a narrower doc command was used.
-- [ ] `specs/SPRINT.md` reflects the plan and its real state.
-- [ ] `specs/REFACTOR-STATUS.md` reflects the plan and its real state.
-- [ ] Closeout note lists any intentionally deferred style debts with concrete
-      reasons.
+- [x] `cargo test --workspace` green **on Linux** (the required env — `mvm-backend`
+      tests SIGKILL under macOS amfid, so they can only be validated on Linux).
+      Verified on the x86_64 Linux box: 3720+ tests pass across the heavy crates
+      alone (mvm-core 1244, mvm-hostd 962, mvm-backend 914, …) plus the rest of
+      the suite, **zero genuine failures**. Two non-genuine results, both
+      understood: (1) the run first surfaced 15 failures in the `cfg(linux)`
+      `mvm-host-vm-init` bin — a real test-isolation bug (unguarded
+      `set_var("TMPDIR", …)` leaking a non-existent path to parallel tests),
+      invisible on macOS where the bin is `cfg`-excluded; **fixed** with `TestEnv`
+      + a valid sentinel (PR #960, now 151/151). (2) `each_embedded_binary_starts_
+      with_elf_magic` fails only under `MVM_SKIP_EMBED_BINARIES=1` (it asserts
+      real ELF payloads; the flag embeds zero-byte stubs) — a documented env
+      artifact, green in a real-embed CI build.
+- [x] `cargo check --workspace` green (the test build above compiled the whole
+      workspace + all test targets on Linux).
+- [~] `cargo clippy --workspace --all-targets -- -D warnings` green in the
+      **required env (macOS CI)** — verified for all Plan 185 changes. A Linux
+      clippy run additionally surfaced **pre-existing** lints in the `cfg(linux)`
+      `mvm-build` bin `mvm-host-vm-init` (same clippy 0.1.96 both hosts; macOS
+      never lints that bin because it's `cfg`-excluded): 9 `doc list item without
+      indentation`, 1 `empty line after doc comment`, 1 `collapsible if`. These
+      are unrelated to Plan 185 and predate it; tracked as a separate Linux-clippy
+      follow-up (chasing "Linux clippy green" risks a cascade through dependent
+      crates — out of this plan's scope).
+- [x] `cargo doc --workspace --all-features --no-deps` — **green on Linux** under
+      `-D rustdoc::broken_intra_doc_links` (exit 0, zero unresolved). Task 13
+      proved the renames introduced zero broken links; the Linux `--all-features`
+      run then inventoried **122 pre-existing** broken intra-doc links across
+      every crate (feature/platform-gated artifacts mixed with genuine bare-path
+      bugs), and **all 122 are now fixed** (mvm-core/mvm-build first via
+      #939/#941, then the full sweep on `docs/plan-185-task13-doclinks`). The
+      gate must run on **Linux with `--all-features`** — the macOS default-feature
+      run can't see `cfg`-gated modules, so it under-reports.
+- [x] `specs/SPRINT.md` reflects the plan and its real state.
+- [x] `specs/REFACTOR-STATUS.md` reflects the plan and its real state.
+- [x] **Closeout note — intentionally deferred debts, with reasons:**
+      1. **Task 8 — `mvm-vm-host/vz_objc.rs` objc2 SAFETY audit.** Held while the
+         Plan-152 vz work is active (concurrent vz worktrees/PRs); touching ~120
+         `msg_send` blocks now would collide. Resume when vz is quiet.
+      2. **Task 13 — broken intra-doc links: DONE.** All 122 pre-existing broken
+         intra-doc links (Linux `--all-features`) fixed; `cargo doc --workspace
+         --all-features --no-deps` is clean under `-D broken_intra_doc_links` on
+         the Linux box. (No longer deferred.)
+      3. **Pre-existing Linux-only clippy lints in `mvm-host-vm-init`** (11, doc
+         formatting + collapsible-if). Surfaced by the Phase 7 Linux clippy run;
+         orthogonal to Plan 185; deferred to avoid a cross-crate Linux-clippy
+         cascade inside this closeout.

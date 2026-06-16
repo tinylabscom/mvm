@@ -175,6 +175,7 @@ impl Commands {
             Commands::Doctor(_) => "doctor",
             Commands::Manifest(_) => "manifest",
             Commands::Image(_) => "image",
+            Commands::Machine(_) => "machine",
             Commands::Storage(_) => "storage",
             // `build <sub>` delegates to the per-op verb (image/compile/validate/kernel).
             Commands::Build(a) => a.action.verb_name(),

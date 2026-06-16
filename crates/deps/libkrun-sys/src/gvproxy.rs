@@ -202,7 +202,7 @@ pub struct GvproxyHandle {
 impl GvproxyHandle {
     /// Path to the unix-domain socket gvproxy listens on. Hand this
     /// to [`crate::KrunContext::with_gvproxy`] (or directly to
-    /// [`crate::sys::Context::add_net_unixgram_path`] for advanced
+    /// `crate::sys::Context::add_net_unixgram_path` for advanced
     /// callers).
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
