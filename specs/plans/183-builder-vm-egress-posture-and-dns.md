@@ -297,22 +297,23 @@ Two independent defects blocked `mvmctl up --flake <workload> --hypervisor vz`:
   gvproxy and the dev VM took a DHCP lease 192.168.127.3 from the gvproxy gateway
   192.168.127.1 (vs no virtio-net at all under `network: None`); `dev down` reaped
   the gvproxy with no leak.
-- [ ] `mvmctl doctor` line surfacing the in-builder egress posture + last builder
-  network bootstrap outcome (lease vs static vs none), so this class of failure is
-  diagnosable without console archaeology.
-  Close-out triage (2026-06-13): DEFERRED — the "last net-bootstrap outcome
-  (lease|static|none)" is not recorded in any audit/state substrate today, so the
-  line needs new plumbing first (record the bootstrap result at builder boot, then
-  surface it). The static per-arm egress posture alone (boot=open, install=locked)
-  is already documented; the diagnostic value is in the *outcome*, which is the
-  part that needs the substrate. Not a vz close-out blocker.
-  Re-confirmed 2026-06-15: the per-arm posture is enforced **in-guest**
-  (`mvm-host-vm-init/network.rs::install_egress_lockdown`, applied inside the
-  builder VM on Linux), so the host-side `doctor` can't read the live state — a
-  doctor line would either restate a fixed design constant (low value) or need
-  the builder boot to record its lease/static/none outcome to a host-readable
-  sidecar first (the plumbing). Either way it edits Linux-gated builder-boot code,
-  not a host-only doctor tweak.
+- [x] `mvmctl doctor` line surfacing the builder VM's egress posture + last
+  network-bootstrap outcome (lease / static-fallback / failed), so this failure
+  class is diagnosable without console archaeology.
+  DONE 2026-06-15. The earlier "needs new host-side recording plumbing" premise
+  was wrong: the outcome is **already host-readable** in the persistent builder
+  VM's `console.log` (busybox's `udhcpc: lease of <ip> …`, our `falling back to
+  static gvproxy addressing`, and the `setup_network warning … udhcpc exit N`
+  failure line). So no in-guest plumbing was needed — `doctor` just parses it.
+  `guest_net::classify_builder_net_bootstrap` (pure, cfg-free) maps the console.log
+  to `Lease{ip}` / `StaticFallback{ip}` / `Failed` / `Unknown`;
+  `vz_builder::dev_builder_vz_console_log` resolves the persistent dev VM's
+  console.log; `doctor`'s `builder_egress_check` reports the outcome plus the
+  static per-arm posture (install-arm locked fail-closed, flake-build arm open),
+  with a `Failed` bootstrap surfaced as not-OK. vz-only (the libkrun persistent
+  dev VM has no fixed session path to probe; vz is the macOS-26 default).
+  Live-validated: `doctor` reports "DHCP lease 192.168.127.3 via the gvproxy
+  gateway" against a real dev-up console.log.
 - [x] fs_quick on Vz: teach the quiesce gate to recognize the Vz paused state
   (pid stays alive under pause), and/or stop deleting the per-instance CoW
   rootfs on `down` so a stopped VM remains checkpointable.

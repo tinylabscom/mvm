@@ -1534,6 +1534,21 @@ pub fn persistent_vz_vsock_dir(session_id: &str) -> PathBuf {
     persistent_vz_state_dir(session_id).join("vsock")
 }
 
+/// Host path of the persistent dev builder VM's `console.log`.
+///
+/// The `"dev"` session id mirrors the CLI's `DEV_VM_SESSION_ID` — the id
+/// `mvmctl dev up` boots the long-lived Vz builder VM under. It is
+/// duplicated here as a string literal rather than imported because the
+/// CLI's dev session module is off-limits to this crate's dependency
+/// direction; if the CLI's id ever changes, this must move with it.
+///
+/// The guest writes its network-bootstrap outcome (DHCP lease / static
+/// fallback / failure) to this log, so it is the host-readable source for
+/// the `mvmctl doctor` builder-egress diagnostic.
+pub fn dev_builder_vz_console_log() -> PathBuf {
+    persistent_vz_state_dir("dev").join("console.log")
+}
+
 /// Read the supervisor PID file under `state_dir` and SIGTERM the
 /// process, escalating to SIGKILL after `PERSISTENT_VZ_STOP_TIMEOUT`.
 /// Idempotent: a missing PID file or an already-dead process is a
@@ -2369,6 +2384,13 @@ mod tests {
         let state = persistent_vz_state_dir("dev");
         assert!(state.ends_with("mvm-persistent-builder-vz-dev"));
         assert_eq!(persistent_vz_vsock_dir("dev"), state.join("vsock"));
+    }
+
+    #[test]
+    fn dev_builder_console_log_is_under_dev_state_dir() {
+        let log = dev_builder_vz_console_log();
+        assert!(log.ends_with("console.log"));
+        assert_eq!(log, persistent_vz_state_dir("dev").join("console.log"));
     }
 
     #[test]
