@@ -232,6 +232,21 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
           emit + >4 KiB BadRequest + 20/s rate-limit) as the sealed PID-1
           workload. This is the in-guest half option (a) — the Python-SDK
           delivery (option b) remains the productized path under b3.
+        - [x] **PROVEN live (libkrun, this Mac)** — admitted `up` spawned the
+          per-VM `mvm-broker` + `mvm-audit-signer` (vsock-5300.sock bound); the
+          in-guest probe emitted and 22 entries landed in
+          `local.<vm>.workload.jsonl`, every one host-stamped
+          `category: workload_audit` with a server-authoritative `brk-*`
+          correlation id, and `verify_workload_chain` verifies the chain clean.
+          The 20/s rate-limit is observable (22 of 40 burst emits landed). Two
+          notes: (1) the broker-spawn only fires when `MVM_GATEWAY_BRIDGE=1`
+          (the `up` path couples `tenant_id` threading to the gateway bridge);
+          (2) the bridge supervisor's claim-10 audit-substrate check pins the
+          host-signer key under `~/.mvm/keys`, so the run uses real `~/.mvm`
+          (an isolated `MVM_DATA_DIR` is rejected). `mvmctl trust audit verify`
+          against real `~/.mvm` trips on a pre-existing corrupt shared
+          lifecycle chain — the workload chain itself verifies clean in
+          isolation.
   - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
     `mvm-guest::host_time` + `mvm-guest::host_cost` (`now` / `workload` +
     `tenant`, each with an `_on` stream variant), riding the same
