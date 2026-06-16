@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{BufReader, Cursor};
+use std::io::{BufReader, Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -419,10 +419,13 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
         source::ImageSource::OciArchive(path) => {
             return ingest_local_archive(cache_root, &path, reference, prod);
         }
-        other @ (source::ImageSource::Stdin | source::ImageSource::RootfsDir(_)) => {
+        source::ImageSource::Stdin => {
+            return ingest_stdin_archive(cache_root, reference, prod);
+        }
+        source::ImageSource::RootfsDir(_) => {
             bail!(
-                "`run --image` does not support {other:?} yet; use a registry \
-                 reference or `oci-archive:<path>`"
+                "`run --image` does not support `rootfs-dir:` yet; use a registry \
+                 reference, `oci-archive:<path>`, or `-` for a stdin archive"
             );
         }
         source::ImageSource::Registry(_) => {}
@@ -493,8 +496,53 @@ fn ingest_local_archive(
     }
     let file = fs::File::open(archive_path)
         .with_context(|| format!("open OCI archive {}", archive_path.display()))?;
-    let image = read_oci_archive(BufReader::new(file), &LinuxPlatform::for_current_arch())
-        .with_context(|| format!("read OCI archive {}", archive_path.display()))?;
+    ingest_archive_from_reader(
+        cache_root,
+        BufReader::new(file),
+        supplied_reference,
+        "local_archive",
+        &format!("OCI archive {}", archive_path.display()),
+    )
+}
+
+/// Ingest an OCI image-layout archive streamed on stdin (`run --image -`). Same
+/// digest-verified path as a file archive, for CI/agent pipelines that pipe an
+/// archive in. Dev-only (see [`ingest_local_archive`]).
+fn ingest_stdin_archive(
+    cache_root: &Path,
+    supplied_reference: &str,
+    prod: bool,
+) -> Result<ResolvedOciRunImage> {
+    if prod {
+        bail!(
+            "`run --image --prod` requires a registry reference with cosign; \
+             stdin OCI archives are dev-only for now"
+        );
+    }
+    let stdin = std::io::stdin();
+    ingest_archive_from_reader(
+        cache_root,
+        stdin.lock(),
+        supplied_reference,
+        "stdin_archive",
+        "OCI archive on stdin",
+    )
+}
+
+/// Shared archive-ingest core: digest-verify the archive from `reader`, unpack
+/// every layer through the hardened `unpack_layer`, materialize the ext4
+/// rootfs, and build a `ResolvedOciRunImage` with local-source provenance. The
+/// file and stdin callers differ only in where the bytes come from and the
+/// provenance `source` label.
+fn ingest_archive_from_reader<R: Read>(
+    cache_root: &Path,
+    reader: R,
+    supplied_reference: &str,
+    source_label: &str,
+    source_descr: &str,
+) -> Result<ResolvedOciRunImage> {
+    let image = read_oci_archive(reader, &LinuxPlatform::for_current_arch())
+        .with_context(|| format!("read {source_descr}"))?;
 
     let manifest_hex = sha256_hex(&image.manifest_digest)?;
     let unpacked_root = cache_root.join("unpacked").join(&manifest_hex);
@@ -521,7 +569,7 @@ fn ingest_local_archive(
 
     let provenance = OciProvenance {
         schema_version: 1,
-        source: "local_archive".to_string(),
+        source: source_label.to_string(),
         supplied_reference: supplied_reference.to_string(),
         canonical_reference: image.manifest_digest.clone(),
         registry: String::new(),
@@ -1410,6 +1458,31 @@ mod tests {
         std::fs::write(&bad, b"definitely not a valid tar archive").unwrap();
         let err = ingest_local_archive(tmp.path(), &bad, "oci-archive:bad.tar", false)
             .expect_err("malformed archive must be rejected");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn stdin_archive_prod_is_refused() {
+        // prod bails before any stdin read.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = ingest_stdin_archive(tmp.path(), "-", true)
+            .expect_err("prod stdin archive must be refused");
+        assert!(err.to_string().contains("prod"), "got {err}");
+    }
+
+    #[test]
+    fn archive_from_reader_rejects_malformed() {
+        // The shared file/stdin core rejects a garbage stream inside
+        // read_oci_archive, before any materialize (no builder VM needed).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = ingest_archive_from_reader(
+            tmp.path(),
+            Cursor::new(b"not a valid oci archive".to_vec()),
+            "-",
+            "stdin_archive",
+            "OCI archive on stdin",
+        )
+        .expect_err("malformed stdin archive must be rejected");
         assert!(!err.to_string().is_empty());
     }
 
