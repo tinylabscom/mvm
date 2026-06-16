@@ -1,0 +1,428 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BrokerServices",
+  "description": "Schema root: every broker wire type under one document so the shared `$defs` (`ServiceErrorCode`, `CorrelationId`, `EmitBatchEntryStatus`, …) are emitted once and the generated clients reference one definition set.",
+  "type": "object",
+  "required": [
+    "cost_report",
+    "emit_batch_request",
+    "emit_batch_response",
+    "emit_request",
+    "emit_response",
+    "service_call",
+    "service_response",
+    "time_now_response"
+  ],
+  "properties": {
+    "cost_report": {
+      "$ref": "#/definitions/CostReport"
+    },
+    "emit_batch_request": {
+      "$ref": "#/definitions/EmitBatchRequest"
+    },
+    "emit_batch_response": {
+      "$ref": "#/definitions/EmitBatchResponse"
+    },
+    "emit_request": {
+      "$ref": "#/definitions/EmitRequest"
+    },
+    "emit_response": {
+      "$ref": "#/definitions/EmitResponse"
+    },
+    "service_call": {
+      "$ref": "#/definitions/ServiceCall"
+    },
+    "service_response": {
+      "$ref": "#/definitions/ServiceResponse"
+    },
+    "time_now_response": {
+      "$ref": "#/definitions/TimeNowResponse"
+    }
+  },
+  "definitions": {
+    "CostReport": {
+      "description": "Response for both `host.cost.v1` verbs: the accumulated spend for the queried scope.",
+      "type": "object",
+      "required": [
+        "spent_micros_usd"
+      ],
+      "properties": {
+        "spent_micros_usd": {
+          "description": "Accumulated spend for the queried scope, in micro-USD (1e-6 USD).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "EmitBatchEntryStatus": {
+      "description": "Per-entry status in a batch response.",
+      "oneOf": [
+        {
+          "description": "This entry was appended; carries the chain head as of the append.",
+          "type": "object",
+          "required": [
+            "chain_head",
+            "kind"
+          ],
+          "properties": {
+            "chain_head": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "ok"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "This entry was rejected — the batch may have stopped at this entry depending on `stop_on_error`.",
+          "type": "object",
+          "required": [
+            "code",
+            "kind",
+            "message"
+          ],
+          "properties": {
+            "code": {
+              "$ref": "#/definitions/EmitErrorCode"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "err"
+              ]
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Batch stopped before this entry was processed (because an earlier entry failed). No append was attempted.",
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "skipped"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "EmitBatchRequest": {
+      "description": "Payload for `host.audit.v1::emit_batch`.",
+      "type": "object",
+      "required": [
+        "entries"
+      ],
+      "properties": {
+        "entries": {
+          "description": "Entries to append, in order. Length capped at [`BROKER_AUDIT_BATCH_MAX`]; total bytes capped at [`BROKER_AUDIT_BATCH_BYTES`].",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/EmitRequest"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "EmitBatchResponse": {
+      "description": "Response for `host.audit.v1::emit_batch`.",
+      "type": "object",
+      "required": [
+        "chain_head",
+        "statuses"
+      ],
+      "properties": {
+        "chain_head": {
+          "description": "Final chain head after the last successful append. Equal to the pre-batch chain head if every entry was rejected.",
+          "type": "string"
+        },
+        "statuses": {
+          "description": "Per-entry status, one per input entry, in input order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/EmitBatchEntryStatus"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "EmitErrorCode": {
+      "description": "Per-entry error code for batch responses.",
+      "oneOf": [
+        {
+          "description": "Entry serialises to more than [`BROKER_AUDIT_RECORD_BYTES`] bytes.",
+          "type": "string",
+          "enum": [
+            "record_too_large"
+          ]
+        },
+        {
+          "description": "Entry parse failed (unknown fields, bad timestamp, etc.).",
+          "type": "string",
+          "enum": [
+            "invalid_entry"
+          ]
+        },
+        {
+          "description": "Audit-signer rejected the entry (chain drift, fsync failure, internal error). Inspect `message` for the underlying code.",
+          "type": "string",
+          "enum": [
+            "audit_signer_error"
+          ]
+        }
+      ]
+    },
+    "EmitRequest": {
+      "description": "Payload for `host.audit.v1::emit`.",
+      "type": "object",
+      "required": [
+        "fields",
+        "ts"
+      ],
+      "properties": {
+        "fields": {
+          "description": "Typed workload-supplied fields. The broker treats them as opaque JSON; they're carried verbatim into the chain entry's `fields` after the per-record byte-cap check."
+        },
+        "ts": {
+          "description": "Wall-clock timestamp in RFC 3339 form. The broker handler records its own timestamp in addition for clock-jump detection.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "EmitResponse": {
+      "description": "Response for `host.audit.v1::emit`.",
+      "type": "object",
+      "required": [
+        "chain_head"
+      ],
+      "properties": {
+        "chain_head": {
+          "description": "SHA-256-or-equivalent hash of the JCS-canonical chain entry bytes, signed by `mvm-audit-signer`'s chain key. This is the new chain head after the append.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ServiceCall": {
+      "description": "The host-bound envelope every broker call rides on.\n\nThe envelope itself is strictly typed (`deny_unknown_fields`); the `payload` is `serde_json::Value` because per-handler payloads vary. The handler's `parse_payload` step is the *real* schema gate for payload contents.",
+      "type": "object",
+      "required": [
+        "correlation_id",
+        "payload",
+        "service",
+        "verb"
+      ],
+      "properties": {
+        "correlation_id": {
+          "type": "string"
+        },
+        "payload": true,
+        "service": {
+          "$ref": "#/definitions/ServiceId"
+        },
+        "verb": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ServiceErrorCode": {
+      "description": "Typed broker error codes. Audit log entries carry the code as a stable snake_case string. New variants are additive; renames are wire-breaking.",
+      "oneOf": [
+        {
+          "description": "The workload's `ExecutionPlan.services` did not bind this service.",
+          "type": "string",
+          "enum": [
+            "not_bound"
+          ]
+        },
+        {
+          "description": "The service exists in the static catalog but the verb is not implemented yet.",
+          "type": "string",
+          "enum": [
+            "not_implemented"
+          ]
+        },
+        {
+          "description": "The handler's typed `parse_payload` rejected the payload shape.",
+          "type": "string",
+          "enum": [
+            "bad_request"
+          ]
+        },
+        {
+          "description": "Token-bucket rate limit exceeded (gate 4).",
+          "type": "string",
+          "enum": [
+            "rate_limit_exceeded"
+          ]
+        },
+        {
+          "description": "Lifetime quota for this `(workload, service)` exhausted.",
+          "type": "string",
+          "enum": [
+            "lifetime_quota_exhausted"
+          ]
+        },
+        {
+          "description": "Bounded vsock receive queue at capacity.",
+          "type": "string",
+          "enum": [
+            "queue_full"
+          ]
+        },
+        {
+          "description": "Handler response exceeded `response_size_cap()`.",
+          "type": "string",
+          "enum": [
+            "response_too_large"
+          ]
+        },
+        {
+          "description": "Handler call timed out per `call_timeout()`.",
+          "type": "string",
+          "enum": [
+            "timeout"
+          ]
+        },
+        {
+          "description": "Handler-internal failure: dispatch panic, circuit-breaker open, downstream (e.g. mvmd) unavailable.",
+          "type": "string",
+          "enum": [
+            "unavailable"
+          ]
+        },
+        {
+          "description": "Subprocess hasn't finished initial config + listener bring-up yet (bootstrap-order failure mode).",
+          "type": "string",
+          "enum": [
+            "not_ready"
+          ]
+        },
+        {
+          "description": "Service composition exceeded the depth cap.",
+          "type": "string",
+          "enum": [
+            "composition_depth"
+          ]
+        },
+        {
+          "description": "Service composition exceeded the width cap.",
+          "type": "string",
+          "enum": [
+            "composition_width"
+          ]
+        },
+        {
+          "description": "Per-workload total-call/minute budget exceeded; escalates to audit + (optional) workload pause.",
+          "type": "string",
+          "enum": [
+            "service_call_abuse"
+          ]
+        },
+        {
+          "description": "Operator revoked this workload's broker session.",
+          "type": "string",
+          "enum": [
+            "session_revoked"
+          ]
+        },
+        {
+          "description": "Catch-all for unexpected handler-internal errors. Never carries payload-derived information in the message.",
+          "type": "string",
+          "enum": [
+            "internal_error"
+          ]
+        }
+      ]
+    },
+    "ServiceId": {
+      "description": "Reverse-DNS-like service identifier with a mandatory version segment.\n\nExamples: `host.secrets.v1`, `host.time.v1`, `host.cost.v1`, `broker.v1`.\n\nStrings are validated at construction so the gate code can rely on the shape (in particular, the version segment is the rate-limiting parser for the binding gate).",
+      "type": "string"
+    },
+    "ServiceResponse": {
+      "description": "The guest-bound envelope. Tagged variant; `Ok` carries the typed response payload, `Err` carries a typed error code + message.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "correlation_id",
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "correlation_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "ok"
+              ]
+            },
+            "payload": true
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "code",
+            "correlation_id",
+            "kind",
+            "message"
+          ],
+          "properties": {
+            "code": {
+              "$ref": "#/definitions/ServiceErrorCode"
+            },
+            "correlation_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "err"
+              ]
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "TimeNowResponse": {
+      "description": "Response for `host.time.v1::now`: the host wall-clock, milliseconds since the Unix epoch (UTC).",
+      "type": "object",
+      "required": [
+        "wall_ms"
+      ],
+      "properties": {
+        "wall_ms": {
+          "description": "Milliseconds since the Unix epoch, host-authoritative.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

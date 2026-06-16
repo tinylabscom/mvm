@@ -105,6 +105,24 @@ fn artifacts() -> &'static [StubArtifact] {
             class_name: "Protocol",
             stem: "protocol-v0",
         },
+        StubArtifact {
+            label: "host-services broker",
+            emit_args: &[
+                "run",
+                "-q",
+                "-p",
+                "mvm-core",
+                "--features",
+                "schema",
+                "--bin",
+                "emit_broker_schema",
+            ],
+            schema_path: "schema/broker-services-v0.json",
+            python_path: "sdks/python/mvm/_broker/services.py",
+            ts_path: "sdks/typescript/src/broker/services.ts",
+            class_name: "BrokerServices",
+            stem: "broker-services-v0",
+        },
     ]
 }
 

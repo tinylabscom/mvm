@@ -51,6 +51,7 @@ pub const BROKER_AUDIT_TOKENS_PER_SEC: u32 = 20;
 
 /// Payload for `host.audit.v1::emit`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct EmitRequest {
     /// Wall-clock timestamp in RFC 3339 form. The broker handler
@@ -64,6 +65,7 @@ pub struct EmitRequest {
 
 /// Response for `host.audit.v1::emit`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct EmitResponse {
     /// SHA-256-or-equivalent hash of the JCS-canonical chain entry
@@ -78,6 +80,7 @@ pub struct EmitResponse {
 
 /// Payload for `host.audit.v1::emit_batch`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct EmitBatchRequest {
     /// Entries to append, in order. Length capped at
@@ -88,6 +91,7 @@ pub struct EmitBatchRequest {
 
 /// Per-entry status in a batch response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EmitBatchEntryStatus {
     /// This entry was appended; carries the chain head as of the
@@ -106,6 +110,7 @@ pub enum EmitBatchEntryStatus {
 
 /// Response for `host.audit.v1::emit_batch`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct EmitBatchResponse {
     /// Final chain head after the last successful append. Equal to the
@@ -121,6 +126,7 @@ pub struct EmitBatchResponse {
 
 /// Per-entry error code for batch responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum EmitErrorCode {
     /// Entry serialises to more than [`BROKER_AUDIT_RECORD_BYTES`] bytes.

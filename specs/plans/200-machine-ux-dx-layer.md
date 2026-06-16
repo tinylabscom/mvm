@@ -2,8 +2,8 @@
 
 **Status:** in progress — `mvmctl machine run` shipped (Workstream A/B kickoff);
 persistent verbs (`create/start/exec/shell/stop`), `--net`/`--allow-host`, local
-image sources, `mvm.toml` schema v2, SDK parity, and `pack` pending  
-**Owner:** mvm  
+image sources, `mvm.toml` schema v2, SDK parity, and `pack` pending
+**Owner:** mvm
 **Date:** 2026-06-15
 
 ## Goal
