@@ -8,15 +8,22 @@
 //! optional `name` field is a display label / S3 channel hint —
 //! NOT the registry key.
 //!
-//! Schema (v1):
+//! Schema (v2):
 //! ```toml
-//! flake = "."
+//! # Source selector — exactly one of `flake` / `image` (both omitted
+//! # defaults to the flake "."). Setting both is a parse error.
+//! flake = "."             # OR: image = "alpine:3.20"
 //! profile = "default"
 //! vcpus = 2
 //! mem = "1024M"
 //! data_disk = "0"
-//! name = "openclaw"   # optional, display only
+//! name = "openclaw"       # optional, display only
 //! ```
+//!
+//! v2 is strict: unknown keys are rejected (`deny_unknown_fields`), and
+//! `image` is mutually exclusive with `flake`. Read the resolved flake
+//! via [`Manifest::flake_ref`]; check the source kind via
+//! [`Manifest::is_image_source`].
 //!
 //! Boundary: build inputs + dev sizing only. No `role` (the flake's
 //! profile selects role variants), no `[network]` (runtime policy
@@ -39,10 +46,12 @@ use crate::util::parse_human_size;
 /// exist in one directory the discovery layer errors.
 pub const MANIFEST_FILENAMES: &[&str] = &["mvm.toml", "Mvmfile.toml"];
 
-/// Highest manifest schema version this build understands. Future
-/// fields are additive via `#[serde(default)]`; bumping this signals
-/// breaking changes that older mvmctl versions must reject.
-pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
+/// Highest manifest schema version this build understands. Additive
+/// fields ride `#[serde(default)]`; bumping this signals breaking
+/// changes older mvmctl versions must reject. v2 adds the `image`
+/// source selector (mutually exclusive with `flake`) and makes the
+/// schema strict (`deny_unknown_fields`).
+pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 /// Floor for `mem`. Below this Firecracker guests don't reliably
 /// boot; we'd rather fail loudly at parse time than have a confusing
@@ -51,10 +60,6 @@ const MIN_MEM_MIB: u32 = 64;
 
 fn default_schema_version() -> u32 {
     MANIFEST_SCHEMA_VERSION
-}
-
-fn default_flake() -> String {
-    ".".to_string()
 }
 
 fn default_profile() -> String {
@@ -73,17 +78,51 @@ fn default_data_disk() -> String {
     "0".to_string()
 }
 
+/// Conservative validation for an `image` source selector. The full
+/// OCI reference grammar is enforced downstream by the OCI client; here
+/// we only reject empty/whitespace/shell-meta so a manifest value can
+/// never be interpolated into a command line (the same safety intent as
+/// `validate_flake_ref`).
+fn validate_image_ref(image: &str) -> Result<()> {
+    let img = image.trim();
+    if img.is_empty() {
+        return Err(anyhow!("`image` must not be empty"));
+    }
+    if img.chars().any(char::is_whitespace) {
+        return Err(anyhow!("`image` must not contain whitespace: {image:?}"));
+    }
+    const SHELL_META: &[char] = &[
+        ';', '&', '|', '$', '`', '(', ')', '<', '>', '\n', '\\', '\'', '"',
+    ];
+    if let Some(c) = img.chars().find(|c| SHELL_META.contains(c)) {
+        return Err(anyhow!(
+            "`image` contains disallowed character {c:?}: {image:?}"
+        ));
+    }
+    Ok(())
+}
+
 /// User-facing manifest file. One per project directory.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
 
-    /// Nix flake reference. `"."` resolves to the directory the
-    /// manifest lives in. Any flake ref form is accepted (path,
-    /// `github:owner/repo`, `git+https://…`, etc.).
-    #[serde(default = "default_flake")]
-    pub flake: String,
+    /// Nix flake reference (source selector). `"."` resolves to the
+    /// directory the manifest lives in; any flake ref form is accepted
+    /// (path, `github:owner/repo`, `git+https://…`). Mutually exclusive
+    /// with [`image`](Self::image); when both are omitted the source
+    /// defaults to the flake `"."`. Read the resolved value via
+    /// [`flake_ref`](Self::flake_ref).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flake: Option<String>,
+
+    /// OCI image reference (source selector), e.g. `alpine:3.20` or a
+    /// `registry/repo@sha256:…` digest pin. Mutually exclusive with
+    /// [`flake`](Self::flake) — setting both is a parse error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 
     /// Flake package selector — picks `packages.<system>.<profile>`
     /// out of the flake's outputs.
@@ -147,11 +186,29 @@ impl Manifest {
                 MANIFEST_SCHEMA_VERSION
             ));
         }
-        if self.flake.trim().is_empty() {
-            return Err(anyhow!("manifest field `flake` must not be empty"));
+        // Exactly one source selector. `image` and `flake` are
+        // mutually exclusive; both omitted defaults to the flake ".".
+        match (self.image.as_deref(), self.flake.as_deref()) {
+            (Some(_), Some(_)) => {
+                return Err(anyhow!(
+                    "manifest fields `image` and `flake` are mutually exclusive \
+                     source selectors; set exactly one"
+                ));
+            }
+            (Some(image), None) => {
+                validate_image_ref(image)
+                    .with_context(|| format!("invalid `image` field: {image:?}"))?;
+            }
+            (None, _) => {
+                // Flake source — explicit, or the default "." when omitted.
+                let flake = self.flake_ref();
+                if flake.trim().is_empty() {
+                    return Err(anyhow!("manifest field `flake` must not be empty"));
+                }
+                validate_flake_ref(flake)
+                    .with_context(|| format!("invalid `flake` field: {flake:?}"))?;
+            }
         }
-        validate_flake_ref(&self.flake)
-            .with_context(|| format!("invalid `flake` field: {:?}", self.flake))?;
         if self.vcpus == 0 {
             return Err(anyhow!("manifest field `vcpus` must be >= 1"));
         }
@@ -186,6 +243,19 @@ impl Manifest {
                 .with_context(|| format!("invalid `name` field: {:?}", name))?;
         }
         Ok(())
+    }
+
+    /// Resolved flake source reference: the explicit `flake` value, or
+    /// the default `"."` when `flake` is omitted. Always the flake the
+    /// build should use when `image` is not the selected source.
+    pub fn flake_ref(&self) -> &str {
+        self.flake.as_deref().unwrap_or(".")
+    }
+
+    /// True when this manifest selects an OCI image as its build source
+    /// rather than a Nix flake.
+    pub fn is_image_source(&self) -> bool {
+        self.image.is_some()
     }
 
     /// Memory cap in MiB, parsed from the human-readable string.
@@ -474,7 +544,7 @@ impl PersistedManifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
             manifest_path,
             manifest_hash,
-            flake_ref: manifest.flake.clone(),
+            flake_ref: manifest.flake_ref().to_string(),
             profile: manifest.profile.clone(),
             vcpus: manifest.vcpus,
             mem_mib,
@@ -560,13 +630,88 @@ mod tests {
     #[test]
     fn parse_minimal_manifest_succeeds() {
         let m = Manifest::from_toml_str(minimal_manifest_toml()).expect("parses");
-        assert_eq!(m.flake, ".");
+        assert_eq!(m.flake_ref(), ".");
         assert_eq!(m.profile, "default");
         assert_eq!(m.vcpus, 2);
         assert_eq!(m.mem, "1024M");
         assert_eq!(m.data_disk, "0");
         assert!(m.name.is_none());
         assert_eq!(m.schema_version, MANIFEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn unknown_field_rejected() {
+        // schema-v2 is strict: an unrecognised key is a typo or a
+        // newer-schema field, never silently ignored.
+        let toml = r#"
+            flake = "."
+            vcpus = 2
+            mem = "1024M"
+            netwrok = "off"
+        "#;
+        let err = Manifest::from_toml_str(toml).expect_err("rejects unknown key");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("netwrok") || msg.contains("unknown"),
+            "msg was {msg}"
+        );
+    }
+
+    #[test]
+    fn image_and_flake_are_mutually_exclusive() {
+        let toml = r#"
+            flake = "."
+            image = "alpine:3.20"
+            vcpus = 2
+            mem = "1024M"
+        "#;
+        let err = Manifest::from_toml_str(toml).expect_err("rejects both source selectors");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("mutually exclusive"), "msg was {msg}");
+    }
+
+    #[test]
+    fn image_only_parses_and_is_image_source() {
+        let toml = r#"
+            image = "alpine:3.20"
+            vcpus = 2
+            mem = "1024M"
+        "#;
+        let m = Manifest::from_toml_str(toml).expect("image-only parses");
+        assert_eq!(m.image.as_deref(), Some("alpine:3.20"));
+        assert!(m.is_image_source());
+        // flake_ref still resolves to the default but is not the source.
+        assert_eq!(m.flake_ref(), ".");
+    }
+
+    #[test]
+    fn neither_source_defaults_to_flake_dot() {
+        let m = Manifest::from_toml_str("").expect("empty parses");
+        assert!(m.image.is_none());
+        assert!(!m.is_image_source());
+        assert_eq!(m.flake_ref(), ".");
+    }
+
+    #[test]
+    fn shell_meta_in_image_rejected() {
+        let toml = r#"
+            image = "alpine:3.20 ; rm -rf /"
+            vcpus = 2
+            mem = "1024M"
+        "#;
+        let err = Manifest::from_toml_str(toml).expect_err("rejects shell meta in image");
+        assert!(format!("{err:#}").contains("image"));
+    }
+
+    #[test]
+    fn empty_image_rejected() {
+        let toml = r#"
+            image = ""
+            vcpus = 2
+            mem = "1024M"
+        "#;
+        let err = Manifest::from_toml_str(toml).expect_err("rejects empty image");
+        assert!(format!("{err:#}").contains("image"));
     }
 
     #[test]
@@ -586,7 +731,7 @@ mod tests {
     #[test]
     fn parse_uses_defaults_for_omitted_fields() {
         let m = Manifest::from_toml_str("").expect("parses");
-        assert_eq!(m.flake, ".");
+        assert_eq!(m.flake_ref(), ".");
         assert_eq!(m.profile, "default");
         assert_eq!(m.vcpus, 2);
         assert_eq!(m.mem, "1024M");
@@ -881,7 +1026,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write(tmp.path(), "mvm.toml", minimal_manifest_toml());
         let m = Manifest::read_file(&tmp.path().join("mvm.toml")).unwrap();
-        assert_eq!(m.flake, ".");
+        assert_eq!(m.flake_ref(), ".");
     }
 
     #[test]

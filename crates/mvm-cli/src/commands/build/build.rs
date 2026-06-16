@@ -169,23 +169,35 @@ fn build_manifest(
         )
     })?;
 
+    // An `image`-source manifest selects an OCI image, not a flake. The
+    // image build path is a separate Plan 200 workstream; until it is
+    // wired, fail closed rather than silently building the default "."
+    // flake for an image manifest.
+    if manifest.is_image_source() {
+        anyhow::bail!(
+            "manifest selects an `image` source ({:?}); `build` only handles \
+             flake sources today — image-backed builds land in a later Plan 200 slice",
+            manifest.image.as_deref().unwrap_or_default()
+        );
+    }
+
     // Resolve flake "." relative to the manifest's parent directory so a
     // user running `mvmctl build /elsewhere/mvm.toml` from any cwd still
     // picks up the right flake.
-    let resolved_flake = if manifest.flake == "." {
+    let flake = manifest.flake_ref();
+    let resolved_flake = if flake == "." {
         canonical
             .parent()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| ".".to_string())
-    } else if !manifest.flake.contains(':') && !std::path::Path::new(&manifest.flake).is_absolute()
-    {
+    } else if !flake.contains(':') && !std::path::Path::new(flake).is_absolute() {
         // Relative path inside the flake field — resolve against manifest's parent.
         canonical
             .parent()
-            .map(|p| p.join(&manifest.flake).display().to_string())
-            .unwrap_or_else(|| manifest.flake.clone())
+            .map(|p| p.join(flake).display().to_string())
+            .unwrap_or_else(|| flake.to_string())
     } else {
-        manifest.flake.clone()
+        flake.to_string()
     };
 
     if json {
