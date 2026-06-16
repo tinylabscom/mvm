@@ -1,0 +1,24 @@
+[package]
+name = "mvm-host-services-ffi"
+description = "C-ABI veneer over the in-guest host-services broker clients (host.audit / host.time / host.cost). One JSON-in/JSON-out cdylib that every language SDK loads through a thin FFI shim (Python ctypes, Node koffi, ...), so adding a language is a shim-sized change with no new Rust binding code."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# A clean, shim-friendly shared-object name (`libmvm_host_services.so`) plus an
+# rlib so the marshalling seam is unit-testable in-process on the host.
+[lib]
+name = "mvm_host_services"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mvm-core.workspace = true
+mvm-guest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

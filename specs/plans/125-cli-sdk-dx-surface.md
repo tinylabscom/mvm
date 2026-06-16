@@ -218,8 +218,38 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
       - **E5.3b-3** — the in-guest `mvm.audit.emit` veneer. **In-process
         library call, NOT a subprocess** (owner: a shell command is an
         injection + cross-platform-consistency hazard): the language SDK builds
-        the typed request (the IR) and calls a linked library function. Binding
-        mechanism TBD at build (PyO3 / napi / a `cdylib` + `ctypes`).
+        the typed request (the IR) and calls a linked library function.
+        **Binding mechanism (owner-locked): `cdylib`-for-all, NOT PyO3/napi.**
+        One Rust `cdylib` exposes a small stable `extern "C"` surface
+        (JSON-in/JSON-out + a paired free fn + an `i32` status; never panics
+        across the boundary) over the existing `mvm_guest::host_audit` /
+        `host_time` / `host_cost`. Each language is then a thin FFI shim over
+        that one `.so` (Python via stdlib `ctypes`, Node via `koffi`) — so
+        "support language X" is a shim-sized change with zero new Rust binding
+        code (Ruby/Fiddle, Go/cgo, Java/Panama, C# all consume the same lib).
+        - [x] **E5.3b-3a** — the `cdylib` core. New `mvm-host-services-ffi`
+          crate (`cdylib` + `rlib`, lib name `mvm_host_services` →
+          `libmvm_host_services.so`). `mvm_hsvc_call(method, request_json,
+          timeout, out) -> i32` dispatches `host.{audit.emit,audit.emit_batch,
+          time.now,cost.workload,cost.tenant}`, marshals the typed request/reply
+          across the C ABI, and maps every typed `AuditError`/`TimeError`/
+          `CostError` onto a stable `MVM_HSVC_*` status + `{"code","message"}`
+          error JSON; `mvm_hsvc_free` releases the reply buffer. The marshalling
+          seam (`dispatch_on(&mut UnixStream, …)`) is unit-tested over a
+          `UnixStream::pair()` mock broker: request/response JSON round-trip,
+          refusal → error-JSON-not-panic, unknown-method/malformed-body →
+          `invalid_input`, and a free-after-use round trip. Host-testable, no
+          cross-compile/bake. 12 RED-first tests.
+        - [ ] **E5.3b-3b** — cross-compile the `cdylib` to the guest musl target
+          (the `mvm-cli/build.rs` zig path) + bake it into the rootfs (`mkGuest`
+          `extraFiles` → `/usr/lib/mvm/`), then the in-guest `mvm.audit.emit` /
+          `emit_batch` + `mvm.host.time()` / `cost()` Python veneer: load the
+          `.so` via `ctypes`, build the IR request, call `mvm_hsvc_call`, parse
+          the reply, map `MVM_HSVC_*` onto typed exceptions. Replaces the
+          AF_VSOCK-in-Python `_broker/transport.py` sketch with the one-cdylib
+          transport.
+        - [ ] **E5.3b-3c** — the Node/TS shim via `koffi` over the same
+          `.so` (mirrors the Python shim shape).
       - [ ] **E5.3b-4** — live-VM E2E. Venues: vz on this Mac (broker-capable;
         pre-existing init-EOF boot issues to clear first) or libkrun on the
         Linux box (`88.99.197.234` is FC today — no broker — so it'd need
