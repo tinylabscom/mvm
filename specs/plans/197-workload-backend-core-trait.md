@@ -1,7 +1,13 @@
 # Plan 197 — `WorkloadBackend`: core security features as a compile-time obligation
 
 **Date:** 2026-06-13
-**Status:** design approved; implementation plan to follow
+**Status (2026-06-16 rollup wave-1 closeout):** ✅ mvm-side DONE — Phase 1 (type-bar the
+funnel) MERGED #860; Phase 2a (vsock substitution channel, SUBSTITUTION_PORT 5253) MERGED
+#866 + the default-path plan-persist gap closed #909, with the vz data plane proven live on
+macOS-26 (2026-06-15). The lone residual, **2b (transparent :80/:443 terminator)**, can only
+live in the gateway (macOS has no nft) and is rehomed to **Plan 193 / rvproxy** (cross-repo
+gate) — not a Plan 197 mvm-scope box.
+**Status (original):** design approved; implementation plan to follow
 **Related:** ADR-002 (security posture / per-backend tier matrix), Plan 97
 (vz closeout), Plan 129 (egress secret substitution), Plan 177 / ADR-076
 (backend consolidation)
