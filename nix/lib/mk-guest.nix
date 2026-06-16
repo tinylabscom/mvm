@@ -88,6 +88,12 @@ in
 # — a meaningful saving in Stage 0 where the build runs on tmpfs and
 # competes with the kernel compile for memory.
 , bakeAddonDns   ? true
+# Whether to bake the `mvm-audit-probe` binary into the rootfs at
+# `/usr/local/bin/audit-probe`. Off by default — it is a test fixture, not a
+# production binary. A live-VM `host.audit.v1` round-trip fixture image sets
+# this `true` and runs the probe as its entrypoint; the production guest
+# closure never includes it.
+, withAuditProbe ? false
 # Optional kernel package. When set, mkGuest copies its module
 # tree (`/lib/modules/<kver>/`) into the rootfs and `/init` runs
 # `modprobe vmw_vsock_virtio_transport` before forking the agent.
@@ -157,6 +163,13 @@ let
   # Exit reporter — records workload exit status before poweroff.
   # Baked unconditionally into every guest rootfs (prod and dev).
   exitReportPkg = pkgs.callPackage ../packages/mvm-exit-report.nix {
+    inherit mvmSrc;
+  };
+
+  # In-guest host.audit.v1 driver — test fixture, baked only when
+  # `withAuditProbe`. Compiled lazily (Nix only evaluates this when the
+  # bake below references it) so the default path adds no build cost.
+  auditProbePkg = pkgs.callPackage ../packages/mvm-audit-probe.nix {
     inherit mvmSrc;
   };
 
@@ -717,6 +730,7 @@ let
   # unaffected. See `crates/mvm-addon-dns` for details.
   mvmAddonDnsBinary = "${addonDnsPkg}/bin/mvm-addon-dns";
   mvmExitReportBinary = "${exitReportPkg}/bin/mvm-exit-report";
+  mvmAuditProbeBinary = "${auditProbePkg}/bin/audit-probe";
 
   # extraFiles — three accepted spec shapes per target path:
   #
@@ -932,6 +946,13 @@ let
     # poweroff regardless of whether dev-shell features are compiled in.
     cp ${mvmExitReportBinary} "$out/usr/local/bin/mvm-exit-report"
     chmod 0555 "$out/usr/local/bin/mvm-exit-report"
+
+    # In-guest host.audit.v1 driver — test fixture, baked only when the
+    # caller opts in. The production guest closure never carries it.
+    ${if withAuditProbe then ''
+      cp ${mvmAuditProbeBinary} "$out/usr/local/bin/audit-probe"
+      chmod 0555 "$out/usr/local/bin/audit-probe"
+    '' else ""}
 
     # Kernel modules. `/init` `modprobe`s vsock before forking the
     # agent (default nixpkgs kernel ships AF_VSOCK as `=m`); without

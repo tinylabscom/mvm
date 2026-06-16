@@ -224,6 +224,14 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
         pre-existing init-EOF boot issues to clear first) or libkrun on the
         Linux box (`88.99.197.234` is FC today — no broker — so it'd need
         libkrun stood up). Needs b3 for the headline `mvm.audit.emit` test.
+        - [x] **in-guest driver (audit-probe)** — `crates/mvm-guest/src/bin/audit-probe.rs`
+          calls `mvm_guest::host_audit::emit` from inside the guest; the opt-in
+          `withAuditProbe` mkGuest flag bakes it at `/usr/local/bin/audit-probe`
+          (via `nix/packages/mvm-audit-probe.nix`), and the
+          `examples/audit-probe/` fixture flake runs it (mode `all`: normal
+          emit + >4 KiB BadRequest + 20/s rate-limit) as the sealed PID-1
+          workload. This is the in-guest half option (a) — the Python-SDK
+          delivery (option b) remains the productized path under b3.
   - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
     `mvm-guest::host_time` + `mvm-guest::host_cost` (`now` / `workload` +
     `tenant`, each with an `_on` stream variant), riding the same
