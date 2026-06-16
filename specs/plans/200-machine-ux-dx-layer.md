@@ -773,9 +773,15 @@ Required behavior:
 
 ### C1. `mvm.toml` schema v2 machine specs
 
-- [ ] Add a typed schema-v2 parser for machine workflows with strict
-      unknown-key rejection.
-- [ ] Enforce exactly one source selector: `image` or `flake`, never both.
+- [x] Add a typed schema-v2 parser for machine workflows with strict
+      unknown-key rejection. → `Manifest` (mvm-core `domain/manifest.rs`) bumped to
+      schema v2 with `#[serde(deny_unknown_fields)]`; unknown keys now fail to parse.
+- [x] Enforce exactly one source selector: `image` or `flake`, never both. → added
+      `image: Option<String>`, made `flake` optional with a `flake_ref()` accessor
+      (defaults to `"."`), and `validate()` rejects both-set; `is_image_source()`
+      exposes the selected kind. `build` fails closed on an image-source manifest
+      (image build path is a later slice). Conservative `image` ref validation
+      (no shell-meta) mirrors `validate_flake_ref`.
 - [ ] Map `net`, `[network].allow_hosts`, `[auth].ssh_agent`, `[dev].init`,
       `[dev].volumes`, `cpus`, `mem`, and `mem_initial` into the durable
       machine spec and launch request.
@@ -785,9 +791,12 @@ Required behavior:
       writable shares.
 - [ ] Include effective network, auth, and volume policy in dry-run output,
       admission metadata, audit events, and receipts.
-- [ ] Add serde roundtrip, unknown-key, image+flake conflict, no-source,
+- [~] Add serde roundtrip, unknown-key, image+flake conflict, no-source,
       read-only-volume-default, writable-volume-explicit, SSH-agent-no-key-file,
-      and dev-init-prod-refusal tests.
+      and dev-init-prod-refusal tests. → **parser-level tests done** (unknown-key,
+      image+flake conflict, image-only, no-source-defaults-to-flake, shell-meta /
+      empty image reject; serde roundtrips already covered). The volume / SSH-agent
+      / dev-init tests land with their respective mapping slices below.
 - [ ] Update `guides/manifests.md`, quickstart, and CLI reference only after the
       parser and command behavior are implemented.
 
