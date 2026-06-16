@@ -14,7 +14,7 @@
 //!     metadata),
 //!   - `l4_allowlist` — per-tenant L4 grants at full proto + CIDR + port-range
 //!     precision (rvproxy `policy_flow_reason`),
-//!   - `dns_allowlist` — the upstream DNS hostname sinkhole (dotted-suffix).
+//!   - `dns_hostname_allowlist` — the upstream DNS hostname sinkhole (dotted-suffix).
 //!
 //! So the lowering is an exact projection of the resolved `CanonicalEgress`
 //! (proven by the parity tests: `permits_flow` agrees with
@@ -49,7 +49,7 @@ pub struct RvproxyPolicy {
     pub cidr_denylist: Vec<String>,
     /// Upstream DNS hostname allow-list (dotted-suffix sinkhole).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub dns_allowlist: Vec<String>,
+    pub dns_hostname_allowlist: Vec<String>,
     /// Per-tenant L4 grants: proto + CIDR + inclusive port range. Kept last
     /// because the `toml` crate renders a `Vec<struct>` as an array-of-tables
     /// (`[[l4_allowlist]]`), which must follow every scalar/inline-array field.
@@ -110,15 +110,15 @@ impl RvproxyPolicy {
 
     /// Whether `name` may be resolved upstream under the DNS hostname allow-list.
     /// Empty list = no restriction. Dotted-suffix, case/dot-normalized — mirrors
-    /// rvproxy's `dns_allowlist_permits` and mvm's `DnsSinkholeScan`: `name` is
+    /// rvproxy's `hostname_matches_allowlist` and mvm's `DnsSinkholeScan`: `name` is
     /// admitted iff it equals a listed suffix or is a dotted subdomain of one
     /// (so `example.com` admits `api.example.com`, never `notexample.com`).
     pub fn dns_permits(&self, name: &str) -> bool {
-        if self.dns_allowlist.is_empty() {
+        if self.dns_hostname_allowlist.is_empty() {
             return true;
         }
         let query = name.trim_matches('.').to_ascii_lowercase();
-        self.dns_allowlist.iter().any(|suffix| {
+        self.dns_hostname_allowlist.iter().any(|suffix| {
             let suffix = suffix.trim_matches('.').to_ascii_lowercase();
             !suffix.is_empty() && (query == suffix || query.ends_with(&format!(".{suffix}")))
         })
@@ -172,7 +172,7 @@ pub fn lower_policy(egress: &CanonicalEgress, dns_allow: &[String]) -> RvproxyLo
             cidr_allowlist: Vec::new(),
             cidr_denylist,
             l4_allowlist,
-            dns_allowlist: dns_allow.to_vec(),
+            dns_hostname_allowlist: dns_allow.to_vec(),
         },
         gaps: RvproxyPolicyGaps {
             byte_scans_in_splice: true,
@@ -330,7 +330,7 @@ mod tests {
             &CanonicalEgress::Rules(vec![]),
             &["example.com".to_string(), "Foo.NET".to_string()],
         );
-        assert_eq!(lowered.policy.dns_allowlist.len(), 2);
+        assert_eq!(lowered.policy.dns_hostname_allowlist.len(), 2);
         assert!(lowered.policy.dns_permits("example.com"));
         assert!(lowered.policy.dns_permits("api.example.com"));
         assert!(lowered.policy.dns_permits("API.EXAMPLE.COM."));
@@ -368,7 +368,7 @@ mod tests {
         assert!(toml.contains("allow_guest_egress = true"));
         assert!(toml.contains("default_egress_deny = true"));
         assert!(toml.contains("169.254.169.254/32"));
-        assert!(toml.contains("dns_allowlist = [\"example.com\"]"));
+        assert!(toml.contains("dns_hostname_allowlist = [\"example.com\"]"));
         // L4 rules serialize as a TOML array-of-tables rvproxy parses.
         assert!(toml.contains("[[l4_allowlist]]"));
         assert!(toml.contains("protocol = \"tcp\""));

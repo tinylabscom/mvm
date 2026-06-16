@@ -126,7 +126,7 @@ own internal default).
         `CanonicalEgress` (+ DNS allow-list) into rvproxy's `[policy]` table at
         **full claim-10 fidelity** now that rvproxy ships the L4 + DNS config
         (rvproxy `014` follow-ups): `default_egress_deny` + mandatory-deny
-        `cidr_denylist` + `l4_allowlist` (proto/CIDR/port) + `dns_allowlist`
+        `cidr_denylist` + `l4_allowlist` (proto/CIDR/port) + `dns_hostname_allowlist`
         (dotted-suffix sinkhole). The unit parity oracle `permits_flow` mirrors
         rvproxy's `policy_flow_reason` and is proven verdict-identical to
         `CanonicalEgress::permits` for every probed proto/ip/port (no longer just
@@ -134,7 +134,9 @@ own internal default).
         residual left (`RvproxyPolicyGaps`) is the byte scans (placeholder-leak +
         undeclared redaction), which ride the transform path, not `[policy]`.
         Pure, no live boot; deletes nothing. (Started as an IP-coarse pre-filter;
-        completed to full L4+DNS once rvproxy #115/#120 landed.)
+        completed to full L4+DNS once rvproxy #115/#119 landed; the
+        `dns_hostname_allowlist` field name matches rvproxy main, which merged the
+        DNS sinkhole as #119.)
   - [ ] **2b — config emission + native launch path.** Wrap the lowered
         `[policy]` in the full rvproxy config (network/api/forward/audit — the
         audit section points the `FlowEvent` JSONL/UDS export at mvm for 2c) and
