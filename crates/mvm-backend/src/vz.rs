@@ -400,6 +400,16 @@ impl VmBackend for VzBackend {
             config.tenant_id.as_deref(),
         )?;
 
+        // Then the broker the guest dials over BROKER_PORT (the vz supervisor
+        // splices the guest dial to the per-VM vsock-port socket the broker
+        // binds). It forwards host.audit.v1 to the audit-signer above.
+        let mut broker_guard = crate::broker_spawn::spawn_broker_if_needed(
+            &config.name,
+            &state_dir,
+            config.tenant_id.as_deref(),
+            &mvm_core::config::vm_vz_vsock_port_socket(&config.name, mvm_guest::vsock::BROKER_PORT),
+        )?;
+
         ui::success(&format!(
             "Vz VM '{}' started (pid file: {}, console log: {}).",
             config.name,
@@ -408,6 +418,7 @@ impl VmBackend for VzBackend {
         ));
         endpoint_guard.defuse();
         audit_signer_guard.defuse();
+        broker_guard.defuse();
         Ok(VmId(config.name.clone()))
     }
 
@@ -417,7 +428,8 @@ impl VmBackend for VzBackend {
         // guest. Mirrors the libkrun / FC stop ordering — safe because reap is a
         // no-op when nothing exists, even before the not-running early return.
         crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
-        // Reap the per-VM audit-signer too (no-op when none was spawned).
+        // Reap the per-VM broker + audit-signer too (no-op when none was spawned).
+        crate::broker_spawn::reap_broker(&vm_state_dir(&id.0));
         crate::audit_signer_spawn::reap_audit_signer(&vm_state_dir(&id.0));
 
         let pid_path = vm_state_dir(&id.0).join(PID_FILE_NAME);

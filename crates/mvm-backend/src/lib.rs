@@ -45,6 +45,8 @@ pub mod codesign;
 /// Shared per-VM `mvm-audit-signer` spawn/reap (one impl for libkrun + vz).
 pub(crate) mod audit_signer_spawn;
 pub mod base;
+/// Shared per-VM `mvm-broker` spawn/reap (one impl for libkrun + vz).
+pub(crate) mod broker_spawn;
 pub mod compat;
 /// Per-VM transparent egress redirect (nft prerouting REDIRECT scoped
 /// to the guest TAP) steering guest :80 to the host-side substitution
@@ -66,6 +68,9 @@ pub mod network;
 pub mod network_provider;
 /// QEMU workload runtime backend (dev/test).
 pub mod qemu;
+/// Shared per-VM host-service subprocess spawn primitives (audit-signer +
+/// broker ride these).
+pub(crate) mod service_spawn;
 /// Backend-agnostic supervisor standby pool registry (`~/.mvm/pool/`
 /// state-dir; record/select-idle-by-kernel/remove/reap).
 pub mod standby_pool;

@@ -167,9 +167,28 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
         substitution spawn. 5 unit tests (no-op guard, config has exactly the 6
         `SubprocessConfig` keys, services-dir paths, bad-env-override reject,
         reap idempotency); the live spawn round-trip is E5.3b-4.
-      - [ ] **E5.3b-2** — per-VM `mvm-broker` spawn binding
-        `vm_vsock_port_socket(name, BROKER_PORT)` + `ServiceCallCtx`
-        enrichment. Unblocks the round-trip.
+      - [x] **E5.3b-2** — per-VM `mvm-broker` spawn. New
+        `mvm-backend::broker_spawn` + a shared `mvm-backend::service_spawn` core
+        (resolve binary → `setsid`-detach → pipe config → wait UDS bind → PID →
+        reap + `ServiceGuard`) that the audit-signer (E5.3b-1) was refactored
+        onto (reuse-first, no drift). The broker binds the backend-shaped
+        vsock-port socket the VMM bridges the guest's
+        `connect_host_vsock(BROKER_PORT)` to — `vm_vsock_port_socket` (libkrun,
+        direct-bind) / `vm_vz_vsock_port_socket` (vz, supervisor-splice) — passed
+        by the caller; its config carries `audit_signer_uds_path` =
+        `audit_signer_uds_path(state_dir)` (so it forwards `host.audit.v1` to the
+        E5.3b-1 signer) + the host signer **public** key path. Gated on a tenant,
+        spawned after the audit-signer, fail-closed via `ServiceGuard`, wired into
+        both backends' start/stop. **This unblocks the guest→broker→signer
+        round-trip** (the broker registers `HostAuditV1Handler` when
+        `audit_signer_uds_path` is set). 10 spawn-module unit tests.
+      - [ ] **E5.3b-2b** — `ServiceCallCtx` enrichment: `broker/server.rs` builds
+        a stub ctx today (`session_id: "w1a-stub-session"`, `profile: Dev`).
+        Thread the real session/profile (from the admitted plan) into the broker
+        config + the host-authoritative correlation-id rewrite at ingress. The
+        round-trip works without it (the entry just records the stub session);
+        this is the recorded-entry correctness pass. (The claim-12 binding-gated
+        dispatch stays Plan 128.)
       - [ ] **E5.3b-3** — PyO3/napi veneer.
       - [ ] **E5.3b-4** — live-VM E2E on the dev-kvm box.
   - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
@@ -204,7 +223,7 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
 
 - [ ] Go / C SDK parity (scope call).
 - [ ] Desktop/interactive-terminal helpers beyond the browser preset.
-- [ ] Ship the `mvm-audit-signer` binary beside `mvmctl` in the release artifacts (the E5.3b-1 spawn resolver already looks for a sibling binary, like `mvm-substitution-endpoint`; dev uses `target/`). Without it, an admitted-plan VM fails closed at start in release.
+- [ ] Ship the `mvm-audit-signer` **and `mvm-broker`** binaries beside `mvmctl` in the release artifacts (the E5.3b-1/-2 `service_spawn` resolver looks for a sibling binary, like `mvm-substitution-endpoint`; dev uses `target/`). Without them, an admitted-plan VM fails closed at start in release.
 - [ ] Spawn process-moat hardening for the per-VM `mvm-audit-signer` (+ `mvm-broker`): seccomp + setpriv `--bounding-set=-all --no-new-privs` + per-workload cgroup + `pdeathsig`, cosign verify-then-exec (`binary_integrity`), and the signed config envelope (`config_signer` — the signer parses unsigned config today). Rides E5.3b-2 / Plan 128.
 - [ ] Single-physical-writer consolidation (route the lifecycle `plan.*` emissions through a subprocess too) — deferred moat hardening; not a correctness prereq since the per-VM workload chains and the flock'd lifecycle chain don't co-write one file.
 
