@@ -662,7 +662,15 @@ mod tests {
         let key_path = version_path(tmp.path(), 1);
         fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644)).unwrap();
         let err = load_master_key(tmp.path(), 1).unwrap_err();
-        assert!(err.to_string().contains("0644"), "got: {err}");
+        // Match the typed variant + its structured `mode` field rather than a
+        // substring of the rendered message — robust to any message rewording,
+        // and asserts the error actually carries the loose mode it observed.
+        match err.downcast_ref::<RotationError>() {
+            Some(RotationError::KeyFilePerms { mode, .. }) => {
+                assert_eq!(*mode, 0o644, "must report the actual loose mode")
+            }
+            other => panic!("expected RotationError::KeyFilePerms, got {other:?}"),
+        }
     }
 
     #[test]

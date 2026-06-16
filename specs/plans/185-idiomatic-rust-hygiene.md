@@ -404,16 +404,30 @@ thread many related values through runtime/build/CLI layers.
 **Files:** start from library modules that expose public errors and CLI/binary
 edges that currently wrap them.
 
-- [ ] **Step 1 - clarify `thiserror` vs `anyhow`.** Library/domain crates expose
-      typed errors when callers can react programmatically; CLI and binary edges
-      add `anyhow::Context` for operator-facing messages.
-- [ ] **Step 2 - stop matching error strings in tests where typed errors exist.**
-      Prefer enum variants, error kinds, or structured fields. Keep substring
-      assertions only for final user-facing CLI text.
-- [ ] **Step 3 - add context at process and filesystem boundaries.** File, socket,
-      command, and config errors should include the path/operation without
-      leaking secrets.
-- [ ] **Step 4 - green.** Run targeted tests and clippy for touched crates.
+- [x] **Step 1 - clarify `thiserror` vs `anyhow`.** Audit confirms the boundary
+      is already the intended one: domain/library surfaces that callers react to
+      programmatically expose typed `thiserror` enums (the hostd keyholder
+      `ProxyError`/`TerminatorError`/`SignDispatchError`, `RotationError`,
+      `OciUnpackError`, plan/bundle errors), while the bulk of fallible
+      operations use `anyhow` with `.context()`/`bail!` for operator-facing
+      messages. No reshaping needed.
+- [x] **Step 2 - stop matching error strings in tests where typed errors exist.**
+      Finding: the actionable surface is **tiny**. Where a typed enum exists and
+      callers react, the tests already use `matches!` (the hostd security paths).
+      Almost every `unwrap_err().to_string().contains(...)` in the tree is on an
+      `anyhow` error (e.g. `mock::start`, `capture_fs_quick`, `AddDir::parse`,
+      `migrate_wrapped_keys`' version `bail!`s) or a `serde_json` parse error —
+      where the rendered string is the only handle and is the correct thing to
+      assert. The one genuine candidate was `load_master_key`, which surfaces an
+      anyhow-wrapped `RotationError::KeyFilePerms { mode }`; its test now
+      `downcast_ref::<RotationError>()`s and matches the structured `mode` field
+      instead of substring-matching `"0644"` (robust to message rewording).
+- [x] **Step 3 - add context at process and filesystem boundaries.** Spot-check
+      confirms FS/command/config errors already carry the path/operation via
+      `.with_context(|| format!("…{}", path.display()))` (e.g. the host-signer
+      keypair, key-rotation, secret-store paths) without leaking secret values.
+- [x] **Step 4 - green.** `cargo test -p mvm-core load_master_key` +
+      `cargo clippy -p mvm-core --all-targets -- -D warnings`.
 
 ### Task 11 - Consolidate repeated fixtures and builders
 
