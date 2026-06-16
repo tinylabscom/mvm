@@ -25,6 +25,7 @@ mod inspect;
 mod ls;
 mod pull;
 mod rm;
+mod source;
 
 const INDEX_FILE: &str = "index.json";
 
@@ -411,6 +412,16 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
     reference: &str,
     prod: bool,
 ) -> Result<ResolvedOciRunImage> {
+    // Registry refs flow through the existing pull path; local sources
+    // (oci-archive / rootfs-dir / stdin) are refused here until their ingest
+    // lands, rather than being misparsed as a registry reference.
+    let classified = source::ImageSource::classify(reference)?;
+    if !classified.is_registry() {
+        bail!(
+            "`run --image` does not support local image sources yet ({classified:?}); \
+             use a registry reference for now"
+        );
+    }
     let image_ref: ImageReference = reference.parse()?;
     if prod && !image_ref.is_digest_pinned() {
         bail!("mvmctl run --image --prod requires a digest-pinned reference");

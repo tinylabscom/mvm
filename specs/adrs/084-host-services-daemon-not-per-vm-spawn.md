@@ -22,23 +22,27 @@ The moat that the two-process split exists to provide is real and must survive: 
 
 ## Decision
 
-Host services run as **two long-lived daemons, scoped per tenant**, that VMs **register with** at boot and **deregister from** at teardown. There is no per-VM fork.
+Host services run as a **single host-agent daemon plus a supervised signer helper, scoped per tenant**. VMs **register with** the daemon at boot and **deregister** at teardown. There is no per-VM fork.
 
-- **`mvm-broker` daemon (per tenant)** — guest-facing dispatch. Holds no keys. Owns a control socket; binds each registered VM's `BROKER_PORT` socket dynamically and demultiplexes accepted connections to a `vm_id` by *which socket accepted them*. Enforces the admitted plan's `services` bindings (claim 12) and the per-workload rate limit, both keyed by `vm_id`.
-- **`mvm-audit-signer` daemon (per tenant)** — holds the tenant signing key and is the single writer to every per-VM workload chain (`<tenant>.<vm>.workload.jsonl`), one in-memory chain head per `vm_id`. The broker forwards each accepted entry tagged with a **server-derived** `vm_id` (never guest-supplied) for the signer to route and stamp `category: workload_audit`.
+- **Host-agent daemon (per tenant)** — the one process a user runs (`mvmctl` is a thin client to it). **Keyless.** Owns VM lifecycle, admission orchestration, and **broker dispatch**: a control socket for register/deregister, dynamic binding of each registered VM's `BROKER_PORT` socket, demultiplexing accepted connections to a `vm_id` by *which socket accepted them*, and enforcement of the admitted plan's `services` bindings (claim 12) + the per-workload rate limit, both keyed by `vm_id`. It parses untrusted guest frames but holds no signing key.
+- **Signer helper (per tenant)** — the **one separate address space**. Holds *all* of the tenant's signing keys (admission plan-signing **and** audit-chain signing) and is the single writer to every per-VM workload chain (`<tenant>.<vm>.workload.jsonl`), one in-memory chain head per `vm_id`. The host agent forwards each sign request — a plan to admit, or an accepted audit entry tagged with a **server-derived** `vm_id` (never guest-supplied) — for the helper to sign/route and stamp `category: workload_audit`. The host agent never holds a key, which is why one helper suffices.
 
-Per tenant, that is **two** processes regardless of VM count. Per host it is `O(active tenants)`, never `O(VMs)`.
+Per tenant, that is **two processes regardless of VM count** — a user's many microVMs are *registrations* in the one daemon, not processes. Per host it is `O(active tenants)`, never `O(VMs)`. The helper is a privilege-separated child supervised by the host agent (the sshd model): the user runs and manages **one daemon**; the helper is invisible to them.
 
 VM lifecycle becomes registration:
 
-- **start** → `ensure_daemons(tenant)` (lazy, idempotent; warm after the first VM) → `Register { vm_id, broker_listen_socket, services_bindings, workload_chain_path }`. The supervisor splices the guest's `connect_host_vsock(BROKER_PORT)` to `broker_listen_socket` exactly as today — the backend-specific path is unchanged.
-- **stop** → `Deregister { vm_id }` → the broker unbinds and drops that VM's socket; the signer flushes and closes that VM's chain head.
+- **start** → `ensure_daemon(tenant)` (lazy, idempotent; warm after the first VM) → `Register { vm_id, broker_listen_socket, services_bindings, workload_chain_path }`. The per-VM supervisor splices the guest's `connect_host_vsock(BROKER_PORT)` to `broker_listen_socket` exactly as today — the backend-specific path is unchanged.
+- **stop** → `Deregister { vm_id }` → the daemon unbinds and drops that VM's socket; the helper flushes and closes that VM's chain head.
 
-Registration is driven by the **admitted plan**, not by `MVM_GATEWAY_BRIDGE`. A plan that binds no host services registers nothing and spawns nothing — same zero-process outcome as today, but for the right reason. `host.audit.v1` is implicitly available to any admitted workload (emitting to your own chain is a low-risk, broadly useful capability); the catalog services (`time`, `cost`, secrets, future addons) require an explicit `ExecutionPlan.services` binding and are dispatch-gated on it.
+Registration is driven by the **admitted plan**, not by `MVM_GATEWAY_BRIDGE`. A plan that binds no host services registers nothing — same zero-process outcome as today, but for the right reason. `host.audit.v1` is implicitly available to any admitted workload (emitting to your own chain is a low-risk, broadly useful capability); the catalog services (`time`, `cost`, secrets, future addons) require an explicit `ExecutionPlan.services` binding and are dispatch-gated on it.
+
+### mvm and mvmd are one design
+
+`mvm` without `mvmd` is a **single tenant** running many microVMs: one host-agent daemon + one signer helper, fixed, for the whole install — its VMs are registrations, not processes. `mvmd` is the **coordinator** that replicates that unit — one (host-agent + helper) per active tenant — and adds fleet orchestration, density, and cross-VM/cross-tenant arbitration. `mvmd` does not reimplement the daemon; it conducts per-tenant instances. Local `mvm` is therefore the literal single-tenant degenerate case of the fleet design: **mvm-daemon ⊂ mvmd**. Tenant separation under `mvmd` is detailed in [Tenant boundaries](#tenant-boundaries).
 
 ### Scope: per tenant
 
-The broker holds no secrets, so a single host-wide broker handling every tenant would be functionally sufficient. We reject it for **defense in depth**: a parsing bug in a daemon that eats untrusted guest input must not be a cross-tenant confidentiality boundary, and the audit-signer holds a tenant-scoped signing key that must not be reachable from another tenant's traffic. One daemon pair per tenant makes the process boundary the tenant boundary. For local `mvm` that is one tenant (`local`) and therefore one pair; for `mvmd` it is one pair per *active* tenant on the host — bounded by tenancy, not by fan-out.
+The host agent holds no secrets, so a single host-wide agent serving every tenant would be functionally sufficient. We reject it for **defense in depth** (detailed under [Tenant boundaries](#tenant-boundaries)): a parsing bug in a daemon that eats untrusted guest input must not be a cross-tenant boundary, and each tenant's signer helper holds that tenant's keys, which must not be reachable from another tenant's traffic. One (host-agent + helper) per tenant makes the process boundary the tenant boundary — one tenant for local `mvm`, one per *active* tenant for `mvmd`, bounded by tenancy not by fan-out.
 
 ## Architecture
 
@@ -58,15 +62,28 @@ A resident per-tenant daemon has a larger blast radius than a per-VM child: its 
 - Chain integrity survives restart: each per-VM head already persists out of band (the secondary head file), so the signer rebuilds heads from disk + the live registration set rather than forking the chain. A restart re-binds sockets for the still-registered VMs from the journal.
 - This is the ordinary resident-daemon bargain (nix-daemon, containerd) and is the correct trade for `O(tenants)` instead of `O(VMs)` processes.
 
-### Why not fold the broker into the supervisor
+### Where broker dispatch lives — the host agent, not the VMM
 
-Considered: drop the broker process entirely, handle `BROKER_PORT` inline in the per-VM supervisor (which already parses guest vsock I/O), keep only the shared signer. Rejected: the supervisor is the VMM — already the largest, most-exposed TCB — and widening it with host-service dispatch is the wrong direction. Dispatch stays in a separate, keyless, *shared* daemon.
+Broker dispatch folds into the **host-agent daemon** (a host-side control process), not into the per-VM supervisor. Folding it into the supervisor was rejected: the supervisor is the VMM — already the largest, most-exposed TCB — and widening it with host-service dispatch is the wrong direction. The host agent is a separate host-side daemon, so it carries dispatch without touching the VMM's TCB; it stays keyless, with the signer helper as the only key-holding address space.
+
+## Tenant boundaries
+
+`mvmd` separates tenants in layers, strongest first. The host-services daemon model is defense in depth on top of the VM boundary, not the primary isolation.
+
+1. **Hypervisor + jailer, per microVM — primary.** Each workload is its own guest (Firecracker + jailer on the fleet path) with its own kernel, seccomp, cgroups, and namespaces. ADR-002 holds: one guest = one tenant's workload; multi-tenant *inside* a guest is out of scope. Two tenants' VMs are isolated because they are separate jailed VMs — full stop.
+2. **Host services — separation by replication.** `mvmd` runs one (host-agent daemon + signer helper) per tenant, so there is no shared mutable host-services state across tenants: separate **process** (a parser bug or crash in one tenant's daemon can't reach another's), separate **key** (each helper holds only its tenant's signing keys — it cannot sign as another tenant, and compromising it yields nothing of another's), separate **audit** (a tenant's chains are written only by its helper, signed by its key, verified against its pubkey). Within a tenant, cross-VM is blocked by the server-derived `vm_id`; a VM reaches only its own tenant's daemon because that daemon is the only one that binds its socket.
+3. **`mvmd` is the cross-tenant arbiter — and in the TCB.** It assigns VMs to tenants, scopes each tenant's network/egress policy, and arbitrates cross-VM/cross-tenant requests under tenant-scoped authz. The orchestration-layer tenant boundary is exactly as strong as `mvmd`'s authz — `mvmd`'s to harden.
+
+Two constraints make this real:
+
+- **Per-tenant keys are required, not optional.** The key/audit boundaries mean nothing if tenants share one host key; each tenant's helper holds that tenant's signing key(s). Local single-tenant `mvm` is the degenerate case (one key, one helper).
+- **The trust root is the host.** All tenants share one host and one hypervisor; a VM escape or host compromise defeats tenant isolation (ADR-002 trusts the hypervisor and puts a malicious host out of scope). Daemon-set replication contains *host-services-layer* faults to a tenant — it does not change the trust root.
 
 ## Security model
 
 The claim-12 (binding-gated dispatch) and claim-13 (no raw secret over the broker channel) properties are **preserved unchanged** — this ADR moves *where the two roles live*, not *what they may do*:
 
-- Two address spaces still separate the untrusted-input parser (broker, keyless) from the key holder (signer). `2` per tenant instead of `2N`.
+- Two address spaces still separate the untrusted-input parser (the keyless host-agent daemon, which does broker dispatch) from the key holder (the signer helper). `2` per tenant instead of `2N`.
 - `vm_id` and `correlation_id` remain server-authoritative — a guest cannot forge cross-VM identity, and the per-tenant process boundary blocks cross-tenant reach.
 - The rate limit and the 4 KiB record cap stay host-side, now keyed by `vm_id` in the daemon's per-VM state.
 - The signing key path stays pinned under the host key dir (the claim-8 trust boundary); the daemon model does not relax it.
@@ -99,7 +116,7 @@ The guest-facing wire (`ServiceCall` over `AuthenticatedFrame` on `BROKER_PORT`)
 
 ## Migration
 
-Phased in [Plan 202](../plans/202-host-services-daemon.md). The wire protocol on `BROKER_PORT` does not change, so guests, the SDK veneer, and the in-guest probe are untouched. The change is host-side: `spawn_broker_services_if_admitted` (fork) becomes `ensure_daemons` + `register_vm`, the daemons gain a control plane, and `mvmd`'s host agent adopts the same daemon per tenant.
+Phased in [Plan 202](../plans/202-host-services-daemon.md). The wire protocol on `BROKER_PORT` does not change, so guests, the SDK veneer, and the in-guest probe are untouched. The change is host-side: `spawn_broker_services_if_admitted` (fork) becomes `ensure_daemon` + `register_vm`, the host-agent daemon gains a control plane with the signer as a supervised helper, and `mvmd` adopts the same per-tenant daemon by replication.
 
 ## Out of scope
 
