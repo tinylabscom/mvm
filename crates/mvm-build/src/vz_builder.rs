@@ -4,7 +4,7 @@
 //! Second `VmBackendForBuilder` impl. Owns the
 //! Vz-specific spawn (`mvm-vz-supervisor` binary with
 //! [`crate::vz::SupervisorConfig`] JSON on stdin) and surfaces the
-//! resulting [`BuilderVmExitInfo`] back to the seam.
+//! resulting `BuilderVmExitInfo` back to the seam.
 //!
 //! ## Scope
 //!

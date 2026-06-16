@@ -3,7 +3,7 @@
 //! A workload reaches a host service (`host.audit.v1`, `host.time.v1`,
 //! `host.cost.v1`) by dialing the supervisor's guest-facing broker port
 //! ([`crate::vsock::BROKER_PORT`]) over vsock, writing a framed
-//! [`ServiceCall`], and reading a framed [`ServiceResponse`]. The supervisor
+//! `ServiceCall`, and reading a framed `ServiceResponse`. The supervisor
 //! accepts the connection, derives the workload identity from the connection
 //! itself, enforces the admitted `ExecutionPlan.services` binding, and proxies
 //! the call to the `mvm-broker` subprocess.

@@ -4,8 +4,8 @@
 //! the host substitution endpoint over vsock, carrying an opaque placeholder.
 //! The host resolves the placeholder, binding-checks the destination, injects
 //! the real credential, and makes the real TLS — the guest only ever held the
-//! placeholder. This module is the relay: send a [`WireRequest`], get a
-//! [`WireResponse`]. The HTTP-proxy front (parsing the workload's proxied
+//! placeholder. This module is the relay: send a `WireRequest`, get a
+//! `WireResponse`. The HTTP-proxy front (parsing the workload's proxied
 //! request, the `HTTP_PROXY` wiring) sits on top.
 
 use std::os::unix::net::UnixStream;

@@ -2,7 +2,7 @@
 //!
 //! A resolver maps a workload's [`SecretRef`] (by name) to its raw
 //! credential value, handed back in a zeroizing `SecretBox`. The value
-//! source is swappable: [`LocalResolver`] reads the single-host
+//! source is swappable: `LocalResolver` reads the single-host
 //! [`SecretStore`] (the `mvmctl secret set` backend) so the standalone
 //! demo needs no `mvmd`; the fleet resolver is a separate mvmd plan.
 //!

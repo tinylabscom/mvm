@@ -1,7 +1,7 @@
 //! Host substitution endpoint: request preparation.
 //!
 //! The guest's SDK client routes a secret-bearing request to this host-local
-//! endpoint carrying an opaque placeholder. [`prepare_request`] is the
+//! endpoint carrying an opaque placeholder. `prepare_request` is the
 //! security-critical core: it locates the placeholder in each header, resolves
 //! it against the session registry, binding-checks the request's destination
 //! (claim 12), and substitutes the real credential — yielding a request ready

@@ -1,12 +1,12 @@
 //! Host-side scaffold for the persistent builder VM's dispatch
 //! supervisor.
 //!
-//! [`PersistentBuilderSupervisor`] owns the host end of the
+//! `PersistentBuilderSupervisor` owns the host end of the
 //! dispatch socket libkrun creates at
 //! `<vm_state_dir>/vsock-<BUILDER_DISPATCH_PORT>.sock` once the
 //! persistent VM is up. Callers — eventually `mvmctl build` from
 //! inside an active `mvmctl dev` session — submit a
-//! [`crate::builder_vm::BuilderJob`] via [`Self::submit`]; the
+//! [`crate::builder_vm::BuilderJob`] via `Self::submit`; the
 //! supervisor serializes it to a
 //! [`crate::builder_protocol::HostVmRequest::Run`], writes the
 //! frame over the socket, then reads back streamed

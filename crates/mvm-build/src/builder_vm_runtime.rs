@@ -1,6 +1,6 @@
 //! Hypervisor-agnostic builder-VM orchestration helper.
 //!
-//! [`BuilderVmRuntime`] is the shared orchestration body that both
+//! `BuilderVmRuntime` is the shared orchestration body that both
 //! the libkrun and Vz builder paths route through. It owns the
 //! pieces that aren't tied to a specific VMM:
 //!
@@ -17,7 +17,7 @@
 //! It does **not** own:
 //!
 //! - Supervisor process lifecycle (lives in the
-//!   [`VmBackendForBuilder`] impl — libkrun's
+//!   `VmBackendForBuilder` impl — libkrun's
 //!   `spawn_supervisor_in_background` / Vz's `run_attached`)
 //! - Console-log watching for kernel-panic detection (also lives
 //!   in the impl; surfaces through `BuilderVmExitInfo.panic_line`)

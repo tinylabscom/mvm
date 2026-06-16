@@ -7,7 +7,7 @@
 //! reaches the wire via the host forward leg — never the guest.
 //!
 //! Process contract:
-//! 1. The backend writes an [`EndpointConfig`] JSON on stdin and closes it.
+//! 1. The backend writes an `EndpointConfig` JSON on stdin and closes it.
 //! 2. The endpoint opens the stores, mints placeholders, and writes ONE JSON
 //!    line to **stdout** — the `[(guest var, placeholder)]` pairs the backend
 //!    injects into the guest launch env — then flushes. This is the ready
