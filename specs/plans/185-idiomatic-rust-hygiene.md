@@ -546,13 +546,51 @@ plus secret-bearing modules.
 
 ### Task 14 - Final verification and index updates
 
-- [ ] `cargo test --workspace` green.
-- [ ] `cargo check --workspace` green.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` green in the
-      required environment(s).
-- [ ] `cargo doc --workspace --no-deps` green, or a documented host/platform
-      blocker explains why a narrower doc command was used.
-- [ ] `specs/SPRINT.md` reflects the plan and its real state.
-- [ ] `specs/REFACTOR-STATUS.md` reflects the plan and its real state.
-- [ ] Closeout note lists any intentionally deferred style debts with concrete
-      reasons.
+- [x] `cargo test --workspace` green **on Linux** (the required env — `mvm-backend`
+      tests SIGKILL under macOS amfid, so they can only be validated on Linux).
+      Verified on the x86_64 Linux box: 3720+ tests pass across the heavy crates
+      alone (mvm-core 1244, mvm-hostd 962, mvm-backend 914, …) plus the rest of
+      the suite, **zero genuine failures**. Two non-genuine results, both
+      understood: (1) the run first surfaced 15 failures in the `cfg(linux)`
+      `mvm-host-vm-init` bin — a real test-isolation bug (unguarded
+      `set_var("TMPDIR", …)` leaking a non-existent path to parallel tests),
+      invisible on macOS where the bin is `cfg`-excluded; **fixed** with `TestEnv`
+      + a valid sentinel (PR #960, now 151/151). (2) `each_embedded_binary_starts_
+      with_elf_magic` fails only under `MVM_SKIP_EMBED_BINARIES=1` (it asserts
+      real ELF payloads; the flag embeds zero-byte stubs) — a documented env
+      artifact, green in a real-embed CI build.
+- [x] `cargo check --workspace` green (the test build above compiled the whole
+      workspace + all test targets on Linux).
+- [~] `cargo clippy --workspace --all-targets -- -D warnings` green in the
+      **required env (macOS CI)** — verified for all Plan 185 changes. A Linux
+      clippy run additionally surfaced **pre-existing** lints in the `cfg(linux)`
+      `mvm-build` bin `mvm-host-vm-init` (same clippy 0.1.96 both hosts; macOS
+      never lints that bin because it's `cfg`-excluded): 9 `doc list item without
+      indentation`, 1 `empty line after doc comment`, 1 `collapsible if`. These
+      are unrelated to Plan 185 and predate it; tracked as a separate Linux-clippy
+      follow-up (chasing "Linux clippy green" risks a cascade through dependent
+      crates — out of this plan's scope).
+- [~] `cargo doc --workspace --no-deps` — **documented blocker, not a Plan 185
+      regression.** Task 13 proved the renames introduced zero broken links;
+      separately, `cargo doc --workspace --all-features` on Linux inventories
+      **~122 pre-existing broken intra-doc links** scattered ~1-per-file across
+      ~60 files (feature/platform-gated artifacts mixed with genuine bare-path
+      bugs). mvm-core + mvm-build's unconditional bugs are fixed (#939/#941); the
+      remaining crates are a tracked doc-hygiene follow-up that must be measured
+      and fixed **on Linux with `--all-features`** (only links broken there are
+      real). This is the "narrower doc command / documented reason" Task 14 allows.
+- [x] `specs/SPRINT.md` reflects the plan and its real state.
+- [x] `specs/REFACTOR-STATUS.md` reflects the plan and its real state.
+- [x] **Closeout note — intentionally deferred debts, with reasons:**
+      1. **Task 8 — `mvm-vm-host/vz_objc.rs` objc2 SAFETY audit.** Held while the
+         Plan-152 vz work is active (concurrent vz worktrees/PRs); touching ~120
+         `msg_send` blocks now would collide. Resume when vz is quiet.
+      2. **Task 13 — remaining-crate broken intra-doc links (~122 under Linux
+         `--all-features`).** Pre-existing doc-hygiene debt, not introduced by this
+         plan (renames were clean). Must be re-measured + fixed on Linux +
+         `--all-features` per-crate, because macOS tooling can't separate real
+         bugs from `cfg(feature)`/`cfg(target_os="linux")` artifacts.
+      3. **Pre-existing Linux-only clippy lints in `mvm-host-vm-init`** (11, doc
+         formatting + collapsible-if). Surfaced by the Phase 7 Linux clippy run;
+         orthogonal to Plan 185; deferred to avoid a cross-crate Linux-clippy
+         cascade inside this closeout.
