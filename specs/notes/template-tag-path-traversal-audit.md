@@ -85,7 +85,7 @@ The sibling's own remedy was to add the guard at the **dereference site**
 (`read_snapshot_volumes`), not only at the request handler — so a future forgetful caller
 fails closed. Mirror that here:
 
-- [ ] Validate inside `template_load` and `template_load_dispatched` (legacy-name arm):
+- [x] Validate inside `template_load` and `template_load_dispatched` (legacy-name arm):
       reject the id with `validate_template_name` before `template_spec_path`. This closes
       `export_oci` and every future caller at once, regardless of caller discipline.
       Slot-hash inputs already route through `is_slot_hash_dirname`, so the guard applies
@@ -93,8 +93,10 @@ fails closed. Mirror that here:
 - [ ] (Optional, stronger) Introduce a `TemplateId` newtype constructible only via
       `validate_template_name`, and have the path helpers take `&TemplateId` instead of
       `&str` — makes the unvalidated path unrepresentable rather than merely guarded.
-- [ ] Add a regression test: `template_load("../../etc/x")` and the `export_oci` resolver
+      Follow-up candidate: this is broader than the security fix because it touches every
+      legacy template path-helper call site.
+- [x] Add a regression test: `template_load("../../etc/x")` and the `export_oci` resolver
       both reject a traversal arg (the red test, then the guard).
 
-Until then the only live gap is the low-severity local read in `export_oci`; the primary
-boot/exec/MCP flows are safe.
+Implementation update, 2026-06-16: `template_create` now also validates
+`TemplateSpec.template_id` before writing via legacy template path helpers.
