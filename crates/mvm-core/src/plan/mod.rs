@@ -27,6 +27,8 @@
 pub mod bundle;
 pub mod execution_plan;
 pub mod signing;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod types;
 pub mod validity;
 
