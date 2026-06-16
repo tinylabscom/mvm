@@ -224,6 +224,38 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
         pre-existing init-EOF boot issues to clear first) or libkrun on the
         Linux box (`88.99.197.234` is FC today — no broker — so it'd need
         libkrun stood up). Needs b3 for the headline `mvm.audit.emit` test.
+        - [x] **in-guest driver (audit-probe)** — `crates/mvm-guest/src/bin/audit-probe.rs`
+          calls `mvm_guest::host_audit::emit` from inside the guest; the opt-in
+          `withAuditProbe` mkGuest flag bakes it at `/usr/local/bin/audit-probe`
+          (via `nix/packages/mvm-audit-probe.nix`), and the
+          `examples/audit-probe/` fixture flake runs it (mode `all`: normal
+          emit + >4 KiB BadRequest + 20/s rate-limit) as the sealed PID-1
+          workload. This is the in-guest half option (a) — the Python-SDK
+          delivery (option b) remains the productized path under b3.
+        - [x] **PROVEN live (libkrun, this Mac)** — admitted `up` spawned the
+          per-VM `mvm-broker` + `mvm-audit-signer` (vsock-5300.sock bound); the
+          in-guest probe emitted and 22 entries landed in
+          `local.<vm>.workload.jsonl`, every one host-stamped
+          `category: workload_audit` with a server-authoritative `brk-*`
+          correlation id, and `verify_workload_chain` verifies the chain clean.
+          The 20/s rate-limit is observable (22 of 40 burst emits landed). Two
+          notes: (1) the broker-spawn only fires when `MVM_GATEWAY_BRIDGE=1`
+          (the `up` path couples `tenant_id` threading to the gateway bridge);
+          (2) the bridge supervisor's claim-10 audit-substrate check pins the
+          host-signer key under `~/.mvm/keys`, so the run uses real `~/.mvm`
+          (an isolated `MVM_DATA_DIR` is rejected). `mvmctl trust audit verify`
+          against real `~/.mvm` trips on a pre-existing corrupt shared
+          lifecycle chain — the workload chain itself verifies clean in
+          isolation.
+        - [ ] **follow-up: decouple broker-spawn from `MVM_GATEWAY_BRIDGE`** —
+          today a plain admitted `mvmctl up --tenant local` does not spawn the
+          per-VM broker (tenant_id is only threaded when the egress bridge is
+          on), so `host.audit.v1` is silently unavailable on a normal launch.
+          Thread `tenant_id` for the broker independently of the bridge.
+        - [ ] **follow-up: workload-chain verify is unreachable when the
+          lifecycle chain is corrupt** — `audit_verify` checks the lifecycle
+          chain first and bails, never reaching `verify_workload_chain`. Verify
+          each chain independently (report per-chain, don't short-circuit).
   - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
     `mvm-guest::host_time` + `mvm-guest::host_cost` (`now` / `workload` +
     `tenant`, each with an `_on` stream variant), riding the same
