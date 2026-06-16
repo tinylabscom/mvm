@@ -1426,11 +1426,18 @@ impl SupervisorConfig {
             .ok_or(AuditSubstrateError::MissingField("signing_key_path"))?;
         // Path-traversal defense: the signing key is host-trust-
         // boundary state. Reject callers that point us anywhere
-        // outside the well-known location. We accept both the
-        // canonical form and the un-canonicalized form pointing
-        // under `~/.mvm/keys/` (canonicalize would fail if the
-        // file doesn't exist yet, which is legal at admission).
-        let keys_dir = home_mvm_keys_dir();
+        // outside the operator's keys dir. Resolved through the same
+        // `mvm_keys_dir()` every other site uses (admission's
+        // `default_keys_dir`, the audit-substrate builder), so the
+        // prefix check holds across the supervisor process boundary —
+        // the supervisor inherits the launcher's data-dir env. This
+        // honors the data-dir override (worktree isolation) rather than
+        // hard-pinning `$HOME`: relocating the key via the environment
+        // requires host access, and a malicious host is out of the
+        // threat model. The prefix check accepts the un-canonicalized
+        // form (canonicalize would fail if the file doesn't exist yet,
+        // which is legal at admission).
+        let keys_dir = mvm_core::config::mvm_keys_dir();
         if !signing_key.starts_with(&keys_dir) {
             return Err(AuditSubstrateError::SigningKeyOutsideKeysDir {
                 path: signing_key.display().to_string(),
@@ -1648,16 +1655,6 @@ mod base_attach_tests {
         });
         assert!(serde_json::from_value::<SupervisorBaseConfig>(whole).is_err());
     }
-}
-
-/// `~/.mvm/keys/` resolver. Centralised so the signing-key
-/// validation in [`SupervisorConfig::validate_audit_substrate`]
-/// can be tested without env mutation across multiple sites.
-fn home_mvm_keys_dir() -> std::path::PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/"));
-    home.join(".mvm").join("keys")
 }
 
 /// Errors returned by [`SupervisorConfig::validate_audit_substrate`]
@@ -2070,7 +2067,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     fn well_formed_supervisor_config() -> SupervisorConfig {
-        let keys = home_mvm_keys_dir();
+        let keys = mvm_core::config::mvm_keys_dir();
         SupervisorConfig {
             krun: KrunContext::new("vm-a", "/k", "/r"),
             vm_state_dir: "/tmp/mvm/vms/vm-a".to_string(),
@@ -2172,8 +2169,8 @@ mod tests {
     #[test]
     fn validate_audit_substrate_refuses_signing_key_path_traversal() {
         let mut cfg = well_formed_supervisor_config();
-        let keys = home_mvm_keys_dir();
-        // Traversal attempt: ~/.mvm/keys/../../../etc/shadow.
+        let keys = mvm_core::config::mvm_keys_dir();
+        // Traversal attempt: <keys-dir>/../../../etc/shadow.
         cfg.signing_key_path = Some(
             keys.join("..")
                 .join("..")
