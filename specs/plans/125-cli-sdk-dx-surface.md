@@ -150,10 +150,23 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
         Shared `compute_entry_hash` extracted so writer + verifier can't drift;
         per-VM path convention in `mvm-core::config`. 10 RED-first verifier
         tests + 2 path-helper tests.
-      - [ ] **E5.3b-1** — per-VM `mvm-audit-signer` spawn + chain wiring
-        (`software_chain_key_path` = host-signer key, `audit_jsonl_path` =
-        `workload_audit_path(tenant, vm)`), gated on an admitted plan, mirroring
-        `spawn_libkrun_egress_endpoint_if_needed` (libkrun + vz).
+      - [x] **E5.3b-1** — per-VM `mvm-audit-signer` spawn + chain wiring.
+        New `mvm-backend::audit_signer_spawn` (one impl for libkrun + vz — the
+        signer has no backend-shaped fields, always a host UDS): resolve the
+        binary (`MVM_AUDIT_SIGNER_PATH` → sibling → `target/`), hand-build the
+        `SubprocessConfig` JSON on stdin (mvm-backend sits below mvm-hostd, can't
+        import the type — same pattern substitution uses), detach via `setsid`,
+        wait for the UDS to bind (the bin writes no handshake → poll), persist a
+        PID. `software_chain_key_path` = `compute_audit_substrate().signing_key_path`
+        (host signer → one trust root), `audit_jsonl_path` =
+        `workload_audit_path(tenant, vm)`, UDS under `<state>/services/`. Gated
+        on a tenant (admitted plan); a no-tenant VM is a defused no-op.
+        Fail-closed: spawn errors roll the launch back, and `AuditSignerGuard`
+        reaps on early-return (mirrors the substitution `EndpointGuard`). Wired
+        into `LibkrunBackend::start`/`stop` + the vz start/stop next to the
+        substitution spawn. 5 unit tests (no-op guard, config has exactly the 6
+        `SubprocessConfig` keys, services-dir paths, bad-env-override reject,
+        reap idempotency); the live spawn round-trip is E5.3b-4.
       - [ ] **E5.3b-2** — per-VM `mvm-broker` spawn binding
         `vm_vsock_port_socket(name, BROKER_PORT)` + `ServiceCallCtx`
         enrichment. Unblocks the round-trip.
@@ -191,6 +204,9 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
 
 - [ ] Go / C SDK parity (scope call).
 - [ ] Desktop/interactive-terminal helpers beyond the browser preset.
+- [ ] Ship the `mvm-audit-signer` binary beside `mvmctl` in the release artifacts (the E5.3b-1 spawn resolver already looks for a sibling binary, like `mvm-substitution-endpoint`; dev uses `target/`). Without it, an admitted-plan VM fails closed at start in release.
+- [ ] Spawn process-moat hardening for the per-VM `mvm-audit-signer` (+ `mvm-broker`): seccomp + setpriv `--bounding-set=-all --no-new-privs` + per-workload cgroup + `pdeathsig`, cosign verify-then-exec (`binary_integrity`), and the signed config envelope (`config_signer` — the signer parses unsigned config today). Rides E5.3b-2 / Plan 128.
+- [ ] Single-physical-writer consolidation (route the lifecycle `plan.*` emissions through a subprocess too) — deferred moat hardening; not a correctness prereq since the per-VM workload chains and the flock'd lifecycle chain don't co-write one file.
 
 ## Self-review
 

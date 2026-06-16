@@ -390,6 +390,16 @@ impl VmBackend for VzBackend {
         // no-op.
         let mut endpoint_guard = spawn_vz_egress_endpoint_if_needed(&config.name, &state_dir)?;
 
+        // Stand up the per-VM audit-signer when the plan is admitted (a tenant
+        // is present) so the workload chain has its sole writer. Armed via the
+        // guard until the VM is up; fail-closed. A no-tenant VM gets a defused
+        // no-op.
+        let mut audit_signer_guard = crate::audit_signer_spawn::spawn_audit_signer_if_needed(
+            &config.name,
+            &state_dir,
+            config.tenant_id.as_deref(),
+        )?;
+
         ui::success(&format!(
             "Vz VM '{}' started (pid file: {}, console log: {}).",
             config.name,
@@ -397,6 +407,7 @@ impl VmBackend for VzBackend {
             console_log.display()
         ));
         endpoint_guard.defuse();
+        audit_signer_guard.defuse();
         Ok(VmId(config.name.clone()))
     }
 
@@ -406,6 +417,8 @@ impl VmBackend for VzBackend {
         // guest. Mirrors the libkrun / FC stop ordering — safe because reap is a
         // no-op when nothing exists, even before the not-running early return.
         crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        // Reap the per-VM audit-signer too (no-op when none was spawned).
+        crate::audit_signer_spawn::reap_audit_signer(&vm_state_dir(&id.0));
 
         let pid_path = vm_state_dir(&id.0).join(PID_FILE_NAME);
         let pid = match read_pid(&pid_path) {

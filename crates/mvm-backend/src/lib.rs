@@ -42,6 +42,8 @@ pub mod codesign;
 // (`mvm → mvm-backend → mvm`). `mvm` re-exports these at their old
 // paths so the mvmd `mvmctl::runtime::{shell,ui,shell_mock}` contract
 // surface keeps resolving.
+/// Shared per-VM `mvm-audit-signer` spawn/reap (one impl for libkrun + vz).
+pub(crate) mod audit_signer_spawn;
 pub mod base;
 pub mod compat;
 /// Per-VM transparent egress redirect (nft prerouting REDIRECT scoped
