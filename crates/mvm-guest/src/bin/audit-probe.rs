@@ -50,6 +50,9 @@ mod linux {
     /// Records to burst in `rate` mode — comfortably over the 20/s bucket so at
     /// least one must be refused once the initial capacity drains.
     const RATE_BURST: usize = 40;
+    /// Attempts the first `emit` makes before giving up — covers the brief
+    /// boot window before the BROKER_PORT host-listen splice is wired.
+    const AUDIT_CONNECT_RETRIES: usize = 20;
 
     /// Build the workload record for `action`/`seq`. Pure so the field shape is
     /// unit-testable without a broker. `ts` is a workload field the host passes
@@ -67,17 +70,32 @@ mod linux {
     }
 
     /// `emit`: one normal record must land. Prints the returned chain head.
+    /// Retries on transport errors so the very first guest dial doesn't lose a
+    /// race against the supervisor wiring up the BROKER_PORT host-listen splice
+    /// at boot — a real workload that emits early would hit the same window.
     fn run_emit() -> bool {
-        match host_audit::emit(&build_record("probe-emit", 0), TIMEOUT_SECS) {
-            Ok(resp) => {
-                println!("audit-probe: emit ok chain_head={}", resp.chain_head);
-                true
-            }
-            Err(e) => {
-                println!("audit-probe: emit FAILED err={e}");
-                false
+        let record = build_record("probe-emit", 0);
+        for attempt in 0..AUDIT_CONNECT_RETRIES {
+            match host_audit::emit(&record, TIMEOUT_SECS) {
+                Ok(resp) => {
+                    println!("audit-probe: emit ok chain_head={}", resp.chain_head);
+                    return true;
+                }
+                // Transport/Unavailable means the broker leg isn't reachable
+                // yet (boot race) — back off briefly and retry.
+                Err(e @ (AuditError::Transport(_) | AuditError::Unavailable(_)))
+                    if attempt + 1 < AUDIT_CONNECT_RETRIES =>
+                {
+                    println!("audit-probe: emit retry {attempt} (transport not ready: {e})");
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+                Err(e) => {
+                    println!("audit-probe: emit FAILED err={e}");
+                    return false;
+                }
             }
         }
+        false
     }
 
     /// `oversized`: a record past the 4 KiB cap. Success = the host refuses it
