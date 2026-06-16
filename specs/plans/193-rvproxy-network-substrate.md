@@ -121,19 +121,26 @@ own internal default).
       followups mvm needs from rvproxy: a JSONL/UDS **`FlowEvent` export** (slice-2
       deferral) and **port/proto + DNS-hostname policy config** (slice-1 covers
       only `default_egress_deny` + CIDR allow/deny). Sub-slices:
-  - [x] **2a — policy lowering (config half, the IP-coarse pre-filter).**
+  - [x] **2a — policy lowering, full fidelity.**
         `supervisor::network::rvproxy_policy::lower_policy` projects a resolved
-        `CanonicalEgress` (+ DNS allow-list) into rvproxy's `[policy]` table
-        (`default_egress_deny` + `cidr_allowlist` + mandatory-deny `cidr_denylist`),
-        with a unit parity oracle (`permits_dest` mirrors rvproxy's
-        `policy_destination_reason`) proving verdict-agreement with
-        `CanonicalEgress::permits` at the IP layer, and an explicit
-        `RvproxyPolicyGaps` enumerating what stays in the splice (port/proto-scoped
-        L4 rules, DNS hostnames, byte scans) — coarsening is never silent. Pure,
-        no live boot; deletes nothing.
-  - [ ] **2b — config emission + native launch path.** Write the full rvproxy
-        config (network/api/forward/audit + the lowered `[policy]`) and launch
-        `rvproxy run --config` behind a flag, keeping the splice. (Overlaps WS-3.)
+        `CanonicalEgress` (+ DNS allow-list) into rvproxy's `[policy]` table at
+        **full claim-10 fidelity** now that rvproxy ships the L4 + DNS config
+        (rvproxy `014` follow-ups): `default_egress_deny` + mandatory-deny
+        `cidr_denylist` + `l4_allowlist` (proto/CIDR/port) + `dns_allowlist`
+        (dotted-suffix sinkhole). The unit parity oracle `permits_flow` mirrors
+        rvproxy's `policy_flow_reason` and is proven verdict-identical to
+        `CanonicalEgress::permits` for every probed proto/ip/port (no longer just
+        the IP layer); `dns_permits` mirrors `DnsSinkholeScan`. The only splice
+        residual left (`RvproxyPolicyGaps`) is the byte scans (placeholder-leak +
+        undeclared redaction), which ride the transform path, not `[policy]`.
+        Pure, no live boot; deletes nothing. (Started as an IP-coarse pre-filter;
+        completed to full L4+DNS once rvproxy #115/#120 landed.)
+  - [ ] **2b — config emission + native launch path.** Wrap the lowered
+        `[policy]` in the full rvproxy config (network/api/forward/audit — the
+        audit section points the `FlowEvent` JSONL/UDS export at mvm for 2c) and
+        launch `rvproxy run --config` behind a flag, keeping the splice. Real
+        config-parse validation lands here via the parity gate (the emitted TOML
+        is fed to the actual rvproxy binary). (Overlaps WS-3.)
   - [ ] **2c — flow-event sink → audit re-emission.** Subscribe to rvproxy's
         `FlowEvent` export (needs the rvproxy JSONL/UDS export followup) and
         re-feed `signer_task`'s chain so the claim-10 audit stays mvm's source of
