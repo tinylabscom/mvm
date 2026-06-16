@@ -160,8 +160,14 @@ define_class!(
     #[name = "MvmVzSupervisorDelegate"]
     struct VmDelegate;
 
+    // SAFETY: the NSObject superclass furnishes every NSObjectProtocol method;
+    // VmDelegate overrides none of them.
     unsafe impl NSObjectProtocol for VmDelegate {}
 
+    // SAFETY: the `#[unsafe(method(...))]` handlers below match the
+    // VZVirtualMachineDelegate selectors by name and signature; VZ invokes them
+    // only on the VM's own (serial) dispatch queue, so `&self` access is
+    // single-threaded per the module's threading model.
     unsafe impl VZVirtualMachineDelegate for VmDelegate {
         /// Guest initiated a clean power-off.
         #[unsafe(method(guestDidStopVirtualMachine:))]
@@ -182,6 +188,9 @@ impl VmDelegate {
         let this = Self::alloc().set_ivars(VmDelegateIvars {
             state_tx: Cell::new(Some(tx)),
         });
+        // SAFETY: `this` is a freshly `alloc`'d MvmVzSupervisorDelegate with its
+        // ivars initialized; `init` is NSObject's designated initializer, so the
+        // standard alloc+init contract holds and yields an owned `Retained<Self>`.
         unsafe { msg_send![super(this), init] }
     }
 
@@ -392,8 +401,13 @@ define_class!(
     #[name = "MvmVzExitListenerDelegate"]
     struct VsockListenerDelegate;
 
+    // SAFETY: the NSObject superclass furnishes every NSObjectProtocol method;
+    // VsockListenerDelegate overrides none of them.
     unsafe impl NSObjectProtocol for VsockListenerDelegate {}
 
+    // SAFETY: the `#[unsafe(method(...))]` handler below matches the
+    // VZVirtioSocketListenerDelegate selector by name and signature; VZ invokes
+    // it on the listener's dispatch queue, single-threaded per `&self`.
     unsafe impl VZVirtioSocketListenerDelegate for VsockListenerDelegate {
         /// Accept a guest-initiated connection and forward it for capture.
         #[unsafe(method(listener:shouldAcceptNewConnection:fromSocketDevice:))]
@@ -425,6 +439,9 @@ impl VsockListenerDelegate {
         let this = Self::alloc().set_ivars(VsockListenerDelegateIvars {
             tx: Cell::new(Some(tx)),
         });
+        // SAFETY: `this` is a freshly `alloc`'d MvmVzExitListenerDelegate with its
+        // ivars initialized; `init` is NSObject's designated initializer, so the
+        // standard alloc+init contract holds and yields an owned `Retained<Self>`.
         unsafe { msg_send![super(this), init] }
     }
 
@@ -1619,6 +1636,9 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
     // configs it can't snapshot). A `Boot` that never snapshots is fine, so this
     // is a warning, not a gate — SAVE / `Restore` startup surface the real error
     // if they're used against an unsupported config.
+    // SAFETY: `vz_config` is a fully-assembled VZVirtualMachineConfiguration;
+    // validateSaveRestoreSupportWithError only reads it and returns an
+    // autoreleased NSError on failure (surfaced as the warning below).
     if let Err(e) = unsafe { vz_config.validateSaveRestoreSupportWithError() } {
         tracing::warn!(
             error = %ns_error_to_string(&e),
@@ -2025,9 +2045,13 @@ mod tests {
         // The "gvproxy" listener side: a bound SOCK_DGRAM socket.
         let listener_path = dir.path().join("gvproxy.sock");
         let listener_path_str = listener_path.to_str().unwrap();
+        // SAFETY: `socket` takes only constants and returns -1 or a fresh fd
+        // (checked below); no pointers involved.
         let listener_fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0) };
         assert!(listener_fd >= 0, "listener socket");
         let listener_addr = sockaddr_un_from_path(listener_path_str).unwrap();
+        // SAFETY: `listener_fd` is the fd just returned by `socket`; `listener_addr`
+        // is a valid `sockaddr_un` and the length passed is exactly its size.
         let ret = unsafe {
             libc::bind(
                 listener_fd,
@@ -2043,13 +2067,18 @@ mod tests {
 
         // Client sends a datagram to the listener.
         let msg = b"hello";
+        // SAFETY: `client_raw` is an open fd; `msg` points to `msg.len()` readable bytes.
         let sent = unsafe { libc::send(client_raw, msg.as_ptr().cast(), msg.len(), 0) };
         assert_eq!(sent as usize, msg.len(), "client send");
 
         // Listener receives it and captures the sender address.
         let mut buf = [0u8; 64];
+        // SAFETY: `sockaddr_un` is a plain-old-data C struct; all-zero is a valid
+        // initial value the kernel overwrites on `recvfrom`.
         let mut src_addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
         let mut src_len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        // SAFETY: `listener_fd` is open; `buf` is writable for `buf.len()`; the
+        // `src_addr`/`src_len` out-params are sized to `sockaddr_un`.
         let recvd = unsafe {
             libc::recvfrom(
                 listener_fd,
@@ -2064,6 +2093,9 @@ mod tests {
         assert!(&buf[..msg.len()] == msg);
 
         // The sender address must be non-empty — the fix ensures bind() was called.
+        // SAFETY: `recvfrom` populated `src_addr.sun_path` with a NUL-terminated
+        // path (kernel guarantee for AF_UNIX); the pointer is valid for the
+        // borrow of `src_addr`, which outlives this read.
         let sun_path_bytes =
             unsafe { std::ffi::CStr::from_ptr(src_addr.sun_path.as_ptr()).to_bytes() };
         assert!(
@@ -2073,6 +2105,8 @@ mod tests {
 
         // Listener replies back to the sender address.
         let reply = b"pong";
+        // SAFETY: `listener_fd` is open; `reply` is readable for `reply.len()`;
+        // `src_addr`/`src_len` are the sender address `recvfrom` just populated.
         let replied = unsafe {
             libc::sendto(
                 listener_fd,
@@ -2087,10 +2121,13 @@ mod tests {
 
         // Client receives the reply — this is the defect path that was broken.
         let mut rbuf = [0u8; 64];
+        // SAFETY: `client_raw` is open; `rbuf` is writable for `rbuf.len()`.
         let got = unsafe { libc::recv(client_raw, rbuf.as_mut_ptr().cast(), rbuf.len(), 0) };
         assert_eq!(got as usize, reply.len(), "client recv reply");
         assert_eq!(&rbuf[..reply.len()], reply);
 
+        // SAFETY: `listener_fd` was opened by `socket` above and is closed exactly
+        // once here (the client fd is an `OwnedFd` that closes on drop).
         unsafe { libc::close(listener_fd) };
     }
 }
