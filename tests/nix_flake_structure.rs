@@ -629,15 +629,14 @@ fn no_host_package_uses_release_binary_provenance() {
         "binaryNativeCode",
     ];
     let mut scanned = 0usize;
-    for entry in
-        fs::read_dir(&dir).unwrap_or_else(|e| panic!("nix/packages/ must be present: {e}"))
+    for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("nix/packages/ must be present: {e}"))
     {
         let path = entry.expect("readable dir entry").path();
         if path.extension().and_then(|s| s.to_str()) != Some("nix") {
             continue;
         }
-        let content = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let content =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
         let name = path.file_name().unwrap().to_string_lossy();
         for needle in forbidden {
             assert!(
