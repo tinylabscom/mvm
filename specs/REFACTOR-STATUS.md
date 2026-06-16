@@ -312,14 +312,17 @@ PLAN 118 — Supervisor standby pool              🟡 libkrun + Vz done; FC fol
       follow-up; not blocking current libkrun/Vz use
 
 PLAN 183 — Builder-VM egress posture + net boot ✅ DONE (follow-ups tracked in plan)
-  Last updated: 2026-06-15 (deferred-section close-out: DHCP belt-and-suspenders item
-  closed; persistent Vz builder VM now gets gvproxy egress — `dev up` spawns gvproxy +
-  the dev VM takes a DHCP lease 192.168.127.3 from the gvproxy gateway, `dev down`
-  reaps it, all contained to vz_builder.rs, live-validated on macOS-26; only the
-  doctor egress-posture line remains deferred — it's in-guest-enforced + the
-  lease/static/none outcome isn't host-recorded, so it needs builder-boot work)
-  [x] persistent Vz builder VM gvproxy egress — vz_builder.rs spawn+config+reap;
+  Last updated: 2026-06-15 (ALL deferred items now CLOSED: DHCP belt-and-suspenders
+  resolved by WS-E2; persistent Vz builder VM gets gvproxy egress (live-validated
+  DHCP lease 192.168.127.3, dev down reaps — #940); and the `doctor` builder-egress
+  line lands — it parses the persistent builder VM's console.log for the last
+  net-bootstrap outcome (lease/static-fallback/failed) + surfaces the per-arm posture,
+  the earlier "needs host-side plumbing" premise was wrong since the outcome is already
+  host-readable in console.log)
+  [x] persistent Vz builder VM gvproxy egress (#940) — vz_builder.rs spawn+config+reap;
       live-validated (dev up lease 192.168.127.3 from gvproxy gw; dev down no leak)
+  [x] doctor builder-egress line — guest_net::classify_builder_net_bootstrap +
+      doctor builder_egress_check; live-validated (reports the DHCP lease)
   [x] follow-ups: fs_quick-on-Vz (pause-aware gate) + vm_full restore (gvproxy re-spawn, idempotent cleanup)
   Diagnosis proven 2026-06-11: boot-time install_egress_lockdown (OUTPUT DROP,
   proxy-uid-only) applied to the whole builder VM and dropped every nix fetch.
