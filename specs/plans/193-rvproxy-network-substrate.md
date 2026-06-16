@@ -111,12 +111,37 @@ own internal default).
       `PlanFlowPolicy` deny-by-default gate + flow-audit onto rvproxy's native
       flow API; delete the in-line splice/`etherparse` wrapper (Plan 141) and the
       per-backend `on_packet` hooks once parity is proven. Keep claim-10/12/13
-      witnesses green throughout. **🔴 BLOCKED on rvproxy R2** (the native
-      flow-decision API does not exist yet — only static config policy + a
-      packet-level `ByteTransform` + an audit *export* sink). Design + the R2
-      contract this needs are in "## WS-2 design" below; mvm authors the
-      requirements into rvproxy `specs/plans/014` R2, the rvproxy session builds
-      it, then mvm does the port.
+      witnesses green throughout. **🟢 UNBLOCKED** — rvproxy R2 shipped (rvproxy
+      `014` R2 slices all merged: flow-lifecycle `FlowEvent`/`FlowEventSink`,
+      flow-context + `FlowKill` + sticky teardown + the over-MTU/unserializable
+      fail-closed guard, and the rule-carrying `secret-redaction-filter` region
+      rules). Note the consumption nuance: R2's primary seam is **in-process
+      Rust traits** (rvproxy embedded as a lib); mvm consumes rvproxy as a
+      **subprocess** (`rvproxy run --config` + event sink), so two R2 pieces are
+      followups mvm needs from rvproxy: a JSONL/UDS **`FlowEvent` export** (slice-2
+      deferral) and **port/proto + DNS-hostname policy config** (slice-1 covers
+      only `default_egress_deny` + CIDR allow/deny). Sub-slices:
+  - [x] **2a — policy lowering (config half, the IP-coarse pre-filter).**
+        `supervisor::network::rvproxy_policy::lower_policy` projects a resolved
+        `CanonicalEgress` (+ DNS allow-list) into rvproxy's `[policy]` table
+        (`default_egress_deny` + `cidr_allowlist` + mandatory-deny `cidr_denylist`),
+        with a unit parity oracle (`permits_dest` mirrors rvproxy's
+        `policy_destination_reason`) proving verdict-agreement with
+        `CanonicalEgress::permits` at the IP layer, and an explicit
+        `RvproxyPolicyGaps` enumerating what stays in the splice (port/proto-scoped
+        L4 rules, DNS hostnames, byte scans) — coarsening is never silent. Pure,
+        no live boot; deletes nothing.
+  - [ ] **2b — config emission + native launch path.** Write the full rvproxy
+        config (network/api/forward/audit + the lowered `[policy]`) and launch
+        `rvproxy run --config` behind a flag, keeping the splice. (Overlaps WS-3.)
+  - [ ] **2c — flow-event sink → audit re-emission.** Subscribe to rvproxy's
+        `FlowEvent` export (needs the rvproxy JSONL/UDS export followup) and
+        re-feed `signer_task`'s chain so the claim-10 audit stays mvm's source of
+        truth.
+  - [ ] **2d — parity-gate extension + splice deletion.** Make the WS-1.5
+        witnesses run against the **native** path (binary-discriminating) and
+        delete the splice + Plan-141 `on_packet` hooks only once green.
+      Design + the R2 contract are in "## WS-2 design" below.
 - [ ] **WS-3 — backend cutover.** Replace the gvproxy spawn
       (`mvm-build/host_gvproxy.rs`, `libkrun-sys/gvproxy.rs`) + passt with
       `rvproxy run --config` per the integration contract; drop the Homebrew
