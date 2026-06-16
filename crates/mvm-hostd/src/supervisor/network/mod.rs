@@ -34,6 +34,8 @@ pub mod flow_byte_log;
 pub mod latency;
 pub mod packet;
 pub mod pipeline;
+/// Render the full `rvproxy run --config` TOML for a native gateway.
+pub mod rvproxy_config;
 /// Lowering of a resolved egress policy into rvproxy's native `[policy]` config
 /// (claim-10 enforcement onto the rvproxy substrate).
 pub mod rvproxy_policy;

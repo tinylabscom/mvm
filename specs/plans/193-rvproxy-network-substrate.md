@@ -143,6 +143,21 @@ own internal default).
         launch `rvproxy run --config` behind a flag, keeping the splice. Real
         config-parse validation lands here via the parity gate (the emitted TOML
         is fed to the actual rvproxy binary). (Overlaps WS-3.)
+    - [x] **config emission.** `render_rvproxy_config` emits the complete
+          single-vm config (id/mode/network/backend/transport/api/dns/audit +
+          the lowered `[policy]`) over mvm-side `Serialize` structs — no rvproxy
+          crate dep. Transport is the proven `BackendKind::Vfkit` +
+          `TransportKind::Vfkit` unixgram pair (same shape rvproxy's gvproxy-compat
+          mode builds), so `run --config` reaches WS-1's validated boot path. The
+          emitted TOML is parsed + `RvproxyConfig::validate()`d against the real
+          rvproxy binary (off-tree); that caught a silent schema-fidelity hole —
+          `DnsConfig` renames its resolvers field to `upstream`, so emitting
+          `upstream_resolvers` was dropped to empty and failed validation. Also
+          set the four `[policy]` toggles rvproxy defaults to `false`
+          (`allow_transport_{ingress,egress}`, `allow_dns_{local,upstream}`) or
+          the dataplane drops every frame.
+    - [ ] **native launch.** Rewire the gvproxy spawn to `rvproxy run --config`
+          behind a flag (keeping the splice) + a live `dev up`-through-rvproxy boot.
   - [ ] **2c — flow-event sink → audit re-emission.** Subscribe to rvproxy's
         `FlowEvent` export (needs the rvproxy JSONL/UDS export followup) and
         re-feed `signer_task`'s chain so the claim-10 audit stays mvm's source of
