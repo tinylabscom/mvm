@@ -69,14 +69,28 @@ The target shape is:
 
 - [x] Document release-binary installation as the primary user path, separate
       from source-checkout Nix builds.
-- [ ] Define the release artifact matrix for Linux and macOS, including
-      architecture, checksums, signatures, and provenance metadata.
-- [ ] Decide whether a Nix expression that installs release binaries is useful
+- [x] Define the release artifact matrix for Linux and macOS, including
+      architecture, checksums, signatures, and provenance metadata. → documented
+      in [`../notes/plan-199-release-artifact-matrix.md`](../notes/plan-199-release-artifact-matrix.md)
+      (3 published binary targets + the deferred Intel-mac row; per-target
+      sha256 + cosign bundle; combined manifest; signed SBOM; per-arch image set).
+- [x] Decide whether a Nix expression that installs release binaries is useful
       for Nix users; if added, keep it separate from the source-built package
-      and mark `binaryNativeCode` provenance explicitly.
-- [ ] Add release verification tests or CI checks proving every published
+      and mark `binaryNativeCode` provenance explicitly. → **Decided: not now.**
+      install.sh + Homebrew + `cargo install` cover binary install; the
+      source-built `packages.<system>.mvmctl` is the Nix path. Revisit only on
+      Nix-user demand; if added it must be a separate `binaryNativeCode`-marked
+      package (WS-B's structural test already guards the source package against
+      release tarballs).
+- [x] Add release verification tests or CI checks proving every published
       archive has a checksum, signature, and matching `mvmctl --version`
-      metadata.
+      metadata. → `packaging/release/verify-release-assets.sh` (fail-closed:
+      per-target tarball + matching sha256 + cosign signature bundle + manifest
+      entry + signed SBOM, with `--cosign` validity check and a host-native
+      `--expect-version` assertion) wired as the `verify-release` job in
+      `release.yml` (needs `release`). Self-tested across happy-path + 6 tamper
+      cases (bad checksum, missing signature, missing tarball, not-in-manifest,
+      missing SBOM sig, version mismatch).
 - [x] Keep install docs clear that package-manager and one-line installs do not
       require host Nix.
 
@@ -102,8 +116,9 @@ The target shape is:
 - [x] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] Builder-VM follow-up: `nix flake check --no-build` for `nix/`
 - [ ] Builder-VM follow-up: build `.#mvmctl` on at least one Linux system
-- [ ] Release artifact follow-up: verify signature/checksum metadata for the
-      published binary install path
+- [x] Release artifact follow-up: verify signature/checksum metadata for the
+      published binary install path → `verify-release` job in `release.yml`
+      (implemented + self-tested; executes on the next `v*` tag).
 
 ## Security notes
 
