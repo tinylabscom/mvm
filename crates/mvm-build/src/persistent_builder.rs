@@ -345,8 +345,8 @@ impl PersistentBuilderSupervisor {
     /// echoed id + spawned VMM pid on success, or
     /// [`PersistentBuilderError::WorkloadFailed`] if the guest
     /// refused. Workload requests get a single reply (no streaming),
-    /// so this uses [`Self::dispatch_single_response`] rather than the
-    /// build-job [`Self::dispatch`] streaming loop.
+    /// so this uses `Self::dispatch_single_response` rather than the
+    /// build-job `Self::dispatch` streaming loop.
     pub fn submit_workload_start(
         &self,
         params: WorkloadStartParams,

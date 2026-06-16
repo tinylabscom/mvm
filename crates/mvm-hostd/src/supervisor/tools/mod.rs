@@ -13,7 +13,7 @@
 //!    that.
 //! 2. **Audit emission** — every successful or failed invoke fires
 //!    a chain-signed entry through the
-//!    [`Recorder`](crate::supervisor::Recorder) under `EventCategory::Cmd` with
+//!    `Recorder` under `EventCategory::Cmd` with
 //!    the canonical event name `cmd.tool.<name>.{completed,failed}`.
 //!    The audit is best-effort: a chain-signer failure does not
 //!    fail the tool call.

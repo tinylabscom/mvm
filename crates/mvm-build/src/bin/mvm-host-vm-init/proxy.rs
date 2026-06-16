@@ -22,7 +22,7 @@
 //! trait so unit tests can supply a noop / fake controller. The
 //! production implementation [`ChildProxyLifecycle`] shells out to
 //! `mvm-egress-proxy`; tests use [`NoopProxyLifecycle`] (does
-//! nothing) or [`FakeProxyLifecycle`] (records start/stop calls).
+//! nothing) or `FakeProxyLifecycle` (records start/stop calls).
 //!
 //! ## Future complementary iptables drop-rule
 //!

@@ -2,7 +2,7 @@
 //!
 //! Stands in for the production wrapper binaries (e.g. `python-runner`)
 //! when exercising the per-call lifecycle — spawn, drain, poll, kill.
-//! Compiled as an ELF binary so the `/proc/self/fd/<n>` argv[0] that
+//! Compiled as an ELF binary so the `/proc/self/fd/<n>` `argv[0]` that
 //! `spawn_path` synthesizes on Linux loads directly without re-opening
 //! the path by name; a `#!/bin/sh` script would fail in that flow once
 //! the validation-held fd's `FD_CLOEXEC` had closed the fd before the

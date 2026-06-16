@@ -21,11 +21,11 @@
 //!   `mvmctl console` can find the artifacts), constructs a
 //!   [`mvm_build::vz::SupervisorConfig`] from the `VmStartConfig`, spawns
 //!   `mvm-vz-supervisor` with the JSON on stdin, and waits up to
-//!   [`PID_FILE_TIMEOUT`] for the supervisor to write its PID file.
+//!   `PID_FILE_TIMEOUT` for the supervisor to write its PID file.
 //! - `stop` reads `<vm_state_dir>/vz.pid`, sends `SIGTERM` (the
 //!   supervisor forwards to `VZVirtualMachine.requestStop()`), polls
 //!   for the process to exit, and falls back to `SIGKILL` after
-//!   [`STOP_TIMEOUT`].
+//!   `STOP_TIMEOUT`.
 //! - `status` reads the PID file and probes with `kill(pid, 0)`.
 //! - `list` walks `~/.mvm/vms/*/vz.pid`.
 //! - `logs` tails `<vm_state_dir>/console.log` (capture-only console).

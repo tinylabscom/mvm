@@ -1,9 +1,9 @@
 //! `LifecycleHooks` convenience layer.
 //!
 //! Three composable pieces sit underneath: the unified audit
-//! [`Recorder`](crate::supervisor::Recorder), the per-category metrics on
+//! `Recorder`, the per-category metrics on
 //! [`Metrics`](mvm_core::observability::metrics::Metrics), and the
-//! live [`EventBus`](crate::supervisor::EventBus). Each one stands on its own.
+//! live `EventBus`. Each one stands on its own.
 //! In practice, callers that want one usually want all three at
 //! once — every state-machine transition emits a durable audit
 //! record + bumps a counter + notifies live subscribers.

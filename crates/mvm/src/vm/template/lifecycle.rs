@@ -367,7 +367,7 @@ fn persisted_to_synthetic_spec(p: &PersistedManifest) -> TemplateSpec {
 ///    `template_artifacts_for_slot`.
 /// 3. **Bundle sha256** (also 64-char hex, but the slot dir doesn't
 ///    exist; the bundle registry under `~/.mvm/bundles/<sha>/` does)
-///    → [`bundle_artifacts_for_sha`]. Bundles are content-addressed
+///    → `bundle_artifacts_for_sha`. Bundles are content-addressed
 ///    images fetched + installed via `mvmctl bundle install`.
 ///
 /// Used by `mvmctl up` / `mvmctl exec` so the CLI can resolve a
@@ -670,7 +670,7 @@ pub fn template_list_slots() -> Result<Vec<SlotEntry>> {
 }
 
 /// Build a manifest-keyed slot using the dev build pipeline (local Nix in
-/// Lima or host). Mirrors [`template_build`] but operates on a
+/// Lima or host). Mirrors `template_build` but operates on a
 /// [`PersistedManifest`] instead of looking up by name.
 ///
 /// On success, the slot's `current` symlink points at

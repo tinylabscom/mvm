@@ -41,7 +41,7 @@ impl ConfigWatcher {
         Self::start_with_debounce(path, Duration::from_millis(500))
     }
 
-    /// Like [`start`] but with a configurable debounce duration.  Useful in
+    /// Like `start` but with a configurable debounce duration.  Useful in
     /// tests where a shorter debounce keeps suites fast.
     #[cfg(feature = "dev-watch")]
     pub fn start_with_debounce(path: &Path, debounce: Duration) -> Result<Self> {

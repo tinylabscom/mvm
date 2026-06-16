@@ -33,7 +33,7 @@
 //!
 //! Tier 3 / test-only. The mock accepts every request, never
 //! validates signatures, and never enforces policy. It mirrors
-//! [`MockBackend`]'s posture — never selectable from
+//! `MockBackend`'s posture — never selectable from
 //! `AnyBackend::auto_select`, only via `--hypervisor mock`.
 
 use std::io::{Read, Write};

@@ -78,7 +78,7 @@ pub struct AuditSignerHandle {
 /// Spawn the per-VM `mvm-audit-signer` moat. Hands it a JSON `SubprocessConfig`
 /// on stdin (chain JSONL + host-signer key + the UDS to bind), detaches it via
 /// `setsid` so it outlives `mvmctl up`, waits for it to bind the UDS, and
-/// writes [`AUDIT_SIGNER_PID_FILE`] for the stop path to reap.
+/// writes `AUDIT_SIGNER_PID_FILE` for the stop path to reap.
 pub fn spawn_audit_signer(params: AuditSignerSpawnParams<'_>) -> Result<AuditSignerHandle> {
     spawn_audit_signer_with_timeout(params, AUDIT_SIGNER_READY_TIMEOUT)
 }
@@ -244,7 +244,7 @@ pub struct BrokerHandle {
 /// forwards the guest's dial to. Hands it a JSON `SubprocessConfig` on stdin
 /// (the audit-signer UDS to forward `host.audit.v1` to + the host-signer
 /// pubkey), `setsid`-detaches, waits for the UDS, and writes
-/// [`BROKER_PID_FILE`] for the stop path to reap.
+/// `BROKER_PID_FILE` for the stop path to reap.
 pub fn spawn_broker(params: BrokerSpawnParams<'_>) -> Result<BrokerHandle> {
     spawn_broker_with_timeout(params, BROKER_READY_TIMEOUT)
 }

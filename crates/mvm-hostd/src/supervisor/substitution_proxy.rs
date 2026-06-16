@@ -741,8 +741,8 @@ impl SubstitutionService {
     /// the request to the real destination — returning its response verbatim.
     ///
     /// Linux-only: `SO_ORIGINAL_DST` is an `SOL_IP` getsockopt. The substitution
-    /// core ([`terminator::handler::handle_request`]) and the splice
-    /// ([`terminator::listener::forward_http_raw`]) are sync + blocking, so each
+    /// core (`terminator::handler::handle_request`) and the splice
+    /// (`terminator::listener::forward_http_raw`) are sync + blocking, so each
     /// connection's syscalls (orig-dst, request read, forward, write-back) run
     /// on `spawn_blocking` threads, off the reactor. A failure on one connection
     /// is logged and the socket dropped — never fatal to the loop.

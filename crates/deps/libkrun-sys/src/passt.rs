@@ -4,7 +4,7 @@
 //! virtio-net frames the libkrun guest writes to a unixstream socket
 //! and AF_INET sockets on the host. Together with libkrun's
 //! `krun_add_net_unixstream` (exposed via
-//! [`crate::sys::Context::add_net_unixstream_fd`]) it replaces
+//! `crate::sys::Context::add_net_unixstream_fd`) it replaces
 //! libkrun's TSI mode, which breaks on the HTTP patterns nix relies
 //! on for substituter / source fetches.
 //!

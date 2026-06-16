@@ -1,7 +1,7 @@
 //! `mvm-substitution-endpoint` — the per-VM secret-substitution moat.
 //! Spawned per-VM by the backend, it is the one process that holds
 //! the workload's secrets in the clear: it opens the host's encrypted secret +
-//! binding stores, builds the per-VM [`SubstitutionService`], and serves the
+//! binding stores, builds the per-VM `SubstitutionService`, and serves the
 //! guest→host substitution channel. The guest only ever holds the opaque
 //! `mvm-secret-<hex>` placeholder; the real credential is substituted here and
 //! reaches the wire via the host forward leg — never the guest.

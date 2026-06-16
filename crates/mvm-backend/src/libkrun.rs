@@ -14,12 +14,12 @@
 //! - `start` writes `~/.mvm/vms/<name>/{rootfs.ref,kernel.ref}` runtime
 //!   metadata (so `mvmctl console` can find the artifacts), serializes a
 //!   [`SupervisorConfig`], spawns `mvm-libkrun-supervisor` with the JSON
-//!   on stdin, and waits up to [`PID_FILE_TIMEOUT`] for the supervisor
+//!   on stdin, and waits up to `PID_FILE_TIMEOUT` for the supervisor
 //!   to write its PID file. Returns once the supervisor is running or
 //!   exits with an error if the spawn fails or PID file never appears.
 //! - `stop` reads `<vm_state_dir>/libkrun.pid`, sends `SIGTERM`, polls
 //!   for the process to exit, and falls back to `SIGKILL` if it doesn't
-//!   die within [`STOP_TIMEOUT`].
+//!   die within `STOP_TIMEOUT`.
 //! - `status` reads the PID file and probes with `kill(pid, 0)`.
 //! - `list` walks `~/.mvm/vms/*/libkrun.pid`.
 

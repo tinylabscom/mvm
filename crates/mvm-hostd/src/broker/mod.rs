@@ -1,8 +1,8 @@
 //! `mvm-broker` — host services broker subprocess.
 //!
-//! Owns the dispatch-loop, the UDS listener, and the [`SubprocessConfig`]
+//! Owns the dispatch-loop, the UDS listener, and the `SubprocessConfig`
 //! envelope the supervisor passes on stdin. Handlers (`host.time.v1`,
-//! `host.cost.v1`, `broker.v1`) wire in through [`Registry::register`] —
+//! `host.cost.v1`, `broker.v1`) wire in through `Registry::register` —
 //! until any are registered every call returns `Err(NotBound)`.
 //!
 //! What does NOT live here (owned by the supervisor side unless noted):

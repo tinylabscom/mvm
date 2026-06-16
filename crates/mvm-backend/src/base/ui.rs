@@ -55,7 +55,7 @@ fn prefix() -> String {
     "[mvm]".bold().cyan().to_string()
 }
 
-/// Print an informational message: [mvm] message
+/// Print an informational message: `[mvm]` message
 pub fn info(msg: &str) {
     if chrome_to_stderr() {
         eprintln!("{} {}", prefix(), msg);
@@ -64,7 +64,7 @@ pub fn info(msg: &str) {
     }
 }
 
-/// Print a success message: [mvm] message (in green)
+/// Print a success message: `[mvm]` message (in green)
 pub fn success(msg: &str) {
     if chrome_to_stderr() {
         eprintln!("{} {}", prefix(), msg.green());
@@ -73,12 +73,12 @@ pub fn success(msg: &str) {
     }
 }
 
-/// Print an error message: [mvm] ERROR: message (in red).
+/// Print an error message: `[mvm]` ERROR: message (in red).
 pub fn error(msg: &str) {
     eprintln!("{} {}", "[mvm]".bold().red(), msg.red());
 }
 
-/// Print a warning message: [mvm] message (in yellow)
+/// Print a warning message: `[mvm]` message (in yellow)
 pub fn warn(msg: &str) {
     if chrome_to_stderr() {
         eprintln!("{} {}", prefix(), msg.yellow());
@@ -87,7 +87,7 @@ pub fn warn(msg: &str) {
     }
 }
 
-/// Print a numbered step: [mvm] Step n/total: message
+/// Print a numbered step: `[mvm]` Step n/total: message
 pub fn step(n: u32, total: u32, msg: &str) {
     let formatted = format!(
         "\n{} {} {}",

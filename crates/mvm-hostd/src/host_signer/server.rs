@@ -1,5 +1,5 @@
 //! UDS server loop — accepts `SignRequest` envelopes from the supervisor,
-//! dispatches via [`Keystore`], writes back the [`SignResponse`].
+//! dispatches via `Keystore`, writes back the [`SignResponse`].
 //!
 //! Frame format: 4-byte big-endian length prefix + JSON `SignRequest`.
 //! Response: 4-byte big-endian length prefix + JSON `SignResponse`.

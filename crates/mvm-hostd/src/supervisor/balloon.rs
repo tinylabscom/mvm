@@ -392,7 +392,7 @@ fn macos_level_to_pressure(level: i32) -> f32 {
 /// Pick the best-available pressure source for the current host.
 ///
 /// - Linux with PSI available → [`PsiPressureSource`].
-/// - macOS → [`VmPressureLevelSource`] (which itself falls back
+/// - macOS → `VmPressureLevelSource` (which itself falls back
 ///   to sysinfo on sysctl failure).
 /// - Anything else → [`SysinfoPressureSource`].
 ///

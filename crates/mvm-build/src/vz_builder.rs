@@ -47,7 +47,7 @@ use crate::libkrun_builder::{
 
 /// Standard kernel cmdline the Vz supervisor pairs with the builder
 /// VM's rootfs. Matches `mvm_backend::vz::DEFAULT_CMDLINE`'s shape —
-/// console on the virtio-hvc port (so [`Self::console_log_path`]
+/// console on the virtio-hvc port (so `Self::console_log_path`
 /// captures it), rootfs as the first virtio-blk device, builder VM
 /// init at `/init`.
 ///
@@ -94,7 +94,7 @@ pub struct VzBuilderBackend {
 impl VzBuilderBackend {
     /// Construct over an already-resolved supervisor path + image.
     /// Refuses [`BuilderVmImage::RootDir`] — that variant is
-    /// libkrun-only. Used by [`Self::new`] and by tests that want to
+    /// libkrun-only. Used by `Self::new` and by tests that want to
     /// inject a fake supervisor without touching the filesystem.
     pub fn new_with_rootfs_image(
         supervisor_path: PathBuf,
@@ -1067,7 +1067,7 @@ impl VzPersistentBuilderVm {
     /// through the dispatch socket that
     /// [`VzPersistentVmHandle::dispatch_socket_path`] points at.
     ///
-    /// Layered like [`LibkrunPersistentHostVm::start`]:
+    /// Layered like `LibkrunPersistentHostVm::start`:
     /// pre-flight checks (Vz available, workspace dir exists,
     /// supervisor binary resolvable) → image + nix-store lock
     /// acquisition → state dir + job dir staging →
@@ -1497,7 +1497,7 @@ pub fn persistent_vz_vsock_dir(session_id: &str) -> PathBuf {
 }
 
 /// Read the supervisor PID file under `state_dir` and SIGTERM the
-/// process, escalating to SIGKILL after [`PERSISTENT_VZ_STOP_TIMEOUT`].
+/// process, escalating to SIGKILL after `PERSISTENT_VZ_STOP_TIMEOUT`.
 /// Idempotent: a missing PID file or an already-dead process is a
 /// clean no-op (the file is unlinked either way). Returns whether a
 /// live supervisor was actually signalled. Mirrors the

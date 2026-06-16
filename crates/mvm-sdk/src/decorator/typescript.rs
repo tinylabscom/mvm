@@ -4,7 +4,7 @@
 //! tree-sitter-typescript and extracts the literal kwargs from the
 //! single `mvm.app({...})(fn)` site at module scope. Both parsers
 //! produce a `BTreeMap<String, super::value::Value>` and hand it to
-//! [`super::value::lower_to_workload`] for the IR.
+//! `super::value::lower_to_workload` for the IR.
 //!
 //! Surface for v1:
 //!

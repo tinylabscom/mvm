@@ -229,7 +229,7 @@ impl std::fmt::Display for InstanceReadiness {
 /// Per-instance network configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceNet {
-    /// TAP device name: "tn<net_id>i<offset>"
+    /// TAP device name: `tn<net_id>i<offset>`
     pub tap_dev: String,
     /// Deterministic MAC: "02:xx:xx:xx:xx:xx"
     pub mac: String,
@@ -241,7 +241,7 @@ pub struct InstanceNet {
     pub cidr: u8,
 }
 
-/// Full instance state, persisted at instances/<id>/instance.json.
+/// Full instance state, persisted at `instances/<id>/instance.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceState {
     pub instance_id: String,
