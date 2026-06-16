@@ -170,13 +170,12 @@ fn build_manifest(
     })?;
 
     // An `image`-source manifest selects an OCI image, not a flake. The
-    // image build path is a separate Plan 200 workstream; until it is
-    // wired, fail closed rather than silently building the default "."
-    // flake for an image manifest.
+    // image build path is not wired yet, so fail closed rather than
+    // silently building the default "." flake for an image manifest.
     if manifest.is_image_source() {
         anyhow::bail!(
             "manifest selects an `image` source ({:?}); `build` only handles \
-             flake sources today — image-backed builds land in a later Plan 200 slice",
+             flake sources today — image-backed builds are not wired yet",
             manifest.image.as_deref().unwrap_or_default()
         );
     }
