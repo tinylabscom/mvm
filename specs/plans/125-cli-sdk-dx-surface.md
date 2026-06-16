@@ -159,11 +159,21 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
         fail-closed-on-no-bind. The gated `start()`/stop() wiring moves to b2,
         wired alongside the broker (so no idle audit-signer spawns before a
         consumer exists).
-      - [ ] **E5.3b-2** — per-VM `mvm-broker` spawn binding
-        `vm_vsock_port_socket(name, BROKER_PORT)` + `ServiceCallCtx`
-        enrichment + the gated `start()`/stop() wiring for **both** subprocesses
-        (mirroring `spawn_libkrun_egress_endpoint_if_needed`, libkrun + vz).
-        Unblocks the round-trip.
+      - **E5.3b-2** — per-VM `mvm-broker` spawn + wiring. Unblocks the round-trip.
+        - [x] **E5.3b-2a** — `spawn_broker` in `broker_services_spawn` (mirror
+          `spawn_audit_signer`): binds `vm_vsock_port_socket(name, BROKER_PORT)`
+          (the per-VM socket the VMM forwards the guest's dial to); config
+          carries the `audit_signer_uds_path` (from b1's handle, gates
+          `host.audit.v1`) + the host-signer pubkey; UDS-poll readiness, PID
+          file, `reap_broker`. Shared `spawn_detached_with_config` extracted so
+          the two spawns can't drift. Stub-bin tested.
+        - [ ] **E5.3b-2b** — the gated `start()`/stop() wiring for **both**
+          subprocesses (libkrun + vz, mirroring
+          `spawn_libkrun_egress_endpoint_if_needed`): spawn the audit-signer
+          then the broker on an admitted `up`, RAII-reap on early return, reap
+          on `stop`. This is what actually makes a guest call reach the host.
+        - [ ] **E5.3b-2c** — `ServiceCallCtx` enrichment (correlation rewrite /
+          profile / session) in the broker server (`mvm-hostd`).
       - [ ] **E5.3b-3** — PyO3/napi veneer.
       - [ ] **E5.3b-4** — live-VM E2E on the dev-kvm box.
   - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
