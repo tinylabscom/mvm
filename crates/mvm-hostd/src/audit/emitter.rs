@@ -322,70 +322,13 @@ impl AuditEmitter {
 mod tests {
     use super::*;
     use crate::supervisor::verify_audit_chain;
-    use mvm_core::plan::{
-        AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
-        KeyRotationSpec, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
-        RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
-    };
     use rand::rngs::OsRng;
-    use std::collections::BTreeMap;
 
     fn fixture_plan(tenant: &str, plan_id: &str) -> ExecutionPlan {
-        let now = chrono::Utc::now();
-        ExecutionPlan {
-            schema_version: SCHEMA_VERSION,
-            plan_id: PlanId(plan_id.to_string()),
-            plan_version: 1,
-            tenant: TenantId(tenant.to_string()),
-            workload: WorkloadId("vm-test".to_string()),
-            runtime_profile: RuntimeProfileRef("firecracker".to_string()),
-            image: SignedImageRef {
-                name: "vm-test".to_string(),
-                sha256: "a".repeat(64),
-                cosign_bundle: None,
-                entrypoint_present: true,
-            },
-            resources: Resources {
-                cpus: 1,
-                mem_mib: 128,
-                disk_mib: 0,
-                timeouts: TimeoutSpec {
-                    boot_secs: 30,
-                    exec_secs: 0,
-                },
-            },
-            admission_profile: AdmissionProfile::local_default(
-                "vm:boot",
-                PlanSeccompTier::Standard,
-            ),
-            network_policy: PolicyRef("local-default".to_string()),
-            fs_policy: FsPolicyRef("local-default".to_string()),
-            secrets: Vec::new(),
-            egress_policy: PolicyRef("local-default".to_string()),
-            redaction: Default::default(),
-            tool_policy: PolicyRef("local-default".to_string()),
-            artifact_policy: ArtifactPolicy {
-                capture_paths: Vec::new(),
-                retention_days: 0,
-            },
-            audit_labels: BTreeMap::new(),
-            key_rotation: KeyRotationSpec { interval_days: 0 },
-            attestation: AttestationRequirement {
-                mode: AttestationMode::Noop,
-            },
-            release_pin: None,
-            post_run: PostRunLifecycle {
-                destroy_on_exit: true,
-                snapshot_on_idle: false,
-                idle_secs: 0,
-            },
-            valid_from: now,
-            valid_until: now + chrono::Duration::minutes(10),
-            nonce: Nonce::from_bytes([0u8; 16]),
-            bundle: None,
-            deps_volume: None,
-            shares: Vec::new(),
-        }
+        mvm_core::plan::test_support::PlanFixture::new()
+            .tenant(tenant)
+            .plan_id(plan_id)
+            .build()
     }
 
     #[test]
