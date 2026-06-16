@@ -165,6 +165,21 @@
           };
         };
 
+      # libmvm_host_services.so — the in-guest host-services FFI shared
+      # object the language SDKs dlopen via ctypes/koffi. One JSON-in/
+      # JSON-out C ABI over the broker clients; built for the glibc workload
+      # rootfs (same platform as the agent), not the static-musl builder
+      # target — a cdylib needs the dynamic loader the rootfs provides.
+      mvmHostServicesFfiFor = system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        import (workspace + "/nix/packages/mvm-host-services-ffi.nix") {
+          inherit pkgs;
+          lib = pkgs.lib;
+          mvmSrc = workspace;
+        };
+
       # Pinned-for-determinism flags. MUST mirror:
       #
       # - `mvm_build::oci_to_rootfs::ext4::Mke2fsOptions::default`
@@ -214,6 +229,7 @@
           pkgs = import nixpkgs { inherit system; };
           guest = mvmGuestFor system;
           runner = mvmRunnerFor system;
+          hostsvc = mvmHostServicesFfiFor system;
         in
         pkgs.runCommand "mvm-runtime-overlay-${system}"
           {
@@ -223,7 +239,7 @@
               pkgs.coreutils
             ];
             passthru = {
-              inherit guest runner;
+              inherit guest runner hostsvc;
               version = overlayVersion;
               dataBlockSize = overlayBlockSize;
               verityHashAlgorithm = overlayVerityHashAlgorithm;
@@ -244,18 +260,29 @@
             cp ${guest}/bin/mvm-guest-netinit    "$staging/netinit"
             cp ${runner}/bin/mvm-runner          "$staging/runner"
 
-            # SDK runtime library placeholders. Later these get
-            # filled with the pyo3 / napi-rs hook libraries the
-            # vsock substitution depends on. Today they
-            # exist so the boot path stabilizes and downstream
-            # code (PYTHONPATH/NODE_PATH injection in the service
-            # supervisor) can reference fixed mount points.
-            mkdir -p "$staging/sdk-py" "$staging/sdk-ts"
-            cat > "$staging/sdk-py/README.md" <<EOF
-            mvm-sdk-runtime Python hooks (plan 74 W4 — placeholder).
-            EOF
+            # In-guest host-services FFI shared object. The language SDKs
+            # (mvm.audit / mvm.host) dlopen this via ctypes/koffi; it is the
+            # one JSON-in/JSON-out C ABI over the broker clients. The Python
+            # ctypes loader (mvm._hostsvc) defaults to this exact path.
+            mkdir -p "$staging/lib"
+            cp ${hostsvc}/lib/libmvm_host_services.so \
+              "$staging/lib/libmvm_host_services.so"
+            chmod 0555 "$staging/lib/libmvm_host_services.so"
+
+            # In-guest Python runtime SDK. PYTHONPATH points at
+            # /mvm/runtime/sdk-py (see mk-guest.nix), so the `mvm` package
+            # lands at /mvm/runtime/sdk-py/mvm and a booted workload's
+            # `import mvm; mvm.audit.emit(...)` resolves against the one
+            # cdylib above. Pure Python, copied from the workspace source.
+            mkdir -p "$staging/sdk-py"
+            cp -r ${workspace}/sdks/python/mvm "$staging/sdk-py/mvm"
+            find "$staging/sdk-py" -name '__pycache__' -type d -prune \
+              -exec rm -rf {} +
+
+            # TS runtime SDK placeholder — replaced by the koffi shim slice.
+            mkdir -p "$staging/sdk-ts"
             cat > "$staging/sdk-ts/README.md" <<EOF
-            mvm-sdk-runtime TypeScript hooks (plan 74 W4 — placeholder).
+            mvm-sdk-runtime TypeScript hooks (koffi shim — pending).
             EOF
 
             # Version pin. The resolver compares this to the

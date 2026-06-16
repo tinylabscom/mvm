@@ -85,7 +85,15 @@ from mvm._sandbox import (
 )
 from mvm._session import current_session_id
 
+# In-guest host-services runtime surface (`mvm.audit.emit`, `mvm.host.time()`).
+# Submodules, so `import mvm; mvm.audit.emit(...)` works inside a booted
+# workload. Importing them is cheap — the shared object is loaded lazily on
+# first call, never at import — so this stays inert in host authoring use.
+from mvm import audit, host
+
 __all__ = [
+    "audit",
+    "host",
     "DEFAULT_TTL_SECONDS",
     "MVM_CLI_BIN_ENV",
     "SCHEMA_VERSION",
