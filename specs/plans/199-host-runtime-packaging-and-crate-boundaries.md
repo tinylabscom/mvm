@@ -82,16 +82,32 @@ The target shape is:
 
 ### C. Crate-boundary audit
 
-- [ ] Record the current workspace package count and the reason each tiny crate
-      exists.
-- [ ] Decide whether `mvm-sdk-macros` should stay as a crate or be removed until
-      macro bodies actually ship.
-- [ ] Decide whether `mvm-mcp` remains independently useful or should move under
-      the CLI surface.
-- [ ] Keep `mvm-verify` separate unless the browser verifier stops needing a
-      wasm-clean dependency surface.
-- [ ] Keep `mvm-guest-helpers` as the grouped in-guest helper crate unless a
-      smaller binary packaging split is proven useful.
+Done 2026-06-16 — full write-up in
+[`../notes/plan-199-crate-boundary-audit.md`](../notes/plan-199-crate-boundary-audit.md).
+Headline: 17 crates, 328-crate default `mvmctl` closure; merging any two
+workspace crates removes **0** closure crates, so crate count is not the
+binary-size lever — boundaries are isolation/ownership decisions and are kept.
+
+- [x] Record the current workspace package count and the reason each tiny crate
+      exists. (17 crates inventoried; default closure 328; in-closure vs
+      separate-target split recorded.)
+- [x] Decide whether `mvm-sdk-macros` should stay as a crate or be removed until
+      macro bodies actually ship. → **Remove**: zero dependents (orphaned empty
+      placeholder); deletion is a pure subtraction across no boundary. Tracked as
+      a tested follow-up commit.
+- [x] Decide whether `mvm-mcp` remains independently useful or should move under
+      the CLI surface. → **Keep the crate**; recommend a future `mcp` cargo
+      feature on `mvm-cli` (code-size win only — it adds 0 new closure crates).
+      Do not merge: keeps the JSON-RPC surface testable in isolation.
+- [x] Keep `mvm-verify` separate unless the browser verifier stops needing a
+      wasm-clean dependency surface. → **Keep** (wasm-clean, zero `mvm-*` deps,
+      ADR-069; still required).
+- [x] Keep `mvm-guest-helpers` as the grouped in-guest helper crate unless a
+      smaller binary packaging split is proven useful. → **Keep grouped** (baked
+      into the rootfs, never in the host binary; no smaller split proven).
+
+**Surfaced actions (each its own tested follow-up):** (1) delete the orphaned
+`mvm-sdk-macros`; (2) feature-gate `mvm-mcp` behind an `mcp` feature.
 
 ### D. Verification
 
