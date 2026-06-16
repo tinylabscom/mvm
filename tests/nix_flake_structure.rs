@@ -603,3 +603,54 @@ fn flake_lock_pins_microvm_input_by_hash() {
         "flake.lock must pin inputs by `rev` (commit hash)"
     );
 }
+
+/// Plan 199 WS-B — the no-release-binary contract (ADR-046) must hold for
+/// *every* host package under `nix/packages/`, not just `mvmctl.nix`. A new
+/// sidecar package that pulled a project release tarball or carried
+/// `binaryNativeCode` provenance would silently bypass the source-build
+/// guarantee. This scans the whole directory (so adding such a package fails
+/// CI immediately) rather than naming files.
+///
+/// Note the forbidden set is deliberately *project-release-specific*: a host
+/// package may legitimately `fetchurl` its own **upstream source** (the future
+/// source-built `libkrun` / `libkrunfw` recipes do exactly this — Plan 199 WS-B
+/// native-VMM recipes). Source-building from a pinned upstream tarball is the
+/// contract; pulling an mvm-published release binary or shipping prebuilt
+/// native code is what's banned. The stricter "no fetch at all" rule stays
+/// scoped to `mvmctl.nix` (which builds purely from `mvmSrc`).
+#[test]
+fn no_host_package_uses_release_binary_provenance() {
+    let dir = nix_dir().join("packages");
+    // Project-release / prebuilt-binary provenance — never source.
+    let forbidden = [
+        "releases/download",
+        "github.com/tinylabscom/mvm/releases",
+        "tinylabscom/mvm/releases",
+        "binaryNativeCode",
+    ];
+    let mut scanned = 0usize;
+    for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("nix/packages/ must be present: {e}"))
+    {
+        let path = entry.expect("readable dir entry").path();
+        if path.extension().and_then(|s| s.to_str()) != Some("nix") {
+            continue;
+        }
+        let content =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let name = path.file_name().unwrap().to_string_lossy();
+        for needle in forbidden {
+            assert!(
+                !content.contains(needle),
+                "host package nix/packages/{name} must not use {needle:?} — host \
+                 packages are source-built, never mvm-published release binaries \
+                 (ADR-046 / Plan 199 WS-B)"
+            );
+        }
+        scanned += 1;
+    }
+    // Guard against the scan silently matching nothing (wrong dir / glob drift).
+    assert!(
+        scanned >= 5,
+        "expected to scan every nix/packages/*.nix host package; only saw {scanned}"
+    );
+}
