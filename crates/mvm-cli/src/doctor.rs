@@ -258,6 +258,90 @@ fn builder_store_check() -> Check {
     }
 }
 
+/// The builder VM's fixed egress posture, appended to every
+/// builder-egress line as an affirmation. The builder VM locks egress on
+/// the deps-install arm (proxy-uid-only, fail-closed) and opens it for
+/// flake-build fetches — a fixed design, not a runtime decision.
+const BUILDER_EGRESS_POSTURE: &str = "egress is locked on the deps-install arm (proxy-uid-only, fail-closed) \
+     and open for flake-build fetches";
+
+/// Map a parsed network-bootstrap outcome to its `Check` body.
+/// Pure so the classification → report mapping is unit-testable without
+/// touching the filesystem.
+#[cfg(feature = "builder-vm")]
+fn builder_egress_check_from_outcome(outcome: mvm_build::guest_net::BuilderNetBootstrap) -> Check {
+    use mvm_build::guest_net::BuilderNetBootstrap;
+    // The check name is already "builder egress", and the renderer prints
+    // it as `builder egress: <status> (<info>)` — so the info body omits
+    // the redundant prefix and leads with the outcome.
+    let (ok, info) = match outcome {
+        BuilderNetBootstrap::Lease { ip } => (
+            true,
+            format!("DHCP lease {ip} via the gvproxy gateway; {BUILDER_EGRESS_POSTURE}"),
+        ),
+        BuilderNetBootstrap::StaticFallback { ip } => (
+            true,
+            format!(
+                "static fallback {ip} (no DHCP lease — degraded but \
+                 reachable); {BUILDER_EGRESS_POSTURE}"
+            ),
+        ),
+        BuilderNetBootstrap::Failed => (
+            false,
+            format!(
+                "net bootstrap FAILED (no DHCP lease, no static fallback \
+                 — builds can't fetch); {BUILDER_EGRESS_POSTURE}"
+            ),
+        ),
+        BuilderNetBootstrap::Unknown => (
+            true,
+            format!("outcome not yet recorded in console.log; {BUILDER_EGRESS_POSTURE}"),
+        ),
+    };
+    Check {
+        name: "builder egress",
+        category: "platform",
+        ok,
+        info,
+    }
+}
+
+/// Surface the persistent builder VM's last network-bootstrap outcome
+/// (DHCP lease / static fallback / failure) so the failure class is
+/// diagnosable without reading the guest console by hand.
+///
+/// Reads the persistent dev builder VM's host-side `console.log`. Only the
+/// Vz dev VM (the macOS-26 default) has a stable, predictable console-log
+/// path under a fixed session id; the libkrun persistent path keys off an
+/// opaque per-run job id, so there is no analogous fixed helper to probe.
+#[cfg(feature = "builder-vm")]
+fn builder_egress_check() -> Check {
+    let log_path = mvm_build::vz_builder::dev_builder_vz_console_log();
+    let Ok(contents) = std::fs::read_to_string(&log_path) else {
+        return Check {
+            name: "builder egress",
+            category: "platform",
+            ok: true,
+            info: "no builder VM yet (run `mvmctl dev up`)".to_string(),
+        };
+    };
+    let outcome = mvm_build::guest_net::classify_builder_net_bootstrap(&contents);
+    builder_egress_check_from_outcome(outcome)
+}
+
+/// Stub when the `builder-vm` feature is off — the Vz console-log helper
+/// is feature-gated, and a CLI built without builder support never boots
+/// a builder VM.
+#[cfg(not(feature = "builder-vm"))]
+fn builder_egress_check() -> Check {
+    Check {
+        name: "builder egress",
+        category: "platform",
+        ok: true,
+        info: "n/a (mvm-cli built without `builder-vm` feature)".to_string(),
+    }
+}
+
 /// One-line summary of a dry-run convergence report for `doctor`.
 /// Pure so it's testable without touching the registry.
 fn registry_drift_summary(report: &mvm::vm::reconcile::ConvergeReport) -> String {
@@ -341,6 +425,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(ts_runner_check());
     checks.push(stage0_status_check());
     checks.push(builder_store_check());
+    checks.push(builder_egress_check());
     checks.push(registry_drift_check());
 
     checks.push(disk_space_check(false));
@@ -2444,6 +2529,88 @@ mod tests {
             info: "not found".to_string(),
         };
         assert!(!c.ok);
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn builder_egress_lease_is_ok_and_names_ip() {
+        use mvm_build::guest_net::BuilderNetBootstrap;
+        let c = builder_egress_check_from_outcome(BuilderNetBootstrap::Lease {
+            ip: "192.168.127.3".to_string(),
+        });
+        assert_eq!(c.name, "builder egress");
+        assert_eq!(c.category, "platform");
+        assert!(c.ok);
+        assert!(c.info.contains("DHCP lease 192.168.127.3"));
+        assert!(c.info.contains("gvproxy gateway"));
+        assert!(c.info.contains("fail-closed"), "posture appended");
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn builder_egress_static_fallback_is_ok_but_degraded() {
+        use mvm_build::guest_net::BuilderNetBootstrap;
+        let c = builder_egress_check_from_outcome(BuilderNetBootstrap::StaticFallback {
+            ip: "192.168.127.3".to_string(),
+        });
+        assert!(c.ok);
+        assert!(c.info.contains("static fallback 192.168.127.3"));
+        assert!(c.info.contains("degraded but reachable"));
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn builder_egress_failed_is_not_ok() {
+        use mvm_build::guest_net::BuilderNetBootstrap;
+        let c = builder_egress_check_from_outcome(BuilderNetBootstrap::Failed);
+        assert!(!c.ok);
+        assert!(c.info.contains("FAILED"));
+        assert!(c.info.contains("can't fetch"));
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn builder_egress_unknown_is_ok() {
+        use mvm_build::guest_net::BuilderNetBootstrap;
+        let c = builder_egress_check_from_outcome(BuilderNetBootstrap::Unknown);
+        assert!(c.ok);
+        assert!(c.info.contains("not yet recorded"));
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn builder_egress_check_reports_no_vm_when_console_log_absent() {
+        use mvm_core::util::test_env::TestEnv;
+        // With MVM_CACHE_DIR pointed at an empty dir there is no
+        // persistent builder console.log, so the check reports the
+        // no-VM-yet info and exits ok.
+        let scratch = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", scratch.path());
+        let c = builder_egress_check();
+        assert!(c.ok);
+        assert!(c.info.contains("no builder VM yet"));
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn builder_egress_check_classifies_a_fixture_console_log() {
+        use mvm_core::util::test_env::TestEnv;
+        let scratch = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", scratch.path());
+        // Materialize a fixture console.log at the exact path the helper
+        // resolves, then assert the lease is read end-to-end.
+        let log = mvm_build::vz_builder::dev_builder_vz_console_log();
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(
+            &log,
+            "udhcpc: lease of 192.168.127.3 obtained from 192.168.127.1, lease time 3600\n",
+        )
+        .unwrap();
+        let c = builder_egress_check();
+        assert!(c.ok);
+        assert!(c.info.contains("DHCP lease 192.168.127.3"));
     }
 
     #[test]
