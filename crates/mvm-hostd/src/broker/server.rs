@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use mvm_core::policy::security::AgentProfile;
-use mvm_core::protocol::broker::{ServiceCall, ServiceResponse};
+use mvm_core::protocol::broker::{CorrelationId, ServiceCall, ServiceResponse};
 use mvm_core::protocol::handler::ServiceCallCtx;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -76,19 +76,29 @@ async fn handle_connection(
     max_frame_bytes: usize,
 ) -> Result<()> {
     let call = read_frame::<ServiceCall>(&mut stream, max_frame_bytes).await?;
+    // Reassign a server-authoritative correlation id at ingress: the
+    // guest-supplied `call.correlation_id` is NEVER trusted — a workload could
+    // otherwise choose an id that collides with or impersonates another entry
+    // in the chain-signed audit log. The reassigned id flows into the ctx
+    // (hence the audit entry) and the response. The guest does not match on it
+    // (one call per connection), so reassignment is transparent to it.
+    let correlation_id = mint_correlation_id();
     debug!(
         service = %call.service,
         verb = %call.verb,
-        correlation_id = %call.correlation_id,
-        "mvm-broker received call"
+        client_correlation_id = %call.correlation_id,
+        correlation_id = %correlation_id,
+        "mvm-broker received call (correlation id reassigned)"
     );
 
-    // Stub ctx: profile = Dev (default), composition counters = 0.
-    // The supervisor-side enriched envelope will populate these.
+    // session_id + profile are still stubbed; enriching them from the
+    // supervisor envelope is a follow-up (neither gates the registered
+    // host.audit.v1). The correlation id is the integrity-relevant field and is
+    // reassigned above.
     let ctx = ServiceCallCtx {
         workload_id: workload_id.clone(),
         tenant_id: tenant_id.clone(),
-        correlation_id: call.correlation_id.clone(),
+        correlation_id: correlation_id.clone(),
         session_id: "w1a-stub-session".to_string(),
         profile: AgentProfile::default(),
         composition_depth: 0,
@@ -100,11 +110,11 @@ async fn handle_connection(
         .await
     {
         Ok(payload) => ServiceResponse::Ok {
-            correlation_id: call.correlation_id,
+            correlation_id,
             payload,
         },
         Err(e) => ServiceResponse::Err {
-            correlation_id: call.correlation_id,
+            correlation_id,
             code: e.code,
             message: e.message,
         },
@@ -116,6 +126,18 @@ async fn handle_connection(
         .await
         .context("mvm-broker UDS shutdown failed")?;
     Ok(())
+}
+
+/// Mint a fresh, server-authoritative correlation id at frame ingress. Unique
+/// per (broker process, call): a process-id prefix + a monotonic counter — the
+/// broker is per-VM and serves one call per connection, so this never collides
+/// within a workload. No new dependency; the value is opaque (a future change
+/// to ULID/Snowflake is a serde-compatible widening since it stays a string).
+fn mint_correlation_id() -> CorrelationId {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    CorrelationId::new(format!("brk-{}-{:016x}", std::process::id(), n))
 }
 
 /// Read a length-prefixed JSON frame. Enforces the max-frame-bytes cap
@@ -217,7 +239,14 @@ mod tests {
                 code,
                 message,
             } => {
-                assert_eq!(correlation_id.as_str(), "01HBROKER0000000000000000");
+                // The broker reassigns a server-authoritative correlation id at
+                // ingress — the guest-supplied value is never trusted/echoed.
+                assert_ne!(correlation_id.as_str(), "01HBROKER0000000000000000");
+                assert!(
+                    correlation_id.as_str().starts_with("brk-"),
+                    "correlation id must be server-minted: {}",
+                    correlation_id.as_str()
+                );
                 assert_eq!(code, ServiceErrorCode::NotBound);
                 assert!(message.contains("host.time.v1"));
             }
