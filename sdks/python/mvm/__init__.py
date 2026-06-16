@@ -62,6 +62,12 @@ from mvm._dsl import (
     workload,
     workload_ref,
 )
+
+# In-guest host-services surface: `mvm.audit.emit(...)`, `mvm.host.time()`,
+# `mvm.host.cost()`. These speak vsock to the per-VM broker from inside a
+# microVM; on the host they raise a clear transport error. Imported here so
+# `mvm.audit` / `mvm.host` resolve as attributes (no connection at import).
+from mvm import audit, host
 from mvm._helpers import BrowserSandbox, CodeError, CodeSandbox
 from mvm._sandbox import (
     DEFAULT_TTL_SECONDS,
@@ -106,6 +112,7 @@ __all__ = [
     "WorkloadRef",
     "addon_use",
     "app",
+    "audit",
     "current_recording_dict",
     "current_session_id",
     "derive_schema",
@@ -119,6 +126,7 @@ __all__ = [
     "entrypoint_function",
     "func",
     "hook",
+    "host",
     "host_port",
     "literal",
     "local_path",
