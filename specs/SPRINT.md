@@ -2670,11 +2670,13 @@ Phase 1 host cross-compile targets **`<arch>-unknown-linux-musl` static**, not g
 - [ ] **Phase 1 re-plan** — implement [ADR-064](adrs/065-single-builder-dev-image.md) as the new Phase 1, coordinated with the `specs/prompts/93-phase-1-2-3-fast-secure-dev.md` track (do not race it).
 - [~] **PR-9 — adaptive readiness poll** (Phase 2 Lever 2). Landed: `adaptive_backoff` + `wait_for_guest_agent` rewired (20ms→500ms cap; cuts up to ~480ms dead time per readiness detection; timing-only, connect→negotiate ordering untouched). Deferred (tracked): the `connect_and_authenticate` combiner and the guest `socket/bind/listen`-first reorder — both touch the sealed-prod Ed25519 auth path / agent main and need a live VM to validate.
 - [ ] **PR-10 — warm pool of supervisors** `--warm-pool-size N` default 0 (Phase 2 Lever 3; guests unbooted until admission; control UDS reuses `deny_unknown_fields` parser + new fuzz target).
+- [ ] **PR-10c — density + concurrent-launch distribution bench** (🔴 proposed 2026-06-16; [`plans/118-supervisor-standby-pool-and-live-bench.md`](plans/118-supervisor-standby-pool-and-live-bench.md) §"Part C"). Extends PR-10a's probe to two metrics the warm pools exist to move: per-instance host footprint (`bench microvm-density --count K --max-count M`, platform-split PSS / `phys_footprint` accessor) and launch P50/P95/P99 under concurrency (`bench microvm-launch --concurrency N`). libkrun → Vz → FC, staged. Read-only; every boot still routes through claim-8 admission (no bypass); no new key/daemon/socket; `libkrun-live`-gated → zero new attack surface. Motivation + rejected alternatives (OpenResty egress gateway, eBPF enforcer, forked VMM, E2B→mvmd) recorded in [`notes/external-agent-sandbox-runtime-prior-art.md`](notes/external-agent-sandbox-runtime-prior-art.md). Inherits PR-10a's blocker for committed baselines (needs a freshly-built default-microvm image); pure substrate (percentile/footprint math + schema) lands VM-free now.
 
 ### Deferred (tracked in Plan 93 §deferred follow-ups)
 - [ ] Phase 2 Lever 1 kernel cmdline trim — gated on Plan 92/95 merge (plumbing + override allowlist land now).
 - [ ] Phase 2 Lever 4 VMM balloon — blocked on libkrun upstream balloon C API.
 - [ ] Vz + Firecracker/Linux coverage for the bind-mount and the launch bench.
+- [ ] **Rebuild the cached `default-microvm` image** — shared blocker for committed bench baselines. The dev-host cache predates the W1.4b runtime-overlay / `mvm-meta.json` sidecar, so `backend.start` correctly refuses it; this blocks **both** PR-10a's baseline JSON and PR-10c's footprint/latency baselines. Pure substrate for both lands VM-free without it; the committed live numbers do not. Unblocks two boxes at once.
 
 ### Sprint 59 success criteria
 - [ ] `mvmctl bench microvm-launch` produces a versioned JSON report + regression-gates against a baseline.
@@ -2682,6 +2684,7 @@ Phase 1 host cross-compile targets **`<arch>-unknown-linux-musl` static**, not g
 - [ ] `dev up` boots `dev-minimal` by default; `dev up --compile` boots `dev-compile`.
 - [ ] Reproducibility CI lane is byte-identical across two `macos-14` runners.
 - [ ] PRs 9–10 show measured handshake / process-spawn deltas (sub-200 ms headline itself gated on Plan 92/95).
+- [ ] PR-10c emits `HostDescriptor`-namespaced, regression-gated baselines for per-instance host footprint and P50/P95/P99 launch latency (libkrun + Vz), every boot through claim-8 admission, so the warm pool's payoff and our footprint/latency posture rest on committed numbers — not assertion.
 - [ ] `doctor` / `cache info` explain Stage 0 hit/miss without grepping the audit log; `vendor_blob_fetched` audited.
 - [ ] No security regression: admission + Ed25519 auth + TSI refusal + control-socket frame rejection covered by negative-path tests; `cargo test --workspace` green; `cargo clippy --workspace --all-targets -- -D warnings` clean.
 
