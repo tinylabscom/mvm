@@ -363,10 +363,17 @@ thread many related values through runtime/build/CLI layers.
       above; also dropped the post-fork malloc path (Step 2).
 - [x] `mvm-guest-agent` bin — done in the Step 1 agent pass above (the four
       remaining `close(fd)` / signal-handler-test blocks).
-- [ ] Annotate the remaining deeper `unsafe` cluster with `SAFETY:`
-      invariants, one reviewed file at a time (it needs genuine soundness
-      reasoning, not a formula): the `mvm-vm-host/vz_objc.rs` objc2 FFI (~100)
-      — best done while the Plan-152 vz work is quiet.
+- [x] `mvm-vm-host/vz_objc.rs` objc2 Vz bridge — **done (#976).** The "~100 raw
+      blocks" estimate was stale: the file already had 89 `SAFETY:` notes and uses
+      typed objc2 (only 3 raw `msg_send`). Audited the unsafe surface and filled
+      the ~16 gaps (the `define_class!` protocol conformances, the two
+      `msg_send![super(this), init]` delegate initializers,
+      `validateSaveRestoreSupportWithError`, and the bound-dgram-socket test's libc
+      cluster), each citing the file's serial-dispatch-queue / single-guest
+      ownership invariant. Every `unsafe` block now carries a SAFETY note.
+      Comment-only; verified on macOS arm64 (the only host that compiles this
+      objc2 code) — `clippy -p mvm-vm-host --bin mvm-vz-supervisor -- -D warnings`,
+      the lib test, nightly fmt.
 
 ### Task 9 - Audit feature and dependency boundaries
 
@@ -568,10 +575,15 @@ plus secret-bearing modules.
       run can't see `cfg`-gated modules, so it under-reports.
 - [x] `specs/SPRINT.md` reflects the plan and its real state.
 - [x] `specs/REFACTOR-STATUS.md` reflects the plan and its real state.
-- [x] **Closeout note — intentionally deferred debts, with reasons:**
-      1. **Task 8 — `mvm-vm-host/vz_objc.rs` objc2 SAFETY audit.** Held while the
-         Plan-152 vz work is active (concurrent vz worktrees/PRs); touching ~120
-         `msg_send` blocks now would collide. Resume when vz is quiet.
+- [x] **Closeout note — all deferred debts now resolved:**
+      1. **Task 8 — `mvm-vm-host/vz_objc.rs` objc2 SAFETY audit: DONE (#976).**
+         The "~120 `msg_send` blocks" estimate was stale — the file already had
+         89 `SAFETY:` notes and uses typed objc2 (3 raw `msg_send`). Filled the
+         ~16 gaps; every `unsafe` block now carries a SAFETY note citing the
+         serial-dispatch-queue / single-guest invariant. Comment-only, verified
+         on macOS arm64. (Done despite live vz work — the additive SAFETY notes
+         sit in the delegate/init/validate/test regions, disjoint from the
+         `feat/plan-152-vz-supervisor-hardening` struct/host-listen reshape.)
       2. **Task 13 — broken intra-doc links: DONE.** All 122 pre-existing broken
          intra-doc links (Linux `--all-features`) fixed; `cargo doc --workspace
          --all-features --no-deps` is clean under `-D broken_intra_doc_links` on
@@ -582,5 +594,5 @@ plus secret-bearing modules.
          `ci-full` `clippy -p mvm-build -p mvm-backend --all-targets` Linux lane
          is green on the box, no cascade. (No longer deferred.)
 
-      **Net: the only remaining Plan 185 item is Task 8 (`vz_objc.rs`), parked
-      until the vz work quiets.**
+      **Net: Plan 185 is COMPLETE — all of Phases 1–7 done, every task closed,
+      no remaining deferrals.**
