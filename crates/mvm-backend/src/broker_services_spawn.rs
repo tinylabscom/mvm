@@ -89,7 +89,6 @@ fn spawn_audit_signer_with_timeout(
     params: AuditSignerSpawnParams<'_>,
     ready_timeout: Duration,
 ) -> Result<AuditSignerHandle> {
-    use std::io::Write;
     let AuditSignerSpawnParams {
         workload_id,
         tenant_id,
@@ -97,7 +96,7 @@ fn spawn_audit_signer_with_timeout(
         state_dir,
     } = params;
 
-    let bin = resolve_audit_signer_path()?;
+    let bin = resolve_subprocess_bin("mvm-audit-signer", "MVM_AUDIT_SIGNER_PATH")?;
     let uds_path = state_dir.join(AUDIT_SIGNER_SOCK);
     let audit_dir = mvm_core::config::mvm_audit_dir();
     // The audit-signer opens the JSONL with O_APPEND|create; its parent must
@@ -119,7 +118,190 @@ fn spawn_audit_signer_with_timeout(
         "software_chain_key_path": mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_KEY),
     });
 
-    let mut cmd = Command::new(&bin);
+    let child = spawn_detached_with_config(&bin, &cfg, "mvm-audit-signer")?;
+    // The audit-signer emits no stdout handshake — it binds its UDS after
+    // parsing config. Readiness = the UDS path appears. On timeout, fail closed.
+    wait_for_uds("mvm-audit-signer", &uds_path, child.id(), ready_timeout)?;
+
+    let pid_file = state_dir.join(AUDIT_SIGNER_PID_FILE);
+    std::fs::write(&pid_file, child.id().to_string())
+        .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
+    // Detach: drop the child handle without killing. The subprocess runs
+    // daemonized (setsid) and is reaped by the stop path via the PID file.
+    Ok(AuditSignerHandle { uds_path })
+}
+
+/// Locate a per-VM subprocess binary `bin`: `<env_var>` override → sibling of
+/// the current exe → workspace `target/{release,debug}`. Mirrors
+/// `substitution_spawn::resolve_substitution_endpoint_path`; shared by the
+/// audit-signer + broker spawns so the lookup can't drift.
+fn resolve_subprocess_bin(bin: &str, env_var: &str) -> Result<PathBuf> {
+    if let Some(p) = std::env::var_os(env_var).map(PathBuf::from) {
+        if p.is_file() {
+            return Ok(p);
+        }
+        bail!("{env_var} points at {} which is not a file", p.display());
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
+        let candidate = dir.join(bin);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
+        for variant in ["release", "debug"] {
+            let candidate = workspace_root.join("target").join(variant).join(bin);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    bail!("could not locate the {bin} binary (set {env_var})")
+}
+
+/// Poll for the subprocess's UDS to appear within `timeout`. The subprocess
+/// binds it shortly after parsing its stdin config; a missing socket past the
+/// deadline (or an early exit) means the spawn failed — SIGKILL it and bail so
+/// the caller rolls back the VM (fail closed). Adaptive backoff keeps a fast
+/// bind cheap while bounding a slow one.
+fn wait_for_uds(what: &str, uds_path: &Path, pid: u32, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut backoff = Duration::from_millis(5);
+    loop {
+        if uds_path.exists() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            kill(pid as libc::pid_t, libc::SIGKILL);
+            bail!(
+                "{what} did not bind {} within {timeout:?}",
+                uds_path.display()
+            );
+        }
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(Duration::from_millis(100));
+    }
+}
+
+/// Reap the per-VM audit-signer (if this VM spawned one) and drop its PID file.
+/// Best-effort + idempotent: a VM with no audit-signer is a no-op. The liveness
+/// guard prevents signalling a recycled PID from a stale pidfile.
+pub fn reap_audit_signer(state_dir: &Path) {
+    let pid_file = state_dir.join(AUDIT_SIGNER_PID_FILE);
+    if let Some(pid) = read_pid(&pid_file)
+        && pid_alive(pid)
+    {
+        kill(pid, libc::SIGTERM);
+    }
+    let _ = std::fs::remove_file(&pid_file);
+}
+
+// ============================================================================
+// mvm-broker spawn
+// ============================================================================
+
+/// PID file for the per-VM broker, under the VM state dir.
+pub const BROKER_PID_FILE: &str = "broker.pid";
+
+/// Host-signer public-key filename under `mvm_keys_dir()` — the broker reads it
+/// to verify secrets-dispatcher response signatures.
+pub const HOST_SIGNER_PUB: &str = "host-signer.pub";
+
+/// How long the broker gets to bind its UDS before the spawn is declared failed
+/// (it then gets SIGKILLed and the caller fails closed).
+pub const BROKER_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Inputs to [`spawn_broker`].
+pub struct BrokerSpawnParams<'a> {
+    /// Admitted workload id.
+    pub workload_id: &'a str,
+    /// Tenant id.
+    pub tenant_id: &'a str,
+    /// VM name; the broker binds the per-VM `BROKER_PORT` socket keyed on it
+    /// (the VMM forwards the guest's `connect_host_vsock(BROKER_PORT)` there).
+    pub vm_name: &'a str,
+    /// Per-VM state dir; holds the broker PID file.
+    pub state_dir: &'a Path,
+    /// The audit-signer UDS from [`spawn_audit_signer`] — the broker's
+    /// `host.audit.v1` handler forwards entries here, and only registers that
+    /// service when this is set.
+    pub audit_signer_uds_path: &'a Path,
+}
+
+/// Handle to a spawned broker: the per-VM `BROKER_PORT` UDS the VMM proxies the
+/// guest's `connect_host_vsock(BROKER_PORT)` to.
+#[derive(Debug)]
+pub struct BrokerHandle {
+    /// The `vm_vsock_port_socket(vm_name, BROKER_PORT)` the broker bound.
+    pub uds_path: PathBuf,
+}
+
+/// Spawn the per-VM `mvm-broker` moat, binding the `BROKER_PORT` UDS the VMM
+/// forwards the guest's dial to. Hands it a JSON `SubprocessConfig` on stdin
+/// (the audit-signer UDS to forward `host.audit.v1` to + the host-signer
+/// pubkey), `setsid`-detaches, waits for the UDS, and writes
+/// [`BROKER_PID_FILE`] for the stop path to reap.
+pub fn spawn_broker(params: BrokerSpawnParams<'_>) -> Result<BrokerHandle> {
+    spawn_broker_with_timeout(params, BROKER_READY_TIMEOUT)
+}
+
+/// [`spawn_broker`] with an explicit readiness timeout — the test seam.
+fn spawn_broker_with_timeout(
+    params: BrokerSpawnParams<'_>,
+    ready_timeout: Duration,
+) -> Result<BrokerHandle> {
+    let BrokerSpawnParams {
+        workload_id,
+        tenant_id,
+        vm_name,
+        state_dir,
+        audit_signer_uds_path,
+    } = params;
+
+    let bin = resolve_subprocess_bin("mvm-broker", "MVM_BROKER_PATH")?;
+    // The broker binds the per-VM BROKER_PORT socket the VMM forwards the
+    // guest's `connect_host_vsock(BROKER_PORT)` dial to.
+    let uds_path = mvm_core::config::vm_vsock_port_socket(vm_name, mvm_guest::vsock::BROKER_PORT);
+    if let Some(parent) = uds_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow!("create broker socket dir {}: {e}", parent.display()))?;
+    }
+
+    let cfg = serde_json::json!({
+        "workload_id": workload_id,
+        "tenant_id": tenant_id,
+        "uds_path": uds_path,
+        "host_signer_public_key_path": mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_PUB),
+        // host.audit.v1 forwards each accepted entry to the per-VM audit-signer;
+        // the broker only registers that service when this is set.
+        "audit_signer_uds_path": audit_signer_uds_path,
+    });
+
+    let child = spawn_detached_with_config(&bin, &cfg, "mvm-broker")?;
+    // No stdout handshake — the broker just binds. Readiness = the UDS appears.
+    wait_for_uds("mvm-broker", &uds_path, child.id(), ready_timeout)?;
+    let pid_file = state_dir.join(BROKER_PID_FILE);
+    std::fs::write(&pid_file, child.id().to_string())
+        .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
+    Ok(BrokerHandle { uds_path })
+}
+
+/// Spawn `bin` detached (`setsid`), write `cfg` JSON to its stdin then close it
+/// (EOF), and hand back the child. The shared core of the audit-signer + broker
+/// spawns so the detach/pipe moat can't drift between them. stdout/stderr are
+/// nulled — both subprocesses log structured JSON to the supervisor's capture,
+/// and neither emits a stdout handshake (readiness is detected by UDS-poll).
+fn spawn_detached_with_config(
+    bin: &Path,
+    cfg: &serde_json::Value,
+    what: &str,
+) -> Result<std::process::Child> {
+    use std::io::Write;
+    let mut cmd = Command::new(bin);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -134,92 +316,21 @@ fn spawn_audit_signer_with_timeout(
     }
     let mut child = cmd
         .spawn()
-        .map_err(|e| anyhow!("spawn mvm-audit-signer ({}): {e}", bin.display()))?;
-
+        .map_err(|e| anyhow!("spawn {what} ({}): {e}", bin.display()))?;
     child
         .stdin
         .take()
-        .ok_or_else(|| anyhow!("audit-signer stdin was not piped"))?
+        .ok_or_else(|| anyhow!("{what} stdin was not piped"))?
         .write_all(cfg.to_string().as_bytes())
-        .map_err(|e| anyhow!("pipe SubprocessConfig to audit-signer: {e}"))?;
+        .map_err(|e| anyhow!("pipe SubprocessConfig to {what}: {e}"))?;
     // (stdin writer dropped here → EOF, so the subprocess stops reading config.)
-
-    // The audit-signer emits no stdout handshake — it binds its UDS after
-    // parsing config. Readiness = the UDS path appears. On timeout, fail closed.
-    wait_for_uds(&uds_path, child.id(), ready_timeout)?;
-
-    let pid_file = state_dir.join(AUDIT_SIGNER_PID_FILE);
-    std::fs::write(&pid_file, child.id().to_string())
-        .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
-    // Detach: drop the child handle without killing. The subprocess runs
-    // daemonized (setsid) and is reaped by the stop path via the PID file.
-    Ok(AuditSignerHandle { uds_path })
+    Ok(child)
 }
 
-/// Locate the `mvm-audit-signer` binary: `MVM_AUDIT_SIGNER_PATH` override →
-/// sibling of the current exe → workspace `target/{release,debug}`. Mirrors
-/// `substitution_spawn::resolve_substitution_endpoint_path`.
-fn resolve_audit_signer_path() -> Result<PathBuf> {
-    const BIN: &str = "mvm-audit-signer";
-    if let Some(p) = std::env::var_os("MVM_AUDIT_SIGNER_PATH").map(PathBuf::from) {
-        if p.is_file() {
-            return Ok(p);
-        }
-        bail!(
-            "MVM_AUDIT_SIGNER_PATH points at {} which is not a file",
-            p.display()
-        );
-    }
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf))
-    {
-        let candidate = dir.join(BIN);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
-        for variant in ["release", "debug"] {
-            let candidate = workspace_root.join("target").join(variant).join(BIN);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
-    bail!("could not locate the {BIN} binary (set MVM_AUDIT_SIGNER_PATH)")
-}
-
-/// Poll for the subprocess's UDS to appear within `timeout`. The subprocess
-/// binds it shortly after parsing its stdin config; a missing socket past the
-/// deadline (or an early exit) means the spawn failed — SIGKILL it and bail so
-/// the caller rolls back the VM (fail closed). Adaptive backoff keeps a fast
-/// bind cheap while bounding a slow one.
-fn wait_for_uds(uds_path: &Path, pid: u32, timeout: Duration) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    let mut backoff = Duration::from_millis(5);
-    loop {
-        if uds_path.exists() {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            kill(pid as libc::pid_t, libc::SIGKILL);
-            bail!(
-                "mvm-audit-signer did not bind {} within {timeout:?}",
-                uds_path.display()
-            );
-        }
-        std::thread::sleep(backoff);
-        backoff = (backoff * 2).min(Duration::from_millis(100));
-    }
-}
-
-/// Reap the per-VM audit-signer (if this VM spawned one) and drop its PID file.
-/// Best-effort + idempotent: a VM with no audit-signer is a no-op. The liveness
-/// guard prevents signalling a recycled PID from a stale pidfile.
-pub fn reap_audit_signer(state_dir: &Path) {
-    let pid_file = state_dir.join(AUDIT_SIGNER_PID_FILE);
+/// Reap the per-VM broker (if spawned) and drop its PID file. Best-effort +
+/// idempotent + liveness-guarded.
+pub fn reap_broker(state_dir: &Path) {
+    let pid_file = state_dir.join(BROKER_PID_FILE);
     if let Some(pid) = read_pid(&pid_file)
         && pid_alive(pid)
     {
@@ -417,6 +528,92 @@ mod tests {
         }
         let err = res.expect_err("a missing bin override must error");
         assert!(err.to_string().contains("is not a file"), "got {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn spawn_broker_binds_broker_port_with_audit_signer_uds() {
+        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("mvm-broker-spawn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved_home = std::env::var_os("HOME");
+        // SAFETY: serialised by HOME_TEST_LOCK.
+        unsafe { std::env::set_var("HOME", &dir) };
+
+        let state_dir = dir.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        // The broker binds the per-VM BROKER_PORT socket the VMM forwards to.
+        let uds = mvm_core::config::vm_vsock_port_socket("vm-1", mvm_guest::vsock::BROKER_PORT);
+        std::fs::create_dir_all(uds.parent().unwrap()).unwrap();
+        let captured = dir.join("captured-broker-config.json");
+
+        let stub = dir.join("stub-broker.sh");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\ncat > {cap}\ntouch {uds}\nsleep 5\n",
+                cap = captured.display(),
+                uds = uds.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let saved_bin = std::env::var_os("MVM_BROKER_PATH");
+        // SAFETY: serialised by HOME_TEST_LOCK.
+        unsafe { std::env::set_var("MVM_BROKER_PATH", &stub) };
+
+        let audit_uds = state_dir.join(AUDIT_SIGNER_SOCK);
+        let res = spawn_broker(BrokerSpawnParams {
+            workload_id: "wl-001",
+            tenant_id: "tenant-x",
+            vm_name: "vm-1",
+            state_dir: &state_dir,
+            audit_signer_uds_path: &audit_uds,
+        });
+
+        // SAFETY: serialised by HOME_TEST_LOCK.
+        unsafe {
+            match saved_bin {
+                Some(v) => std::env::set_var("MVM_BROKER_PATH", v),
+                None => std::env::remove_var("MVM_BROKER_PATH"),
+            }
+        }
+        let handle = res.expect("spawn with stub broker should succeed");
+        assert_eq!(handle.uds_path, uds);
+
+        let cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&captured).expect("stub wrote config"))
+                .expect("config is JSON");
+        assert_eq!(cfg["workload_id"], "wl-001");
+        assert_eq!(cfg["tenant_id"], "tenant-x");
+        // The broker binds the per-VM BROKER_PORT socket so the VMM forwards the
+        // guest's connect_host_vsock(BROKER_PORT) dial straight to it.
+        assert_eq!(cfg["uds_path"], uds.to_string_lossy().as_ref());
+        // host.audit.v1 is only registered when the audit-signer UDS is present.
+        assert_eq!(
+            cfg["audit_signer_uds_path"],
+            audit_uds.to_string_lossy().as_ref()
+        );
+        assert!(
+            cfg["host_signer_public_key_path"]
+                .as_str()
+                .unwrap()
+                .ends_with("host-signer.pub"),
+            "broker must point at the host-signer pubkey: {}",
+            cfg["host_signer_public_key_path"]
+        );
+        assert!(state_dir.join(BROKER_PID_FILE).exists());
+
+        reap_broker(&state_dir);
+        // SAFETY: serialised by HOME_TEST_LOCK.
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

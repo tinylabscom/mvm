@@ -103,7 +103,8 @@ pub use substitution_spawn::{
 /// Per-VM broker-services spawn/reap, called from the workload backends' launch
 /// path (E5.3b-2 wiring). Exposed so the backends and tests share one impl.
 pub use broker_services_spawn::{
-    AuditSignerHandle, AuditSignerSpawnParams, reap_audit_signer, spawn_audit_signer,
+    AuditSignerHandle, AuditSignerSpawnParams, BrokerHandle, BrokerSpawnParams, reap_audit_signer,
+    reap_broker, spawn_audit_signer, spawn_broker,
 };
 
 /// Crate-wide test serialization for tests that mutate `HOME` or
