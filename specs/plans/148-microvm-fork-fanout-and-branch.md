@@ -29,8 +29,15 @@ live-branch of a running workload.** That is the sibling's delta, and the agent
 fan-out use case (parallel rollouts, code-interpreter swarms, SWE-bench evals) is
 squarely mvm/mvmd territory.
 
-**Decision up front — no vendored Firecracker.** The sibling vendors a patched
-Firecracker branch to expose `mmap MAP_SHARED` on a memfd-backed *live* parent. That collides with three standing principles: keep VMM
+**Decision up front — no vendored Firecracker.** A live shared-memory parent
+(`mmap MAP_SHARED` on a memfd-backed running VM) needs a patched Firecracker — the
+sibling sketched exactly that fork and then **abandoned it** (decision recorded in
+its design notes, 2026-05-19): it deleted the patch and reached a ~143× pause-window
+reduction (a 4 GiB-RSS source dropped from ~29.3 s to ~205 ms) on **stock**
+Firecracker using only diff snapshots + `track_dirty_pages`, judging the residual
+headroom (snapshot-API round-trip + vCPU-state harvest) too small to justify owning
+a fork against upstream and weakening the vanilla-Firecracker trust story. That is
+independent external confirmation of our own three standing principles: keep VMM
 specifics behind the backend trait (the trick is Firecracker/x86_64/Linux-only,
 with no libkrun/Vz/AppleContainer analogue); replace a problematic dep rather than
 maintain a fork against upstream; and don't pay a vendored-hypervisor tax for a win
@@ -132,8 +139,11 @@ entropy_seed }`), `crates/mvm-core` plan/audit (`synthesize_plan` / `admit_for_r
 ## Phase B — live BRANCH (bounded spike, go/no-go)
 
 Branching a **running** parent into divergent children inheriting in-flight state is
-the sibling's speculative-branch feature and the one piece that wants a live shared-memory
-parent. This phase is investigation, not a vendoring commitment.
+the sibling's speculative-branch feature and the one piece that might want a live
+shared-memory parent. This phase is investigation, not a vendoring commitment — and
+the sibling's own retreat from the fork (it ships live BRANCH at ~56 ms via async
+`UFFD_WP` dirty-page capture on stock Firecracker, no vendored memfd) is a strong
+prior that B1 lands on go.
 
 ### Task B1: feasibility spike on stock Firecracker
 
@@ -204,9 +214,23 @@ parent. This phase is investigation, not a vendoring commitment.
   single-restore path is the prereq, not the feature.
 - **The honest win:** Phase A gives the "many-from-one" amortized-warmup benefit on
   stock Firecracker via page-cache sharing of a frozen base. The sub-ms `mmap`
-  fork-of-a-live-parent that needs the vendored hypervisor is deliberately deferred
-  to a measured go/no-go (Phase B), because we don't yet know we need it.
+  fork-of-a-live-parent that would need a vendored hypervisor — a path the sibling
+  itself tried and then abandoned — is deliberately deferred to a measured go/no-go
+  (Phase B), because we don't yet know we need it.
 - **Where it runs:** the warm-pool orchestration and the *policy* for what a
   fan-out/branch admission requires are mvmd's (fleet) — cross-reference the mvmd
   warm-pool plan. This plan wires the mvm-side fan-out primitive + per-child
   admission call; mvmd decides when and how many.
+
+## Deferred follow-ups
+
+- [ ] **High-N host-memory hygiene (operational knobs the sibling learned the hard
+      way).** When many children share one resident base, two host-level tunings keep
+      a runaway child from taking down its siblings via the shared parent: (1) nudge
+      each child's `oom_score_adj` up (the sibling uses +500) so the OOM killer
+      reaps a runaway child before the shared base; (2) per-child `memory.max` already
+      lands in A2's cgroup setup — pair it with the score nudge. Evaluate a `doctor`
+      hint for KSM aggressiveness (`pages_to_scan` / `sleep_millisecs`) as a
+      backstop for divergent-but-similar pages on hosts running large fan-outs; with
+      page-cache CoW it is a backstop, not the primary sharing mechanism. Linux/
+      Firecracker only; gate behind the fan-out disposition (A4).
