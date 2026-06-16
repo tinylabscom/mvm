@@ -294,6 +294,20 @@ recipe (it exercises the full disk + memory freeze).
       cache is shared across every fork, so priming mutable/sensitive state would leak
       it (claim 1 / 11); the freeze step rejects a working set that escapes the rootfs.
 
+- [ ] **Diff-snapshot chains as a first-class warm artifact (the sibling's v0.5).** The
+      sibling stacks warm parents as a *chain* — `base → +numpy → +pandas` — where each
+      layer is a dirty-page diff recording its parent reference, and pulling a leaf pulls
+      its ancestors. mvm has the COW-delta *mechanism* (Plan 123 `SnapshotUpper`, content-
+      addressed store) and live-memory diff chaining (Plan 175 Task 2 Step 1) but no
+      *catalog-level* chain: a way to author "warm parent B is parent A plus this
+      `pip install` delta" so an incremental dep change re-warms in seconds against a
+      pinned ancestor instead of re-running the whole warmup. Evaluate folding a
+      `parent_artifact` reference + ancestor-set resolution into Task C2's warm-artifact
+      provenance, so each layer is independently signed/audited (claims 9/14) and a
+      fetch materializes the full chain. Distinct from C1's single base→delta freeze;
+      this is the *registry/provenance* framing of a multi-layer warm lineage. Sequences
+      behind Task C2 + Plan 175 Task 2 Step 1's chaining note.
+
 ## Success criteria
 
 - [ ] `Catalog` schema 2 round-trips with and without `warmup`; unknown fields rejected.
