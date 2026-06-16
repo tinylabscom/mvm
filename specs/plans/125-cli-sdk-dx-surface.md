@@ -195,7 +195,29 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
             Identical pattern; E5.3b-2b-wire complete (both workload backends).
         - [ ] **E5.3b-2c** — `ServiceCallCtx` enrichment (correlation rewrite /
           profile / session) in the broker server (`mvm-hostd`).
-      - [ ] **E5.3b-3** — PyO3/napi veneer.
+      - **E5.3b-3** — in-guest host-services SDK veneer. **Not PyO3/napi** —
+        owner preference is auto-generation, so it rides the existing
+        schema-codegen pipeline (Plan 124 D `xtask gen-stubs`/`check-stubs`):
+        generate the wire **types**, hand-write only the thin vsock transport
+        the pipeline can't generate (it emits types, never clients — same as
+        `_sandbox.py`). No `pyo3`/`napi`: each language gets a generated client
+        type set + a pure-language `AF_VSOCK(BROKER_PORT)` veneer. Split:
+        - [x] **E5.3b-3a** — codegen foundation: feature-gated
+          `#[derive(JsonSchema)]` on the broker wire types
+          (`ServiceCall`/`ServiceResponse`/`ServiceErrorCode` +
+          `host_audit`/`host_time`/`host_cost` payloads) + a new
+          `mvm-core` `emit_broker_schema` bin (`required-features=["schema"]`) +
+          a `gen-stubs` `StubArtifact` → `schema/broker-services-v0.json` +
+          generated `sdks/python/mvm/_broker/services.py` &
+          `sdks/typescript/src/broker/services.ts` (+ `_broker/__init__.py`).
+          `check-stubs` drift-gated; default closure stays schemars-free
+          (runtime-free gate green).
+        - [ ] **E5.3b-3b** — the thin pure-Python/TS veneer over the generated
+          types: `mvm.audit.emit`/`emit_batch`, `mvm.host.time()`,
+          `mvm.host.cost()` — open `AF_VSOCK(BROKER_PORT)`, length-frame a
+          `ServiceCall`, parse the `ServiceResponse`, map `ServiceErrorCode` →
+          typed exceptions. Injectable transport for tests (mirror the Rust
+          `_on` stream variants).
       - [ ] **E5.3b-4** — live-VM E2E on the dev-kvm box.
   - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
     `mvm-guest::host_time` + `mvm-guest::host_cost` (`now` / `workload` +

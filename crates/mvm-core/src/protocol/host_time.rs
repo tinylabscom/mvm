@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 /// Response for `host.time.v1::now`: the host wall-clock, milliseconds since
 /// the Unix epoch (UTC).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct TimeNowResponse {
     /// Milliseconds since the Unix epoch, host-authoritative.

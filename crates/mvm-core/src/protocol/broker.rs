@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 /// shape (in particular, the version segment is the rate-limiting parser
 /// for the binding gate).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "String", into = "String")]
 pub struct ServiceId(String);
 
@@ -114,6 +115,7 @@ pub enum ServiceIdParseError {
 /// formats ULIDs; a future change to Snowflake or other id format is a
 /// serde-compatible widening as long as the value stays a string).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct CorrelationId(String);
 
@@ -144,6 +146,7 @@ impl std::fmt::Display for CorrelationId {
 /// The handler's `parse_payload` step is the *real* schema gate for
 /// payload contents.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ServiceCall {
     pub service: ServiceId,
@@ -159,6 +162,7 @@ pub struct ServiceCall {
 /// The guest-bound envelope. Tagged variant; `Ok` carries the typed
 /// response payload, `Err` carries a typed error code + message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServiceResponse {
     Ok {
@@ -188,6 +192,7 @@ impl ServiceResponse {
 /// Typed broker error codes. Audit log entries carry the code as a stable
 /// snake_case string. New variants are additive; renames are wire-breaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceErrorCode {
     /// The workload's `ExecutionPlan.services` did not bind this service.
