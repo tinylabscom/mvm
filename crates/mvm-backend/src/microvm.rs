@@ -2107,17 +2107,26 @@ pub fn configure_flake_microvm_with_drives_dir(
         ),
     )?;
 
-    // Create and attach mvm-secrets drive (stub secrets.json + extra secret files)
-    ui::info("Creating secrets drive...");
-    let secrets_drive = create_dev_secrets_drive(drives_dir, &config.secret_files)?;
-    api_put_socket(
-        socket,
-        "/drives/secrets",
-        &format!(
-            r#"{{"drive_id": "secrets", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
-            path = secrets_drive,
-        ),
-    )?;
+    // Attach the mvm-secrets drive ONLY when there is something to put on it.
+    // The workload guest never mounts this drive — `/init` reads the egress CA
+    // cert and the secret PLACEHOLDERS from the kernel cmdline (`mvm.egress_ca=`
+    // / `mvm.secret_env=`), and raw secrets never enter the guest (they are
+    // substituted at egress, claim 13). So for the common no-secret-binding
+    // workload the drive carries only a stub `{}` and is dead weight; skip the
+    // `mkfs` + attach entirely. It is still built when `secret_files` is
+    // non-empty (an explicit `--volume <host>:/mnt/secrets` share).
+    if !config.secret_files.is_empty() {
+        ui::info("Creating secrets drive...");
+        let secrets_drive = create_dev_secrets_drive(drives_dir, &config.secret_files)?;
+        api_put_socket(
+            socket,
+            "/drives/secrets",
+            &format!(
+                r#"{{"drive_id": "secrets", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
+                path = secrets_drive,
+            ),
+        )?;
+    }
 
     for (idx, vol) in config.volumes.iter().enumerate() {
         let drive_id = format!("vol{}", idx);
