@@ -2,7 +2,7 @@
 
 **Status:** in progress — `mvmctl machine run` shipped (Workstream A/B kickoff);
 persistent verbs (`create/start/exec/shell/stop`), `--net`/`--allow-host`, local
-image sources, `mvm.toml` schema v2, SDK parity, and `pack` pending
+image sources, `mvm.toml` schema v1, SDK parity, and `pack` pending
 **Owner:** mvm
 **Date:** 2026-06-15
 
@@ -164,7 +164,7 @@ completion.
       package recipes, templates, and CI evaluation.
 - [x] Nix package recipes should build from checkout source and lockfiles; they
       must not fetch this project's release binaries.
-- [x] The schema direction is `mvm.toml` schema v2: `image` means OCI-backed
+- [x] The schema direction is `mvm.toml` schema v1: `image` means OCI-backed
       machine, `flake` means existing flake-backed build flow, and both are
       mutually exclusive until explicit composition exists.
 - [x] Unknown TOML keys are rejected so typos cannot silently widen network,
@@ -318,9 +318,9 @@ Gaps to close:
   machinery. The machine UX should be paired with a default-closure budget, not
   only a nicer command parser.
 
-## `mvm.toml` schema v2 for machine workflows
+## `mvm.toml` schema v1 for machine workflows
 
-Support this as `mvm.toml` schema v2 for machine workflows, not as a day-one
+Support this as `mvm.toml` schema v1 for machine workflows, not as a day-one
 replacement for the current flake/build manifest.
 
 Rules:
@@ -696,7 +696,7 @@ Required behavior:
       optional source-built Nix, image-backed one-shot UX, persistent named
       machines, verified portable artifacts, and no crate-count reduction across
       security boundaries.
-- [x] Record the `mvm.toml` schema-v2 direction: `image` means an OCI-backed
+- [x] Record the `mvm.toml` schema-v1 direction: `image` means an OCI-backed
       machine, `flake` means the existing flake-backed build flow, both are
       mutually exclusive for now, and unknown keys are rejected.
 - [x] Add the current image-backed one-shot path to public quickstart and
@@ -771,11 +771,13 @@ Required behavior:
 - [ ] Add tests for state persistence, state deletion, unknown-field rejection,
       and worktree-isolated `MVM_DATA_DIR`.
 
-### C1. `mvm.toml` schema v2 machine specs
+### C1. `mvm.toml` schema v1 machine specs
 
-- [x] Add a typed schema-v2 parser for machine workflows with strict
-      unknown-key rejection. → `Manifest` (mvm-core `domain/manifest.rs`) bumped to
-      schema v2 with `#[serde(deny_unknown_fields)]`; unknown keys now fail to parse.
+- [x] Add a typed schema-v1 parser for machine workflows with strict
+      unknown-key rejection. → `Manifest` (mvm-core `domain/manifest.rs`) is schema
+      v1 with `#[serde(deny_unknown_fields)]`; unknown keys now fail to parse. (No
+      version bump — there is no pre-release schema, so the strict parser + `image`
+      selector are simply v1.)
 - [x] Enforce exactly one source selector: `image` or `flake`, never both. → added
       `image: Option<String>`, made `flake` optional with a `flake_ref()` accessor
       (defaults to `"."`), and `validate()` rejects both-set; `is_image_source()`
@@ -931,7 +933,7 @@ Required behavior:
 - Whether `machine start` should default to detached. Safer default: persistent
   machines start detached; `machine run` streams foreground output.
 - Whether image+flake composition should ever be supported in `mvm.toml`. Safer
-  default: schema v2 allows exactly one source selector, either `image` or
+  default: schema v1 allows exactly one source selector, either `image` or
   `flake`, and rejects files that specify both until composition has a signed
   policy model.
 - Whether `.mvm` and `.mvmpkg` should both remain public. Safer DX default: one

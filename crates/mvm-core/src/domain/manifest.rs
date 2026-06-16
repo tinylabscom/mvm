@@ -8,7 +8,7 @@
 //! optional `name` field is a display label / S3 channel hint —
 //! NOT the registry key.
 //!
-//! Schema (v2):
+//! Schema (v1):
 //! ```toml
 //! # Source selector — exactly one of `flake` / `image` (both omitted
 //! # defaults to the flake "."). Setting both is a parse error.
@@ -20,8 +20,8 @@
 //! name = "openclaw"       # optional, display only
 //! ```
 //!
-//! v2 is strict: unknown keys are rejected (`deny_unknown_fields`), and
-//! `image` is mutually exclusive with `flake`. Read the resolved flake
+//! The schema is strict: unknown keys are rejected (`deny_unknown_fields`),
+//! and `image` is mutually exclusive with `flake`. Read the resolved flake
 //! via [`Manifest::flake_ref`]; check the source kind via
 //! [`Manifest::is_image_source`].
 //!
@@ -48,10 +48,10 @@ pub const MANIFEST_FILENAMES: &[&str] = &["mvm.toml", "Mvmfile.toml"];
 
 /// Highest manifest schema version this build understands. Additive
 /// fields ride `#[serde(default)]`; bumping this signals breaking
-/// changes older mvmctl versions must reject. v2 adds the `image`
-/// source selector (mutually exclusive with `flake`) and makes the
-/// schema strict (`deny_unknown_fields`).
-pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
+/// changes older mvmctl versions must reject. v1 carries the `flake`/
+/// `image` source selectors (mutually exclusive) and is strict
+/// (`deny_unknown_fields`); there is no pre-release schema to migrate from.
+pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 /// Floor for `mem`. Below this Firecracker guests don't reliably
 /// boot; we'd rather fail loudly at parse time than have a confusing
