@@ -216,7 +216,10 @@ impl GvproxyHandle {
 /// configuration referencing `socket_path()`. On Drop the child is
 /// killed gracefully and the socket file is deleted (best-effort —
 /// libkrun may have already consumed it).
-pub fn spawn(scratch_dir: &Path) -> Result<GvproxyHandle, GvproxyError> {
+pub fn spawn(
+    scratch_dir: &Path,
+    native_config: Option<&Path>,
+) -> Result<GvproxyHandle, GvproxyError> {
     let gvproxy_bin = locate_gvproxy().ok_or_else(|| GvproxyError::NotInstalled {
         install_hint: install_hint(),
     })?;
@@ -260,20 +263,8 @@ pub fn spawn(scratch_dir: &Path) -> Result<GvproxyHandle, GvproxyError> {
     //   -debug               — verbose logging. Not set by default;
     //                          if a future MVM_GVPROXY_DEBUG=1 env
     //                          var trips this we'd flip it here.
-    // gvproxy expects the `-listen-vfkit` arg as a URL —
-    // `unixgram://<path>`. A bare path errors out with
-    // "vfkit listen address must be unixgram:// address" before the
-    // listener is created. The libkrun-end of the socket connects
-    // to the absolute path; the URL prefix only carries the scheme.
-    let listen_url = {
-        let mut s = OsString::from("unixgram://");
-        s.push(socket_path.as_os_str());
-        s
-    };
-    let ssh_port = free_loopback_port().map_err(|e| GvproxyError::Io {
-        context: "reserving a free port for gvproxy's ssh-forward listener".to_string(),
-        source: e,
-    })?;
+    // (Native rvproxy mode skips all of the above: `run --config <path>`
+    // carries the transport socket, log, and policy in its config file.)
 
     // NEVER inherit the spawner's stdout/stderr. gvproxy is a long-lived
     // daemon; if it holds a write end of the parent's stdout/stderr pipe,
@@ -304,13 +295,42 @@ pub fn spawn(scratch_dir: &Path) -> Result<GvproxyHandle, GvproxyError> {
         source: e,
     })?;
     let mut cmd = Command::new(&gvproxy_bin);
-    cmd.arg("-listen-vfkit")
-        .arg(listen_url)
-        .arg("-log-file")
-        .arg(OsString::from(&log_path))
-        .arg("-ssh-port")
-        .arg(ssh_port.to_string())
-        .stdout(std::process::Stdio::from(stdio_log))
+    match native_config {
+        // Native rvproxy: `run --config <path>`. The config's
+        // `[transport].path` is `<scratch_dir>/gvproxy.sock` (the same
+        // `socket_path` the poll loop waits on), so libkrun connects to the
+        // socket rvproxy binds. Logging + listener config live in the file,
+        // so none of the gvproxy `-listen-vfkit`/`-log-file`/`-ssh-port`
+        // flags apply.
+        Some(config_path) => {
+            cmd.arg("run").arg("--config").arg(config_path.as_os_str());
+        }
+        // gvproxy-compat: `-listen-vfkit` wants the socket as a
+        // `unixgram://<path>` URL — a bare path errors with "vfkit listen
+        // address must be unixgram:// address" before the listener is
+        // created. The libkrun-end connects to the absolute path; the URL
+        // prefix only carries the scheme. `-ssh-port` gets a fresh free
+        // port so two gvproxy instances (concurrent VMs, leaked daemons)
+        // never collide on the default 2222.
+        None => {
+            let listen_url = {
+                let mut s = OsString::from("unixgram://");
+                s.push(socket_path.as_os_str());
+                s
+            };
+            let ssh_port = free_loopback_port().map_err(|e| GvproxyError::Io {
+                context: "reserving a free port for gvproxy's ssh-forward listener".to_string(),
+                source: e,
+            })?;
+            cmd.arg("-listen-vfkit")
+                .arg(listen_url)
+                .arg("-log-file")
+                .arg(OsString::from(&log_path))
+                .arg("-ssh-port")
+                .arg(ssh_port.to_string());
+        }
+    }
+    cmd.stdout(std::process::Stdio::from(stdio_log))
         .stderr(std::process::Stdio::from(stdio_log_err));
 
     let mut child = cmd.spawn().map_err(GvproxyError::Spawn)?;
@@ -508,7 +528,7 @@ mod tests {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         env.set("PATH", tmp.path());
-        let result = spawn(tmp.path());
+        let result = spawn(tmp.path(), None);
         match result {
             Err(GvproxyError::NotInstalled { install_hint }) => {
                 assert!(!install_hint.is_empty());
@@ -528,7 +548,7 @@ mod tests {
             return;
         };
         let tmp = tempfile::tempdir().unwrap();
-        let handle = spawn(tmp.path()).expect("spawn gvproxy");
+        let handle = spawn(tmp.path(), None).expect("spawn gvproxy");
         let socket = handle.socket_path().to_path_buf();
         let pid_file = tmp.path().join(PID_FILE_NAME);
         assert!(socket.exists(), "socket missing: {}", socket.display());
@@ -550,6 +570,76 @@ mod tests {
             0,
             "global gvproxy pid slot not cleared on Drop"
         );
+    }
+
+    /// Native rvproxy path: given a real `rvproxy` binary (via
+    /// `MVM_TEST_RVPROXY_BIN`) and a rendered config, `spawn(.., Some(cfg))`
+    /// launches `rvproxy run --config`, which binds the vfkit transport
+    /// socket libkrun would connect to. Confirms the socket + pid sidecar
+    /// appear and Drop reaps cleanly — the same handle contract as the
+    /// gvproxy-compat path. Skipped unless the binary is provided.
+    #[test]
+    fn native_spawn_then_drop_reaps_child() {
+        let Some(bin) = std::env::var_os("MVM_TEST_RVPROXY_BIN") else {
+            eprintln!("test skipped: set MVM_TEST_RVPROXY_BIN to a real rvproxy binary");
+            return;
+        };
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let socket = tmp.path().join("gvproxy.sock");
+        // The config's [transport].path must equal the socket the poll loop
+        // waits on, so libkrun connects to the one rvproxy binds.
+        let config_path = tmp.path().join("rvproxy.toml");
+        let api_sock = tmp.path().join("rvproxy-api.sock");
+        let audit_path = tmp.path().join("flow-audit.jsonl");
+        std::fs::write(
+            &config_path,
+            format!(
+                "id = \"vm-test\"\n\
+                 mode = \"single-vm\"\n\
+                 [network]\n\
+                 cidr = \"192.168.127.0/24\"\n\
+                 gateway_ip = \"192.168.127.1\"\n\
+                 guest_ip = \"192.168.127.2\"\n\
+                 mtu = 1500\n\
+                 [backend]\n\
+                 kind = \"vfkit\"\n\
+                 [transport]\n\
+                 kind = \"vfkit\"\n\
+                 path = \"{sock}\"\n\
+                 [api]\n\
+                 listen = \"unix:{api}\"\n\
+                 [dns]\n\
+                 enabled = true\n\
+                 upstream = [\"1.1.1.1\"]\n\
+                 [audit]\n\
+                 dataplane_audit_jsonl_path = \"{audit}\"\n\
+                 [policy]\n\
+                 allow_transport_ingress = true\n\
+                 allow_transport_egress = true\n\
+                 allow_guest_egress = true\n\
+                 default_egress_deny = true\n",
+                sock = socket.display(),
+                api = api_sock.display(),
+                audit = audit_path.display(),
+            ),
+        )
+        .unwrap();
+
+        env.set("MVM_GATEWAY_BIN", &bin);
+        let handle = spawn(tmp.path(), Some(&config_path)).expect("spawn rvproxy run --config");
+
+        assert!(
+            handle.socket_path().exists(),
+            "rvproxy did not bind the vfkit transport socket: {}",
+            handle.socket_path().display()
+        );
+        assert!(
+            tmp.path().join(PID_FILE_NAME).exists(),
+            "pid sidecar missing"
+        );
+        drop(handle);
+        assert!(!socket.exists(), "socket lingered after Drop");
     }
 
     /// `reap_by_pid_file` SIGTERMs the pid named in the sidecar and

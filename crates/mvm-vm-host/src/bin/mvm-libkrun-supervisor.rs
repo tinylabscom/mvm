@@ -329,7 +329,7 @@ fn run_legacy(cfg: &SupervisorConfig) -> Result<std::convert::Infallible> {
 /// chain-signing `FileAuditSigner`, then calls
 /// `spawn_bridge_thread`. The bridge thread runs concurrently with
 /// `krun_start_enter` and is reaped by `exit()` on guest shutdown.
-fn run_with_bridge(cfg: SupervisorConfig) -> Result<std::convert::Infallible> {
+fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible> {
     // Pre-extract the audit-substrate paths + plan/bundle. The
     // factory closure needs them as owned values; the legacy
     // `&SupervisorConfig` reference path doesn't fit because
@@ -375,6 +375,40 @@ fn run_with_bridge(cfg: SupervisorConfig) -> Result<std::convert::Infallible> {
         Some(v) => Some(serde_json::from_value(v).context("decode cfg.bundle into PolicyBundle")?),
         None => None,
     };
+
+    // Native rvproxy gateway: when MVM_NETWORKING=native is in effect (the
+    // supervisor inherits the launcher's env — the same channel that swaps the
+    // gateway binary via MVM_GATEWAY_BIN), render the `run --config` TOML from
+    // the admitted bundle into the per-VM scratch dir and point the gateway
+    // spawn at it. The in-line splice still runs and shares the exact same
+    // egress resolution, so this is additive belt-and-suspenders during the
+    // transition off the splice.
+    if matches!(
+        mvm_build::libkrun_builder::resolve_networking_mode(),
+        mvm_build::libkrun_builder::NetworkingPreference::Native
+    ) && let libkrun_sys::NetworkingMode::Gvproxy { scratch_dir, .. } = &cfg.krun.networking
+    {
+        let scratch = std::path::PathBuf::from(scratch_dir);
+        // Fail closed: a native gateway we can't configure must not silently
+        // fall back to gvproxy-compat, which carries no policy.
+        let config_path =
+            mvm_hostd::supervisor::network::rvproxy_launch::write_native_gateway_config(
+                bundle.as_ref(),
+                &plan.tenant,
+                &vm_name,
+                &scratch,
+                chrono::Utc::now(),
+            )
+            .context("render native rvproxy gateway config")?;
+        tracing::info!(
+            vm = %vm_name,
+            config = %config_path.display(),
+            "native rvproxy gateway: rendered run --config"
+        );
+        cfg.krun = cfg
+            .krun
+            .with_gvproxy_native_config(config_path.to_string_lossy().into_owned());
+    }
 
     // Load the host signer secret bytes. The file is mode 0600 and
     // written by mvm-cli's `host_signer::load_or_init_at` at admit
