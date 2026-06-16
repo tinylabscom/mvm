@@ -503,6 +503,13 @@ Implementation shape:
 - Add a typed `MachineImageSource` enum for registry refs, archive files, stdin
   archives, and unpacked rootfs directories. Avoid stringly typed source
   dispatch at call sites.
+  - **Landed (classifier + seam):** `ImageSource` (`commands/image/source.rs`) —
+    prefix-driven, filesystem-free taxonomy (`oci-archive:` / `rootfs-dir:` /
+    `-` stdin / bare → registry), wired into `resolve_or_pull_run_image`. The
+    registry path is byte-unchanged; local sources fail closed with a clear
+    message until their ingest lands. Per-variant ingest (archive / rootfs-dir /
+    stdin) + the traversal / malformed / wrong-arch / missing-provenance negative
+    tests are the following slices.
 - Route every `MachineImageSource` through the existing OCI/rootfs hardening,
   provenance, policy admission, and receipt/audit code paths. Do not add a
   daemon-bypass or extraction shortcut for DX.
