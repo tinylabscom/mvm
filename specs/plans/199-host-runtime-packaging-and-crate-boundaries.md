@@ -56,14 +56,40 @@ The target shape is:
 ### B. Native VMM package recipes
 
 - [ ] Add reviewed, source-built Nix recipes for libkrun firmware and the
-      libkrun shared library.
+      libkrun shared library. → **builder-VM-gated** (see note). The recipe
+      *shape* is settled (a `fetchurl`-from-upstream `stdenv.mkDerivation` for
+      `libkrunfw` + `libkrun`, source-built, no prebuilt binary); the blocker is
+      computing the real upstream source hashes + the per-arch build under the
+      approved builder-VM Nix path. Writing them with placeholder hashes is
+      disallowed, so the derivations land once the builder VM can verify them.
 - [ ] Expose the native VMM recipes only after their source pins, kernel source,
       cargo vendor hashes, and platform matrix have been verified in the builder
-      VM.
-- [ ] Wire `mvmctl.override { withNativeLibkrun = true; libkrun = ...; }` as the
-      opt-in native package path once the recipes are verified.
-- [ ] Add a structural test that no mvm host package uses project release
-      tarballs or `binaryNativeCode` provenance.
+      VM. → **builder-VM-gated** (the verification step itself).
+- [~] Wire `mvmctl.override { withNativeLibkrun = true; libkrun = ...; }` as the
+      opt-in native package path once the recipes are verified. → **the override
+      seam already exists** (WS-A: `mvmctl.nix` takes `libkrun ? null` +
+      `withNativeLibkrun ? false`, asserts `withNativeLibkrun -> libkrun != null`,
+      and wires `buildInputs`/`MVM_LIBKRUN_HEADER`/the `*/libkrun-sys` features;
+      guarded by `host_mvmctl_package_keeps_native_vmm_linkage_explicit`). It is
+      consumable the moment the box-1 recipe exists — no further wiring needed,
+      only the verified `libkrun` package to pass in.
+- [x] Add a structural test that no mvm host package uses project release
+      tarballs or `binaryNativeCode` provenance. →
+      `no_host_package_uses_release_binary_provenance` in
+      `tests/nix_flake_structure.rs` scans **every** `nix/packages/*.nix` (not
+      just `mvmctl.nix`) for project-release / `binaryNativeCode` provenance.
+      Deliberately project-release-specific (not a blanket `fetchurl` ban) so the
+      future source-built `libkrun`/`libkrunfw` recipes — which legitimately
+      fetch upstream *source* — stay valid; the strict no-fetch rule remains
+      scoped to `mvmctl.nix`.
+
+> **Builder-VM gate (boxes 1–2).** The libkrun/libkrunfw source recipes need
+> real upstream source hashes + a per-arch source build, both of which must be
+> produced and verified through the approved builder-VM Nix path (host Nix is
+> never used by mvmctl). They are intentionally *not* committed with placeholder
+> hashes. Tracked here as the remaining native-VMM-recipe work; the consuming
+> override seam (box 3) and the directory-wide guard (box 4) are already in
+> place, so the recipes drop in without further host-package changes.
 
 ### B2. Release installation policy
 
