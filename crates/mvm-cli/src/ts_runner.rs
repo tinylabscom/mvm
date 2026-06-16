@@ -3,7 +3,7 @@
 //! probe). Lives in its own module so the install-hint string is one
 //! source of truth between the two surfaces.
 //!
-//! Resolution order applied by [`resolve`]:
+//! Resolution order applied by `resolve`:
 //!
 //! 1. `MVM_TSX` env override — explicit user pin (handled by the
 //!    caller; this module is only the post-override fallback).
@@ -14,7 +14,7 @@
 //! 5. `tsx` on `PATH`.
 //! 6. `bun` on `PATH`.
 //! 7. `deno` on `PATH`.
-//! 8. `None` — the caller surfaces [`install_hint`] to the user.
+//! 8. `None` — the caller surfaces `install_hint` to the user.
 
 use std::path::PathBuf;
 

@@ -1,7 +1,7 @@
 //! Type-safe interface to `mvm-vz-supervisor`.
 //!
 //! The Vz backend (`mvm-backend::VzBackend`) constructs a
-//! [`SupervisorConfig`], serializes it to JSON, and pipes it to the
+//! `SupervisorConfig`, serializes it to JSON, and pipes it to the
 //! Rust-native `mvm-vz-supervisor` binary on stdin, which decodes it
 //! with strict deny-unknown-fields semantics — claim 5 (vsock framing
 //! fuzzed) rests on that decoder rejecting malformed input.

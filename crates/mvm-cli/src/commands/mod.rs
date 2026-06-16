@@ -5,6 +5,7 @@ mod cmd_audit;
 mod deps;
 mod env;
 mod image;
+mod machine;
 mod manifest;
 mod ops;
 /// Supervisor warm-pool: the `mvmctl pool warm/status` command + the
@@ -78,6 +79,8 @@ pub(in crate::commands) enum Commands {
     Manifest(manifest::Args),
     /// Inspect cached OCI images
     Image(image::Args),
+    /// Beginner microVM workflows (run an OCI image and more)
+    Machine(machine::Args),
     /// Inspect the dm-thin storage pool
     Storage(storage::Args),
     /// Build-time commands (image, compile, validate, kernel)
@@ -268,6 +271,7 @@ pub fn run() -> Result<()> {
         Commands::Build(a) => build::group::run(&cli, a, &cfg),
         Commands::Manifest(a) => manifest::run(&cli, a, &cfg),
         Commands::Image(a) => image::run(&cli, a, &cfg),
+        Commands::Machine(a) => machine::run(&cli, a, &cfg),
         Commands::Storage(a) => storage::run(&cli, a, &cfg),
         Commands::Up(a) => vm::up::run(&cli, a, &cfg),
         Commands::Down(a) => vm::down::run(&cli, a, &cfg),

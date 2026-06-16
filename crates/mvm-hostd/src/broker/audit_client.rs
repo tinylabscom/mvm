@@ -57,7 +57,7 @@ pub enum AuditClientError {
 
 /// One-call-per-connection UDS client.
 ///
-/// Cheap to construct: holds only the path. Each [`append`] re-opens
+/// Cheap to construct: holds only the path. Each `append` re-opens
 /// the socket and shuts it down after the response — there's no
 /// connection state to retain.
 #[derive(Debug, Clone)]

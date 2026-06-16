@@ -62,6 +62,10 @@ cargo install mvmctl
 ## Quick start
 
 ```bash
+# Beginner path: run a command in a microVM from an OCI image (no flake, no host Nix).
+# Networking is off by default; the VM is torn down on exit.
+mvmctl machine run --image alpine -- sh -c "echo 'hello from a microVM' && uname -a"
+
 # Build and run a VM from a Nix flake
 mvmctl up --flake .
 

@@ -9,7 +9,7 @@
 //! *inside the supervisor process* (`mvm-libkrun-supervisor`), not here. So
 //! `provision` is a pure config *selection* — which gateway — and `teardown`
 //! is a no-op. The actual `krun_add_net_*` wiring happens later, when the
-//! supervisor consumes the resolved [`NetworkingPreference`].
+//! supervisor consumes the resolved `NetworkingPreference`.
 //!
 //! claim-10: the provider only chooses between the two existing gvproxy/passt →
 //! gateway-bridge paths; there is no no-gateway / TSI bypass to select (TSI was
@@ -21,7 +21,7 @@
 //! path (`mvm_backend::libkrun::build_supervisor_config`) hardcodes
 //! `cfg!(target_os = "macos")` (per-OS default, ignores `MVM_NETWORKING`),
 //! while the builder path ([`apply_networking_mode`](crate::libkrun_builder))
-//! honors `MVM_NETWORKING` via [`resolve_networking_mode`]. Re-pointing both
+//! honors `MVM_NETWORKING` via `resolve_networking_mode`. Re-pointing both
 //! through this provider must first reconcile that divergence, so it is deferred
 //! rather than silently changing the workload selection.
 

@@ -984,25 +984,25 @@ mod linux {
         power_off()
     }
 
-    /// Listen on `AF_VSOCK` port
-    /// [`BUILDER_DISPATCH_PORT`] and write a single framed
-    /// `HostVmResponse::Result` to the first connection that
-    /// arrives within `ACCEPT_TIMEOUT_SECS` seconds. Best-effort:
-    /// any failure (no host connection, socket setup error, write
-    /// error) is logged to stderr and the boot continues to
-    /// `power_off`.
-    ///
-    /// Wire shape is hand-rolled by
-    /// [`crate::dispatch_response::DispatchResponse::to_json`]; the
-    /// cross-validation test in that module pins the output against
-    /// `mvm_build::builder_protocol::HostVmResponse` so the host
-    /// deserializer parses what we emit.
-    ///
-    /// AF_VSOCK constants are inlined rather than going through
-    /// `nix` because the size-budget comment in this crate's
-    /// Cargo.toml (≤ 1.5 MiB) discourages new dep
-    /// features. The pattern mirrors
-    /// `crates/mvm-guest/src/bin/mvm-builder-agent.rs` exactly.
+    // Listen on `AF_VSOCK` port
+    // `BUILDER_DISPATCH_PORT` and write a single framed
+    // `HostVmResponse::Result` to the first connection that
+    // arrives within `ACCEPT_TIMEOUT_SECS` seconds. Best-effort:
+    // any failure (no host connection, socket setup error, write
+    // error) is logged to stderr and the boot continues to
+    // `power_off`.
+    //
+    // Wire shape is hand-rolled by
+    // `crate::dispatch_response::DispatchResponse::to_json`; the
+    // cross-validation test in that module pins the output against
+    // `mvm_build::builder_protocol::HostVmResponse` so the host
+    // deserializer parses what we emit.
+    //
+    // AF_VSOCK constants are inlined rather than going through
+    // `nix` because the size-budget comment in this crate's
+    // Cargo.toml (≤ 1.5 MiB) discourages new dep
+    // features. The pattern mirrors
+    // `crates/mvm-guest/src/bin/mvm-builder-agent.rs` exactly.
     // -----------------------------------------------------------
     // AF_VSOCK helpers
     // -----------------------------------------------------------
@@ -2324,15 +2324,15 @@ mod linux {
     /// - [`Isolation::Unshared`]: subprocess runs in fresh mount
     ///   + pid + ipc namespaces via `unshare --mount --pid --ipc
     ///   --fork`, then drops to the unprivileged builder uid via
-    ///   `setpriv --reuid --regid --clear-groups`. The pid
-    ///   namespace turns orphan-cleanup into a
-    ///   single namespace-exit; the mount namespace lets future
-    ///   parts bind-mount `/dev/shm` etc. per-job without bleeding
-    ///   state into the shared rootfs; the IPC namespace prevents
-    ///   SysV/POSIX IPC keys leaking across jobs; the uid drop
-    ///   prevents a malicious build from remounting / killing
-    ///   outside its pid ns / loading a kernel module via the root
-    ///   privileges the dispatch loop has as PID 1.
+    ///     `setpriv --reuid --regid --clear-groups`. The pid
+    ///     namespace turns orphan-cleanup into a
+    ///     single namespace-exit; the mount namespace lets future
+    ///     parts bind-mount `/dev/shm` etc. per-job without bleeding
+    ///     state into the shared rootfs; the IPC namespace prevents
+    ///     SysV/POSIX IPC keys leaking across jobs; the uid drop
+    ///     prevents a malicious build from remounting / killing
+    ///     outside its pid ns / loading a kernel module via the root
+    ///     privileges the dispatch loop has as PID 1.
     ///
     /// Network namespace is intentionally *not* unshared — the
     /// per-VM iptables baseline already

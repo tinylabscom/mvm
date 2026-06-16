@@ -22,7 +22,7 @@
 //! - `entrypoint` is the **final** [`RecordedOp::CommandStart`]
 //!   argv. Earlier `CommandStart` ops become `before_start` hooks so
 //!   they fire in declaration order before the entrypoint.
-//! - [`RecordedOp::FilesWrite`] ops lower to [`App::files`] entries
+//! - [`RecordedOp::FilesWrite`] ops lower to `App::files` entries
 //!   baked into the rootfs at build time — never into a shell hook.
 //! - [`RecordedOp::Kill`] ops are dropped — the workload VM lives
 //!   for its declared TTL, not until a kill in the recording.

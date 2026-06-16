@@ -20,7 +20,7 @@ use crate::{firecracker, microvm};
 
 /// Firecracker VM configuration for the [`VmBackend`] trait.
 ///
-/// Wraps [`FlakeRunConfig`](microvm::FlakeRunConfig) which contains all
+/// Wraps `FlakeRunConfig` which contains all
 /// data needed for starting a Firecracker VM from Nix-built artifacts.
 pub struct FirecrackerConfig {
     pub run_config: microvm::FlakeRunConfig,

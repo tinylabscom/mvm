@@ -10,7 +10,7 @@
 //! for one snapshot can't be replayed onto a different one.
 //!
 //! This module is the shared substrate: the host mints tokens
-//! ([`fresh_generation_token`]); the guest tracks them ([`GenIdState`]) and
+//! ([`fresh_generation_token`]); the guest tracks them (`GenIdState`) and
 //! performs the reseed itself (the I/O side effect is kept out of here so the
 //! change-detection stays pure and unit-testable).
 

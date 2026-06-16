@@ -1,7 +1,9 @@
 # Plan 200 — machine UX/DX layer
 
-**Status:** planned  
-**Owner:** mvm  
+**Status:** in progress — `mvmctl machine run` shipped (Workstream A/B kickoff);
+persistent verbs (`create/start/exec/shell/stop`), `--net`/`--allow-host`, local
+image sources, `mvm.toml` schema v2, SDK parity, and `pack` pending
+**Owner:** mvm
 **Date:** 2026-06-15
 
 ## Goal
@@ -126,6 +128,20 @@ follow-up design discussion:
 - **Portable artifacts are product surface.** Users should understand how to
   create, verify, transfer, run, inspect, and clean them up without knowing the
   registry/cache internals.
+- **Local image inputs are a DX and resilience feature.** The beginner path
+  should handle registry image refs, local OCI archives, stdin image streams,
+  and already-unpacked rootfs directories without requiring a daemon at launch
+  time. Every input shape still goes through the same extraction hardening,
+  provenance recording, and admission path.
+- **Docs are part of the product surface.** The getting-started flow should
+  lead with "use this for" scenarios — sandbox untrusted code, run a command in
+  an OCI image, pack a portable artifact, use a local image archive, create a
+  persistent dev machine, forward an SSH agent, and declare the same workflow in
+  `mvm.toml` — before architecture or flake details.
+- **Known limitations should be explicit.** Network protocol scope, volume
+  constraints, SSH-agent prerequisites, macOS signing/entitlement requirements,
+  GPU availability, and backend/architecture constraints should appear in the
+  machine docs so users do not infer stronger guarantees than we have measured.
 - **Latency claims need measured phase boundaries.** A <200 ms claim is only
   credible for hot cached paths after image materialization and policy inputs
   are already available. First pull/build is a different product message.
@@ -166,6 +182,16 @@ completion.
       admission; they are not self-executing bypass blobs.
 - [x] Portable artifacts should be product surface: create, verify, transfer,
       run, inspect, and clean up.
+- [x] Local image inputs should be supported as first-class sources: registry
+      refs, local OCI archives, stdin archive streams, and unpacked rootfs
+      directories, all behind the same hardened extraction and admission path.
+- [x] Beginner docs should be scenario-led: untrusted-code sandboxing,
+      image-backed one-shot run, portable artifact, local image archive,
+      persistent dev machine, SSH-agent forwarding, and `mvm.toml`.
+- [x] Known limitations should be documented beside the happy path so docs do
+      not imply unmeasured support for ICMP, arbitrary volume shapes, GPU,
+      signing/entitlement behavior, or unsupported host/guest architecture
+      combinations.
 - [x] Hot-start latency claims must be measured by phase and scoped to cached
       image/artifact paths, not first pull/build.
 - [x] Elastic memory should be explained as `mem` cap plus `mem_initial`
@@ -268,12 +294,26 @@ Gaps to close:
   `vm proc`; users need `machine exec`.
 - Docs lead with flakes, manifests, and project structure before the simplest
   image-backed "run a command" path.
+- Machine docs do not yet have a scenario-led "use this for" guide that teaches
+  untrusted-code sandboxing, local image use, persistent dev machines,
+  SSH-agent forwarding, `mvm.toml`, and portable artifacts before internals.
+- Local image inputs need product-level handling: registry reference, local OCI
+  archive path, stdin archive stream, and unpacked rootfs directory.
+- The docs need an explicit limitations section for machine UX: network
+  protocol scope, volume constraints, SSH-agent prerequisites, macOS
+  signing/entitlement requirements, GPU status, and backend/architecture
+  support.
 - The install story still has optional Nix material that can be misread as a
   prerequisite; beginner docs must lead with "no host Nix required."
 - The existing SDKs do not yet present the same `machine` lifecycle vocabulary
   across Python, TypeScript, and Rust.
+- SDKs do not yet prove that their machine wrappers reuse the same
+  admission/audit/artifact verification path as the CLI instead of becoming a
+  parallel launch surface.
 - Portable artifacts exist at the lower layers, but users do not yet get a
   polished `machine pack` / `machine run <artifact>` path.
+- Portable artifacts do not yet have an executable-feeling product loop: pack,
+  verify, inspect, run, fail on tamper/wrong arch/wrong key, and clean up.
 - The normal user binary still risks carrying too much build/dev/backend
   machinery. The machine UX should be paired with a default-closure budget, not
   only a nicer command parser.
@@ -437,6 +477,13 @@ tears down.
 Required behavior:
 
 - `--image <ref>` pulls or reuses an OCI image through the existing image cache.
+- `--image <path.tar>` accepts a local OCI archive file without requiring a
+  registry push/pull.
+- `--image -` accepts an OCI archive from stdin for CI and agent workflows that
+  already produced an image stream.
+- `--image <rootfs-dir>` accepts an already-unpacked rootfs directory only after
+  path traversal, symlink, ownership, architecture, and provenance rules are
+  made explicit and tested.
 - No `--net` means `NetworkPolicy::deny_all()`.
 - `--net` means a dev-friendly outbound policy with DNS enabled.
 - `--allow-host HOST[:PORT]` means allow-list egress only; `PORT` defaults to
@@ -453,11 +500,20 @@ Implementation shape:
 - Add `commands/machine.rs` with a `MachineCmd::Run` parser.
 - Reuse `vm::exec::RunArgs` by adding missing network fields there first, then
   translate `machine run` into the same execution path.
+- Add a typed `MachineImageSource` enum for registry refs, archive files, stdin
+  archives, and unpacked rootfs directories. Avoid stringly typed source
+  dispatch at call sites.
+- Route every `MachineImageSource` through the existing OCI/rootfs hardening,
+  provenance, policy admission, and receipt/audit code paths. Do not add a
+  daemon-bypass or extraction shortcut for DX.
 - Extend `crate::exec::ExecRequest` with a `network_policy` field.
 - Thread that field into `VmStartConfig.network_policy`.
 - Include the effective network policy in dry-run output and signed receipts
   as non-sensitive metadata.
 - Add parser tests, dry-run tests, deny-by-default tests, and allow-list tests.
+- Add source-shape tests for registry ref, local archive path, stdin archive,
+  unpacked rootfs, malformed archive, traversal attempt, wrong architecture, and
+  missing provenance handling.
 
 ### `mvmctl machine create/start/exec/shell/stop`
 
@@ -550,6 +606,9 @@ Required behavior:
   not become a self-executing blob that bypasses `mvmctl`.
 - Artifacts are architecture-specific unless/until a multi-arch envelope is
   added.
+- The artifact workflow feels executable from the user's perspective: pack,
+  verify, inspect, run, transfer/copy guidance, and cleanup are all documented
+  and test-covered.
 - The public docs explain the difference between OCI images (distribution/base
   input), `.mvm` portable artifacts (signed runnable VM payload), and `.mvmpkg`
   bundles (publisher-signed installed package flow) if all three remain.
@@ -563,6 +622,8 @@ Implementation shape:
   stories.
 - Add artifact run tests for wrong key, tampered payload, traversal entries,
   missing verity sidecars, and architecture mismatch.
+- Add docs/source tests that artifact examples do not imply host Nix is needed
+  to run a verified portable artifact.
 
 ### Embeddable SDKs
 
@@ -597,6 +658,11 @@ Required behavior:
   writable shares, prod digest verification, and no host Nix requirement.
 - Rust `mvm-sdk` remains the stable embeddable crate for Rust hosts; Python and
   TypeScript wrap the same lifecycle semantics.
+- SDK parity tests prove SDK machine wrappers and CLI machine commands produce
+  equivalent admission inputs, effective policy, and receipt/audit summaries for
+  the same config.
+- Negative SDK tests prove wrappers cannot bypass artifact verification, network
+  default-deny, unknown-key rejection, or source-selector conflict rejection.
 
 ## Security invariants
 
@@ -637,24 +703,43 @@ Required behavior:
       first-use happy-path docs before flake/manifests.
 - [ ] Add `mvmctl machine --help` with `run`, `create`, `start`, `exec`,
       `shell`, `stop`, `ls`, `inspect`, and `rm` subcommands.
+      (`run` shipped — `commands/machine/`; create/start/exec/shell/stop/ls/inspect/rm remain.)
 - [ ] Add parser tests for every target command shown in this plan.
-- [ ] Add the future `mvmctl machine run --image ...` quickstart to README and
+      (`machine run` parser + translation tests shipped; remaining verbs pending.)
+- [x] Add the future `mvmctl machine run --image ...` quickstart to README and
       public docs after the command is implemented.
 - [ ] Rewrite install docs so the primary path is binary install + `mvmctl
       machine run`; until then, keep binary install + `mvmctl run --image ...`
       as the documented current path and keep optional Nix clearly marked as
       optional.
+- [ ] Add a scenario-led "use this for" guide before architecture internals:
+      untrusted-code sandboxing, image-backed one-shot run, local image archive,
+      persistent dev machine, SSH-agent forwarding, portable artifact, and
+      `mvm.toml`.
+- [ ] Add a machine limitations page covering network protocol scope, volume
+      shapes, SSH-agent prerequisites, macOS signing/entitlement requirements,
+      GPU status, and host/guest architecture support.
+- [ ] Add docs/source guards that prevent beginner docs from implying host Nix,
+      GPU, ICMP, or unsupported architectures are available by default.
 - [ ] Keep old verbs documented as advanced/underlying surfaces, not removed.
 
 ### B. Ephemeral image runner parity
 
 - [ ] Add `--net` and `--allow-host HOST[:PORT]` to `mvmctl run`.
+- [ ] Add `MachineImageSource` support for registry refs, local OCI archive
+      paths, stdin archive streams, and unpacked rootfs directories.
+- [ ] Route every machine image source through hardened unpacking, source
+      provenance, admission, receipts, and audit; do not add a daemon-bypass or
+      extraction shortcut for DX.
 - [ ] Thread transient run network policy through `ExecRequest` and
       `VmStartConfig`.
-- [ ] Make `mvmctl machine run` translate into `mvmctl run` internals.
+- [x] Make `mvmctl machine run` translate into `mvmctl run` internals.
 - [ ] Add receipt/dry-run output for effective network posture.
 - [ ] Add unit tests for deny-all, `--net`, allow-list parsing, conflict
       handling, and dry-run redaction.
+- [ ] Add tests for local archive path, stdin archive, unpacked rootfs,
+      malformed archive, traversal attempt, wrong architecture, and missing
+      provenance handling.
 - [ ] Add a Linux builder-VM/KVM smoke for `machine run --image alpine -- true`.
 - [ ] Add a network smoke for `machine run --net --image alpine -- nslookup
       example.com`.
@@ -717,6 +802,11 @@ Required behavior:
 - [ ] Keep structured errors aligned across Python, TypeScript, and Rust.
 - [ ] Add SDK tests proving no host Nix is invoked for image-backed machine
       runs.
+- [ ] Add SDK/CLI parity tests proving equivalent admission inputs, effective
+      policy, and receipt/audit summaries for the same machine config.
+- [ ] Add SDK negative tests proving wrappers cannot bypass artifact
+      verification, network default-deny, unknown-key rejection, or
+      `image`/`flake` conflict rejection.
 
 ### D. Agent-safe auth and volumes
 
@@ -757,6 +847,9 @@ Required behavior:
       transfer, run, inspect, and clean up.
 - [ ] Add docs showing artifact creation, transfer, verification, run, and
       cleanup without host Nix.
+- [ ] Add docs/source tests that portable artifact examples do not imply host
+      Nix is required and do state host architecture/backend compatibility
+      requirements.
 - [ ] Add tamper, wrong-key, traversal, unknown-version, missing-verity, and
       arch-mismatch tests.
 
@@ -793,6 +886,18 @@ Required behavior:
       features only.
 - [ ] Duplicate-major dependency budget check, including OCI/TLS stacks.
 - [ ] Binary-size budget check for the default `mvmctl` artifact.
+- [ ] Local image-source tests: registry ref, archive path, stdin archive,
+      unpacked rootfs, malformed archive, traversal attempt, wrong
+      architecture, and missing provenance.
+- [ ] SDK/CLI parity and non-bypass tests: equivalent admission inputs,
+      effective policy, artifact verification, unknown-key rejection,
+      source-selector conflict rejection, and receipt/audit summaries.
+- [ ] Docs/source guards for no-host-Nix default and explicit limitations:
+      network protocol scope, volumes, SSH-agent prerequisites, macOS
+      signing/entitlements, GPU status, and backend/architecture support.
+- [ ] Portable artifact workflow tests/docs: pack, verify, inspect, run,
+      transfer guidance, cleanup, tamper, wrong-key, wrong-arch, traversal,
+      unknown-version, and missing-verity rejection.
 - [ ] `cargo test --workspace`
 - [ ] `cargo check --workspace`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`

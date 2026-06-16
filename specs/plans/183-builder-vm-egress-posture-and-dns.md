@@ -286,21 +286,17 @@ Two independent defects blocked `mvmctl up --flake <workload> --hypervisor vz`:
   No pending action: the static-IP fallback from WS-B2 is a deliberate keep
   (belt-and-suspenders for any residual race during udhcpc startup), not a TODO to
   remove. Closed 2026-06-15.
-- [ ] Persistent Vz builder (`VzPersistentBuilderVm`) still runs `network: None`;
-  wire gvproxy when that path leaves scaffold status.
-  Close-out triage (2026-06-13): DEFERRED by design — the one-shot Vz builder
-  already spawns gvproxy (`host_gvproxy::spawn_detached`), which is what the
-  proven cold `dev up`/`build` path uses; the persistent path is still scaffold,
-  so wiring gvproxy there (~50-70 LOC copy of the one-shot pattern) can't be
-  live-validated until that path is exercised. Not a vz close-out blocker.
-  Re-confirmed 2026-06-15: the persistent driver is **not selected** —
-  `builder_backend_select` picks the one-shot `run_build` path, and
-  `build_persistent_supervisor_config` (vz_builder.rs `network: None`) documents
-  in-code that it "stays offline until it is [selected] — at which point it gets
-  the same trusted-builder gvproxy as the one-shot path." So wiring it now is
-  speculative + dead-on-arrival; do it as part of making the persistent driver
-  the selected path, not before. (The caller, `commands/env/dev_vz.rs`, is also in
-  the Plan 189 boundary — coordinate there.)
+- [x] Persistent Vz builder (`VzPersistentBuilderVm`) gets gvproxy egress.
+  DONE 2026-06-15: `start` spawns `host_gvproxy::spawn_detached` (a
+  `BuilderGvproxyGuard` reaps it on any start-error path, defused on success so the
+  detached gvproxy outlives the CLI), `build_vz_persistent_supervisor_config` now
+  wires `NetworkConfig::Gvproxy` (was `network: None`; no flow-audit drainer —
+  trusted dev-tier), and `stop_persistent_vz_by_pid_file` reaps it so `dev down`
+  doesn't leak it — all contained to `vz_builder.rs` (the dev_vz.rs down path
+  already delegates the reap here). Live-validated on macOS-26: `dev up` spawned
+  gvproxy and the dev VM took a DHCP lease 192.168.127.3 from the gvproxy gateway
+  192.168.127.1 (vs no virtio-net at all under `network: None`); `dev down` reaped
+  the gvproxy with no leak.
 - [ ] `mvmctl doctor` line surfacing the in-builder egress posture + last builder
   network bootstrap outcome (lease vs static vs none), so this class of failure is
   diagnosable without console archaeology.

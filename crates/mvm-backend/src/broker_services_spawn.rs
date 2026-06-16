@@ -78,7 +78,7 @@ pub struct AuditSignerHandle {
 /// Spawn the per-VM `mvm-audit-signer` moat. Hands it a JSON `SubprocessConfig`
 /// on stdin (chain JSONL + host-signer key + the UDS to bind), detaches it via
 /// `setsid` so it outlives `mvmctl up`, waits for it to bind the UDS, and
-/// writes [`AUDIT_SIGNER_PID_FILE`] for the stop path to reap.
+/// writes `AUDIT_SIGNER_PID_FILE` for the stop path to reap.
 pub fn spawn_audit_signer(params: AuditSignerSpawnParams<'_>) -> Result<AuditSignerHandle> {
     spawn_audit_signer_with_timeout(params, AUDIT_SIGNER_READY_TIMEOUT)
 }
@@ -221,9 +221,12 @@ pub struct BrokerSpawnParams<'a> {
     pub workload_id: &'a str,
     /// Tenant id.
     pub tenant_id: &'a str,
-    /// VM name; the broker binds the per-VM `BROKER_PORT` socket keyed on it
-    /// (the VMM forwards the guest's `connect_host_vsock(BROKER_PORT)` there).
-    pub vm_name: &'a str,
+    /// The per-VM `BROKER_PORT` socket the broker binds — the **backend-specific**
+    /// path the VMM forwards the guest's `connect_host_vsock(BROKER_PORT)` to:
+    /// `vm_vsock_port_socket` on libkrun (the VMM proxies straight to it),
+    /// `vm_vz_vsock_port_socket` on vz (the supervisor splices to it). Passed in
+    /// rather than derived because the two backends use different socket paths.
+    pub broker_uds_path: &'a Path,
     /// Per-VM state dir; holds the broker PID file.
     pub state_dir: &'a Path,
     /// The audit-signer UDS from [`spawn_audit_signer`] — the broker's
@@ -244,7 +247,7 @@ pub struct BrokerHandle {
 /// forwards the guest's dial to. Hands it a JSON `SubprocessConfig` on stdin
 /// (the audit-signer UDS to forward `host.audit.v1` to + the host-signer
 /// pubkey), `setsid`-detaches, waits for the UDS, and writes
-/// [`BROKER_PID_FILE`] for the stop path to reap.
+/// `BROKER_PID_FILE` for the stop path to reap.
 pub fn spawn_broker(params: BrokerSpawnParams<'_>) -> Result<BrokerHandle> {
     spawn_broker_with_timeout(params, BROKER_READY_TIMEOUT)
 }
@@ -257,15 +260,16 @@ fn spawn_broker_with_timeout(
     let BrokerSpawnParams {
         workload_id,
         tenant_id,
-        vm_name,
+        broker_uds_path,
         state_dir,
         audit_signer_uds_path,
     } = params;
 
     let bin = resolve_subprocess_bin("mvm-broker", "MVM_BROKER_PATH")?;
-    // The broker binds the per-VM BROKER_PORT socket the VMM forwards the
-    // guest's `connect_host_vsock(BROKER_PORT)` dial to.
-    let uds_path = mvm_core::config::vm_vsock_port_socket(vm_name, mvm_guest::vsock::BROKER_PORT);
+    // The broker binds the backend-specific per-VM BROKER_PORT socket the VMM
+    // forwards the guest's `connect_host_vsock(BROKER_PORT)` dial to (the caller
+    // passes the right path — libkrun and vz differ).
+    let uds_path = broker_uds_path;
     if let Some(parent) = uds_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("create broker socket dir {}: {e}", parent.display()))?;
@@ -283,11 +287,13 @@ fn spawn_broker_with_timeout(
 
     let child = spawn_detached_with_config(&bin, &cfg, "mvm-broker")?;
     // No stdout handshake — the broker just binds. Readiness = the UDS appears.
-    wait_for_uds("mvm-broker", &uds_path, child.id(), ready_timeout)?;
+    wait_for_uds("mvm-broker", uds_path, child.id(), ready_timeout)?;
     let pid_file = state_dir.join(BROKER_PID_FILE);
     std::fs::write(&pid_file, child.id().to_string())
         .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
-    Ok(BrokerHandle { uds_path })
+    Ok(BrokerHandle {
+        uds_path: uds_path.to_path_buf(),
+    })
 }
 
 /// Spawn `bin` detached (`setsid`), write `cfg` JSON to its stdin then close it
@@ -365,10 +371,14 @@ pub struct BrokerServicesSpawnParams<'a> {
     /// is a defused no-op (an unadmitted dev VM has no broker services, so a
     /// stray guest dial to `BROKER_PORT` gets `ECONNREFUSED`).
     pub tenant_id: Option<&'a str>,
-    /// VM name; keys the per-VM workload chain + the `BROKER_PORT` socket.
+    /// VM name; keys the per-VM workload chain (`<tenant>.<vm>.workload.jsonl`).
     pub vm_name: &'a str,
     /// Per-VM state dir.
     pub state_dir: &'a Path,
+    /// The `BROKER_PORT` socket the broker binds — backend-specific (the caller
+    /// passes `vm_vsock_port_socket` on libkrun, `vm_vz_vsock_port_socket` on
+    /// vz; the VMM forwards the guest's `connect_host_vsock(BROKER_PORT)` here).
+    pub broker_listen_socket: &'a Path,
 }
 
 /// Spawn the per-VM broker services (audit-signer **then** broker) when the VM
@@ -388,6 +398,7 @@ pub fn spawn_broker_services_if_admitted(
         tenant_id,
         vm_name,
         state_dir,
+        broker_listen_socket,
     } = params;
     let Some(tenant_id) = tenant_id else {
         return Ok(BrokerServicesGuard::defused());
@@ -405,7 +416,7 @@ pub fn spawn_broker_services_if_admitted(
     spawn_broker(BrokerSpawnParams {
         workload_id,
         tenant_id,
-        vm_name,
+        broker_uds_path: broker_listen_socket,
         state_dir,
         audit_signer_uds_path: &audit.uds_path,
     })?;
@@ -668,7 +679,7 @@ mod tests {
         let res = spawn_broker(BrokerSpawnParams {
             workload_id: "wl-001",
             tenant_id: "tenant-x",
-            vm_name: "vm-1",
+            broker_uds_path: &uds,
             state_dir: &state_dir,
             audit_signer_uds_path: &audit_uds,
         });
@@ -729,6 +740,8 @@ mod tests {
             tenant_id: None,
             vm_name: "vm",
             state_dir: &dir,
+            // Unused on the unadmitted path (the gate short-circuits first).
+            broker_listen_socket: &dir,
         })
         .expect("unadmitted VM yields a defused no-op guard");
         drop(guard); // a defused guard's Drop reaps nothing
@@ -790,6 +803,7 @@ mod tests {
             tenant_id: Some("tenant-x"),
             vm_name: "vm-1",
             state_dir: &state_dir,
+            broker_listen_socket: &broker_uds,
         });
 
         // SAFETY: serialised by HOME_TEST_LOCK.

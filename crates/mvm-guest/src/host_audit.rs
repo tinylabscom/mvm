@@ -2,14 +2,14 @@
 //!
 //! `emit` / `emit_batch` let a workload append to the chain-signed audit log
 //! over the broker transport ([`crate::broker_client`]). The payload types
-//! ([`EmitRequest`] / [`EmitResponse`] / [`EmitBatchRequest`] /
-//! [`EmitBatchResponse`]) are the shared wire contract in
+//! (`EmitRequest` / `EmitResponse` / `EmitBatchRequest` /
+//! `EmitBatchResponse`) are the shared wire contract in
 //! [`mvm_core::protocol::host_audit`]; this module builds the `ServiceCall`
-//! envelope and maps the host's typed [`ServiceErrorCode`] reply onto a typed
-//! [`AuditError`].
+//! envelope and maps the host's typed `ServiceErrorCode` reply onto a typed
+//! `AuditError`.
 //!
 //! Claim 8 — a workload can never write a host-category entry — is structural,
-//! not advisory: [`EmitRequest`] carries no `category` field, so this method
+//! not advisory: `EmitRequest` carries no `category` field, so this method
 //! cannot express one, and the host handler independently stamps
 //! `category: workload_audit` on every forwarded entry. The 4 KiB per-record
 //! cap and the 20/s rate limit are likewise enforced host-side; this client

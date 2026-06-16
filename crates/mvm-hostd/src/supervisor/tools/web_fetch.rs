@@ -139,7 +139,7 @@ impl HttpFetcher for NoopHttpFetcher {
 ///   [`SsrfGuard::classify`]. Any private / loopback /
 ///   link-local / multicast / metadata-service IP triggers a
 ///   refusal. The validated IPs are pinned via a custom reqwest
-///   resolver ([`PinnedDnsResolver`]) so reqwest cannot
+///   resolver (`PinnedDnsResolver`) so reqwest cannot
 ///   re-resolve to a different IP. The pre-resolve filter +
 ///   pinned resolver are two independent layers — defense in
 ///   depth.

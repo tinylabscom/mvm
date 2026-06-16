@@ -1,11 +1,11 @@
 //! In-guest `host.time.v1` typed method — host wall-clock query.
 //!
-//! [`now`] returns the host's wall-clock over the broker transport
+//! `now` returns the host's wall-clock over the broker transport
 //! ([`crate::broker_client`]). The response type
 //! ([`mvm_core::protocol::host_time::TimeNowResponse`]) is the shared wire
 //! contract; this module builds the `host.time.v1::now` `ServiceCall`
-//! envelope and maps the host's typed [`ServiceErrorCode`] reply onto a
-//! typed [`TimeError`].
+//! envelope and maps the host's typed `ServiceErrorCode` reply onto a
+//! typed `TimeError`.
 //!
 //! Like every broker client this runs in the untrusted guest and is
 //! advisory: it holds no key, the call carries a bare `ServiceCall`, and the

@@ -4,8 +4,8 @@
 //! ## No VMM lock-in
 //!
 //! Everything VMM-specific (the config-file format, the binary
-//! path, the spawn argv) lives behind the [`WorkloadVmm`] trait.
-//! [`FirecrackerVmm`] is the only impl today and the only type that
+//! path, the spawn argv) lives behind the `WorkloadVmm` trait.
+//! `FirecrackerVmm` is the only impl today and the only type that
 //! names Firecracker; the dispatch loop, the wire protocol, and the
 //! state-dir / process lifecycle are all VMM-agnostic. A second
 //! backend (qemu) is a pure addition: a
@@ -17,7 +17,7 @@
 //! Same rationale as [`crate::dispatch_response`] /
 //! [`crate::builder_request`]: the ≤ 1.5 MiB rootfs budget
 //! keeps `serde_json` out of the production rootfs, so
-//! [`FirecrackerVmm::render_config`] hand-rolls the Firecracker
+//! `FirecrackerVmm::render_config` hand-rolls the Firecracker
 //! `--config-file` JSON. The `render_config_is_valid_json` test
 //! parses the output with a dev-only `serde_json` to keep it honest.
 
@@ -250,21 +250,19 @@ pub fn stop_workload(base: &Path, workload_id: &str) -> io::Result<()> {
     use std::time::Duration;
 
     let pid_path = base.join(workload_id).join("fc.pid");
-    if let Ok(pid) = fs::read_to_string(&pid_path).map(|s| s.trim().parse::<i32>()) {
-        if let Ok(pid) = pid {
-            // SIGTERM, then poll up to ~2s for the process to exit.
-            unsafe { libc::kill(pid, libc::SIGTERM) };
-            let mut exited = false;
-            for _ in 0..40 {
-                if unsafe { libc::kill(pid, 0) } != 0 {
-                    exited = true;
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(50));
+    if let Ok(Ok(pid)) = fs::read_to_string(&pid_path).map(|s| s.trim().parse::<i32>()) {
+        // SIGTERM, then poll up to ~2s for the process to exit.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+        let mut exited = false;
+        for _ in 0..40 {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                exited = true;
+                break;
             }
-            if !exited {
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if !exited {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
         }
     }
     cleanup_state_dir(base, workload_id)

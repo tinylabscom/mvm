@@ -90,14 +90,14 @@ pub struct SynthesisInput<'a> {
     pub image_sha256: &'a str,
     pub image_cosign_bundle: Option<&'a str>,
     /// Purpose this run is admitted for. `None` means
-    /// [`DEFAULT_INTENT`].
+    /// `DEFAULT_INTENT`.
     pub intent: Option<&'a str>,
     /// Seccomp tier resolved by the caller before admission. This is
     /// mirrored into `ExecutionPlan.admission_profile` so audit can
     /// prove which filter tier the boot was bound to.
     pub seccomp_tier: PlanSeccompTier,
     /// Policy refs selected by the caller. `None` falls back to
-    /// [`DEFAULT_POLICY_REF`]. Keeping refs in the synthesis input
+    /// `DEFAULT_POLICY_REF`. Keeping refs in the synthesis input
     /// lets intent profiles bind to live policy bundles without a
     /// later mutation step.
     pub network_policy_ref: Option<&'a str>,

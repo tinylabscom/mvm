@@ -269,7 +269,7 @@ const KNOWN_MISSING_ADRS: &[(u32, &str)] = &[
     ),
 ];
 
-/// Run the check; print findings; return Err on any "[error]" line.
+/// Run the check; print findings; return Err on any `[error]` line.
 pub fn run(workspace: &Path) -> Result<()> {
     let adrs = discover_adrs(workspace)?;
     let refs = scan_for_refs(workspace)?;

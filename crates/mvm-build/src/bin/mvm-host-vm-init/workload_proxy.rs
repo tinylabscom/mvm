@@ -20,7 +20,7 @@
 //!
 //! libkrun registers its vsock ports when the host VM is *launched*
 //! (`krun_add_vsock_port2`); ports can't be added per workload at
-//! runtime. So the host VM exposes a single [`WORKLOAD_FORWARD_PORT`]
+//! runtime. So the host VM exposes a single `WORKLOAD_FORWARD_PORT`
 //! and the forwarder multiplexes: each inbound connection opens with
 //! a length-prefixed `"<workload_id> <port>"` handshake naming which
 //! workload + which guest port to reach. The forwarder resolves the
@@ -31,7 +31,7 @@
 //!
 //! Same size-budget rationale as the rest of `mvm-host-vm-init`: the
 //! handshake is hand-parsed, the CONNECT line hand-rolled. The
-//! cross-platform core ([`handle_forward_conn`] and helpers) is
+//! cross-platform core (`handle_forward_conn` and helpers) is
 //! exercised by `cargo test` on every host against a fake `v.sock`
 //! server — no VM required; only the AF_VSOCK listener is Linux-only.
 

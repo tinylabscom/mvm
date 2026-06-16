@@ -3,7 +3,7 @@
 //! The workload points `HTTP_PROXY`/`HTTPS_PROXY` (or the SDK's thin client) at
 //! this guest-local proxy and makes ordinary requests carrying an opaque
 //! placeholder (from `mvm.secret()`) where a credential goes. The proxy parses
-//! the proxied request into a [`WireRequest`] and relays it to the host
+//! the proxied request into a `WireRequest` and relays it to the host
 //! substitution endpoint ([`crate::substitution_client`]); the host substitutes
 //! the real credential and makes the **real TLS** upstream (model ii — no
 //! in-guest TLS MITM). This module is the request parser; the listen/relay loop

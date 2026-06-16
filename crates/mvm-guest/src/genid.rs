@@ -7,7 +7,7 @@
 //! nonces/keys (a real key-reuse break), and drop its vsock session so a
 //! fresh Ed25519 handshake runs.
 //!
-//! The pure change-detection lives in [`GenIdState`]; this wraps it with the
+//! The pure change-detection lives in `GenIdState`; this wraps it with the
 //! guest-side reseed I/O. Delivery (the host sending the token over the
 //! resume RPC) is the remaining wiring.
 

@@ -1,6 +1,6 @@
 //! Pre-spawn binary integrity check.
 //!
-//! Before [`super::spawn::ProcessSpawner::spawn`] hands control to a
+//! Before `super::spawn::ProcessSpawner::spawn` hands control to a
 //! subprocess binary, the supervisor mmaps the file, computes its
 //! SHA-256, and verifies an Ed25519 signature against a pinned release
 //! key. Refuse-to-spawn on any mismatch; the supervisor's lifecycle
@@ -25,7 +25,7 @@
 //! signature-doesn't-verify.
 //!
 //! **Important — TOCTOU window remains (deferred).** This
-//! module verifies the binary's bytes *before* [`Command::spawn`] is
+//! module verifies the binary's bytes *before* `Command::spawn` is
 //! called; the kernel then reads the same path during exec. An
 //! attacker who can swap the binary file between verify-time and
 //! exec-time wins. Closing the window requires Linux `fexecve` (or

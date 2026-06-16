@@ -21,11 +21,11 @@
 //!   `mvmctl console` can find the artifacts), constructs a
 //!   [`mvm_build::vz::SupervisorConfig`] from the `VmStartConfig`, spawns
 //!   `mvm-vz-supervisor` with the JSON on stdin, and waits up to
-//!   [`PID_FILE_TIMEOUT`] for the supervisor to write its PID file.
+//!   `PID_FILE_TIMEOUT` for the supervisor to write its PID file.
 //! - `stop` reads `<vm_state_dir>/vz.pid`, sends `SIGTERM` (the
 //!   supervisor forwards to `VZVirtualMachine.requestStop()`), polls
 //!   for the process to exit, and falls back to `SIGKILL` after
-//!   [`STOP_TIMEOUT`].
+//!   `STOP_TIMEOUT`.
 //! - `status` reads the PID file and probes with `kill(pid, 0)`.
 //! - `list` walks `~/.mvm/vms/*/vz.pid`.
 //! - `logs` tails `<vm_state_dir>/console.log` (capture-only console).
@@ -403,6 +403,13 @@ impl VmBackend for VzBackend {
                 tenant_id: config.tenant_id.as_deref(),
                 vm_name: &config.name,
                 state_dir: &state_dir,
+                // vz splices the guest's BROKER_PORT dial to the per-VM socket
+                // under `vsock/` (same shape as the substitution endpoint) — a
+                // different path from libkrun's, so the broker must bind THIS.
+                broker_listen_socket: &mvm_core::config::vm_vz_vsock_port_socket(
+                    &config.name,
+                    mvm_guest::vsock::BROKER_PORT,
+                ),
             },
         ) {
             Ok(guard) => guard,

@@ -1,8 +1,8 @@
 //! In-guest `host.cost.v1` typed methods — accumulated spend query.
 //!
-//! [`workload`] returns this workload's spend; [`tenant`] returns the
+//! `workload` returns this workload's spend; `tenant` returns the
 //! tenant-aggregated spend (mvmd-delegated, may answer
-//! [`CostError::NotImplemented`] on a build without the cross-VM verb).
+//! `CostError::NotImplemented` on a build without the cross-VM verb).
 //! Both ride the broker transport ([`crate::broker_client`]) and decode the
 //! shared wire contract
 //! [`mvm_core::protocol::host_cost::CostReport`].

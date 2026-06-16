@@ -494,25 +494,18 @@ plus secret-bearing modules.
       grepping the unresolved-link set for `Backend`/`EgressProxy`/
       `DeviceMapperBackend`/`BackendKind` returns nothing, so #892/#894/#895
       updated their own doc links cleanly.
-- [~] **Step 2 - fix broken intra-doc links.** The doc run surfaced ~115
-      *pre-existing* broken intra-doc links (not introduced by this plan),
-      spread across every crate (mvm-hostd 26, mvm-build 26, mvm-backend 16,
-      mvm-core 15, mvm-guest 13, libkrun-sys 8, others ≤4). These are general
-      doc-hygiene debt — private-item links, std-trait links written bare
-      (`[`FromStr`]`), test-fn links, prose that should be backticked, and a few
-      module-doc `//!` links that don't resolve even fully-qualified.
-      **`mvm-core` cleared** (16 sites): public API got real qualified links
-      (`[`SecretStore::list`]`, `[`crate::crypto::snapshot_hmac`]`,
-      `[`std::str::FromStr`]`, the `SIG_ALG_*` consts), private/test/prose items
-      were backticked, and `cargo doc -p mvm-core --no-deps` is now clean under
-      `-D rustdoc::broken_intra_doc_links`.
-      **`mvm-build` partially cleared** (45 → 32 under `--all-features`): fixed
-      the *unconditional* path bugs — `vz_builder.rs` dropped the `crate::`
-      prefix on 10 `libkrun_builder::…` links the code itself qualifies;
-      `vz.rs` `Boot`/`Restore` → `StartupMode::{Boot,Restore}`; `builder_vm.rs`
-      `LibkrunBuilderVm` → `crate::libkrun_builder::LibkrunBuilderVm`; private
-      consts + external objc2 types backticked. This pass also **refined the
-      finding** (see Step 3): the count is feature- and platform-sensitive.
+- [x] **Step 2 - fix broken intra-doc links. DONE.** The Linux `--all-features`
+      doc run surfaced **122** *pre-existing* broken intra-doc links (not
+      introduced by this plan — the renames were clean) across every crate.
+      **All 122 are now fixed**: `cargo doc --workspace --all-features --no-deps`
+      is clean under `-D rustdoc::broken_intra_doc_links` on the x86_64 Linux box
+      (exit 0, zero unresolved). Fixes (doc-comment only, no logic): public-API
+      refs got real qualified links where the path was obvious; the rest —
+      `<placeholder>` paths, literal `[bracket]` prose (`[mvm]`, `[error]`,
+      `argv[0]`), private/test/method links, cross-crate refs (broken under
+      `--no-deps`), and module-doc `//!` submodule/type-overview lists — were
+      backticked to inline code. Valid `///` item-doc links and type-defining-file
+      links were left intact. Landed as three batches on `docs/plan-185-task13-doclinks`.
 - [~] **Step 3 - document the doc-generation conditions.** Not a host/platform
       *blocker* (`cargo doc` runs here), but the workspace doc build is
       **feature- and platform-conditional**, which the initial `~115` count hid:
@@ -527,18 +520,10 @@ plus secret-bearing modules.
       bugs. mvm-core + the unconditional mvm-build bugs are fixed; the rest is
       tracked below.
 
-  **Deferred (tracked) — clear the remaining broken intra-doc links before
-  Phase 7 (counts are the macOS-host default-feature run; re-measure on Linux
-  with `--all-features`, which is the real gate — many are feature/platform
-  artifacts, not bugs):**
-  - [ ] mvm-hostd (26)
-  - [~] mvm-build (32 left under `--all-features`; unconditional path bugs fixed —
-        remainder is module-doc `//!` qualification + `cfg(linux)` builder-VM bins
-        that resolve only on a Linux doc build)
-  - [ ] mvm-backend (16)
-  - [ ] mvm-guest (13)
-  - [ ] libkrun-sys / deps (8)
-  - [ ] mvm-cli (4), mvm-vm-host (3), mvm (2), mvm-sdk (1), mvm-oci (1)
+  **All crates cleared** (measured on Linux with `--all-features`, the real
+  gate): mvm-core, mvm-build, mvm-hostd, mvm-backend, mvm-guest, libkrun-sys,
+  mvm-cli, mvm-vm-host, mvm, mvm-sdk, mvm-oci, and xtask — all green under
+  `-D rustdoc::broken_intra_doc_links`.
 
 ---
 
@@ -561,36 +546,41 @@ plus secret-bearing modules.
       artifact, green in a real-embed CI build.
 - [x] `cargo check --workspace` green (the test build above compiled the whole
       workspace + all test targets on Linux).
-- [~] `cargo clippy --workspace --all-targets -- -D warnings` green in the
-      **required env (macOS CI)** — verified for all Plan 185 changes. A Linux
-      clippy run additionally surfaced **pre-existing** lints in the `cfg(linux)`
-      `mvm-build` bin `mvm-host-vm-init` (same clippy 0.1.96 both hosts; macOS
-      never lints that bin because it's `cfg`-excluded): 9 `doc list item without
-      indentation`, 1 `empty line after doc comment`, 1 `collapsible if`. These
-      are unrelated to Plan 185 and predate it; tracked as a separate Linux-clippy
-      follow-up (chasing "Linux clippy green" risks a cascade through dependent
-      crates — out of this plan's scope).
-- [~] `cargo doc --workspace --no-deps` — **documented blocker, not a Plan 185
-      regression.** Task 13 proved the renames introduced zero broken links;
-      separately, `cargo doc --workspace --all-features` on Linux inventories
-      **~122 pre-existing broken intra-doc links** scattered ~1-per-file across
-      ~60 files (feature/platform-gated artifacts mixed with genuine bare-path
-      bugs). mvm-core + mvm-build's unconditional bugs are fixed (#939/#941); the
-      remaining crates are a tracked doc-hygiene follow-up that must be measured
-      and fixed **on Linux with `--all-features`** (only links broken there are
-      real). This is the "narrower doc command / documented reason" Task 14 allows.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` green in the
+      **required env (macOS CI)** for all Plan 185 changes. A Linux clippy run
+      additionally surfaced **pre-existing** lints in the `cfg(linux)` `mvm-build`
+      bin `mvm-host-vm-init` (macOS never lints that bin because it's
+      `cfg`-excluded; the per-PR root `clippy --all-targets` doesn't lint a
+      dependency's bin, but the `ci-full` `clippy -p mvm-build -p mvm-backend
+      --all-targets` Linux lane does): 9 `doc_lazy_continuation`, 1 `empty line
+      after doc comment`, 1 collapsible `if let`. Now **fixed** (collapsible
+      if-let collapsed, dangling `///` overview → `//`, list continuations
+      re-indented); `cargo clippy -p mvm-build -p mvm-backend --all-targets --
+      -D warnings` is green on the Linux box. No cascade — the lane is clean.
+- [x] `cargo doc --workspace --all-features --no-deps` — **green on Linux** under
+      `-D rustdoc::broken_intra_doc_links` (exit 0, zero unresolved). Task 13
+      proved the renames introduced zero broken links; the Linux `--all-features`
+      run then inventoried **122 pre-existing** broken intra-doc links across
+      every crate (feature/platform-gated artifacts mixed with genuine bare-path
+      bugs), and **all 122 are now fixed** (mvm-core/mvm-build first via
+      #939/#941, then the full sweep on `docs/plan-185-task13-doclinks`). The
+      gate must run on **Linux with `--all-features`** — the macOS default-feature
+      run can't see `cfg`-gated modules, so it under-reports.
 - [x] `specs/SPRINT.md` reflects the plan and its real state.
 - [x] `specs/REFACTOR-STATUS.md` reflects the plan and its real state.
 - [x] **Closeout note — intentionally deferred debts, with reasons:**
       1. **Task 8 — `mvm-vm-host/vz_objc.rs` objc2 SAFETY audit.** Held while the
          Plan-152 vz work is active (concurrent vz worktrees/PRs); touching ~120
          `msg_send` blocks now would collide. Resume when vz is quiet.
-      2. **Task 13 — remaining-crate broken intra-doc links (~122 under Linux
-         `--all-features`).** Pre-existing doc-hygiene debt, not introduced by this
-         plan (renames were clean). Must be re-measured + fixed on Linux +
-         `--all-features` per-crate, because macOS tooling can't separate real
-         bugs from `cfg(feature)`/`cfg(target_os="linux")` artifacts.
-      3. **Pre-existing Linux-only clippy lints in `mvm-host-vm-init`** (11, doc
-         formatting + collapsible-if). Surfaced by the Phase 7 Linux clippy run;
-         orthogonal to Plan 185; deferred to avoid a cross-crate Linux-clippy
-         cascade inside this closeout.
+      2. **Task 13 — broken intra-doc links: DONE.** All 122 pre-existing broken
+         intra-doc links (Linux `--all-features`) fixed; `cargo doc --workspace
+         --all-features --no-deps` is clean under `-D broken_intra_doc_links` on
+         the Linux box. (No longer deferred.)
+      3. **Pre-existing Linux-only clippy lints in `mvm-host-vm-init`: DONE.**
+         The 12 lints (`doc_lazy_continuation`, empty-line-after-doc, collapsible
+         if-let) the Phase 7 Linux clippy run surfaced are fixed; the
+         `ci-full` `clippy -p mvm-build -p mvm-backend --all-targets` Linux lane
+         is green on the box, no cascade. (No longer deferred.)
+
+      **Net: the only remaining Plan 185 item is Task 8 (`vz_objc.rs`), parked
+      until the vz work quiets.**

@@ -1,7 +1,7 @@
 //! `mvm-seccomp-apply` — install a seccomp BPF filter, then run a wrapped command.
 //!
 //! Usage:
-//!     mvm-seccomp-apply <tier> -- <cmd> [args...]
+//!     `mvm-seccomp-apply <tier> -- <cmd> [args...]`
 //!
 //! `<tier>` is one of `essential` / `minimal` / `standard` / `network`
 //! / `unrestricted` (matching `mvm_core::crypto::seccomp::SeccompTier`).

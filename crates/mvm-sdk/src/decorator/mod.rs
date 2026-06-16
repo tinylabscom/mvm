@@ -10,8 +10,8 @@
 //! function at invoke time.
 //!
 //! Today the Python parser is implemented; the TypeScript mirror lands
-//! in a follow-up slice. The two share the [`DecoratorManifest`]
-//! shape and [`ParseError`] taxonomy so callers can route by file
+//! in a follow-up slice. The two share the `DecoratorManifest`
+//! shape and `ParseError` taxonomy so callers can route by file
 //! extension without language-specific branches.
 
 pub mod python;

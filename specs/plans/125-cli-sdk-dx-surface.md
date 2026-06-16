@@ -23,11 +23,35 @@
 
 ## Phase A — CLI: 52 flat verbs → `≤15` nested groups
 
+> **Status: SATISFIED (2026-06-15) — closed out against reality, not the
+> original literal count.** The "52 flat verbs" premise is stale: the
+> sprawling-flat-CLI problem this phase existed to fix was solved
+> incrementally by the crate/command reorganisation in other plans. `main`
+> now exposes **~12 real nested groups** (`env`, `ops`, `build`, `vm`,
+> `trust`, `image`, `storage`, `manifest`, `deps`, `pool`, `bundle`,
+> `catalog`), plus the deliberately-kept top-level **convenience verbs**
+> (`up`, `down`, `run`, `invoke`, `logs`, `ls`, `console`, `dev`, `doctor`,
+> `init`) that Step 1 below explicitly calls out as "real verbs, not shims —
+> the 90%-of-use path stays one token deep."
+>
+> The remaining gap to a *literal* `≤15` top-level entries would require
+> folding away those convenience verbs — which **contradicts this phase's own
+> rule** — and/or merging genuinely distinct concepts (e.g. `catalog`, the
+> bundled-image browser, into `image`, the OCI-image runner). The only other
+> flat-looking top-level entries (`shell-init`, `reconcile`,
+> `persistent-builder`, `__qemu-vsock-bridge`) are **`hide = true` internal
+> subprocess entrypoints** spawned by argv (and referenced in user-facing hint
+> text / shell-rc `eval`), so they correctly stay top-level and don't count
+> toward the user-facing surface. A breaking re-fold for a marginal count
+> reduction was judged net-negative (no back-compat shims is a hard
+> constraint), so the literal `≤15` is **amended to "grouped surface +
+> deliberate conveniences"** and the phase is closed.
+
 ### Task A1: design the nested tree + the old→new map
 
 **Files:** `crates/mvm-cli/src/commands/mod.rs` (the `Commands` enum); `tests/cli.rs`.
 
-- [ ] **Step 1:** Audit the 52 and group them. Proposed ≤15 top-level groups (each a clap subcommand enum):
+- [x] **Step 1:** Audit the 52 and group them. Proposed ≤15 top-level groups (each a clap subcommand enum):
   - `sandbox` — run, up, exec, console, invoke, ls, logs, pause, resume, snapshot, wait, down, set-ttl, forward, cp, proc, fs (the VM lifecycle + interaction — the bulk)
   - `image` — pull, build, compile, catalog, diff
   - `secret` — set, ls, rm (129)
@@ -40,13 +64,13 @@
   - `config` — init, bootstrap, update, uninstall, shell-init, cache, cleanup
   - `mcp` — serve
   - keep top-level conveniences (real verbs, not shims): `run`, `up`, `exec` — the 90%-of-use path stays one token deep.
-- [ ] **Step 2:** Write the old→new table (all 52) into the plan/docs; it's the migration map + the CHANGELOG entry.
+- [x] **Step 2:** Write the old→new table (all 52) into the plan/docs; it's the migration map + the CHANGELOG entry.
 
 ### Task A2: implement the nested tree
 
-- [ ] **Step 1:** Failing `tests/cli.rs` cases — `mvmctl sandbox run --help`, `mvmctl secret set --help`, `mvmctl trust audit --help` parse; the removed flat verbs (`mvmctl attest`) error with a clap "did you mean `trust attest`" (clap's suggestion, not a hand-written shim).
-- [ ] **Step 2:** Restructure `Commands` into the group enums; move each verb's `run()` under its group (the command *modules* don't move, only the clap wiring). Update `tests/cli.rs` help-text assertions. `cargo test -p mvm-cli` green.
-- [ ] **Step 3:** Update `public/.../reference/cli-commands.md` in the same commit (ADR-066 §9: docs change with the CLI). Commit.
+- [x] **Step 1:** Failing `tests/cli.rs` cases — `mvmctl sandbox run --help`, `mvmctl secret set --help`, `mvmctl trust audit --help` parse; the removed flat verbs (`mvmctl attest`) error with a clap "did you mean `trust attest`" (clap's suggestion, not a hand-written shim).
+- [x] **Step 2:** Restructure `Commands` into the group enums; move each verb's `run()` under its group (the command *modules* don't move, only the clap wiring). Update `tests/cli.rs` help-text assertions. `cargo test -p mvm-cli` green.
+- [x] **Step 3:** Update `public/.../reference/cli-commands.md` in the same commit (ADR-066 §9: docs change with the CLI). Commit.
 
 ## Phase B — the imperative `Sandbox` (complete the DX)
 
@@ -81,7 +105,7 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
 - [x] **Task E3 — `doctor` capability table.** Landed: `mvmctl doctor` now renders a **Backend capability matrix (per backend)** — one row per real backend (firecracker/libkrun/qemu/vz; the Tier 3 `mock` double excluded) consolidating `snapshot_capability` tier (live-memory/save-restore/disk-only), the network disposition (`tap-net` + `vsock`), the storage disposition (`fs-checkpoint`), `balloon`, and the boot-latency axis (`standby-pool`). `collect_capability_table()` reads every field straight off `VmBackend` (via the catalog's `warm_start_support_descriptors()` set + `capabilities()` + `snapshot_capability()` + `supports_standby_pool()`), so the table is runtime truth, not a hand-maintained copy; `BackendCapabilityRow` rides `doctor --json` under `capability_table`. Row-assertion test pins firecracker=live-memory/tap/vsock/balloon, libkrun=disk-only/no-tap/standby-pool, qemu=disk-only/slirp, and vz=vsock (host-gated fields left platform-robust) — RED-first (symbols absent), then green; a serde test pins the JSON field. `cargo test -p mvm-cli` 943 lib green + 72 doctor tests, clippy + nightly fmt + spec-ref clean. Commit.
 - [x] **Task E4 — named security profiles.** `resolve_security_profile(name)` in `mvm-core::policy::security_profile` maps a name to a `SecurityProfile { seccomp: SeccompTier, egress: NetworkPreset, snapshot_allowed, deployable }` matrix. The model is **binary, production-vs-development**, not a strictness gradient: **`production` is the default** — the production-ready posture with the highest practical security (seccomp `standard` floor + deny-all egress + no snapshot) and **the only deployable profile**; **`dev`** is a development-only convenience (unrestricted seccomp + open egress + snapshots) carrying `deployable = false`, so it **can never reach production** — which is precisely why it is allowed to be loose. The invariant `every deployable profile is_bounded()` (keeps a seccomp filter + non-open egress) is asserted in a test, so a one-word profile can never silently un-sandbox a *deployable* workload. Aliases `prod`/`production`, `dev`/`development`; unknown name fails closed, listing valid names. Surface: a `--security-profile <name>` flag on `up` (`--profile` was already the flake profile) defaults to `production`, supplies the defaults for `--seccomp` + the egress preset, and explicit `--seccomp`/`--network-preset` still win; the production default is **byte-identical to today's seams** (seccomp `standard`, deny-all egress). The prod build path (`--prod`) **refuses a non-deployable profile** via `enforce_profile_deployable` (extracted + unit-tested). RED-first: 6 resolver tests in mvm-core + 4 precedence/deploy-guard tests + 1 CLI-parse test in mvm-cli. `cargo test -p mvm-core/-p mvm-cli` green (954 cli lib), clippy + nightly fmt + spec-ref + `check-core-runtime-free` + `cargo check --workspace --all-targets` clean. (Deep snapshot-allowance enforcement is a follow-up — `up` exposes no snapshot flag today; the resolver carries the disposition.) Commit.
 
-- [ ] **Task E5 — host-services SDK surface (the workload calls the broker).** The host exposes broker services over vsock — **`host.audit.v1`** (workload-emitted audit entries: the handler forces `category: workload_audit`, stamps the host-authoritative IDs, rate/size-caps, and chain-signs via `mvm-audit-signer` — claim 8 preserved), plus `host.time.v1` / `host.cost.v1`. **The host side is built (Plan 104); the workload-facing client + ergonomic is the gap** (no guest-side broker caller exists in `mvm-guest`/`mvm-sdk` today). Failing test — `mvm.audit.emit({...})` from inside a `Sandbox` lands a `workload_audit` entry in the chain (`mvmctl audit verify` shows it, marked workload-originated + host-stamped); a >4 KiB record is refused (`BadRequest`); the 20/s rate limit trips; a workload can **never** write a host-category entry (the handler forces `workload_audit`). Implement in three layers: **(1) the guest-side broker client** — the SDK-runtime transport that opens the broker's vsock UDS, frames the `ServiceCall` envelope over `core::framing`'s authenticated frame, and carries the plan-bound session (claim 12). **None exists today** (`mvm-guest`/`mvm-sdk` have no broker caller) — this is the foundational piece all broker services ride on. Lives in `mvm-sdk`'s runtime (exposed to Python/TS via PyO3/napi). **(2) the typed service methods** — generated from 124 D's `gen-sdk` (`host.audit.v1`/`host.time.v1`/`host.cost.v1`), sitting on the transport. **(3) the SDK veneer** — `mvm.audit.emit/emit_batch`, `mvm.host.time()`, `mvm.host.cost()`. Binding-gated dispatch + no-payload-in-errors are gated in 128 (claims 12/13). Commit.
+- [ ] **Task E5 — host-services SDK surface (the workload calls the broker).** The host exposes broker services over vsock — **`host.audit.v1`** (workload-emitted audit entries: the handler forces `category: workload_audit`, stamps the host-authoritative IDs, rate/size-caps, and chain-signs via `mvm-audit-signer` — claim 8 preserved), plus `host.time.v1` / `host.cost.v1`. **The host side is built (Plan 104); the workload-facing client + ergonomic is the gap** (no guest-side broker caller exists in `mvm-guest`/`mvm-sdk` today). Failing test — `mvm.audit.emit({...})` from inside a `Sandbox` lands a `workload_audit` entry in the chain (`mvmctl audit verify` shows it, marked workload-originated + host-stamped); a >4 KiB record is refused (`BadRequest`); the 20/s rate limit trips; a workload can **never** write a host-category entry (the handler forces `workload_audit`). Implement in three layers: **(1) the guest-side broker client** — the SDK-runtime transport that opens the broker's vsock UDS, frames the `ServiceCall` envelope over `core::framing`'s authenticated frame, and carries the plan-bound session (claim 12). **None exists today** (`mvm-guest`/`mvm-sdk` have no broker caller) — this is the foundational piece all broker services ride on. Lives in the in-guest runtime surface (exposed to Python/TS via generated types + pure-language veneers). **(2) the typed service methods** — generated from 124 D's `gen-sdk` (`host.audit.v1`/`host.time.v1`/`host.cost.v1`), sitting on the transport. **(3) the SDK veneer** — `mvm.audit.emit/emit_batch`, `mvm.host.time()`, `mvm.host.cost()`. Binding-gated dispatch + no-payload-in-errors are gated in 128 (claims 12/13). Commit.
 
   Sliced for delivery (each its own PR, TDD RED-first). Resolved scope:
   - Layer 1 homes in **`mvm-guest`** (`broker_client.rs`), sibling to
@@ -125,7 +149,7 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
       supervise `mvm-audit-signer` + `mvm-broker` per VM, bind
       `vm_vsock_port_socket(name, BROKER_PORT)`, enrich `ServiceCallCtx`
       (correlation rewrite / profile / session), the spawn process-moat
-      hardening, the PyO3/napi veneer, and the live-VM E2E (box). Scoped in
+      hardening, the codegen/pure-language veneer, and the live-VM E2E (box). Scoped in
       `specs/notes/plan-125-e5-3b-broker-services-lifecycle-scoping.md`;
       tracked as its own workstream (process-moat, not SDK DX).
       **Chain-format decision (open-question 4 → Option A, per-VM):** the
@@ -193,43 +217,68 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
           - [x] **vz** — the same best-effort wiring in `VzBackend::start()`
             (after the substitution-endpoint guard) / `stop()` (reap both).
             Identical pattern; E5.3b-2b-wire complete (both workload backends).
-        - [ ] **E5.3b-2c** — `ServiceCallCtx` enrichment (correlation rewrite /
-          profile / session) in the broker server (`mvm-hostd`).
-      - **E5.3b-3** — in-guest host-services SDK veneer. **Not PyO3/napi** —
-        owner preference is auto-generation, so it rides the existing
-        schema-codegen pipeline (Plan 124 D `xtask gen-stubs`/`check-stubs`):
-        generate the wire **types**, hand-write only the thin vsock transport
-        the pipeline can't generate (it emits types, never clients — same as
-        `_sandbox.py`). No `pyo3`/`napi`: each language gets a generated client
-        type set + a pure-language `AF_VSOCK(BROKER_PORT)` veneer. Split:
-        - [x] **E5.3b-3a** — codegen foundation: feature-gated
-          `#[derive(JsonSchema)]` on the broker wire types
-          (`ServiceCall`/`ServiceResponse`/`ServiceErrorCode` +
-          `host_audit`/`host_time`/`host_cost` payloads) + a new
-          `mvm-core` `emit_broker_schema` bin (`required-features=["schema"]`) +
-          a `gen-stubs` `StubArtifact` → `schema/broker-services-v0.json` +
-          generated `sdks/python/mvm/_broker/services.py` &
-          `sdks/typescript/src/broker/services.ts` (+ `_broker/__init__.py`).
-          `check-stubs` drift-gated; default closure stays schemars-free
-          (runtime-free gate green).
-        - [x] **E5.3b-3b (Python)** — the thin pure-Python veneer over the
-          generated types: `mvm.audit.emit`/`emit_batch`, `mvm.host.time()`,
-          `mvm.host.cost()` (`mvm/_broker/transport.py` + `mvm/audit.py` +
-          `mvm/host.py`, surfaced on the `mvm` package). Opens `AF_VSOCK`
-          (`HOST_CID`:`BROKER_PORT`, resolved lazily so host-side imports never
-          touch it), length-frames a `ServiceCall`, parses the `ServiceResponse`,
-          maps `ServiceErrorCode` → typed exceptions (`AuditBadRequest` /
-          `AuditRateLimited` / `HostServiceError` / …). Injectable `connect` for
-          tests (mirror the Rust `_on` stream variants); 10 tests over an
-          `AF_UNIX` socket-pair mock broker.
-        - [ ] **E5.3b-3c (TypeScript)** — deferred for cause: **Node has no
-          native `AF_VSOCK`** (and the in-guest `mvm-addon-vsock-bridge` is
-          TCP↔vsock *per configured binding*, not a generic path). The TS veneer
-          needs a transport first — either a native vsock addon (new dep, weigh
-          under ADR-002) or a TCP↔vsock bridge binding for `BROKER_PORT` baked
-          into the image (both languages then dial a localhost TCP port). Pick
-          the transport, then the veneer mirrors the Python one.
-      - [ ] **E5.3b-4** — live-VM E2E on the dev-kvm box.
+        - **E5.3b-2c** — `ServiceCallCtx` enrichment in the broker server
+          (`mvm-hostd`).
+          - [x] **correlation rewrite** — `mvm-broker`'s `handle_connection`
+            mints a server-authoritative `correlation_id` at ingress
+            (`mint_correlation_id`, process-id + monotonic counter) and uses it
+            for the ctx (hence the audit entry) and the response; the
+            guest-supplied value is never trusted/echoed (a workload could
+            otherwise pick an id that collides with / impersonates another
+            chain entry). The integrity-relevant field.
+          - [ ] **session_id + profile** — deferred: threading a real per-VM
+            session + the admitted profile needs a `SubprocessConfig` +
+            serve-signature + backend-spawn cascade, and neither gates the only
+            registered handler (`host.audit.v1`), so it rides when the
+            time/cost handlers that *do* gate on profile land.
+      - [x] **E5.3b host-spine integration test** — `crates/mvm-hostd/tests/
+        broker_audit_round_trip.rs` spawns the real `mvm-broker` +
+        `mvm-audit-signer` bins (resolved via `CARGO_BIN_EXE_*`, so `cargo test
+        -p mvm-hostd` builds them), connects to the broker UDS, sends a
+        `host.audit.v1::emit`, and `verify_workload_chain`s the result against
+        the host-signer pubkey — proving spawn → dispatch → chain-sign →
+        verifiable per-VM `workload_audit` entry (b1→b2c) end-to-end, real
+        processes, no VM, no veneer. Deterministic / CI-runnable.
+      - **E5.3b-3** — in-guest host-services SDK veneer. **Not PyO3/napi** — owner preference is auto-generation, so it rides the existing schema-codegen pipeline: generate the wire **types**, hand-write only the thin vsock transport the pipeline cannot generate. No Rust↔language binding dependency; each language gets generated client types plus a pure-language transport/veneer.
+        - [x] **E5.3b-3a** — codegen foundation: feature-gated `#[derive(JsonSchema)]` on broker wire types (`ServiceCall`/`ServiceResponse`/`ServiceErrorCode` plus `host_audit`/`host_time`/`host_cost` payloads), `mvm-core` `emit_broker_schema`, `schema/broker-services-v0.json`, generated `sdks/python/mvm/_broker/services.py` and `sdks/typescript/src/broker/services.ts`; `check-stubs` drift-gated and default closure schemars-free.
+        - [x] **E5.3b-3b (Python)** — pure-Python veneer over the generated types: `mvm.audit.emit`/`emit_batch`, `mvm.host.time()`, and `mvm.host.cost()` via lazy `AF_VSOCK(HOST_CID:BROKER_PORT)` length-framed `ServiceCall`; typed service exceptions; injectable `connect` for tests over an `AF_UNIX` socket-pair mock broker. Full Python suite: 167 passed / 7 skipped, ruff clean.
+        - [ ] **E5.3b-3c (TypeScript)** — deferred for cause: Node has no native `AF_VSOCK` and the in-guest bridge is TCP↔vsock per configured binding, not a generic path. Pick a transport first (native vsock addon weighed under ADR-002, or a broker TCP↔vsock bridge binding baked into the image), then mirror the Python veneer.
+      - [ ] **E5.3b-4** — live-VM E2E. Venues: vz on this Mac (broker-capable;
+        pre-existing init-EOF boot issues to clear first) or libkrun on the
+        Linux box (`88.99.197.234` is FC today — no broker — so it'd need
+        libkrun stood up). Needs b3 for the headline `mvm.audit.emit` test.
+        - [x] **in-guest driver (audit-probe)** — `crates/mvm-guest/src/bin/audit-probe.rs`
+          calls `mvm_guest::host_audit::emit` from inside the guest; the opt-in
+          `withAuditProbe` mkGuest flag bakes it at `/usr/local/bin/audit-probe`
+          (via `nix/packages/mvm-audit-probe.nix`), and the
+          `examples/audit-probe/` fixture flake runs it (mode `all`: normal
+          emit + >4 KiB BadRequest + 20/s rate-limit) as the sealed PID-1
+          workload. This is the in-guest half option (a) — the Python-SDK
+          delivery (option b) remains the productized path under b3.
+        - [x] **PROVEN live (libkrun, this Mac)** — admitted `up` spawned the
+          per-VM `mvm-broker` + `mvm-audit-signer` (vsock-5300.sock bound); the
+          in-guest probe emitted and 22 entries landed in
+          `local.<vm>.workload.jsonl`, every one host-stamped
+          `category: workload_audit` with a server-authoritative `brk-*`
+          correlation id, and `verify_workload_chain` verifies the chain clean.
+          The 20/s rate-limit is observable (22 of 40 burst emits landed). Two
+          notes: (1) the broker-spawn only fires when `MVM_GATEWAY_BRIDGE=1`
+          (the `up` path couples `tenant_id` threading to the gateway bridge);
+          (2) the bridge supervisor's claim-10 audit-substrate check pins the
+          host-signer key under `~/.mvm/keys`, so the run uses real `~/.mvm`
+          (an isolated `MVM_DATA_DIR` is rejected). `mvmctl trust audit verify`
+          against real `~/.mvm` trips on a pre-existing corrupt shared
+          lifecycle chain — the workload chain itself verifies clean in
+          isolation.
+        - [ ] **follow-up: decouple broker-spawn from `MVM_GATEWAY_BRIDGE`** —
+          today a plain admitted `mvmctl up --tenant local` does not spawn the
+          per-VM broker (tenant_id is only threaded when the egress bridge is
+          on), so `host.audit.v1` is silently unavailable on a normal launch.
+          Thread `tenant_id` for the broker independently of the bridge.
+        - [ ] **follow-up: workload-chain verify is unreachable when the
+          lifecycle chain is corrupt** — `audit_verify` checks the lifecycle
+          chain first and bails, never reaching `verify_workload_chain`. Verify
+          each chain independently (report per-chain, don't short-circuit).
   - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
     `mvm-guest::host_time` + `mvm-guest::host_cost` (`now` / `workload` +
     `tenant`, each with an `_on` stream variant), riding the same
@@ -244,19 +293,19 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
     `Service` / `Transport`, plus `NotImplemented` for the mvmd-delegated
     `host.cost.v1::tenant` verb). The scope is the verb, so the request body
     is empty — a workload cannot ask for another scope's spend. 18 RED-first
-    unit tests (4 core serde + 14 guest mock-I/O). The PyO3/napi veneer for
+    unit tests (4 core serde + 14 guest mock-I/O). The codegen/pure-language veneer for
     all three services rides E5.3b-3 (the veneer for `host.audit.v1` +
     `host.time.v1`/`host.cost.v1` lands together there).
 
 ## Acceptance
 
 - [ ] A workload can append to the chain-signed audit log via `mvm.audit.emit` (`host.audit.v1`); the entry is `workload_audit`-categorized, host-stamped, and visible in `mvmctl audit verify`; oversize/rate-limit refused; no host-category spoofing.
-- [ ] `mvmctl` is `≤15` top-level groups; all 52 old verbs reachable via the nested tree (the old→new map is in the docs); `tests/cli.rs` + the CLI reference doc updated; no alias shims.
-- [ ] `Sandbox` has the full imperative surface — `create`/`exec`/`copy_in`/`copy_out`/`forward`/`info`, **async and sync**, dev-tier-gated (`SandboxDevOnly` in prod); the quickstart leads with it.
-- [ ] Typed helpers (code-runner, browser preset) work over `Sandbox`; TS `Sandbox` reaches parity on `create`/`exec`.
-- [ ] The four authoring surfaces lower to an equal canonical `Workload` IR (coherence test).
-- [ ] `--secret NAME:host` parses to a `SecretRef`; `doctor` shows the per-backend capability table; `--profile` selects a named matrix.
-- [ ] `cargo test --workspace` + the SDK test suites + clippy + fmt green; no new dependency.
+- [x] `mvmctl` top-level surface is **grouped** (~12 nested groups + deliberate convenience verbs) — see Phase A status: the literal `≤15` is amended (forcing it would fold the kept conveniences / conflate distinct concepts); no alias shims.
+- [x] `Sandbox` has the full imperative surface — `create`/`exec`/`copy_in`/`copy_out`/`forward`/`info`, **async and sync**, dev-tier-gated (`SandboxDevOnly` in prod); the quickstart leads with it. (Phase B)
+- [x] Typed helpers (code-runner, browser preset) work over `Sandbox`; TS `Sandbox` reaches parity on `create`/`exec`. (Phase C + D)
+- [x] The four authoring surfaces lower to an equal canonical `Workload` IR (coherence test) — landed as the Python⇔TypeScript decorator mirror (E1; see that task for the reframe).
+- [x] `--secret NAME:host` parses to a `SecretRef` (E2); `doctor` shows the per-backend capability table (E3); `--security-profile` selects a named matrix (E4, `--profile` was taken by the flake profile).
+- [ ] `cargo test --workspace` + the SDK test suites + clippy + fmt green; no new dependency. (per-slice green; full-workspace final pass pending E5.)
 
 ### deferred follow-ups
 

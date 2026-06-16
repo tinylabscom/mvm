@@ -232,9 +232,9 @@ pub fn fork_checkpoint(store: &CheckpointStore, params: ForkParams) -> Result<Ch
 /// child's state dir, rewrite the parent's supervisor config for the child
 /// identity, spawn it in restore mode, and record lineage.
 ///
-/// The parent VM MAY be running (see [`FORK_ALLOW_PARENT_RUNNING`]): the fork
+/// The parent VM MAY be running (see `FORK_ALLOW_PARENT_RUNNING`): the fork
 /// clones the sealed checkpoint content, not the parent's live disks. The child
-/// inherits the parent's machine-id (see [`FORK_FRESH_MACHINE_ID`]).
+/// inherits the parent's machine-id (see `FORK_FRESH_MACHINE_ID`).
 ///
 /// Claim-8: `params.child_plan_json` and `params.child_tenant_id` carry the
 /// child's own admitted plan; the spawner injects them into the child's

@@ -571,7 +571,7 @@ impl SearchProvider for TavilySearchProvider {
 ///    fields. The provider builds the URL inside `search()` via
 ///    reqwest's `query()` helper and discards it after the send.
 /// 2. Any error string surfaced upward goes through
-///    [`redact_credentials`], which replaces every occurrence of
+///    `redact_credentials`, which replaces every occurrence of
 ///    the API key and CSE ID with `<REDACTED>`. The redacted
 ///    string is what reaches the audit chain + `tracing` +
 ///    operator-visible diagnostics.
