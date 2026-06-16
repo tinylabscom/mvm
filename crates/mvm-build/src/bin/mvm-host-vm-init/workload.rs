@@ -250,21 +250,19 @@ pub fn stop_workload(base: &Path, workload_id: &str) -> io::Result<()> {
     use std::time::Duration;
 
     let pid_path = base.join(workload_id).join("fc.pid");
-    if let Ok(pid) = fs::read_to_string(&pid_path).map(|s| s.trim().parse::<i32>()) {
-        if let Ok(pid) = pid {
-            // SIGTERM, then poll up to ~2s for the process to exit.
-            unsafe { libc::kill(pid, libc::SIGTERM) };
-            let mut exited = false;
-            for _ in 0..40 {
-                if unsafe { libc::kill(pid, 0) } != 0 {
-                    exited = true;
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(50));
+    if let Ok(Ok(pid)) = fs::read_to_string(&pid_path).map(|s| s.trim().parse::<i32>()) {
+        // SIGTERM, then poll up to ~2s for the process to exit.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+        let mut exited = false;
+        for _ in 0..40 {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                exited = true;
+                break;
             }
-            if !exited {
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if !exited {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
         }
     }
     cleanup_state_dir(base, workload_id)
