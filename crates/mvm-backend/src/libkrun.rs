@@ -532,12 +532,36 @@ impl VmBackend for LibkrunBackend {
         // no secrets this is a defused no-op.
         let mut endpoint_guard = spawn_libkrun_egress_endpoint_if_needed(&config.name, &state_dir)?;
 
+        // Spawn the per-VM host-services broker (+ its audit-signer) for an
+        // admitted workload so the guest can reach `host.audit.v1` over
+        // BROKER_PORT. Best-effort: an absent broker only disables that one
+        // service — the guest's emit fails, but the workload still runs and the
+        // system audit chain (written host-side, not via the broker) is intact.
+        // So a spawn failure is logged, never a launch rollback. On success the
+        // guard reaps both subprocesses if a later start step fails; it's
+        // defused once the VM is up and the `stop` path owns teardown.
+        let mut broker_guard = match crate::broker_services_spawn::spawn_broker_services_if_admitted(
+            crate::broker_services_spawn::BrokerServicesSpawnParams {
+                workload_id: &config.name,
+                tenant_id: config.tenant_id.as_deref(),
+                vm_name: &config.name,
+                state_dir: &state_dir,
+            },
+        ) {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::warn!(vm = %config.name, error = %e, "host-services broker spawn failed; host.audit.v1 unavailable for this VM");
+                crate::broker_services_spawn::BrokerServicesGuard::defused()
+            }
+        };
+
         ui::success(&format!(
             "libkrun VM '{}' started (pid file: {}).",
             config.name,
             pid_file.display()
         ));
         endpoint_guard.defuse();
+        broker_guard.defuse();
         Ok(VmId(config.name.clone()))
     }
 
@@ -547,6 +571,9 @@ impl VmBackend for LibkrunBackend {
         // guest. Mirrors the FC `stop_vm` ordering — safe because reap is a
         // no-op when nothing exists, even before the not-running early return.
         crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        // Reap the per-VM broker + audit-signer too (no-op when none spawned),
+        // so they can't outlive the guest.
+        crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
 
         let pid_path = vm_libkrun_pid(&id.0);
         let pid = match read_pid(&pid_path) {

@@ -175,13 +175,22 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
           `BrokerServicesGuard` (holds the `state_dir`, reaps both on drop until
           `defuse`) + `reap_broker_services`. Stub-bin tested (admitted spawns
           both; unadmitted spawns nothing). Mirrors `EndpointGuard`.
-        - [ ] **E5.3b-2b-wire** — call it from libkrun + vz `start()`/stop()
-          (mirroring `spawn_libkrun_egress_endpoint_if_needed`): the spawn site,
-          the `defuse()` once up, the `stop()` reap. Ground first: is the
-          `mvm-broker`/`mvm-audit-signer` bin available at runtime in a release
-          mvmctl (the substitution endpoint resolves sibling/target), and should
-          a broker-spawn failure fail-close the whole `up`? This is what
-          actually makes a guest call reach the host.
+        - **E5.3b-2b-wire** — call the gate from the backends' `start()`/stop().
+          **Grounded the two open questions:** the bins are workspace `[[bin]]`s
+          (in `target/` for any source checkout, where the live E2E runs) but
+          have no confirmed release-shipping — same status as the substitution
+          endpoint. Resolved to **best-effort, not fail-closed**: an absent
+          broker only disables `host.audit.v1` (the guest's emit fails), while
+          the workload still runs and the system audit chain (written host-side,
+          not via the broker) is intact — so a spawn failure is logged, never a
+          launch rollback. (Unlike the substitution endpoint, whose fail-closed
+          posture is right because a missing endpoint *with secrets* is a leak.)
+          - [x] **libkrun** — `start()` spawns the gate (best-effort: `Err` →
+            warn + defused guard, no rollback), `defuse()` once up, `stop()`
+            reaps both. On success the guard still reaps if a *later* start step
+            fails. Compile/clippy-checked; the call site is exercised by the b4
+            live E2E.
+          - [ ] **vz** — the same wiring in the vz `start()`/stop()`.
         - [ ] **E5.3b-2c** — `ServiceCallCtx` enrichment (correlation rewrite /
           profile / session) in the broker server (`mvm-hostd`).
       - [ ] **E5.3b-3** — PyO3/napi veneer.
