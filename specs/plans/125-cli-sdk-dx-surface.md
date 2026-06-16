@@ -167,11 +167,21 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
           `host.audit.v1`) + the host-signer pubkey; UDS-poll readiness, PID
           file, `reap_broker`. Shared `spawn_detached_with_config` extracted so
           the two spawns can't drift. Stub-bin tested.
-        - [ ] **E5.3b-2b** — the gated `start()`/stop() wiring for **both**
-          subprocesses (libkrun + vz, mirroring
-          `spawn_libkrun_egress_endpoint_if_needed`): spawn the audit-signer
-          then the broker on an admitted `up`, RAII-reap on early return, reap
-          on `stop`. This is what actually makes a guest call reach the host.
+        - [x] **E5.3b-2b-core** — the gated spawn + RAII reaper:
+          `spawn_broker_services_if_admitted` (gate on `tenant_id` present —
+          unadmitted VM → defused no-op; admitted → spawn audit-signer **then**
+          broker, ordered so the audit UDS exists first; guard armed before the
+          broker spawn so a failure reaps the audit-signer — fail closed) +
+          `BrokerServicesGuard` (holds the `state_dir`, reaps both on drop until
+          `defuse`) + `reap_broker_services`. Stub-bin tested (admitted spawns
+          both; unadmitted spawns nothing). Mirrors `EndpointGuard`.
+        - [ ] **E5.3b-2b-wire** — call it from libkrun + vz `start()`/stop()
+          (mirroring `spawn_libkrun_egress_endpoint_if_needed`): the spawn site,
+          the `defuse()` once up, the `stop()` reap. Ground first: is the
+          `mvm-broker`/`mvm-audit-signer` bin available at runtime in a release
+          mvmctl (the substitution endpoint resolves sibling/target), and should
+          a broker-spawn failure fail-close the whole `up`? This is what
+          actually makes a guest call reach the host.
         - [ ] **E5.3b-2c** — `ServiceCallCtx` enrichment (correlation rewrite /
           profile / session) in the broker server (`mvm-hostd`).
       - [ ] **E5.3b-3** — PyO3/napi veneer.

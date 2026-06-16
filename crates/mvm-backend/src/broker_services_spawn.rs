@@ -353,6 +353,106 @@ fn kill(pid: libc::pid_t, sig: libc::c_int) {
     }
 }
 
+// ============================================================================
+// Gated spawn of both subprocesses + RAII reaper (the backend `start()` seam)
+// ============================================================================
+
+/// Inputs to [`spawn_broker_services_if_admitted`].
+pub struct BrokerServicesSpawnParams<'a> {
+    /// Admitted workload id (stamped into both subprocess configs).
+    pub workload_id: &'a str,
+    /// Tenant id from the admitted plan. `None` ⇒ no admitted plan ⇒ the spawn
+    /// is a defused no-op (an unadmitted dev VM has no broker services, so a
+    /// stray guest dial to `BROKER_PORT` gets `ECONNREFUSED`).
+    pub tenant_id: Option<&'a str>,
+    /// VM name; keys the per-VM workload chain + the `BROKER_PORT` socket.
+    pub vm_name: &'a str,
+    /// Per-VM state dir.
+    pub state_dir: &'a Path,
+}
+
+/// Spawn the per-VM broker services (audit-signer **then** broker) when the VM
+/// carries an admitted plan, returning an armed [`BrokerServicesGuard`] that
+/// reaps both on drop until [`BrokerServicesGuard::defuse`]d.
+///
+/// Order matters: the audit-signer binds first so its UDS exists before the
+/// broker's `host.audit.v1` handler is pointed at it. The guard is armed
+/// *before* the broker spawn so a broker-spawn failure still reaps the
+/// already-running audit-signer (fail closed). An unadmitted VM yields a
+/// defused no-op guard — nothing spawns.
+pub fn spawn_broker_services_if_admitted(
+    params: BrokerServicesSpawnParams<'_>,
+) -> Result<BrokerServicesGuard> {
+    let BrokerServicesSpawnParams {
+        workload_id,
+        tenant_id,
+        vm_name,
+        state_dir,
+    } = params;
+    let Some(tenant_id) = tenant_id else {
+        return Ok(BrokerServicesGuard::defused());
+    };
+
+    // Arm the guard before spawning so any spawn failure below drops it and
+    // reaps whatever already started (fail closed).
+    let guard = BrokerServicesGuard::armed(state_dir);
+    let audit = spawn_audit_signer(AuditSignerSpawnParams {
+        workload_id,
+        tenant_id,
+        vm_name,
+        state_dir,
+    })?;
+    spawn_broker(BrokerSpawnParams {
+        workload_id,
+        tenant_id,
+        vm_name,
+        state_dir,
+        audit_signer_uds_path: &audit.uds_path,
+    })?;
+    Ok(guard)
+}
+
+/// Reap both per-VM broker-services subprocesses (broker, then audit-signer) and
+/// drop their PID files. Best-effort + idempotent — a VM with none is a no-op.
+pub fn reap_broker_services(state_dir: &Path) {
+    reap_broker(state_dir);
+    reap_audit_signer(state_dir);
+}
+
+/// RAII reaper for the per-VM broker services, armed while a backend's `start`
+/// wires the VM and dropped on any early-return so a half-spawned pair can't
+/// outlive a failed launch. Defused once the VM is fully up (the `stop` path
+/// then owns teardown). Mirrors `substitution_spawn::EndpointGuard`.
+pub struct BrokerServicesGuard {
+    /// `Some(state_dir)` while armed; `None` once defused.
+    state_dir: Option<PathBuf>,
+}
+
+impl BrokerServicesGuard {
+    fn armed(state_dir: &Path) -> Self {
+        Self {
+            state_dir: Some(state_dir.to_path_buf()),
+        }
+    }
+    /// A guard for a VM that spawned no broker services — Drop is a no-op.
+    pub fn defused() -> Self {
+        Self { state_dir: None }
+    }
+    /// Disarm: the VM is up; the `stop` path now owns teardown.
+    pub fn defuse(&mut self) {
+        self.state_dir = None;
+    }
+}
+
+impl Drop for BrokerServicesGuard {
+    fn drop(&mut self) {
+        if let Some(ref dir) = self.state_dir {
+            tracing::warn!(state_dir = %dir.display(), "BrokerServicesGuard: reaping orphaned broker services");
+            reap_broker_services(dir);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,6 +707,112 @@ mod tests {
         assert!(state_dir.join(BROKER_PID_FILE).exists());
 
         reap_broker(&state_dir);
+        // SAFETY: serialised by HOME_TEST_LOCK.
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn broker_services_defused_and_no_spawn_when_not_admitted() {
+        let dir = std::env::temp_dir().join(format!("mvm-bs-noadmit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // tenant_id None ⇒ unadmitted ⇒ the gate short-circuits before any spawn
+        // (no bin overrides are set, so a spawn attempt would error — proving the
+        // gate returns a defused no-op without trying).
+        let guard = spawn_broker_services_if_admitted(BrokerServicesSpawnParams {
+            workload_id: "wl",
+            tenant_id: None,
+            vm_name: "vm",
+            state_dir: &dir,
+        })
+        .expect("unadmitted VM yields a defused no-op guard");
+        drop(guard); // a defused guard's Drop reaps nothing
+        assert!(!dir.join(AUDIT_SIGNER_PID_FILE).exists());
+        assert!(!dir.join(BROKER_PID_FILE).exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn broker_services_spawns_both_when_admitted() {
+        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("mvm-bs-admit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved_home = std::env::var_os("HOME");
+        // SAFETY: serialised by HOME_TEST_LOCK.
+        unsafe { std::env::set_var("HOME", &dir) };
+
+        let state_dir = dir.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let audit_uds = state_dir.join(AUDIT_SIGNER_SOCK);
+        let broker_uds =
+            mvm_core::config::vm_vsock_port_socket("vm-1", mvm_guest::vsock::BROKER_PORT);
+        std::fs::create_dir_all(broker_uds.parent().unwrap()).unwrap();
+
+        // Two stubs, each binds (touches) its own UDS so both readiness polls pass.
+        let as_stub = dir.join("stub-as.sh");
+        std::fs::write(
+            &as_stub,
+            format!(
+                "#!/bin/sh\ncat > /dev/null\ntouch {}\nsleep 5\n",
+                audit_uds.display()
+            ),
+        )
+        .unwrap();
+        let br_stub = dir.join("stub-br.sh");
+        std::fs::write(
+            &br_stub,
+            format!(
+                "#!/bin/sh\ncat > /dev/null\ntouch {}\nsleep 5\n",
+                broker_uds.display()
+            ),
+        )
+        .unwrap();
+        for s in [&as_stub, &br_stub] {
+            std::fs::set_permissions(s, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let saved_as = std::env::var_os("MVM_AUDIT_SIGNER_PATH");
+        let saved_br = std::env::var_os("MVM_BROKER_PATH");
+        // SAFETY: serialised by HOME_TEST_LOCK.
+        unsafe {
+            std::env::set_var("MVM_AUDIT_SIGNER_PATH", &as_stub);
+            std::env::set_var("MVM_BROKER_PATH", &br_stub);
+        }
+
+        let res = spawn_broker_services_if_admitted(BrokerServicesSpawnParams {
+            workload_id: "wl-001",
+            tenant_id: Some("tenant-x"),
+            vm_name: "vm-1",
+            state_dir: &state_dir,
+        });
+
+        // SAFETY: serialised by HOME_TEST_LOCK.
+        unsafe {
+            match saved_as {
+                Some(v) => std::env::set_var("MVM_AUDIT_SIGNER_PATH", v),
+                None => std::env::remove_var("MVM_AUDIT_SIGNER_PATH"),
+            }
+            match saved_br {
+                Some(v) => std::env::set_var("MVM_BROKER_PATH", v),
+                None => std::env::remove_var("MVM_BROKER_PATH"),
+            }
+        }
+        let mut guard = res.expect("admitted VM spawns both broker services");
+        // Both subprocesses bound their UDS and wrote their PID files.
+        assert!(
+            state_dir.join(AUDIT_SIGNER_PID_FILE).exists(),
+            "audit-signer pid"
+        );
+        assert!(state_dir.join(BROKER_PID_FILE).exists(), "broker pid");
+
+        guard.defuse();
+        reap_broker_services(&state_dir);
         // SAFETY: serialised by HOME_TEST_LOCK.
         unsafe {
             match saved_home {
