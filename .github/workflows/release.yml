@@ -466,3 +466,38 @@ jobs:
             --ref "${TAG_NAME}" \
             -f tag="${TAG_NAME}" \
             -f dry_run=false
+
+  # Plan 199 B2: post-publish gate. Download the just-created release and assert
+  # every binary target has a tarball + matching SHA256 + cosign signature bundle
+  # + an entry in the combined checksums manifest, and that the SBOM is signed.
+  # Fail-closed — a release missing a checksum/signature or whose bytes don't
+  # match their recorded hash fails here, surfacing it instead of shipping silently.
+  verify-release:
+    needs: [release]
+    if: ${{ needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Download published release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          mkdir -p release-assets
+          gh release download "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" --dir release-assets
+
+      - name: Verify release asset set (checksums + signatures + SBOM + version)
+        env:
+          # Keyless GitHub-OIDC signing identity for this workflow's blobs.
+          COSIGN_IDENTITY_REGEXP: "^https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/.*$"
+          COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          bash packaging/release/verify-release-assets.sh \
+            --assets-dir release-assets \
+            --cosign \
+            --expect-version "${TAG_NAME#v}"
