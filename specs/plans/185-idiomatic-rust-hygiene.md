@@ -434,15 +434,27 @@ edges that currently wrap them.
 **Files:** initial candidates include tests constructing `ExecutionPlan`,
 `FlakeRunConfig`, backend configs, admission inputs, and large CLI fixtures.
 
-- [ ] **Step 1 - identify repeated fixture constructors.** Start with structs
-      copied across three or more tests or crates.
-- [ ] **Step 2 - move shared fixtures to the owning crate's test-support module.**
-      Keep fixtures close to the type owner; expose cross-crate fixtures through
-      explicit test-support features only when needed.
-- [ ] **Step 3 - prefer fixture builders over partially valid literals.** Builders
-      should produce valid defaults and make invalid-test mutations explicit.
-- [ ] **Step 4 - green.** Add tests for fixture helpers if they carry logic, then
-      run targeted tests and clippy.
+- [x] **Step 1 - identify repeated fixture constructors.** The clearest
+      duplication: **six** near-identical ~40-line minimal `ExecutionPlan`
+      fixtures across the mvm-hostd audit/admission cluster
+      (`audit/{emitter,bind,host_keypair,plan_persist}`,
+      `supervisor/{lifecycle_hooks,audit_recorder}`). The realistic-shape
+      fixtures (`signing::sample_plan`, supervisor `aggregate`/`audit`, mvm-cli
+      `policy_resolver`) are a *materially different* plan and were left alone.
+- [x] **Step 2 - move shared fixtures to the owning crate's test-support module.**
+      Added `mvm_core::plan::test_support::PlanFixture`, gated
+      `cfg(any(test, feature = "test-support"))` so it never reaches production;
+      both mvm-hostd and mvm-cli already enable `mvm-core/test-support` in
+      dev-deps. Adds no deps — `check-core-runtime-free` stays green (#953).
+- [x] **Step 3 - prefer fixture builders over partially valid literals.**
+      `PlanFixture` produces a valid minimal local plan by default and exposes
+      `with`-style overrides (`tenant`/`plan_id`/`workload`/`runtime_profile`/
+      `nonce`/`secrets`/`validity`) so each migrated site states only what it
+      pins; the six `fixture_plan` fns are now thin wrappers (call sites
+      unchanged). Net −156 lines.
+- [x] **Step 4 - green.** 2 new `PlanFixture` unit tests + 83 migrated
+      mvm-hostd audit/supervisor tests pass; `cargo clippy -p mvm-core
+      --features test-support -p mvm-hostd --all-targets -- -D warnings`.
 
 ### Task 12 - Audit secret/debug exposure
 
