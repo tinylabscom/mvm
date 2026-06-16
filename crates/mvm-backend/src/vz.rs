@@ -403,6 +403,13 @@ impl VmBackend for VzBackend {
                 tenant_id: config.tenant_id.as_deref(),
                 vm_name: &config.name,
                 state_dir: &state_dir,
+                // vz splices the guest's BROKER_PORT dial to the per-VM socket
+                // under `vsock/` (same shape as the substitution endpoint) — a
+                // different path from libkrun's, so the broker must bind THIS.
+                broker_listen_socket: &mvm_core::config::vm_vz_vsock_port_socket(
+                    &config.name,
+                    mvm_guest::vsock::BROKER_PORT,
+                ),
             },
         ) {
             Ok(guard) => guard,
