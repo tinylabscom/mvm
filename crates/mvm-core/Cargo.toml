@@ -116,6 +116,15 @@ attestation-tdx = []
 # into the runtime. Keeps the default closure schemars-free.
 schema = ["dep:schemars"]
 
+# Emit the host-services broker JSON Schema (the in-guest SDK type-codegen
+# input). `required-features` keeps `schemars` out of any default build — the
+# bin only exists under `--features schema`, mirroring `mvm-guest`'s
+# `emit_protocol_schema`.
+[[bin]]
+name = "emit_broker_schema"
+path = "src/bin/emit_broker_schema.rs"
+required-features = ["schema"]
+
 [dev-dependencies]
 # `OsRng` for generating fresh ed25519 keys in signed_config tests
 # without committing static fixtures. (Also a non-dev dep above for the

@@ -28,6 +28,7 @@ use mvm::vm::template::lifecycle as tmpl;
 use mvm_core::manifest::{
     canonical_key_for_path, is_slot_hash_dirname, resolve_manifest_config_path, slot_dir,
 };
+use mvm_core::naming::validate_template_name;
 use mvm_core::user_config::MvmConfig;
 
 use super::super::Cli;
@@ -128,6 +129,8 @@ fn resolve_to_slot_hash(template: &str) -> Result<String> {
     }
     // Fall back to legacy name lookup — let the lifecycle module
     // tell us whether the name resolves.
+    validate_template_name(template)
+        .with_context(|| format!("Invalid template name: {template:?}"))?;
     let spec = tmpl::template_load_dispatched(template)
         .with_context(|| format!("looking up template {template:?}"))?;
     Ok(spec.template_id)
@@ -146,6 +149,16 @@ mod tests {
         assert!(
             msg.contains("no slot at") || msg.contains("manifest ls"),
             "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_to_slot_hash_rejects_traversal_legacy_name() {
+        let err = resolve_to_slot_hash("../../etc/x").expect_err("must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("template name"),
+            "expected template-name validation error, got: {msg}"
         );
     }
 

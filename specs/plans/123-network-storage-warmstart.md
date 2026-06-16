@@ -2,6 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status (2026-06-16 rollup wave-1 closeout):** ✅ DONE at plan scope. Phase A
+(`NetworkProvider` claims-gated lift), Phase B (`StorageProvider` local/encrypted/CAS/snapshot
++ Linux LUKS2 + S3), and warm-start C1/C3/C4 all shipped; C3 (Vz save/restore) is MET via Plan
+159 WS-2 (`vm_full` save/restore, #770). The lone residual, **C2 (Firecracker live-memory
+fast-resume)**, was deliberately carved to **Plan 175** (live-KVM-gated) — it is not a Plan 123
+box.
+
 **Goal:** Stand up the remaining trait seams — `NetworkProvider` (provisioning + ingress/egress default-deny + DNS + audit, with the egress proxy 129 hangs on), `StorageProvider` (host-owned local/encrypted/content-addressed/snapshot volumes, consuming 122's crypto), and `MountProvider` (pluggable mount sources — host/volume/tmpfs built-in, S3/Hetzner/NFS as feature-gated external impls) — and the warm-start substrate, honestly per-backend: full live-memory fast-resume on Firecracker, save/restore on Vz (macOS 26+), disk-snapshot only on libkrun. Creates the 17th crate, `mvm-network`.
 
 **Architecture:** Three subsystems behind traits, per ADR-066 §1–2 and ADR-064. `mvm-network` (new) owns `NetworkProvider`; `mvm-storage` (kept) owns `StorageProvider` and calls 122's `mvm_core::crypto` for the encrypted impl; warm-start extends the `VmBackend` capability the trait already models (`backend.rs` has `pause`/`resume` + a capability flag, with `pause_resume_unsupported_on_{libkrun,apple_container,microvm_nix}` tests today). The pieces exist in scattered form (`mvm-backend/network.rs`, the firewall/proxy in the old `mvm-supervisor` → `mvm-hostd`, `instance_snapshot.rs`'s Firecracker `vmstate.bin`/`mem.bin` store); this plan consolidates them behind the seams and fills the gaps.

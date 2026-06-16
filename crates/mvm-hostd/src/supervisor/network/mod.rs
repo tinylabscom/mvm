@@ -34,6 +34,9 @@ pub mod flow_byte_log;
 pub mod latency;
 pub mod packet;
 pub mod pipeline;
+/// Lowering of a resolved egress policy into rvproxy's native `[policy]` config
+/// (claim-10 enforcement onto the rvproxy substrate).
+pub mod rvproxy_policy;
 /// Substitution/scan egress-proxy seams.
 pub mod stages;
 

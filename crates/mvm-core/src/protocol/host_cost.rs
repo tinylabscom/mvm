@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 /// Response for both `host.cost.v1` verbs: the accumulated spend for the
 /// queried scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CostReport {
     /// Accumulated spend for the queried scope, in micro-USD (1e-6 USD).

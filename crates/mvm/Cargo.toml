@@ -51,5 +51,8 @@ contributor-bootstrap = [
 manifest-verify = ["mvm-core/manifest-verify"]
 template-registry-s3 = ["dep:object_store"]
 
+[dev-dependencies]
+mvm-core = { workspace = true, features = ["test-support"] }
+
 [lints]
 workspace = true

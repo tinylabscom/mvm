@@ -64,6 +64,16 @@ struct BuilderGvproxyGuard {
     state_dir: PathBuf,
 }
 
+impl BuilderGvproxyGuard {
+    /// Disarm the guard so it does NOT reap gvproxy on drop. Used by
+    /// the persistent VM's `start` once the supervisor is spawned: the
+    /// detached gvproxy must outlive the CLI and is reaped later,
+    /// cross-process, by `stop_persistent_vz_by_pid_file`.
+    fn defuse(self) {
+        std::mem::forget(self);
+    }
+}
+
 impl Drop for BuilderGvproxyGuard {
     fn drop(&mut self) {
         if let Err(e) = host_gvproxy::stop_by_pid_file(&self.state_dir) {
@@ -1135,6 +1145,21 @@ impl VzPersistentBuilderVm {
             ))
         })?;
 
+        // Spawn host-side gvproxy so the long-lived dev VM has egress
+        // (a cold `nix build` from `dev shell` fetches nixpkgs). The
+        // guard reaps it if any fallible step below (config build,
+        // supervisor spawn) returns early; on success we `defuse()` so
+        // the detached gvproxy outlives the CLI — it's reaped later,
+        // cross-process, by `stop_persistent_vz_by_pid_file`.
+        let gvproxy = host_gvproxy::spawn_detached(&vm_state_dir).map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!(
+                "spawn gvproxy for Vz persistent builder VM: {e}"
+            ))
+        })?;
+        let gvproxy_guard = BuilderGvproxyGuard {
+            state_dir: vm_state_dir.clone(),
+        };
+
         let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
             vm_name: &vm_name,
             vm_state_dir: &vm_state_dir,
@@ -1145,9 +1170,13 @@ impl VzPersistentBuilderVm {
             vcpus: self.vcpus,
             memory_mib: self.memory_mib,
             expose_guest_agent: self.expose_guest_agent,
+            gvproxy: Some(&gvproxy),
         })?;
 
         let child = spawn_vz_supervisor_in_background(&supervisor_path, &cfg)?;
+
+        // Supervisor is up; hand gvproxy's lifetime to the detached VM.
+        gvproxy_guard.defuse();
 
         Ok(VzPersistentVmHandle {
             vm_state_dir,
@@ -1196,6 +1225,9 @@ struct VzPersistentConfigParams<'a> {
     memory_mib: u32,
     /// Open the guest-agent port (5252) alongside the dispatch port.
     expose_guest_agent: bool,
+    /// Host-side gvproxy giving the VM egress. `None` keeps the VM
+    /// offline (the cached-derivation path). A shared ref — `Copy`-safe.
+    gvproxy: Option<&'a host_gvproxy::HostGvproxyInfo>,
 }
 
 /// Build a [`crate::vz::SupervisorConfig`] for the persistent VM.
@@ -1218,6 +1250,7 @@ fn build_vz_persistent_supervisor_config(
         vcpus,
         memory_mib,
         expose_guest_agent,
+        gvproxy,
     } = params;
     let BuilderVmImage::Rootfs {
         kernel_path,
@@ -1321,13 +1354,18 @@ fn build_vz_persistent_supervisor_config(
             host_listen_ports: vec![],
         },
         console_output_path: Some(console_log),
-        // No virtio-net on the persistent driver yet. gvproxy is wired
-        // into the one-shot `run_build` path (the one
-        // `builder_backend_select` actually picks); this persistent
-        // driver isn't selected, so it stays offline until it is — at
-        // which point it gets the same trusted-builder gvproxy
-        // (no flow-audit drainer) as the one-shot path.
-        network: None,
+        // Host-side gvproxy gives the long-lived dev VM egress (a cold
+        // `nix build` from `dev shell` fetches nixpkgs). `None` keeps
+        // the offline / cached-derivation path (the caller passes
+        // `None` to opt out). The builder VM is a TRUSTED dev-tier build
+        // VM, not a workload subject to the claim-10 gateway flow-audit,
+        // so it gets plain gvproxy with no flow-audit drainer
+        // (events_ingest_socket_path stays None).
+        network: gvproxy.map(|g| crate::vz::NetworkConfig::Gvproxy {
+            socket_path: g.socket_path.to_string_lossy().into_owned(),
+            mac: host_gvproxy::derive_mac(vm_name),
+            events_ingest_socket_path: None,
+        }),
         balloon: None,
         control_socket_path: None,
         startup_mode: crate::vz::StartupMode::Boot,
@@ -1496,6 +1534,21 @@ pub fn persistent_vz_vsock_dir(session_id: &str) -> PathBuf {
     persistent_vz_state_dir(session_id).join("vsock")
 }
 
+/// Host path of the persistent dev builder VM's `console.log`.
+///
+/// The `"dev"` session id mirrors the CLI's `DEV_VM_SESSION_ID` — the id
+/// `mvmctl dev up` boots the long-lived Vz builder VM under. It is
+/// duplicated here as a string literal rather than imported because the
+/// CLI's dev session module is off-limits to this crate's dependency
+/// direction; if the CLI's id ever changes, this must move with it.
+///
+/// The guest writes its network-bootstrap outcome (DHCP lease / static
+/// fallback / failure) to this log, so it is the host-readable source for
+/// the `mvmctl doctor` builder-egress diagnostic.
+pub fn dev_builder_vz_console_log() -> PathBuf {
+    persistent_vz_state_dir("dev").join("console.log")
+}
+
 /// Read the supervisor PID file under `state_dir` and SIGTERM the
 /// process, escalating to SIGKILL after `PERSISTENT_VZ_STOP_TIMEOUT`.
 /// Idempotent: a missing PID file or an already-dead process is a
@@ -1504,6 +1557,12 @@ pub fn persistent_vz_vsock_dir(session_id: &str) -> PathBuf {
 /// `VzBackend::stop` reap ladder without depending on its private
 /// helpers across the crate boundary.
 pub fn stop_persistent_vz_by_pid_file(state_dir: &Path) -> bool {
+    // Best-effort reap of the VM's host-side gvproxy. The supervisor
+    // detaches it, so `dev down` owns its teardown. Idempotent (a
+    // missing PID sidecar is a clean no-op), so it's safe even on the
+    // early-return paths below.
+    let _ = host_gvproxy::stop_by_pid_file(state_dir);
+
     let pid_path = state_dir.join(PERSISTENT_VZ_PID_FILE);
     let Some(pid) = read_pid_file(&pid_path) else {
         return false;
@@ -2085,6 +2144,7 @@ mod tests {
             vcpus: VZ_BUILDER_DEFAULT_VCPUS,
             memory_mib: VZ_BUILDER_DEFAULT_MEMORY_MIB,
             expose_guest_agent: false,
+            gvproxy: None,
         })
         .expect_err("non-Rootfs image must reject");
         assert!(format!("{err}").contains("non-Rootfs image"), "got: {err}");
@@ -2108,6 +2168,7 @@ mod tests {
             vcpus: 4,
             memory_mib: 8192,
             expose_guest_agent: false,
+            gvproxy: None,
         })
         .expect("config builds");
 
@@ -2138,13 +2199,53 @@ mod tests {
         );
         assert!(cfg.vsock.socket_dir.ends_with("vsock"));
 
-        // Persistent driver is still offline (not yet selected by
-        // builder_backend_select); gvproxy is wired into the one-shot
-        // run_build path instead. See build_vz_persistent_supervisor_config.
+        // No gvproxy passed → VM stays offline (cached-derivation path).
         assert!(cfg.network.is_none());
         // Boot startup; persistent Vz doesn't yet restore from a saved
         // snapshot.
         assert!(matches!(cfg.startup_mode, crate::vz::StartupMode::Boot));
+    }
+
+    #[test]
+    fn build_vz_persistent_supervisor_config_wires_gvproxy_when_present() {
+        let scratch = tempfile::tempdir().unwrap();
+        let vm_name = "mvm-persistent-builder-vz-net";
+        let vm_state_dir = scratch.path().join("vms").join(vm_name);
+        let gvproxy = host_gvproxy::HostGvproxyInfo {
+            socket_path: scratch.path().join("gvproxy.sock"),
+            pid: 4242,
+        };
+        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+            vm_name,
+            vm_state_dir: &vm_state_dir,
+            image: &rootfs_image(),
+            workspace_root: &scratch.path().join("work"),
+            job_dir: &scratch.path().join("job"),
+            nix_store_img: &scratch.path().join("nix-store.img"),
+            vcpus: 2,
+            memory_mib: 1024,
+            expose_guest_agent: false,
+            gvproxy: Some(&gvproxy),
+        })
+        .expect("config builds");
+
+        // gvproxy present → trusted-builder plain Gvproxy (no flow-audit
+        // drainer), MAC derived from the VM name, socket pointed at the
+        // spawned listener.
+        match cfg.network.expect("network wired when gvproxy is present") {
+            crate::vz::NetworkConfig::Gvproxy {
+                socket_path,
+                mac,
+                events_ingest_socket_path,
+            } => {
+                assert_eq!(socket_path, gvproxy.socket_path.to_string_lossy());
+                assert_eq!(mac, host_gvproxy::derive_mac(vm_name));
+                assert!(
+                    events_ingest_socket_path.is_none(),
+                    "trusted dev-tier builder has no claim-10 flow-audit drainer"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2166,6 +2267,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 1024,
             expose_guest_agent: false,
+            gvproxy: None,
         })
         .expect("config builds");
         assert_eq!(cfg.kernel.cmdline, DEFAULT_VZ_BUILDER_CMDLINE);
@@ -2188,6 +2290,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 1024,
             expose_guest_agent: false,
+            gvproxy: None,
         })
         .expect("config builds");
         let console = cfg.console_output_path.expect("console path set");
@@ -2224,6 +2327,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 1024,
             expose_guest_agent: false,
+            gvproxy: None,
         })
         .expect("config builds");
         let socket_dir = std::path::Path::new(&cfg.vsock.socket_dir);
@@ -2249,6 +2353,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 1024,
             expose_guest_agent: false,
+            gvproxy: None,
         };
         let dispatch_only = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
             expose_guest_agent: false,
@@ -2279,6 +2384,13 @@ mod tests {
         let state = persistent_vz_state_dir("dev");
         assert!(state.ends_with("mvm-persistent-builder-vz-dev"));
         assert_eq!(persistent_vz_vsock_dir("dev"), state.join("vsock"));
+    }
+
+    #[test]
+    fn dev_builder_console_log_is_under_dev_state_dir() {
+        let log = dev_builder_vz_console_log();
+        assert!(log.ends_with("console.log"));
+        assert_eq!(log, persistent_vz_state_dir("dev").join("console.log"));
     }
 
     #[test]

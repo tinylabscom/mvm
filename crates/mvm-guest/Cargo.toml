@@ -61,6 +61,13 @@ path = "src/bin/mvm-guest-netinit.rs"
 name = "syscall-probe"
 path = "src/bin/syscall-probe.rs"
 
+# In-guest host.audit.v1 driver for the live-VM round-trip proof. Baked only
+# by the opt-in `withAuditProbe` mkGuest flag (a test fixture image), never by
+# the production guest closure.
+[[bin]]
+name = "audit-probe"
+path = "src/bin/audit-probe.rs"
+
 # Test fixture for the warm-process worker pool. Speaks the
 # `worker_protocol` framed multi-call loop on stdin/stdout. Behavior
 # selectable via `MVM_FAKE_RUNNER_BEHAVIOR` env var so tests can

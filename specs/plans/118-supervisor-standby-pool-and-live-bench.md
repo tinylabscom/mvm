@@ -3,10 +3,12 @@
 **Status:** design drafted 2026-05-29 (renumbered from the Plan 93 PR-10 draft). Child of
 [`93-fast-secure-dev-path-followups.md`](93-fast-secure-dev-path-followups.md)
 (Phase 2 Lever 0 + Lever 3) and Sprint 59
-(`worktree-plan-93-fast-secure-dev-path`). Sequenced **A → B**:
-A (live bench probe) lands first so B (the pool) is provable.
+(`worktree-plan-93-fast-secure-dev-path`). Sequenced **A → B → C**:
+A (live bench probe) lands first so B (the pool) is provable; C
+(density + concurrency bench, added 2026-06-16) extends A's probe
+substrate to measure the two axes the warm pools exist to move.
 
-**Scope:** two PRs.
+**Scope:** three workstreams.
 
 - **PR-10a — live `bench microvm-launch` probe** (Phase 2 Lever 0
   follow-up). Replaces the `LibkrunProbe::measure_once` stub with a
@@ -15,6 +17,12 @@ A (live bench probe) lands first so B (the pool) is provable.
   `--warm-pool-size N` (default 0) trades RAM for cold-start latency
   by pre-spawning `mvm-libkrun-supervisor` processes that block
   *before* guest boot until an admitted plan is attached.
+- **PR-10c — density + concurrent-launch distribution bench**
+  (added 2026-06-16). Extends A's probe to two new metrics —
+  per-instance host footprint (density) and launch-latency P50/P95/P99
+  under concurrency — so the pool's payoff is provable and our own
+  footprint/latency posture rests on committed numbers, not assertion.
+  Read-only measurement; no new attack surface (see Part C).
 
 **Backend scope:** libkrun only in v1 (matches the bench harness and
 the plan). Vz / Firecracker / Apple-Container pools are a tracked
@@ -422,6 +430,141 @@ process-spawn delta, not the headline number.
 - [ ] Optional decoupled attach credential via `host.secrets.v1`
       pattern, if attach validity must be shorter than plan validity.
 
+## Part C — density + concurrent-launch distribution bench (PR-10c)
+
+### Why now — prior art exposed a measurement gap
+
+A production agent-sandbox runtime (KVM microVMs, Rust /
+Cloud-Hypervisor lineage, open-sourced June 2026) published headline
+numbers we currently cannot answer in kind: per-instance host
+overhead "<5 MB", "2000+ sandboxes on one 96-vCPU host", and
+concurrent-launch latency P95/P99 at 50–100 concurrency. Part A's
+probe measures one **serial** launch's **latency** only — it
+quantifies neither steady-state **footprint** (density) nor the
+launch-latency **distribution under concurrency**. Those are exactly
+the two axes those claims flex, and the two axes Part B's libkrun
+standby pool and the landed Vz saved-standby pool exist to improve.
+Part C closes the gap so the warm-pool work is provable in the same
+terms and our footprint/latency posture rests on committed numbers.
+
+This is the only idea from that survey worth building here: the other
+candidates fail the "no new blast radius" bar (an eBPF egress enforcer
+— new privileged in-kernel code, Linux-only, redundant with our
+nftables default-deny) or live in mvmd (E2B API compatibility). An
+OpenResty/Lua egress gateway was explicitly rejected: the egress
+gateway holds the raw secrets (claim 13) and the name-constrained CA
+key, so moving that logic into nginx+LuaJIT would enlarge the highest-
+value TCB with a large C/JIT surface that cannot be `zeroize`d, cannot
+share the typed `PlanFlowPolicy` lowering, and is not covered by
+`cargo deny`/fuzz — and it reverses ADR-082 (the in-house Rust
+gateway). Part C, by contrast, adds **zero** attack surface.
+
+### No new blast radius — by construction
+
+Part C is read-only measurement. Every benched boot still goes through
+the **same claim-8 admission** Part A uses (`admit_probe_plan` →
+`admit_for_run`) — no bypass, no shared plan, a distinct signed plan
+and nonce per instance. It introduces no new key, no daemon, no
+on-disk control socket, and runs only under the existing
+`libkrun-live` feature gate. It is sampling + a wider orchestration
+loop around the existing probe; nothing privileged is added.
+
+### Two new metrics, one substrate
+
+Reuse Part A verbatim: `bench_probe::boot_measure_once`,
+`BootMarks`/`IterationTiming`, `admit_probe_plan`,
+`resolve_probe_image`, `HostDescriptor`, the versioned-JSON +
+regression-gate machinery, and the `libkrun-live` gate. Part C adds
+two report shapes beside the existing single-launch report.
+
+**1. Density — `mvmctl bench microvm-density --count K --max-count M`.**
+Boot K instances of the canonical `default-microvm` image, each via
+its own admitted plan, hold them live, sample host-side footprint,
+tear all down. The headline is **per-instance host overhead = the
+VMM/supervisor process footprint** (not guest-allocated guest RAM);
+report aggregate and per-instance. Ramp K until a boot fails or a
+host-memory watermark trips, report max-K and the limiting resource,
+bounded by `--max-count` so the bench can never OOM the host.
+
+The footprint accessor is **platform-split** (confirm-before-write):
+Linux/Firecracker reads PSS from `/proc/<pid>/smaps_rollup` (shared
+dylib/kernel pages counted once); macOS/libkrun reads `phys_footprint`
+via `proc_pid_rusage` (no `/proc`; `ps -o rss` over-counts shared
+pages and is a fallback only). The pid set is the per-VM supervisor
+pids at `mvm_backend::libkrun::vm_state_dir(name)/libkrun.pid`.
+
+**2. Concurrency — `mvmctl bench microvm-launch --concurrency N`.**
+Launch N instances concurrently (each its own admitted plan, unique
+nonce, unique name), record every instance's `total_ready_ms`, report
+P50/P95/P99 plus the existing per-span breakdown at that concurrency.
+Because `krun_start_enter` boots-and-`exit()`s its caller (one
+supervisor per VM — `reference_libkrun_gotchas`), N concurrent
+launches are N independent `boot_measure_once` contexts driven from N
+threads; confirm `LibkrunBackend::start` is reentrant for distinct VM
+names + state dirs before writing, and serialize only the shared
+codesign re-exec if it is not.
+
+### Backend coverage — honest, staged
+
+libkrun first: the only backend that boots and is bench-verifiable on
+the dev host (Firecracker needs `/dev/kvm`, untestable on macOS — same
+constraint as Part A). Vz second: the Vz saved-standby pool already
+landed (Deferred follow-ups), so a Vz density/concurrency lane is the
+natural way to prove that pool's payoff. Firecracker last, gated on a
+KVM host, where the density number is most load-bearing (it is the
+fleet/mvmd backend). `HostDescriptor.hypervisor` already namespaces
+baselines per backend, so the three lanes never cross-compare.
+
+### Dependency — inherits Part A's prerequisite
+
+Part C cannot commit a baseline until the blocker Part A hit is
+cleared: the cached `default-microvm` image on the dev host is stale
+(pre-`mvm-meta.json` sidecar) and `backend.start` correctly refuses
+it. A freshly-built `default-microvm` image unblocks both. Until then
+Part C's **pure substrate** (percentile math, per-instance-footprint
+derivation, report schema) lands and is unit-tested VM-free; the live
+lanes are validated on a dev host once the image is rebuilt.
+
+### Testing (PR-10c)
+
+- **Pure substrate:** P50/P95/P99 over a sample vector and the
+  per-instance-footprint derivation are pure functions, unit-tested
+  without a VM (mirror Part A's `BootMarks::to_timing` tests).
+- **Footprint accessor:** unit-test the parse of a captured
+  `smaps_rollup` fixture (Linux) and a `proc_pid_rusage` shim (macOS);
+  the live read is `libkrun-live`-gated.
+- **`libkrun-live` integration:** `--count 4` density + `--concurrency
+  4` launch each return finite, ordered, non-negative numbers and tear
+  **all** instances down — assert the per-VM state dirs are empty
+  after (no leaked supervisors).
+- **Admission preserved:** assert each concurrent/density boot carries
+  a **distinct** admitted plan (distinct nonce); no shared-plan bypass.
+- **Caps:** `--max-count` / `--max-concurrency` refuse to exceed the
+  host watermark.
+- `cargo test --workspace` green (live lanes gated off); clippy clean;
+  `cargo fmt --all -- --check`.
+
+### Ship checklist (PR-10c)
+
+- [ ] Density report shape + percentile/footprint pure helpers,
+      unit-tested VM-free.
+- [ ] Platform-split footprint accessor (Linux PSS `smaps_rollup` /
+      macOS `phys_footprint`), fixture-tested.
+- [ ] `mvmctl bench microvm-density --count K --max-count M` wired
+      through `admit_probe_plan` (no bypass); `libkrun-live`-gated
+      live read.
+- [ ] `mvmctl bench microvm-launch --concurrency N` distribution
+      (P50/P95/P99) reusing `boot_measure_once`.
+- [ ] `HostDescriptor`-namespaced density + concurrency baselines
+      committed (gated on a fresh `default-microvm` image — see
+      Dependency).
+- [ ] No-leak teardown assertion; `--max-*` caps; admission-
+      distinctness test.
+- [ ] Vz density/concurrency lane (pairs with the landed Vz
+      saved-standby pool).
+- [ ] Tick `specs/SPRINT.md` + `specs/REFACTOR-STATUS.md` in the same
+      change when it lands.
+
 ## Success criteria
 
 - [ ] `mvmctl bench microvm-launch` produces a real versioned JSON
@@ -437,3 +580,9 @@ process-spawn delta, not the headline number.
       `mvm-core` launch-config seam (not only the CLI), positioned so
       the deferred Firecracker standby — the actual mvmd-facing
       path — reads the same field unchanged.
+- [ ] `mvmctl bench microvm-density` and `bench microvm-launch
+      --concurrency N` produce `HostDescriptor`-namespaced,
+      regression-gated baselines for per-instance host footprint and
+      P50/P95/P99 launch latency, on libkrun and Vz, with every boot
+      still going through claim-8 admission (no bypass, no new
+      privileged surface).

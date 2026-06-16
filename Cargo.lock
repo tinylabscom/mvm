@@ -3427,10 +3427,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-sdk-macros"
-version = "0.16.1"
-
-[[package]]
 name = "mvm-storage"
 version = "0.16.1"
 dependencies = [

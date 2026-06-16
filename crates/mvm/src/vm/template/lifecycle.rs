@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+use mvm_core::naming::validate_template_name;
 use mvm_core::template::{
     SnapshotInfo, TemplateSpec, template_dir, template_revision_dir, template_snapshot_dir,
     template_spec_path,
@@ -32,6 +33,10 @@ fn build_mode_label(mode: mvm_build::pipeline::BuildMode) -> &'static str {
 
 use super::registry::TemplateRegistry;
 
+fn validate_legacy_template_name(id: &str) -> Result<()> {
+    validate_template_name(id).with_context(|| format!("Invalid template name: {id:?}"))
+}
+
 /// Run a shell command in the VM and check its exit code.
 /// Returns an error with stderr context if the command fails.
 fn vm_exec(script: &str) -> Result<()> {
@@ -51,6 +56,7 @@ fn vm_exec(script: &str) -> Result<()> {
 
 #[instrument(skip_all, fields(template_id = %spec.template_id))]
 pub fn template_create(spec: &TemplateSpec) -> Result<()> {
+    validate_legacy_template_name(&spec.template_id)?;
     let dir = template_dir(&spec.template_id);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create template directory {}", dir))?;
@@ -63,6 +69,7 @@ pub fn template_create(spec: &TemplateSpec) -> Result<()> {
 
 #[instrument(skip_all, fields(template_id = id))]
 pub fn template_load(id: &str) -> Result<TemplateSpec> {
+    validate_legacy_template_name(id)?;
     let path = template_spec_path(id);
     // Read directly from host filesystem — ~/.mvm/ resolves to $HOME/.mvm
     // which is the same path on both host and Lima (home dir is mounted).
@@ -1429,9 +1436,109 @@ pub use mvm_backend::base::snapshot_integrity::{
 mod tests {
     use super::*;
     use mvm_backend::base::cow::CloneStrategy;
+    use mvm_core::util::test_env::TestEnv;
     use mvm_guest::integrations::{
         IntegrationHealthResult, IntegrationStateReport, IntegrationStatus,
     };
+
+    fn test_template_spec(template_id: &str) -> TemplateSpec {
+        TemplateSpec {
+            schema_version: mvm_core::template::CURRENT_SCHEMA_VERSION,
+            template_id: template_id.to_string(),
+            flake_ref: ".".to_string(),
+            profile: "default".to_string(),
+            role: "test".to_string(),
+            vcpus: 1,
+            mem_mib: 256,
+            mem_initial_mib: None,
+            data_disk_mib: 0,
+            created_at: "2026-06-16T00:00:00Z".to_string(),
+            updated_at: "2026-06-16T00:00:00Z".to_string(),
+            default_network_policy: None,
+        }
+    }
+
+    fn test_persisted_manifest(slot_hash: &str) -> PersistedManifest {
+        PersistedManifest {
+            schema_version: mvm_core::manifest::MANIFEST_SCHEMA_VERSION,
+            manifest_path: "/tmp/mvm-test/mvm.toml".to_string(),
+            manifest_hash: slot_hash.to_string(),
+            flake_ref: ".".to_string(),
+            profile: "default".to_string(),
+            vcpus: 1,
+            mem_mib: 256,
+            mem_initial_mib: None,
+            data_disk_mib: 0,
+            name: Some("valid-template".to_string()),
+            backend: "test".to_string(),
+            provenance: Provenance {
+                toolchain_version: "test".to_string(),
+                builder_image_digest: None,
+                host_arch: "test-host".to_string(),
+                built_at: "2026-06-16T00:00:00Z".to_string(),
+                ir_hash: None,
+            },
+            created_at: "2026-06-16T00:00:00Z".to_string(),
+            updated_at: "2026-06-16T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn template_load_rejects_traversal_identifier() {
+        let err = template_load("../../etc/x").expect_err("traversal id must reject");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("template name"),
+            "expected template-name validation error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn template_create_rejects_traversal_identifier_before_writing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", tmp.path());
+
+        let err = template_create(&test_template_spec("../../etc/x"))
+            .expect_err("traversal template id must reject");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("template name"),
+            "expected template-name validation error, got: {msg}"
+        );
+        assert!(
+            !tmp.path().join("templates").exists(),
+            "invalid template id must not create template directories"
+        );
+    }
+
+    #[test]
+    fn template_create_then_load_accepts_valid_template_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", tmp.path());
+
+        let spec = test_template_spec("valid-template");
+        template_create(&spec).expect("create valid template");
+        let loaded = template_load("valid-template").expect("load valid template");
+        assert_eq!(loaded.template_id, "valid-template");
+    }
+
+    #[test]
+    fn template_load_dispatched_accepts_real_slot_hash() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", tmp.path());
+
+        let slot_hash = "0123456789abcdef".repeat(4);
+        assert!(is_slot_hash_dirname(&slot_hash));
+        let slot = test_persisted_manifest(&slot_hash);
+        slot.write_to_slot(std::path::Path::new(&slot_dir(&slot_hash)))
+            .expect("write persisted slot");
+
+        let loaded = template_load_dispatched(&slot_hash).expect("load slot hash");
+        assert_eq!(loaded.template_id, slot_hash);
+    }
 
     fn healthy_report(name: &str) -> IntegrationStateReport {
         IntegrationStateReport {
