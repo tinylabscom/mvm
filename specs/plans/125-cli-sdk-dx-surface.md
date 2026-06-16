@@ -207,8 +207,23 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
             serve-signature + backend-spawn cascade, and neither gates the only
             registered handler (`host.audit.v1`), so it rides when the
             time/cost handlers that *do* gate on profile land.
-      - [ ] **E5.3b-3** — PyO3/napi veneer.
-      - [ ] **E5.3b-4** — live-VM E2E on the dev-kvm box.
+      - [x] **E5.3b host-spine integration test** — `crates/mvm-hostd/tests/
+        broker_audit_round_trip.rs` spawns the real `mvm-broker` +
+        `mvm-audit-signer` bins (resolved via `CARGO_BIN_EXE_*`, so `cargo test
+        -p mvm-hostd` builds them), connects to the broker UDS, sends a
+        `host.audit.v1::emit`, and `verify_workload_chain`s the result against
+        the host-signer pubkey — proving spawn → dispatch → chain-sign →
+        verifiable per-VM `workload_audit` entry (b1→b2c) end-to-end, real
+        processes, no VM, no veneer. Deterministic / CI-runnable.
+      - **E5.3b-3** — the in-guest `mvm.audit.emit` veneer. **In-process
+        library call, NOT a subprocess** (owner: a shell command is an
+        injection + cross-platform-consistency hazard): the language SDK builds
+        the typed request (the IR) and calls a linked library function. Binding
+        mechanism TBD at build (PyO3 / napi / a `cdylib` + `ctypes`).
+      - [ ] **E5.3b-4** — live-VM E2E. Venues: vz on this Mac (broker-capable;
+        pre-existing init-EOF boot issues to clear first) or libkrun on the
+        Linux box (`88.99.197.234` is FC today — no broker — so it'd need
+        libkrun stood up). Needs b3 for the headline `mvm.audit.emit` test.
   - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
     `mvm-guest::host_time` + `mvm-guest::host_cost` (`now` / `workload` +
     `tenant`, each with an `_on` stream variant), riding the same
