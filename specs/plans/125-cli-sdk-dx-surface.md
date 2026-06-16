@@ -208,7 +208,14 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
             registered handler (`host.audit.v1`), so it rides when the
             time/cost handlers that *do* gate on profile land.
       - [ ] **E5.3b-3** — PyO3/napi veneer.
-      - [ ] **E5.3b-4** — live-VM E2E on the dev-kvm box.
+      - [ ] **E5.3b-4** — live-VM E2E. Venue is a local libkrun/vz boot (the
+        dev-kvm box is Firecracker, which carries no broker).
+        - [x] **vz broker listen-socket fix** — `spawn_broker` bound the
+          libkrun-shaped `vm_vsock_port_socket` unconditionally; vz splices
+          `BROKER_PORT` to the `vsock/`-subdir `vm_vz_vsock_port_socket` (like
+          the substitution endpoint), so the guest leg was unreachable on vz.
+          The listen socket is now threaded into `BrokerServicesSpawnParams`,
+          computed per-backend by each `start()`.
   - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
     `mvm-guest::host_time` + `mvm-guest::host_cost` (`now` / `workload` +
     `tenant`, each with an `_on` stream variant), riding the same

@@ -221,9 +221,13 @@ pub struct BrokerSpawnParams<'a> {
     pub workload_id: &'a str,
     /// Tenant id.
     pub tenant_id: &'a str,
-    /// VM name; the broker binds the per-VM `BROKER_PORT` socket keyed on it
-    /// (the VMM forwards the guest's `connect_host_vsock(BROKER_PORT)` there).
-    pub vm_name: &'a str,
+    /// The per-VM `BROKER_PORT` UDS the broker binds — the path the active
+    /// backend's VMM splices the guest's `connect_host_vsock(BROKER_PORT)` dial
+    /// to. libkrun binds `<state>/vsock-<port>.sock`
+    /// (`vm_vsock_port_socket`); vz nests it under `<state>/vsock/`
+    /// (`vm_vz_vsock_port_socket`). The caller computes it so the broker binds
+    /// where its own VMM actually listens, instead of assuming one layout.
+    pub broker_listen_socket: &'a Path,
     /// Per-VM state dir; holds the broker PID file.
     pub state_dir: &'a Path,
     /// The audit-signer UDS from [`spawn_audit_signer`] — the broker's
@@ -236,7 +240,8 @@ pub struct BrokerSpawnParams<'a> {
 /// guest's `connect_host_vsock(BROKER_PORT)` to.
 #[derive(Debug)]
 pub struct BrokerHandle {
-    /// The `vm_vsock_port_socket(vm_name, BROKER_PORT)` the broker bound.
+    /// The backend-specific `BROKER_PORT` UDS the broker bound (the
+    /// `broker_listen_socket` it was handed).
     pub uds_path: PathBuf,
 }
 
@@ -257,15 +262,17 @@ fn spawn_broker_with_timeout(
     let BrokerSpawnParams {
         workload_id,
         tenant_id,
-        vm_name,
+        broker_listen_socket,
         state_dir,
         audit_signer_uds_path,
     } = params;
 
     let bin = resolve_subprocess_bin("mvm-broker", "MVM_BROKER_PATH")?;
-    // The broker binds the per-VM BROKER_PORT socket the VMM forwards the
-    // guest's `connect_host_vsock(BROKER_PORT)` dial to.
-    let uds_path = mvm_core::config::vm_vsock_port_socket(vm_name, mvm_guest::vsock::BROKER_PORT);
+    // The broker binds the per-VM BROKER_PORT socket the active backend's VMM
+    // forwards the guest's `connect_host_vsock(BROKER_PORT)` dial to. The caller
+    // computes it (libkrun vs vz layout differ), so the broker binds exactly
+    // where its own VMM listens.
+    let uds_path = broker_listen_socket.to_path_buf();
     if let Some(parent) = uds_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("create broker socket dir {}: {e}", parent.display()))?;
@@ -365,10 +372,15 @@ pub struct BrokerServicesSpawnParams<'a> {
     /// is a defused no-op (an unadmitted dev VM has no broker services, so a
     /// stray guest dial to `BROKER_PORT` gets `ECONNREFUSED`).
     pub tenant_id: Option<&'a str>,
-    /// VM name; keys the per-VM workload chain + the `BROKER_PORT` socket.
+    /// VM name; keys the per-VM workload audit chain.
     pub vm_name: &'a str,
     /// Per-VM state dir.
     pub state_dir: &'a Path,
+    /// The per-VM `BROKER_PORT` UDS the broker should bind — backend-specific
+    /// (libkrun `<state>/vsock-<port>.sock`, vz `<state>/vsock/vsock-<port>.sock`),
+    /// computed by the caller's `start()` so the broker binds where the active
+    /// VMM splices the guest dial.
+    pub broker_listen_socket: &'a Path,
 }
 
 /// Spawn the per-VM broker services (audit-signer **then** broker) when the VM
@@ -388,6 +400,7 @@ pub fn spawn_broker_services_if_admitted(
         tenant_id,
         vm_name,
         state_dir,
+        broker_listen_socket,
     } = params;
     let Some(tenant_id) = tenant_id else {
         return Ok(BrokerServicesGuard::defused());
@@ -405,7 +418,7 @@ pub fn spawn_broker_services_if_admitted(
     spawn_broker(BrokerSpawnParams {
         workload_id,
         tenant_id,
-        vm_name,
+        broker_listen_socket,
         state_dir,
         audit_signer_uds_path: &audit.uds_path,
     })?;
@@ -668,7 +681,7 @@ mod tests {
         let res = spawn_broker(BrokerSpawnParams {
             workload_id: "wl-001",
             tenant_id: "tenant-x",
-            vm_name: "vm-1",
+            broker_listen_socket: &uds,
             state_dir: &state_dir,
             audit_signer_uds_path: &audit_uds,
         });
@@ -729,6 +742,7 @@ mod tests {
             tenant_id: None,
             vm_name: "vm",
             state_dir: &dir,
+            broker_listen_socket: &dir.join("vsock-5300.sock"),
         })
         .expect("unadmitted VM yields a defused no-op guard");
         drop(guard); // a defused guard's Drop reaps nothing
@@ -751,8 +765,14 @@ mod tests {
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
         let audit_uds = state_dir.join(AUDIT_SIGNER_SOCK);
-        let broker_uds =
-            mvm_core::config::vm_vsock_port_socket("vm-1", mvm_guest::vsock::BROKER_PORT);
+        // The caller now supplies the broker listen socket explicitly; point it
+        // at a vz-style `vsock/` subdir to prove the broker binds where it's
+        // told, not at libkrun's flat `<state>/vsock-<port>.sock` layout.
+        let broker_uds = state_dir
+            .join("vsock")
+            .join(mvm_core::config::vsock_socket_filename(
+                mvm_guest::vsock::BROKER_PORT,
+            ));
         std::fs::create_dir_all(broker_uds.parent().unwrap()).unwrap();
 
         // Two stubs, each binds (touches) its own UDS so both readiness polls pass.
@@ -790,6 +810,7 @@ mod tests {
             tenant_id: Some("tenant-x"),
             vm_name: "vm-1",
             state_dir: &state_dir,
+            broker_listen_socket: &broker_uds,
         });
 
         // SAFETY: serialised by HOME_TEST_LOCK.
@@ -810,6 +831,14 @@ mod tests {
             "audit-signer pid"
         );
         assert!(state_dir.join(BROKER_PID_FILE).exists(), "broker pid");
+        // The broker bound the caller-supplied vz-style listen socket, not the
+        // libkrun default — readiness polled exactly this path, so its presence
+        // proves the path was threaded through (the vz bug regression guard).
+        assert!(
+            broker_uds.exists(),
+            "broker bound the supplied listen socket {}",
+            broker_uds.display()
+        );
 
         guard.defuse();
         reap_broker_services(&state_dir);

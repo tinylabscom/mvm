@@ -403,6 +403,14 @@ impl VmBackend for VzBackend {
                 tenant_id: config.tenant_id.as_deref(),
                 vm_name: &config.name,
                 state_dir: &state_dir,
+                // Vz nests its per-port vsock listeners under `<state>/vsock/`;
+                // the supervisor splices BROKER_PORT there (same shape as the
+                // substitution endpoint), so the broker must bind that path,
+                // not libkrun's flat `<state>/vsock-<port>.sock`.
+                broker_listen_socket: &mvm_core::config::vm_vz_vsock_port_socket(
+                    &config.name,
+                    mvm_guest::vsock::BROKER_PORT,
+                ),
             },
         ) {
             Ok(guard) => guard,

@@ -546,6 +546,12 @@ impl VmBackend for LibkrunBackend {
                 tenant_id: config.tenant_id.as_deref(),
                 vm_name: &config.name,
                 state_dir: &state_dir,
+                // libkrun binds one UDS per forwarded port directly under the
+                // state dir; that's where its supervisor splices BROKER_PORT.
+                broker_listen_socket: &mvm_core::config::vm_vsock_port_socket(
+                    &config.name,
+                    mvm_guest::vsock::BROKER_PORT,
+                ),
             },
         ) {
             Ok(guard) => guard,
