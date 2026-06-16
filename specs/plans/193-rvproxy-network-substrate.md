@@ -182,17 +182,28 @@ own internal default).
           off-by-default — `populate_audit_substrate` (which sets `tenant_id`) is
           gated behind `MVM_GATEWAY_BRIDGE=1` (the old gvproxy bridge "vfkit
           socket address is empty" issue; the native `run --config` path does not
-          hit it, so this work helps un-gate it); (2) the bridge path is
-          incompatible with `MVM_DATA_DIR` test isolation — `validate_audit_substrate`
-          pins the signing key to `$HOME/.mvm/keys` (intentional claim-8
-          trust-boundary; `home_mvm_keys_dir`) while `compute_audit_substrate`
-          builds it from `mvm_data_dir()/keys`; they agree in normal use, diverge
-          only under isolation (orthogonal to this WS).
-    - [ ] **native launch — guest-packet-flow final mile.** Confirm guest egress
-          actually transits the native rvproxy enforcing the rendered policy
-          (needs a non-`MVM_DATA_DIR`-isolated boot, or the audit-substrate
-          key-dir reconciliation above) — the last check before 2d deletes the
-          splice.
+          hit it, so this work helps un-gate it — deferred to 2d with the parity
+          gate); (2) **fixed** — the bridge path refused under `MVM_DATA_DIR`
+          because `validate_audit_substrate` resolved the signing-key dir through a
+          private HOME-fixed helper while admission + `compute_audit_substrate`
+          use the data-dir-aware `mvm_keys_dir()`; the validator now uses the same
+          `mvm_keys_dir()` (path-traversal defense intact; resolves across the
+          supervisor process moat; honors the data-dir override per the
+          isolation invariant and the out-of-scope-malicious-host threat model).
+    - [x] **native launch — guest data-path proven live.** With the audit-substrate
+          fix, a real `mvmctl up --hypervisor libkrun -d` (native + bridge,
+          `MVM_DATA_DIR`-isolated, no key symlink) booted clean: plan admitted →
+          `validate_audit_substrate` passed → supervisor stayed up (`libkrun.pid`
+          written) → native `rvproxy run --config` bound the API + vfkit sockets
+          (no `gvproxy.log`) → rvproxy logged `tenant_id="rv2b"` +
+          `ConnectionEstablished`/`accepted transport connection` (libkrun's
+          virtio-net connected to the native gateway). The guest's data path runs
+          through native rvproxy enforcing the rendered policy.
+    - [ ] **native launch — egress enforcement matrix.** sleeper idles (no
+          egress), so the allow/deny/flow-audit verdicts aren't exercised yet;
+          needs an egress-attempting fixture (curl an allowed host + a denied
+          host, assert the verdicts + flow-audit entries). The last check before
+          2d deletes the splice.
   - [ ] **2c — flow-event sink → audit re-emission.** Subscribe to rvproxy's
         `FlowEvent` export (needs the rvproxy JSONL/UDS export followup) and
         re-feed `signer_task`'s chain so the claim-10 audit stays mvm's source of
