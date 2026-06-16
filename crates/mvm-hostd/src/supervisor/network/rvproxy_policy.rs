@@ -35,10 +35,20 @@ use std::net::IpAddr;
 /// config rvproxy reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RvproxyPolicy {
+    /// Allow the guest's L2 frames into the gateway. rvproxy defaults this to
+    /// `false`, so the emitted `[policy]` must set it true or the dataplane drops
+    /// every ingress frame.
+    pub allow_transport_ingress: bool,
+    /// Allow the gateway's frames back out to the guest. Same false default.
+    pub allow_transport_egress: bool,
     /// Master egress switch. Always true here; the deny decision is expressed
     /// through `default_egress_deny` + the allow/deny lists so a single oracle
     /// ([`Self::permits_flow`]) governs the verdict.
     pub allow_guest_egress: bool,
+    /// Answer guest lookups at the gateway DNS (gateway name + static zones).
+    pub allow_dns_local: bool,
+    /// Forward non-local lookups upstream — refined by `dns_hostname_allowlist`.
+    pub allow_dns_upstream: bool,
     /// Deny a destination matching no allow rule (claim-10 deny-by-default).
     pub default_egress_deny: bool,
     /// IP-only destination allow-list. Unused by the precise lowering (L4 grants
@@ -167,7 +177,11 @@ pub fn lower_policy(egress: &CanonicalEgress, dns_allow: &[String]) -> RvproxyLo
 
     RvproxyLowering {
         policy: RvproxyPolicy {
+            allow_transport_ingress: true,
+            allow_transport_egress: true,
             allow_guest_egress: true,
+            allow_dns_local: true,
+            allow_dns_upstream: true,
             default_egress_deny,
             cidr_allowlist: Vec::new(),
             cidr_denylist,
