@@ -193,8 +193,20 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
           - [x] **vz** — the same best-effort wiring in `VzBackend::start()`
             (after the substitution-endpoint guard) / `stop()` (reap both).
             Identical pattern; E5.3b-2b-wire complete (both workload backends).
-        - [ ] **E5.3b-2c** — `ServiceCallCtx` enrichment (correlation rewrite /
-          profile / session) in the broker server (`mvm-hostd`).
+        - **E5.3b-2c** — `ServiceCallCtx` enrichment in the broker server
+          (`mvm-hostd`).
+          - [x] **correlation rewrite** — `mvm-broker`'s `handle_connection`
+            mints a server-authoritative `correlation_id` at ingress
+            (`mint_correlation_id`, process-id + monotonic counter) and uses it
+            for the ctx (hence the audit entry) and the response; the
+            guest-supplied value is never trusted/echoed (a workload could
+            otherwise pick an id that collides with / impersonates another
+            chain entry). The integrity-relevant field.
+          - [ ] **session_id + profile** — deferred: threading a real per-VM
+            session + the admitted profile needs a `SubprocessConfig` +
+            serve-signature + backend-spawn cascade, and neither gates the only
+            registered handler (`host.audit.v1`), so it rides when the
+            time/cost handlers that *do* gate on profile land.
       - [ ] **E5.3b-3** — PyO3/napi veneer.
       - [ ] **E5.3b-4** — live-VM E2E on the dev-kvm box.
   - [x] **E5.4** — `host.time.v1` / `host.cost.v1` typed methods in
