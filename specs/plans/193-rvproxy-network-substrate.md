@@ -156,8 +156,23 @@ own internal default).
           set the four `[policy]` toggles rvproxy defaults to `false`
           (`allow_transport_{ingress,egress}`, `allow_dns_{local,upstream}`) or
           the dataplane drops every frame.
-    - [ ] **native launch.** Rewire the gvproxy spawn to `rvproxy run --config`
-          behind a flag (keeping the splice) + a live `dev up`-through-rvproxy boot.
+    - [x] **native launch wiring.** `gvproxy::spawn` takes an optional native
+          config: `Some` → `<MVM_GATEWAY_BIN> run --config <path>`, `None` → the
+          gvproxy-compat flags (`NetworkingMode::Gvproxy.native_config`,
+          `#[serde(default)]`). The `mvm-libkrun-supervisor` bin, when
+          `MVM_NETWORKING=native`, renders the config from the admitted bundle
+          (`rvproxy_launch::write_native_gateway_config`) into the per-VM scratch
+          dir and sets `native_config` before the gateway spawn — fail-closed if
+          the render fails. The splice still runs and shares the *same* egress
+          resolution (`egress_and_dns_from_effective`, now consumed by both), so
+          this is additive belt-and-suspenders. Validated against the real
+          rvproxy binary three ways: emitted config parses + `validate()`s
+          (off-tree), `rvproxy run --config` binds the vfkit + API sockets on
+          macOS, and `native_spawn_then_drop_reaps_child` boots a real binary
+          through `spawn(.., Some(cfg))`.
+    - [ ] **native launch — live guest boot.** A `dev up`-through-rvproxy boot
+          with a real microVM (`MVM_NETWORKING=native` + a deployed rvproxy
+          binary) — the final integration gate before 2d deletes the splice.
   - [ ] **2c — flow-event sink → audit re-emission.** Subscribe to rvproxy's
         `FlowEvent` export (needs the rvproxy JSONL/UDS export followup) and
         re-feed `signer_task`'s chain so the claim-10 audit stays mvm's source of
