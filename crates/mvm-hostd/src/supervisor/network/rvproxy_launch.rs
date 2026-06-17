@@ -44,8 +44,11 @@ pub fn resolve_egress_and_dns(
 /// resolved [`EffectivePolicy`]. The in-line splice resolves the bundle once
 /// and calls this directly, so the native gateway and the splice never drift.
 pub fn egress_and_dns_from_effective(eff: &EffectivePolicy) -> (CanonicalEgress, Vec<String>) {
-    let egress =
-        canonicalize_l4(&eff.network.l4).unwrap_or_else(|_| CanonicalEgress::Rules(Vec::new()));
+    let egress = if eff.egress.mode.as_deref() == Some("open") {
+        CanonicalEgress::Unrestricted
+    } else {
+        canonicalize_l4(&eff.network.l4).unwrap_or_else(|_| CanonicalEgress::Rules(Vec::new()))
+    };
     let dns_allow: Vec<String> = if eff.egress.mode.as_deref() == Some("open") {
         Vec::new()
     } else {
@@ -167,5 +170,19 @@ mod tests {
         let toml = std::fs::read_to_string(&path).unwrap();
         assert!(toml.contains("default_egress_deny = true"));
         assert!(!toml.contains("[[policy.l4_allowlist]]"));
+    }
+
+    #[test]
+    fn open_mode_lowers_to_unrestricted_egress() {
+        let mut bundle = deny_all_bundle();
+        bundle.egress.mode = Some("open".to_string());
+        let (egress, dns_allow) = resolve_egress_and_dns(
+            &bundle,
+            &TenantId("acme".to_string()),
+            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+        );
+
+        assert_eq!(egress, CanonicalEgress::Unrestricted);
+        assert!(dns_allow.is_empty());
     }
 }

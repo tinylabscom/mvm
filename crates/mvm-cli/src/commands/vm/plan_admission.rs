@@ -236,10 +236,9 @@ const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// workload must carry it — `host.audit.v1` is implicitly available to any
 /// admitted workload. This is decoupled from
 /// [`populate_audit_substrate`]: the broker needs the tenant string, **not**
-/// the signed `plan_json`, whose presence flips libkrun/Vz onto the
-/// (opt-in, `~/.mvm/keys`-anchored) gateway-bridge supervisor path. Call this
-/// unconditionally; call `populate_audit_substrate` only when the bridge path
-/// is wanted.
+/// the signed `plan_json`, whose presence flips libkrun/Vz workload boots onto
+/// the claim-10 gateway-bridge supervisor path. Call this unconditionally; call
+/// `populate_audit_substrate` when a backend has a signed-plan consumer.
 pub fn thread_tenant_id(cfg: &mut mvm_core::vm_backend::VmStartConfig, admitted: &AdmittedPlan) {
     cfg.tenant_id = Some(admitted.plan.tenant.0.clone());
 }

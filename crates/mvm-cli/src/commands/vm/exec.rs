@@ -296,6 +296,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     let receipt_backend = admit_backend.clone();
     let admit_cpus = args.cpus;
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
+    let admit_network_policy = network_policy.clone();
     // The audit substrate carries no emitter, so stash the AdmissionContext here
     // as the closure runs (during boot) and emit launched/failed after `run`
     // returns — mirroring `up.rs`, so the claim-8 admitted/launched/failed
@@ -328,6 +329,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             deps_volume: None,
             shares: vec![],
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: admit_network_policy.clone(),
         })?;
         let Some(c) = ctx else { return Ok(None) };
         // Persist the bare plan so the pre-start moat / endpoint can read it
@@ -338,10 +340,16 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
         }
         let plan_json = serde_json::to_string(&c.admitted.signed)
             .context("serializing admitted plan for the transient run")?;
+        let bundle_json = c
+            .policy_bundle
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .context("serializing admitted policy bundle for the transient run")?;
         let substrate = crate::exec::SessionAuditSubstrate {
             tenant_id: c.admitted.plan.tenant.0.clone(),
             plan_json,
-            bundle_json: None,
+            bundle_json,
         };
         // Hand the admission context (with its emitter) to the command layer so
         // it can emit `plan.launched` / `plan.failed` once the boot resolves.

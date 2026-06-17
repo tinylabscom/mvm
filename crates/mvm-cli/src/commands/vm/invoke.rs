@@ -291,6 +291,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                             deps_volume: None,
                             shares: vec![],
                             redaction: mvm_core::policy::RedactionPolicy::default(),
+                            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
                         })?;
                         let Some(c) = ctx else { return Ok(None) };
                         // Persist the bare admitted plan to the per-VM state dir
