@@ -528,18 +528,33 @@ Implementation shape:
 >   `deny_all()`. `up` already exposes `--network-preset`/`--network-allow`
 >   through it. Mirror that; the ergonomic `--net`/`--allow-host` names map onto
 >   the same `(preset, allow)` signature.
-> - **`VmStartConfig.network_policy` already exists** and is applied by the
->   backend (the run path defaults it to `deny_all` via `..Default::default()`
->   at `mvm-cli/src/exec.rs` `run_inner`; claim 10 holds today). So enforcement
->   is a one-line thread, **not** new backend work — the earlier worry that the
->   field was missing was wrong.
-> - **Thread:** add `--net`/`--allow-host` to `RunArgs` *and* the internal
->   `Args` (`commands/vm/exec.rs`), map them in `RunArgs::into_exec_args`,
->   `resolve_network_policy` in `build_exec_request`, set
->   `ExecRequest.network_policy`, and set it on the `run_inner` `VmStartConfig`
->   (replacing the defaulted deny-all). `ExecRequest` gains a required field, so
->   the ~9 test constructions + `commands/ops/mcp.rs` need
+> - **CORRECTION (2026-06-16, verified by an implementation attempt):
+>   `VmStartConfig` does *not* have a `network_policy` field.** The struct with
+>   one is `mvm_backend::microvm::FlakeRunConfig` (a different config). The run
+>   path's egress is enforced by the **network provider's `deny_all()` default**
+>   (`mvm-backend/src/network_provider.rs` `default_policy = NetworkPolicy::
+>   deny_all()`; `apply_network_policy(&slot, &policy)`), *not* by a field on
+>   `VmStartConfig`. So enforcing a transient `--net` is **not** a one-line
+>   thread — it requires (a) adding `network_policy` to `VmStartConfig`, and
+>   (b) wiring each workload backend's `start()` to apply it instead of the
+>   provider default: Firecracker via `apply_network_policy`/iptables, libkrun &
+>   vz via their gateway (gvproxy `PlanFlowPolicy`). That is **per-backend,
+>   claim-10-critical, and needs live egress testing** (a box), so this slice is
+>   bigger than the CLI plumbing. The resolve + flags + audit-label parts below
+>   are still correct; **do not ship `--net` resolve/audit without the backend
+>   enforcement** — a flag that audits `preset:dev` but leaves egress denied is
+>   as misleading as the inverse.
+> - **Thread (CLI side — proven to compile cleanly in the attempt):** add
+>   `--net`/`--allow-host` to `RunArgs` *and* the internal `Args`
+>   (`#[arg(skip)]`, set via `RunArgs::into_exec_args`), add a
+>   `resolve_run_network(net, allow_host)` helper (allow-host → allow-list,
+>   `--net` alone → `dev` preset, neither → deny-all), set
+>   `ExecRequest.network_policy`. `ExecRequest` gains a required field, so the
+>   ~9 test constructions + `commands/ops/mcp.rs` need
 >   `network_policy: NetworkPolicy::default()`.
+> - **Enforce (the gap — backend side):** add `network_policy` to `VmStartConfig`
+>   and have each workload backend's `start()` apply it via the network provider
+>   instead of the `deny_all()` default. THIS is the part that needs a live box.
 > - **Machine:** add the same two flags to `MachineRunArgs` and pass them through
 >   `into_run_args`.
 > - **SECURITY DECISION (settled):** the transient policy is applied by the
