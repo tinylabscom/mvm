@@ -32,11 +32,10 @@
 //! the signed chain is the source of truth.
 //!
 //! Mediation seam: the bridge consults [`FlowPolicy::evaluate`]
-//! before emitting `FlowOpened`. [`PlanFlowPolicy`] (derived from the
-//! admitted plan / bare network policy) is the production gate; future
-//! SNI / L7-URL inspectors plug in without re-architecting (the
-//! [`FlowDecisionCtx`] carries optional `sni_hostname` / `url_path`
-//! fields for them to fill).
+//! before emitting `FlowOpened`. [`AllowAll`] is the default; the
+//! per-tenant enforcer and future SNI / L7-URL inspectors plug in
+//! without re-architecting (the [`FlowDecisionCtx`] carries optional
+//! `sni_hostname` / `url_path` fields for them to fill).
 //!
 //! Concurrency model: each VM gets a dedicated `std::thread`
 //! hosting a current-thread tokio runtime + `LocalSet`. Three
@@ -75,9 +74,8 @@ use std::collections::HashSet;
 // ============================================================================
 
 /// Mediation hook the bridge consults before emitting `FlowOpened`.
-/// [`PlanFlowPolicy`] (derived from the admitted plan / bare network
-/// policy) is the production gate; future SNI / L7-URL inspectors plug
-/// in here without re-architecting.
+/// [`AllowAll`] is the default; the per-tenant enforcer and future
+/// SNI / L7-URL inspectors plug in here without re-architecting.
 pub trait FlowPolicy: Send + Sync + 'static {
     fn evaluate(&self, ctx: &FlowDecisionCtx) -> FlowAction;
 }
@@ -109,9 +107,8 @@ pub enum FlowAction {
     /// splicing.
     Allow,
     /// Drop the flow. Bridge emits `FlowClosed { PolicyDropped }`
-    /// and tears down the bridge for that flow. A permissive
-    /// (unrestricted) `PlanFlowPolicy` never returns this; a
-    /// deny-by-default one does.
+    /// and tears down the bridge for that flow. `AllowAll` never
+    /// returns this; the per-tenant enforcer does.
     Drop { reason: DropReason },
 }
 
@@ -124,6 +121,17 @@ pub struct DropReason(pub String);
 impl DropReason {
     pub fn new(reason: impl Into<String>) -> Self {
         Self(reason.into())
+    }
+}
+
+/// Default `FlowPolicy` that lets everything through. The unenforced
+/// substrate uses this; per-tenant enforcement replaces it via the
+/// `BridgeConfig.policy` slot.
+pub struct AllowAll;
+
+impl FlowPolicy for AllowAll {
+    fn evaluate(&self, _ctx: &FlowDecisionCtx) -> FlowAction {
+        FlowAction::Allow
     }
 }
 
@@ -278,6 +286,12 @@ pub struct BridgeConfig {
     /// Subscriber socket path (`~/.mvm/audit/gateway-<vm>.sock`).
     pub audit_socket: PathBuf,
     pub signer: Arc<dyn AuditSigner>,
+    /// Vestigial. `run_bridge_inner` no longer reads this — the flow gate is
+    /// derived from `bundle` (when present) or `network_policy` (the bare path),
+    /// and a missing policy fails CLOSED to deny-all. Every construction site
+    /// still sets it to `AllowAll`; removing the field + the `AllowAll` type is
+    /// a tracked hygiene follow-up. Do NOT rely on it to enforce anything.
+    pub policy: Arc<dyn FlowPolicy>,
     /// Host-allowlisted observers that fan-out each FlowEvent before
     /// chain signing. Empty `Vec` = no observers (only the always-on
     /// chain signer fires). The signer task wraps each observer call in
@@ -293,8 +307,15 @@ pub struct BridgeConfig {
     /// flow gate + DNS host allow-list directly from it (the libkrun/Vz
     /// analogue of Firecracker consuming `VmStartConfig.network_policy`),
     /// so a transient run enforces the same policy without a signed bundle.
-    /// `None` (no bundle either) fails CLOSED to deny-all.
+    /// `None` (no bundle either) fails CLOSED to deny-all — never `AllowAll`.
     pub network_policy: Option<mvm_core::network_policy::NetworkPolicy>,
+    /// Native-gateway flow-audit export to tail. `Some(<vm>/flow-audit.jsonl)`
+    /// when the gateway is native `rvproxy run --config` (it writes its
+    /// `FlowEvent` lifecycle there). The bridge spawns a follower that maps each
+    /// record into a [`FlowEvent`] and feeds the **same** chain-signer the splice
+    /// feeds — so rvproxy's native flow events become a source of the chain-signed
+    /// audit. `None` for the gvproxy/passt path (the splice is the only source).
+    pub native_flow_audit_path: Option<PathBuf>,
 }
 
 // ============================================================================
@@ -529,6 +550,109 @@ pub fn spawn_bridge_thread(endpoints: BridgeEndpoints, cfg: BridgeConfig) -> Joi
         .expect("spawn bridge thread")
 }
 
+/// Spawn the per-VM **native** audit feed thread. Used when the gateway is
+/// native `rvproxy run --config` and libkrun attaches to it directly (no splice
+/// in the data path). rvproxy is the sole egress enforcer; this thread only
+/// re-feeds rvproxy's flow-audit export into the chain-signed audit, so the
+/// claim-10 audit chain stays mvm's source of truth. `cfg.native_flow_audit_path`
+/// must be `Some`. Same panic→exit(1) fail-closed contract as
+/// [`spawn_bridge_thread`].
+pub fn spawn_native_audit_feed(cfg: BridgeConfig) -> JoinHandle<()> {
+    std::thread::Builder::new()
+        .name(format!("mvm-native-audit-{}", cfg.vm_name))
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_native_audit_inner(cfg);
+            }));
+            if let Err(panic) = result {
+                let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "<non-string panic>".to_string()
+                };
+                tracing::error!(panic = %msg, "native audit feed panic — exiting (claim-10 fail-closed)");
+                std::process::exit(1);
+            }
+        })
+        .expect("spawn native audit feed thread")
+}
+
+/// Native audit feed: bind the per-VM gateway audit subscriber socket, run the
+/// chain `signer_task`, and follow rvproxy's flow-audit export — mapping each
+/// `FlowEvent` into the signer's mpsc so it's chain-signed. No splice / copy
+/// tasks: rvproxy (attached directly to libkrun) is the enforcer + the flow
+/// source. Blocks until the signer task ends, which happens when the follower
+/// stops (all senders dropped) — i.e. on process teardown when libkrun's
+/// `start_enter` calls `exit()` at guest poweroff.
+fn run_native_audit_inner(cfg: BridgeConfig) {
+    let flow_audit_path = match cfg.native_flow_audit_path.clone() {
+        Some(p) => p,
+        None => {
+            tracing::error!("native audit feed started without native_flow_audit_path; exiting");
+            return;
+        }
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("build native audit feed tokio runtime");
+    let local = tokio::task::LocalSet::new();
+
+    rt.block_on(local.run_until(async move {
+        let sink = match GatewayAuditSink::bind(&cfg.audit_socket) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(
+                    path = %cfg.audit_socket.display(),
+                    error = %e,
+                    "gateway audit sink bind failed; exiting native audit feed"
+                );
+                return;
+            }
+        };
+        let broadcast_tx = sink.sender();
+
+        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let signer_handle = tokio::task::spawn_local(signer_task(
+            event_rx,
+            cfg.plan.clone(),
+            cfg.bundle.clone(),
+            cfg.signer.clone(),
+            broadcast_tx,
+            cfg.observers.clone(),
+        ));
+        tokio::task::spawn_local(sink.run());
+
+        // Follower (blocking file IO) holds the only surviving sender, so the
+        // signer task lives until the follower stops (process teardown).
+        let feed_tx = event_tx.clone();
+        let vm = cfg.vm_name.clone();
+        std::thread::Builder::new()
+            .name(format!("mvm-rvproxy-flowaudit-{}", cfg.vm_name))
+            .spawn(move || {
+                if let Err(e) = crate::supervisor::network::rvproxy_flow_audit::follow_flow_audit(
+                    &flow_audit_path,
+                    &vm,
+                    |ev| feed_tx.blocking_send(ev).is_ok(),
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        path = %flow_audit_path.display(),
+                        "rvproxy flow-audit follower exited"
+                    );
+                }
+            })
+            .expect("spawn rvproxy flow-audit follower");
+        drop(event_tx);
+
+        let _ = signer_handle.await;
+    }));
+}
+
 fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -595,7 +719,8 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
                 // The per-tenant deny-by-default flow-open gate,
                 // derived from the SAME resolved policy as the packet scan above
                 // (so the coarse gate never drops a flow the scan would admit).
-                // It's the libkrun analogue of the Firecracker
+                // This replaces the supervisor bin's `AllowAll` when a bundle
+                // resolves; it's the libkrun analogue of the Firecracker
                 // `install_default_deny`. The two compose: flow must open AND
                 // every packet must pass mandatory-deny + L4 + DNS.
                 let flow_policy: Arc<dyn FlowPolicy> =
@@ -610,16 +735,18 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
             // scans exactly as the bundle path does.
             None => match &cfg.network_policy {
                 Some(np) => bare_network_policy_egress(np),
-                // Neither bundle nor a threaded policy: fail CLOSED to deny-all.
-                // Every workload-bearing spawn now threads a policy (cold boot +
-                // warm-claim attach frame); this arm is the backstop so a missing
-                // policy can't silently open egress on a pool hit. The always-on
-                // mandatory-deny + placeholder scans still compose on top.
+                // Neither bundle nor a threaded policy: fail CLOSED to deny-all,
+                // never `cfg.policy` (AllowAll). Every workload-bearing spawn now
+                // threads a policy (cold boot + warm-claim attach frame); this
+                // arm is the backstop so a missing policy can't silently open
+                // egress on a pool hit. The always-on mandatory-deny +
+                // placeholder scans still compose on top.
                 None => {
                     bare_network_policy_egress(&mvm_core::network_policy::NetworkPolicy::deny_all())
                 }
             },
         };
+
         // Packet-observer wiring shared across both directions.
         let wiring = ObserverWiring {
             observers: cfg.observers.clone(),
@@ -692,10 +819,11 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
                     cfg.vm_name.clone(),
                     cfg.plan.tenant.0.clone(),
                     // The resolved flow gate (bundle- or bare-policy-derived),
-                    // matching every other endpoint. This is the primary Vz
-                    // path's deny-by-default enforcement point: a bare deny-all
-                    // run installs no L4 scan, so enforcement rides entirely on
-                    // this gate.
+                    // matching every other endpoint. Using `cfg.policy` here
+                    // (the supervisor's `AllowAll` default) left the primary Vz
+                    // path's deny-by-default flow gate open: a bare deny-all run
+                    // installs no L4 scan, so enforcement rides entirely on this
+                    // gate — `cfg.policy` would have let all egress through.
                     flow_policy.clone(),
                     event_tx,
                     wiring,
@@ -1841,6 +1969,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn allow_all_policy_lets_all_flows_through() {
+        let p = AllowAll;
+        assert_eq!(p.evaluate(&ctx()), FlowAction::Allow);
+        let mut c = ctx();
+        c.direction = FlowDirection::Ingress;
+        assert_eq!(p.evaluate(&c), FlowAction::Allow);
+    }
+
     struct DropAllForTest;
     impl FlowPolicy for DropAllForTest {
         fn evaluate(&self, _: &FlowDecisionCtx) -> FlowAction {
@@ -2154,9 +2291,7 @@ mod tests {
         let mut libkrun = tokio::net::UnixStream::from_std(guest_b).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
-        let policy: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_network_policy(
-            &mvm_core::network_policy::NetworkPolicy::unrestricted(),
-        ));
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
         let bridge_task = tokio::spawn(bridge_copy_bidirectional(
             supervisor_gateway,
             supervisor_guest,
@@ -2221,9 +2356,7 @@ mod tests {
         let mut libkrun = tokio::net::UnixStream::from_std(guest_b).unwrap();
 
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
-        let policy: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_network_policy(
-            &mvm_core::network_policy::NetworkPolicy::unrestricted(),
-        ));
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
         let bridge_task = tokio::spawn(bridge_copy_bidirectional(
             supervisor_gateway,
             supervisor_guest,
@@ -2264,9 +2397,7 @@ mod tests {
         let supervisor_fd = OwnedFd::from(sup_std);
 
         let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
-        let policy: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_network_policy(
-            &mvm_core::network_policy::NetworkPolicy::unrestricted(),
-        ));
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
         let task = tokio::spawn(run_vz_gvproxy_bridge(
             supervisor_fd,
             gvproxy_path.clone(),
@@ -2567,9 +2698,7 @@ mod tests {
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
 
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
-        let policy: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_network_policy(
-            &mvm_core::network_policy::NetworkPolicy::unrestricted(),
-        ));
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
         let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
@@ -2612,9 +2741,7 @@ mod tests {
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
-        let policy: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_network_policy(
-            &mvm_core::network_policy::NetworkPolicy::unrestricted(),
-        ));
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
         let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
@@ -2710,9 +2837,7 @@ mod tests {
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
-        let policy: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_network_policy(
-            &mvm_core::network_policy::NetworkPolicy::unrestricted(),
-        ));
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
         // deny_all egress → the egress frame to 93.184.216.34:443 has no
         // matching rule → L4PolicyScan drops it at the chokepoint.
         let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
@@ -2770,9 +2895,7 @@ mod tests {
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
 
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
-        let policy: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_network_policy(
-            &mvm_core::network_policy::NetworkPolicy::unrestricted(),
-        ));
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
         // Allow tcp to exactly 93.184.216.34:443 — the frame's destination.
         let allow = canonicalize_l4(&[L4RuleSpec {
             proto: "tcp".into(),
@@ -2814,9 +2937,7 @@ mod tests {
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
-        let policy: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_network_policy(
-            &mvm_core::network_policy::NetworkPolicy::unrestricted(),
-        ));
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
         // Egress allow-list = {example.com} → a UDP/53 query for a host outside
         // it is sink-holed at the chokepoint.
         let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
@@ -2876,9 +2997,7 @@ mod tests {
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
 
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
-        let policy: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_network_policy(
-            &mvm_core::network_policy::NetworkPolicy::unrestricted(),
-        ));
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
         let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
@@ -3087,9 +3206,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bare_deny_all_policy_drops_egress_through_the_live_vz_bridge() {
         // Parity proof for the PRIMARY Vz path (`run_vz_gvproxy_bridge`): the
-        // resolved deny-by-default flow gate must reach this bridge. With no L4
-        // scan on a bare deny-all run, enforcement rides entirely on this gate,
-        // so a permissive gate here would leave Vz egress fully open.
+        // resolved flow gate — not the supervisor's `AllowAll` default — must
+        // reach this bridge. The dispatch arm used to pass `cfg.policy`
+        // (AllowAll), which left bare deny-all (no L4 scan) fully open on Vz.
         let (l4, dns_allow, policy) =
             bare_network_policy_egress(&mvm_core::network_policy::NetworkPolicy::deny_all());
         let dir = tempfile::tempdir().unwrap();
@@ -3403,9 +3522,7 @@ mod tests {
         // a listener the harness connects to.
         let sup_listen = tmp.path().join("sup.sock");
         let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
-        let policy: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_network_policy(
-            &mvm_core::network_policy::NetworkPolicy::unrestricted(),
-        ));
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
         let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
             gw_sock.clone(),
             sup_listen.clone(),
