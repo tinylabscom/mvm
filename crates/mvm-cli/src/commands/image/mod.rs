@@ -17,6 +17,7 @@ use mvm_oci::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use mvm_core::domain::manifest::canonical_key_for_path;
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
@@ -422,11 +423,8 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
         source::ImageSource::Stdin => {
             return ingest_stdin_archive(cache_root, reference, prod);
         }
-        source::ImageSource::RootfsDir(_) => {
-            bail!(
-                "`run --image` does not support `rootfs-dir:` yet; use a registry \
-                 reference, `oci-archive:<path>`, or `-` for a stdin archive"
-            );
+        source::ImageSource::RootfsDir(path) => {
+            return ingest_rootfs_dir(cache_root, &path, reference, prod);
         }
         source::ImageSource::Registry(_) => {}
     }
@@ -592,6 +590,135 @@ fn ingest_archive_from_reader<R: Read>(
         provenance,
         auth_source: None,
     })
+}
+
+/// Ingest an already-unpacked rootfs directory (`run --image rootfs-dir:<path>`)
+/// straight into an ext4 rootfs — no layers to unpack. A bare tree carries no
+/// OCI manifest/config, so there is no digest or signature to verify; it is
+/// therefore **dev-only** (`--prod` is refused) and the wrong-architecture
+/// guard falls back to probing a representative ELF binary's machine type
+/// against the host. `materialize_ext4` reads the directory read-only.
+fn ingest_rootfs_dir(
+    cache_root: &Path,
+    rootfs_dir: &Path,
+    supplied_reference: &str,
+    prod: bool,
+) -> Result<ResolvedOciRunImage> {
+    if prod {
+        bail!(
+            "`run --image --prod` requires a registry reference with cosign; an \
+             unpacked rootfs directory carries no provenance to verify"
+        );
+    }
+    if !rootfs_dir.is_dir() {
+        bail!(
+            "rootfs directory not found or not a directory: {}",
+            rootfs_dir.display()
+        );
+    }
+    // A bare tree has no manifest architecture, so probe a representative ELF
+    // binary and reject a cross-arch tree before paying for materialization.
+    if let (Some(found), Some(host)) = (probe_rootfs_elf_machine(rootfs_dir), host_elf_machine())
+        && found != host
+    {
+        bail!(
+            "rootfs directory targets a different CPU architecture \
+             (ELF e_machine {found}, host expects {host})"
+        );
+    }
+
+    let key = canonical_key_for_path(rootfs_dir)
+        .with_context(|| format!("canonicalize rootfs dir {}", rootfs_dir.display()))?;
+    let tree_size = unpacked_tree_size(rootfs_dir)
+        .with_context(|| format!("measure rootfs dir {}", rootfs_dir.display()))?;
+    let rootfs_rel = format!("rootfs/{key}/rootfs.ext4");
+    let rootfs_abs = cache_root.join(&rootfs_rel);
+    materialize_ext4(
+        &MaterializeExt4Input::new(rootfs_dir.to_path_buf(), rootfs_abs.clone(), tree_size),
+        &MaterializeExt4Options::default(),
+    )
+    .context("materialize rootfs.ext4 from directory")?;
+
+    let provenance = OciProvenance {
+        schema_version: 1,
+        source: "rootfs_dir".to_string(),
+        supplied_reference: supplied_reference.to_string(),
+        canonical_reference: rootfs_dir.display().to_string(),
+        registry: String::new(),
+        repository: String::new(),
+        tag: None,
+        resolved_digest: String::new(),
+        layer_digests: Vec::new(),
+        trust_policy: "rootfs-dir-unverified".to_string(),
+        verification_status: "no-provenance (dev)".to_string(),
+    };
+    Ok(ResolvedOciRunImage {
+        reference: supplied_reference.to_string(),
+        resolved_digest: String::new(),
+        rootfs_path: rootfs_abs,
+        pulled: true,
+        provenance,
+        auth_source: None,
+    })
+}
+
+/// ELF `e_machine` for the host CPU, or `None` for an architecture we don't
+/// map (in which case the rootfs-dir arch guard is skipped rather than
+/// guessing). `EM_X86_64` = 62, `EM_AARCH64` = 183.
+fn host_elf_machine() -> Option<u16> {
+    if cfg!(target_arch = "x86_64") {
+        Some(62)
+    } else if cfg!(target_arch = "aarch64") {
+        Some(183)
+    } else {
+        None
+    }
+}
+
+/// Probe a few representative binaries in `rootfs_dir` and return the first
+/// one's ELF `e_machine`. `None` when none is present/readable as ELF (a tree
+/// with no probe-able binary can't be arch-checked — dev-only, so we don't
+/// block on it).
+fn probe_rootfs_elf_machine(rootfs_dir: &Path) -> Option<u16> {
+    const CANDIDATES: &[&str] = &[
+        "bin/sh",
+        "bin/busybox",
+        "bin/bash",
+        "usr/bin/env",
+        "sbin/init",
+    ];
+    for candidate in CANDIDATES {
+        let path = rootfs_dir.join(candidate);
+        if let Ok(bytes) = read_elf_header(&path)
+            && let Some(machine) = elf_machine(&bytes)
+        {
+            return Some(machine);
+        }
+    }
+    None
+}
+
+/// Read just enough of a file to inspect its ELF header (cheap; never slurps a
+/// whole binary).
+fn read_elf_header(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut buf = [0u8; 20];
+    let mut file = fs::File::open(path)?;
+    let n = file.read(&mut buf)?;
+    Ok(buf[..n].to_vec())
+}
+
+/// Parse the ELF `e_machine` (offset 18, endianness per `EI_DATA`) from a
+/// header. `None` if the bytes aren't an ELF header.
+fn elf_machine(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() < 20 || bytes[..4] != [0x7f, b'E', b'L', b'F'] {
+        return None;
+    }
+    let m = [bytes[18], bytes[19]];
+    match bytes[5] {
+        1 => Some(u16::from_le_bytes(m)),
+        2 => Some(u16::from_be_bytes(m)),
+        _ => None,
+    }
 }
 
 pub(super) fn pull_image_with_trust(
@@ -1468,6 +1595,57 @@ mod tests {
         let err = ingest_stdin_archive(tmp.path(), "-", true)
             .expect_err("prod stdin archive must be refused");
         assert!(err.to_string().contains("prod"), "got {err}");
+    }
+
+    fn fake_elf(machine: u16) -> Vec<u8> {
+        let mut b = vec![0u8; 20];
+        b[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        b[4] = 2; // ELFCLASS64
+        b[5] = 1; // little-endian
+        b[6] = 1; // version
+        b[16..18].copy_from_slice(&2u16.to_le_bytes()); // e_type ET_EXEC
+        b[18..20].copy_from_slice(&machine.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn elf_machine_parses_le_and_rejects_non_elf() {
+        assert_eq!(elf_machine(&fake_elf(62)), Some(62));
+        assert_eq!(elf_machine(&fake_elf(183)), Some(183));
+        assert_eq!(elf_machine(b"definitely not an elf!"), None);
+    }
+
+    #[test]
+    fn rootfs_dir_prod_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = ingest_rootfs_dir(tmp.path(), tmp.path(), "rootfs-dir:.", true)
+            .expect_err("prod rootfs dir must be refused");
+        assert!(err.to_string().contains("prod"), "got {err}");
+    }
+
+    #[test]
+    fn rootfs_dir_missing_is_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("nope");
+        let err = ingest_rootfs_dir(tmp.path(), &missing, "rootfs-dir:nope", false)
+            .expect_err("missing rootfs dir must error");
+        assert!(err.to_string().contains("directory"), "got {err}");
+    }
+
+    #[test]
+    fn rootfs_dir_wrong_arch_is_rejected() {
+        // The guard is a no-op on hosts we don't map; skip there.
+        let Some(host) = host_elf_machine() else {
+            return;
+        };
+        let wrong = if host == 62 { 183 } else { 62 };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("sh"), fake_elf(wrong)).unwrap();
+        let err = ingest_rootfs_dir(tmp.path(), tmp.path(), "rootfs-dir:.", false)
+            .expect_err("cross-arch rootfs must be rejected before materialize");
+        assert!(err.to_string().contains("architecture"), "got {err}");
     }
 
     #[test]
