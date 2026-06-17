@@ -1036,12 +1036,17 @@ follow-ups:
       enforce the field). MCP runs untrusted AI code — exactly claim 10's target. The live
       window is narrow today (macOS transient guest has no `eth0`), but it should admit so
       the bridge actually enforces. Pre-existing (not introduced by this branch).
-- [ ] **Remove the vestigial `BridgeConfig.policy` field + the `AllowAll` type.**
-      `run_bridge_inner` no longer reads `cfg.policy` (the flow gate is derived from
-      `bundle` / `network_policy`, failing closed to deny-all). Every construction site
-      still sets it to `AllowAll`; the field is now a write-only footgun. Drop it across
-      the supervisor bins (`mvm-libkrun-supervisor`, `vz_objc`, `mvm-vz-drainer`,
-      `mvm-firecracker-bridge`) and the tests. Pure hygiene, no behavior change.
+- [x] **Remove the vestigial `BridgeConfig.policy` field + the `AllowAll` type.**
+      `run_bridge_inner` no longer read `cfg.policy` (the flow gate is derived from
+      `bundle` / `network_policy`, failing closed to deny-all). The field was a write-only
+      footgun. Dropped the field + the `AllowAll` `FlowPolicy` impl; the four supervisor-bin
+      construction sites (`mvm-libkrun-supervisor`, `vz_objc`, `mvm-vz-drainer`,
+      `mvm-firecracker-bridge`) no longer set it; the gateway-bridge tests that used
+      `Arc::new(AllowAll)` as an allow-all gate now use
+      `PlanFlowPolicy::from_network_policy(&NetworkPolicy::unrestricted())` (the production
+      allow-mode gate); the `AllowAll`-only unit test was deleted (allow-mode is covered by
+      the `PlanFlowPolicy` unrestricted test). Pure hygiene, no behavior change — cfg(linux)
+      `mvm-firecracker-bridge` cross-compiled with cargo-zigbuild.
 - [ ] **Decide the DHCP/ARP posture under deny-all.** The flow-open gate has no UDP
       67/68 / ARP carve-out; latent today (macOS transient guest doesn't DHCP) but a
       correctness trap once guest networking is fixed (a deny-all networked guest would

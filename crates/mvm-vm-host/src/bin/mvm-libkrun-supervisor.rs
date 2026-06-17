@@ -59,9 +59,7 @@ use mvm_core::plan::{ExecutionPlan, NonceStore, SignedExecutionPlan};
 use mvm_core::policy::PolicyBundle;
 use mvm_hostd::supervisor::audit::AuditSigner;
 use mvm_hostd::supervisor::audit_file::FileAuditSigner;
-use mvm_hostd::supervisor::gateway_bridge::{
-    AllowAll, BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
-};
+use mvm_hostd::supervisor::gateway_bridge::{BridgeConfig, BridgeEndpoints, spawn_bridge_thread};
 
 /// Per-connection attach timeout. An abandoned connect must not wedge the
 /// standby; pool size bounds the blast radius.
@@ -494,15 +492,6 @@ fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible
         bundle: bundle.map(Arc::new),
         audit_socket,
         signer,
-        // The flow-open gate. This `AllowAll` is only the
-        // *no-bundle fallback*: when the admitted plan carries a resolvable
-        // policy bundle, `run_bridge_inner` derives a per-tenant
-        // `PlanFlowPolicy` (deny-by-default, the libkrun analogue of the
-        // Firecracker `install_default_deny`) from the same resolved policy as
-        // the packet scan, and that supersedes this field. Stage 0 builder VMs /
-        // dev-mode carry no bundle, so they keep `AllowAll` (still gated by the
-        // always-on mandatory-deny + placeholder-leak packet scans).
-        policy: Arc::new(AllowAll),
         // Observers resolved above from the
         // admitted plan's `network_policy` ref through the host
         // allowlist. Empty for `local-default` plans (preserves
