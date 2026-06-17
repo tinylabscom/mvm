@@ -25,6 +25,10 @@ name = "mvm-broker"
 path = "src/bin/mvm-broker.rs"
 
 [[bin]]
+name = "mvm-host-agent"
+path = "src/bin/mvm-host-agent.rs"
+
+[[bin]]
 name = "mvm-host-signer"
 path = "src/bin/mvm-host-signer.rs"
 
