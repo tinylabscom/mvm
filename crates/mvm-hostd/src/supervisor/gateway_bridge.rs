@@ -32,10 +32,10 @@
 //! the signed chain is the source of truth.
 //!
 //! Mediation seam: the bridge consults [`FlowPolicy::evaluate`]
-//! before emitting `FlowOpened`. [`AllowAll`] is the default; the
-//! per-tenant enforcer and future SNI / L7-URL inspectors plug in
-//! without re-architecting (the [`FlowDecisionCtx`] carries optional
-//! `sni_hostname` / `url_path` fields for them to fill).
+//! before emitting `FlowOpened`. [`PlanFlowPolicy`] is the production gate
+//! (deny-by-default, derived from the resolved policy); future SNI / L7-URL
+//! inspectors plug in without re-architecting (the [`FlowDecisionCtx`] carries
+//! optional `sni_hostname` / `url_path` fields for them to fill).
 //!
 //! Concurrency model: each VM gets a dedicated `std::thread`
 //! hosting a current-thread tokio runtime + `LocalSet`. Three
@@ -74,7 +74,7 @@ use std::collections::HashSet;
 // ============================================================================
 
 /// Mediation hook the bridge consults before emitting `FlowOpened`.
-/// [`AllowAll`] is the default; the per-tenant enforcer and future
+/// [`PlanFlowPolicy`] is the production gate (deny-by-default); future
 /// SNI / L7-URL inspectors plug in here without re-architecting.
 pub trait FlowPolicy: Send + Sync + 'static {
     fn evaluate(&self, ctx: &FlowDecisionCtx) -> FlowAction;
@@ -107,8 +107,8 @@ pub enum FlowAction {
     /// splicing.
     Allow,
     /// Drop the flow. Bridge emits `FlowClosed { PolicyDropped }`
-    /// and tears down the bridge for that flow. `AllowAll` never
-    /// returns this; the per-tenant enforcer does.
+    /// and tears down the bridge for that flow. A deny-by-default
+    /// [`PlanFlowPolicy`] returns this for an unadmitted egress flow.
     Drop { reason: DropReason },
 }
 
@@ -124,11 +124,16 @@ impl DropReason {
     }
 }
 
-/// Default `FlowPolicy` that lets everything through. The unenforced
-/// substrate uses this; per-tenant enforcement replaces it via the
-/// `BridgeConfig.policy` slot.
+/// Test-only `FlowPolicy` that lets every flow through. Production no longer
+/// uses an always-allow gate: `run_bridge_inner` derives the flow gate from the
+/// resolved bundle or the bare `network_policy`, failing CLOSED to deny-all when
+/// neither is present (see [`PlanFlowPolicy`]). The bridge unit tests keep this
+/// permissive gate so they can exercise frame forwarding without policy
+/// interference.
+#[cfg(test)]
 pub struct AllowAll;
 
+#[cfg(test)]
 impl FlowPolicy for AllowAll {
     fn evaluate(&self, _ctx: &FlowDecisionCtx) -> FlowAction {
         FlowAction::Allow
@@ -286,12 +291,6 @@ pub struct BridgeConfig {
     /// Subscriber socket path (`~/.mvm/audit/gateway-<vm>.sock`).
     pub audit_socket: PathBuf,
     pub signer: Arc<dyn AuditSigner>,
-    /// Vestigial. `run_bridge_inner` no longer reads this — the flow gate is
-    /// derived from `bundle` (when present) or `network_policy` (the bare path),
-    /// and a missing policy fails CLOSED to deny-all. Every construction site
-    /// still sets it to `AllowAll`; removing the field + the `AllowAll` type is
-    /// a tracked hygiene follow-up. Do NOT rely on it to enforce anything.
-    pub policy: Arc<dyn FlowPolicy>,
     /// Host-allowlisted observers that fan-out each FlowEvent before
     /// chain signing. Empty `Vec` = no observers (only the always-on
     /// chain signer fires). The signer task wraps each observer call in
@@ -625,12 +624,11 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
             // scans exactly as the bundle path does.
             None => match &cfg.network_policy {
                 Some(np) => bare_network_policy_egress(np),
-                // Neither bundle nor a threaded policy: fail CLOSED to deny-all,
-                // never `cfg.policy` (AllowAll). Every workload-bearing spawn now
-                // threads a policy (cold boot + warm-claim attach frame); this
-                // arm is the backstop so a missing policy can't silently open
-                // egress on a pool hit. The always-on mandatory-deny +
-                // placeholder scans still compose on top.
+                // Neither bundle nor a threaded policy: fail CLOSED to deny-all.
+                // Every workload-bearing spawn now threads a policy (cold boot +
+                // warm-claim attach frame); this arm is the backstop so a missing
+                // policy can't silently open egress on a pool hit. The always-on
+                // mandatory-deny + placeholder scans still compose on top.
                 None => {
                     bare_network_policy_egress(&mvm_core::network_policy::NetworkPolicy::deny_all())
                 }
@@ -708,11 +706,10 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
                     cfg.vm_name.clone(),
                     cfg.plan.tenant.0.clone(),
                     // The resolved flow gate (bundle- or bare-policy-derived),
-                    // matching every other endpoint. Using `cfg.policy` here
-                    // (the supervisor's `AllowAll` default) left the primary Vz
-                    // path's deny-by-default flow gate open: a bare deny-all run
-                    // installs no L4 scan, so enforcement rides entirely on this
-                    // gate — `cfg.policy` would have let all egress through.
+                    // matching every other endpoint. This gate is the sole
+                    // enforcement for a bare deny-all run on Vz (which installs
+                    // no L4 scan), so it must be the resolved deny-by-default
+                    // gate, not an always-open one.
                     flow_policy.clone(),
                     event_tx,
                     wiring,
@@ -3095,9 +3092,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bare_deny_all_policy_drops_egress_through_the_live_vz_bridge() {
         // Parity proof for the PRIMARY Vz path (`run_vz_gvproxy_bridge`): the
-        // resolved flow gate — not the supervisor's `AllowAll` default — must
-        // reach this bridge. The dispatch arm used to pass `cfg.policy`
-        // (AllowAll), which left bare deny-all (no L4 scan) fully open on Vz.
+        // resolved deny-by-default flow gate must reach this bridge. An
+        // always-open gate would leave bare deny-all (which installs no L4 scan)
+        // fully open on Vz, since the flow gate is the sole enforcement there.
         let (l4, dns_allow, policy) =
             bare_network_policy_egress(&mvm_core::network_policy::NetworkPolicy::deny_all());
         let dir = tempfile::tempdir().unwrap();

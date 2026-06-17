@@ -678,7 +678,7 @@ pub struct StandbyClaim {
     /// The launcher's resolved bare egress policy, threaded so a warm-claimed
     /// standby enforces the SAME deny-by-default posture a cold boot would. The
     /// no-bundle bridge arm lowers this; without it a pool hit on a bundle-less
-    /// admitted plan would silently widen to `AllowAll`.
+    /// admitted plan would silently widen to open egress.
     pub network_policy: crate::network_policy::NetworkPolicy,
 }
 
