@@ -3251,6 +3251,7 @@ dependencies = [
  "schemars 0.8.22",
  "secrecy",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2",
  "sigstore",

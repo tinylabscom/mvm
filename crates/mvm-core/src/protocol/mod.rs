@@ -2,6 +2,7 @@
 
 pub mod audit_signer;
 pub mod broker;
+pub mod broker_control;
 pub mod handler;
 pub mod host_audit;
 pub mod host_cost;

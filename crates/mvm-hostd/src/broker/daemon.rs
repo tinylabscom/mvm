@@ -31,7 +31,7 @@ use tokio::net::UnixListener;
 use tracing::warn;
 
 use super::audit_client::AuditClient;
-use super::control::{ControlRequest, RegisterVm, SignedControl};
+use super::control::{ControlRequest, ControlResponse, RegisterVm, SignedControl};
 use super::handlers::host_audit_v1::HostAuditV1Handler;
 use super::registry::Registry;
 use super::server::{read_frame, serve_on_listener, write_frame};
@@ -92,20 +92,6 @@ impl Drop for VmHandle {
         self.serve_task.abort();
         let _ = std::fs::remove_file(&self.listen_socket);
     }
-}
-
-/// Reply to a control request on the control socket.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ControlResponse {
-    /// The request was applied.
-    Ok,
-    /// The request was rejected (bad signature, wrong tenant, unsafe id, bind
-    /// failure). Carries a host-authored message; never guest-authored.
-    Err {
-        /// Why the request was refused.
-        message: String,
-    },
 }
 
 /// The resident per-tenant host-agent daemon.
