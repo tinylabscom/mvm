@@ -2853,12 +2853,13 @@ fn test_cache_prune_dry_run() {
                 CacheAction::Prune {
                     dry_run,
                     orphan_builds,
-                    reap_orphans,
+                    no_reap_orphans,
                 },
         }) => {
             assert!(dry_run);
             assert!(!orphan_builds);
-            assert!(!reap_orphans);
+            // Reaping is on by default; `--no-reap-orphans` was not passed.
+            assert!(!no_reap_orphans);
         }
         _ => panic!("Expected Cache Prune command"),
     }
@@ -2873,36 +2874,52 @@ fn test_cache_prune_orphan_builds_flag() {
                 CacheAction::Prune {
                     dry_run,
                     orphan_builds,
-                    reap_orphans,
+                    no_reap_orphans,
                 },
         }) => {
             assert!(!dry_run);
             assert!(orphan_builds);
-            assert!(!reap_orphans);
+            // Reaping is on by default; `--no-reap-orphans` was not passed.
+            assert!(!no_reap_orphans);
         }
         _ => panic!("Expected Cache Prune command"),
     }
 }
 
 #[test]
-fn test_cache_prune_reap_orphans_flag() {
-    // `--reap-orphans` sweeps orphaned mvm-libkrun-supervisor /
-    // gvproxy / console-tail processes left behind by killed
-    // `mvmctl dev up` runs, plus their per-VM cache dirs.
-    let cli = Cli::try_parse_from(["mvmctl", "cache", "prune", "--reap-orphans"]).unwrap();
+fn test_cache_prune_no_reap_orphans_flag() {
+    // `prune` reaps orphaned mvm-libkrun-supervisor / gvproxy / console-tail
+    // processes (and their per-VM cache dirs) by default; `--no-reap-orphans`
+    // opts out so a disk-only prune touches no processes.
+    let cli = Cli::try_parse_from(["mvmctl", "cache", "prune", "--no-reap-orphans"]).unwrap();
     match cli.command {
         Commands::Cache(cache::Args {
             action:
                 CacheAction::Prune {
                     dry_run,
                     orphan_builds,
-                    reap_orphans,
+                    no_reap_orphans,
                 },
         }) => {
             assert!(!dry_run);
             assert!(!orphan_builds);
-            assert!(reap_orphans);
+            assert!(no_reap_orphans);
         }
+        _ => panic!("Expected Cache Prune command"),
+    }
+}
+
+#[test]
+fn test_cache_prune_reaps_orphans_by_default() {
+    // Regression: a bare `cache prune` must reap orphans (dead microVMs don't
+    // accumulate); the opt-out flag is off.
+    let cli = Cli::try_parse_from(["mvmctl", "cache", "prune"]).unwrap();
+    match cli.command {
+        Commands::Cache(cache::Args {
+            action: CacheAction::Prune {
+                no_reap_orphans, ..
+            },
+        }) => assert!(!no_reap_orphans),
         _ => panic!("Expected Cache Prune command"),
     }
 }
@@ -2917,7 +2934,7 @@ fn test_cache_prune_combined_flags() {
         "prune",
         "--dry-run",
         "--orphan-builds",
-        "--reap-orphans",
+        "--no-reap-orphans",
     ])
     .unwrap();
     match cli.command {
@@ -2926,12 +2943,12 @@ fn test_cache_prune_combined_flags() {
                 CacheAction::Prune {
                     dry_run,
                     orphan_builds,
-                    reap_orphans,
+                    no_reap_orphans,
                 },
         }) => {
             assert!(dry_run);
             assert!(orphan_builds);
-            assert!(reap_orphans);
+            assert!(no_reap_orphans);
         }
         _ => panic!("Expected Cache Prune command"),
     }

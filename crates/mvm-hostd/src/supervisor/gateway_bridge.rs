@@ -2916,6 +2916,21 @@ mod tests {
         o
     }
 
+    /// A DHCP DISCOVER-shaped egress frame (guest 0.0.0.0:68 → broadcast
+    /// 255.255.255.255:67). The payload is a stub — only the UDP 5-tuple matters
+    /// to the flow gate. Used to pin the deny-all control-plane posture: DHCP is
+    /// an egress flow and is dropped at the gate under deny-all (the guest then
+    /// self-assigns the static gvproxy fallback address — no lease, no hang).
+    fn dhcp_discover_frame() -> Vec<u8> {
+        use etherparse::PacketBuilder;
+        let b = PacketBuilder::ethernet2([1; 6], [0xff; 6])
+            .ipv4([0, 0, 0, 0], [255, 255, 255, 255], 64)
+            .udp(68, 67);
+        let mut o = Vec::new();
+        b.write(&mut o, &[0u8; 32]).unwrap();
+        o
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn l4_policy_denied_flow_is_dropped_through_the_live_bridge() {
         let dir = tempfile::tempdir().unwrap();
@@ -3288,6 +3303,48 @@ mod tests {
         assert!(
             saw_drop,
             "deny-all bare policy must emit FlowClosed{{PolicyDropped}}"
+        );
+        bridge.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bare_deny_all_drops_dhcp_discover_through_the_live_bridge() {
+        // Deny-all control-plane posture (loopback-only): DHCP is an egress flow,
+        // so it is dropped at the flow gate under deny-all — no lease reaches the
+        // guest. The guest then self-assigns the static gvproxy fallback address
+        // (udhcpc `-n` exits rather than hanging on a never-arriving OFFER). This
+        // pins the decision: deny-all admits NO control-plane carve-out; egress
+        // (incl. DHCP) is uniformly denied and the static fallback keeps eth0 up.
+        let (l4, dns_allow, policy) = bare_network_policy_egress(
+            &mvm_core::network_policy::NetworkPolicy::deny_all(),
+            &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let sup_listen = dir.path().join("sup.sock");
+        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+            gvproxy_path.clone(),
+            sup_listen.clone(),
+            "vm-test".to_string(),
+            "t".to_string(),
+            policy,
+            tx,
+            wiring_with_egress_scan(l4, dns_allow),
+        ));
+        let libkrun = connect_libkrun(&sup_listen).await;
+        libkrun.send(&dhcp_discover_frame()).await.unwrap();
+
+        let mut buf = vec![0u8; 65536];
+        let got = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            gvproxy.recv(&mut buf),
+        )
+        .await;
+        assert!(
+            got.is_err(),
+            "deny-all must drop the guest's DHCP DISCOVER (no lease under deny-all)"
         );
         bridge.abort();
     }

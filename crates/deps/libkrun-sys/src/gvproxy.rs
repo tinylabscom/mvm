@@ -333,6 +333,9 @@ pub fn spawn(
     cmd.stdout(std::process::Stdio::from(stdio_log))
         .stderr(std::process::Stdio::from(stdio_log_err));
 
+    // Tie gvproxy to the supervisor's lifetime: a SIGKILL'd / panicked
+    // supervisor (which the SIGTERM handler can't catch) must not orphan it.
+    crate::child_lifecycle::tie_to_parent_death(&mut cmd);
     let mut child = cmd.spawn().map_err(GvproxyError::Spawn)?;
 
     // Record the pid before the poll loop: the SIGTERM handler reaps
