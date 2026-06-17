@@ -1,8 +1,9 @@
 # Plan 200 — machine UX/DX layer
 
 **Status:** in progress — `mvmctl machine run` shipped (Workstream A/B kickoff);
-persistent verbs (`create/start/exec/shell/stop`), `--net`/`--allow-host`, local
-image sources, `mvm.toml` schema v1, SDK parity, and `pack` pending
+`--net`/`--allow-host` and local image sources shipped; persistent verbs
+(`create/start/exec/shell/stop/ls/inspect/rm`), `mvm.toml` machine mapping,
+SDK parity, and `pack` pending
 **Owner:** mvm
 **Date:** 2026-06-15
 
@@ -516,7 +517,9 @@ Implementation shape:
     (`local_archive_malformed_is_rejected`, `rootfs_dir_wrong_arch_is_rejected`,
     `*_prod_is_refused`, `*_missing*`); provenance labels are asserted by
     `provenance_labels_cover_claim_10_fields`; path traversal is covered in the
-    `mvm-oci` unpacker (`archive.rs`/`unpack.rs`). Session 3 item 2 complete.
+    `mvm-oci` unpacker (`archive.rs`/`unpack.rs`) and by a CLI local-archive
+    traversal-layer regression proving the ingest path reaches hardened unpack
+    refusal before materialization. Session 3 item 2 complete.
 - Route every `MachineImageSource` through the existing OCI/rootfs hardening,
   provenance, policy admission, and receipt/audit code paths. Do not add a
   daemon-bypass or extraction shortcut for DX.
@@ -804,11 +807,15 @@ Required behavior:
 > un-admitted (follow-up).
 
 - [x] Add `--net` and `--allow-host HOST[:PORT]` to `mvmctl run`.
-- [ ] Add `MachineImageSource` support for registry refs, local OCI archive
+- [x] Add `MachineImageSource` support for registry refs, local OCI archive
       paths, stdin archive streams, and unpacked rootfs directories.
-- [ ] Route every machine image source through hardened unpacking, source
+- [x] Route every machine image source through hardened unpacking, source
       provenance, admission, receipts, and audit; do not add a daemon-bypass or
-      extraction shortcut for DX.
+      extraction shortcut for DX. Local archive/stdin sources share
+      `read_oci_archive` + `unpack_layer` + ext4 materialization with registry
+      pulls; rootfs-dir is dev-only and records explicit no-provenance
+      local-source metadata before the existing `run_secure` admission/audit
+      caller handles launch.
 - [x] Thread transient run network policy through `ExecRequest` and
       `VmStartConfig` (and on to `SupervisorConfig` → `BridgeConfig` → the
       libkrun/Vz gateway-bridge enforcer; FC consumes the same field).
@@ -816,9 +823,14 @@ Required behavior:
 - [x] Add receipt/dry-run output for effective network posture.
 - [x] Add unit tests for deny-all, `--net`, allow-list parsing, conflict
       handling, and dry-run redaction.
-- [ ] Add tests for local archive path, stdin archive, unpacked rootfs,
+- [x] Add tests for local archive path, stdin archive, unpacked rootfs,
       malformed archive, traversal attempt, wrong architecture, and missing
-      provenance handling.
+      provenance handling. Coverage includes classifier variants, prod refusal
+      for local sources (missing registry/cosign provenance), missing/malformed
+      archive rejection, malformed stdin rejection, rootfs-dir missing/wrong-arch
+      rejection, and a local OCI archive whose layer contains a traversal entry
+      proving ingest reaches the hardened unpack refusal path before
+      materialization.
 - [ ] Add a Linux builder-VM/KVM smoke for `machine run --image alpine -- true`.
 - [ ] Add a network smoke for `machine run --net --image alpine -- nslookup
       example.com`.

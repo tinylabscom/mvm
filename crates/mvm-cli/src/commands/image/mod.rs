@@ -1549,7 +1549,10 @@ fn truncate(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::{Compression, write::GzEncoder};
+    use sha2::{Digest, Sha256};
     use std::cell::RefCell;
+    use tar::{Builder, EntryType, Header};
 
     struct MockCosignVerifier {
         results: RefCell<Vec<Result<(), CosignVerifyError>>>,
@@ -1621,6 +1624,106 @@ mod tests {
         fs::write(path, body).expect("write cache file");
     }
 
+    fn digest_of(bytes: &[u8]) -> String {
+        format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+    }
+
+    fn add_tar_entry(builder: &mut Builder<Vec<u8>>, name: &str, body: &[u8]) {
+        let mut header = Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_entry_type(EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, name, body)
+            .expect("append tar entry");
+    }
+
+    fn traversal_layer_gzip() -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let gz = GzEncoder::new(&mut buf, Compression::default());
+            let mut tar = Builder::new(gz);
+            tar.mode(tar::HeaderMode::Deterministic);
+
+            let mut bad = Header::new_gnu();
+            bad.set_size(1);
+            bad.set_mode(0o644);
+            bad.set_mtime(0);
+            bad.set_entry_type(EntryType::Regular);
+            let name_bytes = b"../escape";
+            let name_field = bad.as_old_mut().name.as_mut_slice();
+            name_field[..name_bytes.len()].copy_from_slice(name_bytes);
+            bad.set_cksum();
+            tar.append(&bad, &b"x"[..]).expect("append traversal entry");
+            tar.finish().expect("finish layer tar");
+        }
+        buf
+    }
+
+    fn oci_archive_with_layer(layer: &[u8]) -> Vec<u8> {
+        let platform = LinuxPlatform::for_current_arch();
+        let layer_digest = digest_of(layer);
+        let config = format!(
+            r#"{{"architecture":"{}","os":"linux","rootfs":{{"type":"layers","diff_ids":["{}"]}}}}"#,
+            platform.architecture, layer_digest
+        )
+        .into_bytes();
+        let config_digest = digest_of(&config);
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":{config_size}}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"{layer_digest}","size":{layer_size}}}]}}"#,
+            config_size = config.len(),
+            layer_size = layer.len()
+        )
+        .into_bytes();
+        let manifest_digest = digest_of(&manifest);
+        let index = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{manifest_digest}","size":{manifest_size},"platform":{{"architecture":"{}","os":"linux"}}}}]}}"#,
+            platform.architecture,
+            manifest_size = manifest.len()
+        )
+        .into_bytes();
+
+        let mut builder = Builder::new(Vec::new());
+        add_tar_entry(
+            &mut builder,
+            "oci-layout",
+            br#"{"imageLayoutVersion":"1.0.0"}"#,
+        );
+        add_tar_entry(&mut builder, "index.json", &index);
+        add_tar_entry(
+            &mut builder,
+            &format!(
+                "blobs/sha256/{}",
+                manifest_digest
+                    .strip_prefix("sha256:")
+                    .expect("manifest digest prefix")
+            ),
+            &manifest,
+        );
+        add_tar_entry(
+            &mut builder,
+            &format!(
+                "blobs/sha256/{}",
+                config_digest
+                    .strip_prefix("sha256:")
+                    .expect("config digest prefix")
+            ),
+            &config,
+        );
+        add_tar_entry(
+            &mut builder,
+            &format!(
+                "blobs/sha256/{}",
+                layer_digest
+                    .strip_prefix("sha256:")
+                    .expect("layer digest prefix")
+            ),
+            layer,
+        );
+        builder.into_inner().expect("finish OCI archive")
+    }
+
     #[test]
     fn prod_pull_requires_digest_pin_before_network() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1665,6 +1768,25 @@ mod tests {
         let err = ingest_local_archive(tmp.path(), &bad, "oci-archive:bad.tar", false)
             .expect_err("malformed archive must be rejected");
         assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn local_archive_layer_traversal_is_rejected_by_hardened_unpack() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let archive = oci_archive_with_layer(&traversal_layer_gzip());
+        let err = ingest_archive_from_reader(
+            tmp.path(),
+            Cursor::new(archive),
+            "oci-archive:traversal.tar",
+            "local_archive",
+            "OCI archive with traversal layer",
+        )
+        .expect_err("local archive ingest must reject traversal entries");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("refused") || msg.contains("traversal"),
+            "got {msg}"
+        );
     }
 
     #[test]
