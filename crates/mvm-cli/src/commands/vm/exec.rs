@@ -296,6 +296,13 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     let receipt_backend = admit_backend.clone();
     let admit_cpus = args.cpus;
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
+    // The audit substrate carries no emitter, so stash the AdmissionContext here
+    // as the closure runs (during boot) and emit launched/failed after `run`
+    // returns — mirroring `up.rs`, so the claim-8 admitted/launched/failed
+    // narrative holds on the transient-run path too.
+    let admit_ctx: std::rc::Rc<std::cell::RefCell<Option<super::up::AdmissionContext>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let ctx_sink = std::rc::Rc::clone(&admit_ctx);
     let admit = move |rootfs: &std::path::Path,
                       vm_name: &str|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
@@ -331,11 +338,15 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
         }
         let plan_json = serde_json::to_string(&c.admitted.signed)
             .context("serializing admitted plan for the transient run")?;
-        Ok(Some(crate::exec::SessionAuditSubstrate {
+        let substrate = crate::exec::SessionAuditSubstrate {
             tenant_id: c.admitted.plan.tenant.0.clone(),
             plan_json,
             bundle_json: None,
-        }))
+        };
+        // Hand the admission context (with its emitter) to the command layer so
+        // it can emit `plan.launched` / `plan.failed` once the boot resolves.
+        *ctx_sink.borrow_mut() = Some(c);
+        Ok(Some(substrate))
     };
 
     let receipt_path = args.receipt.clone();
@@ -351,7 +362,18 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             prod,
             network_policy,
         )?;
-        let output = crate::exec::run_captured(req, Some(&admit))?;
+        let output = match crate::exec::run_captured(req, Some(&admit)) {
+            Ok(o) => {
+                let ctx = admit_ctx.borrow_mut().take();
+                super::up::emit_launched_if(&ctx, &receipt_backend);
+                o
+            }
+            Err(e) => {
+                let ctx = admit_ctx.borrow_mut().take();
+                super::up::emit_failed_if(&ctx, "launch", &e);
+                return Err(e);
+            }
+        };
         if !json_requested && !output.stdout.is_empty() {
             print!("{}", output.stdout);
         }
@@ -382,7 +404,11 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
         image,
         prod,
         network_policy,
-        Some(&admit),
+        RunAudit {
+            admit: Some(&admit),
+            ctx: &admit_ctx,
+            backend: &receipt_backend,
+        },
     )
 }
 
@@ -468,6 +494,16 @@ fn validate_run_profile(args: &RunArgs) -> Result<()> {
     Ok(())
 }
 
+/// The boot-time admission hook plus the plumbing needed to chain-audit the
+/// run after it resolves: the cell the hook fills with the `AdmissionContext`
+/// (the audit emitter lives inside it) and the resolved backend name for the
+/// audit `backend` label.
+struct RunAudit<'a> {
+    admit: Option<&'a crate::exec::SessionAdmit<'a>>,
+    ctx: &'a std::cell::RefCell<Option<super::up::AdmissionContext>>,
+    backend: &'a str,
+}
+
 fn run_run_args(
     _cli: &Cli,
     args: Args,
@@ -475,10 +511,21 @@ fn run_run_args(
     image: Option<String>,
     prod: bool,
     network_policy: mvm_core::network_policy::NetworkPolicy,
-    admit: Option<&crate::exec::SessionAdmit<'_>>,
+    audit: RunAudit<'_>,
 ) -> Result<()> {
     let req = build_exec_request(args, "`mvmctl run`", image, prod, network_policy)?;
-    let exit_code = crate::exec::run(req, admit)?;
+    let exit_code = match crate::exec::run(req, audit.admit) {
+        Ok(code) => {
+            // The VM booted and the command ran (whatever its exit code), so the
+            // admission launched — emit `plan.launched`.
+            super::up::emit_launched_if(&audit.ctx.borrow_mut().take(), audit.backend);
+            code
+        }
+        Err(e) => {
+            super::up::emit_failed_if(&audit.ctx.borrow_mut().take(), "launch", &e);
+            return Err(e);
+        }
+    };
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
