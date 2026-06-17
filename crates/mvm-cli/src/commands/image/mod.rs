@@ -486,6 +486,61 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
     })
 }
 
+/// Inject the mvm guest runtime into `unpacked_root`, seal it into
+/// `rootfs_abs` as ext4, and drop the overlay-aware sidecar beside it.
+///
+/// Every OCI run source funnels through here. An arbitrary OCI image has
+/// no mvm agent, so without the injection `run --image` boots a guest
+/// with no vsock control plane and times out at `wait_for_agent`. The
+/// injected `/init` + baked agent + `/mvm/runtime` mount point make the
+/// rootfs genuinely overlay-aware, so the `for_oci_run` sidecar admits
+/// honestly through `admit_overlay_aware` without weakening the gate.
+fn inject_runtime_and_materialize(
+    cache_root: &Path,
+    unpacked_root: &Path,
+    rootfs_abs: &Path,
+    image_label: &str,
+) -> Result<()> {
+    let arch = mvm_core::arch::GuestArch::host();
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| anyhow::anyhow!("cannot locate workspace root for guest-agent build"))?;
+    let bins = mvm_build::guest_agent_build::resolve_or_build_guest_binaries(
+        cache_root,
+        env!("CARGO_PKG_VERSION"),
+        arch,
+        workspace_root,
+    )
+    .context("obtain guest agent binaries for OCI run")?;
+    mvm_build::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins)
+        .context("inject mvm runtime into OCI rootfs")?;
+
+    // Measure AFTER injection so the ext4 sizing covers the baked
+    // agent/netinit (~1.6 MiB).
+    let tree_size = unpacked_tree_size(unpacked_root)
+        .with_context(|| format!("measure unpacked root {}", unpacked_root.display()))?;
+    materialize_ext4(
+        &MaterializeExt4Input::new(
+            unpacked_root.to_path_buf(),
+            rootfs_abs.to_path_buf(),
+            tree_size,
+        ),
+        &MaterializeExt4Options::default(),
+    )
+    .context("materialize OCI rootfs.ext4")?;
+
+    // The sidecar lives next to rootfs.ext4 so the backend's
+    // admit_overlay_aware gate reads it at start.
+    let rootfs_dir = rootfs_abs.parent().ok_or_else(|| {
+        anyhow::anyhow!("rootfs path has no parent dir: {}", rootfs_abs.display())
+    })?;
+    mvm_build::builder_vm::GuestSidecar::for_oci_run(image_label)
+        .write_to_dir(rootfs_dir)
+        .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
+    Ok(())
+}
+
 /// Ingest a local OCI image-layout archive (`oci-archive:<path>`) into a
 /// bootable rootfs. Mirrors the registry pull's unpack → ext4 path with no
 /// network: `read_oci_archive` digest-verifies every blob, then the same
@@ -568,15 +623,14 @@ fn ingest_archive_from_reader<R: Read>(
             .with_context(|| format!("unpack layer {}", layer.descriptor.digest))?;
     }
 
-    let unpacked_size = unpacked_tree_size(&unpacked_root)
-        .with_context(|| format!("measure unpacked root {}", unpacked_root.display()))?;
     let rootfs_rel = format!("rootfs/{manifest_hex}/rootfs.ext4");
     let rootfs_abs = cache_root.join(&rootfs_rel);
-    materialize_ext4(
-        &MaterializeExt4Input::new(unpacked_root, rootfs_abs.clone(), unpacked_size),
-        &MaterializeExt4Options::default(),
-    )
-    .context("materialize OCI rootfs.ext4")?;
+    inject_runtime_and_materialize(
+        cache_root,
+        &unpacked_root,
+        &rootfs_abs,
+        &image.manifest_digest,
+    )?;
 
     let provenance = OciProvenance {
         schema_version: 1,
@@ -956,15 +1010,14 @@ fn pull_image_ref(
         });
     }
 
-    let unpacked_size = unpacked_tree_size(&unpacked_root)
-        .with_context(|| format!("measure unpacked root {}", unpacked_root.display()))?;
     let rootfs_path = format!("rootfs/{manifest_hex}/rootfs.ext4");
     let rootfs_abs = cache_root.join(&rootfs_path);
-    materialize_ext4(
-        &MaterializeExt4Input::new(unpacked_root, rootfs_abs, unpacked_size),
-        &MaterializeExt4Options::default(),
-    )
-    .context("materialize OCI rootfs.ext4")?;
+    inject_runtime_and_materialize(
+        cache_root,
+        &unpacked_root,
+        &rootfs_abs,
+        &image_ref.canonical(),
+    )?;
 
     let provenance = OciProvenance {
         schema_version: 1,

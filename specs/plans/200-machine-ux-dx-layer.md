@@ -507,9 +507,16 @@ Implementation shape:
     prefix-driven, filesystem-free taxonomy (`oci-archive:` / `rootfs-dir:` /
     `-` stdin / bare → registry), wired into `resolve_or_pull_run_image`. The
     registry path is byte-unchanged; local sources fail closed with a clear
-    message until their ingest lands. Per-variant ingest (archive / rootfs-dir /
-    stdin) + the traversal / malformed / wrong-arch / missing-provenance negative
-    tests are the following slices.
+    message until their ingest lands.
+  - **Landed (per-variant ingest + tests):** `ingest_local_archive` /
+    `ingest_stdin_archive` / `ingest_rootfs_dir` route every source through the
+    same hardened unpack → inject → materialize → provenance → admission path
+    (`inject_runtime_and_materialize`). Negative tests cover prod-refusal,
+    missing file/dir, malformed archive, and wrong architecture
+    (`local_archive_malformed_is_rejected`, `rootfs_dir_wrong_arch_is_rejected`,
+    `*_prod_is_refused`, `*_missing*`); provenance labels are asserted by
+    `provenance_labels_cover_claim_10_fields`; path traversal is covered in the
+    `mvm-oci` unpacker (`archive.rs`/`unpack.rs`). Session 3 item 2 complete.
 - Route every `MachineImageSource` through the existing OCI/rootfs hardening,
   provenance, policy admission, and receipt/audit code paths. Do not add a
   daemon-bypass or extraction shortcut for DX.
@@ -994,15 +1001,12 @@ change:
       `#1020` enabler. The Vz VM-level smoke is gated on `up --wait` being libkrun-only
       today (Plan 152 WS-A), an orthogonal pre-existing gap; the Vz *bridge* enforcement is
       covered by the deterministic `*_live_vz_bridge` tests.
-      Follow-up surfaced by this validation: the `up --wait` direct-boot path
-      (`commands/vm/up.rs`) builds `VmStartConfig { ..Default::default() }` and never sets
-      `.network_policy` from the resolved `--network-allow` policy, so a dev `up
-      --network-allow` does not thread the bare policy to the libkrun supervisor (the
-      transient `run` path DOES — `exec.rs` sets `start_config.network_policy`, the path PR2
-      targets). So PR2's bare `host:port` L4 is proven by the deterministic live-bridge tests
-      and exercised live by the transient `run` path, not `up`. Wiring `up`'s bare policy
-      onto `VmStartConfig` (and confirming the libkrun gvproxy splice interposes there — the
-      probe saw no enforcement at all, not even the default deny-all) is a tracked follow-up.
+      Follow-up surfaced by this validation and **fixed in #1034**: the `up --wait`
+      direct-boot path (`commands/vm/up.rs`) previously built `VmStartConfig` without
+      threading the resolved `--network-allow` policy, so a dev `up --network-allow` did not
+      pass the bare policy to the libkrun supervisor. #1034 threads the resolved policy
+      through the `up` boot path; the remaining enforcement proof is the native-rvproxy
+      cutover work in Plan 193, not a missing `VmStartConfig.network_policy` field.
 - [x] **OCI cache index `schema_version 0` bug.** `OciCacheIndex`
       (`crates/mvm-cli/src/commands/image/mod.rs`) derives `Default` (→ `schema_version:
       0`), overriding the `#[serde(default = "schema_version")]` (= 1), so `save_index`
@@ -1010,21 +1014,36 @@ change:
       schema_version 0`). Breaks `image ls` / `run --image` on any freshly-created OCI
       cache. Fixed: manual `impl Default` initializes the field to `schema_version()`, plus
       a save→load round-trip regression test.
-- [ ] **`run --image <oci>` won't boot on macOS — missing `mvm-meta.json` sidecar.** The
-      OCI materialize path produces a rootfs without the W6.2 `mvm-meta.json` sidecar /
-      W1.4b runtime-overlay mount point, so the workload boot path refuses it. Needed for
-      the OCI-image machine-run path (Workstream B `MachineImageSource`) on macOS.
-- [ ] **`up --network-allow` doesn't enforce egress on the libkrun direct-boot path
-      (claim-10 relevant).** Surfaced while live-validating the eth0 enabler: a libkrun
-      `up --network-allow one.one.one.one:443 --wait` egress-probe reached BOTH the allowed
-      and an unlisted IP (verdict 0) — no enforcement at all, not even the default deny-all.
-      Two causes to confirm/fix: (1) the `up` direct-boot path builds
-      `VmStartConfig { ..Default::default() }` and never sets `.network_policy` from the
-      resolved `--network-allow` (the transient `run` path does, in `exec.rs`); (2) verify
-      the libkrun gvproxy splice actually interposes on the `up` data path (the VM dir showed
-      gvproxy-direct sockets). The transient `run` path + the deterministic live-bridge tests
-      DO enforce; this is the `up`-path wiring. Pre-existing (not introduced by the WS-B
-      egress work).
+- [x] **`run --image <oci>` boots end-to-end (Session 3 item 1).** Root cause was deeper
+      than a missing sidecar: an arbitrary OCI image carries no mvm agent, so the guest had
+      no vsock control plane and timed out at `wait_for_agent`. The settled "attach the
+      runtime overlay" mechanism is Firecracker-only (`attach_runtime_overlay` returns early
+      for libkrun/Vz; both backends have zero `runtime_overlay` references), so it is a no-op
+      on macOS where the agent is delivered baked-in. Fix (all host-side): cross-compile the
+      guest agent + netinit to static musl (`mvm_build::guest_agent_build`, the same
+      `cargo-zigbuild` pattern `build.rs` uses for the host-vm bins) and **inject** them plus
+      an overlay-preferring `/init` + `/mvm/runtime` mount point into the OCI rootfs at
+      materialize time (`mvm_build::oci_runtime_inject`); write an honest
+      `GuestSidecar::for_oci_run` (`overlay_aware: true`) so `admit_overlay_aware` passes
+      without scoping the gate off. Also fixed a pre-existing OCI-materialize bug that blocked
+      vz boot regardless: `mkfs.ext4` formatted to the full device size, but vz's virtio-blk
+      reports ~64 KiB fewer blocks → "bad geometry" root-mount panic; now formats with a 1 MiB
+      margin. **Live-verified** on macOS-26/vz: `mvmctl run --image docker.io/library/alpine:3.20
+      -- /bin/echo <marker>` boots, the injected agent comes up on vsock 5252, runs the command
+      in-guest, and streams the marker back (exit 0). `tests/oci_image_runner_smoke.rs` rewritten
+      to drive the real CLI end-to-end (gate + agent round-trip), env-gated `MVM_OCI_IMAGE_RUNNER_SMOKE=1`.
+
+      ### deferred follow-ups (OCI run)
+      - [ ] `rootfs-dir:` source (`ingest_rootfs_dir`) is not yet injected — it would mutate
+            the user's directory; needs a staging copy before inject. Registry + OCI-archive +
+            stdin sources all inject via the shared `inject_runtime_and_materialize` helper.
+      - [ ] End-user (non-source-checkout) agent source: `resolve_or_build_guest_binaries`
+            builds from the workspace; an installed mvmctl has no workspace, so wire the
+            published runtime-overlay download as the agent-binary source for that path.
+      - [ ] Harden the OCI guest agent to uid 901 under `setpriv` (mkGuest parity, W4.5); the
+            injected `/init` currently forks the agent as root (dev-tier acceptable).
+      - [ ] Guest egress for OCI images: alpine lacks `udhcpc`, so netinit's DHCP leg is a
+            no-op (deny-all default makes this moot today; revisit with `--net`).
 
 Surfaced by the adversarial security review of the WS-B branch (verdict
 `merge-after-fixes`; the three blockers — warm-claim AllowAll bypass, the
