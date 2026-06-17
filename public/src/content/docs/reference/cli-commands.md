@@ -315,30 +315,41 @@ paths.
 ## Machine (beginner UX)
 
 `mvmctl machine` is the beginner-facing command group. It is a thin UX layer
-over the existing runtime verbs, not a parallel runtime — every `machine`
-subcommand translates into the same signed-`ExecutionPlan`, audited, OCI-provenance
-execution path as the lower-level commands, so the security posture is identical.
+over the existing runtime verbs and state helpers, not a parallel runtime.
+Booting machine commands use the same signed-`ExecutionPlan`, audited,
+OCI-provenance execution path as the lower-level commands; non-booting state
+commands persist declarative specs under `MVM_DATA_DIR`.
 
 The flagship verb is `machine run`: boot a fresh microVM from an OCI image, run a
 command, and tear the VM down. It routes into the same code path as
-`mvmctl run --image`, so it inherits **deny-all networking by default** and the
-same `--profile`, `--add-dir`, `--receipt`, `--json`, and `--dry-run` semantics.
+`mvmctl run --image`, so it inherits **deny-all networking by default**, opt-in
+egress via `--net` / `--allow-host`, and the same `--profile`, `--add-dir`,
+`--receipt`, `--json`, and `--dry-run` semantics.
 
 | Command | Description |
 |---------|-------------|
 | `mvmctl machine run --image <ref> -- <cmd>...` | Boot an OCI image, run `<cmd>` with no network, tear down |
+| `mvmctl machine run --net --image <ref> -- <cmd>...` | Boot with dev-tier outbound networking enabled |
+| `mvmctl machine run --image <ref> --allow-host <host[:port]> -- <cmd>...` | Boot with egress narrowed to the listed host/port entries |
 | `mvmctl machine run --image <ref> --profile dev --add-dir .:/work:rw -- <cmd>` | Same, with a writable host share under the dev profile |
 | `mvmctl machine run --image <ref> --cpus <n> --memory <size> -- <cmd>` | Resize the transient VM |
 | `mvmctl machine run --image <ref> --dry-run -- <cmd>` | Validate and explain the run plan without booting a VM |
 | `mvmctl machine run --image <ref> --json -- <cmd>` | Print a redacted JSON execution summary |
 | `mvmctl machine run --image <ref> --receipt <path> -- <cmd>` | Write a signed execution receipt |
+| `mvmctl machine create --name <name> --image <ref>` | Persist a named OCI-backed machine spec without booting it |
+| `mvmctl machine create --name <name> --image <ref> --net --allow-host <host[:port]>` | Persist a named spec with opt-in egress settings for future lifecycle starts |
+| `mvmctl machine create --name <name> --image <ref> --force` | Overwrite an existing named machine spec |
+| `mvmctl machine ls` | List persisted named machine specs |
+| `mvmctl machine ls --json` | Print persisted named machine specs as JSON |
+| `mvmctl machine inspect <name>` | Show one persisted named machine spec |
+| `mvmctl machine inspect <name> --json` | Print one persisted named machine spec as JSON |
+| `mvmctl machine rm <name> --yes` | Remove one persisted named machine spec |
+| `mvmctl machine rm <name> --yes --json` | Print a JSON deletion summary |
 
-Ergonomic opt-in egress (`--net` / `--allow-host`), persistent named machines
-(`machine create/start/exec/shell/stop`), and `machine pack` for portable signed
-artifacts are planned follow-ups; they are intentionally not yet present rather
-than stubbed. Until `--net` lands, image-backed machine runs are network-isolated;
-use `mvmctl up` for the manifest/flake path that already exposes named networks
-and policy bundles.
+Persistent lifecycle verbs (`machine start` / `exec` / `shell` / `stop`) and
+`machine pack` for portable signed artifacts are planned follow-ups; they are
+intentionally not yet present rather than stubbed. Use `mvmctl up` for the
+manifest/flake path that already exposes named networks and policy bundles.
 
 ## Sandbox State
 

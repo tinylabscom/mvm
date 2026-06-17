@@ -1,9 +1,10 @@
 # Plan 200 — machine UX/DX layer
 
 **Status:** in progress — `mvmctl machine run` shipped (Workstream A/B kickoff);
-`--net`/`--allow-host` and local image sources shipped; persistent verbs
-(`create/start/exec/shell/stop/ls/inspect/rm`), `mvm.toml` machine mapping,
-SDK parity, and `pack` pending
+`--net`/`--allow-host`, local image sources, and persistent spec verbs
+(`create`/`ls`/`inspect`/`rm`) shipped; persistent lifecycle verbs
+(`start`/`exec`/`shell`/`stop`), full `mvm.toml` machine mapping, SDK parity,
+and `pack` pending
 **Owner:** mvm
 **Date:** 2026-06-15
 
@@ -849,17 +850,21 @@ Required behavior:
 
 ### C. Persistent image-backed machines
 
-- [ ] Add `MachineSpec` storage under the data dir with atomic writes and
-      traversal-safe name handling.
-- [ ] Implement `machine create --name <name> --image <ref>`.
+- [x] Add `MachineSpec` storage under the data dir with atomic writes and
+      traversal-safe name handling. Landed as `<MVM_DATA_DIR>/machines/<name>/
+      machine.json` via `mvm_core::config::{machine_state_root,
+      machine_state_dir, machine_spec_path}`, strict JSON, and `naming::validate_id`
+      before any path dereference.
+- [x] Implement `machine create --name <name> --image <ref>`.
 - [ ] Implement `machine start --name <name>` through the existing admitted
       launch path.
 - [ ] Implement `machine exec --name <name> -- <cmd>` through the existing
       guest-agent command path.
 - [ ] Implement `machine shell --name <name>` through the existing console path.
 - [ ] Implement `machine stop --name <name>` through the existing `down` path.
-- [ ] Implement `machine inspect --json` and `machine ls --json`.
-- [ ] Add tests for state persistence, state deletion, unknown-field rejection,
+- [x] Implement `machine inspect --json` and `machine ls --json`.
+- [x] Implement `machine rm <name> --yes` with confirmed spec deletion.
+- [x] Add tests for state persistence, state deletion, unknown-field rejection,
       and worktree-isolated `MVM_DATA_DIR`.
 
 ### C1. `mvm.toml` schema v1 machine specs
