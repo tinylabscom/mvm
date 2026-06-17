@@ -274,6 +274,9 @@ mod tests {
         include_index: bool,
         corrupt_layer_digest: bool,
         layout_version: String,
+        /// Extra tar entries appended verbatim — used to prove hostile entry
+        /// names are ignored, never written out or followed.
+        extra_entries: Vec<(String, Vec<u8>)>,
     }
 
     impl Default for ArchiveFixture {
@@ -286,6 +289,7 @@ mod tests {
                 include_index: true,
                 corrupt_layer_digest: false,
                 layout_version: SUPPORTED_LAYOUT_VERSION.to_string(),
+                extra_entries: Vec::new(),
             }
         }
     }
@@ -363,12 +367,41 @@ mod tests {
                 ),
                 &layer,
             );
+            for (name, data) in &self.extra_entries {
+                add(&mut builder, name, data);
+            }
             builder.into_inner().unwrap()
         }
     }
 
     fn read(bytes: &[u8]) -> Result<OciArchiveImage, OciError> {
         read_oci_archive(bytes, &LinuxPlatform::for_current_arch())
+    }
+
+    #[test]
+    fn unexpected_extra_entries_are_ignored() {
+        // The reader resolves blobs only by exact digest key and performs no
+        // filesystem writes. Padding the archive with unreferenced blobs, stray
+        // files, and look-alike names changes nothing — the valid image still
+        // parses unchanged and no unexpected entry is followed. (A hostile
+        // traversal *name* is mooted structurally here: this reader writes
+        // nothing to disk; layer-content traversal is rejected downstream by
+        // `unpack_layer`.)
+        let f = ArchiveFixture {
+            extra_entries: vec![
+                (
+                    "blobs/sha256/unreferenced-blob".to_string(),
+                    b"junk".to_vec(),
+                ),
+                ("a-stray-top-level-file".to_string(), b"junk".to_vec()),
+                ("manifest.json".to_string(), b"{}".to_vec()),
+                ("blobs/garbage".to_string(), b"junk".to_vec()),
+            ],
+            ..Default::default()
+        };
+        let img = read(&f.build()).expect("valid archive with extra entries still parses");
+        assert_eq!(img.layers.len(), 1);
+        assert_eq!(img.layers[0].bytes, b"layer-bytes-pretend-tar-gz");
     }
 
     #[test]
