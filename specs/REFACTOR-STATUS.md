@@ -8,6 +8,8 @@
 
 **Additional 2026-06-16 — Plan 202 (ADR-084) proposed, merged #977:** grounding the first live in-guest `host.audit.v1` round-trip (Plan 125 E5.3b-4 — in-guest `audit-probe` proven on libkrun, #973) surfaced that the shipped broker/audit-signer model forks two host subprocesses *per VM* and couples `host.audit.v1` availability to `MVM_GATEWAY_BRIDGE`. ADR-084 + Plan 202 re-architect this to two long-lived **per-tenant** daemons (register/deregister, `O(active tenants)` not `O(VMs)`, moat + claims 12/13 preserved, guest wire unchanged, mvmd consumes the same daemon). The vz broker-socket bug found alongside it landed as #971. Plan 202 is proposed/not-started; Phase-1 kickoff prompt committed.
 
+**Additional 2026-06-17 — Plan 202 Phase 3c landed:** `mvmctl doctor` now reports per-tenant host-agent daemon state as an informational platform check. It enumerates `<MVM_DATA_DIR>/host-agent/<tenant>/`, reports warm daemons from live `daemon.pid` + `control.sock`, flags stale pid/socket artifacts, and treats first-run absence as non-blocking. Phase 1 (broker daemon/control plane) and Phase 3a (daemon default-on) are landed; Phase 2 signer-helper daemonization remains next.
+
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
 > change and bump the "Last updated" date — update BOTH the glance checklist
@@ -57,7 +59,7 @@ details** below for the workstream-level state.
 - [ ] **PLAN 199** — Host runtime packaging + crate boundaries · 🟡 source-built `mvmctl` + host overlay complete; release-install policy/matrix/signature CI complete; crate-boundary audit complete; remaining = builder-VM-verified native VMM Nix recipes (`libkrunfw`/`libkrun`) in the source-built overlay shape (external prior-art pattern), plus `nix flake check` / `.#mvmctl` build follow-ups. Signed binary install remains primary; source-checkout Nix never fetches mvm release binaries
 - [ ] **PLAN 200** — Machine UX/DX layer · 🟢 in progress — `machine run` shipped (#968); Session 3 item 1 `run --image <oci>` boots end-to-end (#1036: injected static guest agent/netinit + honest `overlay_aware` sidecar + vz ext4-geometry fix, live-verified macOS-26/vz); WS-B `--net`/`--allow-host` uniform FC/libkrun/Vz egress enforcement **MERGED (#1003)** with follow-ups through #1034 closed (MCP admitted, BridgeConfig.policy/AllowAll removed, uniform bare host:port L4, DHCP/ARP loopback-only posture, transient eth0 enabler, and `up` direct-boot network-policy threading). First-class `mvmctl machine` surface over existing runtime primitives; no-host-Nix binary-install DX, image-backed one-shot docs, explicit network opt-in, persistent named machines, SDK parity, verified portable artifacts, measured hot-start latency, friendly exec/shell wrappers, `mvm.toml` schema v2 with strict security defaults, and default-binary-closure dependency budgets
 - [ ] **PLAN 201** — `WarmLease` borrow-handle + batched guest exec · 🔴 proposed — DX-ergonomics layer over the Plan 118 standby pool + Plan 169 agent-RPC: RAII claim/release that stops + replenishes a fresh standby, plus staged batched guest exec. Caller-convenience only; no new backend/transport, admission + audit untouched. Docs-only so far (#937).
-- [ ] **PLAN 202** — Host services daemon (per-tenant, not per-VM spawn) · 🔴 proposed ([ADR-084](adrs/084-host-services-daemon-not-per-vm-spawn.md), #977) — re-architect the broker/audit-signer from the shipped per-VM subprocess fork (Plan 125 E5.3b — `2N` processes + a per-boot spawn, availability coupled to `MVM_GATEWAY_BRIDGE`) to **two long-lived per-tenant daemons** VMs register/deregister with: `O(active tenants)` processes not `O(VMs)`; the moat (keyless broker / key-holding signer) + claims 12/13 preserved; guest wire unchanged; registration driven by the admitted plan (decouples availability from the egress bridge); mvmd consumes the same daemon per tenant. Supersedes ADR-059's process model. Phased: control plane → broker daemon → signer daemon → decouple-from-bridge → supervision → mvmd → retire the fork. Phase-1 kickoff prompt at `plans/host-services-daemon-phase-1-kickoff.md`
+- [ ] **PLAN 202** — Host services daemon (per-tenant, not per-VM spawn) · 🟡 in progress ([ADR-084](adrs/084-host-services-daemon-not-per-vm-spawn.md), #977) — re-architect the broker/audit-signer from the shipped per-VM subprocess fork (Plan 125 E5.3b — `2N` processes + a per-boot spawn, availability coupled to `MVM_GATEWAY_BRIDGE`) to **two long-lived per-tenant daemons** VMs register/deregister with: `O(active tenants)` processes not `O(VMs)`; the moat (keyless broker / key-holding signer) + claims 12/13 preserved; guest wire unchanged; registration driven by the admitted plan (decouples availability from the egress bridge); mvmd consumes the same daemon per tenant. Phase 1 broker daemon/control plane landed; Phase 3a daemon default-on landed; Phase 3c doctor daemon-state reporting landed. Remaining: Phase 2 signer-helper daemonization, vz live-verify, supervision/restart journal, mvmd adoption, and retiring `spawn_broker_services_if_admitted`.
 
 ## Plan details
 
@@ -860,15 +862,16 @@ PLAN 200 — Machine UX/DX layer  🟢 in progress — `machine run` shipped (#9
       --network-allow doesn't enforce egress on the libkrun direct-boot path (up.rs VmStartConfig
       never sets .network_policy; the transient run path does) — pre-existing, not the WS-B work.
 
-PLAN 202 — Host services daemon (per-tenant, not per-VM spawn)   🔴 PROPOSED (ADR-084, #977)
+PLAN 202 — Host services daemon (per-tenant, not per-VM spawn)   🟡 IN PROGRESS (ADR-084, #977)
   Supersedes the Plan 125 E5.3b per-VM subprocess fork. Wire protocol unchanged.
   [x] ADR-084 + Plan 202 written (per-tenant daemon model; revises ADR-059).
   [x] Phase 1 kickoff prompt (plans/host-services-daemon-phase-1-kickoff.md).
   [ ] ADR-084 reviewed + accepted.
-  [ ] Phase 1 — broker daemon + host-signed Register/Deregister control plane + dynamic
+  [x] Phase 1 — broker daemon + host-signed Register/Deregister control plane + dynamic
       per-VM socket binding + server-derived vm_id; spawn_broker fork → ensure_daemon/register_vm.
   [ ] Phase 2 — audit-signer daemon (vm_id→chain, persisted-head restart).
-  [ ] Phase 3 — decouple availability from MVM_GATEWAY_BRIDGE (registration driven by admitted plan).
+  [ ] Phase 3 — decouple availability from MVM_GATEWAY_BRIDGE (3a default-on + 3c doctor
+      daemon-state reporting landed; cost framing + vz live-verify remain).
   [ ] Phase 4 — supervision + crash/restart journal.
   [ ] Phase 5 — mvmd host agent owns the daemon per tenant (mvmd Plan 52).
   [ ] Phase 6 — retire spawn_broker_services_if_admitted; note ADR-059 superseded.

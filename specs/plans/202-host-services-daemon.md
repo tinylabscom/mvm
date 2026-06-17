@@ -1,6 +1,6 @@
 # Plan 202 — Host services daemon (per-tenant, not per-VM spawn)
 
-- Status: **Proposed**
+- Status: **In progress**
 - ADR: [ADR-084](../adrs/084-host-services-daemon-not-per-vm-spawn.md)
 - Revises: the E5.3b-2 per-VM spawn stack (`mvm_backend::broker_services_spawn`) landed under [Plan 125](125-cli-sdk-dx-surface.md) E5.3b
 - Consumer: mvmd Plan 52 (host services) adopts the daemon per tenant
@@ -53,9 +53,9 @@ The signer becomes a **supervised helper** of the host-agent daemon, holding **a
 
 - [x] **3a — daemon is the default.** `host_agent_daemon_enabled()` inverted: **default on**, `MVM_HOST_AGENT_DAEMON=0` is the opt-out escape hatch back to the per-VM fork during the soak. An admitted `up` already threads `tenant_id` unconditionally (the broker-spawn decoupling), so a plain `up` registers with the daemon and `host.audit.v1` is reachable **without `MVM_GATEWAY_BRIDGE`** — that flag now gates *only* the egress bridge / L4 policy. Catalog services still require an explicit `services` binding (dispatch-gated).
 - [ ] **3b — cost is `O(active tenants)`, not zero-per-workload.** Per ADR-084 `host.audit.v1` is implicitly available to *every* admitted workload, so the daemon runs whenever a tenant has an admitted workload — but it is **per-tenant and warm**, so the host-services process cost is `O(active tenants)`, not `O(VMs)`. (The per-VM audit-signer is still forked until Phase 2.) "Zero cost when unused" holds at the install level — no admitted workloads ⇒ no daemon.
-- [ ] **3c — `mvmctl doctor`** reports the per-tenant daemon state (running / warm / absent) so the move from per-VM is observable.
+- [x] **3c — `mvmctl doctor`** reports the per-tenant daemon state (running / warm / absent) so the move from per-VM is observable. The `host-agent daemon` platform check enumerates `<MVM_DATA_DIR>/host-agent/<tenant>/`, reports warm daemons by live `daemon.pid` + `control.sock`, flags stale pid/socket artifacts, and stays informational so first-run machines are not blocked.
 
-**Verify:** a plain `mvmctl up --tenant local` (no `MVM_GATEWAY_BRIDGE`) makes `host.audit.v1` reachable — **PROVEN live on libkrun 2026-06-16**: the daemon spawned per-tenant (control socket mode 0700), bound the VM's `BROKER_PORT` socket on register, the in-guest probe's 22 emits verified clean via `verify_workload_chain`, and teardown deregistered while the daemon stayed warm. The `MVM_HOST_AGENT_DAEMON=1` boot proved the path; the default-on boot is the same code with the env-default flipped. vz live-verify + the `doctor` line (3c) remain.
+**Verify:** a plain `mvmctl up --tenant local` (no `MVM_GATEWAY_BRIDGE`) makes `host.audit.v1` reachable — **PROVEN live on libkrun 2026-06-16**: the daemon spawned per-tenant (control socket mode 0700), bound the VM's `BROKER_PORT` socket on register, the in-guest probe's 22 emits verified clean via `verify_workload_chain`, and teardown deregistered while the daemon stayed warm. The `MVM_HOST_AGENT_DAEMON=1` boot proved the path; the default-on boot is the same code with the env-default flipped. The `doctor` line is covered by `host_agent_daemon_summary_reports_absent_warm_and_stale`; vz live-verify remains.
 
 ## Phase 4 — supervision + crash semantics
 

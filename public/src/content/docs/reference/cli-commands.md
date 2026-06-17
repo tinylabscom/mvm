@@ -87,7 +87,7 @@ verification under `trust`. Domains that already own their own subcommands
 | `mvmctl dev rebuild` | Stop, clear cache, and rebuild + restart the dev VM |
 | `mvmctl dev rebuild --shell` (or `-s`) | Open an interactive shell after rebuilding |
 | `mvmctl dev import-image <path>` | Side-load a pre-built dev image artifact into the cache (air-gapped install path; from plan 36 sealed builder image) |
-| `mvmctl doctor` | Run diagnostics + dependency checks + security posture (folded in from the dropped `mvmctl security` verb) |
+| `mvmctl doctor` | Run diagnostics + dependency checks + security posture, including per-tenant host-agent daemon state (folded in from the dropped `mvmctl security` verb) |
 | `mvmctl doctor --json` | Output diagnostics as JSON |
 | `mvmctl env update` | Check for and install mvmctl updates |
 | `mvmctl env update --check` | Only check for updates, don't install |

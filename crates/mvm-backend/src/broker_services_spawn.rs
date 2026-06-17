@@ -658,6 +658,7 @@ mod tests {
         // The broker binds the per-VM BROKER_PORT socket the VMM forwards to.
         let uds = mvm_core::config::vm_vsock_port_socket("vm-1", mvm_guest::vsock::BROKER_PORT);
         std::fs::create_dir_all(uds.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&uds);
         let captured = dir.join("captured-broker-config.json");
 
         let stub = dir.join("stub-broker.sh");
@@ -767,6 +768,7 @@ mod tests {
         let broker_uds =
             mvm_core::config::vm_vsock_port_socket("vm-1", mvm_guest::vsock::BROKER_PORT);
         std::fs::create_dir_all(broker_uds.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&broker_uds);
 
         // Two stubs, each binds (touches) its own UDS so both readiness polls pass.
         let as_stub = dir.join("stub-as.sh");
