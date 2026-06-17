@@ -310,6 +310,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                             tenant_id: c.admitted.plan.tenant.0.clone(),
                             plan_json,
                             bundle_json: None,
+                            // The invoke/session path emits its own lifecycle
+                            // elsewhere; the run-path launched/failed hook is not
+                            // wired here.
+                            launch_audit: None,
                         }))
                     },
                 ) as Box<crate::exec::SessionAdmit>

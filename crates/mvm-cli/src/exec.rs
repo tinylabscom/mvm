@@ -616,12 +616,16 @@ fn run_inner(
     // of the legacy unfiltered path; on Firecracker the policy already enforces
     // via the FlakeRunConfig firewall. Force cold boot when admitted — the
     // bridge spawn is on the cold-boot path, not snapshot-restore.
+    // Held across `backend.start()` so the launched/failed leg can fire after
+    // the substrate's other fields are moved into `start_config`.
+    let mut launch_audit: Option<Box<dyn LaunchAudit>> = None;
     if let Some(admit_fn) = admit
         && let Some(sub) = admit_fn(std::path::Path::new(&rootfs), &vm_name)?
     {
         start_config.tenant_id = Some(sub.tenant_id);
         start_config.plan_json = Some(sub.plan_json);
         start_config.bundle_json = sub.bundle_json;
+        launch_audit = sub.launch_audit;
         use_snapshot = false;
     }
 
@@ -652,8 +656,14 @@ fn run_inner(
     if !booted {
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
         if let Err(e) = backend.start(&start_config) {
+            if let Some(la) = &launch_audit {
+                la.failed("backend-start", &e);
+            }
             let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
             return Err(e).context("starting transient microVM");
+        }
+        if let Some(la) = &launch_audit {
+            la.launched(backend.name());
         }
     }
 
@@ -895,6 +905,25 @@ pub struct SessionAuditSubstrate {
     pub tenant_id: String,
     pub plan_json: String,
     pub bundle_json: Option<String>,
+    /// Optional hook the boot path calls to record `plan.launched` /
+    /// `plan.failed` around `backend.start()`. `admit_plan_for_boot` already
+    /// emits `plan.admitted`; this completes the admitted/launched/failed
+    /// triple so a transient run is as observable as `up`. The impl (which
+    /// owns the `AuditEmitter` + plan) lives in the command layer, keeping this
+    /// module free of admission-type deps. `None` ⇒ no launch audit.
+    pub launch_audit: Option<Box<dyn LaunchAudit>>,
+}
+
+/// Boot-path audit hook for the transient-run launched/failed leg. Best-effort
+/// by contract: implementations log and swallow emit errors (chain integrity is
+/// intact; this is observability, never forgery), so callers don't branch on a
+/// result.
+pub trait LaunchAudit {
+    /// Backend start succeeded; record `plan.launched` with the backend name.
+    fn launched(&self, backend: &str);
+    /// Boot failed before the workload ran; record `plan.failed` with a
+    /// grep-friendly class tag and the error.
+    fn failed(&self, class: &str, err: &anyhow::Error);
 }
 
 /// Admission callback: given the resolved rootfs + the generated vm_name (both
