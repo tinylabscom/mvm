@@ -954,8 +954,11 @@ Required behavior:
       keep deterministic plain output and `--json` as the default.
 - [ ] Move `libkrun-sys` bindgen/libclang usage to a regeneration-only path with
       checked-in generated bindings for normal builds.
-- [ ] Add CI gates for default closure size, duplicate major versions,
-      forbidden heavy deps, and binary-size regressions.
+- [~] Add CI gates for default closure size, duplicate major versions,
+      forbidden heavy deps, and binary-size regressions. → **closure-size landed**
+      (`xtask check-closure-budget`: distinct-crate ratchet on the pinned
+      `x86_64-unknown-linux-gnu` target, wired into the CI Lint job); forbidden-heavy-deps
+      already gated (Plan 126 D1). Duplicate-major + binary-size regression gates remain.
 - [ ] Preserve verification, signing, secret-handling, TLS, hashing, zeroization,
       and artifact-integrity dependencies that enforce real security
       guarantees.
@@ -984,12 +987,13 @@ WS-B change:
       the headline `machine run --net --image alpine -- nslookup` actually work on macOS.
       (Linux/KVM/Firecracker transient runs already network, so WS-B is exercisable there
       today.)
-- [ ] **OCI cache index `schema_version 0` bug.** `OciCacheIndex`
+- [x] **OCI cache index `schema_version 0` bug.** `OciCacheIndex`
       (`crates/mvm-cli/src/commands/image/mod.rs`) derives `Default` (→ `schema_version:
       0`), overriding the `#[serde(default = "schema_version")]` (= 1), so `save_index`
       persists `0` and the next `load_index` rejects it (`unsupported OCI cache index
       schema_version 0`). Breaks `image ls` / `run --image` on any freshly-created OCI
-      cache. Fix: `impl Default` (or initialize the field to `schema_version()`).
+      cache. Fixed: manual `impl Default` initializes the field to `schema_version()`, plus
+      a save→load round-trip regression test.
 - [ ] **`run --image <oci>` won't boot on macOS — missing `mvm-meta.json` sidecar.** The
       OCI materialize path produces a rootfs without the W6.2 `mvm-meta.json` sidecar /
       W1.4b runtime-overlay mount point, so the workload boot path refuses it. Needed for
@@ -1016,13 +1020,16 @@ follow-ups:
       `firecracker:l4-host-port` vs `libkrun:dns-name-only`) instead of overstating, but
       true uniformity needs an admission-time DNS pin feeding `L4PolicyScan` on the bare
       path, mirroring the bundle path. deny-all / unrestricted are already uniform.
-- [ ] **Emit `plan.launched` / `plan.failed` on the universal transient-run path.** The
-      run admit closure (`commands/vm/exec.rs`) consumes `admit_plan_for_boot`'s
-      `AdmissionContext` for the substrate but drops the emitter, so only `plan.admitted`
-      lands for a transient run (chain integrity is intact — this is observability, not
-      forgery). Thread the `AdmissionContext` out and emit launched/failed mirroring
-      `up.rs` so the claim-8 catalog narrative ("admitted/launched/failed per admission")
-      stays honest.
+- [x] **Emit `plan.launched` / `plan.failed` on the universal transient-run path.** The
+      run admit closure (`commands/vm/exec.rs`) consumed `admit_plan_for_boot`'s
+      `AdmissionContext` for the substrate but dropped the emitter, so only `plan.admitted`
+      landed for a transient run (chain integrity was intact — this was observability, not
+      forgery). Fixed: the admit closure stashes the `AdmissionContext` into a cell as it
+      runs during boot, and both the json/receipt and streaming branches emit
+      launched/failed after the boot resolves via the `up.rs` `emit_launched_if` /
+      `emit_failed_if` helpers; the run's admission/audit plumbing is grouped into a
+      `RunAudit` struct. Full end-to-end verification is box-gated (the emit fires during a
+      real boot); the emit helpers are unit-tested on the `up` path.
 - [ ] **Route MCP code-run through the admit closure so its `deny_all()` is enforced.**
       `commands/ops/mcp.rs` sets `network_policy: deny_all()` but passes `admit = None`, so
       on the gateway-bridge backends no bridge spawns and the deny-all is inert (FC does
@@ -1046,8 +1053,9 @@ follow-ups:
 - [ ] `cargo test -p mvm-cli commands::tests::machine`
 - [ ] `cargo test --test nix_flake_structure` if docs/plans touch Nix install
       language.
-- [ ] Default binary closure budget check for `mvmctl` with normal machine-run
-      features only.
+- [x] Default binary closure budget check for `mvmctl` with normal machine-run
+      features only. → `xtask check-closure-budget` (distinct-crate ratchet, pinned
+      `x86_64-unknown-linux-gnu` target) in the CI Lint job.
 - [ ] Duplicate-major dependency budget check, including OCI/TLS stacks.
 - [ ] Binary-size budget check for the default `mvmctl` artifact.
 - [ ] Local image-source tests: registry ref, archive path, stdin archive,
