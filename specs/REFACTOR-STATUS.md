@@ -914,3 +914,14 @@ Recommended sequence to close the remaining rollup items:
 10. Resolve Plan 126 by correcting status first, then decide blocked deps (`sigstore`, `pgp`, `aws-lc-rs`) rather than treating them as normal TODOs.
 11. Plan 118/175 are live-KVM gated; do density bench substrate first, then FC standby/warm-start once the KVM environment is ready.
 12. Plan 159 and 201 are lowest priority: Plan 159 mostly needs residuals rehomed/descope, and Plan 201 is a convenience layer after warm-pool fundamentals.
+
+Plan 200 implementation checklist after `#1039`:
+
+- [ ] Reconcile Plan 200 bookkeeping first: the rollup says MCP code-run admission is done via `#1017`/`#1023`, but the Plan 200 deferred checkbox still shows it open.
+- [ ] Persistent machine UX: implement `machine create/start/exec/shell/stop/ls/inspect/rm`, persist `MachineSpec` under the existing data-dir helpers with atomic writes, and add state deletion/JSON tests.
+- [ ] `mvm.toml` machine mapping: map `net`, `[network].allow_hosts`, `[auth].ssh_agent`, `[dev].init`, and volumes into the admitted machine path; preserve read-only volume defaults; reject dev init for sealed/prod; include effective policy in dry-run/receipt output.
+- [ ] SDK parity: add Python, TypeScript, and Rust machine wrappers that reuse CLI/library admission paths; add parity tests and negative non-bypass tests for artifact verification, default-deny network, unknown keys, source conflicts, and receipt/audit summaries.
+- [ ] Scenario-led docs: update binary-install-first docs, machine quickstart, limitations, old-verb mapping, source guards, completions, and first-run output without implying host Nix, GPU, ICMP, or unsupported architecture support.
+- [ ] Portable artifacts: implement `machine pack`, `machine run <artifact>`, verify/extract/run docs, and tamper/wrong-key/wrong-arch/traversal/unknown-version/missing-verity tests.
+- [ ] Performance and smoke coverage: add builder-VM/KVM `machine run --image alpine -- true`, `machine run --net --image alpine -- nslookup example.com`, phase timing, cached hot-start benchmark, and macOS backend measurements before making latency claims.
+- [ ] Dependency and budget gates: add duplicate-major and binary-size budgets, finish default-machine-path dependency cleanup, reduce OCI/TLS stack duplication, slim heavy test fixtures, audit machine-path CLI UI deps, and move libkrun bindgen/libclang usage to regeneration-only.
