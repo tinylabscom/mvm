@@ -234,7 +234,7 @@ const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// The per-VM host-services broker (`host.audit.v1` / `host.time.v1` /
 /// `host.cost.v1`) keys its spawn off `config.tenant_id`, so any admitted
 /// workload must carry it — `host.audit.v1` is implicitly available to any
-/// admitted workload (ADR-084). This is decoupled from
+/// admitted workload. This is decoupled from
 /// [`populate_audit_substrate`]: the broker needs the tenant string, **not**
 /// the signed `plan_json`, whose presence flips libkrun/Vz onto the
 /// (opt-in, `~/.mvm/keys`-anchored) gateway-bridge supervisor path. Call this

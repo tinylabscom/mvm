@@ -1818,7 +1818,15 @@ fn build_supervisor_config(
     state_dir: &Path,
     gvproxy: &host_gvproxy::HostGvproxyInfo,
 ) -> Result<vz::SupervisorConfig> {
-    // Resolve the gateway-bridge audit substrate (paths + tenant validation).
+    // `tenant_id` flows into the per-VM audit-chain path that the host-services
+    // broker spawns against, even on the no-bridge path where the substrate
+    // stays all-None — so validate it regardless of `plan_json` (a path-
+    // injection guard; `compute_audit_substrate` re-validates harmlessly).
+    if let Some(tenant) = config.tenant_id.as_deref() {
+        crate::audit_substrate::validate_tenant_id(tenant)?;
+    }
+
+    // Resolve the gateway-bridge audit substrate (paths).
     // It drives the supervisor's in-process flow-audited gvproxy bridge
     // (payload_tap). Gated on `plan_json` — the bridge's actual input — NOT on
     // `tenant_id`: an admitted workload always carries `tenant_id` (so the

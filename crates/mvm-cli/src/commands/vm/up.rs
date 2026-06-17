@@ -2261,7 +2261,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // Thread the admitted tenant label unconditionally: the per-VM
         // host-services broker (libkrun/Vz) keys its spawn off
         // `config.tenant_id`, so `host.audit.v1` is available to any admitted
-        // workload (ADR-084). This is independent of the opt-in gateway-bridge
+        // workload. This is independent of the opt-in gateway-bridge
         // path below, which additionally threads the signed `plan_json` and is
         // what flips the backends onto the bridge supervisor.
         if let Some(ctx) = admission_main.as_ref() {

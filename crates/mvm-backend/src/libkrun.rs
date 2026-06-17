@@ -317,13 +317,25 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         };
     }
 
-    // Resolve the gateway-bridge audit substrate (paths + tenant validation).
-    // Gated on `plan_json` — the bridge supervisor's actual input — NOT on
-    // `tenant_id`: a substrate without a plan is what the supervisor rejects as
-    // "cfg.plan missing on bridge path". An admitted workload always carries
-    // `tenant_id` (so the per-VM host-services broker spawns below), but only
-    // the opt-in bridge path threads `plan_json`; without it the supervisor
-    // stays on the legacy `run_supervisor` path and the substrate is all-None.
+    // `tenant_id` flows into the per-VM audit-chain path
+    // (`workload_audit_path`) that the host-services broker spawns against —
+    // even on the legacy/no-bridge path where the substrate stays all-None. So
+    // validate it here regardless of `plan_json`: an unsafe tenant (e.g. a
+    // path-traversal label) must be refused before `start()` reaches the broker
+    // spawn, independent of whether the gateway bridge is engaged. A path-
+    // injection guard, not just the bridge's input check.
+    if let Some(tenant) = config.tenant_id.as_deref() {
+        crate::audit_substrate::validate_tenant_id(tenant)?;
+    }
+
+    // Resolve the gateway-bridge audit substrate (paths). Gated on `plan_json`
+    // — the bridge supervisor's actual input — NOT on `tenant_id`: a substrate
+    // without a plan is what the supervisor rejects as "cfg.plan missing on
+    // bridge path". An admitted workload always carries `tenant_id` (so the
+    // per-VM host-services broker spawns below), but only the opt-in bridge
+    // path threads `plan_json`; without it the supervisor stays on the legacy
+    // `run_supervisor` path and the substrate is all-None. (`compute_audit_
+    // substrate` re-validates the tenant — harmless after the guard above.)
     let substrate = if config.plan_json.is_some() {
         crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?
     } else {
