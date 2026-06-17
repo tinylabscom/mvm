@@ -996,8 +996,11 @@ WS-B change:
       a save→load round-trip regression test.
 - [ ] **`run --image <oci>` won't boot on macOS — missing `mvm-meta.json` sidecar.** The
       OCI materialize path produces a rootfs without the W6.2 `mvm-meta.json` sidecar /
-      W1.4b runtime-overlay mount point, so the workload boot path refuses it. Needed for
-      the OCI-image machine-run path (Workstream B `MachineImageSource`) on macOS.
+      W1.4b runtime-overlay mount point, so `admit_overlay_aware` refuses it. **Handed to
+      Session 3 item 1a** (the `MachineImageSource` admission leg) — investigation showed it
+      is a design decision (scope the gate to actual overlay attachment vs. make OCI rootfs
+      overlay-aware), not a sidecar write, and needs live builder-VM verification. See the
+      Session 3 prompt below for the full findings + the design question.
 
 Surfaced by the adversarial security review of the WS-B branch (verdict
 `merge-after-fixes`; the three blockers — warm-claim AllowAll bypass, the
@@ -1244,6 +1247,26 @@ landing via PR + merge queue, keeping SPRINT.md + REFACTOR-STATUS.md current:
    unpacked rootfs dir — every shape routed through the existing OCI extraction hardening +
    provenance recording + admission (mvm-oci unpack; image::resolve_or_pull_run_image in
    commands/image/mod.rs). No bypass — all sources go through the same admitted/audited path.
+
+   1a. (BLOCKER for the admission leg, handed off from the WS-B deferred list)
+   `run --image <oci>` does not boot today: the admission gate
+   `mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)` — called unconditionally on every
+   backend start (libkrun.rs, vz.rs, backend.rs/FC, qemu.rs) — refuses any rootfs without a
+   host-side `mvm-meta.json` sidecar saying `overlay_aware: true`. That sidecar is normally
+   nix-evaluated from the flake `passthru.mvm` inside the builder VM (builder_vm_runtime.rs);
+   the OCI materialize path (rootfs.rs) writes only `rootfs.ext4`, no sidecar, so the gate
+   refuses it. This is NOT a one-line sidecar write: `overlay_aware: true` means the rootfs
+   carries a `/mvm/runtime` bind-mount target + an overlay-preferring `/init` (mk-guest.nix),
+   which an arbitrary OCI image has neither of — and the gate also refuses `overlay_aware:
+   false`, so there is no safe partial fix. Crucially, the OCI run path attaches NO runtime
+   overlay (`run_inner`'s `ImageSource::Prebuilt` leaves `runtime_overlay_path = None`), so the
+   gate is firing as a FALSE POSITIVE on OCI — refusing for lacking a W1.4b contract the OCI
+   boot never uses. DESIGN DECISION REQUIRED (claim-adjacent gate; confirm with owner):
+   prefer (A) scope `admit_overlay_aware` to actual overlay attachment (only enforce when
+   `runtime_overlay_path.is_some()`) and give OCI its own admission posture; vs (B) make the
+   OCI materialize path produce a genuinely overlay-aware rootfs (`/mvm/runtime` + mvm `/init`)
+   and write the sidecar. Needs live builder-VM + boot verification — `tests/oci_image_runner_smoke.rs`
+   is gated off and does NOT exercise the gate, so OCI boot is unproven end-to-end today.
 
 2. WS-C persistent verbs: machine create/start/exec/shell/stop/ls/inspect/rm, backed by a
    MachineSpec persisted under mvm-core::config data-dir helpers (NEVER inline $HOME — use
