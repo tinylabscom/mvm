@@ -71,12 +71,24 @@ pub(in crate::commands) enum ImageAction {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OciCacheIndex {
     #[serde(default = "schema_version")]
     schema_version: u32,
     #[serde(default)]
     images: Vec<CachedOciImage>,
+}
+
+// `#[derive(Default)]` would zero `schema_version` (u32 default), so a freshly
+// created index serializes `schema_version: 0` and the next load rejects it.
+// Default must mint the current schema, matching the serde field default.
+impl Default for OciCacheIndex {
+    fn default() -> Self {
+        Self {
+            schema_version: schema_version(),
+            images: Vec::new(),
+        }
+    }
 }
 
 fn schema_version() -> u32 {
@@ -1574,6 +1586,21 @@ mod tests {
         let err = ingest_local_archive(tmp.path(), &missing, "oci-archive:nope.tar", false)
             .expect_err("missing archive must error");
         assert!(err.to_string().contains("open OCI archive"), "got {err}");
+    }
+
+    #[test]
+    fn default_index_saves_and_loads_without_schema_rejection() {
+        // A fresh cache writes a default index; the next read must accept it.
+        // Regression: `#[derive(Default)]` minted schema_version 0, which
+        // load_index rejected, breaking `image ls` / `run --image` on any
+        // freshly-created OCI cache.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let index = OciCacheIndex::default();
+        assert_eq!(index.schema_version, 1, "default must mint current schema");
+        save_index(tmp.path(), &index).expect("save default index");
+        let loaded = load_index(tmp.path()).expect("load default index back");
+        assert_eq!(loaded.schema_version, 1);
+        assert!(loaded.images.is_empty());
     }
 
     #[test]
