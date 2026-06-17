@@ -204,10 +204,20 @@ own internal default).
           needs an egress-attempting fixture (curl an allowed host + a denied
           host, assert the verdicts + flow-audit entries). The last check before
           2d deletes the splice.
-  - [ ] **2c — flow-event sink → audit re-emission.** Subscribe to rvproxy's
-        `FlowEvent` export (needs the rvproxy JSONL/UDS export followup) and
-        re-feed `signer_task`'s chain so the claim-10 audit stays mvm's source of
-        truth.
+  - [x] **2c — flow-event sink → audit re-emission (parser + mapper + pump).**
+        `supervisor::network::rvproxy_flow_audit` parses rvproxy's exported
+        dataplane-audit JSONL/UDS stream, keeps only the `flow` records, and maps
+        each rvproxy `FlowEvent` onto mvm's audit `FlowEvent` (`opened`→`Opened`;
+        `denied` close→`Closed{PolicyDropped}` for claim-10; normal
+        `closed`→`Closed{Eof}`), with a per-connection `flow_id` from the 5-tuple
+        (more granular than the splice's coarse `<vm>-egress`). `pump_flow_audit`
+        runs over any `BufRead` (real source = the JSONL file / `UnixStream`) and
+        hands mapped events to a sink; the production sink forwards into
+        `signer_task`'s mpsc channel so they're chain-signed. Byte-scan kills stay
+        splice-side, so rvproxy only emits opened/denied/normal-closed — the
+        mapping is total. Pure + golden-tested; spawning the reader thread + the
+        sink→channel wiring lands with 2b (the export only flows once rvproxy runs
+        with the emitted config).
   - [ ] **2d — parity-gate extension + splice deletion.** Make the WS-1.5
         witnesses run against the **native** path (binary-discriminating) and
         delete the splice + Plan-141 `on_packet` hooks only once green.
