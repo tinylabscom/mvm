@@ -917,7 +917,7 @@ Recommended sequence to close the remaining rollup items:
 
 Plan 200 implementation checklist after `#1039`:
 
-- [ ] Reconcile Plan 200 bookkeeping first: the rollup says MCP code-run admission is done via `#1017`/`#1023`, but the Plan 200 deferred checkbox still shows it open.
+- [x] Reconcile Plan 200 bookkeeping first: the rollup says MCP code-run admission is done via `#1017`/`#1023`, but the Plan 200 deferred checkbox still shows it open. Completed here: the Plan 200 deferred checkbox now points at #1017/#1023 and is ticked.
 - [ ] Persistent machine UX: implement `machine create/start/exec/shell/stop/ls/inspect/rm`, persist `MachineSpec` under the existing data-dir helpers with atomic writes, and add state deletion/JSON tests.
 - [ ] `mvm.toml` machine mapping: map `net`, `[network].allow_hosts`, `[auth].ssh_agent`, `[dev].init`, and volumes into the admitted machine path; preserve read-only volume defaults; reject dev init for sealed/prod; include effective policy in dry-run/receipt output.
 - [ ] SDK parity: add Python, TypeScript, and Rust machine wrappers that reuse CLI/library admission paths; add parity tests and negative non-bypass tests for artifact verification, default-deny network, unknown keys, source conflicts, and receipt/audit summaries.
