@@ -969,12 +969,11 @@ Live validation of the WS-B network-policy work on macOS/Vz proved the enforceme
 mechanism (deny-all drops, allow-list forwards-and-narrows) through the live gateway
 bridge with real Unix datagram sockets (`bare_*_through_the_live_bridge` tests in
 `mvm-hostd` `gateway_bridge`), and proved no regression (A/B vs `main` identical).
-Caveat on the bare allow-list: on the libkrun/Vz no-bundle path the narrowing is by
-host **name** only (a `DnsSinkholeScan` over DNS queries) — the port is not gated and a
-direct-IP dial bypasses the name gate; Firecracker gates `host:port` via nftables. The
-signed receipt records this honestly via `egress_enforcement` (see the deferred
-"uniform L4" follow-up). It also surfaced these pre-existing gaps, none caused by the
-WS-B change:
+The bare allow-list is now `host:port` L4-enforced uniformly across Firecracker (nftables)
+and libkrun/Vz (admission-time DNS pin → `L4PolicyScan`), closing the direct-IP-dial bypass
+that the original name-only `DnsSinkholeScan` left open (see the "uniform L4" follow-up
+below, now landed). WS-B also surfaced these pre-existing gaps, none caused by the WS-B
+change:
 
 - [ ] **macOS transient-run guest networking (blocks `machine run --net` on macOS).**
       `mvmctl run` / `machine run` transient guests never bring up `eth0`: the transient
@@ -1012,14 +1011,23 @@ flow gate was the sole enforcement. Proven by
 `bare_deny_all_policy_drops_egress_through_the_live_vz_bridge`. Remaining
 follow-ups:
 
-- [ ] **Uniform `host:port` L4 egress enforcement on the libkrun/Vz bare path.** The
-      no-bundle path lowers an allow-list to a `DnsSinkholeScan` over the host *names*
-      only (`bare_network_policy_egress` returns `egress_l4 = None`), so the port is not
-      gated and a direct-IP dial bypasses the name gate. Firecracker enforces `host:port`
-      via nftables. The receipt now records this honestly (`egress_enforcement`:
-      `firecracker:l4-host-port` vs `libkrun:dns-name-only`) instead of overstating, but
-      true uniformity needs an admission-time DNS pin feeding `L4PolicyScan` on the bare
-      path, mirroring the bundle path. deny-all / unrestricted are already uniform.
+- [x] **Uniform `host:port` L4 egress enforcement on the libkrun/Vz bare path.** Was: the
+      no-bundle path lowered an allow-list to a `DnsSinkholeScan` over host *names* only
+      (`bare_network_policy_egress` returned `egress_l4 = None`), so the port was ungated and
+      a direct-IP dial bypassed the name gate; Firecracker gates `host:port` via nftables.
+      Closed: `run_bridge_inner` now resolves the bare allow-list's hosts on the host
+      (`resolve_bare_dns_pins`, the admission-time DNS pin, mirroring nftables resolving
+      `-d <host>` at insert) and `mvm_core::policy::projection::canonicalize_network_policy`
+      lowers `(pinned IP, port)` into `CanonicalEgress::Rules` (TCP per pin + a UDP/53-only
+      carve-out so name resolution still works, gated on qname by the `DnsSinkholeScan`;
+      TCP/53 is deliberately not carved out — the qname gate only covers UDP/53).
+      `L4PolicyScan` then drops a direct-IP dial to an unlisted address and a connection to a
+      pinned host on the wrong port — uniform with Firecracker. An unresolvable/expired pin
+      fails CLOSED to deny-all. The receipt tier collapsed to a uniform
+      `<backend>:l4-host-port` (no more `dns-name-only`). Proven by
+      `bare_allow_list_l4_{forwards_pinned_host_port,drops_direct_ip_to_unlisted,drops_wrong_port_on_pinned_host}_through_the_live_bridge`
+      (libkrun + Vz) + `canonicalize_network_policy` unit tests. deny-all / unrestricted were
+      already uniform.
 - [x] **Emit `plan.launched` / `plan.failed` on the universal transient-run path.** The
       run admit closure (`commands/vm/exec.rs`) consumed `admit_plan_for_boot`'s
       `AdmissionContext` for the substrate but dropped the emitter, so only `plan.admitted`
