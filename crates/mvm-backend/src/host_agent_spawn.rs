@@ -27,8 +27,8 @@ use mvm_core::protocol::broker_control::{
 };
 
 use crate::broker_services_spawn::{
-    HOST_SIGNER_KEY, HOST_SIGNER_PUB, pid_alive, read_pid, resolve_subprocess_bin,
-    spawn_detached_with_config, wait_for_uds,
+    AUDIT_SIGNER_HEAD_FILE, HOST_SIGNER_KEY, HOST_SIGNER_PUB, pid_alive, read_pid,
+    resolve_subprocess_bin, spawn_detached_with_config, wait_for_uds,
 };
 
 /// PID file for the per-tenant host-agent daemon, under `host_agent_dir`.
@@ -90,6 +90,8 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
         "tenant_id": tenant,
         "control_socket": control_socket,
         "host_signer_public_key_path": mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_PUB),
+        "signer_helper_uds_path": mvm_core::config::host_agent_signer_helper_socket(tenant),
+        "software_chain_key_path": mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_KEY),
     });
     let child = spawn_detached_with_config(&bin, &cfg, "mvm-host-agent")?;
     wait_for_uds(
@@ -144,13 +146,13 @@ pub struct HostAgentServicesParams<'a> {
     pub broker_listen_socket: &'a Path,
 }
 
-/// Daemon-path equivalent of `spawn_broker_services_if_admitted`: spawn the
-/// per-VM audit-signer (still forked — Phase 2 daemon-izes it), ensure the
-/// per-tenant host-agent daemon, and register the VM with it (the daemon binds
-/// `broker_listen_socket` and forwards `host.audit.v1` to the audit-signer).
+/// Daemon-path equivalent of `spawn_broker_services_if_admitted`: ensure the
+/// per-tenant host-agent daemon and register the VM with it. The daemon binds
+/// `broker_listen_socket`; its resident signer-helper child owns the per-VM
+/// workload chain.
 /// Returns a guard that, until [`HostAgentServicesGuard::defuse`]d, deregisters
-/// the VM + reaps the audit-signer on drop (the daemon stays warm). An
-/// unadmitted VM yields a defused no-op.
+/// the VM on drop (the daemon stays warm). An unadmitted VM yields a defused
+/// no-op.
 pub fn register_host_agent_services_if_admitted(
     params: HostAgentServicesParams<'_>,
 ) -> Result<HostAgentServicesGuard> {
@@ -168,14 +170,6 @@ pub fn register_host_agent_services_if_admitted(
     // Arm before any spawn so a failure below reaps what already started.
     let guard = HostAgentServicesGuard::armed(state_dir, tenant, vm_name);
 
-    let audit = crate::broker_services_spawn::spawn_audit_signer(
-        crate::broker_services_spawn::AuditSignerSpawnParams {
-            workload_id,
-            tenant_id: tenant,
-            vm_name,
-            state_dir,
-        },
-    )?;
     let control_socket = ensure_host_agent_daemon(tenant)?;
     let key = load_host_signing_key()?;
     register_vm(
@@ -183,10 +177,12 @@ pub fn register_host_agent_services_if_admitted(
         &key,
         RegisterVm {
             vm_id: vm_name.to_string(),
+            workload_id: Some(workload_id.to_string()),
             tenant_id: tenant.to_string(),
             broker_listen_socket: broker_listen_socket.to_path_buf(),
             workload_chain_path: mvm_core::config::workload_audit_path(tenant, vm_name),
-            audit_signer_uds_path: Some(audit.uds_path),
+            workload_chain_head_path: Some(state_dir.join(AUDIT_SIGNER_HEAD_FILE)),
+            audit_signer_uds_path: None,
             services_bindings: vec![],
         },
     )?;
@@ -197,8 +193,8 @@ pub fn register_host_agent_services_if_admitted(
 }
 
 /// Teardown for a VM that registered with a host-agent daemon: deregister it
-/// (best-effort — the daemon stays warm) and reap the per-VM audit-signer.
-/// Idempotent.
+/// (best-effort — the daemon stays warm). Also reaps the legacy per-VM
+/// audit-signer if an older daemon-path launch left one behind. Idempotent.
 pub fn reap_host_agent_services(state_dir: &Path, tenant: &str, vm_name: &str) {
     if let Ok(key) = load_host_signing_key() {
         let control_socket = mvm_core::config::host_agent_control_socket(tenant);
@@ -386,9 +382,11 @@ mod tests {
     fn sample_register(dir: &Path) -> RegisterVm {
         RegisterVm {
             vm_id: "vm-1".into(),
+            workload_id: Some("wl-1".into()),
             tenant_id: "local".into(),
             broker_listen_socket: dir.join("vsock-5300.sock"),
             workload_chain_path: dir.join("local.vm-1.workload.jsonl"),
+            workload_chain_head_path: Some(dir.join("local.vm-1.head")),
             audit_signer_uds_path: Some(dir.join("audit-signer.sock")),
             services_bindings: vec![],
         }

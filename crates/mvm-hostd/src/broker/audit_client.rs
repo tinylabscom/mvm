@@ -13,7 +13,10 @@
 
 use std::path::{Path, PathBuf};
 
-use mvm_core::protocol::audit_signer::{AppendEntryRequest, AppendEntryResponse};
+use mvm_core::protocol::audit_signer::{
+    AppendEntryRequest, AppendEntryResponse, SignerHelperAppendEntry, SignerHelperRequest,
+    SignerHelperResponse,
+};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -53,6 +56,8 @@ pub enum AuditClientError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("protocol violation from {path}: {message}")]
+    Protocol { path: PathBuf, message: String },
 }
 
 /// One-call-per-connection UDS client.
@@ -62,15 +67,35 @@ pub enum AuditClientError {
 /// connection state to retain.
 #[derive(Debug, Clone)]
 pub struct AuditClient {
-    uds_path: PathBuf,
+    target: AuditClientTarget,
     max_frame_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+enum AuditClientTarget {
+    PerVmSigner { uds_path: PathBuf },
+    SignerHelper { uds_path: PathBuf, vm_id: String },
 }
 
 impl AuditClient {
     /// New client targeting the audit-signer UDS at `uds_path`.
     pub fn new(uds_path: impl Into<PathBuf>) -> Self {
         Self {
-            uds_path: uds_path.into(),
+            target: AuditClientTarget::PerVmSigner {
+                uds_path: uds_path.into(),
+            },
+            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
+        }
+    }
+
+    /// New client targeting the resident signer helper for one server-derived
+    /// `vm_id`.
+    pub fn new_signer_helper(uds_path: impl Into<PathBuf>, vm_id: impl Into<String>) -> Self {
+        Self {
+            target: AuditClientTarget::SignerHelper {
+                uds_path: uds_path.into(),
+                vm_id: vm_id.into(),
+            },
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
         }
     }
@@ -89,13 +114,90 @@ impl AuditClient {
         &self,
         req: &AppendEntryRequest,
     ) -> Result<AppendEntryResponse, AuditClientError> {
-        let mut stream = connect(&self.uds_path).await?;
-        write_frame(&mut stream, &self.uds_path, req).await?;
-        let resp =
-            read_frame::<AppendEntryResponse>(&mut stream, &self.uds_path, self.max_frame_bytes)
-                .await?;
-        let _ = stream.shutdown().await;
-        Ok(resp)
+        match &self.target {
+            AuditClientTarget::PerVmSigner { uds_path } => {
+                let mut stream = connect(uds_path).await?;
+                write_frame(&mut stream, uds_path, req).await?;
+                let resp =
+                    read_frame::<AppendEntryResponse>(&mut stream, uds_path, self.max_frame_bytes)
+                        .await?;
+                let _ = stream.shutdown().await;
+                Ok(resp)
+            }
+            AuditClientTarget::SignerHelper { uds_path, vm_id } => {
+                let helper_req = helper_request_from_append(req, vm_id);
+                let mut stream = connect(uds_path).await?;
+                write_frame(&mut stream, uds_path, &helper_req).await?;
+                let resp =
+                    read_frame::<SignerHelperResponse>(&mut stream, uds_path, self.max_frame_bytes)
+                        .await?;
+                let _ = stream.shutdown().await;
+                helper_response_to_append_response(resp, uds_path)
+            }
+        }
+    }
+}
+
+fn helper_request_from_append(req: &AppendEntryRequest, vm_id: &str) -> SignerHelperRequest {
+    match req {
+        AppendEntryRequest::AppendEntry {
+            request_id,
+            category,
+            ts,
+            workload_id,
+            tenant_id,
+            session_id,
+            correlation_id,
+            fields,
+        } => SignerHelperRequest::AppendEntry(SignerHelperAppendEntry {
+            request_id: request_id.clone(),
+            vm_id: vm_id.to_string(),
+            category: category.clone(),
+            ts: ts.clone(),
+            workload_id: workload_id.clone(),
+            tenant_id: tenant_id.clone(),
+            session_id: session_id.clone(),
+            correlation_id: correlation_id.clone(),
+            fields: fields.clone(),
+        }),
+        AppendEntryRequest::Probe { request_id } => SignerHelperRequest::Probe {
+            request_id: request_id.clone(),
+        },
+    }
+}
+
+fn helper_response_to_append_response(
+    resp: SignerHelperResponse,
+    path: &Path,
+) -> Result<AppendEntryResponse, AuditClientError> {
+    match resp {
+        SignerHelperResponse::Ok {
+            request_id,
+            chain_head,
+            entry_hash,
+            sig_alg,
+        } => Ok(AppendEntryResponse::Ok {
+            request_id,
+            chain_head,
+            entry_hash,
+            sig_alg,
+        }),
+        SignerHelperResponse::Pong { request_id } => Ok(AppendEntryResponse::Pong { request_id }),
+        SignerHelperResponse::Err {
+            request_id,
+            code,
+            message,
+        } => Ok(AppendEntryResponse::Err {
+            request_id,
+            code,
+            message,
+        }),
+        SignerHelperResponse::Registered { .. } | SignerHelperResponse::Deregistered { .. } => {
+            Err(AuditClientError::Protocol {
+                path: path.to_path_buf(),
+                message: "signer helper returned a control response to append".into(),
+            })
+        }
     }
 }
 
