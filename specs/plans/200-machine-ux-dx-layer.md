@@ -975,17 +975,34 @@ that the original name-only `DnsSinkholeScan` left open (see the "uniform L4" fo
 below, now landed). WS-B also surfaced these pre-existing gaps, none caused by the WS-B
 change:
 
-- [ ] **macOS transient-run guest networking (blocks `machine run --net` on macOS).**
-      `mvmctl run` / `machine run` transient guests never bring up `eth0`: the transient
-      init doesn't run mkGuest `setup_network`, and the run's command is unprivileged
-      (uid 901, setpriv) so it can't DHCP either (`udhcpc: socket: Operation not
-      permitted`). So a transient guest has no egress at all on macOS (Vz) regardless of
-      policy — identical on `main`, pre-existing. The fix: the transient init must bring
-      up `eth0` (DHCP) as root before the agent drops privileges, policy-gated so deny-all
-      still means no egress. This unblocks the VM-level egress proof on macOS *and* makes
-      the headline `machine run --net --image alpine -- nslookup` actually work on macOS.
-      (Linux/KVM/Firecracker transient runs already network, so WS-B is exercisable there
-      today.)
+- [x] **macOS transient-run guest networking (blocks `machine run --net` on macOS).**
+      Was: `mvmctl run` / `machine run` transient guests never brought up `eth0` (the init
+      ran only loopback; the unprivileged uid-901 command couldn't DHCP), so a guest had no
+      egress on the gvproxy backends regardless of policy. **Landed in #1020**: the shared
+      `mvm_guest::guest_net::configure_guest_network` (eth0 link-up → resolv.conf seed →
+      `udhcpc -n -q` → static gvproxy fallback) now runs in `mvm-guest-netinit` as **uid 0,
+      before the agent drops privileges**, on every workload (incl. transient). The
+      bring-up is **unconditional** and egress is enforced **host-side** (the gateway-bridge
+      flow gate + mandatory-deny), not by withholding `eth0` — an untrusted guest can't be
+      its own boundary, and under deny-all the flow gate drops all egress while the static
+      fallback keeps `eth0` up without hanging (`udhcpc -n`; see the DHCP/ARP posture
+      decision below). Claims 1–3 (uid/setpriv/verified-boot) are unaffected: DHCP runs in
+      PID-1 init at uid 0, the entrypoint still drops to uid 901 under setpriv.
+      **Live-validated on this Mac (2026-06-16):** the `examples/egress-probe` workload
+      booted on libkrun and reached BOTH external probe targets (`up --wait` verdict 0),
+      proving the guest now gets a working `eth0` (link-up → DHCP/static-fallback) — the
+      `#1020` enabler. The Vz VM-level smoke is gated on `up --wait` being libkrun-only
+      today (Plan 152 WS-A), an orthogonal pre-existing gap; the Vz *bridge* enforcement is
+      covered by the deterministic `*_live_vz_bridge` tests.
+      Follow-up surfaced by this validation: the `up --wait` direct-boot path
+      (`commands/vm/up.rs`) builds `VmStartConfig { ..Default::default() }` and never sets
+      `.network_policy` from the resolved `--network-allow` policy, so a dev `up
+      --network-allow` does not thread the bare policy to the libkrun supervisor (the
+      transient `run` path DOES — `exec.rs` sets `start_config.network_policy`, the path PR2
+      targets). So PR2's bare `host:port` L4 is proven by the deterministic live-bridge tests
+      and exercised live by the transient `run` path, not `up`. Wiring `up`'s bare policy
+      onto `VmStartConfig` (and confirming the libkrun gvproxy splice interposes there — the
+      probe saw no enforcement at all, not even the default deny-all) is a tracked follow-up.
 - [x] **OCI cache index `schema_version 0` bug.** `OciCacheIndex`
       (`crates/mvm-cli/src/commands/image/mod.rs`) derives `Default` (→ `schema_version:
       0`), overriding the `#[serde(default = "schema_version")]` (= 1), so `save_index`
@@ -997,6 +1014,17 @@ change:
       OCI materialize path produces a rootfs without the W6.2 `mvm-meta.json` sidecar /
       W1.4b runtime-overlay mount point, so the workload boot path refuses it. Needed for
       the OCI-image machine-run path (Workstream B `MachineImageSource`) on macOS.
+- [ ] **`up --network-allow` doesn't enforce egress on the libkrun direct-boot path
+      (claim-10 relevant).** Surfaced while live-validating the eth0 enabler: a libkrun
+      `up --network-allow one.one.one.one:443 --wait` egress-probe reached BOTH the allowed
+      and an unlisted IP (verdict 0) — no enforcement at all, not even the default deny-all.
+      Two causes to confirm/fix: (1) the `up` direct-boot path builds
+      `VmStartConfig { ..Default::default() }` and never sets `.network_policy` from the
+      resolved `--network-allow` (the transient `run` path does, in `exec.rs`); (2) verify
+      the libkrun gvproxy splice actually interposes on the `up` data path (the VM dir showed
+      gvproxy-direct sockets). The transient `run` path + the deterministic live-bridge tests
+      DO enforce; this is the `up`-path wiring. Pre-existing (not introduced by the WS-B
+      egress work).
 
 Surfaced by the adversarial security review of the WS-B branch (verdict
 `merge-after-fixes`; the three blockers — warm-claim AllowAll bypass, the
