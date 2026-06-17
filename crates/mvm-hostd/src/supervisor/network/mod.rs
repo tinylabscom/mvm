@@ -431,7 +431,20 @@ pub fn from_admitted(
     leaf_caps: ProviderCapabilities,
     allowlist: &ObserverAllowlist,
 ) -> Result<Vec<Arc<dyn Observer>>, BuildError> {
-    let observer_names = resolve_observer_chain_from_plan(plan)?;
+    from_policy_source(plan, None, leaf_caps, allowlist)
+}
+
+/// Resolve observers from the effective policy source already handed to a
+/// bridge process. Generated in-memory bundles do not exist under
+/// `~/.mvm/policies`, so their observer list must be read from `bundle_json`
+/// rather than re-resolved through the plan's policy ref.
+pub fn from_policy_source(
+    plan: &mvm_core::plan::ExecutionPlan,
+    bundle: Option<&mvm_core::policy::PolicyBundle>,
+    leaf_caps: ProviderCapabilities,
+    allowlist: &ObserverAllowlist,
+) -> Result<Vec<Arc<dyn Observer>>, BuildError> {
+    let observer_names = resolve_observer_chain_from_policy_source(plan, bundle)?;
     if observer_names.is_empty() {
         return Ok(Vec::new());
     }
@@ -441,6 +454,19 @@ pub fn from_admitted(
         pipe = pipe.observe(obs, leaf_caps)?;
     }
     Ok(pipe.build_observers())
+}
+
+/// Return the policy-authored observer names without consulting the host
+/// allowlist. Callers use this to avoid requiring an allowlist when the
+/// effective policy has no observers.
+pub fn resolve_observer_chain_from_policy_source(
+    plan: &mvm_core::plan::ExecutionPlan,
+    bundle: Option<&mvm_core::policy::PolicyBundle>,
+) -> Result<Vec<String>, BuildError> {
+    match bundle {
+        Some(bundle) => Ok(bundle.network.observers.clone()),
+        None => resolve_observer_chain_from_plan(plan),
+    }
 }
 
 /// Validate that a policy-bundle path segment is safe to use as a
@@ -955,6 +981,38 @@ mod tests {
         let plan = test_execution_plan_with_policy("local-default");
         let names = resolve_observer_chain_from_plan(&plan).expect("local-default ok");
         assert!(names.is_empty());
+    }
+
+    #[test]
+    fn resolve_observer_chain_uses_supplied_bundle_for_generated_ref() {
+        use mvm_core::policy::bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION};
+        use mvm_core::policy::policies::{
+            ArtifactPolicy, AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy,
+            ToolPolicy, WasiCapPolicy,
+        };
+
+        let plan = test_execution_plan_with_policy("acme:generated-cli-egress");
+        let bundle = PolicyBundle {
+            schema_version: SCHEMA_VERSION,
+            bundle_id: PolicyId("acme/generated-cli-egress".to_string()),
+            bundle_version: 1,
+            network: NetworkPolicy {
+                observers: vec!["flow-count-metrics".to_string()],
+                ..Default::default()
+            },
+            egress: EgressPolicy::default(),
+            pii: PiiPolicy::default(),
+            tool: ToolPolicy::default(),
+            artifact: ArtifactPolicy::default(),
+            keys: KeyPolicy::default(),
+            audit: AuditPolicy::default(),
+            wasi: WasiCapPolicy::default(),
+            tenant_overlays: std::collections::BTreeMap::new(),
+        };
+
+        let names = resolve_observer_chain_from_policy_source(&plan, Some(&bundle))
+            .expect("supplied bundle avoids disk policy lookup");
+        assert_eq!(names, vec!["flow-count-metrics".to_string()]);
     }
 
     #[test]

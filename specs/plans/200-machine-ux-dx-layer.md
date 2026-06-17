@@ -1044,6 +1044,40 @@ change:
             injected `/init` currently forks the agent as root (dev-tier acceptable).
       - [ ] Guest egress for OCI images: alpine lacks `udhcpc`, so netinit's DHCP leg is a
             no-op (deny-all default makes this moot today; revisit with `--net`).
+- [x] **`up` egress enforcement on libkrun/Vz is gated off by default AND drops an explicit
+      `--network-allow` when on (claim-10 relevant; two bugs).** Diagnosed live + by code
+      trace 2026-06-16 and fixed 2026-06-17 (Firecracker is unaffected — it enforces via nftables regardless).
+      The foreground `up --wait` (main) path **does** thread the resolved policy onto
+      `VmStartConfig.network_policy` (`into_start_config`, `start.rs`); the libkrun backend
+      threads it to the supervisor unconditionally (`libkrun.rs` ~384). The two real bugs:
+      - **(A) Bridge gated off by default.** `should_thread_signed_plan = gateway_bridge_enabled
+        || hypervisor=="qemu"` (`up.rs` ~781) only threads `plan_json` when
+        `MVM_GATEWAY_BRIDGE=1`, and the libkrun/Vz backend spawns the **enforcing** bridge
+        supervisor only `if config.plan_json.is_some()` (`libkrun.rs` ~344). So a default `up`
+        takes the legacy gvproxy-direct path with **no egress enforcement** — live
+        `up --network-allow` (no env) = egress-probe **verdict 0** (both reachable).
+      - **(B) Signed bundle shadows the bare allow-list.** With `MVM_GATEWAY_BRIDGE=1` the
+        bridge engages, but `up` also resolves a `PolicyBundle` from the **synthesized plan's**
+        `network_policy_ref="local-default"` (deny-all) and threads it as `bundle_json`;
+        `run_bridge_inner` prefers `cfg.bundle` over the bare `cfg.network_policy`, so the
+        `--network-allow` allow-list is shadowed → live verdict **3** (both blocked = deny-all).
+        The transient `run` path works because it threads **no** bundle (`cfg.bundle=None` →
+        the bare path / `canonicalize_network_policy` runs).
+      Fixed by defaulting signed-plan threading on for libkrun/Vz admitted workload boots
+      (`should_thread_signed_plan(false, "libkrun"|"vz") == true`) so the gateway bridge is
+      the default `up` data path, while Firecracker keeps its nftables default path and only
+      uses `MVM_GATEWAY_BRIDGE=1` for the sidecar. Non-deny resolved `NetworkPolicy` values
+      (`--network-allow`, non-`none` presets, and template defaults) now synthesize a generated
+      in-memory `PolicyBundle`, set all signed plan policy refs to that generated ref, and pass
+      the bundle as `bundle_json`; allow-lists are host-pinned into signed TCP `/32`/`/128`
+      L4 rows and fail closed if a requested hostname cannot resolve. Deny-all stays
+      `local-default` with no bundle. The transient `run` session substrate now carries the
+      generated bundle too, so it does not regress to the unsigned bare carrier. Open-mode
+      bundle lowering now maps to `CanonicalEgress::Unrestricted` instead of an empty L4
+      deny-all scan. Fail-closed behavior is preserved by the existing hard-fail bridge restart
+      policy and bridge-thread process exit on panic. Tests: `mvm-cli` admission generated-bundle
+      tests, default signed-plan threading test, full `mvm-cli --lib`; `mvm-hostd`
+      `open_mode_lowers_to_unrestricted_egress`.
 
 Surfaced by the adversarial security review of the WS-B branch (verdict
 `merge-after-fixes`; the three blockers — warm-claim AllowAll bypass, the

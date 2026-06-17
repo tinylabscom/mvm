@@ -33,7 +33,22 @@ runs:
 
     - name: Install cargo-zigbuild
       shell: bash
-      run: cargo install cargo-zigbuild --version 0.20.0 --locked
+      run: |
+        set -euo pipefail
+
+        # crates.io occasionally returns partial downloads on hosted runners.
+        # Retry the pinned install instead of failing CI before fmt/clippy run.
+        for attempt in 1 2 3; do
+          if CARGO_NET_RETRY=10 cargo install cargo-zigbuild --version 0.20.0 --locked; then
+            exit 0
+          fi
+
+          if [ "$attempt" -eq 3 ]; then
+            exit 1
+          fi
+
+          sleep "$((attempt * 10))"
+        done
 
     - name: Add musl targets (both arches)
       shell: bash

@@ -158,6 +158,12 @@ pub(super) struct AdmitPlanForBootParams<'a> {
     /// Per-destination egress redaction authored by `--redact HOST[=audit]`.
     /// Default (all-off) preserves the curated-only baseline.
     pub redaction: mvm_core::policy::RedactionPolicy,
+    /// The resolved runtime egress policy (`--network-preset`,
+    /// `--network-allow`, template default, or deny-all default). Non-deny
+    /// policies are lowered into a generated PolicyBundle and referenced by the
+    /// signed plan so the bridge never relies on an unsigned bare carrier to
+    /// authorize outbound traffic.
+    pub network_policy: mvm_core::network_policy::NetworkPolicy,
 }
 
 /// Build the signed-plan host-fs grant list from the resolved volume
@@ -229,6 +235,148 @@ fn enforce_profile_deployable(
         );
     }
     Ok(())
+}
+
+fn generated_policy_ref(tenant: &str, vm_name: &str) -> Result<String> {
+    fn valid_component(s: &str) -> bool {
+        !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains(':')
+    }
+    if !valid_component(tenant) {
+        anyhow::bail!(
+            "tenant {tenant:?} cannot be encoded into a generated signed network policy ref"
+        );
+    }
+    if !valid_component(vm_name) {
+        anyhow::bail!(
+            "vm name {vm_name:?} cannot be encoded into a generated signed network policy ref"
+        );
+    }
+    Ok(format!("{tenant}:{vm_name}"))
+}
+
+fn generated_policy_bundle_for_network_policy(
+    tenant: &str,
+    vm_name: &str,
+    policy: &mvm_core::network_policy::NetworkPolicy,
+) -> Result<Option<(String, PolicyBundle)>> {
+    use mvm_core::policy::bundle::{PolicyId, SCHEMA_VERSION as POLICY_SCHEMA_VERSION};
+    use mvm_core::policy::policies::{
+        ArtifactPolicy, AuditPolicy, EgressPolicy, KeyPolicy, L4RuleSpec, NetworkPolicy, PiiPolicy,
+        ToolPolicy, WasiCapPolicy,
+    };
+    use std::net::{IpAddr, ToSocketAddrs};
+
+    let Some(rules) = policy.resolve_rules() else {
+        let policy_ref = generated_policy_ref(tenant, vm_name)?;
+        let mut egress = EgressPolicy {
+            mode: Some("open".to_string()),
+            ..Default::default()
+        };
+        egress.redaction = mvm_core::policy::RedactionPolicy::default();
+        return Ok(Some((
+            policy_ref,
+            PolicyBundle {
+                schema_version: POLICY_SCHEMA_VERSION,
+                bundle_id: PolicyId(format!("{tenant}/{vm_name}/cli-egress")),
+                bundle_version: 1,
+                network: NetworkPolicy::default(),
+                egress,
+                pii: PiiPolicy::default(),
+                tool: ToolPolicy::default(),
+                artifact: ArtifactPolicy::default(),
+                keys: KeyPolicy::default(),
+                audit: AuditPolicy {
+                    chain_signing: true,
+                    ..Default::default()
+                },
+                wasi: WasiCapPolicy::default(),
+                tenant_overlays: std::collections::BTreeMap::new(),
+            },
+        )));
+    };
+    if rules.is_empty() {
+        return Ok(None);
+    }
+
+    let policy_ref = generated_policy_ref(tenant, vm_name)?;
+    let mut l4 = Vec::new();
+    let mut egress_allow = Vec::new();
+    for rule in rules {
+        let ips: Vec<IpAddr> = if let Ok(ip) = rule.host.parse::<IpAddr>() {
+            vec![ip]
+        } else {
+            (rule.host.as_str(), 0u16)
+                .to_socket_addrs()
+                .with_context(|| {
+                    format!(
+                        "resolving {} for generated signed network policy",
+                        rule.host
+                    )
+                })?
+                .map(|sa| sa.ip())
+                .collect()
+        };
+        if ips.is_empty() {
+            anyhow::bail!(
+                "resolving {} for generated signed network policy returned no addresses",
+                rule.host
+            );
+        }
+        egress_allow.push((rule.host.clone(), rule.port));
+        for ip in ips {
+            let dst_cidr = match ip {
+                IpAddr::V4(v4) => format!("{v4}/32"),
+                IpAddr::V6(v6) => format!("{v6}/128"),
+            };
+            l4.push(L4RuleSpec {
+                proto: "tcp".to_string(),
+                dst_cidr,
+                port_lo: rule.port,
+                port_hi: rule.port,
+            });
+        }
+    }
+    l4.sort_by(|a, b| {
+        (&a.proto, &a.dst_cidr, a.port_lo, a.port_hi).cmp(&(
+            &b.proto,
+            &b.dst_cidr,
+            b.port_lo,
+            b.port_hi,
+        ))
+    });
+    l4.dedup();
+    egress_allow.sort();
+    egress_allow.dedup();
+
+    let bundle = PolicyBundle {
+        schema_version: POLICY_SCHEMA_VERSION,
+        bundle_id: PolicyId(format!("{tenant}/{vm_name}/cli-egress")),
+        bundle_version: 1,
+        network: NetworkPolicy {
+            preset: Some("cli-allow-list".to_string()),
+            l4,
+            observers: Vec::new(),
+            flow_byte_log: None,
+        },
+        egress: EgressPolicy {
+            allow_list: egress_allow,
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            ..Default::default()
+        },
+        pii: PiiPolicy::default(),
+        tool: ToolPolicy::default(),
+        artifact: ArtifactPolicy::default(),
+        keys: KeyPolicy::default(),
+        audit: AuditPolicy {
+            chain_signing: true,
+            ..Default::default()
+        },
+        wasi: WasiCapPolicy::default(),
+        tenant_overlays: std::collections::BTreeMap::new(),
+    };
+    mvm_core::policy::canonicalize_l4(&bundle.network.l4)
+        .context("validating generated signed network policy L4 rules")?;
+    Ok(Some((policy_ref, bundle)))
 }
 
 /// Bundle of artifacts produced by a successful admission: the
@@ -339,6 +487,12 @@ pub(super) fn admit_plan_for_boot(
         None => (None, None, None),
     };
 
+    let generated_network_policy_bundle =
+        generated_policy_bundle_for_network_policy(p.tenant, p.vm_name, &p.network_policy)?;
+    let generated_policy_ref = generated_network_policy_bundle
+        .as_ref()
+        .map(|(policy_ref, _)| policy_ref.as_str());
+
     let input = SynthesisInput {
         vm_name: p.vm_name,
         tenant: Some(p.tenant),
@@ -348,10 +502,10 @@ pub(super) fn admit_plan_for_boot(
         image_cosign_bundle: None,
         intent: None,
         seccomp_tier: p.seccomp_tier,
-        network_policy_ref: None,
-        fs_policy_ref: None,
-        egress_policy_ref: None,
-        tool_policy_ref: None,
+        network_policy_ref: generated_policy_ref,
+        fs_policy_ref: generated_policy_ref,
+        egress_policy_ref: generated_policy_ref,
+        tool_policy_ref: generated_policy_ref,
         secret_release: p.secret_release,
         secrets: p.secrets.clone(),
         audit_event_prefix: None,
@@ -408,13 +562,33 @@ pub(super) fn admit_plan_for_boot(
     // every success-path audit record. If policy resolution itself
     // fails, fall back to the default local chain for the failure
     // record so the rejection is still visible.
-    let resolved = match resolve_policy_for_admission(&admitted.plan, p.policy_dir) {
-        Ok(resolved) => resolved,
-        Err(err) => {
+    let generated_bundle = generated_network_policy_bundle.map(|(_, bundle)| bundle);
+    let resolved = if let Some(bundle) = generated_bundle.as_ref() {
+        // The signed plan refs point at this generated in-memory bundle. Validate
+        // the L4 rows before using its audit policy; the bundle is then threaded
+        // to the bridge as `bundle_json`, so the signed plan path, not the bare
+        // VmStartConfig carrier, authorizes the allow-list.
+        if let Err(err) = mvm_core::policy::canonicalize_l4(&bundle.network.l4)
+            .context("validating generated signed network policy")
+        {
             let fallback = build_default_audit_emitter(signer.signing, p.audit_dir)
                 .context("opening fallback audit chain emitter")?;
             emit_policy_resolve_failure(&admitted.plan, &fallback, &err);
             return Err(err);
+        }
+        PolicyAdmissionResolution {
+            slots_mode: "live",
+            audit: Some(bundle.audit.clone()),
+        }
+    } else {
+        match resolve_policy_for_admission(&admitted.plan, p.policy_dir) {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                let fallback = build_default_audit_emitter(signer.signing, p.audit_dir)
+                    .context("opening fallback audit chain emitter")?;
+                emit_policy_resolve_failure(&admitted.plan, &fallback, &err);
+                return Err(err);
+            }
         }
     };
 
@@ -460,11 +634,14 @@ pub(super) fn admit_plan_for_boot(
     // bridge for per-tenant L4 egress enforcement. resolve_policy_for_admission
     // above already validated the refs, so a well-formed bundle won't surface a
     // new error class here.
-    let policy_bundle = match p.policy_dir {
-        Some(dir) => resolve_policy_bundle_with_dir(&admitted.plan, dir),
-        None => resolve_policy_bundle(&admitted.plan),
-    }
-    .context("loading the tenant policy bundle for the bridge")?;
+    let policy_bundle = match generated_bundle {
+        Some(bundle) => Some(bundle),
+        None => match p.policy_dir {
+            Some(dir) => resolve_policy_bundle_with_dir(&admitted.plan, dir),
+            None => resolve_policy_bundle(&admitted.plan),
+        }
+        .context("loading the tenant policy bundle for the bridge")?,
+    };
 
     Ok(Some(AdmissionContext {
         admitted,
@@ -527,6 +704,7 @@ fn untrusted_transient_admit_in(
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         })?;
         let Some(c) = ctx else { return Ok(None) };
         // Persist the bare plan so the pre-start moat / endpoint can read it on
@@ -775,11 +953,14 @@ fn resolve_workload_ir_path(
 ///   gateway-bridge path, so threading the plan only enables the endpoint;
 ///   always do it for QEMU.
 /// - **libkrun/Vz gateway-bridge** factory: those backends branch into the
-///   bridge supervisor on `plan_json` presence, and that gvproxy wiring isn't
-///   working end-to-end yet, so it stays opt-in behind `MVM_GATEWAY_BRIDGE=1`
-///   (`gateway_bridge_enabled`); the default keeps them on the legacy path.
+///   bridge supervisor on `plan_json` presence. Claim 10's default-deny egress
+///   is load-bearing on that bridge, so admitted workload boots thread it by
+///   default rather than hiding enforcement behind `MVM_GATEWAY_BRIDGE=1`.
+/// - **Firecracker bridge sidecar**: remains behind `MVM_GATEWAY_BRIDGE=1`
+///   because Firecracker already enforces `VmStartConfig.network_policy` through
+///   nftables on the default path.
 fn should_thread_signed_plan(gateway_bridge_enabled: bool, hypervisor: &str) -> bool {
-    gateway_bridge_enabled || hypervisor == "qemu"
+    gateway_bridge_enabled || matches!(hypervisor, "qemu" | "libkrun" | "vz")
 }
 
 /// Whether the admitted plan must be persisted to `<state_dir>/plan.json`
@@ -1801,6 +1982,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             // Re-exec path: user volumes aren't threaded here.
             shares: Vec::new(),
             redaction: redaction.clone(),
+            network_policy: network_policy.clone(),
         })?;
 
         let mut start_config = mvm_core::vm_backend::VmStartConfig {
@@ -2224,6 +2406,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         deps_volume: deps_volume_binding.clone(),
         shares: shares_from_volume_cfg(&volume_cfg),
         redaction: redaction.clone(),
+        network_policy: network_policy.clone(),
     })?;
 
     // Vz-family backends need a real kernel file; mkGuest workload images ship
@@ -2317,27 +2500,21 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         .into_start_config();
         // Attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
         attach_runtime_overlay_if_cached(&mut start_config, effective_hypervisor);
-        // Thread audit substrate from admission_main
-        // through to backend.start() so libkrun/Vz take the bridge-factory
-        // path. None keeps the legacy supervisor path for no-admission flows.
-        //
-        // The in-VM gateway-audit bridge (claim 10/12) is gated behind an
-        // explicit opt-in: its libkrun gvproxy wiring
-        // (`run_supervisor_with_bridge`) is not yet working end-to-end
-        // (gvproxy exits with "vfkit socket address is empty"), so the
-        // default routes `up --flake` through the proven legacy supervisor —
-        // the same path the builder VM boots on, with the per-OS gateway.
-        // Host-side admission (claim 8) above still applies. Re-enable with
-        // MVM_GATEWAY_BRIDGE=1 once the bridge gvproxy path is fixed.
+        // Thread audit substrate from admission_main through to backend.start().
+        // For libkrun/Vz this is the claim-10 enforcement boundary: plan_json
+        // presence makes the backend use the gateway-bridge supervisor, and the
+        // bridge fails closed instead of falling back to gvproxy-direct. QEMU
+        // needs the same signed plan for its substitution endpoint. Firecracker
+        // already enforces egress via nftables on the default path; its bridge
+        // sidecar remains an explicit MVM_GATEWAY_BRIDGE opt-in.
         let gateway_bridge_enabled = std::env::var("MVM_GATEWAY_BRIDGE")
             .map(|v| v == "1")
             .unwrap_or(false);
         // Thread the admitted tenant label unconditionally: the per-VM
         // host-services broker (libkrun/Vz) keys its spawn off
         // `config.tenant_id`, so `host.audit.v1` is available to any admitted
-        // workload. This is independent of the opt-in gateway-bridge
-        // path below, which additionally threads the signed `plan_json` and is
-        // what flips the backends onto the bridge supervisor.
+        // workload. The signed plan is threaded separately below when a backend
+        // has a live consumer for it.
         if let Some(ctx) = admission_main.as_ref() {
             thread_tenant_id(&mut start_config, &ctx.admitted);
         }
@@ -2640,6 +2817,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 deps_volume: deps_volume_binding.clone(),
                 shares: shares_from_volume_cfg(&w_volume_cfg),
                 redaction: redaction.clone(),
+                network_policy: network_policy.clone(),
             }) {
                 Ok(ctx) => ctx,
                 Err(e) => {
@@ -3085,6 +3263,7 @@ mod admit_plan_tests {
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         })
         .expect("must succeed");
         assert!(result.is_none(), "no_supervisor must return None");
@@ -3117,6 +3296,7 @@ mod admit_plan_tests {
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -3210,6 +3390,7 @@ mod admit_plan_tests {
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         })
         .expect_err("missing rootfs must fail");
         assert!(
@@ -3249,6 +3430,7 @@ mod admit_plan_tests {
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         })
         .unwrap()
         .unwrap();
@@ -3272,6 +3454,7 @@ mod admit_plan_tests {
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         })
         .unwrap()
         .unwrap();
@@ -3337,6 +3520,7 @@ mod admit_plan_tests {
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -3354,6 +3538,102 @@ mod admit_plan_tests {
         );
         // Sanity: plan_id matches.
         assert!(content.contains(&ctx.admitted.plan_id.0));
+    }
+
+    #[test]
+    fn admission_weaves_allow_list_into_signed_generated_policy_bundle() {
+        use mvm_core::network_policy::{HostPort, NetworkPolicy};
+
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"allow-list-payload");
+        let ledger = InMemoryNonceLedger::new();
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name: "vm-allow-list",
+            backend_name: "libkrun",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: NetworkPolicy::allow_list(vec![HostPort::new("93.184.216.34", 443)]),
+        })
+        .expect("admission")
+        .expect("Some when admission ran");
+
+        assert_ne!(ctx.admitted.plan.network_policy.0, LOCAL_DEFAULT);
+        assert_eq!(
+            ctx.admitted.plan.network_policy.0,
+            ctx.admitted.plan.egress_policy.0
+        );
+        let bundle = ctx.policy_bundle.expect("generated policy bundle");
+        assert_eq!(bundle.network.l4.len(), 1);
+        assert_eq!(bundle.network.l4[0].proto, "tcp");
+        assert_eq!(bundle.network.l4[0].dst_cidr, "93.184.216.34/32");
+        assert_eq!(bundle.network.l4[0].port_lo, 443);
+        assert_eq!(bundle.network.l4[0].port_hi, 443);
+        assert_eq!(
+            bundle.egress.allow_list,
+            vec![("93.184.216.34".to_string(), 443)]
+        );
+
+        let content =
+            std::fs::read_to_string(audit_dir.path().join("local.jsonl")).expect("audit file");
+        assert!(
+            content.contains("\"slots_mode\":\"live\""),
+            "generated bundle must audit as live policy resolution: {content}"
+        );
+    }
+
+    #[test]
+    fn admission_weaves_unrestricted_policy_into_signed_generated_policy_bundle() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"unrestricted-payload");
+        let ledger = InMemoryNonceLedger::new();
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name: "vm-unrestricted",
+            backend_name: "vz",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::unrestricted(),
+        })
+        .expect("admission")
+        .expect("Some when admission ran");
+
+        assert_ne!(ctx.admitted.plan.network_policy.0, LOCAL_DEFAULT);
+        let bundle = ctx.policy_bundle.expect("generated policy bundle");
+        assert_eq!(bundle.egress.mode.as_deref(), Some("open"));
+        assert!(bundle.network.l4.is_empty());
     }
 
     #[test]
@@ -4058,11 +4338,12 @@ mod resolve_deps_volume_tests {
     }
 
     #[test]
-    fn libkrun_threads_signed_plan_only_under_gateway_bridge_flag() {
-        // libkrun/Vz branch into the (not-yet-working) bridge factory on
-        // plan_json presence, so the default keeps them on the legacy path.
-        assert!(!should_thread_signed_plan(false, "libkrun"));
-        assert!(!should_thread_signed_plan(false, "vz"));
+    fn libkrun_and_vz_thread_signed_plan_by_default() {
+        // libkrun/Vz branch into the claim-10 gateway bridge on plan_json
+        // presence. That bridge is the enforcement boundary, so the default
+        // workload path must not require MVM_GATEWAY_BRIDGE=1.
+        assert!(should_thread_signed_plan(false, "libkrun"));
+        assert!(should_thread_signed_plan(false, "vz"));
         assert!(should_thread_signed_plan(true, "libkrun"));
     }
 
