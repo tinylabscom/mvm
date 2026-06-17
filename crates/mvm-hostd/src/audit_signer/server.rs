@@ -125,7 +125,7 @@ async fn dispatch(req: AppendEntryRequest, chain: &SharedChain) -> AppendEntryRe
     }
 }
 
-fn format_code_message(code: AuditSignerErrorCode) -> String {
+pub(crate) fn format_code_message(code: AuditSignerErrorCode) -> String {
     match code {
         AuditSignerErrorCode::NotReady => "audit-signer not ready".into(),
         AuditSignerErrorCode::InvalidRequest => "invalid request shape".into(),

@@ -21,12 +21,17 @@
 //! `spawn_broker` fork is the next slice.
 
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::VerifyingKey;
+use mvm_core::protocol::audit_signer::{
+    SignerHelperDeregisterVm, SignerHelperRegisterVm, SignerHelperRequest, SignerHelperResponse,
+};
 use tokio::net::UnixListener;
 use tracing::warn;
 
@@ -58,6 +63,12 @@ pub struct HostAgentConfig {
     /// Path to the host signer's 32-byte Ed25519 public key, used to verify
     /// every control message.
     pub host_signer_public_key_path: PathBuf,
+    /// UDS bound by this daemon's supervised signer helper child.
+    pub signer_helper_uds_path: PathBuf,
+    /// Tenant signing key path handed to the signer helper child. The
+    /// host-agent never reads this key; it only passes the path across the
+    /// process moat.
+    pub software_chain_key_path: PathBuf,
     /// Per-VM guest dispatch frame cap.
     #[serde(default = "default_max_frame_bytes")]
     pub max_frame_bytes: usize,
@@ -98,6 +109,7 @@ impl Drop for VmHandle {
 pub struct HostAgentDaemon {
     tenant_id: String,
     verifying_key: VerifyingKey,
+    signer_helper_uds_path: Option<PathBuf>,
     max_frame_bytes: usize,
     vms: HashMap<String, VmHandle>,
 }
@@ -114,6 +126,25 @@ impl HostAgentDaemon {
         Self {
             tenant_id: tenant_id.into(),
             verifying_key,
+            signer_helper_uds_path: None,
+            max_frame_bytes,
+            vms: HashMap::new(),
+        }
+    }
+
+    /// New daemon wired to a supervised resident signer helper. Registered VMs
+    /// route `host.audit.v1` appends through this helper instead of a per-VM
+    /// audit-signer process.
+    pub fn new_with_signer_helper(
+        tenant_id: impl Into<String>,
+        verifying_key: VerifyingKey,
+        signer_helper_uds_path: impl Into<PathBuf>,
+        max_frame_bytes: usize,
+    ) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+            verifying_key,
+            signer_helper_uds_path: Some(signer_helper_uds_path.into()),
             max_frame_bytes,
             vms: HashMap::new(),
         }
@@ -138,6 +169,9 @@ impl HostAgentDaemon {
             ControlRequest::Deregister(d) => {
                 // Drop = abort + unbind; idempotent on an unknown id.
                 self.vms.remove(&d.vm_id);
+                if let Err(e) = self.deregister_helper_vm(&d.vm_id) {
+                    warn!(vm_id = %d.vm_id, error = %e, "signer-helper deregister failed");
+                }
                 Ok(())
             }
         }
@@ -160,17 +194,9 @@ impl HostAgentDaemon {
         // Re-register replaces: drop the prior handle first so its socket is
         // unbound before we rebind (idempotent rebind, fail-closed).
         self.vms.remove(&r.vm_id);
-
-        // Per-VM registry: its own `host.audit.v1` handler points at this VM's
-        // audit-signer, so the handler's rate-limiter + the forwarded chain are
-        // both per-VM. Absent signer ⇒ `host.audit.v1` returns `NotBound`.
-        let mut registry = Registry::new();
-        if let Some(signer) = &r.audit_signer_uds_path {
-            registry.register(Arc::new(HostAuditV1Handler::new(AuditClient::new(
-                signer.clone(),
-            ))));
+        if let Err(e) = self.deregister_helper_vm(&r.vm_id) {
+            warn!(vm_id = %r.vm_id, error = %e, "stale signer-helper deregister failed before re-register");
         }
-        let registry = Arc::new(registry);
 
         if let Some(parent) = r.broker_listen_socket.parent() {
             std::fs::create_dir_all(parent)
@@ -185,13 +211,30 @@ impl HostAgentDaemon {
             )
         })?;
 
-        let vm_id = r.vm_id.clone();
+        self.register_helper_vm(r)?;
+
+        // Per-VM registry: in daemon mode its `host.audit.v1` handler points
+        // at the resident helper with this server-derived `vm_id`; legacy
+        // per-VM broker mode still points at a per-VM audit-signer UDS.
+        let mut registry = Registry::new();
+        if let Some(helper) = &self.signer_helper_uds_path {
+            registry.register(Arc::new(HostAuditV1Handler::new(
+                AuditClient::new_signer_helper(helper.clone(), r.vm_id.clone()),
+            )));
+        } else if let Some(signer) = &r.audit_signer_uds_path {
+            registry.register(Arc::new(HostAuditV1Handler::new(AuditClient::new(
+                signer.clone(),
+            ))));
+        }
+        let registry = Arc::new(registry);
+
         let tenant = self.tenant_id.clone();
+        let workload_id = r.workload_id.clone().unwrap_or_else(|| r.vm_id.clone());
         let mfb = self.max_frame_bytes;
-        // `vm_id` is the server-derived identity threaded into dispatch — the
-        // guest frame carries none, and this socket only ever serves this VM.
+        // `workload_id` is server-derived from registration context; the guest
+        // frame carries none, and this socket only ever serves this VM.
         let serve_task = tokio::spawn(async move {
-            if let Err(e) = serve_on_listener(listener, registry, vm_id, tenant, mfb).await {
+            if let Err(e) = serve_on_listener(listener, registry, workload_id, tenant, mfb).await {
                 warn!(error = %e, "host-agent per-VM serve loop exited");
             }
         });
@@ -204,6 +247,47 @@ impl HostAgentDaemon {
             },
         );
         Ok(())
+    }
+
+    fn register_helper_vm(&self, r: &RegisterVm) -> Result<()> {
+        let Some(path) = &self.signer_helper_uds_path else {
+            return Ok(());
+        };
+        let req = SignerHelperRequest::RegisterVm(SignerHelperRegisterVm {
+            request_id: format!("register-{}", r.vm_id),
+            vm_id: r.vm_id.clone(),
+            tenant_id: r.tenant_id.clone(),
+            workload_id: r.workload_id.clone().unwrap_or_else(|| r.vm_id.clone()),
+            workload_chain_path: r.workload_chain_path.clone(),
+            chain_head_secondary_path: r
+                .workload_chain_head_path
+                .clone()
+                .unwrap_or_else(|| r.workload_chain_path.with_extension("head")),
+        });
+        match send_helper_request(path, &req)? {
+            SignerHelperResponse::Registered { .. } => Ok(()),
+            SignerHelperResponse::Err { message, .. } => {
+                bail!("signer-helper register refused: {message}")
+            }
+            other => bail!("signer-helper returned unexpected register response: {other:?}"),
+        }
+    }
+
+    fn deregister_helper_vm(&self, vm_id: &str) -> Result<()> {
+        let Some(path) = &self.signer_helper_uds_path else {
+            return Ok(());
+        };
+        let req = SignerHelperRequest::DeregisterVm(SignerHelperDeregisterVm {
+            request_id: format!("deregister-{vm_id}"),
+            vm_id: vm_id.to_string(),
+        });
+        match send_helper_request(path, &req)? {
+            SignerHelperResponse::Deregistered { .. } => Ok(()),
+            SignerHelperResponse::Err { message, .. } => {
+                bail!("signer-helper deregister refused: {message}")
+            }
+            other => bail!("signer-helper returned unexpected deregister response: {other:?}"),
+        }
     }
 
     /// Bind the per-tenant control UDS (mode 0700, host-only) and process
@@ -253,6 +337,35 @@ impl HostAgentDaemon {
     }
 }
 
+fn send_helper_request(path: &Path, req: &SignerHelperRequest) -> Result<SignerHelperResponse> {
+    let mut stream =
+        StdUnixStream::connect(path).with_context(|| format!("connect {}", path.display()))?;
+    let body = serde_json::to_vec(req).context("encode signer-helper request")?;
+    let len: u32 = body
+        .len()
+        .try_into()
+        .context("signer-helper request too large")?;
+    stream
+        .write_all(&len.to_be_bytes())
+        .with_context(|| format!("write signer-helper request len to {}", path.display()))?;
+    stream
+        .write_all(&body)
+        .with_context(|| format!("write signer-helper request body to {}", path.display()))?;
+    let mut len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .with_context(|| format!("read signer-helper response len from {}", path.display()))?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > CONTROL_MAX_FRAME_BYTES {
+        bail!("signer-helper response {len} bytes exceeds cap {CONTROL_MAX_FRAME_BYTES}");
+    }
+    let mut body = vec![0u8; len];
+    stream
+        .read_exact(&mut body)
+        .with_context(|| format!("read signer-helper response body from {}", path.display()))?;
+    serde_json::from_slice(&body).context("decode signer-helper response")
+}
+
 /// Validate a `vm_id` is safe to embed in a filesystem path: a non-empty DNS-
 /// label-shaped token (alphanumeric plus `-`/`_`), no separators, no traversal.
 fn validate_vm_id(vm_id: &str) -> Result<()> {
@@ -271,11 +384,16 @@ fn validate_vm_id(vm_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit_signer::helper::{
+        SignerHelper, serve_on_listener as serve_helper_on_listener,
+    };
     use crate::broker::control::DeregisterVm;
     use ed25519_dalek::SigningKey;
     use mvm_core::protocol::broker::{ServiceCall, ServiceId, ServiceResponse};
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::net::UnixStream;
+    use tokio::sync::Mutex;
 
     fn daemon(tenant: &str) -> HostAgentDaemon {
         let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
@@ -285,9 +403,11 @@ mod tests {
     fn register(dir: &Path, vm: &str, tenant: &str, signer: Option<PathBuf>) -> RegisterVm {
         RegisterVm {
             vm_id: vm.into(),
+            workload_id: Some(format!("wl-{vm}")),
             tenant_id: tenant.into(),
             broker_listen_socket: dir.join(format!("{vm}.sock")),
             workload_chain_path: dir.join(format!("{tenant}.{vm}.workload.jsonl")),
+            workload_chain_head_path: Some(dir.join(format!("{tenant}.{vm}.head"))),
             audit_signer_uds_path: signer,
             services_bindings: vec![],
         }
@@ -383,5 +503,57 @@ mod tests {
             "server-derived correlation id, got {correlation_id:?}"
         );
         assert_ne!(correlation_id.as_str(), "guest-picked-id");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn helper_backed_registered_vm_can_only_write_its_own_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper_sock = dir.path().join("signer-helper.sock");
+        let helper_listener = UnixListener::bind(&helper_sock).unwrap();
+        let key_path = dir.path().join("tenant-key.ed25519");
+        std::fs::write(&key_path, [12u8; 32]).unwrap();
+        let helper = Arc::new(Mutex::new(SignerHelper::new("local", Some(key_path))));
+        let helper_task = tokio::spawn({
+            let helper = helper.clone();
+            async move {
+                let _ = serve_helper_on_listener(helper_listener, helper, 65_536).await;
+            }
+        });
+        tokio::task::yield_now().await;
+
+        let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
+        let mut d = HostAgentDaemon::new_with_signer_helper("local", vk, &helper_sock, 64 * 1024);
+        let reg_a = register(dir.path(), "vm-a", "local", None);
+        let sock_a = reg_a.broker_listen_socket.clone();
+        let chain_a = reg_a.workload_chain_path.clone();
+        let reg_b = register(dir.path(), "vm-b", "local", None);
+        let chain_b = reg_b.workload_chain_path.clone();
+
+        d.apply(&ControlRequest::Register(reg_a)).unwrap();
+        d.apply(&ControlRequest::Register(reg_b)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut client = UnixStream::connect(&sock_a).await.unwrap();
+        let call = ServiceCall {
+            service: ServiceId::parse("host.audit.v1").unwrap(),
+            verb: "emit".into(),
+            correlation_id: mvm_core::protocol::broker::CorrelationId::new("guest-picked-id"),
+            payload: serde_json::json!({
+                "ts": "2026-06-17T00:00:00Z",
+                "fields": {"vm": "a"}
+            }),
+        };
+        write_frame(&mut client, &call).await.unwrap();
+        let resp: ServiceResponse = read_frame(&mut client, 64 * 1024).await.unwrap();
+        assert!(matches!(resp, ServiceResponse::Ok { .. }));
+
+        let a_lines = std::fs::read_to_string(&chain_a).unwrap();
+        assert_eq!(a_lines.lines().count(), 1);
+        assert!(
+            !chain_b.exists() || std::fs::read_to_string(&chain_b).unwrap().is_empty(),
+            "vm-a socket must not write vm-b chain"
+        );
+
+        helper_task.abort();
     }
 }

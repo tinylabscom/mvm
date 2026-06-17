@@ -35,6 +35,27 @@ pub fn parse(bytes: &[u8]) -> Result<SubprocessConfig, serde_json::Error> {
     serde_json::from_slice(bytes)
 }
 
+/// Config for the resident per-tenant signer helper.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SignerHelperConfig {
+    /// The single tenant this helper serves.
+    pub tenant_id: String,
+    /// UDS the host-agent daemon uses for register/deregister/append requests.
+    pub uds_path: PathBuf,
+    /// Path to a pre-existing tenant signing key (software path; a hardware
+    /// enclave handle replaces it later).
+    #[serde(default)]
+    pub software_chain_key_path: Option<PathBuf>,
+    /// Max request frame size accepted by the helper.
+    #[serde(default = "crate::audit_signer::server::default_max_frame_bytes")]
+    pub max_frame_bytes: usize,
+}
+
+pub fn parse_signer_helper(bytes: &[u8]) -> Result<SignerHelperConfig, serde_json::Error> {
+    serde_json::from_slice(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,5 +86,30 @@ mod tests {
         });
         let err = parse(&serde_json::to_vec(&bad).unwrap()).unwrap_err();
         assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn signer_helper_config_roundtrips() {
+        let cfg = SignerHelperConfig {
+            tenant_id: "local".into(),
+            uds_path: PathBuf::from("/tmp/test/signer-helper.sock"),
+            software_chain_key_path: Some(PathBuf::from("/tmp/test/host-signer.ed25519")),
+            max_frame_bytes: 4096,
+        };
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        assert_eq!(parse_signer_helper(&bytes).unwrap(), cfg);
+    }
+
+    #[test]
+    fn signer_helper_config_defaults_max_frame_bytes() {
+        let raw = serde_json::json!({
+            "tenant_id": "local",
+            "uds_path": "/tmp/test/signer-helper.sock",
+        });
+        let cfg = parse_signer_helper(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert_eq!(
+            cfg.max_frame_bytes,
+            crate::audit_signer::server::default_max_frame_bytes()
+        );
     }
 }
