@@ -385,6 +385,24 @@ fn build_tool_registry() -> ToolRegistry {
     registry
 }
 
+/// The admission hook every MCP code-run boots under — cold and warm alike.
+/// MCP runs untrusted AI code, so each VM is admitted as a deny-all transient
+/// workload: the signed plan's `tenant_id` makes the libkrun/Vz supervisor
+/// spawn the enforcing gateway bridge (Firecracker enforces the same policy
+/// field via nftables). Without admission no bridge spawns and the deny-all is
+/// inert on the bridge backends.
+fn mcp_untrusted_admit()
+-> impl Fn(&std::path::Path, &str) -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+    let backend = mvm_backend::backend::AnyBackend::auto_select()
+        .name()
+        .to_string();
+    crate::commands::vm::untrusted_transient_admit(
+        backend,
+        DEFAULT_VM_CPUS,
+        u64::from(DEFAULT_VM_MEM_MIB),
+    )
+}
+
 impl ExecDispatcher {
     /// Cold-boot path: every call boots its own transient VM via
     /// [`crate::exec::run_captured`]. Used when the client did not
@@ -408,20 +426,9 @@ impl ExecDispatcher {
             // MCP runs untrusted code: deny egress by default.
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
-        // Admit the run like any untrusted transient workload: the signed plan's
-        // tenant_id makes the libkrun/Vz supervisor spawn the enforcing gateway
-        // bridge, so the deny-all above is actually applied (without admission no
-        // bridge spawns and the deny-all is inert on those backends; Firecracker
-        // enforces the same field via nftables). Each cold call is its own
-        // admission against the host signer.
-        let backend = mvm_backend::backend::AnyBackend::auto_select()
-            .name()
-            .to_string();
-        let admit = crate::commands::vm::untrusted_transient_admit(
-            backend,
-            DEFAULT_VM_CPUS,
-            u64::from(DEFAULT_VM_MEM_MIB),
-        );
+        // Admit the run (see `mcp_untrusted_admit`): without it no bridge spawns
+        // and the deny-all above is inert on the libkrun/Vz backends.
+        let admit = mcp_untrusted_admit();
         crate::exec::run_captured(req, Some(&admit))
     }
 
@@ -467,9 +474,21 @@ impl ExecDispatcher {
         // tears down its own boot. That's correct (no leak) at the
         // cost of an extra VM start in pathological cases.
         let prefix = format!("mcp-session-{}", short_id(session_id));
-        let booted =
-            crate::exec::boot_session_vm(env, &prefix, DEFAULT_VM_CPUS, DEFAULT_VM_MEM_MIB, None)
-                .with_context(|| format!("booting warm VM for session '{session_id}'"))?;
+        // Admit the session VM like the cold path so the gateway bridge spawns and
+        // the deny-all is enforced (see `mcp_untrusted_admit`). A substrate forces
+        // a cold boot — snapshot restore goes through `FlakeRunConfig`, which
+        // carries `network_policy` but not the `tenant_id`/`plan_json` that trigger
+        // the bridge — so the first call of a session pays a cold boot; every later
+        // call reuses this running VM.
+        let admit = mcp_untrusted_admit();
+        let booted = crate::exec::boot_session_vm(
+            env,
+            &prefix,
+            DEFAULT_VM_CPUS,
+            DEFAULT_VM_MEM_MIB,
+            Some(&admit),
+        )
+        .with_context(|| format!("booting warm VM for session '{session_id}'"))?;
         let booted_name = booted.vm_name.clone();
         let handle = Arc::new(Mutex::new(booted));
 

@@ -199,30 +199,87 @@ impl FlowPolicy for PlanFlowPolicy {
     }
 }
 
+/// TTL for an admission-time bare DNS pin (hours). Generous (a transient run's
+/// lifetime); the pin is resolved once at bridge launch and used for the VM's
+/// life, mirroring Firecracker resolving `-d <host>` once at nftables-insert.
+const BARE_PIN_TTL_HOURS: i64 = 24;
+
+/// Resolve a bare [`mvm_core::network_policy::NetworkPolicy`]'s allow-list hosts
+/// to IPs on the host — the admission-time DNS pin that lets the no-bundle path
+/// gate `host:port` at L4 like Firecracker (whose iptables resolves `-d <host>`
+/// at insert time). Impure (does DNS); called once in `run_bridge_inner`'s sync
+/// prologue, before the async bridge starts. Unrestricted ⇒ empty registry (no
+/// pins needed). A literal IP needs no lookup. A host that fails to resolve is
+/// pinned with an empty IP set so [`canonicalize_network_policy`] fails CLOSED
+/// (deny-all) rather than silently widening reach.
+fn resolve_bare_dns_pins(
+    np: &mvm_core::network_policy::NetworkPolicy,
+) -> mvm_core::policy::dns_pin::DnsPinRegistry {
+    use std::net::{IpAddr, ToSocketAddrs};
+    let mut reg = mvm_core::policy::dns_pin::DnsPinRegistry::new();
+    let Some(rules) = np.resolve_rules() else {
+        return reg; // unrestricted: no L4 pin set, the gate opens wide
+    };
+    for hp in rules {
+        let ips: Vec<IpAddr> = if let Ok(ip) = hp.host.parse::<IpAddr>() {
+            vec![ip]
+        } else {
+            (hp.host.as_str(), 0u16)
+                .to_socket_addrs()
+                .map(|addrs| addrs.map(|sa| sa.ip()).collect())
+                .unwrap_or_default()
+        };
+        reg.add(mvm_core::policy::dns_pin::DnsPin::new(
+            hp.host,
+            ips,
+            chrono::Duration::hours(BARE_PIN_TTL_HOURS),
+        ));
+    }
+    reg
+}
+
 /// Lower a bare [`mvm_core::network_policy::NetworkPolicy`] (the no-signed-bundle
-/// transient/dev path) to the bridge's egress-enforcement triple
-/// `(egress_l4, dns_allow, flow_policy)` — the libkrun/Vz analogue of
-/// Firecracker consuming `VmStartConfig.network_policy`. Egress flows open iff
-/// the policy admits some egress (unrestricted, or a non-empty allow-list /
-/// preset); a deny-all policy drops every egress flow at open. Host gating rides
-/// the [`DnsSinkholeScan`] (`dns_allow` = the allow-list hostnames); there is no
-/// L4/CIDR rule because a bare policy carries `host:port`, not resolved CIDRs (no
-/// admission-time DNS pin). Composes under the always-on mandatory-deny +
-/// placeholder-leak scans. `run_bridge_inner` calls this on its no-bundle arm;
-/// the live-bridge tests call it so they exercise the exact production lowering.
+/// transient/dev path) + admission-time DNS `pins` to the bridge's
+/// egress-enforcement triple `(egress_l4, dns_allow, flow_policy)` — the
+/// libkrun/Vz analogue of Firecracker consuming `VmStartConfig.network_policy`.
+/// Egress flows open iff the policy admits some egress (unrestricted, or a
+/// non-empty allow-list / preset); a deny-all policy drops every egress flow at
+/// open.
+///
+/// `egress_l4` now carries the resolved L4 grant set
+/// ([`mvm_core::policy::projection::canonicalize_network_policy`]): a DNS
+/// carve-out (UDP/53, name-gated) plus one TCP rule per (pinned IP, allow-list port), so
+/// the [`L4PolicyScan`] gates `host:port` and a direct-IP dial to an unlisted
+/// address is dropped — uniform with Firecracker's nftables. `dns_allow` still
+/// rides the [`DnsSinkholeScan`] (the host-name gate on DNS queries); the two
+/// compose under the always-on mandatory-deny + placeholder-leak scans. A
+/// lowering failure (an unresolvable / expired pin) fails CLOSED to deny-all.
+/// `run_bridge_inner` calls this on its no-bundle arm; the live-bridge tests
+/// call it with a hand-built pin registry so they exercise the exact production
+/// lowering.
 fn bare_network_policy_egress(
     np: &mvm_core::network_policy::NetworkPolicy,
+    pins: &mvm_core::policy::dns_pin::DnsPinRegistry,
 ) -> (
     Option<mvm_core::policy::projection::CanonicalEgress>,
     Vec<String>,
     Arc<dyn FlowPolicy>,
 ) {
+    let now = chrono::Utc::now().to_rfc3339();
     let dns_allow: Vec<String> = np
         .resolve_rules()
         .map(|rules| rules.into_iter().map(|hp| hp.host).collect())
         .unwrap_or_default();
+    let egress_l4 = mvm_core::policy::projection::canonicalize_network_policy(np, pins, &now)
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                error = %e,
+                "bare egress L4 lowering failed; failing closed to deny-all"
+            );
+            mvm_core::policy::projection::CanonicalEgress::Rules(Vec::new())
+        });
     let flow: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_network_policy(np));
-    (None, dns_allow, flow)
+    (Some(egress_l4), dns_allow, flow)
 }
 
 // ============================================================================
@@ -537,6 +594,17 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
         .expect("build bridge tokio runtime");
     let local = tokio::task::LocalSet::new();
 
+    // Admission-time DNS pin for the bare (no-bundle) path: resolve the bare
+    // allow-list's hosts to IPs on the host BEFORE entering the async bridge
+    // (blocking DNS belongs in this sync prologue, not the runtime). The pins
+    // feed the L4 scan so libkrun/Vz gate host:port — not host name only —
+    // mirroring Firecracker resolving `-d <host>` at nftables-insert time. The
+    // bundle path resolves its own L4 from the signed policy and ignores these.
+    let bare_pins = match (cfg.bundle.is_none(), cfg.network_policy.as_ref()) {
+        (true, Some(np)) => resolve_bare_dns_pins(np),
+        _ => mvm_core::policy::dns_pin::DnsPinRegistry::new(),
+    };
+
     rt.block_on(local.run_until(async move {
         let sink = match GatewayAuditSink::bind(&cfg.audit_socket) {
             Ok(s) => s,
@@ -609,15 +677,16 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
             // Composes under the always-on mandatory-deny + placeholder-leak
             // scans exactly as the bundle path does.
             None => match &cfg.network_policy {
-                Some(np) => bare_network_policy_egress(np),
+                Some(np) => bare_network_policy_egress(np, &bare_pins),
                 // Neither bundle nor a threaded policy: fail CLOSED to deny-all.
                 // Every workload-bearing spawn now threads a policy (cold boot +
                 // warm-claim attach frame); this arm is the backstop so a missing
                 // policy can't silently open egress on a pool hit. The always-on
                 // mandatory-deny + placeholder scans still compose on top.
-                None => {
-                    bare_network_policy_egress(&mvm_core::network_policy::NetworkPolicy::deny_all())
-                }
+                None => bare_network_policy_egress(
+                    &mvm_core::network_policy::NetworkPolicy::deny_all(),
+                    &bare_pins,
+                ),
             },
         };
         // Packet-observer wiring shared across both directions.
@@ -693,9 +762,10 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
                     cfg.plan.tenant.0.clone(),
                     // The resolved flow gate (bundle- or bare-policy-derived),
                     // matching every other endpoint. This is the primary Vz
-                    // path's deny-by-default enforcement point: a bare deny-all
-                    // run installs no L4 scan, so enforcement rides entirely on
-                    // this gate.
+                    // path's coarse deny-by-default enforcement point; it composes
+                    // with the per-packet L4 + DNS scans in `wiring` (a deny-all
+                    // flow drops here before a packet is ever scanned). It must be
+                    // the resolved gate, not a permissive default.
                     flow_policy.clone(),
                     event_tx,
                     wiring,
@@ -2517,13 +2587,32 @@ mod tests {
     }
 
     fn tcp_egress_frame(payload: &[u8]) -> Vec<u8> {
+        tcp_egress_frame_to([93, 184, 216, 34], 443, payload)
+    }
+
+    /// A TCP egress frame (guest 10.0.0.2 → `dst:port`). Lets the bare-L4 tests
+    /// dial an unlisted IP or the wrong port to prove the L4 scan drops it.
+    fn tcp_egress_frame_to(dst: [u8; 4], dst_port: u16, payload: &[u8]) -> Vec<u8> {
         use etherparse::PacketBuilder;
         let b = PacketBuilder::ethernet2([1; 6], [2; 6])
-            .ipv4([10, 0, 0, 2], [93, 184, 216, 34], 64)
-            .tcp(40000, 443, 1, 64000);
+            .ipv4([10, 0, 0, 2], dst, 64)
+            .tcp(40000, dst_port, 1, 64000);
         let mut o = Vec::new();
         b.write(&mut o, payload).unwrap();
         o
+    }
+
+    /// A bare DNS pin registry pinning `host` to `ips`, valid now — the
+    /// admission-time pin `run_bridge_inner` resolves on the host. Tests build it
+    /// by hand so the bare-L4 lowering is exercised without real DNS.
+    fn bare_pins(host: &str, ips: &[&str]) -> mvm_core::policy::dns_pin::DnsPinRegistry {
+        let mut reg = mvm_core::policy::dns_pin::DnsPinRegistry::new();
+        reg.add(mvm_core::policy::dns_pin::DnsPin::new(
+            host,
+            ips.iter().map(|s| s.parse().unwrap()).collect(),
+            chrono::Duration::hours(1),
+        ));
+        reg
     }
 
     fn wiring_with(observers: Vec<Arc<dyn Observer>>) -> ObserverWiring {
@@ -2699,6 +2788,21 @@ mod tests {
             .udp(40000, 53);
         let mut o = Vec::new();
         b.write(&mut o, &dns).unwrap();
+        o
+    }
+
+    /// A DHCP DISCOVER-shaped egress frame (guest 0.0.0.0:68 → broadcast
+    /// 255.255.255.255:67). The payload is a stub — only the UDP 5-tuple matters
+    /// to the flow gate. Used to pin the deny-all control-plane posture: DHCP is
+    /// an egress flow and is dropped at the gate under deny-all (the guest then
+    /// self-assigns the static gvproxy fallback address — no lease, no hang).
+    fn dhcp_discover_frame() -> Vec<u8> {
+        use etherparse::PacketBuilder;
+        let b = PacketBuilder::ethernet2([1; 6], [0xff; 6])
+            .ipv4([0, 0, 0, 0], [255, 255, 255, 255], 64)
+            .udp(68, 67);
+        let mut o = Vec::new();
+        b.write(&mut o, &[0u8; 32]).unwrap();
         o
     }
 
@@ -3031,8 +3135,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bare_deny_all_policy_drops_egress_through_the_live_bridge() {
         // No flag ⇒ deny-all. The bare lowering's flow gate drops egress at open.
-        let (l4, dns_allow, policy) =
-            bare_network_policy_egress(&mvm_core::network_policy::NetworkPolicy::deny_all());
+        let (l4, dns_allow, policy) = bare_network_policy_egress(
+            &mvm_core::network_policy::NetworkPolicy::deny_all(),
+            &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
+        );
         let dir = tempfile::tempdir().unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
@@ -3085,13 +3191,57 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bare_deny_all_drops_dhcp_discover_through_the_live_bridge() {
+        // Deny-all control-plane posture (loopback-only): DHCP is an egress flow,
+        // so it is dropped at the flow gate under deny-all — no lease reaches the
+        // guest. The guest then self-assigns the static gvproxy fallback address
+        // (udhcpc `-n` exits rather than hanging on a never-arriving OFFER). This
+        // pins the decision: deny-all admits NO control-plane carve-out; egress
+        // (incl. DHCP) is uniformly denied and the static fallback keeps eth0 up.
+        let (l4, dns_allow, policy) = bare_network_policy_egress(
+            &mvm_core::network_policy::NetworkPolicy::deny_all(),
+            &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let sup_listen = dir.path().join("sup.sock");
+        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+            gvproxy_path.clone(),
+            sup_listen.clone(),
+            "vm-test".to_string(),
+            "t".to_string(),
+            policy,
+            tx,
+            wiring_with_egress_scan(l4, dns_allow),
+        ));
+        let libkrun = connect_libkrun(&sup_listen).await;
+        libkrun.send(&dhcp_discover_frame()).await.unwrap();
+
+        let mut buf = vec![0u8; 65536];
+        let got = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            gvproxy.recv(&mut buf),
+        )
+        .await;
+        assert!(
+            got.is_err(),
+            "deny-all must drop the guest's DHCP DISCOVER (no lease under deny-all)"
+        );
+        bridge.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bare_deny_all_policy_drops_egress_through_the_live_vz_bridge() {
         // Parity proof for the PRIMARY Vz path (`run_vz_gvproxy_bridge`): the
         // resolved deny-by-default flow gate must reach this bridge. With no L4
         // scan on a bare deny-all run, enforcement rides entirely on this gate,
         // so a permissive gate here would leave Vz egress fully open.
-        let (l4, dns_allow, policy) =
-            bare_network_policy_egress(&mvm_core::network_policy::NetworkPolicy::deny_all());
+        let (l4, dns_allow, policy) = bare_network_policy_egress(
+            &mvm_core::network_policy::NetworkPolicy::deny_all(),
+            &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
+        );
         let dir = tempfile::tempdir().unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
@@ -3153,10 +3303,12 @@ mod tests {
         // `--allow-host example.com:443` ⇒ flow opens AND a DNS lookup for the
         // listed host is forwarded — the end-to-end "allow-host actually opens
         // egress" proof the macOS VM-level test could not produce.
-        let (l4, dns_allow, policy) =
-            bare_network_policy_egress(&mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+        let (l4, dns_allow, policy) = bare_network_policy_egress(
+            &mvm_core::network_policy::NetworkPolicy::allow_list(vec![
                 mvm_core::network_policy::HostPort::new("example.com", 443),
-            ]));
+            ]),
+            &bare_pins("example.com", &["93.184.216.34"]),
+        );
         let dir = tempfile::tempdir().unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
@@ -3189,10 +3341,12 @@ mod tests {
     async fn bare_allow_list_policy_narrows_to_unlisted_host_through_the_live_bridge() {
         // `--allow-host example.com:443` ⇒ a lookup for a DIFFERENT host is
         // sink-holed: the allow-list narrows, it does not open everything.
-        let (l4, dns_allow, policy) =
-            bare_network_policy_egress(&mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+        let (l4, dns_allow, policy) = bare_network_policy_egress(
+            &mvm_core::network_policy::NetworkPolicy::allow_list(vec![
                 mvm_core::network_policy::HostPort::new("example.com", 443),
-            ]));
+            ]),
+            &bare_pins("example.com", &["93.184.216.34"]),
+        );
         let dir = tempfile::tempdir().unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
@@ -3227,16 +3381,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn bare_allow_list_policy_forwards_tcp_egress_through_the_live_bridge() {
-        // A bare allow-list carries host:port, not CIDRs, so it adds no L4 scan
-        // (`egress_l4 == None`) — the TCP connection itself is forwarded (the
-        // DnsSinkholeScan does the host gating). Guards against the allow path
-        // being silently over-blocked at L4.
-        let (l4, dns_allow, policy) =
-            bare_network_policy_egress(&mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+    async fn bare_allow_list_l4_forwards_pinned_host_port_through_the_live_bridge() {
+        // `--allow-host example.com:443` with the admission-time pin
+        // example.com → 93.184.216.34 ⇒ a TCP connection to the pinned IP:port is
+        // forwarded. Proves the L4 scan admits the allowed host:port (the allow
+        // path is not over-blocked now that L4 gates it).
+        let (l4, dns_allow, policy) = bare_network_policy_egress(
+            &mvm_core::network_policy::NetworkPolicy::allow_list(vec![
                 mvm_core::network_policy::HostPort::new("example.com", 443),
-            ]));
-        assert!(l4.is_none(), "bare allow-list installs no L4 scan");
+            ]),
+            &bare_pins("example.com", &["93.184.216.34"]),
+        );
+        assert!(l4.is_some(), "bare allow-list now installs an L4 scan");
         let dir = tempfile::tempdir().unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
@@ -3257,11 +3413,100 @@ mod tests {
         let mut buf = vec![0u8; 65536];
         let n = tokio::time::timeout(std::time::Duration::from_secs(3), gvproxy.recv(&mut buf))
             .await
-            .expect("a TCP egress packet must reach gvproxy under an open allow-list")
+            .expect("a TCP packet to the pinned host:port must reach gvproxy")
             .expect("recv ok");
         let parsed = crate::supervisor::network::packet::parse(&buf[..n])
             .expect("forwarded frame re-parses");
         assert_eq!(parsed.five_tuple.dst_port, 443);
+        bridge.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bare_allow_list_l4_drops_direct_ip_to_unlisted_through_the_live_bridge() {
+        // THE direct-IP bypass, closed: `--allow-host example.com:443` pinned to
+        // 93.184.216.34, but the guest dials a raw, unlisted IP (8.8.8.8:443) with
+        // no DNS lookup. Name gating can't see it; the L4 scan must drop it —
+        // uniform with Firecracker's nftables.
+        let (l4, dns_allow, policy) = bare_network_policy_egress(
+            &mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+                mvm_core::network_policy::HostPort::new("example.com", 443),
+            ]),
+            &bare_pins("example.com", &["93.184.216.34"]),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let sup_listen = dir.path().join("sup.sock");
+        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+            gvproxy_path.clone(),
+            sup_listen.clone(),
+            "vm-test".to_string(),
+            "t".to_string(),
+            policy,
+            tx,
+            wiring_with_egress_scan(l4, dns_allow),
+        ));
+        let libkrun = connect_libkrun(&sup_listen).await;
+        libkrun
+            .send(&tcp_egress_frame_to([8, 8, 8, 8], 443, b"payload"))
+            .await
+            .unwrap();
+
+        let mut buf = vec![0u8; 65536];
+        let got = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            gvproxy.recv(&mut buf),
+        )
+        .await;
+        assert!(
+            got.is_err(),
+            "a direct-IP dial to an unlisted address must be dropped at L4"
+        );
+        bridge.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bare_allow_list_l4_drops_wrong_port_on_pinned_host_through_the_live_bridge() {
+        // Port gating: `--allow-host example.com:443` pinned to 93.184.216.34, but
+        // the guest dials the pinned IP on a DIFFERENT port (8080). The L4 scan
+        // gates host:port, so this must drop — what a name-only gate would miss.
+        let (l4, dns_allow, policy) = bare_network_policy_egress(
+            &mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+                mvm_core::network_policy::HostPort::new("example.com", 443),
+            ]),
+            &bare_pins("example.com", &["93.184.216.34"]),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let sup_listen = dir.path().join("sup.sock");
+        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+            gvproxy_path.clone(),
+            sup_listen.clone(),
+            "vm-test".to_string(),
+            "t".to_string(),
+            policy,
+            tx,
+            wiring_with_egress_scan(l4, dns_allow),
+        ));
+        let libkrun = connect_libkrun(&sup_listen).await;
+        libkrun
+            .send(&tcp_egress_frame_to([93, 184, 216, 34], 8080, b"payload"))
+            .await
+            .unwrap();
+
+        let mut buf = vec![0u8; 65536];
+        let got = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            gvproxy.recv(&mut buf),
+        )
+        .await;
+        assert!(
+            got.is_err(),
+            "a connection to the pinned host on an unlisted port must drop at L4"
+        );
         bridge.abort();
     }
 

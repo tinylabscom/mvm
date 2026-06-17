@@ -570,24 +570,42 @@ impl VmBackend for LibkrunBackend {
         // So a spawn failure is logged, never a launch rollback. On success the
         // guard reaps both subprocesses if a later start step fails; it's
         // defused once the VM is up and the `stop` path owns teardown.
-        let mut broker_guard = match crate::broker_services_spawn::spawn_broker_services_if_admitted(
-            crate::broker_services_spawn::BrokerServicesSpawnParams {
-                workload_id: &config.name,
-                tenant_id: config.tenant_id.as_deref(),
-                vm_name: &config.name,
-                state_dir: &state_dir,
-                // libkrun proxies the guest's BROKER_PORT dial straight to this
-                // per-VM socket.
-                broker_listen_socket: &mvm_core::config::vm_vsock_port_socket(
-                    &config.name,
-                    mvm_guest::vsock::BROKER_PORT,
-                ),
-            },
-        ) {
-            Ok(guard) => guard,
-            Err(e) => {
-                tracing::warn!(vm = %config.name, error = %e, "host-services broker spawn failed; host.audit.v1 unavailable for this VM");
-                crate::broker_services_spawn::BrokerServicesGuard::defused()
+        // libkrun proxies the guest's BROKER_PORT dial straight to this per-VM
+        // socket — bound by the per-VM broker fork, or by the per-tenant daemon
+        // (the default; opt out with MVM_HOST_AGENT_DAEMON=0).
+        let broker_listen_socket =
+            mvm_core::config::vm_vsock_port_socket(&config.name, mvm_guest::vsock::BROKER_PORT);
+        let mut broker_guard = if crate::host_agent_spawn::host_agent_daemon_enabled() {
+            match crate::host_agent_spawn::register_host_agent_services_if_admitted(
+                crate::host_agent_spawn::HostAgentServicesParams {
+                    workload_id: &config.name,
+                    tenant_id: config.tenant_id.as_deref(),
+                    vm_name: &config.name,
+                    state_dir: &state_dir,
+                    broker_listen_socket: &broker_listen_socket,
+                },
+            ) {
+                Ok(g) => crate::host_agent_spawn::ServicesGuard::Agent(g),
+                Err(e) => {
+                    tracing::warn!(vm = %config.name, error = %e, "host-agent registration failed; host.audit.v1 unavailable for this VM");
+                    crate::host_agent_spawn::ServicesGuard::None
+                }
+            }
+        } else {
+            match crate::broker_services_spawn::spawn_broker_services_if_admitted(
+                crate::broker_services_spawn::BrokerServicesSpawnParams {
+                    workload_id: &config.name,
+                    tenant_id: config.tenant_id.as_deref(),
+                    vm_name: &config.name,
+                    state_dir: &state_dir,
+                    broker_listen_socket: &broker_listen_socket,
+                },
+            ) {
+                Ok(guard) => crate::host_agent_spawn::ServicesGuard::Fork(guard),
+                Err(e) => {
+                    tracing::warn!(vm = %config.name, error = %e, "host-services broker spawn failed; host.audit.v1 unavailable for this VM");
+                    crate::host_agent_spawn::ServicesGuard::None
+                }
             }
         };
 
@@ -610,6 +628,11 @@ impl VmBackend for LibkrunBackend {
         // Reap the per-VM broker + audit-signer too (no-op when none spawned),
         // so they can't outlive the guest.
         crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
+        // If this VM registered with a per-tenant host-agent daemon instead of
+        // forking a broker, deregister it + reap its audit-signer (no-op for the
+        // fork path; the daemon stays warm). The two reaps compose — each is a
+        // no-op for the other path.
+        crate::host_agent_spawn::reap_host_agent_services_from_state(&vm_state_dir(&id.0), &id.0);
 
         let pid_path = vm_libkrun_pid(&id.0);
         let pid = match read_pid(&pid_path) {

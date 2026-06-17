@@ -219,6 +219,9 @@ pub fn spawn(scratch_dir: &std::path::Path) -> Result<PasstHandle, PasstError> {
         source: e,
     })?;
 
+    // Tie passt to the supervisor's lifetime so a SIGKILL'd / panicked
+    // supervisor never orphans it (Linux `PR_SET_PDEATHSIG`).
+    crate::child_lifecycle::tie_to_parent_death(&mut cmd);
     let child = cmd.spawn().map_err(PasstError::Spawn)?;
 
     // Close the child end on the parent side — the child inherits

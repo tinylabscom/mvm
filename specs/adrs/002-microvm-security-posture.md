@@ -409,6 +409,26 @@ path at all — the carve-out is a compile-time constraint, not only prose.
 (The mock backend implements the marker as the hermetic lifecycle test
 double per ADR-045; it never carries a real workload.)
 
+**Deny-all control-plane posture (DHCP/ARP).** A networked guest brings up
+`eth0` at boot — link-up, then DHCP, then a static fallback on the gvproxy
+subnet — before the agent drops privileges. Under a **deny-all** policy the
+host-side flow gate drops *every* egress flow, and DHCP (UDP 67/68) is an egress
+flow, so the guest's DISCOVER never reaches the gateway and no lease is offered.
+The decision is **loopback-only, with no control-plane carve-out**: deny-all
+means deny-all, including DHCP. This does not hang the guest — `udhcpc` runs with
+`-n` (exit if no lease) and the guest then self-assigns the static gvproxy
+fallback address, so `eth0` is administratively up but has no admitted egress;
+only loopback and the (egress-denied) local link are usable. ARP / IPv6-ND are
+non-IP L2 frames the bridge forwards unchanged (it gates IP 5-tuples, not L2);
+they reach only the local gateway and admit no IP egress, so they are harmless
+under deny-all and need no special handling. A *minimal DHCP/ARP carve-out* was
+considered and rejected: the static fallback already keeps `eth0` up without one,
+and a UDP 67/68 allowance would be one more flow-gate special case (and, if
+scoped to "anywhere", a covert-channel surface) for no functional gain. When the
+policy admits egress (allow-list / unrestricted) the flow gate opens and DHCP
+flows normally. This is pinned by
+`bare_deny_all_drops_dhcp_discover_through_the_live_bridge`.
+
 **Tier-0 preview substrate (a naming bridge).** The `wasm-sandbox` backend
 above asserts none of the numbered claims by design, so it sits *outside* the
 Tier 1/2 isolation scale rather than below it — there is no "Tier 3" to demote

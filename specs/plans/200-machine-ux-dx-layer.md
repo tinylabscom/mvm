@@ -976,24 +976,37 @@ Live validation of the WS-B network-policy work on macOS/Vz proved the enforceme
 mechanism (deny-all drops, allow-list forwards-and-narrows) through the live gateway
 bridge with real Unix datagram sockets (`bare_*_through_the_live_bridge` tests in
 `mvm-hostd` `gateway_bridge`), and proved no regression (A/B vs `main` identical).
-Caveat on the bare allow-list: on the libkrun/Vz no-bundle path the narrowing is by
-host **name** only (a `DnsSinkholeScan` over DNS queries) — the port is not gated and a
-direct-IP dial bypasses the name gate; Firecracker gates `host:port` via nftables. The
-signed receipt records this honestly via `egress_enforcement` (see the deferred
-"uniform L4" follow-up). It also surfaced these pre-existing gaps, none caused by the
-WS-B change:
+The bare allow-list is now `host:port` L4-enforced uniformly across Firecracker (nftables)
+and libkrun/Vz (admission-time DNS pin → `L4PolicyScan`), closing the direct-IP-dial bypass
+that the original name-only `DnsSinkholeScan` left open (see the "uniform L4" follow-up
+below, now landed). WS-B also surfaced these pre-existing gaps, none caused by the WS-B
+change:
 
-- [ ] **macOS transient-run guest networking (blocks `machine run --net` on macOS).**
-      `mvmctl run` / `machine run` transient guests never bring up `eth0`: the transient
-      init doesn't run mkGuest `setup_network`, and the run's command is unprivileged
-      (uid 901, setpriv) so it can't DHCP either (`udhcpc: socket: Operation not
-      permitted`). So a transient guest has no egress at all on macOS (Vz) regardless of
-      policy — identical on `main`, pre-existing. The fix: the transient init must bring
-      up `eth0` (DHCP) as root before the agent drops privileges, policy-gated so deny-all
-      still means no egress. This unblocks the VM-level egress proof on macOS *and* makes
-      the headline `machine run --net --image alpine -- nslookup` actually work on macOS.
-      (Linux/KVM/Firecracker transient runs already network, so WS-B is exercisable there
-      today.)
+- [x] **macOS transient-run guest networking (blocks `machine run --net` on macOS).**
+      Was: `mvmctl run` / `machine run` transient guests never brought up `eth0` (the init
+      ran only loopback; the unprivileged uid-901 command couldn't DHCP), so a guest had no
+      egress on the gvproxy backends regardless of policy. **Landed in #1020**: the shared
+      `mvm_guest::guest_net::configure_guest_network` (eth0 link-up → resolv.conf seed →
+      `udhcpc -n -q` → static gvproxy fallback) now runs in `mvm-guest-netinit` as **uid 0,
+      before the agent drops privileges**, on every workload (incl. transient). The
+      bring-up is **unconditional** and egress is enforced **host-side** (the gateway-bridge
+      flow gate + mandatory-deny), not by withholding `eth0` — an untrusted guest can't be
+      its own boundary, and under deny-all the flow gate drops all egress while the static
+      fallback keeps `eth0` up without hanging (`udhcpc -n`; see the DHCP/ARP posture
+      decision below). Claims 1–3 (uid/setpriv/verified-boot) are unaffected: DHCP runs in
+      PID-1 init at uid 0, the entrypoint still drops to uid 901 under setpriv.
+      **Live-validated on this Mac (2026-06-16):** the `examples/egress-probe` workload
+      booted on libkrun and reached BOTH external probe targets (`up --wait` verdict 0),
+      proving the guest now gets a working `eth0` (link-up → DHCP/static-fallback) — the
+      `#1020` enabler. The Vz VM-level smoke is gated on `up --wait` being libkrun-only
+      today (Plan 152 WS-A), an orthogonal pre-existing gap; the Vz *bridge* enforcement is
+      covered by the deterministic `*_live_vz_bridge` tests.
+      Follow-up surfaced by this validation and **fixed in #1034**: the `up --wait`
+      direct-boot path (`commands/vm/up.rs`) previously built `VmStartConfig` without
+      threading the resolved `--network-allow` policy, so a dev `up --network-allow` did not
+      pass the bare policy to the libkrun supervisor. #1034 threads the resolved policy
+      through the `up` boot path; the remaining enforcement proof is the native-rvproxy
+      cutover work in Plan 193, not a missing `VmStartConfig.network_policy` field.
 - [x] **OCI cache index `schema_version 0` bug.** `OciCacheIndex`
       (`crates/mvm-cli/src/commands/image/mod.rs`) derives `Default` (→ `schema_version:
       0`), overriding the `#[serde(default = "schema_version")]` (= 1), so `save_index`
@@ -1045,14 +1058,23 @@ flow gate was the sole enforcement. Proven by
 `bare_deny_all_policy_drops_egress_through_the_live_vz_bridge`. Remaining
 follow-ups:
 
-- [ ] **Uniform `host:port` L4 egress enforcement on the libkrun/Vz bare path.** The
-      no-bundle path lowers an allow-list to a `DnsSinkholeScan` over the host *names*
-      only (`bare_network_policy_egress` returns `egress_l4 = None`), so the port is not
-      gated and a direct-IP dial bypasses the name gate. Firecracker enforces `host:port`
-      via nftables. The receipt now records this honestly (`egress_enforcement`:
-      `firecracker:l4-host-port` vs `libkrun:dns-name-only`) instead of overstating, but
-      true uniformity needs an admission-time DNS pin feeding `L4PolicyScan` on the bare
-      path, mirroring the bundle path. deny-all / unrestricted are already uniform.
+- [x] **Uniform `host:port` L4 egress enforcement on the libkrun/Vz bare path.** Was: the
+      no-bundle path lowered an allow-list to a `DnsSinkholeScan` over host *names* only
+      (`bare_network_policy_egress` returned `egress_l4 = None`), so the port was ungated and
+      a direct-IP dial bypassed the name gate; Firecracker gates `host:port` via nftables.
+      Closed: `run_bridge_inner` now resolves the bare allow-list's hosts on the host
+      (`resolve_bare_dns_pins`, the admission-time DNS pin, mirroring nftables resolving
+      `-d <host>` at insert) and `mvm_core::policy::projection::canonicalize_network_policy`
+      lowers `(pinned IP, port)` into `CanonicalEgress::Rules` (TCP per pin + a UDP/53-only
+      carve-out so name resolution still works, gated on qname by the `DnsSinkholeScan`;
+      TCP/53 is deliberately not carved out — the qname gate only covers UDP/53).
+      `L4PolicyScan` then drops a direct-IP dial to an unlisted address and a connection to a
+      pinned host on the wrong port — uniform with Firecracker. An unresolvable/expired pin
+      fails CLOSED to deny-all. The receipt tier collapsed to a uniform
+      `<backend>:l4-host-port` (no more `dns-name-only`). Proven by
+      `bare_allow_list_l4_{forwards_pinned_host_port,drops_direct_ip_to_unlisted,drops_wrong_port_on_pinned_host}_through_the_live_bridge`
+      (libkrun + Vz) + `canonicalize_network_policy` unit tests. deny-all / unrestricted were
+      already uniform.
 - [x] **Emit `plan.launched` / `plan.failed` on the universal transient-run path.** The
       run admit closure (`commands/vm/exec.rs`) consumed `admit_plan_for_boot`'s
       `AdmissionContext` for the substrate but dropped the emitter, so only `plan.admitted`
@@ -1080,11 +1102,18 @@ follow-ups:
       allow-mode gate); the `AllowAll`-only unit test was deleted (allow-mode is covered by
       the `PlanFlowPolicy` unrestricted test). Pure hygiene, no behavior change — cfg(linux)
       `mvm-firecracker-bridge` cross-compiled with cargo-zigbuild.
-- [ ] **Decide the DHCP/ARP posture under deny-all.** The flow-open gate has no UDP
-      67/68 / ARP carve-out; latent today (macOS transient guest doesn't DHCP) but a
-      correctness trap once guest networking is fixed (a deny-all networked guest would
-      hang on a DHCP OFFER). Pick loopback-only vs a control-plane carve-out and pin it
-      with a live-bridge test.
+- [x] **Decide the DHCP/ARP posture under deny-all.** Decision: **loopback-only, no
+      control-plane carve-out** — deny-all drops every egress flow, DHCP (UDP 67/68)
+      included, so the guest gets no lease and self-assigns the static gvproxy fallback
+      address (`eth0` up, no admitted egress; only loopback + the egress-denied local link
+      usable). It does **not** hang: `udhcpc -n` exits on no-lease and the static fallback
+      applies (both from the eth0 bring-up that already landed). ARP / IPv6-ND are non-IP L2
+      frames the bridge forwards unchanged (it gates IP 5-tuples) — local-only, harmless
+      under deny-all, no special handling. A minimal DHCP/ARP carve-out was considered and
+      rejected (the static fallback already keeps `eth0` up; a UDP 67/68 allowance would be
+      a needless flow-gate special case and, if unscoped, a covert-channel surface).
+      Documented in ADR-002 §"Deny-all control-plane posture (DHCP/ARP)"; pinned by
+      `bare_deny_all_drops_dhcp_discover_through_the_live_bridge`.
 
 ## Verification
 

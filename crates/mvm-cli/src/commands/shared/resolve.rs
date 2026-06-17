@@ -212,12 +212,12 @@ pub fn resolve_run_network_policy(
 /// - **deny-all** → `flow-drop` and **unrestricted** → `open`: enforced
 ///   identically on every backend (the flow-open gate / no gate), so the tier
 ///   is backend-independent.
-/// - An **allow-list / preset** is host **and** port enforced on Firecracker
-///   (nftables `-d <host> --dport <port>`), but on the libkrun/Vz bare path
-///   only the host *name* is gated (DNS sinkhole) — the port is not, and a
-///   direct-IP dial bypasses the name gate. Full `host:port` L4 enforcement
-///   there needs an admission-time DNS pin feeding the L4 scan (deferred), so
-///   the tier is reported honestly as `dns-name-only` rather than overstating.
+/// - An **allow-list / preset** is now host **and** port enforced on every
+///   backend: Firecracker via nftables (`-d <host> --dport <port>`), libkrun/Vz
+///   via the admission-time DNS pin feeding the `L4PolicyScan` (a direct-IP dial
+///   to an unlisted address is dropped, not just an unlisted name). The tier is
+///   uniformly `<backend>:l4-host-port`; the backend is still named so the
+///   receipt records which substrate enforced.
 pub fn egress_enforcement_label(
     backend: &str,
     policy: &mvm_core::network_policy::NetworkPolicy,
@@ -228,11 +228,8 @@ pub fn egress_enforcement_label(
     match policy.resolve_rules() {
         // Some(empty) = deny-all: every egress flow dropped at the gate, uniform.
         Some(rules) if rules.is_empty() => "flow-drop".to_string(),
-        // Allow-list / preset with rules: fidelity differs by backend.
-        _ => match backend {
-            "firecracker" => format!("{backend}:l4-host-port"),
-            other => format!("{other}:dns-name-only"),
-        },
+        // Allow-list / preset with rules: host:port L4-enforced on every backend.
+        _ => format!("{backend}:l4-host-port"),
     }
 }
 
@@ -358,10 +355,10 @@ mod tests {
     }
 
     #[test]
-    fn enforcement_tier_allow_list_is_honest_per_backend() {
-        // The signed receipt must NOT claim port enforcement on backends that
-        // only gate the host name. Firecracker enforces host:port; libkrun/Vz
-        // gate the DNS name only on the bare path.
+    fn enforcement_tier_allow_list_is_uniform_l4_host_port() {
+        // host:port is now L4-enforced on every backend (Firecracker nftables;
+        // libkrun/Vz via the admission-time DNS pin → L4 scan), so the receipt
+        // records `<backend>:l4-host-port` uniformly — no more `dns-name-only`.
         let p = NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]);
         assert_eq!(
             egress_enforcement_label("firecracker", &p),
@@ -369,8 +366,8 @@ mod tests {
         );
         assert_eq!(
             egress_enforcement_label("libkrun", &p),
-            "libkrun:dns-name-only"
+            "libkrun:l4-host-port"
         );
-        assert_eq!(egress_enforcement_label("vz", &p), "vz:dns-name-only");
+        assert_eq!(egress_enforcement_label("vz", &p), "vz:l4-host-port");
     }
 }
