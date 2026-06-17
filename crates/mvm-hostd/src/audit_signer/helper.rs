@@ -1,6 +1,6 @@
 //! Resident per-tenant signer helper.
 //!
-//! Phase 2a of Plan 202 moves the audit signer from one process per VM to one
+//! The resident helper moves audit signing from one process per VM to one
 //! helper per tenant. The helper owns a `vm_id -> Chain` map: `RegisterVm`
 //! opens a VM's workload chain, `AppendEntry` routes through the server-derived
 //! `vm_id`, and `DeregisterVm` drops the chain handle so the file is closed.
