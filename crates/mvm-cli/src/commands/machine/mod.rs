@@ -25,6 +25,7 @@ use mvm_core::{config, naming};
 
 use super::Cli;
 use super::vm::exec::{RunArgs, RunProfile, run_secure};
+use super::vm::{console, down};
 
 const MACHINE_SPEC_SCHEMA_VERSION: u32 = 1;
 
@@ -48,6 +49,12 @@ pub(in crate::commands) enum MachineAction {
     /// Remove one persistent named machine spec
     #[command(name = "rm")]
     Rm(MachineRemoveArgs),
+    /// Run a command inside an already-started named machine
+    Exec(MachineExecArgs),
+    /// Attach an interactive shell/console to an already-started named machine
+    Shell(MachineShellArgs),
+    /// Stop an already-started named machine
+    Stop(MachineStopArgs),
 }
 
 /// Ephemeral image-backed run. Mirrors the relevant subset of `mvmctl run`'s
@@ -199,6 +206,36 @@ pub(in crate::commands) struct MachineRemoveArgs {
     /// Print a JSON deletion summary.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineExecArgs {
+    /// Persistent machine name.
+    #[arg(long)]
+    pub name: String,
+    /// Bypass the sealed-image accessibility check.
+    #[arg(long)]
+    pub force: bool,
+    /// Argv to run inside the guest (use `--` to separate).
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+    pub argv: Vec<String>,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineShellArgs {
+    /// Persistent machine name.
+    #[arg(long)]
+    pub name: String,
+    /// Bypass the sealed-image accessibility check.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineStopArgs {
+    /// Persistent machine name.
+    #[arg(long)]
+    pub name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -362,6 +399,55 @@ fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
     Ok(())
 }
 
+fn ensure_machine_spec_exists(name: &str) -> Result<MachineSpec> {
+    load_machine_spec(name).with_context(|| format!("loading machine spec for {name:?}"))
+}
+
+fn machine_exec_command(argv: &[String]) -> String {
+    let quoted = argv
+        .iter()
+        .map(|arg| crate::exec::shell_quote(arg))
+        .collect::<Vec<_>>();
+    format!("exec {}", quoted.join(" "))
+}
+
+fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) -> Result<()> {
+    ensure_machine_spec_exists(&args.name)?;
+    console::run(
+        cli,
+        console::Args {
+            name: args.name,
+            command: Some(machine_exec_command(&args.argv)),
+            force: args.force,
+        },
+        cfg,
+    )
+}
+
+fn shell_machine(cli: &Cli, args: MachineShellArgs, cfg: &MvmConfig) -> Result<()> {
+    ensure_machine_spec_exists(&args.name)?;
+    console::run(
+        cli,
+        console::Args {
+            name: args.name,
+            command: None,
+            force: args.force,
+        },
+        cfg,
+    )
+}
+
+fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) -> Result<()> {
+    ensure_machine_spec_exists(&args.name)?;
+    down::run(
+        cli,
+        down::Args {
+            name: Some(args.name),
+        },
+        cfg,
+    )
+}
+
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     match args.action {
         MachineAction::Run(run_args) => run_secure(cli, run_args.into_run_args(), cfg),
@@ -369,6 +455,9 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Ls(list_args) => list_machines(list_args),
         MachineAction::Inspect(inspect_args) => inspect_machine(inspect_args),
         MachineAction::Rm(remove_args) => remove_machine(remove_args),
+        MachineAction::Exec(exec_args) => exec_machine(cli, exec_args, cfg),
+        MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
+        MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
     }
 }
 
@@ -604,6 +693,48 @@ mod tests {
     }
 
     #[test]
+    fn exec_shell_and_stop_parse() {
+        match parse(&["exec", "--name", "web", "--", "echo", "hello world"]).expect("parse") {
+            MachineAction::Exec(args) => {
+                assert_eq!(args.name, "web");
+                assert_eq!(args.argv, vec!["echo", "hello world"]);
+                assert!(!args.force);
+            }
+            other => panic!("expected exec action, got {other:?}"),
+        }
+        match parse(&["shell", "--name", "web", "--force"]).expect("parse") {
+            MachineAction::Shell(args) => {
+                assert_eq!(args.name, "web");
+                assert!(args.force);
+            }
+            other => panic!("expected shell action, got {other:?}"),
+        }
+        match parse(&["stop", "--name", "web"]).expect("parse") {
+            MachineAction::Stop(args) => assert_eq!(args.name, "web"),
+            other => panic!("expected stop action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_requires_argv() {
+        let err = parse(&["exec", "--name", "web"]).expect_err("argv is required");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn machine_exec_command_quotes_argv_for_guest_exec() {
+        let argv = vec![
+            "printf".to_string(),
+            "hello %s\n".to_string(),
+            "it's ok".to_string(),
+        ];
+        assert_eq!(
+            machine_exec_command(&argv),
+            "exec 'printf' 'hello %s\n' 'it'\\''s ok'"
+        );
+    }
+
+    #[test]
     fn create_persists_machine_spec_under_data_dir() {
         let _state = IsolatedMachineState::new();
         let args = MachineCreateArgs {
@@ -734,6 +865,14 @@ mod tests {
     }
 
     #[test]
+    fn running_vm_wrappers_require_a_persisted_machine_spec() {
+        let _state = IsolatedMachineState::new();
+        let err = ensure_machine_spec_exists("web").expect_err("missing spec rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("loading machine spec for \"web\""));
+    }
+
+    #[test]
     fn top_level_cli_routes_machine_run() {
         let cli = Cli::try_parse_from([
             "mvmctl", "machine", "run", "--image", "alpine", "--", "echo", "hi",
@@ -764,6 +903,24 @@ mod tests {
                     assert_eq!(create.image, "alpine");
                 }
                 other => panic!("expected create action, got {other:?}"),
+            },
+            other => panic!("expected Commands::Machine, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn top_level_cli_routes_machine_exec() {
+        let cli = Cli::try_parse_from([
+            "mvmctl", "machine", "exec", "--name", "web", "--", "echo", "hi",
+        ])
+        .expect("top-level parse");
+        match cli.command {
+            Commands::Machine(args) => match args.action {
+                MachineAction::Exec(exec) => {
+                    assert_eq!(exec.name, "web");
+                    assert_eq!(exec.argv, vec!["echo", "hi"]);
+                }
+                other => panic!("expected exec action, got {other:?}"),
             },
             other => panic!("expected Commands::Machine, got {other:?}"),
         }

@@ -1,10 +1,10 @@
 # Plan 200 — machine UX/DX layer
 
 **Status:** in progress — `mvmctl machine run` shipped (Workstream A/B kickoff);
-`--net`/`--allow-host`, local image sources, and persistent spec verbs
-(`create`/`ls`/`inspect`/`rm`) shipped; persistent lifecycle verbs
-(`start`/`exec`/`shell`/`stop`), full `mvm.toml` machine mapping, SDK parity,
-and `pack` pending
+`--net`/`--allow-host`, local image sources, persistent spec verbs
+(`create`/`ls`/`inspect`/`rm`), and running-VM wrappers
+(`exec`/`shell`/`stop`) shipped; persistent image-backed `start`, full
+`mvm.toml` machine mapping, SDK parity, and `pack` pending
 **Owner:** mvm
 **Date:** 2026-06-15
 
@@ -858,10 +858,12 @@ Required behavior:
 - [x] Implement `machine create --name <name> --image <ref>`.
 - [ ] Implement `machine start --name <name>` through the existing admitted
       launch path.
-- [ ] Implement `machine exec --name <name> -- <cmd>` through the existing
-      guest-agent command path.
-- [ ] Implement `machine shell --name <name>` through the existing console path.
-- [ ] Implement `machine stop --name <name>` through the existing `down` path.
+- [x] Implement `machine exec --name <name> -- <cmd>` through the existing
+      guest-agent command path. This wrapper requires a persisted `MachineSpec`
+      and reuses the current `console --command` attach path with the same
+      argv shell-quoting strategy as transient exec.
+- [x] Implement `machine shell --name <name>` through the existing console path.
+- [x] Implement `machine stop --name <name>` through the existing `down` path.
 - [x] Implement `machine inspect --json` and `machine ls --json`.
 - [x] Implement `machine rm <name> --yes` with confirmed spec deletion.
 - [x] Add tests for state persistence, state deletion, unknown-field rejection,

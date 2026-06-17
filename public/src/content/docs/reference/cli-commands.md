@@ -345,11 +345,16 @@ egress via `--net` / `--allow-host`, and the same `--profile`, `--add-dir`,
 | `mvmctl machine inspect <name> --json` | Print one persisted named machine spec as JSON |
 | `mvmctl machine rm <name> --yes` | Remove one persisted named machine spec |
 | `mvmctl machine rm <name> --yes --json` | Print a JSON deletion summary |
+| `mvmctl machine exec --name <name> -- <cmd>...` | Run a command in an already-started named machine |
+| `mvmctl machine shell --name <name>` | Attach an interactive shell/console to an already-started named machine |
+| `mvmctl machine stop --name <name>` | Stop an already-started named machine |
 
-Persistent lifecycle verbs (`machine start` / `exec` / `shell` / `stop`) and
-`machine pack` for portable signed artifacts are planned follow-ups; they are
-intentionally not yet present rather than stubbed. Use `mvmctl up` for the
-manifest/flake path that already exposes named networks and policy bundles.
+`machine exec`, `machine shell`, and `machine stop` require the named
+`MachineSpec` to exist first, then reuse the existing console/down paths for the
+running VM. Persistent image-backed `machine start` and `machine pack` for
+portable signed artifacts are planned follow-ups; they are intentionally not yet
+present rather than stubbed. Use `mvmctl up` for the manifest/flake path that
+already exposes named networks and policy bundles.
 
 ## Sandbox State
 
