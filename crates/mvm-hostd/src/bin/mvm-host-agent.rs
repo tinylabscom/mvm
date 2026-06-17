@@ -34,6 +34,7 @@ use mvm_hostd::audit_signer::config::SignerHelperConfig;
 use mvm_hostd::broker::daemon::{HostAgentConfig, HostAgentDaemon};
 
 const SIGNER_HELPER_READY_TIMEOUT: Duration = Duration::from_secs(10);
+const REGISTRATION_JOURNAL_FILE: &str = "registrations.json";
 
 fn read_stdin_blocking() -> Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(1024);
@@ -168,6 +169,14 @@ async fn supervise_signer_helper(
     }
 }
 
+fn registration_journal_path(cfg: &HostAgentConfig) -> Result<PathBuf> {
+    let dir = cfg
+        .control_socket
+        .parent()
+        .context("host-agent control socket path must have a parent directory")?;
+    Ok(dir.join(REGISTRATION_JOURNAL_FILE))
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_target(true)
@@ -195,12 +204,16 @@ fn main() -> Result<()> {
         .context("mvm-host-agent tokio runtime build failed")?;
 
     runtime.block_on(async move {
-        let daemon = Arc::new(Mutex::new(HostAgentDaemon::new_with_signer_helper(
-            cfg.tenant_id.clone(),
-            verifying_key,
-            cfg.signer_helper_uds_path.clone(),
-            cfg.max_frame_bytes,
-        )));
+        let registration_journal = registration_journal_path(&cfg)?;
+        let daemon = Arc::new(Mutex::new(
+            HostAgentDaemon::new_with_signer_helper(
+                cfg.tenant_id.clone(),
+                verifying_key,
+                cfg.signer_helper_uds_path.clone(),
+                cfg.max_frame_bytes,
+            )
+            .with_registration_journal(registration_journal),
+        ));
         let (ready_tx, ready_rx) = oneshot::channel();
         tokio::spawn(supervise_signer_helper(
             cfg.clone(),
@@ -210,6 +223,15 @@ fn main() -> Result<()> {
         ready_rx
             .await
             .context("mvm-signer-helper supervisor stopped before readiness")??;
+        let restored = {
+            let mut daemon = daemon.lock().await;
+            daemon.restore_journaled_registrations()
+        }?;
+        tracing::info!(
+            tenant_id = %cfg.tenant_id,
+            registrations = restored,
+            "mvm-host-agent registration journal restored"
+        );
         HostAgentDaemon::run_shared(daemon, &cfg.control_socket).await
     })?;
 
