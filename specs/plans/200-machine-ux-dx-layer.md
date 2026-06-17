@@ -518,6 +518,43 @@ Implementation shape:
 - Include the effective network policy in dry-run output and signed receipts
   as non-sensitive metadata.
 - Add parser tests, dry-run tests, deny-by-default tests, and allow-list tests.
+
+> **Implementation plan (investigated 2026-06-16; not yet built).** Exact
+> touch points + one security decision, so the next pass is mechanical:
+>
+> - **Reuse, don't reinvent:** `resolve_network_policy(preset, allow)`
+>   (`commands/shared/resolve.rs`) already maps preset/allow-list → a
+>   `NetworkPolicy`, rejects the mutual-exclusion case, and defaults to
+>   `deny_all()`. `up` already exposes `--network-preset`/`--network-allow`
+>   through it. Mirror that; the ergonomic `--net`/`--allow-host` names map onto
+>   the same `(preset, allow)` signature.
+> - **`VmStartConfig.network_policy` already exists** and is applied by the
+>   backend (the run path defaults it to `deny_all` via `..Default::default()`
+>   at `mvm-cli/src/exec.rs` `run_inner`; claim 10 holds today). So enforcement
+>   is a one-line thread, **not** new backend work — the earlier worry that the
+>   field was missing was wrong.
+> - **Thread:** add `--net`/`--allow-host` to `RunArgs` *and* the internal
+>   `Args` (`commands/vm/exec.rs`), map them in `RunArgs::into_exec_args`,
+>   `resolve_network_policy` in `build_exec_request`, set
+>   `ExecRequest.network_policy`, and set it on the `run_inner` `VmStartConfig`
+>   (replacing the defaulted deny-all). `ExecRequest` gains a required field, so
+>   the ~9 test constructions + `commands/ops/mcp.rs` need
+>   `network_policy: NetworkPolicy::default()`.
+> - **Machine:** add the same two flags to `MachineRunArgs` and pass them through
+>   `into_run_args`.
+> - **SECURITY DECISION (settled):** the transient policy is applied by the
+>   backend (image-backed runs are ephemeral; it does **not** ride a signed
+>   plan), **but every egress relaxation MUST be recorded in the chain-signed
+>   audit** — `emit_oci_run_admission` gains an `oci_network_policy` audit label
+>   (e.g. `"deny-all"` / `"preset:dev"` / `"allowlist:2"`). `network_policy_ref`
+>   on `SynthesisInput` is a *named* bundle reference and is the wrong channel
+>   for an inline transient policy. An enforcement-without-audit `--net` is
+>   rejected as a claim-10 gap; do not ship enforcement and audit separately.
+> - **Dry-run/receipt:** add a `network_policy` summary to `RunPreflightSummary`
+>   and the redacted receipt (`ReceiptInput`): kind only, not the host list.
+> - **Tests:** default→deny-all, `--net dev`, `--allow-host h:443`, mutual
+>   exclusion, machine-run passthrough, dry-run surfaces the policy, and the
+>   audit chain records the relaxation.
 - Add source-shape tests for registry ref, local archive path, stdin archive,
   unpacked rootfs, malformed archive, traversal attempt, wrong architecture, and
   missing provenance handling.
