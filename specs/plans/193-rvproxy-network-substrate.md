@@ -156,12 +156,68 @@ own internal default).
           set the four `[policy]` toggles rvproxy defaults to `false`
           (`allow_transport_{ingress,egress}`, `allow_dns_{local,upstream}`) or
           the dataplane drops every frame.
-    - [ ] **native launch.** Rewire the gvproxy spawn to `rvproxy run --config`
-          behind a flag (keeping the splice) + a live `dev up`-through-rvproxy boot.
-  - [ ] **2c — flow-event sink → audit re-emission.** Subscribe to rvproxy's
-        `FlowEvent` export (needs the rvproxy JSONL/UDS export followup) and
-        re-feed `signer_task`'s chain so the claim-10 audit stays mvm's source of
-        truth.
+    - [x] **native launch wiring.** `gvproxy::spawn` takes an optional native
+          config: `Some` → `<MVM_GATEWAY_BIN> run --config <path>`, `None` → the
+          gvproxy-compat flags (`NetworkingMode::Gvproxy.native_config`,
+          `#[serde(default)]`). The `mvm-libkrun-supervisor` bin, when
+          `MVM_NETWORKING=native`, renders the config from the admitted bundle
+          (`rvproxy_launch::write_native_gateway_config`) into the per-VM scratch
+          dir and sets `native_config` before the gateway spawn — fail-closed if
+          the render fails. The splice still runs and shares the *same* egress
+          resolution (`egress_and_dns_from_effective`, now consumed by both), so
+          this is additive belt-and-suspenders. Validated against the real
+          rvproxy binary three ways: emitted config parses + `validate()`s
+          (off-tree), `rvproxy run --config` binds the vfkit + API sockets on
+          macOS, and `native_spawn_then_drop_reaps_child` boots a real binary
+          through `spawn(.., Some(cfg))`.
+    - [x] **native launch — proven live on a real libkrun workload boot.**
+          `mvmctl up --flake examples/sleeper --hypervisor libkrun -d` with
+          `MVM_NETWORKING=native` + `MVM_GATEWAY_BIN=<macOS rvproxy>` +
+          `MVM_GATEWAY_BRIDGE=1`: the workload took the bridge path
+          (`tenant_id=Some`), the supervisor's native block fired and rendered
+          the correct policy config (`<vm>/rvproxy.toml` — deny-by-default + the
+          6-entry mandatory-deny denylist + vfkit transport + flow-audit export),
+          and the gateway launched as `rvproxy run --config` (native — no
+          `gvproxy.log`, vs gvproxy-compat). Two findings: (1) the bridge is
+          off-by-default — `populate_audit_substrate` (which sets `tenant_id`) is
+          gated behind `MVM_GATEWAY_BRIDGE=1` (the old gvproxy bridge "vfkit
+          socket address is empty" issue; the native `run --config` path does not
+          hit it, so this work helps un-gate it — deferred to 2d with the parity
+          gate); (2) **fixed** — the bridge path refused under `MVM_DATA_DIR`
+          because `validate_audit_substrate` resolved the signing-key dir through a
+          private HOME-fixed helper while admission + `compute_audit_substrate`
+          use the data-dir-aware `mvm_keys_dir()`; the validator now uses the same
+          `mvm_keys_dir()` (path-traversal defense intact; resolves across the
+          supervisor process moat; honors the data-dir override per the
+          isolation invariant and the out-of-scope-malicious-host threat model).
+    - [x] **native launch — guest data-path proven live.** With the audit-substrate
+          fix, a real `mvmctl up --hypervisor libkrun -d` (native + bridge,
+          `MVM_DATA_DIR`-isolated, no key symlink) booted clean: plan admitted →
+          `validate_audit_substrate` passed → supervisor stayed up (`libkrun.pid`
+          written) → native `rvproxy run --config` bound the API + vfkit sockets
+          (no `gvproxy.log`) → rvproxy logged `tenant_id="rv2b"` +
+          `ConnectionEstablished`/`accepted transport connection` (libkrun's
+          virtio-net connected to the native gateway). The guest's data path runs
+          through native rvproxy enforcing the rendered policy.
+    - [ ] **native launch — egress enforcement matrix.** sleeper idles (no
+          egress), so the allow/deny/flow-audit verdicts aren't exercised yet;
+          needs an egress-attempting fixture (curl an allowed host + a denied
+          host, assert the verdicts + flow-audit entries). The last check before
+          2d deletes the splice.
+  - [x] **2c — flow-event sink → audit re-emission (parser + mapper + pump).**
+        `supervisor::network::rvproxy_flow_audit` parses rvproxy's exported
+        dataplane-audit JSONL/UDS stream, keeps only the `flow` records, and maps
+        each rvproxy `FlowEvent` onto mvm's audit `FlowEvent` (`opened`→`Opened`;
+        `denied` close→`Closed{PolicyDropped}` for claim-10; normal
+        `closed`→`Closed{Eof}`), with a per-connection `flow_id` from the 5-tuple
+        (more granular than the splice's coarse `<vm>-egress`). `pump_flow_audit`
+        runs over any `BufRead` (real source = the JSONL file / `UnixStream`) and
+        hands mapped events to a sink; the production sink forwards into
+        `signer_task`'s mpsc channel so they're chain-signed. Byte-scan kills stay
+        splice-side, so rvproxy only emits opened/denied/normal-closed — the
+        mapping is total. Pure + golden-tested; spawning the reader thread + the
+        sink→channel wiring lands with 2b (the export only flows once rvproxy runs
+        with the emitted config).
   - [ ] **2d — parity-gate extension + splice deletion.** Make the WS-1.5
         witnesses run against the **native** path (binary-discriminating) and
         delete the splice + Plan-141 `on_packet` hooks only once green.

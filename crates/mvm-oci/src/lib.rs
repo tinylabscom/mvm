@@ -44,6 +44,10 @@
 
 #![forbid(unsafe_code)]
 
+// Local OCI image-layout archive reader (`oci-archive:` / stdin). Public so
+// `mvm-cli`'s `run --image` can ingest a local archive through the same
+// digest-verified path as a registry pull. Filesystem-free (reads a `Read`).
+pub mod archive;
 pub mod error;
 pub mod layer;
 pub mod manifest;
@@ -54,6 +58,7 @@ pub mod reference;
 // drive the unpack and to surface refusals in audit-chain entries.
 pub mod unpack;
 
+pub use archive::{OciArchiveImage, OciArchiveLayer, read_oci_archive};
 pub use error::OciError;
 pub use layer::{LayerDescriptor, LayerFetchOptions, OciLayerFetcher};
 pub use manifest::{

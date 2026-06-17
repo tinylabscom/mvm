@@ -89,6 +89,24 @@ export type {
 export { BrowserSandbox, CodeError, CodeSandbox } from "./_helpers.js";
 export type { BrowserSandboxOptions } from "./_helpers.js";
 
+// In-guest host-services runtime surface (`mvm.audit.emit`, `mvm.host.time()`).
+// Namespaces, so `import * as mvm; mvm.audit.emit(...)` works inside a booted
+// workload. Importing them is cheap — the shared object is loaded lazily on
+// first call, never at import — so this stays inert in host authoring use.
+export * as audit from "./audit.js";
+export * as host from "./host.js";
+export {
+  HostServiceError,
+  BadRequestError,
+  RateLimitedError,
+  UnavailableError,
+  NotBoundError,
+  VerbNotImplementedError,
+  ServiceError,
+  TransportError,
+  InvalidInputError,
+} from "./_hostsvc.js";
+
 // ────────────────────────────────────────────────────────────────────
 // Module state
 // ────────────────────────────────────────────────────────────────────

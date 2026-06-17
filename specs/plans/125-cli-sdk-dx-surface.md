@@ -239,10 +239,10 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
         the host-signer pubkey — proving spawn → dispatch → chain-sign →
         verifiable per-VM `workload_audit` entry (b1→b2c) end-to-end, real
         processes, no VM, no veneer. Deterministic / CI-runnable.
-      - **E5.3b-3** — in-guest host-services SDK veneer. **Not PyO3/napi** — owner preference is auto-generation, so it rides the existing schema-codegen pipeline: generate the wire **types**, hand-write only the thin vsock transport the pipeline cannot generate. No Rust↔language binding dependency; each language gets generated client types plus a pure-language transport/veneer.
-        - [x] **E5.3b-3a** — codegen foundation: feature-gated `#[derive(JsonSchema)]` on broker wire types (`ServiceCall`/`ServiceResponse`/`ServiceErrorCode` plus `host_audit`/`host_time`/`host_cost` payloads), `mvm-core` `emit_broker_schema`, `schema/broker-services-v0.json`, generated `sdks/python/mvm/_broker/services.py` and `sdks/typescript/src/broker/services.ts`; `check-stubs` drift-gated and default closure schemars-free.
-        - [x] **E5.3b-3b (Python)** — pure-Python veneer over the generated types: `mvm.audit.emit`/`emit_batch`, `mvm.host.time()`, and `mvm.host.cost()` via lazy `AF_VSOCK(HOST_CID:BROKER_PORT)` length-framed `ServiceCall`; typed service exceptions; injectable `connect` for tests over an `AF_UNIX` socket-pair mock broker. Full Python suite: 167 passed / 7 skipped, ruff clean.
-        - [ ] **E5.3b-3c (TypeScript)** — deferred for cause: Node has no native `AF_VSOCK` and the in-guest bridge is TCP↔vsock per configured binding, not a generic path. Pick a transport first (native vsock addon weighed under ADR-002, or a broker TCP↔vsock bridge binding baked into the image), then mirror the Python veneer.
+      - **E5.3b-3** — in-guest host-services SDK veneer. **Not PyO3/napi.** Two complementary auto-generation legs, so a new language is shim-sized with no hand-written Rust binding: (1) **schema codegen** keeps generating the wire **types** for every SDK (the typed surface), and (2) a single Rust **`cdylib`** (`mvm-host-services-ffi`, JSON-in/JSON-out `extern "C"`) carries the transport, which each language loads through a thin FFI shim. The cdylib transport **supersedes the original per-language pure-language transport** (the Python AF_VSOCK sketch) — the wire + framing now live once, in Rust, and the no-native-`AF_VSOCK` problem that deferred TypeScript dissolves (the shim just loads the `.so`).
+        - [x] **E5.3b-3a (codegen + cdylib core)** — codegen foundation (feature-gated `#[derive(JsonSchema)]` on the broker wire types, `mvm-core` `emit_broker_schema`, `schema/broker-services-v0.json`, generated `sdks/python/mvm/_broker/services.py` + `sdks/typescript/src/broker/services.ts`, `check-stubs` drift-gated, default closure schemars-free) **plus** the `mvm-host-services-ffi` cdylib (#982): `mvm_hsvc_call`/`mvm_hsvc_free` over `mvm_guest::host_{audit,time,cost}`, typed errors → stable `MVM_HSVC_*` status, socket-pair tested.
+        - [x] **E5.3b-3b (Python)** — `ctypes` veneer over the cdylib (#983): `mvm.audit.emit`/`emit_batch`, `mvm.host.time()`/`cost()` over `mvm/_hostsvc.py` (lazy-loaded `libmvm_host_services.so`, `MVM_HSVC_*` → typed `HostServiceError`); cross-compiled for the glibc workload rootfs + baked at `/mvm/runtime/lib/` by the runtime-overlay flake. **Supersedes** the pure-Python `_broker/transport.py` (removed); the generated `_broker/services.py` types are retained. C-call seam monkeypatched in tests (no real `.so`/broker); Python suite green.
+        - [x] **E5.3b-3c (TypeScript)** — `koffi` shim over the same cdylib (#987): `sdks/typescript/src/_hostsvc.ts` loads `libmvm_host_services.so` via koffi, `mvm.audit`/`mvm.host` over it; no native `AF_VSOCK` needed, so the prior deferral is resolved. Mirrors the Python veneer; baked into the runtime overlay alongside the Python SDK. **E5.3b-3 is complete across both SDKs.**
       - [x] **E5.3b-4** — live-VM E2E. **PROVEN on libkrun (this Mac)**: an
         admitted `mvmctl up --tenant local` boots a sealed workload whose
         in-guest `host_audit::emit` reaches the per-VM broker over BROKER_PORT,
@@ -250,8 +250,8 @@ Thin wrappers over `Sandbox`; big perceived surface, small code.
         `mvmctl trust audit verify` (host-stamped `category: workload_audit`,
         server-authoritative `brk-*` correlation id). The Rust audit-probe is the
         in-guest driver (option a); the Python/cdylib `mvm.audit.emit` over the
-        same wire (option b) is the productized path under b3. The broker-spawn
-        wiring gap that blocked a plain launch is fixed (see below).
+        same wire (option b) is the productized path now that b3 has landed. The
+        broker-spawn wiring gap that blocked a plain launch is fixed (see below).
         - [x] **in-guest driver (audit-probe)** — `crates/mvm-guest/src/bin/audit-probe.rs`
           calls `mvm_guest::host_audit::emit` from inside the guest; the opt-in
           `withAuditProbe` mkGuest flag bakes it at `/usr/local/bin/audit-probe`

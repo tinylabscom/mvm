@@ -36,6 +36,10 @@ pub mod packet;
 pub mod pipeline;
 /// Render the full `rvproxy run --config` TOML for a native gateway.
 pub mod rvproxy_config;
+/// Re-feed rvproxy's exported flow events into mvm's chain-signed audit.
+pub mod rvproxy_flow_audit;
+/// Resolve an admitted bundle into a written native rvproxy gateway config.
+pub mod rvproxy_launch;
 /// Lowering of a resolved egress policy into rvproxy's native `[policy]` config
 /// (claim-10 enforcement onto the rvproxy substrate).
 pub mod rvproxy_policy;

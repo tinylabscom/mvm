@@ -543,21 +543,14 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
                     chrono::Utc::now(),
                     &EmergencyDeny::default(),
                 );
-                let l4 = mvm_core::policy::canonicalize_l4(&eff.network.l4).unwrap_or_else(|_| {
-                    mvm_core::policy::projection::CanonicalEgress::Rules(Vec::new())
-                });
-                // DNS hostname gating from the egress allow-list's hosts — unless
-                // egress is "open" (no host restriction). An empty list adds no
-                // sink-hole (build_egress_scan), so "open"/unset stays ungated.
-                let dns_allow: Vec<String> = if eff.egress.mode.as_deref() == Some("open") {
-                    Vec::new()
-                } else {
-                    eff.egress
-                        .allow_list
-                        .iter()
-                        .map(|(host, _port)| host.clone())
-                        .collect()
-                };
+                // L4 egress + DNS hostname allow-list, derived from the resolved
+                // policy. The same derivation the native rvproxy gateway uses
+                // (`rvproxy_launch::egress_and_dns_from_effective`), so the splice
+                // and the native substrate enforce byte-identical policy. An
+                // empty DNS list adds no sink-hole (build_egress_scan), so
+                // "open"/unset stays ungated.
+                let (l4, dns_allow) =
+                    crate::supervisor::network::rvproxy_launch::egress_and_dns_from_effective(&eff);
                 // The per-tenant deny-by-default flow-open gate,
                 // derived from the SAME resolved policy as the packet scan above
                 // (so the coarse gate never drops a flow the scan would admit).
