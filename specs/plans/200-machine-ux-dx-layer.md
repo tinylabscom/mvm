@@ -997,7 +997,7 @@ WS-B change:
 - [ ] **`run --image <oci>` won't boot on macOS — missing `mvm-meta.json` sidecar.** The
       OCI materialize path produces a rootfs without the W6.2 `mvm-meta.json` sidecar /
       W1.4b runtime-overlay mount point, so `admit_overlay_aware` refuses it. **Handed to
-      Session 3 item 1a** (the `MachineImageSource` admission leg) — investigation showed it
+      Session 3 item 1** (the OCI-boot blocker) — investigation showed it
       is not a sidecar write: `run --image` drives the guest via the in-guest agent, which an
       OCI image lacks, so the runtime overlay (carrying the agent) must be ATTACHED to OCI
       guests (making the rootfs overlay-aware) rather than the gate being scoped off. Needs
@@ -1233,7 +1233,16 @@ OCI cache load), and `run --image <oci>` missing mvm-meta.json sidecar on macOS.
 Advance the remaining Plan 200 (machine UX/DX) PRODUCT workstreams. WS-B `--net`/`--allow-host`
 egress enforcement already shipped (#1003); these are the user-facing surface, not security debt.
 Read specs/plans/200-machine-ux-dx-layer.md and the memory note
-project_plan_200_machine_run_shipped.md first.
+project_plan_200_machine_run_shipped.md first. This prompt was refreshed against the merged state
+on 2026-06-17 — the ingest plumbing below already landed, so do NOT redo it.
+
+ALREADY LANDED (verify, don't rebuild):
+- `mvmctl machine run` + `--net`/`--allow-host` egress (#968, #1003) and the WS-B follow-ups
+  (#1010/#1013/#1017/#1019/#1020).
+- Image INGEST shapes as functions in commands/image/mod.rs: classifier + run --image seam (#996),
+  OCI archive reader (#998), `oci-archive:` ingest (#1000), stdin + unpacked-rootfs-dir ingest
+  (#1002). These exist but are stringly-dispatched (no typed enum yet — see item 2).
+- `mvm.toml` schema v1 PARSER (#993/#995) — parsing only; the field→launch mapping is open (item 4).
 
 STEP 0 (do before any code): re-confirm ownership. The Plan 200 de-duplication pass split
 responsibilities against Plans 199 (install/host packaging), 126/156 (dependency + binary-size),
@@ -1241,59 +1250,69 @@ responsibilities against Plans 199 (install/host packaging), 126/156 (dependency
 to Plan 200 and isn't owned elsewhere; adjust scope before building. Output a short sequencing plan
 and confirm with the owner before starting the first slice.
 
+SEQUENCE: do item 1 FIRST — it is the linchpin. `run --image` is effectively NON-FUNCTIONAL today
+(the OCI guest never gets an agent), so the headline `mvmctl machine run --image alpine -- …` UX
+does not work at all, and item 6 (pack/run an artifact) cannot be validated until it does. Items
+2–6 are additive surface on top.
+
 Then build, each as its own slice/PR off latest origin/main in a fresh worktree (NOT main checkout),
 landing via PR + merge queue, keeping SPRINT.md + REFACTOR-STATUS.md current:
 
-1. WS-B MachineImageSource enum: registry ref / local OCI archive / stdin archive stream /
-   unpacked rootfs dir — every shape routed through the existing OCI extraction hardening +
-   provenance recording + admission (mvm-oci unpack; image::resolve_or_pull_run_image in
-   commands/image/mod.rs). No bypass — all sources go through the same admitted/audited path.
-
-   1a. (BLOCKER for the admission leg, handed off from the WS-B deferred list)
-   `run --image <oci>` does not boot today: the admission gate
-   `mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)` — called unconditionally on every
-   backend start (libkrun.rs, vz.rs, backend.rs/FC, qemu.rs) — refuses any rootfs without a
-   host-side `mvm-meta.json` sidecar saying `overlay_aware: true`. That sidecar is normally
-   nix-evaluated from the flake `passthru.mvm` inside the builder VM (builder_vm_runtime.rs);
-   the OCI materialize path (rootfs.rs) writes only `rootfs.ext4`, no sidecar, so the gate
-   refuses it. This is NOT a one-line sidecar write: `overlay_aware: true` means the rootfs
-   carries a `/mvm/runtime` bind-mount target + an overlay-preferring `/init` (mk-guest.nix),
-   which an arbitrary OCI image has neither of — and the gate also refuses `overlay_aware:
-   false`, so there is no safe partial fix.
+1. (BLOCKER) Make `run --image <oci>` actually boot. Today it cannot: the admission gate
+   `mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)` — called on every backend start
+   (libkrun.rs, vz.rs, backend.rs/FC, qemu.rs) — refuses any rootfs without a host-side
+   `mvm-meta.json` sidecar saying `overlay_aware: true`. That sidecar is normally nix-evaluated
+   from the flake `passthru.mvm` inside the builder VM (builder_vm_runtime.rs); the OCI materialize
+   path (rootfs.rs) writes only `rootfs.ext4`, no sidecar, so the gate refuses it. This is NOT a
+   one-line sidecar write: `overlay_aware: true` means the rootfs carries a `/mvm/runtime`
+   bind-mount target + an overlay-preferring `/init` (mk-guest.nix), which an arbitrary OCI image
+   has neither of — and the gate also refuses `overlay_aware: false`, so there is no safe partial
+   fix.
 
    The deeper finding (DECIDES the design): `run --image` drives the guest through the in-guest
    AGENT — `run_in_guest` (exec.rs) calls `wait_for_agent` then connects to `GUEST_AGENT_PORT`
-   over vsock. An OCI image has no mvm agent baked in, and the OCI run attaches NO runtime
-   overlay (`ImageSource::Prebuilt` leaves `runtime_overlay_path = None`). So even if the gate
-   passed, the guest would have no agent and the run would fail at `wait_for_agent` ("guest
-   agent did not become reachable within 30s"). The runtime overlay (W1.4b, dm-verity sealed)
-   is exactly what carries the agent + netinit.
+   over vsock. An OCI image has no mvm agent baked in, and the OCI run attaches NO runtime overlay
+   (`ImageSource::Prebuilt` leaves `runtime_overlay_path = None`). So even if the gate passed, the
+   guest would have no agent and the run would fail at `wait_for_agent` ("guest agent did not
+   become reachable within 30s"). The runtime overlay (W1.4b, dm-verity sealed) is exactly what
+   carries the agent + netinit.
 
-   Therefore "scope `admit_overlay_aware` to `runtime_overlay_path.is_some()` and let OCI skip
-   it" is the WRONG fix — it removes the gate's refusal but moves the failure 30s downstream to
-   the missing agent. The right direction is the opposite: ATTACH the runtime overlay to OCI
-   guests (inject the agent/netinit), which requires the OCI materialize path to create the
-   `/mvm/runtime` mount point, the run path to wire `runtime_overlay_path` to the default
-   overlay, then write the `overlay_aware: true` sidecar so the gate passes honestly. Confirm
-   the OCI control model with the owner before building; needs live builder-VM + boot
-   verification (`tests/oci_image_runner_smoke.rs` is gated off and does NOT exercise the gate,
-   so OCI boot is unproven end-to-end today).
+   So "scope `admit_overlay_aware` to `runtime_overlay_path.is_some()` and let OCI skip it" is the
+   WRONG fix — it removes the gate's refusal but moves the failure 30s downstream to the missing
+   agent. The right direction is the opposite: ATTACH the runtime overlay to OCI guests (inject the
+   agent/netinit), which requires the OCI materialize path to create the `/mvm/runtime` mount
+   point, the run path to wire `runtime_overlay_path` to the default overlay, then write the
+   `overlay_aware: true` sidecar so the gate passes honestly. Confirm the OCI control model with
+   the owner before building; needs live builder-VM + boot verification (`tests/oci_image_runner_smoke.rs`
+   is gated off and does NOT exercise the gate, so OCI boot is unproven end-to-end today).
 
-2. WS-C persistent verbs: machine create/start/exec/shell/stop/ls/inspect/rm, backed by a
-   MachineSpec persisted under mvm-core::config data-dir helpers (NEVER inline $HOME — use
-   vm_state_dir/mvm_data_dir/etc.). Mirror the run_secure admitted/audited posture; deny-all default.
+2. Typed MachineImageSource enum. Replace the stringly ingest dispatch (the #996/#998/#1000/#1002
+   functions in commands/image/mod.rs) with a typed enum: registry ref / local OCI archive / stdin
+   archive stream / unpacked rootfs dir — every shape routed through the existing OCI extraction
+   hardening + provenance recording + admission (mvm-oci unpack; image::resolve_or_pull_run_image).
+   No bypass — all sources go through the same admitted/audited path. Add the source-shape tests the
+   plan's B section still lists open (local archive / stdin / rootfs-dir / malformed / traversal /
+   wrong-arch / missing-provenance).
 
-3. C1 mvm.toml schema v2 parser: image|flake mutually exclusive, #[serde(deny_unknown_fields)],
-   RO volumes default, ssh_agent socket-only, dev.init dev-only. NOTE: crates/mvm-backend/src/image.rs
-   MvmImageConfig is the OLD Lima Mvmfile schema — find the real flake-backed mvm.toml parser before
-   adding v2; do not extend the wrong type.
+3. WS-C persistent verbs: machine create/start/exec/shell/stop/ls/inspect/rm (only `run` exists
+   today), backed by a MachineSpec persisted under mvm-core::config data-dir helpers (NEVER inline
+   $HOME — use vm_state_dir/mvm_data_dir/etc.). Mirror the run_secure admitted/audited posture;
+   deny-all default. (Depends on item 1 for the image-backed start path to actually boot.)
 
-4. C2 SDK parity (Python/TS/Rust) for the machine surface + non-bypass tests: equivalent admission
+4. C1 mvm.toml field→launch mapping (parser already landed #993/#995): map `net` /
+   `[network].allow_hosts` / `[auth].ssh_agent` / `[dev].init` / `[dev].volumes` / cpus / mem /
+   mem_initial into the durable MachineSpec + launch request; reject `[dev].init` for sealed/prod;
+   preserve RO-volume defaults (explicit `:rw`); surface effective network/auth/volume policy in
+   dry-run + admission + audit + receipt. (crates/mvm-backend/src/image.rs MvmImageConfig is the OLD
+   Lima Mvmfile schema — do NOT extend it.)
+
+5. C2 SDK parity (Python/TS/Rust) for the machine surface + non-bypass tests: equivalent admission
    inputs produce equal effective policy, artifact verification, source-selector conflict rejection,
    and matching receipt/audit summaries across CLI and each SDK. SDKs must NOT bypass admission/audit.
 
-5. F: machine pack / run <artifact> over the Plan 155 portable-artifact primitives (signed, verified,
+6. F: machine pack / run <artifact> over the Plan 155 portable-artifact primitives (signed, verified,
    runnable elsewhere, no host Nix; never a self-executing bypass around admission/policy/signature).
+   Cannot be validated until item 1 lands.
 
 Guardrails:
 - Security posture stays identical to `up`/`run`: signed ExecutionPlan, OCI provenance, deny-all
