@@ -1131,12 +1131,10 @@ follow-ups:
       `emit_failed_if` helpers; the run's admission/audit plumbing is grouped into a
       `RunAudit` struct. Full end-to-end verification is box-gated (the emit fires during a
       real boot); the emit helpers are unit-tested on the `up` path.
-- [ ] **Route MCP code-run through the admit closure so its `deny_all()` is enforced.**
-      `commands/ops/mcp.rs` sets `network_policy: deny_all()` but passes `admit = None`, so
-      on the gateway-bridge backends no bridge spawns and the deny-all is inert (FC does
-      enforce the field). MCP runs untrusted AI code — exactly claim 10's target. The live
-      window is narrow today (macOS transient guest has no `eth0`), but it should admit so
-      the bridge actually enforces. Pre-existing (not introduced by this branch).
+- [x] **Route MCP code-run through the admit closure so its `deny_all()` is enforced.**
+      Fixed by #1017 (cold MCP code-run) and #1023 (warm MCP code-run): both paths now route
+      through admission so deny-all is enforced on the libkrun/Vz gateway bridge; FC already
+      enforced through nftables. This closes the bookkeeping mismatch with the rollup.
 - [x] **Remove the vestigial `BridgeConfig.policy` field + the `AllowAll` type.**
       `run_bridge_inner` no longer read `cfg.policy` (the flow gate is derived from
       `bundle` / `network_policy`, failing closed to deny-all). The field was a write-only
