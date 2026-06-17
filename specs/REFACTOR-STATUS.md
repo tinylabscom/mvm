@@ -882,3 +882,31 @@ PLAN 202 — Host services daemon (per-tenant, not per-VM spawn)   🟡 IN PROGR
 15/15 shipped, none regressed, + 1 `Preview` (claim 16, egress-substitution
 leak-gate — witnesses machine-checked, ADR-002 promotion pending) (`specs/claims/catalog.md`,
 gated by `xtask check-claim-catalog`).
+
+## Sequencing note — 2026-06-17
+
+Why the 12 open rollup boxes still show as open:
+
+- `REFACTOR-STATUS.md` only ticks a plan when the whole plan is done. Partial progress is recorded in the long `Last updated` history and detail blocks, so progress is easy to miss.
+- There is visible drift to clean up: Plan 126's summary says the forbidden-dep gate landed, but its detail section still has D1 unchecked.
+- Plan 202 has local unmerged rollup updates in the `mvm-202-2a-signer-helper` worktree.
+
+Open PRs at investigation time:
+
+- `#1039` / `feat/plan-200-image-source-closeout`: touches Plan 200 + `REFACTOR-STATUS`; merge state `DIRTY`, so update/rebase first.
+- `#1041` / `docs/adr-bundle-posture`: ADR-only, no `REFACTOR-STATUS`; blocked by checks/branch state, not part of the 12 directly.
+
+Recommended sequence to close the remaining rollup items:
+
+1. Land hygiene first: rebase/merge `#1039`, merge `#1041` when checks clear, and either land or shelve the local Plan 202 Phase 2a worktree updates.
+2. Clean stale worktrees: several are old/behind or already landed (`mvm-202-3c-doctor`, `mvm-pr1009`, `mvm-p200-ociboot`, old status/170/vz100 branches). Do not sequence new work from them.
+3. Finish Plan 202 next: Phase 2 signer-helper daemonization is active and unlocks the host-services model.
+4. Close/rehome Plan 125 after Plan 202: most SDK veneer work is done; remaining per-tenant daemon work now belongs to Plan 202.
+5. Continue Plan 200 product path: local image sources, persistent OCI-backed machine specs, schema parser, SDK parity, docs, CI budgets.
+6. Do Plan 199 in parallel if builder VM time is available: native `libkrunfw`/`libkrun` Nix recipes and flake/build verification.
+7. Do Plan 195 before Plan 189 acceptance: fingerprint narrowing reduces builder churn and supports cached fast-boot validation.
+8. Continue Plan 193 only after rvproxy cross-repo slices are ready: delete splice, remove Plan-141 hooks, default-on bridge, transparent terminator.
+9. Then Plan 189 VZ DX parity: save/restore verbs, JSON coverage, base pinning.
+10. Resolve Plan 126 by correcting status first, then decide blocked deps (`sigstore`, `pgp`, `aws-lc-rs`) rather than treating them as normal TODOs.
+11. Plan 118/175 are live-KVM gated; do density bench substrate first, then FC standby/warm-start once the KVM environment is ready.
+12. Plan 159 and 201 are lowest priority: Plan 159 mostly needs residuals rehomed/descope, and Plan 201 is a convenience layer after warm-pool fundamentals.
