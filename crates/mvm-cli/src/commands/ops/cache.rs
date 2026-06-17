@@ -30,14 +30,17 @@ pub(in crate::commands) enum CacheAction {
         /// these are slot directories under `~/.mvm/templates/`.)
         #[arg(long)]
         orphan_builds: bool,
-        /// Also reap orphaned per-VM helpers — `mvm-libkrun-supervisor`,
-        /// `gvproxy`, and console-tail processes that were reparented
-        /// to launchd when the parent `mvmctl` was killed mid-run, plus
-        /// their `~/.cache/mvm/builder-vm/vms/<id>/` cache directories.
-        /// Skips dirs whose PIDs are still children of a live `mvmctl`
-        /// (those are in-flight `dev up` runs, not orphans).
+        /// Skip reaping orphaned per-VM helpers. By default `prune` reaps
+        /// `mvm-libkrun-supervisor` / `gvproxy` / console-tail processes that
+        /// were reparented to launchd when their parent `mvmctl` was killed
+        /// mid-run, plus their `~/.cache/mvm/builder-vm/vms/<id>/` cache
+        /// directories — so dead microVMs don't accumulate. The sweep is
+        /// liveness-aware: a running VM (a detached `up -d`, the persistent dev
+        /// builder, any in-flight `dev up`) is spared; only already-dead
+        /// helpers are reaped. Pass this to prune disk only, touching no
+        /// processes.
         #[arg(long)]
-        reap_orphans: bool,
+        no_reap_orphans: bool,
     },
     /// Show cache directory path and disk usage
     Info {
@@ -159,13 +162,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         CacheAction::Prune {
             dry_run,
             orphan_builds,
-            reap_orphans,
+            no_reap_orphans,
         } => {
-            // Reap orphaned per-VM helpers. Done first so subsequent
-            // steps see a clean process list and so the
-            // sweeper can drop the per-VM cache dirs along with the
-            // helpers that were holding their sockets/PIDs.
-            if reap_orphans {
+            // Reap orphaned per-VM helpers by default (liveness-aware: live VMs
+            // are spared). Done first so subsequent steps see a clean process
+            // list and so the sweeper can drop the per-VM cache dirs along with
+            // the helpers that were holding their sockets/PIDs.
+            if !no_reap_orphans {
                 match super::super::env::dev_vz::reap_orphaned_vm_helpers(dry_run) {
                     Ok(o) => {
                         if o.killed == 0 && o.removed_dirs == 0 {
