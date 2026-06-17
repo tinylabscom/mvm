@@ -56,9 +56,7 @@ use mvm_core::plan::{ExecutionPlan, plan_from_admitted_json};
 use mvm_core::policy::PolicyBundle;
 use mvm_hostd::supervisor::audit::AuditSigner;
 use mvm_hostd::supervisor::audit_file::FileAuditSigner;
-use mvm_hostd::supervisor::gateway_bridge::{
-    BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
-};
+use mvm_hostd::supervisor::gateway_bridge::{BridgeConfig, BridgeEndpoints, spawn_bridge_thread};
 use mvm_hostd::supervisor::network::{ObserverAllowlist, ProviderCapabilities, from_admitted};
 use serde::Deserialize;
 

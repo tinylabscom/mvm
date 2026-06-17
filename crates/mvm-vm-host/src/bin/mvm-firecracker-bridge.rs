@@ -76,9 +76,7 @@ use mvm_hostd::supervisor::audit::AuditSigner;
 #[cfg(target_os = "linux")]
 use mvm_hostd::supervisor::audit_file::FileAuditSigner;
 #[cfg(target_os = "linux")]
-use mvm_hostd::supervisor::gateway_bridge::{
-    BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
-};
+use mvm_hostd::supervisor::gateway_bridge::{BridgeConfig, BridgeEndpoints, spawn_bridge_thread};
 #[cfg(target_os = "linux")]
 use mvm_hostd::supervisor::network::{ObserverAllowlist, ProviderCapabilities, from_admitted};
 #[cfg(target_os = "linux")]

@@ -59,9 +59,7 @@ use mvm_core::plan::{ExecutionPlan, NonceStore, SignedExecutionPlan};
 use mvm_core::policy::PolicyBundle;
 use mvm_hostd::supervisor::audit::AuditSigner;
 use mvm_hostd::supervisor::audit_file::FileAuditSigner;
-use mvm_hostd::supervisor::gateway_bridge::{
-    BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
-};
+use mvm_hostd::supervisor::gateway_bridge::{BridgeConfig, BridgeEndpoints, spawn_bridge_thread};
 
 /// Per-connection attach timeout. An abandoned connect must not wedge the
 /// standby; pool size bounds the blast radius.

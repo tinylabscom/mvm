@@ -979,12 +979,12 @@ WS-B change:
       the headline `machine run --net --image alpine -- nslookup` actually work on macOS.
       (Linux/KVM/Firecracker transient runs already network, so WS-B is exercisable there
       today.)
-- [ ] **OCI cache index `schema_version 0` bug.** `OciCacheIndex`
-      (`crates/mvm-cli/src/commands/image/mod.rs`) derives `Default` (→ `schema_version:
+- [x] **OCI cache index `schema_version 0` bug.** `OciCacheIndex`
+      (`crates/mvm-cli/src/commands/image/mod.rs`) derived `Default` (→ `schema_version:
       0`), overriding the `#[serde(default = "schema_version")]` (= 1), so `save_index`
-      persists `0` and the next `load_index` rejects it (`unsupported OCI cache index
-      schema_version 0`). Breaks `image ls` / `run --image` on any freshly-created OCI
-      cache. Fix: `impl Default` (or initialize the field to `schema_version()`).
+      persisted `0` and the next `load_index` rejected it. → hand-wrote `impl Default`
+      minting `schema_version()`; regression test
+      `default_index_saves_and_loads_without_schema_rejection`.
 - [ ] **`run --image <oci>` won't boot on macOS — missing `mvm-meta.json` sidecar.** The
       OCI materialize path produces a rootfs without the W6.2 `mvm-meta.json` sidecar /
       W1.4b runtime-overlay mount point, so the workload boot path refuses it. Needed for
@@ -1011,30 +1011,34 @@ follow-ups:
       `firecracker:l4-host-port` vs `libkrun:dns-name-only`) instead of overstating, but
       true uniformity needs an admission-time DNS pin feeding `L4PolicyScan` on the bare
       path, mirroring the bundle path. deny-all / unrestricted are already uniform.
-- [ ] **Emit `plan.launched` / `plan.failed` on the universal transient-run path.** The
-      run admit closure (`commands/vm/exec.rs`) consumes `admit_plan_for_boot`'s
-      `AdmissionContext` for the substrate but drops the emitter, so only `plan.admitted`
-      lands for a transient run (chain integrity is intact — this is observability, not
-      forgery). Thread the `AdmissionContext` out and emit launched/failed mirroring
-      `up.rs` so the claim-8 catalog narrative ("admitted/launched/failed per admission")
-      stays honest.
-- [ ] **Route MCP code-run through the admit closure so its `deny_all()` is enforced.**
-      `commands/ops/mcp.rs` sets `network_policy: deny_all()` but passes `admit = None`, so
-      on the gateway-bridge backends no bridge spawns and the deny-all is inert (FC does
-      enforce the field). MCP runs untrusted AI code — exactly claim 10's target. The live
-      window is narrow today (macOS transient guest has no `eth0`), but it should admit so
-      the bridge actually enforces. Pre-existing (not introduced by this branch).
-- [ ] **Remove the vestigial `BridgeConfig.policy` field + the `AllowAll` type.**
-      `run_bridge_inner` no longer reads `cfg.policy` (the flow gate is derived from
-      `bundle` / `network_policy`, failing closed to deny-all). Every construction site
-      still sets it to `AllowAll`; the field is now a write-only footgun. Drop it across
-      the supervisor bins (`mvm-libkrun-supervisor`, `vz_objc`, `mvm-vz-drainer`,
-      `mvm-firecracker-bridge`) and the tests. Pure hygiene, no behavior change.
+- [x] **Emit `plan.launched` / `plan.failed` on the universal transient-run path.** →
+      added a `LaunchAudit` hook on `SessionAuditSubstrate` (kept in `crate::exec`, free of
+      admission-type deps); `RunLaunchAudit` (command layer) owns the emitter + admitted
+      plan; `run_inner` fires `failed("backend-start")` on start error and
+      `launched(backend)` on success, mirroring `up`'s `emit_failed_if`/`emit_launched_if`.
+      `admit_plan_for_boot` already emits `plan.admitted`. Test
+      `run_launch_audit_emits_launched_and_failed_to_the_chain`.
+- [x] **Route MCP code-run through the admit closure so its `deny_all()` is enforced.** →
+      extracted the run admit closure into a shared `make_run_admit()` (used by both
+      `run_secure` and MCP); `commands/ops/mcp.rs::run_cold` now admits (so the gateway
+      bridge spawns + enforces + chain-audits) instead of passing `admit = None`.
+- [x] **Remove the vestigial `BridgeConfig.policy` field + the `AllowAll` type.** →
+      dropped the field from `BridgeConfig` and all five construction sites
+      (`mvm-libkrun-supervisor`, `mvm-vz-drainer`, `mvm-firecracker-bridge`, `vz_objc`,
+      warm path); `AllowAll` is now `#[cfg(test)]` (only a permissive flow gate in the
+      bridge unit tests). Stale doc/comment refs refreshed (FlowPolicy default narrative is
+      now `PlanFlowPolicy`/deny-by-default). Pure hygiene, no behavior change.
 - [ ] **Decide the DHCP/ARP posture under deny-all.** The flow-open gate has no UDP
       67/68 / ARP carve-out; latent today (macOS transient guest doesn't DHCP) but a
       correctness trap once guest networking is fixed (a deny-all networked guest would
-      hang on a DHCP OFFER). Pick loopback-only vs a control-plane carve-out and pin it
-      with a live-bridge test.
+      hang on a DHCP OFFER). **Decision (recommended): loopback-only under deny-all** —
+      the guest init brings up `eth0`/DHCP only when the resolved policy permits some
+      egress (allow-list/preset/unrestricted), so a deny-all guest never issues DHCP and
+      needs no carve-out in the security gate. For the egress-permitted case, DHCP/ARP
+      (L2/L3 bootstrap to the local gateway, not internet egress) must pass the flow gate
+      + L4 scan — couple this carve-out with the "macOS transient-run guest networking"
+      item below and pin both with a live-bridge test. Not yet implemented (interacts with
+      guest-init bring-up; needs live Vz verification).
 
 ## Verification
 
