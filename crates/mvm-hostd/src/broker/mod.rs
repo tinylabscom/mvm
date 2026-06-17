@@ -23,6 +23,7 @@
 
 pub mod audit_client;
 pub mod config;
+pub mod control;
 pub mod handlers;
 pub mod registry;
 pub mod server;
