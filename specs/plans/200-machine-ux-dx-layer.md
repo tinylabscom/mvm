@@ -1101,3 +1101,158 @@ follow-ups:
   dedicated follow-up for the machine path. Safer default: Plan 200 records the
   product requirement, while Plan 126 or a successor owns the mechanical cuts
   and CI budgets.
+
+## Future-work session prompts
+
+The remaining Plan 200 work (after the WS-B `--net`/`--allow-host` egress
+enforcement shipped in #1003) is split into three focused sessions. Run them in
+order: the quick security closeouts reduce risk first, the uniform-egress work
+delivers the headline promise and its macOS enabler makes everything live-
+verifiable, and the product workstreams are a separate (and ownership-gated)
+track. Each prompt is self-contained — paste one into a fresh session.
+
+### Session 1 — security closeouts (quick, high-value)
+
+```
+Close out three small Plan 200 WS-B security/observability follow-ups left after PR #1003.
+Read specs/plans/200-machine-ux-dx-layer.md "Deferred follow-ups" + the memory note
+project_plan_200_machine_run_shipped.md first. Branch off latest origin/main in a fresh
+git worktree (NOT the main checkout). Land via PR + merge queue. Keep specs/SPRINT.md +
+specs/REFACTOR-STATUS.md updated in the SAME change.
+
+These three are independent — prefer three small PRs, do them in this order:
+
+1. Emit plan.launched / plan.failed on the universal transient-run path (claim-8 completeness).
+   crates/mvm-cli/src/commands/vm/exec.rs: the run admit closure consumes admit_plan_for_boot's
+   AdmissionContext for the audit substrate but DROPS the emitter, so only plan.admitted lands for
+   a transient run. Thread the AdmissionContext out and emit launched/failed mirroring up.rs
+   (emit_launched_if / emit_failed_if). Chain integrity is intact today — this is observability.
+   Add tests asserting all three entries land for a transient run and verify clean via
+   `mvmctl trust audit verify`.
+
+2. Route MCP code-run through admission. crates/mvm-cli/src/commands/ops/mcp.rs sets
+   network_policy: deny_all() but passes admit=None, so on the gateway-bridge backends no bridge
+   spawns and the deny-all is INERT (FC still enforces via nftables). MCP runs untrusted AI code —
+   exactly claim-10's target. Route it through the same admit closure the transient run uses so the
+   bridge actually spawns and enforces. Add a negative test that deny-all drops egress on the
+   bridge backends for an MCP run.
+
+3. Remove the vestigial BridgeConfig.policy field + the AllowAll type. run_bridge_inner
+   (mvm-hostd/src/supervisor/gateway_bridge.rs) no longer reads cfg.policy — the flow gate is
+   derived from bundle / network_policy and fails closed to deny-all. Drop the field across the
+   supervisor bins (mvm-libkrun-supervisor, vz_objc, mvm-vz-drainer, mvm-firecracker-bridge) and
+   the tests + the AllowAll type. Pure hygiene, no behavior change.
+
+Guardrails:
+- Keep egress UNIFORM across FC/libkrun/Vz; deny-all default; never weaken claims 8/10; never
+  over-claim more enforcement than delivered.
+- Several bridge files are cfg(target_os="linux") and macOS cargo check/clippy SKIPS them (#1003's
+  first CI run failed on exactly this). Cross-compile the Linux target with cargo-zigbuild
+  (cargo zigbuild --target x86_64-unknown-linux-gnu -p <crate> --bins --tests) before pushing.
+- Full local gate before each PR: nextest --workspace (exclude package(mvm-backend) on macOS —
+  amfid SIGKILLs it), cargo test --workspace --doc, clippy --all-targets -D warnings, nightly
+  cargo fmt --all, xtask check-no-spec-refs-in-comments, xtask check-spec-numbers.
+- No spec/PR/ADR citations in code comments. No Claude co-author trailer; attribute to the user.
+```
+
+### Session 2 — uniform egress (the headline; design-heavy)
+
+```
+Deliver genuinely UNIFORM host:port egress enforcement across Firecracker/libkrun/Vz for Plan 200,
+and unblock live verification on macOS. Read specs/plans/200-machine-ux-dx-layer.md "Deferred
+follow-ups", ADR-002 (security posture / claim 10), and the memory notes
+project_plan_200_machine_run_shipped.md, reference_transient_run_no_guest_network_on_macos.md,
+reference_transient_egress_enforced_only_on_firecracker.md FIRST. Branch off latest origin/main in
+a fresh git worktree. Land via PR + merge queue; keep SPRINT.md + REFACTOR-STATUS.md current.
+This is security-sensitive — run an adversarial security review before opening each egress PR.
+
+Do these in order; each is its own PR:
+
+1. (ENABLER) Fix the pre-existing macOS transient-guest networking gap. `mvmctl run` / `machine run`
+   transient guests never bring up eth0: the transient init doesn't run mkGuest setup_network, and
+   the run command is unprivileged (uid 901, setpriv) so it can't DHCP either. So today no transient
+   guest reaches the network on macOS regardless of policy — which blocks live-proving any egress
+   work and blocks the headline `machine run --net --image alpine -- nslookup example.com`. Fix: the
+   transient init must bring up eth0 (DHCP) as root BEFORE the agent drops privileges, policy-gated
+   so deny-all still means no egress. Live-validate on a Mac (macOS 26 / Vz). This must NOT
+   weaken claims 1-3 (uid/setpriv/verified-boot) on the prod path.
+
+2. Uniform host:port L4 egress on the libkrun/Vz bare path. Today bare_network_policy_egress
+   (mvm-hostd/src/supervisor/gateway_bridge.rs) returns egress_l4=None, so an allow-list is gated by
+   host NAME only (DnsSinkholeScan) — the port is not gated and a direct-IP dial bypasses the name
+   gate. Firecracker gates host:port via nftables. Add an admission-time DNS pin that feeds
+   L4PolicyScan on the bare (no-bundle) path, mirroring the bundle path, so libkrun/Vz enforce
+   host:port like FC. Then collapse the per-backend egress_enforcement receipt tiers
+   (firecracker:l4-host-port / libkrun:dns-name-only) now that they're uniform — keep the receipt
+   honest. Prove with live gateway-bridge tests on libkrun AND Vz (deny-all drop, allow-listed
+   host:port forward, wrong-port drop, direct-IP-to-unlisted drop), plus a real-guest end-to-end
+   smoke now that (1) is fixed.
+
+3. Decide + pin the DHCP/ARP posture under deny-all. The flow-open gate has no UDP 67/68 / ARP
+   carve-out; once (1) lands a deny-all networked guest would hang on a DHCP OFFER. Choose
+   loopback-only vs a minimal control-plane carve-out (DHCP/ARP only), document the decision in
+   ADR-002 / the plan, and pin it with a live-bridge test.
+
+Guardrails:
+- Egress must be UNIFORM and deny-by-default; the signed receipt's egress_enforcement must never
+  overstate. Don't reintroduce an AllowAll flow gate on any workload-bearing path.
+- cfg(target_os="linux") bridge files are skipped by macOS cargo check/clippy — cross-compile with
+  cargo zigbuild --target x86_64-unknown-linux-gnu -p <crate> --bins --tests before pushing.
+- The primary Vz workload path is BridgeEndpoints::VzGvproxy (in-process), NOT mvm-vz-drainer
+  (vestigial NDJSON). When touching run_bridge_inner dispatch, verify EVERY arm routes the resolved
+  flow_policy, not cfg.policy.
+- Full local gate (nextest --workspace excluding package(mvm-backend) on macOS, doctests, clippy
+  -D warnings --all-targets, nightly fmt --all, xtask spec-ref + spec-number gates) + adversarial
+  security review before each PR. No spec refs in code comments; no Claude trailer.
+
+Also surfaced + filed during WS-B (fold in if cheap, else leave tracked): OCI cache index
+schema_version 0 bug (OciCacheIndex derives Default→0, overriding #[serde(default)]=1; breaks fresh
+OCI cache load), and `run --image <oci>` missing mvm-meta.json sidecar on macOS.
+```
+
+### Session 3 — product workstreams (plan first, then build)
+
+```
+Advance the remaining Plan 200 (machine UX/DX) PRODUCT workstreams. WS-B `--net`/`--allow-host`
+egress enforcement already shipped (#1003); these are the user-facing surface, not security debt.
+Read specs/plans/200-machine-ux-dx-layer.md and the memory note
+project_plan_200_machine_run_shipped.md first.
+
+STEP 0 (do before any code): re-confirm ownership. The Plan 200 de-duplication pass split
+responsibilities against Plans 199 (install/host packaging), 126/156 (dependency + binary-size),
+155 (low-level artifact execution), and 159/189 (VZ-specific). Verify each item below still belongs
+to Plan 200 and isn't owned elsewhere; adjust scope before building. Output a short sequencing plan
+and confirm with the owner before starting the first slice.
+
+Then build, each as its own slice/PR off latest origin/main in a fresh worktree (NOT main checkout),
+landing via PR + merge queue, keeping SPRINT.md + REFACTOR-STATUS.md current:
+
+1. WS-B MachineImageSource enum: registry ref / local OCI archive / stdin archive stream /
+   unpacked rootfs dir — every shape routed through the existing OCI extraction hardening +
+   provenance recording + admission (mvm-oci unpack; image::resolve_or_pull_run_image in
+   commands/image/mod.rs). No bypass — all sources go through the same admitted/audited path.
+
+2. WS-C persistent verbs: machine create/start/exec/shell/stop/ls/inspect/rm, backed by a
+   MachineSpec persisted under mvm-core::config data-dir helpers (NEVER inline $HOME — use
+   vm_state_dir/mvm_data_dir/etc.). Mirror the run_secure admitted/audited posture; deny-all default.
+
+3. C1 mvm.toml schema v2 parser: image|flake mutually exclusive, #[serde(deny_unknown_fields)],
+   RO volumes default, ssh_agent socket-only, dev.init dev-only. NOTE: crates/mvm-backend/src/image.rs
+   MvmImageConfig is the OLD Lima Mvmfile schema — find the real flake-backed mvm.toml parser before
+   adding v2; do not extend the wrong type.
+
+4. C2 SDK parity (Python/TS/Rust) for the machine surface + non-bypass tests: equivalent admission
+   inputs produce equal effective policy, artifact verification, source-selector conflict rejection,
+   and matching receipt/audit summaries across CLI and each SDK. SDKs must NOT bypass admission/audit.
+
+5. F: machine pack / run <artifact> over the Plan 155 portable-artifact primitives (signed, verified,
+   runnable elsewhere, no host Nix; never a self-executing bypass around admission/policy/signature).
+
+Guardrails:
+- Security posture stays identical to `up`/`run`: signed ExecutionPlan, OCI provenance, deny-all
+  egress default, dev-only surfaces gated off in prod. Reuse existing helpers; don't reimplement.
+- Full local gate (nextest --workspace excluding package(mvm-backend) on macOS, doctests, clippy
+  -D warnings --all-targets, nightly fmt --all, xtask spec-ref + spec-number gates) before each PR.
+- cfg(linux) files are skipped by macOS check — cross-compile with cargo-zigbuild before pushing.
+- No spec/PR/ADR refs in code comments; no Claude co-author trailer; attribute to the user.
+```
