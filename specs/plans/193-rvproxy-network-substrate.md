@@ -218,9 +218,30 @@ own internal default).
         mapping is total. Pure + golden-tested; spawning the reader thread + the
         sink→channel wiring lands with 2b (the export only flows once rvproxy runs
         with the emitted config).
-  - [ ] **2d — parity-gate extension + splice deletion.** Make the WS-1.5
-        witnesses run against the **native** path (binary-discriminating) and
-        delete the splice + Plan-141 `on_packet` hooks only once green.
+  - [x] **2d task 1 — native flow-audit → chain feed, PROVEN LIVE.** When the
+        gateway is native `rvproxy run --config`, libkrun attaches **directly**
+        to rvproxy (`run_supervisor`, no splice in the data path) and a
+        standalone `spawn_native_audit_feed` runs `signer_task` +
+        `rvproxy_flow_audit::follow_flow_audit`, tailing rvproxy's flow-audit
+        export into the chain. Validated end-to-end (2026-06-16, after the
+        libkrun workload-egress fix landed): a real `mvmctl up --hypervisor
+        libkrun --wait` of `examples/egress-probe` through native rvproxy +
+        `MVM_GATEWAY_BRIDGE=1` →
+        (1) the guest reached rvproxy (frames processed),
+        (2) native rvproxy **enforced deny-by-default** (`workload.exit=3`, both
+            targets blocked; rvproxy logged `guest egress denied tcp …->1.1.1.1:443
+            deny-by-default`),
+        (3) rvproxy **exported `flow` records** (`closed/denied/deny-by-default`),
+        (4) the follower **fed them into the chain-signed audit** — `local.jsonl`
+            shows `gateway.flow_closed` with **per-connection** `flow_id`
+            (`egp-egress-tcp-192.168.127.2:39861-1.1.1.1:443`, reason
+            `policy_dropped`), strictly more granular than the splice's coarse
+            `<vm>-egress`. The claim-10 audit is now sourced from native rvproxy.
+  - [ ] **2d — parity gate + splice deletion.** Remaining: (a) extend the WS-1.5
+        witnesses to discriminate the native path (binary-discriminating
+        enforcement arm); (b) exercise the **allow** half live (verdict 2 — needs
+        an L4 allow rule, i.e. a tenant bundle, since local `up` is deny-all);
+        (c) delete the splice + Plan-141 `on_packet` hooks once the gate is green.
       Design + the R2 contract are in "## WS-2 design" below.
 - [ ] **WS-3 — backend cutover.** Replace the gvproxy spawn
       (`mvm-build/host_gvproxy.rs`, `libkrun-sys/gvproxy.rs`) + passt with
