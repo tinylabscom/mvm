@@ -1556,8 +1556,8 @@ pub struct SupervisorAttachConfig {
     /// `SupervisorConfig.network_policy`). Threaded from the launcher's resolved
     /// policy so a warm-claimed standby enforces the SAME egress posture a cold
     /// boot would — the no-bundle deny-by-default path must not silently widen to
-    /// `AllowAll` on a pool hit. `None` only for pre-policy callers; the merge
-    /// fails closed to deny-all in that case.
+    /// an allow-all (permissive) gate on a pool hit. `None` only for pre-policy
+    /// callers; the merge fails closed to deny-all in that case.
     #[serde(default)]
     pub network_policy: Option<serde_json::Value>,
 }
@@ -1620,8 +1620,8 @@ impl SupervisorConfig {
             // Carry the launcher's resolved egress policy onto the merged config so
             // a warm-claimed standby enforces the SAME deny-by-default posture a
             // cold boot would. Without this, a bundle-less admitted plan that
-            // cold-boots deny-all would silently run `AllowAll` on a pool hit
-            // (run_bridge_inner's no-bundle arm). The attach frame is Ed25519
+            // cold-boots deny-all would silently run an allow-all gate on a pool
+            // hit (run_bridge_inner's no-bundle arm). The attach frame is Ed25519
             // re-verified in `verify_and_merge_attach`, and (like the cold-boot
             // `network_policy` field) the policy is host-provided over the 0700
             // control UDS — a malicious host is out of the threat model.
@@ -1683,7 +1683,7 @@ mod base_attach_tests {
     fn merge_threads_network_policy_onto_the_merged_config() {
         // Deny-by-default must survive the warm-claim merge: a policy on the
         // attach frame lands verbatim on the merged config (the no-bundle arm
-        // of run_bridge_inner lowers it), not silently dropped to AllowAll.
+        // of run_bridge_inner lowers it), not silently dropped to an allow-all gate.
         let deny =
             serde_json::to_value(mvm_core::network_policy::NetworkPolicy::deny_all()).unwrap();
         let mut a = attach(&"aa".repeat(32));
