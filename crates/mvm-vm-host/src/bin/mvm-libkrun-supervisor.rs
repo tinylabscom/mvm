@@ -475,8 +475,11 @@ fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible
         flow_events: true,
         payload_tap: true,
     };
-    let observer_names = mvm_hostd::supervisor::network::resolve_observer_chain_from_plan(&plan)
-        .context("resolve observer chain from admitted plan")?;
+    let observer_names = mvm_hostd::supervisor::network::resolve_observer_chain_from_policy_source(
+        &plan,
+        bundle.as_ref(),
+    )
+    .context("resolve observer chain from admitted policy source")?;
     let observers = if observer_names.is_empty() {
         Vec::new()
     } else {

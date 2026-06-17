@@ -59,7 +59,9 @@ use mvm_hostd::supervisor::audit_file::FileAuditSigner;
 use mvm_hostd::supervisor::gateway_bridge::{
     AllowAll, BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
 };
-use mvm_hostd::supervisor::network::{ObserverAllowlist, ProviderCapabilities, from_admitted};
+use mvm_hostd::supervisor::network::{
+    ObserverAllowlist, Pipeline, ProviderCapabilities, resolve_observer_chain_from_policy_source,
+};
 use serde::Deserialize;
 
 /// Stdin JSON contract. Producer is `mvm-backend::vz::start()`.
@@ -171,10 +173,25 @@ fn run() -> Result<()> {
         flow_events: true,
         payload_tap: false,
     };
-    let allowlist = ObserverAllowlist::load_from_host_config()
-        .map_err(|e| anyhow!("load ObserverAllowlist from ~/.mvm/observers/allowlist.toml: {e}"))?;
-    let observers = from_admitted(&plan, leaf_caps, &allowlist)
-        .map_err(|e| anyhow!("resolve observer chain from admitted plan: {e}"))?;
+    let observer_names = resolve_observer_chain_from_policy_source(&plan, bundle.as_ref())
+        .map_err(|e| anyhow!("resolve observer chain from admitted policy source: {e}"))?;
+    let observers = if observer_names.is_empty() {
+        Vec::new()
+    } else {
+        let allowlist = ObserverAllowlist::load_from_host_config().map_err(|e| {
+            anyhow!("load ObserverAllowlist from ~/.mvm/observers/allowlist.toml: {e}")
+        })?;
+        let mut pipe = Pipeline::new();
+        for name in observer_names {
+            let obs = allowlist
+                .resolve(&name)
+                .map_err(|e| anyhow!("resolve observer name in allowlist: {e}"))?;
+            pipe = pipe
+                .observe(obs, leaf_caps)
+                .map_err(|e| anyhow!("observer capability gate: {e}"))?;
+        }
+        pipe.build_observers()
+    };
 
     tracing::info!(
         vm = %cfg.vm_name,
