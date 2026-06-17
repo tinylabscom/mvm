@@ -796,6 +796,15 @@ PLAN 200 — Machine UX/DX layer  🟢 in progress — `machine run` shipped (#9
   [~] Implement `mvmctl machine` parser and command aliases over existing runtime primitives.
       `machine run` shipped (commands/machine/, translates into run_secure, deny-all egress
       preserved); create/start/exec/shell/stop/ls/inspect/rm + `--net`/`--allow-host` pending.
+  [x] Make `run --image <oci>` boot end-to-end (Session 3 item 1). Cross-compile the guest
+      agent+netinit to static musl and inject them + an overlay-preferring `/init` +
+      `/mvm/runtime` into the OCI rootfs at materialize (`mvm_build::guest_agent_build` +
+      `oci_runtime_inject`); honest `GuestSidecar::for_oci_run` passes `admit_overlay_aware`
+      (overlay-attach is FC-only, so macOS bakes the agent). Fixed the vz virtio-blk ext4
+      bad-geometry boot panic (1 MiB mkfs margin). Live-verified macOS-26/vz: alpine boots,
+      agent answers vsock 5252, runs the command, streams output (exit 0). Smoke test drives
+      the real CLI (gate + agent round-trip). Deferred: rootfs-dir inject, end-user agent
+      source via overlay download, uid-901 setpriv hardening — see plan doc.
   [ ] Implement transient network policy plumbing for image-backed runs.
   [ ] Implement local image-source handling for registry refs, local OCI archive files,
       stdin archive streams, and unpacked rootfs directories with traversal, malformed archive,

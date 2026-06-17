@@ -261,6 +261,48 @@ impl GuestSidecar {
         self.overlay_aware
     }
 
+    /// Sidecar for a rootfs materialized from an OCI image and made
+    /// bootable by the mvm runtime injection (baked agent + netinit +
+    /// `/mvm/runtime` mount point + overlay-preferring `/init`).
+    ///
+    /// An arbitrary OCI image ships none of the mvm runtime. The
+    /// materialize path injects it, so the resulting rootfs is
+    /// genuinely overlay-aware: the `/mvm/runtime` mount point exists
+    /// and the injected `/init` prefers an overlay-resident agent when
+    /// one is attached (Firecracker) and falls back to the baked agent
+    /// otherwise (libkrun/Vz). `overlay_aware: true` is therefore an
+    /// honest claim, not a gate bypass — only emit this sidecar once
+    /// the injection has actually run.
+    ///
+    /// Posture: a `run --image` guest is a dev/interactive surface, so
+    /// it is `accessible` (console may attach) and not `sealed`; the
+    /// `--prod` path refuses mutable OCI references upstream and never
+    /// reaches this constructor. The baked agent is the real
+    /// cross-compiled binary, not the stub. `hypervisor` is left
+    /// backend-neutral ("oci"): the materialized rootfs is cached and
+    /// boots on any backend, so it can't honestly name one — and no
+    /// gate reads this field (it is informational; only `accessible`
+    /// drives a runtime decision).
+    pub fn for_oci_run(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            accessible: true,
+            sealed: false,
+            entrypoint_kind: "command".to_string(),
+            init_system: "busybox".to_string(),
+            // Unknown for an arbitrary OCI image; not load-bearing
+            // (perf gates only apply to the curated image set).
+            expected_boot_ms: 0,
+            agent_binary: "real".to_string(),
+            // OCI images default to running as root unless the image
+            // config says otherwise; the entrypoint runs under the
+            // agent, which applies the configured uid.
+            rootless_entrypoint: false,
+            hypervisor: "oci".to_string(),
+            overlay_aware: true,
+        }
+    }
+
     /// Read the sidecar from a directory. Returns `Ok(None)` if the
     /// sidecar doesn't exist (older build artifacts; runtime path
     /// falls through to the default-accessible behavior). Errors only
@@ -1176,6 +1218,20 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let result = GuestSidecar::read_from_dir(tmp.path()).expect("ok");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn oci_run_sidecar_passes_overlay_aware_gate() {
+        // The whole point of injecting the mvm runtime into an OCI
+        // rootfs is that the resulting image admits honestly. Writing
+        // the `for_oci_run` sidecar next to the rootfs must satisfy
+        // `admit_overlay_aware` — without it, `run --image` never boots.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sidecar = GuestSidecar::for_oci_run("oci:sha256-deadbeef");
+        assert!(sidecar.is_overlay_aware());
+        assert_eq!(sidecar.agent_binary, "real");
+        sidecar.write_to_dir(tmp.path()).expect("write");
+        admit_overlay_aware(tmp.path()).expect("OCI-run rootfs must admit");
     }
 
     #[test]
