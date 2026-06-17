@@ -254,6 +254,33 @@ pub(in crate::commands) fn run_receipt(
     }
 }
 
+/// Boot-path hook that records `plan.launched` / `plan.failed` for a transient
+/// run, mirroring `up`'s `emit_launched_if` / `emit_failed_if`. Owns the
+/// `AuditEmitter` + admitted `ExecutionPlan`; it lives here (not in
+/// `crate::exec`) so that module stays free of admission-type deps. Best-effort:
+/// emit failures are logged, never propagated.
+struct RunLaunchAudit {
+    emitter: AuditEmitter,
+    plan: mvm_core::plan::ExecutionPlan,
+}
+
+impl crate::exec::LaunchAudit for RunLaunchAudit {
+    fn launched(&self, backend: &str) {
+        if let Err(e) = self.emitter.emit_launched(&self.plan, backend) {
+            tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
+        }
+    }
+
+    fn failed(&self, class: &str, err: &anyhow::Error) {
+        if let Err(e) = self
+            .emitter
+            .emit_failed(&self.plan, class, &format!("{err:#}"))
+        {
+            tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
+        }
+    }
+}
+
 pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig) -> Result<()> {
     // When an SDK transport mode is requested, peel off the
     // SDK-shaped surface before the sandbox-runner validation kicks
@@ -331,10 +358,20 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
         }
         let plan_json = serde_json::to_string(&c.admitted.signed)
             .context("serializing admitted plan for the transient run")?;
+        let tenant_id = c.admitted.plan.tenant.0.clone();
+        // Move the emitter + plan into the launched/failed hook so the boot path
+        // completes the admitted/launched/failed triple (admit_plan_for_boot
+        // already emitted plan.admitted).
+        let launch_audit: Option<Box<dyn crate::exec::LaunchAudit>> =
+            Some(Box::new(RunLaunchAudit {
+                emitter: c.emitter,
+                plan: c.admitted.plan,
+            }));
         Ok(Some(crate::exec::SessionAuditSubstrate {
-            tenant_id: c.admitted.plan.tenant.0.clone(),
+            tenant_id,
             plan_json,
             bundle_json: None,
+            launch_audit,
         }))
     };
 
@@ -1126,6 +1163,71 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_launch_audit_emits_launched_and_failed_to_the_chain() {
+        // The transient-run launched/failed hook must append `plan.launched`
+        // (start ok) and `plan.failed` (start err) to the tenant chain, mirroring
+        // `up`. `plan.admitted` is emitted earlier by admit_plan_for_boot.
+        use crate::exec::LaunchAudit;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let emitter = AuditEmitter::with_dir(key, dir.path()).expect("emitter");
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-run")
+            .build();
+        let audit = RunLaunchAudit { emitter, plan };
+
+        audit.launched("libkrun");
+        audit.failed("backend-start", &anyhow::anyhow!("boom"));
+
+        let content = std::fs::read_to_string(dir.path().join("local.jsonl")).expect("chain file");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "launched + failed expected, got {lines:?}");
+        assert!(lines[0].contains("plan.launched") && lines[0].contains("libkrun"));
+        assert!(lines[1].contains("plan.failed") && lines[1].contains("backend-start"));
+    }
+
+    #[test]
+    fn transient_run_chain_lands_admitted_launched_failed_and_verifies_clean() {
+        // The whole point of the follow-up: a transient run's chain carries the
+        // admitted/launched/failed triple, not just `plan.admitted`. Emit all
+        // three through one emitter (admitted = what admit_plan_for_boot writes;
+        // launched/failed = the RunLaunchAudit hook) and assert the chain both
+        // records every kind AND verifies clean under the signer's key — exactly
+        // what `mvmctl trust audit verify` checks.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).expect("emitter");
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-run")
+            .build();
+
+        emitter
+            .emit_admitted(&plan, "host-signer")
+            .expect("admitted");
+        emitter.emit_launched(&plan, "libkrun").expect("launched");
+        emitter
+            .emit_failed(&plan, "backend-start", "boom")
+            .expect("failed");
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("chain file");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 3, "admitted+launched+failed, got {lines:?}");
+        assert!(lines[0].contains("plan.admitted"));
+        assert!(lines[1].contains("plan.launched") && lines[1].contains("libkrun"));
+        assert!(lines[2].contains("plan.failed") && lines[2].contains("backend-start"));
+
+        // `mvmctl trust audit verify` ⇒ verify_audit_chain; the run-path entries
+        // must extend the chain without breaking it.
+        let verified =
+            mvm_hostd::supervisor::verify_audit_chain(&path, &vk).expect("chain verifies clean");
+        assert_eq!(verified, 3, "all three entries verified");
+    }
 
     #[test]
     fn dry_run_posture_reflects_resolved_policy() {

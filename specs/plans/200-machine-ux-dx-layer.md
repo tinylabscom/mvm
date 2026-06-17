@@ -1011,13 +1011,17 @@ follow-ups:
       `firecracker:l4-host-port` vs `libkrun:dns-name-only`) instead of overstating, but
       true uniformity needs an admission-time DNS pin feeding `L4PolicyScan` on the bare
       path, mirroring the bundle path. deny-all / unrestricted are already uniform.
-- [ ] **Emit `plan.launched` / `plan.failed` on the universal transient-run path.** The
-      run admit closure (`commands/vm/exec.rs`) consumes `admit_plan_for_boot`'s
-      `AdmissionContext` for the substrate but drops the emitter, so only `plan.admitted`
-      lands for a transient run (chain integrity is intact — this is observability, not
-      forgery). Thread the `AdmissionContext` out and emit launched/failed mirroring
-      `up.rs` so the claim-8 catalog narrative ("admitted/launched/failed per admission")
-      stays honest.
+- [x] **Emit `plan.launched` / `plan.failed` on the universal transient-run path.** The
+      run admit closure (`commands/vm/exec.rs`) consumed `admit_plan_for_boot`'s
+      `AdmissionContext` for the substrate but dropped the emitter, so only `plan.admitted`
+      landed for a transient run (chain integrity was intact — this was observability, not
+      forgery). A `LaunchAudit` hook on `SessionAuditSubstrate` (impl `RunLaunchAudit` owns
+      the emitter + admitted plan in the command layer, keeping `crate::exec` free of
+      admission-type deps) now fires `plan.failed("backend-start")` on start error and
+      `plan.launched(backend)` on success, mirroring `up.rs`'s `emit_failed_if` /
+      `emit_launched_if`. Best-effort by contract. Tests assert the full
+      admitted/launched/failed triple lands on the tenant chain and `verify_audit_chain`
+      (= `mvmctl trust audit verify`) confirms it clean.
 - [ ] **Route MCP code-run through the admit closure so its `deny_all()` is enforced.**
       `commands/ops/mcp.rs` sets `network_policy: deny_all()` but passes `admit = None`, so
       on the gateway-bridge backends no bridge spawns and the deny-all is inert (FC does
