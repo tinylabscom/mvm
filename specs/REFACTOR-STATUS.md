@@ -54,7 +54,7 @@ details** below for the workstream-level state.
 - [ ] **PLAN 193** — rvproxy network substrate (replace gvproxy/passt) · 🟡 WS-1 PROVEN (libkrun-unixgram live `dev up` through rvproxy, ~540k connections relayed, builder rootfs built — rvproxy #38/#42/#53) + WS-1.5 parity-gate scaffold `scripts/rvproxy-gateway-parity.sh` (gvproxy↔rvproxy conformance, refuses non-conforming binary) + CI lane LIVE `.github/workflows/rvproxy-parity.yml` (macos-latest, pinned-rev candidate via `RVPROXY_CHECKOUT_TOKEN`, fail-closed) — validated green in CI 2026-06-15 (gvproxy+rvproxy PASS) + paths-filtered `pull_request` trigger; WS-2 native-flow port (the biggest win — replaces the in-line claim-10 datapath wrapper, Plan 141) DESIGNED (Plan 193 §"WS-2 design" + R2 contract authored into rvproxy `specs/plans/014` R2) now 🟡 R2 BUILD UNDERWAY — slice 1 deny-by-default (`default_egress_deny`, rvproxy #97) MERGED to rvproxy main; slices 2–4 remaining (2 flow-lifecycle events in flight by a parallel session, 3 flow-context transform + flow-kill, 4 mvm-rule redaction); then the mvm port + WS-3/4 + making the lane a required check (branch protection), cross-repo
 - [ ] **PLAN 195** — Builder-VM fingerprint narrowing · 🟡 planned — drop the redundant whole-workspace `Cargo.lock` from `builder_vm_source_fingerprint` (flake forbids buildRustPackage → L3 byte-hash already authoritative) to kill the ~9s Stage 0 re-materialize churn; Commit 2 tightens build.rs rerun triggers. Build-perf only, no claim impact. (194 reserved for ADR-081 A3)
 - [x] **PLAN 197** — `WorkloadBackend` type-bar (core security features non-skippable) · ✅ **mvm-side DONE** — Phase 1 MERGED (#860); Phase 2a (vsock substitution channel) MERGED (#866) + **default-path plan-persist gap closed (#909)** so the substitution endpoint now actually spawns on a plain `up`/`invoke --hypervisor vz`/`libkrun` with secrets (no `MVM_GATEWAY_BRIDGE` needed) — **vz DATA PLANE PROVEN LIVE 2026-06-15** (driver `up --name -d` → `vm wait` → `invoke --attach`: httpbin reflects the real cred, guest holds only the placeholder, claim 12 refuses a non-allowed host, 6 dials prove the 5253 listener re-accepts; no code change). Phase 2a COMPLETE on vz. The lone residual, 2b (transparent :80/:443 terminator), is rehomed to **Plan 193/rvproxy** (cross-repo gate — macOS has no nft, so it can only live in the gateway); not a Plan 197 mvm-scope box. Marker trait gates the admitted launch path so qemu (a real dev/test VMM) is type-barred and a new backend can't reach the funnel without the shared enforcement (mock is permitted as the ADR-045 hermetic test double — carries no real workload). Arose from the Sprint 55 vz closeout finding.
-- [ ] **PLAN 199** — Host runtime packaging + crate boundaries · 🟡 Workstream A complete + release-install policy docs advanced (optional source-built Nix `mvmctl` package + host overlay, binary install remains primary, no host-Nix default preserved); native VMM recipes, release artifact matrix/signature CI, and crate-boundary audit remain
+- [ ] **PLAN 199** — Host runtime packaging + crate boundaries · 🟡 source-built `mvmctl` + host overlay complete; release-install policy/matrix/signature CI complete; crate-boundary audit complete; remaining = builder-VM-verified native VMM Nix recipes (`libkrunfw`/`libkrun`) in the source-built overlay shape (external prior-art pattern), plus `nix flake check` / `.#mvmctl` build follow-ups. Signed binary install remains primary; source-checkout Nix never fetches mvm release binaries
 - [ ] **PLAN 200** — Machine UX/DX layer · 🟢 in progress — `machine run` shipped (#968); WS-B `--net`/`--allow-host` uniform FC/libkrun/Vz egress enforcement **MERGED (#1003)** — security review (verdict merge-after-fixes), all blockers fixed (warm-claim AllowAll bypass threaded + fail-closed deny-all fallback; primary Vz `VzGvproxy` routes the resolved `flow_policy` not `cfg.policy`; `mvm_keys_dir` stale-base revert restored; committed local cache + chain-signed audit log removed + gitignored; honest per-backend `egress_enforcement` tier in the signed receipt) — proven by live gateway-bridge tests on libkrun + Vz; landed via PR + merge-queue CI. WS-B egress follow-ups **MERGED**: uniform `host:port` L4 on the libkrun/Vz bare path (#1029 — admission-time DNS pin → `canonicalize_network_policy` → `L4PolicyScan` drops direct-IP/wrong-port dials, uniform with FC's nftables; receipt tier collapsed to `<backend>:l4-host-port`; adversarial-reviewed, UDP/53-only carve-out); DHCP/ARP posture under deny-all (#1030 — decided **loopback-only, no carve-out**, ADR-002 documented, live-bridge test); transient-guest eth0 enabler ticked + live-validated on libkrun (#1031 — the bring-up landed in #1020; verdict-0 egress-probe proves the guest networks). **Open follow-up surfaced live:** `up --network-allow` does NOT enforce egress on the libkrun direct-boot path (verdict 0 = no enforcement) — `up.rs` `VmStartConfig{..Default}` never sets `.network_policy` (the transient `run` path does); pre-existing, filed. First-class `mvmctl machine` surface over existing runtime primitives; no-host-Nix binary-install DX, image-backed one-shot docs, explicit network opt-in, persistent named machines, SDK parity, verified portable artifacts, measured hot-start latency, friendly exec/shell wrappers, `mvm.toml` schema v2 with strict security defaults, and default-binary-closure dependency budgets
 - [ ] **PLAN 201** — `WarmLease` borrow-handle + batched guest exec · 🔴 proposed — DX-ergonomics layer over the Plan 118 standby pool + Plan 169 agent-RPC: RAII claim/release that stops + replenishes a fresh standby, plus staged batched guest exec. Caller-convenience only; no new backend/transport, admission + audit untouched. Docs-only so far (#937).
 - [ ] **PLAN 202** — Host services daemon (per-tenant, not per-VM spawn) · 🔴 proposed ([ADR-084](adrs/084-host-services-daemon-not-per-vm-spawn.md), #977) — re-architect the broker/audit-signer from the shipped per-VM subprocess fork (Plan 125 E5.3b — `2N` processes + a per-boot spawn, availability coupled to `MVM_GATEWAY_BRIDGE`) to **two long-lived per-tenant daemons** VMs register/deregister with: `O(active tenants)` processes not `O(VMs)`; the moat (keyless broker / key-holding signer) + claims 12/13 preserved; guest wire unchanged; registration driven by the admitted plan (decouples availability from the egress bridge); mvmd consumes the same daemon per tenant. Supersedes ADR-059's process model. Phased: control plane → broker daemon → signer daemon → decouple-from-bridge → supervision → mvmd → retire the fork. Phase-1 kickoff prompt at `plans/host-services-daemon-phase-1-kickoff.md`
@@ -749,7 +749,7 @@ PLAN 197 — WorkloadBackend type-bar (core security features non-skippable)  �
       requirements (Plan 193 / ADR-082); gated on the rvproxy migration.
   Design + spike output + bite-sized plan: specs/plans/197-workload-backend-core-trait.md
 
-PLAN 199 — Host runtime packaging + crate boundaries  🟡 Workstream A complete
+PLAN 199 — Host runtime packaging + crate boundaries  🟡 native VMM recipes remain
   Plan: specs/plans/199-host-runtime-packaging-and-crate-boundaries.md
   [x] Add optional source-built Nix host package for `mvmctl` without changing the Linux-only
       `mkGuest` image API.
@@ -758,8 +758,12 @@ PLAN 199 — Host runtime packaging + crate boundaries  🟡 Workstream A comple
   [x] Keep native VMM linkage explicit/opt-in in Nix packaging tests.
   [x] Document binary install as the primary user path and host Nix as optional.
   [ ] Add native VMM Nix recipes without making native linkage a default hidden dependency.
-  [ ] Add release artifact matrix/signature CI.
-  [ ] Audit crate boundaries against default binary closure and security isolation goals.
+      Decision: use the useful external-prior-art overlay shape — pinned, source-built `libkrunfw`
+      and `libkrun` packages exposed through the host overlay — but keep them builder-VM-verified.
+  [x] Decide against an external-prior-art-style release-tarball Nix package for now: source-built
+      `packages.<system>.mvmctl` is the Nix path; signed binary install is handled by `binaryNativeCode`.
+  [x] Add release artifact matrix/signature CI.
+  [x] Audit crate boundaries against default binary closure and security isolation goals.
 
 PLAN 200 — Machine UX/DX layer  🟢 in progress — `machine run` shipped (#968) + WS-B `--net`/`--allow-host` egress enforcement MERGED (#1003)
   Plan: specs/plans/200-machine-ux-dx-layer.md
@@ -823,12 +827,17 @@ PLAN 200 — Machine UX/DX layer  🟢 in progress — `machine run` shipped (#9
       firecracker-bridge cross-compiled with cargo-zigbuild.
   [~] Superseded multi-PR #1014 closed — every commit landed elsewhere (OCI→#1010,
       #1→#1013, #2→#1017, #3→#1019); duplicate #1016 closed too.
-  Remaining WS-B deferred items (owned by the parallel uniform-egress session):
-  [ ] Uniform host:port L4 egress on the libkrun/Vz bare path (bare_network_policy_egress
-      returns egress_l4=None → port not gated; admission-time DNS pin → L4PolicyScan).
-  [ ] DHCP/ARP posture under deny-all (flow-open gate has no UDP 67/68 / ARP carve-out).
-  [ ] (enabler) macOS transient-guest eth0 bring-up — note #1020 already landed the shared
-      mvm-guest::guest_net bring-up; residual is the transient/Vz path + policy-gate.
+  WS-B deferred items — ALL MERGED (uniform-egress session):
+  [x] Uniform host:port L4 egress on the libkrun/Vz bare path — #1029 (admission-time DNS pin →
+      canonicalize_network_policy → L4PolicyScan drops direct-IP/wrong-port dials; uniform with FC;
+      receipt tier collapsed to <backend>:l4-host-port; UDP/53-only carve-out, adversarial-reviewed).
+  [x] DHCP/ARP posture under deny-all — #1030 (decided loopback-only, NO carve-out; deny-all drops
+      DHCP, guest self-assigns static gvproxy fallback; ARP/IPv6-ND are L2, forwarded; ADR-002 §"Deny-all
+      control-plane posture", pinned by bare_deny_all_drops_dhcp_discover_through_the_live_bridge).
+  [x] macOS transient-guest eth0 bring-up — #1020 (shared mvm-guest::guest_net) + #1031 (live-validated:
+      examples/egress-probe boots on libkrun, verdict-0 egress reach). Open follow-up filed: up
+      --network-allow doesn't enforce egress on the libkrun direct-boot path (up.rs VmStartConfig
+      never sets .network_policy; the transient run path does) — pre-existing, not the WS-B work.
 
 PLAN 202 — Host services daemon (per-tenant, not per-VM spawn)   🔴 PROPOSED (ADR-084, #977)
   Supersedes the Plan 125 E5.3b per-VM subprocess fork. Wire protocol unchanged.
