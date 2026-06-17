@@ -473,6 +473,78 @@ pub(super) fn admit_plan_for_boot(
     }))
 }
 
+/// Build the boot-time admission hook for an **untrusted transient run** —
+/// deny-all egress, no secrets, tenant `local`. The locally-signed
+/// `ExecutionPlan` sets `tenant_id`, which makes the libkrun/Vz supervisor
+/// spawn the enforcing gateway bridge (so the resolved egress policy is
+/// actually applied) instead of the legacy unfiltered path; Firecracker reads
+/// the same field through nftables. Shared by `mvmctl run` and the MCP
+/// code-runner so both admit identically — neither leaves a deny-all inert on
+/// the bridge backends.
+///
+/// The returned closure owns a fresh nonce ledger per boot and yields the
+/// `SessionAuditSubstrate` (tenant + signed plan) the exec layer hands to the
+/// backend, persisting the bare plan first on the backends that read it from
+/// disk before `start()`.
+pub(in crate::commands) fn untrusted_transient_admit(
+    backend_name: String,
+    cpus: u32,
+    mem_mib: u64,
+) -> impl Fn(&std::path::Path, &str) -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+    untrusted_transient_admit_in(backend_name, cpus, mem_mib, None, None)
+}
+
+/// [`untrusted_transient_admit`] with explicit signer / audit directories so
+/// tests can admit against isolated `TempDir`s; production passes `None` (the
+/// default `~/.mvm` locations).
+fn untrusted_transient_admit_in(
+    backend_name: String,
+    cpus: u32,
+    mem_mib: u64,
+    keys_dir: Option<std::path::PathBuf>,
+    audit_dir: Option<std::path::PathBuf>,
+) -> impl Fn(&std::path::Path, &str) -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+    move |rootfs: &std::path::Path, vm_name: &str| {
+        let ledger = InMemoryNonceLedger::new();
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name,
+            backend_name: &backend_name,
+            rootfs_path: rootfs,
+            precomputed_image_sha256: None,
+            cpus,
+            mem_mib,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            // No secrets on the untrusted transient path; deny secret release.
+            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: keys_dir.as_deref(),
+            audit_dir: audit_dir.as_deref(),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+        })?;
+        let Some(c) = ctx else { return Ok(None) };
+        // Persist the bare plan so the pre-start moat / endpoint can read it on
+        // the backends that consume it from disk.
+        if persists_plan_before_start(&backend_name) {
+            super::plan_persist::write_plan(vm_name, &c.admitted.plan)
+                .context("persisting admitted plan for the untrusted transient run")?;
+        }
+        let plan_json = serde_json::to_string(&c.admitted.signed)
+            .context("serializing admitted plan for the untrusted transient run")?;
+        Ok(Some(crate::exec::SessionAuditSubstrate {
+            tenant_id: c.admitted.plan.tenant.0.clone(),
+            plan_json,
+            bundle_json: None,
+        }))
+    }
+}
+
 #[derive(Debug)]
 struct PolicyAdmissionResolution {
     slots_mode: &'static str,
@@ -3066,6 +3138,46 @@ mod admit_plan_tests {
         let content = std::fs::read_to_string(&audit_path).expect("audit file exists");
         assert!(content.contains("plan.admitted"));
         assert!(content.contains(&ctx.admitted.plan_id.0));
+    }
+
+    // The shared untrusted-transient admit closure (used by both `mvmctl run`
+    // and the MCP code-runner) must produce a real audit substrate — a
+    // non-empty `tenant_id` + signed `plan_json`. That substrate is precisely
+    // what makes the libkrun/Vz supervisor spawn the enforcing gateway bridge,
+    // so a `Some` here is the proof that a deny-all is no longer inert on the
+    // bridge backends (the bug: the MCP path passed `admit = None`).
+    #[test]
+    fn untrusted_transient_admit_yields_bridge_substrate() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"untrusted code rootfs");
+
+        let admit = untrusted_transient_admit_in(
+            "firecracker".to_string(),
+            2,
+            1024,
+            Some(keys_dir.path().to_path_buf()),
+            Some(audit_dir.path().to_path_buf()),
+        );
+        let substrate = admit(&rootfs, "mcp-cold-vm")
+            .expect("admission runs")
+            .expect("untrusted transient run is admitted (Some), not bypassed");
+
+        assert_eq!(substrate.tenant_id, "local");
+        assert!(
+            !substrate.plan_json.is_empty(),
+            "the signed plan must travel to the backend so the bridge spawns"
+        );
+        assert!(
+            substrate.bundle_json.is_none(),
+            "the bare untrusted path pins no bundle"
+        );
+        // The admission emitted its `plan.admitted` chain entry to the isolated
+        // audit dir, confirming the closure went through real admission.
+        let chain = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
+            .expect("audit chain file exists");
+        assert!(chain.contains("plan.admitted"));
     }
 
     #[test]
