@@ -17,7 +17,7 @@
 //! **Cheapness is a hard constraint.** Liveness is a `kill(pid, 0)`
 //! stat against the recorded supervisor pid files only — never `pgrep` / `ps`
 //! (which spawn subprocesses), never a VM boot, never Nix. The heavier
-//! helper-PID argv sweep stays in `mvmctl cache prune --reap-orphans`. This
+//! helper-PID argv sweep stays in `mvmctl cache prune` (on by default). This
 //! reuses the live-vs-orphan discrimination from `mvm-cli`'s
 //! `env::dev_vz` reaper rather than reinventing the policy; the bare
 //! syscall is restated here only because the lower `mvm` crate can't depend on
