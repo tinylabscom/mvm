@@ -519,8 +519,13 @@ Implementation shape:
   as non-sensitive metadata.
 - Add parser tests, dry-run tests, deny-by-default tests, and allow-list tests.
 
-> **Implementation plan (investigated 2026-06-16; not yet built).** Exact
-> touch points + one security decision, so the next pass is mechanical:
+> **Implementation plan — SUPERSEDED: `--net`/`--allow-host` shipped and
+> live-validated via WS-B (#1003).** `VmStartConfig.network_policy` now exists
+> and is applied per-backend; the deny-all default holds. The investigation
+> notes below are kept as history — note the `VmStartConfig` field that #1003
+> added did *not* exist when this was written (a separate attempt confirmed the
+> gap; #1003 closed it). See the "Deferred follow-ups (from WS-B live
+> validation)" section lower in this doc for the remaining items.
 >
 > - **Reuse, don't reinvent:** `resolve_network_policy(preset, allow)`
 >   (`commands/shared/resolve.rs`) already maps preset/allow-list → a
