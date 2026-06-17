@@ -17,6 +17,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use super::host_signer::{SignRequest, SignResponse};
+
 // ============================================================================
 // AppendEntryRequest — supervisor → mvm-audit-signer
 // ============================================================================
@@ -205,6 +207,16 @@ pub struct SignerHelperAppendEntry {
     pub fields: serde_json::Value,
 }
 
+/// One host-signing request routed through the resident signer helper.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignerHelperSignHost {
+    /// Per-call request id, echoed back in the response.
+    pub request_id: String,
+    /// Existing host-signer request envelope.
+    pub request: SignRequest,
+}
+
 /// Request accepted by a resident per-tenant signer helper.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "verb", rename_all = "snake_case", deny_unknown_fields)]
@@ -215,6 +227,8 @@ pub enum SignerHelperRequest {
     DeregisterVm(SignerHelperDeregisterVm),
     /// Append a signed entry to a registered VM's chain.
     AppendEntry(SignerHelperAppendEntry),
+    /// Sign a host admission envelope through the resident helper.
+    SignHost(SignerHelperSignHost),
     /// Health probe.
     Probe { request_id: String },
 }
@@ -225,6 +239,7 @@ impl SignerHelperRequest {
             SignerHelperRequest::RegisterVm(req) => &req.request_id,
             SignerHelperRequest::DeregisterVm(req) => &req.request_id,
             SignerHelperRequest::AppendEntry(req) => &req.request_id,
+            SignerHelperRequest::SignHost(req) => &req.request_id,
             SignerHelperRequest::Probe { request_id } => request_id,
         }
     }
@@ -249,6 +264,12 @@ pub enum SignerHelperResponse {
         entry_hash: String,
         sig_alg: u8,
     },
+    /// Host-signing request completed. The nested response carries the
+    /// host-signer's typed success/error shape unchanged.
+    HostSigned {
+        request_id: String,
+        response: SignResponse,
+    },
     /// Probe succeeded.
     Pong { request_id: String },
     /// Request was refused.
@@ -265,6 +286,7 @@ impl SignerHelperResponse {
             SignerHelperResponse::Registered { request_id, .. }
             | SignerHelperResponse::Deregistered { request_id, .. }
             | SignerHelperResponse::Ok { request_id, .. }
+            | SignerHelperResponse::HostSigned { request_id, .. }
             | SignerHelperResponse::Pong { request_id }
             | SignerHelperResponse::Err { request_id, .. } => request_id,
         }
@@ -442,6 +464,35 @@ mod tests {
         let parsed: SignerHelperRequest = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed, req);
         assert_eq!(parsed.request_id(), "append-1");
+    }
+
+    #[test]
+    fn signer_helper_host_sign_roundtrips() {
+        let req = SignerHelperRequest::SignHost(SignerHelperSignHost {
+            request_id: "sign-1".into(),
+            request: SignRequest::SignPlan {
+                bytes: b"canonical-plan".to_vec(),
+                request_id: "sign-1".into(),
+            },
+        });
+        let json = serde_json::to_vec(&req).unwrap();
+        let parsed: SignerHelperRequest = serde_json::from_slice(&json).unwrap();
+        assert_eq!(parsed, req);
+        assert_eq!(parsed.request_id(), "sign-1");
+
+        let resp = SignerHelperResponse::HostSigned {
+            request_id: "sign-1".into(),
+            response: SignResponse::Ok {
+                request_id: "sign-1".into(),
+                sig_alg: SIG_ALG_ED25519,
+                signature: vec![0u8; 64],
+                signer_pubkey: vec![1u8; 32],
+            },
+        };
+        let json = serde_json::to_vec(&resp).unwrap();
+        let parsed: SignerHelperResponse = serde_json::from_slice(&json).unwrap();
+        assert_eq!(parsed, resp);
+        assert_eq!(parsed.request_id(), "sign-1");
     }
 
     #[test]

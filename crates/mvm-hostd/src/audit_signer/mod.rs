@@ -43,5 +43,6 @@ pub mod category;
 pub mod chain;
 pub mod config;
 pub mod helper;
+pub mod helper_client;
 pub mod server;
 pub mod verify;

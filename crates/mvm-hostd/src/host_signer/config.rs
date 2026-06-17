@@ -25,6 +25,10 @@ pub struct SubprocessConfig {
     /// signing. Not yet wired.
     #[serde(default)]
     pub audit_signer_uds_path: Option<PathBuf>,
+    /// Resident signer-helper UDS. When set, this process is a keyless
+    /// compatibility proxy and forwards signing requests to that helper.
+    #[serde(default)]
+    pub signer_helper_uds_path: Option<PathBuf>,
     /// Optional path to a pre-existing key file (software-fallback path —
     /// used by tests + persisted-key dev workflows). If absent, the
     /// subprocess generates a fresh in-memory key at boot. A future
@@ -49,6 +53,7 @@ mod tests {
             tenant_id: "t-001".into(),
             uds_path: PathBuf::from("/tmp/test/host-signer.sock"),
             audit_signer_uds_path: Some(PathBuf::from("/tmp/test/audit-signer.sock")),
+            signer_helper_uds_path: Some(PathBuf::from("/tmp/test/signer-helper.sock")),
             software_key_path: None,
         };
         let bytes = serde_json::to_vec(&cfg).unwrap();

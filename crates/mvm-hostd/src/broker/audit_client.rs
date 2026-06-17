@@ -192,12 +192,12 @@ fn helper_response_to_append_response(
             code,
             message,
         }),
-        SignerHelperResponse::Registered { .. } | SignerHelperResponse::Deregistered { .. } => {
-            Err(AuditClientError::Protocol {
-                path: path.to_path_buf(),
-                message: "signer helper returned a control response to append".into(),
-            })
-        }
+        SignerHelperResponse::Registered { .. }
+        | SignerHelperResponse::Deregistered { .. }
+        | SignerHelperResponse::HostSigned { .. } => Err(AuditClientError::Protocol {
+            path: path.to_path_buf(),
+            message: "signer helper returned a non-append response to append".into(),
+        }),
     }
 }
 
