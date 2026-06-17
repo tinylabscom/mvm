@@ -56,6 +56,7 @@ pub mod egress_redirect;
 pub(crate) mod egress_shared;
 pub mod firecracker;
 pub mod handle_registry;
+pub(crate) mod host_agent_spawn;
 pub mod image;
 pub mod libkrun;
 pub mod microvm;
@@ -106,6 +107,16 @@ pub use broker_services_spawn::{
     AuditSignerHandle, AuditSignerSpawnParams, BrokerHandle, BrokerServicesGuard,
     BrokerServicesSpawnParams, BrokerSpawnParams, reap_audit_signer, reap_broker,
     reap_broker_services, spawn_audit_signer, spawn_broker, spawn_broker_services_if_admitted,
+};
+
+/// Per-tenant host-agent daemon seam: register/deregister VMs with one
+/// resident daemon instead of forking a per-VM broker. Exposed so the backend
+/// start/stop paths (and tests) share one impl. Not yet wired into `start()` —
+/// that lands behind a flag next.
+pub use host_agent_spawn::{
+    HostAgentServicesGuard, HostAgentServicesParams, ServicesGuard, deregister_vm,
+    ensure_host_agent_daemon, host_agent_daemon_enabled, load_host_signing_key,
+    reap_host_agent_services_from_state, register_host_agent_services_if_admitted, register_vm,
 };
 
 /// Crate-wide test serialization for tests that mutate `HOME` or

@@ -725,11 +725,10 @@ struct ReceiptInput {
     /// `allow-list:host:port,...`). Non-sensitive; the signature covers it.
     network_posture: String,
     /// How faithfully the resolved backend actually enforces that posture
-    /// (`flow-drop`, `open`, `firecracker:l4-host-port`,
-    /// `libkrun:dns-name-only`, ...). Recorded so the signed receipt cannot
-    /// overstate enforcement fidelity — a host:port allow-list is port-gated on
-    /// Firecracker but name-only on the libkrun/Vz bare path. See
-    /// `shared::egress_enforcement_label`.
+    /// (`flow-drop`, `open`, `<backend>:l4-host-port`). Recorded so the signed
+    /// receipt cannot overstate enforcement fidelity — a host:port allow-list is
+    /// now port-gated on every backend (Firecracker nftables; libkrun/Vz via the
+    /// admission-time DNS pin → L4 scan). See `shared::egress_enforcement_label`.
     egress_enforcement: String,
     command: ReceiptCommand,
     env_keys: Vec<String>,
@@ -1204,16 +1203,17 @@ mod tests {
     }
 
     #[test]
-    fn receipt_enforcement_tier_is_honest_per_backend() {
+    fn receipt_enforcement_tier_is_uniform_l4_host_port() {
         // The signed receipt records the REQUESTED posture and, separately, the
-        // honest per-backend enforcement fidelity — it must not claim port
-        // gating on a backend that only sink-holes the host name.
+        // enforcement fidelity. host:port is now L4-enforced on every backend, so
+        // the tier is uniformly `<backend>:l4-host-port` (the backend is still
+        // named so the receipt records which substrate enforced).
         let mut args = run_args(RunProfile::Standard);
         args.allow_host = vec!["api.example.com".into()];
         let fc = ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input");
         assert_eq!(fc.egress_enforcement, "firecracker:l4-host-port");
         let krun = ReceiptInput::from_run_args(&args, "libkrun").expect("receipt input");
-        assert_eq!(krun.egress_enforcement, "libkrun:dns-name-only");
+        assert_eq!(krun.egress_enforcement, "libkrun:l4-host-port");
 
         // deny-all is uniform across backends.
         let deny = run_args(RunProfile::Standard);

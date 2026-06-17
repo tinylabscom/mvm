@@ -135,7 +135,7 @@ fn spawn_audit_signer_with_timeout(
 /// the current exe → workspace `target/{release,debug}`. Mirrors
 /// `substitution_spawn::resolve_substitution_endpoint_path`; shared by the
 /// audit-signer + broker spawns so the lookup can't drift.
-fn resolve_subprocess_bin(bin: &str, env_var: &str) -> Result<PathBuf> {
+pub(crate) fn resolve_subprocess_bin(bin: &str, env_var: &str) -> Result<PathBuf> {
     if let Some(p) = std::env::var_os(env_var).map(PathBuf::from) {
         if p.is_file() {
             return Ok(p);
@@ -168,7 +168,7 @@ fn resolve_subprocess_bin(bin: &str, env_var: &str) -> Result<PathBuf> {
 /// deadline (or an early exit) means the spawn failed — SIGKILL it and bail so
 /// the caller rolls back the VM (fail closed). Adaptive backoff keeps a fast
 /// bind cheap while bounding a slow one.
-fn wait_for_uds(what: &str, uds_path: &Path, pid: u32, timeout: Duration) -> Result<()> {
+pub(crate) fn wait_for_uds(what: &str, uds_path: &Path, pid: u32, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let mut backoff = Duration::from_millis(5);
     loop {
@@ -301,7 +301,7 @@ fn spawn_broker_with_timeout(
 /// spawns so the detach/pipe moat can't drift between them. stdout/stderr are
 /// nulled — both subprocesses log structured JSON to the supervisor's capture,
 /// and neither emits a stdout handshake (readiness is detected by UDS-poll).
-fn spawn_detached_with_config(
+pub(crate) fn spawn_detached_with_config(
     bin: &Path,
     cfg: &serde_json::Value,
     what: &str,
@@ -345,15 +345,15 @@ pub fn reap_broker(state_dir: &Path) {
     let _ = std::fs::remove_file(&pid_file);
 }
 
-fn read_pid(path: &Path) -> Option<libc::pid_t> {
+pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-fn pid_alive(pid: libc::pid_t) -> bool {
+pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-fn kill(pid: libc::pid_t, sig: libc::c_int) {
+pub(crate) fn kill(pid: libc::pid_t, sig: libc::c_int) {
     unsafe {
         libc::kill(pid, sig);
     }

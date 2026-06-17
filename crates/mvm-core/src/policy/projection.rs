@@ -248,6 +248,101 @@ pub fn canonicalize_effective(
     Ok(CanonicalEgress::Rules(rules))
 }
 
+/// The DNS service port. A bare allow-list's name resolution must still reach
+/// the resolver, so the bare lowering carves out UDP/53 (the `DnsSinkholeScan`
+/// gates *which* names resolve).
+const DNS_PORT: u16 = 53;
+
+/// The DNS carve-out rules so a bare allow-list can resolve names: **UDP/53
+/// only** (IPv4 + IPv6 `0.0.0.0/0` / `::/0`). TCP/53 is deliberately NOT carved
+/// out: the host-name gate (`DnsSinkholeScan`) only inspects UDP/53, so a
+/// TCP/53-to-anywhere allowance would be an ungated egress channel — the same
+/// direct-dial-to-an-unlisted-target shape this lowering exists to close. Guest
+/// resolvers (busybox / glibc / musl) query over UDP; TCP/53 fallback is rare.
+/// `CanonicalEgress::permits` still denies the mandatory-deny ranges first, so 53
+/// to cloud-metadata / link-local stays blocked. The qname gate constrains the
+/// remaining UDP/53 reach to allow-listed names; scoping it to the gateway
+/// resolver IP is a follow-up that applies uniformly to every backend.
+fn dns_carve_out_rules() -> Vec<CanonicalRule> {
+    let any_v4: IpNet = "0.0.0.0/0".parse().expect("0.0.0.0/0 is a valid CIDR");
+    let any_v6: IpNet = "::/0".parse().expect("::/0 is a valid CIDR");
+    [any_v4, any_v6]
+        .into_iter()
+        .map(|net| CanonicalRule {
+            proto: Proto::Udp,
+            net,
+            port_lo: DNS_PORT,
+            port_hi: DNS_PORT,
+        })
+        .collect()
+}
+
+/// Lower a bare [`crate::policy::network_policy::NetworkPolicy`] (the
+/// no-signed-bundle transient/dev path) + admission-time DNS pins into the
+/// canonical egress grant set — the transient analogue of
+/// [`canonicalize_effective`]. This is what makes the libkrun/Vz bare path gate
+/// `host:port` at L4 like Firecracker's nftables, closing the direct-IP-dial
+/// bypass that a name-only [`crate::policy`] sink-hole leaves open.
+///
+/// - unrestricted ⇒ [`CanonicalEgress::Unrestricted`] (mandatory-deny still applies).
+/// - deny-all (empty rule set) ⇒ `Rules([])`: L4 admits nothing. The flow gate
+///   drops every egress flow before a packet reaches here; the empty rule set is
+///   the fail-closed backstop.
+/// - allow-list / preset ⇒ a DNS carve-out (UDP/53 only, gated on qname by the
+///   sink-hole) plus one TCP rule per (pinned IP, port).
+///
+/// Fail-closed: a host with no live, non-empty pin returns an error and the
+/// caller drops to deny-all. Lenient on mandatory-deny overlap (kernel-path
+/// posture, matching [`canonicalize_l4`]) — [`CanonicalEgress::permits`] denies
+/// those ranges at decision time and the always-on deny scan backstops it.
+pub fn canonicalize_network_policy(
+    policy: &crate::policy::network_policy::NetworkPolicy,
+    pins: &DnsPinRegistry,
+    now: &str,
+) -> Result<CanonicalEgress, ProjectionError> {
+    let rules = match policy.resolve_rules() {
+        // `None` ⇒ unrestricted kill-switch.
+        None => return Ok(CanonicalEgress::Unrestricted),
+        Some(rules) => rules,
+    };
+    // Empty rule set ⇒ deny-all: admit nothing (no DNS carve-out — a deny-all
+    // flow is dropped at the gate before it reaches the scan).
+    if rules.is_empty() {
+        return Ok(CanonicalEgress::Rules(Vec::new()));
+    }
+    let mut canon = dns_carve_out_rules();
+    for hp in &rules {
+        let pin = pins
+            .lookup(&hp.host)
+            .ok_or_else(|| ProjectionError::MissingPin {
+                host: hp.host.clone(),
+            })?;
+        if !pin.is_valid_at(now) {
+            return Err(ProjectionError::ExpiredPin {
+                host: hp.host.clone(),
+                expires_at: pin.expires_at.clone(),
+            });
+        }
+        if pin.ips.is_empty() {
+            return Err(ProjectionError::EmptyPin {
+                host: hp.host.clone(),
+            });
+        }
+        let (port_lo, port_hi) = normalize_ports(hp.port, hp.port);
+        for pinned in &pin.ips {
+            canon.push(CanonicalRule {
+                proto: Proto::Tcp,
+                net: host_net(*pinned),
+                port_lo,
+                port_hi,
+            });
+        }
+    }
+    canon.sort();
+    canon.dedup();
+    Ok(CanonicalEgress::Rules(canon))
+}
+
 /// A pinned IP as a host-length net (`/32` or `/128`), explicit
 /// so there is no doubt about prefix length.
 fn host_net(ip: IpAddr) -> IpNet {
@@ -498,6 +593,110 @@ mod tests {
         let eg = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap();
         assert!(eg.permits(&Proto::Udp, ip("8.8.8.8"), 53));
         assert!(eg.permits(&Proto::Udp, ip("8.8.8.8"), 65535));
+    }
+
+    // ── canonicalize_network_policy: the bare (no-bundle) transient lowering ──
+    // (reuses the `pin` / `registry` helpers defined lower in this module)
+
+    #[test]
+    fn bare_unrestricted_is_unrestricted() {
+        let eg = canonicalize_network_policy(
+            &crate::policy::network_policy::NetworkPolicy::unrestricted(),
+            &DnsPinRegistry::new(),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(eg, CanonicalEgress::Unrestricted);
+    }
+
+    #[test]
+    fn bare_deny_all_admits_nothing() {
+        let eg = canonicalize_network_policy(
+            &crate::policy::network_policy::NetworkPolicy::deny_all(),
+            &DnsPinRegistry::new(),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(eg, CanonicalEgress::Rules(vec![]));
+        // No carve-out on deny-all: even DNS is denied (the flow gate drops it).
+        assert!(!eg.permits(&Proto::Udp, ip("1.1.1.1"), 53));
+        assert!(!eg.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
+    }
+
+    #[test]
+    fn bare_allow_list_pins_host_port_and_carves_out_dns() {
+        let np = crate::policy::network_policy::NetworkPolicy::allow_list(vec![
+            crate::policy::network_policy::HostPort::new("example.com", 443),
+        ]);
+        let eg = canonicalize_network_policy(
+            &np,
+            &registry(vec![pin("example.com", &["93.184.216.34"])]),
+            NOW,
+        )
+        .unwrap();
+        // The pinned host:port is admitted…
+        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
+        // …but a different port on the same IP is not (port gating — the fix).
+        assert!(!eg.permits(&Proto::Tcp, ip("93.184.216.34"), 8080));
+        // …and a direct dial to an unlisted IP is denied (the bypass closed).
+        assert!(!eg.permits(&Proto::Tcp, ip("8.8.8.8"), 443));
+        // UDP/53 is carved out (name resolution) to any non-mandatory-deny dest…
+        assert!(eg.permits(&Proto::Udp, ip("1.1.1.1"), 53));
+        // …but TCP/53 is NOT carved out (the qname gate only covers UDP/53, so a
+        // TCP/53-to-anywhere allowance would be an ungated channel).
+        assert!(!eg.permits(&Proto::Tcp, ip("1.1.1.1"), 53));
+        // …and mandatory-deny still wins, even on UDP/53.
+        assert!(!eg.permits(&Proto::Udp, ip("169.254.169.254"), 53));
+    }
+
+    #[test]
+    fn bare_allow_list_pins_every_resolved_ip() {
+        let np = crate::policy::network_policy::NetworkPolicy::allow_list(vec![
+            crate::policy::network_policy::HostPort::new("multi.example", 443),
+        ]);
+        let eg = canonicalize_network_policy(
+            &np,
+            &registry(vec![pin("multi.example", &["203.0.113.7", "198.51.100.9"])]),
+            NOW,
+        )
+        .unwrap();
+        assert!(eg.permits(&Proto::Tcp, ip("203.0.113.7"), 443));
+        assert!(eg.permits(&Proto::Tcp, ip("198.51.100.9"), 443));
+        assert!(!eg.permits(&Proto::Tcp, ip("203.0.113.8"), 443));
+    }
+
+    #[test]
+    fn bare_allow_list_fails_closed_on_missing_pin() {
+        let np = crate::policy::network_policy::NetworkPolicy::allow_list(vec![
+            crate::policy::network_policy::HostPort::new("unresolved.example", 443),
+        ]);
+        let err = canonicalize_network_policy(&np, &DnsPinRegistry::new(), NOW).unwrap_err();
+        assert!(matches!(err, ProjectionError::MissingPin { .. }));
+    }
+
+    #[test]
+    fn bare_allow_list_fails_closed_on_empty_pin() {
+        let np = crate::policy::network_policy::NetworkPolicy::allow_list(vec![
+            crate::policy::network_policy::HostPort::new("empty.example", 443),
+        ]);
+        let err = canonicalize_network_policy(&np, &registry(vec![pin("empty.example", &[])]), NOW)
+            .unwrap_err();
+        assert!(matches!(err, ProjectionError::EmptyPin { .. }));
+    }
+
+    #[test]
+    fn bare_allow_list_fails_closed_on_expired_pin() {
+        let np = crate::policy::network_policy::NetworkPolicy::allow_list(vec![
+            crate::policy::network_policy::HostPort::new("stale.example", 443),
+        ]);
+        let stale = DnsPin::at(
+            "stale.example",
+            vec![ip("93.184.216.34")],
+            "2020-01-01T00:00:00Z",
+            "2020-01-01T01:00:00Z",
+        );
+        let err = canonicalize_network_policy(&np, &registry(vec![stale]), NOW).unwrap_err();
+        assert!(matches!(err, ProjectionError::ExpiredPin { .. }));
     }
 
     #[test]

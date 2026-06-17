@@ -337,6 +337,21 @@ pub fn vm_state_dir(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+/// Per-tenant host-agent daemon directory: `<mvm_data_dir>/host-agent/<tenant>/`.
+/// Holds the resident daemon's control UDS, pid file, and spawn lock — one set
+/// per tenant, so the daemon is `O(active tenants)` not `O(VMs)`.
+pub fn host_agent_dir(tenant: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir())
+        .join("host-agent")
+        .join(tenant)
+}
+
+/// The per-tenant host-agent control UDS the daemon binds (mode 0700) and the
+/// backend registers VMs over.
+pub fn host_agent_control_socket(tenant: &str) -> std::path::PathBuf {
+    host_agent_dir(tenant).join("control.sock")
+}
+
 /// `<mvm_data_dir>/pool/` — the supervisor standby pool root.
 /// Each idle standby gets a `pool/<id>/` subdir holding its control UDS +
 /// `standby.json`. Uses the strict resolver so a missing `$HOME`/`MVM_DATA_DIR`
