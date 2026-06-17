@@ -1974,6 +1974,13 @@ fn build_supervisor_config(
         tenant_id: substrate.tenant_id,
         plan,
         bundle,
+        // Always carry the resolved egress policy so the Vz bridge enforces it
+        // on the no-bundle path (deny-all included). Inert for the non-bridge
+        // dev/builder start; superseded by `bundle` when one resolves.
+        network_policy: Some(
+            serde_json::to_value(&config.network_policy)
+                .map_err(|e| anyhow!("serialize VmStartConfig.network_policy: {e}"))?,
+        ),
         audit_dir: substrate
             .audit_dir
             .map(|p| p.to_string_lossy().into_owned()),
@@ -2960,6 +2967,7 @@ mod tests {
             tenant_id: None,
             plan: None,
             bundle: None,
+            network_policy: None,
             audit_dir: None,
             gateway_audit_socket: None,
             signing_key_path: None,
@@ -3043,6 +3051,7 @@ mod tests {
             tenant_id: Some("tenant-x".into()),
             plan: None,
             bundle: None,
+            network_policy: None,
             audit_dir: Some("/parent/audit".into()),
             gateway_audit_socket: Some("/parent/audit/gateway-parentvm.sock".into()),
             signing_key_path: Some("/parent/keys/host-signer.ed25519".into()),
@@ -3238,6 +3247,7 @@ mod tests {
             tenant_id: None,
             plan: None,
             bundle: None,
+            network_policy: None,
             audit_dir: None,
             gateway_audit_socket: None,
             signing_key_path: None,
@@ -3402,6 +3412,7 @@ mod tests {
             gateway_audit_socket: tmp.path().join("audit.sock"),
             gateway_events_socket: None,
             bundle_json: None,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
 
         let err = vz_claim_standby(&handle, &claim).unwrap_err();
@@ -3498,6 +3509,7 @@ mod tests {
             gateway_audit_socket: tmp.path().join("audit.sock"),
             gateway_events_socket: None,
             bundle_json: None,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
 
         let err = vz_claim_standby(&handle, &claim).unwrap_err();

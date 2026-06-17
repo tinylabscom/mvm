@@ -2230,6 +2230,8 @@ fn run_default_profile_argv_only() {
         Commands::Run(exec::RunArgs {
             manifest,
             image,
+            net,
+            allow_host,
             cpus,
             memory,
             profile,
@@ -2248,6 +2250,8 @@ fn run_default_profile_argv_only() {
         }) => {
             assert!(manifest.is_none(), "manifest should default to None");
             assert!(image.is_none(), "image should default to None");
+            assert!(!net, "net should default to false (deny-all)");
+            assert!(allow_host.is_empty(), "allow_host should default to empty");
             assert_eq!(cpus, 2);
             assert_eq!(memory, "512M");
             assert_eq!(profile, exec::RunProfile::Standard);

@@ -499,6 +499,11 @@ impl LibkrunBuilderVm {
             signing_key_path: None,
             plan: None,
             bundle: None,
+            // Builder VMs take the legacy non-bridge path (tenant_id None), so
+            // this is inert today (set explicitly to None — no bare-policy
+            // override). Step 3 flips builder/dev to trusted_build_egress when
+            // they move onto the bridge.
+            network_policy: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -606,6 +611,11 @@ impl LibkrunBuilderVm {
             signing_key_path: None,
             plan: None,
             bundle: None,
+            // Builder VMs take the legacy non-bridge path (tenant_id None), so
+            // this is inert today (set explicitly to None — no bare-policy
+            // override). Step 3 flips builder/dev to trusted_build_egress when
+            // they move onto the bridge.
+            network_policy: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -920,6 +930,11 @@ impl BuilderVm for LibkrunBuilderVm {
             signing_key_path: None,
             plan: None,
             bundle: None,
+            // Builder VMs take the legacy non-bridge path (tenant_id None), so
+            // this is inert today (set explicitly to None — no bare-policy
+            // override). Step 3 flips builder/dev to trusted_build_egress when
+            // they move onto the bridge.
+            network_policy: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -1099,6 +1114,11 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             signing_key_path: None,
             plan: None,
             bundle: None,
+            // Builder VMs take the legacy non-bridge path (tenant_id None), so
+            // this is inert today (set explicitly to None — no bare-policy
+            // override). Step 3 flips builder/dev to trusted_build_egress when
+            // they move onto the bridge.
+            network_policy: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -2045,6 +2065,11 @@ impl LibkrunPersistentHostVm {
             signing_key_path: None,
             plan: None,
             bundle: None,
+            // Builder VMs take the legacy non-bridge path (tenant_id None), so
+            // this is inert today (set explicitly to None — no bare-policy
+            // override). Step 3 flips builder/dev to trusted_build_egress when
+            // they move onto the bridge.
+            network_policy: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.

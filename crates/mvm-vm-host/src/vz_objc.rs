@@ -1784,6 +1784,15 @@ fn spawn_payload_tap(
         }
         None => None,
     };
+    // Bare egress policy for the no-bundle path (transient/dev). Same seam as
+    // libkrun: the bridge enforces it when no bundle resolves.
+    let network_policy: Option<mvm_core::network_policy::NetworkPolicy> =
+        match config.network_policy.clone() {
+            Some(v) => {
+                Some(serde_json::from_value(v).map_err(|e| anyhow!("decode NetworkPolicy: {e}"))?)
+            }
+            None => None,
+        };
 
     let audit_dir = config.audit_dir.clone().expect("has_audit_substrate");
     let audit_socket = config
@@ -1838,6 +1847,9 @@ fn spawn_payload_tap(
         signer,
         policy: Arc::new(AllowAll),
         observers,
+        // Bare-policy enforcement seam (no-bundle path), decoded from
+        // SupervisorConfig.network_policy (filled from VmStartConfig.network_policy).
+        network_policy,
     };
     let endpoints = BridgeEndpoints::VzGvproxy {
         supervisor_fd: pending.supervisor_fd,

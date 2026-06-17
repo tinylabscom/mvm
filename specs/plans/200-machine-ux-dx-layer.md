@@ -518,6 +518,43 @@ Implementation shape:
 - Include the effective network policy in dry-run output and signed receipts
   as non-sensitive metadata.
 - Add parser tests, dry-run tests, deny-by-default tests, and allow-list tests.
+
+> **Implementation plan (investigated 2026-06-16; not yet built).** Exact
+> touch points + one security decision, so the next pass is mechanical:
+>
+> - **Reuse, don't reinvent:** `resolve_network_policy(preset, allow)`
+>   (`commands/shared/resolve.rs`) already maps preset/allow-list → a
+>   `NetworkPolicy`, rejects the mutual-exclusion case, and defaults to
+>   `deny_all()`. `up` already exposes `--network-preset`/`--network-allow`
+>   through it. Mirror that; the ergonomic `--net`/`--allow-host` names map onto
+>   the same `(preset, allow)` signature.
+> - **`VmStartConfig.network_policy` already exists** and is applied by the
+>   backend (the run path defaults it to `deny_all` via `..Default::default()`
+>   at `mvm-cli/src/exec.rs` `run_inner`; claim 10 holds today). So enforcement
+>   is a one-line thread, **not** new backend work — the earlier worry that the
+>   field was missing was wrong.
+> - **Thread:** add `--net`/`--allow-host` to `RunArgs` *and* the internal
+>   `Args` (`commands/vm/exec.rs`), map them in `RunArgs::into_exec_args`,
+>   `resolve_network_policy` in `build_exec_request`, set
+>   `ExecRequest.network_policy`, and set it on the `run_inner` `VmStartConfig`
+>   (replacing the defaulted deny-all). `ExecRequest` gains a required field, so
+>   the ~9 test constructions + `commands/ops/mcp.rs` need
+>   `network_policy: NetworkPolicy::default()`.
+> - **Machine:** add the same two flags to `MachineRunArgs` and pass them through
+>   `into_run_args`.
+> - **SECURITY DECISION (settled):** the transient policy is applied by the
+>   backend (image-backed runs are ephemeral; it does **not** ride a signed
+>   plan), **but every egress relaxation MUST be recorded in the chain-signed
+>   audit** — `emit_oci_run_admission` gains an `oci_network_policy` audit label
+>   (e.g. `"deny-all"` / `"preset:dev"` / `"allowlist:2"`). `network_policy_ref`
+>   on `SynthesisInput` is a *named* bundle reference and is the wrong channel
+>   for an inline transient policy. An enforcement-without-audit `--net` is
+>   rejected as a claim-10 gap; do not ship enforcement and audit separately.
+> - **Dry-run/receipt:** add a `network_policy` summary to `RunPreflightSummary`
+>   and the redacted receipt (`ReceiptInput`): kind only, not the host list.
+> - **Tests:** default→deny-all, `--net dev`, `--allow-host h:443`, mutual
+>   exclusion, machine-run passthrough, dry-run surfaces the policy, and the
+>   audit chain records the relaxation.
 - Add source-shape tests for registry ref, local archive path, stdin archive,
   unpacked rootfs, malformed archive, traversal attempt, wrong architecture, and
   missing provenance handling.
@@ -732,17 +769,40 @@ Required behavior:
 
 ### B. Ephemeral image runner parity
 
-- [ ] Add `--net` and `--allow-host HOST[:PORT]` to `mvmctl run`.
+> **Status (in flight):** `--net`/`--allow-host` + **uniform egress enforcement
+> across Firecracker, libkrun, and Vz** are implemented on branch
+> `feat/plan-200-machine-net`. Design: one `NetworkPolicy` on `VmStartConfig`;
+> FC enforces via its firewall, libkrun/Vz via the gateway bridge — every
+> transient run is admitted as a locally-signed workload so the bridge spawns.
+>
+> **Live-validated 2026-06-16 (macOS/Vz):** no regression (A/B vs `main`
+> identical); admission + bridge-spawn + boot + run + teardown work; dry-run /
+> receipt posture correct; fail-closed parse. The bare-`NetworkPolicy`
+> enforcement is **proven through the live gateway bridge with real Unix
+> datagram sockets** — deny-all drops at the flow gate, an allow-listed host's
+> DNS + TCP are forwarded, and an unlisted host is sink-holed
+> (`bare_*_through_the_live_bridge` tests in `mvm-hostd` `gateway_bridge`).
+>
+> **Remaining before merge:** the macOS *VM-level* egress smoke is blocked by a
+> pre-existing transient-run networking gap (the transient guest never brings up
+> `eth0`; unprivileged exec can't DHCP — see "Deferred follow-ups"), so that
+> smoke runs on Linux/KVM/Firecracker; plus the adversarial security review.
+> Builder/dev still take the legacy non-bridge path (their `trusted_build_egress`
+> opt-in + `run_legacy` removal is the deferred step 3); MCP code-run stays
+> un-admitted (follow-up).
+
+- [x] Add `--net` and `--allow-host HOST[:PORT]` to `mvmctl run`.
 - [ ] Add `MachineImageSource` support for registry refs, local OCI archive
       paths, stdin archive streams, and unpacked rootfs directories.
 - [ ] Route every machine image source through hardened unpacking, source
       provenance, admission, receipts, and audit; do not add a daemon-bypass or
       extraction shortcut for DX.
-- [ ] Thread transient run network policy through `ExecRequest` and
-      `VmStartConfig`.
+- [x] Thread transient run network policy through `ExecRequest` and
+      `VmStartConfig` (and on to `SupervisorConfig` → `BridgeConfig` → the
+      libkrun/Vz gateway-bridge enforcer; FC consumes the same field).
 - [x] Make `mvmctl machine run` translate into `mvmctl run` internals.
-- [ ] Add receipt/dry-run output for effective network posture.
-- [ ] Add unit tests for deny-all, `--net`, allow-list parsing, conflict
+- [x] Add receipt/dry-run output for effective network posture.
+- [x] Add unit tests for deny-all, `--net`, allow-list parsing, conflict
       handling, and dry-run redaction.
 - [ ] Add tests for local archive path, stdin archive, unpacked rootfs,
       malformed archive, traversal attempt, wrong architecture, and missing
@@ -894,6 +954,87 @@ Required behavior:
 - [ ] Preserve verification, signing, secret-handling, TLS, hashing, zeroization,
       and artifact-integrity dependencies that enforce real security
       guarantees.
+
+### Deferred follow-ups (from WS-B live validation, 2026-06-16)
+
+Live validation of the WS-B network-policy work on macOS/Vz proved the enforcement
+mechanism (deny-all drops, allow-list forwards-and-narrows) through the live gateway
+bridge with real Unix datagram sockets (`bare_*_through_the_live_bridge` tests in
+`mvm-hostd` `gateway_bridge`), and proved no regression (A/B vs `main` identical).
+Caveat on the bare allow-list: on the libkrun/Vz no-bundle path the narrowing is by
+host **name** only (a `DnsSinkholeScan` over DNS queries) — the port is not gated and a
+direct-IP dial bypasses the name gate; Firecracker gates `host:port` via nftables. The
+signed receipt records this honestly via `egress_enforcement` (see the deferred
+"uniform L4" follow-up). It also surfaced these pre-existing gaps, none caused by the
+WS-B change:
+
+- [ ] **macOS transient-run guest networking (blocks `machine run --net` on macOS).**
+      `mvmctl run` / `machine run` transient guests never bring up `eth0`: the transient
+      init doesn't run mkGuest `setup_network`, and the run's command is unprivileged
+      (uid 901, setpriv) so it can't DHCP either (`udhcpc: socket: Operation not
+      permitted`). So a transient guest has no egress at all on macOS (Vz) regardless of
+      policy — identical on `main`, pre-existing. The fix: the transient init must bring
+      up `eth0` (DHCP) as root before the agent drops privileges, policy-gated so deny-all
+      still means no egress. This unblocks the VM-level egress proof on macOS *and* makes
+      the headline `machine run --net --image alpine -- nslookup` actually work on macOS.
+      (Linux/KVM/Firecracker transient runs already network, so WS-B is exercisable there
+      today.)
+- [ ] **OCI cache index `schema_version 0` bug.** `OciCacheIndex`
+      (`crates/mvm-cli/src/commands/image/mod.rs`) derives `Default` (→ `schema_version:
+      0`), overriding the `#[serde(default = "schema_version")]` (= 1), so `save_index`
+      persists `0` and the next `load_index` rejects it (`unsupported OCI cache index
+      schema_version 0`). Breaks `image ls` / `run --image` on any freshly-created OCI
+      cache. Fix: `impl Default` (or initialize the field to `schema_version()`).
+- [ ] **`run --image <oci>` won't boot on macOS — missing `mvm-meta.json` sidecar.** The
+      OCI materialize path produces a rootfs without the W6.2 `mvm-meta.json` sidecar /
+      W1.4b runtime-overlay mount point, so the workload boot path refuses it. Needed for
+      the OCI-image machine-run path (Workstream B `MachineImageSource`) on macOS.
+
+Surfaced by the adversarial security review of the WS-B branch (verdict
+`merge-after-fixes`; the three blockers — warm-claim AllowAll bypass, the
+`mvm_keys_dir` stale-base revert, and the accidentally-committed local cache/audit
+log — were fixed in the same branch). The fix pass also closed two further egress
+holes: (a) `run_bridge_inner`'s no-bundle/no-policy fallback now fails CLOSED to
+deny-all instead of honoring the supervisor's `AllowAll`; and (b) the primary Vz
+path (`BridgeEndpoints::VzGvproxy`) now routes the resolved `flow_policy` to the
+in-process bridge instead of `cfg.policy` (`AllowAll`) — without this, a bare
+deny-all run on Vz (which installs no L4 scan) left general egress open, since the
+flow gate was the sole enforcement. Proven by
+`bare_deny_all_policy_drops_egress_through_the_live_vz_bridge`. Remaining
+follow-ups:
+
+- [ ] **Uniform `host:port` L4 egress enforcement on the libkrun/Vz bare path.** The
+      no-bundle path lowers an allow-list to a `DnsSinkholeScan` over the host *names*
+      only (`bare_network_policy_egress` returns `egress_l4 = None`), so the port is not
+      gated and a direct-IP dial bypasses the name gate. Firecracker enforces `host:port`
+      via nftables. The receipt now records this honestly (`egress_enforcement`:
+      `firecracker:l4-host-port` vs `libkrun:dns-name-only`) instead of overstating, but
+      true uniformity needs an admission-time DNS pin feeding `L4PolicyScan` on the bare
+      path, mirroring the bundle path. deny-all / unrestricted are already uniform.
+- [ ] **Emit `plan.launched` / `plan.failed` on the universal transient-run path.** The
+      run admit closure (`commands/vm/exec.rs`) consumes `admit_plan_for_boot`'s
+      `AdmissionContext` for the substrate but drops the emitter, so only `plan.admitted`
+      lands for a transient run (chain integrity is intact — this is observability, not
+      forgery). Thread the `AdmissionContext` out and emit launched/failed mirroring
+      `up.rs` so the claim-8 catalog narrative ("admitted/launched/failed per admission")
+      stays honest.
+- [ ] **Route MCP code-run through the admit closure so its `deny_all()` is enforced.**
+      `commands/ops/mcp.rs` sets `network_policy: deny_all()` but passes `admit = None`, so
+      on the gateway-bridge backends no bridge spawns and the deny-all is inert (FC does
+      enforce the field). MCP runs untrusted AI code — exactly claim 10's target. The live
+      window is narrow today (macOS transient guest has no `eth0`), but it should admit so
+      the bridge actually enforces. Pre-existing (not introduced by this branch).
+- [ ] **Remove the vestigial `BridgeConfig.policy` field + the `AllowAll` type.**
+      `run_bridge_inner` no longer reads `cfg.policy` (the flow gate is derived from
+      `bundle` / `network_policy`, failing closed to deny-all). Every construction site
+      still sets it to `AllowAll`; the field is now a write-only footgun. Drop it across
+      the supervisor bins (`mvm-libkrun-supervisor`, `vz_objc`, `mvm-vz-drainer`,
+      `mvm-firecracker-bridge`) and the tests. Pure hygiene, no behavior change.
+- [ ] **Decide the DHCP/ARP posture under deny-all.** The flow-open gate has no UDP
+      67/68 / ARP carve-out; latent today (macOS transient guest doesn't DHCP) but a
+      correctness trap once guest networking is fixed (a deny-all networked guest would
+      hang on a DHCP OFFER). Pick loopback-only vs a control-plane carve-out and pin it
+      with a live-bridge test.
 
 ## Verification
 

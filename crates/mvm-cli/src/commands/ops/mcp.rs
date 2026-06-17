@@ -405,8 +405,12 @@ impl ExecDispatcher {
             env: Vec::new(),
             target: crate::exec::ExecTarget::Inline { argv },
             timeout_secs: Some(timeout),
+            // MCP runs untrusted code: deny egress by default.
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
-        crate::exec::run_captured(req)
+        // MCP code-run stays on the un-admitted path for now (no bridge); its
+        // egress hardening is a tracked follow-up.
+        crate::exec::run_captured(req, None)
     }
 
     /// Warm-VM path (A.2 v2): boot the session's VM on first call,

@@ -212,6 +212,18 @@ impl NetworkPolicy {
         }
     }
 
+    /// Egress grant for **trusted build/dev infrastructure** only — the
+    /// Stage-0 builder VM and dev shells, which fetch from arbitrary Nix
+    /// substituters/forges and so can't use a tight allow-list yet. This
+    /// is unrestricted egress, but cloud-metadata + link-local stay blocked
+    /// by the always-on mandatory-deny. It exists as one named, greppable
+    /// constructor so every broad-egress grant is auditable and can never
+    /// be confused with a workload policy. **Never** use it for a workload
+    /// (`mvmctl run`/`up`/`invoke`): those default to `deny_all`.
+    pub fn trusted_build_egress() -> Self {
+        Self::unrestricted()
+    }
+
     pub fn deny_all() -> Self {
         Self::Preset {
             preset: NetworkPreset::None,
@@ -279,6 +291,35 @@ impl NetworkPolicy {
             Self::Preset { preset, .. } if preset.is_unrestricted() => None,
             Self::Preset { preset, .. } => Some(preset.rules()),
             Self::AllowList { rules, .. } => Some(rules.clone()),
+        }
+    }
+
+    /// Short, non-sensitive, human-readable summary of the effective
+    /// egress posture for admission/audit/dry-run/receipt surfaces.
+    ///
+    /// Carries only the preset name or the declared host:port allow-list
+    /// (user-supplied destinations, classified non-sensitive like the
+    /// run profile) — never credentials. `deny-all` and `unrestricted`
+    /// are spelled out so a reader never has to know that the deny-all
+    /// default is internally `Preset { None }`.
+    pub fn posture_label(&self) -> String {
+        match self {
+            Self::Preset {
+                preset: NetworkPreset::None,
+                ..
+            } => "deny-all".to_string(),
+            Self::Preset {
+                preset: NetworkPreset::Unrestricted,
+                ..
+            } => "unrestricted".to_string(),
+            Self::Preset { preset, .. } => format!("preset:{preset}"),
+            Self::AllowList { rules, .. } if rules.is_empty() => "deny-all".to_string(),
+            Self::AllowList { rules, .. } => {
+                let mut hosts: Vec<String> = rules.iter().map(HostPort::to_string).collect();
+                hosts.sort();
+                hosts.dedup();
+                format!("allow-list:{}", hosts.join(","))
+            }
         }
     }
 
@@ -580,6 +621,34 @@ mod tests {
         let hp: HostPort = "github.com:443".parse().unwrap();
         assert_eq!(hp.host, "github.com");
         assert_eq!(hp.port, 443);
+    }
+
+    #[test]
+    fn posture_label_covers_every_shape() {
+        assert_eq!(NetworkPolicy::deny_all().posture_label(), "deny-all");
+        assert_eq!(
+            NetworkPolicy::unrestricted().posture_label(),
+            "unrestricted"
+        );
+        assert_eq!(
+            NetworkPolicy::preset(NetworkPreset::Dev).posture_label(),
+            "preset:dev"
+        );
+        // An empty allow-list is deny-all, not an empty "allow-list:".
+        assert_eq!(
+            NetworkPolicy::allow_list(vec![]).posture_label(),
+            "deny-all"
+        );
+        // Hosts are sorted + deduped so the label is stable and non-sensitive.
+        assert_eq!(
+            NetworkPolicy::allow_list(vec![
+                HostPort::new("b.com", 8443),
+                HostPort::new("a.com", 443),
+                HostPort::new("a.com", 443),
+            ])
+            .posture_label(),
+            "allow-list:a.com:443,b.com:8443"
+        );
     }
 
     #[test]

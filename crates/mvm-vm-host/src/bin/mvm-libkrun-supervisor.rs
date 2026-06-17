@@ -375,6 +375,16 @@ fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible
         Some(v) => Some(serde_json::from_value(v).context("decode cfg.bundle into PolicyBundle")?),
         None => None,
     };
+    // Bare egress policy for the no-bundle path. The bridge derives the flow
+    // gate + DNS allow-list from it when no bundle resolves (transient/dev).
+    let network_policy: Option<mvm_core::network_policy::NetworkPolicy> =
+        match cfg.network_policy.clone() {
+            Some(v) => Some(
+                serde_json::from_value(v)
+                    .context("decode cfg.network_policy into NetworkPolicy")?,
+            ),
+            None => None,
+        };
 
     // Native rvproxy gateway: when MVM_NETWORKING=native is in effect (the
     // supervisor inherits the launcher's env — the same channel that swaps the
@@ -499,6 +509,10 @@ fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible
         // prior behavior); non-empty for tenant policies that
         // reference an allowlisted observer by name.
         observers,
+        // Bare-policy enforcement seam for the no-bundle path, decoded from
+        // SupervisorConfig.network_policy (which the libkrun backend fills from
+        // VmStartConfig.network_policy).
+        network_policy,
     };
 
     run_supervisor_with_bridge(&cfg, move |bridge_fds| {

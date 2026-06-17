@@ -137,6 +137,7 @@ mod tests {
             gateway_events_socket: None,
             plan: plan_envelope,
             bundle: None,
+            network_policy: None,
         };
         serde_json::to_vec(&attach).unwrap()
     }

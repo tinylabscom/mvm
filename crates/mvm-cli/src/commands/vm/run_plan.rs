@@ -528,6 +528,8 @@ mod tests {
         RunArgs {
             manifest: None,
             image: None,
+            net: false,
+            allow_host: Vec::new(),
             cpus: 2,
             memory: "512M".to_string(),
             profile: RunProfile::Standard,
