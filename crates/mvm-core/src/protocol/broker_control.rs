@@ -109,6 +109,16 @@ pub enum ControlError {
 }
 
 impl SignedControl {
+    /// Sign `request` with the raw 32-byte host signer key. Lets a caller that
+    /// only reads the key file (e.g. the backend that registers VMs) sign
+    /// without taking an `ed25519_dalek` dependency of its own.
+    pub fn sign_with_key_bytes(
+        request: ControlRequest,
+        key_bytes: &[u8; 32],
+    ) -> Result<Self, ControlError> {
+        Self::sign(request, &SigningKey::from_bytes(key_bytes))
+    }
+
     /// Sign `request` with the host signer key over its JCS canonical bytes.
     pub fn sign(request: ControlRequest, key: &SigningKey) -> Result<Self, ControlError> {
         let bytes = serde_jcs::to_vec(&request)?;
@@ -191,6 +201,15 @@ mod tests {
         // `deny_unknown_fields` fails closed on an unexpected key.
         let bad = r#"{"kind":"deregister","vm_id":"vm-1","extra":true}"#;
         assert!(serde_json::from_str::<ControlRequest>(bad).is_err());
+    }
+
+    #[test]
+    fn sign_with_key_bytes_matches_sign() {
+        let kb = [7u8; 32];
+        let from_bytes = SignedControl::sign_with_key_bytes(sample_register(), &kb).unwrap();
+        let vk = SigningKey::from_bytes(&kb).verifying_key();
+        // Verifies under the key derived from the same bytes.
+        assert_eq!(from_bytes.verify(&vk).unwrap(), &sample_register());
     }
 
     #[test]
