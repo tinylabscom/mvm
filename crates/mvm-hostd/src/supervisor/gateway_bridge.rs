@@ -3612,6 +3612,144 @@ mod tests {
         out
     }
 
+    /// Outcome of a single-SYN native-rvproxy probe.
+    struct NativeProbe {
+        /// `Some(reason)` if rvproxy exported a `denied` flow for the probed dst;
+        /// `None` if it was admitted (an admitted flow stays silent until its
+        /// upstream connect resolves, so absence-of-deny is the admit signal).
+        denied_reason: Option<String>,
+        export: String,
+        stdio: String,
+    }
+
+    /// Scan an rvproxy flow-audit JSONL export for a `flow` record with
+    /// `verdict:"denied"` for `dst_ip`, returning its `reason`.
+    fn denied_reason_for(export: &str, dst_ip: &str) -> Option<String> {
+        for line in export.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if v.get("kind").and_then(|k| k.as_str()) == Some("flow")
+                && v.pointer("/event/verdict").and_then(|x| x.as_str()) == Some("denied")
+                && v.pointer("/event/endpoints/destination_ip")
+                    .and_then(|x| x.as_str())
+                    == Some(dst_ip)
+            {
+                return Some(
+                    v.pointer("/event/reason")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+            }
+        }
+        None
+    }
+
+    /// Spawn native `rvproxy run --config` with `egress`, play the VMM directly
+    /// against its vfkit socket (no splice) with a SINGLE first-frame TCP SYN to
+    /// `dst:443`, and report whether rvproxy exported a `denied` flow for that
+    /// dst. Only the first data frame after the VFKT/DHCP handshake is reliably
+    /// processed — and only one vfkit connection is accepted per spawn — so each
+    /// dst must be probed by its own spawn. Returns `None` if the binary can't be
+    /// spawned (soft-skip); panics if it spawns but never binds (a real failure).
+    async fn native_first_frame_probe(
+        gw_bin: &str,
+        id: &str,
+        egress: &mvm_core::policy::projection::CanonicalEgress,
+        dst: [u8; 4],
+        poll_secs: u64,
+    ) -> Option<NativeProbe> {
+        let tmp = tempfile::tempdir().unwrap();
+        let gw_sock = tmp.path().join("gw.sock");
+        let api_sock = tmp.path().join("api.sock");
+        let flow_audit = tmp.path().join("flow-audit.jsonl");
+        let cfg_path = tmp.path().join("rvproxy.toml");
+
+        let resolvers = [std::net::Ipv4Addr::new(1, 1, 1, 1)];
+        let toml = crate::supervisor::network::rvproxy_config::render_rvproxy_config(
+            &crate::supervisor::network::rvproxy_config::RvproxyConfigParams {
+                id,
+                transport_socket: &gw_sock,
+                api_socket: &api_sock,
+                flow_audit_path: &flow_audit,
+                egress,
+                dns_allow: &[],
+                upstream_resolvers: &resolvers,
+            },
+        )
+        .expect("render native config");
+        std::fs::write(&cfg_path, toml).unwrap();
+
+        let stdio = std::fs::File::create(tmp.path().join("gw-stdio.log")).unwrap();
+        let mut gateway = match std::process::Command::new(gw_bin)
+            .arg("run")
+            .arg("--config")
+            .arg(&cfg_path)
+            .stdout(stdio.try_clone().unwrap())
+            .stderr(stdio)
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skip: cannot spawn native gateway {gw_bin:?}: {e}");
+                return None;
+            }
+        };
+
+        let mut ready = false;
+        for _ in 0..100 {
+            if gw_sock.exists() {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if !ready {
+            let _ = gateway.kill();
+            let log = std::fs::read_to_string(tmp.path().join("gw-stdio.log")).unwrap_or_default();
+            panic!(
+                "native gateway {gw_bin:?} never bound {} (stdio: {log})",
+                gw_sock.display()
+            );
+        }
+
+        // Play the VMM: bind a unixgram, connect straight to rvproxy (no splice),
+        // VFKT handshake, DHCP, then the single TCP SYN to dst:443.
+        let harness = tokio::net::UnixDatagram::bind(tmp.path().join("harness.sock")).unwrap();
+        harness
+            .connect(&gw_sock)
+            .expect("connect to rvproxy vfkit socket");
+        let mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x42];
+        harness.send(b"VFKT").await.unwrap();
+        harness.send(&build_dhcp_discover(mac)).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let syn = build_tcp_syn(mac, [192, 168, 127, 2], dst, 40000, 443);
+        harness.send(&syn).await.unwrap();
+
+        let dst_ip = format!("{}.{}.{}.{}", dst[0], dst[1], dst[2], dst[3]);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(poll_secs);
+        let mut denied_reason = None;
+        while tokio::time::Instant::now() < deadline {
+            let export = std::fs::read_to_string(&flow_audit).unwrap_or_default();
+            if let Some(reason) = denied_reason_for(&export, &dst_ip) {
+                denied_reason = Some(reason);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+
+        let export = std::fs::read_to_string(&flow_audit).unwrap_or_default();
+        let stdio = std::fs::read_to_string(tmp.path().join("gw-stdio.log")).unwrap_or_default();
+        let _ = gateway.kill();
+        let _ = gateway.wait();
+        Some(NativeProbe {
+            denied_reason,
+            export,
+            stdio,
+        })
+    }
+
     /// Native-rvproxy enforcement parity arm (binary-discriminating).
     /// Spawns the candidate as **native**
     /// `rvproxy run --config` with a deny-all `[policy]` + a flow-audit export,
@@ -3632,112 +3770,118 @@ mod tests {
             return;
         };
 
-        let tmp = tempfile::tempdir().unwrap();
-        let gw_sock = tmp.path().join("gw.sock");
-        let api_sock = tmp.path().join("api.sock");
-        let flow_audit = tmp.path().join("flow-audit.jsonl");
-        let cfg_path = tmp.path().join("rvproxy.toml");
+        // Deny-all native config (no allow rules) → a SYN to any dst must be
+        // refused + a denied flow exported with reason `deny-by-default`.
+        let deny_all = mvm_core::policy::projection::CanonicalEgress::Rules(Vec::new());
+        let Some(probe) =
+            native_first_frame_probe(&gw_bin, "vm-native-deny", &deny_all, [93, 184, 216, 34], 8)
+                .await
+        else {
+            return;
+        };
+        let reason = probe.denied_reason.unwrap_or_else(|| {
+            panic!(
+                "native rvproxy {gw_bin:?} did not export a denied flow for the deny-all SYN \
+                 (export: {}; stdio: {})",
+                probe.export, probe.stdio
+            )
+        });
+        assert_eq!(
+            reason, "deny-by-default",
+            "native rvproxy {gw_bin:?} denied the deny-all SYN for the wrong reason \
+             (export: {}; stdio: {})",
+            probe.export, probe.stdio
+        );
+    }
 
-        // Deny-all native config (no allow rules) + the flow-audit export.
-        let resolvers = [std::net::Ipv4Addr::new(1, 1, 1, 1)];
-        let toml = crate::supervisor::network::rvproxy_config::render_rvproxy_config(
-            &crate::supervisor::network::rvproxy_config::RvproxyConfigParams {
-                id: "vm-native-deny",
-                transport_socket: &gw_sock,
-                api_socket: &api_sock,
-                flow_audit_path: &flow_audit,
-                egress: &mvm_core::policy::projection::CanonicalEgress::Rules(Vec::new()),
-                dns_allow: &[],
-                upstream_resolvers: &resolvers,
-            },
-        )
-        .expect("render deny-all native config");
-        std::fs::write(&cfg_path, toml).unwrap();
-
-        let stdio = std::fs::File::create(tmp.path().join("gw-stdio.log")).unwrap();
-        let mut gateway = match std::process::Command::new(&gw_bin)
-            .arg("run")
-            .arg("--config")
-            .arg(&cfg_path)
-            .stdout(stdio.try_clone().unwrap())
-            .stderr(stdio)
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("skip: cannot spawn native gateway {gw_bin:?}: {e}");
-                return;
-            }
+    /// Native-rvproxy allow/deny matrix (binary-discriminating). Renders ONE
+    /// `[policy]` with an **L4 allow rule** for a public /24 + deny-by-default,
+    /// then probes it twice (rvproxy accepts a single vfkit connection per spawn,
+    /// and only the first post-handshake frame is reliably processed, so each dst
+    /// gets its own spawn of the identical config):
+    ///
+    ///   - an UNLISTED dst (8.8.8.8) must be DENIED with reason `l4_allowlist_miss`
+    ///     — proving the rendered allow-list is active and consulted (a deny-all
+    ///     config without an allow-list denies for `deny-by-default` instead);
+    ///   - the LISTED dst (93.184.216.34) must NOT be denied — the allow rule
+    ///     admitted it.
+    ///
+    /// The asymmetry under the identical config proves the allow-list changes the
+    /// verdict, not just blanket deny. We assert admission as absence-of-deny
+    /// rather than a positive `allowed` flow because rvproxy only exports an
+    /// admitted flow once its upstream connect resolves, and its SSRF guards
+    /// (`guest_to_host`, `lan_access`) refuse every locally-reachable address
+    /// before the L4 allow-list is consulted — so no prompt-connectable local
+    /// listener can stand in for an admitted public dst. Deny decisions, by
+    /// contrast, are synchronous. The unlisted-deny half demonstrates the frame
+    /// path works under this config, so the listed-not-denied half is meaningful.
+    /// Same opt-in gate as the deny witness.
+    #[tokio::test]
+    async fn rvproxy_native_admits_listed_denies_unlisted() {
+        if std::env::var("MVM_GATEWAY_NATIVE_E2E").is_err() {
+            eprintln!("skip: set MVM_GATEWAY_NATIVE_E2E=1 to run the native allow/deny witness");
+            return;
+        }
+        let Ok(gw_bin) = std::env::var("MVM_GATEWAY_BIN") else {
+            eprintln!("skip: set MVM_GATEWAY_BIN to a native rvproxy binary");
+            return;
         };
 
-        // Wait for rvproxy to bind its vfkit transport socket.
-        let mut ready = false;
-        for _ in 0..100 {
-            if gw_sock.exists() {
-                ready = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        if !ready {
-            let _ = gateway.kill();
-            let log = std::fs::read_to_string(tmp.path().join("gw-stdio.log")).unwrap_or_default();
+        use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
+        // Allow tcp 93.184.216.0/24:443 (public, passes rvproxy's SSRF guards);
+        // everything else deny-by-default.
+        let egress = CanonicalEgress::Rules(vec![CanonicalRule {
+            proto: Proto::Tcp,
+            net: "93.184.216.0/24".parse().unwrap(),
+            port_lo: 443,
+            port_hi: 443,
+        }]);
+
+        // Unlisted dst → denied, attributed to the allow-list miss (not
+        // deny-by-default), proving the rendered allow-list is active.
+        let Some(unlisted) =
+            native_first_frame_probe(&gw_bin, "vm-native-allow-miss", &egress, [8, 8, 8, 8], 8)
+                .await
+        else {
+            return;
+        };
+        let reason = unlisted.denied_reason.clone().unwrap_or_else(|| {
             panic!(
-                "native gateway {gw_bin:?} never bound {} (stdio: {log})",
-                gw_sock.display()
-            );
-        }
+                "native rvproxy {gw_bin:?} did not DENY the unlisted dst 8.8.8.8 under an \
+                 allow-list config (export: {}; stdio: {})",
+                unlisted.export, unlisted.stdio
+            )
+        });
+        assert_eq!(
+            reason, "l4_allowlist_miss",
+            "native rvproxy {gw_bin:?} denied the unlisted dst for the wrong reason — the L4 \
+             allow-list was not consulted (export: {}; stdio: {})",
+            unlisted.export, unlisted.stdio
+        );
 
-        // Play the VMM: bind a unixgram, connect straight to rvproxy (no splice),
-        // VFKT handshake, register via DHCP, then a TCP SYN to a denied dst.
-        let harness_path = tmp.path().join("harness.sock");
-        let harness = tokio::net::UnixDatagram::bind(&harness_path).unwrap();
-        harness
-            .connect(&gw_sock)
-            .expect("connect to rvproxy vfkit socket");
-        let mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x42];
-        harness.send(b"VFKT").await.unwrap();
-        harness.send(&build_dhcp_discover(mac)).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        // Deny-all → this SYN to 93.184.216.34:443 must be refused + a denied
-        // flow record exported. Source is rvproxy's configured guest_ip.
-        let syn = build_tcp_syn(mac, [192, 168, 127, 2], [93, 184, 216, 34], 40000, 443);
-        harness.send(&syn).await.unwrap();
-
-        // Poll the export for a `flow` record with verdict=denied for the dst.
-        let mut denied = false;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
-        while tokio::time::Instant::now() < deadline {
-            if let Ok(contents) = std::fs::read_to_string(&flow_audit) {
-                for line in contents.lines() {
-                    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-                        continue;
-                    };
-                    if v.get("kind").and_then(|k| k.as_str()) == Some("flow")
-                        && v.pointer("/event/verdict").and_then(|x| x.as_str()) == Some("denied")
-                        && v.pointer("/event/endpoints/destination_ip")
-                            .and_then(|x| x.as_str())
-                            == Some("93.184.216.34")
-                    {
-                        denied = true;
-                        break;
-                    }
-                }
-            }
-            if denied {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        }
-
-        let _ = gateway.kill();
-        let _ = gateway.wait();
-        let log = std::fs::read_to_string(tmp.path().join("gw-stdio.log")).unwrap_or_default();
-        let export = std::fs::read_to_string(&flow_audit).unwrap_or_default();
+        // Listed dst → admitted: it must NOT produce a denied flow. (It may later
+        // export an `allowed` flow once its upstream connect resolves — not a
+        // deny.) The unlisted probe above already proved the frame path enforces
+        // under this config, so absence-of-deny here means the allow rule
+        // admitted the dst.
+        let Some(listed) = native_first_frame_probe(
+            &gw_bin,
+            "vm-native-allow-hit",
+            &egress,
+            [93, 184, 216, 34],
+            3,
+        )
+        .await
+        else {
+            return;
+        };
         assert!(
-            denied,
-            "native rvproxy {gw_bin:?} did not export a denied flow for the deny-all SYN \
-             (export: {export}; stdio: {log})"
+            listed.denied_reason.is_none(),
+            "native rvproxy {gw_bin:?} DENIED the allow-listed dst 93.184.216.34 (reason {:?}) — \
+             the rendered L4 allow-list was not honored (export: {}; stdio: {})",
+            listed.denied_reason,
+            listed.export,
+            listed.stdio
         );
     }
 

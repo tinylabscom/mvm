@@ -248,11 +248,28 @@ own internal default).
         binary. Wired as `scripts/rvproxy-gateway-parity.sh` step [2/4]
         (`run_native_enforcement`), required to PASS in the verdict. Validated
         locally: all four arms green against the rvproxy binary + gvproxy control.
-  - [ ] **2d — remaining: allow half + splice deletion.** (a) Exercise the
-        **allow** half live (verdict 2 — needs an L4 allow rule, i.e. a tenant
-        bundle, since local `up` is deny-all); (b) delete the splice + Plan-141
-        `on_packet` hooks once the gate is green by default.
-      Design + the R2 contract are in "## WS-2 design" below.
+  - [x] **2d task 2b — native allow/deny matrix (binary-discriminating).**
+        `rvproxy_native_admits_listed_denies_unlisted` renders ONE `[policy]` with
+        an L4 allow rule for a public /24 + deny-by-default and probes it twice
+        (rvproxy accepts one vfkit connection per spawn and only its first
+        post-handshake frame is reliably processed, so each dst gets its own
+        spawn of the identical config): the **unlisted** dst (8.8.8.8) is denied
+        with reason `l4_allowlist_miss` — proving the rendered allow-list is
+        active and consulted (deny-all denies for `deny-by-default` instead) —
+        while the **listed** dst (93.184.216.34) is **not** denied, proving
+        admission. Admission is asserted as absence-of-deny because rvproxy only
+        exports an admitted flow once its upstream connect resolves and its SSRF
+        guards (`guest_to_host`/`lan_access`) refuse every locally-reachable
+        address before the L4 allow-list is consulted; the unlisted-deny half
+        proves the frame path enforces under this config, so the listed half is
+        meaningful. Both native witnesses share a `native_first_frame_probe`
+        helper. Folded into `scripts/rvproxy-gateway-parity.sh` step [2/4]
+        (`run_native_enforcement` now runs the whole `rvproxy_native` family).
+        Validated locally: all four gate arms green, both witnesses 5/5.
+  - [ ] **2d — remaining: splice deletion.** Delete the splice + Plan-141
+        `on_packet` hooks once the gate is green by default and the native audit
+        feed is the sole path. Design + the R2 contract are in "## WS-2 design"
+        below.
 - [ ] **WS-3 — backend cutover.** Replace the gvproxy spawn
       (`mvm-build/host_gvproxy.rs`, `libkrun-sys/gvproxy.rs`) + passt with
       `rvproxy run --config` per the integration contract; drop the Homebrew

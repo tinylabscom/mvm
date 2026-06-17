@@ -63,21 +63,23 @@ run_conformance() {
   return 1
 }
 
-# Native-enforcement witness (binary-discriminating): drives the candidate as
-# `rvproxy run --config` with a deny-all policy and asserts it ENFORCES
-# deny-by-default by EXPORTING a denied flow record. gvproxy can't (no
-# run --config / flow export), so this runs against the candidate only.
+# Native-enforcement witnesses (binary-discriminating): drive the candidate as
+# `rvproxy run --config` and assert it ENFORCES the rendered policy by EXPORTING
+# flow records — deny-by-default denies + exports a denied flow, and a rendered
+# L4 allow-list discriminates (unlisted dst denied for `l4_allowlist_miss`,
+# listed dst admitted). gvproxy can do neither (no run --config / flow export),
+# so these run against the candidate only.
 run_native_enforcement() {
   local bin="$1" log
   log="$(mktemp)"
   if MVM_GATEWAY_NATIVE_E2E=1 MVM_GATEWAY_BIN="$bin" \
-      cargo test -p mvm-hostd --lib rvproxy_native_denies_and_exports_flow -- --nocapture \
+      cargo test -p mvm-hostd --lib rvproxy_native -- --nocapture \
       >"$log" 2>&1; then
     if grep -q '^skip:' "$log"; then
-      echo "  rvproxy: SKIP (witness did not run — see $log)"
+      echo "  rvproxy: SKIP (witnesses did not run — see $log)"
       return 3
     fi
-    echo "  rvproxy: PASS ($bin enforces deny-by-default + exports the denied flow)"
+    echo "  rvproxy: PASS ($bin enforces deny-by-default + the L4 allow-list, exporting flows)"
     return 0
   fi
   echo "  rvproxy: FAIL ($bin) — see $log"
@@ -107,7 +109,7 @@ fi
 echo "  PASS: claim-10 / flow-audit / substitution witnesses green"
 echo
 
-echo "[2/4] native-enforcement (binary-discriminating: native rvproxy run --config enforces deny-by-default + exports the denied flow)"
+echo "[2/4] native-enforcement (binary-discriminating: native rvproxy run --config enforces deny-by-default AND the rendered L4 allow-list, exporting flows)"
 native=0
 run_native_enforcement "$RVPROXY_BIN" || native=$?
 echo
@@ -135,12 +137,13 @@ if [[ "$candidate" -ne 0 ]]; then
   echo "Do not flip the macOS/libkrun default to rvproxy."
   exit 1
 fi
-# The candidate MUST prove native enforcement (deny-by-default + denied-flow
-# export). A skip means rvproxy didn't run the witness for real — unproven.
+# The candidate MUST prove native enforcement (deny-by-default + L4 allow-list,
+# with exported flows). A skip means rvproxy didn't run the witnesses for real —
+# unproven.
 if [[ "$native" -ne 0 ]]; then
-  echo "REFUSED: rvproxy did not pass the native-enforcement witness (status $native)."
-  echo "Native rvproxy must enforce deny-by-default + export the denied flow before"
-  echo "the splice can be deleted (Plan 193 WS-2.2d)."
+  echo "REFUSED: rvproxy did not pass the native-enforcement witnesses (status $native)."
+  echo "Native rvproxy must enforce deny-by-default + the rendered L4 allow-list,"
+  echo "exporting flow records, before the splice can be deleted (Plan 193 WS-2.2d)."
   exit 1
 fi
 if [[ "$control" -eq 1 ]]; then
@@ -156,5 +159,6 @@ if [[ "$control" -eq 3 ]]; then
 fi
 echo "PASS: rvproxy matches gvproxy on the conformance gate, the claim-10 /"
 echo "flow-audit / substitution witnesses are green, AND native rvproxy enforces"
-echo "deny-by-default + exports the denied flow (binary-discriminating). The"
-echo "native-enforcement parity arm is satisfied (Plan 193 WS-2.2d task 2)."
+echo "deny-by-default + the rendered L4 allow-list, exporting flows (binary-"
+echo "discriminating). The native-enforcement parity arm is satisfied"
+echo "(Plan 193 WS-2.2d task 2)."
