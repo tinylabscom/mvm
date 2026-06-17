@@ -40,6 +40,14 @@ pub(in crate::commands) struct MachineRunArgs {
     /// OCI image reference to boot (pulled or reused from the local cache).
     #[arg(long, value_name = "REF")]
     pub image: String,
+    /// Enable dev-tier outbound networking (broad egress + DNS). Off by
+    /// default (deny-all). Narrow it with `--allow-host`.
+    #[arg(long)]
+    pub net: bool,
+    /// Allow egress only to these hosts: `HOST[:PORT]` (PORT defaults to
+    /// 443), repeatable. Implies networking and **wins over `--net`**.
+    #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
+    pub allow_host: Vec<String>,
     /// vCPU cores.
     #[arg(long, default_value = "2")]
     pub cpus: u32,
@@ -82,6 +90,8 @@ impl MachineRunArgs {
         RunArgs {
             manifest: None,
             image: Some(self.image),
+            net: self.net,
+            allow_host: self.allow_host,
             cpus: self.cpus,
             memory: self.memory,
             profile: self.profile,
@@ -134,6 +144,36 @@ mod tests {
         let args = parse(&["run", "--image", "alpine", "--", "echo", "hello"]).expect("parse");
         assert_eq!(args.image, "alpine");
         assert_eq!(args.argv, vec!["echo", "hello"]);
+    }
+
+    #[test]
+    fn run_parses_and_forwards_net_flags() {
+        let args = parse(&[
+            "run",
+            "--image",
+            "alpine",
+            "--net",
+            "--allow-host",
+            "a.com",
+            "--allow-host",
+            "b.com:8443",
+            "--",
+            "true",
+        ])
+        .expect("parse");
+        assert!(args.net);
+        assert_eq!(args.allow_host, vec!["a.com", "b.com:8443"]);
+        // The flags ride through into the canonical run args unchanged.
+        let run = args.into_run_args();
+        assert!(run.net);
+        assert_eq!(run.allow_host, vec!["a.com", "b.com:8443"]);
+    }
+
+    #[test]
+    fn run_net_flags_default_off() {
+        let args = parse(&["run", "--image", "alpine", "--", "true"]).expect("parse");
+        assert!(!args.net);
+        assert!(args.allow_host.is_empty());
     }
 
     #[test]

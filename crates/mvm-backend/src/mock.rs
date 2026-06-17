@@ -345,6 +345,7 @@ mod tests {
             plan_json: None,
             bundle_json: None,
             warm_pool_size: 0,
+            network_policy: Default::default(),
         }
     }
 

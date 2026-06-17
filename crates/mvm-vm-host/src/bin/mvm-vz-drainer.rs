@@ -194,6 +194,12 @@ fn run() -> Result<()> {
         signer,
         policy: Arc::new(AllowAll),
         observers,
+        // Bare-policy is not threaded for the legacy Vz NDJSON drainer (a
+        // non-primary path; the live Vz workload runs the in-process VzGvproxy
+        // bridge). This is safe: when a bundle is absent, run_bridge_inner's
+        // no-bundle arm now fails CLOSED to deny-all rather than honoring the
+        // `AllowAll` above, so a bundle-less drainer run cannot open egress.
+        network_policy: None,
     };
 
     let endpoints = BridgeEndpoints::VzIngest {

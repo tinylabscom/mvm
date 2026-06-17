@@ -234,6 +234,10 @@ fn standby_attach_config(
         ),
         None => None,
     };
+    let network_policy = Some(
+        serde_json::to_value(&claim.network_policy)
+            .map_err(|e| StandbyError::ClaimFailed(format!("encode network_policy: {e}")))?,
+    );
     Ok(SupervisorAttachConfig {
         binding_nonce,
         rootfs_path: claim.rootfs_path.clone(),
@@ -243,6 +247,7 @@ fn standby_attach_config(
         gateway_events_socket: claim.gateway_events_socket.clone(),
         plan,
         bundle,
+        network_policy,
     })
 }
 
@@ -355,6 +360,14 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         signing_key_path: substrate.signing_key_path,
         plan,
         bundle,
+        // Always carry the resolved egress policy so the bridge enforces it
+        // on the no-bundle path (deny-all included — that's the enforced
+        // default). Inert for the legacy non-bridge path (it only spawns the
+        // bridge when admitted), and superseded by `bundle` when one resolves.
+        network_policy: Some(
+            serde_json::to_value(&config.network_policy)
+                .map_err(|e| anyhow!("serialize VmStartConfig.network_policy: {e}"))?,
+        ),
         // Only `HardFail` is
         // implemented today. Defaulting here keeps the producer site
         // explicit while a future change can introduce policy-driven
@@ -1031,6 +1044,7 @@ mod tests {
             gateway_events_socket: None,
             plan_json: r#"{"signed":"envelope"}"#.into(),
             bundle_json: None,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         }
     }
 

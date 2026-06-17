@@ -1113,6 +1113,7 @@ mod tests {
             tenant_id: None,
             plan: None,
             bundle: None,
+            network_policy: None,
             audit_dir: None,
             gateway_audit_socket: None,
             signing_key_path: None,

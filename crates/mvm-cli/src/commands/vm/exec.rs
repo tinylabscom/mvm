@@ -92,6 +92,14 @@ pub(in crate::commands) struct RunArgs {
     /// performs the existing verified OCI pull and rootfs materialization path.
     #[arg(long, value_name = "REF")]
     pub image: Option<String>,
+    /// Enable dev-tier outbound networking (broad egress + DNS). Off by
+    /// default (deny-all). Narrow it with `--allow-host`.
+    #[arg(long)]
+    pub net: bool,
+    /// Allow egress only to these hosts: `HOST[:PORT]` (PORT defaults to
+    /// 443), repeatable. Implies networking and **wins over `--net`**.
+    #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
+    pub allow_host: Vec<String>,
     /// vCPU cores (default: 2)
     #[arg(long, default_value = "2")]
     pub cpus: u32,
@@ -269,14 +277,81 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
         }
         return Ok(());
     }
+    // One policy model for every backend: resolve the egress flags here and
+    // thread the result down both the json/receipt and the streaming paths.
+    let network_policy = super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
+
+    // Every transient run is admitted as a locally-signed workload (uniform
+    // with `up`): a signed `ExecutionPlan` sets `tenant_id`, which makes the
+    // libkrun/Vz supervisor spawn the enforcing gateway bridge (so the egress
+    // policy is enforced and the run is chain-audited) instead of the legacy
+    // unfiltered path. The closure runs inside the boot path with the resolved
+    // rootfs + generated vm_name. cpus/mem are captured here because `args` is
+    // consumed by `into_exec_args()` below.
+    let admit_backend = mvm_backend::backend::AnyBackend::auto_select()
+        .name()
+        .to_string();
+    // The closure below moves `admit_backend`; keep a copy for the receipt's
+    // honest per-backend enforcement tier.
+    let receipt_backend = admit_backend.clone();
+    let admit_cpus = args.cpus;
+    let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
+    let admit = move |rootfs: &std::path::Path,
+                      vm_name: &str|
+          -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+        let ledger = super::plan_admission::InMemoryNonceLedger::default();
+        let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name,
+            backend_name: &admit_backend,
+            rootfs_path: rootfs,
+            precomputed_image_sha256: None,
+            cpus: admit_cpus,
+            mem_mib: admit_mem_mib,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            // No secrets on the plain transient path; deny secret release.
+            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+            secrets: vec![],
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: None,
+            audit_dir: None,
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: vec![],
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+        })?;
+        let Some(c) = ctx else { return Ok(None) };
+        // Persist the bare plan so the pre-start moat / endpoint can read it
+        // on the backends that consume it from disk (mirrors the invoke path).
+        if super::up::persists_plan_before_start(&admit_backend) {
+            super::plan_persist::write_plan(vm_name, &c.admitted.plan)
+                .context("persisting admitted plan for the transient run")?;
+        }
+        let plan_json = serde_json::to_string(&c.admitted.signed)
+            .context("serializing admitted plan for the transient run")?;
+        Ok(Some(crate::exec::SessionAuditSubstrate {
+            tenant_id: c.admitted.plan.tenant.0.clone(),
+            plan_json,
+            bundle_json: None,
+        }))
+    };
+
     let receipt_path = args.receipt.clone();
     if args.json || receipt_path.is_some() {
-        let receipt_input = ReceiptInput::from_run_args(&args)?;
+        let receipt_input = ReceiptInput::from_run_args(&args, &receipt_backend)?;
         let json_requested = args.json;
         let image = args.image.clone();
         let prod = args.prod;
-        let req = build_exec_request(args.into_exec_args(), "`mvmctl run`", image, prod)?;
-        let output = crate::exec::run_captured(req)?;
+        let req = build_exec_request(
+            args.into_exec_args(),
+            "`mvmctl run`",
+            image,
+            prod,
+            network_policy,
+        )?;
+        let output = crate::exec::run_captured(req, Some(&admit))?;
         if !json_requested && !output.stdout.is_empty() {
             print!("{}", output.stdout);
         }
@@ -300,7 +375,15 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     }
     let image = args.image.clone();
     let prod = args.prod;
-    run_run_args(cli, args.into_exec_args(), cfg, image, prod)
+    run_run_args(
+        cli,
+        args.into_exec_args(),
+        cfg,
+        image,
+        prod,
+        network_policy,
+        Some(&admit),
+    )
 }
 
 /// Resolve the `mvmctl run` transport mode from the explicit
@@ -391,9 +474,11 @@ fn run_run_args(
     _cfg: &MvmConfig,
     image: Option<String>,
     prod: bool,
+    network_policy: mvm_core::network_policy::NetworkPolicy,
+    admit: Option<&crate::exec::SessionAdmit<'_>>,
 ) -> Result<()> {
-    let req = build_exec_request(args, "`mvmctl run`", image, prod)?;
-    let exit_code = crate::exec::run(req)?;
+    let req = build_exec_request(args, "`mvmctl run`", image, prod, network_policy)?;
+    let exit_code = crate::exec::run(req, admit)?;
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
@@ -405,6 +490,7 @@ fn build_exec_request(
     command_name: &str,
     image_ref: Option<String>,
     prod: bool,
+    network_policy: mvm_core::network_policy::NetworkPolicy,
 ) -> Result<crate::exec::ExecRequest> {
     let target = match (args.launch_plan.as_ref(), args.argv.is_empty()) {
         (Some(_), false) => {
@@ -510,6 +596,7 @@ fn build_exec_request(
         env: env_pairs,
         target,
         timeout_secs: args.timeout,
+        network_policy,
     })
 }
 
@@ -587,6 +674,16 @@ struct ReceiptInput {
     cpus: u32,
     memory: String,
     profile: String,
+    /// Requested egress posture (`deny-all`, `preset:dev`,
+    /// `allow-list:host:port,...`). Non-sensitive; the signature covers it.
+    network_posture: String,
+    /// How faithfully the resolved backend actually enforces that posture
+    /// (`flow-drop`, `open`, `firecracker:l4-host-port`,
+    /// `libkrun:dns-name-only`, ...). Recorded so the signed receipt cannot
+    /// overstate enforcement fidelity — a host:port allow-list is port-gated on
+    /// Firecracker but name-only on the libkrun/Vz bare path. See
+    /// `shared::egress_enforcement_label`.
+    egress_enforcement: String,
     command: ReceiptCommand,
     env_keys: Vec<String>,
     add_dirs: Vec<ReceiptAddDir>,
@@ -661,6 +758,11 @@ struct RunPreflightReceipt {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RunPreflightInvocation {
     profile: String,
+    /// Requested egress posture the run would boot with.
+    network_posture: String,
+    /// Honest per-backend enforcement fidelity for that posture (see
+    /// `ReceiptInput::egress_enforcement`).
+    egress_enforcement: String,
     command: ReceiptCommand,
     env_keys: Vec<String>,
     add_dirs: Vec<ReceiptAddDir>,
@@ -735,7 +837,12 @@ impl RunPreflightSummary {
             );
         }
 
-        let receipt_input = ReceiptInput::from_run_args(args)?;
+        // Report the backend the real run would auto-select, so the dry-run's
+        // enforcement tier matches what an actual boot would record.
+        let backend = mvm_backend::backend::AnyBackend::auto_select()
+            .name()
+            .to_string();
+        let receipt_input = ReceiptInput::from_run_args(args, &backend)?;
 
         Ok(Self {
             schema_version: 1,
@@ -743,6 +850,8 @@ impl RunPreflightSummary {
             will_execute: false,
             invocation: RunPreflightInvocation {
                 profile: receipt_input.profile,
+                network_posture: receipt_input.network_posture,
+                egress_enforcement: receipt_input.egress_enforcement,
                 command: receipt_input.command,
                 env_keys: receipt_input.env_keys,
                 add_dirs: receipt_input.add_dirs,
@@ -788,6 +897,8 @@ fn print_run_preflight_human(summary: &RunPreflightSummary) {
         summary.resources.timeout_secs
     );
     println!("profile: {}", summary.invocation.profile);
+    println!("network: {}", summary.invocation.network_posture);
+    println!("enforced: {}", summary.invocation.egress_enforcement);
     println!("command: {}", summary.invocation.command.describe());
     if summary.invocation.env_keys.is_empty() {
         println!("env: none");
@@ -817,7 +928,10 @@ fn print_run_preflight_human(summary: &RunPreflightSummary) {
 }
 
 impl ReceiptInput {
-    fn from_run_args(args: &RunArgs) -> Result<Self> {
+    fn from_run_args(args: &RunArgs, backend: &str) -> Result<Self> {
+        // Resolve the egress policy once: the requested posture and the honest
+        // per-backend enforcement tier are two views of the same policy.
+        let policy = super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
         let command = if let Some(path) = &args.launch_plan {
             ReceiptCommand::LaunchPlan {
                 path_sha256: sha256_hex(path.as_bytes()),
@@ -861,6 +975,8 @@ impl ReceiptInput {
                 .expect("value enum")
                 .get_name()
                 .to_string(),
+            network_posture: policy.posture_label(),
+            egress_enforcement: super::shared::egress_enforcement_label(backend, &policy),
             command,
             env_keys,
             add_dirs,
@@ -1011,10 +1127,60 @@ fn sha256_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn dry_run_posture_reflects_resolved_policy() {
+        // Default: deny-all.
+        let mut args = run_args(RunProfile::Standard);
+        let s = RunPreflightSummary::from_args(&args).expect("preflight");
+        assert_eq!(s.invocation.network_posture, "deny-all");
+
+        // --net → dev preset.
+        args.net = true;
+        let s = RunPreflightSummary::from_args(&args).expect("preflight");
+        assert_eq!(s.invocation.network_posture, "preset:dev");
+
+        // --allow-host wins over --net and defaults the port.
+        args.allow_host = vec!["a.com".into(), "b.com:8443".into()];
+        let s = RunPreflightSummary::from_args(&args).expect("preflight");
+        assert_eq!(
+            s.invocation.network_posture,
+            "allow-list:a.com:443,b.com:8443"
+        );
+    }
+
+    #[test]
+    fn receipt_records_resolved_posture() {
+        let mut args = run_args(RunProfile::Standard);
+        args.allow_host = vec!["api.example.com".into()];
+        let r = ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input");
+        assert_eq!(r.network_posture, "allow-list:api.example.com:443");
+    }
+
+    #[test]
+    fn receipt_enforcement_tier_is_honest_per_backend() {
+        // The signed receipt records the REQUESTED posture and, separately, the
+        // honest per-backend enforcement fidelity — it must not claim port
+        // gating on a backend that only sink-holes the host name.
+        let mut args = run_args(RunProfile::Standard);
+        args.allow_host = vec!["api.example.com".into()];
+        let fc = ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input");
+        assert_eq!(fc.egress_enforcement, "firecracker:l4-host-port");
+        let krun = ReceiptInput::from_run_args(&args, "libkrun").expect("receipt input");
+        assert_eq!(krun.egress_enforcement, "libkrun:dns-name-only");
+
+        // deny-all is uniform across backends.
+        let deny = run_args(RunProfile::Standard);
+        let r = ReceiptInput::from_run_args(&deny, "vz").expect("receipt input");
+        assert_eq!(r.network_posture, "deny-all");
+        assert_eq!(r.egress_enforcement, "flow-drop");
+    }
+
     fn run_args(profile: RunProfile) -> RunArgs {
         RunArgs {
             manifest: None,
             image: None,
+            net: false,
+            allow_host: Vec::new(),
             cpus: 2,
             memory: "512M".to_string(),
             profile,
@@ -1140,7 +1306,7 @@ mod tests {
         args.env.push("API_TOKEN=secret-value".to_string());
         args.add_dir.push("/private/project:/work:ro".to_string());
 
-        let receipt = ReceiptInput::from_run_args(&args).expect("receipt input");
+        let receipt = ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input");
         let json = serde_json::to_string(&receipt).expect("json");
 
         assert!(!json.contains("token-secret"));
@@ -1177,7 +1343,7 @@ mod tests {
             stderr: "sensitive stderr".to_string(),
         };
         let summary = RunJsonSummary::from_parts(
-            ReceiptInput::from_run_args(&args).expect("receipt input"),
+            ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input"),
             &output,
             Some(PathBuf::from("/tmp/receipt.json")),
         );
@@ -1240,7 +1406,7 @@ mod tests {
             schema_version: 1,
             receipt_id: "receipt-1".to_string(),
             recorded_at: "2026-05-14T00:00:00Z".to_string(),
-            invocation: ReceiptInput::from_run_args(&args).expect("receipt input"),
+            invocation: ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input"),
             outcome: ReceiptOutcome {
                 exit_code: 0,
                 success: true,
@@ -1284,7 +1450,7 @@ mod tests {
             schema_version: 1,
             receipt_id: "receipt-1".to_string(),
             recorded_at: "2026-05-14T00:00:00Z".to_string(),
-            invocation: ReceiptInput::from_run_args(&args).expect("receipt input"),
+            invocation: ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input"),
             outcome: ReceiptOutcome {
                 exit_code: 0,
                 success: true,

@@ -243,6 +243,14 @@ fn run() -> Result<()> {
         signer,
         policy: Arc::new(AllowAll),
         observers,
+        // Firecracker's authoritative egress gate is the kernel nftables
+        // `install_default_deny` chain at the FC start path (claim 10 leg 1);
+        // this passt sidecar is the audit/observer + relay, not the enforcer.
+        // So the bridge flow gate must DEFER (open) rather than double-gate —
+        // `unrestricted` keeps the no-bundle arm flow-open exactly as the prior
+        // `AllowAll` did. (A bundle, when present, still drives the bundle path.)
+        // Using `None` would now fail closed to deny-all and over-block FC.
+        network_policy: Some(mvm_core::network_policy::NetworkPolicy::unrestricted()),
     };
 
     let endpoints = BridgeEndpoints::Passt {

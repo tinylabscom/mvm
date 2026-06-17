@@ -122,6 +122,17 @@ pub struct VmStartConfig {
     /// Firecracker standby reads the same field (it's why this lives on the
     /// backend-agnostic config, not a libkrun-specific knob).
     pub warm_pool_size: u32,
+    /// Effective egress policy for this VM, enforced identically across
+    /// every workload backend (Firecracker nftables, libkrun/Vz gateway
+    /// bridge). The mechanism is the per-backend enforcer; the policy and
+    /// its observable deny/allow effect are the same value here.
+    ///
+    /// Defaults (via `#[derive(Default)]`) to `NetworkPolicy::deny_all()`,
+    /// so any caller that omits the field keeps deny-by-default. Trusted
+    /// infrastructure that genuinely needs egress (the Stage-0 builder VM,
+    /// dev shells) sets this to `NetworkPolicy::unrestricted()` explicitly;
+    /// it is never an implicit, backend-specific fallback.
+    pub network_policy: crate::network_policy::NetworkPolicy,
 }
 
 /// A host:guest port mapping, backend-agnostic.
@@ -664,6 +675,11 @@ pub struct StandbyClaim {
     pub plan_json: String,
     /// JSON-encoded `PolicyBundle`, if any.
     pub bundle_json: Option<String>,
+    /// The launcher's resolved bare egress policy, threaded so a warm-claimed
+    /// standby enforces the SAME deny-by-default posture a cold boot would. The
+    /// no-bundle bridge arm lowers this; without it a pool hit on a bundle-less
+    /// admitted plan would silently widen to `AllowAll`.
+    pub network_policy: crate::network_policy::NetworkPolicy,
 }
 
 /// Why a standby spawn/claim failed. Fail-closed: every variant means the caller must
@@ -1215,6 +1231,7 @@ mod tests {
             gateway_events_socket: None,
             plan_json: "{}".into(),
             bundle_json: None,
+            network_policy: crate::network_policy::NetworkPolicy::deny_all(),
         }
     }
 

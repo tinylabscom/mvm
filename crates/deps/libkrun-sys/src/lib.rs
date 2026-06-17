@@ -1382,6 +1382,14 @@ pub struct SupervisorConfig {
     /// in `BridgeConfig`).
     #[serde(default)]
     pub bundle: Option<serde_json::Value>,
+    /// JSON-encoded [`mvm_core::network_policy::NetworkPolicy`] — the bare
+    /// egress policy for the no-bundle path. The supervisor decodes it onto
+    /// `BridgeConfig.network_policy` so a transient/dev run enforces the same
+    /// policy Firecracker derives from `VmStartConfig.network_policy`. `None`
+    /// ⇒ no bare-policy override (admitted workloads with a `bundle` resolve
+    /// egress from that instead).
+    #[serde(default)]
+    pub network_policy: Option<serde_json::Value>,
 
     // --- bridge crash policy reservation ----------
     //
@@ -1544,6 +1552,14 @@ pub struct SupervisorAttachConfig {
     /// JSON-encoded `PolicyBundle`, optional even when `plan` is set.
     #[serde(default)]
     pub bundle: Option<serde_json::Value>,
+    /// JSON-encoded bare `NetworkPolicy` (same carrier shape as the cold-boot
+    /// `SupervisorConfig.network_policy`). Threaded from the launcher's resolved
+    /// policy so a warm-claimed standby enforces the SAME egress posture a cold
+    /// boot would — the no-bundle deny-by-default path must not silently widen to
+    /// `AllowAll` on a pool hit. `None` only for pre-policy callers; the merge
+    /// fails closed to deny-all in that case.
+    #[serde(default)]
+    pub network_policy: Option<serde_json::Value>,
 }
 
 /// Failure modes of [`SupervisorConfig::from_base_and_attach`]. The plan
@@ -1601,6 +1617,15 @@ impl SupervisorConfig {
             signing_key_path: Some(base.signing_key_path),
             plan: Some(attach.plan),
             bundle: attach.bundle,
+            // Carry the launcher's resolved egress policy onto the merged config so
+            // a warm-claimed standby enforces the SAME deny-by-default posture a
+            // cold boot would. Without this, a bundle-less admitted plan that
+            // cold-boots deny-all would silently run `AllowAll` on a pool hit
+            // (run_bridge_inner's no-bundle arm). The attach frame is Ed25519
+            // re-verified in `verify_and_merge_attach`, and (like the cold-boot
+            // `network_policy` field) the policy is host-provided over the 0700
+            // control UDS — a malicious host is out of the threat model.
+            network_policy: attach.network_policy,
             bridge_restart_policy: base.bridge_restart_policy,
         })
     }
@@ -1637,6 +1662,7 @@ mod base_attach_tests {
             gateway_events_socket: None,
             plan: serde_json::json!({"envelope": "stub"}),
             bundle: None,
+            network_policy: None,
         }
     }
 
@@ -1651,6 +1677,19 @@ mod base_attach_tests {
         );
         assert_eq!(cfg.vm_state_dir, "/run/mvm/standby-0");
         assert!(cfg.plan.is_some());
+    }
+
+    #[test]
+    fn merge_threads_network_policy_onto_the_merged_config() {
+        // Deny-by-default must survive the warm-claim merge: a policy on the
+        // attach frame lands verbatim on the merged config (the no-bundle arm
+        // of run_bridge_inner lowers it), not silently dropped to AllowAll.
+        let deny =
+            serde_json::to_value(mvm_core::network_policy::NetworkPolicy::deny_all()).unwrap();
+        let mut a = attach(&"aa".repeat(32));
+        a.network_policy = Some(deny.clone());
+        let cfg = SupervisorConfig::from_base_and_attach(base(), a).unwrap();
+        assert_eq!(cfg.network_policy, Some(deny));
     }
 
     #[test]
@@ -2117,6 +2156,7 @@ mod tests {
             signing_key_path: Some(keys.join("host-signer.ed25519")),
             plan: None,
             bundle: None,
+            network_policy: None,
             bridge_restart_policy: BridgeRestartPolicy::HardFail,
         }
     }
@@ -2238,6 +2278,7 @@ mod tests {
             signing_key_path: None,
             plan: None,
             bundle: None,
+            network_policy: None,
             bridge_restart_policy: BridgeRestartPolicy::HardFail,
         };
         let json = serde_json::to_string(&cfg_pre_w6a).unwrap();

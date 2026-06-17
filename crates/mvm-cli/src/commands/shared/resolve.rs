@@ -174,6 +174,84 @@ pub fn resolve_network_policy(
     }
 }
 
+/// Resolve the transient-run egress flags (`--net` / `--allow-host`) into a
+/// single `NetworkPolicy`, identical for every backend.
+///
+/// Precedence (one tested place so it can't drift):
+/// - any `--allow-host` ⇒ allow-list (narrowest intent **wins** over `--net`);
+/// - else `--net` ⇒ the `dev` preset (broad outbound + DNS, never
+///   `unrestricted`, so it never trips the claim-10 unrestricted ack);
+/// - else ⇒ `deny_all` (the safe default).
+///
+/// `HOST` with no `:PORT` defaults to `443`.
+pub fn resolve_run_network_policy(
+    net: bool,
+    allow_host: &[String],
+) -> Result<mvm_core::network_policy::NetworkPolicy> {
+    use mvm_core::network_policy::{NetworkPolicy, NetworkPreset};
+
+    if !allow_host.is_empty() {
+        let rules = allow_host
+            .iter()
+            .map(|s| parse_allow_host(s))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(NetworkPolicy::allow_list(rules))
+    } else if net {
+        Ok(NetworkPolicy::preset(NetworkPreset::Dev))
+    } else {
+        Ok(NetworkPolicy::deny_all())
+    }
+}
+
+/// How faithfully the resolved `backend` enforces `policy` on the transient
+/// (no-signed-bundle) run path. Recorded in the signed receipt **alongside**
+/// the requested `network_posture` so a verifier never mistakes a requested
+/// `host:port` allow-list for port-level enforcement on a backend that only
+/// gates the host name.
+///
+/// - **deny-all** → `flow-drop` and **unrestricted** → `open`: enforced
+///   identically on every backend (the flow-open gate / no gate), so the tier
+///   is backend-independent.
+/// - An **allow-list / preset** is host **and** port enforced on Firecracker
+///   (nftables `-d <host> --dport <port>`), but on the libkrun/Vz bare path
+///   only the host *name* is gated (DNS sinkhole) — the port is not, and a
+///   direct-IP dial bypasses the name gate. Full `host:port` L4 enforcement
+///   there needs an admission-time DNS pin feeding the L4 scan (deferred), so
+///   the tier is reported honestly as `dns-name-only` rather than overstating.
+pub fn egress_enforcement_label(
+    backend: &str,
+    policy: &mvm_core::network_policy::NetworkPolicy,
+) -> String {
+    if policy.is_unrestricted() {
+        return "open".to_string();
+    }
+    match policy.resolve_rules() {
+        // Some(empty) = deny-all: every egress flow dropped at the gate, uniform.
+        Some(rules) if rules.is_empty() => "flow-drop".to_string(),
+        // Allow-list / preset with rules: fidelity differs by backend.
+        _ => match backend {
+            "firecracker" => format!("{backend}:l4-host-port"),
+            other => format!("{other}:dns-name-only"),
+        },
+    }
+}
+
+/// Parse one `--allow-host` entry. `HOST:PORT` is parsed strictly;
+/// `HOST` with no port defaults to `443` (https). Fails closed on a
+/// malformed port or empty host before any VM work.
+fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
+    use mvm_core::network_policy::HostPort;
+    match entry.rsplit_once(':') {
+        // Has an explicit `:PORT` — strict parse (rejects empty host / bad port).
+        Some(_) => entry
+            .parse()
+            .with_context(|| format!("invalid --allow-host {entry:?}")),
+        // Bare host — default to the https port.
+        None if entry.is_empty() => anyhow::bail!("--allow-host cannot be empty"),
+        None => Ok(HostPort::new(entry, 443)),
+    }
+}
+
 // `resolve_optional_network_policy` was used by `mvmctl template
 // create --network-preset` to bake a default policy into the
 // TemplateSpec. With the `template *` namespace gone and `[network]`
@@ -202,4 +280,97 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
         "firecracker"
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
+
+    #[test]
+    fn run_net_default_is_deny_all() {
+        assert_eq!(
+            resolve_run_network_policy(false, &[]).unwrap(),
+            NetworkPolicy::deny_all()
+        );
+    }
+
+    #[test]
+    fn run_net_flag_maps_to_dev_preset_not_unrestricted() {
+        let p = resolve_run_network_policy(true, &[]).unwrap();
+        assert_eq!(p, NetworkPolicy::preset(NetworkPreset::Dev));
+        assert!(!p.is_unrestricted(), "--net must never be unrestricted");
+    }
+
+    #[test]
+    fn allow_host_defaults_to_port_443() {
+        let p = resolve_run_network_policy(false, &["api.example.com".to_string()]).unwrap();
+        assert_eq!(
+            p,
+            NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)])
+        );
+    }
+
+    #[test]
+    fn allow_host_honors_explicit_port_and_multiple_hosts() {
+        let p = resolve_run_network_policy(false, &["a.com".to_string(), "b.com:8443".to_string()])
+            .unwrap();
+        assert_eq!(
+            p,
+            NetworkPolicy::allow_list(vec![
+                HostPort::new("a.com", 443),
+                HostPort::new("b.com", 8443),
+            ])
+        );
+    }
+
+    #[test]
+    fn allow_host_wins_over_net() {
+        let p = resolve_run_network_policy(true, &["a.com".to_string()]).unwrap();
+        assert_eq!(
+            p,
+            NetworkPolicy::allow_list(vec![HostPort::new("a.com", 443)]),
+            "--allow-host must narrow, winning over --net"
+        );
+    }
+
+    #[test]
+    fn allow_host_rejects_malformed_entries_fail_closed() {
+        assert!(resolve_run_network_policy(false, &["host:0notaport".to_string()]).is_err());
+        assert!(resolve_run_network_policy(false, &[":443".to_string()]).is_err());
+        assert!(resolve_run_network_policy(false, &["".to_string()]).is_err());
+    }
+
+    #[test]
+    fn enforcement_tier_uniform_for_deny_all_and_unrestricted() {
+        // deny-all and unrestricted are enforced the same way on every backend,
+        // so the receipt records a backend-independent tier.
+        for backend in ["firecracker", "libkrun", "vz"] {
+            assert_eq!(
+                egress_enforcement_label(backend, &NetworkPolicy::deny_all()),
+                "flow-drop"
+            );
+            assert_eq!(
+                egress_enforcement_label(backend, &NetworkPolicy::unrestricted()),
+                "open"
+            );
+        }
+    }
+
+    #[test]
+    fn enforcement_tier_allow_list_is_honest_per_backend() {
+        // The signed receipt must NOT claim port enforcement on backends that
+        // only gate the host name. Firecracker enforces host:port; libkrun/Vz
+        // gate the DNS name only on the bare path.
+        let p = NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]);
+        assert_eq!(
+            egress_enforcement_label("firecracker", &p),
+            "firecracker:l4-host-port"
+        );
+        assert_eq!(
+            egress_enforcement_label("libkrun", &p),
+            "libkrun:dns-name-only"
+        );
+        assert_eq!(egress_enforcement_label("vz", &p), "vz:dns-name-only");
+    }
 }

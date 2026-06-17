@@ -43,6 +43,9 @@ nix/images/dev-prebuilt/
 # Worktree-local dev env (use .envrc.example as template)
 /.envrc
 /.mvm-test/
+# Ad-hoc parallel-session isolation dirs (MVM_CACHE_DIR / MVM_DATA_DIR pointed
+# inside the worktree). Never commit a host cache or chain-signed audit log.
+/.mvm-*/
 .worktrees/
 graphify-out/
 specs/scratch.md
