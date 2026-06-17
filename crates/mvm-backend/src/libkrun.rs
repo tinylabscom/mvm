@@ -322,13 +322,30 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         };
     }
 
-    // Resolve the audit substrate (paths + tenant
-    // validation). When the producer threaded an AdmittedPlan in
-    // (`tenant_id` Some), the AuditSubstrate carries the five resolved
-    // paths; otherwise it's all-None and the supervisor takes the
-    // legacy `run_supervisor` path.
-    let substrate =
-        crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?;
+    // `tenant_id` flows into the per-VM audit-chain path
+    // (`workload_audit_path`) that the host-services broker spawns against —
+    // even on the legacy/no-bridge path where the substrate stays all-None. So
+    // validate it here regardless of `plan_json`: an unsafe tenant (e.g. a
+    // path-traversal label) must be refused before `start()` reaches the broker
+    // spawn, independent of whether the gateway bridge is engaged. A path-
+    // injection guard, not just the bridge's input check.
+    if let Some(tenant) = config.tenant_id.as_deref() {
+        crate::audit_substrate::validate_tenant_id(tenant)?;
+    }
+
+    // Resolve the gateway-bridge audit substrate (paths). Gated on `plan_json`
+    // — the bridge supervisor's actual input — NOT on `tenant_id`: a substrate
+    // without a plan is what the supervisor rejects as "cfg.plan missing on
+    // bridge path". An admitted workload always carries `tenant_id` (so the
+    // per-VM host-services broker spawns below), but only the opt-in bridge
+    // path threads `plan_json`; without it the supervisor stays on the legacy
+    // `run_supervisor` path and the substrate is all-None. (`compute_audit_
+    // substrate` re-validates the tenant — harmless after the guard above.)
+    let substrate = if config.plan_json.is_some() {
+        crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?
+    } else {
+        crate::audit_substrate::AuditSubstrate::default()
+    };
 
     // Parse the signed-plan + bundle envelopes from VmStartConfig.
     // libkrun_sys::SupervisorConfig carries them as Option<serde_json::Value>

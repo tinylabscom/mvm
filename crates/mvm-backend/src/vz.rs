@@ -1818,14 +1818,26 @@ fn build_supervisor_config(
     state_dir: &Path,
     gvproxy: &host_gvproxy::HostGvproxyInfo,
 ) -> Result<vz::SupervisorConfig> {
-    // Resolve the audit substrate (paths + tenant validation). It's
-    // threaded into the Rust-native supervisor's config so it runs the
-    // in-process flow-audited gvproxy bridge (payload_tap). When the
-    // producer threaded an AdmittedPlan in (`tenant_id` Some), the
-    // substrate carries the resolved paths; otherwise it's all-None
-    // and the supervisor direct-attaches gvproxy.
-    let substrate =
-        crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?;
+    // `tenant_id` flows into the per-VM audit-chain path that the host-services
+    // broker spawns against, even on the no-bridge path where the substrate
+    // stays all-None — so validate it regardless of `plan_json` (a path-
+    // injection guard; `compute_audit_substrate` re-validates harmlessly).
+    if let Some(tenant) = config.tenant_id.as_deref() {
+        crate::audit_substrate::validate_tenant_id(tenant)?;
+    }
+
+    // Resolve the gateway-bridge audit substrate (paths).
+    // It drives the supervisor's in-process flow-audited gvproxy bridge
+    // (payload_tap). Gated on `plan_json` — the bridge's actual input — NOT on
+    // `tenant_id`: an admitted workload always carries `tenant_id` (so the
+    // per-VM host-services broker spawns), but only the opt-in bridge path
+    // threads `plan_json`. Without it the supervisor direct-attaches gvproxy
+    // and the substrate is all-None.
+    let substrate = if config.plan_json.is_some() {
+        crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?
+    } else {
+        crate::audit_substrate::AuditSubstrate::default()
+    };
     // Signed-plan + bundle envelopes from VmStartConfig, as JSON Values the
     // supervisor decodes into the typed plan + bundle for the bridge.
     let plan = match config.plan_json.as_deref() {

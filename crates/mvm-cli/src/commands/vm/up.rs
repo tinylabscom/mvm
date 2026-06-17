@@ -21,7 +21,7 @@ use super::host_signer::load_or_init_at;
 use super::managed_secrets::lower_workload_secrets;
 use super::plan_admission::{
     AdmittedPlan, BundleAdmissionContext, InMemoryNonceLedger, SystemClock, admit_for_run,
-    populate_audit_substrate, stash_plan_for_bridge,
+    populate_audit_substrate, stash_plan_for_bridge, thread_tenant_id,
 };
 use super::plan_builder::SynthesisInput;
 use super::policy_resolver::{
@@ -2258,6 +2258,15 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         let gateway_bridge_enabled = std::env::var("MVM_GATEWAY_BRIDGE")
             .map(|v| v == "1")
             .unwrap_or(false);
+        // Thread the admitted tenant label unconditionally: the per-VM
+        // host-services broker (libkrun/Vz) keys its spawn off
+        // `config.tenant_id`, so `host.audit.v1` is available to any admitted
+        // workload. This is independent of the opt-in gateway-bridge
+        // path below, which additionally threads the signed `plan_json` and is
+        // what flips the backends onto the bridge supervisor.
+        if let Some(ctx) = admission_main.as_ref() {
+            thread_tenant_id(&mut start_config, &ctx.admitted);
+        }
         if should_thread_signed_plan(gateway_bridge_enabled, effective_hypervisor)
             && let Some(ctx) = admission_main.as_ref()
         {
