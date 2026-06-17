@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Latest update: 2026-06-17** Plan 202 Phase 2c landed: admission host-signing can now route through the resident signer helper. The helper protocol gained `sign_host`, the helper signs existing host-signer `SignRequest` envelopes with the resident key path, and `mvm-host-signer` becomes a keyless compatibility proxy when configured with `signer_helper_uds_path`. Phase 2 remaining work is restart/head rebuild (2d). Plan 125 is also closed/rehome-only: its SDK/CLI veneer work is complete, and the remaining host-services daemon/process-model work now lives in Plan 202.
+**Latest update: 2026-06-17** Plan 202 Phase 2d landed, completing the Phase 2 signer-helper migration. Helper restart now rebuilds per-VM heads from the persisted workload chain/secondary head and replays the host-agent's live registration set after the helper child is restarted. `Chain::open` fails closed on secondary-head drift, and the restart regression verifies a two-entry workload chain across helper restart. Plan 125 is also closed/rehome-only: its SDK/CLI veneer work is complete, and the remaining host-services daemon/process-model work now lives in Plan 202.
 
 
 **Additional 2026-06-15 planning rollup:** Plan 200 de-duplication pass completed — Plans 199/200 are the priority product path; Plan 200 maps ownership against Plans 114/125/126/136/155/156/159/189/193/197/198 so `machine` owns beginner UX, Plan 199 owns install/host packaging, Plan 126/156 own dependency and binary-size mechanics, Plan 155 owns low-level artifact execution, Plan 159/189 stay VZ-specific, Plan 193/197 stay security substrate, and Plan 198 is completed perf input. Plan 200 also records binary-first install, optional source-built Nix, current image-backed one-shot docs before flakes/manifests, future `mvmctl machine`, local image sources, scenario-led beginner docs, explicit limitations docs, verified portable artifacts, measured hot-start claims, no crate-count reduction across security boundaries, `mvm.toml` schema v1 with `image`/`flake` mutual exclusion and strict default-deny network/auth/volume rules, managed macOS virtualization as the safer default, custom kernels as signed runtime/artifact payloads, SDKs mirroring the CLI without bypassing admission/audit, and dependency weight as a first-class DX/security goal measured by default binary closure. Plan 199 Workstream A is complete: source-built Nix `mvmctl` package + host overlay, project-release binary download refused by tests, native libkrun linkage explicit/opt-in, and host Nix remains optional. Plan 201 adds a proposed WarmLease borrow-handle + batched guest exec docs-only workstream over the standby pool and agent-RPC, with no new backend/transport or admission/audit changes.
@@ -62,7 +62,7 @@ details** below for the workstream-level state.
 - [ ] **PLAN 199** — Host runtime packaging + crate boundaries · 🟡 source-built `mvmctl` + host overlay complete; release-install policy/matrix/signature CI complete; crate-boundary audit complete; remaining = builder-VM-verified native VMM Nix recipes (`libkrunfw`/`libkrun`) in the source-built overlay shape (external prior-art pattern), plus `nix flake check` / `.#mvmctl` build follow-ups. Signed binary install remains primary; source-checkout Nix never fetches mvm release binaries
 - [ ] **PLAN 200** — Machine UX/DX layer · 🟢 in progress — `machine run` shipped (#968); Session 3 item 1 `run --image <oci>` boots end-to-end (#1036: injected static guest agent/netinit + honest `overlay_aware` sidecar + vz ext4-geometry fix, live-verified macOS-26/vz); WS-B `--net`/`--allow-host` uniform FC/libkrun/Vz egress enforcement **MERGED (#1003)** with follow-ups through #1034 closed (MCP admitted, BridgeConfig.policy/AllowAll removed, uniform bare host:port L4, DHCP/ARP loopback-only posture, transient eth0 enabler, and `up` direct-boot network-policy threading). First-class `mvmctl machine` surface over existing runtime primitives; no-host-Nix binary-install DX, image-backed one-shot docs, explicit network opt-in, persistent named machines, SDK parity, verified portable artifacts, measured hot-start latency, friendly exec/shell wrappers, `mvm.toml` schema v2 with strict security defaults, and default-binary-closure dependency budgets
 - [ ] **PLAN 201** — `WarmLease` borrow-handle + batched guest exec · 🔴 proposed — DX-ergonomics layer over the Plan 118 standby pool + Plan 169 agent-RPC: RAII claim/release that stops + replenishes a fresh standby, plus staged batched guest exec. Caller-convenience only; no new backend/transport, admission + audit untouched. Docs-only so far (#937).
-- [ ] **PLAN 202** — Host services daemon (per-tenant, not per-VM spawn) · 🟡 in progress ([ADR-084](adrs/084-host-services-daemon-not-per-vm-spawn.md), #977) — re-architect the broker/audit-signer from the shipped per-VM subprocess fork (Plan 125 E5.3b — `2N` processes + a per-boot spawn, availability coupled to `MVM_GATEWAY_BRIDGE`) to **two long-lived per-tenant daemons** VMs register/deregister with: `O(active tenants)` processes not `O(VMs)`; the moat (keyless broker / key-holding signer) + claims 12/13 preserved; guest wire unchanged; registration driven by the admitted plan (decouples availability from the egress bridge); mvmd consumes the same daemon per tenant. Phase 1 broker daemon/control plane, Phase 2a signer-helper child + per-VM heads, Phase 2b helper forwarding, Phase 2c helper-backed admission signing, Phase 3a daemon default-on, and Phase 3c doctor daemon-state reporting landed. Remaining: Phase 2d restart/head rebuild, vz live-verify, supervision/restart journal, mvmd adoption, and retiring `spawn_broker_services_if_admitted`.
+- [ ] **PLAN 202** — Host services daemon (per-tenant, not per-VM spawn) · 🟡 in progress ([ADR-084](adrs/084-host-services-daemon-not-per-vm-spawn.md), #977) — re-architect the broker/audit-signer from the shipped per-VM subprocess fork (Plan 125 E5.3b — `2N` processes + a per-boot spawn, availability coupled to `MVM_GATEWAY_BRIDGE`) to **two long-lived per-tenant daemons** VMs register/deregister with: `O(active tenants)` processes not `O(VMs)`; the moat (keyless broker / key-holding signer) + claims 12/13 preserved; guest wire unchanged; registration driven by the admitted plan (decouples availability from the egress bridge); mvmd consumes the same daemon per tenant. Phase 1 broker daemon/control plane, Phase 2 signer-helper migration, Phase 3a daemon default-on, and Phase 3c doctor daemon-state reporting landed. Remaining: vz live-verify, supervision/restart journal, mvmd adoption, and retiring `spawn_broker_services_if_admitted`.
 
 ## Plan details
 
@@ -872,8 +872,8 @@ PLAN 202 — Host services daemon (per-tenant, not per-VM spawn)   🟡 IN PROGR
   [ ] ADR-084 reviewed + accepted.
   [x] Phase 1 — broker daemon + host-signed Register/Deregister control plane + dynamic
       per-VM socket binding + server-derived vm_id; spawn_broker fork → ensure_daemon/register_vm.
-  [ ] Phase 2 — audit-signer daemon (2a helper core + 2b forwarding + 2c helper-backed
-      admission signing landed; 2d persisted-head restart remains).
+  [x] Phase 2 — audit-signer daemon (2a helper core + 2b forwarding + 2c helper-backed
+      admission signing + 2d persisted-head restart/head rebuild landed).
   [ ] Phase 3 — decouple availability from MVM_GATEWAY_BRIDGE (3a default-on + 3c doctor
       daemon-state reporting landed; cost framing + vz live-verify remain).
   [ ] Phase 4 — supervision + crash/restart journal.
@@ -893,28 +893,27 @@ Why the 11 open rollup boxes still show as open:
 
 - `REFACTOR-STATUS.md` only ticks a plan when the whole plan is done. Partial progress is recorded in the long `Last updated` history and detail blocks, so progress is easy to miss.
 - There is visible drift to clean up: Plan 126's summary says the forbidden-dep gate landed, but its detail section still has D1 unchecked.
-- The Plan 125 closeout + Plan 200 checklist reconciliation are staged in PR #1047 and are not on `main` until that PR merges.
+- The Plan 125 closeout + Plan 200 checklist reconciliation landed in #1047; remaining Plan 202 work continues from the daemon/signature-helper plan, not Plan 125.
 
 Open PRs at update time:
 
-- `#1047` / `docs/plan-200-implementation-checklist`: carries the Plan 200 implementation checklist, MCP-admission bookkeeping reconciliation, and Plan 125 close/rehome rollup.
-- `#1039` / `feat/plan-200-image-source-closeout`: merged.
-- `#1041` / `docs/adr-bundle-posture`: merged.
+- `#1049` / `feat/plan-202-2d-signer-restart`: carries signer-helper restart/head rebuild and completes Plan 202 Phase 2.
+- `#1048` / `feat/plan-200-persistent-machine`: carries the Plan 200 persistent-machine workstream.
+- `#1047` / `docs/plan-200-implementation-checklist`: merged; carries the Plan 200 implementation checklist, MCP-admission bookkeeping reconciliation, and Plan 125 close/rehome rollup.
 
 Recommended sequence to close the remaining rollup items:
 
-1. Merge `#1047` after post-rebase checks pass so the Plan 125 closeout and Plan 200 checklist reconciliation reach `main`.
-2. Clean stale worktrees: several are old/behind or already landed (`mvm-202-3c-doctor`, `mvm-pr1009`, `mvm-p200-ociboot`, old status/170/vz100 branches). Do not sequence new work from them.
-3. Finish Plan 202 next: Phase 2d restart/head rebuild unlocks the host-services model.
-4. **Done:** Plan 125 is closed/rehome-only; remaining per-tenant daemon work belongs to Plan 202.
-5. Continue Plan 200 product path: local image sources, persistent OCI-backed machine specs, schema parser, SDK parity, docs, CI budgets.
-6. Do Plan 199 in parallel if builder VM time is available: native `libkrunfw`/`libkrun` Nix recipes and flake/build verification.
-7. Do Plan 195 before Plan 189 acceptance: fingerprint narrowing reduces builder churn and supports cached fast-boot validation.
-8. Continue Plan 193 only after rvproxy cross-repo slices are ready: delete splice, remove Plan-141 hooks, default-on bridge, transparent terminator.
-9. Then Plan 189 VZ DX parity: save/restore verbs, JSON coverage, base pinning.
-10. Resolve Plan 126 by correcting status first, then decide blocked deps (`sigstore`, `pgp`, `aws-lc-rs`) rather than treating them as normal TODOs.
-11. Plan 118/175 are live-KVM gated; do density bench substrate first, then FC standby/warm-start once the KVM environment is ready.
-12. Plan 159 and 201 are lowest priority: Plan 159 mostly needs residuals rehomed/descope, and Plan 201 is a convenience layer after warm-pool fundamentals.
+1. Clean stale worktrees: several are old/behind or already landed (`mvm-202-3c-doctor`, `mvm-pr1009`, `mvm-p200-ociboot`, old status/170/vz100 branches). Do not sequence new work from them.
+2. Continue Plan 202 next: vz live-verify, supervision/restart journal, mvmd adoption, and retirement of `spawn_broker_services_if_admitted`.
+3. **Done:** Plan 125 is closed/rehome-only; remaining per-tenant daemon work belongs to Plan 202.
+4. Continue Plan 200 product path: local image sources, persistent OCI-backed machine specs, schema parser, SDK parity, docs, CI budgets.
+5. Do Plan 199 in parallel if builder VM time is available: native `libkrunfw`/`libkrun` Nix recipes and flake/build verification.
+6. Do Plan 195 before Plan 189 acceptance: fingerprint narrowing reduces builder churn and supports cached fast-boot validation.
+7. Continue Plan 193 only after rvproxy cross-repo slices are ready: delete splice, remove Plan-141 hooks, default-on bridge, transparent terminator.
+8. Then Plan 189 VZ DX parity: save/restore verbs, JSON coverage, base pinning.
+9. Resolve Plan 126 by correcting status first, then decide blocked deps (`sigstore`, `pgp`, `aws-lc-rs`) rather than treating them as normal TODOs.
+10. Plan 118/175 are live-KVM gated; do density bench substrate first, then FC standby/warm-start once the KVM environment is ready.
+11. Plan 159 and 201 are lowest priority: Plan 159 mostly needs residuals rehomed/descope, and Plan 201 is a convenience layer after warm-pool fundamentals.
 
 Plan 200 implementation checklist after `#1039`:
 
