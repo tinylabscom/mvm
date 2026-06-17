@@ -71,12 +71,25 @@ pub(in crate::commands) enum ImageAction {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OciCacheIndex {
     #[serde(default = "schema_version")]
     schema_version: u32,
     #[serde(default)]
     images: Vec<CachedOciImage>,
+}
+
+impl Default for OciCacheIndex {
+    fn default() -> Self {
+        // Hand-written, NOT derived: a derived `Default` sets `schema_version`
+        // to 0 (the u32 default), which `save_index` then persists and the next
+        // `load_index` rejects as unsupported. The `#[serde(default)]` only
+        // fills a *missing* field on deserialize — it does not feed `Default`.
+        Self {
+            schema_version: schema_version(),
+            images: Vec::new(),
+        }
+    }
 }
 
 fn schema_version() -> u32 {
@@ -1534,6 +1547,19 @@ mod tests {
             serde_json::to_vec_pretty(index).expect("serialize index"),
         )
         .expect("write index");
+    }
+
+    #[test]
+    fn default_index_round_trips_through_save_and_load() {
+        // Regression: a derived `Default` set schema_version = 0, which
+        // save_index persisted and load_index then rejected — breaking
+        // `image ls` / `run --image` on a freshly-created OCI cache.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert_eq!(OciCacheIndex::default().schema_version, schema_version());
+        save_index(tmp.path(), &OciCacheIndex::default()).expect("save a default index");
+        let loaded = load_index(tmp.path()).expect("a freshly-saved default index must load");
+        assert_eq!(loaded.schema_version, schema_version());
+        assert!(loaded.images.is_empty());
     }
 
     fn write_file(cache_root: &Path, relative: &str, body: &[u8]) {
