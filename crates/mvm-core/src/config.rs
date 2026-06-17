@@ -345,8 +345,9 @@ pub fn host_agent_root() -> std::path::PathBuf {
 }
 
 /// Per-tenant host-agent daemon directory: `<mvm_data_dir>/host-agent/<tenant>/`.
-/// Holds the resident daemon's control UDS, pid file, and spawn lock — one set
-/// per tenant, so the daemon is `O(active tenants)` not `O(VMs)`.
+/// Holds the resident daemon's control UDS, pid file, worker pid file, and
+/// spawn lock — one set per tenant, so the daemon is `O(active tenants)` not
+/// `O(VMs)`.
 pub fn host_agent_dir(tenant: &str) -> std::path::PathBuf {
     host_agent_root().join(tenant)
 }
@@ -355,6 +356,11 @@ pub fn host_agent_dir(tenant: &str) -> std::path::PathBuf {
 /// backend registers VMs over.
 pub fn host_agent_control_socket(tenant: &str) -> std::path::PathBuf {
     host_agent_dir(tenant).join("control.sock")
+}
+
+/// The per-tenant host-agent worker pid file used by restart recovery.
+pub fn host_agent_worker_pid(tenant: &str) -> std::path::PathBuf {
+    host_agent_dir(tenant).join("worker.pid")
 }
 
 /// The per-tenant signer-helper UDS the host-agent daemon connects to. The

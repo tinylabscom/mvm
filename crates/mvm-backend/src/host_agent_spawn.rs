@@ -27,7 +27,7 @@ use mvm_core::protocol::broker_control::{
 
 use crate::broker_services_spawn::{
     AUDIT_SIGNER_HEAD_FILE, HOST_SIGNER_KEY, HOST_SIGNER_PUB, pid_alive, read_pid,
-    resolve_subprocess_bin, spawn_detached_with_config, wait_for_uds,
+    resolve_subprocess_bin, spawn_detached_with_config,
 };
 
 /// PID file for the per-tenant host-agent daemon, under `host_agent_dir`.
@@ -38,6 +38,31 @@ const SPAWN_LOCK: &str = "spawn.lock";
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Control-frame cap (replies are tiny).
 const CONTROL_MAX_FRAME_BYTES: usize = 64 * 1024;
+
+fn control_socket_is_ready(control_socket: &Path) -> bool {
+    UnixStream::connect(control_socket).is_ok()
+}
+
+fn wait_for_control_socket(control_socket: &Path, pid: u32, timeout: Duration) -> Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if control_socket_is_ready(control_socket) {
+            return Ok(());
+        }
+        if !pid_alive(pid as libc::pid_t) {
+            bail!(
+                "mvm-host-agent exited before binding {}",
+                control_socket.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    bail!(
+        "mvm-host-agent did not bind {} within {:?}",
+        control_socket.display(),
+        timeout
+    )
+}
 
 /// Load the raw 32-byte host signing key from `mvm_keys_dir()`.
 pub fn load_host_signing_key() -> Result<[u8; 32]> {
@@ -73,12 +98,15 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
         return Err(std::io::Error::last_os_error()).context("flock host-agent spawn lock");
     }
 
-    // Already up? (live pid + bound socket).
+    // Already up? (live pid + connectable socket).
     let pid_file = dir.join(DAEMON_PID_FILE);
     if let Some(pid) = read_pid(&pid_file)
         && pid_alive(pid)
-        && control_socket.exists()
     {
+        if control_socket_is_ready(&control_socket) {
+            return Ok(control_socket);
+        }
+        wait_for_control_socket(&control_socket, pid as u32, DAEMON_READY_TIMEOUT)?;
         return Ok(control_socket);
     }
 
@@ -93,12 +121,7 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
         "software_chain_key_path": mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_KEY),
     });
     let child = spawn_detached_with_config(&bin, &cfg, "mvm-host-agent")?;
-    wait_for_uds(
-        "mvm-host-agent",
-        &control_socket,
-        child.id(),
-        DAEMON_READY_TIMEOUT,
-    )?;
+    wait_for_control_socket(&control_socket, child.id(), DAEMON_READY_TIMEOUT)?;
     std::fs::write(&pid_file, child.id().to_string())
         .with_context(|| format!("write {}", pid_file.display()))?;
     Ok(control_socket)
