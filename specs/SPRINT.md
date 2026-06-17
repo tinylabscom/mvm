@@ -2550,6 +2550,8 @@ Today admission to microVMs is single-process: the supervisor signs `ExecutionPl
 > **Plan 202 Phase 2c (2026-06-17):** helper-backed admission signing landed. The signer-helper wire gained `sign_host`, `SignerHelper` signs existing host-signer `SignRequest` envelopes with the resident key path, and `mvm-host-signer` can run as a keyless compatibility proxy when its config carries `signer_helper_uds_path`. Direct keystore mode remains for the legacy fork path. New coverage includes protocol roundtrips, helper signing, missing-key typed errors, helper-client forwarding, and host-signer proxy forwarding. Remaining Phase 2 work is 2d restart/head rebuild.
 >
 > **Plan 202 Phase 2d (2026-06-17):** signer-helper restart/head rebuild landed. `mvm-host-agent` now supervises the signer-helper child, restarts it on exit, and replays the daemon's live registration set so per-VM heads are reopened without rebinding guest-facing broker sockets. `Chain::open` cross-checks the persisted secondary head against the JSONL tail and fails closed on drift. New coverage includes secondary-head mismatch refusal and a helper kill/restart regression that emits through the same live broker socket before and after restart, then `verify_workload_chain`s the two-entry chain clean. Phase 2 is complete.
+>
+> **Plan 202 Phase 3b (2026-06-17):** cost framing is now closed as `O(active tenants)`: one resident `mvm-host-agent` plus one supervised `mvm-signer-helper` per active tenant, while each additional VM adds only a registration, broker socket, and per-VM chain head. The backend seam docs now describe the post-Phase-2 helper model, and `one_tenant_daemon_tracks_many_vm_registrations` covers multiple VM registrations in one tenant daemon.
 
 ### Workstream breakdown
 

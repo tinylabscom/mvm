@@ -10,10 +10,9 @@
 //!   key and send it over that socket — the daemon binds/unbinds the VM's
 //!   `BROKER_PORT` socket in response.
 //!
-//! The audit-signer stays per-VM (forked by `broker_services_spawn`); the
-//! daemon's `host.audit.v1` handler forwards to it. This slice is the seam
-//! only — it is not yet wired into `start()`/`stop()` (that lands behind a flag
-//! next), so it changes no behavior on its own.
+//! The daemon owns all VM registrations for the tenant. Its supervised signer
+//! helper is also per-tenant, so additional VMs add broker sockets and
+//! registrations, not host-service processes.
 
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
