@@ -998,9 +998,10 @@ WS-B change:
       OCI materialize path produces a rootfs without the W6.2 `mvm-meta.json` sidecar /
       W1.4b runtime-overlay mount point, so `admit_overlay_aware` refuses it. **Handed to
       Session 3 item 1a** (the `MachineImageSource` admission leg) — investigation showed it
-      is a design decision (scope the gate to actual overlay attachment vs. make OCI rootfs
-      overlay-aware), not a sidecar write, and needs live builder-VM verification. See the
-      Session 3 prompt below for the full findings + the design question.
+      is not a sidecar write: `run --image` drives the guest via the in-guest agent, which an
+      OCI image lacks, so the runtime overlay (carrying the agent) must be ATTACHED to OCI
+      guests (making the rootfs overlay-aware) rather than the gate being scoped off. Needs
+      live builder-VM verification. See the Session 3 prompt below for the full findings.
 
 Surfaced by the adversarial security review of the WS-B branch (verdict
 `merge-after-fixes`; the three blockers — warm-claim AllowAll bypass, the
@@ -1258,15 +1259,25 @@ landing via PR + merge queue, keeping SPRINT.md + REFACTOR-STATUS.md current:
    refuses it. This is NOT a one-line sidecar write: `overlay_aware: true` means the rootfs
    carries a `/mvm/runtime` bind-mount target + an overlay-preferring `/init` (mk-guest.nix),
    which an arbitrary OCI image has neither of — and the gate also refuses `overlay_aware:
-   false`, so there is no safe partial fix. Crucially, the OCI run path attaches NO runtime
-   overlay (`run_inner`'s `ImageSource::Prebuilt` leaves `runtime_overlay_path = None`), so the
-   gate is firing as a FALSE POSITIVE on OCI — refusing for lacking a W1.4b contract the OCI
-   boot never uses. DESIGN DECISION REQUIRED (claim-adjacent gate; confirm with owner):
-   prefer (A) scope `admit_overlay_aware` to actual overlay attachment (only enforce when
-   `runtime_overlay_path.is_some()`) and give OCI its own admission posture; vs (B) make the
-   OCI materialize path produce a genuinely overlay-aware rootfs (`/mvm/runtime` + mvm `/init`)
-   and write the sidecar. Needs live builder-VM + boot verification — `tests/oci_image_runner_smoke.rs`
-   is gated off and does NOT exercise the gate, so OCI boot is unproven end-to-end today.
+   false`, so there is no safe partial fix.
+
+   The deeper finding (DECIDES the design): `run --image` drives the guest through the in-guest
+   AGENT — `run_in_guest` (exec.rs) calls `wait_for_agent` then connects to `GUEST_AGENT_PORT`
+   over vsock. An OCI image has no mvm agent baked in, and the OCI run attaches NO runtime
+   overlay (`ImageSource::Prebuilt` leaves `runtime_overlay_path = None`). So even if the gate
+   passed, the guest would have no agent and the run would fail at `wait_for_agent` ("guest
+   agent did not become reachable within 30s"). The runtime overlay (W1.4b, dm-verity sealed)
+   is exactly what carries the agent + netinit.
+
+   Therefore "scope `admit_overlay_aware` to `runtime_overlay_path.is_some()` and let OCI skip
+   it" is the WRONG fix — it removes the gate's refusal but moves the failure 30s downstream to
+   the missing agent. The right direction is the opposite: ATTACH the runtime overlay to OCI
+   guests (inject the agent/netinit), which requires the OCI materialize path to create the
+   `/mvm/runtime` mount point, the run path to wire `runtime_overlay_path` to the default
+   overlay, then write the `overlay_aware: true` sidecar so the gate passes honestly. Confirm
+   the OCI control model with the owner before building; needs live builder-VM + boot
+   verification (`tests/oci_image_runner_smoke.rs` is gated off and does NOT exercise the gate,
+   so OCI boot is unproven end-to-end today).
 
 2. WS-C persistent verbs: machine create/start/exec/shell/stop/ls/inspect/rm, backed by a
    MachineSpec persisted under mvm-core::config data-dir helpers (NEVER inline $HOME — use
