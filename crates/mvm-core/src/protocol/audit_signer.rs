@@ -15,6 +15,7 @@
 //! audit-signer's typed schema lives in its own crate.
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 // ============================================================================
 // AppendEntryRequest — supervisor → mvm-audit-signer
@@ -143,6 +144,131 @@ pub enum AuditSignerErrorCode {
     ChainDriftDetected,
     /// Catch-all. Never carries entry-content bytes in the message.
     InternalError,
+}
+
+// ============================================================================
+// Signer helper protocol — host-agent daemon → resident per-tenant helper
+// ============================================================================
+
+/// Register a VM with the resident per-tenant signer helper.
+///
+/// Registration opens and owns that VM's workload chain in the helper process.
+/// Subsequent append requests address the chain by server-derived `vm_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignerHelperRegisterVm {
+    /// Per-call request id, echoed back in the response.
+    pub request_id: String,
+    /// Server-derived VM identity. The guest never supplies this value.
+    pub vm_id: String,
+    /// Tenant this helper serves. Must match the helper's configured tenant.
+    pub tenant_id: String,
+    /// Workload identifier recorded in diagnostics and future admission logs.
+    pub workload_id: String,
+    /// Per-VM workload audit chain JSONL.
+    pub workload_chain_path: PathBuf,
+    /// Secondary persisted chain-head file for this VM.
+    pub chain_head_secondary_path: PathBuf,
+}
+
+/// Deregister a VM from the resident signer helper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignerHelperDeregisterVm {
+    /// Per-call request id, echoed back in the response.
+    pub request_id: String,
+    /// Server-derived VM identity to close and drop.
+    pub vm_id: String,
+}
+
+/// One append routed through the resident signer helper.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignerHelperAppendEntry {
+    /// Per-call request id, echoed back in the response.
+    pub request_id: String,
+    /// Server-derived VM identity selecting the per-VM chain head.
+    pub vm_id: String,
+    /// Audit category (v1 forwards `workload_audit` for guest emissions).
+    pub category: String,
+    /// Wall-clock timestamp in RFC 3339 form.
+    pub ts: String,
+    /// Workload identifier the entry is being recorded for.
+    pub workload_id: String,
+    /// Tenant identifier. Must match the helper's configured tenant.
+    pub tenant_id: String,
+    /// Session identifier.
+    pub session_id: String,
+    /// Host-agent assigned correlation id.
+    pub correlation_id: String,
+    /// Typed per-category fields.
+    pub fields: serde_json::Value,
+}
+
+/// Request accepted by a resident per-tenant signer helper.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "verb", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SignerHelperRequest {
+    /// Open/own a VM's workload chain.
+    RegisterVm(SignerHelperRegisterVm),
+    /// Flush/drop a VM's workload chain.
+    DeregisterVm(SignerHelperDeregisterVm),
+    /// Append a signed entry to a registered VM's chain.
+    AppendEntry(SignerHelperAppendEntry),
+    /// Health probe.
+    Probe { request_id: String },
+}
+
+impl SignerHelperRequest {
+    pub fn request_id(&self) -> &str {
+        match self {
+            SignerHelperRequest::RegisterVm(req) => &req.request_id,
+            SignerHelperRequest::DeregisterVm(req) => &req.request_id,
+            SignerHelperRequest::AppendEntry(req) => &req.request_id,
+            SignerHelperRequest::Probe { request_id } => request_id,
+        }
+    }
+}
+
+/// Response from the resident per-tenant signer helper.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SignerHelperResponse {
+    /// VM registration succeeded and the helper now owns its chain head.
+    Registered {
+        request_id: String,
+        vm_id: String,
+        chain_head: String,
+    },
+    /// VM deregistration succeeded. Unknown VMs are idempotently accepted.
+    Deregistered { request_id: String, vm_id: String },
+    /// Append succeeded.
+    Ok {
+        request_id: String,
+        chain_head: String,
+        entry_hash: String,
+        sig_alg: u8,
+    },
+    /// Probe succeeded.
+    Pong { request_id: String },
+    /// Request was refused.
+    Err {
+        request_id: String,
+        code: AuditSignerErrorCode,
+        message: String,
+    },
+}
+
+impl SignerHelperResponse {
+    pub fn request_id(&self) -> &str {
+        match self {
+            SignerHelperResponse::Registered { request_id, .. }
+            | SignerHelperResponse::Deregistered { request_id, .. }
+            | SignerHelperResponse::Ok { request_id, .. }
+            | SignerHelperResponse::Pong { request_id }
+            | SignerHelperResponse::Err { request_id, .. } => request_id,
+        }
+    }
 }
 
 // ============================================================================
@@ -277,5 +403,73 @@ mod tests {
             let s = serde_json::to_string(&code).unwrap();
             assert_eq!(s, expected);
         }
+    }
+
+    fn helper_register() -> SignerHelperRequest {
+        SignerHelperRequest::RegisterVm(SignerHelperRegisterVm {
+            request_id: "reg-1".into(),
+            vm_id: "vm-1".into(),
+            tenant_id: "local".into(),
+            workload_id: "wl-1".into(),
+            workload_chain_path: PathBuf::from("/audit/local.vm-1.workload.jsonl"),
+            chain_head_secondary_path: PathBuf::from("/audit/local.vm-1.head"),
+        })
+    }
+
+    #[test]
+    fn signer_helper_register_roundtrips() {
+        let req = helper_register();
+        let json = serde_json::to_vec(&req).unwrap();
+        let parsed: SignerHelperRequest = serde_json::from_slice(&json).unwrap();
+        assert_eq!(parsed, req);
+        assert_eq!(parsed.request_id(), "reg-1");
+    }
+
+    #[test]
+    fn signer_helper_append_roundtrips() {
+        let req = SignerHelperRequest::AppendEntry(SignerHelperAppendEntry {
+            request_id: "append-1".into(),
+            vm_id: "vm-1".into(),
+            category: "workload_audit".into(),
+            ts: "2026-06-17T00:00:00Z".into(),
+            workload_id: "wl-1".into(),
+            tenant_id: "local".into(),
+            session_id: "sess-1".into(),
+            correlation_id: "brk-1".into(),
+            fields: serde_json::json!({"event": "ready"}),
+        });
+        let json = serde_json::to_vec(&req).unwrap();
+        let parsed: SignerHelperRequest = serde_json::from_slice(&json).unwrap();
+        assert_eq!(parsed, req);
+        assert_eq!(parsed.request_id(), "append-1");
+    }
+
+    #[test]
+    fn signer_helper_rejects_unknown_fields() {
+        let bad = serde_json::json!({
+            "verb": "register_vm",
+            "request_id": "reg-1",
+            "vm_id": "vm-1",
+            "tenant_id": "local",
+            "workload_id": "wl-1",
+            "workload_chain_path": "/audit/local.vm-1.workload.jsonl",
+            "chain_head_secondary_path": "/audit/local.vm-1.head",
+            "extra": true,
+        });
+        let err = serde_json::from_value::<SignerHelperRequest>(bad).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn signer_helper_response_roundtrips() {
+        let resp = SignerHelperResponse::Registered {
+            request_id: "reg-1".into(),
+            vm_id: "vm-1".into(),
+            chain_head: "0".repeat(64),
+        };
+        let json = serde_json::to_vec(&resp).unwrap();
+        let parsed: SignerHelperResponse = serde_json::from_slice(&json).unwrap();
+        assert_eq!(parsed, resp);
+        assert_eq!(parsed.request_id(), "reg-1");
     }
 }

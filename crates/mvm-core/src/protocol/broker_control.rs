@@ -40,6 +40,10 @@ pub struct RegisterVm {
     /// off any guest-supplied field; this label is how the host names that VM
     /// in the registration and in the chain path.
     pub vm_id: String,
+    /// Workload identifier stamped into helper registration. Older callers may
+    /// omit it; the daemon falls back to `vm_id`.
+    #[serde(default)]
+    pub workload_id: Option<String>,
     /// Tenant the VM belongs to. The daemon is per-tenant, so this matches the
     /// daemon's own tenant; carried for validation + audit labelling.
     pub tenant_id: String,
@@ -50,6 +54,10 @@ pub struct RegisterVm {
     /// Per-VM workload audit chain the daemon forwards `host.audit.v1` entries
     /// into (`<tenant>.<vm>.workload.jsonl`).
     pub workload_chain_path: PathBuf,
+    /// Secondary persisted head for the per-VM workload chain. Older callers
+    /// may omit it; the daemon derives a sibling fallback.
+    #[serde(default)]
+    pub workload_chain_head_path: Option<PathBuf>,
     /// The signer UDS the daemon forwards accepted audit entries to. `None`
     /// disables `host.audit.v1` for this VM (the handler returns `NotBound`).
     #[serde(default)]
@@ -174,9 +182,11 @@ mod tests {
     fn sample_register() -> ControlRequest {
         ControlRequest::Register(RegisterVm {
             vm_id: "vm-1".into(),
+            workload_id: Some("wl-1".into()),
             tenant_id: "local".into(),
             broker_listen_socket: PathBuf::from("/run/state/vm-1/vsock-5300.sock"),
             workload_chain_path: PathBuf::from("/audit/local.vm-1.workload.jsonl"),
+            workload_chain_head_path: Some(PathBuf::from("/run/state/vm-1/audit-signer.head")),
             audit_signer_uds_path: Some(PathBuf::from("/run/state/vm-1/audit-signer.sock")),
             services_bindings: vec![ServiceId::parse("host.time.v1").unwrap()],
         })

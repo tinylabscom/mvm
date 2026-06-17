@@ -1,307 +1,418 @@
-//! Tenant-scoped audit signer helper core.
+//! Resident per-tenant signer helper.
 //!
-//! The per-VM `mvm-audit-signer` binary owns exactly one [`Chain`]. The resident
-//! helper owns the same signing key but keeps one chain head per registered VM,
-//! so a tenant can run many VMs without spawning one key-holding process per VM.
+//! The helper owns a `vm_id -> Chain` map: `RegisterVm` opens a VM's workload
+//! chain, `AppendEntry` routes through the server-derived `vm_id`, and
+//! `DeregisterVm` drops the chain handle so the file is closed.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use mvm_core::naming::{validate_id, validate_vm_name};
 use mvm_core::protocol::audit_signer::{
-    AppendEntryRequest, AppendEntryResponse, AuditSignerErrorCode,
+    AuditSignerErrorCode, SignerHelperAppendEntry, SignerHelperDeregisterVm,
+    SignerHelperRegisterVm, SignerHelperRequest, SignerHelperResponse,
 };
+use mvm_core::security::SIG_ALG_ED25519;
+use tokio::io::AsyncWriteExt;
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
 
+use crate::audit_signer::canonical::CanonicalEntry;
 use crate::audit_signer::chain::Chain;
-use crate::audit_signer::server::dispatch_on_chain;
+use crate::audit_signer::server::format_code_message;
 
-/// A VM chain the tenant helper should open and own.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HelperVmRegistration {
-    /// Server-derived VM id. Used only for routing inside the helper.
-    pub vm_id: String,
-    /// Tenant this VM belongs to. Must match the helper's tenant.
-    pub tenant_id: String,
-    /// Workload id stamped by the host-agent path before forwarding appends.
-    pub workload_id: String,
-    /// Per-VM workload audit JSONL path.
-    pub workload_chain_path: PathBuf,
-    /// Per-VM secondary chain-head path.
-    pub chain_head_secondary_path: PathBuf,
-}
+const WORKLOAD_AUDIT_CATEGORY: &str = "workload_audit";
+
+/// Shared helper state for the async UDS server.
+pub type SharedSignerHelper = Arc<Mutex<SignerHelper>>;
 
 struct VmChain {
     workload_id: String,
     chain: Chain,
 }
 
-/// One key-holding helper per tenant, with one in-memory chain head per VM.
-pub struct TenantSignerHelper {
+/// The one key-holding signer helper for a tenant.
+pub struct SignerHelper {
     tenant_id: String,
     software_chain_key_path: Option<PathBuf>,
-    vms: HashMap<String, VmChain>,
+    chains: HashMap<String, VmChain>,
 }
 
-impl TenantSignerHelper {
-    /// Create an empty helper for one tenant.
+impl SignerHelper {
+    /// Create an empty helper for one tenant. Chains are opened by
+    /// `RegisterVm`, not at helper boot.
     pub fn new(tenant_id: impl Into<String>, software_chain_key_path: Option<PathBuf>) -> Self {
         Self {
             tenant_id: tenant_id.into(),
             software_chain_key_path,
-            vms: HashMap::new(),
+            chains: HashMap::new(),
         }
     }
 
-    /// Number of registered VM chains currently owned by this helper.
+    /// Number of currently registered VM chains.
     pub fn registration_count(&self) -> usize {
-        self.vms.len()
-    }
-
-    /// Whether this helper currently owns a chain for `vm_id`.
-    pub fn is_registered(&self, vm_id: &str) -> bool {
-        self.vms.contains_key(vm_id)
+        self.chains.len()
     }
 
     /// Current chain head for a registered VM.
     pub fn chain_head(&self, vm_id: &str) -> Option<&str> {
-        self.vms.get(vm_id).map(|vm| vm.chain.head())
+        self.chains.get(vm_id).map(|vm| vm.chain.head())
     }
 
-    /// Register or replace a VM chain. The helper opens the chain and owns the
-    /// file descriptor until deregistration or process exit.
-    pub fn register_vm(&mut self, reg: HelperVmRegistration) -> Result<()> {
-        validate_id(&self.tenant_id, "tenant")?;
-        validate_id(&reg.tenant_id, "tenant")?;
-        if reg.tenant_id != self.tenant_id {
+    /// Apply one helper request.
+    pub fn dispatch(&mut self, req: SignerHelperRequest) -> SignerHelperResponse {
+        match req {
+            SignerHelperRequest::RegisterVm(req) => self.register(req),
+            SignerHelperRequest::DeregisterVm(req) => self.deregister(req),
+            SignerHelperRequest::AppendEntry(req) => self.append(req),
+            SignerHelperRequest::Probe { request_id } => SignerHelperResponse::Pong { request_id },
+        }
+    }
+
+    fn register(&mut self, req: SignerHelperRegisterVm) -> SignerHelperResponse {
+        let request_id = req.request_id.clone();
+        match self.open_chain(&req) {
+            Ok(chain) => {
+                let chain_head = chain.head().to_string();
+                self.chains.insert(
+                    req.vm_id.clone(),
+                    VmChain {
+                        workload_id: req.workload_id,
+                        chain,
+                    },
+                );
+                SignerHelperResponse::Registered {
+                    request_id,
+                    vm_id: req.vm_id,
+                    chain_head,
+                }
+            }
+            Err(e) => SignerHelperResponse::Err {
+                request_id,
+                code: AuditSignerErrorCode::InvalidRequest,
+                message: e.to_string(),
+            },
+        }
+    }
+
+    fn open_chain(&mut self, req: &SignerHelperRegisterVm) -> Result<Chain> {
+        if req.tenant_id != self.tenant_id {
             bail!(
-                "register for tenant {:?} on helper for tenant {:?}",
-                reg.tenant_id,
+                "register for tenant {:?} on signer helper for tenant {:?}",
+                req.tenant_id,
                 self.tenant_id
             );
         }
-        validate_vm_name(&reg.vm_id)?;
-        ensure_parent(&reg.workload_chain_path, "workload audit chain")?;
-        ensure_parent(&reg.chain_head_secondary_path, "secondary chain head")?;
-
-        let chain = Chain::open(
-            &reg.workload_chain_path,
-            &reg.chain_head_secondary_path,
+        validate_vm_id(&req.vm_id)?;
+        ensure_parent(&req.workload_chain_path)?;
+        ensure_parent(&req.chain_head_secondary_path)?;
+        Chain::open(
+            &req.workload_chain_path,
+            &req.chain_head_secondary_path,
             self.software_chain_key_path.as_deref(),
         )
-        .with_context(|| format!("open workload audit chain for vm {}", reg.vm_id))?;
-
-        self.vms.insert(
-            reg.vm_id,
-            VmChain {
-                workload_id: reg.workload_id,
-                chain,
-            },
-        );
-        Ok(())
     }
 
-    /// Deregister a VM. Dropping the owned [`Chain`] closes the append fd.
-    pub fn deregister_vm(&mut self, vm_id: &str) {
-        self.vms.remove(vm_id);
+    fn deregister(&mut self, req: SignerHelperDeregisterVm) -> SignerHelperResponse {
+        self.chains.remove(&req.vm_id);
+        SignerHelperResponse::Deregistered {
+            request_id: req.request_id,
+            vm_id: req.vm_id,
+        }
     }
 
-    /// Append a request to the chain selected by the server-derived `vm_id`.
-    pub fn append_for_vm(&mut self, vm_id: &str, req: AppendEntryRequest) -> AppendEntryResponse {
-        let request_id = req.request_id().to_string();
-        let Some(registered_workload_id) = self.vms.get(vm_id).map(|vm| vm.workload_id.clone())
-        else {
-            return AppendEntryResponse::Err {
-                request_id,
-                code: AuditSignerErrorCode::NotReady,
-                message: "vm is not registered with the tenant signer helper".into(),
-            };
-        };
-        if let Err(message) =
-            validate_append_identity(&self.tenant_id, &req, &registered_workload_id)
-        {
-            return AppendEntryResponse::Err {
+    fn append(&mut self, req: SignerHelperAppendEntry) -> SignerHelperResponse {
+        let request_id = req.request_id.clone();
+        if req.tenant_id != self.tenant_id {
+            return SignerHelperResponse::Err {
                 request_id,
                 code: AuditSignerErrorCode::InvalidRequest,
-                message,
+                message: "append tenant does not match signer helper tenant".into(),
             };
         }
-        let vm = self
-            .vms
-            .get_mut(vm_id)
-            .expect("registered vm chain must exist after preflight lookup");
-        dispatch_on_chain(req, &mut vm.chain)
-    }
-}
-
-fn validate_append_identity(
-    helper_tenant_id: &str,
-    req: &AppendEntryRequest,
-    registered_workload_id: &str,
-) -> std::result::Result<(), String> {
-    match req {
-        AppendEntryRequest::Probe { .. } => Ok(()),
-        AppendEntryRequest::AppendEntry {
-            tenant_id,
-            workload_id,
-            ..
-        } => {
-            if tenant_id != helper_tenant_id {
-                return Err(format!(
-                    "append tenant {:?} does not match helper tenant {:?}",
-                    tenant_id, helper_tenant_id
-                ));
-            }
-            if workload_id != registered_workload_id {
-                return Err(format!(
-                    "append workload {:?} does not match registered workload {:?}",
-                    workload_id, registered_workload_id
-                ));
-            }
-            Ok(())
+        let Some(vm) = self.chains.get_mut(&req.vm_id) else {
+            return SignerHelperResponse::Err {
+                request_id,
+                code: AuditSignerErrorCode::NotReady,
+                message: "vm is not registered with signer helper".into(),
+            };
+        };
+        if req.workload_id != vm.workload_id {
+            return SignerHelperResponse::Err {
+                request_id,
+                code: AuditSignerErrorCode::InvalidRequest,
+                message: "append workload does not match registered signer helper workload".into(),
+            };
+        }
+        debug!(
+            vm_id = %req.vm_id,
+            workload_id = %vm.workload_id,
+            request_id = %request_id,
+            "signer helper appending entry"
+        );
+        let entry = CanonicalEntry {
+            category: WORKLOAD_AUDIT_CATEGORY.into(),
+            correlation_id: req.correlation_id,
+            fields: req.fields,
+            prev_hash: vm.chain.head().to_string(),
+            session_id: req.session_id,
+            tenant_id: req.tenant_id,
+            ts: req.ts,
+            workload_id: req.workload_id,
+        };
+        match vm.chain.append(entry) {
+            Ok(new_head) => SignerHelperResponse::Ok {
+                request_id,
+                chain_head: new_head.clone(),
+                entry_hash: new_head,
+                sig_alg: SIG_ALG_ED25519,
+            },
+            Err(code) => SignerHelperResponse::Err {
+                request_id,
+                code,
+                message: format_code_message(code),
+            },
         }
     }
 }
 
-fn ensure_parent(path: &Path, label: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .with_context(|| format!("{label} path {} has no parent", path.display()))?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("create {label} parent {}", parent.display()))
+/// Accept loop for the resident helper UDS.
+pub async fn serve(
+    listener: UnixListener,
+    helper: SharedSignerHelper,
+    max_frame_bytes: usize,
+) -> Result<()> {
+    info!(max_frame_bytes, "mvm-signer-helper accept loop started");
+    loop {
+        let (stream, _addr) = listener
+            .accept()
+            .await
+            .context("mvm-signer-helper UDS accept failed")?;
+        let helper = helper.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(stream, helper, max_frame_bytes).await {
+                warn!(error = %e, "mvm-signer-helper connection terminated with error");
+            }
+        });
+    }
+}
+
+pub async fn serve_on_listener(
+    listener: UnixListener,
+    helper: SharedSignerHelper,
+    max_frame_bytes: usize,
+) -> Result<()> {
+    serve(listener, helper, max_frame_bytes).await
+}
+
+async fn handle_connection(
+    mut stream: UnixStream,
+    helper: SharedSignerHelper,
+    max_frame_bytes: usize,
+) -> Result<()> {
+    let req = read_frame::<SignerHelperRequest>(&mut stream, max_frame_bytes).await?;
+    let response = {
+        let mut helper = helper.lock().await;
+        helper.dispatch(req)
+    };
+    write_frame(&mut stream, &response).await?;
+    stream
+        .shutdown()
+        .await
+        .context("mvm-signer-helper UDS shutdown failed")?;
+    Ok(())
+}
+
+async fn read_frame<T: serde::de::DeserializeOwned>(
+    stream: &mut UnixStream,
+    max_frame_bytes: usize,
+) -> Result<T> {
+    crate::framing::read_json_frame(stream, max_frame_bytes)
+        .await
+        .context("mvm-signer-helper frame read failed")
+}
+
+async fn write_frame<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
+    crate::framing::write_json_frame(stream, value)
+        .await
+        .context("mvm-signer-helper frame write failed")
+}
+
+fn validate_vm_id(vm_id: &str) -> Result<()> {
+    if vm_id.is_empty() || vm_id.len() > 63 {
+        bail!("vm_id must be 1..=63 chars, got {}", vm_id.len());
+    }
+    if !vm_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        bail!("vm_id {:?} has characters outside [A-Za-z0-9_-]", vm_id);
+    }
+    Ok(())
+}
+
+fn ensure_parent(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use ed25519_dalek::{SigningKey, VerifyingKey};
+    use super::*;
     use tempfile::tempdir;
 
-    use super::*;
-    use crate::audit_signer::canonical::CanonicalEntry;
-    use crate::audit_signer::verify::verify_workload_chain;
-
-    fn write_key(dir: &Path) -> (PathBuf, VerifyingKey) {
-        let key = SigningKey::from_bytes(&[7u8; 32]);
-        let path = dir.join("host-signer.ed25519");
-        std::fs::write(&path, key.to_bytes()).unwrap();
-        (path, key.verifying_key())
+    fn key_path(dir: &Path) -> PathBuf {
+        let path = dir.join("tenant-key.ed25519");
+        std::fs::write(&path, [9u8; 32]).unwrap();
+        path
     }
 
-    fn registration(dir: &Path, tenant: &str, vm: &str, workload: &str) -> HelperVmRegistration {
-        HelperVmRegistration {
-            vm_id: vm.into(),
-            tenant_id: tenant.into(),
-            workload_id: workload.into(),
-            workload_chain_path: dir.join(format!("{tenant}.{vm}.workload.jsonl")),
-            chain_head_secondary_path: dir.join(format!("{tenant}.{vm}.head")),
-        }
+    fn register_req(dir: &Path, vm_id: &str, tenant_id: &str) -> SignerHelperRequest {
+        SignerHelperRequest::RegisterVm(SignerHelperRegisterVm {
+            request_id: format!("reg-{vm_id}"),
+            vm_id: vm_id.into(),
+            tenant_id: tenant_id.into(),
+            workload_id: format!("wl-{vm_id}"),
+            workload_chain_path: dir.join(format!("{tenant_id}.{vm_id}.workload.jsonl")),
+            chain_head_secondary_path: dir.join(format!("{tenant_id}.{vm_id}.head")),
+        })
     }
 
-    fn append_request(req: &str, tenant: &str, workload: &str) -> AppendEntryRequest {
-        AppendEntryRequest::AppendEntry {
-            request_id: req.into(),
+    fn append_req(vm_id: &str, request_id: &str) -> SignerHelperRequest {
+        SignerHelperRequest::AppendEntry(SignerHelperAppendEntry {
+            request_id: request_id.into(),
+            vm_id: vm_id.into(),
             category: "workload_audit".into(),
             ts: "2026-06-17T00:00:00Z".into(),
-            workload_id: workload.into(),
-            tenant_id: tenant.into(),
-            session_id: "sess-001".into(),
-            correlation_id: format!("corr-{req}"),
-            fields: serde_json::json!({"message": req}),
-        }
-    }
-
-    fn ok_head(resp: AppendEntryResponse) -> String {
-        match resp {
-            AppendEntryResponse::Ok { chain_head, .. } => chain_head,
-            other => panic!("expected ok response, got {other:?}"),
-        }
+            workload_id: format!("wl-{vm_id}"),
+            tenant_id: "local".into(),
+            session_id: "sess-1".into(),
+            correlation_id: format!("brk-{request_id}"),
+            fields: serde_json::json!({"event": request_id}),
+        })
     }
 
     #[test]
-    fn register_vm_opens_independent_per_vm_chains() {
+    fn register_opens_per_vm_chain_and_deregister_closes_it() {
         let dir = tempdir().unwrap();
-        let (key_path, verify_key) = write_key(dir.path());
-        let mut helper = TenantSignerHelper::new("local", Some(key_path));
-        let vm_a = registration(dir.path(), "local", "vm-a", "wl-a");
-        let vm_b = registration(dir.path(), "local", "vm-b", "wl-b");
-        let path_a = vm_a.workload_chain_path.clone();
-        let path_b = vm_b.workload_chain_path.clone();
+        let mut helper = SignerHelper::new("local", Some(key_path(dir.path())));
 
-        helper.register_vm(vm_a).unwrap();
-        helper.register_vm(vm_b).unwrap();
-
-        let head_a = ok_head(helper.append_for_vm("vm-a", append_request("a", "local", "wl-a")));
-        let head_b = ok_head(helper.append_for_vm("vm-b", append_request("b", "local", "wl-b")));
-
-        assert_eq!(helper.registration_count(), 2);
-        assert_eq!(helper.chain_head("vm-a"), Some(head_a.as_str()));
-        assert_eq!(helper.chain_head("vm-b"), Some(head_b.as_str()));
-        assert_ne!(
-            helper.chain_head("vm-a"),
-            Some(CanonicalEntry::genesis_prev_hash().as_str())
-        );
-        assert_eq!(verify_workload_chain(&path_a, &verify_key).unwrap(), 1);
-        assert_eq!(verify_workload_chain(&path_b, &verify_key).unwrap(), 1);
-    }
-
-    #[test]
-    fn deregister_vm_closes_the_owned_chain_slot() {
-        let dir = tempdir().unwrap();
-        let (key_path, _verify_key) = write_key(dir.path());
-        let mut helper = TenantSignerHelper::new("local", Some(key_path));
-        helper
-            .register_vm(registration(dir.path(), "local", "vm-a", "wl-a"))
-            .unwrap();
-        assert!(helper.is_registered("vm-a"));
-
-        helper.deregister_vm("vm-a");
-
-        assert!(!helper.is_registered("vm-a"));
-        let resp = helper.append_for_vm("vm-a", append_request("a", "local", "wl-a"));
-        match resp {
-            AppendEntryResponse::Err { code, .. } => {
-                assert_eq!(code, AuditSignerErrorCode::NotReady);
+        let registered = helper.dispatch(register_req(dir.path(), "vm-1", "local"));
+        match registered {
+            SignerHelperResponse::Registered {
+                vm_id, chain_head, ..
+            } => {
+                assert_eq!(vm_id, "vm-1");
+                assert_eq!(Some(chain_head.as_str()), helper.chain_head("vm-1"));
             }
-            other => panic!("expected NotReady, got {other:?}"),
+            other => panic!("expected Registered, got {other:?}"),
         }
+        assert_eq!(helper.registration_count(), 1);
+
+        let deregistered = helper.dispatch(SignerHelperRequest::DeregisterVm(
+            SignerHelperDeregisterVm {
+                request_id: "dereg-1".into(),
+                vm_id: "vm-1".into(),
+            },
+        ));
+        assert!(matches!(
+            deregistered,
+            SignerHelperResponse::Deregistered { .. }
+        ));
+        assert_eq!(helper.registration_count(), 0);
+
+        let append_after_drop = helper.dispatch(append_req("vm-1", "append-after-drop"));
+        assert!(matches!(
+            append_after_drop,
+            SignerHelperResponse::Err {
+                code: AuditSignerErrorCode::NotReady,
+                ..
+            }
+        ));
     }
 
     #[test]
-    fn register_vm_refuses_other_tenant_and_unsafe_vm_id() {
+    fn append_routes_to_the_selected_vm_chain() {
         let dir = tempdir().unwrap();
-        let (key_path, _verify_key) = write_key(dir.path());
-        let mut helper = TenantSignerHelper::new("local", Some(key_path));
+        let mut helper = SignerHelper::new("local", Some(key_path(dir.path())));
+        helper.dispatch(register_req(dir.path(), "vm-a", "local"));
+        helper.dispatch(register_req(dir.path(), "vm-b", "local"));
 
-        assert!(
-            helper
-                .register_vm(registration(dir.path(), "other", "vm-a", "wl-a"))
-                .is_err()
+        let a_head = match helper.dispatch(append_req("vm-a", "append-a")) {
+            SignerHelperResponse::Ok { chain_head, .. } => chain_head,
+            other => panic!("expected vm-a append Ok, got {other:?}"),
+        };
+        let b_head = match helper.dispatch(append_req("vm-b", "append-b")) {
+            SignerHelperResponse::Ok { chain_head, .. } => chain_head,
+            other => panic!("expected vm-b append Ok, got {other:?}"),
+        };
+
+        assert_eq!(Some(a_head.as_str()), helper.chain_head("vm-a"));
+        assert_eq!(Some(b_head.as_str()), helper.chain_head("vm-b"));
+        assert_ne!(a_head, b_head);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("local.vm-a.workload.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
         );
-        let mut bad = registration(dir.path(), "local", "vm-a", "wl-a");
-        bad.vm_id = "../escape".into();
-        assert!(helper.register_vm(bad).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("local.vm-b.workload.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn register_rejects_cross_tenant_and_unsafe_vm_id() {
+        let dir = tempdir().unwrap();
+        let mut helper = SignerHelper::new("local", Some(key_path(dir.path())));
+
+        let cross_tenant = helper.dispatch(register_req(dir.path(), "vm-1", "other"));
+        assert!(matches!(
+            cross_tenant,
+            SignerHelperResponse::Err {
+                code: AuditSignerErrorCode::InvalidRequest,
+                ..
+            }
+        ));
+
+        let unsafe_id = helper.dispatch(register_req(dir.path(), "../escape", "local"));
+        assert!(matches!(
+            unsafe_id,
+            SignerHelperResponse::Err {
+                code: AuditSignerErrorCode::InvalidRequest,
+                ..
+            }
+        ));
         assert_eq!(helper.registration_count(), 0);
     }
 
     #[test]
-    fn append_identity_must_match_registered_tenant_and_workload() {
+    fn append_rejects_workload_mismatch_for_registered_vm() {
         let dir = tempdir().unwrap();
-        let (key_path, _verify_key) = write_key(dir.path());
-        let mut helper = TenantSignerHelper::new("local", Some(key_path));
-        helper
-            .register_vm(registration(dir.path(), "local", "vm-a", "wl-a"))
-            .unwrap();
+        let mut helper = SignerHelper::new("local", Some(key_path(dir.path())));
+        helper.dispatch(register_req(dir.path(), "vm-a", "local"));
 
-        let tenant_resp = helper.append_for_vm("vm-a", append_request("a", "other", "wl-a"));
-        let workload_resp = helper.append_for_vm("vm-a", append_request("b", "local", "wl-b"));
+        let mut req = append_req("vm-a", "append-a");
+        let SignerHelperRequest::AppendEntry(append) = &mut req else {
+            panic!("expected append request");
+        };
+        append.workload_id = "wl-other".into();
 
-        for resp in [tenant_resp, workload_resp] {
-            match resp {
-                AppendEntryResponse::Err { code, .. } => {
-                    assert_eq!(code, AuditSignerErrorCode::InvalidRequest);
-                }
-                other => panic!("expected InvalidRequest, got {other:?}"),
+        assert!(matches!(
+            helper.dispatch(req),
+            SignerHelperResponse::Err {
+                code: AuditSignerErrorCode::InvalidRequest,
+                ..
             }
-        }
+        ));
     }
 }

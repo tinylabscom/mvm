@@ -276,7 +276,8 @@ impl HostAuditV1Handler {
                 }
                 AuditClientError::ResponseTooLarge { .. }
                 | AuditClientError::Decode { .. }
-                | AuditClientError::Encode { .. } => ServiceError::new(
+                | AuditClientError::Encode { .. }
+                | AuditClientError::Protocol { .. } => ServiceError::new(
                     ServiceErrorCode::InternalError,
                     "audit-signer protocol violation",
                 ),

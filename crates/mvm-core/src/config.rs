@@ -357,6 +357,13 @@ pub fn host_agent_control_socket(tenant: &str) -> std::path::PathBuf {
     host_agent_dir(tenant).join("control.sock")
 }
 
+/// The per-tenant signer-helper UDS the host-agent daemon connects to. The
+/// helper is a child of the host-agent and owns the tenant's signing keys plus
+/// per-VM workload chain heads.
+pub fn host_agent_signer_helper_socket(tenant: &str) -> std::path::PathBuf {
+    host_agent_dir(tenant).join("signer-helper.sock")
+}
+
 /// `<mvm_data_dir>/pool/` — the supervisor standby pool root.
 /// Each idle standby gets a `pool/<id>/` subdir holding its control UDS +
 /// `standby.json`. Uses the strict resolver so a missing `$HOME`/`MVM_DATA_DIR`
