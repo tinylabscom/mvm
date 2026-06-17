@@ -572,7 +572,7 @@ impl VmBackend for LibkrunBackend {
         // defused once the VM is up and the `stop` path owns teardown.
         // libkrun proxies the guest's BROKER_PORT dial straight to this per-VM
         // socket — bound by the per-VM broker fork, or by the per-tenant daemon
-        // when the daemon path is opted in.
+        // (the default; opt out with MVM_HOST_AGENT_DAEMON=0).
         let broker_listen_socket =
             mvm_core::config::vm_vsock_port_socket(&config.name, mvm_guest::vsock::BROKER_PORT);
         let mut broker_guard = if crate::host_agent_spawn::host_agent_daemon_enabled() {

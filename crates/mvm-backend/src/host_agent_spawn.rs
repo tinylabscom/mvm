@@ -259,13 +259,20 @@ impl Drop for HostAgentServicesGuard {
     }
 }
 
-/// Whether the host-agent daemon path is selected (opt-in during rollout —
-/// the default stays the proven per-VM fork until the daemon path is live-
-/// validated and made default).
+/// Whether the host-agent daemon path is selected. **Default: enabled** — the
+/// per-tenant daemon is the default for an admitted libkrun/vz workload, so
+/// `host.audit.v1` is available on a plain `up` (no `MVM_GATEWAY_BRIDGE`).
+/// `MVM_HOST_AGENT_DAEMON=0` is the opt-out escape hatch back to the per-VM
+/// broker fork during the transition; the fork is removed once the daemon path
+/// has soaked. Any value other than `0` leaves the daemon on.
 pub fn host_agent_daemon_enabled() -> bool {
-    std::env::var("MVM_HOST_AGENT_DAEMON")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    daemon_enabled_from(std::env::var("MVM_HOST_AGENT_DAEMON").ok().as_deref())
+}
+
+/// Pure decision for [`host_agent_daemon_enabled`] — unset ⇒ on; explicit `0`
+/// ⇒ off (fork); anything else ⇒ on.
+fn daemon_enabled_from(env: Option<&str>) -> bool {
+    env != Some("0")
 }
 
 /// Unifies the two start-path service guards (fork vs daemon) so a backend's
@@ -447,6 +454,15 @@ mod tests {
         // No host-agent.tenant marker ⇒ fork path ⇒ this must do nothing and
         // must not panic (so it's safe to call unconditionally in stop()).
         reap_host_agent_services_from_state(dir.path(), "vm-1");
+    }
+
+    #[test]
+    fn daemon_is_the_default_with_a_zero_opt_out() {
+        // Default (unset) is on; only an explicit "0" opts back to the fork.
+        assert!(daemon_enabled_from(None), "default is the daemon");
+        assert!(!daemon_enabled_from(Some("0")), "0 opts out to the fork");
+        assert!(daemon_enabled_from(Some("1")));
+        assert!(daemon_enabled_from(Some("")), "non-0 stays on the daemon");
     }
 
     #[test]
