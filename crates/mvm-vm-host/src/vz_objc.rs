@@ -1764,7 +1764,7 @@ fn spawn_payload_tap(
     use mvm_hostd::supervisor::audit::AuditSigner;
     use mvm_hostd::supervisor::audit_file::FileAuditSigner;
     use mvm_hostd::supervisor::gateway_bridge::{
-        BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
+        AllowAll, BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
     };
     use mvm_hostd::supervisor::network::{
         ObserverAllowlist, Pipeline, ProviderCapabilities, resolve_observer_chain_from_plan,
@@ -1845,10 +1845,14 @@ fn spawn_payload_tap(
         bundle: bundle.map(Arc::new),
         audit_socket: PathBuf::from(audit_socket),
         signer,
+        policy: Arc::new(AllowAll),
         observers,
         // Bare-policy enforcement seam (no-bundle path), decoded from
         // SupervisorConfig.network_policy (filled from VmStartConfig.network_policy).
         network_policy,
+        // Native rvproxy flow-audit follower is the libkrun path; the Vz objc
+        // bridge doesn't run a native rvproxy gateway.
+        native_flow_audit_path: None,
     };
     let endpoints = BridgeEndpoints::VzGvproxy {
         supervisor_fd: pending.supervisor_fd,

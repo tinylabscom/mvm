@@ -59,7 +59,9 @@ use mvm_core::plan::{ExecutionPlan, NonceStore, SignedExecutionPlan};
 use mvm_core::policy::PolicyBundle;
 use mvm_hostd::supervisor::audit::AuditSigner;
 use mvm_hostd::supervisor::audit_file::FileAuditSigner;
-use mvm_hostd::supervisor::gateway_bridge::{BridgeConfig, BridgeEndpoints, spawn_bridge_thread};
+use mvm_hostd::supervisor::gateway_bridge::{
+    AllowAll, BridgeConfig, BridgeEndpoints, spawn_bridge_thread, spawn_native_audit_feed,
+};
 
 /// Per-connection attach timeout. An abandoned connect must not wedge the
 /// standby; pool size bounds the blast radius.
@@ -391,12 +393,18 @@ fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible
     // spawn at it. The in-line splice still runs and shares the exact same
     // egress resolution, so this is additive belt-and-suspenders during the
     // transition off the splice.
+    //
+    // When native, also record the flow-audit export path so the bridge tails
+    // rvproxy's `FlowEvent`s into the chain-signer (WS-2.2c live wiring).
+    let mut native_flow_audit_path: Option<std::path::PathBuf> = None;
     if matches!(
         mvm_build::libkrun_builder::resolve_networking_mode(),
         mvm_build::libkrun_builder::NetworkingPreference::Native
     ) && let libkrun_sys::NetworkingMode::Gvproxy { scratch_dir, .. } = &cfg.krun.networking
     {
         let scratch = std::path::PathBuf::from(scratch_dir);
+        // Matches `write_native_gateway_config`'s `[audit]` export path.
+        native_flow_audit_path = Some(scratch.join("flow-audit.jsonl"));
         // Fail closed: a native gateway we can't configure must not silently
         // fall back to gvproxy-compat, which carries no policy.
         let config_path =
@@ -492,6 +500,15 @@ fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible
         bundle: bundle.map(Arc::new),
         audit_socket,
         signer,
+        // The flow-open gate. This `AllowAll` is only the
+        // *no-bundle fallback*: when the admitted plan carries a resolvable
+        // policy bundle, `run_bridge_inner` derives a per-tenant
+        // `PlanFlowPolicy` (deny-by-default, the libkrun analogue of the
+        // Firecracker `install_default_deny`) from the same resolved policy as
+        // the packet scan, and that supersedes this field. Stage 0 builder VMs /
+        // dev-mode carry no bundle, so they keep `AllowAll` (still gated by the
+        // always-on mandatory-deny + placeholder-leak packet scans).
+        policy: Arc::new(AllowAll),
         // Observers resolved above from the
         // admitted plan's `network_policy` ref through the host
         // allowlist. Empty for `local-default` plans (preserves
@@ -502,7 +519,24 @@ fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible
         // SupervisorConfig.network_policy (which the libkrun backend fills from
         // VmStartConfig.network_policy).
         network_policy,
+        // Native rvproxy gateway: tail its flow-audit export into the chain
+        // signer. `Some` only when the native gateway was rendered above; the
+        // gvproxy/passt path leaves it `None` (splice is the sole audit source).
+        native_flow_audit_path,
     };
+
+    // Native rvproxy: libkrun attaches DIRECTLY to rvproxy (no splice in the
+    // data path — interposing the splice in front of rvproxy breaks the vfkit
+    // return path and would only mask rvproxy's own enforcement). rvproxy is the
+    // sole egress enforcer; a standalone audit feed re-feeds its flow-audit
+    // export into the chain signer so the claim-10 audit stays mvm's source of
+    // truth. gvproxy/passt keep the in-line splice bridge.
+    if bridge_cfg.native_flow_audit_path.is_some() {
+        // JoinHandle dropped — libkrun's exit() on guest shutdown reaps it;
+        // the feed's own catch_unwind → exit(1) is the fail-closed signal.
+        let _feed = spawn_native_audit_feed(bridge_cfg);
+        return run_supervisor(&cfg).map_err(|e| anyhow!("run_supervisor (native) failed: {e}"));
+    }
 
     run_supervisor_with_bridge(&cfg, move |bridge_fds| {
         let endpoints = match bridge_fds {

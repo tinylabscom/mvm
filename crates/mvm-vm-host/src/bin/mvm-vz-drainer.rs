@@ -56,7 +56,9 @@ use mvm_core::plan::{ExecutionPlan, plan_from_admitted_json};
 use mvm_core::policy::PolicyBundle;
 use mvm_hostd::supervisor::audit::AuditSigner;
 use mvm_hostd::supervisor::audit_file::FileAuditSigner;
-use mvm_hostd::supervisor::gateway_bridge::{BridgeConfig, BridgeEndpoints, spawn_bridge_thread};
+use mvm_hostd::supervisor::gateway_bridge::{
+    AllowAll, BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
+};
 use mvm_hostd::supervisor::network::{ObserverAllowlist, ProviderCapabilities, from_admitted};
 use serde::Deserialize;
 
@@ -190,13 +192,17 @@ fn run() -> Result<()> {
         bundle: bundle.map(Arc::new),
         audit_socket: cfg.audit_socket,
         signer,
+        policy: Arc::new(AllowAll),
         observers,
         // Bare-policy is not threaded for the legacy Vz NDJSON drainer (a
         // non-primary path; the live Vz workload runs the in-process VzGvproxy
         // bridge). This is safe: when a bundle is absent, run_bridge_inner's
-        // no-bundle arm fails CLOSED to deny-all, so a bundle-less drainer run
-        // cannot open egress.
+        // no-bundle arm now fails CLOSED to deny-all rather than honoring the
+        // `AllowAll` above, so a bundle-less drainer run cannot open egress.
         network_policy: None,
+        // Native rvproxy flow-audit follower is the libkrun path; the Vz drainer
+        // doesn't run a native rvproxy gateway.
+        native_flow_audit_path: None,
     };
 
     let endpoints = BridgeEndpoints::VzIngest {
