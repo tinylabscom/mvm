@@ -111,9 +111,77 @@ pub struct HostAgentDaemon {
     tenant_id: String,
     verifying_key: VerifyingKey,
     signer_helper_uds_path: Option<PathBuf>,
+    registration_journal: Option<RegistrationJournal>,
     max_frame_bytes: usize,
     vms: HashMap<String, VmHandle>,
     registrations: HashMap<String, RegisterVm>,
+}
+
+#[derive(Debug, Clone)]
+struct RegistrationJournal {
+    path: PathBuf,
+}
+
+impl RegistrationJournal {
+    fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    fn load(&self) -> Result<Vec<RegisterVm>> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("read registration journal {}", self.path.display()));
+            }
+        };
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            return Ok(Vec::new());
+        }
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("decode registration journal {}", self.path.display()))
+    }
+
+    fn store<'a>(&self, registrations: impl IntoIterator<Item = &'a RegisterVm>) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create registration journal dir {}", parent.display()))?;
+        }
+
+        let mut registrations: Vec<RegisterVm> = registrations.into_iter().cloned().collect();
+        registrations.sort_by(|a, b| a.vm_id.cmp(&b.vm_id));
+
+        let mut bytes = serde_json::to_vec_pretty(&registrations)
+            .context("encode registration journal snapshot")?;
+        bytes.push(b'\n');
+
+        let tmp_path = self.tmp_path()?;
+        std::fs::write(&tmp_path, bytes)
+            .with_context(|| format!("write registration journal temp {}", tmp_path.display()))?;
+        if let Err(e) = std::fs::rename(&tmp_path, &self.path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e).with_context(|| {
+                format!(
+                    "replace registration journal {} with {}",
+                    self.path.display(),
+                    tmp_path.display()
+                )
+            });
+        }
+        Ok(())
+    }
+
+    fn tmp_path(&self) -> Result<PathBuf> {
+        let file_name = self
+            .path
+            .file_name()
+            .context("registration journal path must have a file name")?
+            .to_string_lossy();
+        let mut tmp_path = self.path.clone();
+        tmp_path.set_file_name(format!("{file_name}.{}.tmp", std::process::id()));
+        Ok(tmp_path)
+    }
 }
 
 impl HostAgentDaemon {
@@ -129,6 +197,7 @@ impl HostAgentDaemon {
             tenant_id: tenant_id.into(),
             verifying_key,
             signer_helper_uds_path: None,
+            registration_journal: None,
             max_frame_bytes,
             vms: HashMap::new(),
             registrations: HashMap::new(),
@@ -148,10 +217,18 @@ impl HostAgentDaemon {
             tenant_id: tenant_id.into(),
             verifying_key,
             signer_helper_uds_path: Some(signer_helper_uds_path.into()),
+            registration_journal: None,
             max_frame_bytes,
             vms: HashMap::new(),
             registrations: HashMap::new(),
         }
+    }
+
+    /// Persist the live registration set to `path` after every successful
+    /// register/deregister and use it for daemon restart recovery.
+    pub fn with_registration_journal(mut self, path: impl Into<PathBuf>) -> Self {
+        self.registration_journal = Some(RegistrationJournal::new(path));
+        self
     }
 
     /// Whether `vm_id` is currently registered (bound + serving).
@@ -177,6 +254,7 @@ impl HostAgentDaemon {
                 if let Err(e) = self.deregister_helper_vm(&d.vm_id) {
                     warn!(vm_id = %d.vm_id, error = %e, "signer-helper deregister failed");
                 }
+                self.persist_registrations()?;
                 Ok(())
             }
         }
@@ -253,6 +331,32 @@ impl HostAgentDaemon {
             },
         );
         self.registrations.insert(r.vm_id.clone(), r.clone());
+        self.persist_registrations()?;
+        Ok(())
+    }
+
+    /// Replay the persisted live registration set after the daemon itself
+    /// restarts. Each replay goes through the normal `register` path, so tenant
+    /// checks, vm-id validation, socket bind, and signer-helper rebind all
+    /// remain fail-closed.
+    pub fn restore_journaled_registrations(&mut self) -> Result<usize> {
+        let Some(journal) = &self.registration_journal else {
+            return Ok(0);
+        };
+        let registrations = journal.load()?;
+        let mut restored = 0usize;
+        for registration in registrations {
+            self.register(&registration)
+                .with_context(|| format!("restore VM registration {}", registration.vm_id))?;
+            restored += 1;
+        }
+        Ok(restored)
+    }
+
+    fn persist_registrations(&self) -> Result<()> {
+        if let Some(journal) = &self.registration_journal {
+            journal.store(self.registrations.values())?;
+        }
         Ok(())
     }
 
@@ -483,6 +587,77 @@ mod tests {
         assert!(!d.is_registered("vm-1"));
         // Drop runs synchronously on remove → socket file gone.
         assert!(!sock.exists(), "broker socket unbound");
+    }
+
+    #[test]
+    fn registration_journal_stores_sorted_snapshot_and_loads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RegistrationJournal::new(dir.path().join("registrations.json"));
+        let reg_b = register(dir.path(), "vm-b", "local", None);
+        let reg_a = register(dir.path(), "vm-a", "local", None);
+
+        journal.store([&reg_b, &reg_a]).unwrap();
+
+        let raw = std::fs::read_to_string(dir.path().join("registrations.json")).unwrap();
+        assert!(
+            raw.find("\"vm-a\"").unwrap() < raw.find("\"vm-b\"").unwrap(),
+            "journal snapshot should be stable by vm_id"
+        );
+        assert_eq!(journal.load().unwrap(), vec![reg_a, reg_b]);
+    }
+
+    #[tokio::test]
+    async fn deregister_updates_registration_journal_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("registrations.json");
+        let mut d = daemon("local").with_registration_journal(&journal_path);
+
+        d.apply(&ControlRequest::Register(register(
+            dir.path(),
+            "vm-1",
+            "local",
+            None,
+        )))
+        .unwrap();
+        assert_eq!(
+            RegistrationJournal::new(journal_path.clone())
+                .load()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        d.apply(&ControlRequest::Deregister(DeregisterVm {
+            vm_id: "vm-1".into(),
+        }))
+        .unwrap();
+        assert!(
+            RegistrationJournal::new(journal_path.clone())
+                .load()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_restart_restores_journaled_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("registrations.json");
+        let reg = register(dir.path(), "vm-1", "local", None);
+        let sock = reg.broker_listen_socket.clone();
+
+        {
+            let mut first = daemon("local").with_registration_journal(&journal_path);
+            first.apply(&ControlRequest::Register(reg)).unwrap();
+            assert!(first.is_registered("vm-1"));
+            assert!(sock.exists(), "first daemon bound broker socket");
+        }
+        assert!(!sock.exists(), "dropping daemon unbinds broker socket");
+
+        let mut restarted = daemon("local").with_registration_journal(&journal_path);
+        assert_eq!(restarted.restore_journaled_registrations().unwrap(), 1);
+        assert!(restarted.is_registered("vm-1"));
+        assert!(sock.exists(), "restarted daemon rebound broker socket");
     }
 
     #[tokio::test]

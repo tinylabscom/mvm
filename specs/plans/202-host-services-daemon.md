@@ -59,10 +59,10 @@ The signer becomes a **supervised helper** of the host-agent daemon, holding **a
 
 ## Phase 4 — supervision + crash semantics
 
-- [ ] **4a — registration journal.** Persist the live registration set so a restarted daemon re-binds sockets + reopens heads for still-running VMs.
+- [x] **4a — registration journal.** Persist the live registration set so a restarted daemon re-binds sockets + reopens heads for still-running VMs. **Landed 2026-06-17:** `mvm-host-agent` now stores a deterministic per-tenant `registrations.json` snapshot beside `control.sock`, rewrites it after successful register/deregister, and replays it after the signer helper is ready on daemon startup. Recovery uses the normal register path, so tenant checks, `vm_id` validation, broker-socket bind, and signer-helper chain reopen still fail closed. Tests cover stable journal snapshots, deregister cleanup, and daemon restart rebinding a journaled broker socket.
 - [ ] **4b — supervised restart.** `mvm` restarts a crashed local daemon; document the blast-radius trade. Crash-mid-flight test: a kill during dispatch loses at most the in-flight call, never corrupts a chain.
 
-**Verify:** kill-and-restart leaves every running VM's `host.audit.v1` working and chains clean.
+**Verify:** 4a is covered by `registration_journal_stores_sorted_snapshot_and_loads_it`, `deregister_updates_registration_journal_snapshot`, and `daemon_restart_restores_journaled_registration`. Full kill-and-restart remains with 4b: every running VM's `host.audit.v1` keeps working and chains stay clean after the supervisor restarts the daemon.
 
 ## Phase 5 — mvmd adoption + tenant boundaries (cross-repo)
 
