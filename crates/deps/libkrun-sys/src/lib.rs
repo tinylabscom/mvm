@@ -51,6 +51,11 @@ pub mod passt;
 #[cfg(target_family = "unix")]
 pub mod gvproxy;
 
+// Tie a spawned networking helper to its supervisor's lifetime so a dead
+// supervisor never orphans it (Linux `PR_SET_PDEATHSIG`; no-op elsewhere).
+#[cfg(target_family = "unix")]
+mod child_lifecycle;
+
 // Sync length-prefixed JSON framing for the supervisor control
 // channels. Colocated with the `Supervisor*Config` wire types it frames so both the
 // `mvm-backend` writer (`claim_standby`) and the supervisor-bin reader reach it without
