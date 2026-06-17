@@ -150,7 +150,7 @@ pub fn materialize_ext4(
     {
         allocate_sparse_image(&input.output, size_bytes)?;
 
-        if let Err(err) = materialize_ext4_in_builder_vm(input, options) {
+        if let Err(err) = materialize_ext4_in_builder_vm(input, options, size_bytes) {
             let _ = std::fs::remove_file(&input.output);
             return Err(err);
         }
@@ -186,6 +186,7 @@ fn allocate_sparse_image(path: &Path, size_bytes: u64) -> Result<(), RootfsError
 fn materialize_ext4_in_builder_vm(
     input: &MaterializeExt4Input,
     options: &MaterializeExt4Options,
+    device_size_bytes: u64,
 ) -> Result<(), RootfsError> {
     use crate::libkrun_builder::{BuilderExtraDisk, BuilderShellJob, LibkrunBuilderVm};
 
@@ -194,7 +195,7 @@ fn materialize_ext4_in_builder_vm(
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let script = ext4_materialization_script(&options.guest_output_device);
+    let script = ext4_materialization_script(&options.guest_output_device, device_size_bytes);
     let shell_job = BuilderShellJob {
         work_dir: input.unpacked_root.clone(),
         artifact_out,
@@ -210,10 +211,42 @@ fn materialize_ext4_in_builder_vm(
     Ok(())
 }
 
+/// Safety margin (bytes) left between the formatted ext4 size and the
+/// backing device size. The builder VM (libkrun) and the workload
+/// backends (Vz, Firecracker) can report a virtio-blk device size that
+/// differs from the host sparse file by up to ~64 KiB in either
+/// direction (kernel/VMM rounding). Formatting `mkfs.ext4` to the full
+/// device size makes a filesystem that boots on the backend whose device
+/// view matches but panics with "bad geometry: block count … exceeds
+/// size of device" on one that reports fewer blocks. A 1 MiB margin
+/// safely absorbs the discrepancy on every backend.
+#[cfg(any(test, feature = "builder-vm"))]
+const EXT4_DEVICE_MARGIN_BYTES: u64 = 1024 * 1024;
+
+/// ext4 block size used when formatting with an explicit block count.
+#[cfg(any(test, feature = "builder-vm"))]
+const EXT4_BLOCK_SIZE_BYTES: u64 = 4096;
+
+/// Number of `EXT4_BLOCK_SIZE_BYTES` blocks to format, given the host
+/// sparse-file size. Subtracts the device margin, then rounds down to a
+/// whole block count.
+#[cfg(any(test, feature = "builder-vm"))]
+fn ext4_block_count(device_size_bytes: u64) -> u64 {
+    device_size_bytes.saturating_sub(EXT4_DEVICE_MARGIN_BYTES) / EXT4_BLOCK_SIZE_BYTES
+}
+
 /// Shell executed inside the builder VM. Public within the crate so
 /// tests can pin the command shape without booting a VM.
+///
+/// `device_size_bytes` is the host sparse-file size; the script formats
+/// the ext4 to an explicit block count a margin below it so the image
+/// mounts on a workload backend whose virtio-blk device reports slightly
+/// fewer blocks than the builder VM saw (see [`EXT4_DEVICE_MARGIN_BYTES`]).
 #[cfg(any(test, feature = "builder-vm"))]
-pub(crate) fn ext4_materialization_script(guest_output_device: &str) -> String {
+pub(crate) fn ext4_materialization_script(
+    guest_output_device: &str,
+    device_size_bytes: u64,
+) -> String {
     format!(
         r#"#!/bin/sh
 set -eu
@@ -222,7 +255,7 @@ ROOTFS_DEV='{guest_output_device}'
 MOUNTPOINT=/tmp/mvm-image-rootfs
 
 mkdir -p "$MOUNTPOINT"
-/sbin/mkfs.ext4 -F "$ROOTFS_DEV"
+/sbin/mkfs.ext4 -F -b {block_size} "$ROOTFS_DEV" {block_count}
 mount -t ext4 "$ROOTFS_DEV" "$MOUNTPOINT"
 trap 'umount "$MOUNTPOINT" 2>/dev/null || true' EXIT
 cp -aR /work/. "$MOUNTPOINT"/
@@ -231,6 +264,8 @@ umount "$MOUNTPOINT"
 trap - EXIT
 "#,
         guest_output_device = shell_single_quote_escape(guest_output_device),
+        block_size = EXT4_BLOCK_SIZE_BYTES,
+        block_count = ext4_block_count(device_size_bytes),
     )
 }
 
@@ -273,12 +308,25 @@ mod tests {
 
     #[test]
     fn script_formats_mounts_copies_and_unmounts_inside_guest() {
-        let script = ext4_materialization_script("/dev/vdc");
-        assert!(script.contains("/sbin/mkfs.ext4 -F \"$ROOTFS_DEV\""));
+        let script = ext4_materialization_script("/dev/vdc", 64 * 1024 * 1024);
+        // Formats to an explicit block count a margin below the device
+        // so the image mounts on a backend reporting fewer blocks.
+        assert!(script.contains("/sbin/mkfs.ext4 -F -b 4096 \"$ROOTFS_DEV\""));
         assert!(script.contains("mount -t ext4 \"$ROOTFS_DEV\" \"$MOUNTPOINT\""));
         assert!(script.contains("cp -aR /work/. \"$MOUNTPOINT\"/"));
         assert!(script.contains("umount \"$MOUNTPOINT\""));
         assert!(!script.contains("mke2fs -d"));
+    }
+
+    #[test]
+    fn ext4_block_count_leaves_a_one_mib_margin() {
+        // 64 MiB device → format (64 MiB - 1 MiB) / 4096 = 16128 blocks.
+        assert_eq!(ext4_block_count(64 * 1024 * 1024), 16128);
+        // The formatted size is strictly below the device size by at
+        // least the margin, so a backend reporting up to 1 MiB fewer
+        // bytes still mounts it.
+        let dev = 128 * 1024 * 1024;
+        assert!(ext4_block_count(dev) * 4096 + EXT4_DEVICE_MARGIN_BYTES <= dev + 4096);
     }
 
     #[cfg(not(feature = "builder-vm"))]

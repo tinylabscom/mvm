@@ -83,7 +83,14 @@ pub mod vz_builder;
 #[cfg(feature = "builder-vm")]
 pub mod builder_backend_select;
 
+/// Host-side cross-compile + cache of the guest agent/netinit binaries
+/// baked into an OCI rootfs by [`oci_runtime_inject`].
+pub mod guest_agent_build;
 pub mod nix;
+/// Inject the mvm guest runtime (agent, netinit, `/init`, `/mvm/runtime`
+/// mount point) into an OCI-unpacked rootfs so `run --image` has a vsock
+/// control plane. Host-side filesystem I/O against the staging tree.
+pub mod oci_runtime_inject;
 /// OCI layer unpack to a staging rootfs directory. Handles whiteouts,
 /// symlinks, hardlinks, ownership, permissions, path traversal, the
 /// `/mvm` reserved-path collision check, and per-entry + per-layer
