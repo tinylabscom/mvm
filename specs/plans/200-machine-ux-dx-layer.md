@@ -1244,11 +1244,15 @@ ALREADY LANDED (verify, don't rebuild):
   (#1002). These exist but are stringly-dispatched (no typed enum yet — see item 2).
 - `mvm.toml` schema v1 PARSER (#993/#995) — parsing only; the field→launch mapping is open (item 4).
 
-STEP 0 (do before any code): re-confirm ownership. The Plan 200 de-duplication pass split
-responsibilities against Plans 199 (install/host packaging), 126/156 (dependency + binary-size),
-155 (low-level artifact execution), and 159/189 (VZ-specific). Verify each item below still belongs
-to Plan 200 and isn't owned elsewhere; adjust scope before building. Output a short sequencing plan
-and confirm with the owner before starting the first slice.
+EXECUTE AUTONOMOUSLY: the design decisions below are settled and the sequence is fixed — do NOT
+stop to ask for confirmation. Work straight through the items in order, landing each as its own PR.
+
+STEP 0 (do before any code, no human checkpoint): scan for in-flight/landed work so you don't
+redo or race it — `git worktree list`, `gh pr list --state all`, and the ALREADY-LANDED list
+above. The Plan 200 de-duplication pass split responsibilities against Plans 199 (install/host
+packaging), 126/156 (dependency + binary-size), 155 (low-level artifact execution), and 159/189
+(VZ-specific); if an item below turns out to be owned elsewhere or already merged, skip it and move
+to the next — don't wait for a decision.
 
 SEQUENCE: do item 1 FIRST — it is the linchpin. `run --image` is effectively NON-FUNCTIONAL today
 (the OCI guest never gets an agent), so the headline `mvmctl machine run --image alpine -- …` UX
@@ -1277,14 +1281,17 @@ landing via PR + merge queue, keeping SPRINT.md + REFACTOR-STATUS.md current:
    become reachable within 30s"). The runtime overlay (W1.4b, dm-verity sealed) is exactly what
    carries the agent + netinit.
 
-   So "scope `admit_overlay_aware` to `runtime_overlay_path.is_some()` and let OCI skip it" is the
-   WRONG fix — it removes the gate's refusal but moves the failure 30s downstream to the missing
-   agent. The right direction is the opposite: ATTACH the runtime overlay to OCI guests (inject the
-   agent/netinit), which requires the OCI materialize path to create the `/mvm/runtime` mount
-   point, the run path to wire `runtime_overlay_path` to the default overlay, then write the
-   `overlay_aware: true` sidecar so the gate passes honestly. Confirm the OCI control model with
-   the owner before building; needs live builder-VM + boot verification (`tests/oci_image_runner_smoke.rs`
-   is gated off and does NOT exercise the gate, so OCI boot is unproven end-to-end today).
+   DECISION (settled — build this, do not re-litigate): "scope `admit_overlay_aware` to
+   `runtime_overlay_path.is_some()` and let OCI skip it" is the WRONG fix — it removes the gate's
+   refusal but moves the failure 30s downstream to the missing agent. Build the opposite: ATTACH
+   the runtime overlay to OCI guests (inject the agent/netinit). Concretely: the OCI materialize
+   path creates the `/mvm/runtime` mount point, the run path wires `runtime_overlay_path` to the
+   default overlay, then writes the `overlay_aware: true` sidecar so the gate passes honestly.
+   This is a hard correctness requirement, not a checkpoint: PROVE it with live builder-VM + boot
+   verification — get a real OCI image (e.g. alpine) to boot and run a command end-to-end
+   (`tests/oci_image_runner_smoke.rs` is gated off and does NOT exercise the gate today; extend it
+   to exercise the gate + a real agent round-trip). Do not mark item 1 done on a green unit suite
+   alone — the failure mode (`wait_for_agent` timeout) only shows on a real boot.
 
 2. Typed MachineImageSource enum. Replace the stringly ingest dispatch (the #996/#998/#1000/#1002
    functions in commands/image/mod.rs) with a typed enum: registry ref / local OCI archive / stdin
