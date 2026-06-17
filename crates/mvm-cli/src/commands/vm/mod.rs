@@ -35,3 +35,7 @@ pub(super) mod volume;
 pub(super) mod wait;
 
 pub(super) use super::{Cli, shared};
+
+// Shared untrusted-transient admission hook — `up` is `pub(super)` (vm-only),
+// so re-export the one helper the MCP code-runner (`commands::ops`) needs.
+pub(in crate::commands) use up::untrusted_transient_admit;
