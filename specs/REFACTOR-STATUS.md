@@ -904,34 +904,37 @@ Why the 11 open rollup boxes still show as open:
 - `REFACTOR-STATUS.md` only ticks a plan when the whole plan is done. Partial progress is recorded in the long `Last updated` history and detail blocks, so progress is easy to miss.
 - There is visible drift to clean up: Plan 126's summary says the forbidden-dep gate landed, but its detail section still has D1 unchecked.
 - The Plan 125 closeout + Plan 200 checklist reconciliation landed in #1047; remaining Plan 202 work continues from the daemon/signature-helper plan, not Plan 125.
-- Plan 202 Phase 2d landed in #1049; Phase 4a landed in #1051; Phase 3b landed in #1052; Phase 4b supervised daemon restart/crash semantics is complete in this slice.
+- Plan 202 Phase 2d landed in #1049, completing the signer-helper restart/head-rebuild slice.
+- Plan 202 Phase 4a landed in #1051, adding the persisted host-agent registration journal/replay slice.
+- Plan 202 Phase 3b landed in #1052, closing host-services cost framing as `O(active tenants)`.
+- Plan 202 Phase 4b landed in #1053, adding supervised host-agent restart/replay.
+- Plan 202 Phase 4b cleanup landed in #1054, tightening the post-merge host-agent restart docs/code.
+- Plan 200 is actively landing in slices. The persistent spec + running-VM wrapper slice is in PR #1048; persistent image-backed `machine start` is still open and must use an admitted persistent boot helper, not transient `run --image`.
 
 Open PRs at update time:
 
-- `#1052` / `feat/plan-202-3b-cost-semantics`: merged; closed Plan 202 Phase 3b cost framing after #1051.
-- `#1051` / `feat/plan-202-4-supervision`: merged; carried Plan 202 Phase 4a registration journal.
-- `#1048` / `feat/plan-200-persistent-machine`: carries the Plan 200 persistent-machine workstream.
-- `#1049` / `feat/plan-202-2d-signer-restart`: merged; carried signer-helper restart/head rebuild and completed Plan 202 Phase 2.
-- `#1047` / `docs/plan-200-implementation-checklist`: merged; carried the Plan 200 implementation checklist, MCP-admission bookkeeping reconciliation, and Plan 125 close/rehome rollup.
+- `#1048` / `feat/plan-200-persistent-machine`: Plan 200 persistent `MachineSpec` storage plus `machine create` / `ls` / `inspect` / `rm --yes` and running-VM `exec` / `shell` / `stop` wrappers.
+- Already merged: `#1039` Plan 200 local image-source closeout, `#1041` ADR bundle/GPU posture, `#1046` Plan 202 Phase 2c signer-helper-backed admission signing, `#1047` Plan 125 close/rehome plus Plan 200 checklist reconciliation, `#1049` Plan 202 Phase 2d signer-helper restart/head rebuild, `#1051` Plan 202 Phase 4a registration journal, `#1052` Plan 202 Phase 3b cost framing, `#1053` Plan 202 Phase 4b supervised restart, and `#1054` Plan 202 Phase 4b cleanup.
 
 Recommended sequence to close the remaining rollup items:
 
-1. Clean stale worktrees: several are old/behind or already landed (`mvm-202-3c-doctor`, `mvm-pr1009`, `mvm-p200-ociboot`, old status/170/vz100 branches). Do not sequence new work from them.
-2. Continue Plan 202 next: finish vz live-verify, mvmd adoption, and retirement of `spawn_broker_services_if_admitted`.
-3. **Done:** Plan 125 is closed/rehome-only; remaining per-tenant daemon work belongs to Plan 202.
-4. Continue Plan 200 product path: local image sources, persistent OCI-backed machine specs, schema parser, SDK parity, docs, CI budgets.
-5. Do Plan 199 in parallel if builder VM time is available: native `libkrunfw`/`libkrun` Nix recipes and flake/build verification.
-6. Do Plan 195 before Plan 189 acceptance: fingerprint narrowing reduces builder churn and supports cached fast-boot validation.
-7. Continue Plan 193 only after rvproxy cross-repo slices are ready: delete splice, remove Plan-141 hooks, default-on bridge, transparent terminator.
-8. Then Plan 189 VZ DX parity: save/restore verbs, JSON coverage, base pinning.
-9. Resolve Plan 126 by correcting status first, then decide blocked deps (`sigstore`, `pgp`, `aws-lc-rs`) rather than treating them as normal TODOs.
-10. Plan 118/175 are live-KVM gated; do density bench substrate first, then FC standby/warm-start once the KVM environment is ready.
-11. Plan 159 and 201 are lowest priority: Plan 159 mostly needs residuals rehomed/descope, and Plan 201 is a convenience layer after warm-pool fundamentals.
+1. Merge `#1048` once CI is green; it closes the persistent spec substrate and running-VM wrapper part of Plan 200 but leaves `machine start` open.
+2. Continue Plan 200 with persistent image-backed `machine start`: extract/add an admitted persistent boot helper for OCI images rather than routing through transient `run --image`, which tears down by design.
+3. Continue Plan 202 after Phase 4b: vz live-verify, mvmd adoption, and retirement of `spawn_broker_services_if_admitted`.
+4. Clean stale worktrees: several are old/behind or already landed (`mvm-202-3c-doctor`, `mvm-pr1009`, `mvm-p200-ociboot`, old status/170/vz100 branches). Do not sequence new work from them.
+5. Confirm Plan 125 remains closed/rehome-only; remaining per-tenant daemon work belongs to Plan 202.
+6. Do Plan 199 in parallel if builder VM time is available: native `libkrunfw`/`libkrun` Nix recipes and flake/build verification.
+7. Do Plan 195 before Plan 189 acceptance: fingerprint narrowing reduces builder churn and supports cached fast-boot validation.
+8. Continue Plan 193 only after rvproxy cross-repo slices are ready: delete splice, remove Plan-141 hooks, default-on bridge, transparent terminator.
+9. Then Plan 189 VZ DX parity: save/restore verbs, JSON coverage, base pinning.
+10. Resolve Plan 126 by correcting status first, then decide blocked deps (`sigstore`, `pgp`, `aws-lc-rs`) rather than treating them as normal TODOs.
+11. Plan 118/175 are live-KVM gated; do density bench substrate first, then FC standby/warm-start once the KVM environment is ready.
+12. Plan 159 and 201 are lowest priority: Plan 159 mostly needs residuals rehomed/descope, and Plan 201 is a convenience layer after warm-pool fundamentals.
 
 Plan 200 implementation checklist after `#1039`:
 
-- [x] Reconcile Plan 200 bookkeeping first: the rollup says MCP code-run admission is done via `#1017`/`#1023`, but the Plan 200 deferred checkbox still shows it open. Completed here: the Plan 200 deferred checkbox now points at #1017/#1023 and is ticked.
-- [ ] Persistent machine UX: implement `machine create/start/exec/shell/stop/ls/inspect/rm`, persist `MachineSpec` under the existing data-dir helpers with atomic writes, and add state deletion/JSON tests.
+- [x] Reconcile Plan 200 bookkeeping first: the rollup says MCP code-run admission is done via `#1017`/`#1023`, but the Plan 200 deferred checkbox still showed it open. Completed in #1047: the Plan 200 deferred checkbox points at #1017/#1023 and is ticked.
+- [ ] Persistent machine UX: partially complete in #1048. Done: `MachineSpec` persists under existing data-dir helpers with atomic writes and strict JSON; `machine create` / `ls` / `inspect` / `rm --yes` plus running-VM `exec` / `shell` / `stop` wrappers are implemented with parser/state/JSON/deletion/spec-guard tests. Remaining: persistent image-backed `machine start` through the admitted launch path.
 - [ ] `mvm.toml` machine mapping: map `net`, `[network].allow_hosts`, `[auth].ssh_agent`, `[dev].init`, and volumes into the admitted machine path; preserve read-only volume defaults; reject dev init for sealed/prod; include effective policy in dry-run/receipt output.
 - [ ] SDK parity: add Python, TypeScript, and Rust machine wrappers that reuse CLI/library admission paths; add parity tests and negative non-bypass tests for artifact verification, default-deny network, unknown keys, source conflicts, and receipt/audit summaries.
 - [ ] Scenario-led docs: update binary-install-first docs, machine quickstart, limitations, old-verb mapping, source guards, completions, and first-run output without implying host Nix, GPU, ICMP, or unsupported architecture support.
