@@ -21,9 +21,12 @@ use anyhow::{Context, Result};
 use tokio::net::UnixListener;
 use tracing::{error, info};
 
+use mvm_hostd::audit_signer::helper_client::SignerHelperClient;
 use mvm_hostd::host_signer::config::{SubprocessConfig, parse as parse_config};
 use mvm_hostd::host_signer::keystore::Keystore;
-use mvm_hostd::host_signer::server::{default_max_frame_bytes, serve_on_listener};
+use mvm_hostd::host_signer::server::{
+    default_max_frame_bytes, serve_on_listener, serve_via_helper_on_listener,
+};
 
 fn read_stdin_blocking() -> Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(4096);
@@ -50,14 +53,9 @@ fn main() -> Result<()> {
         tenant_id = %cfg.tenant_id,
         uds_path = %cfg.uds_path.display(),
         software_key_path = ?cfg.software_key_path,
+        signer_helper_uds_path = ?cfg.signer_helper_uds_path,
         "mvm-host-signer config loaded"
     );
-
-    let keystore = match &cfg.software_key_path {
-        Some(path) => Keystore::load_from_file(path)?,
-        None => Keystore::generate(),
-    };
-    let keystore = Arc::new(keystore);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -75,16 +73,31 @@ fn main() -> Result<()> {
         })?;
         info!(
             uds_path = %cfg.uds_path.display(),
-            "mvm-host-signer listening (W1b.1 software-fallback key path; W8 replaces with HW enclave)"
+            helper = ?cfg.signer_helper_uds_path,
+            "mvm-host-signer listening"
         );
-        if let Err(e) = serve_on_listener(
-            listener,
-            keystore,
-            cfg.workload_id,
-            default_max_frame_bytes(),
-        )
-        .await
-        {
+        let result = if let Some(helper) = cfg.signer_helper_uds_path {
+            serve_via_helper_on_listener(
+                listener,
+                SignerHelperClient::new(helper),
+                cfg.workload_id,
+                default_max_frame_bytes(),
+            )
+            .await
+        } else {
+            let keystore = match &cfg.software_key_path {
+                Some(path) => Keystore::load_from_file(path)?,
+                None => Keystore::generate(),
+            };
+            serve_on_listener(
+                listener,
+                Arc::new(keystore),
+                cfg.workload_id,
+                default_max_frame_bytes(),
+            )
+            .await
+        };
+        if let Err(e) = result {
             error!(error = %e, "mvm-host-signer serve loop exited with error");
             return Err::<(), _>(e);
         }

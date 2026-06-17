@@ -11,8 +11,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use mvm_core::protocol::audit_signer::{
     AuditSignerErrorCode, SignerHelperAppendEntry, SignerHelperDeregisterVm,
-    SignerHelperRegisterVm, SignerHelperRequest, SignerHelperResponse,
+    SignerHelperRegisterVm, SignerHelperRequest, SignerHelperResponse, SignerHelperSignHost,
 };
+use mvm_core::protocol::host_signer::{HostSignerErrorCode, SignRequest, SignResponse};
 use mvm_core::security::SIG_ALG_ED25519;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -22,6 +23,7 @@ use tracing::{debug, info, warn};
 use crate::audit_signer::canonical::CanonicalEntry;
 use crate::audit_signer::chain::Chain;
 use crate::audit_signer::server::format_code_message;
+use crate::host_signer::keystore::Keystore;
 
 const WORKLOAD_AUDIT_CATEGORY: &str = "workload_audit";
 
@@ -67,6 +69,7 @@ impl SignerHelper {
             SignerHelperRequest::RegisterVm(req) => self.register(req),
             SignerHelperRequest::DeregisterVm(req) => self.deregister(req),
             SignerHelperRequest::AppendEntry(req) => self.append(req),
+            SignerHelperRequest::SignHost(req) => self.sign_host(req),
             SignerHelperRequest::Probe { request_id } => SignerHelperResponse::Pong { request_id },
         }
     }
@@ -176,6 +179,40 @@ impl SignerHelper {
             },
         }
     }
+
+    fn sign_host(&self, req: SignerHelperSignHost) -> SignerHelperResponse {
+        let request_id = req.request_id;
+        let response = match self.sign_host_inner(&req.request) {
+            Ok(resp) => resp,
+            Err(message) => SignResponse::Err {
+                request_id: request_id.clone(),
+                code: HostSignerErrorCode::KeyUnavailable,
+                message,
+            },
+        };
+        SignerHelperResponse::HostSigned {
+            request_id,
+            response,
+        }
+    }
+
+    fn sign_host_inner(&self, req: &SignRequest) -> std::result::Result<SignResponse, String> {
+        let Some(path) = self.software_chain_key_path.as_deref() else {
+            return Err("signer helper has no host signing key path".into());
+        };
+        let keystore = Keystore::load_from_file(path).map_err(|e| e.to_string())?;
+        let request_id = req.request_id().to_string();
+        let bytes_to_sign: &[u8] = match req {
+            SignRequest::SignPlan { bytes, .. } => bytes,
+        };
+        let result = keystore.sign(bytes_to_sign);
+        Ok(SignResponse::Ok {
+            request_id,
+            sig_alg: result.sig_alg,
+            signature: result.signature,
+            signer_pubkey: result.pub_key_bytes,
+        })
+    }
 }
 
 /// Accept loop for the resident helper UDS.
@@ -263,6 +300,7 @@ fn ensure_parent(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Verifier, VerifyingKey};
     use tempfile::tempdir;
 
     fn key_path(dir: &Path) -> PathBuf {
@@ -414,5 +452,61 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn sign_host_signs_plan_bytes_with_helper_key() {
+        let dir = tempdir().unwrap();
+        let mut helper = SignerHelper::new("local", Some(key_path(dir.path())));
+        let plan_bytes = b"canonical-plan".to_vec();
+
+        let response = helper.dispatch(SignerHelperRequest::SignHost(SignerHelperSignHost {
+            request_id: "sign-1".into(),
+            request: SignRequest::SignPlan {
+                bytes: plan_bytes.clone(),
+                request_id: "sign-1".into(),
+            },
+        }));
+
+        match response {
+            SignerHelperResponse::HostSigned {
+                request_id,
+                response:
+                    SignResponse::Ok {
+                        signer_pubkey,
+                        signature,
+                        ..
+                    },
+            } => {
+                assert_eq!(request_id, "sign-1");
+                let pk_arr: [u8; 32] = signer_pubkey.try_into().unwrap();
+                let vk = VerifyingKey::from_bytes(&pk_arr).unwrap();
+                let sig_arr: [u8; 64] = signature.try_into().unwrap();
+                let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+                vk.verify(&plan_bytes, &sig).expect("signature must verify");
+            }
+            other => panic!("expected host sign response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sign_host_without_key_path_returns_typed_error() {
+        let mut helper = SignerHelper::new("local", None);
+
+        let response = helper.dispatch(SignerHelperRequest::SignHost(SignerHelperSignHost {
+            request_id: "sign-missing".into(),
+            request: SignRequest::SignPlan {
+                bytes: b"canonical-plan".to_vec(),
+                request_id: "sign-missing".into(),
+            },
+        }));
+
+        match response {
+            SignerHelperResponse::HostSigned {
+                response: SignResponse::Err { code, .. },
+                ..
+            } => assert_eq!(code, HostSignerErrorCode::KeyUnavailable),
+            other => panic!("expected host sign error response, got {other:?}"),
+        }
     }
 }

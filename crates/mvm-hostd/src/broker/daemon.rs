@@ -21,9 +21,7 @@
 //! `spawn_broker` fork is the next slice.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -34,6 +32,8 @@ use mvm_core::protocol::audit_signer::{
 };
 use tokio::net::UnixListener;
 use tracing::warn;
+
+use crate::audit_signer::helper_client::SignerHelperClient;
 
 use super::audit_client::AuditClient;
 use super::control::{ControlRequest, ControlResponse, RegisterVm, SignedControl};
@@ -264,7 +264,7 @@ impl HostAgentDaemon {
                 .clone()
                 .unwrap_or_else(|| r.workload_chain_path.with_extension("head")),
         });
-        match send_helper_request(path, &req)? {
+        match SignerHelperClient::new(path.clone()).send(&req)? {
             SignerHelperResponse::Registered { .. } => Ok(()),
             SignerHelperResponse::Err { message, .. } => {
                 bail!("signer-helper register refused: {message}")
@@ -281,7 +281,7 @@ impl HostAgentDaemon {
             request_id: format!("deregister-{vm_id}"),
             vm_id: vm_id.to_string(),
         });
-        match send_helper_request(path, &req)? {
+        match SignerHelperClient::new(path.clone()).send(&req)? {
             SignerHelperResponse::Deregistered { .. } => Ok(()),
             SignerHelperResponse::Err { message, .. } => {
                 bail!("signer-helper deregister refused: {message}")
@@ -335,35 +335,6 @@ impl HostAgentDaemon {
             }
         }
     }
-}
-
-fn send_helper_request(path: &Path, req: &SignerHelperRequest) -> Result<SignerHelperResponse> {
-    let mut stream =
-        StdUnixStream::connect(path).with_context(|| format!("connect {}", path.display()))?;
-    let body = serde_json::to_vec(req).context("encode signer-helper request")?;
-    let len: u32 = body
-        .len()
-        .try_into()
-        .context("signer-helper request too large")?;
-    stream
-        .write_all(&len.to_be_bytes())
-        .with_context(|| format!("write signer-helper request len to {}", path.display()))?;
-    stream
-        .write_all(&body)
-        .with_context(|| format!("write signer-helper request body to {}", path.display()))?;
-    let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .with_context(|| format!("read signer-helper response len from {}", path.display()))?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > CONTROL_MAX_FRAME_BYTES {
-        bail!("signer-helper response {len} bytes exceeds cap {CONTROL_MAX_FRAME_BYTES}");
-    }
-    let mut body = vec![0u8; len];
-    stream
-        .read_exact(&mut body)
-        .with_context(|| format!("read signer-helper response body from {}", path.display()))?;
-    serde_json::from_slice(&body).context("decode signer-helper response")
 }
 
 /// Validate a `vm_id` is safe to embed in a filesystem path: a non-empty DNS-

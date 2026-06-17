@@ -12,14 +12,36 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, info, warn};
 
+use crate::audit_signer::helper_client::SignerHelperClient;
 use crate::host_signer::keystore::SharedKeystore;
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 65_536;
+
+#[derive(Clone)]
+enum SignBackend {
+    Local(SharedKeystore),
+    Helper(SignerHelperClient),
+}
 
 /// Accept loop.
 pub async fn serve(
     listener: UnixListener,
     keystore: SharedKeystore,
+    workload_id: String,
+    max_frame_bytes: usize,
+) -> Result<()> {
+    serve_with_backend(
+        listener,
+        SignBackend::Local(keystore),
+        workload_id,
+        max_frame_bytes,
+    )
+    .await
+}
+
+async fn serve_with_backend(
+    listener: UnixListener,
+    backend: SignBackend,
     workload_id: String,
     max_frame_bytes: usize,
 ) -> Result<()> {
@@ -33,11 +55,10 @@ pub async fn serve(
             .accept()
             .await
             .context("mvm-host-signer UDS accept failed")?;
-        let keystore = keystore.clone();
+        let backend = backend.clone();
         let workload_id = workload_id.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, keystore, workload_id, max_frame_bytes).await
-            {
+            if let Err(e) = handle_connection(stream, backend, workload_id, max_frame_bytes).await {
                 warn!(error = %e, "mvm-host-signer connection terminated with error");
             }
         });
@@ -56,9 +77,26 @@ pub async fn serve_on_listener(
     serve(listener, keystore, workload_id, max_frame_bytes).await
 }
 
+/// Variant that runs `mvm-host-signer` as a keyless compatibility proxy
+/// backed by the resident signer helper.
+pub async fn serve_via_helper_on_listener(
+    listener: UnixListener,
+    helper: SignerHelperClient,
+    workload_id: String,
+    max_frame_bytes: usize,
+) -> Result<()> {
+    serve_with_backend(
+        listener,
+        SignBackend::Helper(helper),
+        workload_id,
+        max_frame_bytes,
+    )
+    .await
+}
+
 async fn handle_connection(
     mut stream: UnixStream,
-    keystore: SharedKeystore,
+    backend: SignBackend,
     workload_id: String,
     max_frame_bytes: usize,
 ) -> Result<()> {
@@ -69,7 +107,7 @@ async fn handle_connection(
         "mvm-host-signer received request"
     );
 
-    let response = dispatch(&req, &keystore);
+    let response = dispatch(&req, &backend).await;
     write_frame(&mut stream, &response).await?;
     stream
         .shutdown()
@@ -78,7 +116,31 @@ async fn handle_connection(
     Ok(())
 }
 
-fn dispatch(req: &SignRequest, keystore: &SharedKeystore) -> SignResponse {
+async fn dispatch(req: &SignRequest, backend: &SignBackend) -> SignResponse {
+    match backend {
+        SignBackend::Local(keystore) => dispatch_local(req, keystore),
+        SignBackend::Helper(client) => {
+            let request_id = req.request_id().to_string();
+            let client = client.clone();
+            let req = req.clone();
+            match tokio::task::spawn_blocking(move || client.sign_host(req)).await {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(e)) => err_response(
+                    request_id,
+                    HostSignerErrorCode::InternalError,
+                    format!("signer helper request failed: {e}"),
+                ),
+                Err(e) => err_response(
+                    request_id,
+                    HostSignerErrorCode::InternalError,
+                    format!("signer helper task failed: {e}"),
+                ),
+            }
+        }
+    }
+}
+
+fn dispatch_local(req: &SignRequest, keystore: &SharedKeystore) -> SignResponse {
     let request_id = req.request_id().to_string();
     let bytes_to_sign: &[u8] = match req {
         SignRequest::SignPlan { bytes, .. } => bytes,
@@ -112,10 +174,7 @@ async fn write_frame<T: serde::Serialize>(stream: &mut UnixStream, value: &T) ->
         .context("mvm-host-signer frame write failed")
 }
 
-/// Build an `Err` response with the supplied typed code. Kept around so
-/// future paths (config-rejection, enclave-error) have a uniform
-/// constructor. Currently unused in the happy-path dispatch.
-#[allow(dead_code)]
+/// Build an `Err` response with the supplied typed code.
 pub fn err_response(
     request_id: impl Into<String>,
     code: HostSignerErrorCode,
@@ -143,14 +202,17 @@ mod tests {
     use std::sync::Arc;
 
     use ed25519_dalek::{Verifier, VerifyingKey};
+    use mvm_core::protocol::audit_signer::{SignerHelperRequest, SignerHelperResponse};
     use mvm_core::protocol::host_signer::SignRequest;
     use mvm_core::security::SIG_ALG_ED25519;
     use tempfile::tempdir;
     use tokio::net::UnixStream as ClientStream;
 
     use super::*;
+    use crate::audit_signer::helper_client::SignerHelperClient;
     use crate::host_signer::keystore::Keystore;
     use tokio::io::AsyncReadExt;
+    use tokio::sync::Mutex;
 
     async fn write_req(stream: &mut ClientStream, req: &SignRequest) -> Result<()> {
         let body = serde_json::to_vec(req).unwrap();
@@ -171,6 +233,24 @@ mod tests {
 
     fn uds_path(dir: &tempfile::TempDir) -> PathBuf {
         dir.path().join("host-signer.sock")
+    }
+
+    async fn spawn_helper_mock(
+        path: PathBuf,
+        response: SignerHelperResponse,
+        captured: Arc<Mutex<Option<SignerHelperRequest>>>,
+    ) -> tokio::task::JoinHandle<()> {
+        let listener = UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let req: SignerHelperRequest = crate::framing::read_json_frame(&mut stream, 65_536)
+                .await
+                .unwrap();
+            *captured.lock().await = Some(req);
+            crate::framing::write_json_frame(&mut stream, &response)
+                .await
+                .unwrap();
+        })
     }
 
     #[tokio::test]
@@ -258,6 +338,69 @@ mod tests {
         }
 
         server_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn helper_proxy_forwards_sign_plan_to_signer_helper() {
+        let dir = tempdir().unwrap();
+        let signer_path = uds_path(&dir);
+        let helper_path = dir.path().join("signer-helper.sock");
+        let listener = UnixListener::bind(&signer_path).unwrap();
+        let captured = Arc::new(Mutex::new(None));
+
+        let helper = spawn_helper_mock(
+            helper_path.clone(),
+            SignerHelperResponse::HostSigned {
+                request_id: "req-helper".into(),
+                response: SignResponse::Ok {
+                    request_id: "req-helper".into(),
+                    sig_alg: SIG_ALG_ED25519,
+                    signature: vec![2u8; 64],
+                    signer_pubkey: vec![3u8; 32],
+                },
+            },
+            captured.clone(),
+        )
+        .await;
+        tokio::task::yield_now().await;
+
+        let server_task = tokio::spawn(async move {
+            let _ = serve_via_helper_on_listener(
+                listener,
+                SignerHelperClient::new(helper_path),
+                "wl-test".into(),
+                65_536,
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+
+        let mut client = ClientStream::connect(&signer_path).await.unwrap();
+        let req = SignRequest::SignPlan {
+            bytes: b"canonical-plan".to_vec(),
+            request_id: "req-helper".into(),
+        };
+        write_req(&mut client, &req).await.unwrap();
+        let resp = read_resp(&mut client).await.unwrap();
+
+        match resp {
+            SignResponse::Ok {
+                request_id,
+                signature,
+                signer_pubkey,
+                ..
+            } => {
+                assert_eq!(request_id, "req-helper");
+                assert_eq!(signature, vec![2u8; 64]);
+                assert_eq!(signer_pubkey, vec![3u8; 32]);
+            }
+            other => panic!("expected Ok response, got {other:?}"),
+        }
+        let captured_req = captured.lock().await.clone().expect("helper request");
+        assert!(matches!(captured_req, SignerHelperRequest::SignHost(_)));
+
+        server_task.abort();
+        helper.abort();
     }
 
     #[test]
