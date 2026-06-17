@@ -23,6 +23,9 @@ pub mod fs_rpc;
 /// normal wake) the guest reseeds its CSPRNG so two clones don't generate
 /// identical key material.
 pub mod genid;
+/// Shared in-guest network bring-up (eth0 up + DHCP + static fallback), used by
+/// both the builder VM init and the workload guest netinit.
+pub mod guest_net;
 /// In-guest `host.audit.v1` typed methods: `emit` / `emit_batch` over the
 /// broker transport, letting a workload append to the chain-signed audit log.
 pub mod host_audit;

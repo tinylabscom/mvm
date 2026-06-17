@@ -48,6 +48,23 @@
 
 #[cfg(target_os = "linux")]
 fn main() {
+    // Bring the guest network up FIRST — eth0 link-up → DHCP → static fallback —
+    // before layering the mandatory-deny blackhole routes on top. The workload
+    // guest's `/init` brings up only loopback; nothing else configures eth0, so
+    // without this the guest gets no network at all (the libkrun
+    // `NET_FLAG_DHCP_CLIENT` does not configure the interface here). This is the
+    // same shared bring-up the builder VM init uses. Best-effort: a failure
+    // (e.g. a network:None workload with no eth0) logs and continues to the
+    // blackhole install — a no-egress guest is degraded, not a hard failure.
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    if let Err(e) = mvm_guest::guest_net::configure_guest_network("eth0", &cmdline, "192.168.127.2")
+    {
+        eprintln!(
+            "mvm-guest-netinit: guest network bring-up failed: {e} \
+             (continuing — guest may have no egress)"
+        );
+    }
+
     let report = match mvm_guest::netinit::install_mandatory_deny_via_netlink() {
         Ok(r) => r,
         Err(e) => {

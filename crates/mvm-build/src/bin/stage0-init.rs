@@ -178,7 +178,7 @@ mod linux {
     fn configure_network_qemu() -> Result<(), String> {
         let iface = find_net_iface().ok_or("no non-loopback interface present")?;
         eprintln!("stage0-init: net config {iface} = 10.0.2.15/24 gw 10.0.2.2 (slirp)");
-        mvm_build::guest_net::configure_static(&iface, "10.0.2.15", "255.255.255.0", "10.0.2.2")
+        mvm_guest::guest_net::configure_static(&iface, "10.0.2.15", "255.255.255.0", "10.0.2.2")
     }
 
     /// The non-loopback interface name from `/sys/class/net` (e.g. `ens3`).
