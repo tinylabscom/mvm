@@ -279,10 +279,15 @@
             find "$staging/sdk-py" -name '__pycache__' -type d -prune \
               -exec rm -rf {} +
 
-            # TS runtime SDK placeholder — replaced by the koffi shim slice.
+            # TS runtime SDK placeholder. The koffi shim (mvm.audit / mvm.host
+            # in @runmvm/mvm) is built and tested, but baking it into the guest
+            # needs a node runtime + the koffi native addon cross-built for the
+            # guest arch (a packaging step beyond the Python case, where ctypes
+            # is stdlib). That guest TS-runtime bake rides the live-E2E work.
             mkdir -p "$staging/sdk-ts"
             cat > "$staging/sdk-ts/README.md" <<EOF
-            mvm-sdk-runtime TypeScript hooks (koffi shim — pending).
+            mvm-sdk-runtime TypeScript hooks — koffi shim shipped in @runmvm/mvm;
+            guest node + koffi-addon bake pending (rides live E2E).
             EOF
 
             # Version pin. The resolver compares this to the

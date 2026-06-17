@@ -30,6 +30,9 @@
     "directory": "sdks/typescript"
   },
   "homepage": "https://github.com/tinylabscom/mvm",
+  "dependencies": {
+    "koffi": "2.12.0"
+  },
   "devDependencies": {
     "@types/node": "22.7.5",
     "typescript": "5.6.3",
