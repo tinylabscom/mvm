@@ -1809,6 +1809,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             kernel_path: Some(kernel),
             cpus: direct_cpus,
             memory_mib: direct_mem,
+            network_policy: network_policy.clone(),
             ..Default::default()
         };
         // Attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
@@ -2311,6 +2312,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             secret_files: &secret_files,
             port_mappings: &port_mappings,
             warm_pool_size,
+            network_policy: network_policy.clone(),
         }
         .into_start_config();
         // Attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
@@ -2666,6 +2668,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 port_mappings: &w_port_mappings,
                 // `--wait` is a one-shot workload; no warm-pool claim on this path.
                 warm_pool_size: 0,
+                network_policy: network_policy.clone(),
             }
             .into_start_config();
             // Attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
