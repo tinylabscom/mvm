@@ -1,5 +1,7 @@
 # Refactor status — rollup checklist
 
+**Latest update: 2026-06-17** Plan 200 WS-B product closeout — local image sources are implemented and status-synced: registry refs, `oci-archive:<path>`, stdin archives, and `rootfs-dir:<path>` route through the existing image resolution path; local archives/stdin share `read_oci_archive` + hardened layer unpack + ext4 materialization; rootfs-dir is dev-only with architecture probing and explicit no-provenance metadata; prod refuses local sources without registry/cosign provenance. A local-archive traversal-layer regression now proves the hardened unpack refusal path is reached before materialization.
+
 
 **Additional 2026-06-15 planning rollup:** Plan 200 de-duplication pass completed — Plans 199/200 are the priority product path; Plan 200 maps ownership against Plans 114/125/126/136/155/156/159/189/193/197/198 so `machine` owns beginner UX, Plan 199 owns install/host packaging, Plan 126/156 own dependency and binary-size mechanics, Plan 155 owns low-level artifact execution, Plan 159/189 stay VZ-specific, Plan 193/197 stay security substrate, and Plan 198 is completed perf input. Plan 200 also records binary-first install, optional source-built Nix, current image-backed one-shot docs before flakes/manifests, future `mvmctl machine`, local image sources, scenario-led beginner docs, explicit limitations docs, verified portable artifacts, measured hot-start claims, no crate-count reduction across security boundaries, `mvm.toml` schema v1 with `image`/`flake` mutual exclusion and strict default-deny network/auth/volume rules, managed macOS virtualization as the safer default, custom kernels as signed runtime/artifact payloads, SDKs mirroring the CLI without bypassing admission/audit, and dependency weight as a first-class DX/security goal measured by default binary closure. Plan 199 Workstream A is complete: source-built Nix `mvmctl` package + host overlay, project-release binary download refused by tests, native libkrun linkage explicit/opt-in, and host Nix remains optional. Plan 201 adds a proposed WarmLease borrow-handle + batched guest exec docs-only workstream over the standby pool and agent-RPC, with no new backend/transport or admission/audit changes.
 
@@ -824,8 +826,8 @@ PLAN 200 — Machine UX/DX layer  🟢 in progress — `machine run` shipped (#9
       agent answers vsock 5252, runs the command, streams output (exit 0). Smoke test drives
       the real CLI (gate + agent round-trip). Deferred: rootfs-dir inject, end-user agent
       source via overlay download, uid-901 setpriv hardening — see plan doc.
-  [ ] Implement transient network policy plumbing for image-backed runs.
-  [ ] Implement local image-source handling for registry refs, local OCI archive files,
+  [x] Implement transient network policy plumbing for image-backed runs.
+  [x] Implement local image-source handling for registry refs, local OCI archive files,
       stdin archive streams, and unpacked rootfs directories with traversal, malformed archive,
       wrong-architecture, and missing-provenance negative tests.
   [ ] Implement persistent OCI-backed machine specs under existing data-dir helpers.
