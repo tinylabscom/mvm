@@ -1055,11 +1055,18 @@ follow-ups:
       allow-mode gate); the `AllowAll`-only unit test was deleted (allow-mode is covered by
       the `PlanFlowPolicy` unrestricted test). Pure hygiene, no behavior change — cfg(linux)
       `mvm-firecracker-bridge` cross-compiled with cargo-zigbuild.
-- [ ] **Decide the DHCP/ARP posture under deny-all.** The flow-open gate has no UDP
-      67/68 / ARP carve-out; latent today (macOS transient guest doesn't DHCP) but a
-      correctness trap once guest networking is fixed (a deny-all networked guest would
-      hang on a DHCP OFFER). Pick loopback-only vs a control-plane carve-out and pin it
-      with a live-bridge test.
+- [x] **Decide the DHCP/ARP posture under deny-all.** Decision: **loopback-only, no
+      control-plane carve-out** — deny-all drops every egress flow, DHCP (UDP 67/68)
+      included, so the guest gets no lease and self-assigns the static gvproxy fallback
+      address (`eth0` up, no admitted egress; only loopback + the egress-denied local link
+      usable). It does **not** hang: `udhcpc -n` exits on no-lease and the static fallback
+      applies (both from the eth0 bring-up that already landed). ARP / IPv6-ND are non-IP L2
+      frames the bridge forwards unchanged (it gates IP 5-tuples) — local-only, harmless
+      under deny-all, no special handling. A minimal DHCP/ARP carve-out was considered and
+      rejected (the static fallback already keeps `eth0` up; a UDP 67/68 allowance would be
+      a needless flow-gate special case and, if unscoped, a covert-channel surface).
+      Documented in ADR-002 §"Deny-all control-plane posture (DHCP/ARP)"; pinned by
+      `bare_deny_all_drops_dhcp_discover_through_the_live_bridge`.
 
 ## Verification
 
