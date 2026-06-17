@@ -397,25 +397,43 @@ impl VmBackend for VzBackend {
         // system audit chain is intact — so a spawn failure is logged, never a
         // launch rollback. On success the guard reaps both if a later start step
         // fails; defused once the VM is up.
-        let mut broker_guard = match crate::broker_services_spawn::spawn_broker_services_if_admitted(
-            crate::broker_services_spawn::BrokerServicesSpawnParams {
-                workload_id: &config.name,
-                tenant_id: config.tenant_id.as_deref(),
-                vm_name: &config.name,
-                state_dir: &state_dir,
-                // vz splices the guest's BROKER_PORT dial to the per-VM socket
-                // under `vsock/` (same shape as the substitution endpoint) — a
-                // different path from libkrun's, so the broker must bind THIS.
-                broker_listen_socket: &mvm_core::config::vm_vz_vsock_port_socket(
-                    &config.name,
-                    mvm_guest::vsock::BROKER_PORT,
-                ),
-            },
-        ) {
-            Ok(guard) => guard,
-            Err(e) => {
-                tracing::warn!(vm = %config.name, error = %e, "host-services broker spawn failed; host.audit.v1 unavailable for this VM");
-                crate::broker_services_spawn::BrokerServicesGuard::defused()
+        // vz splices the guest's BROKER_PORT dial to the per-VM socket under
+        // `vsock/` (same shape as the substitution endpoint) — a different path
+        // from libkrun's, so whoever binds it (broker fork or per-tenant daemon)
+        // must bind THIS.
+        let broker_listen_socket =
+            mvm_core::config::vm_vz_vsock_port_socket(&config.name, mvm_guest::vsock::BROKER_PORT);
+        let mut broker_guard = if crate::host_agent_spawn::host_agent_daemon_enabled() {
+            match crate::host_agent_spawn::register_host_agent_services_if_admitted(
+                crate::host_agent_spawn::HostAgentServicesParams {
+                    workload_id: &config.name,
+                    tenant_id: config.tenant_id.as_deref(),
+                    vm_name: &config.name,
+                    state_dir: &state_dir,
+                    broker_listen_socket: &broker_listen_socket,
+                },
+            ) {
+                Ok(g) => crate::host_agent_spawn::ServicesGuard::Agent(g),
+                Err(e) => {
+                    tracing::warn!(vm = %config.name, error = %e, "host-agent registration failed; host.audit.v1 unavailable for this VM");
+                    crate::host_agent_spawn::ServicesGuard::None
+                }
+            }
+        } else {
+            match crate::broker_services_spawn::spawn_broker_services_if_admitted(
+                crate::broker_services_spawn::BrokerServicesSpawnParams {
+                    workload_id: &config.name,
+                    tenant_id: config.tenant_id.as_deref(),
+                    vm_name: &config.name,
+                    state_dir: &state_dir,
+                    broker_listen_socket: &broker_listen_socket,
+                },
+            ) {
+                Ok(guard) => crate::host_agent_spawn::ServicesGuard::Fork(guard),
+                Err(e) => {
+                    tracing::warn!(vm = %config.name, error = %e, "host-services broker spawn failed; host.audit.v1 unavailable for this VM");
+                    crate::host_agent_spawn::ServicesGuard::None
+                }
             }
         };
 
@@ -438,6 +456,9 @@ impl VmBackend for VzBackend {
         crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
         // Reap the per-VM broker + audit-signer too (no-op when none spawned).
         crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
+        // Daemon path: deregister + reap the audit-signer if this VM registered
+        // with a per-tenant host-agent daemon (no-op for the fork path).
+        crate::host_agent_spawn::reap_host_agent_services_from_state(&vm_state_dir(&id.0), &id.0);
 
         let pid_path = vm_state_dir(&id.0).join(PID_FILE_NAME);
         let pid = match read_pid(&pid_path) {
