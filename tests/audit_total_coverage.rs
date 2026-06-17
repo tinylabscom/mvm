@@ -194,13 +194,17 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
 // `InteractiveOrControl` posture (it streams guest output; the admitted
 // execution path emits via the inner plan/run protocol). The persistent-spec
 // mutations use `ConfigChange` because they rewrite the operator's machine
-// inventory.
+// inventory; lifecycle wrappers delegate to existing interactive/control
+// surfaces after first resolving the named machine.
 const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("run", AuditPosture::InteractiveOrControl),
     ("create", AuditPosture::Emits("ConfigChange")),
     ("ls", AuditPosture::ReadOnly),
     ("inspect", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("ConfigChange")),
+    ("exec", AuditPosture::InteractiveOrControl),
+    ("shell", AuditPosture::InteractiveOrControl),
+    ("stop", AuditPosture::InteractiveOrControl),
 ];
 
 const VOLUME_SUB: &[(&str, AuditPosture)] = &[
