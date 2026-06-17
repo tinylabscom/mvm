@@ -661,6 +661,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_tenant_daemon_tracks_many_vm_registrations() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut d = daemon("local");
+
+        for vm in ["vm-1", "vm-2", "vm-3"] {
+            d.apply(&ControlRequest::Register(register(
+                dir.path(),
+                vm,
+                "local",
+                None,
+            )))
+            .unwrap();
+            assert!(d.is_registered(vm), "{vm} registered");
+        }
+
+        assert_eq!(d.registration_count(), 3);
+        assert_eq!(d.registrations.len(), 3);
+
+        d.apply(&ControlRequest::Deregister(DeregisterVm {
+            vm_id: "vm-2".into(),
+        }))
+        .unwrap();
+
+        assert_eq!(d.registration_count(), 2);
+        assert_eq!(d.registrations.len(), 2);
+        assert!(d.is_registered("vm-1"));
+        assert!(!d.is_registered("vm-2"));
+        assert!(d.is_registered("vm-3"));
+    }
+
+    #[tokio::test]
     async fn register_refuses_other_tenant_and_unsafe_vm_id() {
         let dir = tempfile::tempdir().unwrap();
         let mut d = daemon("local");
