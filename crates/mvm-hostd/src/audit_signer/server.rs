@@ -84,6 +84,11 @@ async fn handle_connection(
 }
 
 async fn dispatch(req: AppendEntryRequest, chain: &SharedChain) -> AppendEntryResponse {
+    let mut chain = chain.lock().await;
+    dispatch_on_chain(req, &mut chain)
+}
+
+pub(crate) fn dispatch_on_chain(req: AppendEntryRequest, chain: &mut Chain) -> AppendEntryResponse {
     let request_id = req.request_id().to_string();
     match req {
         AppendEntryRequest::Probe { request_id } => AppendEntryResponse::Pong { request_id },
@@ -97,7 +102,6 @@ async fn dispatch(req: AppendEntryRequest, chain: &SharedChain) -> AppendEntryRe
             correlation_id,
             fields,
         } => {
-            let mut chain = chain.lock().await;
             let entry = CanonicalEntry {
                 category,
                 correlation_id,

@@ -2540,6 +2540,8 @@ Today admission to microVMs is single-process: the supervisor signs `ExecutionPl
 
 > **Plan 202 Phase 3c (2026-06-17):** `mvmctl doctor` now surfaces a `host-agent daemon` platform check. It enumerates the per-tenant host-agent root, reports warm daemons by live `daemon.pid` + `control.sock`, flags stale pid/socket artifacts, and treats first-run absence as informational. Phase 1 and Phase 3a are already landed; Phase 2 remains the signer-helper daemonization.
 
+> **Plan 202 Phase 2a (2026-06-17):** the signer-helper core now exists as `mvm_hostd::audit_signer::helper::TenantSignerHelper`: one per-tenant key-holding helper owns per-VM `Chain` slots, registers/deregisters VM workload chains, routes appends by server-derived `vm_id`, and refuses tenant/workload identity mismatches before signing. Host-agent forwarding, admission signing, and restart recovery remain in 2b-2d.
+
 ### Workstream breakdown
 
 - [ ] **W1 — Three-subprocess infrastructure substrate** (envelope, registry, single vsock listener per VM on port 5300; three new crates: `mvm-broker`, `mvm-host-signer`, `mvm-audit-signer`; supervisor subprocess lifecycle for all three; UDS proxy code paths; cosign-verify + TOCTOU-resistant exec + config-signing per subprocess; per-workload cgroup + namespace isolation; resource caps; binary hardening; doctor host-posture checks; KSM/THP off; `fido_touch_required()` stub on `mvmctl up --prod`) — *rescoped from "four-subprocess" by ADR-062; `mvm-secrets-dispatcher` + port 5301 dropped*

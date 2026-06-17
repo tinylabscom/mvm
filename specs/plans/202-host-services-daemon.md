@@ -42,12 +42,12 @@ The host-agent daemon does broker dispatch and stays **keyless**; the signer it 
 
 The signer becomes a **supervised helper** of the host-agent daemon, holding **all** of the tenant's signing keys, so the host agent is keyless including admission.
 
-- [ ] **2a — helper + per-VM heads.** The signer helper is resident per tenant (a child the host agent supervises), holding the tenant's key(s), with a `vm_id → in-memory chain head` map; `RegisterVm` opens/owns that VM's `<tenant>.<vm>.workload.jsonl`, `DeregisterVm` flushes + closes it. Single-writer per file preserved by one owning process.
+- [x] **2a — helper + per-VM heads.** `mvm_hostd::audit_signer::helper::TenantSignerHelper` is the resident per-tenant signer core: one key-holding helper owns a `vm_id → Chain` map, `register_vm` opens and owns each VM's `<tenant>.<vm>.workload.jsonl` plus secondary head, `deregister_vm` drops the owned chain slot, and `append_for_vm` routes by server-derived `vm_id` while refusing tenant/workload identity mismatches before signing. Single-writer per file is preserved by one owning process.
 - [ ] **2b — host-agent→helper forwarding tagged by server `vm_id`.** The host agent forwards each accepted audit entry with the server-derived `vm_id`; the helper routes to the right head and stamps `category: workload_audit`. Cross-VM forgery test (guest A cannot land in B's chain).
 - [ ] **2c — admission signing moves to the helper.** Plan admission (`host_signer`) signs via the helper too, so the keyless-host-agent invariant covers admission as well as audit — one helper holds every key. Existing claim-8 admission tests stay green through the indirection.
 - [ ] **2d — restart rebuilds heads.** On helper restart, rebuild each head from the persisted secondary head + re-bind from the live registration set; chain stays append-only (no fork). Kill-and-restart test asserts the chain still `verify_workload_chain`s clean across the restart.
 
-**Verify:** `verify_workload_chain` clean before and after a signer restart; per-VM chains isolated; `cargo test -p mvm-hostd`.
+**Verify:** 2a is covered by `register_vm_opens_independent_per_vm_chains`, `deregister_vm_closes_the_owned_chain_slot`, `register_vm_refuses_other_tenant_and_unsafe_vm_id`, and `append_identity_must_match_registered_tenant_and_workload`; the focused `cargo test -p mvm-hostd audit_signer` pass proves per-VM chains verify clean under one helper. Restart behavior remains 2d.
 
 ## Phase 3 — decouple availability from the egress bridge
 
