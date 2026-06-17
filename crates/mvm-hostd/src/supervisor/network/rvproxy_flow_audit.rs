@@ -19,8 +19,10 @@
 //! re-emitted `flow_id` is `<vm>-egress-<proto>-<src>-<dst>` (strictly more
 //! granular audit).
 
-use std::io::BufRead;
+use std::io::{BufRead, BufReader};
 use std::net::Ipv4Addr;
+use std::path::Path;
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -127,6 +129,66 @@ pub fn pump_flow_audit<R: BufRead>(
     Ok(())
 }
 
+/// How long [`follow_flow_audit`] waits for rvproxy to create the export file
+/// before giving up, and how long it idles between EOF polls once attached.
+const FOLLOW_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+const FOLLOW_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Tail rvproxy's growing flow-audit JSONL export (the native-gateway audit
+/// source), mapping each new `flow` record into mvm's [`FlowEvent`] and handing
+/// it to `sink`. Unlike [`pump_flow_audit`] (read-to-EOF), this follows the file
+/// as rvproxy appends over the VM's lifetime: on EOF it idles `FOLLOW_POLL_INTERVAL`
+/// and resumes. `sink` returns `false` to stop the loop — the production caller
+/// returns `false` once `signer_task`'s channel is closed (the supervisor is
+/// tearing down), so the thread exits instead of spinning.
+///
+/// The file is opened append-follow style; rvproxy creates it at gateway start,
+/// but to avoid a startup race we poll up to `FOLLOW_OPEN_TIMEOUT` for it to
+/// appear. rvproxy's default 128 MiB rotation threshold is far above a per-VM
+/// flow volume, so a held read position does not miss events to rotation in
+/// practice. Returns when `sink` stops, on the open timeout, or on read error.
+pub fn follow_flow_audit(
+    path: &Path,
+    vm_name: &str,
+    mut sink: impl FnMut(FlowEvent) -> bool,
+) -> std::io::Result<()> {
+    let mut waited = Duration::ZERO;
+    let file = loop {
+        match std::fs::File::open(path) {
+            Ok(f) => break f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if waited >= FOLLOW_OPEN_TIMEOUT {
+                    return Err(e);
+                }
+                std::thread::sleep(FOLLOW_POLL_INTERVAL);
+                waited += FOLLOW_POLL_INTERVAL;
+            }
+            Err(e) => return Err(e),
+        }
+    };
+
+    let mut reader = BufReader::new(file);
+    // `line` accumulates across reads: a partial append (no trailing newline)
+    // is kept and completed on a later read rather than parsed truncated. It is
+    // cleared only after a whole line is consumed.
+    let mut line = String::new();
+    loop {
+        let n = reader.read_line(&mut line)?;
+        if n == 0 || !line.ends_with('\n') {
+            // EOF, or a partial line not yet terminated: idle, then resume —
+            // the buffered partial survives for the next read to complete.
+            std::thread::sleep(FOLLOW_POLL_INTERVAL);
+            continue;
+        }
+        if let Some(event) = parse_flow_record(line.trim())
+            && !sink(to_mvm_flow_event(vm_name, &event))
+        {
+            return Ok(());
+        }
+        line.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +288,55 @@ mod tests {
             events[2].kind,
             FlowEventKind::Closed {
                 reason: FlowCloseReason::Eof
+            }
+        ));
+    }
+
+    #[test]
+    fn follow_reads_appended_records_and_stops_on_sink_false() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("flow-audit.jsonl");
+        // Pre-populate: an opened + a denied-close record, plus a garbage line
+        // the follower must skip without counting.
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            "{}",
+            flow_line("opened", "allowed", "null", "93.184.216.34", 443)
+        )
+        .unwrap();
+        writeln!(f, "garbage not json").unwrap();
+        writeln!(
+            f,
+            "{}",
+            flow_line("closed", "denied", "\"deny-by-default\"", "8.8.8.8", 443)
+        )
+        .unwrap();
+        f.flush().unwrap();
+
+        // Sink collects and stops (returns false) once both flow records arrive,
+        // so the follow loop exits instead of polling forever.
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let sink_collected = collected.clone();
+        follow_flow_audit(&path, "vm-demo", move |ev| {
+            let mut v = sink_collected.lock().unwrap();
+            v.push(ev);
+            v.len() < 2
+        })
+        .unwrap();
+
+        let events = collected.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "two flow records followed; garbage skipped"
+        );
+        assert!(matches!(events[0].kind, FlowEventKind::Opened));
+        assert!(matches!(
+            events[1].kind,
+            FlowEventKind::Closed {
+                reason: FlowCloseReason::PolicyDropped
             }
         ));
     }

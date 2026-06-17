@@ -63,12 +63,36 @@ run_conformance() {
   return 1
 }
 
+# Native-enforcement witnesses (binary-discriminating): drive the candidate as
+# `rvproxy run --config` and assert it ENFORCES the rendered policy by EXPORTING
+# flow records — deny-by-default denies + exports a denied flow, and a rendered
+# L4 allow-list discriminates (unlisted dst denied for `l4_allowlist_miss`,
+# listed dst admitted). gvproxy can do neither (no run --config / flow export),
+# so these run against the candidate only.
+run_native_enforcement() {
+  local bin="$1" log
+  log="$(mktemp)"
+  if MVM_GATEWAY_NATIVE_E2E=1 MVM_GATEWAY_BIN="$bin" \
+      cargo test -p mvm-hostd --lib rvproxy_native -- --nocapture \
+      >"$log" 2>&1; then
+    if grep -q '^skip:' "$log"; then
+      echo "  rvproxy: SKIP (witnesses did not run — see $log)"
+      return 3
+    fi
+    echo "  rvproxy: PASS ($bin enforces deny-by-default + the L4 allow-list, exporting flows)"
+    return 0
+  fi
+  echo "  rvproxy: FAIL ($bin) — see $log"
+  sed -n 's/^/    /p' "$log" | tail -20
+  return 1
+}
+
 echo "== rvproxy gateway parity gate =="
 echo "candidate (rvproxy): $RVPROXY_BIN"
 echo "control  (gvproxy):  ${GVPROXY_BIN:-<none>}"
 echo
 
-echo "[1/3] enforcement witnesses (claim-10 / flow-audit / substitution; bridge-side, binary-agnostic)"
+echo "[1/4] enforcement witnesses (claim-10 / flow-audit / substitution; bridge-side, binary-agnostic)"
 # Scope to the witness families on purpose: the full mvm-hostd suite carries
 # timing/flock-sensitive broker/vsock tests whose flakiness is unrelated to the
 # gateway and must not gate a default flip. claim-10 deny-by-default + flow-audit
@@ -85,7 +109,12 @@ fi
 echo "  PASS: claim-10 / flow-audit / substitution witnesses green"
 echo
 
-echo "[2/3] conformance — control (gvproxy)"
+echo "[2/4] native-enforcement (binary-discriminating: native rvproxy run --config enforces deny-by-default AND the rendered L4 allow-list, exporting flows)"
+native=0
+run_native_enforcement "$RVPROXY_BIN" || native=$?
+echo
+
+echo "[3/4] conformance — control (gvproxy)"
 control=0
 if [[ -n "$GVPROXY_BIN" && -x "$GVPROXY_BIN" ]]; then
   run_conformance "gvproxy" "$GVPROXY_BIN" || control=$?
@@ -95,7 +124,7 @@ else
 fi
 echo
 
-echo "[3/3] conformance — candidate (rvproxy)"
+echo "[4/4] conformance — candidate (rvproxy)"
 candidate=0
 run_conformance "rvproxy" "$RVPROXY_BIN" || candidate=$?
 echo
@@ -108,16 +137,28 @@ if [[ "$candidate" -ne 0 ]]; then
   echo "Do not flip the macOS/libkrun default to rvproxy."
   exit 1
 fi
+# The candidate MUST prove native enforcement (deny-by-default + L4 allow-list,
+# with exported flows). A skip means rvproxy didn't run the witnesses for real —
+# unproven.
+if [[ "$native" -ne 0 ]]; then
+  echo "REFUSED: rvproxy did not pass the native-enforcement witnesses (status $native)."
+  echo "Native rvproxy must enforce deny-by-default + the rendered L4 allow-list,"
+  echo "exporting flow records, before the splice can be deleted (Plan 193 WS-2.2d)."
+  exit 1
+fi
 if [[ "$control" -eq 1 ]]; then
   echo "REFUSED: gvproxy control unexpectedly FAILED — the gate itself is suspect."
   exit 1
 fi
 if [[ "$control" -eq 3 ]]; then
-  echo "PASS (candidate only): rvproxy met the conformance gate; gvproxy control"
-  echo "was unavailable on this host, so the head-to-head was not recorded. Re-run"
-  echo "on a host with gvproxy to capture the control case before flipping."
+  echo "PASS (candidate only): rvproxy met the conformance gate + the native-"
+  echo "enforcement witness; gvproxy control was unavailable on this host, so the"
+  echo "conformance head-to-head was not recorded. Re-run on a host with gvproxy"
+  echo "to capture the control case before flipping."
   exit 0
 fi
-echo "PASS: rvproxy matches gvproxy on the conformance gate, and the claim-10 /"
-echo "flow-audit / substitution enforcement witnesses are green. Conformance"
-echo "parity recorded; the native-enforcement parity arm lands with Plan 193 WS-2."
+echo "PASS: rvproxy matches gvproxy on the conformance gate, the claim-10 /"
+echo "flow-audit / substitution witnesses are green, AND native rvproxy enforces"
+echo "deny-by-default + the rendered L4 allow-list, exporting flows (binary-"
+echo "discriminating). The native-enforcement parity arm is satisfied"
+echo "(Plan 193 WS-2.2d task 2)."

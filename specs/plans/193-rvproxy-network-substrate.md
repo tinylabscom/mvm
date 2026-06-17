@@ -218,10 +218,58 @@ own internal default).
         mapping is total. Pure + golden-tested; spawning the reader thread + the
         sink→channel wiring lands with 2b (the export only flows once rvproxy runs
         with the emitted config).
-  - [ ] **2d — parity-gate extension + splice deletion.** Make the WS-1.5
-        witnesses run against the **native** path (binary-discriminating) and
-        delete the splice + Plan-141 `on_packet` hooks only once green.
-      Design + the R2 contract are in "## WS-2 design" below.
+  - [x] **2d task 1 — native flow-audit → chain feed, PROVEN LIVE.** When the
+        gateway is native `rvproxy run --config`, libkrun attaches **directly**
+        to rvproxy (`run_supervisor`, no splice in the data path) and a
+        standalone `spawn_native_audit_feed` runs `signer_task` +
+        `rvproxy_flow_audit::follow_flow_audit`, tailing rvproxy's flow-audit
+        export into the chain. Validated end-to-end (2026-06-16, after the
+        libkrun workload-egress fix landed): a real `mvmctl up --hypervisor
+        libkrun --wait` of `examples/egress-probe` through native rvproxy +
+        `MVM_GATEWAY_BRIDGE=1` →
+        (1) the guest reached rvproxy (frames processed),
+        (2) native rvproxy **enforced deny-by-default** (`workload.exit=3`, both
+            targets blocked; rvproxy logged `guest egress denied tcp …->1.1.1.1:443
+            deny-by-default`),
+        (3) rvproxy **exported `flow` records** (`closed/denied/deny-by-default`),
+        (4) the follower **fed them into the chain-signed audit** — `local.jsonl`
+            shows `gateway.flow_closed` with **per-connection** `flow_id`
+            (`egp-egress-tcp-192.168.127.2:39861-1.1.1.1:443`, reason
+            `policy_dropped`), strictly more granular than the splice's coarse
+            `<vm>-egress`. The claim-10 audit is now sourced from native rvproxy.
+  - [x] **2d task 2 — native-enforcement parity arm (binary-discriminating).**
+        `rvproxy_native_denies_and_exports_flow` (gated `MVM_GATEWAY_NATIVE_E2E=1`
+        + `MVM_GATEWAY_BIN`) spawns the candidate as native `rvproxy run --config`
+        with a deny-all `[policy]` + flow-audit export, plays the VMM directly
+        against rvproxy's vfkit socket (no VM, no splice), sends a guest TCP SYN
+        to a denied dst, and asserts rvproxy **exports a `verdict:"denied"` flow
+        record** — proving native deny-by-default enforcement. gvproxy can do
+        neither (no `run --config`, no flow export), so it discriminates the
+        binary. Wired as `scripts/rvproxy-gateway-parity.sh` step [2/4]
+        (`run_native_enforcement`), required to PASS in the verdict. Validated
+        locally: all four arms green against the rvproxy binary + gvproxy control.
+  - [x] **2d task 2b — native allow/deny matrix (binary-discriminating).**
+        `rvproxy_native_admits_listed_denies_unlisted` renders ONE `[policy]` with
+        an L4 allow rule for a public /24 + deny-by-default and probes it twice
+        (rvproxy accepts one vfkit connection per spawn and only its first
+        post-handshake frame is reliably processed, so each dst gets its own
+        spawn of the identical config): the **unlisted** dst (8.8.8.8) is denied
+        with reason `l4_allowlist_miss` — proving the rendered allow-list is
+        active and consulted (deny-all denies for `deny-by-default` instead) —
+        while the **listed** dst (93.184.216.34) is **not** denied, proving
+        admission. Admission is asserted as absence-of-deny because rvproxy only
+        exports an admitted flow once its upstream connect resolves and its SSRF
+        guards (`guest_to_host`/`lan_access`) refuse every locally-reachable
+        address before the L4 allow-list is consulted; the unlisted-deny half
+        proves the frame path enforces under this config, so the listed half is
+        meaningful. Both native witnesses share a `native_first_frame_probe`
+        helper. Folded into `scripts/rvproxy-gateway-parity.sh` step [2/4]
+        (`run_native_enforcement` now runs the whole `rvproxy_native` family).
+        Validated locally: all four gate arms green, both witnesses 5/5.
+  - [ ] **2d — remaining: splice deletion.** Delete the splice + Plan-141
+        `on_packet` hooks once the gate is green by default and the native audit
+        feed is the sole path. Design + the R2 contract are in "## WS-2 design"
+        below.
 - [ ] **WS-3 — backend cutover.** Replace the gvproxy spawn
       (`mvm-build/host_gvproxy.rs`, `libkrun-sys/gvproxy.rs`) + passt with
       `rvproxy run --config` per the integration contract; drop the Homebrew

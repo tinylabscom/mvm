@@ -46,10 +46,14 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # rvproxy main carrying the R3 fixes (#38 DNS source-IP, #42 EMSGSIZE
-  # MTU-segmentation, #53 read-timeout). Single source for the pin; bump
-  # deliberately — a moving ref would make the gate non-reproducible.
-  RVPROXY_DEFAULT_REF: "520a5dc6cc1fa5453979bba2fe9b7dc1a4c7aeb7"
+  # rvproxy main carrying the R2 flow-audit slices (the `Flow` dataplane event
+  # the native-enforcement witness reads: kind=flow, verdict, endpoints) plus the
+  # R3 fixes (#38 DNS source-IP, #42 EMSGSIZE MTU-segmentation, #53 read-timeout).
+  # The prior pin predated the flow-audit event, so native rvproxy enforced
+  # deny-by-default but exported a guest-egress record instead of the kind=flow
+  # one the witness asserts. Single source for the pin; bump deliberately — a
+  # moving ref would make the gate non-reproducible.
+  RVPROXY_DEFAULT_REF: "92125e839bb6dce435ce4fccc8358b1f5d317843"
 
 jobs:
   parity:
