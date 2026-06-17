@@ -122,6 +122,174 @@ pub fn deregister_vm(control_socket: &Path, key_bytes: &[u8; 32], vm_id: &str) -
     )
 }
 
+/// Marker file under the VM state dir recording the tenant whose host-agent
+/// daemon this VM registered with — so `stop()` can deregister without a flag
+/// or a re-derivation of the tenant.
+const HOST_AGENT_TENANT_REF: &str = "host-agent.tenant";
+
+/// Inputs to [`register_host_agent_services_if_admitted`] — mirrors the per-VM
+/// fork's `BrokerServicesSpawnParams`.
+pub struct HostAgentServicesParams<'a> {
+    /// Admitted workload id.
+    pub workload_id: &'a str,
+    /// Tenant id from the admitted plan. `None` ⇒ no admitted plan ⇒ defused
+    /// no-op (an unadmitted dev VM registers no host services).
+    pub tenant_id: Option<&'a str>,
+    /// VM name; the registration's `vm_id` and the per-VM chain key.
+    pub vm_name: &'a str,
+    /// Per-VM state dir (audit-signer pid/sock + the tenant-ref marker).
+    pub state_dir: &'a Path,
+    /// The backend-specific `BROKER_PORT` socket the daemon should bind for this
+    /// VM (libkrun `vm_vsock_port_socket`, vz `vm_vz_vsock_port_socket`).
+    pub broker_listen_socket: &'a Path,
+}
+
+/// Daemon-path equivalent of `spawn_broker_services_if_admitted`: spawn the
+/// per-VM audit-signer (still forked — Phase 2 daemon-izes it), ensure the
+/// per-tenant host-agent daemon, and register the VM with it (the daemon binds
+/// `broker_listen_socket` and forwards `host.audit.v1` to the audit-signer).
+/// Returns a guard that, until [`HostAgentServicesGuard::defuse`]d, deregisters
+/// the VM + reaps the audit-signer on drop (the daemon stays warm). An
+/// unadmitted VM yields a defused no-op.
+pub fn register_host_agent_services_if_admitted(
+    params: HostAgentServicesParams<'_>,
+) -> Result<HostAgentServicesGuard> {
+    let HostAgentServicesParams {
+        workload_id,
+        tenant_id,
+        vm_name,
+        state_dir,
+        broker_listen_socket,
+    } = params;
+    let Some(tenant) = tenant_id else {
+        return Ok(HostAgentServicesGuard::defused());
+    };
+
+    // Arm before any spawn so a failure below reaps what already started.
+    let guard = HostAgentServicesGuard::armed(state_dir, tenant, vm_name);
+
+    let audit = crate::broker_services_spawn::spawn_audit_signer(
+        crate::broker_services_spawn::AuditSignerSpawnParams {
+            workload_id,
+            tenant_id: tenant,
+            vm_name,
+            state_dir,
+        },
+    )?;
+    let control_socket = ensure_host_agent_daemon(tenant)?;
+    let key = load_host_signing_key()?;
+    register_vm(
+        &control_socket,
+        &key,
+        RegisterVm {
+            vm_id: vm_name.to_string(),
+            tenant_id: tenant.to_string(),
+            broker_listen_socket: broker_listen_socket.to_path_buf(),
+            workload_chain_path: mvm_core::config::workload_audit_path(tenant, vm_name),
+            audit_signer_uds_path: Some(audit.uds_path),
+            services_bindings: vec![],
+        },
+    )?;
+    // Record the tenant so the stop path can deregister without a flag.
+    std::fs::write(state_dir.join(HOST_AGENT_TENANT_REF), tenant)
+        .with_context(|| format!("write host-agent tenant ref in {}", state_dir.display()))?;
+    Ok(guard)
+}
+
+/// Teardown for a VM that registered with a host-agent daemon: deregister it
+/// (best-effort — the daemon stays warm) and reap the per-VM audit-signer.
+/// Idempotent.
+pub fn reap_host_agent_services(state_dir: &Path, tenant: &str, vm_name: &str) {
+    if let Ok(key) = load_host_signing_key() {
+        let control_socket = mvm_core::config::host_agent_control_socket(tenant);
+        // Best-effort: a missing daemon (already gone) is fine.
+        let _ = deregister_vm(&control_socket, &key, vm_name);
+    }
+    crate::broker_services_spawn::reap_audit_signer(state_dir);
+    let _ = std::fs::remove_file(state_dir.join(HOST_AGENT_TENANT_REF));
+}
+
+/// The `stop()`-side reap: if this VM registered with a daemon (the tenant-ref
+/// marker is present), deregister + reap; otherwise a no-op. So `stop()` need
+/// not know which path `start()` took — and it composes with the fork path's
+/// `reap_broker_services` (each is a no-op for the other path).
+pub fn reap_host_agent_services_from_state(state_dir: &Path, vm_name: &str) {
+    let ref_path = state_dir.join(HOST_AGENT_TENANT_REF);
+    if let Ok(tenant) = std::fs::read_to_string(&ref_path) {
+        let tenant = tenant.trim();
+        if !tenant.is_empty() {
+            reap_host_agent_services(state_dir, tenant, vm_name);
+        }
+    }
+}
+
+/// RAII guard mirroring `BrokerServicesGuard` for the daemon path: while armed,
+/// Drop deregisters the VM + reaps its audit-signer; `defuse` once the VM is up
+/// and the `stop` path owns teardown.
+pub struct HostAgentServicesGuard {
+    /// `Some((state_dir, tenant, vm))` while armed; `None` once defused.
+    armed: Option<(PathBuf, String, String)>,
+}
+
+impl HostAgentServicesGuard {
+    fn armed(state_dir: &Path, tenant: &str, vm_name: &str) -> Self {
+        Self {
+            armed: Some((
+                state_dir.to_path_buf(),
+                tenant.to_string(),
+                vm_name.to_string(),
+            )),
+        }
+    }
+    /// A guard for a VM that registered nothing — Drop is a no-op.
+    pub fn defused() -> Self {
+        Self { armed: None }
+    }
+    /// Disarm: the VM is up; the `stop` path now owns teardown.
+    pub fn defuse(&mut self) {
+        self.armed = None;
+    }
+}
+
+impl Drop for HostAgentServicesGuard {
+    fn drop(&mut self) {
+        if let Some((state_dir, tenant, vm)) = self.armed.take() {
+            reap_host_agent_services(&state_dir, &tenant, &vm);
+        }
+    }
+}
+
+/// Whether the host-agent daemon path is selected (opt-in during rollout —
+/// the default stays the proven per-VM fork until the daemon path is live-
+/// validated and made default).
+pub fn host_agent_daemon_enabled() -> bool {
+    std::env::var("MVM_HOST_AGENT_DAEMON")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Unifies the two start-path service guards (fork vs daemon) so a backend's
+/// `start()` holds one value and `defuse`s it once the VM is up.
+pub enum ServicesGuard {
+    /// The per-VM broker fork path.
+    Fork(crate::broker_services_spawn::BrokerServicesGuard),
+    /// The per-tenant host-agent daemon path.
+    Agent(HostAgentServicesGuard),
+    /// Nothing armed (unadmitted, or a spawn failure that was logged).
+    None,
+}
+
+impl ServicesGuard {
+    /// Disarm whichever path armed; the `stop` path owns teardown after this.
+    pub fn defuse(&mut self) {
+        match self {
+            ServicesGuard::Fork(g) => g.defuse(),
+            ServicesGuard::Agent(g) => g.defuse(),
+            ServicesGuard::None => {}
+        }
+    }
+}
+
 /// Sign `request` with the host key, send it framed over `control_socket`, and
 /// map the daemon's `ControlResponse` onto a `Result`.
 fn send_control(
@@ -255,5 +423,37 @@ mod tests {
         let err = deregister_vm(&socket, &key(), "vm-1").expect_err("Err surfaces");
         assert!(err.to_string().contains("unsafe vm_id"));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn unadmitted_register_is_a_defused_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = register_host_agent_services_if_admitted(HostAgentServicesParams {
+            workload_id: "wl",
+            tenant_id: None,
+            vm_name: "vm",
+            state_dir: dir.path(),
+            broker_listen_socket: &dir.path().join("vsock-5300.sock"),
+        })
+        .expect("unadmitted VM registers nothing");
+        drop(guard); // defused Drop reaps nothing
+        // No tenant-ref written, no audit-signer pid.
+        assert!(!dir.path().join(HOST_AGENT_TENANT_REF).exists());
+    }
+
+    #[test]
+    fn reap_from_state_is_a_no_op_without_a_tenant_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        // No host-agent.tenant marker ⇒ fork path ⇒ this must do nothing and
+        // must not panic (so it's safe to call unconditionally in stop()).
+        reap_host_agent_services_from_state(dir.path(), "vm-1");
+    }
+
+    #[test]
+    fn defused_guard_drop_does_not_reap() {
+        // A defused guard's Drop must be inert (no key load, no deregister).
+        let mut g = HostAgentServicesGuard::defused();
+        g.defuse();
+        drop(g);
     }
 }

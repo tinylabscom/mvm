@@ -114,7 +114,9 @@ pub use broker_services_spawn::{
 /// start/stop paths (and tests) share one impl. Not yet wired into `start()` —
 /// that lands behind a flag next.
 pub use host_agent_spawn::{
-    deregister_vm, ensure_host_agent_daemon, load_host_signing_key, register_vm,
+    HostAgentServicesGuard, HostAgentServicesParams, ServicesGuard, deregister_vm,
+    ensure_host_agent_daemon, host_agent_daemon_enabled, load_host_signing_key,
+    reap_host_agent_services_from_state, register_host_agent_services_if_admitted, register_vm,
 };
 
 /// Crate-wide test serialization for tests that mutate `HOME` or
