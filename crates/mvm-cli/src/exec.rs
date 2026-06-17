@@ -173,6 +173,11 @@ pub struct ExecRequest {
     /// Timeout for the in-guest command in seconds. `None` ⇒ no per-command
     /// kill (the default for interactive/ad-hoc exec).
     pub timeout_secs: Option<u64>,
+    /// Effective egress policy for the transient VM. Defaults to
+    /// `deny_all`; `--net` / `--allow-host` widen it. Threaded onto
+    /// `VmStartConfig.network_policy` so every backend enforces the same
+    /// value.
+    pub network_policy: mvm_core::network_policy::NetworkPolicy,
 }
 
 impl ExecRequest {
@@ -441,8 +446,8 @@ pub struct ExecOutput {
 /// Used by `mvmctl mcp` to build MCP `tools/call run` responses; the
 /// CLI's interactive `mvmctl exec` keeps using [`run`] (streaming) so
 /// human ergonomics don't regress.
-pub fn run_captured(req: ExecRequest) -> Result<ExecOutput> {
-    run_inner(req, /* capture = */ true)
+pub fn run_captured(req: ExecRequest, admit: Option<&SessionAdmit<'_>>) -> Result<ExecOutput> {
+    run_inner(req, /* capture = */ true, admit)
         .map(|either| either.right().expect("capture mode returns ExecOutput"))
 }
 
@@ -451,8 +456,8 @@ pub fn run_captured(req: ExecRequest) -> Result<ExecOutput> {
 /// Returns the guest command's exit code. On orchestrator failure (boot,
 /// agent unreachable, vsock error), returns an error; the VM is torn down
 /// best-effort before returning.
-pub fn run(req: ExecRequest) -> Result<i32> {
-    run_inner(req, /* capture = */ false)
+pub fn run(req: ExecRequest, admit: Option<&SessionAdmit<'_>>) -> Result<i32> {
+    run_inner(req, /* capture = */ false, admit)
         .map(|either| either.left().expect("streaming mode returns exit code"))
 }
 
@@ -477,7 +482,11 @@ impl<L, R> Either<L, R> {
     }
 }
 
-fn run_inner(req: ExecRequest, capture: bool) -> Result<Either<i32, ExecOutput>> {
+fn run_inner(
+    req: ExecRequest,
+    capture: bool,
+    admit: Option<&SessionAdmit<'_>>,
+) -> Result<Either<i32, ExecOutput>> {
     let backend = AnyBackend::auto_select();
 
     // Resolve image artifacts: either a named template or a pre-built pair.
@@ -549,7 +558,7 @@ fn run_inner(req: ExecRequest, capture: bool) -> Result<Either<i32, ExecOutput>>
     }
 
     // Snapshot path is taken when the request is eligible; otherwise cold boot.
-    let use_snapshot = snapshot_eligible(
+    let mut use_snapshot = snapshot_eligible(
         &req.image,
         &req.add_dirs,
         snap_info.is_some(),
@@ -569,7 +578,7 @@ fn run_inner(req: ExecRequest, capture: bool) -> Result<Either<i32, ExecOutput>>
     // `run_supervisor` dispatch. Routing template restores through
     // admission would add an `admit_for_run` call here and a
     // `populate_audit_substrate` invocation after the struct literal.
-    let start_config = VmStartConfig {
+    let mut start_config = VmStartConfig {
         name: vm_name.clone(),
         rootfs_path: rootfs.clone(),
         kernel_path: Some(vmlinux.clone()),
@@ -597,8 +606,24 @@ fn run_inner(req: ExecRequest, capture: bool) -> Result<Either<i32, ExecOutput>>
         config_files: Vec::new(),
         secret_files: Vec::new(),
         runner_dir: None,
+        network_policy: req.network_policy.clone(),
         ..Default::default()
     };
+
+    // Admit the transient run as a locally-signed workload. Setting
+    // tenant_id + plan_json makes the libkrun/Vz supervisor spawn the gateway
+    // bridge (so it enforces `network_policy` + chain-audits the run) instead
+    // of the legacy unfiltered path; on Firecracker the policy already enforces
+    // via the FlakeRunConfig firewall. Force cold boot when admitted — the
+    // bridge spawn is on the cold-boot path, not snapshot-restore.
+    if let Some(admit_fn) = admit
+        && let Some(sub) = admit_fn(std::path::Path::new(&rootfs), &vm_name)?
+    {
+        start_config.tenant_id = Some(sub.tenant_id);
+        start_config.plan_json = Some(sub.plan_json);
+        start_config.bundle_json = sub.bundle_json;
+        use_snapshot = false;
+    }
 
     let booted = if use_snapshot {
         let tmpl = template_id
@@ -717,7 +742,9 @@ fn restore_via_snapshot(
         config_files: Vec::new(),
         secret_files: Vec::new(),
         ports: Vec::new(),
-        network_policy: mvm_core::network_policy::NetworkPolicy::default(),
+        // Inherit the resolved egress policy so a restored transient VM
+        // enforces the same posture as a cold-boot one.
+        network_policy: start_config.network_policy.clone(),
     };
     let rev = if mvm_core::manifest::is_slot_hash_dirname(template_id) {
         mvm::vm::template::lifecycle::current_revision_id_for_slot(template_id)?
@@ -995,6 +1022,9 @@ pub fn dispatch_in_session(
             argv: vec!["bash".to_string(), "-c".to_string(), code],
         },
         timeout_secs,
+        // Wrapper-string construction only — the session VM is already
+        // running, so this never reaches a backend boot.
+        network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
     };
     let wrapper = build_guest_wrapper(&req, &[]);
     let transport = vsock_transport::for_vm(&vm.vm_name)?;
@@ -1184,6 +1214,7 @@ mod tests {
                 argv: vec!["uname".into(), "-a".into()],
             },
             timeout_secs: Some(30),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
         assert_eq!(req.target_command(), "exec 'uname' '-a'");
     }
@@ -1201,6 +1232,7 @@ mod tests {
                 argv: vec!["true".into()],
             },
             timeout_secs: Some(30),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(script.starts_with("set -e\n"));
@@ -1226,6 +1258,7 @@ mod tests {
                 argv: vec!["echo".into(), "$FOO".into()],
             },
             timeout_secs: Some(30),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
         assert!(script.contains("mkdir -p '/g'"));
@@ -1251,6 +1284,7 @@ mod tests {
                 argv: vec!["true".into()],
             },
             timeout_secs: Some(30),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
         // RW mount is unqualified — no `-o ro`.
@@ -1480,6 +1514,7 @@ mod tests {
                 },
             },
             timeout_secs: Some(30),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
         assert_eq!(req.target_command(), "exec 'python' '-m' 'x'");
     }
@@ -1504,6 +1539,7 @@ mod tests {
                 },
             },
             timeout_secs: Some(30),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
         let script = build_guest_wrapper(&req, &[]);
         // Env from entrypoint exported.
@@ -1539,6 +1575,7 @@ mod tests {
                 argv: vec!["true".into()],
             },
             timeout_secs: Some(30),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(!script.contains("cd "));

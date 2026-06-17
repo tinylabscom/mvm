@@ -350,6 +350,9 @@ fn build_vz_supervisor_config(
         tenant_id: None,
         plan: None,
         bundle: None,
+        // Builder VM is trusted dev-tier on the non-bridge path; no bare-policy
+        // override (step 3 flips builder/dev to trusted_build_egress on the bridge).
+        network_policy: None,
         audit_dir: None,
         gateway_audit_socket: None,
         signing_key_path: None,
@@ -1373,6 +1376,9 @@ fn build_vz_persistent_supervisor_config(
         tenant_id: None,
         plan: None,
         bundle: None,
+        // Builder VM is trusted dev-tier on the non-bridge path; no bare-policy
+        // override (step 3 flips builder/dev to trusted_build_egress on the bridge).
+        network_policy: None,
         audit_dir: None,
         gateway_audit_socket: None,
         signing_key_path: None,

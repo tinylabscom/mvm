@@ -342,6 +342,7 @@ pub fn try_warm_claim(
             gateway_events_socket: sub.gateway_events_socket,
             plan_json: plan_json.clone(),
             bundle_json: bundle_json.clone(),
+            network_policy: cfg.network_policy.clone(),
         })
     })?;
     Ok(match decision {
@@ -639,6 +640,7 @@ mod tests {
             gateway_events_socket: None,
             plan_json: "{}".into(),
             bundle_json: None,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         }
     }
 
