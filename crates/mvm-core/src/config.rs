@@ -337,13 +337,18 @@ pub fn vm_state_dir(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+/// Root of the per-tenant host-agent daemon dirs: `<mvm_data_dir>/host-agent`.
+/// Each `<tenant>/` subdir holds one resident daemon's control UDS, pid file,
+/// and spawn lock. Enumerated by `mvmctl doctor` to report daemon state.
+pub fn host_agent_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir()).join("host-agent")
+}
+
 /// Per-tenant host-agent daemon directory: `<mvm_data_dir>/host-agent/<tenant>/`.
 /// Holds the resident daemon's control UDS, pid file, and spawn lock — one set
 /// per tenant, so the daemon is `O(active tenants)` not `O(VMs)`.
 pub fn host_agent_dir(tenant: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_data_dir())
-        .join("host-agent")
-        .join(tenant)
+    host_agent_root().join(tenant)
 }
 
 /// The per-tenant host-agent control UDS the daemon binds (mode 0700) and the
