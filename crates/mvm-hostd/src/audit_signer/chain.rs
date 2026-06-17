@@ -92,27 +92,7 @@ impl Chain {
                 )
             })?;
 
-        // Determine initial head by reading the existing file end-to-end
-        // if present. A future revision can short-circuit via the
-        // secondary head file (which is faster and tamper-evident).
-        let head = match std::fs::read_to_string(jsonl_path) {
-            Ok(contents) if !contents.is_empty() => {
-                let last_line = contents.lines().last().unwrap_or("");
-                if last_line.is_empty() {
-                    CanonicalEntry::genesis_prev_hash()
-                } else {
-                    let parsed: OnDiskEntry =
-                        serde_json::from_str(last_line).with_context(|| {
-                            format!(
-                                "mvm-audit-signer existing chain tail malformed: {}",
-                                jsonl_path.display()
-                            )
-                        })?;
-                    parsed.entry_hash
-                }
-            }
-            _ => CanonicalEntry::genesis_prev_hash(),
-        };
+        let head = recover_head(jsonl_path, secondary_head_path)?;
 
         Ok(Self {
             signing_key,
@@ -177,6 +157,68 @@ impl Chain {
         // Caller might also want the canonical entry back for diagnostics.
         entry.prev_hash = self.head.clone(); // unused but keeps the value tidy
         Ok(entry_hash)
+    }
+}
+
+fn recover_head(jsonl_path: &Path, secondary_head_path: &Path) -> Result<String> {
+    let jsonl_head = head_from_jsonl_tail(jsonl_path)?;
+    match read_secondary_head(secondary_head_path)? {
+        Some(secondary_head) if secondary_head == jsonl_head => Ok(jsonl_head),
+        Some(secondary_head) => anyhow::bail!(
+            "mvm-audit-signer secondary head {} disagrees with JSONL tail {} for {}",
+            secondary_head,
+            jsonl_head,
+            jsonl_path.display()
+        ),
+        None if jsonl_head == CanonicalEntry::genesis_prev_hash() => Ok(jsonl_head),
+        None => anyhow::bail!(
+            "mvm-audit-signer missing secondary head {} for non-empty chain {}",
+            secondary_head_path.display(),
+            jsonl_path.display()
+        ),
+    }
+}
+
+fn head_from_jsonl_tail(jsonl_path: &Path) -> Result<String> {
+    let contents = match std::fs::read_to_string(jsonl_path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CanonicalEntry::genesis_prev_hash());
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "mvm-audit-signer existing chain read failed: {}",
+                    jsonl_path.display()
+                )
+            });
+        }
+    };
+    let Some(last_line) = contents.lines().rev().find(|line| !line.trim().is_empty()) else {
+        return Ok(CanonicalEntry::genesis_prev_hash());
+    };
+    let parsed: OnDiskEntry = serde_json::from_str(last_line).with_context(|| {
+        format!(
+            "mvm-audit-signer existing chain tail malformed: {}",
+            jsonl_path.display()
+        )
+    })?;
+    Ok(parsed.entry_hash)
+}
+
+fn read_secondary_head(secondary_head_path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(secondary_head_path) {
+        Ok(contents) => {
+            let trimmed = contents.trim();
+            Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| {
+            format!(
+                "mvm-audit-signer secondary head read failed: {}",
+                secondary_head_path.display()
+            )
+        }),
     }
 }
 
@@ -304,6 +346,28 @@ mod tests {
         // Reopen — should resume at the first-append head.
         let chain = Chain::open(&jsonl, &head, None).unwrap();
         assert_eq!(chain.head(), first_head);
+    }
+
+    #[test]
+    fn reopening_chain_refuses_secondary_head_mismatch() {
+        let dir = tempdir().unwrap();
+        let jsonl = dir.path().join("audit.jsonl");
+        let head = dir.path().join("HEAD");
+        {
+            let mut chain = Chain::open(&jsonl, &head, None).unwrap();
+            let entry = sample_entry(chain.head().to_string());
+            chain.append(entry).unwrap();
+        }
+        std::fs::write(&head, CanonicalEntry::genesis_prev_hash()).unwrap();
+
+        let err = match Chain::open(&jsonl, &head, None) {
+            Ok(_) => panic!("mismatched secondary head must fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("disagrees with JSONL tail"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
