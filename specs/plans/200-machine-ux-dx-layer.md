@@ -507,9 +507,16 @@ Implementation shape:
     prefix-driven, filesystem-free taxonomy (`oci-archive:` / `rootfs-dir:` /
     `-` stdin / bare → registry), wired into `resolve_or_pull_run_image`. The
     registry path is byte-unchanged; local sources fail closed with a clear
-    message until their ingest lands. Per-variant ingest (archive / rootfs-dir /
-    stdin) + the traversal / malformed / wrong-arch / missing-provenance negative
-    tests are the following slices.
+    message until their ingest lands.
+  - **Landed (per-variant ingest + tests):** `ingest_local_archive` /
+    `ingest_stdin_archive` / `ingest_rootfs_dir` route every source through the
+    same hardened unpack → inject → materialize → provenance → admission path
+    (`inject_runtime_and_materialize`). Negative tests cover prod-refusal,
+    missing file/dir, malformed archive, and wrong architecture
+    (`local_archive_malformed_is_rejected`, `rootfs_dir_wrong_arch_is_rejected`,
+    `*_prod_is_refused`, `*_missing*`); provenance labels are asserted by
+    `provenance_labels_cover_claim_10_fields`; path traversal is covered in the
+    `mvm-oci` unpacker (`archive.rs`/`unpack.rs`). Session 3 item 2 complete.
 - Route every `MachineImageSource` through the existing OCI/rootfs hardening,
   provenance, policy admission, and receipt/audit code paths. Do not add a
   daemon-bypass or extraction shortcut for DX.
