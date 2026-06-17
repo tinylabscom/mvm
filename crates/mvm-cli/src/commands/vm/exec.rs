@@ -254,6 +254,69 @@ pub(in crate::commands) fn run_receipt(
     }
 }
 
+/// Build the transient-run admit closure: it admits a locally-signed
+/// `ExecutionPlan` (setting `tenant_id` so the libkrun/Vz supervisor spawns the
+/// enforcing gateway bridge rather than the legacy unfiltered path), persists
+/// the bare plan for the pre-start moat, and wires the launched/failed audit
+/// hook. Shared by `mvmctl run` and the MCP cold-run path so untrusted code-run
+/// is admitted and egress-enforced uniformly. The closure is `'static` (it
+/// captures only owned values), so callers pass `Some(&admit)`.
+pub(in crate::commands) fn make_run_admit(
+    admit_backend: String,
+    admit_cpus: u32,
+    admit_mem_mib: u64,
+) -> impl Fn(&std::path::Path, &str) -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+    move |rootfs: &std::path::Path, vm_name: &str| {
+        let ledger = super::plan_admission::InMemoryNonceLedger::default();
+        let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name,
+            backend_name: &admit_backend,
+            rootfs_path: rootfs,
+            precomputed_image_sha256: None,
+            cpus: admit_cpus,
+            mem_mib: admit_mem_mib,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            // No secrets on the plain transient path; deny secret release.
+            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+            secrets: vec![],
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: None,
+            audit_dir: None,
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: vec![],
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+        })?;
+        let Some(c) = ctx else { return Ok(None) };
+        // Persist the bare plan so the pre-start moat / endpoint can read it
+        // on the backends that consume it from disk (mirrors the invoke path).
+        if super::up::persists_plan_before_start(&admit_backend) {
+            super::plan_persist::write_plan(vm_name, &c.admitted.plan)
+                .context("persisting admitted plan for the transient run")?;
+        }
+        let plan_json = serde_json::to_string(&c.admitted.signed)
+            .context("serializing admitted plan for the transient run")?;
+        let tenant_id = c.admitted.plan.tenant.0.clone();
+        // Move the emitter + plan into the launched/failed hook so the boot path
+        // completes the admitted/launched/failed triple (admit_plan_for_boot
+        // already emitted plan.admitted).
+        let launch_audit: Option<Box<dyn crate::exec::LaunchAudit>> =
+            Some(Box::new(RunLaunchAudit {
+                emitter: c.emitter,
+                plan: c.admitted.plan,
+            }));
+        Ok(Some(crate::exec::SessionAuditSubstrate {
+            tenant_id,
+            plan_json,
+            bundle_json: None,
+            launch_audit,
+        }))
+    }
+}
+
 /// Boot-path hook that records `plan.launched` / `plan.failed` for a transient
 /// run, mirroring `up`'s `emit_launched_if` / `emit_failed_if`. Owns the
 /// `AuditEmitter` + admitted `ExecutionPlan`; it lives here (not in
@@ -323,57 +386,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     let receipt_backend = admit_backend.clone();
     let admit_cpus = args.cpus;
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
-    let admit = move |rootfs: &std::path::Path,
-                      vm_name: &str|
-          -> Result<Option<crate::exec::SessionAuditSubstrate>> {
-        let ledger = super::plan_admission::InMemoryNonceLedger::default();
-        let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
-            tenant: "local",
-            vm_name,
-            backend_name: &admit_backend,
-            rootfs_path: rootfs,
-            precomputed_image_sha256: None,
-            cpus: admit_cpus,
-            mem_mib: admit_mem_mib,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            // No secrets on the plain transient path; deny secret release.
-            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
-            secrets: vec![],
-            no_supervisor: false,
-            ledger: &ledger,
-            keys_dir: None,
-            audit_dir: None,
-            policy_dir: None,
-            bundle_pin: None,
-            deps_volume: None,
-            shares: vec![],
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-        })?;
-        let Some(c) = ctx else { return Ok(None) };
-        // Persist the bare plan so the pre-start moat / endpoint can read it
-        // on the backends that consume it from disk (mirrors the invoke path).
-        if super::up::persists_plan_before_start(&admit_backend) {
-            super::plan_persist::write_plan(vm_name, &c.admitted.plan)
-                .context("persisting admitted plan for the transient run")?;
-        }
-        let plan_json = serde_json::to_string(&c.admitted.signed)
-            .context("serializing admitted plan for the transient run")?;
-        let tenant_id = c.admitted.plan.tenant.0.clone();
-        // Move the emitter + plan into the launched/failed hook so the boot path
-        // completes the admitted/launched/failed triple (admit_plan_for_boot
-        // already emitted plan.admitted).
-        let launch_audit: Option<Box<dyn crate::exec::LaunchAudit>> =
-            Some(Box::new(RunLaunchAudit {
-                emitter: c.emitter,
-                plan: c.admitted.plan,
-            }));
-        Ok(Some(crate::exec::SessionAuditSubstrate {
-            tenant_id,
-            plan_json,
-            bundle_json: None,
-            launch_audit,
-        }))
-    };
+    let admit = make_run_admit(admit_backend, admit_cpus, admit_mem_mib);
 
     let receipt_path = args.receipt.clone();
     if args.json || receipt_path.is_some() {

@@ -408,9 +408,19 @@ impl ExecDispatcher {
             // MCP runs untrusted code: deny egress by default.
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
-        // MCP code-run stays on the un-admitted path for now (no bridge); its
-        // egress hardening is a tracked follow-up.
-        crate::exec::run_captured(req, None)
+        // Admit the run so libkrun/Vz spawn the enforcing gateway bridge — the
+        // deny-all above is inert on those backends without admission (only
+        // Firecracker enforces the field directly). MCP runs untrusted AI code,
+        // exactly claim 10's target, so it must take the admitted path.
+        let backend = mvm_backend::backend::AnyBackend::auto_select()
+            .name()
+            .to_string();
+        let admit = crate::commands::vm::exec::make_run_admit(
+            backend,
+            DEFAULT_VM_CPUS,
+            u64::from(DEFAULT_VM_MEM_MIB),
+        );
+        crate::exec::run_captured(req, Some(&admit))
     }
 
     /// Warm-VM path (A.2 v2): boot the session's VM on first call,
