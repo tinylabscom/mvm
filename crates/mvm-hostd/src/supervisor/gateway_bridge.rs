@@ -3594,6 +3594,153 @@ mod tests {
         assert!(saw_open, "bridge must emit a FlowOpened for the exchange");
     }
 
+    /// A guest TCP SYN wrapped in IPv4/Ethernet, from `src_ip:src_port` to
+    /// `dst_ip:dst_port`. Used to drive the native-rvproxy enforcement witness.
+    fn build_tcp_syn(
+        mac: [u8; 6],
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let builder = etherparse::PacketBuilder::ethernet2(mac, [0xff; 6])
+            .ipv4(src_ip, dst_ip, 64)
+            .tcp(src_port, dst_port, 1, 64000)
+            .syn();
+        let mut out = Vec::new();
+        builder.write(&mut out, &[]).unwrap();
+        out
+    }
+
+    /// Native-rvproxy enforcement parity arm (binary-discriminating).
+    /// Spawns the candidate as **native**
+    /// `rvproxy run --config` with a deny-all `[policy]` + a flow-audit export,
+    /// plays the VMM directly against rvproxy's vfkit socket (no splice), and
+    /// asserts rvproxy ENFORCES deny-by-default by EXPORTING a `flow` record
+    /// with `verdict:"denied"` for the probed destination. gvproxy can do
+    /// neither (no `run --config`, no flow export), so this discriminates the
+    /// candidate. Opt-in (`MVM_GATEWAY_NATIVE_E2E=1` + `MVM_GATEWAY_BIN` = an
+    /// rvproxy binary); self-skips otherwise.
+    #[tokio::test]
+    async fn rvproxy_native_denies_and_exports_flow() {
+        if std::env::var("MVM_GATEWAY_NATIVE_E2E").is_err() {
+            eprintln!("skip: set MVM_GATEWAY_NATIVE_E2E=1 to run the native-enforcement witness");
+            return;
+        }
+        let Ok(gw_bin) = std::env::var("MVM_GATEWAY_BIN") else {
+            eprintln!("skip: set MVM_GATEWAY_BIN to a native rvproxy binary");
+            return;
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let gw_sock = tmp.path().join("gw.sock");
+        let api_sock = tmp.path().join("api.sock");
+        let flow_audit = tmp.path().join("flow-audit.jsonl");
+        let cfg_path = tmp.path().join("rvproxy.toml");
+
+        // Deny-all native config (no allow rules) + the flow-audit export.
+        let resolvers = [std::net::Ipv4Addr::new(1, 1, 1, 1)];
+        let toml = crate::supervisor::network::rvproxy_config::render_rvproxy_config(
+            &crate::supervisor::network::rvproxy_config::RvproxyConfigParams {
+                id: "vm-native-deny",
+                transport_socket: &gw_sock,
+                api_socket: &api_sock,
+                flow_audit_path: &flow_audit,
+                egress: &mvm_core::policy::projection::CanonicalEgress::Rules(Vec::new()),
+                dns_allow: &[],
+                upstream_resolvers: &resolvers,
+            },
+        )
+        .expect("render deny-all native config");
+        std::fs::write(&cfg_path, toml).unwrap();
+
+        let stdio = std::fs::File::create(tmp.path().join("gw-stdio.log")).unwrap();
+        let mut gateway = match std::process::Command::new(&gw_bin)
+            .arg("run")
+            .arg("--config")
+            .arg(&cfg_path)
+            .stdout(stdio.try_clone().unwrap())
+            .stderr(stdio)
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skip: cannot spawn native gateway {gw_bin:?}: {e}");
+                return;
+            }
+        };
+
+        // Wait for rvproxy to bind its vfkit transport socket.
+        let mut ready = false;
+        for _ in 0..100 {
+            if gw_sock.exists() {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if !ready {
+            let _ = gateway.kill();
+            let log = std::fs::read_to_string(tmp.path().join("gw-stdio.log")).unwrap_or_default();
+            panic!(
+                "native gateway {gw_bin:?} never bound {} (stdio: {log})",
+                gw_sock.display()
+            );
+        }
+
+        // Play the VMM: bind a unixgram, connect straight to rvproxy (no splice),
+        // VFKT handshake, register via DHCP, then a TCP SYN to a denied dst.
+        let harness_path = tmp.path().join("harness.sock");
+        let harness = tokio::net::UnixDatagram::bind(&harness_path).unwrap();
+        harness
+            .connect(&gw_sock)
+            .expect("connect to rvproxy vfkit socket");
+        let mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x42];
+        harness.send(b"VFKT").await.unwrap();
+        harness.send(&build_dhcp_discover(mac)).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // Deny-all → this SYN to 93.184.216.34:443 must be refused + a denied
+        // flow record exported. Source is rvproxy's configured guest_ip.
+        let syn = build_tcp_syn(mac, [192, 168, 127, 2], [93, 184, 216, 34], 40000, 443);
+        harness.send(&syn).await.unwrap();
+
+        // Poll the export for a `flow` record with verdict=denied for the dst.
+        let mut denied = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(contents) = std::fs::read_to_string(&flow_audit) {
+                for line in contents.lines() {
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                        continue;
+                    };
+                    if v.get("kind").and_then(|k| k.as_str()) == Some("flow")
+                        && v.pointer("/event/verdict").and_then(|x| x.as_str()) == Some("denied")
+                        && v.pointer("/event/endpoints/destination_ip")
+                            .and_then(|x| x.as_str())
+                            == Some("93.184.216.34")
+                    {
+                        denied = true;
+                        break;
+                    }
+                }
+            }
+            if denied {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        let _ = gateway.kill();
+        let _ = gateway.wait();
+        let log = std::fs::read_to_string(tmp.path().join("gw-stdio.log")).unwrap_or_default();
+        let export = std::fs::read_to_string(&flow_audit).unwrap_or_default();
+        assert!(
+            denied,
+            "native rvproxy {gw_bin:?} did not export a denied flow for the deny-all SYN \
+             (export: {export}; stdio: {log})"
+        );
+    }
+
     /// Plan-doc-shaped `ExecutionPlan` for fan-out tests. Mirrors the
     /// `sample_plan()` helper in `audit.rs` but kept local so this
     /// test module owns its fixture lifecycle.

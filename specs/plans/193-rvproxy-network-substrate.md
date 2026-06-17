@@ -237,11 +237,21 @@ own internal default).
             (`egp-egress-tcp-192.168.127.2:39861-1.1.1.1:443`, reason
             `policy_dropped`), strictly more granular than the splice's coarse
             `<vm>-egress`. The claim-10 audit is now sourced from native rvproxy.
-  - [ ] **2d — parity gate + splice deletion.** Remaining: (a) extend the WS-1.5
-        witnesses to discriminate the native path (binary-discriminating
-        enforcement arm); (b) exercise the **allow** half live (verdict 2 — needs
-        an L4 allow rule, i.e. a tenant bundle, since local `up` is deny-all);
-        (c) delete the splice + Plan-141 `on_packet` hooks once the gate is green.
+  - [x] **2d task 2 — native-enforcement parity arm (binary-discriminating).**
+        `rvproxy_native_denies_and_exports_flow` (gated `MVM_GATEWAY_NATIVE_E2E=1`
+        + `MVM_GATEWAY_BIN`) spawns the candidate as native `rvproxy run --config`
+        with a deny-all `[policy]` + flow-audit export, plays the VMM directly
+        against rvproxy's vfkit socket (no VM, no splice), sends a guest TCP SYN
+        to a denied dst, and asserts rvproxy **exports a `verdict:"denied"` flow
+        record** — proving native deny-by-default enforcement. gvproxy can do
+        neither (no `run --config`, no flow export), so it discriminates the
+        binary. Wired as `scripts/rvproxy-gateway-parity.sh` step [2/4]
+        (`run_native_enforcement`), required to PASS in the verdict. Validated
+        locally: all four arms green against the rvproxy binary + gvproxy control.
+  - [ ] **2d — remaining: allow half + splice deletion.** (a) Exercise the
+        **allow** half live (verdict 2 — needs an L4 allow rule, i.e. a tenant
+        bundle, since local `up` is deny-all); (b) delete the splice + Plan-141
+        `on_packet` hooks once the gate is green by default.
       Design + the R2 contract are in "## WS-2 design" below.
 - [ ] **WS-3 — backend cutover.** Replace the gvproxy spawn
       (`mvm-build/host_gvproxy.rs`, `libkrun-sys/gvproxy.rs`) + passt with
