@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Cursor;
+use std::io::{BufReader, Cursor};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -11,7 +11,8 @@ use flate2::read::GzDecoder;
 use mvm_build::rootfs::{MaterializeExt4Input, MaterializeExt4Options, materialize_ext4};
 use mvm_oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
-    OciManifestFetcher, RegistryAuthConfig, UnpackOptions, unpack_layer, verify_sha256_digest,
+    OciManifestFetcher, RegistryAuthConfig, UnpackOptions, read_oci_archive, unpack_layer,
+    verify_sha256_digest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -412,15 +413,19 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
     reference: &str,
     prod: bool,
 ) -> Result<ResolvedOciRunImage> {
-    // Registry refs flow through the existing pull path; local sources
-    // (oci-archive / rootfs-dir / stdin) are refused here until their ingest
-    // lands, rather than being misparsed as a registry reference.
-    let classified = source::ImageSource::classify(reference)?;
-    if !classified.is_registry() {
-        bail!(
-            "`run --image` does not support local image sources yet ({classified:?}); \
-             use a registry reference for now"
-        );
+    // Local sources route to their own ingest; a registry reference falls
+    // through to the cache-or-pull path below.
+    match source::ImageSource::classify(reference)? {
+        source::ImageSource::OciArchive(path) => {
+            return ingest_local_archive(cache_root, &path, reference, prod);
+        }
+        other @ (source::ImageSource::Stdin | source::ImageSource::RootfsDir(_)) => {
+            bail!(
+                "`run --image` does not support {other:?} yet; use a registry \
+                 reference or `oci-archive:<path>`"
+            );
+        }
+        source::ImageSource::Registry(_) => {}
     }
     let image_ref: ImageReference = reference.parse()?;
     if prod && !image_ref.is_digest_pinned() {
@@ -464,6 +469,80 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
         rootfs_path,
         pulled,
         auth_source: auth_source_from_pull,
+    })
+}
+
+/// Ingest a local OCI image-layout archive (`oci-archive:<path>`) into a
+/// bootable rootfs. Mirrors the registry pull's unpack → ext4 path with no
+/// network: `read_oci_archive` digest-verifies every blob, then the same
+/// hardened `unpack_layer` extracts each layer. Dev-only for now — `--prod`
+/// still requires a registry reference + cosign (a local archive carries no
+/// registry policy or signature to check yet). Re-ingests each run rather than
+/// caching by reference (the archive has no stable registry identity).
+fn ingest_local_archive(
+    cache_root: &Path,
+    archive_path: &Path,
+    supplied_reference: &str,
+    prod: bool,
+) -> Result<ResolvedOciRunImage> {
+    if prod {
+        bail!(
+            "`run --image --prod` requires a registry reference with cosign; \
+             local OCI archives are dev-only for now"
+        );
+    }
+    let file = fs::File::open(archive_path)
+        .with_context(|| format!("open OCI archive {}", archive_path.display()))?;
+    let image = read_oci_archive(BufReader::new(file), &LinuxPlatform::for_current_arch())
+        .with_context(|| format!("read OCI archive {}", archive_path.display()))?;
+
+    let manifest_hex = sha256_hex(&image.manifest_digest)?;
+    let unpacked_root = cache_root.join("unpacked").join(&manifest_hex);
+    if unpacked_root.exists() {
+        fs::remove_dir_all(&unpacked_root)
+            .with_context(|| format!("remove stale unpacked root {}", unpacked_root.display()))?;
+    }
+    fs::create_dir_all(&unpacked_root)
+        .with_context(|| format!("create {}", unpacked_root.display()))?;
+    for layer in &image.layers {
+        unpack_layer_bytes(&layer.descriptor, &layer.bytes, &unpacked_root)
+            .with_context(|| format!("unpack layer {}", layer.descriptor.digest))?;
+    }
+
+    let unpacked_size = unpacked_tree_size(&unpacked_root)
+        .with_context(|| format!("measure unpacked root {}", unpacked_root.display()))?;
+    let rootfs_rel = format!("rootfs/{manifest_hex}/rootfs.ext4");
+    let rootfs_abs = cache_root.join(&rootfs_rel);
+    materialize_ext4(
+        &MaterializeExt4Input::new(unpacked_root, rootfs_abs.clone(), unpacked_size),
+        &MaterializeExt4Options::default(),
+    )
+    .context("materialize OCI rootfs.ext4")?;
+
+    let provenance = OciProvenance {
+        schema_version: 1,
+        source: "local_archive".to_string(),
+        supplied_reference: supplied_reference.to_string(),
+        canonical_reference: image.manifest_digest.clone(),
+        registry: String::new(),
+        repository: String::new(),
+        tag: None,
+        resolved_digest: image.manifest_digest.clone(),
+        layer_digests: image
+            .layers
+            .iter()
+            .map(|l| l.descriptor.digest.clone())
+            .collect(),
+        trust_policy: "local-archive-digest-verified".to_string(),
+        verification_status: "content-digest-verified (dev)".to_string(),
+    };
+    Ok(ResolvedOciRunImage {
+        reference: image.manifest_digest.clone(),
+        resolved_digest: image.manifest_digest,
+        rootfs_path: rootfs_abs,
+        pulled: true,
+        provenance,
+        auth_source: None,
     })
 }
 
@@ -1298,6 +1377,40 @@ mod tests {
                 .contains("requires a digest-pinned reference"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn local_archive_prod_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = ingest_local_archive(
+            tmp.path(),
+            Path::new("/does/not/matter.tar"),
+            "oci-archive:/does/not/matter.tar",
+            true,
+        )
+        .expect_err("prod local archive must be refused");
+        assert!(err.to_string().contains("prod"), "got {err}");
+    }
+
+    #[test]
+    fn local_archive_missing_file_errors() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("nope.tar");
+        let err = ingest_local_archive(tmp.path(), &missing, "oci-archive:nope.tar", false)
+            .expect_err("missing archive must error");
+        assert!(err.to_string().contains("open OCI archive"), "got {err}");
+    }
+
+    #[test]
+    fn local_archive_malformed_is_rejected() {
+        // Fails inside read_oci_archive (no oci-layout / index) before any
+        // materialize, so no builder VM is needed to exercise the reject path.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bad = tmp.path().join("bad.tar");
+        std::fs::write(&bad, b"definitely not a valid tar archive").unwrap();
+        let err = ingest_local_archive(tmp.path(), &bad, "oci-archive:bad.tar", false)
+            .expect_err("malformed archive must be rejected");
+        assert!(!err.to_string().is_empty());
     }
 
     #[test]

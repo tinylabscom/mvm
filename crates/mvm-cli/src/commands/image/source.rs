@@ -69,11 +69,6 @@ impl ImageSource {
         }
         Ok(Self::Registry(input.to_string()))
     }
-
-    /// True when acquiring this source requires a network registry fetch.
-    pub(in crate::commands) fn is_registry(&self) -> bool {
-        matches!(self, Self::Registry(_))
-    }
 }
 
 #[cfg(test)]
@@ -99,11 +94,10 @@ mod tests {
             ImageSource::classify("ghcr.io/foo/bar@sha256:abc").unwrap(),
             ImageSource::Registry("ghcr.io/foo/bar@sha256:abc".to_string())
         );
-        assert!(
-            ImageSource::classify("registry.local:5000/x:v1")
-                .unwrap()
-                .is_registry()
-        );
+        assert!(matches!(
+            ImageSource::classify("registry.local:5000/x:v1").unwrap(),
+            ImageSource::Registry(_)
+        ));
     }
 
     #[test]
@@ -158,18 +152,20 @@ mod tests {
     }
 
     #[test]
-    fn is_registry_only_for_registry_variant() {
-        assert!(ImageSource::classify("alpine").unwrap().is_registry());
-        assert!(
-            !ImageSource::classify("oci-archive:/x.tar")
-                .unwrap()
-                .is_registry()
-        );
-        assert!(
-            !ImageSource::classify("rootfs-dir:/x")
-                .unwrap()
-                .is_registry()
-        );
-        assert!(!ImageSource::classify("-").unwrap().is_registry());
+    fn each_input_maps_to_its_variant() {
+        use ImageSource::*;
+        assert!(matches!(
+            ImageSource::classify("alpine").unwrap(),
+            Registry(_)
+        ));
+        assert!(matches!(
+            ImageSource::classify("oci-archive:/x.tar").unwrap(),
+            OciArchive(_)
+        ));
+        assert!(matches!(
+            ImageSource::classify("rootfs-dir:/x").unwrap(),
+            RootfsDir(_)
+        ));
+        assert!(matches!(ImageSource::classify("-").unwrap(), Stdin));
     }
 }
