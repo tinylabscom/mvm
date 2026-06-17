@@ -903,7 +903,7 @@ Open PRs at update time:
 
 Recommended sequence to close the remaining rollup items:
 
-1. Merge `#1047` so the Plan 125 closeout and Plan 200 checklist reconciliation reach `main`.
+1. Merge `#1047` after post-rebase checks pass so the Plan 125 closeout and Plan 200 checklist reconciliation reach `main`.
 2. Clean stale worktrees: several are old/behind or already landed (`mvm-202-3c-doctor`, `mvm-pr1009`, `mvm-p200-ociboot`, old status/170/vz100 branches). Do not sequence new work from them.
 3. Finish Plan 202 next: Phase 2d restart/head rebuild unlocks the host-services model.
 4. **Done:** Plan 125 is closed/rehome-only; remaining per-tenant daemon work belongs to Plan 202.
