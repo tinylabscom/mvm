@@ -11,6 +11,7 @@ mod build_dev_image;
 mod check_adr_coverage;
 mod check_audit_positional;
 mod check_claim_catalog;
+mod check_closure_budget;
 mod check_core_runtime_free;
 mod check_doc_claims;
 mod check_forbidden_deps;
@@ -69,6 +70,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_core_runtime_free::run(&workspace)
         }
+        Some("check-closure-budget") => {
+            let workspace = workspace_root();
+            check_closure_budget::run(&workspace)
+        }
         Some("check-guest-agent-runtime-free") => {
             let workspace = workspace_root();
             check_guest_agent_runtime_free::run(&workspace)
@@ -115,7 +120,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-core-runtime-free, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {
@@ -141,6 +146,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-core-runtime-free                 Plan 126 B5: assert mvm-core's default build pulls no tokio"
+            );
+            eprintln!(
+                "  check-closure-budget                    Plan 200: assert mvmctl's default linux closure stays within the crate budget"
             );
             eprintln!(
                 "  check-guest-agent-runtime-free          Plan 124 A: assert mvm-guest's Linux closure pulls no tokio/async-trait/rtnetlink"
