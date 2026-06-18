@@ -2553,7 +2553,7 @@ Today admission to microVMs is single-process: the supervisor signs `ExecutionPl
 >
 > **Plan 202 Phase 3b (2026-06-17):** cost framing is now closed as `O(active tenants)`: one resident `mvm-host-agent` plus one supervised `mvm-signer-helper` per active tenant, while each additional VM adds only a registration, broker socket, and per-VM chain head. The backend seam docs now describe the post-Phase-2 helper model, and `one_tenant_daemon_tracks_many_vm_registrations` covers multiple VM registrations in one tenant daemon.
 
-> **Plan 202 Phase 4b (2026-06-17):** `mvm-host-agent` now runs under a supervising wrapper that restarts a crashed local daemon worker, reuses the Phase 4a registration journal to restore still-running VM registrations, and keeps crash-mid-flight semantics bounded: at most the in-flight `host.audit.v1` call is lost, and the workload chain remains append-only and verifies clean. Focused tests cover daemon restart rebinding the live broker socket and crash recovery during dispatch.
+> **Plan 202 Phase 4b (2026-06-17):** `mvm-host-agent` now runs under a supervising wrapper that restarts a crashed local daemon worker, reuses the Phase 4a registration journal to restore still-running VM registrations, and keeps crash-mid-flight semantics bounded: at most the in-flight `host.audit.v1` call is lost, and the workload chain remains append-only and verifies clean. Focused tests cover worker restart, wrapper restart via `ensure_host_agent_daemon`, and crash recovery during dispatch.
 
 ### Workstream breakdown
 

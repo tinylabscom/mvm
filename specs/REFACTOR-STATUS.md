@@ -13,9 +13,9 @@
 
 **Additional 2026-06-17 — Plan 202 Phase 2a/2b landed:** the resident per-tenant signer-helper path is in place. `mvm-signer-helper` runs as a child of `mvm-host-agent`, owns `vm_id → Chain` workload-audit heads, opens/closes per-VM chains on register/deregister, and receives only the tenant key path from the keyless host-agent. The shared helper wire (`register_vm` / `deregister_vm` / `append_entry` / `probe`), host-agent audit forwarding by server-derived `vm_id`, and cross-VM chain isolation tests landed; remaining Phase 2 work after 2c is restart/head rebuild.
 
-**Additional 2026-06-17 — Plan 202 Phase 4a landed:** the host-agent daemon now has durable registration recovery. It snapshots the live registration set to `<MVM_DATA_DIR>/host-agent/<tenant>/registrations.json`, removes entries on deregister, and restores by replaying registrations after signer-helper readiness. Focused tests pin stable snapshot order, deregister cleanup, and daemon restart rebinding a journaled socket. Phase 4b still needs local daemon supervision/restart and crash-mid-flight semantics.
+**Additional 2026-06-17 — Plan 202 Phase 4a landed:** the host-agent daemon now has durable registration recovery. It snapshots the live registration set to `<MVM_DATA_DIR>/host-agent/<tenant>/registrations.json`, removes entries on deregister, and restores by replaying registrations after signer-helper readiness. Focused tests pin stable snapshot order, deregister cleanup, and daemon restart rebinding a journaled socket.
 
-**Additional 2026-06-17 — Plan 202 Phase 4b landed:** `mvm-host-agent` now runs under a supervising wrapper that restarts a crashed local daemon worker, reuses the Phase 4a registration journal to restore still-running VM registrations, and keeps crash-mid-flight semantics bounded: at most the in-flight `host.audit.v1` call is lost, and the workload chain remains append-only and verifies clean. Focused tests cover daemon restart rebinding the live broker socket and crash recovery during dispatch.
+**Additional 2026-06-17 — Plan 202 Phase 4b landed:** `mvm-host-agent` now runs under a supervising wrapper that restarts a crashed local daemon worker, reuses the Phase 4a registration journal to restore still-running VM registrations, and keeps crash-mid-flight semantics bounded: at most the in-flight `host.audit.v1` call is lost, and the workload chain remains append-only and verifies clean. Focused tests cover worker restart, wrapper restart via `ensure_host_agent_daemon`, and crash recovery during dispatch.
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -881,7 +881,7 @@ PLAN 202 — Host services daemon (per-tenant, not per-VM spawn)   🟡 IN PROGR
   [ ] Phase 3 — decouple availability from MVM_GATEWAY_BRIDGE (3a default-on + 3b
       `O(active tenants)` cost framing + 3c doctor daemon-state reporting landed; vz live-verify
       remains).
-  [ ] Phase 4 — supervision + crash/restart journal (4a registration journal landed; 4b supervised restart remains).
+  [x] Phase 4 — supervision + crash/restart journal (4a registration journal + 4b supervised restart/crash semantics landed).
   [ ] Phase 5 — mvmd host agent owns the daemon per tenant (mvmd Plan 52).
   [ ] Phase 6 — retire spawn_broker_services_if_admitted; note ADR-059 superseded.
 ```
@@ -899,7 +899,7 @@ Why the 11 open rollup boxes still show as open:
 - `REFACTOR-STATUS.md` only ticks a plan when the whole plan is done. Partial progress is recorded in the long `Last updated` history and detail blocks, so progress is easy to miss.
 - There is visible drift to clean up: Plan 126's summary says the forbidden-dep gate landed, but its detail section still has D1 unchecked.
 - The Plan 125 closeout + Plan 200 checklist reconciliation landed in #1047; remaining Plan 202 work continues from the daemon/signature-helper plan, not Plan 125.
-- Plan 202 Phase 2d landed in #1049; Phase 4a landed in #1051; Phase 3b landed in #1052; Phase 4b supervised daemon restart is the active Plan 202 slice.
+- Plan 202 Phase 2d landed in #1049; Phase 4a landed in #1051; Phase 3b landed in #1052; Phase 4b supervised daemon restart/crash semantics is complete in this slice.
 
 Open PRs at update time:
 
@@ -912,7 +912,7 @@ Open PRs at update time:
 Recommended sequence to close the remaining rollup items:
 
 1. Clean stale worktrees: several are old/behind or already landed (`mvm-202-3c-doctor`, `mvm-pr1009`, `mvm-p200-ociboot`, old status/170/vz100 branches). Do not sequence new work from them.
-2. Continue Plan 202 next: finish vz live-verify, mvmd adoption, and retirement of `spawn_broker_services_if_admitted`; Phase 4b supervised daemon restart/crash semantics is landed in the 4b worktree.
+2. Continue Plan 202 next: finish vz live-verify, mvmd adoption, and retirement of `spawn_broker_services_if_admitted`.
 3. **Done:** Plan 125 is closed/rehome-only; remaining per-tenant daemon work belongs to Plan 202.
 4. Continue Plan 200 product path: local image sources, persistent OCI-backed machine specs, schema parser, SDK parity, docs, CI budgets.
 5. Do Plan 199 in parallel if builder VM time is available: native `libkrunfw`/`libkrun` Nix recipes and flake/build verification.
