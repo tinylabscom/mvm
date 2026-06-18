@@ -3094,6 +3094,7 @@ dependencies = [
  "chrono",
  "colored",
  "ed25519-dalek",
+ "fs2",
  "indicatif",
  "inquire",
  "libc",

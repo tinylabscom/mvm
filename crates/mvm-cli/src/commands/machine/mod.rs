@@ -8,10 +8,11 @@
 //! The flagship verb is `machine run`: boot a fresh VM from an OCI image, run a
 //! command, tear down. It routes straight into `vm::exec::run_secure` (the same
 //! code path as `mvmctl run --image`), so it inherits deny-all networking by
-//! default. Persistent machine specs (`create`/`ls`/`inspect`/`rm`) store only
-//! the declarative image/network/profile shape today; booting lifecycle verbs
-//! (`start`/`exec`/`shell`/`stop`) and `pack` land on top of this state in
-//! follow-up work rather than stubbing runtime behavior.
+//! default. Persistent machine specs (`create`/`ls`/`inspect`/`rm`) store the
+//! declarative image/network/profile shape for later lifecycle starts; `start`
+//! boots that spec through the same admitted OCI-backed substrate as the
+//! transient runner, while `exec` / `shell` / `stop` stay thin wrappers over
+//! the existing running-VM surfaces.
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
@@ -21,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use mvm_core::atomic_io::atomic_write;
 use mvm_core::user_config::MvmConfig;
+use mvm_core::util::parse_human_size;
 use mvm_core::{config, naming};
 
 use super::Cli;
@@ -49,6 +51,8 @@ pub(in crate::commands) enum MachineAction {
     /// Remove one persistent named machine spec
     #[command(name = "rm")]
     Rm(MachineRemoveArgs),
+    /// Boot a persistent named machine without running a one-shot command
+    Start(MachineStartArgs),
     /// Run a command inside an already-started named machine
     Exec(MachineExecArgs),
     /// Attach an interactive shell/console to an already-started named machine
@@ -142,11 +146,17 @@ struct MachineSpec {
     schema_version: u32,
     name: String,
     image: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_digest: Option<String>,
     net: bool,
     allow_host: Vec<String>,
     cpus: u32,
     memory: String,
     profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_started_at: Option<String>,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -209,6 +219,13 @@ pub(in crate::commands) struct MachineRemoveArgs {
 }
 
 #[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineStartArgs {
+    /// Persistent machine name.
+    #[arg(long)]
+    pub name: String,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct MachineExecArgs {
     /// Persistent machine name.
     #[arg(long)]
@@ -247,15 +264,20 @@ struct MachineRemoveSummary {
 impl MachineCreateArgs {
     fn into_spec(self) -> Result<MachineSpec> {
         validate_machine_name(&self.name)?;
+        super::shared::resolve_run_network_policy(self.net, &self.allow_host)?;
+        let _ = parse_human_size(&self.memory).context("invalid machine memory")?;
         Ok(MachineSpec {
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: self.name,
             image: self.image,
+            resolved_digest: None,
             net: self.net,
             allow_host: self.allow_host,
             cpus: self.cpus,
             memory: self.memory,
             profile: run_profile_name(self.profile).to_string(),
+            created_at: Some(mvm_core::time::utc_now()),
+            last_started_at: None,
         })
     }
 }
@@ -281,6 +303,14 @@ fn save_machine_spec(spec: &MachineSpec, force: bool) -> Result<()> {
             spec.name
         );
     }
+    let bytes = serde_json::to_vec_pretty(spec).context("serializing machine spec")?;
+    atomic_write(&path, &bytes)
+        .with_context(|| format!("writing machine spec {}", path.display()))?;
+    Ok(())
+}
+
+fn overwrite_machine_spec(spec: &MachineSpec) -> Result<()> {
+    let path = config::machine_spec_path(&spec.name);
     let bytes = serde_json::to_vec_pretty(spec).context("serializing machine spec")?;
     atomic_write(&path, &bytes)
         .with_context(|| format!("writing machine spec {}", path.display()))?;
@@ -378,11 +408,20 @@ fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
     } else {
         println!("name: {}", spec.name);
         println!("image: {}", spec.image);
+        if let Some(resolved_digest) = spec.resolved_digest.as_deref() {
+            println!("resolved-digest: {resolved_digest}");
+        }
         println!("net: {}", spec.net);
         println!("allow-host: {}", spec.allow_host.join(","));
         println!("cpus: {}", spec.cpus);
         println!("memory: {}", spec.memory);
         println!("profile: {}", spec.profile);
+        if let Some(created_at) = spec.created_at.as_deref() {
+            println!("created-at: {created_at}");
+        }
+        if let Some(last_started_at) = spec.last_started_at.as_deref() {
+            println!("last-started-at: {last_started_at}");
+        }
     }
     Ok(())
 }
@@ -401,6 +440,51 @@ fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
 
 fn ensure_machine_spec_exists(name: &str) -> Result<MachineSpec> {
     load_machine_spec(name).with_context(|| format!("loading machine spec for {name:?}"))
+}
+
+fn mark_machine_started(spec: &mut MachineSpec, resolved_digest: String) {
+    spec.resolved_digest = Some(resolved_digest);
+    spec.last_started_at = Some(mvm_core::time::utc_now());
+}
+
+fn start_machine(args: MachineStartArgs) -> Result<()> {
+    let mut spec = ensure_machine_spec_exists(&args.name)?;
+    let network_policy = super::shared::resolve_run_network_policy(spec.net, &spec.allow_host)?;
+    let memory_mib = parse_human_size(&spec.memory).context("invalid machine memory")?;
+    let cached = super::image::resolve_or_pull_run_image(
+        &super::image::oci_cache_root(),
+        &spec.image,
+        false,
+    )?;
+    if cached.pulled {
+        let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
+        mvm_core::audit_emit!(
+            ImageFetch,
+            "source=machine_start reference={} digest={} prod=false layers={} trust_policy={} verification_status={} auth_source={}",
+            cached.reference,
+            cached.resolved_digest,
+            cached.provenance.layer_digests.len(),
+            cached.provenance.trust_policy,
+            cached.provenance.verification_status,
+            auth_source
+        );
+    }
+    super::vm::up::start_persistent_oci_machine(super::vm::up::PersistentImageStartParams {
+        name: &spec.name,
+        image_label: &cached.reference,
+        resolved_digest: &cached.resolved_digest,
+        rootfs_path: &cached.rootfs_path,
+        cpus: spec.cpus,
+        memory_mib,
+        mem_initial_mib: None,
+        network_policy,
+    })?;
+    mark_machine_started(&mut spec, cached.resolved_digest);
+    if let Err(err) = overwrite_machine_spec(&spec) {
+        tracing::warn!(error = %err, machine = %spec.name, "updating machine start metadata failed (non-fatal)");
+    }
+    println!("started machine {}", spec.name);
+    Ok(())
 }
 
 fn machine_exec_command(argv: &[String]) -> String {
@@ -455,6 +539,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Ls(list_args) => list_machines(list_args),
         MachineAction::Inspect(inspect_args) => inspect_machine(inspect_args),
         MachineAction::Rm(remove_args) => remove_machine(remove_args),
+        MachineAction::Start(start_args) => start_machine(start_args),
         MachineAction::Exec(exec_args) => exec_machine(cli, exec_args, cfg),
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
@@ -675,6 +760,10 @@ mod tests {
             MachineAction::Ls(args) => assert!(args.json),
             other => panic!("expected ls action, got {other:?}"),
         }
+        match parse(&["start", "--name", "web"]).expect("parse") {
+            MachineAction::Start(args) => assert_eq!(args.name, "web"),
+            other => panic!("expected start action, got {other:?}"),
+        }
         match parse(&["inspect", "web", "--json"]).expect("parse") {
             MachineAction::Inspect(args) => {
                 assert_eq!(args.name, "web");
@@ -735,6 +824,26 @@ mod tests {
     }
 
     #[test]
+    fn mark_machine_started_sets_digest_and_timestamp() {
+        let mut spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: "alpine:latest".to_string(),
+            resolved_digest: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            memory: "512M".to_string(),
+            profile: "standard".to_string(),
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+        };
+        mark_machine_started(&mut spec, "sha256:abc".to_string());
+        assert_eq!(spec.resolved_digest.as_deref(), Some("sha256:abc"));
+        assert!(spec.last_started_at.is_some());
+    }
+
+    #[test]
     fn create_persists_machine_spec_under_data_dir() {
         let _state = IsolatedMachineState::new();
         let args = MachineCreateArgs {
@@ -756,6 +865,8 @@ mod tests {
         let loaded = load_machine_spec("web").expect("load");
         assert_eq!(loaded, spec);
         assert_eq!(loaded.schema_version, MACHINE_SPEC_SCHEMA_VERSION);
+        assert!(loaded.created_at.is_some());
+        assert!(loaded.last_started_at.is_none());
     }
 
     #[test]
@@ -782,11 +893,14 @@ mod tests {
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: "web".to_string(),
             image: "alpine:latest".to_string(),
+            resolved_digest: None,
             net: false,
             allow_host: Vec::new(),
             cpus: 2,
             memory: "512M".to_string(),
             profile: "standard".to_string(),
+            created_at: Some(mvm_core::time::utc_now()),
+            last_started_at: None,
         };
         save_machine_spec(&spec, false).expect("first save");
         let err = save_machine_spec(&spec, false).expect_err("overwrite rejected");
@@ -802,11 +916,14 @@ mod tests {
                 schema_version: MACHINE_SPEC_SCHEMA_VERSION,
                 name: name.to_string(),
                 image: format!("example/{name}:latest"),
+                resolved_digest: None,
                 net: false,
                 allow_host: Vec::new(),
                 cpus: 2,
                 memory: "512M".to_string(),
                 profile: "standard".to_string(),
+                created_at: Some(mvm_core::time::utc_now()),
+                last_started_at: None,
             };
             save_machine_spec(&spec, false).expect("save");
         }
@@ -828,11 +945,14 @@ mod tests {
               "schema_version": 1,
               "name": "web",
               "image": "alpine:latest",
+              "resolved_digest": null,
               "net": false,
               "allow_host": [],
               "cpus": 2,
               "memory": "512M",
               "profile": "standard",
+              "created_at": "2026-06-18T00:00:00Z",
+              "last_started_at": null,
               "unexpected": true
             }"#,
         )
@@ -848,11 +968,14 @@ mod tests {
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: "web".to_string(),
             image: "alpine:latest".to_string(),
+            resolved_digest: None,
             net: false,
             allow_host: Vec::new(),
             cpus: 2,
             memory: "512M".to_string(),
             profile: "standard".to_string(),
+            created_at: Some(mvm_core::time::utc_now()),
+            last_started_at: None,
         };
         save_machine_spec(&spec, false).expect("save");
         let err = remove_machine_spec("web", false).expect_err("confirmation required");
@@ -903,6 +1026,19 @@ mod tests {
                     assert_eq!(create.image, "alpine");
                 }
                 other => panic!("expected create action, got {other:?}"),
+            },
+            other => panic!("expected Commands::Machine, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn top_level_cli_routes_machine_start() {
+        let cli = Cli::try_parse_from(["mvmctl", "machine", "start", "--name", "web"])
+            .expect("top-level parse");
+        match cli.command {
+            Commands::Machine(args) => match args.action {
+                MachineAction::Start(start) => assert_eq!(start.name, "web"),
+                other => panic!("expected start action, got {other:?}"),
             },
             other => panic!("expected Commands::Machine, got {other:?}"),
         }

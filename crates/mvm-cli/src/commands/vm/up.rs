@@ -1194,6 +1194,60 @@ fn write_host_only_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result
     std::fs::rename(&tmp, path)
 }
 
+struct VmNameReservation<'a> {
+    name: &'a str,
+    network: &'a str,
+    tags: std::collections::BTreeMap<String, String>,
+    expires_at: Option<String>,
+    auto_resume: bool,
+}
+
+fn reserve_vm_name(
+    registry_path: &std::path::Path,
+    reservation: VmNameReservation<'_>,
+) -> Result<()> {
+    let _lock = mvm::vm::name_registry::acquire_registry_lock(registry_path)?;
+    let mut registry = mvm::vm::name_registry::VmNameRegistry::load(registry_path)?;
+    if registry.lookup(reservation.name).is_some() {
+        anyhow::bail!(
+            "VM name {:?} is already reserved; stop the existing VM with `mvmctl down {}` or choose a different name",
+            reservation.name,
+            reservation.name
+        );
+    }
+    registry.register_with_metadata(mvm::vm::name_registry::RegisterParams {
+        name: reservation.name,
+        vm_dir: "",
+        network: reservation.network,
+        guest_ip: None,
+        slot_index: 0,
+        tags: reservation.tags,
+        expires_at: reservation.expires_at,
+        auto_resume: reservation.auto_resume,
+    })?;
+    registry.save(registry_path)
+}
+
+fn reserve_launch_vm_name(
+    registry_path: &std::path::Path,
+    vm_name: &str,
+    network_name: &str,
+    sandbox_tags: &std::collections::BTreeMap<String, String>,
+    sandbox_ttl: Option<std::time::Duration>,
+    auto_resume: bool,
+) -> Result<()> {
+    reserve_vm_name(
+        registry_path,
+        VmNameReservation {
+            name: vm_name,
+            network: network_name,
+            tags: sandbox_tags.clone(),
+            expires_at: sandbox_ttl.map(mvm_core::util::time::utc_plus_duration),
+            auto_resume,
+        },
+    )
+}
+
 /// Resolve the `source_root` for an app's lockfile path. For
 /// `Source::LocalPath { path, .. }` the source root is the directory
 /// the path resolves against — relative paths root at the IR file's
@@ -1804,6 +1858,122 @@ pub(in crate::commands) struct RunParams<'a> {
     pub(super) console: bool,
 }
 
+pub(in crate::commands) struct PersistentImageStartParams<'a> {
+    pub name: &'a str,
+    pub image_label: &'a str,
+    pub resolved_digest: &'a str,
+    pub rootfs_path: &'a std::path::Path,
+    pub cpus: u32,
+    pub memory_mib: u32,
+    pub mem_initial_mib: Option<u32>,
+    pub network_policy: mvm_core::network_policy::NetworkPolicy,
+}
+
+fn register_vm_name(vm_name: &str, network_name: &str) {
+    let registry_path = mvm::vm::name_registry::registry_path();
+    if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
+        registry.deregister(vm_name);
+        let _ = registry.register_with_metadata(mvm::vm::name_registry::RegisterParams {
+            name: vm_name,
+            vm_dir: "",
+            network: network_name,
+            guest_ip: None,
+            slot_index: 0,
+            tags: std::collections::BTreeMap::new(),
+            expires_at: None,
+            auto_resume: true,
+        });
+        let _ = registry.save(&registry_path);
+    }
+}
+
+pub(in crate::commands) fn start_persistent_oci_machine(
+    params: PersistentImageStartParams<'_>,
+) -> Result<()> {
+    let PersistentImageStartParams {
+        name,
+        image_label,
+        resolved_digest,
+        rootfs_path,
+        cpus,
+        memory_mib,
+        mem_initial_mib,
+        network_policy,
+    } = params;
+    validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
+    let effective_hypervisor = super::shared::resolve_effective_hypervisor("firecracker");
+    let (kernel_path, _default_rootfs_path) =
+        ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
+    register_vm_name(name, "default");
+
+    let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
+    let admission_ledger = InMemoryNonceLedger::new();
+    let admission = admit_plan_for_boot(AdmitPlanForBootParams {
+        tenant: "local",
+        vm_name: name,
+        backend_name: &effective_hypervisor,
+        rootfs_path,
+        precomputed_image_sha256: None,
+        cpus,
+        mem_mib: u64::from(memory_mib),
+        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+        secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+        secrets: vec![],
+        no_supervisor: false,
+        ledger: &admission_ledger,
+        keys_dir: None,
+        audit_dir: None,
+        policy_dir: None,
+        bundle_pin: None,
+        deps_volume: None,
+        shares: vec![],
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        network_policy: network_policy.clone(),
+    })?;
+    let mut start_config = VmStartParams {
+        name: name.to_string(),
+        rootfs_path: rootfs_path.display().to_string(),
+        vmlinux_path: kernel_path,
+        initrd_path: None,
+        verity_path: None,
+        roothash: None,
+        revision_hash: resolved_digest.to_string(),
+        flake_ref: format!("oci:{image_label}"),
+        profile: Some("standard".to_string()),
+        cpus,
+        memory_mib,
+        mem_initial_mib,
+        volumes: &[],
+        config_files: &[],
+        secret_files: &[],
+        port_mappings: &[],
+        warm_pool_size: 0,
+        network_policy,
+    }
+    .into_start_config();
+    attach_runtime_overlay_if_cached(&mut start_config, &effective_hypervisor);
+    if let Some(ctx) = admission.as_ref() {
+        thread_tenant_id(&mut start_config, &ctx.admitted);
+        populate_audit_substrate(&mut start_config, &ctx.admitted, ctx.policy_bundle.as_ref())?;
+        if persists_plan_before_start(&effective_hypervisor) {
+            stash_plan_for_bridge(&start_config)?;
+        }
+    }
+    enforce_shares_if(&admission, &start_config.volumes)?;
+    if let Err(err) = mvm_backend::workload_backend::require_workload_backend(&backend) {
+        emit_failed_if(&admission, "backend-start", &err);
+        return Err(err);
+    }
+    if let Err(err) = backend.start(&start_config) {
+        emit_failed_if(&admission, "backend-start", &err);
+        return Err(err);
+    }
+    emit_launched_if(&admission, &effective_hypervisor);
+    record_vm_readiness(name, InstanceReadiness::LaunchAccepted);
+    mvm_core::audit_emit!(VmStart, vm: name);
+    Ok(())
+}
+
 pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     let RunParams {
         flake_ref,
@@ -1918,25 +2088,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             generator.next().unwrap_or_else(|| "vm-0".to_string())
         }),
     };
-
-    // Register the VM name in the persistent registry (best-effort).
     let registry_path = mvm::vm::name_registry::registry_path();
-    if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
-        // Deregister stale entry with the same name if it exists
-        registry.deregister(&vm_name);
-        let expires_at = sandbox_ttl.map(mvm_core::util::time::utc_plus_duration);
-        let _ = registry.register_with_metadata(mvm::vm::name_registry::RegisterParams {
-            name: &vm_name,
-            vm_dir: "",
-            network: network_name,
-            guest_ip: None,
-            slot_index: 0,
-            tags: sandbox_tags.clone(),
-            expires_at,
-            auto_resume,
-        });
-        let _ = registry.save(&registry_path);
-    }
 
     // Admission ledger. One per `cmd_run`; the watch-mode loop
     // reuses it across rebuilds so synthesized plans share a single
@@ -2014,6 +2166,14 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             emit_failed_if(&admission, "backend-start", &e);
             return Err(e);
         }
+        reserve_launch_vm_name(
+            &registry_path,
+            &vm_name,
+            network_name,
+            &sandbox_tags,
+            sandbox_ttl,
+            auto_resume,
+        )?;
         if let Err(e) = backend.start(&start_config) {
             emit_failed_if(&admission, "backend-start", &e);
             return Err(e);
@@ -2468,6 +2628,14 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             2,
             &format!("Restoring VM '{}' from snapshot", vm_name_owned),
         );
+        reserve_launch_vm_name(
+            &registry_path,
+            &vm_name_owned,
+            network_name,
+            &sandbox_tags,
+            sandbox_ttl,
+            auto_resume,
+        )?;
         if let Err(e) =
             microvm::restore_from_template_snapshot(tmpl, &run_config, &snap_dir, snap_info)
         {
@@ -2589,6 +2757,14 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                     emit_failed_if(&admission_main, "backend-start", &e);
                     return Err(e);
                 }
+                reserve_launch_vm_name(
+                    &registry_path,
+                    &vm_name_owned,
+                    network_name,
+                    &sandbox_tags,
+                    sandbox_ttl,
+                    auto_resume,
+                )?;
                 if let Err(e) = backend.start(&start_config) {
                     emit_failed_if(&admission_main, "backend-start", &e);
                     return Err(e);
@@ -3041,6 +3217,35 @@ mod runtime_overlay_attach_tests {
             sc.runtime_overlay_path.is_none(),
             "cold cache must not attach (legacy boot)"
         );
+    }
+}
+
+#[cfg(test)]
+mod vm_name_reservation_tests {
+    use super::*;
+
+    fn reservation<'a>(name: &'a str, network: &'a str) -> VmNameReservation<'a> {
+        VmNameReservation {
+            name,
+            network,
+            tags: std::collections::BTreeMap::new(),
+            expires_at: None,
+            auto_resume: true,
+        }
+    }
+
+    #[test]
+    fn duplicate_reservation_fails_without_replacing_original() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vm-names.json");
+
+        reserve_vm_name(&path, reservation("vm-a", "default")).unwrap();
+        let err = reserve_vm_name(&path, reservation("vm-a", "isolated")).unwrap_err();
+
+        assert!(err.to_string().contains("already reserved"));
+        let registry = mvm::vm::name_registry::VmNameRegistry::load(&path).unwrap();
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.lookup("vm-a").unwrap().network, "default");
     }
 }
 
