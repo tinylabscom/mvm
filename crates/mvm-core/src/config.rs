@@ -337,6 +337,29 @@ pub fn vm_state_dir(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+// ============================================================================
+// Persistent `mvmctl machine` specs
+// ============================================================================
+//
+// Named machines are product-level state, not a VMM runtime directory. Keep
+// their declarative spec under `<mvm_data_dir>/machines/<name>/` so runtime
+// sockets/pids under `vms/` can be replaced without migrating the UX contract.
+
+/// Root of persistent named machine specs: `<mvm_data_dir>/machines/`.
+pub fn machine_state_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir()).join("machines")
+}
+
+/// Persistent named machine directory: `<mvm_data_dir>/machines/<name>/`.
+pub fn machine_state_dir(name: &str) -> std::path::PathBuf {
+    machine_state_root().join(name)
+}
+
+/// Persistent named machine spec: `<mvm_data_dir>/machines/<name>/machine.json`.
+pub fn machine_spec_path(name: &str) -> std::path::PathBuf {
+    machine_state_dir(name).join("machine.json")
+}
+
 /// Root of the per-tenant host-agent daemon dirs: `<mvm_data_dir>/host-agent`.
 /// Each `<tenant>/` subdir holds one resident daemon's control UDS, pid file,
 /// and spawn lock. Enumerated by `mvmctl doctor` to report daemon state.
@@ -345,8 +368,9 @@ pub fn host_agent_root() -> std::path::PathBuf {
 }
 
 /// Per-tenant host-agent daemon directory: `<mvm_data_dir>/host-agent/<tenant>/`.
-/// Holds the resident daemon's control UDS, pid file, and spawn lock — one set
-/// per tenant, so the daemon is `O(active tenants)` not `O(VMs)`.
+/// Holds the resident daemon's control UDS, pid file, worker pid file, and
+/// spawn lock — one set per tenant, so the daemon is `O(active tenants)` not
+/// `O(VMs)`.
 pub fn host_agent_dir(tenant: &str) -> std::path::PathBuf {
     host_agent_root().join(tenant)
 }
@@ -355,6 +379,11 @@ pub fn host_agent_dir(tenant: &str) -> std::path::PathBuf {
 /// backend registers VMs over.
 pub fn host_agent_control_socket(tenant: &str) -> std::path::PathBuf {
     host_agent_dir(tenant).join("control.sock")
+}
+
+/// The per-tenant host-agent worker pid file used by restart recovery.
+pub fn host_agent_worker_pid(tenant: &str) -> std::path::PathBuf {
+    host_agent_dir(tenant).join("worker.pid")
 }
 
 /// The per-tenant signer-helper UDS the host-agent daemon connects to. The
@@ -893,6 +922,27 @@ mod tests {
         assert_eq!(
             vm_state_dir("foo").join(vsock_socket_filename(5252)),
             vm_vsock_port_socket("foo", 5252)
+        );
+
+        env.remove("MVM_DATA_DIR");
+    }
+
+    #[test]
+    fn machine_state_paths_honor_data_dir() {
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", "/custom/data");
+
+        assert_eq!(
+            machine_state_root(),
+            std::path::PathBuf::from("/custom/data/machines")
+        );
+        assert_eq!(
+            machine_state_dir("web"),
+            std::path::PathBuf::from("/custom/data/machines/web")
+        );
+        assert_eq!(
+            machine_spec_path("web"),
+            std::path::PathBuf::from("/custom/data/machines/web/machine.json")
         );
 
         env.remove("MVM_DATA_DIR");

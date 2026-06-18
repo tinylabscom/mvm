@@ -192,8 +192,21 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
 // Plan 200 — beginner machine UX. `machine run` translates into the same
 // transient-runner path as top-level `run`, so it shares `run`'s
 // `InteractiveOrControl` posture (it streams guest output; the admitted
-// execution path emits via the inner plan/run protocol).
-const MACHINE_SUB: &[(&str, AuditPosture)] = &[("run", AuditPosture::InteractiveOrControl)];
+// execution path emits via the inner plan/run protocol). The persistent-spec
+// mutations use `ConfigChange` because they rewrite the operator's machine
+// inventory; lifecycle wrappers delegate to existing interactive/control
+// surfaces after first resolving the named machine.
+const MACHINE_SUB: &[(&str, AuditPosture)] = &[
+    ("run", AuditPosture::InteractiveOrControl),
+    ("create", AuditPosture::Emits("ConfigChange")),
+    ("ls", AuditPosture::ReadOnly),
+    ("inspect", AuditPosture::ReadOnly),
+    ("rm", AuditPosture::Emits("ConfigChange")),
+    ("start", AuditPosture::InteractiveOrControl),
+    ("exec", AuditPosture::InteractiveOrControl),
+    ("shell", AuditPosture::InteractiveOrControl),
+    ("stop", AuditPosture::InteractiveOrControl),
+];
 
 const VOLUME_SUB: &[(&str, AuditPosture)] = &[
     ("create", AuditPosture::Emits("VolumeCreate")),

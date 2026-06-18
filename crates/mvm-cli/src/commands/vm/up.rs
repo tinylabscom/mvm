@@ -1804,6 +1804,122 @@ pub(in crate::commands) struct RunParams<'a> {
     pub(super) console: bool,
 }
 
+pub(in crate::commands) struct PersistentImageStartParams<'a> {
+    pub name: &'a str,
+    pub image_label: &'a str,
+    pub resolved_digest: &'a str,
+    pub rootfs_path: &'a std::path::Path,
+    pub cpus: u32,
+    pub memory_mib: u32,
+    pub mem_initial_mib: Option<u32>,
+    pub network_policy: mvm_core::network_policy::NetworkPolicy,
+}
+
+fn register_vm_name(vm_name: &str, network_name: &str) {
+    let registry_path = mvm::vm::name_registry::registry_path();
+    if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
+        registry.deregister(vm_name);
+        let _ = registry.register_with_metadata(mvm::vm::name_registry::RegisterParams {
+            name: vm_name,
+            vm_dir: "",
+            network: network_name,
+            guest_ip: None,
+            slot_index: 0,
+            tags: std::collections::BTreeMap::new(),
+            expires_at: None,
+            auto_resume: true,
+        });
+        let _ = registry.save(&registry_path);
+    }
+}
+
+pub(in crate::commands) fn start_persistent_oci_machine(
+    params: PersistentImageStartParams<'_>,
+) -> Result<()> {
+    let PersistentImageStartParams {
+        name,
+        image_label,
+        resolved_digest,
+        rootfs_path,
+        cpus,
+        memory_mib,
+        mem_initial_mib,
+        network_policy,
+    } = params;
+    validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
+    let effective_hypervisor = super::shared::resolve_effective_hypervisor("firecracker");
+    let (kernel_path, _default_rootfs_path) =
+        ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
+    register_vm_name(name, "default");
+
+    let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
+    let admission_ledger = InMemoryNonceLedger::new();
+    let admission = admit_plan_for_boot(AdmitPlanForBootParams {
+        tenant: "local",
+        vm_name: name,
+        backend_name: &effective_hypervisor,
+        rootfs_path,
+        precomputed_image_sha256: None,
+        cpus,
+        mem_mib: u64::from(memory_mib),
+        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+        secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+        secrets: vec![],
+        no_supervisor: false,
+        ledger: &admission_ledger,
+        keys_dir: None,
+        audit_dir: None,
+        policy_dir: None,
+        bundle_pin: None,
+        deps_volume: None,
+        shares: vec![],
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        network_policy: network_policy.clone(),
+    })?;
+    let mut start_config = VmStartParams {
+        name: name.to_string(),
+        rootfs_path: rootfs_path.display().to_string(),
+        vmlinux_path: kernel_path,
+        initrd_path: None,
+        verity_path: None,
+        roothash: None,
+        revision_hash: resolved_digest.to_string(),
+        flake_ref: format!("oci:{image_label}"),
+        profile: Some("standard".to_string()),
+        cpus,
+        memory_mib,
+        mem_initial_mib,
+        volumes: &[],
+        config_files: &[],
+        secret_files: &[],
+        port_mappings: &[],
+        warm_pool_size: 0,
+        network_policy,
+    }
+    .into_start_config();
+    attach_runtime_overlay_if_cached(&mut start_config, &effective_hypervisor);
+    if let Some(ctx) = admission.as_ref() {
+        thread_tenant_id(&mut start_config, &ctx.admitted);
+        populate_audit_substrate(&mut start_config, &ctx.admitted, ctx.policy_bundle.as_ref())?;
+        if persists_plan_before_start(&effective_hypervisor) {
+            stash_plan_for_bridge(&start_config)?;
+        }
+    }
+    enforce_shares_if(&admission, &start_config.volumes)?;
+    if let Err(err) = mvm_backend::workload_backend::require_workload_backend(&backend) {
+        emit_failed_if(&admission, "backend-start", &err);
+        return Err(err);
+    }
+    if let Err(err) = backend.start(&start_config) {
+        emit_failed_if(&admission, "backend-start", &err);
+        return Err(err);
+    }
+    emit_launched_if(&admission, &effective_hypervisor);
+    record_vm_readiness(name, InstanceReadiness::LaunchAccepted);
+    mvm_core::audit_emit!(VmStart, vm: name);
+    Ok(())
+}
+
 pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     let RunParams {
         flake_ref,
