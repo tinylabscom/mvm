@@ -47,6 +47,12 @@ MicroVMs don't use networking for host communication -- they use **vsock**:
 
 The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, Apple Container, and microvm.nix backends. Docker uses a unix socket instead.
 
+For Firecracker, the host-side vsock UDS is scoped to the running VM directory:
+`<vm-dir>/runtime/v.sock`. It is not a global or master socket. `mvmctl up`
+reserves the VM name before launch and rejects duplicate active/reserved names,
+because that name is the identity used to resolve the per-VM communication
+channel.
+
 ## No SSH
 
 MicroVMs have **no SSH access** by design. Communication is exclusively via vsock. This eliminates:

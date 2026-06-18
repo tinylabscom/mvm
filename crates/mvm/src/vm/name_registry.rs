@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use fs2::FileExt;
 use mvm_core::domain::instance::InstanceReadiness;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -12,6 +13,14 @@ use std::path::{Path, PathBuf};
 pub struct VmNameRegistry {
     /// Map from VM name to registration info.
     pub vms: HashMap<String, VmRegistration>,
+}
+
+/// Exclusive advisory lock for the VM name registry.
+///
+/// Keep this guard alive across load/mutate/save sequences that must be
+/// serialized across multiple `mvmctl` processes.
+pub struct VmNameRegistryLock {
+    _file: std::fs::File,
 }
 
 /// Registration info for a running or recently-running VM.
@@ -298,6 +307,33 @@ impl<'a> RegisterParams<'a> {
 /// Default registry file path.
 pub fn registry_path() -> PathBuf {
     PathBuf::from(mvm_core::config::mvm_share_dir()).join("vm-names.json")
+}
+
+/// Lock path paired with a registry file.
+pub fn registry_lock_path(registry_path: &Path) -> PathBuf {
+    registry_path.with_extension("json.lock")
+}
+
+/// Acquire an exclusive registry lock.
+///
+/// The registry file itself is written with atomic rename, so the lock lives in
+/// a stable sibling file that survives those renames.
+pub fn acquire_registry_lock(registry_path: &Path) -> Result<VmNameRegistryLock> {
+    let lock_path = registry_lock_path(registry_path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating VM name registry lock dir {}", parent.display()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("opening VM name registry lock {}", lock_path.display()))?;
+    file.lock_exclusive()
+        .with_context(|| format!("locking VM name registry {}", lock_path.display()))?;
+    Ok(VmNameRegistryLock { _file: file })
 }
 
 /// Generate a unique VM name with a random suffix.
@@ -738,5 +774,24 @@ mod tests {
             r.last_readiness_change_at.as_deref(),
             Some("2025-01-01T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn registry_lock_path_is_stable_sibling_file() {
+        let path = PathBuf::from("/tmp/mvm/vm-names.json");
+        assert_eq!(
+            registry_lock_path(&path),
+            PathBuf::from("/tmp/mvm/vm-names.json.lock")
+        );
+    }
+
+    #[test]
+    fn acquire_registry_lock_creates_parent_and_lock_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nested").join("vm-names.json");
+
+        let _lock = acquire_registry_lock(&path).unwrap();
+
+        assert!(registry_lock_path(&path).is_file());
     }
 }

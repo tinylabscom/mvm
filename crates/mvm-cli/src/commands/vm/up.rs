@@ -1194,6 +1194,60 @@ fn write_host_only_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result
     std::fs::rename(&tmp, path)
 }
 
+struct VmNameReservation<'a> {
+    name: &'a str,
+    network: &'a str,
+    tags: std::collections::BTreeMap<String, String>,
+    expires_at: Option<String>,
+    auto_resume: bool,
+}
+
+fn reserve_vm_name(
+    registry_path: &std::path::Path,
+    reservation: VmNameReservation<'_>,
+) -> Result<()> {
+    let _lock = mvm::vm::name_registry::acquire_registry_lock(registry_path)?;
+    let mut registry = mvm::vm::name_registry::VmNameRegistry::load(registry_path)?;
+    if registry.lookup(reservation.name).is_some() {
+        anyhow::bail!(
+            "VM name {:?} is already reserved; stop the existing VM with `mvmctl down {}` or choose a different name",
+            reservation.name,
+            reservation.name
+        );
+    }
+    registry.register_with_metadata(mvm::vm::name_registry::RegisterParams {
+        name: reservation.name,
+        vm_dir: "",
+        network: reservation.network,
+        guest_ip: None,
+        slot_index: 0,
+        tags: reservation.tags,
+        expires_at: reservation.expires_at,
+        auto_resume: reservation.auto_resume,
+    })?;
+    registry.save(registry_path)
+}
+
+fn reserve_launch_vm_name(
+    registry_path: &std::path::Path,
+    vm_name: &str,
+    network_name: &str,
+    sandbox_tags: &std::collections::BTreeMap<String, String>,
+    sandbox_ttl: Option<std::time::Duration>,
+    auto_resume: bool,
+) -> Result<()> {
+    reserve_vm_name(
+        registry_path,
+        VmNameReservation {
+            name: vm_name,
+            network: network_name,
+            tags: sandbox_tags.clone(),
+            expires_at: sandbox_ttl.map(mvm_core::util::time::utc_plus_duration),
+            auto_resume,
+        },
+    )
+}
+
 /// Resolve the `source_root` for an app's lockfile path. For
 /// `Source::LocalPath { path, .. }` the source root is the directory
 /// the path resolves against — relative paths root at the IR file's
@@ -1918,25 +1972,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             generator.next().unwrap_or_else(|| "vm-0".to_string())
         }),
     };
-
-    // Register the VM name in the persistent registry (best-effort).
     let registry_path = mvm::vm::name_registry::registry_path();
-    if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
-        // Deregister stale entry with the same name if it exists
-        registry.deregister(&vm_name);
-        let expires_at = sandbox_ttl.map(mvm_core::util::time::utc_plus_duration);
-        let _ = registry.register_with_metadata(mvm::vm::name_registry::RegisterParams {
-            name: &vm_name,
-            vm_dir: "",
-            network: network_name,
-            guest_ip: None,
-            slot_index: 0,
-            tags: sandbox_tags.clone(),
-            expires_at,
-            auto_resume,
-        });
-        let _ = registry.save(&registry_path);
-    }
 
     // Admission ledger. One per `cmd_run`; the watch-mode loop
     // reuses it across rebuilds so synthesized plans share a single
@@ -2014,6 +2050,14 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             emit_failed_if(&admission, "backend-start", &e);
             return Err(e);
         }
+        reserve_launch_vm_name(
+            &registry_path,
+            &vm_name,
+            network_name,
+            &sandbox_tags,
+            sandbox_ttl,
+            auto_resume,
+        )?;
         if let Err(e) = backend.start(&start_config) {
             emit_failed_if(&admission, "backend-start", &e);
             return Err(e);
@@ -2468,6 +2512,14 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             2,
             &format!("Restoring VM '{}' from snapshot", vm_name_owned),
         );
+        reserve_launch_vm_name(
+            &registry_path,
+            &vm_name_owned,
+            network_name,
+            &sandbox_tags,
+            sandbox_ttl,
+            auto_resume,
+        )?;
         if let Err(e) =
             microvm::restore_from_template_snapshot(tmpl, &run_config, &snap_dir, snap_info)
         {
@@ -2589,6 +2641,14 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                     emit_failed_if(&admission_main, "backend-start", &e);
                     return Err(e);
                 }
+                reserve_launch_vm_name(
+                    &registry_path,
+                    &vm_name_owned,
+                    network_name,
+                    &sandbox_tags,
+                    sandbox_ttl,
+                    auto_resume,
+                )?;
                 if let Err(e) = backend.start(&start_config) {
                     emit_failed_if(&admission_main, "backend-start", &e);
                     return Err(e);
@@ -3041,6 +3101,35 @@ mod runtime_overlay_attach_tests {
             sc.runtime_overlay_path.is_none(),
             "cold cache must not attach (legacy boot)"
         );
+    }
+}
+
+#[cfg(test)]
+mod vm_name_reservation_tests {
+    use super::*;
+
+    fn reservation<'a>(name: &'a str, network: &'a str) -> VmNameReservation<'a> {
+        VmNameReservation {
+            name,
+            network,
+            tags: std::collections::BTreeMap::new(),
+            expires_at: None,
+            auto_resume: true,
+        }
+    }
+
+    #[test]
+    fn duplicate_reservation_fails_without_replacing_original() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vm-names.json");
+
+        reserve_vm_name(&path, reservation("vm-a", "default")).unwrap();
+        let err = reserve_vm_name(&path, reservation("vm-a", "isolated")).unwrap_err();
+
+        assert!(err.to_string().contains("already reserved"));
+        let registry = mvm::vm::name_registry::VmNameRegistry::load(&path).unwrap();
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.lookup("vm-a").unwrap().network, "default");
     }
 }
 

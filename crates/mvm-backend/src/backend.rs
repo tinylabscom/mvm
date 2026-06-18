@@ -171,7 +171,9 @@ impl VmBackend for FirecrackerBackend {
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| std::path::Path::new("."));
         mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
         crate::base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
+        let mut slot_reservation = microvm::SlotReservationGuard::new(&fc_config.run_config.slot);
         microvm::run_from_build(&fc_config.run_config)?;
+        slot_reservation.defuse();
         Ok(VmId(fc_config.run_config.name.clone()))
     }
 

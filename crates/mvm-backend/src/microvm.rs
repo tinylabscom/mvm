@@ -94,6 +94,37 @@ impl Drop for TapGuard {
     }
 }
 
+/// Removes a slot reservation if launch fails before real run-info is written.
+pub struct SlotReservationGuard {
+    slot: Option<VmSlot>,
+}
+
+impl SlotReservationGuard {
+    pub fn new(slot: &VmSlot) -> Self {
+        Self {
+            slot: Some(slot.clone()),
+        }
+    }
+
+    pub fn defuse(&mut self) {
+        self.slot = None;
+    }
+}
+
+impl Drop for SlotReservationGuard {
+    fn drop(&mut self) {
+        if let Some(ref slot) = self.slot
+            && let Err(e) = release_slot_reservation(slot)
+        {
+            warn!(
+                vm = %slot.name,
+                slot = slot.index,
+                "SlotReservationGuard: cleanup failed: {e}"
+            );
+        }
+    }
+}
+
 /// RAII reaper for the per-VM substitution endpoint when it is spawned
 /// **before** boot (the placeholders it mints must ride the boot
 /// cmdline). If a later boot step fails and returns before the endpoint
@@ -156,16 +187,22 @@ pub fn resolve_running_vm_dir(name: &str) -> Result<String> {
     Ok(format!("{}/{}", abs_vms, name))
 }
 
-/// Firecracker binds the vsock UDS at `<dir>/v.sock`, but the host-side
-/// transport resolves it via `vsock_uds_path` = `<dir>/runtime/v.sock`
-/// (the convention the template/slot launch and the mock agent share).
-/// Expose the socket under `runtime/` so `wait_for_guest_agent` finds it.
-/// Best-effort; a dangling symlink until InstanceStart binds the socket.
-fn expose_vsock_runtime_symlink(dir: &str) {
+fn firecracker_vsock_uds_path(dir: &str) -> String {
+    format!("{dir}/runtime/v.sock")
+}
+
+/// Prepare the per-VM runtime directory that will hold the live vsock UDS.
+///
+/// The host transport already resolves `<vm_dir>/runtime/v.sock`, so we bind
+/// the socket there directly instead of creating a root-level `v.sock` plus a
+/// symlink. That keeps the communication path instance-scoped and avoids stale
+/// alias files after stop/restart.
+fn prepare_vsock_runtime_dir(dir: &str) {
+    let vsock = firecracker_vsock_uds_path(dir);
     if let Err(e) = run_in_vm(&format!(
-        "mkdir -p {dir}/runtime && ln -sf ../v.sock {dir}/runtime/v.sock"
+        "mkdir -p {dir}/runtime && rm -f {vsock} {dir}/v.sock"
     )) {
-        warn!("failed to expose vsock UDS under runtime/: {e}");
+        warn!("failed to prepare runtime vsock dir: {e}");
     }
 }
 
@@ -188,11 +225,12 @@ pub fn vm_console_log_path(vm_name: &str) -> Result<std::path::PathBuf> {
 #[instrument(skip_all)]
 fn start_firecracker_daemon(abs_dir: &str) -> Result<()> {
     ui::info("Starting Firecracker...");
+    let vsock = firecracker_vsock_uds_path(abs_dir);
     run_in_vm_visible(&format!(
         r#"
         mkdir -p {dir}
         sudo rm -f {socket}
-        rm -f {dir}/v.sock
+        rm -f {vsock} {dir}/v.sock
         touch {dir}/console.log {dir}/firecracker.log
         sudo bash -c 'nohup setsid firecracker --api-sock {socket} --enable-pci \
             </dev/null >{dir}/console.log 2>{dir}/firecracker.log &
@@ -219,11 +257,12 @@ fn start_firecracker_daemon(abs_dir: &str) -> Result<()> {
 #[instrument(skip_all)]
 pub fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
     ui::info("Starting Firecracker...");
+    let vsock = firecracker_vsock_uds_path(abs_dir);
     run_in_vm_visible(&format!(
         r#"
         mkdir -p {dir}
         sudo rm -f {socket}
-        rm -f {dir}/v.sock
+        rm -f {vsock} {dir}/v.sock
         touch {dir}/console.log {dir}/firecracker.log
         sudo bash -c 'nohup setsid firecracker --api-sock {socket} --enable-pci \
             </dev/null >{dir}/console.log 2>{dir}/firecracker.log &
@@ -404,16 +443,16 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
     )?;
 
     ui::info("Setting vsock device...");
+    prepare_vsock_runtime_dir(abs_dir);
+    let vsock = firecracker_vsock_uds_path(abs_dir);
     api_put(
         "/vsock",
         &format!(
-            r#"{{"vsock_id": "vsock0", "guest_cid": {cid}, "uds_path": "{dir}/v.sock"}}"#,
+            r#"{{"vsock_id": "vsock0", "guest_cid": {cid}, "uds_path": "{vsock}"}}"#,
             cid = mvm_guest::vsock::GUEST_CID,
-            dir = abs_dir,
+            vsock = vsock,
         ),
     )?;
-
-    expose_vsock_runtime_symlink(abs_dir);
 
     Ok(())
 }
@@ -465,7 +504,11 @@ pub fn start() -> Result<()> {
         );
 
     // Make vsock socket accessible to the current user
-    if let Err(e) = run_in_vm(&format!("sudo chmod 0666 {}/v.sock 2>/dev/null", abs_dir)) {
+    let vsock = firecracker_vsock_uds_path(&abs_dir);
+    if let Err(e) = run_in_vm(&format!(
+        "sudo chmod 0666 {vsock} 2>/dev/null",
+        vsock = vsock,
+    )) {
         warn!("failed to chmod vsock socket: {e}");
     }
 
@@ -519,10 +562,11 @@ pub fn stop() -> Result<()> {
         sudo pkill -x firecracker 2>/dev/null || true
         sudo rm -f {socket}
         rm -f {dir}/.mvm-run-info
-        rm -f {dir}/v.sock
+        rm -f {vsock} {dir}/v.sock
         "#,
         dir = MICROVM_DIR,
         socket = API_SOCKET,
+        vsock = firecracker_vsock_uds_path(MICROVM_DIR),
     ))?;
 
     // Tear down networking
@@ -810,7 +854,11 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     )?;
 
     // Make vsock socket accessible to the current user
-    if let Err(e) = run_in_vm(&format!("sudo chmod 0666 {}/v.sock 2>/dev/null", abs_dir)) {
+    let vsock = firecracker_vsock_uds_path(&abs_dir);
+    if let Err(e) = run_in_vm(&format!(
+        "sudo chmod 0666 {vsock} 2>/dev/null",
+        vsock = vsock,
+    )) {
         warn!("failed to chmod vsock socket: {e}");
     }
 
@@ -965,6 +1013,7 @@ pub fn restore_from_template_snapshot(
     // Start Firecracker daemon in per-VM directory (before acquiring lock)
     start_vm_firecracker(&abs_dir, &abs_socket)?;
     let mut fc_guard = FirecrackerGuard::new(&abs_dir);
+    let vsock_path = firecracker_vsock_uds_path(&abs_dir);
 
     // Atomic operation: create symlinks + load snapshot (serialized by flock)
     ui::info("Loading snapshot...");
@@ -985,7 +1034,7 @@ pub fn restore_from_template_snapshot(
             # Create symlinks to this instance's drives and vsock socket location
             ln -s {config} {runtime_dir}/config.ext4
             ln -s {secrets} {runtime_dir}/secrets.ext4
-            ln -s {abs_dir}/v.sock {runtime_dir}/v.sock
+            ln -s {vsock} {runtime_dir}/v.sock
 
             # Load snapshot (Firecracker opens the drives via symlinks)
             response=$(sudo curl -s -w "\n%{{http_code}}" --unix-socket {socket} -X PUT \
@@ -1004,6 +1053,7 @@ pub fn restore_from_template_snapshot(
         lock_file = lock_file,
         config = config_drive,
         secrets = secrets_drive,
+        vsock = &vsock_path,
         socket = abs_socket,
         vmstate = vmstate_path,
         mem = mem_path,
@@ -1014,13 +1064,15 @@ pub fn restore_from_template_snapshot(
     api_patch_socket(&abs_socket, "/vm", r#"{"state": "Resumed"}"#)?;
 
     // Make vsock socket accessible
-    if let Err(e) = run_in_vm(&format!("sudo chmod 0666 {}/v.sock 2>/dev/null", abs_dir)) {
+    if let Err(e) = run_in_vm(&format!(
+        "sudo chmod 0666 {vsock_path} 2>/dev/null",
+        vsock_path = &vsock_path,
+    )) {
         warn!("failed to chmod vsock socket: {e}");
     }
 
     // Post-restore: remount drives and restart services with fresh config/secrets.
     if !config.config_files.is_empty() || !config.secret_files.is_empty() {
-        let vsock_path = format!("{}/v.sock", abs_dir);
         ui::info("Sending post-restore signal (remounting drives, restarting services)...");
         // Wait for guest agent to be reachable after resume (may take a moment).
         let mut agent_ready = false;
@@ -1525,9 +1577,10 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
     }
 
     // Layer 3: Vsock socket exists?
+    let vsock_path = firecracker_vsock_uds_path(&abs_dir);
     let sock_check = run_in_vm_stdout(&format!(
-        "[ -S '{dir}/v.sock' ] && echo yes || echo no",
-        dir = abs_dir,
+        "[ -S '{vsock}' ] && echo yes || echo no",
+        vsock = &vsock_path,
     ))?;
     result.vsock_exists = sock_check.trim() == "yes";
     if !result.vsock_exists && result.fc_alive {
@@ -1569,7 +1622,6 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
 
     // Layer 6: Guest agent reachable? (short timeout)
     if result.vsock_exists {
-        let vsock_path = format!("{}/v.sock", abs_dir);
         match mvm_guest::vsock::ping_at(&vsock_path) {
             Ok(true) => {
                 result.agent_reachable = true;
@@ -1597,7 +1649,6 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
 
     // Layer 7: If agent reachable, get detailed status
     if result.agent_reachable {
-        let vsock_path = format!("{}/v.sock", abs_dir);
         if let Ok(mvm_guest::vsock::GuestResponse::WorkerStatus {
             status,
             last_busy_at,
@@ -1668,32 +1719,59 @@ pub fn list_vms() -> Result<Vec<RunInfo>> {
 
 /// Allocate the next free slot index by scanning existing VMs.
 pub fn allocate_slot(name: &str) -> Result<VmSlot> {
+    let q_name = shell_quote(name);
+    let q_json_name = shell_quote(&serde_json::to_string(name)?);
     let output = run_in_vm_stdout(&format!(
-        r#"for f in {dir}/*/run-info.json; do [ -f "$f" ] && cat "$f"; done 2>/dev/null || true"#,
+        r#"
+        set -e
+        mkdir -p {dir}
+        (
+          flock -x 9
+          used="$(
+            for f in {dir}/*/run-info.json; do
+              [ -f "$f" ] || continue
+              sed -n 's/.*"slot_index":\([0-9][0-9]*\).*/\1/p' "$f"
+            done 2>/dev/null || true
+          )"
+          for i in $(seq 0 252); do
+            if ! printf '%s\n' "$used" | grep -qx "$i"; then
+              vm_dir={dir}/{name}
+              mkdir -p "$vm_dir"
+              printf '{{"schema_version":1,"mode":"starting","name":%s,"slot_index":%s,"slot_reserved":true}}\n' {json_name} "$i" > "$vm_dir/run-info.json"
+              echo "$i"
+              exit 0
+            fi
+          done
+          exit 2
+        ) 9>{dir}/.slot.lock
+        "#,
         dir = VMS_DIR,
+        name = q_name,
+        json_name = q_json_name,
     ))?;
 
-    let mut used_indices: Vec<u8> = Vec::new();
-    for line in output.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(info) = serde_json::from_str::<serde_json::Value>(line)
-            && let Some(idx) = info.get("slot_index").and_then(|v| v.as_u64())
-        {
-            used_indices.push(idx as u8);
-        }
-    }
+    let index = output
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().parse::<u8>().ok())
+        .ok_or_else(|| anyhow::anyhow!("No free VM slots available (max 253 VMs)"))?;
+    Ok(VmSlot::new(name, index))
+}
 
-    // Find first free index (0..253, since IP = index + 2, max 255)
-    for i in 0..253u8 {
-        if !used_indices.contains(&i) {
-            return Ok(VmSlot::new(name, i));
-        }
-    }
-
-    anyhow::bail!("No free VM slots available (max 253 VMs)")
+fn release_slot_reservation(slot: &VmSlot) -> Result<()> {
+    let q_name = shell_quote(&slot.name);
+    run_in_vm(&format!(
+        r#"
+        run_info={dir}/{name}/run-info.json
+        if [ -f {run_info} ] && grep -q '"slot_reserved":true' {run_info}; then
+          rm -f {run_info}
+        fi
+        "#,
+        dir = VMS_DIR,
+        name = q_name,
+        run_info = "$run_info",
+    ))
+    .map(|_| ())
 }
 
 /// Generate shell commands to inject `DriveFile`s into a mounted drive.
@@ -2162,16 +2240,17 @@ pub fn configure_flake_microvm_with_drives_dir(
     )?;
 
     ui::info("Setting vsock device...");
+    prepare_vsock_runtime_dir(drives_dir);
+    let vsock = firecracker_vsock_uds_path(drives_dir);
     api_put_socket(
         socket,
         "/vsock",
         &format!(
-            r#"{{"vsock_id": "vsock0", "guest_cid": {cid}, "uds_path": "{dir}/v.sock"}}"#,
+            r#"{{"vsock_id": "vsock0", "guest_cid": {cid}, "uds_path": "{vsock}"}}"#,
             cid = mvm_guest::vsock::GUEST_CID,
-            dir = drives_dir,
+            vsock = vsock,
         ),
     )?;
-    expose_vsock_runtime_symlink(drives_dir);
 
     // Virtio-balloon. Only attached when the workload opted in via
     // `mem_initial`. The device boots pre-inflated to `memory -
@@ -2944,6 +3023,14 @@ mod tests {
         assert!(f.name.is_empty());
         assert!(f.content.is_empty());
         assert_eq!(f.mode, 0o444);
+    }
+
+    #[test]
+    fn firecracker_vsock_uds_lives_under_vm_runtime_dir() {
+        assert_eq!(
+            firecracker_vsock_uds_path("/builder/microvm/vms/vm-a"),
+            "/builder/microvm/vms/vm-a/runtime/v.sock"
+        );
     }
 
     fn baseline_run_config(mem_initial: Option<u32>) -> FlakeRunConfig {
