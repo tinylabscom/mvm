@@ -101,7 +101,7 @@ Every key fingerprint, key rotation, and key-unwrap-failure event lands in the a
 ## Out of scope (named, like ADR-002)
 
 - **Host filesystem encryption (FDE).** That's the user's concern — full-disk encryption protects host backups; this ADR protects per-volume at-rest exposure during active workload runs.
-- **Per-byte traffic audit.** Aggregated `flow_bytes` only ([Plan 101](../plans/101-in-guest-volume-encryption-and-gateway-audit.md) W8); coverage of every byte through the bridge is structural (W6.A amendment above), capture is opt-in future mode.
+- **Per-byte traffic audit.** Aggregated `flow_bytes` only ([Plan 101](../plans/101-in-guest-volume-encryption-and-gateway-audit.md) W8); coverage of every byte through the bridge is structural (W6.A amendment above), capture is opt-in future mode ([Plan 203](../plans/203-forensic-network-transcript-capture.md)).
 - **Audit metadata at rest.** The chain itself (5-tuples, byte counts, key fingerprints) is plaintext on host disk under `~/.mvm/audit/<tenant>.jsonl`. Tenant *data* is encrypted; tenant *behavior metadata* is not. Future claim 10.1 candidate; not in this sprint.
 
 ### Added by W6.A amendment

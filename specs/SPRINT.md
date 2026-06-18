@@ -2506,7 +2506,7 @@ Out of scope for this sprint:
 - Side-channel information leakage via flow timing — inherent to any flow audit; accepted in ADR-058 amendment landed via [Plan 103](plans/103-w6a-implementation-tracker.md).
 - Audit-metadata-at-rest encryption — the chain itself is plaintext on host disk under `~/.mvm/audit/<tenant>.jsonl`. Tenant *data* is encrypted (claim 10 leg 1); tenant *metadata* is not. Future claim 10.1 candidate; not this sprint.
 - Multi-user shared host with the same UID — same-UID local attacker can read the gateway subscriber socket; documented as accepted. Mode 0700 covers cross-UID; cross-UID-same-user is out of scope.
-- Per-byte content capture by default — coverage (every byte traverses the bridge) is structural; full pcap into the chain is opt-in for forensics (future `network_audit.mode = full_pcap`), not default. Aggregated `FlowBytes` lands in W8.
+- Per-byte content capture by default — coverage (every byte traverses the bridge) is structural; full pcap into the chain is opt-in for forensics (future `network_audit.mode = full_pcap`, see Plan 203), not default. Aggregated `FlowBytes` lands in W8.
 - L7 URL inspection (path-level allowlist) — composes via `L7EgressProxy` Phase 2 (TLS MITM with workload-CA trust); substrate exists, finalization is a separate plan ([Plan 34 / ADR-006](adrs/006-name-constrained-egress-ca.md)).
 - DNS-over-HTTPS bypass mitigation — separate Plan 74 follow-up: mandatory-deny well-known DoH endpoints.
 
