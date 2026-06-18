@@ -15,9 +15,9 @@
 //! 4. This process binds the control UDS (mode 0700) and serves until killed.
 //!
 //! It holds **no signing key** — it verifies control messages against the host
-//! signer *public* key and forwards audit entries to the per-VM audit-signer
-//! that holds the private key. The moat (keyless parser / key-holding signer)
-//! is preserved; this is the keyless half.
+//! signer *public* key and forwards audit/signing requests to its supervised
+//! signer-helper child. The moat (keyless parser / key-holding signer) is
+//! preserved; this is the keyless half.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -57,8 +57,8 @@ fn is_worker_mode() -> bool {
         .unwrap_or(false)
 }
 
-fn worker_pid_path(cfg: &HostAgentConfig) -> Result<PathBuf> {
-    Ok(mvm_core::config::host_agent_worker_pid(&cfg.tenant_id))
+fn worker_pid_path(cfg: &HostAgentConfig) -> PathBuf {
+    mvm_core::config::host_agent_worker_pid(&cfg.tenant_id)
 }
 
 fn read_pid(path: &Path) -> Option<libc::pid_t> {
@@ -66,10 +66,14 @@ fn read_pid(path: &Path) -> Option<libc::pid_t> {
 }
 
 fn pid_alive(pid: libc::pid_t) -> bool {
+    // SAFETY: kill(pid, 0) only probes process existence/permission and does
+    // not deliver a signal.
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
 fn kill_process_group(pgid: libc::pid_t, sig: libc::c_int) {
+    // SAFETY: negative pid targets the process group created for the worker by
+    // setsid() below. Errors are intentionally ignored by callers during cleanup.
     unsafe {
         libc::kill(-pgid, sig);
     }
@@ -124,6 +128,9 @@ async fn spawn_worker(raw_cfg: &[u8]) -> Result<Child> {
         .stderr(Stdio::null())
         .kill_on_drop(true);
     #[cfg(unix)]
+    // SAFETY: pre_exec runs after fork and before exec. The closure only calls
+    // setsid(), which is async-signal-safe, to put the worker and its helper
+    // descendants in a process group the supervisor can reap.
     unsafe {
         command.as_std_mut().pre_exec(|| {
             let rc = libc::setsid();
@@ -315,7 +322,7 @@ async fn run_worker_once(cfg: HostAgentConfig) -> Result<()> {
 }
 
 async fn supervise_worker(cfg: HostAgentConfig, raw_cfg: Vec<u8>) -> Result<()> {
-    let worker_pid_path = worker_pid_path(&cfg)?;
+    let worker_pid_path = worker_pid_path(&cfg);
     reap_stale_worker_group(&worker_pid_path);
     let mut startup_failures = 0u32;
 
