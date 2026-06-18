@@ -337,6 +337,29 @@ pub fn vm_state_dir(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+// ============================================================================
+// Persistent `mvmctl machine` specs
+// ============================================================================
+//
+// Named machines are product-level state, not a VMM runtime directory. Keep
+// their declarative spec under `<mvm_data_dir>/machines/<name>/` so runtime
+// sockets/pids under `vms/` can be replaced without migrating the UX contract.
+
+/// Root of persistent named machine specs: `<mvm_data_dir>/machines/`.
+pub fn machine_state_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir()).join("machines")
+}
+
+/// Persistent named machine directory: `<mvm_data_dir>/machines/<name>/`.
+pub fn machine_state_dir(name: &str) -> std::path::PathBuf {
+    machine_state_root().join(name)
+}
+
+/// Persistent named machine spec: `<mvm_data_dir>/machines/<name>/machine.json`.
+pub fn machine_spec_path(name: &str) -> std::path::PathBuf {
+    machine_state_dir(name).join("machine.json")
+}
+
 /// Root of the per-tenant host-agent daemon dirs: `<mvm_data_dir>/host-agent`.
 /// Each `<tenant>/` subdir holds one resident daemon's control UDS, pid file,
 /// and spawn lock. Enumerated by `mvmctl doctor` to report daemon state.
@@ -899,6 +922,27 @@ mod tests {
         assert_eq!(
             vm_state_dir("foo").join(vsock_socket_filename(5252)),
             vm_vsock_port_socket("foo", 5252)
+        );
+
+        env.remove("MVM_DATA_DIR");
+    }
+
+    #[test]
+    fn machine_state_paths_honor_data_dir() {
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", "/custom/data");
+
+        assert_eq!(
+            machine_state_root(),
+            std::path::PathBuf::from("/custom/data/machines")
+        );
+        assert_eq!(
+            machine_state_dir("web"),
+            std::path::PathBuf::from("/custom/data/machines/web")
+        );
+        assert_eq!(
+            machine_spec_path("web"),
+            std::path::PathBuf::from("/custom/data/machines/web/machine.json")
         );
 
         env.remove("MVM_DATA_DIR");

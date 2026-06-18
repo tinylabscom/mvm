@@ -34,6 +34,8 @@
 //!   path key)
 //! - `mvmctl config set <key> <value>` → `ConfigChange`
 //! - `mvmctl config show` → **no** audit entry
+//! - `mvmctl machine create --name <name> --image <ref>` → `ConfigChange`
+//! - `mvmctl machine rm <name> --yes` → `ConfigChange`
 //! - `mvmctl cleanup --keep 5` → `SlotPrune`
 //!   (`source=cleanup removed=N`; the VM-dependent Step 1 / Step 3
 //!   degrade to warnings when the dev VM isn't reachable, but
@@ -768,6 +770,96 @@ fn config_set_emits_config_change_audit_entry() {
         log.contains("key=default_cpus value=4"),
         "config_change detail must carry the key+value pair. \
          Full log:\n{log}"
+    );
+}
+
+#[test]
+fn machine_create_emits_config_change_audit_entry() {
+    let sandbox = AuditSandbox::new();
+    let output = sandbox
+        .mvmctl()
+        .args([
+            "machine",
+            "create",
+            "--name",
+            "web",
+            "--image",
+            "ghcr.io/example/web:latest",
+        ])
+        .output()
+        .expect("spawn mvmctl");
+    assert!(
+        output.status.success(),
+        "mvmctl machine create failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let log = read_audit_log(&sandbox.audit_log_path());
+    let hits = count_entries_with_kind(&log, "config_change");
+    assert!(
+        hits >= 1,
+        "expected ≥1 config_change entry in audit log, got {hits}. \
+         Full log:\n{log}"
+    );
+    assert!(
+        log.contains("\"vm_name\":\"web\""),
+        "machine create audit entry must carry the machine name as vm_name. \
+         Full log:\n{log}"
+    );
+    assert!(
+        log.contains("action=machine.create force=false"),
+        "machine create audit entry must carry the action without image metadata. \
+         Full log:\n{log}"
+    );
+}
+
+#[test]
+fn machine_rm_emits_config_change_audit_entry() {
+    let sandbox = AuditSandbox::new();
+    let create = sandbox
+        .mvmctl()
+        .args([
+            "machine",
+            "create",
+            "--name",
+            "web",
+            "--image",
+            "ghcr.io/example/web:latest",
+        ])
+        .output()
+        .expect("spawn mvmctl");
+    assert!(
+        create.status.success(),
+        "mvmctl machine create failed: stderr={}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    let remove = sandbox
+        .mvmctl()
+        .args(["machine", "rm", "web", "--yes"])
+        .output()
+        .expect("spawn mvmctl");
+    assert!(
+        remove.status.success(),
+        "mvmctl machine rm failed: stderr={}",
+        String::from_utf8_lossy(&remove.stderr)
+    );
+
+    let log = read_audit_log(&sandbox.audit_log_path());
+    let hits = count_entries_with_kind(&log, "config_change");
+    assert!(
+        hits >= 2,
+        "expected create+rm config_change entries in audit log, got {hits}. \
+         Full log:\n{log}"
+    );
+    assert!(
+        log.contains("\"vm_name\":\"web\""),
+        "machine rm audit entry must carry the machine name as vm_name. \
+         Full log:\n{log}"
+    );
+    assert!(
+        log.contains("action=machine.rm"),
+        "machine rm audit entry must carry the action. Full log:\n{log}"
     );
 }
 
