@@ -129,9 +129,10 @@ pub struct Manifest {
     #[serde(default = "default_profile")]
     pub profile: String,
 
-    /// Firecracker host-side vCPU count.
-    #[serde(default = "default_vcpus")]
-    pub vcpus: u8,
+    /// Host-side CPU count. `vcpus` remains an accepted alias so
+    /// older manifests keep parsing.
+    #[serde(default = "default_vcpus", alias = "vcpus")]
+    pub cpus: u8,
 
     /// Human-readable memory size (`512M`, `1G`, `1024`, …). Acts as
     /// the *cap* on guest memory; when [`mem_initial`](Self::mem_initial)
@@ -147,6 +148,25 @@ pub struct Manifest {
     /// strictly between zero and `mem`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_initial: Option<String>,
+
+    /// Machine-oriented network default. `false` keeps the deny-all
+    /// posture; `true` requests the dev-tier preset. `[network]`
+    /// narrows it further with explicit allow-hosts.
+    #[serde(default)]
+    pub net: bool,
+
+    /// Optional machine-oriented host allow-list. Empty means "no
+    /// narrowing beyond `net`".
+    #[serde(default, skip_serializing_if = "ManifestNetwork::is_empty")]
+    pub network: ManifestNetwork,
+
+    /// Optional machine-oriented auth hints.
+    #[serde(default, skip_serializing_if = "ManifestAuth::is_empty")]
+    pub auth: ManifestAuth,
+
+    /// Optional development-only machine hints.
+    #[serde(default, skip_serializing_if = "ManifestDev::is_empty")]
+    pub dev: ManifestDev,
 
     /// Human-readable data disk size; `"0"` means no data disk.
     #[serde(default = "default_data_disk")]
@@ -209,8 +229,8 @@ impl Manifest {
                     .with_context(|| format!("invalid `flake` field: {flake:?}"))?;
             }
         }
-        if self.vcpus == 0 {
-            return Err(anyhow!("manifest field `vcpus` must be >= 1"));
+        if self.cpus == 0 {
+            return Err(anyhow!("manifest field `cpus` must be >= 1"));
         }
         let mem = parse_human_size(&self.mem)
             .with_context(|| format!("invalid `mem` field: {:?}", self.mem))?;
@@ -238,6 +258,19 @@ impl Manifest {
         }
         let _ = parse_human_size(&self.data_disk)
             .with_context(|| format!("invalid `data_disk` field: {:?}", self.data_disk))?;
+        for entry in &self.network.allow_hosts {
+            parse_allow_host(entry)?;
+        }
+        for cmd in &self.dev.init {
+            if cmd.trim().is_empty() {
+                return Err(anyhow!(
+                    "manifest field `dev.init` must not contain empty commands"
+                ));
+            }
+        }
+        for volume in &self.dev.volumes {
+            validate_volume_spec(volume)?;
+        }
         if let Some(name) = self.name.as_deref() {
             validate_template_name(name)
                 .with_context(|| format!("invalid `name` field: {:?}", name))?;
@@ -256,6 +289,22 @@ impl Manifest {
     /// rather than a Nix flake.
     pub fn is_image_source(&self) -> bool {
         self.image.is_some()
+    }
+
+    /// Typed machine-oriented view of the manifest. Only image-backed
+    /// manifests produce one; flake-backed manifests return `None`.
+    pub fn machine_workflow(&self) -> Option<ManifestMachineWorkflow> {
+        Some(ManifestMachineWorkflow {
+            image: self.image.clone()?,
+            net: self.net,
+            allow_hosts: self.network.allow_hosts.clone(),
+            ssh_agent: self.auth.ssh_agent,
+            init: self.dev.init.clone(),
+            volumes: self.dev.volumes.clone(),
+            cpus: u32::from(self.cpus),
+            mem: self.mem.clone(),
+            mem_initial: self.mem_initial.clone(),
+        })
     }
 
     /// Memory cap in MiB, parsed from the human-readable string.
@@ -280,6 +329,109 @@ impl Manifest {
         parse_human_size(&self.data_disk)
             .with_context(|| format!("invalid `data_disk` field: {:?}", self.data_disk))
     }
+}
+
+fn parse_allow_host(entry: &str) -> Result<crate::network_policy::HostPort> {
+    if let Some((host, port)) = entry.rsplit_once(':')
+        && port.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return format!("{host}:{port}")
+            .parse()
+            .with_context(|| format!("invalid allow_hosts entry: {entry:?}"));
+    }
+    let host = entry.trim();
+    if host.is_empty() {
+        return Err(anyhow!("invalid allow_hosts entry: {entry:?}"));
+    }
+    Ok(crate::network_policy::HostPort::new(host, 443))
+}
+
+fn looks_like_volume_mode_typo(tail: &str) -> bool {
+    !tail.is_empty()
+        && tail.len() <= 8
+        && !tail.contains('/')
+        && tail.chars().all(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn validate_volume_spec(spec: &str) -> Result<()> {
+    let (host, rest) = spec
+        .split_once(':')
+        .ok_or_else(|| anyhow!("volume must be 'host:guest[:mode]', got {spec:?}"))?;
+    if host.is_empty() {
+        return Err(anyhow!("volume host path must not be empty: {spec:?}"));
+    }
+    let guest = match rest.rsplit_once(':') {
+        Some((path, "ro" | "rw")) => path,
+        Some((_, tail)) if looks_like_volume_mode_typo(tail) => {
+            return Err(anyhow!(
+                "volume mode must be 'ro' or 'rw' when present, got {tail:?} in {spec:?}"
+            ));
+        }
+        _ => rest,
+    };
+    if guest.is_empty() {
+        return Err(anyhow!("volume guest path must not be empty: {spec:?}"));
+    }
+    if !guest.starts_with('/') {
+        return Err(anyhow!(
+            "volume guest path must be absolute (start with '/'): {spec:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestNetwork {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_hosts: Vec<String>,
+}
+
+impl ManifestNetwork {
+    fn is_empty(&self) -> bool {
+        self.allow_hosts.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestAuth {
+    #[serde(default)]
+    pub ssh_agent: bool,
+}
+
+impl ManifestAuth {
+    fn is_empty(&self) -> bool {
+        !self.ssh_agent
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestDev {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub init: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<String>,
+}
+
+impl ManifestDev {
+    fn is_empty(&self) -> bool {
+        self.init.is_empty() && self.volumes.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestMachineWorkflow {
+    pub image: String,
+    pub net: bool,
+    pub allow_hosts: Vec<String>,
+    pub ssh_agent: bool,
+    pub init: Vec<String>,
+    pub volumes: Vec<String>,
+    pub cpus: u32,
+    pub mem: String,
+    pub mem_initial: Option<String>,
 }
 
 /// If exactly one of `mvm.toml` / `Mvmfile.toml` exists in `dir`,
@@ -546,7 +698,7 @@ impl PersistedManifest {
             manifest_hash,
             flake_ref: manifest.flake_ref().to_string(),
             profile: manifest.profile.clone(),
-            vcpus: manifest.vcpus,
+            vcpus: manifest.cpus,
             mem_mib,
             mem_initial_mib,
             data_disk_mib,
@@ -632,9 +784,14 @@ mod tests {
         let m = Manifest::from_toml_str(minimal_manifest_toml()).expect("parses");
         assert_eq!(m.flake_ref(), ".");
         assert_eq!(m.profile, "default");
-        assert_eq!(m.vcpus, 2);
+        assert_eq!(m.cpus, 2);
         assert_eq!(m.mem, "1024M");
         assert_eq!(m.data_disk, "0");
+        assert!(!m.net);
+        assert!(m.network.allow_hosts.is_empty());
+        assert!(!m.auth.ssh_agent);
+        assert!(m.dev.init.is_empty());
+        assert!(m.dev.volumes.is_empty());
         assert!(m.name.is_none());
         assert_eq!(m.schema_version, MANIFEST_SCHEMA_VERSION);
     }
@@ -674,7 +831,7 @@ mod tests {
     fn image_only_parses_and_is_image_source() {
         let toml = r#"
             image = "alpine:3.20"
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
         "#;
         let m = Manifest::from_toml_str(toml).expect("image-only parses");
@@ -696,7 +853,7 @@ mod tests {
     fn shell_meta_in_image_rejected() {
         let toml = r#"
             image = "alpine:3.20 ; rm -rf /"
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
         "#;
         let err = Manifest::from_toml_str(toml).expect_err("rejects shell meta in image");
@@ -707,7 +864,7 @@ mod tests {
     fn empty_image_rejected() {
         let toml = r#"
             image = ""
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
         "#;
         let err = Manifest::from_toml_str(toml).expect_err("rejects empty image");
@@ -733,7 +890,7 @@ mod tests {
         let m = Manifest::from_toml_str("").expect("parses");
         assert_eq!(m.flake_ref(), ".");
         assert_eq!(m.profile, "default");
-        assert_eq!(m.vcpus, 2);
+        assert_eq!(m.cpus, 2);
         assert_eq!(m.mem, "1024M");
         assert_eq!(m.data_disk, "0");
     }
@@ -781,15 +938,101 @@ mod tests {
     }
 
     #[test]
-    fn zero_vcpus_rejected() {
+    fn zero_cpus_rejected() {
         let toml = r#"
             flake = "."
             profile = "default"
-            vcpus = 0
+            cpus = 0
             mem = "1024M"
         "#;
-        let err = Manifest::from_toml_str(toml).expect_err("rejects 0 vcpus");
-        assert!(format!("{err:#}").contains("vcpus"));
+        let err = Manifest::from_toml_str(toml).expect_err("rejects 0 cpus");
+        assert!(format!("{err:#}").contains("cpus"));
+    }
+
+    #[test]
+    fn legacy_vcpus_alias_still_parses() {
+        let m = Manifest::from_toml_str(minimal_manifest_toml()).expect("parses");
+        assert_eq!(m.cpus, 2);
+    }
+
+    #[test]
+    fn machine_fields_parse_and_project() {
+        let toml = r#"
+            image = "python:3.12-alpine"
+            cpus = 4
+            mem = "8G"
+            mem_initial = "512M"
+            net = true
+
+            [network]
+            allow_hosts = ["api.example.com", "db.example.com:5432"]
+
+            [auth]
+            ssh_agent = true
+
+            [dev]
+            init = ["pip install -r requirements.txt"]
+            volumes = ["./src:/work:rw", "./cache:/cache"]
+        "#;
+        let m = Manifest::from_toml_str(toml).expect("parses");
+        let workflow = m.machine_workflow().expect("image-backed machine workflow");
+        assert!(m.net);
+        assert_eq!(m.network.allow_hosts.len(), 2);
+        assert!(m.auth.ssh_agent);
+        assert_eq!(m.dev.init, vec!["pip install -r requirements.txt"]);
+        assert_eq!(m.dev.volumes, vec!["./src:/work:rw", "./cache:/cache"]);
+        assert_eq!(workflow.cpus, 4);
+        assert_eq!(workflow.mem, "8G");
+        assert_eq!(workflow.mem_initial.as_deref(), Some("512M"));
+        assert_eq!(workflow.allow_hosts, m.network.allow_hosts);
+    }
+
+    #[test]
+    fn machine_workflow_is_none_for_flake_manifests() {
+        let m = Manifest::from_toml_str(minimal_manifest_toml()).expect("parses");
+        assert!(m.machine_workflow().is_none());
+    }
+
+    #[test]
+    fn invalid_allow_hosts_entry_is_rejected() {
+        let toml = r#"
+            image = "alpine:3.20"
+            cpus = 2
+            mem = "1024M"
+
+            [network]
+            allow_hosts = [":443", "db.example.com:notaport"]
+        "#;
+        let err = Manifest::from_toml_str(toml).expect_err("rejects invalid allow_hosts");
+        assert!(format!("{err:#}").contains("allow_hosts"));
+    }
+
+    #[test]
+    fn invalid_dev_volume_mode_is_rejected() {
+        let toml = r#"
+            image = "alpine:3.20"
+            cpus = 2
+            mem = "1024M"
+
+            [dev]
+            volumes = ["./src:/work:bogus"]
+        "#;
+        let err = Manifest::from_toml_str(toml).expect_err("rejects invalid volume mode");
+        assert!(format!("{err:#}").contains("volume mode"));
+    }
+
+    #[test]
+    fn dev_volume_guest_path_must_be_absolute() {
+        let toml = r#"
+            image = "alpine:3.20"
+            cpus = 2
+            mem = "1024M"
+
+            [dev]
+            volumes = ["./src:work"]
+        "#;
+        let err = Manifest::from_toml_str(toml).expect_err("rejects relative guest path");
+        assert!(format!("{err:#}").contains("guest path"));
     }
 
     #[test]
@@ -911,6 +1154,9 @@ mod tests {
         let m = Manifest::from_toml_str(minimal_manifest_toml()).unwrap();
         let json = serde_json::to_string(&m).unwrap();
         assert!(!json.contains("\"name\""));
+        assert!(!json.contains("\"network\""));
+        assert!(!json.contains("\"auth\""));
+        assert!(!json.contains("\"dev\""));
     }
 
     #[test]

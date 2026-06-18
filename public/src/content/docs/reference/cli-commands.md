@@ -339,6 +339,7 @@ egress via `--net` / `--allow-host`, and the same `--profile`, `--add-dir`,
 | `mvmctl machine create --name <name> --image <ref>` | Persist a named OCI-backed machine spec without booting it |
 | `mvmctl machine create --name <name> --image <ref> --net --allow-host <host[:port]>` | Persist a named spec with opt-in egress settings for future lifecycle starts |
 | `mvmctl machine create --name <name> --image <ref> --force` | Overwrite an existing named machine spec |
+| `mvmctl machine start --name <name>` | Boot a persisted named machine through the admitted OCI-backed start path |
 | `mvmctl machine ls` | List persisted named machine specs |
 | `mvmctl machine ls --json` | Print persisted named machine specs as JSON |
 | `mvmctl machine inspect <name>` | Show one persisted named machine spec |
@@ -349,12 +350,14 @@ egress via `--net` / `--allow-host`, and the same `--profile`, `--add-dir`,
 | `mvmctl machine shell --name <name>` | Attach an interactive shell/console to an already-started named machine |
 | `mvmctl machine stop --name <name>` | Stop an already-started named machine |
 
-`machine exec`, `machine shell`, and `machine stop` require the named
-`MachineSpec` to exist first, then reuse the existing console/down paths for the
-running VM. Persistent image-backed `machine start` and `machine pack` for
-portable signed artifacts are planned follow-ups; they are intentionally not yet
-present rather than stubbed. Use `mvmctl up` for the manifest/flake path that
-already exposes named networks and policy bundles.
+`machine start`, `machine exec`, `machine shell`, and `machine stop` require the
+named `MachineSpec` to exist first. `machine start` resolves the stored OCI
+image through the normal cache/materialization path, emits the same admission
+and OCI provenance audit substrate as the transient image runner, and then
+boots the named VM; `exec` / `shell` / `stop` reuse the existing console/down
+paths for the running VM. `machine pack` for portable signed artifacts is still
+follow-up work. Use `mvmctl up` for the manifest/flake path that already
+exposes named networks and policy bundles.
 
 ## Sandbox State
 

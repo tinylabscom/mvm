@@ -856,7 +856,7 @@ Required behavior:
       machine_state_dir, machine_spec_path}`, strict JSON, and `naming::validate_id`
       before any path dereference.
 - [x] Implement `machine create --name <name> --image <ref>`.
-- [ ] Implement `machine start --name <name>` through the existing admitted
+- [x] Implement `machine start --name <name>` through the existing admitted
       launch path.
 - [x] Implement `machine exec --name <name> -- <cmd>` through the existing
       guest-agent command path. This wrapper requires a persisted `MachineSpec`
@@ -894,9 +894,11 @@ Required behavior:
 - [~] Add serde roundtrip, unknown-key, image+flake conflict, no-source,
       read-only-volume-default, writable-volume-explicit, SSH-agent-no-key-file,
       and dev-init-prod-refusal tests. → **parser-level tests done** (unknown-key,
-      image+flake conflict, image-only, no-source-defaults-to-flake, shell-meta /
-      empty image reject; serde roundtrips already covered). The volume / SSH-agent
-      / dev-init tests land with their respective mapping slices below.
+      image+flake conflict, image-only, no-source-defaults-to-flake, `cpus` with
+      legacy `vcpus` aliasing, shell-meta / empty image reject, `allow_hosts`
+      validation, volume-shape validation, and typed machine-workflow projection;
+      serde roundtrips already covered). The SSH-agent / dev-init policy-refusal
+      tests land with their respective mapping slices below.
 - [ ] Update `guides/manifests.md`, quickstart, and CLI reference only after the
       parser and command behavior are implemented.
 
