@@ -112,6 +112,8 @@ On the host (on Linux) or inside the builder VM (on macOS), mvm stores data at:
         ├── fc-base.json
         ├── vmlinux
         ├── rootfs.ext4
+        ├── runtime/
+        │   └── v.sock          # per-VM Firecracker vsock UDS
         └── volumes/
             ├── config.ext4
             ├── secrets.ext4

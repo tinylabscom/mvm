@@ -343,6 +343,7 @@ fn guest_agent_socket_path(backend: &str, name: &str) -> Result<PathBuf> {
                 .join("microvm")
                 .join("vms")
                 .join(name)
+                .join("runtime")
                 .join("v.sock"))
         }
         "libkrun" | "krun" => Ok(Path::new(&mvm_core::config::mvm_data_dir())
@@ -357,6 +358,16 @@ fn guest_agent_socket_path(backend: &str, name: &str) -> Result<PathBuf> {
 
 fn ping_guest_agent(uds_path: &Path) -> Result<()> {
     let mut stream = mvm_guest::vsock::connect_to(&uds_path.to_string_lossy(), 1)?;
+    let negotiated = mvm_guest::vsock::negotiate_protocol(
+        &mut stream,
+        vec![mvm_guest::vsock::GuestCapability::Ping],
+    )?;
+    if !negotiated
+        .capabilities
+        .contains(&mvm_guest::vsock::GuestCapability::Ping)
+    {
+        bail!("guest agent did not advertise the Ping capability");
+    }
     let response = mvm_guest::vsock::send_request(&mut stream, &GuestRequest::Ping)?;
     match response {
         GuestResponse::Pong => Ok(()),

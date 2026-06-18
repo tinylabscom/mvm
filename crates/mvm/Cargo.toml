@@ -41,6 +41,7 @@ toml.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 libc.workspace = true
+fs2.workspace = true
 
 [features]
 default = []
