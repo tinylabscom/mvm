@@ -30,6 +30,8 @@ If you have changes intended for `main`, push them to a branch and open a PR —
 
 The only `git` commands that should ever target `main` directly are read-only (`git log main`, `git show main:path`) or routine sync (`git fetch origin`, `git pull --ff-only origin main`).
 
+After any pull request merge, immediately sync the local main checkout before doing anything else: `git fetch origin` followed by `git pull --ff-only origin main`. Do not leave local `main` behind the merged PR state.
+
 ### Creating the worktree
 
 All worktrees live in a `.worktrees/` directory that sits as a sibling of the main checkout — never directly next to the main checkout. This keeps the parent directory (which holds the rest of the ecosystem repos) free of feature-branch clutter and makes it obvious at a glance which directories are real repos vs. transient sandboxes.
