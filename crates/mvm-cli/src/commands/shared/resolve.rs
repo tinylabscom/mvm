@@ -237,8 +237,8 @@ pub fn egress_enforcement_label(
 /// `HOST` with no port defaults to `443` (https). Fails closed on a
 /// malformed port or empty host before any VM work.
 fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
-    use mvm_core::network_policy::HostPort;
-    match entry.rsplit_once(':') {
+    use mvm_core::network_policy::{HostPort, is_banned_ssh_port};
+    let parsed = match entry.rsplit_once(':') {
         // Has an explicit `:PORT` — strict parse (rejects empty host / bad port).
         Some(_) => entry
             .parse()
@@ -246,7 +246,13 @@ fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
         // Bare host — default to the https port.
         None if entry.is_empty() => anyhow::bail!("--allow-host cannot be empty"),
         None => Ok(HostPort::new(entry, 443)),
+    }?;
+    if is_banned_ssh_port(parsed.port) {
+        anyhow::bail!(
+            "--allow-host {entry:?} requests TCP/22, but SSH sessions are banned in microVMs"
+        );
     }
+    Ok(parsed)
 }
 
 // `resolve_optional_network_policy` was used by `mvmctl template
@@ -336,6 +342,16 @@ mod tests {
         assert!(resolve_run_network_policy(false, &["host:0notaport".to_string()]).is_err());
         assert!(resolve_run_network_policy(false, &[":443".to_string()]).is_err());
         assert!(resolve_run_network_policy(false, &["".to_string()]).is_err());
+    }
+
+    #[test]
+    fn allow_host_rejects_ssh_port() {
+        let err = resolve_run_network_policy(false, &["github.com:22".to_string()])
+            .expect_err("TCP/22 must be refused");
+        assert!(
+            err.to_string().contains("SSH sessions are banned"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]

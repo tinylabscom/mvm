@@ -41,6 +41,17 @@ impl FromStr for HostPort {
     }
 }
 
+/// TCP/22 is reserved for SSH and is never an admitted guest egress target.
+///
+/// This is deliberately separate from the CIDR mandatory-deny list: SSH is a
+/// protocol/port ban, not an address range. Runtime gates still enforce it in
+/// the shared L4 projection path so an open policy cannot override it.
+pub const BANNED_SSH_PORT: u16 = 22;
+
+pub fn is_banned_ssh_port(port: u16) -> bool {
+    port == BANNED_SSH_PORT
+}
+
 /// Built-in network presets for common workloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -431,7 +442,6 @@ fn registry_rules() -> Vec<HostPort> {
 fn dev_extra_rules() -> Vec<HostPort> {
     vec![
         HostPort::new("github.com", 443),
-        HostPort::new("github.com", 22),
         HostPort::new("api.github.com", 443),
         HostPort::new("api.openai.com", 443),
         HostPort::new("api.anthropic.com", 443),
@@ -448,7 +458,6 @@ fn agent_rules() -> Vec<HostPort> {
         HostPort::new("api.anthropic.com", 443),
         HostPort::new("api.openai.com", 443),
         HostPort::new("github.com", 443),
-        HostPort::new("github.com", 22),
         HostPort::new("api.github.com", 443),
     ]
 }
@@ -586,6 +595,12 @@ pub fn mandatory_deny_iptables_script(bridge_dev: &str, guest_ip: &str) -> Strin
             cidr = net,
         ));
     }
+    script.push_str(&format!(
+        "sudo iptables -I FORWARD -i {br} -s {ip} -p tcp --dport {port} -j DROP\n",
+        br = bridge_dev,
+        ip = guest_ip,
+        port = BANNED_SSH_PORT,
+    ));
     script
 }
 
@@ -609,6 +624,12 @@ pub fn mandatory_deny_iptables_cleanup_script(bridge_dev: &str, guest_ip: &str) 
             cidr = net,
         ));
     }
+    script.push_str(&format!(
+        "while sudo iptables -D FORWARD -i {br} -s {ip} -p tcp --dport {port} -j DROP 2>/dev/null; do :; done\n",
+        br = bridge_dev,
+        ip = guest_ip,
+        port = BANNED_SSH_PORT,
+    ));
     script
 }
 
@@ -736,6 +757,25 @@ mod tests {
         assert!(hosts.contains(&"github.com"));
         assert!(hosts.contains(&"api.openai.com"));
         assert!(hosts.contains(&"api.anthropic.com"));
+    }
+
+    #[test]
+    fn built_in_presets_do_not_grant_ssh_port() {
+        for preset in [
+            NetworkPreset::Registries,
+            NetworkPreset::Dev,
+            NetworkPreset::Agent,
+        ] {
+            let offenders: Vec<_> = preset
+                .rules()
+                .into_iter()
+                .filter(|rule| is_banned_ssh_port(rule.port))
+                .collect();
+            assert!(
+                offenders.is_empty(),
+                "{preset} must not authorize SSH port 22: {offenders:?}"
+            );
+        }
     }
 
     #[test]
@@ -1181,6 +1221,15 @@ mod tests {
         assert!(
             script.contains("-d 169.254.169.254/32 -j DROP"),
             "script must drop cloud metadata endpoint; got: {script}"
+        );
+    }
+
+    #[test]
+    fn mandatory_deny_iptables_script_drops_ssh_port() {
+        let script = mandatory_deny_iptables_script("br-mvm", "172.16.0.2");
+        assert!(
+            script.contains("-p tcp --dport 22 -j DROP"),
+            "script must drop TCP/22 so SSH sessions cannot be established; got: {script}"
         );
     }
 

@@ -1098,6 +1098,40 @@
           "additionalProperties": false
         },
         {
+          "description": "Bind a guest Unix socket and forward each accepted connection to a host vsock port. Used for dev-tier SSH-agent forwarding only.",
+          "type": "object",
+          "required": [
+            "StartUnixSocketForward"
+          ],
+          "properties": {
+            "StartUnixSocketForward": {
+              "type": "object",
+              "required": [
+                "guest_path",
+                "host_vsock_port",
+                "socket_mode"
+              ],
+              "properties": {
+                "guest_path": {
+                  "type": "string"
+                },
+                "host_vsock_port": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "socket_mode": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "description": "Open an interactive PTY console session (dev-mode only). The guest allocates a PTY, spawns a shell, and listens on a dedicated vsock data port for raw byte streaming.",
           "type": "object",
           "required": [
@@ -1115,6 +1149,23 @@
                   "type": "integer",
                   "format": "uint16",
                   "minimum": 0.0
+                },
+                "env": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "maxItems": 2,
+                    "minItems": 2
+                  }
                 },
                 "rows": {
                   "type": "integer",
@@ -2133,6 +2184,34 @@
                   "minimum": 0.0
                 },
                 "vsock_port": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Guest Unix socket forward started successfully.",
+          "type": "object",
+          "required": [
+            "UnixSocketForwardStarted"
+          ],
+          "properties": {
+            "UnixSocketForwardStarted": {
+              "type": "object",
+              "required": [
+                "guest_path",
+                "host_vsock_port"
+              ],
+              "properties": {
+                "guest_path": {
+                  "type": "string"
+                },
+                "host_vsock_port": {
                   "type": "integer",
                   "format": "uint32",
                   "minimum": 0.0

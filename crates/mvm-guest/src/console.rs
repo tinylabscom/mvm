@@ -110,7 +110,11 @@ pub struct Winsize {
 /// Allocates a PTY pair, forks a shell process attached to the slave,
 /// and returns the master fd + session info. The caller is responsible
 /// for starting the vsock data relay.
-pub fn open_session(cols: u16, rows: u16) -> Result<ConsoleSession, ConsoleError> {
+pub fn open_session(
+    cols: u16,
+    rows: u16,
+    extra_env: &[(String, String)],
+) -> Result<ConsoleSession, ConsoleError> {
     // Only one session at a time
     if CONSOLE_ACTIVE.swap(true, Ordering::SeqCst) {
         return Err(ConsoleError::AlreadyActive);
@@ -153,7 +157,7 @@ pub fn open_session(cols: u16, rows: u16) -> Result<ConsoleSession, ConsoleError
     // functions. `putenv`/`execvp` can `malloc` — if another thread held the
     // allocator lock at fork time the child would deadlock — so we build a
     // fixed `envp` here and hand it to `execve` (async-signal-safe) instead.
-    let shell_env = build_shell_env();
+    let shell_env = build_shell_env_with(extra_env);
     let mut envp: Vec<*const u8> = shell_env.iter().map(|c| c.as_ptr().cast::<u8>()).collect();
     envp.push(std::ptr::null());
 
@@ -489,12 +493,16 @@ const SHUT_RDWR: i32 = 2;
 /// can `execve` a fixed array without any allocation (see the async-signal
 /// safety note in `open_session`).
 fn build_shell_env() -> Vec<std::ffi::CString> {
-    build_shell_env_from(std::env::vars_os())
+    build_shell_env_with(&[])
+}
+
+fn build_shell_env_with(extra_env: &[(String, String)]) -> Vec<std::ffi::CString> {
+    build_shell_env_from(std::env::vars_os(), extra_env)
 }
 
 /// Pure core of [`build_shell_env`], parameterized over the source vars so it
 /// is testable without mutating process-global state.
-fn build_shell_env_from<I>(vars: I) -> Vec<std::ffi::CString>
+fn build_shell_env_from<I>(vars: I, extra_env: &[(String, String)]) -> Vec<std::ffi::CString>
 where
     I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 {
@@ -511,6 +519,14 @@ where
         kv.extend_from_slice(val.as_bytes());
         // Skip any var carrying an interior NUL — it can't cross the C ABI.
         if let Ok(c) = std::ffi::CString::new(kv) {
+            env.push(c);
+        }
+    }
+    for (key, val) in extra_env {
+        if key.contains('\0') || key.contains('=') || val.contains('\0') {
+            continue;
+        }
+        if let Ok(c) = std::ffi::CString::new(format!("{key}={val}")) {
             env.push(c);
         }
     }
@@ -549,11 +565,14 @@ mod tests {
     #[test]
     fn build_shell_env_overrides_home_and_term() {
         // Inherited HOME/TERM are dropped; the forced values are appended once.
-        let out = build_shell_env_from([
-            (oss("HOME"), oss("/somewhere/else")),
-            (oss("TERM"), oss("dumb")),
-            (oss("PATH"), oss("/usr/bin")),
-        ]);
+        let out = build_shell_env_from(
+            [
+                (oss("HOME"), oss("/somewhere/else")),
+                (oss("TERM"), oss("dumb")),
+                (oss("PATH"), oss("/usr/bin")),
+            ],
+            &[],
+        );
         let strs: Vec<&str> = out.iter().filter_map(|c| c.to_str().ok()).collect();
         assert!(
             strs.contains(&"PATH=/usr/bin"),
@@ -572,11 +591,24 @@ mod tests {
         // A value with an embedded NUL can't cross the C ABI — it's dropped,
         // but the forced HOME/TERM still come through.
         let bad = std::ffi::OsString::from_vec(b"a\0b".to_vec());
-        let out = build_shell_env_from([(oss("WEIRD"), bad)]);
+        let out = build_shell_env_from([(oss("WEIRD"), bad)], &[]);
         let strs: Vec<&str> = out.iter().filter_map(|c| c.to_str().ok()).collect();
         assert!(!strs.iter().any(|s| s.starts_with("WEIRD=")), "{strs:?}");
         assert!(strs.contains(&"HOME=/root"));
         assert!(strs.contains(&"TERM=xterm-256color"));
+    }
+
+    #[test]
+    fn build_shell_env_adds_valid_extra_env() {
+        let out = build_shell_env_from(
+            [(oss("PATH"), oss("/usr/bin"))],
+            &[(
+                "SSH_AUTH_SOCK".to_string(),
+                "/run/mvm/ssh-agent.sock".to_string(),
+            )],
+        );
+        let strs: Vec<&str> = out.iter().filter_map(|c| c.to_str().ok()).collect();
+        assert!(strs.contains(&"SSH_AUTH_SOCK=/run/mvm/ssh-agent.sock"));
     }
 
     #[test]

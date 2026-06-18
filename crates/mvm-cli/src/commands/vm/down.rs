@@ -33,6 +33,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // (resolved from its state-dir pid marker) so a QEMU/libkrun
             // VM is stopped by its own VMM, not the platform default.
             let backend = AnyBackend::for_started_vm(n).unwrap_or_else(platform_default);
+            crate::commands::ssh_agent_proxy::reap_proxy(n);
             // Persist the `Stopping` readiness milestone BEFORE the
             // backend stop call so a
             // concurrent `mvmctl ls --json` running during the stop
@@ -74,6 +75,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             let mut last_err = None;
             for vm in AnyBackend::list_all() {
                 let backend = AnyBackend::for_started_vm(&vm.name).unwrap_or_else(platform_default);
+                crate::commands::ssh_agent_proxy::reap_proxy(&vm.name);
                 record_vm_readiness(&vm.name, InstanceReadiness::Stopping);
                 match backend.stop(&VmId::from(vm.name.as_str())) {
                     Ok(()) => {

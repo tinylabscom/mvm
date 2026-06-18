@@ -70,6 +70,13 @@ pub const SUBSTITUTION_PORT: u32 = 5253;
 /// is no live collision.
 pub const BROKER_PORT: u32 = 5300;
 
+/// Vsock port used for dev-tier SSH-agent socket forwarding. The guest agent
+/// binds a guest Unix socket and splices each accepted connection to
+/// `connect_host_vsock(SSH_AGENT_PORT)`, where the host-side mvmctl proxy
+/// connects to the operator's `SSH_AUTH_SOCK`. This is dev-only: no private key
+/// files or `~/.ssh` material cross the boundary.
+pub const SSH_AGENT_PORT: u32 = 5301;
+
 /// Base vsock port for TCP port forwarding.
 /// The forwarded vsock port = `PORT_FORWARD_BASE + guest_tcp_port`.
 pub const PORT_FORWARD_BASE: u32 = 10000;
@@ -213,10 +220,22 @@ pub enum GuestRequest {
     /// The agent binds vsock port `PORT_FORWARD_BASE + guest_port` and
     /// forwards each connection to `localhost:guest_port`.
     StartPortForward { guest_port: u16 },
+    /// Bind a guest Unix socket and forward each accepted connection to a host
+    /// vsock port. Used for dev-tier SSH-agent forwarding only.
+    StartUnixSocketForward {
+        guest_path: String,
+        host_vsock_port: u32,
+        socket_mode: u32,
+    },
     /// Open an interactive PTY console session (dev-mode only).
     /// The guest allocates a PTY, spawns a shell, and listens on a
     /// dedicated vsock data port for raw byte streaming.
-    ConsoleOpen { cols: u16, rows: u16 },
+    ConsoleOpen {
+        cols: u16,
+        rows: u16,
+        #[serde(default)]
+        env: Vec<(String, String)>,
+    },
     /// Close an active console session.
     ConsoleClose { session_id: u32 },
     /// Resize the PTY window for an active console session.
@@ -504,6 +523,7 @@ impl GuestRequest {
             Self::PostRestore => "post-restore",
             Self::FsDiff => "fs-diff",
             Self::StartPortForward { .. } => "start-port-forward",
+            Self::StartUnixSocketForward { .. } => "start-unix-socket-forward",
             Self::ConsoleOpen { .. } => "console-open",
             Self::ConsoleClose { .. } => "console-close",
             Self::ConsoleResize { .. } => "console-resize",
@@ -713,6 +733,7 @@ impl GuestRequest {
             GuestRequest::PostRestore => Verb::PostRestore,
             GuestRequest::FsDiff => Verb::FsDiff,
             GuestRequest::StartPortForward { .. } => Verb::StartPortForward,
+            GuestRequest::StartUnixSocketForward { .. } => Verb::StartUnixSocketForward,
             GuestRequest::ConsoleOpen { .. } => Verb::ConsoleOpen,
             GuestRequest::ConsoleClose { .. } => Verb::ConsoleClose,
             GuestRequest::ConsoleResize { .. } => Verb::ConsoleResize,
@@ -781,6 +802,7 @@ impl GuestRequest {
             GuestRequest::Exec { .. }
             | GuestRequest::FsDiff
             | GuestRequest::StartPortForward { .. }
+            | GuestRequest::StartUnixSocketForward { .. }
             | GuestRequest::ConsoleOpen { .. }
             | GuestRequest::ConsoleClose { .. }
             | GuestRequest::ConsoleResize { .. }
@@ -906,6 +928,11 @@ pub enum GuestResponse {
     FsDiffResult { changes: Vec<FsChange> },
     /// Port forward started successfully.
     PortForwardStarted { guest_port: u16, vsock_port: u32 },
+    /// Guest Unix socket forward started successfully.
+    UnixSocketForwardStarted {
+        guest_path: String,
+        host_vsock_port: u32,
+    },
     /// Console PTY session opened. Connect to `data_port` for raw I/O.
     ConsoleOpened { session_id: u32, data_port: u32 },
     /// Console PTY session ended (shell exited).
@@ -1001,11 +1028,11 @@ name_enum! {
     pub enum Verb {
         ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, IntegrationStatus,
         CheckpointIntegrations, ProbeStatus, Exec, RunEntrypoint, PostRestore,
-        FsDiff, StartPortForward, ConsoleOpen, ConsoleClose, ConsoleResize,
-        EntrypointStatus, ReadinessStatus, FsRead, FsWrite, FsList, FsStat,
-        FsMkdir, FsRemove, FsMove, ProcStart, ProcList, ProcSignal,
-        ProcSendInput, ProcWait, ProcKill, MountVolume, UnmountVolume,
-        UpdateIdleTimeout, RunCode,
+        FsDiff, StartPortForward, StartUnixSocketForward, ConsoleOpen,
+        ConsoleClose, ConsoleResize, EntrypointStatus, ReadinessStatus, FsRead,
+        FsWrite, FsList, FsStat, FsMkdir, FsRemove, FsMove, ProcStart,
+        ProcList, ProcSignal, ProcSendInput, ProcWait, ProcKill, MountVolume,
+        UnmountVolume, UpdateIdleTimeout, RunCode,
     }
 }
 
@@ -1017,8 +1044,9 @@ name_enum! {
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
         Pong, Error, UnsupportedInProfile, IntegrationStatusReport,
         CheckpointResult, ProbeStatusReport, EntrypointEvent, ExecEvent,
-        PostRestoreAck, FsDiffResult, PortForwardStarted, ConsoleOpened,
-        ConsoleExited, ConsoleResized, EntrypointStatusReport,
+        PostRestoreAck, FsDiffResult, PortForwardStarted,
+        UnixSocketForwardStarted, ConsoleOpened, ConsoleExited, ConsoleResized,
+        EntrypointStatusReport,
         ReadinessStatusReport, FsResult, ProcResult, ProcWaitEvent,
         VolumeMountResult, UpdateIdleTimeoutAck,
     }
@@ -1087,6 +1115,7 @@ impl Verb {
             Verb::PostRestore => unary(&[R::PostRestoreAck]),
             Verb::FsDiff => unary(&[R::FsDiffResult]),
             Verb::StartPortForward => unary(&[R::PortForwardStarted]),
+            Verb::StartUnixSocketForward => unary(&[R::UnixSocketForwardStarted]),
             Verb::ConsoleOpen => unary(&[R::ConsoleOpened]),
             Verb::ConsoleClose => unary(&[R::ConsoleExited]),
             Verb::ConsoleResize => unary(&[R::ConsoleResized]),
@@ -1136,6 +1165,9 @@ impl GuestResponse {
             GuestResponse::PostRestoreAck { .. } => ResponseVariant::PostRestoreAck,
             GuestResponse::FsDiffResult { .. } => ResponseVariant::FsDiffResult,
             GuestResponse::PortForwardStarted { .. } => ResponseVariant::PortForwardStarted,
+            GuestResponse::UnixSocketForwardStarted { .. } => {
+                ResponseVariant::UnixSocketForwardStarted
+            }
             GuestResponse::ConsoleOpened { .. } => ResponseVariant::ConsoleOpened,
             GuestResponse::ConsoleExited { .. } => ResponseVariant::ConsoleExited,
             GuestResponse::ConsoleResized { .. } => ResponseVariant::ConsoleResized,
@@ -3046,9 +3078,15 @@ mod tests {
             GuestRequest::PostRestore,
             GuestRequest::FsDiff,
             GuestRequest::StartPortForward { guest_port: 8080 },
+            GuestRequest::StartUnixSocketForward {
+                guest_path: "/run/mvm/ssh-agent.sock".to_string(),
+                host_vsock_port: SSH_AGENT_PORT,
+                socket_mode: 0o600,
+            },
             GuestRequest::ConsoleOpen {
                 cols: 120,
                 rows: 40,
+                env: Vec::new(),
             },
             GuestRequest::ConsoleClose { session_id: 1 },
             GuestRequest::ConsoleResize {
@@ -5120,7 +5158,16 @@ mod tests {
             GuestRequest::PostRestore,
             GuestRequest::FsDiff,
             GuestRequest::StartPortForward { guest_port: 1 },
-            GuestRequest::ConsoleOpen { cols: 1, rows: 1 },
+            GuestRequest::StartUnixSocketForward {
+                guest_path: "/run/mvm/ssh-agent.sock".to_string(),
+                host_vsock_port: SSH_AGENT_PORT,
+                socket_mode: 0o600,
+            },
+            GuestRequest::ConsoleOpen {
+                cols: 1,
+                rows: 1,
+                env: Vec::new(),
+            },
             GuestRequest::ConsoleClose { session_id: 1 },
             GuestRequest::ConsoleResize {
                 session_id: 1,
@@ -5244,7 +5291,11 @@ mod tests {
                 stdin: None,
                 timeout_secs: None,
             },
-            GuestRequest::ConsoleOpen { cols: 80, rows: 24 },
+            GuestRequest::ConsoleOpen {
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+            },
             GuestRequest::ProcStart {
                 argv: vec!["/x".into()],
                 env: Default::default(),
@@ -5595,7 +5646,19 @@ mod tests {
                 "start-port-forward",
             ),
             (
-                GuestRequest::ConsoleOpen { cols: 0, rows: 0 },
+                GuestRequest::StartUnixSocketForward {
+                    guest_path: "/run/mvm/ssh-agent.sock".to_string(),
+                    host_vsock_port: SSH_AGENT_PORT,
+                    socket_mode: 0o600,
+                },
+                "start-unix-socket-forward",
+            ),
+            (
+                GuestRequest::ConsoleOpen {
+                    cols: 0,
+                    rows: 0,
+                    env: Vec::new(),
+                },
                 "console-open",
             ),
             (

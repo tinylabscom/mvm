@@ -177,6 +177,29 @@ fn host_mvmctl_package_keeps_native_vmm_linkage_explicit() {
 }
 
 #[test]
+fn mk_guest_rejects_ssh_template_inputs_structurally() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("mk-guest.nix must be present: {e}"));
+
+    for needle in [
+        "assertNoSshTemplateInputs",
+        "SSH is banned in microVM templates",
+        "openssh",
+        "authorized_keys",
+        "known_hosts",
+        "closureInfo",
+        "SSH-related Nix store paths are banned",
+        "sshTemplateBan",
+    ] {
+        assert!(
+            content.contains(needle),
+            "mkGuest must keep the SSH template-input ban marker {needle:?}"
+        );
+    }
+}
+
+#[test]
 fn installation_docs_keep_host_nix_optional() {
     let path = repo_dir()
         .join("public")

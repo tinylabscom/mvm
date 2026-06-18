@@ -14,6 +14,7 @@ mod ops;
 mod pool;
 mod qemu_bridge;
 mod shared;
+mod ssh_agent_proxy;
 mod storage;
 mod trust;
 pub(crate) mod vm;
@@ -138,6 +139,9 @@ pub(in crate::commands) enum Commands {
     /// user-facing command.
     #[command(name = "__qemu-vsock-bridge", hide = true)]
     QemuVsockBridge(qemu_bridge::Args),
+    /// Internal: per-machine SSH_AUTH_SOCK proxy for dev-tier machines.
+    #[command(name = "__ssh-agent-proxy", hide = true)]
+    SshAgentProxy(ssh_agent_proxy::Args),
 }
 
 // ============================================================================
@@ -215,6 +219,9 @@ pub fn run() -> Result<()> {
     // load, and the cmd-audit envelope — none of which apply to it.
     if let Commands::QemuVsockBridge(a) = &cli.command {
         return qemu_bridge::run(a);
+    }
+    if let Commands::SshAgentProxy(a) = &cli.command {
+        return ssh_agent_proxy::run(a);
     }
 
     // Install Ctrl-C / SIGTERM handler for graceful shutdown.
@@ -297,6 +304,7 @@ pub fn run() -> Result<()> {
         // Handled by the early return above (before ctrl-c / config /
         // cmd-audit setup); this arm only satisfies match exhaustiveness.
         Commands::QemuVsockBridge(_) => unreachable!("qemu vsock bridge short-circuits in run()"),
+        Commands::SshAgentProxy(_) => unreachable!("ssh-agent proxy short-circuits in run()"),
     };
 
     cmd_audit::emit_cmd_outcome(cmd_recorder.as_ref(), verb, &result);

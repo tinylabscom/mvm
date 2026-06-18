@@ -75,6 +75,9 @@ pub(in crate::commands) struct Args {
     /// `Exec`/`ConsoleOpen` regardless).
     #[arg(long)]
     pub force: bool,
+    /// Extra KEY=VALUE environment entries for the guest dev shell/session.
+    #[arg(skip)]
+    pub env: Vec<(String, String)>,
 }
 
 /// Refuse to attach if the VM's image was built sealed (dev = false /
@@ -118,25 +121,23 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         );
         // send_exec_streaming does the protocol hello internally.
         use std::io::Write as _;
-        let terminal = mvm_guest::vsock::send_exec_streaming(
-            &mut stream,
-            cmd,
-            None,
-            None,
-            |event| match event {
-                mvm_guest::vsock::ExecEvent::Stdout { chunk } => {
-                    let mut so = std::io::stdout();
-                    let _ = so.write_all(chunk);
-                    let _ = so.flush();
+        let command = command_with_env(cmd, &args.env);
+        let terminal =
+            mvm_guest::vsock::send_exec_streaming(&mut stream, &command, None, None, |event| {
+                match event {
+                    mvm_guest::vsock::ExecEvent::Stdout { chunk } => {
+                        let mut so = std::io::stdout();
+                        let _ = so.write_all(chunk);
+                        let _ = so.flush();
+                    }
+                    mvm_guest::vsock::ExecEvent::Stderr { chunk } => {
+                        let mut se = std::io::stderr();
+                        let _ = se.write_all(chunk);
+                        let _ = se.flush();
+                    }
+                    _ => {}
                 }
-                mvm_guest::vsock::ExecEvent::Stderr { chunk } => {
-                    let mut se = std::io::stderr();
-                    let _ = se.write_all(chunk);
-                    let _ = se.flush();
-                }
-                _ => {}
-            },
-        )?;
+            })?;
         match terminal {
             mvm_guest::vsock::ExecEvent::Exit { code } => {
                 if code != 0 {
@@ -152,8 +153,20 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         }
     } else {
         // Interactive PTY session
-        console_interactive(name)
+        console_interactive_with_env(name, args.env)
     }
+}
+
+fn command_with_env(cmd: &str, env: &[(String, String)]) -> String {
+    if env.is_empty() {
+        return cmd.to_string();
+    }
+    let exports = env
+        .iter()
+        .map(|(key, value)| format!("{key}={}", crate::exec::shell_quote(value)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{exports} {cmd}")
 }
 
 /// Record a coarse guest-activity touch on the named VM.
@@ -176,6 +189,13 @@ fn touch_activity(name: &str) {
 /// sockets), Apple Container (via direct vsock), and vsock proxy (via
 /// daemon Unix socket for cross-process access).
 pub(in crate::commands) fn console_interactive(name: &str) -> Result<()> {
+    console_interactive_with_env(name, Vec::new())
+}
+
+pub(in crate::commands) fn console_interactive_with_env(
+    name: &str,
+    env: Vec<(String, String)>,
+) -> Result<()> {
     let (cols, rows) = get_terminal_size();
 
     ui::info(&format!(
@@ -190,7 +210,7 @@ pub(in crate::commands) fn console_interactive(name: &str) -> Result<()> {
         &mut stream,
         &[mvm_guest::vsock::GuestCapability::Console],
     )?;
-    let req = mvm_guest::vsock::GuestRequest::ConsoleOpen { cols, rows };
+    let req = mvm_guest::vsock::GuestRequest::ConsoleOpen { cols, rows, env };
     // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
     let (session_id, data_port) = match mvm_guest::vsock::call_unary(&mut stream, &req)? {

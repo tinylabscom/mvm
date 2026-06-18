@@ -24,7 +24,7 @@ use ipnet::IpNet;
 use thiserror::Error;
 
 use crate::policy::dns_pin::DnsPinRegistry;
-use crate::policy::network_policy::{is_mandatory_deny, mandatory_deny_ranges};
+use crate::policy::network_policy::{is_banned_ssh_port, is_mandatory_deny, mandatory_deny_ranges};
 use crate::policy::resolver::EffectivePolicy;
 
 /// L4 protocol of a canonical rule. The string forms `"tcp"` /
@@ -102,11 +102,18 @@ impl CanonicalEgress {
         if is_mandatory_deny(ip) {
             return false;
         }
+        if is_banned_ssh_flow(proto, port) {
+            return false;
+        }
         match self {
             Self::Unrestricted => true,
             Self::Rules(rules) => rules.iter().any(|r| r.permits(proto, ip, port)),
         }
     }
+}
+
+fn is_banned_ssh_flow(proto: &Proto, port: u16) -> bool {
+    *proto == Proto::Tcp && is_banned_ssh_port(port)
 }
 
 /// Projection-time refusals. Every variant is a fail-closed
@@ -516,6 +523,9 @@ pub fn wasi_allows(egress: &WasiEgress, proto: &Proto, ip_addr: IpAddr, port: u1
     if is_mandatory_deny(ip_addr) {
         return false;
     }
+    if is_banned_ssh_flow(proto, port) {
+        return false;
+    }
     match egress {
         WasiEgress::Unrestricted => true,
         WasiEgress::Grants(grants) => grants.iter().any(|g| {
@@ -535,6 +545,7 @@ mod tests {
     use super::*;
 
     use crate::policy::dns_pin::{DnsPin, DnsPinRegistry};
+    use crate::policy::network_policy::BANNED_SSH_PORT;
     use crate::policy::policies::L4RuleSpec;
     use crate::policy::resolver::EffectivePolicy;
 
@@ -835,6 +846,19 @@ mod tests {
     }
 
     #[test]
+    fn ssh_port_is_denied_even_under_unrestricted() {
+        let eg = CanonicalEgress::Unrestricted;
+        assert!(
+            !eg.permits(&Proto::Tcp, ip("93.184.216.34"), BANNED_SSH_PORT),
+            "TCP/22 is banned even under open egress"
+        );
+        assert!(
+            eg.permits(&Proto::Udp, ip("93.184.216.34"), BANNED_SSH_PORT),
+            "the SSH ban is TCP/22-specific, not an unrelated UDP port block"
+        );
+    }
+
+    #[test]
     fn mandatory_deny_wins_even_under_unrestricted() {
         // The `open` kill-switch never reaches metadata/loopback —
         // mirrors the gateway-bridge invariant that even an open
@@ -1072,6 +1096,7 @@ mod tests {
         let w = to_wasi_grants(&eff, &DnsPinRegistry::new(), NOW).unwrap();
         assert!(matches!(w, WasiEgress::Unrestricted));
         assert!(!wasi_allows(&w, &Proto::Tcp, ip("169.254.169.254"), 443));
+        assert!(!wasi_allows(&w, &Proto::Tcp, ip("93.184.216.34"), 22));
         assert!(wasi_allows(&w, &Proto::Tcp, ip("93.184.216.34"), 443));
     }
 

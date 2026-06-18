@@ -5,9 +5,13 @@
 //! probes the live backend (libkrun → vz → firecracker) per VM, so a
 //! VM started under any backend reaches its agent on the right transport.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use mvm::vsock_transport;
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 
 /// Wait for the guest agent to complete the protocol hello over
 /// vsock. Returns true once the agent has
@@ -121,6 +125,89 @@ pub fn start_port_proxy(vm_id: &str, host_port: u16, guest_port: u16) {
             }
         })
         .ok();
+}
+
+/// Host-side SSH-agent socket proxy for dev-tier machines.
+///
+/// This lives with the existing per-VM port/vsock substrate because it binds a
+/// local listener and splices it to a guest-visible vsock path. The only
+/// upstream it may dial is the already validated host `SSH_AUTH_SOCK` Unix
+/// socket; callers are responsible for policy admission before spawning it.
+pub(crate) fn run_ssh_agent_proxy_uds(listen_uds: &Path, host_sock: &Path) -> Result<()> {
+    if let Some(parent) = listen_uds.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let _ = std::fs::remove_file(listen_uds);
+    let listener = UnixListener::bind(listen_uds)
+        .with_context(|| format!("binding ssh-agent proxy {}", listen_uds.display()))?;
+    std::fs::set_permissions(listen_uds, std::fs::Permissions::from_mode(0o600))?;
+    println!("READY");
+    std::io::stdout().flush().ok();
+    serve_ssh_agent_unix_listener(listener, host_sock)
+}
+
+fn serve_ssh_agent_unix_listener(listener: UnixListener, host_sock: &Path) -> Result<()> {
+    for inbound in listener.incoming() {
+        let inbound = inbound?;
+        let host_sock = host_sock.to_path_buf();
+        std::thread::spawn(move || {
+            if let Ok(agent) = UnixStream::connect(&host_sock) {
+                splice_unix_streams(inbound, agent);
+            }
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn run_ssh_agent_proxy_vsock(port: u32, host_sock: &Path) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use mvm_hostd::supervisor::substitution_proxy::vsock::{VsockListener, accept};
+        use std::os::fd::FromRawFd;
+        let listener = VsockListener::bind(port)
+            .with_context(|| format!("binding AF_VSOCK ssh-agent proxy port {port}"))?;
+        println!("READY");
+        std::io::stdout().flush().ok();
+        loop {
+            let fd = accept(listener.raw_fd())?;
+            let inbound = unsafe {
+                // SAFETY: `accept` returned a fresh connected socket fd owned by
+                // this process; UnixStream is an fd wrapper suitable for splice.
+                UnixStream::from_raw_fd(fd)
+            };
+            let host_sock = host_sock.to_path_buf();
+            std::thread::spawn(move || {
+                if let Ok(agent) = UnixStream::connect(&host_sock) {
+                    splice_unix_streams(inbound, agent);
+                }
+            });
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (port, host_sock);
+        anyhow::bail!("AF_VSOCK ssh-agent proxy listener is linux-only")
+    }
+}
+
+fn splice_unix_streams(left: UnixStream, right: UnixStream) {
+    let Ok(mut left_read) = left.try_clone() else {
+        return;
+    };
+    let Ok(mut right_write) = right.try_clone() else {
+        return;
+    };
+    let mut left_write = left;
+    let mut right_read = right;
+    let h1 = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut left_read, &mut right_write);
+    });
+    let h2 = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut right_read, &mut left_write);
+    });
+    let _ = h1.join();
+    let _ = h2.join();
 }
 
 /// Emit a `LocalAuditKind::NetworkPolicyAllow` audit record for one

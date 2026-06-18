@@ -326,6 +326,11 @@ command, and tear the VM down. It routes into the same code path as
 egress via `--net` / `--allow-host`, and the same `--profile`, `--add-dir`,
 `--receipt`, `--json`, and `--dry-run` semantics.
 
+SSH sessions are banned in microVMs. `--allow-host <host:22>` is refused, and
+the runtime also denies TCP/22 even under broad egress. Dev-tier `ssh_agent`
+means only Unix-socket forwarding of the host `SSH_AUTH_SOCK`; it never copies
+or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
+
 | Command | Description |
 |---------|-------------|
 | `mvmctl machine run --image <ref> -- <cmd>...` | Boot an OCI image, run `<cmd>` with no network, tear down |
@@ -337,9 +342,14 @@ egress via `--net` / `--allow-host`, and the same `--profile`, `--add-dir`,
 | `mvmctl machine run --image <ref> --json -- <cmd>` | Print a redacted JSON execution summary |
 | `mvmctl machine run --image <ref> --receipt <path> -- <cmd>` | Write a signed execution receipt |
 | `mvmctl machine create --name <name> --image <ref>` | Persist a named OCI-backed machine spec without booting it |
+| `mvmctl machine create --name <name> --manifest <path>` | Persist a named machine spec from an image-backed `mvm.toml` / `Mvmfile.toml` |
 | `mvmctl machine create --name <name> --image <ref> --net --allow-host <host[:port]>` | Persist a named spec with opt-in egress settings for future lifecycle starts |
 | `mvmctl machine create --name <name> --image <ref> --force` | Overwrite an existing named machine spec |
 | `mvmctl machine start --name <name>` | Boot a persisted named machine through the admitted OCI-backed start path |
+| `mvmctl machine start --name <name> --dry-run` | Validate and explain the effective machine-start policy without booting a VM |
+| `mvmctl machine start --name <name> --dry-run --json` | Print the machine-start preflight summary as redacted JSON |
+| `mvmctl machine start --name <name> --json` | Print a redacted JSON start summary instead of plain text |
+| `mvmctl machine start --name <name> --receipt <path>` | Write a signed machine-start receipt with effective policy plus the resolved digest and start timestamp |
 | `mvmctl machine ls` | List persisted named machine specs |
 | `mvmctl machine ls --json` | Print persisted named machine specs as JSON |
 | `mvmctl machine inspect <name>` | Show one persisted named machine spec |
@@ -353,11 +363,22 @@ egress via `--net` / `--allow-host`, and the same `--profile`, `--add-dir`,
 `machine start`, `machine exec`, `machine shell`, and `machine stop` require the
 named `MachineSpec` to exist first. `machine start` resolves the stored OCI
 image through the normal cache/materialization path, emits the same admission
-and OCI provenance audit substrate as the transient image runner, and then
-boots the named VM; `exec` / `shell` / `stop` reuse the existing console/down
-paths for the running VM. `machine pack` for portable signed artifacts is still
-follow-up work. Use `mvmctl up` for the manifest/flake path that already
-exposes named networks and policy bundles.
+and OCI provenance audit substrate as the transient image runner, then boots
+the named VM with any persisted `mem_initial` and volume settings. When the
+named spec came from an image-backed manifest, `machine create --manifest`
+persists the manifest's `net`, `[network].allow_hosts`, `cpus`, `mem`,
+`mem_initial`, `[dev].volumes`, and `[dev].init` fields into the durable
+machine spec; relative manifest volume paths are resolved against the manifest
+directory when persisted. `dev.init` and `ssh_agent = true` currently require
+`--profile dev` or `--profile permissive`; standard/prod-like profiles refuse
+them. `machine start --dry-run` reports the
+effective network posture, enforcement tier, auth mode, dev-init hash/count,
+and redacted volume policy without resolving or booting the image; the signed
+machine-start receipt carries the same policy summary plus the resolved digest
+and start timestamp after a real boot. `exec` / `shell` / `stop` reuse the
+existing console/down paths for the running VM. `machine pack` for portable
+signed artifacts is still follow-up work. Use `mvmctl up` for the manifest/flake
+path that already exposes named networks and policy bundles.
 
 ## Sandbox State
 

@@ -84,6 +84,12 @@ That direct Nix command is only for users who intentionally manage their own Nix
 | `uids` | `attrs` (optional) | `{ agent = 990; entrypoint = 0|1000; }` — privilege model override. See [Rootless workloads](#rootless-workloads) below. |
 | `extraFiles` | `attrs` (optional) | `{ "/abs/path" = { content; mode?; }; }` baked into the rootfs at build time. |
 
+SSH is not a template capability. `mkGuest` fails Nix evaluation if `packages`
+or `extraFiles` try to add SSH clients, SSH servers, SSH config, host keys,
+`authorized_keys`, `known_hosts`, or private-key material, and the rootfs build
+also rejects SSH-related Nix store paths pulled in transitively. Guest control
+is vsock-only; do not build images that rely on SSH.
+
 ## Entrypoint forms
 
 `entrypoint` declares **exactly one** of:

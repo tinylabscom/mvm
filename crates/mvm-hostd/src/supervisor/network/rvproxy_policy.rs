@@ -24,7 +24,7 @@
 //! redaction), which ride the transform/redaction path; [`RvproxyPolicyGaps`]
 //! records that residual so the splice keeps it.
 
-use mvm_core::network_policy::MANDATORY_DENY_RANGES;
+use mvm_core::network_policy::{BANNED_SSH_PORT, MANDATORY_DENY_RANGES};
 use mvm_core::policy::projection::{CanonicalEgress, Proto};
 use serde::Serialize;
 use std::net::IpAddr;
@@ -155,9 +155,10 @@ pub fn lower_policy(egress: &CanonicalEgress, dns_allow: &[String]) -> RvproxyLo
         .collect();
 
     let (default_egress_deny, l4_allowlist) = match egress {
-        // The `egress.mode = "open"` kill-switch: allow-unless-denied. Mandatory
-        // deny still bites via the denylist.
-        CanonicalEgress::Unrestricted => (false, Vec::new()),
+        // The `egress.mode = "open"` kill-switch: broad allow except mandatory
+        // deny and TCP/22. Use explicit L4 grants instead of default-allow so the
+        // rvproxy config can enforce the SSH-session ban.
+        CanonicalEgress::Unrestricted => (true, unrestricted_without_ssh_rules()),
         // Rules — deny-by-default, allow each grant at full proto/CIDR/port
         // precision. An empty rule set is deny-all (no allow rules + deny-by-
         // default).
@@ -209,6 +210,31 @@ fn proto_str(proto: Proto) -> &'static str {
     }
 }
 
+fn unrestricted_without_ssh_rules() -> Vec<RvproxyL4Rule> {
+    let mut rules = Vec::new();
+    for cidr in ["0.0.0.0/0", "::/0"] {
+        rules.push(RvproxyL4Rule {
+            protocol: proto_str(Proto::Tcp).to_string(),
+            cidr: cidr.to_string(),
+            port_lo: 0,
+            port_hi: BANNED_SSH_PORT - 1,
+        });
+        rules.push(RvproxyL4Rule {
+            protocol: proto_str(Proto::Tcp).to_string(),
+            cidr: cidr.to_string(),
+            port_lo: BANNED_SSH_PORT + 1,
+            port_hi: u16::MAX,
+        });
+        rules.push(RvproxyL4Rule {
+            protocol: proto_str(Proto::Udp).to_string(),
+            cidr: cidr.to_string(),
+            port_lo: 0,
+            port_hi: u16::MAX,
+        });
+    }
+    rules
+}
+
 fn cidr_contains(cidr: &str, ip: IpAddr) -> bool {
     cidr.parse::<ipnet::IpNet>()
         .map(|net| net.contains(&ip))
@@ -242,7 +268,7 @@ mod tests {
         "1.1.1.1",         // another allowed CIDR in tests
         "10.0.0.5",        // private
     ];
-    const PORTS: &[u16] = &[0, 53, 80, 443, 8080, 65535];
+    const PORTS: &[u16] = &[0, 22, 53, 80, 443, 8080, 65535];
 
     /// The lowering must reproduce `CanonicalEgress::permits` exactly for every
     /// probed (proto, ip, port) — full L4 parity, not just coarse IP. This is the
@@ -267,9 +293,14 @@ mod tests {
     fn unrestricted_lowers_to_allow_unless_mandatory_deny() {
         assert_flow_parity(CanonicalEgress::Unrestricted);
         let lowered = lower_policy(&CanonicalEgress::Unrestricted, &[]);
-        assert!(!lowered.policy.default_egress_deny);
-        assert!(lowered.policy.l4_allowlist.is_empty());
+        assert!(lowered.policy.default_egress_deny);
+        assert_eq!(lowered.policy.l4_allowlist.len(), 6);
         assert!(lowered.policy.permits_flow(Proto::Tcp, ip("8.8.8.8"), 443));
+        assert!(
+            !lowered
+                .policy
+                .permits_flow(Proto::Tcp, ip("8.8.8.8"), BANNED_SSH_PORT)
+        );
         assert!(
             !lowered
                 .policy

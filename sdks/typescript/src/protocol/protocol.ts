@@ -65,8 +65,16 @@ export type GuestRequest =
       };
     }
   | {
+      StartUnixSocketForward: {
+        guest_path: string;
+        host_vsock_port: number;
+        socket_mode: number;
+      };
+    }
+  | {
       ConsoleOpen: {
         cols: number;
+        env?: [string, string][];
         rows: number;
       };
     }
@@ -337,6 +345,12 @@ export type GuestResponse =
       PortForwardStarted: {
         guest_port: number;
         vsock_port: number;
+      };
+    }
+  | {
+      UnixSocketForwardStarted: {
+        guest_path: string;
+        host_vsock_port: number;
       };
     }
   | {
