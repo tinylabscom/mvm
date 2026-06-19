@@ -869,12 +869,14 @@ Required behavior:
 - [~] Add phase timing around `machine run`: cache resolve, admission, drive
       materialization, backend start, vsock ready, command exit, teardown.
       Landed: `commands::vm::phase_timing` (`RunPhaseMarks`→`RunPhaseTimings`,
-      pure + unit-tested) wired at the `exec::run_inner` seams — resolve,
-      drives, admit, backend start, run, teardown — emitting a single greppable
-      line to stderr behind `MVM_PHASE_TIMING=1` (default off, zero behavior
-      change). Deferred: split vsock-ready from command-exit (needs a mark
-      inside `run_in_guest`) and capture the upstream OCI cache-resolve span
-      that `run_secure` does before `run_inner` for `--image`.
+      pure + unit-tested) wired at the `exec::run_inner` + `run_in_guest`
+      seams — resolve, drives, admit, backend start, vsock wait (boot→agent
+      reachable), command, teardown — emitting a single greppable line to
+      stderr behind `MVM_PHASE_TIMING=1` (default off, zero behavior change).
+      The line also reports `dispatch_window` (admitted→agent-reachable), the
+      span the `<200 ms` bar below is set against. Deferred: capture the
+      upstream OCI cache-resolve span that `run_secure` does before
+      `run_inner` for `--image`.
 - [ ] Add a hardware-gated Linux/KVM benchmark for cached
       `machine run --image alpine -- true`.
 - [ ] Set the first acceptance bar at `<200 ms` for backend start to command

@@ -25,6 +25,10 @@ pub struct RunPhaseMarks {
     pub admitted: Instant,
     /// The backend reported the VM booted (cold start or snapshot restore).
     pub backend_started: Instant,
+    /// The guest agent first became reachable over vsock — i.e. the command
+    /// is about to be dispatched. The `backend_started`..`vsock_ready` span
+    /// is the boot-to-ready wait; `start`..`vsock_ready` is the dispatch bar.
+    pub vsock_ready: Instant,
     /// The guest command finished and its exit code was captured.
     pub command_done: Instant,
     /// The VM was stopped and transient staging was cleaned up.
@@ -39,7 +43,8 @@ pub struct RunPhaseTimings {
     pub drives_ms: f64,
     pub admit_ms: f64,
     pub backend_start_ms: f64,
-    pub run_ms: f64,
+    pub vsock_wait_ms: f64,
+    pub command_ms: f64,
     pub teardown_ms: f64,
     pub total_ms: f64,
 }
@@ -55,7 +60,8 @@ impl RunPhaseMarks {
             drives_ms: ms(self.image_resolved, self.drives_ready),
             admit_ms: ms(self.drives_ready, self.admitted),
             backend_start_ms: ms(self.admitted, self.backend_started),
-            run_ms: ms(self.backend_started, self.command_done),
+            vsock_wait_ms: ms(self.backend_started, self.vsock_ready),
+            command_ms: ms(self.vsock_ready, self.command_done),
             teardown_ms: ms(self.command_done, self.torn_down),
             total_ms: ms(self.start, self.torn_down),
         }
@@ -63,18 +69,27 @@ impl RunPhaseMarks {
 }
 
 impl RunPhaseTimings {
+    /// Admitted-plan to command-dispatch: the window B2's `<200 ms`
+    /// acceptance bar is set against (backend boot + boot-to-agent wait).
+    pub fn dispatch_window_ms(&self) -> f64 {
+        self.backend_start_ms + self.vsock_wait_ms
+    }
+
     /// A single stable, greppable line for logs and the benchmark harness.
     pub fn render(&self) -> String {
         format!(
             "[mvm] phase-timing: resolve={:.1}ms drives={:.1}ms admit={:.1}ms \
-             backend_start={:.1}ms run={:.1}ms teardown={:.1}ms total={:.1}ms",
+             backend_start={:.1}ms vsock_wait={:.1}ms command={:.1}ms \
+             teardown={:.1}ms total={:.1}ms dispatch_window={:.1}ms",
             self.resolve_ms,
             self.drives_ms,
             self.admit_ms,
             self.backend_start_ms,
-            self.run_ms,
+            self.vsock_wait_ms,
+            self.command_ms,
             self.teardown_ms,
             self.total_ms,
+            self.dispatch_window_ms(),
         )
     }
 }
@@ -99,31 +114,49 @@ mod tests {
         assert!((a - b).abs() < 1e-9, "expected {b}, got {a}");
     }
 
-    #[test]
-    fn marks_collapse_to_ordered_non_negative_spans() {
-        let t0 = Instant::now();
-        let marks = RunPhaseMarks {
+    fn ordered_marks(t0: Instant) -> RunPhaseMarks {
+        RunPhaseMarks {
             start: t0,
             image_resolved: t0 + Duration::from_millis(5),
             drives_ready: t0 + Duration::from_millis(12),
             admitted: t0 + Duration::from_millis(20),
             backend_started: t0 + Duration::from_millis(120),
+            vsock_ready: t0 + Duration::from_millis(150),
             command_done: t0 + Duration::from_millis(160),
             torn_down: t0 + Duration::from_millis(175),
-        };
-        let t = marks.to_timings();
+        }
+    }
+
+    #[test]
+    fn marks_collapse_to_ordered_non_negative_spans() {
+        let t = ordered_marks(Instant::now()).to_timings();
         approx(t.resolve_ms, 5.0);
         approx(t.drives_ms, 7.0);
         approx(t.admit_ms, 8.0);
         approx(t.backend_start_ms, 100.0);
-        approx(t.run_ms, 40.0);
+        approx(t.vsock_wait_ms, 30.0);
+        approx(t.command_ms, 10.0);
         approx(t.teardown_ms, 15.0);
         approx(t.total_ms, 175.0);
         // The phases partition the run: their sum is the total.
         approx(
-            t.resolve_ms + t.drives_ms + t.admit_ms + t.backend_start_ms + t.run_ms + t.teardown_ms,
+            t.resolve_ms
+                + t.drives_ms
+                + t.admit_ms
+                + t.backend_start_ms
+                + t.vsock_wait_ms
+                + t.command_ms
+                + t.teardown_ms,
             t.total_ms,
         );
+    }
+
+    #[test]
+    fn dispatch_window_is_backend_start_plus_vsock_wait() {
+        // B2's `<200 ms` acceptance bar is "backend start to command
+        // dispatch": admitted -> backend booted -> guest agent reachable.
+        let t = ordered_marks(Instant::now()).to_timings();
+        approx(t.dispatch_window_ms(), 130.0);
     }
 
     #[test]
@@ -136,6 +169,7 @@ mod tests {
             admitted: t0 + Duration::from_millis(20),
             // backend_started before admitted (clock anomaly): clamps to 0.
             backend_started: t0 + Duration::from_millis(10),
+            vsock_ready: t0 + Duration::from_millis(150),
             command_done: t0 + Duration::from_millis(160),
             torn_down: t0 + Duration::from_millis(175),
         };
@@ -150,13 +184,14 @@ mod tests {
             drives_ms: 7.0,
             admit_ms: 8.0,
             backend_start_ms: 100.0,
-            run_ms: 40.0,
+            vsock_wait_ms: 30.0,
+            command_ms: 10.0,
             teardown_ms: 15.0,
             total_ms: 175.0,
         };
         assert_eq!(
             t.render(),
-            "[mvm] phase-timing: resolve=5.0ms drives=7.0ms admit=8.0ms backend_start=100.0ms run=40.0ms teardown=15.0ms total=175.0ms"
+            "[mvm] phase-timing: resolve=5.0ms drives=7.0ms admit=8.0ms backend_start=100.0ms vsock_wait=30.0ms command=10.0ms teardown=15.0ms total=175.0ms dispatch_window=130.0ms"
         );
     }
 

@@ -681,8 +681,12 @@ fn run_inner(
     }
 
     // Run the command + always tear down.
-    let result = run_in_guest(&vm_name, &req, &add_dir_labels, capture);
+    let run_outcome = run_in_guest(&vm_name, &req, &add_dir_labels, capture, timing);
     let t_command_done = timing.then(std::time::Instant::now);
+    let (result, t_vsock_ready) = match run_outcome {
+        Ok((either, vsock_ready)) => (Ok(either), vsock_ready),
+        Err(e) => (Err(e), None),
+    };
 
     let _ = backend.stop(&VmId(vm_name.clone()));
 
@@ -714,6 +718,7 @@ fn run_inner(
         Some(drives_ready),
         Some(admitted),
         Some(backend_started),
+        Some(vsock_ready),
         Some(command_done),
         Some(torn_down),
     ) = (
@@ -722,6 +727,7 @@ fn run_inner(
         t_drives_ready,
         t_admitted,
         t_backend_started,
+        t_vsock_ready,
         t_command_done,
         t_torn_down,
     ) {
@@ -731,6 +737,7 @@ fn run_inner(
             drives_ready,
             admitted,
             backend_started,
+            vsock_ready,
             command_done,
             torn_down,
         };
@@ -819,11 +826,14 @@ fn run_in_guest(
     req: &ExecRequest,
     labels: &[String],
     capture: bool,
-) -> Result<Either<i32, ExecOutput>> {
+    timing: bool,
+) -> Result<(Either<i32, ExecOutput>, Option<std::time::Instant>)> {
     use std::io::Write as _;
     if !wait_for_agent(vm_name, 30) {
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
+    // Agent reachable over vsock: the command is about to be dispatched.
+    let vsock_ready = timing.then(std::time::Instant::now);
     let wrapper = build_guest_wrapper(req, labels);
 
     let transport = vsock_transport::for_vm(vm_name)?;
@@ -884,15 +894,16 @@ fn run_in_guest(
         other => anyhow::bail!("unexpected terminal exec event: {other:?}"),
     };
 
-    if capture {
-        Ok(Either::Right(ExecOutput {
+    let either = if capture {
+        Either::Right(ExecOutput {
             exit_code,
             stdout: String::from_utf8_lossy(&out).into_owned(),
             stderr: String::from_utf8_lossy(&err).into_owned(),
-        }))
+        })
     } else {
-        Ok(Either::Left(exit_code))
-    }
+        Either::Left(exit_code)
+    };
+    Ok((either, vsock_ready))
 }
 
 // ---------------------------------------------------------------------------
