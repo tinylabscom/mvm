@@ -3967,7 +3967,7 @@ mod tests {
 
         // Harness plays the VMM (vfkit/libkrun). It MUST be bound to a
         // pathname so the gateway can address its DHCP reply back.
-        let harness_path = tmp.path().join("harness.sock");
+        let harness_path = libkrun_reply_path(&sup_listen);
         let harness = tokio::net::UnixDatagram::bind(&harness_path).unwrap();
         let mut connected = false;
         for _ in 0..100 {
