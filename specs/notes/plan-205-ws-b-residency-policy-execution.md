@@ -346,6 +346,7 @@ git commit -m "feat(plan-205): doctor reports resolved residency policy (WS-B)"
 
 - [ ] WS-D: reaper demotes a warm standby to a parked snapshot after `idle_timeout`, using `vz::snapshot_save`/`snapshot_restore`; parked→warm promotion on claim; the `StandbyHandle` gains an `idle_since` timestamp.
 - [ ] Live: prove `MVM_RESIDENCY=warm` holds a standby and a second `up` claims it without a boot (needs the live pool — gated like the Plan 118 live lanes).
+- [ ] OCI `run --image` (`start_persistent_oci_machine` in `up.rs`) stays at `warm_pool_size: 0`; the residency policy is not applied to persistent OCI machines — revisit if warm OCI standbys are wanted.
 
 ## Self-Review
 

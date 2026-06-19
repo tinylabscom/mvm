@@ -128,6 +128,7 @@ mod tests {
     fn cold_holds_no_warm() {
         assert_eq!(ResidencyPolicy::cold().warm_target(), 0);
         assert_eq!(ResidencyPolicy::cold().label(), "cold");
+        assert_eq!(ResidencyPolicy::cold().idle_timeout(), None);
     }
 
     #[test]
@@ -141,6 +142,10 @@ mod tests {
             Some(ResidencyPolicy::parked())
         );
         assert_eq!(parse_env_residency("Cold"), Some(ResidencyPolicy::cold()));
+        assert_eq!(
+            parse_env_residency("always-warm"),
+            Some(ResidencyPolicy::always_warm())
+        );
     }
 
     #[test]
@@ -159,5 +164,13 @@ mod tests {
     fn explicit_warm_pool_size_overrides_policy() {
         assert_eq!(effective_warm_pool_size(Some(3)), 3);
         assert_eq!(effective_warm_pool_size(Some(0)), 0);
+    }
+
+    #[test]
+    fn none_warm_pool_size_falls_back_to_resolved_policy() {
+        assert_eq!(
+            effective_warm_pool_size(None),
+            resolve_residency().0.warm_target()
+        );
     }
 }
