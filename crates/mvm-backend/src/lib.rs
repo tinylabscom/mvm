@@ -85,6 +85,7 @@ pub mod vz_control;
 /// untrusted workload. The admitted launch path accepts `&dyn WorkloadBackend`
 /// only, so a non-workload backend (QEMU dev/test, mock) cannot reach it.
 pub mod workload_backend;
+mod workload_wait;
 
 pub use backend::{AnyBackend, FirecrackerBackend, FirecrackerConfig};
 pub use libkrun::LibkrunBackend;

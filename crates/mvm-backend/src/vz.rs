@@ -570,6 +570,15 @@ impl VmBackend for VzBackend {
         Ok(())
     }
 
+    fn wait(&self, id: &VmId) -> Result<mvm_core::vm_backend::VmExitStatus> {
+        // The detached vz-supervisor persists `<vm_state_dir>/workload.exit`
+        // before the guest powers off (mirrors libkrun), so the shared
+        // state-dir poll captures a one-shot `up --wait` verdict on Vz too.
+        Ok(crate::workload_wait::wait_for_workload_exit(&vm_state_dir(
+            &id.0,
+        )))
+    }
+
     fn stop_all(&self) -> Result<()> {
         let vms = self.list()?;
         let mut last_err = None;

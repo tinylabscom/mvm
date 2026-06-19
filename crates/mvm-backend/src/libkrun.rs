@@ -108,12 +108,6 @@ const VSOCK_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 /// means `mvmctl stop` returns in 2 s instead of 5 s.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Upper bound for `wait()` (the `up --wait` path): how long to wait
-/// for the guest's one-shot workload to finish and report its exit code via
-/// `<vm_state_dir>/workload.exit`. A workload that exceeds this (or crashes
-/// without reporting) fails closed to `VmExitStatus::UNKNOWN`.
-const WORKLOAD_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
-
 /// Open the per-VM guest-console capture sink. OUTPUT-ONLY by
 /// construction (write-only, create+truncate): the guest console
 /// streams here and NO host-readable fd is ever attached as console
@@ -865,26 +859,9 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn wait(&self, id: &VmId) -> Result<mvm_core::vm_backend::VmExitStatus> {
-        // Poll for the captured exit code to appear. The guest writes
-        // `workload.exit` (and the supervisor persists it) BEFORE the guest
-        // powers off — the ack handshake guarantees the
-        // ordering — so its presence is the reliable "workload finished"
-        // signal. We deliberately do NOT poll supervisor PID liveness: on a
-        // busy host the dead supervisor's PID can be reused by another
-        // process, making a liveness check spin forever. Bounded so a guest
-        // that crashes without reporting fails closed to UNKNOWN.
-        let state_dir = vm_state_dir(&id.0);
-        let deadline = Instant::now() + WORKLOAD_WAIT_TIMEOUT;
-        loop {
-            let status = read_exit_status_from(&state_dir);
-            if status != mvm_core::vm_backend::VmExitStatus::UNKNOWN {
-                return Ok(status);
-            }
-            if Instant::now() >= deadline {
-                return Ok(mvm_core::vm_backend::VmExitStatus::UNKNOWN);
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        Ok(crate::workload_wait::wait_for_workload_exit(&vm_state_dir(
+            &id.0,
+        )))
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {
@@ -1056,19 +1033,6 @@ fn pid_alive(pid: libc::pid_t) -> bool {
 
 fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
     unsafe { libc::kill(pid, sig) };
-}
-
-/// Read the workload exit status written by the supervisor into
-/// `<state_dir>/workload.exit`. Returns UNKNOWN when the file is absent
-/// (guest was killed / backend doesn't support capture).
-fn read_exit_status_from(state_dir: &std::path::Path) -> mvm_core::vm_backend::VmExitStatus {
-    match mvm_core::exit_capture::read_captured(state_dir) {
-        Some(code) => mvm_core::vm_backend::VmExitStatus {
-            code: Some(code),
-            success: code == 0,
-        },
-        None => mvm_core::vm_backend::VmExitStatus::UNKNOWN,
-    }
 }
 
 #[cfg(test)]
@@ -1434,33 +1398,6 @@ mod tests {
             let err = result.expect_err("expected missing-file error");
             assert!(err.to_string().contains("not a file"));
         });
-    }
-
-    // read_exit_status_from / wait() tests.
-
-    #[test]
-    fn wait_reads_workload_exit_file() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(mvm_core::exit_capture::exit_file_path(dir.path()), "3").unwrap();
-        let status = read_exit_status_from(dir.path());
-        assert_eq!(status.code, Some(3));
-        assert!(!status.success);
-    }
-
-    #[test]
-    fn read_exit_status_zero_is_success() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(mvm_core::exit_capture::exit_file_path(dir.path()), "0").unwrap();
-        let status = read_exit_status_from(dir.path());
-        assert_eq!(status.code, Some(0));
-        assert!(status.success);
-    }
-
-    #[test]
-    fn read_exit_status_absent_is_unknown() {
-        let dir = tempfile::tempdir().unwrap();
-        let status = read_exit_status_from(dir.path());
-        assert_eq!(status, mvm_core::vm_backend::VmExitStatus::UNKNOWN);
     }
 
     #[test]
