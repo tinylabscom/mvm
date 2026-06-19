@@ -1,6 +1,6 @@
 # Plan 204 — Builder VM resident control plane
 
-**Status:** Proposed
+**Status:** In progress — WS-A protocol wire types + version negotiation landed; daemon skeleton, image wiring, and host client remain
 **Sprint:** 56 / product-DX follow-up
 **ADR:** [ADR-089](../adrs/089-builder-vm-resident-control-plane.md)
 **Depends on:** Plan 199, Plan 200, ADR-046, ADR-057, ADR-071
@@ -120,8 +120,20 @@ Add structural tests that prove:
 
 ### A. Protocol and daemon skeleton
 
-- [ ] Add builder request/response wire types with serde roundtrip tests.
-- [ ] Add protocol-version negotiation and unsupported-version refusal tests.
+- [x] Add builder request/response wire types with serde roundtrip tests.
+      `mvm_build::builderd_protocol` — typed `BuilderRequest`
+      (`Handshake`/`Probe`/`FlakeCheck`/`BuildGuestImage`/`BuildHostTool`/
+      `PrefetchSource`/`QueryStorePath`/`CancelJob`) + `BuilderResponse`
+      (`Accepted`/`Progress`/`LogChunk`/`ArtifactReady`/`StorePathReady`/
+      `Failed`/`Cancelled`), an `OperationId` newtype, and a stable
+      `FailureCategory`. Externally-tagged snake_case + `deny_unknown_fields`
+      on every variant (fail-closed against an unknown peer field/kind),
+      reusing the existing 256 KiB vsock framing. Roundtrip, kind-tag
+      stability, and unknown-field/unknown-kind rejection tests (26 tests).
+- [x] Add protocol-version negotiation and unsupported-version refusal tests.
+      `PROTOCOL_VERSION` + `negotiate()` (exact-match v1, fail-closed) +
+      `handshake_reply()` returning `Failed`/`FailureCategory::Version` on an
+      unsupported version.
 - [ ] Add `mvm-builderd` skeleton with `Handshake` and `Probe`.
 - [ ] Add builder-VM image wiring so the daemon starts on boot.
 - [ ] Add `mvmctl doctor` visibility for builder daemon readiness.

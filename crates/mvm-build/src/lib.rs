@@ -8,6 +8,10 @@ pub mod builder_vm;
 /// Hypervisor-agnostic builder-VM orchestration helper that wraps a
 /// `VmBackendForBuilder` implementation (libkrun and Vz).
 pub mod builder_vm_runtime;
+/// Typed allowlisted control-plane protocol for the resident
+/// `mvm-builderd` builder-VM service (the long-term replacement for the
+/// controlled-shell-job channel in `builder_protocol`).
+pub mod builderd_protocol;
 pub mod cache;
 /// Builder-VM egress allowlist proxy — the lib half of the
 /// `mvm-egress-proxy` bin. Kept as a lib module (not bin-inlined) so
