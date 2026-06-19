@@ -1,4 +1,4 @@
-//! `mvmctl checkpoint create|ls|rm|fork` — immutable fs_quick snapshots of a
+//! `mvmctl vm checkpoint create|ls|rm|fork` — immutable fs_quick snapshots of a
 //! quiesced VM's rootfs, and copy-on-write forks that branch a new sandbox
 //! lineage from one. With `--boot` the fork arm also admits and launches the
 //! child as a fresh VM, adopting the materialized rootfs without clobbering it.
@@ -11,13 +11,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
+use serde::Serialize;
 
 use mvm_backend::checkpoint::{
     CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, RestoreParams,
     capture_fs_quick, capture_vm_full, fork_checkpoint, fork_vm_full, restore_checkpoint,
 };
 use mvm_backend::vz::supervisor_config_path;
-use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
+use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
 use mvm_core::config::vm_state_dir;
 use mvm_hostd::audit::bind::class_str;
 
@@ -63,6 +64,9 @@ pub(in crate::commands) enum CheckpointCmd {
     Restore {
         /// Checkpoint id to restore.
         id: String,
+        /// Output the restore result as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// List checkpoints under ~/.mvm/checkpoints.
     Ls {
@@ -74,6 +78,9 @@ pub(in crate::commands) enum CheckpointCmd {
     Rm {
         /// Checkpoint id to remove.
         id: String,
+        /// Output the removal result as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Branch a new sandbox lineage from a checkpoint.
     ///
@@ -103,6 +110,9 @@ pub(in crate::commands) enum CheckpointCmd {
         /// Inherits from the parent plan when omitted.
         #[arg(long)]
         memory: Option<String>,
+        /// Output the fork result as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Compare two checkpoints (metadata + content manifest; `b` relative to `a`).
     Diff {
@@ -127,9 +137,9 @@ pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> R
             CheckpointClassArg::FsQuick => create(&name, tag, json),
             CheckpointClassArg::VmFull => create_vm_full(&name, tag, json),
         },
-        CheckpointCmd::Restore { id } => restore(&id),
+        CheckpointCmd::Restore { id, json } => restore(&id, json),
         CheckpointCmd::Ls { json } => ls(json),
-        CheckpointCmd::Rm { id } => rm(&id),
+        CheckpointCmd::Rm { id, json } => rm(&id, json),
         CheckpointCmd::Fork {
             id,
             new_id,
@@ -137,9 +147,44 @@ pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> R
             hypervisor,
             cpus,
             memory,
-        } => fork(&id, new_id, boot, &hypervisor, cpus, memory.as_deref()),
+            json,
+        } => fork(
+            &id,
+            new_id,
+            boot,
+            &hypervisor,
+            cpus,
+            memory.as_deref(),
+            json,
+        ),
         CheckpointCmd::Diff { a, b, json } => diff(&a, &b, json),
     }
+}
+
+#[derive(Serialize)]
+struct CheckpointRestoreJson<'a> {
+    schema_version: u8,
+    action: &'static str,
+    vm_name: &'a str,
+    checkpoint: &'a CheckpointMeta,
+}
+
+#[derive(Serialize)]
+struct CheckpointRemoveJson<'a> {
+    schema_version: u8,
+    action: &'static str,
+    id: &'a CheckpointId,
+    removed: bool,
+}
+
+#[derive(Serialize)]
+struct CheckpointForkJson<'a> {
+    schema_version: u8,
+    action: &'static str,
+    parent_id: &'a CheckpointId,
+    child_vm_name: &'a str,
+    booted: bool,
+    checkpoint: &'a CheckpointMeta,
 }
 
 /// Reject a user-supplied checkpoint id that could escape the store root or
@@ -505,17 +550,26 @@ fn diff(a: &str, b: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn rm(id: &str) -> Result<()> {
+fn rm(id: &str, json: bool) -> Result<()> {
     let id = validated_checkpoint_id(id)?;
     CheckpointStore::open().remove(&id)?;
-    ui::success(&format!("checkpoint {} removed", id.as_str()));
+    if json {
+        crate::json_out::emit_json(&CheckpointRemoveJson {
+            schema_version: 1,
+            action: "rm",
+            id: &id,
+            removed: true,
+        })?;
+    } else {
+        ui::success(&format!("checkpoint {} removed", id.as_str()));
+    }
     Ok(())
 }
 
-/// `mvmctl checkpoint restore <id>`: same-identity resume of a vm_full
+/// `mvmctl vm checkpoint restore <id>`: same-identity resume of a vm_full
 /// checkpoint. The library verifies the manifest, then materializes the saved
 /// {rootfs, memory, machine-id} back into the original VM and resumes it.
-fn restore(id: &str) -> Result<()> {
+fn restore(id: &str, json: bool) -> Result<()> {
     let checkpoint = validated_checkpoint_id(id)?;
     let store = CheckpointStore::open();
     let meta = store.read_meta(&checkpoint)?;
@@ -532,11 +586,20 @@ fn restore(id: &str) -> Result<()> {
     .with_context(|| format!("restoring checkpoint {id:?}"))?;
 
     bind_checkpoint_restored(&meta.vm_name, &meta);
-    ui::success(&format!(
-        "restored {} into vm '{}'",
-        checkpoint.as_str(),
-        meta.vm_name
-    ));
+    if json {
+        crate::json_out::emit_json(&CheckpointRestoreJson {
+            schema_version: 1,
+            action: "restore",
+            vm_name: &meta.vm_name,
+            checkpoint: &meta,
+        })?;
+    } else {
+        ui::success(&format!(
+            "restored {} into vm '{}'",
+            checkpoint.as_str(),
+            meta.vm_name
+        ));
+    }
     Ok(())
 }
 
@@ -547,6 +610,7 @@ fn fork(
     hypervisor: &str,
     cpus: Option<u32>,
     memory: Option<&str>,
+    json: bool,
 ) -> Result<()> {
     let checkpoint = validated_checkpoint_id(id)?;
     let store = CheckpointStore::open();
@@ -555,35 +619,51 @@ fn fork(
     // a rootfs-only clone that the operator can optionally boot with `--boot`.
     let parent = store.read_meta(&checkpoint)?;
     match parent.class {
-        CheckpointClass::VmFull => fork_vm_full_arm(&store, &checkpoint, new_id, cpus, memory),
-        CheckpointClass::FsQuick => {
-            fork_fs_quick_arm(&store, &checkpoint, new_id, boot, hypervisor, cpus, memory)
+        CheckpointClass::VmFull => {
+            fork_vm_full_arm(&store, &checkpoint, new_id, cpus, memory, json)
         }
+        CheckpointClass::FsQuick => fork_fs_quick_arm(ForkFsQuickArmParams {
+            store: &store,
+            checkpoint: &checkpoint,
+            new_id,
+            boot,
+            hypervisor,
+            cpus_override: cpus,
+            memory_override: memory,
+            json,
+        }),
     }
+}
+
+/// Inputs for [`fork_fs_quick_arm`]. Grouped to stay under the
+/// `clippy::too_many_arguments` workspace ceiling.
+struct ForkFsQuickArmParams<'a> {
+    store: &'a CheckpointStore,
+    checkpoint: &'a CheckpointId,
+    new_id: Option<String>,
+    boot: bool,
+    hypervisor: &'a str,
+    cpus_override: Option<u32>,
+    memory_override: Option<&'a str>,
+    json: bool,
 }
 
 /// fs_quick fork: CoW-clone the rootfs into a new VM state dir. With
 /// `--boot`, also admits and launches the child as a fresh VM, adopting the
 /// materialized rootfs without clobbering it (the no-clobber seam in
 /// `prepare_instance_rootfs` returns early when source == instance path).
-fn fork_fs_quick_arm(
-    store: &CheckpointStore,
-    checkpoint: &CheckpointId,
-    new_id: Option<String>,
-    boot: bool,
-    hypervisor: &str,
-    cpus: Option<u32>,
-    memory: Option<&str>,
-) -> Result<()> {
+fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
     let now = now_unix();
-    let child_vm_name = new_id.unwrap_or_else(|| format!("{}-fork-{now}", checkpoint.as_str()));
+    let child_vm_name = p
+        .new_id
+        .unwrap_or_else(|| format!("{}-fork-{now}", p.checkpoint.as_str()));
     let dest_dir = vm_state_dir(&child_vm_name);
     let child_id = CheckpointId::new(format!("fork-{child_vm_name}-{now}"));
 
     let meta = fork_checkpoint(
-        store,
+        p.store,
         ForkParams {
-            checkpoint: checkpoint.clone(),
+            checkpoint: p.checkpoint.clone(),
             child_id,
             child_vm_name: child_vm_name.clone(),
             dest_dir: dest_dir.clone(),
@@ -592,38 +672,51 @@ fn fork_fs_quick_arm(
             child_tenant_id: None,
         },
     )
-    .with_context(|| format!("forking checkpoint {:?}", checkpoint.as_str()))?;
+    .with_context(|| format!("forking checkpoint {:?}", p.checkpoint.as_str()))?;
 
     // A fork that we can't audit (signer present but emit fails) is refused —
     // an unaudited lineage record would break the chain. A missing plan/signer
     // is best-effort, matching capture.
-    bind_checkpoint_forked(checkpoint, &meta, &child_vm_name, store)?;
+    bind_checkpoint_forked(p.checkpoint, &meta, &child_vm_name, p.store)?;
 
-    ui::success(&format!(
-        "forked {} -> checkpoint {} (vm '{}')",
-        checkpoint.as_str(),
-        meta.id.as_str(),
-        child_vm_name
-    ));
-
-    if boot {
+    if p.boot {
         let instance_rootfs = dest_dir.join("rootfs.ext4");
         boot_forked_child(BootForkedChildParams {
             child_vm_name: &child_vm_name,
             instance_rootfs: &instance_rootfs,
-            parent_checkpoint: checkpoint,
-            store,
-            hypervisor,
-            cpus_override: cpus,
-            memory_override: memory,
+            parent_checkpoint: p.checkpoint,
+            store: p.store,
+            hypervisor: p.hypervisor,
+            cpus_override: p.cpus_override,
+            memory_override: p.memory_override,
+            emit_text: !p.json,
+        })?;
+    }
+
+    if p.json {
+        crate::json_out::emit_json(&CheckpointForkJson {
+            schema_version: 1,
+            action: "fork",
+            parent_id: p.checkpoint,
+            child_vm_name: &child_vm_name,
+            booted: p.boot,
+            checkpoint: &meta,
         })?;
     } else {
-        ui::info(&format!(
-            "child '{child_vm_name}' materialized at {}; re-run the fork with \
-             --boot to admit and launch a child, or delete the directory to \
-             discard this one",
-            dest_dir.display()
+        ui::success(&format!(
+            "forked {} -> checkpoint {} (vm '{}')",
+            p.checkpoint.as_str(),
+            meta.id.as_str(),
+            child_vm_name
         ));
+        if !p.boot {
+            ui::info(&format!(
+                "child '{child_vm_name}' materialized at {}; re-run the fork with \
+                 --boot to admit and launch a child, or delete the directory to \
+                 discard this one",
+                dest_dir.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -640,6 +733,7 @@ struct ForkVmFullArmParams<'a> {
     cpus_override: Option<u32>,
     /// Refused with a user-visible error for the same reason as `cpus_override`.
     memory_override: Option<&'a str>,
+    json: bool,
 }
 
 /// vm_full fork: clone the captured triple into a new child identity, admit a
@@ -652,6 +746,7 @@ fn fork_vm_full_arm(
     new_id: Option<String>,
     cpus_override: Option<u32>,
     memory_override: Option<&str>,
+    json: bool,
 ) -> Result<()> {
     fork_vm_full_arm_inner(ForkVmFullArmParams {
         store,
@@ -659,6 +754,7 @@ fn fork_vm_full_arm(
         new_id,
         cpus_override,
         memory_override,
+        json,
     })
 }
 
@@ -779,12 +875,23 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
     bind_checkpoint_forked(p.checkpoint, &meta, &child_vm_name, p.store)?;
     super::up::emit_launched_if(&admission, "vz");
 
-    ui::success(&format!(
-        "forked {} -> checkpoint {} (vm '{}', auto-booted)",
-        p.checkpoint.as_str(),
-        meta.id.as_str(),
-        child_vm_name
-    ));
+    if p.json {
+        crate::json_out::emit_json(&CheckpointForkJson {
+            schema_version: 1,
+            action: "fork",
+            parent_id: p.checkpoint,
+            child_vm_name: &child_vm_name,
+            booted: true,
+            checkpoint: &meta,
+        })?;
+    } else {
+        ui::success(&format!(
+            "forked {} -> checkpoint {} (vm '{}', auto-booted)",
+            p.checkpoint.as_str(),
+            meta.id.as_str(),
+            child_vm_name
+        ));
+    }
     Ok(())
 }
 
@@ -803,6 +910,7 @@ struct BootForkedChildParams<'a> {
     hypervisor: &'a str,
     cpus_override: Option<u32>,
     memory_override: Option<&'a str>,
+    emit_text: bool,
 }
 
 /// Admit and boot a forked child VM after its rootfs has been materialized.
@@ -907,10 +1015,12 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     }
     super::up::emit_launched_if(&admission, &effective_hypervisor);
 
-    ui::success(&format!(
-        "child VM '{}' booted (hypervisor: {})",
-        p.child_vm_name, effective_hypervisor
-    ));
+    if p.emit_text {
+        ui::success(&format!(
+            "child VM '{}' booted (hypervisor: {})",
+            p.child_vm_name, effective_hypervisor
+        ));
+    }
     Ok(())
 }
 
@@ -1300,6 +1410,7 @@ mod tests {
             new_id: None,
             cpus_override: Some(8),
             memory_override: None,
+            json: false,
         })
         .unwrap_err();
         let msg = err.to_string();
@@ -1320,6 +1431,7 @@ mod tests {
             new_id: None,
             cpus_override: None,
             memory_override: Some("2G"),
+            json: false,
         })
         .unwrap_err();
         let msg = err.to_string();

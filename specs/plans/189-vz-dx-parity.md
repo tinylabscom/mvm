@@ -16,7 +16,8 @@
 > after Plan 177 lands." Plan 177 landed 2026-06-12.
 
 > **Status: 🟡 in progress.** Spun out of [Plan 177](./177-backend-consolidation.md)
-> §"deferred follow-ups". WS-3 lifecycle verbs landed: `dev status/down/up --json`.
+> §"deferred follow-ups". WS-3 lifecycle/checkpoint verbs landed:
+> `dev status/down/up --json` and `vm checkpoint`/`vm snapshot` JSON coverage.
 >
 > **Priority update 2026-06-15:** Plan 200 owns the new beginner-facing
 > `mvmctl machine` lifecycle. This plan should stay limited to VZ-specific
@@ -126,13 +127,20 @@ WS-2 / Plan 140 — add `--json` there, don't fork).
       The up handlers now return the outcome string (presentation moved to the
       dispatch, mirroring `dev down`); serde + CLI-parse + conflict tests;
       verified on macOS-26 via the Plan 177 cold-build smoke.
-- [ ] snapshot/checkpoint `--json` — add to the Plan 159/140 verbs in place
-      (don't duplicate the primitive); WS-1 (`save`/`restore`) lands its own.
+- [x] snapshot/checkpoint `--json` — added in place to the Plan 159/140
+      surfaces without duplicating the primitive: `vm checkpoint restore/rm/fork
+      --json` now emit schema-versioned mutation results, and `vm snapshot rm
+      --json` mirrors the existing `snapshot ls --json`. `checkpoint create`,
+      `checkpoint ls`, and `checkpoint diff` already had JSON coverage. Parser
+      tests pin every new flag; CLI reference corrected from stale top-level
+      `mvmctl checkpoint` examples to the grouped `mvmctl vm checkpoint` /
+      `mvmctl vm snapshot` surface.
 - [ ] linux-native richer `--json` — today it collapses to a single `state`
       (`ready`/`not-ready`/`no-kvm`); surface the kvm/firecracker/assets detail
       as a typed shape if a Linux consumer needs it.
 - [ ] acceptance: every vz lifecycle verb has a documented `--json` form with
-      a stable schema + test.
+      a stable schema + test. Checkpoint/snapshot JSON and docs are covered;
+      linux-native richer detail remains open.
 
 ## WS-4: Base pinning
 
