@@ -676,7 +676,7 @@ fn run_inner(
         let _ = ctrlc::set_handler(move || {
             interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
             let backend = AnyBackend::auto_select();
-            let _ = backend.stop(&VmId(vm_name.clone()));
+            let _ = backend.stop_transient(&VmId(vm_name.clone()));
         });
     }
 
@@ -688,7 +688,7 @@ fn run_inner(
         Err(e) => (Err(e), None),
     };
 
-    let _ = backend.stop(&VmId(vm_name.clone()));
+    let _ = backend.stop_transient(&VmId(vm_name.clone()));
 
     // Writable --add-dir uses rsync-back. With the VM stopped the
     // ext4 image is no longer in use, so we mount it host-side and rsync

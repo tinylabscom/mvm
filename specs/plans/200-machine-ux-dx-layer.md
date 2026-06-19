@@ -904,6 +904,17 @@ Required behavior:
       boot-to-agent), not host overhead; warm `backend_start` already sits at
       ~200 ms. Numbers are debug-build, one host; release + a Linux/KVM lane
       are follow-ups.
+- [x] Make ephemeral teardown instant. `VmBackend::stop_transient` (new,
+      defaults to `stop`) lets the transient `run` / `machine run` path skip
+      the graceful-shutdown grace, since the guest command's exit code is
+      already captured. Vz overrides it to SIGKILL the supervisor + drainer
+      up front (no per-process 2 s `STOP_TIMEOUT` wait), and
+      `host_gvproxy::kill_by_pid_file` SIGKILLs gvproxy immediately (it
+      ignores SIGTERM, so the graceful path always burned the full 2 s).
+      Persistent `machine stop` / `down` keep the graceful ladder. **Measured
+      (vz, warm, N=3): teardown 6140 ms → ~0.5 ms, total ~7.5 s → ~1.36 s.**
+      The hot path is now `vsock_wait` (~1.06 s guest boot) + `backend_start`
+      (~190 ms) — addressed by the warm/standby-pool lever (D-tier follow-up).
 
 ### C. Persistent image-backed machines
 

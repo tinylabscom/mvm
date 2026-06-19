@@ -532,6 +532,44 @@ impl VmBackend for VzBackend {
         Ok(())
     }
 
+    /// Fast teardown for an ephemeral transient run (`mvmctl run` /
+    /// `machine run`): the guest command's exit code is already captured, so
+    /// there is nothing to flush. Skip the graceful ACPI/SIGTERM grace
+    /// entirely and SIGKILL the supervisor and drainer up front — both are
+    /// signalled before either is reaped, so the two 2 s `STOP_TIMEOUT` waits
+    /// in `stop()` collapse to nothing. The `VZVirtualMachine` lives in the
+    /// supervisor's address space, so killing the supervisor tears the guest
+    /// down with it; gvproxy is reaped explicitly below.
+    fn stop_transient(&self, id: &VmId) -> Result<()> {
+        let state_dir = vm_state_dir(&id.0);
+        crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &id.0);
+        crate::broker_services_spawn::reap_broker_services(&state_dir);
+        crate::host_agent_spawn::reap_host_agent_services_from_state(&state_dir, &id.0);
+
+        for pid_file in [PID_FILE_NAME, DRAINER_PID_FILE_NAME] {
+            if let Some(pid) = read_pid(&state_dir.join(pid_file))
+                && pid_alive(pid)
+            {
+                send_signal(pid, libc::SIGKILL);
+            }
+            let _ = std::fs::remove_file(state_dir.join(pid_file));
+        }
+        remove_instance_rootfs(&id.0);
+
+        // Fast gvproxy teardown: SIGKILL immediately (it ignores SIGTERM, so
+        // the graceful `stop_by_pid_file` always burns the full 2 s grace).
+        if let Err(e) = host_gvproxy::kill_by_pid_file(&state_dir) {
+            tracing::warn!(
+                vm = %id.0,
+                error = %e,
+                "host_gvproxy kill failed (non-fatal)"
+            );
+        }
+
+        ui::success(&format!("Vz VM '{}' stopped.", id.0));
+        Ok(())
+    }
+
     fn stop_all(&self) -> Result<()> {
         let vms = self.list()?;
         let mut last_err = None;
