@@ -235,10 +235,27 @@ arm lands with the daemon's image baking (boot-gated).
       Fully unit-tested (argv shape, every classification arm, routing,
       over-the-wire serve). The actual `nix` execution inside the builder
       VM is exercised when the daemon bin + boot wiring land on-box.
-- [ ] Implement `BuildGuestImage`.
-- [ ] Implement `BuildHostTool` for source-built host packages.
-- [ ] Implement `PrefetchSource` / `QueryStorePath` if needed to remove ad hoc
+- [~] Implement `BuildGuestImage`.
+      Host-testable core: `nix_build_argv` (`nix build <ref>#<attr> --no-link
+      --print-out-paths`), `nix_build_outcome` (clean exit + out-path →
+      `ArtifactReady{artifact_path,store_path}`; non-zero → `NixBuild`;
+      no out-path → `NixBuild`; spawn error → retryable `Internal`),
+      `dispatch_nix_build`, wired into `dispatch_with_executor` +
+      `serve_connection_with_executor` (over-the-wire test). `OpExecResult`
+      grew a `stdout` field so the store path is read back. The cache
+      short-circuit on `fingerprint` is a later addition (handler always
+      builds). Live in-VM `nix build` is boot-gated.
+- [~] Implement `BuildHostTool` for source-built host packages.
+      Shares `dispatch_nix_build` with `BuildGuestImage` (distinct request
+      variant for audit separation); same `ArtifactReady` contract, tested.
+- [~] Implement `PrefetchSource` / `QueryStorePath` if needed to remove ad hoc
       host-side probing.
+      `prefetch_source_argv` (`nix flake prefetch --json`) +
+      `dispatch_prefetch_source` (parses `storePath` from JSON →
+      `StorePathReady{already_present:false}`; non-zero → retryable `Fetch`);
+      `query_store_path_argv` (`nix path-info`) + `dispatch_query_store_path`
+      (always `StorePathReady`, `already_present = exit==0`; spawn error →
+      `Internal`). All host-tested. Live `nix` exec is boot-gated.
 - [ ] Add tests proving normal `mvmctl` flows do not require host Nix.
 
 ### D. Compatibility shrink
