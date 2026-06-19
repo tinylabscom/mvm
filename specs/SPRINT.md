@@ -46,6 +46,15 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 - [x] Advanced
       [`plans/118-supervisor-standby-pool-and-live-bench.md`](plans/118-supervisor-standby-pool-and-live-bench.md)
+      live libkrun follow-up: x86_64 libkrun starts now carry an explicit
+      `KernelFormat`, reuse the extracted sibling ELF `vmlinux`, and the
+      root `mvmctl` binary forwards `libkrun-live` / `libkrun-sys` feature
+      gates. Remote KVM proof moved the blocker from libkrun's
+      `Kernel doesn't fit in RAM` loader panic to guest readiness: the
+      default image still never exposes `vsock-5252.sock`, with an empty
+      console log, so committed launch/density baselines remain open.
+- [x] Advanced
+      [`plans/118-supervisor-standby-pool-and-live-bench.md`](plans/118-supervisor-standby-pool-and-live-bench.md)
       PR-10c beyond the pure substrate: `mvmctl bench microvm-density`
       now exposes the libkrun-live density path (`--count` /
       `--max-count`), `mvmctl bench microvm-launch --concurrency N`

@@ -470,6 +470,8 @@ builder-vm = [
 ]
 custom-dns = ["mvm-cli/custom-dns"]
 dev-watch = ["mvm-cli/dev-watch"]
+libkrun-live = ["mvm-cli/libkrun-live"]
+libkrun-sys = ["mvm-cli/libkrun-sys"]
 # Forward `mvm-core`'s gated hostd IPC transport (plan 126 B5). Added
 # here in PR-1 (where it's inert — mvm-core still defaults the feature
 # on) so mvmd — the sole consumer, via `mvmctl::core::protocol` with

@@ -231,6 +231,11 @@ pub struct KrunContext {
     /// bundled TSI-patched kernel transparently in `set_root` mode.
     #[serde(default)]
     pub kernel_path: Option<String>,
+    /// Format passed to `krun_set_kernel`. Defaults to `Raw` for
+    /// backwards-compatible supervisor JSON and for aarch64 Image-style
+    /// kernels; x86_64 callers that extract an ELF vmlinux override this.
+    #[serde(default = "default_kernel_format")]
+    pub kernel_format: KernelFormat,
     /// Root ext4 image. `Some` together with [`Self::kernel_path`] for
     /// the steady-state builder VM and runtime microVM path. Mutually
     /// exclusive with `initramfs_path` and `root_dir`.
@@ -301,6 +306,10 @@ pub struct KrunContext {
     /// `NetworkingMode` for the trade-offs.
     #[serde(default)]
     pub networking: NetworkingMode,
+}
+
+fn default_kernel_format() -> KernelFormat {
+    KernelFormat::Raw
 }
 
 /// Libkrun networking backend.
@@ -393,6 +402,7 @@ impl KrunContext {
         Self {
             name: name.into(),
             kernel_path: Some(kernel_path.into()),
+            kernel_format: KernelFormat::Raw,
             rootfs_path: Some(rootfs_path.into()),
             initramfs_path: None,
             root_dir: None,
@@ -421,6 +431,7 @@ impl KrunContext {
         Self {
             name: name.into(),
             kernel_path: Some(kernel_path.into()),
+            kernel_format: KernelFormat::Raw,
             rootfs_path: None,
             initramfs_path: Some(initramfs_path.into()),
             root_dir: None,
@@ -454,6 +465,7 @@ impl KrunContext {
         Self {
             name: name.into(),
             kernel_path: None,
+            kernel_format: KernelFormat::Raw,
             rootfs_path: None,
             initramfs_path: None,
             root_dir: Some(root_dir.into()),
@@ -556,6 +568,12 @@ impl KrunContext {
     pub fn with_resources(mut self, vcpus: u8, ram_mib: u32) -> Self {
         self.vcpus = vcpus;
         self.ram_mib = ram_mib;
+        self
+    }
+
+    /// Set the kernel format passed to libkrun.
+    pub fn with_kernel_format(mut self, format: KernelFormat) -> Self {
+        self.kernel_format = format;
         self
     }
 
@@ -1069,7 +1087,7 @@ fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error> {
         let initramfs_path = ctx.initramfs_path.as_deref().map(Path::new);
         krun.set_kernel(
             Path::new(kernel_path),
-            KernelFormat::Raw,
+            ctx.kernel_format,
             initramfs_path,
             ctx.kernel_cmdline.as_deref(),
         )?;
@@ -1893,8 +1911,16 @@ mod tests {
         assert_eq!(ctx.ram_mib, 512);
         assert_eq!(ctx.vsock_ports, vec![5252]);
         assert_eq!(ctx.kernel_path.as_deref(), Some("/path/vmlinux"));
+        assert_eq!(ctx.kernel_format, KernelFormat::Raw);
         assert!(ctx.root_dir.is_none());
         assert!(ctx.guest_entrypoint.is_none());
+    }
+
+    #[test]
+    fn krun_context_can_override_kernel_format() {
+        let ctx = KrunContext::new("vm-1", "/path/vmlinux.elf", "/path/rootfs.ext4")
+            .with_kernel_format(KernelFormat::Elf);
+        assert_eq!(ctx.kernel_format, KernelFormat::Elf);
     }
 
     #[test]
@@ -2077,6 +2103,7 @@ mod tests {
         }"#;
         let ctx: KrunContext = serde_json::from_str(json).unwrap();
         assert!(ctx.virtio_fs_mounts.is_empty());
+        assert_eq!(ctx.kernel_format, KernelFormat::Raw);
     }
 
     /// Roundtrip with virtio-fs entries populated — the JSON shape
