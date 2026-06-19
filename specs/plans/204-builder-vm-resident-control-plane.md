@@ -1,6 +1,6 @@
 # Plan 204 — Builder VM resident control plane
 
-**Status:** Proposed
+**Status:** In progress — WS-A protocol wire types + version negotiation landed; daemon skeleton, image wiring, and host client remain
 **Sprint:** 56 / product-DX follow-up
 **ADR:** [ADR-089](../adrs/089-builder-vm-resident-control-plane.md)
 **Depends on:** Plan 199, Plan 200, ADR-046, ADR-057, ADR-071
@@ -111,32 +111,121 @@ Rules:
 
 Add structural tests that prove:
 
-- `mkGuest` images do not include `mvmctl`;
-- `mkGuest` images do not include `mvm-builderd`;
+- `mkGuest` images do not include `mvmctl`; **(landed)**
+- `mkGuest` images do not include `mvm-builderd`; **(landed)**
 - host packages are separate from guest image outputs;
 - the builder daemon package is only part of the builder VM image.
+
+Landed: `xtask check-guest-images-no-builder-tools` is a comment-stripping
+source-grep gate over `nix/lib/mk-guest.nix` (the workload + dev-shell
+image builder) asserting it bakes neither `mvmctl` nor `mvm-builderd`,
+wired into the `ci.yml` Lint job beside `check-guest-agent-in-all-images`.
+Source-grep not a build, mirroring the sibling agent gate. `mvm-host-vm-init`
+is deliberately excluded — the builder-VM image injects it through mkGuest's
+generic `extraFiles` mechanism, a separate intentional consumer. The
+affirmative "builder daemon package is only part of the builder VM image"
+arm lands with the daemon's image baking (boot-gated).
 
 ## Workstreams
 
 ### A. Protocol and daemon skeleton
 
-- [ ] Add builder request/response wire types with serde roundtrip tests.
-- [ ] Add protocol-version negotiation and unsupported-version refusal tests.
-- [ ] Add `mvm-builderd` skeleton with `Handshake` and `Probe`.
-- [ ] Add builder-VM image wiring so the daemon starts on boot.
-- [ ] Add `mvmctl doctor` visibility for builder daemon readiness.
+- [x] Add builder request/response wire types with serde roundtrip tests.
+      `mvm_build::builderd_protocol` — typed `BuilderRequest`
+      (`Handshake`/`Probe`/`FlakeCheck`/`BuildGuestImage`/`BuildHostTool`/
+      `PrefetchSource`/`QueryStorePath`/`CancelJob`) + `BuilderResponse`
+      (`Accepted`/`Progress`/`LogChunk`/`ArtifactReady`/`StorePathReady`/
+      `Completed`/`Failed`/`Cancelled` — `Completed` added in WS-C for ops
+      that pass without an artifact), an `OperationId` newtype, and a stable
+      `FailureCategory`. Externally-tagged snake_case + `deny_unknown_fields`
+      on every variant (fail-closed against an unknown peer field/kind),
+      reusing the existing 256 KiB vsock framing. Roundtrip, kind-tag
+      stability, and unknown-field/unknown-kind rejection tests (26 tests).
+- [x] Add protocol-version negotiation and unsupported-version refusal tests.
+      `PROTOCOL_VERSION` + `negotiate()` (exact-match v1, fail-closed) +
+      `handshake_reply()` returning `Failed`/`FailureCategory::Version` on an
+      unsupported version.
+- [~] Add `mvm-builderd` skeleton with `Handshake` and `Probe`.
+      Daemon request-handling **core** landed in the library
+      (`mvm_build::builderd`): stateless `dispatch()` answers `Handshake`
+      (version-negotiated), `Probe` (echoes the op), and `CancelJob` (no-op
+      ack); recognized-but-unimplemented build ops fail closed with
+      `FailureCategory::Unsupported`. `serve_connection()` runs the
+      framed read-dispatch-write loop until clean EOF. Driven from
+      `UnixStream` pairs in tests (9 tests) without booting the VM. The bin
+      entrypoint + Linux AF_VSOCK listener are deferred to land with the
+      next box (boot wiring) — a listener with no boot path is untestable
+      dead code.
+- [ ] Add builder-VM image wiring so the daemon starts on boot (also lands
+      the `mvm-builderd` bin entrypoint + AF_VSOCK listener over
+      `serve_connection_with_executor`).
+      **Boot-gated, single on-box slice.** This is inseparable from the
+      cross-compile + rootfs baking + boot launch + lifecycle owner: the
+      `mvm-build` lib pulls `reqwest`/`tokio`, so (like every other builder
+      bin) `mvm-builderd` must `#[path]`-include the daemon modules rather
+      than `use mvm_build`, then cross-compile to `aarch64-unknown-linux-musl`
+      via the zigbuild embedding path and be launched by `mvm-host-vm-init`.
+      None of that is verifiable from a non-Linux contributor host, so it is
+      left as one coherent slice to land + boot-validate on the builder box.
+- [x] Add `mvmctl doctor` visibility for builder daemon readiness.
+      Host-side readiness probe landed in `mvm_build::builderd`
+      (`probe_builderd_readiness` over a `Handshake` →
+      `BuilderdReadiness::{Ready,VersionMismatch,NotRunning,Unreachable}`,
+      `readiness_summary`, `builderd_control_socket_path` matching the
+      `persistent_builder::dispatch_socket_path` convention on the new
+      `BUILDERD_CONTROL_PORT` 21473). `mvmctl doctor` gained an
+      informational `builder daemon` platform check that scans the
+      persistent builder-VM `vms/` root and probes each present control
+      socket (always `ok` — absence is the normal "builder VM down" state).
+      Probe + summary + doctor-scan tested with a real `UnixListener`
+      driving `serve_connection` end-to-end (no VM boot). Doubles as the
+      first WS-B host-client leg.
 
 ### B. Host client and lifecycle
 
-- [ ] Add a host-side builder client that connects over vsock.
-- [ ] Thread operation ids through progress/log rendering.
-- [ ] Add timeout, cancellation, and daemon-not-ready error handling.
+- [x] Add a host-side builder client that connects over vsock.
+      `mvm_build::builderd_client::BuilderdClient` — `connect()` (over the
+      shared `connect_with_timeout` + `perform_handshake`, factored out of
+      the readiness probe), `run_operation()` (one operation per connection:
+      write the request, stream `OperationEvent::{Progress,Log}` to a
+      caller sink, return a typed `OperationOutcome::{Artifact,StorePath,
+      Failed,Cancelled}`), and `request_cancel()`. Integration-tested end
+      to end against the real `serve_connection` daemon core plus
+      `UnixStream`-pair tests for every streamed/terminal/error path
+      (11 tests).
+- [x] Thread operation ids through progress/log rendering.
+      The client correlates every response frame to the in-flight
+      request's `OperationId` and rejects a mismatched or out-of-band
+      frame as `BuilderdClientError::Protocol`; `OperationEvent`s handed to
+      the sink are already correlated, so the renderer keys on one op.
+- [x] Add timeout, cancellation, and daemon-not-ready error handling.
+      Typed `BuilderdClientError::{NotReady,VersionMismatch,Transport,
+      Timeout,Protocol}`; a read timeout before the terminal frame maps to
+      `Timeout`, a missing/refused socket to `NotReady`, a version refusal
+      to `VersionMismatch`. `request_cancel()` writes a `CancelJob` and the
+      `Cancelled` terminal flows back through `run_operation`. (Full
+      mid-flight async cancellation from a second handle is a transport
+      concern that lands with the listener.)
 - [ ] Ensure `MVM_DATA_DIR` / cache-dir isolation stays per worktree.
 - [ ] Keep all git operations host-side and outside the builder VM.
+      (Client is transport-only and starts/stops no VM; the lifecycle
+      owner connects it to an already-running socket. Asserted by the
+      module contract; revisit when the lifecycle owner lands.)
 
 ### C. Typed Nix operations
 
-- [ ] Implement `FlakeCheck` for the `nix/` flake.
+- [~] Implement `FlakeCheck` for the `nix/` flake.
+      Host-testable core landed in `mvm_build::builderd`: `flake_check_argv`
+      (`nix flake check --no-build path:<flake>`), `flake_check_outcome`
+      classification (clean exit → new `BuilderResponse::Completed`
+      terminal; non-zero → `FailureCategory::NixEval`; executor/spawn error
+      → retryable `Internal`), an injectable `OpExecutor` seam
+      (`CommandExecutor` for the daemon, fakes for tests),
+      `dispatch_flake_check` / `dispatch_with_executor`, and
+      `serve_connection_with_executor` so the daemon serve loop runs it.
+      Fully unit-tested (argv shape, every classification arm, routing,
+      over-the-wire serve). The actual `nix` execution inside the builder
+      VM is exercised when the daemon bin + boot wiring land on-box.
 - [ ] Implement `BuildGuestImage`.
 - [ ] Implement `BuildHostTool` for source-built host packages.
 - [ ] Implement `PrefetchSource` / `QueryStorePath` if needed to remove ad hoc
@@ -177,12 +266,14 @@ Plan 204 is done when:
 
 ## Verification
 
-- [ ] Protocol serde roundtrip and unknown-field/version refusal tests.
-- [ ] Builder daemon health/probe tests.
-- [ ] Host client timeout/cancellation tests.
-- [ ] Builder-VM integration test for typed `FlakeCheck`.
+- [x] Protocol serde roundtrip and unknown-field/version refusal tests.
+- [x] Builder daemon health/probe tests.
+- [x] Host client timeout/cancellation tests.
+- [~] Builder-VM integration test for typed `FlakeCheck` — logic tested via
+      injectable executor; the live in-VM `nix` run is boot-gated.
 - [ ] Builder-VM integration test for typed guest image build.
-- [ ] Structural tests for no `mvmctl` / no `mvm-builderd` in guest images.
+- [x] Structural tests for no `mvmctl` / no `mvm-builderd` in guest images
+      (`xtask check-guest-images-no-builder-tools`, CI-wired).
 - [ ] `cargo test --workspace`.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`.
 - [ ] Builder-VM `nix flake check` for the affected flake paths.

@@ -115,6 +115,9 @@ mvm-core = { workspace = true, features = ["test-support"] }
 # `SigningKey::generate` takes any `CryptoRng + RngCore`; the
 # concrete `OsRng` lives in `rand`.
 rand = "0.8"
+# Builder-daemon readiness-probe tests bind a real UnixListener under a
+# temp dir to drive `serve_connection` end-to-end.
+tempfile.workspace = true
 
 [features]
 default = []

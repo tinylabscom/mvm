@@ -8,6 +8,18 @@ pub mod builder_vm;
 /// Hypervisor-agnostic builder-VM orchestration helper that wraps a
 /// `VmBackendForBuilder` implementation (libkrun and Vz).
 pub mod builder_vm_runtime;
+/// Request-handling core of the resident `mvm-builderd` builder-VM
+/// daemon: stateless request dispatch + the framed connection serve
+/// loop. The bin entrypoint and AF_VSOCK listener land with boot wiring.
+pub mod builderd;
+/// Host-side client for the resident `mvm-builderd` daemon: connect +
+/// handshake, run one typed operation per connection, stream
+/// progress/log events, and surface a typed terminal outcome.
+pub mod builderd_client;
+/// Typed allowlisted control-plane protocol for the resident
+/// `mvm-builderd` builder-VM service (the long-term replacement for the
+/// controlled-shell-job channel in `builder_protocol`).
+pub mod builderd_protocol;
 pub mod cache;
 /// Builder-VM egress allowlist proxy — the lib half of the
 /// `mvm-egress-proxy` bin. Kept as a lib module (not bin-inlined) so
