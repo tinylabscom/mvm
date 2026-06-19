@@ -519,7 +519,7 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
     ];
     let mut virtiofsd = VirtiofsdGuard::default();
     for (tag, dir) in shares {
-        let sock = vm_state_dir.join(format!("vfs-{tag}.sock"));
+        let sock = qemu_virtiofs_socket_path(&job_id, tag);
         virtiofsd.spawn(&virtiofsd_bin, virtiofsd_flavor, tag, &sock, dir)?;
     }
 
@@ -556,7 +556,7 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         "node,memdev=mem",
     ]);
     for (tag, _) in shares {
-        let sock = vm_state_dir.join(format!("vfs-{tag}.sock"));
+        let sock = qemu_virtiofs_socket_path(&job_id, tag);
         cmd.arg("-chardev")
             .arg(format!("socket,id=vfs-{tag},path={}", sock.display()));
         cmd.arg("-device").arg(format!(
@@ -724,7 +724,7 @@ fn run_build_qemu(
     ];
     let mut virtiofsd = VirtiofsdGuard::default();
     for (tag, dir) in shares {
-        let sock = vm_state_dir.join(format!("vfs-{tag}.sock"));
+        let sock = qemu_virtiofs_socket_path(&job_id, tag);
         virtiofsd.spawn(&virtiofsd_bin, virtiofsd_flavor, tag, &sock, dir)?;
     }
 
@@ -764,7 +764,7 @@ fn run_build_qemu(
         "node,memdev=mem",
     ]);
     for (tag, _) in shares {
-        let sock = vm_state_dir.join(format!("vfs-{tag}.sock"));
+        let sock = qemu_virtiofs_socket_path(&job_id, tag);
         cmd.arg("-chardev")
             .arg(format!("socket,id=vfs-{tag},path={}", sock.display()));
         cmd.arg("-device").arg(format!(
@@ -806,6 +806,14 @@ fn run_build_qemu(
     }?;
     drop(nix_store_lock);
     Ok(artifacts)
+}
+
+#[cfg(feature = "builder-vm")]
+fn qemu_virtiofs_socket_path(job_id: &str, tag: &str) -> PathBuf {
+    // AF_UNIX paths cap at ~108 bytes on Linux. Cache roots can be deeply
+    // nested in worktrees, so keep QEMU virtiofs sockets under /tmp and rely
+    // on VirtiofsdGuard to remove them.
+    PathBuf::from(format!("/tmp/mvm-vfs-{job_id}-{tag}.sock"))
 }
 
 /// Validate the caller's mount paths before launching QEMU. Mirrors
@@ -1111,5 +1119,15 @@ mod tests {
             err.to_string().contains("extra disk path does not exist"),
             "{err}"
         );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn virtiofs_socket_path_stays_below_linux_unix_socket_limit() {
+        let path = qemu_virtiofs_socket_path("1781841830517-1343691", "work");
+        let rendered = path.to_string_lossy();
+
+        assert!(rendered.starts_with("/tmp/mvm-vfs-"), "{rendered}");
+        assert!(rendered.len() < 108, "{rendered}");
     }
 }
