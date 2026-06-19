@@ -17,7 +17,7 @@ your audience actually has.
 The shortest current path is a one-shot microVM from an OCI image:
 
 ```bash
-mvmctl run --image alpine -- uname -a
+mvmctl machine run --image alpine -- uname -a
 ```
 
 This pulls or reuses the cached image, records OCI provenance, boots a transient
@@ -27,6 +27,15 @@ this path.
 Use this when you want "run this command in a fresh microVM." Use the flake,
 manifest, and dev-shell flows below when you are building a custom image or a
 repeatable project environment.
+
+For a named machine that survives across starts:
+
+```bash
+mvmctl machine create --name alpine-dev --image alpine
+mvmctl machine start --name alpine-dev
+mvmctl machine exec --name alpine-dev -- uname -a
+mvmctl machine stop --name alpine-dev
+```
 
 ## 2. Launch the Dev Environment
 
@@ -106,6 +115,18 @@ mvmctl up
 
 Use `mvmctl manifest ls` and `mvmctl manifest info` to inspect built
 manifest slots. See [Manifests](/guides/manifests/) for the full flow.
+
+Image-backed manifests can also define a durable machine spec:
+
+```toml
+image = "alpine:3.20"
+cpus = 2
+mem = "512M"
+```
+
+```bash
+mvmctl machine create --name alpine-dev --manifest ./mvm.toml
+```
 
 ## 6. Image Catalog
 

@@ -280,7 +280,7 @@ fn quickstart_docs_lead_with_image_backed_run() {
         "quickstart must put the image-backed one-shot path before dev/flake workflows"
     );
     assert!(
-        content.contains("mvmctl run --image alpine -- uname -a")
+        content.contains("mvmctl machine run --image alpine -- uname -a")
             && normalized.contains("You do not need host Nix for this path"),
         "quickstart must preserve the no-host-Nix image-backed command"
     );

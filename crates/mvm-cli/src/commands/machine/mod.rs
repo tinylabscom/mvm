@@ -187,7 +187,8 @@ pub(in crate::commands) struct MachineCreateArgs {
     #[arg(long)]
     pub name: String,
     /// Image-backed machine manifest (`mvm.toml`, its directory, or
-    /// `Mvmfile.toml`) to source defaults from.
+    /// `Mvmfile.toml`) to source defaults from. If omitted and `--image` is not
+    /// set, the current directory is searched.
     #[arg(long, value_name = "PATH")]
     pub manifest: Option<String>,
     /// OCI image reference to boot when the machine lifecycle starts.
@@ -423,11 +424,15 @@ struct MachineStartReceiptSignature {
 impl MachineCreateArgs {
     fn into_spec(self) -> Result<MachineSpec> {
         validate_machine_name(&self.name)?;
-        let manifest_source = self
-            .manifest
-            .as_deref()
-            .map(load_machine_manifest_source)
-            .transpose()?;
+        let manifest_source = match (self.image.is_none(), self.manifest.as_deref()) {
+            (_, Some(arg)) => Some(load_machine_manifest_source(Path::new(arg))?),
+            (true, None) => Some(load_machine_manifest_source(Path::new(".")).with_context(
+                || {
+                    "machine create requires --image or an image-backed mvm.toml in the current directory"
+                },
+            )?),
+            (false, None) => None,
+        };
         let workflow = manifest_source.as_ref().map(|source| &source.workflow);
         let image = match (self.image, workflow) {
             (Some(image), _) => image,
@@ -513,9 +518,9 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-fn load_machine_manifest_source(arg: &str) -> Result<MachineManifestSource> {
-    let manifest_path = resolve_manifest_config_path(Path::new(arg))
-        .with_context(|| format!("resolving --manifest {arg:?}"))?;
+fn load_machine_manifest_source(arg: &Path) -> Result<MachineManifestSource> {
+    let manifest_path = resolve_manifest_config_path(arg)
+        .with_context(|| format!("resolving machine manifest {}", arg.display()))?;
     let manifest = Manifest::read_file(&manifest_path)
         .with_context(|| format!("reading machine manifest {}", manifest_path.display()))?;
     let workflow = manifest.machine_workflow().ok_or_else(|| {

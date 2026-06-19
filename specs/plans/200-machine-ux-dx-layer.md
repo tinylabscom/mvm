@@ -903,11 +903,12 @@ Required behavior:
       (no shell-meta) mirrors `validate_flake_ref`.
 - [x] Map `net`, `[network].allow_hosts`, `[auth].ssh_agent`, `[dev].init`,
       `[dev].volumes`, `cpus`, `mem`, and `mem_initial` into the durable
-      machine spec and launch request. → `machine create --manifest <path>` now
-      reads image-backed manifests, persists `net`, `allow_hosts`, `cpus`,
-      `mem`, `mem_initial`, `dev.init`, `dev.volumes`, and `auth.ssh_agent`
-      into `MachineSpec`, resolves relative manifest volume paths against the
-      manifest directory, and `machine start --name` now applies
+      machine spec and launch request. → `machine create --manifest <path>` and
+      current-directory image-manifest discovery now read image-backed manifests,
+      persist `net`, `allow_hosts`, `cpus`, `mem`, `mem_initial`, `dev.init`,
+      `dev.volumes`, and `auth.ssh_agent` into `MachineSpec`, resolve relative
+      manifest volume paths against the manifest directory, and
+      `machine start --name` now applies
       `mem_initial`, admitted volume shares, and dev-init execution through the
       existing guest-agent path. `ssh_agent = true` now requires a dev-capable
       profile plus a live host `SSH_AUTH_SOCK`, spawns a per-machine socket
@@ -944,7 +945,7 @@ Required behavior:
       guest socket-path confinement, console env injection, and relative-volume
       persistence. A live VM proof that the guest endpoint can complete a real
       SSH-agent protocol round trip is still a follow-up.
-- [ ] Update `guides/manifests.md`, quickstart, and CLI reference only after the
+- [x] Update `guides/manifests.md`, quickstart, and CLI reference only after the
       parser and command behavior are implemented.
 
 ### C2. SDK parity
