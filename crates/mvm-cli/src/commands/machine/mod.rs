@@ -1254,13 +1254,26 @@ fn configure_machine_ssh_agent_forwarding(
     }
     let transport = mvm::vsock_transport::for_vm(vm_name)?;
     let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    start_guest_ssh_agent_socket_forwarding(vm_name, &mut stream)?;
+    Ok(())
+}
+
+fn start_guest_ssh_agent_socket_forwarding(
+    vm_name: &str,
+    stream: &mut std::os::unix::net::UnixStream,
+) -> Result<()> {
+    mvm_guest::vsock::require_capabilities(
+        stream,
+        &[mvm_guest::vsock::GuestCapability::UnixSocketForward],
+    )
+    .context("guest agent does not support ssh-agent socket forwarding")?;
     let req = mvm_guest::vsock::GuestRequest::StartUnixSocketForward {
         guest_path: SSH_AGENT_GUEST_SOCKET.to_string(),
         host_vsock_port: mvm_guest::vsock::SSH_AGENT_PORT,
         socket_mode: 0o600,
     };
     super::shared::emit_vsock_rpc_audit(vm_name, &req);
-    match mvm_guest::vsock::call_unary(&mut stream, &req)? {
+    match mvm_guest::vsock::call_unary(&mut *stream, &req)? {
         mvm_guest::vsock::GuestResponse::UnixSocketForwardStarted { .. } => {
             mvm_core::audit_emit!(
                 NetworkPolicyAllow,
@@ -2286,6 +2299,96 @@ ssh_agent = true
             mvm_core::plan::AuthPolicy::ssh_agent_socket()
         );
         assert!(machine_start_audit_detail(&input).contains("auth=ssh-agent-socket"));
+    }
+
+    #[test]
+    fn ssh_agent_socket_forwarding_negotiates_capability_before_request() {
+        let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().expect("stream pair");
+
+        let guest_thread = std::thread::spawn(move || {
+            let hello: mvm_guest::vsock::GuestRequest =
+                mvm_guest::vsock::read_frame(&mut guest).expect("read hello");
+            match hello {
+                mvm_guest::vsock::GuestRequest::ProtocolHello {
+                    requested_capabilities,
+                    ..
+                } => assert_eq!(
+                    requested_capabilities,
+                    vec![mvm_guest::vsock::GuestCapability::UnixSocketForward]
+                ),
+                other => panic!("expected ProtocolHello before forwarding request, got {other:?}"),
+            }
+            mvm_guest::vsock::write_frame(
+                &mut guest,
+                &mvm_guest::vsock::GuestResponse::ProtocolHelloAck {
+                    agent_protocol_version: mvm_guest::vsock::PROTOCOL_VERSION,
+                    min_supported_version: mvm_guest::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
+                    agent_version: "test".to_string(),
+                    capabilities: vec![mvm_guest::vsock::GuestCapability::UnixSocketForward],
+                },
+            )
+            .expect("write hello ack");
+
+            let req: mvm_guest::vsock::GuestRequest =
+                mvm_guest::vsock::read_frame(&mut guest).expect("read forward request");
+            match req {
+                mvm_guest::vsock::GuestRequest::StartUnixSocketForward {
+                    guest_path,
+                    host_vsock_port,
+                    socket_mode,
+                } => {
+                    assert_eq!(guest_path, SSH_AGENT_GUEST_SOCKET);
+                    assert_eq!(host_vsock_port, mvm_guest::vsock::SSH_AGENT_PORT);
+                    assert_eq!(socket_mode, 0o600);
+                    mvm_guest::vsock::write_frame(
+                        &mut guest,
+                        &mvm_guest::vsock::GuestResponse::UnixSocketForwardStarted {
+                            guest_path,
+                            host_vsock_port,
+                        },
+                    )
+                    .expect("write forward response");
+                }
+                other => panic!("expected StartUnixSocketForward, got {other:?}"),
+            }
+        });
+
+        start_guest_ssh_agent_socket_forwarding("devbox", &mut host)
+            .expect("ssh-agent forwarding request succeeds");
+        guest_thread.join().expect("guest thread");
+    }
+
+    #[test]
+    fn ssh_agent_socket_forwarding_refuses_guest_without_capability() {
+        let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().expect("stream pair");
+
+        let guest_thread = std::thread::spawn(move || {
+            let hello: mvm_guest::vsock::GuestRequest =
+                mvm_guest::vsock::read_frame(&mut guest).expect("read hello");
+            assert!(
+                matches!(hello, mvm_guest::vsock::GuestRequest::ProtocolHello { .. }),
+                "expected ProtocolHello, got {hello:?}"
+            );
+            mvm_guest::vsock::write_frame(
+                &mut guest,
+                &mvm_guest::vsock::GuestResponse::ProtocolHelloAck {
+                    agent_protocol_version: mvm_guest::vsock::PROTOCOL_VERSION,
+                    min_supported_version: mvm_guest::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
+                    agent_version: "test".to_string(),
+                    capabilities: Vec::new(),
+                },
+            )
+            .expect("write hello ack");
+        });
+
+        let err = start_guest_ssh_agent_socket_forwarding("devbox", &mut host)
+            .expect_err("missing capability is refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ssh-agent socket forwarding"),
+            "unexpected error: {msg}"
+        );
+        guest_thread.join().expect("guest thread");
     }
 
     #[test]

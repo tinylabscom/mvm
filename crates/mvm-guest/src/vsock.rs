@@ -1305,6 +1305,9 @@ pub enum GuestCapability {
     FilesystemRpc,
     ProcessRpc,
     Console,
+    /// Dev-tier Unix-domain socket forwarding. Used for socket-only SSH-agent
+    /// forwarding; not a general SSH session capability.
+    UnixSocketForward,
     VolumeMount,
     UpdateIdleTimeout,
     /// `ReadinessStatus` returns
@@ -1342,6 +1345,7 @@ pub fn supported_capabilities() -> Vec<GuestCapability> {
         GuestCapability::FilesystemRpc,
         GuestCapability::ProcessRpc,
         GuestCapability::Console,
+        GuestCapability::UnixSocketForward,
         GuestCapability::VolumeMount,
         GuestCapability::UpdateIdleTimeout,
         GuestCapability::Readiness,
@@ -3404,6 +3408,11 @@ mod tests {
             }
             other => panic!("expected ProtocolHelloAck, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_supported_capabilities_include_unix_socket_forward() {
+        assert!(supported_capabilities().contains(&GuestCapability::UnixSocketForward));
     }
 
     #[test]
