@@ -1178,6 +1178,43 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::commands) struct RunSecuritySummary {
+    pub dry_run: bool,
+    pub will_execute: bool,
+    pub image_kind: &'static str,
+    pub receipt_requested: bool,
+    pub preflight_network_posture: String,
+    pub preflight_egress_enforcement: String,
+    pub receipt_network_posture: String,
+    pub receipt_egress_enforcement: String,
+}
+
+#[cfg(test)]
+pub(in crate::commands) fn test_run_security_summary(
+    args: &RunArgs,
+    receipt_backend: &str,
+) -> Result<RunSecuritySummary> {
+    let preflight = RunPreflightSummary::from_args(args)?;
+    let receipt = ReceiptInput::from_run_args(args, receipt_backend)?;
+    let image_kind = match preflight.image {
+        RunPreflightImage::DefaultMicrovm => "default-microvm",
+        RunPreflightImage::Manifest { .. } => "manifest",
+        RunPreflightImage::Oci { .. } => "oci",
+    };
+    Ok(RunSecuritySummary {
+        dry_run: preflight.dry_run,
+        will_execute: preflight.will_execute,
+        image_kind,
+        receipt_requested: preflight.receipt.requested,
+        preflight_network_posture: preflight.invocation.network_posture,
+        preflight_egress_enforcement: preflight.invocation.egress_enforcement,
+        receipt_network_posture: receipt.network_posture,
+        receipt_egress_enforcement: receipt.egress_enforcement,
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

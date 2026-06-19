@@ -973,15 +973,24 @@ Required behavior:
 - [~] Add SDK tests proving no host Nix is invoked for image-backed machine
       runs. Python, TypeScript, and Rust fake-CLI tests prove these wrappers
       emit only `mvmctl machine ...` argv and never call `nix` or legacy `up`
-      paths; live admission-path proof remains.
-- [ ] Add SDK/CLI parity tests proving equivalent admission inputs, effective
-      policy, and receipt/audit summaries for the same machine config.
-- [ ] Add SDK negative tests proving wrappers cannot bypass artifact
+      paths. Rust SDK run argv now also round-trips through the real CLI
+      `machine run` parser into `mvmctl run` dry-run/preflight helpers without
+      invoking Nix or a VM; live admission-path proof remains.
+- [~] Add SDK/CLI parity tests proving equivalent admission inputs, effective
+      policy, and receipt/audit summaries for the same machine config. Rust SDK
+      `MachineRun` builder output now feeds the CLI `machine run` parser and
+      preflight/receipt summary path, proving SDK default-deny and
+      `--allow-host` posture matches the CLI for dry-run receipts. Remaining:
+      full admission-input equivalence, audit summary parity, and Python/TS
+      parser/preflight proof.
+- [~] Add SDK negative tests proving wrappers cannot bypass artifact
       verification, network default-deny, unknown-key rejection, or
       `image`/`flake` conflict rejection. Python, TypeScript, and Rust now
       reject source conflicts or invalid commands at the wrapper boundary;
-      artifact, network, unknown-key, and receipt/audit non-bypass coverage
-      remains.
+      Rust SDK `MachineCreate --manifest` argv now reaches the CLI manifest
+      parser and proves strict unknown-key rejection is still owned by the CLI.
+      Artifact-verification, broader network non-bypass, receipt/audit
+      non-bypass, and Python/TS unknown-key proof remain.
 
 ### D. Agent-safe auth and volumes
 
@@ -1251,9 +1260,13 @@ follow-ups:
 - [x] Local image-source tests: registry ref, archive path, stdin archive,
       unpacked rootfs, malformed archive, traversal attempt, wrong
       architecture, and missing provenance.
-- [ ] SDK/CLI parity and non-bypass tests: equivalent admission inputs,
+- [~] SDK/CLI parity and non-bypass tests: equivalent admission inputs,
       effective policy, artifact verification, unknown-key rejection,
-      source-selector conflict rejection, and receipt/audit summaries.
+      source-selector conflict rejection, and receipt/audit summaries. Rust
+      SDK -> CLI parser/preflight coverage now proves dry-run receipt posture
+      parity for default-deny and `--allow-host`, plus CLI strict-manifest
+      unknown-key rejection; full admission-input, artifact-verification,
+      audit-summary, and Python/TS parity remain.
 - [ ] Docs/source guards for no-host-Nix default and explicit limitations:
       network protocol scope, volumes, SSH-agent prerequisites, macOS
       signing/entitlements, GPU status, and backend/architecture support.
@@ -1271,7 +1284,9 @@ follow-ups:
 - [x] SDK suites: Python, TypeScript, and Rust machine lifecycle wrappers.
       Python and TypeScript focused machine wrapper suites are green from the
       previous SDK slice; Rust builder/fake-CLI lifecycle tests are green in
-      this slice.
+      the previous SDK slice. Rust SDK -> CLI parser/preflight parity tests are
+      also green for default-deny, `--allow-host`, and strict manifest
+      unknown-key rejection.
 - [ ] Portable artifact tamper/rejection tests.
 - [ ] macOS smoke on the default supported backend for `machine run --image
       alpine -- uname -a`
