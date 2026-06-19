@@ -44,6 +44,17 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 ## Planning updates
 
+- [x] Advanced
+      [`plans/118-supervisor-standby-pool-and-live-bench.md`](plans/118-supervisor-standby-pool-and-live-bench.md)
+      PR-10c beyond the pure substrate: `mvmctl bench microvm-density`
+      now exposes the libkrun-live density path (`--count` /
+      `--max-count`), `mvmctl bench microvm-launch --concurrency N`
+      emits a concurrent-wave P50/P95/P99 distribution report, and
+      platform footprint sampling is split by host (`smaps_rollup` PSS
+      on Linux, `proc_pid_rusage` `phys_footprint` on macOS). Stock
+      binaries still fail honestly without `libkrun-live`; live
+      baselines remain blocked on rebuilding the stale default-microvm
+      image, and Vz/FC lanes remain open.
 - [x] Implemented the first pure-substrate slice of
       [`plans/118-supervisor-standby-pool-and-live-bench.md`](plans/118-supervisor-standby-pool-and-live-bench.md)
       PR-10c: `mvm-cli` now has density and concurrent-launch report shapes
@@ -2788,7 +2799,7 @@ Phase 1 host cross-compile targets **`<arch>-unknown-linux-musl` static**, not g
 - [ ] **Phase 1 re-plan** — implement [ADR-064](adrs/065-single-builder-dev-image.md) as the new Phase 1, coordinated with the `specs/prompts/93-phase-1-2-3-fast-secure-dev.md` track (do not race it).
 - [~] **PR-9 — adaptive readiness poll** (Phase 2 Lever 2). Landed: `adaptive_backoff` + `wait_for_guest_agent` rewired (20ms→500ms cap; cuts up to ~480ms dead time per readiness detection; timing-only, connect→negotiate ordering untouched). Deferred (tracked): the `connect_and_authenticate` combiner and the guest `socket/bind/listen`-first reorder — both touch the sealed-prod Ed25519 auth path / agent main and need a live VM to validate.
 - [ ] **PR-10 — warm pool of supervisors** `--warm-pool-size N` default 0 (Phase 2 Lever 3; guests unbooted until admission; control UDS reuses `deny_unknown_fields` parser + new fuzz target).
-- [ ] **PR-10c — density + concurrent-launch distribution bench** (🔴 proposed 2026-06-16; [`plans/118-supervisor-standby-pool-and-live-bench.md`](plans/118-supervisor-standby-pool-and-live-bench.md) §"Part C"). Extends PR-10a's probe to two metrics the warm pools exist to move: per-instance host footprint (`bench microvm-density --count K --max-count M`, platform-split PSS / `phys_footprint` accessor) and launch P50/P95/P99 under concurrency (`bench microvm-launch --concurrency N`). libkrun → Vz → FC, staged. Read-only; every boot still routes through claim-8 admission (no bypass); no new key/daemon/socket; `libkrun-live`-gated → zero new attack surface. Motivation + rejected alternatives (OpenResty egress gateway, eBPF enforcer, forked VMM, E2B→mvmd) recorded in [`notes/external-agent-sandbox-runtime-prior-art.md`](notes/external-agent-sandbox-runtime-prior-art.md). Inherits PR-10a's blocker for committed baselines (needs a freshly-built default-microvm image); pure substrate (percentile/footprint math + schema) lands VM-free now.
+- [ ] **PR-10c — density + concurrent-launch distribution bench** (🟡 in progress; [`plans/118-supervisor-standby-pool-and-live-bench.md`](plans/118-supervisor-standby-pool-and-live-bench.md) §"Part C"). Extends PR-10a's probe to two metrics the warm pools exist to move: per-instance host footprint (`bench microvm-density --count K --max-count M`, platform-split PSS / `phys_footprint` accessor) and launch P50/P95/P99 under concurrency (`bench microvm-launch --concurrency N`). libkrun live CLI wiring, platform accessors, concurrency distribution, and cap tests are in place; libkrun → Vz → FC baselines are still staged. Read-only; every boot still routes through claim-8 admission (no bypass); no new key/daemon/socket; `libkrun-live`-gated → zero new attack surface. Motivation + rejected alternatives (OpenResty egress gateway, eBPF enforcer, forked VMM, E2B→mvmd) recorded in [`notes/external-agent-sandbox-runtime-prior-art.md`](notes/external-agent-sandbox-runtime-prior-art.md). Inherits PR-10a's blocker for committed baselines (needs a freshly-built default-microvm image).
 
 ### Deferred (tracked in Plan 93 §deferred follow-ups)
 - [ ] Phase 2 Lever 1 kernel cmdline trim — gated on Plan 92/95 merge (plumbing + override allowlist land now).

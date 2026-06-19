@@ -1,5 +1,5 @@
-//! `mvmctl bench microvm-launch` — measure cold runtime-microvm launch
-//! latency.
+//! `mvmctl bench microvm-launch` / `microvm-density` — measure runtime
+//! microVM launch latency and host footprint.
 //!
 //! Every other launch optimisation (kernel cmdline trim, handshake
 //! pipelining, the warm pool) is judged against this harness — without
@@ -19,6 +19,7 @@
 //! are a deferred follow-up (logged, not silently skipped).
 
 use std::path::{Path, PathBuf};
+use std::thread;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
@@ -43,6 +44,8 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) enum BenchAction {
     /// Measure cold runtime-microvm launch latency end-to-end.
     MicrovmLaunch(MicrovmLaunchArgs),
+    /// Measure held-live runtime-microvm supervisor/VMM footprint.
+    MicrovmDensity(MicrovmDensityArgs),
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -54,6 +57,14 @@ pub(in crate::commands) struct MicrovmLaunchArgs {
     /// load / codesign re-exec / page-cache cost on the first boot).
     #[arg(long, default_value_t = 2)]
     pub warmup: u32,
+    /// Launch this many instances concurrently as a single wave and
+    /// report P50/P95/P99 for that wave. The default keeps the
+    /// original serial benchmark semantics.
+    #[arg(long, default_value_t = 1)]
+    pub concurrency: u32,
+    /// Safety cap for `--concurrency` so a typo cannot fork-bomb the host.
+    #[arg(long, default_value_t = 64)]
+    pub max_concurrency: u32,
     /// Hypervisor backend to measure. v1 supports `libkrun` only.
     #[arg(long, default_value = "libkrun")]
     pub hypervisor: String,
@@ -73,6 +84,27 @@ pub(in crate::commands) struct MicrovmLaunchArgs {
     /// Maximum tolerated regression (percent) when `--baseline` is set.
     #[arg(long, default_value_t = 10.0)]
     pub max_regression_pct: f64,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MicrovmDensityArgs {
+    /// Number of admitted instances to boot and hold live while sampling footprint.
+    #[arg(long, default_value_t = 4)]
+    pub count: u32,
+    /// Safety cap for `--count` so a typo cannot exhaust host memory.
+    #[arg(long, default_value_t = 16)]
+    pub max_count: u32,
+    /// Hypervisor backend to measure. v1 supports `libkrun` only.
+    #[arg(long, default_value = "libkrun")]
+    pub hypervisor: String,
+    /// Write the JSON report here. Default:
+    /// `~/.mvm/bench/microvm-density-<rfc3339>.json` plus a stable
+    /// `microvm-density-latest.json` copy.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Also print the JSON report to stdout.
+    #[arg(long)]
+    pub json: bool,
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -229,7 +261,6 @@ pub struct BenchReport {
 /// macOS `phys_footprint`). The report schema keeps it normalized to
 /// bytes so density baselines are comparable within the same
 /// [`HostDescriptor`].
-#[cfg(any(test, feature = "libkrun-live"))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstanceFootprint {
     pub vm_name: String,
@@ -238,7 +269,6 @@ pub struct InstanceFootprint {
 }
 
 /// Aggregate density result for a held-live instance set.
-#[cfg(any(test, feature = "libkrun-live"))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DensityStats {
     pub instances: u32,
@@ -251,7 +281,6 @@ pub struct DensityStats {
 /// Read-only density report. Live orchestration boots `count`
 /// admitted instances, samples their supervisor/VMM process
 /// footprints, then tears them down; the pure schema is VM-free.
-#[cfg(any(test, feature = "libkrun-live"))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DensityReport {
     pub schema_version: u32,
@@ -263,7 +292,6 @@ pub struct DensityReport {
 }
 
 /// Tail-latency summary for concurrent launch waves.
-#[cfg(any(test, feature = "libkrun-live"))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct TailLatencyStats {
     pub p50: f64,
@@ -274,7 +302,6 @@ pub struct TailLatencyStats {
 /// Launch distribution report for a single concurrency level. This is
 /// the concurrent sibling of [`BenchReport`]: each raw timing is one
 /// admitted instance launched as part of the same wave.
-#[cfg(any(test, feature = "libkrun-live"))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LaunchDistributionReport {
     pub schema_version: u32,
@@ -327,7 +354,6 @@ pub fn summarize_density(samples: &[InstanceFootprint]) -> DensityStats {
     }
 }
 
-#[cfg(any(test, feature = "libkrun-live"))]
 pub fn summarize_tail_latency(samples: &[f64]) -> TailLatencyStats {
     TailLatencyStats {
         p50: percentile(samples, 50.0),
@@ -353,7 +379,6 @@ pub fn build_density_report(
     }
 }
 
-#[cfg(any(test, feature = "libkrun-live"))]
 pub fn build_launch_distribution_report(
     host: HostDescriptor,
     concurrency: u32,
@@ -378,7 +403,7 @@ pub fn build_launch_distribution_report(
 }
 
 /// Serialize `report` to `path` (pretty JSON), creating parent dirs.
-pub fn write_report(report: &BenchReport, path: &Path) -> Result<()> {
+pub fn write_json_report<T: Serialize>(report: &T, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating bench report dir {}", parent.display()))?;
@@ -489,6 +514,114 @@ pub fn run_benchmark<P: LaunchProbe>(probe: &mut P, runs: u32, warmup: u32) -> R
     Ok(build_report(probe.host_descriptor(), runs, warmup, raw))
 }
 
+/// Run one concurrent launch wave. Each worker gets its own probe instance so
+/// the live path uses distinct VM names, signed plans, nonces, and state dirs.
+pub fn run_launch_distribution<F, P>(
+    host: HostDescriptor,
+    concurrency: u32,
+    max_concurrency: u32,
+    make_probe: F,
+) -> Result<LaunchDistributionReport>
+where
+    F: Fn(u32) -> Result<P> + Send + Sync,
+    P: LaunchProbe + Send + 'static,
+{
+    if concurrency == 0 {
+        bail!("--concurrency must be >= 1");
+    }
+    if max_concurrency == 0 {
+        bail!("--max-concurrency must be >= 1");
+    }
+    if concurrency > max_concurrency {
+        bail!("--concurrency {concurrency} exceeds --max-concurrency {max_concurrency}");
+    }
+
+    let make_probe = &make_probe;
+    let raw = thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(concurrency as usize);
+        for index in 0..concurrency {
+            handles.push(scope.spawn(move || {
+                let mut probe = make_probe(index)?;
+                probe
+                    .measure_once()
+                    .with_context(|| format!("concurrent launch worker {index}"))
+            }));
+        }
+
+        let mut raw = Vec::with_capacity(concurrency as usize);
+        for handle in handles {
+            raw.push(
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("launch worker panicked"))??,
+            );
+        }
+        Ok::<_, anyhow::Error>(raw)
+    })?;
+
+    Ok(build_launch_distribution_report(host, concurrency, raw))
+}
+
+/// Linux `/proc/<pid>/smaps_rollup` reports proportional set size in KiB.
+#[cfg(any(test, all(target_os = "linux", feature = "libkrun-live")))]
+pub fn parse_linux_smaps_rollup_pss_bytes(input: &str) -> Result<u64> {
+    for line in input.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("Pss:") {
+            let mut parts = rest.split_whitespace();
+            let kib = parts
+                .next()
+                .context("Pss line missing numeric value")?
+                .parse::<u64>()
+                .context("parsing Pss KiB value")?;
+            let unit = parts.next().unwrap_or("kB");
+            if unit != "kB" {
+                bail!("unsupported Pss unit {unit:?}; expected kB");
+            }
+            return kib
+                .checked_mul(1024)
+                .context("Pss KiB value overflowed bytes");
+        }
+    }
+    bail!("smaps_rollup did not contain a Pss line")
+}
+
+#[cfg(all(target_os = "linux", feature = "libkrun-live"))]
+pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
+    let path = PathBuf::from("/proc")
+        .join(pid.to_string())
+        .join("smaps_rollup");
+    let body =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    parse_linux_smaps_rollup_pss_bytes(&body)
+}
+
+#[cfg(all(target_os = "macos", feature = "libkrun-live"))]
+pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v4>::zeroed();
+    let rc = unsafe {
+        libc::proc_pid_rusage(
+            pid as libc::c_int,
+            libc::RUSAGE_INFO_V4,
+            info.as_mut_ptr().cast(),
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("proc_pid_rusage(RUSAGE_INFO_V4) for pid {pid}"));
+    }
+    let info = unsafe { info.assume_init() };
+    Ok(info.ri_phys_footprint)
+}
+
+#[cfg(all(
+    feature = "libkrun-live",
+    not(any(target_os = "linux", target_os = "macos"))
+))]
+pub fn read_process_footprint_bytes(_pid: u32) -> Result<u64> {
+    bail!("process footprint sampling is only implemented on Linux and macOS")
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Live libkrun probe (tracked follow-up — see module docs).
 // ──────────────────────────────────────────────────────────────────
@@ -496,6 +629,8 @@ pub fn run_benchmark<P: LaunchProbe>(probe: &mut P, runs: u32, warmup: u32) -> R
 struct LibkrunProbe {
     os: String,
     arch: String,
+    #[cfg(feature = "libkrun-live")]
+    name_prefix: String,
     // Per-iteration counter so each boot gets a unique VM name and the
     // teardown of run N never races the cold start of run N+1. Only
     // read on the `libkrun-live` path.
@@ -505,9 +640,18 @@ struct LibkrunProbe {
 
 impl LibkrunProbe {
     fn new(_args: &MicrovmLaunchArgs) -> Result<Self> {
+        Self::new_with_prefix("mvm-bench")
+    }
+
+    fn new_with_prefix(name_prefix: impl Into<String>) -> Result<Self> {
+        let name_prefix = name_prefix.into();
+        #[cfg(not(feature = "libkrun-live"))]
+        let _ = name_prefix;
         Ok(Self {
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
+            #[cfg(feature = "libkrun-live")]
+            name_prefix,
             iter: 0,
         })
     }
@@ -524,7 +668,7 @@ impl LaunchProbe for LibkrunProbe {
             // Unique name per iteration so teardown of run N never races
             // the cold start of run N+1.
             self.iter += 1;
-            let name = format!("mvm-bench-{}", self.iter);
+            let name = format!("{}-{}", self.name_prefix, self.iter);
             let marks = crate::commands::ops::bench_probe::boot_measure_once(&name)?;
             Ok(marks.to_timing())
         }
@@ -570,13 +714,38 @@ impl LaunchProbe for LibkrunProbe {
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     match args.action {
         BenchAction::MicrovmLaunch(a) => run_microvm_launch(a),
+        BenchAction::MicrovmDensity(a) => run_microvm_density(a),
     }
 }
 
-fn default_report_path(stamp: &str) -> PathBuf {
+fn default_report_path(kind: &str, stamp: &str) -> PathBuf {
     PathBuf::from(mvm_core::config::mvm_state_dir())
         .join("bench")
-        .join(format!("microvm-launch-{stamp}.json"))
+        .join(format!("{kind}-{stamp}.json"))
+}
+
+fn timestamp_for_report_path() -> String {
+    // utc_now() is RFC3339 (`2026-05-29T12:34:56+00:00`); sanitise the
+    // colons/plus/dot so it's a safe filename component.
+    mvm_core::time::utc_now().replace([':', '+', '.'], "-")
+}
+
+fn write_report_with_latest<T: Serialize>(
+    report: &T,
+    out: Option<PathBuf>,
+    kind: &str,
+) -> Result<PathBuf> {
+    let stamp = timestamp_for_report_path();
+    let out_path = match out {
+        Some(p) => p,
+        None => default_report_path(kind, &stamp),
+    };
+    write_json_report(report, &out_path)?;
+    if let Some(parent) = out_path.parent() {
+        let latest = parent.join(format!("{kind}-latest.json"));
+        let _ = write_json_report(report, &latest);
+    }
+    Ok(out_path)
 }
 
 fn run_microvm_launch(args: MicrovmLaunchArgs) -> Result<()> {
@@ -587,24 +756,48 @@ fn run_microvm_launch(args: MicrovmLaunchArgs) -> Result<()> {
             args.hypervisor
         );
     }
+    if args.concurrency == 0 {
+        bail!("--concurrency must be >= 1");
+    }
+    if args.max_concurrency == 0 {
+        bail!("--max-concurrency must be >= 1");
+    }
+    if args.concurrency > args.max_concurrency {
+        bail!(
+            "--concurrency {} exceeds --max-concurrency {}",
+            args.concurrency,
+            args.max_concurrency
+        );
+    }
+
+    if args.concurrency > 1 {
+        if args.warmup > 0 {
+            bail!("--warmup is only supported for serial microvm-launch runs");
+        }
+        if args.baseline.is_some() {
+            bail!("--baseline is only supported for serial microvm-launch runs");
+        }
+        let host = LibkrunProbe::new(&args)?.host_descriptor();
+        let report = run_launch_distribution(host, args.concurrency, args.max_concurrency, |i| {
+            LibkrunProbe::new_with_prefix(format!("mvm-bench-c{i}"))
+        })?;
+        let out_path = write_report_with_latest(&report, args.out, "microvm-launch-concurrent")?;
+        eprintln!(
+            "[mvm] bench microvm-launch: concurrency={}, p95 total_ready_ms={:.2}, report at {}",
+            report.concurrency,
+            report.total_ready_tail_ms.p95,
+            out_path.display()
+        );
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        return Ok(());
+    }
 
     let mut probe = LibkrunProbe::new(&args)?;
     let report = run_benchmark(&mut probe, args.runs, args.warmup)?;
+    let out_path = write_report_with_latest(&report, args.out, "microvm-launch")?;
 
-    // utc_now() is RFC3339 (`2026-05-29T12:34:56+00:00`); sanitise the
-    // colons/plus/dot so it's a safe filename component.
-    let stamp = mvm_core::time::utc_now().replace([':', '+', '.'], "-");
-    let out_path = match args.out {
-        Some(p) => p,
-        None => default_report_path(&stamp),
-    };
-    write_report(&report, &out_path)?;
-    // Stable "latest" copy alongside the timestamped report so a CI
-    // baseline always has a fixed path to read.
-    if let Some(parent) = out_path.parent() {
-        let latest = parent.join("microvm-launch-latest.json");
-        let _ = write_report(&report, &latest);
-    }
     eprintln!(
         "[mvm] bench microvm-launch: {} runs, median total_ready_ms={:.2}, report at {}",
         report.runs,
@@ -638,6 +831,79 @@ fn run_microvm_launch(args: MicrovmLaunchArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_microvm_density(args: MicrovmDensityArgs) -> Result<()> {
+    if args.hypervisor != "libkrun" {
+        bail!(
+            "bench microvm-density v1 supports --hypervisor libkrun only (got {:?}); \
+             Vz / Firecracker benches are a tracked Plan 118 follow-up",
+            args.hypervisor
+        );
+    }
+    if args.count == 0 {
+        bail!("--count must be >= 1");
+    }
+    if args.max_count == 0 {
+        bail!("--max-count must be >= 1");
+    }
+    if args.count > args.max_count {
+        bail!(
+            "--count {} exceeds --max-count {}",
+            args.count,
+            args.max_count
+        );
+    }
+
+    let report = run_libkrun_density(args.count, args.max_count)?;
+    let out_path = write_report_with_latest(&report, args.out, "microvm-density")?;
+    eprintln!(
+        "[mvm] bench microvm-density: {} instances, per-instance={} bytes, report at {}",
+        report.stats.instances,
+        report.stats.per_instance_bytes,
+        out_path.display()
+    );
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "libkrun-live")]
+fn run_libkrun_density(count: u32, max_count: u32) -> Result<DensityReport> {
+    let host = LibkrunProbe::new_with_prefix("mvm-density")?.host_descriptor();
+    let mut held = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let name = format!("mvm-density-{i}");
+        held.push(
+            crate::commands::ops::bench_probe::boot_hold_once(&name)
+                .with_context(|| format!("density boot {name}"))?,
+        );
+    }
+    let raw = held
+        .iter()
+        .map(|vm| {
+            Ok(InstanceFootprint {
+                vm_name: vm.vm_name().to_string(),
+                pid: vm.pid(),
+                bytes: read_process_footprint_bytes(vm.pid())?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    drop(held);
+    Ok(build_density_report(host, count, max_count, raw))
+}
+
+#[cfg(not(feature = "libkrun-live"))]
+fn run_libkrun_density(_count: u32, _max_count: u32) -> Result<DensityReport> {
+    bail!(
+        "bench microvm-density: this binary was built without the \
+         `libkrun-live` feature, so it cannot boot and hold real guests. \
+         Rebuild with `cargo build -p mvm-cli --features libkrun-live` \
+         on a host where libkrun boots."
+    )
 }
 
 #[cfg(test)]
@@ -693,6 +959,20 @@ mod tests {
             total_ready_ms: median,
         }];
         build_report(host(arch), 1, 0, raw)
+    }
+
+    fn launch_args() -> MicrovmLaunchArgs {
+        MicrovmLaunchArgs {
+            runs: 1,
+            warmup: 0,
+            concurrency: 1,
+            max_concurrency: 64,
+            hypervisor: "libkrun".to_string(),
+            out: None,
+            json: false,
+            baseline: None,
+            max_regression_pct: 10.0,
+        }
     }
 
     #[test]
@@ -823,11 +1103,71 @@ mod tests {
     }
 
     #[test]
+    fn smaps_rollup_pss_parser_reads_kib_as_bytes() {
+        let fixture = "\
+Rss:                1720 kB
+Pss:                 384 kB
+Pss_Dirty:           128 kB
+";
+        assert_eq!(
+            parse_linux_smaps_rollup_pss_bytes(fixture).unwrap(),
+            384 * 1024
+        );
+    }
+
+    #[test]
+    fn smaps_rollup_pss_parser_rejects_missing_pss() {
+        let err = parse_linux_smaps_rollup_pss_bytes("Rss: 10 kB\n").unwrap_err();
+        assert!(err.to_string().contains("Pss"), "unexpected error: {err:#}");
+    }
+
+    #[test]
+    fn run_launch_distribution_enforces_concurrency_cap() {
+        let err = run_launch_distribution(host("aarch64"), 5, 4, |_i| {
+            Ok(MockProbe {
+                timing: IterationTiming {
+                    start_to_pid_ms: 1.0,
+                    pid_to_connect_ms: 1.0,
+                    handshake_ms: 1.0,
+                    total_ready_ms: 1.0,
+                },
+                calls: 0,
+            })
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn run_launch_distribution_summarises_probe_wave() {
+        let report = run_launch_distribution(host("aarch64"), 3, 4, |i| {
+            Ok(MockProbe {
+                timing: IterationTiming {
+                    start_to_pid_ms: f64::from(i + 1),
+                    pid_to_connect_ms: 1.0,
+                    handshake_ms: 1.0,
+                    total_ready_ms: f64::from((i + 1) * 100),
+                },
+                calls: 0,
+            })
+        })
+        .unwrap();
+
+        assert_eq!(report.concurrency, 3);
+        assert_eq!(report.raw.len(), 3);
+        approx(report.total_ready_tail_ms.p50, 200.0);
+        approx(report.total_ready_tail_ms.p95, 290.0);
+    }
+
+    #[test]
     fn write_then_read_report_roundtrips() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("microvm-launch-test.json");
         let r = report_with_median("aarch64", 55.0);
-        write_report(&r, &path).unwrap();
+        write_json_report(&r, &path).unwrap();
         let back = read_report(&path).unwrap();
         approx(back.total_ready_ms.p50, 55.0);
     }
@@ -887,6 +1227,51 @@ mod tests {
     }
 
     #[test]
+    fn microvm_launch_rejects_concurrency_above_cap_before_boot() {
+        let mut args = launch_args();
+        args.concurrency = 9;
+        args.max_concurrency = 8;
+        let err = run_microvm_launch(args).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn microvm_density_rejects_count_above_cap_before_boot() {
+        let err = run_microvm_density(MicrovmDensityArgs {
+            count: 17,
+            max_count: 16,
+            hypervisor: "libkrun".to_string(),
+            out: None,
+            json: false,
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[cfg(not(feature = "libkrun-live"))]
+    #[test]
+    fn microvm_density_without_live_feature_fails_honestly() {
+        let err = run_microvm_density(MicrovmDensityArgs {
+            count: 1,
+            max_count: 1,
+            hypervisor: "libkrun".to_string(),
+            out: None,
+            json: false,
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("libkrun-live"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
     fn spans_from_marks_are_non_negative_and_ordered() {
         use std::time::Duration;
         let t0 = std::time::Instant::now();
@@ -912,16 +1297,8 @@ mod tests {
     #[cfg(feature = "libkrun-live")]
     #[test]
     fn live_probe_returns_finite_ordered_spans() {
-        let mut probe = LibkrunProbe::new(&MicrovmLaunchArgs {
-            runs: 1,
-            warmup: 0,
-            hypervisor: "libkrun".to_string(),
-            out: None,
-            json: false,
-            baseline: None,
-            max_regression_pct: 10.0,
-        })
-        .unwrap();
+        let args = launch_args();
+        let mut probe = LibkrunProbe::new(&args).unwrap();
         let it = probe
             .measure_once()
             .expect("live boot should succeed on a libkrun host");
@@ -948,16 +1325,8 @@ mod tests {
     #[cfg(feature = "libkrun-live")]
     #[test]
     fn host_descriptor_is_populated() {
-        let probe = LibkrunProbe::new(&MicrovmLaunchArgs {
-            runs: 1,
-            warmup: 0,
-            hypervisor: "libkrun".to_string(),
-            out: None,
-            json: false,
-            baseline: None,
-            max_regression_pct: 10.0,
-        })
-        .unwrap();
+        let args = launch_args();
+        let probe = LibkrunProbe::new(&args).unwrap();
         let h = probe.host_descriptor();
         assert!(
             h.kernel_sha256.is_some(),

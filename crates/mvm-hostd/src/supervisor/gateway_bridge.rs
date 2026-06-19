@@ -922,6 +922,10 @@ async fn run_passt_bridge(
     wiring: ObserverWiring,
 ) {
     let gateway_std = std::os::unix::net::UnixStream::from(gateway_fd);
+    if let Err(e) = gateway_std.set_nonblocking(true) {
+        tracing::error!(error = %e, "passt: failed to set gateway fd nonblocking");
+        return;
+    }
     let gateway = match tokio::net::UnixStream::from_std(gateway_std) {
         Ok(u) => u,
         Err(e) => {
@@ -930,6 +934,10 @@ async fn run_passt_bridge(
         }
     };
     let guest_std = std::os::unix::net::UnixStream::from(supervisor_fd);
+    if let Err(e) = guest_std.set_nonblocking(true) {
+        tracing::error!(error = %e, "passt: failed to set supervisor fd nonblocking");
+        return;
+    }
     let guest = match tokio::net::UnixStream::from_std(guest_std) {
         Ok(u) => u,
         Err(e) => {
