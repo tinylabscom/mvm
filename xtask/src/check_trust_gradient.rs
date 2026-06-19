@@ -113,7 +113,7 @@ pub(crate) fn structural_checks(rows: &[Row], errors: &mut Vec<String>) {
 fn witness_exists(workspace: &Path, token: &str) -> Result<bool> {
     if let Some(name) = token.strip_prefix("fn:") {
         let needle = format!("fn {name}(");
-        return Ok(grep_tree(&workspace.join("crates"), &needle)? || grep_tree(workspace, &needle)?);
+        return grep_tree(workspace, &needle);
     }
     if let Some(name) = token.strip_prefix("ci:") {
         return grep_tree(&workspace.join(".github").join("workflows"), name);
