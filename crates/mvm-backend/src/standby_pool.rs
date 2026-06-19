@@ -14,6 +14,10 @@ use mvm_core::vm_backend::{StandbyCompat, StandbyHandle, StandbyState};
 /// Filename of the per-standby metadata JSON inside its dir.
 const HANDLE_FILE: &str = "standby.json";
 
+/// A parked standby is a low-cost saved-state snapshot; it may outlive the warm
+/// TTL by this factor before the reaper finally removes it.
+const PARKED_TTL_MULTIPLIER: u64 = 6;
+
 /// A view over `~/.mvm/pool/` (or a test root). Cheap to construct; all state is on disk.
 pub struct SupervisorStandbyPool {
     root: PathBuf,
@@ -116,19 +120,39 @@ impl SupervisorStandbyPool {
 
     /// Reap standbys that are dead (pid gone) or expired (`now - spawned > ttl`).
     ///
-    /// Saved-state standbys (pid=0) have no running supervisor; they are reaped by TTL
-    /// only, never by dead-process detection. Live-supervisor standbys are SIGTERMed
-    /// before their dir is removed when they expire while still running.
+    /// Saved-state standbys (pid=0) have no running supervisor. An idle saved-state
+    /// standby that ages past the warm TTL is demoted to `Parked` rather than removed:
+    /// parked standbys remain claimable and are only removed once they age past
+    /// `PARKED_TTL_MULTIPLIER × ttl`. Live-supervisor standbys are SIGTERMed before
+    /// their dir is removed when they expire while still running.
     pub fn reap_stale(&self, ttl: std::time::Duration, now: u64) -> Result<Vec<String>> {
         let ttl_secs = ttl.as_secs();
         let mut reaped = Vec::new();
         for h in self.list()? {
-            let expired = now.saturating_sub(h.spawned_unix_secs) > ttl_secs;
+            let age = now.saturating_sub(h.spawned_unix_secs);
+            let expired = age > ttl_secs;
             if h.is_saved_state() {
-                // No live process; TTL controls expiry exclusively.
-                if expired {
-                    self.remove(&h.id)?;
-                    reaped.push(h.id);
+                let parked_ttl_secs = ttl_secs.saturating_mul(PARKED_TTL_MULTIPLIER);
+                match h.state {
+                    // Past the extended parked TTL: remove.
+                    StandbyState::Parked if age > parked_ttl_secs => {
+                        self.remove(&h.id)?;
+                        reaped.push(h.id);
+                    }
+                    // Under the parked TTL: keep — do nothing.
+                    StandbyState::Parked => {}
+                    // Idle saved-state that aged out: demote to parked, keep it claimable.
+                    StandbyState::Idle if expired => {
+                        let mut parked = h.clone();
+                        parked.state = StandbyState::Parked;
+                        self.record(&parked)?;
+                    }
+                    // Claimed-but-expired (stuck): remove.
+                    _ if expired => {
+                        self.remove(&h.id)?;
+                        reaped.push(h.id);
+                    }
+                    _ => {}
                 }
             } else {
                 let alive = pid_alive(h.pid);
@@ -363,9 +387,71 @@ mod tests {
         );
     }
 
-    /// Saved standbys (pid=0) are kept while recent and reaped only when TTL expires.
     #[test]
-    fn reap_keeps_recent_saved_standby_and_reaps_expired_one() {
+    fn reap_demotes_idle_saved_state_expired_to_parked_not_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let now = 1_000_000u64;
+        // Idle saved-state (pid=0), expired by the warm ttl.
+        let mut h = saved_handle("vz1", "aa", "img", StandbyState::Idle);
+        h.spawned_unix_secs = now - 7_200; // 2h old
+        pool.record(&h).unwrap();
+
+        let reaped = pool
+            .reap_stale(std::time::Duration::from_secs(3_600), now)
+            .unwrap();
+
+        assert!(!reaped.contains(&"vz1".to_string()), "demoted, not reaped");
+        assert_eq!(pool.load("vz1").unwrap().state, StandbyState::Parked);
+    }
+
+    #[test]
+    fn reap_keeps_parked_under_parked_ttl_and_removes_over_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let now = 1_000_000u64;
+        let ttl = std::time::Duration::from_secs(3_600);
+
+        let mut young = saved_handle("p_young", "aa", "img", StandbyState::Parked);
+        young.spawned_unix_secs = now - 4 * 3_600; // older than warm ttl, under parked ttl
+        pool.record(&young).unwrap();
+
+        let mut old = saved_handle("p_old", "aa", "img", StandbyState::Parked);
+        old.spawned_unix_secs = now - 100 * 3_600; // well past parked ttl
+        pool.record(&old).unwrap();
+
+        let reaped = pool.reap_stale(ttl, now).unwrap();
+
+        assert!(
+            !reaped.contains(&"p_young".to_string()),
+            "young parked kept"
+        );
+        assert!(reaped.contains(&"p_old".to_string()), "old parked removed");
+        assert_eq!(pool.load("p_young").unwrap().state, StandbyState::Parked);
+    }
+
+    #[test]
+    fn reap_still_removes_live_pid_expired_standby() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let now = 1_000_000u64;
+        // Live-pid standby (pid!=0, dead pid) expired — libkrun stays reap-to-cold.
+        let mut h = handle("lk1", "aa", StandbyState::Idle);
+        h.pid = 999_999; // not alive
+        h.spawned_unix_secs = now - 7_200;
+        pool.record(&h).unwrap();
+
+        let reaped = pool
+            .reap_stale(std::time::Duration::from_secs(3_600), now)
+            .unwrap();
+        assert!(reaped.contains(&"lk1".to_string()));
+        assert!(pool.load("lk1").is_err(), "removed");
+    }
+
+    /// A recent saved standby (pid=0) is kept idle; an expired idle one is demoted to
+    /// Parked (not removed) on the first reap pass.
+    #[test]
+    fn reap_keeps_recent_saved_standby_and_demotes_expired_one() {
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path());
         let now = now_unix_secs();
@@ -375,7 +461,7 @@ mod tests {
         pool.record(&recent).unwrap();
 
         let mut old = saved_handle("vz-old", "kk", "img", StandbyState::Idle);
-        old.spawned_unix_secs = 1; // ancient
+        old.spawned_unix_secs = 1; // ancient — past warm TTL, demoted to Parked
         pool.record(&old).unwrap();
 
         let reaped = pool
@@ -383,8 +469,11 @@ mod tests {
             .unwrap();
 
         assert!(!reaped.contains(&"vz-keep".to_string()));
-        assert!(reaped.contains(&"vz-old".to_string()));
+        assert!(
+            !reaped.contains(&"vz-old".to_string()),
+            "demoted, not reaped"
+        );
         assert!(pool.load("vz-keep").is_ok());
-        assert!(pool.load("vz-old").is_err());
+        assert_eq!(pool.load("vz-old").unwrap().state, StandbyState::Parked);
     }
 }
