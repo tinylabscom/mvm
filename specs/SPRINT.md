@@ -3056,6 +3056,70 @@ until explicitly directed.
 - Any production isolation claim for Tier 0 — it is single-principal dev preview,
   by design.
 
+## Sprint 63 — Resident builder control plane + residency model (proposed)  [`plans/205-resident-builder-control-plane.md`](plans/205-resident-builder-control-plane.md) | [`adrs/090-resident-daemon-trust-gradient-and-residency.md`](adrs/090-resident-daemon-trust-gradient-and-residency.md)
+
+### Why this sprint
+
+The worst-felt latency is the per-session builder bring-up (boot or rebuild before any
+useful work), with cold acquisition on a fresh machine second. The fix is to make the
+builder *resident* — but "keep the builder running and let it be the daemon" is only
+safe if it does not move authority into a guest. Sprint 63 commits to the redesign that
+makes builds instant while keeping ADR-002's host-trusted/guest-untrusted posture
+intact. It is an umbrella over Plans 118/152/159/196/202/204; it owns the trust gradient
+and the residency model and consumes the in-flight pieces rather than rebuilding them.
+
+### Load-bearing decisions (ADR-090)
+
+- **Three-daemon trust gradient.** Host control daemon (keys, admission, audit chain,
+  pool + lifecycle) stays host-side in the TCB and, under the fleet, per-tenant
+  (ADR-084 / Plan 202). Builder daemon (`mvm-builderd`, Plan 204) is dev-tier
+  (ADR-088), resident, build-only — the only daemon that may go resident for speed.
+  Workload guest agent is the prod-stripped runt with zero authority. Authority
+  decreases monotonically host→builder→workload; keys/admission/audit never cross the
+  host→builder vsock line.
+- **Residency slider.** One standby-pool (Plan 118) `min`+idle knob spans always-warm
+  (`min ≥ 1`, no boot latency) ⇄ parked-snapshot-resume (`min = 0`, no idle RAM,
+  sub-second resume via Plan 159 / Plan 175). Per-host default, user-overridable. Not
+  two code paths.
+- **No claim regression.** Snapshot/resume applies only to the dev-tier builder VM.
+  Claim-11 prod-dep volumes stay safe via host-side content-addressed admit-time
+  re-verification, independent of how the builder booted. The typed allowlisted
+  `BuilderRequest` protocol (Plan 204) means residency shrinks the attack surface.
+
+### Workstream breakdown (see Plan 205)
+
+- **A — Trust-gradient invariant**  🔴 proposed — codify + structural tests (no key /
+  admission / prod do_exec / console below the host line; host daemon stays per-tenant).
+- **B — Residency policy over the standby pool**  🔴 proposed — `min`+idle, warm↔parked
+  transitions, per-host default + override, doctor reporting.
+- **C — Resident builder daemon**  🔴 proposed — `mvm-builderd` long-lived across
+  invocations, session reuse with hot store (Plan 196), readiness/crash-recovery.
+- **D — Snapshot park/resume**  🔴 proposed — Vz snapshot (Plan 159) into parked state,
+  FC leg via Plan 175, freshness keyed to the builder fingerprint (Plan 195).
+- **E — Cold acquisition**  🔴 proposed — first-boot snapshot bake, source-checkout stays
+  release-artifact-free, doctor never-built/parked/warm.
+- **F — Docs and posture**  🔴 proposed — "what runs where" table, residency default +
+  tradeoff, threat-model delta.
+
+### Sprint 63 success criteria
+
+- A second `mvmctl` command in a session triggers no builder boot (warm) or a
+  sub-second resume (parked) — measured, not asserted.
+- Residency is one policy with a per-host default and an override; `mvmctl doctor`
+  reports the live state.
+- The trust-gradient invariant has passing structural tests; no signing key, admission
+  authority, or audit writer exists below the host→builder vsock line.
+- Claim-11 volumes still fail closed on a resumed builder; no ADR-002 numbered claim
+  regresses; `xtask check-claim-catalog` stays green.
+
+### Non-goals (explicit — see Plan 205 §Non-goals)
+
+- Moving keys / admission / audit into the builder VM.
+- Collapsing the per-tenant host security daemons (Plan 202) into one global key holder.
+- Letting the workload guest agent grow authority or hold secrets.
+- Reimplementing the builder protocol (consume Plan 204).
+- Requiring host Nix for normal builds or runs (ADR-089 holds).
+
 ## Completed Sprints
 
 - [01-foundation.md](sprints/01-foundation.md)
