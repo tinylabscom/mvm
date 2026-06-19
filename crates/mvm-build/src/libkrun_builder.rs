@@ -75,7 +75,7 @@ use crate::builder_vm::{
 use crate::builder_vm_runtime::{
     NixStoreImageLock, acquire_nix_store_image_lock, acquire_nix_store_image_lock_named,
     builder_vm_timeout, finalize_flake_job, finalize_install_job, read_job_result,
-    shell_job_exit_error, stage_job_dir, supervisor_exit_error,
+    shell_job_exit_error, stage_job_dir, stage_shell_job_dir, supervisor_exit_error,
 };
 
 /// Default vCPU count for the builder VM. Nix builds are
@@ -1334,23 +1334,12 @@ pub(crate) fn unique_job_id() -> String {
 // `use` at the top of this file pulls it back in for the existing
 // callers.
 
-// `stage_job_dir`, `shell_single_quote_escape`, `read_job_result`,
+// `stage_job_dir`, `stage_shell_job_dir`, `shell_single_quote_escape`, `read_job_result`,
 // `JobResult`, `INSTALL_RESULT_FILENAME`, `read_last_bytes_of`,
 // `finalize_flake_job`, `read_revision_hash`, `extract_nix_store_hash`,
 // `finalize_install_job`, and `InstallResultReport` all live in
 // `crate::builder_vm_runtime` so the future VzBuilderVm path can reuse
 // them.
-
-fn stage_shell_job_dir(job_dir: &Path, script: &str) -> Result<(), BuilderVmError> {
-    std::fs::create_dir_all(job_dir).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("creating job dir {}: {e}", job_dir.display()))
-    })?;
-    let cmd_path = job_dir.join("cmd.sh");
-    std::fs::write(&cmd_path, script).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("writing {}: {e}", cmd_path.display()))
-    })?;
-    Ok(())
-}
 
 /// Locate the `mvm-libkrun-supervisor` binary. Mirrors the
 /// resolver in `mvm-backend::libkrun::resolve_supervisor_path`

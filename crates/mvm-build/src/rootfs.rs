@@ -50,10 +50,9 @@ pub struct MaterializeExt4Options {
     pub size_multiplier_numerator: u64,
     /// Denominator for the uncompressed-size multiplier.
     pub size_multiplier_denominator: u64,
-    /// Guest block device path for the output sparse file. The
-    /// libkrun builder attaches its persistent Nix store as the
-    /// first extra disk (`/dev/vdb`), so the rootfs output disk is
-    /// the second extra disk (`/dev/vdc`).
+    /// Guest block device path for the output sparse file. Builder
+    /// backends attach their persistent Nix store as `/dev/vdb`, so the
+    /// first caller-provided extra disk is `/dev/vdc`.
     pub guest_output_device: String,
 }
 
@@ -188,7 +187,9 @@ fn materialize_ext4_in_builder_vm(
     options: &MaterializeExt4Options,
     device_size_bytes: u64,
 ) -> Result<(), RootfsError> {
+    use crate::builder_backend_select::BuilderBackendChoice;
     use crate::libkrun_builder::{BuilderExtraDisk, BuilderShellJob, LibkrunBuilderVm};
+    use crate::qemu_builder::QemuBuilderVm;
 
     let artifact_out = input
         .output
@@ -207,8 +208,39 @@ fn materialize_ext4_in_builder_vm(
         }],
     };
 
-    LibkrunBuilderVm::default().run_shell_script(&shell_job)?;
+    match ext4_materializer_choice() {
+        BuilderBackendChoice::Libkrun => {
+            LibkrunBuilderVm::default().run_shell_script(&shell_job)?;
+        }
+        BuilderBackendChoice::Qemu => {
+            QemuBuilderVm::new().run_shell_script(&shell_job)?;
+        }
+        BuilderBackendChoice::Vz => {
+            return Err(crate::builder_vm::BuilderVmError::VmmUnavailable {
+                requested: "vz-oci-ext4-materializer".to_string(),
+                reason: "OCI rootfs.ext4 materialization does not yet implement the Vz builder \
+                         shell-job path; use --builder libkrun or --builder qemu."
+                    .to_string(),
+            }
+            .into());
+        }
+    }
     Ok(())
+}
+
+#[cfg(feature = "builder-vm")]
+fn ext4_materializer_choice() -> crate::builder_backend_select::BuilderBackendChoice {
+    use crate::builder_backend_select::{BuilderBackendChoice, resolve_env_override};
+
+    // Preserve the historical default: OCI materialization has always used
+    // libkrun unless an operator explicitly asks for QEMU. Do not use
+    // resolve_choice(), because macOS 26+ auto-detects Vz and Vz has no
+    // shell-job materializer yet.
+    match resolve_env_override() {
+        Some(BuilderBackendChoice::Qemu) => BuilderBackendChoice::Qemu,
+        Some(BuilderBackendChoice::Vz) => BuilderBackendChoice::Vz,
+        Some(BuilderBackendChoice::Libkrun) | None => BuilderBackendChoice::Libkrun,
+    }
 }
 
 /// Safety margin (bytes) left between the formatted ext4 size and the
@@ -278,6 +310,11 @@ fn shell_single_quote_escape(s: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "builder-vm")]
+    use crate::builder_backend_select::{BuilderBackendChoice, MVM_BUILDER_BACKEND_ENV};
+    #[cfg(feature = "builder-vm")]
+    use mvm_core::util::test_env::TestEnv;
+
     #[test]
     fn estimate_uses_sixty_four_mib_floor() {
         let options = MaterializeExt4Options::default();
@@ -327,6 +364,33 @@ mod tests {
         // bytes still mounts it.
         let dev = 128 * 1024 * 1024;
         assert!(ext4_block_count(dev) * 4096 + EXT4_DEVICE_MARGIN_BYTES <= dev + 4096);
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn materializer_defaults_to_libkrun_for_historical_compatibility() {
+        let mut env = TestEnv::new();
+        env.remove(MVM_BUILDER_BACKEND_ENV);
+
+        assert_eq!(ext4_materializer_choice(), BuilderBackendChoice::Libkrun);
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn materializer_honors_explicit_qemu_backend() {
+        let mut env = TestEnv::new();
+        env.set(MVM_BUILDER_BACKEND_ENV, "qemu");
+
+        assert_eq!(ext4_materializer_choice(), BuilderBackendChoice::Qemu);
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn materializer_refuses_explicit_vz_until_shell_jobs_exist() {
+        let mut env = TestEnv::new();
+        env.set(MVM_BUILDER_BACKEND_ENV, "vz");
+
+        assert_eq!(ext4_materializer_choice(), BuilderBackendChoice::Vz);
     }
 
     #[cfg(not(feature = "builder-vm"))]

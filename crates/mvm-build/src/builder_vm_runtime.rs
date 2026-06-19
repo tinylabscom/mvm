@@ -565,6 +565,23 @@ pub fn read_job_result(job_dir: &Path) -> Result<JobResult, BuilderVmError> {
     })
 }
 
+/// Stage a one-shot builder shell job.
+///
+/// Shell jobs are not Nix builds, but they use the same `/job/cmd.sh`
+/// contract as the builder VM's flake path. Keeping this helper in the
+/// backend-neutral runtime module avoids each VMM driver drifting on the
+/// job-dir shape.
+pub fn stage_shell_job_dir(job_dir: &Path, script: &str) -> Result<(), BuilderVmError> {
+    std::fs::create_dir_all(job_dir).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("creating job dir {}: {e}", job_dir.display()))
+    })?;
+    let cmd_path = job_dir.join("cmd.sh");
+    std::fs::write(&cmd_path, script).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("writing {}: {e}", cmd_path.display()))
+    })?;
+    Ok(())
+}
+
 /// Filename of the install report `mvm-host-vm-init` writes into
 /// `artifact_out/` after the install pipeline finishes. The host
 /// reads + parses this to decide whether the install succeeded.
