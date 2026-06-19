@@ -2049,9 +2049,11 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
 
     // Fail fast before boot so the user sees a clear
     // error instead of booting then hitting the generic backend bail.
-    if wait && effective_hypervisor != "libkrun" {
+    // libkrun and vz both capture the one-shot workload exit code to
+    // `workload.exit`; the other backends do not implement `wait` yet.
+    if wait && !matches!(effective_hypervisor, "libkrun" | "vz") {
         anyhow::bail!(
-            "--wait is currently only supported on the libkrun backend (Plan 152 WS-A); \
+            "--wait is currently supported on the libkrun and vz backends; \
              other backends gain it in a later slice"
         );
     }
@@ -2854,8 +2856,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
 
     // Block until the workload powers off and propagate its
     // exit code. `--wait` is parse-time mutually exclusive with `--detach`
-    // and `--up-json` (see Args); only the foreground libkrun path reaches here.
-    if wait && effective_hypervisor == "libkrun" {
+    // and `--up-json` (see Args); the foreground libkrun/vz path reaches here.
+    if wait && matches!(effective_hypervisor, "libkrun" | "vz") {
         let id = mvm_core::vm_backend::VmId(vm_name_owned.clone());
         let status = backend.wait(&id)?;
         let code = status.code.unwrap_or(1);

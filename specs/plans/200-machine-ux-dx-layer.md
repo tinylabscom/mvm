@@ -1206,28 +1206,32 @@ that the original name-only `DnsSinkholeScan` left open (see the "uniform L4" fo
 below, now landed). WS-B also surfaced these pre-existing gaps, none caused by the WS-B
 change:
 
-- [ ] **Vz `up --wait` (verdict-capture) — the last live-validation gap (drafted 2026-06-19).**
-      The libkrun egress matrix is now live-verified `0/3/2` after the ingress-return fix
-      (#1083, the `<listen>-krun.sock` reply path). The equivalent Vz live verdict-capture is
-      still blocked only because `up --wait` is gated to libkrun (`up.rs` ~2046 fail-fast +
-      ~2858 wait block, both `== "libkrun"`). The Vz *bridge* enforcement is already covered by
-      the deterministic `*_live_vz_bridge` tests, and Vz uses a connected socketpair
-      (`run_vz_gvproxy_bridge`) so it has **no** recvfrom-source addressing bug — the #1083 fix
-      does not apply to it. The slice is small because the verdict-capture infra already exists
-      on Vz:
-      - `wait()` is backend-agnostic in substance — libkrun's impl (`libkrun.rs` ~867) just
-        polls `<vm_state_dir>/workload.exit` (no PID-liveness check) until it appears or times
-        out, and the **Vz supervisor already persists `workload.exit`** to the same path
-        (`mvm-vm-host/src/vz_objc.rs` ~468, "Mirrors `exit_capture::capture_once`").
-      - Work: (1) extract libkrun's `wait()` poll into a shared state-dir helper (reuse-first)
-        and implement `VmBackend::wait` for the Vz backend (`mvm-backend/src/vz.rs`) on top of
-        it; (2) relax the two `== "libkrun"` gates in `up.rs` to `matches!(.., "libkrun"|"vz")`;
-        (3) deterministic test that the Vz `wait()` reads a staged `workload.exit`; (4) live Vz
-        matrix (`--hypervisor vz`, `examples/egress-probe`) → expect the same `0/3/2`.
-      - Risk: low. No bridge/data-path change; egress stays deny-by-default; the receipt
-        enforcement tier is unchanged. Validate live on a quiet macOS-26 box (isolate
-        `MVM_CACHE_DIR`, seeded from `~/.cache/mvm/builder-vm/aarch64`, to avoid the one-shot
-        vs persistent vz-builder `VZErrorDomain:2` storage conflict).
+- [x] **Vz `up --wait` (verdict-capture) — implemented; live-vz proof blocked by a separate
+      vz-boot issue (below).** The libkrun egress matrix is live-verified `0/3/2` after the
+      ingress-return fix (#1083). Vz uses a connected socketpair (`run_vz_gvproxy_bridge`) so it
+      has **no** recvfrom-source addressing bug — the #1083 fix does not apply to it; its bridge
+      enforcement is covered by the deterministic `*_live_vz_bridge` tests. Implemented: (1)
+      extracted the `wait()` poll into a shared `mvm_backend::workload_wait` module
+      (`read_exit_status_from` + `wait_for_workload_exit`, state-dir based, backend-agnostic);
+      libkrun's `wait()` now delegates to it; (2) `VmBackend::wait` for the Vz backend delegates
+      to the same helper (the vz supervisor already persists `<vm_state_dir>/workload.exit`,
+      `vz_objc.rs` ~468); (3) relaxed both `up.rs` `--wait` gates to `matches!(.., "libkrun"|"vz")`;
+      (4) `workload_wait` unit tests (read/zero/absent/staged). Unit-tested + clippy/fmt/spec
+      gates + linux cross-compile clean. **Live-vz verdict-capture NOT yet proven** — see the
+      vz-workload-boot blocker below; the `wait()` logic rides the exact shared path proven live
+      on libkrun, so the gap is the boot, not the capture. Risk: additive + safe (if vz boot
+      fails, `up` errors before reaching `wait`, exactly as today).
+- [ ] **Vz one-shot workload boot fails: `supervisor exited before writing PID file (exit 1)`
+      (surfaced 2026-06-19, blocks the Vz `up --wait` live proof).** Running `up --hypervisor vz
+      --wait` on `examples/egress-probe` (isolated cache, `MVM_VZ_DRAINER_PATH` set) reaches
+      `Booting Apple Virtualization` and spawns `mvm-vz-drainer`, then the vz-supervisor exits 1
+      before writing its PID file, with an **empty `console.log`** (guest never hit userspace).
+      All three matrix cases fail identically at boot — so it is not policy/`wait`. Likely the
+      vz-supervisor's VZ config or the drainer-bridge integration on the workload path (a
+      known-fragile area; cf. the vz workload-path bugs). Next: capture the vz-supervisor stderr
+      (it currently isn't persisted — add a `<vm_state_dir>/supervisor.log` like libkrun, or run
+      the supervisor in the foreground), repro on a quiet box, and fix the boot. Once green,
+      re-run the Vz matrix → expect `0/3/2` (validating the `--wait` slice above end-to-end).
 - [x] **macOS transient-run guest networking (blocks `machine run --net` on macOS).**
       Was: `mvmctl run` / `machine run` transient guests never brought up `eth0` (the init
       ran only loopback; the unprivileged uid-901 command couldn't DHCP), so a guest had no
