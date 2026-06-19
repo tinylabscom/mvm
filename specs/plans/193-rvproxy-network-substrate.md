@@ -6,14 +6,17 @@
 > syntax.
 
 **Status: 🟡 in progress — rvproxy R2 is available; mvm-side native parity is
-partly landed.** The matching requirements doc lives in the sibling repo at
+partly landed and macOS/libkrun now selects the native candidate by default when
+configured.** The matching requirements doc lives in the sibling repo at
 `rvproxy/specs/plans/014-mvm-adoption-requirements.md`; rvproxy's own
 `docs/mvm-integration.md` + `specs/plans/008-orchestration-plane.md` define the
 contract. WS-1 transport, WS-1.5 parity scaffold, native config emission/launch,
 native flow-audit refeed, and binary-discriminating native enforcement witnesses
-are landed. Remaining cutover work is deleting the splice/Plan-141 hooks only
-after the native gate is green by default, flipping the default bridge path,
-adding the transparent terminator, and making the parity gate required.
+are landed. The macOS/libkrun default selection now chooses native when
+`MVM_GATEWAY_BIN` is configured, while explicit `MVM_NETWORKING=gvproxy` and the
+no-candidate fallback remain available. Remaining cutover work is deleting the
+splice/Plan-141 hooks, adding the transparent terminator, and making the parity
+gate required.
 
 > **Priority update 2026-06-15:** Plan 200 consumes this plan as security/network
 > substrate. `mvmctl machine --net` and `allow-host` must use the current
@@ -278,10 +281,20 @@ own internal default).
         four supervisor-bin construction sites no longer pass an ignored
         policy, and tests that need an intentionally open flow use
         `PlanFlowPolicy::from_network_policy(NetworkPolicy::unrestricted())`.
+  - [x] **2d task 2d — macOS/libkrun native-default selection.**
+        `resolve_networking_mode()` now selects `NetworkingPreference::Native`
+        by default on macOS when `MVM_GATEWAY_BIN` names the rvproxy candidate,
+        so the already-landed supervisor native block renders `rvproxy.toml`,
+        launches `rvproxy run --config`, and feeds native flow-audit without
+        requiring `MVM_NETWORKING=native`. The fallback stays safe: hosts without
+        `MVM_GATEWAY_BIN` keep the historical gvproxy default, Linux keeps passt
+        by default, and an explicit `MVM_NETWORKING=gvproxy` pin still overrides
+        the native default. Covered by hermetic env-selection tests; this does
+        not delete the splice or change branch-protection settings.
   - [ ] **2d — remaining: splice deletion.** Delete the splice + Plan-141
-        `on_packet` hooks once the gate is green by default and the native audit
-        feed is the sole path. Design + the R2 contract are in "## WS-2 design"
-        below.
+        `on_packet` hooks once the native audit feed is the sole path and the
+        transparent terminator/parity-required gates are in place. Design + the
+        R2 contract are in "## WS-2 design" below.
 - [ ] **WS-3 — backend cutover.** Replace the gvproxy spawn
       (`mvm-build/host_gvproxy.rs`, `libkrun-sys/gvproxy.rs`) + passt with
       `rvproxy run --config` per the integration contract; drop the Homebrew
