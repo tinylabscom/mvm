@@ -532,6 +532,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(vz_check(plat));
     checks.push(libkrun_check(plat));
     checks.push(builder_backend_check(plat));
+    checks.push(residency_check());
     checks.push(network_backend_check(plat));
     checks.push(ts_runner_check());
     checks.push(stage0_status_check());
@@ -1627,6 +1628,35 @@ fn builder_backend_check(_plat: Platform) -> Check {
         category: "platform",
         ok: true,
         info: "n/a (mvm-cli built without `builder-vm` feature)".to_string(),
+    }
+}
+
+/// Report the resolved residency policy, its source, the warm target, and the
+/// idle timeout. The check is informational and never fails — every override is
+/// observable via the `MVM_RESIDENCY` env var at the time doctor runs.
+fn residency_check() -> Check {
+    use mvm_core::residency::{MVM_RESIDENCY_ENV, ResidencySource, resolve_residency};
+
+    let (policy, source) = resolve_residency();
+    let source_str = match source {
+        ResidencySource::EnvOverride => format!("override via ${MVM_RESIDENCY_ENV}"),
+        ResidencySource::AutoDetect => "auto-detected".to_string(),
+    };
+    let idle = match policy.idle_timeout() {
+        Some(d) => format!(", idle={}m", d.as_secs() / 60),
+        None => String::new(),
+    };
+    Check {
+        name: "residency",
+        category: "platform",
+        ok: true,
+        info: format!(
+            "{} — {} — warm_target={}{}",
+            policy.label(),
+            source_str,
+            policy.warm_target(),
+            idle
+        ),
     }
 }
 
@@ -4006,5 +4036,19 @@ mod tests {
         let s = builderd_daemon_summary(root.path());
         assert!(s.contains("bv: ready"), "got {s:?}");
         handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn residency_check_reports_policy_and_source() {
+        let c = residency_check();
+        assert_eq!(c.category, "platform");
+        assert!(c.ok);
+        // label — source — warm_target=N
+        assert!(c.info.contains("warm_target="), "info was {:?}", c.info);
+        assert!(
+            c.info.contains("auto-detected") || c.info.contains("override"),
+            "info was {:?}",
+            c.info
+        );
     }
 }
