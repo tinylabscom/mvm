@@ -1,16 +1,13 @@
-//! Per-VM broker-services subprocess spawn/reap.
+//! Legacy per-VM broker-services subprocess spawn primitives.
 //!
-//! The host-services broker (`host.audit.v1` / `host.time.v1` /
-//! `host.cost.v1`) runs as a per-VM `mvm-broker` subprocess that the guest
-//! reaches by dialing `connect_host_vsock(BROKER_PORT)`; `host.audit.v1`
-//! forwards each accepted entry to a sibling per-VM `mvm-audit-signer`
-//! subprocess that chain-signs it into the tenant's audit log.
+//! Backend launch paths now use per-tenant host-agent registration.
+//! This module remains as the shared low-level process-spawn scaffold and for
+//! tests that exercise the old `mvm-broker` / `mvm-audit-signer` binaries.
 //!
-//! This module owns the spawn/reap moat for those subprocesses, mirroring
-//! [`crate::substitution_spawn`]: locate the bin, hand it a JSON config on
-//! stdin, detach via `setsid`, wait for readiness, and write a PID file the
-//! stop path reaps. mvm-backend can't depend on mvm-hostd, so the config is
-//! emitted as raw JSON matching the bin's `deny_unknown_fields`
+//! The helpers mirror [`crate::substitution_spawn`]: locate the bin, hand it a
+//! JSON config on stdin, detach via `setsid`, wait for readiness, and write a
+//! PID file for direct reaping in tests. mvm-backend can't depend on mvm-hostd,
+//! so the config is emitted as raw JSON matching the bin's `deny_unknown_fields`
 //! `SubprocessConfig` — exactly as `spawn_substitution_endpoint` does for its
 //! `EndpointConfig`.
 //!
