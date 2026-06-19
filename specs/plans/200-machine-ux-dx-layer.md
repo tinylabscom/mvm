@@ -1031,20 +1031,30 @@ Required behavior:
          denial is not claimed.
       4. 2026-06-19 Firecracker-box attempt did not reach guest boot, so this
          remains open. The branch-local `mvmctl`, `mvm-libkrun-supervisor`, and
-         `mvm-firecracker-bridge` built on the x86_64 KVM host with isolated
-         proof state; a throwaway host `ssh-agent` and key were created outside
-         the repo; `alpine:latest` was selected after `python:3.12-alpine`
-         exercised the OCI hardening `MalformedHeader` refusal. The start path
-         then blocked during OCI `rootfs.ext4` materialization because
-         `mvm-build::rootfs::materialize_ext4` still hardcodes the libkrun
-         builder VM path; with an isolated copied builder image cache, the
-         libkrun supervisor failed on the Firecracker host with `rc -22` before
-         any workload VM or SSH-agent socket existed. The remaining proof must
-         either run on a host where that libkrun materializer works, or first
-         teach OCI ext4 materialization to honor the QEMU/builder backend seam.
-         The non-standard-port SSH-banner denial also remains unclaimed because
-         current enforcement only bans TCP/22 plus template SSH material; no
-         runtime SSH-banner classifier exists yet.
+         `mvm-firecracker-bridge` built on the x86_64 KVM host; a throwaway
+         host `ssh-agent` and key were created outside the repo; `alpine:latest`
+         was selected after `python:3.12-alpine` exercised the OCI hardening
+         `MalformedHeader` refusal. The attempt fixed two materializer blockers
+         discovered live: OCI `rootfs.ext4` materialization now honors an
+         explicit QEMU builder choice instead of hardcoding libkrun, and QEMU
+         virtiofs sockets now live under `/tmp/mvm-vfs-*` to stay below Linux
+         `AF_UNIX` path limits. A later start attempt showed the guest shell
+         job produced `result` with `exit_code:0`, but host-side dev-build
+         staging fell into the cross-device rename fallback and blocked in
+         Linux `copy_file_range` / ext4 journal writeback while copying
+         `rootfs.ext4`; that fallback now uses a sparse-preserving manual copy
+         for `rootfs.ext4`. The remote host then required reboot to clear
+         unkillable `D`-state `mvmctl`/Cargo processes and came back pingable
+         but with SSH refusing connections, so the final branch-local rebuild
+         and VM SSH-agent round-trip could not be completed in this session.
+         Remaining gated proof: restore SSH/sshd access to that host (or use an
+         equivalent Linux/KVM builder host), rebuild `mvmctl` at the sparse-copy
+         commit, rerun the throwaway-agent machine start, and capture
+         receipt/audit plus the raw `SSH_AGENTC_REQUEST_IDENTITIES` probe
+         response from `/run/mvm/ssh-agent.sock`. The non-standard-port
+         SSH-banner denial also remains unclaimed because current enforcement
+         only bans TCP/22 plus template SSH material; no runtime SSH-banner
+         classifier exists yet.
 - [ ] Normalize `-v/--volume HOST:GUEST[:ro|rw]` across `machine run` and
       `machine create`.
 - [ ] Preserve read-only default and explicit `:rw` requirement.
