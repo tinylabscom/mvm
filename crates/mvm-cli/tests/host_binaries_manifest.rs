@@ -1,14 +1,16 @@
 use mvm_cli::host_binaries::manifest::{HOST_BINARIES, HostBinary};
 
 #[test]
-fn manifest_lists_mvm_host_vm_init_and_egress_proxy() {
+fn manifest_lists_expected_host_binaries() {
     let names: Vec<&str> = HOST_BINARIES.iter().map(|b| b.name).collect();
     assert!(names.contains(&"mvm-host-vm-init"));
     assert!(names.contains(&"mvm-egress-proxy"));
+    // The resident builder control daemon, baked into the builder/dev rootfs.
+    assert!(names.contains(&"mvm-builderd"));
     assert_eq!(
         HOST_BINARIES.len(),
-        2,
-        "expected exactly two host binaries in this ADR's scope"
+        3,
+        "expected exactly three rootfs-installed host binaries"
     );
 }
 
@@ -25,4 +27,6 @@ fn manifest_install_paths_match_adr_064() {
         "/sbin/mvm-egress-proxy"
     );
     assert_eq!(by_name("mvm-egress-proxy").mode, 0o755);
+    assert_eq!(by_name("mvm-builderd").install_path, "/sbin/mvm-builderd");
+    assert_eq!(by_name("mvm-builderd").mode, 0o755);
 }

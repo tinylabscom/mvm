@@ -152,21 +152,30 @@ arm lands with the daemon's image baking (boot-gated).
       ack); recognized-but-unimplemented build ops fail closed with
       `FailureCategory::Unsupported`. `serve_connection()` runs the
       framed read-dispatch-write loop until clean EOF. Driven from
-      `UnixStream` pairs in tests (9 tests) without booting the VM. The bin
-      entrypoint + Linux AF_VSOCK listener are deferred to land with the
-      next box (boot wiring) — a listener with no boot path is untestable
-      dead code.
-- [ ] Add builder-VM image wiring so the daemon starts on boot (also lands
+      `UnixStream` pairs in tests (9 tests) without booting the VM. The
+      `[[bin]] mvm-builderd` entrypoint + Linux AF_VSOCK listener landed in
+      the boot-wiring slice below.
+- [~] Add builder-VM image wiring so the daemon starts on boot (also lands
       the `mvm-builderd` bin entrypoint + AF_VSOCK listener over
       `serve_connection_with_executor`).
-      **Boot-gated, single on-box slice.** This is inseparable from the
-      cross-compile + rootfs baking + boot launch + lifecycle owner: the
-      `mvm-build` lib pulls `reqwest`/`tokio`, so (like every other builder
-      bin) `mvm-builderd` must `#[path]`-include the daemon modules rather
-      than `use mvm_build`, then cross-compile to `aarch64-unknown-linux-musl`
-      via the zigbuild embedding path and be launched by `mvm-host-vm-init`.
-      None of that is verifiable from a non-Linux contributor host, so it is
-      left as one coherent slice to land + boot-validate on the builder box.
+      **Code landed; one live boot-validation step pending on-box.**
+      `crates/mvm-build/src/bin/mvm-builderd.rs` `#[path]`-includes the
+      daemon modules (not `use mvm_build`, so it cross-compiles to static
+      `aarch64-unknown-linux-musl` like every builder bin) and runs a
+      Linux AF_VSOCK accept loop on `BUILDERD_CONTROL_PORT` (21473),
+      serving each connection via `serve_connection_with_executor(&CommandExecutor)`.
+      Embedded into the builder/dev VM rootfs at `/sbin/mvm-builderd` via
+      `HOST_BINARIES` (`host_binaries/manifest.rs` + `nix/lib/mvm-host-binaries.nix`,
+      `check-mvm-host-binaries-sync` green). `mvm-host-vm-init` (PID 1)
+      `spawn_builderd()`s it at dispatch-loop entry (non-fatal). The
+      persistent libkrun + Vz builder launchers register vsock port 21473
+      so the host reaches it at `<vm_state_dir>/vsock-21473.sock` — the
+      exact path `doctor` and `BuilderdClient` already use. All of this is
+      CI-compiled (incl. the musl zigbuild via embedding); the remaining
+      step is a live `mvmctl dev up` → `doctor: builder daemon ready` →
+      typed `FlakeCheck` on the builder box. The lifecycle owner (routing
+      real `mvmctl` builds through the client instead of the legacy
+      channel) is WS-D, still open.
 - [x] Add `mvmctl doctor` visibility for builder daemon readiness.
       Host-side readiness probe landed in `mvm_build::builderd`
       (`probe_builderd_readiness` over a `Handshake` →

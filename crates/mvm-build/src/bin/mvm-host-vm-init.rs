@@ -1139,6 +1139,22 @@ mod linux {
     /// named workload's `v.sock`, and splices). Runs for the VM's
     /// lifetime; spawned as a background thread at dispatch-loop entry.
     /// Never returns under normal operation.
+    /// Launch the resident builder control daemon (`/sbin/mvm-builderd`,
+    /// process. Best-effort: a launch
+    /// failure is logged and the builder VM continues serving the legacy
+    /// dispatch channel, so an old daemon-less image degrades gracefully.
+    fn spawn_builderd() {
+        match Command::new("/sbin/mvm-builderd").spawn() {
+            Ok(child) => eprintln!(
+                "mvm-host-vm-init: spawned mvm-builderd (pid {})",
+                child.id()
+            ),
+            Err(e) => eprintln!(
+                "mvm-host-vm-init: could not spawn mvm-builderd: {e} (typed builder control plane unavailable; legacy dispatch unaffected)"
+            ),
+        }
+    }
+
     fn run_forward_listener() {
         use std::os::fd::FromRawFd;
         use std::os::unix::net::UnixStream;
@@ -1284,6 +1300,14 @@ mod linux {
         // Firecracker v.sock. Failure here is non-fatal: builds still
         // dispatch; only the nesting hop is unavailable (logged).
         std::thread::spawn(run_forward_listener);
+
+        // Bring up the resident builder control daemon as a
+        // separate process. It listens on its own AF_VSOCK control port
+        // and serves the typed `builderd_protocol` to the host's builder
+        // client, coexisting with the legacy dispatch loop below.
+        // Non-fatal: builds still dispatch over the legacy channel if it
+        // fails to launch (logged).
+        spawn_builderd();
 
         let Some(listen_fd) = open_vsock_listener_fd(BUILDER_DISPATCH_PORT, None) else {
             eprintln!("mvm-host-vm-init: dispatch loop: listener setup failed");
