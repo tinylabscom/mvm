@@ -31,9 +31,9 @@ else
 fi
 
 for sym in load_host_signing_key host_signer admit_for_run; do
-  if grep -qE "mvm_(guest_agent|core|hostd).*${sym}" <<<"$prod_syms"; then
+  if grep -qE "mvm_(guest_agent|core|hostd|backend|cli).*${sym}" <<<"$prod_syms"; then
     echo "::error::host authority symbol \`${sym}\` is PRESENT in the production agent." >&2
-    grep -E "mvm_(guest_agent|core|hostd).*${sym}" <<<"$prod_syms" >&2 || true
+    grep -E "mvm_(guest_agent|core|hostd|backend|cli).*${sym}" <<<"$prod_syms" >&2 || true
     fail=1
   else
     echo "ok: ${sym} absent from the production agent"

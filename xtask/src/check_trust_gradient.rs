@@ -187,6 +187,17 @@ mod tests {
     }
 
     #[test]
+    fn equal_tiers_fail() {
+        let md = "| Tier | Layer | Daemon | Forbidden authorities | Witnesses |\n\
+                  | --- | --- | --- | --- | --- |\n\
+                  | 2 | host | control-daemon | (none) | fn:foo |\n\
+                  | 2 | workload | guest-agent | signing-key, plan-admission, audit-writer | ci:bar |\n";
+        let mut errs = Vec::new();
+        structural_checks(&rows(md), &mut errs);
+        assert!(errs.iter().any(|e| e.contains("monotonic")), "{errs:?}");
+    }
+
+    #[test]
     fn workload_missing_forbidden_authority_fails() {
         let md = "| Tier | Layer | Daemon | Forbidden authorities | Witnesses |\n\
                   | --- | --- | --- | --- | --- |\n\
