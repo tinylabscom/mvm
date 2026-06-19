@@ -427,6 +427,19 @@ Work needed for the hot path:
 - Measure `machine run --image alpine -- true` as phases: image-cache resolve,
   admission, config/secrets drive creation, backend start, vsock ready, command
   exit, teardown.
+- Measure Stage 0 bootstrap separately from normal machine hot start. The active
+  branch now caches the host materialized Stage 0 root, prefers verified native
+  `tar -xJf --strip-components 1` for cold extraction, and makes libkrun
+  Stage 0 use a prepopulated persistent `/dev/vda` Nix-store image when the
+  host has `mkfs.ext4`. Firecracker-host measurement on `156391a4`, isolated
+  cache/data dirs: cold builder-image cache miss reached `Fetching Stage 0
+  bootstrap assets … 0.7s` and `Materializing Stage 0 root dir … 1.7s`;
+  immediate warm rerun reached `Fetching … 0.1s` and `Materializing … 0.1s`.
+  The same host confirmed the Nix seed has no `mkfs.ext4`; host-side
+  prepopulation wrote the sparse `nix-store-stage0-x86_64.img` plus
+  `.stage0-seed` sidecar before a bounded 180s libkrun run timed out. Remaining
+  proof: capture the in-guest `stage0-init` adoption line and full libkrun
+  cold/warm boot timing before making a public speed claim.
 - Avoid config/secrets drive creation when the effective content is empty or
   already cached by digest.
 - Prefer warm-pool/snapshot restore only when the security posture is unchanged
@@ -921,7 +934,7 @@ Required behavior:
       build-time equivalent is implemented in a later plan.
 - [ ] Preserve read-only volume defaults and require explicit `:rw` for
       writable shares.
-- [~] Include effective network, auth, and volume policy in dry-run output,
+- [x] Include effective network, auth, and volume policy in dry-run output,
       admission metadata, audit events, and receipts. →
       `machine start --dry-run` / `--dry-run --json` now emit redacted
       effective network posture, enforcement tier, auth mode, dev-init
@@ -930,10 +943,11 @@ Required behavior:
       successful starts emit a `VmStart` audit line summarizing the effective
       machine policy. SSH-agent auth is now reported as
       `ssh-agent-socket`, and the guest-agent setup RPC emits the same
-      host→guest vsock RPC audit as other dev-only agent calls. Remaining gap:
-      auth is still surfaced in the machine-layer audit/receipt/preflight path,
-      not yet as a distinct signed-plan admission field for forwarded-agent
-      policy.
+      host→guest vsock RPC audit as other dev-only agent calls. The signed
+      `ExecutionPlan` schema is now v6 and carries `auth.mode`
+      (`none` / `ssh_agent_socket`), with `auth_mode=ssh-agent-socket` copied
+      into `plan.admitted` / `plan.policy_resolved` audit labels so admission
+      cannot diverge from dry-run, receipts, or machine-start audit output.
 - [~] Add serde roundtrip, unknown-key, image+flake conflict, no-source,
       read-only-volume-default, writable-volume-explicit, SSH-agent-no-key-file,
       and dev-init-prod-refusal tests. → **parser-level tests done** (unknown-key,
@@ -945,7 +959,9 @@ Required behavior:
       dev-init profile refusal, SSH-agent profile refusal, SSH-agent receipt
       auth mode, proxy host-socket validation, proxy state path isolation,
       guest socket-path confinement, console env injection, and relative-volume
-      persistence. A live VM proof that the guest endpoint can complete a real
+      persistence, signed-plan auth metadata, dry-run/receipt/audit auth
+      honesty, and the existing TCP/22 refusal/template-material ban
+      regressions. A live VM proof that the guest endpoint can complete a real
       SSH-agent protocol round trip is still a follow-up.
 - [x] Update `guides/manifests.md`, quickstart, and CLI reference only after the
       parser and command behavior are implemented.
@@ -1009,10 +1025,46 @@ Required behavior:
 - [~] Add tests proving the guest receives an agent endpoint but no private key
       file path. → Host-side validation accepts only `SSH_AUTH_SOCK` Unix
       sockets; guest forwarding is confined to `/run/mvm/ssh-agent.sock`; the
-      machine receipt/audit auth mode is `ssh-agent-socket`; and no code path
-      copies `~/.ssh`, private key files, or known-hosts material. Remaining:
-      live VM round-trip proof against a real host agent plus non-standard-port
-      SSH protocol denial proof.
+      signed plan, machine receipt/audit auth mode, and admitted audit labels
+      report `ssh-agent-socket`; and no code path copies `~/.ssh`, private key
+      files, or known-hosts material. Remaining gated proof path:
+      1. In the builder VM only, with isolated `MVM_DATA_DIR` /
+         `CARGO_TARGET_DIR` / `CARGO_HOME`, start a throwaway host
+         `ssh-agent` and add a generated throwaway key outside the repo.
+      2. Create a dev-profile persistent image machine with
+         `[auth].ssh_agent = true`, start it, and run an in-guest raw
+         agent-protocol probe against `/run/mvm/ssh-agent.sock` that sends
+         `SSH_AGENTC_REQUEST_IDENTITIES` and verifies an
+         `SSH_AGENT_IDENTITIES_ANSWER`. The probe must not invoke `ssh`,
+         `ssh-add`, `sshd`, or read any key/known-host path.
+      3. Start a host test listener on a non-standard port such as `2222` that
+         emits an SSH banner (`SSH-2.0-...`), allow that host:port explicitly,
+         and prove guest egress is denied/audited as SSH protocol, not merely
+         as TCP/22. Runtime packet enforcement now includes an ingress
+         SSH-identification-string classifier (`ssh-banner-protocol-deny`) on
+         any TCP port, plus reverse-flow kill matching so an inbound banner drop
+         kills the matching egress flow; Firecracker's default bridge/TAP path
+         also installs an inbound TCP string-match drop for the same `SSH-`
+         banner prefix. Firecracker KVM proof at `4ce7d938` used the
+         runtime-assigned/scoped guest IP plus a manual default route against
+         `140.82.121.36:443`; TCP opened, but no `SSH-2.0-...` banner bytes
+         reached the guest.
+      4. 2026-06-19 Firecracker-box attempt now reaches guest boot but the live
+         SSH-agent round-trip remains open. Branch-local `mvmctl` starts a
+         dev-profile `alpine:latest` persistent machine with
+         `[auth].ssh_agent = true`; dry-run, signed receipt, and audit surfaces
+         report `ssh-agent-socket`; and raw `SSH_AGENTC_REQUEST_IDENTITIES`
+         probes to both the throwaway host agent and spawned per-machine proxy
+         UDS return an SSH-agent identities answer. The in-guest raw probe
+         copied to `/tmp/mvm-agent-probe-c` reaches `/run/mvm/ssh-agent.sock`
+         but reads `Connection reset by peer`, narrowing the remaining blocker
+         to Firecracker guest-to-host host-listen forwarding for dev
+         `SSH_AGENT_PORT` 5301. Follow-up code in this PR routes Firecracker
+         SSH-agent proxy traffic through the per-port runtime UDS
+         (`vm_vsock_port_socket(..., 5301)`) instead of raw host AF_VSOCK and
+         unit-tests the backend transport selection. Remaining gated proof:
+         rerun the same raw in-guest probe and observe
+         `SSH_AGENT_IDENTITIES_ANSWER` before claiming the auth smoke.
 - [ ] Normalize `-v/--volume HOST:GUEST[:ro|rw]` across `machine run` and
       `machine create`.
 - [ ] Preserve read-only default and explicit `:rw` requirement.
@@ -1154,6 +1206,17 @@ change:
             injected `/init` currently forks the agent as root (dev-tier acceptable).
       - [ ] Guest egress for OCI images: alpine lacks `udhcpc`, so netinit's DHCP leg is a
             no-op (deny-all default makes this moot today; revisit with `--net`).
+- [x] **Stage 0 bootstrap materialization/cache performance substrate.** The
+      Plan 200 auth-proof branch now avoids repeating the slow cold Stage 0
+      root materialization path when the verified input marker matches, prefers
+      native `tar -xJf --strip-components 1` after SHA-256 verification with
+      pure-Rust extraction as fallback, and teaches libkrun Stage 0 PID 1 to
+      mount/reuse the dedicated `nix-store-stage0-<arch>.img` (`/dev/vda`) by
+      seed-store fingerprint. If the current seed lacks `mkfs.ext4` and the disk
+      is still blank, bootstrap falls back to the prior tmpfs seed copy rather
+      than blocking. Host tests/clippy cover the touched paths; Linux PID-1
+      compile/proof plus live timing remain required before making any public
+      latency claim.
 - [x] **`up` egress enforcement on libkrun/Vz is gated off by default AND drops an explicit
       `--network-allow` when on (claim-10 relevant; two bugs).** Diagnosed live + by code
       trace 2026-06-16 and fixed 2026-06-17 (Firecracker is unaffected — it enforces via nftables regardless).
@@ -1291,6 +1354,12 @@ follow-ups:
       example.com`
 - [ ] Hardware-gated Linux/KVM perf smoke: cached image hot start reaches the
       accepted phase target.
+- [~] Stage 0 bootstrap perf proof: Linux PID-1 compile/clippy is green;
+      Firecracker-host materialized-root timing is measured at 1.7s cold /
+      0.1s warm; host-side libkrun prepopulation of `/dev/vda` is proven with
+      `mkfs.ext4 -d` plus `.stage0-seed` sidecar. Remaining gated proof:
+      in-guest `stage0-init` adoption of the prepopulated store and full
+      libkrun cold/warm boot timing.
 - [x] SDK suites: Python, TypeScript, and Rust machine lifecycle wrappers.
       Python and TypeScript focused machine wrapper suites are green from the
       previous SDK slice; Rust builder/fake-CLI lifecycle tests are green in

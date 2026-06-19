@@ -41,6 +41,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
         network_policy: PolicyRef("none".to_string()),
         fs_policy: FsPolicyRef("none".to_string()),
         secrets: vec![],
+        auth: Default::default(),
         egress_policy: PolicyRef("none".to_string()),
         redaction: Default::default(),
         tool_policy: PolicyRef("none".to_string()),

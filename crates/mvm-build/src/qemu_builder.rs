@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError};
+#[cfg(feature = "builder-vm")]
+use crate::libkrun_builder::{BuilderShellJob, BuilderShellResult};
 
 /// QEMU-backed builder VM (Linux). Constructed with `::default()`; no I/O at
 /// construction — the first I/O is in `run_stage0`.
@@ -32,6 +34,20 @@ pub struct QemuBuilderVm;
 impl QemuBuilderVm {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Run a narrow builder shell job on the QEMU builder backend.
+    ///
+    /// This mirrors the libkrun shell-job contract used by OCI rootfs
+    /// materialization: `/work` is the input tree, `/out` is the artifact
+    /// directory, `/job/cmd.sh` is executed by `mvm-host-vm-init`, and caller
+    /// extra disks enumerate after the persistent Nix-store disk.
+    #[cfg(feature = "builder-vm")]
+    pub fn run_shell_script(
+        &self,
+        job: &BuilderShellJob,
+    ) -> Result<BuilderShellResult, BuilderVmError> {
+        run_shell_script_qemu(job)
     }
 }
 
@@ -441,6 +457,185 @@ fn run_build_qemu(
 }
 
 #[cfg(feature = "builder-vm")]
+fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, BuilderVmError> {
+    use crate::builder_vm_runtime::{
+        acquire_nix_store_image_lock, builder_vm_timeout, read_job_result, shell_job_exit_error,
+        stage_shell_job_dir,
+    };
+    use crate::libkrun_builder::{
+        BuilderVmImage, DEFAULT_NIX_STORE_MIB, builder_vm_cache_dir, ensure_builder_vm_image,
+        host_arch_tag, unique_job_id,
+    };
+
+    validate_shell_job(job)?;
+
+    let qemu_bin = locate_qemu()?;
+    let (virtiofsd_bin, virtiofsd_flavor) = locate_virtiofsd()?;
+    let (kernel, rootfs, image_cmdline) = match ensure_builder_vm_image()? {
+        BuilderVmImage::Rootfs {
+            kernel_path,
+            rootfs_path,
+            cmdline,
+        } => (kernel_path, rootfs_path, cmdline),
+        BuilderVmImage::RootDir { .. } => {
+            return Err(BuilderVmError::ExtractionFailed(
+                "QEMU shell jobs require a steady-state Rootfs builder image but got a RootDir \
+                 (Stage 0) image. Re-bootstrap the builder VM."
+                    .to_string(),
+            ));
+        }
+    };
+    let nix_store_lock = acquire_nix_store_image_lock(
+        &builder_vm_cache_dir(),
+        host_arch_tag(),
+        u64::from(DEFAULT_NIX_STORE_MIB),
+    )?;
+
+    let job_id = unique_job_id();
+    let job_dir = builder_vm_cache_dir().join("jobs").join(&job_id);
+    stage_shell_job_dir(&job_dir, &job.script)?;
+    tracing::info!(
+        job_dir = %job_dir.display(),
+        "builder VM shell job dir staged"
+    );
+
+    let vm_name = format!("mvm-builder-qemu-shell-{job_id}");
+    let vm_state_dir = builder_vm_cache_dir().join("vms").join(&vm_name);
+    std::fs::create_dir_all(&vm_state_dir)
+        .map_err(|e| io_err("creating QEMU builder VM state dir", &vm_state_dir, e))?;
+    let console_log = vm_state_dir.join("console.log");
+
+    let kvm = kvm_available();
+    if !kvm {
+        eprintln!(
+            "[mvm] QEMU running unaccelerated (TCG) — no /dev/kvm; this shell job will be slow."
+        );
+    }
+
+    let shares = [
+        ("work", job.work_dir.as_path()),
+        ("out", job.artifact_out.as_path()),
+        ("job", job_dir.as_path()),
+    ];
+    let mut virtiofsd = VirtiofsdGuard::default();
+    for (tag, dir) in shares {
+        let sock = qemu_virtiofs_socket_path(&job_id, tag);
+        virtiofsd.spawn(&virtiofsd_bin, virtiofsd_flavor, tag, &sock, dir)?;
+    }
+
+    let cmdline = qemu_build_cmdline(&image_cmdline);
+    let timeout_secs = builder_vm_timeout()?.as_secs();
+    let mem_arg = format!("{QEMU_BUILD_MEMORY_MIB}M");
+    let mut cmd = Command::new("timeout");
+    cmd.arg(timeout_secs.to_string()).arg(&qemu_bin);
+    cmd.args(["-m", &mem_arg, "-smp", &QEMU_BUILD_VCPUS.to_string()]);
+    if kvm {
+        cmd.args(["-enable-kvm", "-cpu", "host"]);
+    } else {
+        cmd.args(["-cpu", "max"]);
+    }
+    cmd.arg("-kernel").arg(&kernel);
+    cmd.arg("-append").arg(&cmdline);
+    cmd.arg("-drive")
+        .arg(format!("file={},if=virtio,format=raw", rootfs.display()));
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw",
+        nix_store_lock.path().display()
+    ));
+    for disk in &job.extra_disks {
+        let read_only = if disk.read_only { ",readonly=on" } else { "" };
+        cmd.arg("-drive").arg(format!(
+            "file={},if=virtio,format=raw{read_only}",
+            disk.path.display()
+        ));
+    }
+    cmd.args([
+        "-object",
+        &format!("memory-backend-memfd,id=mem,size={mem_arg},share=on"),
+        "-numa",
+        "node,memdev=mem",
+    ]);
+    for (tag, _) in shares {
+        let sock = qemu_virtiofs_socket_path(&job_id, tag);
+        cmd.arg("-chardev")
+            .arg(format!("socket,id=vfs-{tag},path={}", sock.display()));
+        cmd.arg("-device").arg(format!(
+            "vhost-user-fs-pci,queue-size=1024,chardev=vfs-{tag},tag={tag}"
+        ));
+    }
+    cmd.args([
+        "-netdev",
+        "user,id=n0",
+        "-device",
+        "virtio-net-pci,netdev=n0",
+    ]);
+    cmd.args(["-display", "none"]);
+    cmd.arg("-serial")
+        .arg(format!("file:{}", console_log.display()));
+    cmd.args(["-monitor", "none", "-no-reboot"]);
+
+    let status = cmd
+        .status()
+        .map_err(|e| BuilderVmError::NixBuildFailed(format!("spawning qemu ({qemu_bin}): {e}")))?;
+    drop(virtiofsd);
+
+    if !status.success() && status.code() == Some(124) {
+        return Err(BuilderVmError::NixBuildFailed(format!(
+            "QEMU builder VM shell job timed out after {timeout_secs}s; console at {}",
+            console_log.display()
+        )));
+    }
+    if !status.success() {
+        return Err(BuilderVmError::NixBuildFailed(format!(
+            "QEMU builder VM shell job exited {}; console at {}",
+            status.code().unwrap_or(-1),
+            console_log.display()
+        )));
+    }
+
+    let result = read_job_result(&job_dir)?;
+    if result.exit_code != 0 {
+        return Err(shell_job_exit_error(result.exit_code, &result.stderr_tail));
+    }
+    drop(nix_store_lock);
+    Ok(BuilderShellResult {
+        job_dir,
+        vm_state_dir,
+    })
+}
+
+#[cfg(feature = "builder-vm")]
+fn validate_shell_job(job: &BuilderShellJob) -> Result<(), BuilderVmError> {
+    for disk in &job.extra_disks {
+        if disk.id.trim().is_empty() {
+            return Err(BuilderVmError::ExtractionFailed(
+                "extra disk id is empty".to_string(),
+            ));
+        }
+        if !disk.path.is_file() {
+            return Err(BuilderVmError::ExtractionFailed(format!(
+                "extra disk path does not exist or is not a file: {}",
+                disk.path.display()
+            )));
+        }
+    }
+    if !job.work_dir.is_dir() {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "shell job work_dir must be a directory: {}",
+            job.work_dir.display()
+        )));
+    }
+    std::fs::create_dir_all(&job.artifact_out)
+        .map_err(|e| io_err("creating artifact_out", &job.artifact_out, e))?;
+    if job.script.trim().is_empty() {
+        return Err(BuilderVmError::NixBuildFailed(
+            "builder shell script is empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "builder-vm")]
 fn run_build_qemu(
     job: &BuilderJob,
     mounts: &BuilderMounts,
@@ -529,7 +724,7 @@ fn run_build_qemu(
     ];
     let mut virtiofsd = VirtiofsdGuard::default();
     for (tag, dir) in shares {
-        let sock = vm_state_dir.join(format!("vfs-{tag}.sock"));
+        let sock = qemu_virtiofs_socket_path(&job_id, tag);
         virtiofsd.spawn(&virtiofsd_bin, virtiofsd_flavor, tag, &sock, dir)?;
     }
 
@@ -569,7 +764,7 @@ fn run_build_qemu(
         "node,memdev=mem",
     ]);
     for (tag, _) in shares {
-        let sock = vm_state_dir.join(format!("vfs-{tag}.sock"));
+        let sock = qemu_virtiofs_socket_path(&job_id, tag);
         cmd.arg("-chardev")
             .arg(format!("socket,id=vfs-{tag},path={}", sock.display()));
         cmd.arg("-device").arg(format!(
@@ -611,6 +806,14 @@ fn run_build_qemu(
     }?;
     drop(nix_store_lock);
     Ok(artifacts)
+}
+
+#[cfg(feature = "builder-vm")]
+fn qemu_virtiofs_socket_path(job_id: &str, tag: &str) -> PathBuf {
+    // AF_UNIX paths cap at ~108 bytes on Linux. Cache roots can be deeply
+    // nested in worktrees, so keep QEMU virtiofs sockets under /tmp and rely
+    // on VirtiofsdGuard to remove them.
+    PathBuf::from(format!("/tmp/mvm-vfs-{job_id}-{tag}.sock"))
 }
 
 /// Validate the caller's mount paths before launching QEMU. Mirrors
@@ -854,6 +1057,9 @@ fn qemu_build_cmdline(image_cmdline: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "builder-vm")]
+    use crate::libkrun_builder::{BuilderExtraDisk, BuilderShellJob};
+
     #[test]
     fn cmdline_swaps_hvc0_for_serial_and_adds_qemu_markers() {
         let img = "console=hvc0 root=/dev/vda ro rootfstype=ext4 init=/sbin/mvm-host-vm-init";
@@ -890,5 +1096,38 @@ mod tests {
     fn cmdline_adds_serial_when_no_console_present() {
         let out = qemu_build_cmdline("root=/dev/vda ro init=/sbin/mvm-host-vm-init");
         assert!(out.starts_with("console=ttyS0 "), "got: {out}");
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn shell_job_validation_rejects_missing_extra_disk_before_launch() {
+        let work = tempfile::tempdir().expect("work");
+        let out = tempfile::tempdir().expect("out");
+        let job = BuilderShellJob {
+            work_dir: work.path().to_path_buf(),
+            artifact_out: out.path().to_path_buf(),
+            script: "true".to_string(),
+            extra_disks: vec![BuilderExtraDisk {
+                id: "oci-rootfs".to_string(),
+                path: out.path().join("missing.ext4"),
+                read_only: false,
+            }],
+        };
+
+        let err = validate_shell_job(&job).expect_err("missing extra disk refused");
+        assert!(
+            err.to_string().contains("extra disk path does not exist"),
+            "{err}"
+        );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn virtiofs_socket_path_stays_below_linux_unix_socket_limit() {
+        let path = qemu_virtiofs_socket_path("1781841830517-1343691", "work");
+        let rendered = path.to_string_lossy();
+
+        assert!(rendered.starts_with("/tmp/mvm-vfs-"), "{rendered}");
+        assert!(rendered.len() < 108, "{rendered}");
     }
 }

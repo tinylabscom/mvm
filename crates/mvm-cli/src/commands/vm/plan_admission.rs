@@ -406,7 +406,7 @@ pub(crate) fn enforce_admitted_shares(
 mod tests {
     use super::*;
     use chrono::{DateTime, TimeZone, Utc};
-    use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy};
+    use mvm_core::plan::{AuthPolicy, PlanSeccompTier, SecretReleasePolicy};
 
     const FIXTURE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -426,6 +426,7 @@ mod tests {
             tool_policy_ref: None,
             secret_release: SecretReleasePolicy::None,
             secrets: Vec::new(),
+            auth: AuthPolicy::none(),
             audit_event_prefix: None,
             cpus: 1,
             mem_mib: 256,

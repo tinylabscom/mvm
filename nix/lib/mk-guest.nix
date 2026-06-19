@@ -100,57 +100,6 @@ let
     in
     "${attrText} ${asString}";
 
-  extraFileLabel = path:
-    let
-      rawSpec = extraFiles.${path};
-      spec =
-        if builtins.isString rawSpec then { source = rawSpec; }
-        else rawSpec;
-      source = if spec ? source then toString spec.source else "";
-      content = if spec ? content then toString spec.content else "";
-    in
-    "${path} ${source} ${content}";
-
-  extraFileSourceRoots = lib.filter (source: source != "") (map
-    (path:
-      let
-        rawSpec = extraFiles.${path};
-        spec =
-          if builtins.isString rawSpec then { source = rawSpec; }
-          else rawSpec;
-      in
-      if spec ? source then spec.source else "")
-    (lib.attrNames extraFiles));
-
-  sshClosureInfo = pkgs.closureInfo {
-    rootPaths = packages ++ extraFileSourceRoots;
-  };
-
-  assertNoSshTemplateInputs =
-    let
-      badPackages = lib.filter (pkg: containsSshMarker (packageLabel pkg)) packages;
-      badFiles = lib.filter (path: containsSshMarker (extraFileLabel path)) (lib.attrNames extraFiles);
-      badPackageNames = map (pkg: packageLabel pkg) badPackages;
-      badFileNames = map (path: path) badFiles;
-    in
-    if badPackages != [ ] || badFiles != [ ] then
-      throw ''
-        mkGuest: SSH is banned in microVM templates. Do not add SSH clients,
-        SSH servers, SSH config, host keys, authorized_keys, known_hosts, or
-        private-key material through `packages` or `extraFiles`.
-        Rejected packages: ${builtins.toJSON badPackageNames}
-        Rejected extraFiles: ${builtins.toJSON badFileNames}
-      ''
-    else true;
-
-  assertNoSshClosureScript = ''
-    if ${pkgs.gnugrep}/bin/grep -E '/nix/store/[^-]+-[^/]*(ssh|openssh|dropbear)' \
-        ${sshClosureInfo}/store-paths >/tmp/mvm-ssh-closure-deny 2>/dev/null; then
-      echo "mkGuest: SSH-related Nix store paths are banned from template closures:" >&2
-      cat /tmp/mvm-ssh-closure-deny >&2
-      exit 1
-    fi
-  '';
 in
 { name
 , entrypoint
@@ -212,6 +161,58 @@ let
   # console-wiring fact (see `mvmMeta.withDevShell`) — distinct from the
   # accessible/sealed classification it happens to track.
   withDevShell = isDev;
+
+  extraFileLabel = path:
+    let
+      rawSpec = extraFiles.${path};
+      spec =
+        if builtins.isString rawSpec then { source = rawSpec; }
+        else rawSpec;
+      source = if spec ? source then toString spec.source else "";
+      content = if spec ? content then toString spec.content else "";
+    in
+    "${path} ${source} ${content}";
+
+  extraFileSourceRoots = lib.filter (source: source != "") (map
+    (path:
+      let
+        rawSpec = extraFiles.${path};
+        spec =
+          if builtins.isString rawSpec then { source = rawSpec; }
+          else rawSpec;
+      in
+      if spec ? source then spec.source else "")
+    (lib.attrNames extraFiles));
+
+  sshClosureInfo = pkgs.closureInfo {
+    rootPaths = packages ++ extraFileSourceRoots;
+  };
+
+  assertNoSshTemplateInputs =
+    let
+      badPackages = lib.filter (pkg: containsSshMarker (packageLabel pkg)) packages;
+      badFiles = lib.filter (path: containsSshMarker (extraFileLabel path)) (lib.attrNames extraFiles);
+      badPackageNames = map (pkg: packageLabel pkg) badPackages;
+      badFileNames = map (path: path) badFiles;
+    in
+    if badPackages != [ ] || badFiles != [ ] then
+      throw ''
+        mkGuest: SSH is banned in microVM templates. Do not add SSH clients,
+        SSH servers, SSH config, host keys, authorized_keys, known_hosts, or
+        private-key material through `packages` or `extraFiles`.
+        Rejected packages: ${builtins.toJSON badPackageNames}
+        Rejected extraFiles: ${builtins.toJSON badFileNames}
+      ''
+    else true;
+
+  assertNoSshClosureScript = ''
+    if ${pkgs.gnugrep}/bin/grep -E '/nix/store/[^-]+-(openssh|dropbear|ssh|sshpass|sshfs|autossh)(-|$)' \
+        ${sshClosureInfo}/store-paths >/tmp/mvm-ssh-closure-deny 2>/dev/null; then
+      echo "mkGuest: SSH-related Nix store paths are banned from template closures:" >&2
+      cat /tmp/mvm-ssh-closure-deny >&2
+      exit 1
+    fi
+  '';
 
   # ── Guest agent build ──────────────────────────────────────────
   #

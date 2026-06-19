@@ -618,13 +618,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn machine_start_auth_policy(spec: &MachineSpec) -> MachineStartAuthPolicy {
-    let mode = if spec.ssh_agent {
-        "ssh-agent-socket"
-    } else {
-        "none"
-    };
+    let mode = machine_start_plan_auth_policy(spec).mode.as_str();
     MachineStartAuthPolicy {
         mode: mode.to_string(),
+    }
+}
+
+fn machine_start_plan_auth_policy(spec: &MachineSpec) -> mvm_core::plan::AuthPolicy {
+    if spec.ssh_agent {
+        mvm_core::plan::AuthPolicy::ssh_agent_socket()
+    } else {
+        mvm_core::plan::AuthPolicy::none()
     }
 }
 
@@ -1166,6 +1170,7 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         mem_initial_mib,
         volumes: &volume_cfg,
         network_policy,
+        auth: machine_start_plan_auth_policy(&spec),
     })?;
     if let Some(host_sock) = ssh_auth_sock.as_deref()
         && let Err(err) = configure_machine_ssh_agent_forwarding(&spec.name, &backend, host_sock)
@@ -1198,16 +1203,7 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
     if let Some(path) = args.receipt.as_deref() {
         write_machine_start_receipt(path, receipt_input.clone(), outcome.clone())?;
     }
-    mvm_core::audit_emit!(
-        VmStart,
-        vm: &spec.name,
-        "source=machine.start network={} enforced={} auth={} shares={} init_commands={}",
-        receipt_input.network_posture,
-        receipt_input.egress_enforcement,
-        receipt_input.auth.mode,
-        machine_start_volume_summary(&receipt_input.volumes),
-        receipt_input.init.command_count
-    );
+    mvm_core::audit_emit!(VmStart, vm: &spec.name, "{}", machine_start_audit_detail(&receipt_input));
     if args.json {
         let summary = MachineStartJsonSummary::from_parts(receipt_input, outcome, args.receipt);
         println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -1217,8 +1213,23 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
     Ok(())
 }
 
+fn machine_start_audit_detail(input: &MachineStartReceiptInput) -> String {
+    format!(
+        "source=machine.start network={} enforced={} auth={} shares={} init_commands={}",
+        input.network_posture,
+        input.egress_enforcement,
+        input.auth.mode,
+        machine_start_volume_summary(&input.volumes),
+        input.init.command_count
+    )
+}
+
 fn ssh_agent_proxy_listen_for_backend(vm_name: &str, backend: &str) -> SshAgentProxyListen {
     match backend {
+        "firecracker" => SshAgentProxyListen::Uds(mvm_core::config::vm_vsock_port_socket(
+            vm_name,
+            mvm_guest::vsock::SSH_AGENT_PORT,
+        )),
         "vz" => SshAgentProxyListen::Uds(mvm_core::config::vm_vz_vsock_port_socket(
             vm_name,
             mvm_guest::vsock::SSH_AGENT_PORT,
@@ -1247,13 +1258,26 @@ fn configure_machine_ssh_agent_forwarding(
     }
     let transport = mvm::vsock_transport::for_vm(vm_name)?;
     let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    start_guest_ssh_agent_socket_forwarding(vm_name, &mut stream)?;
+    Ok(())
+}
+
+fn start_guest_ssh_agent_socket_forwarding(
+    vm_name: &str,
+    stream: &mut std::os::unix::net::UnixStream,
+) -> Result<()> {
+    mvm_guest::vsock::require_capabilities(
+        stream,
+        &[mvm_guest::vsock::GuestCapability::UnixSocketForward],
+    )
+    .context("guest agent does not support ssh-agent socket forwarding")?;
     let req = mvm_guest::vsock::GuestRequest::StartUnixSocketForward {
         guest_path: SSH_AGENT_GUEST_SOCKET.to_string(),
         host_vsock_port: mvm_guest::vsock::SSH_AGENT_PORT,
         socket_mode: 0o600,
     };
     super::shared::emit_vsock_rpc_audit(vm_name, &req);
-    match mvm_guest::vsock::call_unary(&mut stream, &req)? {
+    match mvm_guest::vsock::call_unary(&mut *stream, &req)? {
         mvm_guest::vsock::GuestResponse::UnixSocketForwardStarted { .. } => {
             mvm_core::audit_emit!(
                 NetworkPolicyAllow,
@@ -2185,6 +2209,32 @@ ssh_agent = true
     }
 
     #[test]
+    fn machine_start_preflight_surfaces_ssh_agent_auth_mode() {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: "ghcr.io/acme/web:latest".to_string(),
+            resolved_digest: Some("sha256:abc".to_string()),
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "dev".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: true,
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+        };
+
+        let summary = machine_start_preflight_summary(&spec, None).expect("preflight summary");
+        assert_eq!(summary.invocation.auth.mode, "ssh-agent-socket");
+        let json = serde_json::to_string(&summary).expect("summary json");
+        assert!(json.contains("ssh-agent-socket"));
+    }
+
+    #[test]
     fn machine_start_receipt_is_signed_and_verifiable() {
         let _state = IsolatedMachineState::new();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2248,6 +2298,143 @@ ssh_agent = true
         };
         let input = machine_start_receipt_input(&spec, "firecracker").expect("receipt input");
         assert_eq!(input.auth.mode, "ssh-agent-socket");
+        assert_eq!(
+            machine_start_plan_auth_policy(&spec),
+            mvm_core::plan::AuthPolicy::ssh_agent_socket()
+        );
+        assert!(machine_start_audit_detail(&input).contains("auth=ssh-agent-socket"));
+    }
+
+    #[test]
+    fn ssh_agent_socket_forwarding_negotiates_capability_before_request() {
+        let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().expect("stream pair");
+
+        let guest_thread = std::thread::spawn(move || {
+            let hello: mvm_guest::vsock::GuestRequest =
+                mvm_guest::vsock::read_frame(&mut guest).expect("read hello");
+            match hello {
+                mvm_guest::vsock::GuestRequest::ProtocolHello {
+                    requested_capabilities,
+                    ..
+                } => assert_eq!(
+                    requested_capabilities,
+                    vec![mvm_guest::vsock::GuestCapability::UnixSocketForward]
+                ),
+                other => panic!("expected ProtocolHello before forwarding request, got {other:?}"),
+            }
+            mvm_guest::vsock::write_frame(
+                &mut guest,
+                &mvm_guest::vsock::GuestResponse::ProtocolHelloAck {
+                    agent_protocol_version: mvm_guest::vsock::PROTOCOL_VERSION,
+                    min_supported_version: mvm_guest::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
+                    agent_version: "test".to_string(),
+                    capabilities: vec![mvm_guest::vsock::GuestCapability::UnixSocketForward],
+                },
+            )
+            .expect("write hello ack");
+
+            let req: mvm_guest::vsock::GuestRequest =
+                mvm_guest::vsock::read_frame(&mut guest).expect("read forward request");
+            match req {
+                mvm_guest::vsock::GuestRequest::StartUnixSocketForward {
+                    guest_path,
+                    host_vsock_port,
+                    socket_mode,
+                } => {
+                    assert_eq!(guest_path, SSH_AGENT_GUEST_SOCKET);
+                    assert_eq!(host_vsock_port, mvm_guest::vsock::SSH_AGENT_PORT);
+                    assert_eq!(socket_mode, 0o600);
+                    mvm_guest::vsock::write_frame(
+                        &mut guest,
+                        &mvm_guest::vsock::GuestResponse::UnixSocketForwardStarted {
+                            guest_path,
+                            host_vsock_port,
+                        },
+                    )
+                    .expect("write forward response");
+                }
+                other => panic!("expected StartUnixSocketForward, got {other:?}"),
+            }
+        });
+
+        start_guest_ssh_agent_socket_forwarding("devbox", &mut host)
+            .expect("ssh-agent forwarding request succeeds");
+        guest_thread.join().expect("guest thread");
+    }
+
+    #[test]
+    fn ssh_agent_socket_forwarding_refuses_guest_without_capability() {
+        let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().expect("stream pair");
+
+        let guest_thread = std::thread::spawn(move || {
+            let hello: mvm_guest::vsock::GuestRequest =
+                mvm_guest::vsock::read_frame(&mut guest).expect("read hello");
+            assert!(
+                matches!(hello, mvm_guest::vsock::GuestRequest::ProtocolHello { .. }),
+                "expected ProtocolHello, got {hello:?}"
+            );
+            mvm_guest::vsock::write_frame(
+                &mut guest,
+                &mvm_guest::vsock::GuestResponse::ProtocolHelloAck {
+                    agent_protocol_version: mvm_guest::vsock::PROTOCOL_VERSION,
+                    min_supported_version: mvm_guest::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
+                    agent_version: "test".to_string(),
+                    capabilities: Vec::new(),
+                },
+            )
+            .expect("write hello ack");
+        });
+
+        let err = start_guest_ssh_agent_socket_forwarding("devbox", &mut host)
+            .expect_err("missing capability is refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ssh-agent socket forwarding"),
+            "unexpected error: {msg}"
+        );
+        guest_thread.join().expect("guest thread");
+    }
+
+    #[test]
+    fn ssh_agent_proxy_uses_backend_socket_transport_for_firecracker_and_in_process_vmms() {
+        let cases = [
+            (
+                "firecracker",
+                mvm_core::config::vm_vsock_port_socket("devbox", mvm_guest::vsock::SSH_AGENT_PORT),
+            ),
+            (
+                "libkrun",
+                mvm_core::config::vm_vsock_port_socket("devbox", mvm_guest::vsock::SSH_AGENT_PORT),
+            ),
+            (
+                "vz",
+                mvm_core::config::vm_vz_vsock_port_socket(
+                    "devbox",
+                    mvm_guest::vsock::SSH_AGENT_PORT,
+                ),
+            ),
+        ];
+
+        for (backend, expected) in cases {
+            match ssh_agent_proxy_listen_for_backend("devbox", backend) {
+                SshAgentProxyListen::Uds(path) => assert_eq!(path, expected),
+                SshAgentProxyListen::Vsock(port) => {
+                    panic!("{backend} unexpectedly selected AF_VSOCK port {port}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ssh_agent_proxy_keeps_qemu_on_raw_vsock_transport() {
+        match ssh_agent_proxy_listen_for_backend("devbox", "qemu") {
+            SshAgentProxyListen::Vsock(port) => {
+                assert_eq!(port, mvm_guest::vsock::SSH_AGENT_PORT);
+            }
+            SshAgentProxyListen::Uds(path) => {
+                panic!("qemu unexpectedly selected UDS {}", path.display())
+            }
+        }
     }
 
     #[test]
@@ -2272,6 +2459,14 @@ ssh_agent = true
         let err = machine_start_receipt_input(&spec, "firecracker")
             .expect_err("standard profile must refuse ssh-agent");
         assert!(err.to_string().contains("dev-capable profile"));
+    }
+
+    #[test]
+    fn ssh_agent_auth_is_dev_tier_only() {
+        assert!(!profile_allows_ssh_agent("restrictive"));
+        assert!(!profile_allows_ssh_agent("standard"));
+        assert!(profile_allows_ssh_agent("dev"));
+        assert!(profile_allows_ssh_agent("permissive"));
     }
 
     #[test]

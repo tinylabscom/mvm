@@ -71,6 +71,7 @@ pub fn admit_probe_plan(
         tool_policy_ref: None,
         secret_release: SecretReleasePolicy::default(),
         secrets: Vec::new(),
+        auth: mvm_core::plan::AuthPolicy::none(),
         audit_event_prefix: None,
         cpus: 2,
         mem_mib: u64::from(PROBE_MEM_MIB),

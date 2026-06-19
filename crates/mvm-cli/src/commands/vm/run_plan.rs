@@ -351,6 +351,7 @@ fn synthesis_input_for_app<'a>(workload: &'a Workload, app: &'a App) -> Result<S
         tool_policy_ref: None,
         secret_release: lowered_secrets.secret_release,
         secrets: lowered_secrets.secrets,
+        auth: mvm_core::plan::AuthPolicy::none(),
         audit_event_prefix: None,
         cpus: app.resources.cpu_cores.max(1) as u32,
         mem_mib: app.resources.memory_mb.max(64) as u64,

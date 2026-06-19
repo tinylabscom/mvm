@@ -297,9 +297,9 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use mvm_core::plan::{
-        AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
-        KeyRotationSpec, Nonce, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
-        RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TimeoutSpec, WorkloadId,
+        AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuthPolicy,
+        FsPolicyRef, KeyRotationSpec, Nonce, PlanSeccompTier, PolicyRef, PostRunLifecycle,
+        Resources, RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TimeoutSpec, WorkloadId,
     };
     use mvm_core::policy::{
         AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy,
@@ -336,6 +336,7 @@ mod tests {
             network_policy: PolicyRef("n".to_string()),
             fs_policy: FsPolicyRef("f".to_string()),
             secrets: vec![],
+            auth: AuthPolicy::none(),
             egress_policy: PolicyRef("e".to_string()),
             redaction: Default::default(),
             tool_policy: PolicyRef("t".to_string()),

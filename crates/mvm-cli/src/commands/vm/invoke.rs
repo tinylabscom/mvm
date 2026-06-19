@@ -282,6 +282,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
                             secret_release,
                             secrets: secrets.clone(),
+                            auth: mvm_core::plan::AuthPolicy::none(),
                             no_supervisor: false,
                             ledger: &ledger,
                             keys_dir: None,

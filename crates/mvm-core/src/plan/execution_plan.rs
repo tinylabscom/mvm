@@ -12,9 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::plan::bundle::PlanArtifact;
 use crate::plan::types::{
-    AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, DepsVolumeBinding,
-    FsPolicyRef, HostShareGrant, KeyRotationSpec, Nonce, PlanId, PolicyRef, PostRunLifecycle,
-    ReleasePin, Resources, RuntimeProfileRef, SecretBinding, SignedImageRef, TenantId, WorkloadId,
+    AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, AuthPolicy,
+    DepsVolumeBinding, FsPolicyRef, HostShareGrant, KeyRotationSpec, Nonce, PlanId, PolicyRef,
+    PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding, SignedImageRef,
+    TenantId, WorkloadId,
 };
 
 /// Wire-format version. Bump when fields change in a way older
@@ -45,7 +46,12 @@ use crate::plan::types::{
 /// an older verifier doesn't know to enforce that the launch config's
 /// volumes are a subset of the admitted grants (claim 1 / claim 8), so
 /// it must reject rather than admit a plan whose shares it can't check.
-pub const SCHEMA_VERSION: u32 = 5;
+///
+/// Bumped 5 → 6 with the addition of `auth`: an older verifier doesn't
+/// know that a plan can carry a host-auth capability such as dev-tier
+/// ssh-agent socket forwarding, so it must reject rather than admit a plan
+/// whose auth boundary it can't check or audit.
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Typed contract for one workload's execution.
 ///
@@ -95,6 +101,11 @@ pub struct ExecutionPlan {
     pub fs_policy: FsPolicyRef,
 
     pub secrets: Vec<SecretBinding>,
+
+    /// Host-authentication capabilities admitted for this boot. Defaults to
+    /// `none`; dev-tier SSH-agent forwarding is represented explicitly as
+    /// `ssh_agent_socket` so receipts, audit, and signed admission cannot drift.
+    pub auth: AuthPolicy,
 
     /// L7 egress + PII rules. The same kind of `PolicyRef` as
     /// `network_policy` so the resolver is shared, but kept separate

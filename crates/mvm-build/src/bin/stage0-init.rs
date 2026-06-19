@@ -40,6 +40,7 @@ fn main() -> ExitCode {
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
     use std::process::{Command, ExitCode};
 
@@ -48,6 +49,18 @@ mod linux {
     /// Bind of the original (virtiofs) seed `/nix` so we can still read the
     /// seed store after mounting a fresh tmpfs over `/nix`.
     const NIX_SEED_RO: &str = "/nix-seed-ro";
+    /// Stage 0's dedicated persistent Nix-store block device. The libkrun
+    /// launcher attaches this before the virtio-fs shares, so it enumerates as
+    /// `/dev/vda`. QEMU uses `/dev/vda` as the rootfs, so this is libkrun-only.
+    const STAGE0_NIX_STORE_DEV: &str = "/dev/vda";
+    /// Mount point for the persistent Stage 0 Nix store before binding it over
+    /// `/nix`.
+    const STAGE0_NIX_STORE_MOUNT: &str = "/nix-stage0-store";
+    /// Marker written next to `store/` and `var/` on the persistent Stage 0
+    /// store. It binds reuse to the seed store fingerprint, not to mutable Nix
+    /// build output added later.
+    const STAGE0_NIX_STORE_MARKER: &str = "/nix-stage0-store/.mvm-stage0-nix-store";
+    const STAGE0_NIX_STORE_MARKER_SCHEMA_VERSION: u32 = 1;
 
     pub fn run() -> ExitCode {
         // libkrunfw's bundled kernel hands PID 1 a low RLIMIT_NOFILE on some
@@ -248,15 +261,20 @@ mod linux {
     /// Make `/nix` a writable, non-virtiofs store. The seed `/nix` arrives on
     /// the libkrun virtiofs RootDir; overlayfs-over-virtiofs writes fail
     /// (`nix build` → `creating /nix/store/.links: ECONNRESET` — a FUSE
-    /// backend error). So instead: bind the original (virtiofs) `/nix` aside,
-    /// mount a fresh **tmpfs** at `/nix`, and copy the seed closure into it.
-    /// nix then runs entirely on tmpfs (case-sensitive, writable, no FUSE).
+    /// backend error).
     ///
-    /// First cut for the boot proof: a full-tmpfs store can exhaust RAM on
-    /// the full builder-VM build — the persistent ext4 `/dev/vda` (bootstrap
-    /// e2fsprogs via nix, mkfs, copy the store onto it) is the production
-    /// follow-up.
+    /// Fast path: mount the dedicated persistent ext4 `/dev/vda`, seed it once
+    /// from the verified RootDir store, then bind it over `/nix` on every later
+    /// boot. If the current seed lacks `mkfs.ext4` and the disk is still blank,
+    /// fall back to the old tmpfs copy so the bootstrap remains functional.
     fn setup_nix_store() -> Result<(), String> {
+        match setup_persistent_nix_store() {
+            Ok(()) => return Ok(()),
+            Err(e) => eprintln!(
+                "stage0-init: persistent Stage 0 /nix store unavailable ({e}); falling back to tmpfs seed copy"
+            ),
+        }
+
         // Copy BEFORE hiding the seed: mount a tmpfs at NIX_SEED_RO, copy the
         // seed `/nix/store` (still directly readable on the virtiofs root)
         // into it, then bind it over `/nix`. nix then runs from the tmpfs.
@@ -277,6 +295,172 @@ mod linux {
         eprintln!("stage0-init: copied seed store: {n_src} -> {n_dst} entries");
         // Now make the tmpfs copy be `/nix`.
         bind_mount(NIX_SEED_RO, NIX_TARGET)?;
+        Ok(())
+    }
+
+    fn setup_persistent_nix_store() -> Result<(), String> {
+        if !Path::new(STAGE0_NIX_STORE_DEV).exists() {
+            return Err(format!("{STAGE0_NIX_STORE_DEV} is not present"));
+        }
+
+        std::fs::create_dir_all(STAGE0_NIX_STORE_MOUNT)
+            .map_err(|e| format!("create {STAGE0_NIX_STORE_MOUNT}: {e}"))?;
+        mount_stage0_nix_store()?;
+
+        let seed_store = Path::new(NIX_TARGET).join("store");
+        let expected_marker = stage0_nix_store_marker(&seed_store)?;
+        if persistent_nix_store_matches(&expected_marker) {
+            eprintln!(
+                "stage0-init: reusing persistent Stage 0 Nix store at {STAGE0_NIX_STORE_DEV}"
+            );
+            bind_mount(STAGE0_NIX_STORE_MOUNT, NIX_TARGET)?;
+            return Ok(());
+        }
+        if persistent_nix_store_matches_seed(&seed_store)? {
+            std::fs::write(STAGE0_NIX_STORE_MARKER, expected_marker)
+                .map_err(|e| format!("write {STAGE0_NIX_STORE_MARKER}: {e}"))?;
+            eprintln!(
+                "stage0-init: adopting host-prepopulated Stage 0 Nix store at {STAGE0_NIX_STORE_DEV}"
+            );
+            bind_mount(STAGE0_NIX_STORE_MOUNT, NIX_TARGET)?;
+            return Ok(());
+        }
+
+        eprintln!(
+            "stage0-init: initializing persistent Stage 0 Nix store at {STAGE0_NIX_STORE_DEV}"
+        );
+        clear_dir_children(Path::new(STAGE0_NIX_STORE_MOUNT))
+            .map_err(|e| format!("clearing {STAGE0_NIX_STORE_MOUNT}: {e}"))?;
+        let dst_store = Path::new(STAGE0_NIX_STORE_MOUNT).join("store");
+        std::fs::create_dir_all(&dst_store)
+            .map_err(|e| format!("create {}: {e}", dst_store.display()))?;
+        let n_src = std::fs::read_dir(&seed_store)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        copy_tree(&seed_store, &dst_store)
+            .map_err(|e| format!("copying seed nix store to persistent disk: {e}"))?;
+        let n_dst = std::fs::read_dir(&dst_store)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        std::fs::write(STAGE0_NIX_STORE_MARKER, expected_marker)
+            .map_err(|e| format!("write {STAGE0_NIX_STORE_MARKER}: {e}"))?;
+        eprintln!("stage0-init: seeded persistent store: {n_src} -> {n_dst} entries");
+        bind_mount(STAGE0_NIX_STORE_MOUNT, NIX_TARGET)?;
+        Ok(())
+    }
+
+    fn mount_stage0_nix_store() -> Result<(), String> {
+        match mount_fs(STAGE0_NIX_STORE_DEV, STAGE0_NIX_STORE_MOUNT, "ext4") {
+            Ok(()) => return Ok(()),
+            Err(first_mount_err) => {
+                let Some(mkfs) = find_mkfs_ext4() else {
+                    return Err(format!(
+                        "{first_mount_err}; mkfs.ext4 not available in seed"
+                    ));
+                };
+                eprintln!(
+                    "stage0-init: formatting {STAGE0_NIX_STORE_DEV} for persistent Stage 0 store ({first_mount_err})"
+                );
+                format_ext4_with(&mkfs, STAGE0_NIX_STORE_DEV)?;
+            }
+        }
+        mount_fs(STAGE0_NIX_STORE_DEV, STAGE0_NIX_STORE_MOUNT, "ext4")
+    }
+
+    fn find_mkfs_ext4() -> Option<PathBuf> {
+        [
+            "/sbin/mkfs.ext4",
+            "/bin/mkfs.ext4",
+            "/usr/sbin/mkfs.ext4",
+            "/usr/bin/mkfs.ext4",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
+    }
+
+    fn format_ext4_with(mkfs: &Path, dev: &str) -> Result<(), String> {
+        let blocks_4k = device_size_4k_blocks(dev)?;
+        let status = Command::new(mkfs)
+            .args(["-F", "-q", "-b", "4096", dev, &blocks_4k.to_string()])
+            .status()
+            .map_err(|e| format!("spawn {}: {e}", mkfs.display()))?;
+        if !status.success() {
+            return Err(format!(
+                "{} exit {}",
+                mkfs.display(),
+                status.code().unwrap_or(-1)
+            ));
+        }
+        Ok(())
+    }
+
+    fn device_size_4k_blocks(dev: &str) -> Result<u64, String> {
+        let basename = Path::new(dev)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| format!("device path {dev} has no basename"))?;
+        let sys_path = format!("/sys/class/block/{basename}/size");
+        let sectors_str =
+            std::fs::read_to_string(&sys_path).map_err(|e| format!("read {sys_path}: {e}"))?;
+        let sectors: u64 = sectors_str
+            .trim()
+            .parse()
+            .map_err(|e| format!("parse {sys_path} = {sectors_str:?}: {e}"))?;
+        Ok(sectors / 8)
+    }
+
+    fn persistent_nix_store_matches(expected_marker: &str) -> bool {
+        Path::new(STAGE0_NIX_STORE_MOUNT).join("store").is_dir()
+            && std::fs::read_to_string(STAGE0_NIX_STORE_MARKER)
+                .is_ok_and(|marker| marker == expected_marker)
+    }
+
+    fn persistent_nix_store_matches_seed(seed_store: &Path) -> Result<bool, String> {
+        let mounted_store = Path::new(STAGE0_NIX_STORE_MOUNT).join("store");
+        if !mounted_store.is_dir() {
+            return Ok(false);
+        }
+        Ok(seed_store_entries_hash(&mounted_store)? == seed_store_entries_hash(seed_store)?)
+    }
+
+    fn stage0_nix_store_marker(seed_store: &Path) -> Result<String, String> {
+        Ok(format!(
+            "schema_version={STAGE0_NIX_STORE_MARKER_SCHEMA_VERSION}\nseed_store_entries_sha256={}\n",
+            seed_store_entries_hash(seed_store)?
+        ))
+    }
+
+    fn seed_store_entries_hash(seed_store: &Path) -> Result<String, String> {
+        let mut entries = std::fs::read_dir(seed_store)
+            .map_err(|e| format!("read {}: {e}", seed_store.display()))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .map_err(|e| format!("read entry under {}: {e}", seed_store.display()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.sort_unstable();
+
+        let mut hasher = Sha256::new();
+        for entry in entries {
+            hasher.update(entry.as_bytes());
+            hasher.update(b"\n");
+        }
+        Ok(hex::encode(hasher.finalize()))
+    }
+
+    fn clear_dir_children(dir: &Path) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                std::fs::remove_dir_all(path)?;
+            } else {
+                std::fs::remove_file(path)?;
+            }
+        }
         Ok(())
     }
 

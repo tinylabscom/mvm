@@ -738,15 +738,7 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     } else if let Err(e) = std::fs::rename(&staging, &final_dir) {
         std::fs::create_dir_all(&final_dir)
             .with_context(|| format!("creating final build dir {final_dir}"))?;
-        for entry in
-            std::fs::read_dir(&staging).with_context(|| format!("reading staging dir {staging}"))?
-        {
-            let entry = entry?;
-            let dst = std::path::Path::new(&final_dir).join(entry.file_name());
-            std::fs::copy(entry.path(), &dst).with_context(|| {
-                format!("copying {} -> {}", entry.path().display(), dst.display())
-            })?;
-        }
+        copy_staged_artifacts(&staging, &final_dir)?;
         let _ = std::fs::remove_dir_all(&staging);
         tracing::debug!(error = %e, "rename failed; fell back to copy");
     }
@@ -772,6 +764,66 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
         runner_dir,
         artifact_sizes,
     })
+}
+
+#[cfg(feature = "builder-vm")]
+fn copy_staged_artifacts(staging: &str, final_dir: &str) -> Result<()> {
+    for entry in
+        std::fs::read_dir(staging).with_context(|| format!("reading staging dir {staging}"))?
+    {
+        let entry = entry?;
+        let dst = std::path::Path::new(final_dir).join(entry.file_name());
+        copy_staged_artifact(&entry.path(), &dst)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "builder-vm")]
+fn copy_staged_artifact(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    if src.file_name().is_some_and(|name| name == "rootfs.ext4") {
+        return copy_sparse_file(src, dst);
+    }
+    std::fs::copy(src, dst)
+        .map(|_| ())
+        .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))
+}
+
+#[cfg(feature = "builder-vm")]
+fn copy_sparse_file(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    const CHUNK_SIZE: usize = 1024 * 1024;
+
+    let mut input = std::fs::File::open(src)
+        .with_context(|| format!("opening sparse source {}", src.display()))?;
+    let metadata = input
+        .metadata()
+        .with_context(|| format!("stat sparse source {}", src.display()))?;
+    let mut output = std::fs::File::create(dst)
+        .with_context(|| format!("creating sparse destination {}", dst.display()))?;
+    output
+        .set_len(metadata.len())
+        .with_context(|| format!("sizing sparse destination {}", dst.display()))?;
+
+    let mut buf = vec![0_u8; CHUNK_SIZE];
+    loop {
+        let read = input
+            .read(&mut buf)
+            .with_context(|| format!("reading sparse source {}", src.display()))?;
+        if read == 0 {
+            break;
+        }
+        if buf[..read].iter().all(|byte| *byte == 0) {
+            output
+                .seek(SeekFrom::Current(read as i64))
+                .with_context(|| format!("seeking sparse destination {}", dst.display()))?;
+        } else {
+            output
+                .write_all(&buf[..read])
+                .with_context(|| format!("writing sparse destination {}", dst.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Run the flake's `pre-build.sh` hook if it exists.
@@ -1521,6 +1573,45 @@ mod tests {
         let exec_log = env.exec_log.lock().unwrap();
         let has_copy = exec_log.iter().any(|s| s.contains("cp -L"));
         assert!(has_copy, "Expected copy script in exec log");
+    }
+
+    #[cfg(all(feature = "builder-vm", unix))]
+    #[test]
+    fn fallback_copy_preserves_sparse_rootfs_artifact() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        #[cfg(target_os = "linux")]
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let src = temp.path().join("rootfs.ext4");
+        let dst = temp.path().join("copied-rootfs.ext4");
+        let mut file = std::fs::File::create(&src).expect("create sparse source");
+        file.set_len(16 * 1024 * 1024).expect("size sparse source");
+        file.seek(SeekFrom::Start(15 * 1024 * 1024))
+            .expect("seek near sparse source end");
+        file.write_all(b"tail").expect("write sparse source tail");
+        drop(file);
+
+        copy_staged_artifact(&src, &dst).expect("copy sparse rootfs");
+
+        let src_meta = std::fs::metadata(&src).expect("stat source");
+        let dst_meta = std::fs::metadata(&dst).expect("stat destination");
+        assert_eq!(dst_meta.len(), src_meta.len());
+        #[cfg(target_os = "linux")]
+        assert!(
+            dst_meta.blocks() < dst_meta.len() / 512,
+            "destination should stay sparse: len={}, blocks={}",
+            dst_meta.len(),
+            dst_meta.blocks()
+        );
+
+        let mut tail = [0_u8; 4];
+        let mut copied = std::fs::File::open(&dst).expect("open copied rootfs");
+        copied
+            .seek(SeekFrom::Start(15 * 1024 * 1024))
+            .expect("seek copied tail");
+        copied.read_exact(&mut tail).expect("read copied tail");
+        assert_eq!(&tail, b"tail");
     }
 
     #[cfg(feature = "builder-vm")]

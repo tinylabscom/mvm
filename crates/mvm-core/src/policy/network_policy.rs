@@ -47,6 +47,7 @@ impl FromStr for HostPort {
 /// protocol/port ban, not an address range. Runtime gates still enforce it in
 /// the shared L4 projection path so an open policy cannot override it.
 pub const BANNED_SSH_PORT: u16 = 22;
+const SSH_BANNER_HEX_PREFIX: &str = "|5353482d|";
 
 pub fn is_banned_ssh_port(port: u16) -> bool {
     port == BANNED_SSH_PORT
@@ -601,6 +602,12 @@ pub fn mandatory_deny_iptables_script(bridge_dev: &str, guest_ip: &str) -> Strin
         ip = guest_ip,
         port = BANNED_SSH_PORT,
     ));
+    script.push_str(&format!(
+        "sudo iptables -I FORWARD -o {br} -d {ip} -p tcp -m string --algo bm --hex-string '{banner}' -j DROP\n",
+        br = bridge_dev,
+        ip = guest_ip,
+        banner = SSH_BANNER_HEX_PREFIX,
+    ));
     script
 }
 
@@ -629,6 +636,12 @@ pub fn mandatory_deny_iptables_cleanup_script(bridge_dev: &str, guest_ip: &str) 
         br = bridge_dev,
         ip = guest_ip,
         port = BANNED_SSH_PORT,
+    ));
+    script.push_str(&format!(
+        "while sudo iptables -D FORWARD -o {br} -d {ip} -p tcp -m string --algo bm --hex-string '{banner}' -j DROP 2>/dev/null; do :; done\n",
+        br = bridge_dev,
+        ip = guest_ip,
+        banner = SSH_BANNER_HEX_PREFIX,
     ));
     script
 }
@@ -1234,15 +1247,24 @@ mod tests {
     }
 
     #[test]
-    fn mandatory_deny_iptables_script_scopes_to_guest_source() {
+    fn mandatory_deny_iptables_script_drops_inbound_ssh_banner() {
         let script = mandatory_deny_iptables_script("br-mvm", "172.16.0.2");
-        // Every line that adds a rule must be scoped to the
-        // guest's source IP — otherwise a sibling guest's
-        // traffic could be affected by cleanup of this one.
+        assert!(
+            script.contains("-o br-mvm -d 172.16.0.2 -p tcp -m string --algo bm --hex-string '|5353482d|' -j DROP"),
+            "script must drop inbound SSH identification banners on any TCP port; got: {script}"
+        );
+    }
+
+    #[test]
+    fn mandatory_deny_iptables_script_scopes_to_guest_endpoint() {
+        let script = mandatory_deny_iptables_script("br-mvm", "172.16.0.2");
+        // Every line that adds a rule must be scoped to this guest as either
+        // source (egress) or destination (inbound server banners), otherwise a
+        // sibling guest's traffic could be affected by cleanup of this one.
         for line in script.lines().filter(|l| l.contains("iptables -I")) {
             assert!(
-                line.contains("-s 172.16.0.2"),
-                "deny rule line must scope to the guest IP: {line}"
+                line.contains("-s 172.16.0.2") || line.contains("-d 172.16.0.2"),
+                "deny rule line must scope to the guest endpoint: {line}"
             );
         }
     }

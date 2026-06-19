@@ -333,6 +333,9 @@ fn mk_guest_rejects_ssh_template_inputs_structurally() {
         "assertNoSshTemplateInputs",
         "SSH is banned in microVM templates",
         "openssh",
+        "sshpass",
+        "sshfs",
+        "autossh",
         "authorized_keys",
         "known_hosts",
         "closureInfo",
@@ -344,6 +347,21 @@ fn mk_guest_rejects_ssh_template_inputs_structurally() {
             "mkGuest must keep the SSH template-input ban marker {needle:?}"
         );
     }
+
+    let extra_files_arg = content
+        .find(", extraFiles     ? { }")
+        .expect("mkGuest must bind the extraFiles argument");
+    let extra_file_label = content
+        .find("extraFileLabel = path:")
+        .expect("mkGuest must inspect extraFiles for SSH material");
+    assert!(
+        extra_file_label > extra_files_arg,
+        "extraFiles-dependent SSH ban helpers must stay inside the mkGuest argument scope"
+    );
+    assert!(
+        !content.contains("(ssh|openssh|dropbear)"),
+        "closure-level SSH ban must not match library names such as libssh2"
+    );
 }
 
 #[test]

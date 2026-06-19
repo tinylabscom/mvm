@@ -62,6 +62,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use libkrun_sys::{KrunContext, SupervisorConfig};
+use sha2::{Digest, Sha256};
 
 use crate::builder_vm::{
     BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmDisk, BuilderVmError,
@@ -75,7 +76,7 @@ use crate::builder_vm::{
 use crate::builder_vm_runtime::{
     NixStoreImageLock, acquire_nix_store_image_lock, acquire_nix_store_image_lock_named,
     builder_vm_timeout, finalize_flake_job, finalize_install_job, read_job_result,
-    shell_job_exit_error, stage_job_dir, supervisor_exit_error,
+    shell_job_exit_error, stage_job_dir, stage_shell_job_dir, supervisor_exit_error,
 };
 
 /// Default vCPU count for the builder VM. Nix builds are
@@ -454,6 +455,7 @@ impl LibkrunBuilderVm {
             &stage0_nix_store_image_name(),
             u64::from(self.nix_store_mib),
         )?;
+        prepopulate_stage0_nix_store_image(&image, nix_store_lock.path())?;
 
         let job_id = unique_job_id();
         let vm_name = format!("mvm-stage0-{job_id}");
@@ -471,10 +473,9 @@ impl LibkrunBuilderVm {
             .with_console_output(path_to_str(&console_log, "console_log")?)
             .with_vsock_socket_dir(path_to_str(&vm_state_dir, "vm_state_dir")?)
             // Persistent /nix store disk — the only block device on a RootDir
-            // guest, so it enumerates as /dev/vda. Attached for the production
-            // persistent-store path; `stage0-init` currently copies the seed
-            // closure into a tmpfs `/nix` (overlay-over-virtiofs writes fail in
-            // libkrun), so the disk is a follow-up, not yet formatted.
+            // guest, so it enumerates as /dev/vda. `stage0-init` mounts and
+            // reuses it when it is ext4, formats it when the seed carries
+            // mkfs.ext4, and otherwise falls back to the tmpfs seed copy.
             .add_disk(
                 "nix-store",
                 path_to_str(nix_store_lock.path(), "nix_store_img")?,
@@ -1275,6 +1276,130 @@ pub(crate) fn stage0_nix_store_image_name() -> String {
     format!("nix-store-stage0-{}.img", host_arch_tag())
 }
 
+fn prepopulate_stage0_nix_store_image(
+    image: &BuilderVmImage,
+    store_image: &Path,
+) -> Result<(), BuilderVmError> {
+    let BuilderVmImage::RootDir { root_dir, .. } = image else {
+        return Ok(());
+    };
+    let seed_nix = root_dir.join("nix");
+    let seed_store = seed_nix.join("store");
+    if !seed_store.is_dir() {
+        return Ok(());
+    }
+
+    let marker = stage0_nix_store_host_marker(&seed_store)?;
+    let marker_path = stage0_nix_store_host_marker_path(store_image);
+    if std::fs::read_to_string(&marker_path).is_ok_and(|existing| existing == marker) {
+        return Ok(());
+    }
+
+    let Some(mkfs) = find_host_mkfs_ext4() else {
+        tracing::warn!(
+            image = %store_image.display(),
+            "mkfs.ext4 is not available on the host; Stage 0 will fall back to in-guest seed-store setup"
+        );
+        return Ok(());
+    };
+
+    let blocks_4k = host_file_4k_blocks_for_ext4(store_image)?;
+    tracing::info!(
+        image = %store_image.display(),
+        seed = %seed_nix.display(),
+        blocks_4k,
+        "prepopulating Stage 0 Nix store image with host mkfs.ext4"
+    );
+    let status = Command::new(&mkfs)
+        .args(["-F", "-q", "-b", "4096", "-d"])
+        .arg(&seed_nix)
+        .arg(store_image)
+        .arg(blocks_4k.to_string())
+        .status()
+        .map_err(|e| BuilderVmError::ExtractionFailed(format!("spawn {}: {e}", mkfs.display())))?;
+    if !status.success() {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "{} -d {} -> {} exited {}",
+            mkfs.display(),
+            seed_nix.display(),
+            store_image.display(),
+            status.code().unwrap_or(-1)
+        )));
+    }
+    std::fs::write(&marker_path, marker).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("write {}: {e}", marker_path.display()))
+    })?;
+    Ok(())
+}
+
+fn find_host_mkfs_ext4() -> Option<PathBuf> {
+    [
+        "/sbin/mkfs.ext4",
+        "/usr/sbin/mkfs.ext4",
+        "/bin/mkfs.ext4",
+        "/usr/bin/mkfs.ext4",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|p| p.is_file())
+    .or_else(|| which::which("mkfs.ext4").ok())
+}
+
+fn host_file_4k_blocks_for_ext4(store_image: &Path) -> Result<u64, BuilderVmError> {
+    let len = std::fs::metadata(store_image)
+        .map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("stat {}: {e}", store_image.display()))
+        })?
+        .len();
+    let blocks = len / 4096;
+    if blocks <= 16 {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "Stage 0 store image {} is too small for ext4 prepopulation ({len} bytes)",
+            store_image.display()
+        )));
+    }
+    // Leave the same 64 KiB safety margin used by the in-guest formatter path;
+    // it avoids libkrun virtio-blk geometry rounding at mount time.
+    Ok(blocks - 16)
+}
+
+fn stage0_nix_store_host_marker_path(store_image: &Path) -> PathBuf {
+    store_image.with_extension("stage0-seed")
+}
+
+fn stage0_nix_store_host_marker(seed_store: &Path) -> Result<String, BuilderVmError> {
+    Ok(format!(
+        "schema_version=1\nseed_store_entries_sha256={}\n",
+        seed_store_entries_hash(seed_store)?
+    ))
+}
+
+fn seed_store_entries_hash(seed_store: &Path) -> Result<String, BuilderVmError> {
+    let mut entries = std::fs::read_dir(seed_store)
+        .map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("read {}: {e}", seed_store.display()))
+        })?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .map_err(|e| {
+                    BuilderVmError::ExtractionFailed(format!(
+                        "read entry under {}: {e}",
+                        seed_store.display()
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_unstable();
+
+    let mut hasher = Sha256::new();
+    for entry in entries {
+        hasher.update(entry.as_bytes());
+        hasher.update(b"\n");
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 /// Find the builder VM image (kernel + rootfs + cmdline) in
 /// the host cache. The builder-vm flake's `packages.<system>.default`
 /// produces exactly the `vmlinux` / `rootfs.ext4` / `cmdline.txt`
@@ -1334,23 +1459,12 @@ pub(crate) fn unique_job_id() -> String {
 // `use` at the top of this file pulls it back in for the existing
 // callers.
 
-// `stage_job_dir`, `shell_single_quote_escape`, `read_job_result`,
+// `stage_job_dir`, `stage_shell_job_dir`, `shell_single_quote_escape`, `read_job_result`,
 // `JobResult`, `INSTALL_RESULT_FILENAME`, `read_last_bytes_of`,
 // `finalize_flake_job`, `read_revision_hash`, `extract_nix_store_hash`,
 // `finalize_install_job`, and `InstallResultReport` all live in
 // `crate::builder_vm_runtime` so the future VzBuilderVm path can reuse
 // them.
-
-fn stage_shell_job_dir(job_dir: &Path, script: &str) -> Result<(), BuilderVmError> {
-    std::fs::create_dir_all(job_dir).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("creating job dir {}: {e}", job_dir.display()))
-    })?;
-    let cmd_path = job_dir.join("cmd.sh");
-    std::fs::write(&cmd_path, script).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("writing {}: {e}", cmd_path.display()))
-    })?;
-    Ok(())
-}
 
 /// Locate the `mvm-libkrun-supervisor` binary. Mirrors the
 /// resolver in `mvm-backend::libkrun::resolve_supervisor_path`
@@ -2722,6 +2836,35 @@ mod tests {
         // Must NOT collide with the steady-state builder store filename,
         // or the two flocks would serialize against each other.
         assert_ne!(name, format!("nix-store-{}.img", host_arch_tag()));
+    }
+
+    #[test]
+    fn stage0_nix_store_host_marker_is_order_independent_and_schema_bound() {
+        let scratch = TempDir::new().unwrap();
+        let store = scratch.path().join("store");
+        std::fs::create_dir_all(store.join("bbb-seed-b")).unwrap();
+        std::fs::create_dir_all(store.join("aaa-seed-a")).unwrap();
+
+        let marker = stage0_nix_store_host_marker(&store).unwrap();
+        assert!(marker.starts_with("schema_version=1\n"));
+        assert!(marker.contains("seed_store_entries_sha256="));
+
+        std::fs::remove_dir_all(&store).unwrap();
+        std::fs::create_dir_all(store.join("aaa-seed-a")).unwrap();
+        std::fs::create_dir_all(store.join("bbb-seed-b")).unwrap();
+        assert_eq!(marker, stage0_nix_store_host_marker(&store).unwrap());
+    }
+
+    #[test]
+    fn stage0_host_ext4_block_count_leaves_geometry_margin() {
+        let scratch = TempDir::new().unwrap();
+        let image = scratch.path().join("nix-store-stage0-test.img");
+        std::fs::File::create(&image)
+            .unwrap()
+            .set_len(128 * 1024)
+            .unwrap();
+
+        assert_eq!(host_file_4k_blocks_for_ext4(&image).unwrap(), 16);
     }
 
     // `read_job_result_*`, `extract_nix_store_hash_*`,

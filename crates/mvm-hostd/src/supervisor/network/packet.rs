@@ -29,6 +29,18 @@ pub struct FlowKey {
     pub dst_port: u16,
 }
 
+impl FlowKey {
+    pub fn reversed(self) -> Self {
+        Self {
+            proto: self.proto,
+            src_ip: self.dst_ip,
+            dst_ip: self.src_ip,
+            src_port: self.dst_port,
+            dst_port: self.src_port,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FiveTuple {
     pub proto: L4Proto,
@@ -338,5 +350,18 @@ mod tests {
         let k = p.five_tuple.flow_key();
         assert_eq!(k.proto, L4Proto::Tcp);
         assert_eq!(k.dst_port, 443);
+    }
+
+    #[test]
+    fn flow_key_reversed_swaps_endpoints() {
+        let frame = tcp_v4_frame(b"k");
+        let k = parse(&frame).unwrap().five_tuple.flow_key();
+        let reversed = k.reversed();
+        assert_eq!(reversed.proto, k.proto);
+        assert_eq!(reversed.src_ip, k.dst_ip);
+        assert_eq!(reversed.dst_ip, k.src_ip);
+        assert_eq!(reversed.src_port, k.dst_port);
+        assert_eq!(reversed.dst_port, k.src_port);
+        assert_eq!(reversed.reversed(), k);
     }
 }
