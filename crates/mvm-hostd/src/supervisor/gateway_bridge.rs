@@ -1325,9 +1325,13 @@ async fn run_libkrun_gvproxy_bridge(
     let flow_egress = format!("{vm_name}-egress");
     let flow_ingress = format!("{vm_name}-ingress");
 
-    let libkrun_peer = Arc::new(tokio::sync::Mutex::new(
-        None::<tokio::net::unix::SocketAddr>,
-    ));
+    // libkrun does not reply to the recvfrom source of its egress datagrams; it
+    // binds and listens for the return path on a derived sibling of the path it
+    // was told to connect to (`<listen>-krun.sock`). Address ingress there — the
+    // recvfrom source is not a usable reply target on macOS, so the prior
+    // `peer.as_pathname()` return silently dropped every inbound frame and the
+    // guest never saw a response regardless of policy.
+    let krun_reply_path = libkrun_reply_path(&supervisor_listen_path);
     let mut egress_opened = false;
     let mut ingress_opened = false;
 
@@ -1340,7 +1344,6 @@ async fn run_libkrun_gvproxy_bridge(
     let event_a = event_tx.clone();
     let inbound_a = inbound.clone();
     let outbound_a = outbound.clone();
-    let libkrun_peer_a = libkrun_peer.clone();
     let flow_egress_a = flow_egress.clone();
     let observers_a = wiring.observers.clone();
     let latency_a = wiring.latency.clone();
@@ -1353,12 +1356,10 @@ async fn run_libkrun_gvproxy_bridge(
     let egress = async move {
         let mut buf = vec![0u8; 65536];
         loop {
-            let (n, peer) = match inbound_a.recv_from(&mut buf).await {
-                Ok(x) => x,
+            let n = match inbound_a.recv(&mut buf).await {
+                Ok(n) => n,
                 Err(e) => return Err::<(), std::io::Error>(e),
             };
-            // Cache libkrun's autobind peer for the return path.
-            *libkrun_peer_a.lock().await = Some(peer);
 
             if !egress_opened {
                 let action = policy_a.evaluate(&FlowDecisionCtx {
@@ -1449,7 +1450,6 @@ async fn run_libkrun_gvproxy_bridge(
     let event_b = event_tx.clone();
     let inbound_b = inbound.clone();
     let outbound_b = outbound.clone();
-    let libkrun_peer_b = libkrun_peer.clone();
     let flow_ingress_b = flow_ingress.clone();
     let observers_b = wiring.observers.clone();
     let latency_b = wiring.latency.clone();
@@ -1521,12 +1521,9 @@ async fn run_libkrun_gvproxy_bridge(
                 &latency_b,
             ) {
                 PacketDecision::Forward { frame, .. } => {
-                    // Need libkrun's peer addr to send back. If we haven't
-                    // seen a packet from libkrun yet, drop this one.
-                    let peer_guard = libkrun_peer_b.lock().await;
-                    if let Some(path) = peer_guard.as_ref().and_then(|p| p.as_pathname()) {
-                        inbound_b.send_to(&frame, path).await?;
-                    }
+                    // Return to libkrun's bound listener (`<listen>-krun.sock`),
+                    // not the recvfrom source of its egress traffic.
+                    inbound_b.send_to(&frame, &krun_reply_path).await?;
                 }
                 PacketDecision::Kill {
                     observer,
@@ -1566,6 +1563,17 @@ async fn run_libkrun_gvproxy_bridge(
 fn gvproxy_outbound_bind_path(supervisor_listen_path: &std::path::Path) -> PathBuf {
     let mut s = supervisor_listen_path.as_os_str().to_os_string();
     s.push(".gw-out");
+    PathBuf::from(s)
+}
+
+/// The path libkrun binds its own datagram socket to for the return path when
+/// told to connect to `supervisor_listen_path` — a `-krun.sock` sibling. libkrun
+/// listens for ingress here, and (unlike a connected stream) its egress
+/// datagrams do not carry a recvfrom source the bridge can reply to, so the
+/// internet→guest leg must target this derived path.
+fn libkrun_reply_path(supervisor_listen_path: &std::path::Path) -> PathBuf {
+    let mut s = supervisor_listen_path.as_os_str().to_os_string();
+    s.push("-krun.sock");
     PathBuf::from(s)
 }
 
@@ -3379,14 +3387,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn live_bridge_relays_ingress_reply_back_to_the_guest() {
         // Full-duplex proof: an internet→guest reply gvproxy emits must traverse
-        // the bridge back to the guest. The bridge keys the return path on
-        // libkrun's bound peer address (`SocketAddr::as_pathname`); real libkrun
-        // binds its unixgram socket (the bridge and gvproxy both reject
-        // empty-address peers — macOS never autobinds AF_UNIX datagram sockets),
-        // so model that with a bound client here. Without this return leg the
-        // guest's TCP handshake never completes and every egress probe times out
-        // regardless of policy — the bridge would *look* like a deny-all even
-        // when egress was admitted.
+        // the bridge back to the guest. libkrun listens for the return path on a
+        // derived `<listen>-krun.sock` sibling — NOT the recvfrom source of its
+        // egress datagrams (on macOS that source is not a usable reply target).
+        // Model that faithfully: the guest's reply listener is the derived path,
+        // and egress arrives from a *separate* sender so the recvfrom source is
+        // unusable — exactly the condition under which the old `as_pathname()`
+        // return silently dropped every inbound frame and the guest saw a
+        // deny-all regardless of policy. So this test now fails if the return
+        // path regresses to the recvfrom source.
         let (l4, dns_allow, policy) = bare_network_policy_egress(
             &mvm_core::network_policy::NetworkPolicy::unrestricted(),
             &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
@@ -3394,7 +3403,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
-        let libkrun_path = dir.path().join("libkrun.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
         let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
@@ -3406,24 +3414,26 @@ mod tests {
             tx,
             wiring_with_egress_scan(l4, dns_allow),
         ));
-        // Real libkrun binds its socket; mirror that so the bridge can address
-        // the return path (an unbound client has no pathname to reply to).
-        let libkrun = tokio::net::UnixDatagram::bind(&libkrun_path).unwrap();
-        let mut connected = false;
+        // libkrun's reply listener is the derived `-krun.sock` path.
+        let krun_reply = libkrun_reply_path(&sup_listen);
+        let guest = tokio::net::UnixDatagram::bind(&krun_reply).unwrap();
+        // A distinct sender for egress so the bridge's recvfrom source is NOT the
+        // reply listener (mirrors libkrun, whose egress source is not the reply
+        // address). Send via send_to so the source stays unnamed.
+        let sender = tokio::net::UnixDatagram::unbound().unwrap();
+        let mut sent = false;
         for _ in 0..100 {
-            if libkrun.connect(&sup_listen).is_ok() {
-                connected = true;
+            if sender
+                .send_to(&tcp_egress_frame_to([1, 1, 1, 1], 443, b"syn"), &sup_listen)
+                .await
+                .is_ok()
+            {
+                sent = true;
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert!(connected, "bridge never bound {}", sup_listen.display());
-        // Egress first so the bridge caches libkrun's peer and gvproxy learns the
-        // bridge's gvproxy-facing address.
-        libkrun
-            .send(&tcp_egress_frame_to([1, 1, 1, 1], 443, b"syn"))
-            .await
-            .unwrap();
+        assert!(sent, "bridge never bound {}", sup_listen.display());
         let mut buf = vec![0u8; 65536];
         let (n, bridge_peer) = tokio::time::timeout(
             std::time::Duration::from_secs(3),
@@ -3445,8 +3455,8 @@ mod tests {
             )
             .await
             .unwrap();
-        // The reply must reach the guest.
-        let n = tokio::time::timeout(std::time::Duration::from_secs(3), libkrun.recv(&mut buf))
+        // The reply must reach the guest's derived reply listener.
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), guest.recv(&mut buf))
             .await
             .expect("the ingress reply must reach the guest")
             .expect("recv ok");
