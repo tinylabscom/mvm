@@ -1029,6 +1029,22 @@ Required behavior:
          and prove guest egress is denied/audited as SSH protocol, not merely
          as TCP/22. Until that witness exists, non-standard-port SSH protocol
          denial is not claimed.
+      4. 2026-06-19 Firecracker-box attempt did not reach guest boot, so this
+         remains open. The branch-local `mvmctl`, `mvm-libkrun-supervisor`, and
+         `mvm-firecracker-bridge` built on the x86_64 KVM host with isolated
+         proof state; a throwaway host `ssh-agent` and key were created outside
+         the repo; `alpine:latest` was selected after `python:3.12-alpine`
+         exercised the OCI hardening `MalformedHeader` refusal. The start path
+         then blocked during OCI `rootfs.ext4` materialization because
+         `mvm-build::rootfs::materialize_ext4` still hardcodes the libkrun
+         builder VM path; with an isolated copied builder image cache, the
+         libkrun supervisor failed on the Firecracker host with `rc -22` before
+         any workload VM or SSH-agent socket existed. The remaining proof must
+         either run on a host where that libkrun materializer works, or first
+         teach OCI ext4 materialization to honor the QEMU/builder backend seam.
+         The non-standard-port SSH-banner denial also remains unclaimed because
+         current enforcement only bans TCP/22 plus template SSH material; no
+         runtime SSH-banner classifier exists yet.
 - [ ] Normalize `-v/--volume HOST:GUEST[:ro|rw]` across `machine run` and
       `machine create`.
 - [ ] Preserve read-only default and explicit `:rw` requirement.
