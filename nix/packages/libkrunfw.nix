@@ -64,7 +64,7 @@ stdenv.mkDerivation (finalAttrs: {
     "TDX=1"
   ];
 
-  # Upstream issue #55: aarch64 kernel builds need the crypto extension.
+  # aarch64 kernel builds need the crypto extension.
   env = lib.optionalAttrs stdenv.targetPlatform.isAarch64 {
     NIX_CFLAGS_COMPILE = "-march=armv8-a+crypto";
   };
