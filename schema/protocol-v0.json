@@ -834,6 +834,13 @@
           ]
         },
         {
+          "description": "Dev-tier Unix-domain socket forwarding. Used for socket-only SSH-agent forwarding; not a general SSH session capability.",
+          "type": "string",
+          "enum": [
+            "unix_socket_forward"
+          ]
+        },
+        {
           "description": "`ReadinessStatus` returns `GuestResponse::ReadinessStatusReport(ReadinessReport)`. `mvmctl wait` / `mvmctl boot-report` require this capability.",
           "type": "string",
           "enum": [

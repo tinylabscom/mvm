@@ -246,6 +246,7 @@ export type GuestCapability =
       | "volume_mount"
       | "update_idle_timeout"
     )
+  | "unix_socket_forward"
   | "readiness";
 /**
  * Response from guest vsock agent to host.

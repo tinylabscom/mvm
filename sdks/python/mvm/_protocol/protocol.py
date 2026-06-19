@@ -303,10 +303,14 @@ class GuestCapability1(Enum):
 
 
 class GuestCapability2(Enum):
+    unix_socket_forward = 'unix_socket_forward'
+
+
+class GuestCapability3(Enum):
     readiness = 'readiness'
 
 
-GuestCapability = Union[GuestCapability1, GuestCapability2]
+GuestCapability = Union[GuestCapability1, GuestCapability2, GuestCapability3]
 
 
 @dataclass
