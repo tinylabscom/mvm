@@ -8,8 +8,9 @@
 [ADR-071](071-stage0-bootstrap-trust-model.md),
 [ADR-079](079-app-builder-product-surface.md),
 [Plan 199](../plans/199-host-runtime-packaging-and-crate-boundaries.md),
-[Plan 200](../plans/200-machine-ux-dx-layer.md), and
-[Plan 204](../plans/204-builder-vm-resident-control-plane.md)
+[Plan 200](../plans/200-machine-ux-dx-layer.md),
+[Plan 204](../plans/204-builder-vm-resident-control-plane.md), and
+[ADR-090](090-resident-daemon-trust-gradient-and-residency.md) (its trust-gradient and residency complement)
 
 ## Context
 
