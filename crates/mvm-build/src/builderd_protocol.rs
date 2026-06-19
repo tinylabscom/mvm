@@ -286,6 +286,15 @@ pub enum BuilderResponse {
         retryable: bool,
     },
 
+    /// Terminal success for an operation that produces neither an
+    /// artifact nor a store path — it either passed or failed, and it
+    /// passed (e.g. [`BuilderRequest::FlakeCheck`]). A `Failed` is the
+    /// negative counterpart.
+    Completed {
+        /// The operation that completed successfully.
+        op: OperationId,
+    },
+
     /// Terminal acknowledgement that an operation was cancelled in
     /// response to a [`BuilderRequest::CancelJob`].
     Cancelled {
@@ -532,6 +541,11 @@ mod tests {
     }
 
     #[test]
+    fn completed_roundtrips() {
+        roundtrip(&BuilderResponse::Completed { op: op() });
+    }
+
+    #[test]
     fn cancelled_roundtrips() {
         roundtrip(&BuilderResponse::Cancelled { op: op() });
     }
@@ -661,6 +675,10 @@ mod tests {
                 })
                 .unwrap(),
                 "failed",
+            ),
+            (
+                serde_json::to_value(BuilderResponse::Completed { op: op() }).unwrap(),
+                "completed",
             ),
             (
                 serde_json::to_value(BuilderResponse::Cancelled { op: op() }).unwrap(),

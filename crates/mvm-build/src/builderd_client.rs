@@ -106,6 +106,9 @@ pub enum OperationOutcome {
         /// Whether the path was already present in the store.
         already_present: bool,
     },
+    /// The operation succeeded with no artifact or store path (e.g. a
+    /// flake check that passed).
+    Completed,
     /// The operation failed with a stable category.
     Failed {
         /// Stable failure class.
@@ -232,6 +235,7 @@ impl BuilderdClient {
                         retryable,
                     });
                 }
+                BuilderResponse::Completed { .. } => return Ok(OperationOutcome::Completed),
                 BuilderResponse::Cancelled { .. } => return Ok(OperationOutcome::Cancelled),
                 BuilderResponse::Accepted { .. } => {
                     return Err(BuilderdClientError::Protocol {
@@ -310,6 +314,7 @@ fn response_op(response: &BuilderResponse) -> OperationId {
         | BuilderResponse::ArtifactReady { op, .. }
         | BuilderResponse::StorePathReady { op, .. }
         | BuilderResponse::Failed { op, .. }
+        | BuilderResponse::Completed { op }
         | BuilderResponse::Cancelled { op } => *op,
     }
 }
@@ -451,6 +456,22 @@ mod tests {
                 retryable: false,
             }
         );
+    }
+
+    #[test]
+    fn completed_terminal_is_returned() {
+        let (client_stream, mut server) = UnixStream::pair().expect("pair");
+        mvm_guest::vsock::write_frame(&mut server, &BuilderResponse::Completed { op: op() })
+            .expect("stage");
+        let (outcome, _events) = run_collecting(
+            client_stream,
+            &BuilderRequest::FlakeCheck {
+                op: op(),
+                flake_path: "/work/nix".to_string(),
+            },
+        )
+        .expect("operation");
+        assert_eq!(outcome, OperationOutcome::Completed);
     }
 
     #[test]

@@ -17,6 +17,7 @@ mod check_doc_claims;
 mod check_forbidden_deps;
 mod check_guest_agent_in_all_images;
 mod check_guest_agent_runtime_free;
+mod check_guest_images_no_builder_tools;
 mod check_mvm_host_binaries_sync;
 mod check_no_display_on_secret_types;
 mod check_no_overclaim;
@@ -82,6 +83,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_guest_agent_in_all_images::run(&workspace)
         }
+        Some("check-guest-images-no-builder-tools") => {
+            let workspace = workspace_root();
+            check_guest_images_no_builder_tools::run(&workspace)
+        }
         Some("check-no-overclaim") => {
             let workspace = workspace_root();
             check_no_overclaim::run(&workspace)
@@ -120,7 +125,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {
@@ -155,6 +160,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-guest-agent-in-all-images         Plan 124 B: assert every bootable image's launch path forks mvm-guest-agent"
+            );
+            eprintln!(
+                "  check-guest-images-no-builder-tools     assert mkGuest never bakes mvmctl / mvm-builderd into workload guest images"
             );
             eprintln!(
                 "  check-runtime-overlay-version           Plan 124 C: assert the runtime-overlay flake's overlayVersion matches the workspace version"

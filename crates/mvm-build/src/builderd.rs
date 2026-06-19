@@ -92,9 +92,10 @@ fn request_kind(request: &BuilderRequest) -> &'static str {
     }
 }
 
-/// Serve one control connection: read framed [`BuilderRequest`]s, hand
-/// each to [`dispatch`], and write the framed [`BuilderResponse`] back,
-/// until the peer closes the connection (clean EOF).
+/// Serve one control connection, dispatching each request through
+/// `dispatch_one`: read framed [`BuilderRequest`]s, write each framed
+/// [`BuilderResponse`] back, until the peer closes the connection (clean
+/// EOF).
 ///
 /// Framing reuses [`mvm_guest::vsock::read_frame`] /
 /// [`mvm_guest::vsock::write_frame`], inheriting the 256 KiB
@@ -103,11 +104,14 @@ fn request_kind(request: &BuilderRequest) -> &'static str {
 /// or a write failure returns the underlying error so the caller can
 /// log it and drop the connection — the daemon keeps serving other
 /// connections.
-pub fn serve_connection(stream: &mut UnixStream) -> std::io::Result<()> {
+fn serve_loop(
+    stream: &mut UnixStream,
+    mut dispatch_one: impl FnMut(&BuilderRequest) -> BuilderResponse,
+) -> std::io::Result<()> {
     loop {
         match mvm_guest::vsock::read_frame::<BuilderRequest>(stream) {
             Ok(request) => {
-                let response = dispatch(&request);
+                let response = dispatch_one(&request);
                 mvm_guest::vsock::write_frame(stream, &response)
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
             }
@@ -124,6 +128,149 @@ pub fn serve_connection(stream: &mut UnixStream) -> std::io::Result<()> {
                 return Err(std::io::Error::other(e.to_string()));
             }
         }
+    }
+}
+
+/// Serve one control connection with the stateless [`dispatch`] (no
+/// operation executor): build/eval operations answer
+/// [`FailureCategory::Unsupported`]. Used where the daemon has no
+/// builder-side execution context (the skeleton path and tests).
+pub fn serve_connection(stream: &mut UnixStream) -> std::io::Result<()> {
+    serve_loop(stream, dispatch)
+}
+
+/// Serve one control connection with an [`OpExecutor`] so recognized
+/// build/eval operations actually run inside the builder VM (e.g.
+/// [`BuilderRequest::FlakeCheck`] → `nix flake check`). Operations
+/// without a handler still answer [`FailureCategory::Unsupported`].
+pub fn serve_connection_with_executor(
+    stream: &mut UnixStream,
+    executor: &dyn OpExecutor,
+) -> std::io::Result<()> {
+    serve_loop(stream, |request| dispatch_with_executor(request, executor))
+}
+
+// ============================================================================
+// Typed operation execution (builder-VM side)
+// ============================================================================
+
+/// Result of running an operation's subprocess inside the builder VM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpExecResult {
+    /// Process exit code (0 = success).
+    pub exit_code: i32,
+    /// Tail of the process's stderr, capped by the caller, for the
+    /// failure message. Never the full stream — that goes out as
+    /// streamed [`BuilderResponse::LogChunk`]s by the daemon.
+    pub stderr_tail: String,
+}
+
+/// Runs a builder operation's subprocess (Nix/Linux-only work) inside
+/// the builder VM. Injected so the dispatch logic is unit-testable
+/// without spawning a real process; the daemon supplies
+/// [`CommandExecutor`].
+pub trait OpExecutor {
+    /// Run `argv` (argv[0] is the program) and return its exit code and
+    /// a bounded stderr tail.
+    fn run(&self, argv: &[String]) -> std::io::Result<OpExecResult>;
+}
+
+/// Production [`OpExecutor`] that spawns the program with
+/// [`std::process::Command`]. The daemon uses this inside the builder
+/// VM, where `nix` is on `PATH`; on a developer host the program is
+/// absent and `run` returns an `Err`, which dispatch maps to a typed
+/// [`FailureCategory::Internal`] failure.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CommandExecutor;
+
+impl OpExecutor for CommandExecutor {
+    fn run(&self, argv: &[String]) -> std::io::Result<OpExecResult> {
+        let (program, rest) = argv
+            .split_first()
+            .ok_or_else(|| std::io::Error::other("empty argv"))?;
+        let output = std::process::Command::new(program).args(rest).output()?;
+        Ok(OpExecResult {
+            exit_code: output.status.code().unwrap_or(-1),
+            stderr_tail: tail_lines(&String::from_utf8_lossy(&output.stderr), 20),
+        })
+    }
+}
+
+/// Keep at most the last `n` lines of `text`, joined with newlines, so a
+/// failure message stays bounded.
+fn tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+/// The `nix flake check` argv the daemon runs for a
+/// [`BuilderRequest::FlakeCheck`]. Pure so the command shape is
+/// unit-tested without executing Nix. `--no-build` keeps it an
+/// evaluation check (fast, no derivation realisation); the builder VM
+/// already has the `nix-command flakes` features enabled.
+pub fn flake_check_argv(flake_path: &str) -> Vec<String> {
+    vec![
+        "nix".to_string(),
+        "flake".to_string(),
+        "check".to_string(),
+        "--no-build".to_string(),
+        format!("path:{flake_path}"),
+    ]
+}
+
+/// Map a flake-check process result to its terminal response: a clean
+/// exit is [`BuilderResponse::Completed`]; a non-zero exit is a
+/// [`FailureCategory::NixEval`] failure carrying the stderr tail.
+fn flake_check_outcome(op: OperationId, result: &OpExecResult) -> BuilderResponse {
+    if result.exit_code == 0 {
+        BuilderResponse::Completed { op }
+    } else {
+        BuilderResponse::Failed {
+            op,
+            category: FailureCategory::NixEval,
+            message: format!(
+                "nix flake check failed (exit {}): {}",
+                result.exit_code, result.stderr_tail
+            ),
+            retryable: false,
+        }
+    }
+}
+
+/// Run a [`BuilderRequest::FlakeCheck`] through `executor` and classify
+/// the result. An executor error (e.g. `nix` not found) is a typed
+/// retryable [`FailureCategory::Internal`] failure, distinct from a
+/// flake that evaluated and failed.
+pub fn dispatch_flake_check(
+    op: OperationId,
+    flake_path: &str,
+    executor: &dyn OpExecutor,
+) -> BuilderResponse {
+    match executor.run(&flake_check_argv(flake_path)) {
+        Ok(result) => flake_check_outcome(op, &result),
+        Err(e) => BuilderResponse::Failed {
+            op,
+            category: FailureCategory::Internal,
+            message: format!("failed to run nix flake check: {e}"),
+            retryable: true,
+        },
+    }
+}
+
+/// Dispatch with an [`OpExecutor`]: recognized build/eval operations
+/// that have a handler run through the executor; everything else falls
+/// back to the stateless [`dispatch`] (which still answers
+/// [`FailureCategory::Unsupported`] for the not-yet-implemented ops).
+pub fn dispatch_with_executor(
+    request: &BuilderRequest,
+    executor: &dyn OpExecutor,
+) -> BuilderResponse {
+    match request {
+        BuilderRequest::FlakeCheck { op, flake_path } => {
+            dispatch_flake_check(*op, flake_path, executor)
+        }
+        other => dispatch(other),
     }
 }
 
@@ -433,6 +580,166 @@ mod tests {
         let (client, mut server) = UnixStream::pair().expect("socketpair");
         drop(client);
         serve_connection(&mut server).expect("immediate eof is Ok");
+    }
+
+    // ---- typed operation execution (FlakeCheck) -----------------------
+
+    /// A scripted executor: returns a fixed result, or an error, and
+    /// records the argv it was asked to run.
+    struct FakeExecutor {
+        result: std::io::Result<OpExecResult>,
+        seen: std::cell::RefCell<Option<Vec<String>>>,
+    }
+
+    impl FakeExecutor {
+        fn ok(exit_code: i32, stderr_tail: &str) -> Self {
+            Self {
+                result: Ok(OpExecResult {
+                    exit_code,
+                    stderr_tail: stderr_tail.to_string(),
+                }),
+                seen: std::cell::RefCell::new(None),
+            }
+        }
+        fn erroring() -> Self {
+            Self {
+                result: Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "nix not found",
+                )),
+                seen: std::cell::RefCell::new(None),
+            }
+        }
+    }
+
+    impl OpExecutor for FakeExecutor {
+        fn run(&self, argv: &[String]) -> std::io::Result<OpExecResult> {
+            *self.seen.borrow_mut() = Some(argv.to_vec());
+            // io::Error isn't Clone; rebuild the same kind on the error arm.
+            match &self.result {
+                Ok(r) => Ok(r.clone()),
+                Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
+            }
+        }
+    }
+
+    #[test]
+    fn flake_check_argv_is_a_no_build_eval_check() {
+        assert_eq!(
+            flake_check_argv("/work/nix"),
+            vec![
+                "nix".to_string(),
+                "flake".to_string(),
+                "check".to_string(),
+                "--no-build".to_string(),
+                "path:/work/nix".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn tail_lines_keeps_only_the_last_n() {
+        assert_eq!(tail_lines("a\nb\nc\nd", 2), "c\nd");
+        assert_eq!(tail_lines("only", 5), "only");
+        assert_eq!(tail_lines("", 3), "");
+    }
+
+    #[test]
+    fn flake_check_clean_exit_completes() {
+        let exec = FakeExecutor::ok(0, "");
+        let resp = dispatch_flake_check(op(), "/work/nix", &exec);
+        assert!(matches!(resp, BuilderResponse::Completed { op: got } if got == op()));
+        // The executor was handed the no-build eval argv.
+        assert_eq!(
+            exec.seen.into_inner().unwrap(),
+            flake_check_argv("/work/nix")
+        );
+    }
+
+    #[test]
+    fn flake_check_nonzero_exit_is_nix_eval_failure() {
+        let exec = FakeExecutor::ok(1, "error: attribute 'foo' missing");
+        match dispatch_flake_check(op(), "/work/nix", &exec) {
+            BuilderResponse::Failed {
+                category, message, ..
+            } => {
+                assert_eq!(category, FailureCategory::NixEval);
+                assert!(message.contains("attribute 'foo' missing"), "{message}");
+            }
+            other => panic!("expected Failed/NixEval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flake_check_executor_error_is_internal_and_retryable() {
+        let exec = FakeExecutor::erroring();
+        match dispatch_flake_check(op(), "/work/nix", &exec) {
+            BuilderResponse::Failed {
+                category,
+                retryable,
+                ..
+            } => {
+                assert_eq!(category, FailureCategory::Internal);
+                assert!(retryable, "an executor (spawn) error is retryable");
+            }
+            other => panic!("expected Failed/Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_with_executor_routes_flake_check_but_delegates_others() {
+        let exec = FakeExecutor::ok(0, "");
+        // FlakeCheck reaches the executor → Completed.
+        let resp = dispatch_with_executor(
+            &BuilderRequest::FlakeCheck {
+                op: op(),
+                flake_path: "/work/nix".to_string(),
+            },
+            &exec,
+        );
+        assert!(matches!(resp, BuilderResponse::Completed { .. }));
+        // A still-unimplemented op falls back to the stateless dispatch.
+        let resp = dispatch_with_executor(
+            &BuilderRequest::BuildGuestImage {
+                op: op(),
+                flake_ref: "path:.".to_string(),
+                attr_path: "packages.aarch64-linux.default".to_string(),
+                fingerprint: None,
+            },
+            &exec,
+        );
+        assert!(matches!(
+            resp,
+            BuilderResponse::Failed {
+                category: FailureCategory::Unsupported,
+                ..
+            }
+        ));
+        // Handshake/Probe still work through the executor-aware path.
+        assert!(matches!(
+            dispatch_with_executor(&BuilderRequest::Probe { op: op() }, &exec),
+            BuilderResponse::Accepted { .. }
+        ));
+    }
+
+    #[test]
+    fn serve_connection_with_executor_runs_flake_check_over_the_wire() {
+        let (mut client, mut server) = UnixStream::pair().expect("socketpair");
+        mvm_guest::vsock::write_frame(
+            &mut client,
+            &BuilderRequest::FlakeCheck {
+                op: op(),
+                flake_path: "/work/nix".to_string(),
+            },
+        )
+        .expect("write");
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("half-close");
+        let exec = FakeExecutor::ok(0, "");
+        serve_connection_with_executor(&mut server, &exec).expect("serve");
+        let resp = mvm_guest::vsock::read_frame::<BuilderResponse>(&mut client).expect("read");
+        assert!(matches!(resp, BuilderResponse::Completed { op: got } if got == op()));
     }
 
     // ---- host-side readiness probe ------------------------------------

@@ -111,10 +111,20 @@ Rules:
 
 Add structural tests that prove:
 
-- `mkGuest` images do not include `mvmctl`;
-- `mkGuest` images do not include `mvm-builderd`;
+- `mkGuest` images do not include `mvmctl`; **(landed)**
+- `mkGuest` images do not include `mvm-builderd`; **(landed)**
 - host packages are separate from guest image outputs;
 - the builder daemon package is only part of the builder VM image.
+
+Landed: `xtask check-guest-images-no-builder-tools` is a comment-stripping
+source-grep gate over `nix/lib/mk-guest.nix` (the workload + dev-shell
+image builder) asserting it bakes neither `mvmctl` nor `mvm-builderd`,
+wired into the `ci.yml` Lint job beside `check-guest-agent-in-all-images`.
+Source-grep not a build, mirroring the sibling agent gate. `mvm-host-vm-init`
+is deliberately excluded — the builder-VM image injects it through mkGuest's
+generic `extraFiles` mechanism, a separate intentional consumer. The
+affirmative "builder daemon package is only part of the builder VM image"
+arm lands with the daemon's image baking (boot-gated).
 
 ## Workstreams
 
@@ -125,7 +135,8 @@ Add structural tests that prove:
       (`Handshake`/`Probe`/`FlakeCheck`/`BuildGuestImage`/`BuildHostTool`/
       `PrefetchSource`/`QueryStorePath`/`CancelJob`) + `BuilderResponse`
       (`Accepted`/`Progress`/`LogChunk`/`ArtifactReady`/`StorePathReady`/
-      `Failed`/`Cancelled`), an `OperationId` newtype, and a stable
+      `Completed`/`Failed`/`Cancelled` — `Completed` added in WS-C for ops
+      that pass without an artifact), an `OperationId` newtype, and a stable
       `FailureCategory`. Externally-tagged snake_case + `deny_unknown_fields`
       on every variant (fail-closed against an unknown peer field/kind),
       reusing the existing 256 KiB vsock framing. Roundtrip, kind-tag
@@ -147,7 +158,15 @@ Add structural tests that prove:
       dead code.
 - [ ] Add builder-VM image wiring so the daemon starts on boot (also lands
       the `mvm-builderd` bin entrypoint + AF_VSOCK listener over
-      `serve_connection`).
+      `serve_connection_with_executor`).
+      **Boot-gated, single on-box slice.** This is inseparable from the
+      cross-compile + rootfs baking + boot launch + lifecycle owner: the
+      `mvm-build` lib pulls `reqwest`/`tokio`, so (like every other builder
+      bin) `mvm-builderd` must `#[path]`-include the daemon modules rather
+      than `use mvm_build`, then cross-compile to `aarch64-unknown-linux-musl`
+      via the zigbuild embedding path and be launched by `mvm-host-vm-init`.
+      None of that is verifiable from a non-Linux contributor host, so it is
+      left as one coherent slice to land + boot-validate on the builder box.
 - [x] Add `mvmctl doctor` visibility for builder daemon readiness.
       Host-side readiness probe landed in `mvm_build::builderd`
       (`probe_builderd_readiness` over a `Handshake` →
@@ -195,7 +214,18 @@ Add structural tests that prove:
 
 ### C. Typed Nix operations
 
-- [ ] Implement `FlakeCheck` for the `nix/` flake.
+- [~] Implement `FlakeCheck` for the `nix/` flake.
+      Host-testable core landed in `mvm_build::builderd`: `flake_check_argv`
+      (`nix flake check --no-build path:<flake>`), `flake_check_outcome`
+      classification (clean exit → new `BuilderResponse::Completed`
+      terminal; non-zero → `FailureCategory::NixEval`; executor/spawn error
+      → retryable `Internal`), an injectable `OpExecutor` seam
+      (`CommandExecutor` for the daemon, fakes for tests),
+      `dispatch_flake_check` / `dispatch_with_executor`, and
+      `serve_connection_with_executor` so the daemon serve loop runs it.
+      Fully unit-tested (argv shape, every classification arm, routing,
+      over-the-wire serve). The actual `nix` execution inside the builder
+      VM is exercised when the daemon bin + boot wiring land on-box.
 - [ ] Implement `BuildGuestImage`.
 - [ ] Implement `BuildHostTool` for source-built host packages.
 - [ ] Implement `PrefetchSource` / `QueryStorePath` if needed to remove ad hoc
@@ -236,12 +266,14 @@ Plan 204 is done when:
 
 ## Verification
 
-- [ ] Protocol serde roundtrip and unknown-field/version refusal tests.
-- [ ] Builder daemon health/probe tests.
-- [ ] Host client timeout/cancellation tests.
-- [ ] Builder-VM integration test for typed `FlakeCheck`.
+- [x] Protocol serde roundtrip and unknown-field/version refusal tests.
+- [x] Builder daemon health/probe tests.
+- [x] Host client timeout/cancellation tests.
+- [~] Builder-VM integration test for typed `FlakeCheck` — logic tested via
+      injectable executor; the live in-VM `nix` run is boot-gated.
 - [ ] Builder-VM integration test for typed guest image build.
-- [ ] Structural tests for no `mvmctl` / no `mvm-builderd` in guest images.
+- [x] Structural tests for no `mvmctl` / no `mvm-builderd` in guest images
+      (`xtask check-guest-images-no-builder-tools`, CI-wired).
 - [ ] `cargo test --workspace`.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`.
 - [ ] Builder-VM `nix flake check` for the affected flake paths.
