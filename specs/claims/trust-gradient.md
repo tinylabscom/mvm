@@ -1,3 +1,10 @@
+---
+claim: trust-gradient
+status: Shipped
+gated_phrases: []
+exempt_paths: []
+---
+
 # Trust gradient ledger
 
 Machine-checked by `xtask check-trust-gradient`. Authority and resident weight
