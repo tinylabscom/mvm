@@ -14,9 +14,10 @@
 //! which existed only to `apk add nix` and pulled the heavy `pgp` crate for
 //! its release-key verification.
 //!
-//! Per-run, [`materialize_root_dir`] re-verifies the cached tarball
-//! (SHA-256) and extracts its `store/` into `<dest>/nix/store`, then writes
-//! the `stage0-init` binary to `init` (mode 0755).
+//! [`materialize_root_dir`] re-verifies the cached tarball (SHA-256) before
+//! use. The extracted root is cached under `<dest>` with a marker bound to the
+//! tarball hash and embedded `stage0-init` hash, so the common path avoids
+//! re-decompressing the full seed tarball.
 //!
 //! # Trust model
 //!
@@ -33,6 +34,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
+
+const ROOT_MARKER_FILE: &str = ".mvm-stage0-root";
+const ROOT_MARKER_SCHEMA_VERSION: u32 = 1;
 
 /// One downloadable bootstrap asset, pinned by upstream URL + SHA-256.
 /// The cache key is [`Self::cache_filename`].
@@ -271,6 +275,16 @@ pub fn materialize_root_dir_in(cache_dir: &Path, dest: &Path, stage0_init: &[u8]
         );
     }
 
+    let expected_marker = root_marker_content(asset, stage0_init);
+    if stage0_root_matches(dest, &expected_marker, stage0_init)? {
+        return Ok(());
+    }
+
+    if dest.exists() {
+        std::fs::remove_dir_all(dest)
+            .with_context(|| format!("clearing stale Stage 0 root dir {}", dest.display()))?;
+    }
+
     std::fs::create_dir_all(dest)
         .with_context(|| format!("creating Stage 0 root dir {}", dest.display()))?;
 
@@ -296,8 +310,65 @@ pub fn materialize_root_dir_in(cache_dir: &Path, dest: &Path, stage0_init: &[u8]
     // script). `krun_set_exec` runs `/init`.
     write_file_mode(&dest.join("init"), stage0_init, 0o755)
         .context("writing Stage 0 /init (stage0-init binary)")?;
+    write_root_marker(dest, &expected_marker)?;
 
     Ok(())
+}
+
+fn stage0_root_matches(dest: &Path, expected_marker: &str, stage0_init: &[u8]) -> Result<bool> {
+    if !dest.is_dir() {
+        return Ok(false);
+    }
+    let marker_path = dest.join(ROOT_MARKER_FILE);
+    let Ok(marker) = std::fs::read_to_string(&marker_path) else {
+        return Ok(false);
+    };
+    if marker != expected_marker {
+        return Ok(false);
+    }
+    if !dest.join("nix/store").is_dir() {
+        return Ok(false);
+    }
+    for stub in ["work", "out", "mvm-bins"] {
+        if !dest.join(stub).is_dir() {
+            return Ok(false);
+        }
+    }
+    let init_path = dest.join("init");
+    let init = match std::fs::read(&init_path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(err).with_context(|| format!("reading {}", init_path.display()));
+        }
+    };
+    Ok(init_hash_hex(&init) == init_hash_hex(stage0_init))
+}
+
+fn root_marker_content(asset: &BootstrapAsset, stage0_init: &[u8]) -> String {
+    format!(
+        "schema_version={ROOT_MARKER_SCHEMA_VERSION}\n\
+         nix_seed_cache_filename={}\n\
+         nix_seed_sha256={}\n\
+         stage0_init_sha256={}\n",
+        asset.cache_filename,
+        asset.sha256_hex,
+        init_hash_hex(stage0_init)
+    )
+}
+
+fn write_root_marker(dest: &Path, marker: &str) -> Result<()> {
+    let path = dest.join(ROOT_MARKER_FILE);
+    let staging = dest.join(format!(".{ROOT_MARKER_FILE}.{}.tmp", std::process::id()));
+    std::fs::write(&staging, marker).with_context(|| format!("writing {}", staging.display()))?;
+    set_mode(&staging, 0o644)?;
+    std::fs::rename(&staging, &path)
+        .with_context(|| format!("atomic-rename {} -> {}", staging.display(), path.display()))?;
+    Ok(())
+}
+
+fn init_hash_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 /// Extract the official Nix release tarball into `nix_dir` (= `<root>/nix`),
@@ -704,6 +775,63 @@ mod tests {
         assert!(
             msg.contains("sha256 mismatch") || msg.contains("tampered"),
             "error names the tampering: {msg}"
+        );
+    }
+
+    #[test]
+    fn stage0_root_marker_reuses_matching_materialized_root() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("nix/store")).unwrap();
+        for stub in ["work", "out", "mvm-bins"] {
+            std::fs::create_dir_all(root.join(stub)).unwrap();
+        }
+        let init = b"stage0-init-v1";
+        std::fs::write(root.join("init"), init).unwrap();
+        let marker = root_marker_content(&NIX_SEED_X86_64, init);
+        write_root_marker(&root, &marker).unwrap();
+
+        assert!(
+            stage0_root_matches(&root, &marker, init).unwrap(),
+            "matching marker and init hash should reuse root"
+        );
+    }
+
+    #[test]
+    fn stage0_root_marker_rejects_stale_init_hash() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("nix/store")).unwrap();
+        for stub in ["work", "out", "mvm-bins"] {
+            std::fs::create_dir_all(root.join(stub)).unwrap();
+        }
+        let old_init = b"stage0-init-v1";
+        let new_init = b"stage0-init-v2";
+        std::fs::write(root.join("init"), old_init).unwrap();
+        let marker = root_marker_content(&NIX_SEED_X86_64, old_init);
+        write_root_marker(&root, &marker).unwrap();
+
+        assert!(
+            !stage0_root_matches(&root, &marker, new_init).unwrap(),
+            "changed embedded stage0-init must invalidate cached root"
+        );
+    }
+
+    #[test]
+    fn stage0_root_marker_rejects_incomplete_root() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("nix/store")).unwrap();
+        std::fs::create_dir_all(root.join("work")).unwrap();
+        std::fs::create_dir_all(root.join("out")).unwrap();
+        let init = b"stage0-init-v1";
+        std::fs::write(root.join("init"), init).unwrap();
+        let marker = root_marker_content(&NIX_SEED_X86_64, init);
+        write_root_marker(&root, &marker).unwrap();
+
+        assert!(
+            !stage0_root_matches(&root, &marker, init).unwrap(),
+            "missing mvm-bins stub must invalidate cached root"
         );
     }
 }

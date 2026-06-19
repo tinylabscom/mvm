@@ -1851,11 +1851,6 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     // Materialize the guest root tree under a stable per-host location.
     // libkrun mounts this directory as the guest root via virtiofs.
     let root_dir = mvm_build::stage0::stage0_cache_dir().join("root");
-    if root_dir.exists() {
-        std::fs::remove_dir_all(&root_dir).with_context(|| {
-            format!("clearing previous Stage 0 root dir {}", root_dir.display())
-        })?;
-    }
     let materialize_started = std::time::Instant::now();
     // The seed's PID 1 is the embedded `stage0-init` binary. Pull its bytes
     // from the embed table (refuse a zero-byte stub build).
@@ -2180,10 +2175,6 @@ pub(crate) fn build_kernel_via_stage0(
     }
 
     let root_dir = mvm_build::stage0::stage0_cache_dir().join("root");
-    if root_dir.exists() {
-        std::fs::remove_dir_all(&root_dir)
-            .with_context(|| format!("clearing Stage 0 root dir {}", root_dir.display()))?;
-    }
     // The seed's PID 1 is the embedded `stage0-init` binary (refuse a
     // zero-byte stub build that can't seed Stage 0).
     let stage0_init = crate::host_binaries::embedded::EMBEDDED
