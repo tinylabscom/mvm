@@ -1,6 +1,6 @@
 # Plan 199 — host runtime packaging and crate-boundary simplification
 
-**Status:** Workstreams A/B/B2/C complete; builder-VM Nix verification follow-up pending
+**Status:** Complete — Workstreams A/B/B2/C and builder-VM Nix verification are done
 **Owner:** mvm  
 **Date:** 2026-06-15
 
@@ -67,8 +67,9 @@ The target shape is:
       Linux-host-only package outputs (`libkrunfw`, `libkrun`,
       `mvmctl-native-libkrun`) and overlay attrs; Darwin keeps the source-built
       non-native `mvmctl` package only.
-- [x] Wire `mvmctl.override { withNativeLibkrun = true; libkrun = ...; }` as the
-      opt-in native package path. `packages.<linux>.mvmctl-native-libkrun`
+- [x] Wire
+      `mvmctl.override { withNativeLibkrun = true; libkrun = ...; libkrunfw = ...; }`
+      as the opt-in native package path. `packages.<linux>.mvmctl-native-libkrun`
       consumes the existing override seam; `packages.<system>.default` remains
       the non-native `mvmctl`.
 - [x] Add a structural test that no mvm host package uses project release
@@ -81,12 +82,13 @@ The target shape is:
       fetch upstream *source* — stay valid; the strict no-fetch rule remains
       scoped to `mvmctl.nix`.
 
-> **Builder-VM verification follow-up.** The native recipes now carry real
-> upstream source hashes, a pinned kernel source hash, and a Cargo vendor hash
-> from the reviewed nixpkgs source-build shape. The remaining verification boxes
-> in Workstream D must still run through the approved builder-VM Nix path (host
-> Nix is never used by mvmctl): `nix flake check --no-build` for `nix/` and
-> Linux builds of `.#mvmctl` / `.#mvmctl-native-libkrun`.
+> **Builder-VM verification complete.** The native recipes carry real upstream
+> source hashes, a pinned kernel source hash, and a Cargo vendor hash from the
+> reviewed nixpkgs source-build shape. On 2026-06-19 the approved builder-VM Nix
+> path verified `nix flake check` for `nix/`, `.#mvmctl`
+> (`/nix/store/68xqmybxxlpckymlfqfvc1ka0x2yqvhx-mvmctl-0.16.1`), and
+> `.#mvmctl-native-libkrun`
+> (`/nix/store/0sg78jmbiv0yll6csmv8201ap167sm6m-mvmctl-0.16.1`).
 
 ### B2. Release installation policy
 
@@ -153,9 +155,9 @@ binary-size lever — boundaries are isolation/ownership decisions and are kept.
 - [x] `cargo check --workspace`
 - [x] `cargo fmt --all --check`
 - [x] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] Builder-VM follow-up: `nix flake check --no-build` for `nix/`
-- [ ] Builder-VM follow-up: build `.#mvmctl` on at least one Linux system
-- [ ] Builder-VM follow-up: build `.#mvmctl-native-libkrun` on at least one
+- [x] Builder-VM follow-up: `nix flake check` for `nix/`
+- [x] Builder-VM follow-up: build `.#mvmctl` on at least one Linux system
+- [x] Builder-VM follow-up: build `.#mvmctl-native-libkrun` on at least one
       Linux system
 - [x] Release artifact follow-up: verify signature/checksum metadata for the
       published binary install path → `verify-release` job in `release.yml`
