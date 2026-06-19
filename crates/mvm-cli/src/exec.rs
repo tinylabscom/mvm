@@ -489,6 +489,12 @@ fn run_inner(
 ) -> Result<Either<i32, ExecOutput>> {
     let backend = AnyBackend::auto_select();
 
+    // Phase timing (off unless `MVM_PHASE_TIMING` is set): capture a
+    // host-monotonic mark at each run seam, then emit a one-line breakdown
+    // at teardown. When disabled every mark stays `None` and costs nothing.
+    let timing = crate::commands::vm::phase_timing::enabled();
+    let t_start = timing.then(std::time::Instant::now);
+
     // Resolve image artifacts: either a named template or a pre-built pair.
     // For templates, also probe for a pre-built snapshot so we can skip the
     // cold-boot cost when the request is snapshot-eligible.
@@ -528,6 +534,8 @@ fn run_inner(
                 None,
             ),
         };
+
+    let t_image_resolved = timing.then(std::time::Instant::now);
 
     // Build read-only ext4 images for each --add-dir, staged in a transient
     // VMS subdirectory so cleanup is straightforward.
@@ -571,6 +579,7 @@ fn run_inner(
     // inside the VM, so we can't `Path::exists()` them from the host —
     // shell out into the VM instead.
     let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
+    let t_drives_ready = timing.then(std::time::Instant::now);
 
     // Template-restore VMs run without plan admission. Leave tenant_id /
     // plan_json / bundle_json at their None defaults (via
@@ -624,6 +633,7 @@ fn run_inner(
         start_config.bundle_json = sub.bundle_json;
         use_snapshot = false;
     }
+    let t_admitted = timing.then(std::time::Instant::now);
 
     let booted = if use_snapshot {
         let tmpl = template_id
@@ -656,6 +666,7 @@ fn run_inner(
             return Err(e).context("starting transient microVM");
         }
     }
+    let t_backend_started = timing.then(std::time::Instant::now);
 
     // Install Ctrl-C handler that tears the VM down.
     let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -671,6 +682,7 @@ fn run_inner(
 
     // Run the command + always tear down.
     let result = run_in_guest(&vm_name, &req, &add_dir_labels, capture);
+    let t_command_done = timing.then(std::time::Instant::now);
 
     let _ = backend.stop(&VmId(vm_name.clone()));
 
@@ -692,6 +704,38 @@ fn run_inner(
     }
 
     let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
+    let t_torn_down = timing.then(std::time::Instant::now);
+
+    // Emit the phase breakdown when every seam was marked (i.e. timing was
+    // enabled and the run reached teardown without an early return).
+    if let (
+        Some(start),
+        Some(image_resolved),
+        Some(drives_ready),
+        Some(admitted),
+        Some(backend_started),
+        Some(command_done),
+        Some(torn_down),
+    ) = (
+        t_start,
+        t_image_resolved,
+        t_drives_ready,
+        t_admitted,
+        t_backend_started,
+        t_command_done,
+        t_torn_down,
+    ) {
+        let marks = crate::commands::vm::phase_timing::RunPhaseMarks {
+            start,
+            image_resolved,
+            drives_ready,
+            admitted,
+            backend_started,
+            command_done,
+            torn_down,
+        };
+        eprintln!("{}", marks.to_timings().render());
+    }
 
     if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::bail!("interrupted");

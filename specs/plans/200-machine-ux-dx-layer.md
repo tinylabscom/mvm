@@ -859,8 +859,22 @@ Required behavior:
 
 ### B2. Hot-path latency target
 
-- [ ] Add phase timing around `machine run`: cache resolve, admission, drive
+> **Measure-first.** Phase timing is the foundation: optimize nothing until a
+> real run's breakdown is observable. The boot micro-benchmark substrate
+> (`bench microvm-launch`: `BootMarks`→`IterationTiming`, percentile/summary,
+> JSON report, baseline regression gate) already exists and is reused rather
+> than rebuilt; B2 adds the end-to-end `machine run` breakdown the bench
+> harness does not cover.
+
+- [~] Add phase timing around `machine run`: cache resolve, admission, drive
       materialization, backend start, vsock ready, command exit, teardown.
+      Landed: `commands::vm::phase_timing` (`RunPhaseMarks`→`RunPhaseTimings`,
+      pure + unit-tested) wired at the `exec::run_inner` seams — resolve,
+      drives, admit, backend start, run, teardown — emitting a single greppable
+      line to stderr behind `MVM_PHASE_TIMING=1` (default off, zero behavior
+      change). Deferred: split vsock-ready from command-exit (needs a mark
+      inside `run_in_guest`) and capture the upstream OCI cache-resolve span
+      that `run_secure` does before `run_inner` for `--image`.
 - [ ] Add a hardware-gated Linux/KVM benchmark for cached
       `machine run --image alpine -- true`.
 - [ ] Set the first acceptance bar at `<200 ms` for backend start to command
