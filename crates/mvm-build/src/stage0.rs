@@ -31,6 +31,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
@@ -386,6 +387,48 @@ fn init_hash_hex(bytes: &[u8]) -> String {
 fn extract_nix_store_tarball(tarball: &Path, nix_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(nix_dir).with_context(|| format!("creating {}", nix_dir.display()))?;
 
+    match extract_nix_store_tarball_with_native_tar(tarball, nix_dir) {
+        Ok(()) => return Ok(()),
+        Err(native_err) => {
+            if !dir_is_empty(nix_dir)? {
+                std::fs::remove_dir_all(nix_dir)
+                    .with_context(|| format!("clearing partial extract {}", nix_dir.display()))?;
+                std::fs::create_dir_all(nix_dir)
+                    .with_context(|| format!("recreating {}", nix_dir.display()))?;
+            }
+            tracing::debug!(
+                error = %native_err,
+                tarball = %tarball.display(),
+                "native tar Stage 0 extraction failed; falling back to pure Rust extractor"
+            );
+        }
+    }
+
+    extract_nix_store_tarball_pure_rust(tarball, nix_dir)
+}
+
+fn extract_nix_store_tarball_with_native_tar(tarball: &Path, nix_dir: &Path) -> Result<()> {
+    let output = Command::new("tar")
+        .arg("-xJf")
+        .arg(tarball)
+        .arg("-C")
+        .arg(nix_dir)
+        .arg("--strip-components")
+        .arg("1")
+        .output()
+        .with_context(|| "spawning tar for Stage 0 nix seed extraction")?;
+    if !output.status.success() {
+        bail!(
+            "tar -xJf {} exited {}: {}",
+            tarball.display(),
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn extract_nix_store_tarball_pure_rust(tarball: &Path, nix_dir: &Path) -> Result<()> {
     let f =
         std::fs::File::open(tarball).with_context(|| format!("opening {}", tarball.display()))?;
     let mut tar_bytes = Vec::new();
@@ -408,6 +451,12 @@ fn extract_nix_store_tarball(tarball: &Path, nix_dir: &Path) -> Result<()> {
             nix_dir.display()
         )
     })
+}
+
+fn dir_is_empty(dir: &Path) -> Result<bool> {
+    let mut entries =
+        std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    Ok(entries.next().is_none())
 }
 
 /// Hoist the children of the single top-level directory in `dir` up into
