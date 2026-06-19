@@ -1,9 +1,9 @@
 # ADR-084: Host services as a per-tenant daemon, not per-VM spawn
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-06-16
 - Owner: MVM Project
-- Related: ADR-059 (host services broker over vsock — this revises its process model), ADR-049 (TLS substitution mechanism), ADR-002 (microVM security posture — claims 12/13), ADR-041 (signed audited execution plans — claim 8), mvmd Plan 52 (host-services consumer, open)
+- Related: ADR-059 (host services broker over vsock — this revises its process model), ADR-049 (TLS substitution mechanism), ADR-002 (microVM security posture — claims 12/13), ADR-041 (signed audited execution plans — claim 8), mvmd Plan 52 (host-services consumer, complete)
 - Sequenced by: [Plan 202 — Host services daemon](../plans/202-host-services-daemon.md)
 
 ## Context

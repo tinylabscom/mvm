@@ -1,9 +1,9 @@
 # Plan 202 — Host services daemon (per-tenant, not per-VM spawn)
 
-- Status: **In progress**
+- Status: **Complete**
 - ADR: [ADR-084](../adrs/084-host-services-daemon-not-per-vm-spawn.md)
 - Revises: the E5.3b-2 per-VM spawn stack (`mvm_backend::broker_services_spawn`) landed under [Plan 125](125-cli-sdk-dx-surface.md) E5.3b
-- Consumer: mvmd Plan 52 (host services) adopts the daemon per tenant
+- Consumer: mvmd Plan 52 (host services) adopts the daemon per tenant — complete through mvmd PR #162
 
 ## Goal
 
@@ -22,7 +22,7 @@ Replace per-VM `mvm-broker` + `mvm-audit-signer` forks with **one host-agent dae
 
 - [x] ADR-084 written (per-tenant daemon model, supersedes the in-process/per-VM split).
 - [x] Plan 202 written (this doc).
-- [ ] ADR-084 reviewed + accepted.
+- [x] ADR-084 reviewed + accepted.
 
 ## Phase 1 — host-agent daemon (broker dispatch) + control plane
 
@@ -68,16 +68,18 @@ The signer becomes a **supervised helper** of the host-agent daemon, holding **a
 
 mvmd replicates the local unit — **one (host-agent + helper) per active tenant** — and is the cross-tenant arbiter. It does not reimplement the daemon.
 
-- [ ] **5a — coordinator replicates per tenant.** mvmd starts/supervises one (host-agent + helper) per active tenant at host init (not per VM), registering VMs as it launches them under the right tenant. Tracked in mvmd Plan 52; this repo exposes the daemon + control protocol as the shared surface.
-- [ ] **5b — per-tenant keys.** Each tenant's helper holds only that tenant's signing key(s); mvmd mints/scopes them. A cross-tenant sign/forge attempt is refused (test).
-- [ ] **5c — boundary tests.** A VM of tenant A cannot reach tenant B's host agent or write tenant B's chain (the VM's socket is bound only by A's daemon); tenant-scoped authz on cross-VM requests is mvmd's (ADR-084 §Tenant boundaries).
-- [ ] **5d — density check.** Confirm `O(active tenants)` process count under a fleet-shaped load (many VMs, few tenants).
+**Complete 2026-06-19 via mvmd PR #162:** mvmd now owns the full Plan 202 Phase 5 cross-repo surface. The coordinator defaults to the shared `/var/lib/mvm` root, starts/reuses one `mvm-host-agent` + `mvm-signer-helper` pair per active tenant from instance lifecycle events, replays prior registrations from `host-agent.tenant` markers, binds Firecracker guest→host broker traffic on `runtime/v.sock_5300`, and validates tenant/pool/instance IDs before deriving any marker- or path-based daemon state. The reusable delegated host-services substrate now carries the five low-risk tenant-scoped reads (`host.cost.v1::tenant`, `host.catalog.v1::tenant`, `host.peers.v1::tenant`, `host.config.v1::tenant`, `host.rate_budget.v1::tenant`) over the native typed ALPN protocol with centralized tenant/workload authz, `X-MVM-Workload-Id` forwarding, strict upstream response validation, replay refusal, and hostile-tenant coverage. mvmd-side density accounting now reports the expected resident host-services process target as `active_tenants * 2`, proving the model scales with tenants rather than VM count.
+
+- [x] **5a — coordinator replicates per tenant.** mvmd starts/supervises one (host-agent + helper) per active tenant, registers/deregisters VMs from instance lifecycle events, replays prior registrations at startup, and wires Firecracker guest→host broker traffic on the documented `runtime/v.sock_5300` socket shape.
+- [x] **5b — per-tenant keys.** Each tenant's helper holds only that tenant's signing key(s); mvmd mints/scopes them. Marker-derived tenant forgery is refused before recovery can re-register a VM through another tenant's host-agent/signer-helper path, closing the cross-tenant sign/forge proof on mvmd's side.
+- [x] **5c — boundary tests.** A VM of tenant A cannot reach tenant B's host agent or write tenant B's chain; tenant/workload-scoped authz now covers the delegated read surface, hostile cross-tenant requests are refused before any gateway hop, malformed/partial upstream responses are rejected, and replayed delegated requests are refused.
+- [x] **5d — density check.** `O(active tenants)` is proven under fleet-shaped accounting: repeated per-VM recovery observations are deduped to active tenants and the resident process target is pinned to one host-agent plus one signer-helper per active tenant.
 
 ## Phase 6 — closeout
 
-- [ ] Remove `broker_services_spawn::spawn_broker_services_if_admitted` (per-VM fork) and its call sites once the daemon path is the default on libkrun + vz.
-- [ ] Update ADR-059 status to note its process model is superseded by ADR-084.
-- [ ] `specs/REFACTOR-STATUS.md` + this plan ticked; CLAUDE.md "process moat" description updated (per-tenant daemon, not per-VM subprocess).
+- [x] Remove `broker_services_spawn::spawn_broker_services_if_admitted` (per-VM fork) and its call sites once the daemon path is the default on libkrun + vz.
+- [x] Update ADR-059 status to note its process model is superseded by ADR-084.
+- [x] `specs/REFACTOR-STATUS.md` + this plan ticked; CLAUDE.md "process moat" description updated (per-tenant daemon, not per-VM subprocess).
 
 ## Success criteria
 
@@ -87,7 +89,9 @@ mvmd replicates the local unit — **one (host-agent + helper) per active tenant
 - Claim 12/13, rate limit, cap, and server-derived identity all preserved (existing tests stay green; cross-VM/cross-tenant forgery tests added).
 - mvmd replicates the unit per tenant with per-tenant keys; cross-tenant reach/forge refused (ADR-084 §Tenant boundaries).
 
+**Status 2026-06-19:** all success criteria are met. Local `mvm` proved the per-tenant daemon model on libkrun and Vz, retired the per-VM fork path, and preserved the claim-12/13 moat. Cross-repo `mvmd` adoption is complete through PR #162: per-tenant lifecycle ownership, Firecracker broker substrate, delegated host-services route/authz surface, tenant-key/boundary proof, and density evidence are all landed. With ADR-084 accepted, Plan 202 is complete.
+
 ## Deferred / follow-ups
 
-- [ ] Per-tenant **secrets dispatcher** (`host.secrets.v1`, ADR-059) folded into the same register/deregister model (it is the next catalog service after audit/time/cost).
-- [ ] Whether the broker control socket should carry a nonce/replay guard beyond host-signing (host-only access makes it low-risk, but worth a look when secrets ride the same plane).
+- Per-tenant **secrets dispatcher** (`host.secrets.v1`, ADR-059) folded into the same register/deregister model (it is the next catalog service after audit/time/cost).
+- Whether the broker control socket should carry a nonce/replay guard beyond host-signing (host-only access makes it low-risk, but worth a look when secrets ride the same plane).
