@@ -1144,6 +1144,28 @@ that the original name-only `DnsSinkholeScan` left open (see the "uniform L4" fo
 below, now landed). WS-B also surfaced these pre-existing gaps, none caused by the WS-B
 change:
 
+- [ ] **Vz `up --wait` (verdict-capture) — the last live-validation gap (drafted 2026-06-19).**
+      The libkrun egress matrix is now live-verified `0/3/2` after the ingress-return fix
+      (#1083, the `<listen>-krun.sock` reply path). The equivalent Vz live verdict-capture is
+      still blocked only because `up --wait` is gated to libkrun (`up.rs` ~2046 fail-fast +
+      ~2858 wait block, both `== "libkrun"`). The Vz *bridge* enforcement is already covered by
+      the deterministic `*_live_vz_bridge` tests, and Vz uses a connected socketpair
+      (`run_vz_gvproxy_bridge`) so it has **no** recvfrom-source addressing bug — the #1083 fix
+      does not apply to it. The slice is small because the verdict-capture infra already exists
+      on Vz:
+      - `wait()` is backend-agnostic in substance — libkrun's impl (`libkrun.rs` ~867) just
+        polls `<vm_state_dir>/workload.exit` (no PID-liveness check) until it appears or times
+        out, and the **Vz supervisor already persists `workload.exit`** to the same path
+        (`mvm-vm-host/src/vz_objc.rs` ~468, "Mirrors `exit_capture::capture_once`").
+      - Work: (1) extract libkrun's `wait()` poll into a shared state-dir helper (reuse-first)
+        and implement `VmBackend::wait` for the Vz backend (`mvm-backend/src/vz.rs`) on top of
+        it; (2) relax the two `== "libkrun"` gates in `up.rs` to `matches!(.., "libkrun"|"vz")`;
+        (3) deterministic test that the Vz `wait()` reads a staged `workload.exit`; (4) live Vz
+        matrix (`--hypervisor vz`, `examples/egress-probe`) → expect the same `0/3/2`.
+      - Risk: low. No bridge/data-path change; egress stays deny-by-default; the receipt
+        enforcement tier is unchanged. Validate live on a quiet macOS-26 box (isolate
+        `MVM_CACHE_DIR`, seeded from `~/.cache/mvm/builder-vm/aarch64`, to avoid the one-shot
+        vs persistent vz-builder `VZErrorDomain:2` storage conflict).
 - [x] **macOS transient-run guest networking (blocks `machine run --net` on macOS).**
       Was: `mvmctl run` / `machine run` transient guests never brought up `eth0` (the init
       ran only loopback; the unprivileged uid-901 command couldn't DHCP), so a guest had no
