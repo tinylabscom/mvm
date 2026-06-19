@@ -2739,6 +2739,19 @@ mod tests {
         o
     }
 
+    /// A TCP ingress frame (internet `src:port` → guest 10.0.0.2) — the return
+    /// direction of [`tcp_egress_frame_to`]. Drives the bridge's internet→guest
+    /// leg so the full-duplex return path is exercised, not just egress.
+    fn tcp_ingress_frame_from(src: [u8; 4], src_port: u16, payload: &[u8]) -> Vec<u8> {
+        use etherparse::PacketBuilder;
+        let b = PacketBuilder::ethernet2([2; 6], [1; 6])
+            .ipv4(src, [10, 0, 0, 2], 64)
+            .tcp(src_port, 40000, 1, 64000);
+        let mut o = Vec::new();
+        b.write(&mut o, payload).unwrap();
+        o
+    }
+
     /// A bare DNS pin registry pinning `host` to `ips`, valid now — the
     /// admission-time pin `run_bridge_inner` resolves on the host. Tests build it
     /// by hand so the bare-L4 lowering is exercised without real DNS.
@@ -3316,6 +3329,131 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bare_unrestricted_policy_forwards_egress_through_the_live_bridge() {
+        // `--network-preset unrestricted`: the bare lowering opens the flow gate
+        // and the L4 scan resolves to `Unrestricted` (no host:port gate), so
+        // arbitrary egress reaches gvproxy under the always-on mandatory-deny
+        // backstop. This is the verdict-0 arm of the libkrun egress matrix
+        // (`up --network-preset unrestricted`), the sibling of the deny-all and
+        // allow-list arms above. Its absence let the "drops every flow regardless
+        // of policy" regression hide: deny-all *looked* right while unrestricted
+        // silently dropped too.
+        let (l4, dns_allow, policy) = bare_network_policy_egress(
+            &mvm_core::network_policy::NetworkPolicy::unrestricted(),
+            &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let sup_listen = dir.path().join("sup.sock");
+        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+            gvproxy_path.clone(),
+            sup_listen.clone(),
+            "vm-test".to_string(),
+            "t".to_string(),
+            policy,
+            tx,
+            wiring_with_egress_scan(l4, dns_allow),
+        ));
+        let libkrun = connect_libkrun(&sup_listen).await;
+        // An arbitrary host:port a deny-all or allow-list policy would drop.
+        libkrun
+            .send(&tcp_egress_frame_to([203, 0, 113, 9], 8443, b"payload"))
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 65536];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), gvproxy.recv(&mut buf))
+            .await
+            .expect("unrestricted egress must reach gvproxy")
+            .expect("recv ok");
+        let parsed = crate::supervisor::network::packet::parse(&buf[..n])
+            .expect("forwarded frame re-parses");
+        assert_eq!(parsed.five_tuple.dst_port, 8443);
+        bridge.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn live_bridge_relays_ingress_reply_back_to_the_guest() {
+        // Full-duplex proof: an internet→guest reply gvproxy emits must traverse
+        // the bridge back to the guest. The bridge keys the return path on
+        // libkrun's bound peer address (`SocketAddr::as_pathname`); real libkrun
+        // binds its unixgram socket (the bridge and gvproxy both reject
+        // empty-address peers — macOS never autobinds AF_UNIX datagram sockets),
+        // so model that with a bound client here. Without this return leg the
+        // guest's TCP handshake never completes and every egress probe times out
+        // regardless of policy — the bridge would *look* like a deny-all even
+        // when egress was admitted.
+        let (l4, dns_allow, policy) = bare_network_policy_egress(
+            &mvm_core::network_policy::NetworkPolicy::unrestricted(),
+            &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let sup_listen = dir.path().join("sup.sock");
+        let libkrun_path = dir.path().join("libkrun.sock");
+        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+            gvproxy_path.clone(),
+            sup_listen.clone(),
+            "vm-test".to_string(),
+            "t".to_string(),
+            policy,
+            tx,
+            wiring_with_egress_scan(l4, dns_allow),
+        ));
+        // Real libkrun binds its socket; mirror that so the bridge can address
+        // the return path (an unbound client has no pathname to reply to).
+        let libkrun = tokio::net::UnixDatagram::bind(&libkrun_path).unwrap();
+        let mut connected = false;
+        for _ in 0..100 {
+            if libkrun.connect(&sup_listen).is_ok() {
+                connected = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(connected, "bridge never bound {}", sup_listen.display());
+        // Egress first so the bridge caches libkrun's peer and gvproxy learns the
+        // bridge's gvproxy-facing address.
+        libkrun
+            .send(&tcp_egress_frame_to([1, 1, 1, 1], 443, b"syn"))
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 65536];
+        let (n, bridge_peer) = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            gvproxy.recv_from(&mut buf),
+        )
+        .await
+        .expect("egress must reach gvproxy")
+        .expect("recv ok");
+        assert!(n > 0);
+        // gvproxy emits the internet→guest reply back to the bridge's
+        // gvproxy-facing socket.
+        let bridge_outbound = bridge_peer
+            .as_pathname()
+            .expect("the bridge's gvproxy-facing socket is bound to a pathname");
+        gvproxy
+            .send_to(
+                &tcp_ingress_frame_from([1, 1, 1, 1], 443, b"synack"),
+                bridge_outbound,
+            )
+            .await
+            .unwrap();
+        // The reply must reach the guest.
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), libkrun.recv(&mut buf))
+            .await
+            .expect("the ingress reply must reach the guest")
+            .expect("recv ok");
+        let parsed =
+            crate::supervisor::network::packet::parse(&buf[..n]).expect("ingress frame re-parses");
+        assert_eq!(parsed.five_tuple.src_port, 443);
+        bridge.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bare_deny_all_drops_dhcp_discover_through_the_live_bridge() {
         // Deny-all control-plane posture (loopback-only): DHCP is an egress flow,
         // so it is dropped at the flow gate under deny-all — no lease reaches the
@@ -3420,6 +3558,50 @@ mod tests {
             saw_drop,
             "deny-all on the Vz bridge must emit FlowClosed{{PolicyDropped}}"
         );
+        bridge.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bare_unrestricted_policy_forwards_egress_through_the_live_vz_bridge() {
+        // Parity proof for the PRIMARY Vz path's verdict-0 arm: an unrestricted
+        // bare policy opens the flow gate and the L4 scan is `Unrestricted`, so
+        // arbitrary egress reaches gvproxy. The sibling of the Vz deny-all test
+        // above — together they prove the Vz bridge enforces *selectively*, not
+        // "drop everything", matching the libkrun matrix.
+        let (l4, dns_allow, policy) = bare_network_policy_egress(
+            &mvm_core::network_policy::NetworkPolicy::unrestricted(),
+            &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+
+        let (guest, sup) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        guest.set_nonblocking(true).unwrap();
+        let sup_fd: std::os::fd::OwnedFd = sup.into();
+
+        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let bridge = tokio::spawn(run_vz_gvproxy_bridge(
+            sup_fd,
+            gvproxy_path.clone(),
+            "vm-test".to_string(),
+            "t".to_string(),
+            policy,
+            tx,
+            wiring_with_egress_scan(l4, dns_allow),
+        ));
+        guest
+            .send(&tcp_egress_frame_to([203, 0, 113, 9], 8443, b"payload"))
+            .unwrap();
+
+        let mut buf = vec![0u8; 65536];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), gvproxy.recv(&mut buf))
+            .await
+            .expect("unrestricted egress must reach gvproxy on the Vz bridge")
+            .expect("recv ok");
+        let parsed = crate::supervisor::network::packet::parse(&buf[..n])
+            .expect("forwarded frame re-parses");
+        assert_eq!(parsed.five_tuple.dst_port, 8443);
         bridge.abort();
     }
 
