@@ -84,36 +84,39 @@ pub fn run_packet_pipeline<'a>(
     // `owned` holds the live frame once an observer has rebuilt it.
     let mut owned: Option<Vec<u8>> = None;
 
-    // Egress stages: outbound leak controls that run before the
-    // observer chain, so a substituted payload is what the observers + the wire
-    // see. Egress only. Scan first — a drop short-circuits before rewrite work.
-    if ctx.direction == FlowDirection::Egress {
-        if let ScanOutcome::Drop { by } = scan.scan(&ctx, &parsed) {
-            return PacketDecision::Kill {
-                observer: by,
-                reason: KillReason::Drop,
-                flow_key,
-            };
-        }
-        if let Some(new_payload) = substitution.substitute(&ctx, &parsed)
-            && new_payload != parsed.l4_payload
-        {
-            match packet::rebuild_with_payload(raw_frame, &new_payload, mtu) {
-                Ok(new_frame) => owned = Some(new_frame),
-                Err(packet::RebuildError::ExceedsMtu { .. }) => {
-                    return PacketDecision::Kill {
-                        observer: substitution.name(),
-                        reason: KillReason::ModifyOverMtu,
-                        flow_key,
-                    };
-                }
-                Err(_) => {
-                    return PacketDecision::Kill {
-                        observer: substitution.name(),
-                        reason: KillReason::ModifyUnserializable,
-                        flow_key,
-                    };
-                }
+    // Scan before the observer chain, so a drop short-circuits before rewrite
+    // work. Individual scans self-limit by direction: egress leak controls
+    // inspect outbound payloads, while protocol classifiers may inspect inbound
+    // server banners before any guest bytes consume them.
+    if let ScanOutcome::Drop { by } = scan.scan(&ctx, &parsed) {
+        return PacketDecision::Kill {
+            observer: by,
+            reason: KillReason::Drop,
+            flow_key,
+        };
+    }
+
+    // Substitution is outbound-only: ingress payloads are remote-authored and
+    // must not be rewritten before reaching the guest.
+    if ctx.direction == FlowDirection::Egress
+        && let Some(new_payload) = substitution.substitute(&ctx, &parsed)
+        && new_payload != parsed.l4_payload
+    {
+        match packet::rebuild_with_payload(raw_frame, &new_payload, mtu) {
+            Ok(new_frame) => owned = Some(new_frame),
+            Err(packet::RebuildError::ExceedsMtu { .. }) => {
+                return PacketDecision::Kill {
+                    observer: substitution.name(),
+                    reason: KillReason::ModifyOverMtu,
+                    flow_key,
+                };
+            }
+            Err(_) => {
+                return PacketDecision::Kill {
+                    observer: substitution.name(),
+                    reason: KillReason::ModifyUnserializable,
+                    flow_key,
+                };
             }
         }
     }
@@ -574,9 +577,9 @@ mod tests {
     }
 
     #[test]
-    fn egress_stages_skip_on_ingress() {
-        // A scan that would drop must not fire on ingress — these are
-        // outbound-only leak controls.
+    fn scan_stage_runs_on_ingress() {
+        // Ingress protocol classifiers must be able to kill a flow before the
+        // inbound payload reaches the guest.
         let f = frame(b"leak-SECRET");
         let obs: Vec<Arc<dyn Observer>> = vec![];
         let scan = ScanFn(|_| ScanOutcome::Drop { by: "test-scan" });
@@ -590,8 +593,42 @@ mod tests {
             &lat(),
         );
         assert!(
-            matches!(d, PacketDecision::Forward { .. }),
-            "stages are egress-only"
+            matches!(
+                d,
+                PacketDecision::Kill {
+                    observer: "test-scan",
+                    reason: KillReason::Drop,
+                    ..
+                }
+            ),
+            "scan stages must run on ingress"
         );
+    }
+
+    #[test]
+    fn substitution_stage_skips_ingress() {
+        let f = frame(b"token=REAL");
+        let obs: Vec<Arc<dyn Observer>> = vec![];
+        let subst = SubstFn(|_| Some(b"token=XXXX".to_vec()));
+        let d = run_packet_pipeline(
+            &obs,
+            &subst,
+            &NoopScan,
+            ctx(FlowDirection::Ingress),
+            &f,
+            1514,
+            &lat(),
+        );
+        match d {
+            PacketDecision::Forward { frame, .. } => {
+                assert!(
+                    matches!(frame, Cow::Borrowed(_)),
+                    "ingress must not rebuild"
+                );
+                let parsed = packet::parse(&frame).expect("forwarded frame parses");
+                assert_eq!(parsed.l4_payload, b"token=REAL");
+            }
+            other => panic!("expected unchanged Forward, got {other:?}"),
+        }
     }
 }

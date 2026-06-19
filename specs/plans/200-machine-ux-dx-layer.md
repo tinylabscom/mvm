@@ -1034,9 +1034,10 @@ Required behavior:
          `ssh-add`, `sshd`, or read any key/known-host path.
       3. Start a host test listener on a non-standard port such as `2222` that
          emits an SSH banner (`SSH-2.0-...`), allow that host:port explicitly,
-         and prove guest egress is denied/audited as SSH protocol, not merely
-         as TCP/22. Until that witness exists, non-standard-port SSH protocol
-         denial is not claimed.
+         and prove guest egress is denied/audited as SSH protocol by the runtime
+         SSH-identification-string classifier (`ssh-banner-protocol-deny`), not
+         merely as TCP/22. Until that live witness exists, non-standard-port SSH
+         protocol denial is implemented but not claimed.
       4. 2026-06-19 Firecracker-box attempt now reaches guest boot but the live
          round-trip remains open. Branch-local `mvmctl` starts a dev-profile
          `alpine:latest` persistent machine with `[auth].ssh_agent = true`;
@@ -1053,9 +1054,9 @@ Required behavior:
          unit-tests the backend transport selection. Remaining gated proof:
          rerun the same raw in-guest probe and observe
          `SSH_AGENT_IDENTITIES_ANSWER` before claiming the smoke. The
-         non-standard-port SSH-banner denial also remains unclaimed because
-         current enforcement only bans TCP/22 plus template SSH material; no
-         runtime SSH-banner classifier exists yet.
+         non-standard-port SSH-banner denial remains unclaimed until a live
+         guest witness proves the new runtime classifier on an explicitly
+         allowed non-22 port.
 - [ ] Normalize `-v/--volume HOST:GUEST[:ro|rw]` across `machine run` and
       `machine create`.
 - [ ] Preserve read-only default and explicit `:rw` requirement.

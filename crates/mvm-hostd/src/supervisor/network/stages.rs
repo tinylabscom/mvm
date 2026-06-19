@@ -322,9 +322,12 @@ impl ScanStage for DnsSinkholeScan {
         "dns-sinkhole"
     }
 
-    fn scan(&self, _ctx: &PacketCtx<'_>, pkt: &ParsedPacket<'_>) -> ScanOutcome {
+    fn scan(&self, ctx: &PacketCtx<'_>, pkt: &ParsedPacket<'_>) -> ScanOutcome {
         // Only DNS over UDP/53 is policy-checked; everything else passes.
-        if pkt.five_tuple.proto != L4Proto::Udp || pkt.five_tuple.dst_port != 53 {
+        if ctx.direction != FlowDirection::Egress
+            || pkt.five_tuple.proto != L4Proto::Udp
+            || pkt.five_tuple.dst_port != 53
+        {
             return ScanOutcome::Pass;
         }
         match dns_query_qname(pkt.l4_payload) {
@@ -434,6 +437,61 @@ impl ScanStage for PlaceholderLeakScan {
             ScanOutcome::Pass
         }
     }
+}
+
+/// Drops inbound TCP server identification strings for SSH (`SSH-2.0-...`),
+/// including SSH daemons moved off port 22. TCP/22 blocking alone is not a
+/// protocol ban; this classifier catches the protocol banner on any port before
+/// the guest consumes it. Egress is ignored so guest-authored strings in request
+/// bodies are not misclassified as remote SSH service exposure.
+pub struct SshBannerProtocolDenyScan;
+
+impl ScanStage for SshBannerProtocolDenyScan {
+    fn name(&self) -> &'static str {
+        "ssh-banner-protocol-deny"
+    }
+
+    fn scan(&self, ctx: &PacketCtx<'_>, pkt: &ParsedPacket<'_>) -> ScanOutcome {
+        if ctx.direction != FlowDirection::Ingress || pkt.five_tuple.proto != L4Proto::Tcp {
+            return ScanOutcome::Pass;
+        }
+        if is_ssh_identification_banner(pkt.l4_payload) {
+            ScanOutcome::Drop { by: self.name() }
+        } else {
+            ScanOutcome::Pass
+        }
+    }
+}
+
+fn is_ssh_identification_banner(payload: &[u8]) -> bool {
+    let max_len = payload.len().min(255);
+    let mut remaining = &payload[..max_len];
+    while !remaining.is_empty() {
+        let line_end = remaining
+            .iter()
+            .position(|b| *b == b'\n')
+            .unwrap_or(remaining.len());
+        let line = remaining[..line_end]
+            .strip_suffix(b"\r")
+            .unwrap_or(&remaining[..line_end]);
+        if is_ssh_identification_line(line) {
+            return true;
+        }
+        if line_end == remaining.len() {
+            return false;
+        }
+        remaining = &remaining[line_end + 1..];
+    }
+    false
+}
+
+fn is_ssh_identification_line(line: &[u8]) -> bool {
+    line.len() >= b"SSH-1.0".len()
+        && line.starts_with(b"SSH-")
+        && line[4].is_ascii_digit()
+        && line[5] == b'.'
+        && line[6].is_ascii_digit()
+        && line.iter().all(|b| b.is_ascii_graphic() || *b == b' ')
 }
 
 /// Enforces a resolved [`NetworkPolicy`] on the egress packet path (claim 10):
@@ -566,14 +624,17 @@ impl ScanStage for L4PolicyScan {
     }
 }
 
-/// Build the egress `ScanStage` for a VM's gateway bridge, composing the
-/// per-tenant egress filters under the always-on host-side mandatory-deny:
+/// Build the default `ScanStage` for a VM's gateway bridge, composing the
+/// per-tenant egress filters under the always-on host-side mandatory-deny plus
+/// inbound protocol classifiers:
 ///
 /// - `MandatoryDenyEgressScan` — always (link-local + cloud metadata).
 /// - `PlaceholderLeakScan` — always: drops any egress carrying a substitution
 ///   placeholder out the raw wire. Always-on because
 ///   the placeholder namespace is host-reserved and the scan is a cheap
 ///   single-prefix check — a workload that never uses secrets never trips it.
+/// - `SshBannerProtocolDenyScan` — always: drops inbound SSH server banners on
+///   any TCP port.
 /// - `L4PolicyScan(l4)` — when the bundle resolved an L4 policy (CIDR/port).
 /// - `DnsSinkholeScan(dns_allow)` — when `dns_allow` (the bundle's egress
 ///   allow-list hostnames) is non-empty: sink-holes UDP/53 lookups for hosts
@@ -584,10 +645,11 @@ pub fn build_egress_scan(
     l4: Option<CanonicalEgress>,
     dns_allow: Vec<String>,
 ) -> Arc<dyn ScanStage> {
-    // Always-on host backstops: mandatory-deny egress ranges + placeholder-leak.
+    // Always-on host backstops and protocol classifiers.
     let mut stages: Vec<Arc<dyn ScanStage>> = vec![
         Arc::new(MandatoryDenyEgressScan),
         Arc::new(PlaceholderLeakScan),
+        Arc::new(SshBannerProtocolDenyScan),
     ];
     if let Some(eg) = l4 {
         stages.push(Arc::new(L4PolicyScan::new(eg)));
@@ -650,6 +712,20 @@ mod tests {
                 dst_ip: "1.1.1.1".parse().unwrap(),
                 src_port: 5000,
                 dst_port: 443,
+            },
+            l4_payload: payload,
+            raw_frame: payload,
+        }
+    }
+
+    fn tcp_ingress(payload: &[u8]) -> ParsedPacket<'_> {
+        ParsedPacket {
+            five_tuple: FiveTuple {
+                proto: L4Proto::Tcp,
+                src_ip: "1.1.1.1".parse().unwrap(),
+                dst_ip: "10.0.0.2".parse().unwrap(),
+                src_port: 2022,
+                dst_port: 5000,
             },
             l4_payload: payload,
             raw_frame: payload,
@@ -824,6 +900,72 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ssh_banner_protocol_deny_drops_ingress_tcp_banner() {
+        let payload = b"SSH-2.0-OpenSSH_9.6\r\n";
+        assert_eq!(
+            SshBannerProtocolDenyScan.scan(&ingress_ctx(), &tcp_ingress(payload)),
+            ScanOutcome::Drop {
+                by: "ssh-banner-protocol-deny"
+            }
+        );
+    }
+
+    #[test]
+    fn ssh_banner_protocol_deny_drops_ingress_tcp_banner_after_preamble() {
+        let payload = b"maintenance notice\r\nSSH-2.0-OpenSSH_9.6\r\n";
+        assert_eq!(
+            SshBannerProtocolDenyScan.scan(&ingress_ctx(), &tcp_ingress(payload)),
+            ScanOutcome::Drop {
+                by: "ssh-banner-protocol-deny"
+            }
+        );
+    }
+
+    #[test]
+    fn ssh_banner_protocol_deny_passes_egress_banner_like_payload() {
+        let payload = b"SSH-2.0-string-in-a-request\r\n";
+        assert_eq!(
+            SshBannerProtocolDenyScan.scan(&egress_ctx(), &tcp_egress(payload)),
+            ScanOutcome::Pass
+        );
+    }
+
+    #[test]
+    fn ssh_banner_protocol_deny_passes_non_ssh_ingress_payload() {
+        assert_eq!(
+            SshBannerProtocolDenyScan.scan(&ingress_ctx(), &tcp_ingress(b"HTTP/1.1 200 OK\r\n")),
+            ScanOutcome::Pass
+        );
+        assert_eq!(
+            SshBannerProtocolDenyScan.scan(&ingress_ctx(), &tcp_ingress(b"SSH-not-a-version\r\n")),
+            ScanOutcome::Pass
+        );
+        assert_eq!(
+            SshBannerProtocolDenyScan.scan(&ingress_ctx(), &tcp_ingress(b"SSH-2X0-not-ssh\r\n")),
+            ScanOutcome::Pass
+        );
+    }
+
+    #[test]
+    fn ssh_banner_protocol_deny_passes_udp_payload() {
+        let pkt = ParsedPacket {
+            five_tuple: FiveTuple {
+                proto: L4Proto::Udp,
+                src_ip: "1.1.1.1".parse().unwrap(),
+                dst_ip: "10.0.0.2".parse().unwrap(),
+                src_port: 2022,
+                dst_port: 5000,
+            },
+            l4_payload: b"SSH-2.0-OpenSSH_9.6\r\n",
+            raw_frame: b"SSH-2.0-OpenSSH_9.6\r\n",
+        };
+        assert_eq!(
+            SshBannerProtocolDenyScan.scan(&ingress_ctx(), &pkt),
+            ScanOutcome::Pass
+        );
+    }
+
     /// A UDP/53 packet carrying `payload` as its DNS message.
     fn dns_packet(payload: &[u8]) -> ParsedPacket<'_> {
         ParsedPacket {
@@ -914,6 +1056,16 @@ mod tests {
             raw_frame: b"not-dns",
         };
         assert_eq!(scan.scan(&egress_ctx(), &tcp), ScanOutcome::Pass);
+    }
+
+    #[test]
+    fn dns_sinkhole_ignores_ingress() {
+        let scan = DnsSinkholeScan::new(vec!["corp.internal".to_string()]);
+        let query = dns_query("tracker.evil.example");
+        assert_eq!(
+            scan.scan(&ingress_ctx(), &dns_packet(&query)),
+            ScanOutcome::Pass
+        );
     }
 
     #[test]
@@ -1152,6 +1304,17 @@ mod tests {
             scan.scan(&egress_ctx(), &tcp_egress(leak)),
             ScanOutcome::Drop {
                 by: "placeholder-leak"
+            }
+        );
+    }
+
+    #[test]
+    fn build_egress_scan_always_includes_ssh_banner_protocol_deny() {
+        let scan = build_egress_scan(None, vec![]);
+        assert_eq!(
+            scan.scan(&ingress_ctx(), &tcp_ingress(b"SSH-2.0-OpenSSH_9.6\r\n")),
+            ScanOutcome::Drop {
+                by: "ssh-banner-protocol-deny"
             }
         );
     }

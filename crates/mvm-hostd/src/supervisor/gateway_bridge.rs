@@ -1259,7 +1259,10 @@ async fn flow_is_killed(killed: &tokio::sync::Mutex<HashSet<FlowKey>>, raw: &[u8
         return false;
     }
     match packet::parse(raw) {
-        Some(p) => guard.contains(&p.five_tuple.flow_key()),
+        Some(p) => {
+            let key = p.five_tuple.flow_key();
+            guard.contains(&key) || guard.contains(&key.reversed())
+        }
         None => false,
     }
 }
