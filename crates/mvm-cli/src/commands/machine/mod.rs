@@ -1226,6 +1226,10 @@ fn machine_start_audit_detail(input: &MachineStartReceiptInput) -> String {
 
 fn ssh_agent_proxy_listen_for_backend(vm_name: &str, backend: &str) -> SshAgentProxyListen {
     match backend {
+        "firecracker" => SshAgentProxyListen::Uds(mvm_core::config::vm_vsock_port_socket(
+            vm_name,
+            mvm_guest::vsock::SSH_AGENT_PORT,
+        )),
         "vz" => SshAgentProxyListen::Uds(mvm_core::config::vm_vz_vsock_port_socket(
             vm_name,
             mvm_guest::vsock::SSH_AGENT_PORT,
@@ -2389,6 +2393,48 @@ ssh_agent = true
             "unexpected error: {msg}"
         );
         guest_thread.join().expect("guest thread");
+    }
+
+    #[test]
+    fn ssh_agent_proxy_uses_backend_socket_transport_for_firecracker_and_in_process_vmms() {
+        let cases = [
+            (
+                "firecracker",
+                mvm_core::config::vm_vsock_port_socket("devbox", mvm_guest::vsock::SSH_AGENT_PORT),
+            ),
+            (
+                "libkrun",
+                mvm_core::config::vm_vsock_port_socket("devbox", mvm_guest::vsock::SSH_AGENT_PORT),
+            ),
+            (
+                "vz",
+                mvm_core::config::vm_vz_vsock_port_socket(
+                    "devbox",
+                    mvm_guest::vsock::SSH_AGENT_PORT,
+                ),
+            ),
+        ];
+
+        for (backend, expected) in cases {
+            match ssh_agent_proxy_listen_for_backend("devbox", backend) {
+                SshAgentProxyListen::Uds(path) => assert_eq!(path, expected),
+                SshAgentProxyListen::Vsock(port) => {
+                    panic!("{backend} unexpectedly selected AF_VSOCK port {port}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ssh_agent_proxy_keeps_qemu_on_raw_vsock_transport() {
+        match ssh_agent_proxy_listen_for_backend("devbox", "qemu") {
+            SshAgentProxyListen::Vsock(port) => {
+                assert_eq!(port, mvm_guest::vsock::SSH_AGENT_PORT);
+            }
+            SshAgentProxyListen::Uds(path) => {
+                panic!("qemu unexpectedly selected UDS {}", path.display())
+            }
+        }
     }
 
     #[test]
