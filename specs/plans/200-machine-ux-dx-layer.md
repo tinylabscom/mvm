@@ -1039,29 +1039,32 @@ Required behavior:
          `ssh-add`, `sshd`, or read any key/known-host path.
       3. Start a host test listener on a non-standard port such as `2222` that
          emits an SSH banner (`SSH-2.0-...`), allow that host:port explicitly,
-         and prove guest egress is denied/audited as SSH protocol by the runtime
-         SSH-identification-string classifier (`ssh-banner-protocol-deny`), not
-         merely as TCP/22. Until that live witness exists, non-standard-port SSH
-         protocol denial is implemented but not claimed.
+         and prove guest egress is denied/audited as SSH protocol, not merely
+         as TCP/22. Runtime packet enforcement now includes an ingress
+         SSH-identification-string classifier (`ssh-banner-protocol-deny`) on
+         any TCP port, plus reverse-flow kill matching so an inbound banner drop
+         kills the matching egress flow; Firecracker's default bridge/TAP path
+         also installs an inbound TCP string-match drop for the same `SSH-`
+         banner prefix. Firecracker KVM proof at `4ce7d938` used the
+         runtime-assigned/scoped guest IP plus a manual default route against
+         `140.82.121.36:443`; TCP opened, but no `SSH-2.0-...` banner bytes
+         reached the guest.
       4. 2026-06-19 Firecracker-box attempt now reaches guest boot but the live
-         round-trip remains open. Branch-local `mvmctl` starts a dev-profile
-         `alpine:latest` persistent machine with `[auth].ssh_agent = true`;
-         dry-run, signed receipt, and audit surfaces report
-         `ssh-agent-socket`; and raw `SSH_AGENTC_REQUEST_IDENTITIES` probes to
-         both the throwaway host agent and spawned per-machine proxy UDS return
-         an SSH-agent identities answer. The in-guest raw probe copied to
-         `/tmp/mvm-agent-probe-c` reaches `/run/mvm/ssh-agent.sock` but reads
-         `Connection reset by peer`, narrowing the remaining blocker to
-         Firecracker guest-to-host host-listen forwarding for dev
+         SSH-agent round-trip remains open. Branch-local `mvmctl` starts a
+         dev-profile `alpine:latest` persistent machine with
+         `[auth].ssh_agent = true`; dry-run, signed receipt, and audit surfaces
+         report `ssh-agent-socket`; and raw `SSH_AGENTC_REQUEST_IDENTITIES`
+         probes to both the throwaway host agent and spawned per-machine proxy
+         UDS return an SSH-agent identities answer. The in-guest raw probe
+         copied to `/tmp/mvm-agent-probe-c` reaches `/run/mvm/ssh-agent.sock`
+         but reads `Connection reset by peer`, narrowing the remaining blocker
+         to Firecracker guest-to-host host-listen forwarding for dev
          `SSH_AGENT_PORT` 5301. Follow-up code in this PR routes Firecracker
          SSH-agent proxy traffic through the per-port runtime UDS
          (`vm_vsock_port_socket(..., 5301)`) instead of raw host AF_VSOCK and
          unit-tests the backend transport selection. Remaining gated proof:
          rerun the same raw in-guest probe and observe
-         `SSH_AGENT_IDENTITIES_ANSWER` before claiming the smoke. The
-         non-standard-port SSH-banner denial remains unclaimed until a live
-         guest witness proves the new runtime classifier on an explicitly
-         allowed non-22 port.
+         `SSH_AGENT_IDENTITIES_ANSWER` before claiming the auth smoke.
 - [ ] Normalize `-v/--volume HOST:GUEST[:ro|rw]` across `machine run` and
       `machine create`.
 - [ ] Preserve read-only default and explicit `:rw` requirement.
