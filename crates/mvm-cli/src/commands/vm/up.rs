@@ -1337,10 +1337,12 @@ pub(in crate::commands) struct Args {
     #[arg(long, default_value = "0")]
     pub metrics_port: u16,
     /// Keep this many prelaunched supervisor standbys warm so the next
-    /// auto-named `up` claims one instead of cold-booting. 0 (default) = feature off. Only
-    /// the libkrun backend has a standby pool today; a claim uses the gateway-bridge path.
-    #[arg(long, default_value = "0")]
-    pub warm_pool_size: u32,
+    /// auto-named `up` claims one instead of cold-booting. Omit to use the
+    /// residency-policy default (`MVM_RESIDENCY`); pass `0` to disable. Only
+    /// the libkrun backend has a standby pool today; a claim uses the
+    /// gateway-bridge path.
+    #[arg(long)]
+    pub warm_pool_size: Option<u32>,
     /// Reload ~/.mvm/config.toml automatically when it changes
     #[arg(long)]
     pub watch_config: bool,
@@ -1802,8 +1804,8 @@ pub(in crate::commands) struct RunParams<'a> {
     pub(super) env_vars: &'a [String],
     pub(super) forward: bool,
     pub(super) metrics_port: u16,
-    /// `--warm-pool-size`; 0 = off.
-    pub(super) warm_pool_size: u32,
+    /// `--warm-pool-size`; `None` = fall back to residency policy; `Some(0)` = off.
+    pub(super) warm_pool_size: Option<u32>,
     pub(super) watch_config: bool,
     pub(super) watch: bool,
     pub(super) detach: bool,
@@ -2676,7 +2678,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             config_files: &config_files,
             secret_files: &secret_files,
             port_mappings: &port_mappings,
-            warm_pool_size,
+            warm_pool_size: mvm_core::residency::effective_warm_pool_size(warm_pool_size),
             network_policy: network_policy.clone(),
         }
         .into_start_config();

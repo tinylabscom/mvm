@@ -78,6 +78,15 @@ fn host_default_for(is_vz_default_tier: bool) -> ResidencyPolicy {
     }
 }
 
+/// The warm-pool size to use: an explicit request wins; otherwise the resolved
+/// residency policy's warm target.
+pub fn effective_warm_pool_size(explicit: Option<u32>) -> u32 {
+    match explicit {
+        Some(n) => n,
+        None => resolve_residency().0.warm_target(),
+    }
+}
+
 /// Resolve the active policy: `MVM_RESIDENCY` if set to a known value, else the
 /// per-host default. Returns the policy and which source decided it.
 pub fn resolve_residency() -> (ResidencyPolicy, ResidencySource) {
@@ -144,5 +153,11 @@ mod tests {
     fn host_default_is_warm_on_vz_tier_parked_otherwise() {
         assert_eq!(host_default_for(true), ResidencyPolicy::always_warm());
         assert_eq!(host_default_for(false), ResidencyPolicy::parked());
+    }
+
+    #[test]
+    fn explicit_warm_pool_size_overrides_policy() {
+        assert_eq!(effective_warm_pool_size(Some(3)), 3);
+        assert_eq!(effective_warm_pool_size(Some(0)), 0);
     }
 }
