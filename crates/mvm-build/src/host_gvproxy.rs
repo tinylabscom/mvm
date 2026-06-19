@@ -191,12 +191,27 @@ pub fn spawn_detached(scratch_dir: &Path) -> Result<HostGvproxyInfo> {
     }
 }
 
-/// Read the PID file under `scratch_dir`, SIGTERM the gvproxy
-/// process, wait up to `STOP_TIMEOUT` for it to exit, and fall
-/// back to SIGKILL. Removes the PID file + socket file on success
-/// or on a clean already-gone state. Idempotent — no-op when the
-/// PID file is missing or the named process is already gone.
+/// SIGTERM the gvproxy process named by the PID file under `scratch_dir`,
+/// wait up to `STOP_TIMEOUT` for it to exit, and fall back to SIGKILL.
+/// Removes the PID + socket files. Idempotent — no-op when the PID file is
+/// missing or the named process is already gone.
 pub fn stop_by_pid_file(scratch_dir: &Path) -> Result<()> {
+    stop_by_pid_file_with_grace(scratch_dir, Some(STOP_TIMEOUT))
+}
+
+/// Like [`stop_by_pid_file`] but skips the graceful SIGTERM window and
+/// SIGKILLs the gvproxy process immediately — for ephemeral transient
+/// teardown (`mvmctl run` / `machine run`) where the userspace gateway has
+/// nothing to flush. gvproxy ignores SIGTERM, so the graceful path always
+/// burns the full `STOP_TIMEOUT`; this path returns at once.
+pub fn kill_by_pid_file(scratch_dir: &Path) -> Result<()> {
+    stop_by_pid_file_with_grace(scratch_dir, None)
+}
+
+/// Shared teardown. With `grace == None` the process is SIGKILLed
+/// immediately; with `Some(d)` it is SIGTERMed, polled up to `d`, then
+/// SIGKILLed. Removes the PID + socket files on every terminal path.
+fn stop_by_pid_file_with_grace(scratch_dir: &Path, grace: Option<Duration>) -> Result<()> {
     let pid_path = scratch_dir.join(PID_FILE_NAME);
     let socket_path = scratch_dir.join(SOCKET_FILE_NAME);
 
@@ -228,19 +243,26 @@ pub fn stop_by_pid_file(scratch_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    // SAFETY: pid was just probed alive; SIGTERM on a stale pid
-    // returns ESRCH which we treat as a benign race.
-    unsafe { libc::kill(pid, libc::SIGTERM) };
-
-    let deadline = Instant::now() + STOP_TIMEOUT;
-    while Instant::now() < deadline {
-        if !pid_alive(pid) {
-            break;
+    match grace {
+        // No flush needed for an ephemeral gateway — kill at once.
+        None => unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        },
+        Some(d) => {
+            // SAFETY: pid was just probed alive; SIGTERM on a stale pid
+            // returns ESRCH which we treat as a benign race.
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+            let deadline = Instant::now() + d;
+            while Instant::now() < deadline {
+                if !pid_alive(pid) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if pid_alive(pid) {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
         }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    if pid_alive(pid) {
-        unsafe { libc::kill(pid, libc::SIGKILL) };
     }
 
     let _ = std::fs::remove_file(&pid_path);
@@ -319,6 +341,34 @@ mod tests {
     fn stop_by_pid_file_idempotent_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
         stop_by_pid_file(tmp.path()).expect("missing PID file is benign");
+    }
+
+    #[test]
+    fn kill_by_pid_file_idempotent_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        kill_by_pid_file(tmp.path()).expect("missing PID file is benign");
+    }
+
+    #[test]
+    fn kill_by_pid_file_sigkills_without_graceful_wait() {
+        // A child that ignores SIGTERM: the graceful path would block the
+        // full 2 s STOP_TIMEOUT, so a sub-second stop proves the fast path
+        // SIGKILLed immediately.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "trap '' TERM; sleep 30"])
+            .spawn()
+            .expect("spawn sleeper");
+        std::fs::write(tmp.path().join(PID_FILE_NAME), child.id().to_string()).unwrap();
+        let start = Instant::now();
+        kill_by_pid_file(tmp.path()).expect("kill fast path");
+        let elapsed = start.elapsed();
+        let _ = child.wait();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "fast teardown must not wait the graceful window; took {elapsed:?}"
+        );
+        assert!(!tmp.path().join(PID_FILE_NAME).exists());
     }
 
     #[test]

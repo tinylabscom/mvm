@@ -1030,6 +1030,15 @@ pub trait VmBackend: Send + Sync {
     /// Stop a running VM.
     fn stop(&self, id: &VmId) -> Result<()>;
 
+    /// Fast teardown for an *ephemeral* VM — a transient `run` / `machine run`
+    /// guest whose command has already returned, so there is nothing to
+    /// flush. Implementors may skip the graceful-shutdown grace and kill the
+    /// VMM immediately. The default delegates to [`stop`](Self::stop), so
+    /// backends without a dedicated fast path keep their graceful behavior.
+    fn stop_transient(&self, id: &VmId) -> Result<()> {
+        self.stop(id)
+    }
+
     /// Stop all VMs managed by this backend.
     fn stop_all(&self) -> Result<()>;
 
@@ -1395,6 +1404,56 @@ mod tests {
         fn install(&self) -> Result<()> {
             Ok(())
         }
+    }
+
+    // Records whether `stop` was invoked, so we can assert the default
+    // `stop_transient` delegates to it.
+    struct RecordingStopBackend(std::sync::atomic::AtomicBool);
+    impl VmBackend for RecordingStopBackend {
+        fn name(&self) -> &str {
+            "recording-stop"
+        }
+        fn capabilities(&self) -> VmCapabilities {
+            VmCapabilities::default()
+        }
+        fn stop(&self, _id: &VmId) -> Result<()> {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn stop_all(&self) -> Result<()> {
+            Ok(())
+        }
+        fn pause(&self, _id: &VmId) -> Result<()> {
+            Ok(())
+        }
+        fn resume(&self, _id: &VmId) -> Result<()> {
+            Ok(())
+        }
+        fn status(&self, _id: &VmId) -> Result<VmStatus> {
+            Ok(VmStatus::Stopped)
+        }
+        fn list(&self) -> Result<Vec<VmInfo>> {
+            Ok(vec![])
+        }
+        fn logs(&self, _id: &VmId, _lines: u32, _hypervisor: bool) -> Result<String> {
+            Ok(String::new())
+        }
+        fn is_available(&self) -> Result<bool> {
+            Ok(true)
+        }
+        fn install(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stop_transient_defaults_to_stop() {
+        let b = RecordingStopBackend(std::sync::atomic::AtomicBool::new(false));
+        b.stop_transient(&VmId("ephemeral".to_string())).unwrap();
+        assert!(
+            b.0.load(std::sync::atomic::Ordering::SeqCst),
+            "the default stop_transient must delegate to stop for backends without a fast path"
+        );
     }
 
     #[test]
