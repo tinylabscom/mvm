@@ -1,0 +1,11 @@
+run
+--image
+alpine:latest
+--allow-host
+api.example.com
+--receipt
+/tmp/mvm-sdk-machine.receipt.json
+--json
+--dry-run
+--
+true

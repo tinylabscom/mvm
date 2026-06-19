@@ -1455,6 +1455,18 @@ mod tests {
         })
     }
 
+    fn sdk_machine_fixture(name: &str) -> Vec<String> {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../sdks/machine-fixtures")
+                .join(format!("{name}.argv")),
+        )
+        .expect("read shared SDK machine argv fixture")
+        .lines()
+        .map(std::string::ToString::to_string)
+        .collect()
+    }
+
     #[test]
     fn run_parses_image_and_trailing_argv() {
         let args = parse_run(&["run", "--image", "alpine", "--", "echo", "hello"]).expect("parse");
@@ -1623,6 +1635,48 @@ mod tests {
             .into_run_args();
         let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
             .expect("CLI receipt input accepts SDK args");
+
+        assert_eq!(
+            summary.preflight_network_posture,
+            "allow-list:api.example.com:443"
+        );
+        assert!(summary.receipt_requested);
+        assert_eq!(
+            summary.receipt_network_posture,
+            summary.preflight_network_posture
+        );
+        assert_eq!(
+            summary.receipt_egress_enforcement,
+            "firecracker:l4-host-port"
+        );
+    }
+
+    #[test]
+    fn python_typescript_machine_run_default_fixture_uses_cli_default_deny_preflight() {
+        let sdk_args = sdk_machine_fixture("run-default");
+        let run = parse_owned_run(&sdk_args)
+            .expect("Python/TypeScript SDK fixture parses as CLI machine run")
+            .into_run_args();
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+            .expect("CLI preflight accepts Python/TypeScript SDK fixture");
+
+        assert!(summary.dry_run);
+        assert!(!summary.will_execute);
+        assert_eq!(summary.image_kind, "oci");
+        assert_eq!(summary.preflight_network_posture, "deny-all");
+        assert_eq!(summary.preflight_egress_enforcement, "flow-drop");
+        assert_eq!(summary.receipt_network_posture, "deny-all");
+        assert_eq!(summary.receipt_egress_enforcement, "flow-drop");
+    }
+
+    #[test]
+    fn python_typescript_machine_run_allow_host_fixture_matches_cli_receipt_posture() {
+        let sdk_args = sdk_machine_fixture("run-allow-host-receipt");
+        let run = parse_owned_run(&sdk_args)
+            .expect("Python/TypeScript SDK fixture parses as CLI machine run")
+            .into_run_args();
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+            .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
 
         assert_eq!(
             summary.preflight_network_posture,

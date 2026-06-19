@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import mvm
+from mvm._machine import _machine_run_argv
 
 
 @pytest.fixture(autouse=True)
@@ -27,6 +28,36 @@ def _fake_mvm() -> Path:
 
 def _records(path: Path) -> list[str]:
     return path.read_text().splitlines()
+
+
+def _fixture(name: str) -> list[str]:
+    return (
+        Path(__file__)
+        .parents[2]
+        .joinpath("machine-fixtures", f"{name}.argv")
+        .read_text()
+        .splitlines()
+    )
+
+
+def test_machine_run_default_argv_matches_cli_preflight_fixture() -> None:
+    assert _machine_run_argv(
+        image="alpine:latest",
+        command=["true"],
+        json=True,
+        dry_run=True,
+    ) == _fixture("run-default")
+
+
+def test_machine_run_allow_host_receipt_argv_matches_cli_preflight_fixture() -> None:
+    assert _machine_run_argv(
+        image="alpine:latest",
+        command=["true"],
+        allow_hosts=["api.example.com"],
+        receipt="/tmp/mvm-sdk-machine.receipt.json",
+        json=True,
+        dry_run=True,
+    ) == _fixture("run-allow-host-receipt")
 
 
 def test_machine_run_shells_to_cli_machine_run(tmp_path: Path) -> None:
