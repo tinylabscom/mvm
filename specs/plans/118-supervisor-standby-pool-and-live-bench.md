@@ -32,6 +32,19 @@ follow-up.
 no fleet-level pre-warming (mvmd's instance layer, designed in the
 mvmd repo); no new persistent host daemon; no backcompat shims.
 
+**Follow-up status — 2026-06-19:** the x86_64/libkrun live lane now
+threads kernel format into `KrunContext`, extracts/reuses the sibling
+ELF `vmlinux` for x86_64 libkrun starts, and forwards the root
+`libkrun-live` / `libkrun-sys` feature flags so the root `mvmctl`
+binary can run the gated live bench. Remote proof on the KVM host:
+raw bzImage and ELF-as-raw both reproduced libkrun's `Kernel doesn't
+fit in RAM` panic; ELF with `KernelFormat::Elf` loaded the kernel and
+reached libkrun device initialization. Remaining blocker for committed
+baselines: the default image still never exposes the guest-agent vsock
+socket (`vsock-5252.sock`) on that host, and `console.log` stays empty.
+So the kernel-loader issue is fixed, but full live launch/density
+baseline proof remains open.
+
 ---
 
 ## Why this is the next Plan 93 item

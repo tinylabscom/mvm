@@ -23,7 +23,9 @@
 //! - `status` reads the PID file and probes with `kill(pid, 0)`.
 //! - `list` walks `~/.mvm/vms/*/libkrun.pid`.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use mvm_core::config::{mvm_data_dir, vm_console_log, vm_libkrun_pid, vm_state_dir};
+use mvm_core::kernel_format::KernelFormat;
 use mvm_core::vm_backend::{
     BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, SnapshotCapability,
     StandbyClaim, StandbyError, StandbyHandle, StandbySpec, StandbyState, StartMode, VmBackend,
@@ -36,7 +38,6 @@ use libkrun_sys::{
     BridgeRestartPolicy, KrunContext, SupervisorAttachConfig, SupervisorBaseConfig,
     SupervisorConfig,
 };
-use mvm_core::config::{mvm_data_dir, vm_console_log, vm_libkrun_pid, vm_state_dir};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -263,11 +264,22 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn libkrun_kernel_for_host(kernel: &str) -> Result<(String, KernelFormat)> {
+    let path = Path::new(kernel);
+    if cfg!(target_arch = "x86_64") && path.exists() {
+        let loadable = mvm_build::fc_kernel::ensure_fc_loadable_kernel(path)
+            .with_context(|| format!("preparing x86_64 libkrun-loadable kernel from {kernel}"))?;
+        return Ok((loadable.to_string_lossy().into_owned(), KernelFormat::Elf));
+    }
+    Ok((kernel.to_string(), KernelFormat::Raw))
+}
+
 fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<SupervisorConfig> {
     let kernel = config
         .kernel_path
         .as_deref()
         .ok_or_else(|| anyhow!("libkrun backend requires a kernel path"))?;
+    let (kernel, kernel_format) = libkrun_kernel_for_host(kernel)?;
     let vcpus = u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
     // Append the `mvm.uvols=` param so the dev VM's `mvm-host-vm-init`
     // mounts user volumes at their guest paths (no-op when there are
@@ -282,12 +294,13 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     // then sets the workload rootfs + user volumes below.
     let mut krun = krun_context_base(
         &config.name,
-        kernel,
+        &kernel,
         vcpus,
         config.memory_mib,
         &cmdline,
         state_dir,
     );
+    krun = krun.with_kernel_format(kernel_format);
     krun.rootfs_path = Some(config.rootfs_path.clone());
 
     // User-supplied volumes (--volume / MVM_VOLUMES). A directory share
@@ -1198,6 +1211,29 @@ mod tests {
         assert!(cfg.signing_key_path.is_some());
         assert!(cfg.plan.is_some());
         assert!(cfg.bundle.is_none());
+    }
+
+    #[test]
+    fn libkrun_kernel_for_host_keeps_missing_kernel_raw_for_late_error() {
+        let (kernel, format) =
+            libkrun_kernel_for_host("/tmp/mvm-test-missing-vmlinux").expect("no fs read");
+        assert_eq!(kernel, "/tmp/mvm-test-missing-vmlinux");
+        assert_eq!(format, KernelFormat::Raw);
+    }
+
+    #[test]
+    fn libkrun_kernel_for_host_marks_existing_x86_elf_as_elf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel_path = tmp.path().join("vmlinux");
+        std::fs::write(&kernel_path, b"\x7fELFstub").unwrap();
+        let (kernel, format) =
+            libkrun_kernel_for_host(kernel_path.to_str().expect("utf8 temp path")).unwrap();
+        assert_eq!(kernel, kernel_path.to_string_lossy());
+        if cfg!(target_arch = "x86_64") {
+            assert_eq!(format, KernelFormat::Elf);
+        } else {
+            assert_eq!(format, KernelFormat::Raw);
+        }
     }
 
     /// claim 1 (host-fs isolation): libkrun can't enforce a read-only virtio-fs

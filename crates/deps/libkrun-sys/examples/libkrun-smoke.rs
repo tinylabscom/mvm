@@ -50,7 +50,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use libkrun_sys::{KrunContext, LogLevel, set_log_level, start_enter};
+use libkrun_sys::{KernelFormat, KrunContext, LogLevel, set_log_level, start_enter};
 
 fn main() -> ExitCode {
     let args = match Args::parse() {
@@ -93,6 +93,7 @@ fn main() -> ExitCode {
 
     eprintln!("plan 57 W3 — libkrun boot smoke");
     eprintln!("  kernel:   {}", args.kernel);
+    eprintln!("  format:   {:?}", args.kernel_format);
     eprintln!("  rootfs:   {}", args.rootfs);
     if let Some(dd) = &args.data_disk {
         eprintln!("  data:     {dd} (as /dev/vdb)");
@@ -127,6 +128,7 @@ fn main() -> ExitCode {
     }
 
     let mut ctx = KrunContext::new("mvm-libkrun-smoke", &args.kernel, &args.rootfs)
+        .with_kernel_format(args.kernel_format)
         .with_resources(args.vcpus, args.mem_mib)
         .with_cmdline(&args.cmdline)
         .with_vsock_socket_dir(&socket_dir)
@@ -162,6 +164,8 @@ USAGE:
 OPTIONS:
     --kernel <PATH>           kernel image (ARM64 'Image' / raw format)
                               [default: ~/.mvm/dev/current/vmlinux]
+    --kernel-format <FORMAT>  kernel format: raw, elf, image_gz, image_bz2,
+                              image_zstd, or pe_gz [default: raw]
     --rootfs <PATH>           ext4 root filesystem image
                               [default: ~/.mvm/dev/current/rootfs.ext4]
     --data-disk <PATH>        optional second virtio-blk device (/dev/vdb)
@@ -177,6 +181,7 @@ OPTIONS:
 
 struct Args {
     kernel: String,
+    kernel_format: KernelFormat,
     rootfs: String,
     data_disk: Option<String>,
     cmdline: String,
@@ -198,6 +203,7 @@ impl Args {
             .then_some(default_data);
 
         let mut kernel = default_kernel;
+        let mut kernel_format = KernelFormat::Raw;
         let mut rootfs = default_rootfs;
         let mut data_disk = auto_data;
         let mut cmdline = "console=hvc0 root=/dev/vda rw init=/init".to_string();
@@ -211,6 +217,9 @@ impl Args {
             match arg.as_str() {
                 "-h" | "--help" => help = true,
                 "--kernel" => kernel = next_value(&mut it, "--kernel")?,
+                "--kernel-format" => {
+                    kernel_format = parse_kernel_format(&next_value(&mut it, "--kernel-format")?)?
+                }
                 "--rootfs" => rootfs = next_value(&mut it, "--rootfs")?,
                 "--data-disk" => data_disk = Some(next_value(&mut it, "--data-disk")?),
                 "--no-data-disk" => data_disk = None,
@@ -232,6 +241,7 @@ impl Args {
 
         Ok(Args {
             kernel,
+            kernel_format,
             rootfs,
             data_disk,
             cmdline,
@@ -241,6 +251,20 @@ impl Args {
             home,
             help,
         })
+    }
+}
+
+fn parse_kernel_format(value: &str) -> Result<KernelFormat, String> {
+    match value {
+        "raw" => Ok(KernelFormat::Raw),
+        "elf" => Ok(KernelFormat::Elf),
+        "image_gz" => Ok(KernelFormat::ImageGz),
+        "image_bz2" => Ok(KernelFormat::ImageBz2),
+        "image_zstd" => Ok(KernelFormat::ImageZstd),
+        "pe_gz" => Ok(KernelFormat::PeGz),
+        other => Err(format!(
+            "unsupported --kernel-format {other:?}; expected raw, elf, image_gz, image_bz2, image_zstd, or pe_gz"
+        )),
     }
 }
 
