@@ -347,10 +347,10 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     // Resolve the gateway-bridge audit substrate (paths). Gated on `plan_json`
     // — the bridge supervisor's actual input — NOT on `tenant_id`: a substrate
     // without a plan is what the supervisor rejects as "cfg.plan missing on
-    // bridge path". An admitted workload always carries `tenant_id` (so the
-    // per-VM host-services broker spawns below), but only the opt-in bridge
-    // path threads `plan_json`; without it the supervisor stays on the legacy
-    // `run_supervisor` path and the substrate is all-None. (`compute_audit_
+    // bridge path". An admitted workload carries both `tenant_id` and
+    // `plan_json`, so the default workload path reaches the enforcing bridge;
+    // dev/builder starts keep `plan_json` absent and stay on the legacy
+    // `run_supervisor` path with an all-None substrate. (`compute_audit_
     // substrate` re-validates the tenant — harmless after the guard above.)
     let substrate = if config.plan_json.is_some() {
         crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?

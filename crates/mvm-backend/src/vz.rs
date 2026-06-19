@@ -1897,10 +1897,10 @@ fn build_supervisor_config(
     // Resolve the gateway-bridge audit substrate (paths).
     // It drives the supervisor's in-process flow-audited gvproxy bridge
     // (payload_tap). Gated on `plan_json` — the bridge's actual input — NOT on
-    // `tenant_id`: an admitted workload always carries `tenant_id` (so the
-    // per-VM host-services broker spawns), but only the opt-in bridge path
-    // threads `plan_json`. Without it the supervisor direct-attaches gvproxy
-    // and the substrate is all-None.
+    // `tenant_id`: an admitted workload carries both `tenant_id` and
+    // `plan_json`, so the default workload path reaches the enforcing bridge.
+    // Dev/builder starts keep `plan_json` absent; the supervisor direct-attaches
+    // gvproxy and the substrate is all-None.
     let substrate = if config.plan_json.is_some() {
         crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?
     } else {
