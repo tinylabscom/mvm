@@ -9,6 +9,7 @@ use mvm_core::protocol::broker_control::RegisterVm;
 use mvm_core::util::test_env::TestEnv;
 use mvm_hostd::audit::host_keypair;
 use mvm_hostd::audit_signer::verify::verify_workload_chain;
+use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -112,6 +113,14 @@ impl Drop for TenantHandle {
     }
 }
 
+/// Owns the shared environment and temp dir so they outlive both tenants' Drop.
+struct Harness {
+    _env: TestEnv,
+    _data_dir: TempDir,
+    a: TenantHandle,
+    b: TenantHandle,
+}
+
 /// Start a host-agent daemon for one tenant and register one VM.
 ///
 /// The env vars (MVM_DATA_DIR etc.) must already be set by the caller before
@@ -150,8 +159,7 @@ async fn start_tenant(id: &str) -> TenantHandle {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn per_tenant_daemon_paths_are_isolated() {
+async fn build_harness() -> Harness {
     let mut env = TestEnv::new();
     let data_dir = tempfile::tempdir().expect("data dir");
     env.set("MVM_DATA_DIR", data_dir.path());
@@ -161,10 +169,29 @@ async fn per_tenant_daemon_paths_are_isolated() {
     let a = start_tenant("tenant-a").await;
     let b = start_tenant("tenant-b").await;
 
-    // Each tenant has its own control socket, worker pid file, and workload chain.
+    Harness {
+        _env: env,
+        _data_dir: data_dir,
+        a,
+        b,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_tenant_daemon_paths_are_isolated() {
+    let harness = build_harness().await;
+    let a = &harness.a;
+    let b = &harness.b;
+
+    // Each tenant has its own control socket, worker pid file, broker socket,
+    // and workload chain.
     assert_ne!(
         a.control_socket, b.control_socket,
         "control sockets must differ"
+    );
+    assert_ne!(
+        a.broker_socket, b.broker_socket,
+        "broker sockets must differ"
     );
     assert_ne!(a.chain, b.chain, "workload chains must differ");
     assert_ne!(
@@ -179,7 +206,7 @@ async fn per_tenant_daemon_paths_are_isolated() {
     assert!(pid_b.is_some(), "tenant-b worker must be running");
     assert_ne!(pid_a, pid_b, "worker PIDs must differ");
 
-    // An emit to A's broker lands in A's chain; B's chain stays untouched.
+    // An emit to A's broker lands in A's chain; B's chain must not be created.
     let resp = wait_for_emit(&a.broker_socket, "a-only").await;
     assert!(
         matches!(resp, ServiceResponse::Ok { .. }),
@@ -193,13 +220,10 @@ async fn per_tenant_daemon_paths_are_isolated() {
     let a_entries = verify_workload_chain(&a.chain, &verifying_key).expect("A chain verifies");
     assert_eq!(a_entries, 1, "A chain must have exactly one entry");
 
-    // B's chain either does not exist yet or is empty — A's emit must not
-    // cross the tenant boundary.
-    if b.chain.exists() {
-        let b_entries =
-            verify_workload_chain(&b.chain, &verifying_key).expect("B chain verifies (if present)");
-        assert_eq!(b_entries, 0, "B chain must not receive A's emit");
-    }
+    // B's chain is opened at registration time, not at emit time.  The
+    // isolation guarantee is that A's emit writes zero entries to B's chain.
+    let b_entries = verify_workload_chain(&b.chain, &verifying_key).expect("B chain verifies");
+    assert_eq!(b_entries, 0, "B chain must not receive A's emit");
 
     deregister_vm(&a.control_socket, &a.key_bytes, &a.vm).expect("deregister tenant-a vm");
     deregister_vm(&b.control_socket, &b.key_bytes, &b.vm).expect("deregister tenant-b vm");
