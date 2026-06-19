@@ -883,7 +883,27 @@ Required behavior:
       dispatch when image artifacts are cached; track full command latency
       separately.
 - [ ] Cache or elide empty config/secrets drives without weakening admission.
-- [ ] Record macOS backend measurements before making a macOS latency claim.
+      Measured below: `resolve=0 ms` and the per-instance rootfs reflink is
+      ~30 ms, so empty-drive materialization is **not** a hot-path cost on vz
+      today — deprioritized until a backend shows it matters.
+- [x] Record macOS backend measurements before making a macOS latency claim.
+      First live numbers, `MVM_PHASE_TIMING=1 mvmctl run -- true` on macOS 26
+      Apple Silicon / **vz**, dev default microVM (image artifacts warm), N=3:
+      `resolve≈0 · drives≈46 ms (verity probe) · admit≈7 ms ·
+      backend_start≈200 ms warm (1410 ms cold = one-time supervisor codesign) ·
+      vsock_wait≈1061 ms (boot→agent reachable) · command≈53 ms ·
+      teardown≈6140 ms · total≈7.5 s · dispatch_window≈1.26 s`.
+      **Findings that redirect B2:** (1) `resolve≈0` empirically refutes the
+      "Stage 0 install cache / seed materialization" thesis — there is no
+      hot-path cost in image resolution. (2) **Teardown is ~82% of total**,
+      driven by the vz guest not honoring graceful stop: the host waits
+      `SIGTERM→2 s→SIGKILL` for the VM *then again* for the drainer (~4 s of
+      sequential fixed timeouts) plus ACPI 250 ms. This is the single biggest
+      lever and a teardown-path fix, not a cache. (3) `dispatch_window≈1.26 s`
+      vs the `<200 ms` bar is missed almost entirely by `vsock_wait` (guest
+      boot-to-agent), not host overhead; warm `backend_start` already sits at
+      ~200 ms. Numbers are debug-build, one host; release + a Linux/KVM lane
+      are follow-ups.
 
 ### C. Persistent image-backed machines
 
