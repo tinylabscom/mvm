@@ -985,6 +985,7 @@ Why the remaining open rollup boxes still show as open:
 - Plan 200 is actively landing in slices. The persistent spec + running-VM wrapper slice landed in #1048; persistent image-backed `machine start`, manifest-to-machine runtime mapping, policy surfacing, dev-tier SSH-agent forwarding, Python/TypeScript/Rust SDK machine wrappers, Rust SDK -> CLI parser/preflight parity proof for default-deny/allow-host/unknown-key, Python/TypeScript shared-fixture parser/preflight proof for default-deny/allow-host receipt posture, and SDK admission-input/receipt-summary/unknown-key parity are now landed or in the active PR lane. The next open slices are SDK artifact-verification/live non-bypass proof, scenario/limitations docs, portable artifacts, perf/smoke coverage, and dependency/binary budgets.
 - Plan 202 is closed. Local `mvm` landed Phases 1–4 and 6; mvmd PR `#162` closed Phase 5 with the full delegated host-services surface, tenant-key/boundary proof, and `O(active tenants)` density evidence; ADR-084 is now accepted.
 - Stage 0 bootstrap performance has an active branch-local fix: cached materialized root reuse, native verified tar extraction, and persistent `/dev/vda` Stage 0 Nix-store reuse are implemented with host tests/clippy. Do not make a public latency claim until Linux PID-1 compile/proof and live builder timing are captured.
+- Plan 195 and Plan 199 are closed. Plan 195 already removed the builder-VM fingerprint churn that could distort validation, and Plan 199 now has native `libkrunfw` / `libkrun` recipes plus builder-VM Nix/package verification recorded.
 
 Historical open PRs from the 2026-06-17 update:
 
@@ -997,13 +998,11 @@ Recommended sequence to close the remaining rollup items:
 1. Continue Plan 200 with the remaining C2 SDK parity proof: artifact-verification and live non-bypass tests. Python/TypeScript/Rust lifecycle wrappers plus VM-free parser/preflight, admission-input, receipt-summary, and unknown-key proofs are landed.
 2. Clean stale worktrees: several are old/behind or already landed (`mvm-202-3c-doctor`, `mvm-pr1009`, `mvm-p200-ociboot`, old status/170/vz100 branches). Do not sequence new work from them.
 3. Confirm Plan 125 remains closed/rehome-only; remaining per-tenant daemon work belongs to Plan 202.
-4. Do Plan 199 in parallel if builder VM time is available: native `libkrunfw`/`libkrun` Nix recipes and flake/build verification.
-5. Do Plan 195 before Plan 189 acceptance: fingerprint narrowing reduces builder churn and supports cached fast-boot validation.
-6. Continue Plan 193 only after rvproxy cross-repo slices are ready: delete splice, remove Plan-141 hooks, default-on bridge, transparent terminator.
-7. Then Plan 189 VZ DX parity: save/restore verbs, JSON coverage, base pinning.
-8. Resolve Plan 126's remaining blocked deps (`oci-client`, `aws-lc-rs`, `reqwest` major unification) rather than treating rehomed `sigstore` or superseded `pgp` work as normal TODOs.
-9. Plan 118/175 are live-KVM gated; do density bench substrate first, then FC standby/warm-start once the KVM environment is ready.
-10. Plan 159 and 201 are lowest priority: Plan 159 mostly needs residuals rehomed/descope, and Plan 201 is a convenience layer after warm-pool fundamentals.
+4. Continue Plan 193 only after rvproxy cross-repo slices are ready: delete splice, remove Plan-141 hooks, default-on bridge, transparent terminator.
+5. Then Plan 189 VZ DX parity: save/restore verbs, JSON coverage, base pinning.
+6. Resolve Plan 126's remaining blocked deps (`oci-client`, `aws-lc-rs`, `reqwest` major unification) rather than treating rehomed `sigstore` or superseded `pgp` work as normal TODOs.
+7. Plan 118/175 are live-KVM gated; do density bench substrate first, then FC standby/warm-start once the KVM environment is ready.
+8. Plan 159 and 201 are lowest priority: Plan 159 mostly needs residuals rehomed/descope, and Plan 201 is a convenience layer after warm-pool fundamentals.
 
 Plan 200 implementation checklist after `#1039`:
 
