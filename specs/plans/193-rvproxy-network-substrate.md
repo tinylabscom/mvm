@@ -1,15 +1,19 @@
 # Plan 193 — rvproxy network substrate (replace gvproxy/passt)
 
-> **For agentic workers:** proposed / cross-repo-gated. Each workstream needs a
-> who-calls audit + failing-test step fleshed out before implementation (Plan
-> 177 style). Steps use checkbox (`- [ ]`) syntax.
+> **For agentic workers:** in progress. Keep the mvm-side cutover parity-first:
+> every destructive deletion/default flip needs a who-calls audit plus a green
+> witness before implementation (Plan 177 style). Steps use checkbox (`- [ ]`)
+> syntax.
 
-**Status: 🔴 proposed — cross-repo dependency on `rvproxy`.** The matching
-requirements doc lives in the sibling repo at
+**Status: 🟡 in progress — rvproxy R2 is available; mvm-side native parity is
+partly landed.** The matching requirements doc lives in the sibling repo at
 `rvproxy/specs/plans/014-mvm-adoption-requirements.md`; rvproxy's own
 `docs/mvm-integration.md` + `specs/plans/008-orchestration-plane.md` define the
-contract. Do not start the mvm cutover (WS-3) until rvproxy confirms the
-libkrun-`unixgram` transport (WS-1 finding below).
+contract. WS-1 transport, WS-1.5 parity scaffold, native config emission/launch,
+native flow-audit refeed, and binary-discriminating native enforcement witnesses
+are landed. Remaining cutover work is deleting the splice/Plan-141 hooks only
+after the native gate is green by default, flipping the default bridge path,
+adding the transparent terminator, and making the parity gate required.
 
 > **Priority update 2026-06-15:** Plan 200 consumes this plan as security/network
 > substrate. `mvmctl machine --net` and `allow-host` must use the current
@@ -73,7 +77,7 @@ own internal default).
   change (narrow the fingerprint to a `Cargo.lock` subset / source identity);
   tracked here as context but out of scope for the rvproxy cutover.
 
-## Workstreams (proposed)
+## Workstreams
 
 - [x] **WS-1 — transport spike (gate).** libkrun `krun_add_net_unixgram`
       **proven 2026-06-14**: a live `mvmctl dev up` through rvproxy on macOS
@@ -85,7 +89,7 @@ own internal default).
       the single-threaded pump). Vz `vfkit` + Firecracker `passt` replacements
       still pending. Owner: coordinated with the rvproxy session (their Plan 014
       R3).
-- [ ] **WS-1.5 — parity-gate scaffold.** `scripts/rvproxy-gateway-parity.sh`
+- [x] **WS-1.5 — parity-gate scaffold.** `scripts/rvproxy-gateway-parity.sh`
       runs the claim-10 / flow-audit / Plan-129-substitution witness families
       plus the binary-discriminating conformance gate
       (`gvproxy_dhcp_offer_roundtrips_through_bridge`) against both gvproxy
@@ -104,9 +108,9 @@ own internal default).
       enforcement witnesses green). Triggers: `workflow_dispatch` + a
       paths-filtered `pull_request` (gateway-contract files; macos-latest is
       ~10× ubuntu cost per ADR-038, so the filter keeps it off unrelated PRs).
-      Remaining activation = make it a **required** check in branch protection
-      (a settings decision, not code), and bump `RVPROXY_DEFAULT_REF` as rvproxy
-      lands gateway changes.
+      Scaffold complete. Remaining activation = make it a **required** check in
+      branch protection (a settings decision, not code), and bump
+      `RVPROXY_DEFAULT_REF` as rvproxy lands gateway changes.
 - [ ] **WS-2 — flow-decision + audit seam.** Port `gateway_bridge`'s
       `PlanFlowPolicy` deny-by-default gate + flow-audit onto rvproxy's native
       flow API; delete the in-line splice/`etherparse` wrapper (Plan 141) and the
@@ -266,6 +270,14 @@ own internal default).
         helper. Folded into `scripts/rvproxy-gateway-parity.sh` step [2/4]
         (`run_native_enforcement` now runs the whole `rvproxy_native` family).
         Validated locally: all four gate arms green, both witnesses 5/5.
+  - [x] **2d task 2c — remove the dead mvm-side open-policy slot.**
+        `BridgeConfig.policy` and the production `AllowAll` `FlowPolicy` are
+        gone. `run_bridge_inner` already derived the live flow gate from the
+        resolved bundle or threaded bare `NetworkPolicy`, failing closed to
+        deny-all when neither exists; the field was a write-only footgun. The
+        four supervisor-bin construction sites no longer pass an ignored
+        policy, and tests that need an intentionally open flow use
+        `PlanFlowPolicy::from_network_policy(NetworkPolicy::unrestricted())`.
   - [ ] **2d — remaining: splice deletion.** Delete the splice + Plan-141
         `on_packet` hooks once the gate is green by default and the native audit
         feed is the sole path. Design + the R2 contract are in "## WS-2 design"
@@ -282,7 +294,9 @@ own internal default).
 
 Operates under ADR-082 (the decision to adopt rvproxy is already made); this is
 the *how*, so it lives here, not in a new ADR. Status: design + contract; the
-implementation is blocked on rvproxy R2.
+implementation is no longer blocked on R2 itself; deletion is gated on proving
+the native subprocess path is green by default and keeps the claim witnesses
+equivalent.
 
 ### Where enforcement lives today (what WS-2 must reproduce)
 
@@ -387,9 +401,11 @@ the splice is deleted. The splice (`gateway_bridge` + the Plan 141 per-backend
 
 ### Dependency
 
-Hard-blocked on rvproxy R2. mvm authors these requirements into rvproxy
-`specs/plans/014` R2 (done in lockstep with this design); the rvproxy session
-owns building the substrate.
+rvproxy R2 shipped, and mvm has consumed the subprocess-facing pieces needed for
+native config emission plus flow-audit JSONL refeed. Remaining dependency work is
+the cutover contract: keep the native parity gate green by default, add the
+transparent terminator requirement, and only then delete the splice and default
+to the native path.
 
 ## Cross-repo dependency
 rvproxy `specs/plans/014-mvm-adoption-requirements.md` (mvm-authored requirements)
