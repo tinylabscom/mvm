@@ -2164,7 +2164,11 @@ impl LibkrunPersistentHostVm {
             // Firecracker vsock via `<vm_state_dir>/vsock-21472.sock`.
             // libkrun registers vsock ports at launch, so this must be
             // added up front even though workloads start later.
-            .add_vsock_port(mvm_guest::builder_agent::WORKLOAD_FORWARD_PORT);
+            .add_vsock_port(mvm_guest::builder_agent::WORKLOAD_FORWARD_PORT)
+            // The resident builder control daemon's typed control plane
+            // mvm-host-vm-init launches `mvm-builderd` at boot;
+            // the host reaches it via `<vm_state_dir>/vsock-21473.sock`.
+            .add_vsock_port(mvm_guest::builder_agent::BUILDERD_CONTROL_PORT);
 
         krun = apply_networking_mode(krun, &vm_state_dir)?;
 

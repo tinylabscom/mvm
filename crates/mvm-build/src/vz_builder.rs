@@ -1343,6 +1343,9 @@ fn build_vz_persistent_supervisor_config(
         vsock: crate::vz::VsockConfig {
             ports: {
                 let mut ports = vec![mvm_guest::builder_agent::BUILDER_DISPATCH_PORT];
+                // The resident builder control daemon's typed control
+                // plane, reached at `<vsock_dir>/vsock-21473.sock`.
+                ports.push(mvm_guest::builder_agent::BUILDERD_CONTROL_PORT);
                 // The long-lived dev VM additionally serves the guest
                 // agent so `dev shell` / `console` / `status` can reach
                 // it; the warm-pool builder leaves it closed.
@@ -2197,11 +2200,16 @@ mod tests {
         assert_eq!(tags, vec!["work", "out", "job"]);
         assert!(cfg.virtio_fs.iter().all(|m| !m.read_only));
 
-        // Vsock carries the dispatch port; socket dir lives under
-        // the per-VM state directory.
+        // Vsock carries the dispatch port + the resident builder
+        // daemon's control port; socket dir lives under the per-VM state
+        // directory. (Guest-agent port is gated on expose_guest_agent,
+        // off for this persistent-builder shape.)
         assert_eq!(
             cfg.vsock.ports,
-            vec![mvm_guest::builder_agent::BUILDER_DISPATCH_PORT]
+            vec![
+                mvm_guest::builder_agent::BUILDER_DISPATCH_PORT,
+                mvm_guest::builder_agent::BUILDERD_CONTROL_PORT,
+            ]
         );
         assert!(cfg.vsock.socket_dir.ends_with("vsock"));
 
@@ -2366,9 +2374,14 @@ mod tests {
             ..base
         })
         .expect("config builds");
+        // The dispatch + builder-daemon control ports are always present;
+        // only the guest-agent port is gated on expose_guest_agent.
         assert_eq!(
             dispatch_only.vsock.ports,
-            vec![mvm_guest::builder_agent::BUILDER_DISPATCH_PORT]
+            vec![
+                mvm_guest::builder_agent::BUILDER_DISPATCH_PORT,
+                mvm_guest::builder_agent::BUILDERD_CONTROL_PORT,
+            ]
         );
 
         let with_agent = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
@@ -2380,6 +2393,7 @@ mod tests {
             with_agent.vsock.ports,
             vec![
                 mvm_guest::builder_agent::BUILDER_DISPATCH_PORT,
+                mvm_guest::builder_agent::BUILDERD_CONTROL_PORT,
                 mvm_guest::vsock::GUEST_AGENT_PORT,
             ]
         );

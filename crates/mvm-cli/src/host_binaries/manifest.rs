@@ -29,6 +29,14 @@ pub const HOST_BINARIES: &[HostBinary] = &[
         install_path: "/sbin/mvm-egress-proxy",
         mode: 0o755,
     },
+    // The resident builder-VM control daemon. PID 1
+    // (mvm-host-vm-init) launches it at boot; the host reaches it on the
+    // builder VM's forwarded AF_VSOCK control port.
+    HostBinary {
+        name: "mvm-builderd",
+        install_path: "/sbin/mvm-builderd",
+        mode: 0o755,
+    },
 ];
 
 /// Host-side-only embedded `mvm-build` binaries. Cross-compiled +

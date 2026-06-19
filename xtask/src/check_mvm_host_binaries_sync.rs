@@ -111,10 +111,10 @@ mod tests {
     }
 
     #[test]
-    fn rust_manifest_parses_two_entries() {
+    fn rust_manifest_parses_all_entries() {
         let root = workspace_root();
         let entries = parse_rust_manifest(&root).expect("parse rust manifest");
-        assert_eq!(entries.len(), 2, "expected 2 entries, got {entries:?}");
+        assert_eq!(entries.len(), 3, "expected 3 entries, got {entries:?}");
         assert_eq!(
             entries.get("mvm-host-vm-init").map(String::as_str),
             Some("/sbin/mvm-host-vm-init")
@@ -122,14 +122,18 @@ mod tests {
         assert_eq!(
             entries.get("mvm-egress-proxy").map(String::as_str),
             Some("/sbin/mvm-egress-proxy")
+        );
+        assert_eq!(
+            entries.get("mvm-builderd").map(String::as_str),
+            Some("/sbin/mvm-builderd")
         );
     }
 
     #[test]
-    fn nix_attrset_parses_two_entries() {
+    fn nix_attrset_parses_all_entries() {
         let root = workspace_root();
         let entries = parse_nix_attrset(&root).expect("parse nix attrset");
-        assert_eq!(entries.len(), 2, "expected 2 entries, got {entries:?}");
+        assert_eq!(entries.len(), 3, "expected 3 entries, got {entries:?}");
         assert_eq!(
             entries.get("mvm-host-vm-init").map(String::as_str),
             Some("/sbin/mvm-host-vm-init")
@@ -137,6 +141,10 @@ mod tests {
         assert_eq!(
             entries.get("mvm-egress-proxy").map(String::as_str),
             Some("/sbin/mvm-egress-proxy")
+        );
+        assert_eq!(
+            entries.get("mvm-builderd").map(String::as_str),
+            Some("/sbin/mvm-builderd")
         );
     }
 

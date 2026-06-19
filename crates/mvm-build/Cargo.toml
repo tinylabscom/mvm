@@ -29,6 +29,16 @@ path = "src/bin/mvm-egress-proxy.rs"
 name = "stage0-init"
 path = "src/bin/stage0-init.rs"
 
+# The resident builder-VM control daemon. Linux-only AF_VSOCK
+# listener over the typed `builderd_protocol`; `#[path]`-includes the
+# daemon modules so it cross-compiles to static aarch64-musl without the
+# full mvm-build lib, same as the other builder bins. Embedded into the
+# builder/dev VM rootfs at /sbin/mvm-builderd via host_binaries/manifest.rs
+# + nix/lib/mvm-host-binaries.nix (the name is load-bearing for build.rs).
+[[bin]]
+name = "mvm-builderd"
+path = "src/bin/mvm-builderd.rs"
+
 [dependencies]
 # OCI layer unpack to a staging rootfs. `tar` and
 # `flate2` are workspace deps already (used by `mvm-sdk`'s addon
