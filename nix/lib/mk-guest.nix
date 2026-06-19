@@ -206,7 +206,7 @@ let
     else true;
 
   assertNoSshClosureScript = ''
-    if ${pkgs.gnugrep}/bin/grep -E '/nix/store/[^-]+-[^/]*(ssh|openssh|dropbear)' \
+    if ${pkgs.gnugrep}/bin/grep -E '/nix/store/[^-]+-(openssh|dropbear|ssh|sshpass|sshfs|autossh)(-|$)' \
         ${sshClosureInfo}/store-paths >/tmp/mvm-ssh-closure-deny 2>/dev/null; then
       echo "mkGuest: SSH-related Nix store paths are banned from template closures:" >&2
       cat /tmp/mvm-ssh-closure-deny >&2
