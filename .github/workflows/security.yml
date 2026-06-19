@@ -130,6 +130,33 @@ jobs:
       - name: Build prod agent and assert no console symbols
         run: ./scripts/check-prod-agent-no-console.sh
 
+  # ── Lane 1c: No host-authority symbols in a sealed prod agent ─────
+  # The workload agent is the untrusted edge: it must not carry
+  # host-side signing-key loading or plan-admission code. Asserts
+  # load_host_signing_key / host_signer / admit_for_run are ABSENT
+  # (with a handle_run_entrypoint canary against a stripped table).
+  prod-agent-no-authority:
+    name: prod agent carries no host-authority symbols
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-prodagent-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-prodagent-
+
+      - name: No host-signer / admission symbols in the production agent
+        run: ./scripts/check-prod-agent-no-authority.sh
+
   # ── Lane 2b: Seccomp tier functional denial (ADR-002 §W2.4) ───────
   # Tier-structure unit tests in `mvm-security` cover cumulative-subset
   # and serde shapes; they don't exercise the BPF program at runtime.

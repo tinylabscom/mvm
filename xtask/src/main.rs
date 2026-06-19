@@ -24,6 +24,7 @@ mod check_no_overclaim;
 mod check_no_spec_refs_in_comments;
 mod check_runtime_overlay_version;
 mod check_spec_numbers;
+mod check_trust_gradient;
 mod gen_stubs;
 mod perf;
 
@@ -103,6 +104,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_claim_catalog::run(&workspace)
         }
+        Some("check-trust-gradient") => {
+            let workspace = workspace_root();
+            check_trust_gradient::run(&workspace)
+        }
         Some("check-mvm-host-binaries-sync") => {
             let workspace = workspace_root();
             check_mvm_host_binaries_sync::run(&workspace)
@@ -125,7 +130,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-trust-gradient, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {
@@ -178,6 +183,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-claim-catalog                    Verify specs/claims/catalog.md witnesses still exist in the tree"
+            );
+            eprintln!(
+                "  check-trust-gradient                   Verify trust-gradient ledger: monotonic tiers, workload forbidden authorities, witnesses"
             );
             eprintln!(
                 "  check-mvm-host-binaries-sync            Plan 115 / ADR-065: assert Rust manifest and Nix attrset agree"
