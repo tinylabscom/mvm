@@ -571,6 +571,13 @@ impl AnyBackend {
         self.inner().stop(id)
     }
 
+    /// Fast teardown for an ephemeral transient run. See
+    /// [`VmBackend::stop_transient`]. Vz overrides it to skip the graceful
+    /// grace; other backends fall through to the default (== `stop`).
+    pub fn stop_transient(&self, id: &VmId) -> Result<()> {
+        self.inner().stop_transient(id)
+    }
+
     /// Block until a VM exits and return its captured exit status.
     /// Delegates to the inner backend; only libkrun (and mock)
     /// implement a real wait surface — other backends return a clear

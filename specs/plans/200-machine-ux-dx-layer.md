@@ -872,15 +872,77 @@ Required behavior:
 
 ### B2. Hot-path latency target
 
-- [ ] Add phase timing around `machine run`: cache resolve, admission, drive
+> **Measure-first.** Phase timing is the foundation: optimize nothing until a
+> real run's breakdown is observable. The boot micro-benchmark substrate
+> (`bench microvm-launch`: `BootMarks`→`IterationTiming`, percentile/summary,
+> JSON report, baseline regression gate) already exists and is reused rather
+> than rebuilt; B2 adds the end-to-end `machine run` breakdown the bench
+> harness does not cover.
+
+- [~] Add phase timing around `machine run`: cache resolve, admission, drive
       materialization, backend start, vsock ready, command exit, teardown.
+      Landed: `commands::vm::phase_timing` (`RunPhaseMarks`→`RunPhaseTimings`,
+      pure + unit-tested) wired at the `exec::run_inner` + `run_in_guest`
+      seams — resolve, drives, admit, backend start, vsock wait (boot→agent
+      reachable), command, teardown — emitting a single greppable line to
+      stderr behind `MVM_PHASE_TIMING=1` (default off, zero behavior change).
+      The line also reports `dispatch_window` (admitted→agent-reachable), the
+      span the `<200 ms` bar below is set against. Deferred: capture the
+      upstream OCI cache-resolve span that `run_secure` does before
+      `run_inner` for `--image`.
 - [ ] Add a hardware-gated Linux/KVM benchmark for cached
       `machine run --image alpine -- true`.
 - [ ] Set the first acceptance bar at `<200 ms` for backend start to command
       dispatch when image artifacts are cached; track full command latency
       separately.
 - [ ] Cache or elide empty config/secrets drives without weakening admission.
-- [ ] Record macOS backend measurements before making a macOS latency claim.
+      Measured below: `resolve=0 ms` and the per-instance rootfs reflink is
+      ~30 ms, so empty-drive materialization is **not** a hot-path cost on vz
+      today — deprioritized until a backend shows it matters.
+- [x] Record macOS backend measurements before making a macOS latency claim.
+      First live numbers, `MVM_PHASE_TIMING=1 mvmctl run -- true` on macOS 26
+      Apple Silicon / **vz**, dev default microVM (image artifacts warm), N=3:
+      `resolve≈0 · drives≈46 ms (verity probe) · admit≈7 ms ·
+      backend_start≈200 ms warm (1410 ms cold = one-time supervisor codesign) ·
+      vsock_wait≈1061 ms (boot→agent reachable) · command≈53 ms ·
+      teardown≈6140 ms · total≈7.5 s · dispatch_window≈1.26 s`.
+      **Findings that redirect B2:** (1) `resolve≈0` empirically refutes the
+      "Stage 0 install cache / seed materialization" thesis — there is no
+      hot-path cost in image resolution. (2) **Teardown is ~82% of total**,
+      driven by the vz guest not honoring graceful stop: the host waits
+      `SIGTERM→2 s→SIGKILL` for the VM *then again* for the drainer (~4 s of
+      sequential fixed timeouts) plus ACPI 250 ms. This is the single biggest
+      lever and a teardown-path fix, not a cache. (3) `dispatch_window≈1.26 s`
+      vs the `<200 ms` bar is missed almost entirely by `vsock_wait` (guest
+      boot-to-agent), not host overhead; warm `backend_start` already sits at
+      ~200 ms. Numbers are debug-build, one host; release + a Linux/KVM lane
+      are follow-ups.
+- [x] Make ephemeral teardown instant. `VmBackend::stop_transient` (new,
+      defaults to `stop`) lets the transient `run` / `machine run` path skip
+      the graceful-shutdown grace, since the guest command's exit code is
+      already captured. Vz overrides it to SIGKILL the supervisor + drainer
+      up front (no per-process 2 s `STOP_TIMEOUT` wait), and
+      `host_gvproxy::kill_by_pid_file` SIGKILLs gvproxy immediately (it
+      ignores SIGTERM, so the graceful path always burned the full 2 s).
+      Persistent `machine stop` / `down` keep the graceful ladder. **Measured
+      (vz, warm, N=3): teardown 6140 ms → ~0.5 ms, total ~7.5 s → ~1.36 s.**
+      The hot path is now `vsock_wait` (~1.06 s guest boot) + `backend_start`
+      (~190 ms) — addressed by the warm/standby-pool lever (D-tier follow-up).
+- [x] Tighten the guest-agent readiness poll in `wait_for_agent` from 500 ms
+      to 50 ms so `vsock_wait` is not rounded up to the next coarse tick.
+      Measured (vz, N=3): `vsock_wait` ~1.06 s → ~0.79–1.12 s (best total
+      ~1.08 s). The remaining `vsock_wait` is genuine guest boot — no further
+      host-side slack. Closing the gap to "instant" (~150 ms) requires a
+      pre-booted **same-image** standby (warm pool); see the deferred item.
+- [ ] Hide guest boot with a warm/standby pool for `run` / `machine run`.
+      The registry (`mvm_backend::standby_pool`) is backend-agnostic and
+      vz-capable, and `up` already claims via `pool::try_warm_claim`. Two open
+      pieces: (1) a warm claim only matches a *same-image* standby, so this
+      helps repeated runs of one image (the common dev loop), not the first
+      cold run; (2) a pre-fill/refill lifecycle (background warmer or
+      warm-on-use) is needed so a standby exists at claim time. Overlaps active
+      Plan 118 warm-pool work — coordinate, don't fork. This is the lever that
+      takes a warm run from ~1.1 s to ~150 ms.
 
 ### C. Persistent image-backed machines
 
@@ -1144,6 +1206,28 @@ that the original name-only `DnsSinkholeScan` left open (see the "uniform L4" fo
 below, now landed). WS-B also surfaced these pre-existing gaps, none caused by the WS-B
 change:
 
+- [ ] **Vz `up --wait` (verdict-capture) — the last live-validation gap (drafted 2026-06-19).**
+      The libkrun egress matrix is now live-verified `0/3/2` after the ingress-return fix
+      (#1083, the `<listen>-krun.sock` reply path). The equivalent Vz live verdict-capture is
+      still blocked only because `up --wait` is gated to libkrun (`up.rs` ~2046 fail-fast +
+      ~2858 wait block, both `== "libkrun"`). The Vz *bridge* enforcement is already covered by
+      the deterministic `*_live_vz_bridge` tests, and Vz uses a connected socketpair
+      (`run_vz_gvproxy_bridge`) so it has **no** recvfrom-source addressing bug — the #1083 fix
+      does not apply to it. The slice is small because the verdict-capture infra already exists
+      on Vz:
+      - `wait()` is backend-agnostic in substance — libkrun's impl (`libkrun.rs` ~867) just
+        polls `<vm_state_dir>/workload.exit` (no PID-liveness check) until it appears or times
+        out, and the **Vz supervisor already persists `workload.exit`** to the same path
+        (`mvm-vm-host/src/vz_objc.rs` ~468, "Mirrors `exit_capture::capture_once`").
+      - Work: (1) extract libkrun's `wait()` poll into a shared state-dir helper (reuse-first)
+        and implement `VmBackend::wait` for the Vz backend (`mvm-backend/src/vz.rs`) on top of
+        it; (2) relax the two `== "libkrun"` gates in `up.rs` to `matches!(.., "libkrun"|"vz")`;
+        (3) deterministic test that the Vz `wait()` reads a staged `workload.exit`; (4) live Vz
+        matrix (`--hypervisor vz`, `examples/egress-probe`) → expect the same `0/3/2`.
+      - Risk: low. No bridge/data-path change; egress stays deny-by-default; the receipt
+        enforcement tier is unchanged. Validate live on a quiet macOS-26 box (isolate
+        `MVM_CACHE_DIR`, seeded from `~/.cache/mvm/builder-vm/aarch64`, to avoid the one-shot
+        vs persistent vz-builder `VZErrorDomain:2` storage conflict).
 - [x] **macOS transient-run guest networking (blocks `machine run --net` on macOS).**
       Was: `mvmctl run` / `machine run` transient guests never brought up `eth0` (the init
       ran only loopback; the unprivileged uid-901 command couldn't DHCP), so a guest had no

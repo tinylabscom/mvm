@@ -489,6 +489,12 @@ fn run_inner(
 ) -> Result<Either<i32, ExecOutput>> {
     let backend = AnyBackend::auto_select();
 
+    // Phase timing (off unless `MVM_PHASE_TIMING` is set): capture a
+    // host-monotonic mark at each run seam, then emit a one-line breakdown
+    // at teardown. When disabled every mark stays `None` and costs nothing.
+    let timing = crate::commands::vm::phase_timing::enabled();
+    let t_start = timing.then(std::time::Instant::now);
+
     // Resolve image artifacts: either a named template or a pre-built pair.
     // For templates, also probe for a pre-built snapshot so we can skip the
     // cold-boot cost when the request is snapshot-eligible.
@@ -528,6 +534,8 @@ fn run_inner(
                 None,
             ),
         };
+
+    let t_image_resolved = timing.then(std::time::Instant::now);
 
     // Build read-only ext4 images for each --add-dir, staged in a transient
     // VMS subdirectory so cleanup is straightforward.
@@ -571,6 +579,7 @@ fn run_inner(
     // inside the VM, so we can't `Path::exists()` them from the host —
     // shell out into the VM instead.
     let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
+    let t_drives_ready = timing.then(std::time::Instant::now);
 
     // Template-restore VMs run without plan admission. Leave tenant_id /
     // plan_json / bundle_json at their None defaults (via
@@ -624,6 +633,7 @@ fn run_inner(
         start_config.bundle_json = sub.bundle_json;
         use_snapshot = false;
     }
+    let t_admitted = timing.then(std::time::Instant::now);
 
     let booted = if use_snapshot {
         let tmpl = template_id
@@ -656,6 +666,7 @@ fn run_inner(
             return Err(e).context("starting transient microVM");
         }
     }
+    let t_backend_started = timing.then(std::time::Instant::now);
 
     // Install Ctrl-C handler that tears the VM down.
     let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -665,14 +676,19 @@ fn run_inner(
         let _ = ctrlc::set_handler(move || {
             interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
             let backend = AnyBackend::auto_select();
-            let _ = backend.stop(&VmId(vm_name.clone()));
+            let _ = backend.stop_transient(&VmId(vm_name.clone()));
         });
     }
 
     // Run the command + always tear down.
-    let result = run_in_guest(&vm_name, &req, &add_dir_labels, capture);
+    let run_outcome = run_in_guest(&vm_name, &req, &add_dir_labels, capture, timing);
+    let t_command_done = timing.then(std::time::Instant::now);
+    let (result, t_vsock_ready) = match run_outcome {
+        Ok((either, vsock_ready)) => (Ok(either), vsock_ready),
+        Err(e) => (Err(e), None),
+    };
 
-    let _ = backend.stop(&VmId(vm_name.clone()));
+    let _ = backend.stop_transient(&VmId(vm_name.clone()));
 
     // Writable --add-dir uses rsync-back. With the VM stopped the
     // ext4 image is no longer in use, so we mount it host-side and rsync
@@ -692,6 +708,41 @@ fn run_inner(
     }
 
     let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
+    let t_torn_down = timing.then(std::time::Instant::now);
+
+    // Emit the phase breakdown when every seam was marked (i.e. timing was
+    // enabled and the run reached teardown without an early return).
+    if let (
+        Some(start),
+        Some(image_resolved),
+        Some(drives_ready),
+        Some(admitted),
+        Some(backend_started),
+        Some(vsock_ready),
+        Some(command_done),
+        Some(torn_down),
+    ) = (
+        t_start,
+        t_image_resolved,
+        t_drives_ready,
+        t_admitted,
+        t_backend_started,
+        t_vsock_ready,
+        t_command_done,
+        t_torn_down,
+    ) {
+        let marks = crate::commands::vm::phase_timing::RunPhaseMarks {
+            start,
+            image_resolved,
+            drives_ready,
+            admitted,
+            backend_started,
+            vsock_ready,
+            command_done,
+            torn_down,
+        };
+        eprintln!("{}", marks.to_timings().render());
+    }
 
     if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::bail!("interrupted");
@@ -775,11 +826,14 @@ fn run_in_guest(
     req: &ExecRequest,
     labels: &[String],
     capture: bool,
-) -> Result<Either<i32, ExecOutput>> {
+    timing: bool,
+) -> Result<(Either<i32, ExecOutput>, Option<std::time::Instant>)> {
     use std::io::Write as _;
     if !wait_for_agent(vm_name, 30) {
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
+    // Agent reachable over vsock: the command is about to be dispatched.
+    let vsock_ready = timing.then(std::time::Instant::now);
     let wrapper = build_guest_wrapper(req, labels);
 
     let transport = vsock_transport::for_vm(vm_name)?;
@@ -840,15 +894,16 @@ fn run_in_guest(
         other => anyhow::bail!("unexpected terminal exec event: {other:?}"),
     };
 
-    if capture {
-        Ok(Either::Right(ExecOutput {
+    let either = if capture {
+        Either::Right(ExecOutput {
             exit_code,
             stdout: String::from_utf8_lossy(&out).into_owned(),
             stderr: String::from_utf8_lossy(&err).into_owned(),
-        }))
+        })
     } else {
-        Ok(Either::Left(exit_code))
-    }
+        Either::Left(exit_code)
+    };
+    Ok((either, vsock_ready))
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,7 +1155,11 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
         {
             return true;
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Tight poll: the guest agent comes up within ~1s, so a coarse
+        // cadence would round readiness up to the next tick and add hundreds
+        // of ms to perceived launch latency. The connect+hello attempts are
+        // cheap and fail fast while the guest is still booting.
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
     false
 }
