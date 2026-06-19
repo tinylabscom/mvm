@@ -320,6 +320,12 @@ pub enum FailureCategory {
     Timeout,
     /// An internal daemon error not attributable to the request.
     Internal,
+    /// The operation kind is recognized and well-formed, but this
+    /// daemon build does not implement it (skeleton stage or a request
+    /// from a newer host). Distinct from [`Self::Version`]: the
+    /// protocol version matched, only this one operation is missing.
+    /// Non-retryable against the same daemon.
+    Unsupported,
     /// Catch-all when no narrower category applies. Non-retryable.
     Unknown,
 }
@@ -513,6 +519,7 @@ mod tests {
             FailureCategory::Fetch,
             FailureCategory::Timeout,
             FailureCategory::Internal,
+            FailureCategory::Unsupported,
             FailureCategory::Unknown,
         ] {
             roundtrip(&BuilderResponse::Failed {
@@ -675,6 +682,7 @@ mod tests {
             (FailureCategory::Fetch, "fetch"),
             (FailureCategory::Timeout, "timeout"),
             (FailureCategory::Internal, "internal"),
+            (FailureCategory::Unsupported, "unsupported"),
             (FailureCategory::Unknown, "unknown"),
         ];
         for (category, expected) in cases {

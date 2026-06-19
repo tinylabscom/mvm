@@ -134,8 +134,20 @@ Add structural tests that prove:
       `PROTOCOL_VERSION` + `negotiate()` (exact-match v1, fail-closed) +
       `handshake_reply()` returning `Failed`/`FailureCategory::Version` on an
       unsupported version.
-- [ ] Add `mvm-builderd` skeleton with `Handshake` and `Probe`.
-- [ ] Add builder-VM image wiring so the daemon starts on boot.
+- [~] Add `mvm-builderd` skeleton with `Handshake` and `Probe`.
+      Daemon request-handling **core** landed in the library
+      (`mvm_build::builderd`): stateless `dispatch()` answers `Handshake`
+      (version-negotiated), `Probe` (echoes the op), and `CancelJob` (no-op
+      ack); recognized-but-unimplemented build ops fail closed with
+      `FailureCategory::Unsupported`. `serve_connection()` runs the
+      framed read-dispatch-write loop until clean EOF. Driven from
+      `UnixStream` pairs in tests (9 tests) without booting the VM. The bin
+      entrypoint + Linux AF_VSOCK listener are deferred to land with the
+      next box (boot wiring) — a listener with no boot path is untestable
+      dead code.
+- [ ] Add builder-VM image wiring so the daemon starts on boot (also lands
+      the `mvm-builderd` bin entrypoint + AF_VSOCK listener over
+      `serve_connection`).
 - [ ] Add `mvmctl doctor` visibility for builder daemon readiness.
 
 ### B. Host client and lifecycle
