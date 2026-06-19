@@ -17,6 +17,13 @@
 > / `reqwest` unification / `aws-lc-rs` removal are Plan 126 work, while Plan
 > 200 only sets the product requirement that the default `machine run --image`
 > path stay lean. Do not duplicate dependency measurement or gates in Plan 200.
+>
+> **Bookkeeping reconciliation 2026-06-18:** the mvm-side default-closure
+> ratchets and final measurement are landed. Plan 126 now stays open only for the
+> still-real OCI/TLS stack decision (`oci-client` replacement or fork, `aws-lc-rs`
+> removal, and `reqwest`/`oci-client` major unification) plus the documented
+> follow-up sweeps below. The `sigstore` prod cosign decision is rehomed to mvmd,
+> and the old `pgp` default-closure target was superseded by Plan 160.
 
 ---
 
@@ -37,9 +44,12 @@
 
 It backs cosign verification for claim 14 (OCI provenance). Options: move the verification to **mvmd** (the control plane verifies before admit) or drop the in-`mvmctl` path.
 
-- [ ] **Step 1:** Measure `cargo tree -p <crate that pulls sigstore> --features manifest-verify` closure.
-- [ ] **Step 2:** Decide with the claim owner: claim 14's cosign verify is a *prod/admit* concern, and `--prod` admission policy lives in mvmd (memory: prod gate is mvmd's). So **relocate cosign verify to mvmd**; `mvmctl` keeps recording the OCI provenance label (the audit entry) but does not link sigstore. If a local verify is still wanted, gate it behind an off-by-default feature.
-- [ ] **Step 3:** Remove `sigstore` from the default + the `mvmctl` build; re-measure. Claim 14's audit-label path (the part `mvmctl` owns) stays green; the cosign-verify gate moves to mvmd's plan. Commit with the delta.
+- [~] **Steps 1-3 rehomed:** `sigstore` is already out of the `mvmctl`
+      default closure, so there is no remaining mvm-side default-build cut.
+      The prod cosign verification decision belongs to mvmd, where the
+      `--prod` admission policy lives. `mvmctl` keeps the OCI provenance audit
+      label path; if local cosign verification remains useful, it stays behind
+      an off-by-default feature.
 
 ### Task B2: `opendal` (~70) → `object_store`
 
@@ -67,9 +77,10 @@ Pre-decided with 123: one lean S3 client for the repo.
 
 The tarball is **already SHA-256 hash-pinned in source** for the pinned `ALPINE_VERSION` (`verify_sha256`), so PGP is **defense-in-depth** whose distinct value is mainly at version-bump time. Reducing the 168 crates is a **decision**, not a swap:
 
-- [ ] **Option 1 (biggest, −168):** drop the PGP verify, keep the SHA-256 pin. Removes a defense layer → needs security-owner sign-off + an ADR-002 note + a documented version-bump procedure (verify a new tarball's PGP sig out-of-band before pinning its hash).
-- [ ] **Option 3:** gate `verify_alpine_pgp_signature` behind a contributor-only feature if no default/published path reaches it. Audit the call graph first.
-- [ ] **Option 2 (low payoff):** lighter OpenPGP verifier — rpgp already *is* the lean choice; sequoia is heavier; no smaller RSA-OpenPGP-verify crate exists. Likely not worth it.
+- [~] **Closed as superseded:** Plan 160 removed the Alpine seed path from
+      the default closure, so `pgp` is no longer a Plan 126 implementation
+      target. Any future upstream-tarball verification procedure belongs with
+      Stage-0 seed maintenance, not this dependency-reduction plan.
 
 See `docs/investigations/dep-baseline.md` for the full rationale.
 
@@ -140,7 +151,11 @@ Two major versions of the same crate inflate the lock + compile time.
         would false-fail. Recorded here as the remaining blocker.
       - `tokio`-in-`mvm-core` is already enforced by the separate
         `check-core-runtime-free` gate (B5); not duplicated here.
-- [ ] **Step 2:** Final measure — total before/after in `dep-baseline.md`; the sum of B1–B4 + C1 is the headline reduction (alongside 124's ~25–35 agent crates). (Gate + CI wiring done in Step 1; only the `dep-baseline.md` measurement write-up remains.)
+- [x] **Step 2:** Final measure — total before/after in `dep-baseline.md`;
+      default binary closure **407→347 (−60)** and lockfile **722→683 (−39)**.
+      The write-up attributes `pgp` removal to Plan 160 rather than double-
+      counting it here, records `aws-lc-rs` as the remaining blocked default
+      target, and names the four ratchets that hold the cut.
 
 ### Task D2: duplicate-major lock-gate (cargo-deny ratchet) — DONE
 
@@ -159,14 +174,22 @@ rather than a new xtask.
 ## Acceptance
 
 - [x] `dep-baseline.md` records the method + the baseline + the Phase D final measure (all numbers measured, never asserted): default binary closure 407→347 (−60), lockfile 722→683 (−39); per-target outcomes (sigstore/opendal/pgp out of the default closure, aws-lc-rs still in / B4 blocked) and the four ratchets that hold the cut.
-- [ ] `sigstore` out of the `mvmctl` default (cosign verify relocated to mvmd; claim 14's audit-label path intact); `opendal`→`object_store`; `pgp`→`minisign`; `aws-lc-rs` gone (`cargo tree -i aws-lc-rs` empty, C/cmake build removed).
+- [x] `sigstore`, `opendal`, and `pgp` are out of the `mvmctl` default closure;
+      `opendal` is replaced by `object_store`; claim 14's mvmctl-owned OCI
+      provenance audit-label path remains intact.
+- [~] Prod cosign verification is rehomed to mvmd; this plan does not keep it
+      as an mvm-side blocker.
+- [ ] `aws-lc-rs` gone (`cargo tree -i aws-lc-rs` empty, C/cmake build removed).
+      Blocked on the `oci-client` fork/replace/upstream decision.
 - [ ] One major each for `reqwest`/`oci-client` (`cargo tree -d` clean for them).
+      Blocked on the same `oci-client` decision as B4.
 - [x] `check-forbidden-deps` trips if `sigstore`/`opendal`/`pgp` re-enter the default closure (`aws-lc-rs` deferred — still in the closure via `oci-client`).
 - [ ] `cargo test --workspace` + clippy + fmt green; the OCI / template-registry / release-signing / TLS paths still pass.
 
 ### deferred follow-ups
 
-- [ ] The mvmd cosign-verify relocation is an **mvmd plan** (this plan only removes it from `mvmctl`).
+- [~] The mvmd cosign-verify relocation is an **mvmd plan**; this plan only
+      keeps `sigstore` out of the `mvmctl` default closure.
 - [ ] Periodic `cargo tree -d` sweep as the dashboard (127) surfaces new duplicates.
 - [ ] Migrate off the unmaintained `rustls-pemfile` (RUSTSEC-2025-0134) to `rustls_pki_types::pem` and drop the advisory ignore. Direct dep of mvm-hostd (`certs.rs`, `terminator/tls.rs`).
 - [ ] Shrink the D2 baseline as upstream majors converge (e.g. the windows-* families, the rustix/linux-raw-sys split) or `oci-client` is forked (drops `reqwest`).

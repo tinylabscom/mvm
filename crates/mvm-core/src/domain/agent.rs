@@ -249,6 +249,26 @@ pub struct ReconcileReport {
 }
 
 // ============================================================================
+// Host-services delegation types
+// ============================================================================
+
+/// Query for the mvmd-delegated `host.cost.v1::tenant` verb.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TenantCostQuery {
+    /// Tenant the caller wants aggregated spend for. The agent must refuse any
+    /// mismatch against the authenticated workload tenant.
+    pub requested_tenant_id: String,
+}
+
+/// Successful result for the mvmd-delegated `host.cost.v1::tenant` verb.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TenantCostResult {
+    pub report: crate::protocol::host_cost::CostReport,
+}
+
+// ============================================================================
 // Typed message protocol (QUIC API)
 // ============================================================================
 
@@ -289,6 +309,13 @@ pub enum AgentRequest {
         pool_id: String,
         instance_id: String,
         request: serde_json::Value,
+    },
+    /// Query tenant-aggregated spend for the calling workload's tenant.
+    HostCostTenantQuery {
+        tenant_id: String,
+        pool_id: String,
+        instance_id: String,
+        query: TenantCostQuery,
     },
     /// Query the status of an ongoing deployment/rollout for a pool.
     DeploymentStatus { tenant_id: String, pool_id: String },
@@ -400,6 +427,8 @@ pub enum AgentResponse {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Successful result of a `HostCostTenantQuery`.
+    HostCostTenantResult(TenantCostResult),
     /// Error response.
     Error { code: u16, message: String },
     /// Deployment status with rollout progress.
@@ -505,6 +534,46 @@ mod tests {
             }
             _ => panic!("Expected Error variant"),
         }
+    }
+
+    #[test]
+    fn test_host_cost_tenant_query_roundtrips() {
+        let req = AgentRequest::HostCostTenantQuery {
+            tenant_id: "tenant-a".to_string(),
+            pool_id: "pool-a".to_string(),
+            instance_id: "vm-a".to_string(),
+            query: TenantCostQuery {
+                requested_tenant_id: "tenant-a".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentRequest::HostCostTenantQuery {
+                tenant_id,
+                pool_id,
+                instance_id,
+                query,
+            } => {
+                assert_eq!(tenant_id, "tenant-a");
+                assert_eq!(pool_id, "pool-a");
+                assert_eq!(instance_id, "vm-a");
+                assert_eq!(query.requested_tenant_id, "tenant-a");
+            }
+            other => panic!("Expected HostCostTenantQuery, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_host_cost_tenant_result_rejects_unknown_fields() {
+        let bad = serde_json::json!({
+            "HostCostTenantResult": {
+                "report": { "spent_micros_usd": 42 },
+                "unexpected": true
+            }
+        });
+        let err = serde_json::from_value::<AgentResponse>(bad).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
     }
 
     #[test]

@@ -2,9 +2,10 @@
 
 **Status:** in progress — `mvmctl machine run` shipped (Workstream A/B kickoff);
 `--net`/`--allow-host`, local image sources, persistent spec verbs
-(`create`/`ls`/`inspect`/`rm`), and running-VM wrappers
-(`exec`/`shell`/`stop`) shipped; persistent image-backed `start`, full
-`mvm.toml` machine mapping, SDK parity, and `pack` pending
+(`create`/`start`/`ls`/`inspect`/`rm`), and running-VM wrappers
+(`exec`/`shell`/`stop`) shipped; full `mvm.toml` machine runtime mapping,
+SDK parity, scenario docs, portable artifacts, perf/smoke coverage, and
+duplicate-major/binary-size budgets remain
 **Owner:** mvm
 **Date:** 2026-06-15
 
@@ -761,11 +762,15 @@ Required behavior:
       mutually exclusive for now, and unknown keys are rejected.
 - [x] Add the current image-backed one-shot path to public quickstart and
       first-use happy-path docs before flake/manifests.
-- [ ] Add `mvmctl machine --help` with `run`, `create`, `start`, `exec`,
+- [x] Add `mvmctl machine --help` with `run`, `create`, `start`, `exec`,
       `shell`, `stop`, `ls`, `inspect`, and `rm` subcommands.
-      (`run` shipped — `commands/machine/`; create/start/exec/shell/stop/ls/inspect/rm remain.)
-- [ ] Add parser tests for every target command shown in this plan.
-      (`machine run` parser + translation tests shipped; remaining verbs pending.)
+      The lifecycle verbs are implemented under `commands/machine/`; `pack`
+      remains in the portable-artifact workstream below.
+- [x] Add parser/state tests for the shipped machine lifecycle commands.
+      Coverage includes `machine run` translation plus persistent
+      create/start/exec/shell/stop/ls/inspect/rm parser and state behavior.
+- [ ] Add parser tests for portable-artifact, SSH-agent, and volume flags as
+      those still-open surfaces land.
 - [x] Add the future `mvmctl machine run --image ...` quickstart to README and
       public docs after the command is implemented.
 - [ ] Rewrite install docs so the primary path is binary install + `mvmctl
@@ -785,11 +790,11 @@ Required behavior:
 
 ### B. Ephemeral image runner parity
 
-> **Status (in flight):** `--net`/`--allow-host` + **uniform egress enforcement
-> across Firecracker, libkrun, and Vz** are implemented on branch
-> `feat/plan-200-machine-net`. Design: one `NetworkPolicy` on `VmStartConfig`;
-> FC enforces via its firewall, libkrun/Vz via the gateway bridge — every
-> transient run is admitted as a locally-signed workload so the bridge spawns.
+> **Status:** `--net`/`--allow-host` + **uniform egress enforcement across
+> Firecracker, libkrun, and Vz** are merged. Design: one `NetworkPolicy` on
+> `VmStartConfig`; FC enforces via its firewall, libkrun/Vz via the gateway
+> bridge — every transient run is admitted as a locally-signed workload so the
+> bridge spawns.
 >
 > **Live-validated 2026-06-16 (macOS/Vz):** no regression (A/B vs `main`
 > identical); admission + bridge-spawn + boot + run + teardown work; dry-run /
@@ -799,13 +804,10 @@ Required behavior:
 > DNS + TCP are forwarded, and an unlisted host is sink-holed
 > (`bare_*_through_the_live_bridge` tests in `mvm-hostd` `gateway_bridge`).
 >
-> **Remaining before merge:** the macOS *VM-level* egress smoke is blocked by a
-> pre-existing transient-run networking gap (the transient guest never brings up
-> `eth0`; unprivileged exec can't DHCP — see "Deferred follow-ups"), so that
-> smoke runs on Linux/KVM/Firecracker; plus the adversarial security review.
-> Builder/dev still take the legacy non-bridge path (their `trusted_build_egress`
-> opt-in + `run_legacy` removal is the deferred step 3); MCP code-run stays
-> un-admitted (follow-up).
+> **Remaining:** Linux builder-VM/KVM smoke coverage and the measured latency
+> work below. The macOS transient guest networking, MCP admission, default
+> libkrun/Vz bridge threading, and uniform host:port L4 follow-ups are closed in
+> the deferred-follow-up section.
 
 - [x] Add `--net` and `--allow-host HOST[:PORT]` to `mvmctl run`.
 - [x] Add `MachineImageSource` support for registry refs, local OCI archive
@@ -1178,7 +1180,7 @@ follow-ups:
       `x86_64-unknown-linux-gnu` target) in the CI Lint job.
 - [ ] Duplicate-major dependency budget check, including OCI/TLS stacks.
 - [ ] Binary-size budget check for the default `mvmctl` artifact.
-- [ ] Local image-source tests: registry ref, archive path, stdin archive,
+- [x] Local image-source tests: registry ref, archive path, stdin archive,
       unpacked rootfs, malformed archive, traversal attempt, wrong
       architecture, and missing provenance.
 - [ ] SDK/CLI parity and non-bypass tests: equivalent admission inputs,

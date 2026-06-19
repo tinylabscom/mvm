@@ -44,6 +44,15 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 ## Planning updates
 
+- [x] Reconciled Plan 126 / Plan 200 bookkeeping drift with
+      [`REFACTOR-STATUS.md`](REFACTOR-STATUS.md). Plan 126 now distinguishes
+      landed default-closure cuts and gates from the still-blocked OCI/TLS stack
+      decision (`oci-client`, `aws-lc-rs`, `reqwest` unification), and marks
+      `sigstore` prod verification as mvmd-owned plus `pgp` as superseded by
+      Plan 160. Plan 200 now status-syncs the already-landed machine lifecycle
+      verbs and local image-source tests, leaving `mvm.toml` runtime mapping,
+      SDK parity, docs, portable artifacts, perf/smoke coverage, and
+      duplicate-major/binary-size budgets as the open product scope. Docs-only.
 - [x] Implemented [`plans/202-host-services-daemon.md`](plans/202-host-services-daemon.md) Phase 4a — host-agent registration journal. `mvm-host-agent` now persists the live per-tenant `RegisterVm` set as a deterministic `registrations.json` snapshot beside the control socket, rewrites it after successful register/deregister, and replays it after the signer helper is ready on daemon startup. Replay goes through the normal register path, preserving tenant checks, path-safe `vm_id` validation, broker-socket rebinding, and signer-helper chain reopening. Focused coverage: stable journal snapshot round-trip, deregister cleanup, and daemon restart rebinding a journaled broker socket. Phase 4b supervised daemon restart now lands on top of that journal.
 - [ ] Added [`plans/201-warm-lease-and-batched-exec.md`](plans/201-warm-lease-and-batched-exec.md) — a DX-ergonomics plan layering over the Plan 118 standby pool + Plan 169 agent-RPC. Two caller-convenience gaps: no RAII claim/release (callers hand-wire `select_idle_compatible`→`mark_claimed`→`claim_standby`→`remove` + own stop/replenish), and no batched guest exec (stage→compile→run pays three reconnects). Adds a `WarmLease` handle (`acquire`/`Drop`/`release`; release **stops + replenishes a fresh standby, never reuses a dirty VM** — the security-correct inverse of the borrow-pool prior art, matching the Vz saved-state model + claim 1) and a batched stage→run `ExecBuilder` (Tier 1 one-stream pipelining now; opt-in `GuestRequest::ExecBatch` later, `dev-shell`-gated argv with a no-argv `RunEntrypoint` terminal for prod loops; `ExecOutcome` gains duration + peak RSS). No new backend/transport; admission + audit path untouched; all but the example testable on the mock backend + mock guest agent. **PROPOSED**, docs-only (#937).
 - [x] Landed template-identifier path-traversal hardening from the 2026-06-16
@@ -2508,7 +2517,7 @@ Out of scope for this sprint:
 - Side-channel information leakage via flow timing — inherent to any flow audit; accepted in ADR-058 amendment landed via [Plan 103](plans/103-w6a-implementation-tracker.md).
 - Audit-metadata-at-rest encryption — the chain itself is plaintext on host disk under `~/.mvm/audit/<tenant>.jsonl`. Tenant *data* is encrypted (claim 10 leg 1); tenant *metadata* is not. Future claim 10.1 candidate; not this sprint.
 - Multi-user shared host with the same UID — same-UID local attacker can read the gateway subscriber socket; documented as accepted. Mode 0700 covers cross-UID; cross-UID-same-user is out of scope.
-- Per-byte content capture by default — coverage (every byte traverses the bridge) is structural; full pcap into the chain is opt-in for forensics (future `network_audit.mode = full_pcap`), not default. Aggregated `FlowBytes` lands in W8.
+- Per-byte content capture by default — coverage (every byte traverses the bridge) is structural; full pcap into the chain is opt-in for forensics (future `network_audit.mode = full_pcap`, see Plan 203), not default. Aggregated `FlowBytes` lands in W8.
 - L7 URL inspection (path-level allowlist) — composes via `L7EgressProxy` Phase 2 (TLS MITM with workload-CA trust); substrate exists, finalization is a separate plan ([Plan 34 / ADR-006](adrs/006-name-constrained-egress-ca.md)).
 - DNS-over-HTTPS bypass mitigation — separate Plan 74 follow-up: mandatory-deny well-known DoH endpoints.
 
