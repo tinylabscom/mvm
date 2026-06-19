@@ -44,6 +44,20 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 ## Planning updates
 
+- [x] Implemented the first pure-substrate slice of
+      [`plans/118-supervisor-standby-pool-and-live-bench.md`](plans/118-supervisor-standby-pool-and-live-bench.md)
+      PR-10c: `mvm-cli` now has density and concurrent-launch report shapes
+      (`DensityReport`, `InstanceFootprint`, `DensityStats`,
+      `LaunchDistributionReport`) plus VM-free helpers/tests for per-instance
+      footprint derivation and P50/P95/P99 launch distributions. Live density
+      CLI, platform footprint accessors, concurrent orchestration, baselines,
+      and Vz/FC lanes remain open.
+- [x] Closed [`plans/159-vz-inspired-macos-dx.md`](plans/159-vz-inspired-macos-dx.md)
+      and checked it in [`REFACTOR-STATUS.md`](REFACTOR-STATUS.md): all
+      VZ/macOS boxes are complete via linked plans/PRs, verb/install/product
+      polish is rehomed to Plan 181 / Plan 200, and signed delta-image
+      distribution is descoped until an owning artifact/distribution plan is
+      opened.
 - [x] Reconciled Plan 126 / Plan 200 bookkeeping drift with
       [`REFACTOR-STATUS.md`](REFACTOR-STATUS.md). Plan 126 now distinguishes
       landed default-closure cuts and gates from the still-blocked OCI/TLS stack

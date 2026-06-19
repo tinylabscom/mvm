@@ -546,8 +546,12 @@ lanes are validated on a dev host once the image is rebuilt.
 
 ### Ship checklist (PR-10c)
 
-- [ ] Density report shape + percentile/footprint pure helpers,
-      unit-tested VM-free.
+- [x] Density report shape + percentile/footprint pure helpers,
+      unit-tested VM-free. **First PR-10c substrate slice landed:** added
+      `DensityReport`, `InstanceFootprint`, `DensityStats`, and
+      `LaunchDistributionReport` plus pure summary/build helpers and unit tests
+      for per-instance footprint derivation and concurrent P50/P95/P99 launch
+      distribution. Live wiring remains below.
 - [ ] Platform-split footprint accessor (Linux PSS `smaps_rollup` /
       macOS `phys_footprint`), fixture-tested.
 - [ ] `mvmctl bench microvm-density --count K --max-count M` wired

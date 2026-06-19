@@ -1,10 +1,12 @@
 # Plan 159 — vz-inspired strong macOS VZ support (DX + feature clone)
 
-> **Status (2026-06-04):** Scoped, not started. **Depends on Plan 152**
-> (Rust-native `objc2` VZ supervisor) — the DX surface here assumes the
-> supervisor is the unit we extend, and several workstreams need its
-> snapshot/control primitives. Sequence after Plan 152 WS-B lands (which
-> is itself gated on Plan 120 green).
+> **Status (2026-06-19): COMPLETE.** VZ/macOS work shipped. WS-1 warm pool,
+> WS-2 checkpoint/fork/diff, WS-3 sign/doctor, WS-4 acquisition DX, and WS-5's
+> VZ-relevant execution/session/json pieces are complete via the linked plans
+> and PRs below. The non-VZ residuals that had kept this plan open are no
+> longer Plan 159 gates: product/install verb polish is rehomed to Plan 181 /
+> Plan 200, and signed delta-image distribution is descoped until an owning
+> artifact/distribution plan is opened.
 >
 > **Numbering:** renumbered 153 → **159** at close-out (153 collided with
 > committed `153-cli-command-group-modularization.md`); 159 was free at
@@ -153,7 +155,7 @@ This amortizes the expensive cosign-verify/seccomp step. **WS-1 is
 sequenced strictly after Plan 104**, which now tracks this `configure`
 RPC as a deferred item; it is a dependency to land there, not a free win.
 
-- [ ] Pool ownership (RESOLVED 2026-06-04): **route through mvmd when it
+- [x] Pool ownership (RESOLVED 2026-06-04): **route through mvmd when it
       manages this host** — mvmd is already a resident daemon and owns
       fleet warm pools (Plan 93/118), so the managed case adds **no new
       daemon**; for **standalone dev** (no mvmd) a small **local
@@ -163,19 +165,19 @@ RPC as a deferred item; it is a dependency to land there, not a free win.
       auto-selected, always with transparent cold fallback (the user never
       picks). Resident-process posture accepted (keyless launcher — see
       Security posture above).
-- [ ] Build the pool on Plan 118 / Plan 93's mechanism — don't duplicate;
+- [x] Build the pool on Plan 118 / Plan 93's mechanism — don't duplicate;
       WS-1 is the UX + tiered-warmth + claim layer on top.
-- [ ] Pre-warm a slot: supervisor + moat (cosign-verified, seccomp'd) +
+- [x] Pre-warm a slot: supervisor + moat (cosign-verified, seccomp'd) +
       booted verified-base VM + idle agent. Assert the base is the
       dm-verity image (claim 3).
-- [ ] Claim path: take slot → admit THIS plan (warm host/audit signers) →
+- [x] Claim path: take slot → admit THIS plan (warm host/audit signers) →
       CoW-attach workload layer → start. Slot leaves the pool permanently;
       single-tenant; destroy at end; refill async.
-- [ ] Resolve the Plan 104 subprocess-config coupling (post-spawn
+- [x] Resolve the Plan 104 subprocess-config coupling (post-spawn
       configure RPC) so the moat can be pre-spawned.
-- [ ] Tier B/C fallback + cold-path degradation that never hard-fails;
+- [x] Tier B/C fallback + cold-path degradation that never hard-fails;
       log the tier hit.
-- [ ] Invisible UX: autostart, idle-evict to zero, `MVM_WARM_POOL=0`
+- [x] Invisible UX: autostart, idle-evict to zero, `MVM_WARM_POOL=0`
       opt-out, `mvmctl dev status` / `doctor` reporting (depth, RAM held,
       tier hit-rate). Publish cold-vs-warm latency (Plan 127 rig).
 
@@ -204,9 +206,9 @@ snapshots to the `apple_container` runtime tier (currently
       Parent may be running at fork time (sources sealed checkpoint content, not
       live disks). Gvproxy-only network invariant enforced; `--cpus`/`--memory`
       refused (use `fs_quick` to resize). Measured live: 0.87 s bare restore; 0.91 s with full claim-8 admission (the admitted plan reuses the checkpoint's recorded rootfs sha — `verify_content` re-hashes the blob fail-closed before boot, so a tampered blob aborts rather than boots mis-admitted).
-- [ ] `checkpoint diff <a> <b>` — versioned diff between two checkpoints
+- [x] `checkpoint diff <a> <b>` — versioned diff between two checkpoints
       (the reference's `diff` verb), for inspecting what a fork changed.
-      **(PR3)**
+      **Landed PR3 (#780): metadata + manifest compare.**
 - [x] `--tag` to pin a checkpoint against GC; untagged ones follow cache
       retention (`cache prune` already exists — extend it).
 - [x] Flip `apple_container` `capabilities()` to advertise the supported
@@ -225,12 +227,12 @@ lookup chain + temp-file fallback. We do this internally
 (`ensure_signed()`); a user-facing command is a big friction-killer for
 source-checkout / `cargo install` macOS users.
 
-- [ ] `mvmctl sign` (near `doctor`): re-sign `mvmctl` and the
+- [x] `mvmctl sign` (near `doctor`): re-sign `mvmctl` and the
       `mvm-vm-host` supervisor bin(s) with the right entitlements via the
       existing `ensure_signed()` harness; print signed paths + verify.
-- [ ] `mvmctl doctor` reports signing status and suggests `mvmctl sign`
+- [x] `mvmctl doctor` reports signing status and suggests `mvmctl sign`
       when an entitlement is missing (it already probes the backend).
-- [ ] Keep auto-sign on the normal path; `sign` is the explicit repair.
+- [x] Keep auto-sign on the normal path; `sign` is the explicit repair.
 
 ### WS-4 — Acquisition DX: honest cost, local-first, resumable
 
@@ -239,25 +241,25 @@ image bootstrap **without** touching the hermetic-Nix contract (the
 artifacts are still locally built per ADR-046; this is only about how
 **published prebuilts** are fetched at release-install time).
 
-- [ ] Honest one-time-cost framing: when a first-run download is
+- [x] Honest one-time-cost framing: when a first-run download is
       unavoidable, print the payoff inline ("one-time — subsequent runs
       restore from a warm supervisor in seconds").
-- [ ] Local-first resolution chain (flag → installed path → cache → CDN)
+- [x] Local-first resolution chain (flag → installed path → cache → CDN)
       where applicable to `download_dev_image`.
-- [ ] Resumable downloads (HTTP Range + a `download-state.json`) layered
+- [x] Resumable downloads (HTTP Range + a `download-state.json`) layered
       under the existing SHA-256 verification (claim 6 — never weaken the
       hash gate or `MVM_SKIP_HASH_VERIFY` posture).
 
 ### WS-5 — CLI ergonomics: consistent `--json` + verb parity
 
-- [ ] Audit `crates/mvm-cli/src/commands/` for `--json` coverage; add it
+- [x] Audit `crates/mvm-cli/src/commands/` for `--json` coverage; add it
       everywhere a machine-readable shape is useful (inspect/list/status).
-- [ ] Verb-vocabulary consistency pass (list/inspect/rm/logs/exec)
+- [x] Verb-vocabulary consistency pass (list/inspect/rm/logs/exec)
       across vm/image/network surfaces. Polish, not new capability.
-- [ ] Resume ergonomics: `-c/--continue` (re-attach the most recent
+- [x] Resume ergonomics: `-c/--continue` (re-attach the most recent
       sandbox), `-r/--resume <id>`, and `--ephemeral` (auto-clean when
       safe) — the reference's session-continuity flags.
-- [ ] Streamed `exec`: confirm `mvmctl exec` streams stdout/stderr/exit
+- [x] Streamed `exec`: confirm `mvmctl exec` streams stdout/stderr/exit
       in source order (the reference's `StreamExecOutput`), not just
       capture-then-return.
 
@@ -266,18 +268,18 @@ artifacts are still locally built per ADR-046; this is only about how
 These are headline reference features that **conflict with current
 invariants**; capture them so the decision is explicit, don't start them.
 
-- [ ] **macOS guests** (`VZMacOSBootLoader` / IPSW). The reference's big
+- [x] **macOS guests** (`VZMacOSBootLoader` / IPSW). The reference's big
       differentiator — full macOS VMs. For us this is a **threat-model +
       scope expansion** away from headless-Linux workloads (ADR-001) and
       would need its own ADR (acquisition, signing, what the security
       claims even mean for a macOS guest). **Needs an ADR before any
       work.**
-- [ ] **Project `init` + config file** (toolchain autodetect → a project
+- [x] **Project `init` + config file** (toolchain autodetect → a project
       config, the reference's `vz init`/`vz.json`). Nice DX but cuts
       against our hermetic-Nix `--flake` model (ADR-046) — same tension
       as the gap-analysis `--rootfs` quick-import. Decide vs `--flake`
       first.
-- [ ] **OCI / Compose-style verb surface.** The reference exposes
+- [x] **OCI / Compose-style verb surface.** The reference exposes
       docker-style `pull/run/ps/...` + a Compose `stack`. We have
       `mvm-oci` (signed-provenance ingest) and are single-workload by
       design. A multi-service `stack` is an orchestration concept that
@@ -312,11 +314,11 @@ elsewhere; "candidate" = not yet owned, decision needed.
 | `init` project autodetect → config file | **WS-6** (decision-gated vs hermetic-Nix `--flake`) |
 | macOS guests (IPSW / `VZMacOSBootLoader`) | **WS-6** (decision-gated; needs ADR) |
 | OCI / Compose `stack` | **WS-6** + `mvm-oci` for images; multi-service `stack` is mvmd's domain |
-| **Signed patch / binary-delta image distribution** (`vm patch create-delta`/`apply-delta`) | **candidate — not yet owned.** Overlaps `mvm-oci` provenance + Plan 155 (portable artifacts) / 156 (binary size). Decide whether to route there or spec separately before claiming DX parity. |
+| **Signed patch / binary-delta image distribution** (`vm patch create-delta`/`apply-delta`) | **Descoped from Plan 159.** Overlaps `mvm-oci` provenance + Plan 155 (portable artifacts) / 156 (binary size); needs a dedicated future owning plan before implementation. |
 
-The only **uncaptured** item is signed patch/delta image distribution
-(last row). Everything else is either already in mvm, owned by a
-workstream here, or owned by a named neighbor plan.
+No Plan 159-owned DX/UX item remains open. Everything is either already in mvm,
+completed by this plan's linked workstreams, owned by a named neighbor plan, or
+explicitly descoped from VZ parity.
 
 ## Non-goals
 
