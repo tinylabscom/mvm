@@ -268,6 +268,97 @@ pub struct TenantCostResult {
     pub report: crate::protocol::host_cost::CostReport,
 }
 
+/// Query for the mvmd-delegated `host.catalog.v1::tenant` verb.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TenantCatalogQuery {
+    /// Tenant the caller wants the service catalog for. The agent must refuse
+    /// any mismatch against the authenticated workload tenant.
+    pub requested_tenant_id: String,
+    /// Optional caller-provided idempotency/replay key for delegated calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
+/// Query for the mvmd-delegated `host.peers.v1::tenant` verb.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TenantPeersQuery {
+    /// Tenant the caller wants peer data for.
+    pub requested_tenant_id: String,
+    /// Optional caller-provided idempotency/replay key for delegated calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Optional label selector forwarded to the mvmd gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_selector: Option<String>,
+}
+
+/// Query for the mvmd-delegated `host.config.v1::tenant` verb.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TenantConfigQuery {
+    /// Tenant the caller wants config data for.
+    pub requested_tenant_id: String,
+    /// Optional caller-provided idempotency/replay key for delegated calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Tenant config key to read.
+    pub key: String,
+}
+
+/// Query for the mvmd-delegated `host.rate_budget.v1::tenant` verb.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TenantRateBudgetQuery {
+    /// Tenant the caller wants rate-budget data for.
+    pub requested_tenant_id: String,
+    /// Optional caller-provided idempotency/replay key for delegated calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Service id whose effective rate budget should be returned.
+    pub service: String,
+}
+
+/// Successful result for the mvmd-delegated `host.catalog.v1::tenant` verb.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TenantCatalogResult {
+    pub tenant_id: String,
+    pub services: Vec<serde_json::Value>,
+}
+
+/// Successful result for the mvmd-delegated `host.peers.v1::tenant` verb.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TenantPeersResult {
+    pub tenant_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_selector: Option<String>,
+    pub peers: Vec<serde_json::Value>,
+}
+
+/// Successful result for the mvmd-delegated `host.config.v1::tenant` verb.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TenantConfigResult {
+    pub tenant_id: String,
+    pub key: String,
+    pub value: serde_json::Value,
+}
+
+/// Successful result for the mvmd-delegated `host.rate_budget.v1::tenant` verb.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TenantRateBudgetResult {
+    pub tenant_id: String,
+    pub service: String,
+    pub effective_requests_per_second: u32,
+    pub effective_burst: u32,
+    pub source: String,
+    pub limits: Vec<serde_json::Value>,
+}
+
 // ============================================================================
 // Typed message protocol (QUIC API)
 // ============================================================================
@@ -316,6 +407,34 @@ pub enum AgentRequest {
         pool_id: String,
         instance_id: String,
         query: TenantCostQuery,
+    },
+    /// Query tenant service catalog for the calling workload's tenant.
+    HostCatalogTenantQuery {
+        tenant_id: String,
+        pool_id: String,
+        instance_id: String,
+        query: TenantCatalogQuery,
+    },
+    /// Query tenant peer metadata for the calling workload's tenant.
+    HostPeersTenantQuery {
+        tenant_id: String,
+        pool_id: String,
+        instance_id: String,
+        query: TenantPeersQuery,
+    },
+    /// Query one tenant config key for the calling workload's tenant.
+    HostConfigTenantQuery {
+        tenant_id: String,
+        pool_id: String,
+        instance_id: String,
+        query: TenantConfigQuery,
+    },
+    /// Query effective rate budget for a service in the calling workload's tenant.
+    HostRateBudgetTenantQuery {
+        tenant_id: String,
+        pool_id: String,
+        instance_id: String,
+        query: TenantRateBudgetQuery,
     },
     /// Query the status of an ongoing deployment/rollout for a pool.
     DeploymentStatus { tenant_id: String, pool_id: String },
@@ -429,6 +548,14 @@ pub enum AgentResponse {
     },
     /// Successful result of a `HostCostTenantQuery`.
     HostCostTenantResult(TenantCostResult),
+    /// Successful result of a `HostCatalogTenantQuery`.
+    HostCatalogTenantResult(TenantCatalogResult),
+    /// Successful result of a `HostPeersTenantQuery`.
+    HostPeersTenantResult(TenantPeersResult),
+    /// Successful result of a `HostConfigTenantQuery`.
+    HostConfigTenantResult(TenantConfigResult),
+    /// Successful result of a `HostRateBudgetTenantQuery`.
+    HostRateBudgetTenantResult(TenantRateBudgetResult),
     /// Error response.
     Error { code: u16, message: String },
     /// Deployment status with rollout progress.
@@ -574,6 +701,137 @@ mod tests {
         });
         let err = serde_json::from_value::<AgentResponse>(bad).unwrap_err();
         assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn test_delegated_host_services_requests_roundtrip() {
+        let requests = vec![
+            AgentRequest::HostCatalogTenantQuery {
+                tenant_id: "tenant-a".to_string(),
+                pool_id: "pool-a".to_string(),
+                instance_id: "vm-a".to_string(),
+                query: TenantCatalogQuery {
+                    requested_tenant_id: "tenant-a".to_string(),
+                    request_id: Some("req-catalog".to_string()),
+                },
+            },
+            AgentRequest::HostPeersTenantQuery {
+                tenant_id: "tenant-a".to_string(),
+                pool_id: "pool-a".to_string(),
+                instance_id: "vm-a".to_string(),
+                query: TenantPeersQuery {
+                    requested_tenant_id: "tenant-a".to_string(),
+                    request_id: Some("req-peers".to_string()),
+                    label_selector: Some("region=us-east-1".to_string()),
+                },
+            },
+            AgentRequest::HostConfigTenantQuery {
+                tenant_id: "tenant-a".to_string(),
+                pool_id: "pool-a".to_string(),
+                instance_id: "vm-a".to_string(),
+                query: TenantConfigQuery {
+                    requested_tenant_id: "tenant-a".to_string(),
+                    request_id: Some("req-config".to_string()),
+                    key: "max_vcpus".to_string(),
+                },
+            },
+            AgentRequest::HostRateBudgetTenantQuery {
+                tenant_id: "tenant-a".to_string(),
+                pool_id: "pool-a".to_string(),
+                instance_id: "vm-a".to_string(),
+                query: TenantRateBudgetQuery {
+                    requested_tenant_id: "tenant-a".to_string(),
+                    request_id: Some("req-rate".to_string()),
+                    service: "svc-a".to_string(),
+                },
+            },
+        ];
+
+        for request in requests {
+            let json = serde_json::to_value(&request).unwrap();
+            let parsed: AgentRequest = serde_json::from_value(json.clone())
+                .unwrap_or_else(|err| panic!("failed to parse delegated request {json}: {err}"));
+            assert_eq!(serde_json::to_value(parsed).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn test_delegated_host_services_responses_roundtrip() {
+        let responses = vec![
+            AgentResponse::HostCatalogTenantResult(TenantCatalogResult {
+                tenant_id: "tenant-a".to_string(),
+                services: vec![serde_json::json!({"service_id": "svc-a"})],
+            }),
+            AgentResponse::HostPeersTenantResult(TenantPeersResult {
+                tenant_id: "tenant-a".to_string(),
+                label_selector: Some("region=us-east-1".to_string()),
+                peers: vec![serde_json::json!({"peer_region_id": "us-east-1"})],
+            }),
+            AgentResponse::HostConfigTenantResult(TenantConfigResult {
+                tenant_id: "tenant-a".to_string(),
+                key: "max_vcpus".to_string(),
+                value: serde_json::json!(8),
+            }),
+            AgentResponse::HostRateBudgetTenantResult(TenantRateBudgetResult {
+                tenant_id: "tenant-a".to_string(),
+                service: "svc-a".to_string(),
+                effective_requests_per_second: 10,
+                effective_burst: 20,
+                source: "tenant_default".to_string(),
+                limits: vec![serde_json::json!({"scope": "tenant"})],
+            }),
+        ];
+
+        for response in responses {
+            let json = serde_json::to_value(&response).unwrap();
+            let parsed: AgentResponse = serde_json::from_value(json.clone())
+                .unwrap_or_else(|err| panic!("failed to parse delegated response {json}: {err}"));
+            assert_eq!(serde_json::to_value(parsed).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn test_delegated_host_services_reject_unknown_fields() {
+        for bad in [
+            serde_json::json!({
+                "HostCatalogTenantQuery": {
+                    "tenant_id": "tenant-a",
+                    "pool_id": "pool-a",
+                    "instance_id": "vm-a",
+                    "query": {
+                        "requested_tenant_id": "tenant-a",
+                        "unexpected": true
+                    }
+                }
+            }),
+            serde_json::json!({
+                "HostPeersTenantResult": {
+                    "tenant_id": "tenant-a",
+                    "peers": [],
+                    "unexpected": true
+                }
+            }),
+            serde_json::json!({
+                "HostRateBudgetTenantResult": {
+                    "tenant_id": "tenant-a",
+                    "service": "svc-a",
+                    "effective_requests_per_second": 10,
+                    "effective_burst": 20,
+                    "source": "tenant_default",
+                    "limits": [],
+                    "unexpected": true
+                }
+            }),
+        ] {
+            let request_err = serde_json::from_value::<AgentRequest>(bad.clone());
+            let response_err = serde_json::from_value::<AgentResponse>(bad);
+            assert!(
+                [request_err.err(), response_err.err()]
+                    .into_iter()
+                    .flatten()
+                    .any(|err| err.to_string().contains("unknown field"))
+            );
+        }
     }
 
     #[test]
@@ -1596,6 +1854,53 @@ mod tests {
                 instance_id: "i1".to_string(),
                 request: serde_json::json!({"type": "Ping"}),
             },
+            AgentRequest::HostCostTenantQuery {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                instance_id: "i1".to_string(),
+                query: TenantCostQuery {
+                    requested_tenant_id: "t1".to_string(),
+                },
+            },
+            AgentRequest::HostCatalogTenantQuery {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                instance_id: "i1".to_string(),
+                query: TenantCatalogQuery {
+                    requested_tenant_id: "t1".to_string(),
+                    request_id: Some("req-catalog".to_string()),
+                },
+            },
+            AgentRequest::HostPeersTenantQuery {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                instance_id: "i1".to_string(),
+                query: TenantPeersQuery {
+                    requested_tenant_id: "t1".to_string(),
+                    request_id: Some("req-peers".to_string()),
+                    label_selector: Some("region=us-east-1".to_string()),
+                },
+            },
+            AgentRequest::HostConfigTenantQuery {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                instance_id: "i1".to_string(),
+                query: TenantConfigQuery {
+                    requested_tenant_id: "t1".to_string(),
+                    request_id: Some("req-config".to_string()),
+                    key: "max_vcpus".to_string(),
+                },
+            },
+            AgentRequest::HostRateBudgetTenantQuery {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                instance_id: "i1".to_string(),
+                query: TenantRateBudgetQuery {
+                    requested_tenant_id: "t1".to_string(),
+                    request_id: Some("req-rate".to_string()),
+                    service: "svc-a".to_string(),
+                },
+            },
             AgentRequest::DeploymentStatus {
                 tenant_id: "t1".to_string(),
                 pool_id: "p1".to_string(),
@@ -1706,6 +2011,33 @@ mod tests {
                 response: serde_json::json!({"type": "Pong"}),
                 error: None,
             },
+            AgentResponse::HostCostTenantResult(TenantCostResult {
+                report: crate::protocol::host_cost::CostReport {
+                    spent_micros_usd: 42,
+                },
+            }),
+            AgentResponse::HostCatalogTenantResult(TenantCatalogResult {
+                tenant_id: "t1".to_string(),
+                services: vec![serde_json::json!({"service_id": "svc-a"})],
+            }),
+            AgentResponse::HostPeersTenantResult(TenantPeersResult {
+                tenant_id: "t1".to_string(),
+                label_selector: None,
+                peers: vec![serde_json::json!({"peer_region_id": "us-east-1"})],
+            }),
+            AgentResponse::HostConfigTenantResult(TenantConfigResult {
+                tenant_id: "t1".to_string(),
+                key: "max_vcpus".to_string(),
+                value: serde_json::json!(8),
+            }),
+            AgentResponse::HostRateBudgetTenantResult(TenantRateBudgetResult {
+                tenant_id: "t1".to_string(),
+                service: "svc-a".to_string(),
+                effective_requests_per_second: 10,
+                effective_burst: 20,
+                source: "tenant_default".to_string(),
+                limits: vec![],
+            }),
             AgentResponse::Error {
                 code: 500,
                 message: "internal error".to_string(),
