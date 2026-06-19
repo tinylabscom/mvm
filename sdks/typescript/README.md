@@ -83,6 +83,34 @@ mvm.app({
 The IR types (`Workload`, `App`, `Resources`, …) are re-exported, so
 `import { Workload } from "@runmvm/mvm"` works directly.
 
+## Machine lifecycle wrappers
+
+`Machine` mirrors the beginner `mvmctl machine ...` command group for host
+automation. These wrappers deliberately shell to `mvmctl machine ...`; OCI pull,
+admission, receipts, audit, networking, and persistent machine state stay owned
+by the CLI instead of being reimplemented in TypeScript.
+
+```ts
+import { Machine } from "@runmvm/mvm";
+
+const result = Machine.run({
+  image: "alpine:latest",
+  command: ["uname", "-a"],
+  net: true,
+  allowHosts: ["example.com:443"],
+});
+console.log(result.stdout);
+
+const vm = Machine.create({ name: "devbox", manifest: "mvm.toml", profile: "dev" });
+vm.start();
+vm.exec(["echo", "hello"]);
+vm.stop();
+```
+
+Set `MVM_CLI_BIN=/path/to/mvmctl` to point the SDK at a local or test CLI
+binary. CLI process failures raise `MachineError` with `argv`, `exitCode`, and
+captured `stderr`.
+
 ## Versioning
 
 The SDK version tracks the `mvmctl` toolchain version: a workload emitted by

@@ -4,7 +4,9 @@
 `--net`/`--allow-host`, local image sources, persistent spec verbs
 (`create`/`start`/`ls`/`inspect`/`rm`), and running-VM wrappers
 (`exec`/`shell`/`stop`) shipped; full `mvm.toml` machine runtime mapping,
-SDK parity, scenario docs, portable artifacts, perf/smoke coverage, and
+Python/TypeScript SDK machine wrappers, and dev-tier persistent-machine
+ssh-agent forwarding shipped; Rust SDK builders, deeper SDK/CLI parity,
+scenario docs, portable artifacts, perf/smoke coverage, and
 duplicate-major/binary-size budgets remain
 **Owner:** mvm
 **Date:** 2026-06-15
@@ -950,20 +952,31 @@ Required behavior:
 
 ### C2. SDK parity
 
-- [ ] Add Python `Machine.run/create/start/exec/shell/stop` wrappers over the
-      CLI/library lifecycle.
-- [ ] Add TypeScript `Machine.run/create/start/exec/shell/stop` wrappers with
-      matching option names.
+- [x] Add Python `Machine.run/create/start/exec/shell/stop` wrappers over the
+      CLI/library lifecycle. Landed as a thin `mvmctl machine ...` subprocess
+      wrapper with bounded output/timeout handling and structured
+      `MachineError`; fake-CLI tests pin `run`, persistent lifecycle, conflict
+      rejection, empty-command rejection, and failed-process errors.
+- [x] Add TypeScript `Machine.run/create/start/exec/shell/stop` wrappers with
+      matching option names. Landed as a thin `mvmctl machine ...` subprocess
+      wrapper with structured `MachineError`; fake-CLI tests pin `run`,
+      persistent lifecycle, conflict rejection, empty-command rejection, and
+      failed-process errors.
 - [ ] Add Rust `mvm-sdk` machine lifecycle builders for embedders that do not
       want to shell out.
 - [ ] Keep structured errors aligned across Python, TypeScript, and Rust.
+      Python and TypeScript now expose `MachineError`; Rust alignment remains.
 - [ ] Add SDK tests proving no host Nix is invoked for image-backed machine
-      runs.
+      runs. Python and TypeScript fake-CLI tests prove these wrappers emit only
+      `mvmctl machine ...` argv and never call `nix` or legacy `up` paths; Rust
+      and live admission-path proof remain.
 - [ ] Add SDK/CLI parity tests proving equivalent admission inputs, effective
       policy, and receipt/audit summaries for the same machine config.
 - [ ] Add SDK negative tests proving wrappers cannot bypass artifact
       verification, network default-deny, unknown-key rejection, or
-      `image`/`flake` conflict rejection.
+      `image`/`flake` conflict rejection. Python and TypeScript now reject
+      image+manifest/source conflicts at the wrapper boundary; artifact,
+      network, unknown-key, and receipt/audit non-bypass coverage remains.
 
 ### D. Agent-safe auth and volumes
 
@@ -1251,6 +1264,8 @@ follow-ups:
 - [ ] Hardware-gated Linux/KVM perf smoke: cached image hot start reaches the
       accepted phase target.
 - [ ] SDK suites: Python, TypeScript, and Rust machine lifecycle wrappers.
+      Python and TypeScript focused machine wrapper suites are green; Rust
+      machine builders/tests remain.
 - [ ] Portable artifact tamper/rejection tests.
 - [ ] macOS smoke on the default supported backend for `machine run --image
       alpine -- uname -a`

@@ -69,6 +69,13 @@ from mvm._dsl import (
 # `mvm.audit` / `mvm.host` resolve as attributes (no connection at import).
 from mvm import audit, host
 from mvm._helpers import BrowserSandbox, CodeError, CodeSandbox
+from mvm._machine import (
+    MVM_MACHINE_MAX_OUTPUT_ENV,
+    MVM_MACHINE_TIMEOUT_ENV,
+    Machine,
+    MachineError,
+    MachineResult,
+)
 from mvm._sandbox import (
     DEFAULT_TTL_SECONDS,
     MVM_CLI_BIN_ENV,
@@ -96,12 +103,17 @@ __all__ = [
     "host",
     "DEFAULT_TTL_SECONDS",
     "MVM_CLI_BIN_ENV",
+    "MVM_MACHINE_MAX_OUTPUT_ENV",
+    "MVM_MACHINE_TIMEOUT_ENV",
     "SCHEMA_VERSION",
     "BrowserSandbox",
     "CodeError",
     "CodeSandbox",
     "EmittingContextError",
     "ExecResult",
+    "Machine",
+    "MachineError",
+    "MachineResult",
     "MsgpackUnavailable",
     "MvmTransportError",
     "NoVmIntrospectionError",

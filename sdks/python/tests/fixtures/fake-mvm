@@ -211,6 +211,29 @@ case "$subcommand" in
         ;;
     esac
     ;;
+  machine)
+    verb="${2:-}"
+    shift 2
+    record "subcommand=machine" "verb=$verb" "args=$*"
+    case "$verb" in
+      run)
+        if [ -n "${MVM_FAKE_MVM_MACHINE_RUN_OUT:-}" ]; then
+          printf '%s' "$MVM_FAKE_MVM_MACHINE_RUN_OUT"
+        fi
+        exit "${MVM_FAKE_MVM_EXIT:-0}"
+        ;;
+      create|start|exec|shell|stop|ls|inspect|rm)
+        if [ -n "${MVM_FAKE_MVM_MACHINE_OUT:-}" ]; then
+          printf '%s' "$MVM_FAKE_MVM_MACHINE_OUT"
+        fi
+        exit "${MVM_FAKE_MVM_EXIT:-0}"
+        ;;
+      *)
+        echo "fake-mvm: unknown machine verb: $verb" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   ls)
     # `mvmctl ls --json [--tag k=v]... [--show-expired]` — sandbox SDK
     # calls this for `Sandbox.list()` / `info()` / `connect()`. Tests
