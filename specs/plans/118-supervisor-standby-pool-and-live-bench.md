@@ -552,18 +552,28 @@ lanes are validated on a dev host once the image is rebuilt.
       `LaunchDistributionReport` plus pure summary/build helpers and unit tests
       for per-instance footprint derivation and concurrent P50/P95/P99 launch
       distribution. Live wiring remains below.
-- [ ] Platform-split footprint accessor (Linux PSS `smaps_rollup` /
-      macOS `phys_footprint`), fixture-tested.
-- [ ] `mvmctl bench microvm-density --count K --max-count M` wired
+- [x] Platform-split footprint accessor (Linux PSS `smaps_rollup` /
+      macOS `phys_footprint`), fixture-tested. Linux parses
+      `/proc/<pid>/smaps_rollup` `Pss:`; macOS reads
+      `proc_pid_rusage(RUSAGE_INFO_V4).ri_phys_footprint`; unsupported
+      hosts fail closed.
+- [x] `mvmctl bench microvm-density --count K --max-count M` wired
       through `admit_probe_plan` (no bypass); `libkrun-live`-gated
-      live read.
-- [ ] `mvmctl bench microvm-launch --concurrency N` distribution
-      (P50/P95/P99) reusing `boot_measure_once`.
+      live read. Stock binaries fail honestly before booting; live
+      builds hold admitted VMs behind an RAII guard and sample their
+      supervisor PID footprints.
+- [x] `mvmctl bench microvm-launch --concurrency N` distribution
+      (P50/P95/P99) reusing `boot_measure_once`. Each worker gets a
+      distinct probe/VM name, so every boot synthesizes its own
+      admitted plan and nonce.
 - [ ] `HostDescriptor`-namespaced density + concurrency baselines
       committed (gated on a fresh `default-microvm` image — see
       Dependency).
 - [ ] No-leak teardown assertion; `--max-*` caps; admission-
-      distinctness test.
+      distinctness test. **Partial:** `--max-count` and
+      `--max-concurrency` cap checks are unit-tested, and the live
+      density guard stops held VMs on drop; the live state-dir no-leak
+      assertion and nonce-distinctness proof remain baseline-host gated.
 - [ ] Vz density/concurrency lane (pairs with the landed Vz
       saved-standby pool).
 - [ ] Tick `specs/SPRINT.md` + `specs/REFACTOR-STATUS.md` in the same

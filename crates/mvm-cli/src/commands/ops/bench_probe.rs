@@ -12,6 +12,11 @@ use crate::commands::vm::plan_admission::{
 };
 use crate::commands::vm::plan_builder::SynthesisInput;
 
+/// Keep the live probe above the current default-image kernel load floor. Smaller
+/// values can fail before readiness on Linux/libkrun, which makes the benchmark
+/// measure an invalid launch shape rather than runtime startup.
+const PROBE_MEM_MIB: u32 = 2048;
+
 /// Resolved inputs for one benchmarked boot. `kernel`/`rootfs` come
 /// from the same `ensure_default_microvm_image()` `mvmctl up` uses —
 /// the canonical runtime image, NOT the dev-shell rootfs.
@@ -68,7 +73,7 @@ pub fn admit_probe_plan(
         secrets: Vec::new(),
         audit_event_prefix: None,
         cpus: 2,
-        mem_mib: 512,
+        mem_mib: u64::from(PROBE_MEM_MIB),
         disk_mib: 0,
         boot_timeout_secs: 60,
         exec_timeout_secs: 0,
@@ -93,6 +98,36 @@ pub fn admit_probe_plan(
 #[cfg(feature = "libkrun-live")]
 use crate::commands::ops::bench::BootMarks;
 
+/// A live probe VM held only long enough for density sampling. Drop is
+/// best-effort teardown so a sampling error cannot leak the supervisor.
+#[cfg(feature = "libkrun-live")]
+pub struct HeldProbeVm {
+    vm_name: String,
+    pid: u32,
+    marks: BootMarks,
+}
+
+#[cfg(feature = "libkrun-live")]
+impl HeldProbeVm {
+    pub fn vm_name(&self) -> &str {
+        &self.vm_name
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+#[cfg(feature = "libkrun-live")]
+impl Drop for HeldProbeVm {
+    fn drop(&mut self) {
+        use mvm_core::vm_backend::{VmBackend, VmId};
+
+        let backend = mvm_backend::LibkrunBackend;
+        let _ = backend.stop(&VmId(self.vm_name.clone()));
+    }
+}
+
 /// Per-VM state dir the libkrun backend writes the supervisor PID file and host-side
 /// vsock socket into (`~/.mvm/vms/<name>`). Delegate to the
 /// canonical `mvm_core::config::vm_state_dir` the backend itself uses, instead of building
@@ -112,9 +147,19 @@ fn probe_state_dir(vm_name: &str) -> std::path::PathBuf {
 /// `start` → poll readiness → `stop`.
 #[cfg(feature = "libkrun-live")]
 pub fn boot_measure_once(vm_name: &str) -> Result<BootMarks> {
-    use std::time::Instant;
+    let held = boot_hold_once(vm_name)?;
+    let marks = held.marks;
+    drop(held);
+    Ok(marks)
+}
 
-    use mvm_core::vm_backend::{VmBackend, VmId, VmStartConfig};
+/// Boot the canonical default-microvm image once and keep it running
+/// until the returned guard is dropped. Used by the density bench so it
+/// can sample the live supervisor process footprint.
+#[cfg(feature = "libkrun-live")]
+pub fn boot_hold_once(vm_name: &str) -> Result<HeldProbeVm> {
+    use mvm_core::vm_backend::{VmBackend, VmStartConfig};
+    use std::time::Instant;
 
     use crate::commands::vm::plan_admission::populate_audit_substrate;
 
@@ -128,7 +173,7 @@ pub fn boot_measure_once(vm_name: &str) -> Result<BootMarks> {
         rootfs_path: img.rootfs.clone(),
         kernel_path: Some(img.kernel.clone()),
         cpus: 2,
-        memory_mib: 512,
+        memory_mib: PROBE_MEM_MIB,
         ..Default::default()
     };
     populate_audit_substrate(&mut cfg, &admitted, None)?;
@@ -137,39 +182,41 @@ pub fn boot_measure_once(vm_name: &str) -> Result<BootMarks> {
     let start = Instant::now();
     backend.start(&cfg).context("probe backend.start")?;
 
-    let pid_seen = wait_for_pid_file(vm_name)?;
+    let (pid, pid_seen) = wait_for_pid_file(vm_name)?;
     let (connected, ready) = wait_for_ready(vm_name)?;
 
-    // Teardown: SIGTERM the supervisor + clean state so iteration N+1 is
-    // a true cold start.
-    backend
-        .stop(&VmId(vm_name.to_string()))
-        .context("probe backend.stop")?;
-
-    Ok(BootMarks {
+    let marks = BootMarks {
         start,
         pid_seen,
         connected,
         ready,
+    };
+
+    Ok(HeldProbeVm {
+        vm_name: vm_name.to_string(),
+        pid,
+        marks,
     })
 }
 
 /// Poll for the supervisor PID file (`start_to_pid` mark). Deadline at
 /// 30 s — the PID file is written almost immediately after spawn.
 #[cfg(feature = "libkrun-live")]
-fn wait_for_pid_file(vm_name: &str) -> Result<std::time::Instant> {
+fn wait_for_pid_file(vm_name: &str) -> Result<(u32, std::time::Instant)> {
     use mvm_guest::vsock::adaptive_backoff;
 
     let pid_path = probe_state_dir(vm_name).join("libkrun.pid");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut attempt = 0u32;
     loop {
-        if pid_path.exists() {
-            return Ok(std::time::Instant::now());
+        if let Ok(body) = std::fs::read_to_string(&pid_path)
+            && let Ok(pid) = body.trim().parse::<u32>()
+        {
+            return Ok((pid, std::time::Instant::now()));
         }
         if std::time::Instant::now() >= deadline {
             anyhow::bail!(
-                "probe: supervisor pid file never appeared at {}",
+                "probe: supervisor pid file never appeared or was invalid at {}",
                 pid_path.display()
             );
         }
@@ -242,5 +289,6 @@ mod tests {
         let admitted = admit_probe_plan(&rootfs, "bench-probe", Some(tmp.path())).unwrap();
         // The admitted plan binds the workload name we passed.
         assert_eq!(admitted.plan.image.name, "bench-probe");
+        assert_eq!(admitted.plan.resources.mem_mib, u64::from(PROBE_MEM_MIB));
     }
 }

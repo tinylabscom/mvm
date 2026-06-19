@@ -160,6 +160,23 @@ verification under `trust`. Domains that already own their own subcommands
 | `mvmctl ops config edit` | Open the config file in $EDITOR (falls back to nano) |
 | `mvmctl ops config set <key> <value>` | Set a single config key (e.g. `mvmctl ops config set dev_vm_cpus 4`) |
 
+## Benchmarks
+
+Bench commands are measurement tools. They do not bypass admission: live
+microVM runs synthesize and admit signed plans the same way the normal launch
+path does. The libkrun live path requires a binary built with
+`--features libkrun-live` on a host where libkrun can boot guests; stock builds
+fail honestly instead of emitting fake numbers.
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl ops bench microvm-launch` | Measure serial cold runtime-microVM launch latency for the canonical default runtime image. Defaults: `--runs 20 --warmup 2 --hypervisor libkrun`. |
+| `mvmctl ops bench microvm-launch --concurrency N --warmup 0` | Launch `N` admitted probe VMs as one concurrent wave and report P50/P95/P99 launch latency. Use `--max-concurrency` as a safety cap (default 64). `--baseline` is serial-only. |
+| `mvmctl ops bench microvm-launch --out <path> --json` | Write the versioned JSON report to `<path>` and also print it to stdout. Without `--out`, reports are written under `<MVM_DATA_DIR>/bench/`. |
+| `mvmctl ops bench microvm-launch --baseline <path> --max-regression-pct <pct>` | Compare serial median `total_ready_ms` against a comparable baseline and fail if it regresses beyond the threshold. |
+| `mvmctl ops bench microvm-density --count K --max-count M` | Boot and hold `K` admitted libkrun probe VMs, sample each supervisor/VMM process footprint, and report total plus per-instance bytes. `--max-count` is a safety cap (default 16). |
+| `mvmctl ops bench microvm-density --out <path> --json` | Write the density JSON report and optionally print it to stdout. Linux samples PSS from `/proc/<pid>/smaps_rollup`; macOS samples `phys_footprint` through `proc_pid_rusage`. |
+
 ## Audit
 
 | Command | Description |

@@ -146,10 +146,16 @@ const BUILD_SUB: &[(&str, AuditPosture)] = &[
 // (claim 8), so the documented posture is the same `plan.*`+`VmStart`
 // chain `up` emits. (The live boot wiring is a tracked follow-up; the
 // measurement substrate ships first.)
-const BENCH_SUB: &[(&str, AuditPosture)] = &[(
-    "microvm-launch",
-    AuditPosture::Emits("plan.admitted+plan.launched+VmStart"),
-)];
+const BENCH_SUB: &[(&str, AuditPosture)] = &[
+    (
+        "microvm-launch",
+        AuditPosture::Emits("plan.admitted+plan.launched+VmStart"),
+    ),
+    (
+        "microvm-density",
+        AuditPosture::Emits("plan.admitted+plan.launched+VmStart+VmStop"),
+    ),
+];
 
 const NETWORK_SUB: &[(&str, AuditPosture)] = &[
     ("create", AuditPosture::Emits("NetworkCreate")),
