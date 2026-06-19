@@ -153,14 +153,18 @@ plan 25 sequences the work into six independently-shippable workstreams.
       Host-side Stage 0 root materialization now reuses the marker-bound
       extracted root and prefers verified native `tar -xJf --strip-components 1`
       before falling back to the pure-Rust extractor, addressing the observed
-      slow cold materialization path. The libkrun Stage 0 PID 1 now tries to
-      mount the dedicated `nix-store-stage0-<arch>.img` as `/dev/vda`, seeds it
-      once from the verified RootDir `/nix/store`, marks it by seed-store
-      fingerprint, and reuses it on later boots; if the current seed lacks
-      `mkfs.ext4` and the disk is still blank, it falls back to tmpfs rather
-      than blocking bootstrap. Verified so far with host Stage 0 tests and
-      targeted clippy; Linux PID-1 compile/proof and live timing remain before
-      making a latency claim.
+      slow cold materialization path. Firecracker-host measurement at
+      `156391a4` with isolated cache/data dirs: cold `build image` cache miss
+      reached `Fetching Stage 0 bootstrap assets … 0.7s` and `Materializing
+      Stage 0 root dir … 1.7s`; immediate warm rerun reached `Fetching … 0.1s`
+      and `Materializing … 0.1s`. The current Nix seed has no `mkfs.ext4`, so
+      the branch now prepopulates the dedicated libkrun
+      `nix-store-stage0-<arch>.img` host-side when host `mkfs.ext4` is
+      available, marks it with a `.stage0-seed` sidecar, and lets Stage 0 PID 1
+      adopt that prepopulated store instead of copying to tmpfs. Bounded
+      Firecracker-host libkrun proof logged host prepopulation
+      (`blocks_4k=16777200`, sparse image + sidecar written) before a 180s
+      timeout; full in-guest adoption timing remains gated.
 - [x] Implemented [`plans/202-host-services-daemon.md`](plans/202-host-services-daemon.md) Phase 4a — host-agent registration journal. `mvm-host-agent` now persists the live per-tenant `RegisterVm` set as a deterministic `registrations.json` snapshot beside the control socket, rewrites it after successful register/deregister, and replays it after the signer helper is ready on daemon startup. Replay goes through the normal register path, preserving tenant checks, path-safe `vm_id` validation, broker-socket rebinding, and signer-helper chain reopening. Focused coverage: stable journal snapshot round-trip, deregister cleanup, and daemon restart rebinding a journaled broker socket. Phase 4b supervised daemon restart now lands on top of that journal.
 - [ ] Added [`plans/201-warm-lease-and-batched-exec.md`](plans/201-warm-lease-and-batched-exec.md) — a DX-ergonomics plan layering over the Plan 118 standby pool + Plan 169 agent-RPC. Two caller-convenience gaps: no RAII claim/release (callers hand-wire `select_idle_compatible`→`mark_claimed`→`claim_standby`→`remove` + own stop/replenish), and no batched guest exec (stage→compile→run pays three reconnects). Adds a `WarmLease` handle (`acquire`/`Drop`/`release`; release **stops + replenishes a fresh standby, never reuses a dirty VM** — the security-correct inverse of the borrow-pool prior art, matching the Vz saved-state model + claim 1) and a batched stage→run `ExecBuilder` (Tier 1 one-stream pipelining now; opt-in `GuestRequest::ExecBatch` later, `dev-shell`-gated argv with a no-argv `RunEntrypoint` terminal for prod loops; `ExecOutcome` gains duration + peak RSS). No new backend/transport; admission + audit path untouched; all but the example testable on the mock backend + mock guest agent. **PROPOSED**, docs-only (#937).
 - [x] Landed template-identifier path-traversal hardening from the 2026-06-16

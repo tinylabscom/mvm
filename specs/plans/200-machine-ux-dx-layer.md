@@ -430,11 +430,16 @@ Work needed for the hot path:
 - Measure Stage 0 bootstrap separately from normal machine hot start. The active
   branch now caches the host materialized Stage 0 root, prefers verified native
   `tar -xJf --strip-components 1` for cold extraction, and makes libkrun
-  Stage 0 PID 1 attempt persistent `/dev/vda` Nix-store reuse with a
-  seed-fingerprint marker. If the current seed cannot format a blank disk
-  because `mkfs.ext4` is absent, it falls back to the tmpfs seed copy; Linux
-  PID-1 proof and live cold/warm timing are still required before making a
-  public speed claim.
+  Stage 0 use a prepopulated persistent `/dev/vda` Nix-store image when the
+  host has `mkfs.ext4`. Firecracker-host measurement on `156391a4`, isolated
+  cache/data dirs: cold builder-image cache miss reached `Fetching Stage 0
+  bootstrap assets … 0.7s` and `Materializing Stage 0 root dir … 1.7s`;
+  immediate warm rerun reached `Fetching … 0.1s` and `Materializing … 0.1s`.
+  The same host confirmed the Nix seed has no `mkfs.ext4`; host-side
+  prepopulation wrote the sparse `nix-store-stage0-x86_64.img` plus
+  `.stage0-seed` sidecar before a bounded 180s libkrun run timed out. Remaining
+  proof: capture the in-guest `stage0-init` adoption line and full libkrun
+  cold/warm boot timing before making a public speed claim.
 - Avoid config/secrets drive creation when the effective content is empty or
   already cached by digest.
 - Prefer warm-pool/snapshot restore only when the security posture is unchanged
@@ -1346,9 +1351,12 @@ follow-ups:
       example.com`
 - [ ] Hardware-gated Linux/KVM perf smoke: cached image hot start reaches the
       accepted phase target.
-- [ ] Stage 0 bootstrap perf proof: Linux PID-1 compile/proof for persistent
-      `/dev/vda` Nix-store reuse plus live cold/warm timing for materialized
-      root extraction and in-guest Nix-store setup.
+- [~] Stage 0 bootstrap perf proof: Linux PID-1 compile/clippy is green;
+      Firecracker-host materialized-root timing is measured at 1.7s cold /
+      0.1s warm; host-side libkrun prepopulation of `/dev/vda` is proven with
+      `mkfs.ext4 -d` plus `.stage0-seed` sidecar. Remaining gated proof:
+      in-guest `stage0-init` adoption of the prepopulated store and full
+      libkrun cold/warm boot timing.
 - [x] SDK suites: Python, TypeScript, and Rust machine lifecycle wrappers.
       Python and TypeScript focused machine wrapper suites are green from the
       previous SDK slice; Rust builder/fake-CLI lifecycle tests are green in
