@@ -618,13 +618,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn machine_start_auth_policy(spec: &MachineSpec) -> MachineStartAuthPolicy {
-    let mode = if spec.ssh_agent {
-        "ssh-agent-socket"
-    } else {
-        "none"
-    };
+    let mode = machine_start_plan_auth_policy(spec).mode.as_str();
     MachineStartAuthPolicy {
         mode: mode.to_string(),
+    }
+}
+
+fn machine_start_plan_auth_policy(spec: &MachineSpec) -> mvm_core::plan::AuthPolicy {
+    if spec.ssh_agent {
+        mvm_core::plan::AuthPolicy::ssh_agent_socket()
+    } else {
+        mvm_core::plan::AuthPolicy::none()
     }
 }
 
@@ -1166,6 +1170,7 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         mem_initial_mib,
         volumes: &volume_cfg,
         network_policy,
+        auth: machine_start_plan_auth_policy(&spec),
     })?;
     if let Some(host_sock) = ssh_auth_sock.as_deref()
         && let Err(err) = configure_machine_ssh_agent_forwarding(&spec.name, &backend, host_sock)
@@ -1198,16 +1203,7 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
     if let Some(path) = args.receipt.as_deref() {
         write_machine_start_receipt(path, receipt_input.clone(), outcome.clone())?;
     }
-    mvm_core::audit_emit!(
-        VmStart,
-        vm: &spec.name,
-        "source=machine.start network={} enforced={} auth={} shares={} init_commands={}",
-        receipt_input.network_posture,
-        receipt_input.egress_enforcement,
-        receipt_input.auth.mode,
-        machine_start_volume_summary(&receipt_input.volumes),
-        receipt_input.init.command_count
-    );
+    mvm_core::audit_emit!(VmStart, vm: &spec.name, "{}", machine_start_audit_detail(&receipt_input));
     if args.json {
         let summary = MachineStartJsonSummary::from_parts(receipt_input, outcome, args.receipt);
         println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -1215,6 +1211,17 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         println!("started machine {}", spec.name);
     }
     Ok(())
+}
+
+fn machine_start_audit_detail(input: &MachineStartReceiptInput) -> String {
+    format!(
+        "source=machine.start network={} enforced={} auth={} shares={} init_commands={}",
+        input.network_posture,
+        input.egress_enforcement,
+        input.auth.mode,
+        machine_start_volume_summary(&input.volumes),
+        input.init.command_count
+    )
 }
 
 fn ssh_agent_proxy_listen_for_backend(vm_name: &str, backend: &str) -> SshAgentProxyListen {
@@ -2185,6 +2192,32 @@ ssh_agent = true
     }
 
     #[test]
+    fn machine_start_preflight_surfaces_ssh_agent_auth_mode() {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: "ghcr.io/acme/web:latest".to_string(),
+            resolved_digest: Some("sha256:abc".to_string()),
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "dev".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: true,
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+        };
+
+        let summary = machine_start_preflight_summary(&spec, None).expect("preflight summary");
+        assert_eq!(summary.invocation.auth.mode, "ssh-agent-socket");
+        let json = serde_json::to_string(&summary).expect("summary json");
+        assert!(json.contains("ssh-agent-socket"));
+    }
+
+    #[test]
     fn machine_start_receipt_is_signed_and_verifiable() {
         let _state = IsolatedMachineState::new();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2248,6 +2281,11 @@ ssh_agent = true
         };
         let input = machine_start_receipt_input(&spec, "firecracker").expect("receipt input");
         assert_eq!(input.auth.mode, "ssh-agent-socket");
+        assert_eq!(
+            machine_start_plan_auth_policy(&spec),
+            mvm_core::plan::AuthPolicy::ssh_agent_socket()
+        );
+        assert!(machine_start_audit_detail(&input).contains("auth=ssh-agent-socket"));
     }
 
     #[test]
@@ -2272,6 +2310,14 @@ ssh_agent = true
         let err = machine_start_receipt_input(&spec, "firecracker")
             .expect_err("standard profile must refuse ssh-agent");
         assert!(err.to_string().contains("dev-capable profile"));
+    }
+
+    #[test]
+    fn ssh_agent_auth_is_dev_tier_only() {
+        assert!(!profile_allows_ssh_agent("restrictive"));
+        assert!(!profile_allows_ssh_agent("standard"));
+        assert!(profile_allows_ssh_agent("dev"));
+        assert!(profile_allows_ssh_agent("permissive"));
     }
 
     #[test]

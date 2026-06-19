@@ -179,6 +179,50 @@ pub enum SecretReleasePolicy {
     AttestationBound,
 }
 
+/// Host-authentication capability admitted for this workload.
+///
+/// `SshAgentSocket` means a dev-tier Unix socket forward only. It does not
+/// authorize SSH client/server sessions, key-file mounts, known-hosts material,
+/// or any production/sealed auth path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMode {
+    #[default]
+    None,
+    SshAgentSocket,
+}
+
+impl AuthMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::SshAgentSocket => "ssh-agent-socket",
+        }
+    }
+}
+
+/// Plan-visible authentication policy. Kept as an object rather than a bare
+/// enum so future non-secret metadata can extend it behind a schema bump.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthPolicy {
+    pub mode: AuthMode,
+}
+
+impl AuthPolicy {
+    pub fn none() -> Self {
+        Self {
+            mode: AuthMode::None,
+        }
+    }
+
+    pub fn ssh_agent_socket() -> Self {
+        Self {
+            mode: AuthMode::SshAgentSocket,
+        }
+    }
+}
+
 /// Event naming and required labels for plan-bound audit output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

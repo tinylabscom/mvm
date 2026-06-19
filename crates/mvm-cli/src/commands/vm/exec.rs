@@ -320,6 +320,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             // No secrets on the plain transient path; deny secret release.
             secret_release: mvm_core::plan::SecretReleasePolicy::default(),
             secrets: vec![],
+            auth: mvm_core::plan::AuthPolicy::none(),
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: None,
@@ -684,6 +685,7 @@ fn emit_oci_run_admission(
         tool_policy_ref: None,
         secret_release: mvm_core::plan::SecretReleasePolicy::None,
         secrets: Vec::new(),
+        auth: mvm_core::plan::AuthPolicy::none(),
         audit_event_prefix: None,
         cpus,
         mem_mib,

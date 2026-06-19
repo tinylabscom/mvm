@@ -921,7 +921,7 @@ Required behavior:
       build-time equivalent is implemented in a later plan.
 - [ ] Preserve read-only volume defaults and require explicit `:rw` for
       writable shares.
-- [~] Include effective network, auth, and volume policy in dry-run output,
+- [x] Include effective network, auth, and volume policy in dry-run output,
       admission metadata, audit events, and receipts. →
       `machine start --dry-run` / `--dry-run --json` now emit redacted
       effective network posture, enforcement tier, auth mode, dev-init
@@ -930,10 +930,11 @@ Required behavior:
       successful starts emit a `VmStart` audit line summarizing the effective
       machine policy. SSH-agent auth is now reported as
       `ssh-agent-socket`, and the guest-agent setup RPC emits the same
-      host→guest vsock RPC audit as other dev-only agent calls. Remaining gap:
-      auth is still surfaced in the machine-layer audit/receipt/preflight path,
-      not yet as a distinct signed-plan admission field for forwarded-agent
-      policy.
+      host→guest vsock RPC audit as other dev-only agent calls. The signed
+      `ExecutionPlan` schema is now v6 and carries `auth.mode`
+      (`none` / `ssh_agent_socket`), with `auth_mode=ssh-agent-socket` copied
+      into `plan.admitted` / `plan.policy_resolved` audit labels so admission
+      cannot diverge from dry-run, receipts, or machine-start audit output.
 - [~] Add serde roundtrip, unknown-key, image+flake conflict, no-source,
       read-only-volume-default, writable-volume-explicit, SSH-agent-no-key-file,
       and dev-init-prod-refusal tests. → **parser-level tests done** (unknown-key,
@@ -945,7 +946,9 @@ Required behavior:
       dev-init profile refusal, SSH-agent profile refusal, SSH-agent receipt
       auth mode, proxy host-socket validation, proxy state path isolation,
       guest socket-path confinement, console env injection, and relative-volume
-      persistence. A live VM proof that the guest endpoint can complete a real
+      persistence, signed-plan auth metadata, dry-run/receipt/audit auth
+      honesty, and the existing TCP/22 refusal/template-material ban
+      regressions. A live VM proof that the guest endpoint can complete a real
       SSH-agent protocol round trip is still a follow-up.
 - [x] Update `guides/manifests.md`, quickstart, and CLI reference only after the
       parser and command behavior are implemented.
@@ -1009,10 +1012,23 @@ Required behavior:
 - [~] Add tests proving the guest receives an agent endpoint but no private key
       file path. → Host-side validation accepts only `SSH_AUTH_SOCK` Unix
       sockets; guest forwarding is confined to `/run/mvm/ssh-agent.sock`; the
-      machine receipt/audit auth mode is `ssh-agent-socket`; and no code path
-      copies `~/.ssh`, private key files, or known-hosts material. Remaining:
-      live VM round-trip proof against a real host agent plus non-standard-port
-      SSH protocol denial proof.
+      signed plan, machine receipt/audit auth mode, and admitted audit labels
+      report `ssh-agent-socket`; and no code path copies `~/.ssh`, private key
+      files, or known-hosts material. Remaining gated proof path:
+      1. In the builder VM only, with isolated `MVM_DATA_DIR` /
+         `CARGO_TARGET_DIR` / `CARGO_HOME`, start a throwaway host
+         `ssh-agent` and add a generated throwaway key outside the repo.
+      2. Create a dev-profile persistent image machine with
+         `[auth].ssh_agent = true`, start it, and run an in-guest raw
+         agent-protocol probe against `/run/mvm/ssh-agent.sock` that sends
+         `SSH_AGENTC_REQUEST_IDENTITIES` and verifies an
+         `SSH_AGENT_IDENTITIES_ANSWER`. The probe must not invoke `ssh`,
+         `ssh-add`, `sshd`, or read any key/known-host path.
+      3. Start a host test listener on a non-standard port such as `2222` that
+         emits an SSH banner (`SSH-2.0-...`), allow that host:port explicitly,
+         and prove guest egress is denied/audited as SSH protocol, not merely
+         as TCP/22. Until that witness exists, non-standard-port SSH protocol
+         denial is not claimed.
 - [ ] Normalize `-v/--volume HOST:GUEST[:ro|rw]` across `machine run` and
       `machine create`.
 - [ ] Preserve read-only default and explicit `:rw` requirement.

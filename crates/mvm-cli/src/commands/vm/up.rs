@@ -123,6 +123,7 @@ pub(super) struct AdmitPlanForBootParams<'a> {
     pub seccomp_tier: mvm_core::plan::PlanSeccompTier,
     pub secret_release: mvm_core::plan::SecretReleasePolicy,
     pub secrets: Vec<mvm_core::plan::SecretBinding>,
+    pub auth: mvm_core::plan::AuthPolicy,
     pub no_supervisor: bool,
     pub ledger: &'a InMemoryNonceLedger,
     /// Override for the host-signer keys directory. Production callers
@@ -508,6 +509,7 @@ pub(super) fn admit_plan_for_boot(
         tool_policy_ref: generated_policy_ref,
         secret_release: p.secret_release,
         secrets: p.secrets.clone(),
+        auth: p.auth.clone(),
         audit_event_prefix: None,
         cpus: p.cpus,
         mem_mib: p.mem_mib,
@@ -695,6 +697,7 @@ fn untrusted_transient_admit_in(
             // No secrets on the untrusted transient path; deny secret release.
             secret_release: mvm_core::plan::SecretReleasePolicy::default(),
             secrets: Vec::new(),
+            auth: mvm_core::plan::AuthPolicy::none(),
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: keys_dir.as_deref(),
@@ -1869,6 +1872,7 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub mem_initial_mib: Option<u32>,
     pub volumes: &'a [image::RuntimeVolume],
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
+    pub auth: mvm_core::plan::AuthPolicy,
 }
 
 fn register_vm_name(vm_name: &str, network_name: &str) {
@@ -1903,6 +1907,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         mem_initial_mib,
         volumes,
         network_policy,
+        auth,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     let effective_hypervisor = super::shared::resolve_effective_hypervisor("firecracker");
@@ -1923,6 +1928,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
         secret_release: mvm_core::plan::SecretReleasePolicy::default(),
         secrets: vec![],
+        auth,
         no_supervisor: false,
         ledger: &admission_ledger,
         keys_dir: None,
@@ -2128,6 +2134,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             seccomp_tier: plan_seccomp_tier,
             secret_release: plan_secret_release,
             secrets: plan_secrets.clone(),
+            auth: mvm_core::plan::AuthPolicy::none(),
             no_supervisor,
             ledger: &admission_ledger,
             keys_dir: None,
@@ -2561,6 +2568,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         seccomp_tier: plan_seccomp_tier,
         secret_release: plan_secret_release,
         secrets: plan_secrets.clone(),
+        auth: mvm_core::plan::AuthPolicy::none(),
         no_supervisor,
         ledger: &admission_ledger,
         keys_dir: None,
@@ -2988,6 +2996,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 seccomp_tier: plan_seccomp_tier,
                 secret_release: plan_secret_release,
                 secrets: plan_secrets.clone(),
+                auth: mvm_core::plan::AuthPolicy::none(),
                 no_supervisor,
                 ledger: &admission_ledger,
                 keys_dir: None,
@@ -3463,6 +3472,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            auth: mvm_core::plan::AuthPolicy::none(),
             no_supervisor: true,
             ledger: &ledger,
             keys_dir: None, // not read — short-circuit returns first
@@ -3496,6 +3506,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Network,
             secret_release: mvm_core::plan::SecretReleasePolicy::PlanBound,
             secrets: Vec::new(),
+            auth: mvm_core::plan::AuthPolicy::none(),
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -3530,6 +3541,58 @@ mod admit_plan_tests {
         let content = std::fs::read_to_string(&audit_path).expect("audit file exists");
         assert!(content.contains("plan.admitted"));
         assert!(content.contains(&ctx.admitted.plan_id.0));
+    }
+
+    #[test]
+    fn admission_plan_carries_ssh_agent_auth_policy() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"ssh agent rootfs");
+        let ledger = InMemoryNonceLedger::new();
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name: "vm-auth",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 2,
+            mem_mib: 512,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            auth: mvm_core::plan::AuthPolicy::ssh_agent_socket(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+        })
+        .expect("admission")
+        .expect("Some when admission ran");
+
+        assert_eq!(
+            ctx.admitted.plan.auth,
+            mvm_core::plan::AuthPolicy::ssh_agent_socket()
+        );
+        let signed_json = serde_json::to_string(&ctx.admitted.signed).expect("signed plan json");
+        let signed: mvm_core::plan::SignedExecutionPlan =
+            serde_json::from_str(&signed_json).expect("signed envelope parses");
+        let plan: mvm_core::plan::ExecutionPlan =
+            serde_json::from_slice(&signed.0.payload).expect("payload plan parses");
+        assert_eq!(plan.auth.mode, mvm_core::plan::AuthMode::SshAgentSocket);
+
+        let audit_path = audit_dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&audit_path).expect("audit file exists");
+        assert!(
+            content.contains("ssh-agent-socket"),
+            "plan.admitted audit should carry auth policy: {content}"
+        );
     }
 
     // The shared untrusted-transient admit closure (used by both `mvmctl run`
@@ -3590,6 +3653,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            auth: mvm_core::plan::AuthPolicy::none(),
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -3630,6 +3694,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            auth: mvm_core::plan::AuthPolicy::none(),
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -3654,6 +3719,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            auth: mvm_core::plan::AuthPolicy::none(),
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -3720,6 +3786,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            auth: mvm_core::plan::AuthPolicy::none(),
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -3769,6 +3836,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            auth: mvm_core::plan::AuthPolicy::none(),
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -3825,6 +3893,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            auth: mvm_core::plan::AuthPolicy::none(),
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -3903,6 +3972,7 @@ chain_signing = true
                 tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
+                auth: mvm_core::plan::AuthPolicy::none(),
                 audit_event_prefix: None,
                 cpus: 1,
                 mem_mib: 128,
@@ -4004,6 +4074,7 @@ stream_destinations = ["file://{}"]
                 tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
+                auth: mvm_core::plan::AuthPolicy::none(),
                 audit_event_prefix: None,
                 cpus: 1,
                 mem_mib: 128,
@@ -4104,6 +4175,7 @@ chain_signing = false
                 tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
+                auth: mvm_core::plan::AuthPolicy::none(),
                 audit_event_prefix: None,
                 cpus: 1,
                 mem_mib: 128,
@@ -4179,6 +4251,7 @@ chain_signing = false
                 tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
+                auth: mvm_core::plan::AuthPolicy::none(),
                 audit_event_prefix: None,
                 cpus: 1,
                 mem_mib: 128,
@@ -4274,6 +4347,7 @@ disabled_inspectors = ["ssrf_guarrd"]
                 tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
+                auth: mvm_core::plan::AuthPolicy::none(),
                 audit_event_prefix: None,
                 cpus: 1,
                 mem_mib: 128,
@@ -4375,6 +4449,7 @@ port_hi  = 443
                 tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
+                auth: mvm_core::plan::AuthPolicy::none(),
                 audit_event_prefix: None,
                 cpus: 1,
                 mem_mib: 128,
