@@ -1029,32 +1029,25 @@ Required behavior:
          and prove guest egress is denied/audited as SSH protocol, not merely
          as TCP/22. Until that witness exists, non-standard-port SSH protocol
          denial is not claimed.
-      4. 2026-06-19 Firecracker-box attempt did not reach guest boot, so this
-         remains open. The branch-local `mvmctl`, `mvm-libkrun-supervisor`, and
-         `mvm-firecracker-bridge` built on the x86_64 KVM host; a throwaway
-         host `ssh-agent` and key were created outside the repo; `alpine:latest`
-         was selected after `python:3.12-alpine` exercised the OCI hardening
-         `MalformedHeader` refusal. The attempt fixed two materializer blockers
-         discovered live: OCI `rootfs.ext4` materialization now honors an
-         explicit QEMU builder choice instead of hardcoding libkrun, and QEMU
-         virtiofs sockets now live under `/tmp/mvm-vfs-*` to stay below Linux
-         `AF_UNIX` path limits. A later start attempt showed the guest shell
-         job produced `result` with `exit_code:0`, but host-side dev-build
-         staging fell into the cross-device rename fallback and blocked in
-         Linux `copy_file_range` / ext4 journal writeback while copying
-         `rootfs.ext4`; that fallback now uses a sparse-preserving manual copy
-         for `rootfs.ext4`. The remote host then required reboot to clear
-         unkillable `D`-state `mvmctl`/Cargo processes and came back pingable
-         but with SSH refusing connections, so the final branch-local rebuild
-         and VM SSH-agent round-trip could not be completed in this session.
-         Remaining gated proof: restore SSH/sshd access to that host (or use an
-         equivalent Linux/KVM builder host), rebuild `mvmctl` at the sparse-copy
-         commit, rerun the throwaway-agent machine start, and capture
-         receipt/audit plus the raw `SSH_AGENTC_REQUEST_IDENTITIES` probe
-         response from `/run/mvm/ssh-agent.sock`. The non-standard-port
-         SSH-banner denial also remains unclaimed because current enforcement
-         only bans TCP/22 plus template SSH material; no runtime SSH-banner
-         classifier exists yet.
+      4. 2026-06-19 Firecracker-box attempt now reaches guest boot but the live
+         round-trip remains open. Branch-local `mvmctl` starts a dev-profile
+         `alpine:latest` persistent machine with `[auth].ssh_agent = true`;
+         dry-run, signed receipt, and audit surfaces report
+         `ssh-agent-socket`; and raw `SSH_AGENTC_REQUEST_IDENTITIES` probes to
+         both the throwaway host agent and spawned per-machine proxy UDS return
+         an SSH-agent identities answer. The in-guest raw probe copied to
+         `/tmp/mvm-agent-probe-c` reaches `/run/mvm/ssh-agent.sock` but reads
+         `Connection reset by peer`, narrowing the remaining blocker to
+         Firecracker guest-to-host host-listen forwarding for dev
+         `SSH_AGENT_PORT` 5301. Follow-up code in this PR routes Firecracker
+         SSH-agent proxy traffic through the per-port runtime UDS
+         (`vm_vsock_port_socket(..., 5301)`) instead of raw host AF_VSOCK and
+         unit-tests the backend transport selection. Remaining gated proof:
+         rerun the same raw in-guest probe and observe
+         `SSH_AGENT_IDENTITIES_ANSWER` before claiming the smoke. The
+         non-standard-port SSH-banner denial also remains unclaimed because
+         current enforcement only bans TCP/22 plus template SSH material; no
+         runtime SSH-banner classifier exists yet.
 - [ ] Normalize `-v/--volume HOST:GUEST[:ro|rw]` across `machine run` and
       `machine create`.
 - [ ] Preserve read-only default and explicit `:rw` requirement.
