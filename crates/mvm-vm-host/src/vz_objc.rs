@@ -1764,7 +1764,7 @@ fn spawn_payload_tap(
     use mvm_hostd::supervisor::audit::AuditSigner;
     use mvm_hostd::supervisor::audit_file::FileAuditSigner;
     use mvm_hostd::supervisor::gateway_bridge::{
-        AllowAll, BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
+        BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
     };
     use mvm_hostd::supervisor::network::{
         ObserverAllowlist, Pipeline, ProviderCapabilities, resolve_observer_chain_from_plan,
@@ -1845,7 +1845,6 @@ fn spawn_payload_tap(
         bundle: bundle.map(Arc::new),
         audit_socket: PathBuf::from(audit_socket),
         signer,
-        policy: Arc::new(AllowAll),
         observers,
         // Bare-policy enforcement seam (no-bundle path), decoded from
         // SupervisorConfig.network_policy (filled from VmStartConfig.network_policy).
