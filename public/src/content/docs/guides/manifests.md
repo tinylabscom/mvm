@@ -1,47 +1,81 @@
 ---
 title: Manifests
-description: How mvmctl turns a flake + an mvm.toml into a running microVM.
+description: How mvmctl turns an mvm.toml into a built image or a named machine.
 ---
 
-> **Status:** this guide describes the **plan-38 manifest model**, shipped on `feat/manifest-driven-template-dx-claude`. The user-facing primitive is `mvm.toml`; the old `mvmctl template *` namespace has been removed. `mvmctl manifest push` and `pull` are tracked in [plan 39](https://github.com/tinylabscom/mvm/blob/main/specs/plans/39-manifest-push-pull.md) and not yet implemented; everything else listed here works.
+> **Status:** `mvm.toml` / `Mvmfile.toml` is schema v1. A manifest selects
+> exactly one source: `flake = ...` for the build/slot flow, or `image = ...`
+> for `mvmctl machine create`. `mvmctl manifest push` and `pull` are tracked in
+> [plan 39](https://github.com/tinylabscom/mvm/blob/main/specs/plans/39-manifest-push-pull.md)
+> and not yet implemented.
 
-A manifest (`mvm.toml` or `Mvmfile.toml`) is the user-facing primitive for "what to build and how to size it". One manifest sits next to a `flake.nix` in your project; together they describe one microVM.
+A manifest is the user-facing primitive for "what source should back this VM
+and how should it be sized." It can sit next to a `flake.nix` for source-built
+microVM images, or it can name an OCI image for a durable `mvmctl machine`
+spec.
 
 ```
 my-service/
-├── mvm.toml       # build inputs + dev sizing (this file)
-├── flake.nix      # rootfs + kernel content (Nix's job)
+├── mvm.toml       # source selector + sizing (this file)
+├── flake.nix      # present for flake-backed builds
 └── …              # your app source
 ```
 
-The flake is the source of truth for *what's inside* the microVM. The manifest is the source of truth for *how mvm builds and runs that flake* — sizing, profile selector, optional display name. That's the entire surface.
+For a flake-backed manifest, the flake is the source of truth for what's inside
+the microVM, and the manifest selects the flake/profile plus sizing. For an
+image-backed manifest, `machine create` persists the manifest's runtime shape as
+a named machine spec without requiring host Nix.
 
-## The 5-field schema
+## Schema v1
 
 ```toml
-flake = "."                   # default ".", any flake ref accepted
-profile = "default"           # selects packages.<system>.<profile>
-vcpus = 2
-mem = "1024M"
-data_disk = "0"
+# Source selector: choose exactly one. Omitting both defaults to flake = "."
+flake = "."                   # any flake ref accepted
+# image = "alpine:3.20"       # OCI image for mvmctl machine create
+
+profile = "default"           # flake package selector; machine profile is CLI-selected
+cpus = 2                      # vcpus remains accepted as a legacy alias
+mem = "1024M"                 # memory cap
+mem_initial = "512M"          # optional initial host commitment
+data_disk = "0"               # flake/build flow only today
+net = false                   # default-deny unless true or allow_hosts narrows it
+
+[network]
+allow_hosts = ["api.example.com:443"]
+
+[auth]
+ssh_agent = false             # parsed and persisted; machine start fails closed today
+
+[dev]
+init = []                     # dev-only; machine start fails closed today
+volumes = ["./src:/work/src:ro"]
 
 name = "openclaw"             # optional; display + S3 channel hint
 ```
 
-That's it. Build inputs (`flake`, `profile`) and dev sizing (`vcpus`, `mem`, `data_disk`). No `role`, no `[network]`, no `[[variants]]`, no dependencies — those are flake territory or [`mvmd`](https://github.com/tinylabscom/mvmd) territory, not the dev tool's.
+Unknown keys are rejected. `image` and `flake` are mutually exclusive; setting
+both is an error. Volumes default read-only; use `:rw` explicitly for a writable
+mount. Relative volume host paths in an image-backed manifest are resolved
+relative to the manifest file when persisted by `machine create`.
 
 Each field's owner:
 
 | Field | Owner | In manifest? |
 |---|---|---|
-| `flake` | mvmctl (input pointer) | **Yes** |
+| `flake` / `image` | mvmctl source selector | **Yes**, exactly one effective source |
 | `profile` | flake defines, mvmctl selects | **Yes**, as selector |
-| `vcpus` | mvmctl — Firecracker host-side sizing | **Yes** |
+| `cpus` / `vcpus` | mvmctl — host-side sizing | **Yes** |
 | `mem` | mvmctl — host-side sizing | **Yes** |
+| `mem_initial` | mvmctl — optional balloon initial commitment | Optional |
 | `data_disk` | mvmctl — host-side block device sizing | **Yes** |
+| `net`, `[network].allow_hosts` | mvmctl — effective egress policy | Optional |
+| `[auth].ssh_agent` | mvmctl — future agent socket forwarding | Parsed, start fails closed today |
+| `[dev].init` | mvmctl — future dev-only init hook | Parsed, start fails closed today |
+| `[dev].volumes` | mvmctl — host shares / persistent disks | Optional |
 | `name` | mvmctl — display in `ls`, optional S3 channel key | Optional |
 
-Anything not in this list belongs in the flake (kernel/rootfs content, NixOS modules, services) or in `mvmd` (multi-VM topology, network policy, secrets, runtime deps).
+Anything not in this list belongs in the flake (kernel/rootfs content, NixOS
+modules, services) or in `mvmd` (multi-VM topology, tenant policy, runtime deps).
 
 ## The everyday flow
 
@@ -55,6 +89,28 @@ mvmctl up                  # boot the built microVM
 ```
 
 Repeated edits are just edits. The next `mvmctl build` re-reads `mvm.toml` and re-runs the build. Resource changes (`vcpus`, `mem`, `data_disk`) update silently; identity changes (`flake`, `profile`) trip a drift refusal that asks you to `--force` or rename — see [Drift detection](#drift-detection) below.
+
+For an image-backed durable machine:
+
+```toml
+image = "alpine:3.20"
+cpus = 2
+mem = "512M"
+net = false
+
+[dev]
+volumes = ["./workspace:/work:ro"]
+```
+
+```bash
+mvmctl machine create --name alpine-dev --manifest ./mvm.toml
+mvmctl machine start --name alpine-dev
+```
+
+`machine create` stores a strict JSON spec under `MVM_DATA_DIR`, and
+`machine start` boots it through the admitted OCI-backed launch path.
+`[auth].ssh_agent` and `[dev].init` are intentionally fail-closed at start
+until their runtime transports are implemented.
 
 ### Manifest discovery
 
@@ -209,7 +265,7 @@ To keep the schema small and the boundaries crisp, the following are explicitly 
 - **Build-time deps on other flakes** → flake `inputs` + `flake.lock`.
 - **Runtime deps on other VMs (lifecycle ordering, health gates)** → `mvmd` (separate repo).
 - **Per-tenant network bridges, tap names, IP allocation** → `mvmd`.
-- **Network egress policy** → `mvmctl up` flags or `~/.mvm/config.toml` defaults; eventually `mvmd` tenant config.
+- **Per-tenant network policy bundles** → `mvmctl up` flags or `~/.mvm/config.toml` defaults; eventually `mvmd` tenant config. The manifest only carries simple machine defaults (`net`, `allow_hosts`).
 - **Secrets / env vars at boot** → `mvmctl up`-time injection or `mvmd` instance config.
 
 ## See also

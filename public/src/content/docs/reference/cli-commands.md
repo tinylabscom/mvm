@@ -344,6 +344,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine create --name <name> --image <ref>` | Persist a named OCI-backed machine spec without booting it |
 | `mvmctl machine create --name <name> --manifest <path>` | Persist a named machine spec from an image-backed `mvm.toml` / `Mvmfile.toml` |
 | `mvmctl machine create --name <name> --image <ref> --net --allow-host <host[:port]>` | Persist a named spec with opt-in egress settings for future lifecycle starts |
+| `mvmctl machine create --name <name> --manifest <path>` | Persist an image-backed `mvm.toml` / `Mvmfile.toml` as a named machine spec |
 | `mvmctl machine create --name <name> --image <ref> --force` | Overwrite an existing named machine spec |
 | `mvmctl machine start --name <name>` | Boot a persisted named machine through the admitted OCI-backed start path |
 | `mvmctl machine start --name <name> --dry-run` | Validate and explain the effective machine-start policy without booting a VM |
@@ -359,6 +360,14 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine exec --name <name> -- <cmd>...` | Run a command in an already-started named machine |
 | `mvmctl machine shell --name <name>` | Attach an interactive shell/console to an already-started named machine |
 | `mvmctl machine stop --name <name>` | Stop an already-started named machine |
+
+`machine create` accepts either `--image <ref>` or an image-backed manifest, not
+both. When `--image` is omitted, it searches the current directory for
+`mvm.toml` / `Mvmfile.toml`; `--manifest <path>` selects a file explicitly. The
+persisted spec carries the manifest's image, CPU/memory sizing, `mem_initial`,
+network defaults, allow-hosts, and volumes. Relative manifest volume host paths
+are resolved relative to the manifest file; volume validation keeps the shared
+default of read-only mounts unless `:rw` is explicit.
 
 `machine start`, `machine exec`, `machine shell`, and `machine stop` require the
 named `MachineSpec` to exist first. `machine start` resolves the stored OCI

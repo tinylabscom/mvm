@@ -53,6 +53,20 @@ plan 25 sequences the work into six independently-shippable workstreams.
       verbs and local image-source tests, leaving `mvm.toml` runtime mapping,
       SDK parity, docs, portable artifacts, perf/smoke coverage, and
       duplicate-major/binary-size budgets as the open product scope. Docs-only.
+- [x] Advanced [`plans/200-machine-ux-dx-layer.md`](plans/200-machine-ux-dx-layer.md)
+      C1 manifest-to-machine mapping. `mvmctl machine create --manifest <path>`
+      and implicit current-directory manifest discovery now persist image-backed
+      `mvm.toml` / `Mvmfile.toml` fields into strict named `MachineSpec`s:
+      image, `net`, `[network].allow_hosts`, `cpus`, `mem`, `mem_initial`,
+      `[auth].ssh_agent`, `[dev].init`, and `[dev].volumes`. `machine start`
+      now threads network policy, `mem_initial`, and validated volumes through
+      the admitted OCI-backed launch path; manifest-relative volume host paths
+      are resolved from the manifest directory, and read-only remains the
+      default unless `:rw` is explicit. `[auth].ssh_agent` and `[dev].init`
+      intentionally fail closed at start until their runtime transports exist,
+      and create rejects `dev.init` outside `--profile dev`. Docs updated:
+      quickstart, CLI reference, and manifests guide. Focused verification:
+      `cargo test -p mvm-cli commands::machine` (29 passed).
 - [x] Implemented [`plans/202-host-services-daemon.md`](plans/202-host-services-daemon.md) Phase 4a — host-agent registration journal. `mvm-host-agent` now persists the live per-tenant `RegisterVm` set as a deterministic `registrations.json` snapshot beside the control socket, rewrites it after successful register/deregister, and replays it after the signer helper is ready on daemon startup. Replay goes through the normal register path, preserving tenant checks, path-safe `vm_id` validation, broker-socket rebinding, and signer-helper chain reopening. Focused coverage: stable journal snapshot round-trip, deregister cleanup, and daemon restart rebinding a journaled broker socket. Phase 4b supervised daemon restart now lands on top of that journal.
 - [ ] Added [`plans/201-warm-lease-and-batched-exec.md`](plans/201-warm-lease-and-batched-exec.md) — a DX-ergonomics plan layering over the Plan 118 standby pool + Plan 169 agent-RPC. Two caller-convenience gaps: no RAII claim/release (callers hand-wire `select_idle_compatible`→`mark_claimed`→`claim_standby`→`remove` + own stop/replenish), and no batched guest exec (stage→compile→run pays three reconnects). Adds a `WarmLease` handle (`acquire`/`Drop`/`release`; release **stops + replenishes a fresh standby, never reuses a dirty VM** — the security-correct inverse of the borrow-pool prior art, matching the Vz saved-state model + claim 1) and a batched stage→run `ExecBuilder` (Tier 1 one-stream pipelining now; opt-in `GuestRequest::ExecBatch` later, `dev-shell`-gated argv with a no-argv `RunEntrypoint` terminal for prod loops; `ExecOutcome` gains duration + peak RSS). No new backend/transport; admission + audit path untouched; all but the example testable on the mock backend + mock guest agent. **PROPOSED**, docs-only (#937).
 - [x] Landed template-identifier path-traversal hardening from the 2026-06-16
