@@ -915,6 +915,21 @@ Required behavior:
       (vz, warm, N=3): teardown 6140 ms → ~0.5 ms, total ~7.5 s → ~1.36 s.**
       The hot path is now `vsock_wait` (~1.06 s guest boot) + `backend_start`
       (~190 ms) — addressed by the warm/standby-pool lever (D-tier follow-up).
+- [x] Tighten the guest-agent readiness poll in `wait_for_agent` from 500 ms
+      to 50 ms so `vsock_wait` is not rounded up to the next coarse tick.
+      Measured (vz, N=3): `vsock_wait` ~1.06 s → ~0.79–1.12 s (best total
+      ~1.08 s). The remaining `vsock_wait` is genuine guest boot — no further
+      host-side slack. Closing the gap to "instant" (~150 ms) requires a
+      pre-booted **same-image** standby (warm pool); see the deferred item.
+- [ ] Hide guest boot with a warm/standby pool for `run` / `machine run`.
+      The registry (`mvm_backend::standby_pool`) is backend-agnostic and
+      vz-capable, and `up` already claims via `pool::try_warm_claim`. Two open
+      pieces: (1) a warm claim only matches a *same-image* standby, so this
+      helps repeated runs of one image (the common dev loop), not the first
+      cold run; (2) a pre-fill/refill lifecycle (background warmer or
+      warm-on-use) is needed so a standby exists at claim time. Overlaps active
+      Plan 118 warm-pool work — coordinate, don't fork. This is the lever that
+      takes a warm run from ~1.1 s to ~150 ms.
 
 ### C. Persistent image-backed machines
 

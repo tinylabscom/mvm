@@ -1155,7 +1155,11 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
         {
             return true;
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Tight poll: the guest agent comes up within ~1s, so a coarse
+        // cadence would round readiness up to the next tick and add hundreds
+        // of ms to perceived launch latency. The connect+hello attempts are
+        // cheap and fail fast while the guest is still booting.
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
     false
 }
