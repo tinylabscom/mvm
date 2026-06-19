@@ -517,13 +517,23 @@ mod tests {
     /// the reservation drops, which is exactly what gvproxy does.
     #[test]
     fn free_loopback_port_is_in_range_and_bindable() {
-        let port = free_loopback_port().expect("reserve a free port");
-        assert!(port >= 1024, "port {port} below gvproxy's 1024 floor");
-        // The reservation listener is already dropped, so this rebind
-        // models gvproxy claiming the port we handed it.
-        let rebound = std::net::TcpListener::bind(("127.0.0.1", port))
-            .expect("reserved port is free to bind");
-        drop(rebound);
+        for _ in 0..20 {
+            let port = free_loopback_port().expect("reserve a free port");
+            assert!(port >= 1024, "port {port} below gvproxy's 1024 floor");
+            // The reservation listener is already dropped, so this rebind
+            // models gvproxy claiming the port we handed it. Another parallel
+            // test/process can win the intentionally-open TOCTOU window; retry
+            // that specific race and fail all other bind errors.
+            match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                Ok(rebound) => {
+                    drop(rebound);
+                    return;
+                }
+                Err(err) if err.kind() == io::ErrorKind::AddrInUse => continue,
+                Err(err) => panic!("reserved port {port} was not bindable: {err}"),
+            }
+        }
+        panic!("reserved port was repeatedly claimed before the test could bind it");
     }
 
     #[test]
