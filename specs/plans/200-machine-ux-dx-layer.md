@@ -975,22 +975,27 @@ Required behavior:
       emit only `mvmctl machine ...` argv and never call `nix` or legacy `up`
       paths. Rust SDK run argv now also round-trips through the real CLI
       `machine run` parser into `mvmctl run` dry-run/preflight helpers without
-      invoking Nix or a VM; live admission-path proof remains.
+      invoking Nix or a VM. Python/TypeScript `Machine.run` argv now shares
+      checked-in fixtures with the Rust CLI parser/preflight tests, proving the
+      default-deny and allow-host receipt posture is CLI-owned for those SDKs
+      too. Live admission-path proof remains.
 - [~] Add SDK/CLI parity tests proving equivalent admission inputs, effective
       policy, and receipt/audit summaries for the same machine config. Rust SDK
       `MachineRun` builder output now feeds the CLI `machine run` parser and
       preflight/receipt summary path, proving SDK default-deny and
-      `--allow-host` posture matches the CLI for dry-run receipts. Remaining:
-      full admission-input equivalence, audit summary parity, and Python/TS
-      parser/preflight proof.
+      `--allow-host` posture matches the CLI for dry-run receipts.
+      Python/TypeScript shared argv fixtures now feed the same CLI parser and
+      preflight/receipt summary path for default-deny and allow-host receipts.
+      Remaining: full admission-input equivalence, artifact verification, audit
+      summary parity, and live admission proof.
 - [~] Add SDK negative tests proving wrappers cannot bypass artifact
       verification, network default-deny, unknown-key rejection, or
       `image`/`flake` conflict rejection. Python, TypeScript, and Rust now
       reject source conflicts or invalid commands at the wrapper boundary;
       Rust SDK `MachineCreate --manifest` argv now reaches the CLI manifest
       parser and proves strict unknown-key rejection is still owned by the CLI.
-      Artifact-verification, broader network non-bypass, receipt/audit
-      non-bypass, and Python/TS unknown-key proof remain.
+      Artifact-verification, receipt/audit non-bypass, live non-bypass, and
+      Python/TS strict-manifest unknown-key proof remain.
 
 ### D. Agent-safe auth and volumes
 

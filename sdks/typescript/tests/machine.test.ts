@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as mvm from "../src/index.js";
+import { machineRunArgv } from "../src/_machine.js";
 
 let tmpDir: string;
 
@@ -39,6 +40,12 @@ function readFixtureLog(): string[] {
   return fs.readFileSync(log, "utf-8").split("\n").filter((l) => l.length > 0);
 }
 
+function readArgvFixture(name: string): string[] {
+  return fs.readFileSync(path.join("..", "machine-fixtures", `${name}.argv`), "utf-8")
+    .split("\n")
+    .filter((line) => line.length > 0);
+}
+
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mvm-sdk-machine-"));
   delete process.env.MVM_CLI_BIN;
@@ -50,6 +57,26 @@ afterEach(() => {
 });
 
 describe("Machine.run", () => {
+  it("emits the shared default preflight argv fixture", () => {
+    expect(machineRunArgv({
+      image: "alpine:latest",
+      command: ["true"],
+      json: true,
+      dryRun: true,
+    })).toEqual(readArgvFixture("run-default"));
+  });
+
+  it("emits the shared allow-host receipt preflight argv fixture", () => {
+    expect(machineRunArgv({
+      image: "alpine:latest",
+      command: ["true"],
+      allowHosts: ["api.example.com"],
+      receipt: "/tmp/mvm-sdk-machine.receipt.json",
+      json: true,
+      dryRun: true,
+    })).toEqual(readArgvFixture("run-allow-host-receipt"));
+  });
+
   it("shells to mvmctl machine run", () => {
     const script = writeFixtureMvmctl(0, "hello\n");
     process.env.MVM_CLI_BIN = script;

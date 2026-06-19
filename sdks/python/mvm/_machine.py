@@ -112,6 +112,50 @@ def _run_machine(argv: list[str]) -> MachineResult:
     return MachineResult(exit_code=result.returncode, stdout=stdout, stderr=stderr)
 
 
+def _machine_run_argv(
+    *,
+    image: str,
+    command: list[str],
+    net: bool = False,
+    allow_hosts: Iterable[str] | None = None,
+    cpus: int | None = None,
+    memory: str | None = None,
+    profile: str | None = None,
+    add_dirs: Iterable[str] | None = None,
+    env: Iterable[str] | None = None,
+    timeout: int | None = None,
+    receipt: str | None = None,
+    json: bool = False,
+    dry_run: bool = False,
+) -> list[str]:
+    _require_non_empty_str(image, "image")
+    command = _string_list(command, "command")
+    if not command:
+        raise ValueError("command must be non-empty")
+    argv = ["run", "--image", image]
+    if net:
+        argv.append("--net")
+    _append_repeated(argv, "--allow-host", allow_hosts)
+    if cpus is not None:
+        argv.extend(["--cpus", str(cpus)])
+    if memory is not None:
+        argv.extend(["--memory", _require_non_empty_str(memory, "memory")])
+    if profile is not None:
+        argv.extend(["--profile", _require_non_empty_str(profile, "profile")])
+    _append_repeated(argv, "--add-dir", add_dirs)
+    _append_repeated(argv, "--env", env)
+    if timeout is not None:
+        argv.extend(["--timeout", str(timeout)])
+    if receipt is not None:
+        argv.extend(["--receipt", _require_non_empty_str(receipt, "receipt")])
+    if json:
+        argv.append("--json")
+    if dry_run:
+        argv.append("--dry-run")
+    argv.extend(["--", *command])
+    return argv
+
+
 class Machine:
     """Persistent machine handle plus ephemeral ``machine run`` helpers."""
 
@@ -135,32 +179,23 @@ class Machine:
         json: bool = False,
         dry_run: bool = False,
     ) -> MachineResult:
-        _require_non_empty_str(image, "image")
-        command = _string_list(command, "command")
-        if not command:
-            raise ValueError("command must be non-empty")
-        argv = ["run", "--image", image]
-        if net:
-            argv.append("--net")
-        _append_repeated(argv, "--allow-host", allow_hosts)
-        if cpus is not None:
-            argv.extend(["--cpus", str(cpus)])
-        if memory is not None:
-            argv.extend(["--memory", _require_non_empty_str(memory, "memory")])
-        if profile is not None:
-            argv.extend(["--profile", _require_non_empty_str(profile, "profile")])
-        _append_repeated(argv, "--add-dir", add_dirs)
-        _append_repeated(argv, "--env", env)
-        if timeout is not None:
-            argv.extend(["--timeout", str(timeout)])
-        if receipt is not None:
-            argv.extend(["--receipt", _require_non_empty_str(receipt, "receipt")])
-        if json:
-            argv.append("--json")
-        if dry_run:
-            argv.append("--dry-run")
-        argv.extend(["--", *command])
-        return _run_machine(argv)
+        return _run_machine(
+            _machine_run_argv(
+                image=image,
+                command=command,
+                net=net,
+                allow_hosts=allow_hosts,
+                cpus=cpus,
+                memory=memory,
+                profile=profile,
+                add_dirs=add_dirs,
+                env=env,
+                timeout=timeout,
+                receipt=receipt,
+                json=json,
+                dry_run=dry_run,
+            )
+        )
 
     @staticmethod
     def create(
