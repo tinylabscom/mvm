@@ -69,8 +69,8 @@ impl RunPhaseMarks {
 }
 
 impl RunPhaseTimings {
-    /// Admitted-plan to command-dispatch: the window B2's `<200 ms`
-    /// acceptance bar is set against (backend boot + boot-to-agent wait).
+    /// Admitted-plan to command-dispatch: the window the `<200 ms` dispatch
+    /// latency bar is set against (backend boot + boot-to-agent wait).
     pub fn dispatch_window_ms(&self) -> f64 {
         self.backend_start_ms + self.vsock_wait_ms
     }
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn dispatch_window_is_backend_start_plus_vsock_wait() {
-        // B2's `<200 ms` acceptance bar is "backend start to command
+        // The `<200 ms` dispatch latency bar is "backend start to command
         // dispatch": admitted -> backend booted -> guest agent reachable.
         let t = ordered_marks(Instant::now()).to_timings();
         approx(t.dispatch_window_ms(), 130.0);
