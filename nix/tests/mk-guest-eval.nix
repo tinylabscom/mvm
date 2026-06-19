@@ -12,6 +12,7 @@
 let
   flake = builtins.getFlake (toString ./..);
   system = "x86_64-linux";
+  pkgs = import flake.inputs.nixpkgs { inherit system; };
   mkGuest = flake.lib.${system}.mkGuest;
 
   # ── 1. shell entrypoint → accessible mode inferred ────────────
@@ -50,6 +51,11 @@ let
   };
 
   meta = drv: drv.passthru.mvm;
+  rejects = expr:
+    let
+      attempted = builtins.tryEval (builtins.deepSeq expr true);
+    in
+    attempted.success == false;
 in
 {
   shell_default_accessible = (meta shellGuest).accessible == true
@@ -196,4 +202,40 @@ in
 
   # dev=false on a shell entrypoint drops the console
   sealed_override_shell_has_no_console = (meta shellSealedGuest).withDevShell == false;
+
+  # ── SSH ban invariants ────────────────────────────────────────
+  #
+  # mkGuest enforces the no-SSH-session boundary at evaluation time:
+  # user templates cannot add openssh/dropbear/ssh
+  # packages, SSH config paths, authorized_keys, known_hosts, or key
+  # material through packages or extraFiles.
+
+  normal_guest_reports_ssh_template_ban = (meta shellGuest).sshTemplateBan == true;
+
+  openssh_package_is_rejected =
+    rejects ((
+      meta (mkGuest {
+        name = "bad-openssh";
+        entrypoint.command = [ "/bin/x" ];
+        packages = [ pkgs.openssh ];
+      })
+    ).sshTemplateBan);
+
+  ssh_extra_file_path_is_rejected =
+    rejects ((
+      meta (mkGuest {
+        name = "bad-ssh-file";
+        entrypoint.command = [ "/bin/x" ];
+        extraFiles."/root/.ssh/authorized_keys".content = "ssh-ed25519 AAAA test";
+      })
+    ).sshTemplateBan);
+
+  ssh_extra_file_content_is_rejected =
+    rejects ((
+      meta (mkGuest {
+        name = "bad-ssh-content";
+        entrypoint.command = [ "/bin/x" ];
+        extraFiles."/etc/banner".content = "install openssh here";
+      })
+    ).sshTemplateBan);
 }

@@ -207,6 +207,7 @@ impl Commands {
             #[cfg(feature = "builder-vm")]
             Commands::PersistentBuilder(_) => "persistent-builder",
             Commands::QemuVsockBridge(_) => "__qemu-vsock-bridge",
+            Commands::SshAgentProxy(_) => "__ssh-agent-proxy",
         }
     }
 }

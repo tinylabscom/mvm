@@ -141,6 +141,11 @@ follow-up design discussion:
   an OCI image, pack a portable artifact, use a local image archive, create a
   persistent dev machine, forward an SSH agent, and declare the same workflow in
   `mvm.toml` — before architecture or flake details.
+- **Mutable dev state must not silently become a prod input.** Persistent dev
+  machines are allowed to be mutable, but prod/sealed builds still consume only
+  declared host-side inputs. Anything learned or changed inside a dev VM must
+  be promoted back across the boundary explicitly as source, config, or an
+  exported artifact. See [ADR-088](../adrs/088-dev-vm-promotion-boundary.md).
 - **Known limitations should be explicit.** Network protocol scope, volume
   constraints, SSH-agent prerequisites, macOS signing/entitlement requirements,
   GPU availability, and backend/architecture constraints should appear in the
@@ -175,12 +180,18 @@ completion.
 - [x] Network remains default-deny. `net = true` / `--net` is dev-tier egress,
       and `allow_hosts` / `--allow-host` narrows it.
 - [x] SSH-agent support forwards only an agent socket; private key files are
-      never copied or mounted into guests.
+      never copied or mounted into guests, Nix templates cannot add SSH
+      clients/servers/config/material, SSH sessions remain banned, and the
+      feature is dev-tier only.
 - [x] Dev init hooks are dev-only. Sealed/prod machines reject them unless a
       future signed build-time equivalent is designed and audited.
 - [x] Volumes default read-only; writable mounts require explicit `:rw`.
 - [x] Effective network, auth, and volume policy must appear in admission,
       audit, dry-run, and receipts.
+- [x] Mutable dev-machine state never implicitly becomes a prod input. Prod
+      consumes declared host-side inputs only; anything produced in a dev VM
+      must be promoted back explicitly as source, config, or an exported
+      artifact.
 - [x] Portable artifacts verify before extract/launch and still go through
       admission; they are not self-executing bypass blobs.
 - [x] Portable artifacts should be product surface: create, verify, transfer,
@@ -363,12 +374,18 @@ Security mapping:
 - `net = false` is the default. `net = true` is dev-tier egress, and
   `[network].allow_hosts` narrows it.
 - `[auth].ssh_agent = true` forwards an agent socket only. Private key files
-  are never mounted or copied into the guest.
+  are never mounted or copied into the guest, and the feature is dev-tier
+  only: sealed/prod paths reject it. See
+  [ADR-088](../adrs/088-dev-vm-promotion-boundary.md).
 - `[dev].init` is dev-only. Sealed/prod machines reject it unless a future
   signed, audited build-time equivalent is defined.
 - Volumes default read-only. `:rw` is required for writable mounts.
 - The effective network/auth/volume policy appears in admission, audit, and
   receipts.
+- Mutable guest state does not implicitly feed a prod build: prod/sealed paths
+  only consume declared host-side inputs, and any dev-machine output must be
+  promoted back explicitly as source/config/artifact before it can matter to
+  production.
 - Portable artifacts verify before extract/launch and still go through
   admission.
 
@@ -884,23 +901,49 @@ Required behavior:
       exposes the selected kind. `build` fails closed on an image-source manifest
       (image build path is a later slice). Conservative `image` ref validation
       (no shell-meta) mirrors `validate_flake_ref`.
-- [ ] Map `net`, `[network].allow_hosts`, `[auth].ssh_agent`, `[dev].init`,
+- [x] Map `net`, `[network].allow_hosts`, `[auth].ssh_agent`, `[dev].init`,
       `[dev].volumes`, `cpus`, `mem`, and `mem_initial` into the durable
-      machine spec and launch request.
+      machine spec and launch request. → `machine create --manifest <path>` now
+      reads image-backed manifests, persists `net`, `allow_hosts`, `cpus`,
+      `mem`, `mem_initial`, `dev.init`, `dev.volumes`, and `auth.ssh_agent`
+      into `MachineSpec`, resolves relative manifest volume paths against the
+      manifest directory, and `machine start --name` now applies
+      `mem_initial`, admitted volume shares, and dev-init execution through the
+      existing guest-agent path. `ssh_agent = true` now requires a dev-capable
+      profile plus a live host `SSH_AUTH_SOCK`, spawns a per-machine socket
+      proxy, and asks the dev guest agent to expose `/run/mvm/ssh-agent.sock`;
+      no private key files, `~/.ssh`, or known-hosts material are copied or
+      mounted.
 - [ ] Reject `[dev].init` for sealed/prod machines unless a signed, audited
       build-time equivalent is implemented in a later plan.
 - [ ] Preserve read-only volume defaults and require explicit `:rw` for
       writable shares.
-- [ ] Include effective network, auth, and volume policy in dry-run output,
-      admission metadata, audit events, and receipts.
+- [~] Include effective network, auth, and volume policy in dry-run output,
+      admission metadata, audit events, and receipts. →
+      `machine start --dry-run` / `--dry-run --json` now emit redacted
+      effective network posture, enforcement tier, auth mode, dev-init
+      hash/count, and volume policy; `machine start --receipt <path>` now
+      writes the same policy summary into a signed machine-start receipt; and
+      successful starts emit a `VmStart` audit line summarizing the effective
+      machine policy. SSH-agent auth is now reported as
+      `ssh-agent-socket`, and the guest-agent setup RPC emits the same
+      host→guest vsock RPC audit as other dev-only agent calls. Remaining gap:
+      auth is still surfaced in the machine-layer audit/receipt/preflight path,
+      not yet as a distinct signed-plan admission field for forwarded-agent
+      policy.
 - [~] Add serde roundtrip, unknown-key, image+flake conflict, no-source,
       read-only-volume-default, writable-volume-explicit, SSH-agent-no-key-file,
       and dev-init-prod-refusal tests. → **parser-level tests done** (unknown-key,
       image+flake conflict, image-only, no-source-defaults-to-flake, `cpus` with
       legacy `vcpus` aliasing, shell-meta / empty image reject, `allow_hosts`
       validation, volume-shape validation, and typed machine-workflow projection;
-      serde roundtrips already covered). The SSH-agent / dev-init policy-refusal
-      tests land with their respective mapping slices below.
+      serde roundtrips already covered). Runtime mapping now has focused
+      machine-layer tests for manifest-backed create, flake-manifest refusal,
+      dev-init profile refusal, SSH-agent profile refusal, SSH-agent receipt
+      auth mode, proxy host-socket validation, proxy state path isolation,
+      guest socket-path confinement, console env injection, and relative-volume
+      persistence. A live VM proof that the guest endpoint can complete a real
+      SSH-agent protocol round trip is still a follow-up.
 - [ ] Update `guides/manifests.md`, quickstart, and CLI reference only after the
       parser and command behavior are implemented.
 
@@ -925,8 +968,13 @@ Required behavior:
 
 - [ ] Add `--ssh-agent` to `machine run/create` only after the transport is
       implemented as socket forwarding, not key mounting.
-- [ ] Add tests proving the guest receives an agent endpoint but no private key
-      file path.
+- [~] Add tests proving the guest receives an agent endpoint but no private key
+      file path. → Host-side validation accepts only `SSH_AUTH_SOCK` Unix
+      sockets; guest forwarding is confined to `/run/mvm/ssh-agent.sock`; the
+      machine receipt/audit auth mode is `ssh-agent-socket`; and no code path
+      copies `~/.ssh`, private key files, or known-hosts material. Remaining:
+      live VM round-trip proof against a real host agent plus non-standard-port
+      SSH protocol denial proof.
 - [ ] Normalize `-v/--volume HOST:GUEST[:ro|rw]` across `machine run` and
       `machine create`.
 - [ ] Preserve read-only default and explicit `:rw` requirement.
@@ -936,7 +984,8 @@ Required behavior:
 - [ ] Add agent-friendly install/discovery docs that end with
       `mvmctl --help` or `mvmctl doctor --workflow machine-run`.
 - [ ] Add examples for untrusted command, network denied, network allowed,
-      persistent dev machine, and SSH-agent clone.
+      persistent dev machine, and dev-tier agent-socket forwarding without SSH
+      sessions.
 - [ ] Add concise first-run output that explains image pull, network posture,
       VM name, command exit, and cleanup.
 - [ ] Document elastic memory clearly: `mem` is the cap, `mem_initial` is the

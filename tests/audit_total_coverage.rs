@@ -371,6 +371,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // AF_VSOCK<->UNIX bridge for the QEMU workload backend. Pure transport
     // plumbing spawned by `mvm_backend::qemu`; never emits audit events.
     ("__qemu-vsock-bridge", AuditPosture::InteractiveOrControl),
+    ("__ssh-agent-proxy", AuditPosture::InteractiveOrControl),
     ("catalog", AuditPosture::ReadOnly),
     ("image", AuditPosture::DelegatesToSub(IMAGE_SUB)),
     // Plan 200 — beginner microVM workflows.

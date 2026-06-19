@@ -212,16 +212,20 @@ mod tests {
     }
 
     #[test]
-    fn unrestricted_policy_is_allow_unless_denied() {
+    fn unrestricted_policy_is_explicit_allowlist_without_ssh() {
         let egress = CanonicalEgress::Unrestricted;
         let resolvers = [Ipv4Addr::new(1, 1, 1, 1)];
         let sk = sockets();
         let toml = render_rvproxy_config(&params(&egress, &[], &resolvers, &sk)).unwrap();
-        assert!(toml.contains("default_egress_deny = false"));
+        assert!(toml.contains("default_egress_deny = true"));
         // Mandatory-deny denylist is always present.
         assert!(toml.contains("169.254.169.254/32"));
-        // No L4 allow-list for the open posture.
-        assert!(!toml.contains("[[policy.l4_allowlist]]"));
+        // The open posture is still explicit so TCP/22 stays banned.
+        assert!(toml.contains("[[policy.l4_allowlist]]"));
+        assert!(toml.contains("port_hi = 21"));
+        assert!(toml.contains("port_lo = 23"));
+        assert!(!toml.contains("port_lo = 22"));
+        assert!(!toml.contains("port_hi = 22"));
     }
 
     /// Print a sample config so it can be fed to the real `rvproxy` binary for

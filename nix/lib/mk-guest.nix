@@ -66,6 +66,91 @@ let
   # Render a single command list as a quoted shell command line.
   renderCommand = argv:
     lib.concatStringsSep " " (map lib.escapeShellArg argv);
+
+  sshNeedles = [
+    "ssh"
+    "sshd"
+    "openssh"
+    "dropbear"
+    "authorized_keys"
+    "known_hosts"
+    "identityfile"
+    "id_rsa"
+    "id_ed25519"
+    "private key"
+  ];
+
+  containsSshMarker = value:
+    let
+      lower = lib.toLower (toString value);
+    in
+    lib.any (needle: lib.hasInfix needle lower) sshNeedles;
+
+  packageLabel = pkg:
+    let
+      asString = toString pkg;
+      attrText =
+        if builtins.isAttrs pkg then
+          lib.concatStringsSep " " (lib.filter (s: s != "") [
+            (pkg.pname or "")
+            (pkg.name or "")
+            (pkg.meta.mainProgram or "")
+          ])
+        else "";
+    in
+    "${attrText} ${asString}";
+
+  extraFileLabel = path:
+    let
+      rawSpec = extraFiles.${path};
+      spec =
+        if builtins.isString rawSpec then { source = rawSpec; }
+        else rawSpec;
+      source = if spec ? source then toString spec.source else "";
+      content = if spec ? content then toString spec.content else "";
+    in
+    "${path} ${source} ${content}";
+
+  extraFileSourceRoots = lib.filter (source: source != "") (map
+    (path:
+      let
+        rawSpec = extraFiles.${path};
+        spec =
+          if builtins.isString rawSpec then { source = rawSpec; }
+          else rawSpec;
+      in
+      if spec ? source then spec.source else "")
+    (lib.attrNames extraFiles));
+
+  sshClosureInfo = pkgs.closureInfo {
+    rootPaths = packages ++ extraFileSourceRoots;
+  };
+
+  assertNoSshTemplateInputs =
+    let
+      badPackages = lib.filter (pkg: containsSshMarker (packageLabel pkg)) packages;
+      badFiles = lib.filter (path: containsSshMarker (extraFileLabel path)) (lib.attrNames extraFiles);
+      badPackageNames = map (pkg: packageLabel pkg) badPackages;
+      badFileNames = map (path: path) badFiles;
+    in
+    if badPackages != [ ] || badFiles != [ ] then
+      throw ''
+        mkGuest: SSH is banned in microVM templates. Do not add SSH clients,
+        SSH servers, SSH config, host keys, authorized_keys, known_hosts, or
+        private-key material through `packages` or `extraFiles`.
+        Rejected packages: ${builtins.toJSON badPackageNames}
+        Rejected extraFiles: ${builtins.toJSON badFileNames}
+      ''
+    else true;
+
+  assertNoSshClosureScript = ''
+    if ${pkgs.gnugrep}/bin/grep -E '/nix/store/[^-]+-[^/]*(ssh|openssh|dropbear)' \
+        ${sshClosureInfo}/store-paths >/tmp/mvm-ssh-closure-deny 2>/dev/null; then
+      echo "mkGuest: SSH-related Nix store paths are banned from template closures:" >&2
+      cat /tmp/mvm-ssh-closure-deny >&2
+      exit 1
+    fi
+  '';
 in
 { name
 , entrypoint
@@ -793,6 +878,7 @@ let
   rootfsTree = pkgs.runCommand "mvm-rootfs-tree-${name}" { } ''
     set -e
     mkdir -p "$out"
+    ${builtins.seq assertNoSshTemplateInputs assertNoSshClosureScript}
 
     # Standard FHS dirs the kernel + init expect. `/nix-store`,
     # `/job`, `/out`, `/work`, `/mvm-bins` are mount points the libkrun
@@ -1058,7 +1144,7 @@ let
     )}
 
     # Extra user-supplied files.
-    ${extraFilePopulation}
+    ${builtins.seq assertNoSshTemplateInputs extraFilePopulation}
 
     # Closure of additional packages — symlink each binary into
     # `/usr/local/bin` AND `/sbin` so the standard system-binary
@@ -1080,7 +1166,7 @@ let
           fi
         done
       '')
-      packages}
+      (builtins.seq assertNoSshTemplateInputs packages)}
   '';
 
   # Package the tree as an ext4 image. nixpkgs ships a make-ext4-fs
@@ -1138,6 +1224,7 @@ let
     # refuse to boot a workload whose rootfs is not overlay-aware
     # (e.g. an old cached template predating overlay support).
     overlayAware = true;
+    sshTemplateBan = builtins.seq assertNoSshTemplateInputs true;
   };
 in
 rootfsImage.overrideAttrs (old: {

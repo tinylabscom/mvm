@@ -74,6 +74,7 @@ fn internal_subprocess_commands_are_hidden_from_help() {
         "reconcile",
         "persistent-builder",
         "__qemu-vsock-bridge",
+        "__ssh-agent-proxy",
     ] {
         assert!(
             !visible.iter().any(|n| n == hidden),
@@ -2082,10 +2083,12 @@ fn test_console_with_command() {
             name,
             command,
             force,
+            env,
         }) => {
             assert_eq!(name, "myvm");
             assert_eq!(command.as_deref(), Some("ls"));
             assert!(!force, "default --force is off");
+            assert!(env.is_empty());
         }
         _ => panic!("Expected Console command"),
     }

@@ -1863,9 +1863,11 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub image_label: &'a str,
     pub resolved_digest: &'a str,
     pub rootfs_path: &'a std::path::Path,
+    pub profile: &'a str,
     pub cpus: u32,
     pub memory_mib: u32,
     pub mem_initial_mib: Option<u32>,
+    pub volumes: &'a [image::RuntimeVolume],
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
 }
 
@@ -1895,9 +1897,11 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         image_label,
         resolved_digest,
         rootfs_path,
+        profile,
         cpus,
         memory_mib,
         mem_initial_mib,
+        volumes,
         network_policy,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
@@ -1926,7 +1930,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         policy_dir: None,
         bundle_pin: None,
         deps_volume: None,
-        shares: vec![],
+        shares: shares_from_volume_cfg(volumes),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: network_policy.clone(),
     })?;
@@ -1939,11 +1943,11 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         roothash: None,
         revision_hash: resolved_digest.to_string(),
         flake_ref: format!("oci:{image_label}"),
-        profile: Some("standard".to_string()),
+        profile: Some(profile.to_string()),
         cpus,
         memory_mib,
         mem_initial_mib,
-        volumes: &[],
+        volumes,
         config_files: &[],
         secret_files: &[],
         port_mappings: &[],

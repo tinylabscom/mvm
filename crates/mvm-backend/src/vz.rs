@@ -1942,6 +1942,7 @@ fn build_supervisor_config(
             host_listen_ports: vec![
                 mvm_guest::vsock::SUBSTITUTION_PORT,
                 mvm_guest::vsock::BROKER_PORT,
+                mvm_guest::vsock::SSH_AGENT_PORT,
             ],
         },
         console_output_path: Some(console_log),
@@ -2579,6 +2580,20 @@ mod tests {
         assert!(
             !built.vsock.ports.contains(&mvm_guest::vsock::BROKER_PORT),
             "BROKER_PORT must not appear in vsock.ports"
+        );
+        assert!(
+            built
+                .vsock
+                .host_listen_ports
+                .contains(&mvm_guest::vsock::SSH_AGENT_PORT),
+            "SSH_AGENT_PORT must be in vsock.host_listen_ports"
+        );
+        assert!(
+            !built
+                .vsock
+                .ports
+                .contains(&mvm_guest::vsock::SSH_AGENT_PORT),
+            "SSH_AGENT_PORT must not appear in vsock.ports"
         );
         assert_eq!(built.pid_file_name.as_deref(), Some(PID_FILE_NAME));
         // Console capture goes to a file under state_dir; never `None`
