@@ -74,6 +74,18 @@ It does not download a project-published binary. Linux image builds still
 run inside the builder VM; the optional Nix package is only a host CLI
 install surface.
 
+Linux Nix users who explicitly want native libkrun FFI linkage can build the
+opt-in package:
+
+```bash
+cd mvm/nix
+nix build .#mvmctl-native-libkrun
+```
+
+That package uses pinned, source-built upstream `libkrunfw` and `libkrun`
+recipes. It is not the default package, and it does not change the binary-first
+install model.
+
 If a future package-manager expression installs release binaries, it must stay
 separate from this source-built package and preserve release signature/checksum
 verification.

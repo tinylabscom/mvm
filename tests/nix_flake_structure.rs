@@ -126,8 +126,33 @@ fn host_mvmctl_package_is_source_only() {
         "mvmctl package must use the source checkout and committed Cargo.lock"
     );
     assert!(
+        content.contains("unpackPhase")
+            && content.contains("cp -R ${mvmSrc}/. source")
+            && content.contains("sourceRoot=source"),
+        "mvmctl package must normalize the path:.. workspace source before buildRustPackage unpacks it"
+    );
+    assert!(
         content.contains("\"--package\"") && content.contains("\"mvmctl\""),
         "mvmctl package must explicitly build the root CLI package"
+    );
+    assert!(
+        content.contains("cargo-zigbuild") && content.contains("lld") && content.contains("zig"),
+        "mvmctl package must provide the zigbuild and LLD toolchain required by embedded binaries and audited links"
+    );
+    assert!(
+        content.contains("embeddedCargo")
+            && content.contains("embeddedRustc")
+            && content.contains("MVM_EMBED_CARGO")
+            && content.contains("MVM_EMBED_RUSTC"),
+        "mvmctl package must pass explicit musl-target Rust tools to the embedded-binary build"
+    );
+    assert!(
+        content.contains("nativeCheckInputs") && content.contains("curl"),
+        "mvmctl package must provide install.sh test tools during Nix checkPhase"
+    );
+    assert!(
+        content.contains("auditable = !withNativeLibkrun"),
+        "only the native-libkrun package may disable cargo-auditable for the package-qualified feature set"
     );
 
     let forbidden = [
@@ -161,6 +186,10 @@ fn host_mvmctl_package_keeps_native_vmm_linkage_explicit() {
         "enabling native libkrun FFI must require an explicit Nix libkrun package"
     );
     assert!(
+        content.contains("assert withNativeLibkrun -> libkrunfw != null"),
+        "enabling native libkrun FFI must require an explicit Nix libkrunfw package"
+    );
+    assert!(
         content.contains("assert withNativeLibkrun -> withBuilderVm")
             && content.contains("\"mvmctl/builder-vm\""),
         "feature flags must stay package-qualified when mvmctl and sidecars build together"
@@ -173,6 +202,124 @@ fn host_mvmctl_package_keeps_native_vmm_linkage_explicit() {
     assert!(
         content.contains("MVM_LIBKRUN_HEADER"),
         "the Nix package must pass an explicit libkrun.h path to bindgen"
+    );
+    assert!(
+        content.contains("lib.optionals withNativeLibkrun") && content.contains("libkrunfw"),
+        "the Nix package must link libkrunfw explicitly; libkrun does not propagate it"
+    );
+}
+
+#[test]
+fn native_vmm_recipes_are_source_built_and_pinned() {
+    let packages_dir = nix_dir().join("packages");
+    let libkrunfw = fs::read_to_string(packages_dir.join("libkrunfw.nix"))
+        .unwrap_or_else(|e| panic!("nix/packages/libkrunfw.nix must be present: {e}"));
+    let libkrun = fs::read_to_string(packages_dir.join("libkrun.nix"))
+        .unwrap_or_else(|e| panic!("nix/packages/libkrun.nix must be present: {e}"));
+
+    for (name, content) in [
+        ("libkrunfw.nix", libkrunfw.as_str()),
+        ("libkrun.nix", libkrun.as_str()),
+    ] {
+        assert!(
+            content.contains("stdenv.mkDerivation"),
+            "nix/packages/{name} must use a source-built derivation"
+        );
+        assert!(
+            content.contains("owner = \"libkrun\"")
+                && content.contains("tag = \"v${finalAttrs.version}\"")
+                && content.contains("hash = \"sha256-"),
+            "nix/packages/{name} must fetch pinned upstream source by tag and hash"
+        );
+        assert!(
+            !content.contains("github.com/tinylabscom/mvm/releases")
+                && !content.contains("binaryNativeCode"),
+            "nix/packages/{name} must not use mvm release binaries"
+        );
+    }
+
+    assert!(
+        libkrunfw.contains("linux-6.12.91.tar.xz")
+            && libkrunfw.contains("KERNEL_REMOTE")
+            && libkrunfw.contains("ln -s ${kernelSrc} $(KERNEL_TARBALL)"),
+        "libkrunfw must pin and substitute the kernel source instead of downloading it during build"
+    );
+    assert!(
+        libkrun.contains("rustPlatform.fetchCargoVendor")
+            && libkrun.contains("hash = \"sha256-dfIe2pl957MRcY1hIv6wPPX/4He+ou+eCZLbylVeGAE=\""),
+        "libkrun must carry a verified Cargo vendor hash"
+    );
+    assert!(
+        libkrun.contains("withBlk ? true")
+            && libkrun.contains("withNet ? true")
+            && libkrun.contains("\"BLK=1\"")
+            && libkrun.contains("\"NET=1\""),
+        "mvm's native libkrun recipe must build virtio-block and virtio-net support by default"
+    );
+}
+
+#[test]
+fn native_vmm_outputs_stay_optional_and_non_default() {
+    let packages = fs::read_to_string(nix_dir().join("packages").join("default.nix"))
+        .unwrap_or_else(|e| panic!("nix/packages/default.nix must be present: {e}"));
+    let flake = fs::read_to_string(nix_dir().join("flake.nix"))
+        .unwrap_or_else(|e| panic!("nix/flake.nix must be present: {e}"));
+
+    assert!(
+        packages.contains("nativeVmmPackages")
+            && packages.contains("pkgs.stdenv.hostPlatform.isLinux"),
+        "native VMM packages must be exposed only for Linux host package sets"
+    );
+    assert!(
+        packages.contains("embeddedRustTarget")
+            && packages.contains("aarch64-unknown-linux-musl")
+            && packages.contains("x86_64-unknown-linux-musl")
+            && packages.contains("embeddedRustToolchain")
+            && packages.contains("./embedded-rust-toolchain.nix")
+            && packages.contains("pkgs.rust_1_91.packages.prebuilt.cargo")
+            && packages.contains("pkgs.rust_1_91.packages.prebuilt.rustc")
+            && packages.contains("embeddedCargo = embeddedRustToolchain")
+            && packages.contains("embeddedRustc = embeddedRustToolchain"),
+        "host packages must use the pinned musl std Rust wrapper for real embedded host binaries"
+    );
+    assert!(
+        packages.contains("mvmctl-native-libkrun = mvmctl.override")
+            && packages.contains("withNativeLibkrun = true")
+            && packages.contains("inherit libkrun libkrunfw"),
+        "the native mvmctl package must consume the explicit libkrun/libkrunfw override seam"
+    );
+    assert!(
+        flake.contains("default = hostPackages.mvmctl")
+            && flake.contains("mvmctl-native-libkrun")
+            && !flake.contains("default = hostPackages.mvmctl-native-libkrun"),
+        "packages.default must remain the non-native mvmctl package"
+    );
+    assert!(
+        flake.contains("final.stdenv.hostPlatform.isLinux")
+            && flake.contains("inherit (hostPackages) libkrun libkrunfw mvmctl-native-libkrun"),
+        "the host overlay must expose native VMM packages only on Linux"
+    );
+}
+
+#[test]
+fn embedded_rust_toolchain_pins_musl_std_components() {
+    let path = nix_dir()
+        .join("packages")
+        .join("embedded-rust-toolchain.nix");
+    let content = fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!("nix/packages/embedded-rust-toolchain.nix must be present: {e}")
+    });
+
+    assert!(
+        content.contains("rust-std-${version}-${target}.tar.gz")
+            && content.contains("sha256-W95G9gKLSyz+ogTZiIt93mYDG3eKuEtoXrUjQ1kpt7U=")
+            && content.contains("sha256-fcoP5fERdHCAB+tTVG6pWq2MN9/Ww8sGTF8cZS7WsPI="),
+        "embedded Rust toolchain must pin official musl std components for both supported host arches"
+    );
+    assert!(
+        content.contains("--sysroot=$out")
+            && content.contains("--target ${target} --print target-libdir"),
+        "embedded Rust toolchain must wrap rustc with a target-aware sysroot and validate it"
     );
 }
 

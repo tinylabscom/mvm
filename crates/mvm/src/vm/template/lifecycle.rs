@@ -1495,6 +1495,9 @@ mod tests {
 
     #[test]
     fn template_create_rejects_traversal_identifier_before_writing() {
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut env = TestEnv::new();
         env.set("MVM_DATA_DIR", tmp.path());
@@ -1514,6 +1517,9 @@ mod tests {
 
     #[test]
     fn template_create_then_load_accepts_valid_template_name() {
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut env = TestEnv::new();
         env.set("MVM_DATA_DIR", tmp.path());
@@ -1526,6 +1532,9 @@ mod tests {
 
     #[test]
     fn template_load_dispatched_accepts_real_slot_hash() {
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut env = TestEnv::new();
         env.set("MVM_DATA_DIR", tmp.path());

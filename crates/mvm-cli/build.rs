@@ -32,6 +32,8 @@ fn main() {
         pin.cargo_zigbuild
     );
     println!("cargo:rustc-env=MVM_PINNED_TARGET={}", pin.target);
+    println!("cargo:rerun-if-env-changed=MVM_EMBED_CARGO");
+    println!("cargo:rerun-if-env-changed=MVM_EMBED_RUSTC");
 
     // HOST_BINARIES (installed into the builder/dev VM rootfs) + SEED_BINARIES
     // (host-side only, e.g. the Stage 0 nix-seed's /init). Both are
@@ -262,6 +264,15 @@ fn run_cargo_zigbuild(root: &Path, target_dir: &Path, pkg: &str, target: &str, o
 
 /// Find a `(cargo, rustc)` pair that has `target` installed in its sysroot.
 fn rustup_cargo_and_rustc(target: &str) -> (String, String) {
+    if let Some((cargo, rustc)) = configured_embed_tools() {
+        assert!(
+            rustc_has_target(&rustc, target),
+            "MVM_EMBED_RUSTC={rustc:?} does not provide target {target}; \
+             unset MVM_EMBED_RUSTC or point it at a Rust toolchain with that std target"
+        );
+        return (cargo, rustc);
+    }
+
     let env_rustc = std::env::var("RUSTC").unwrap_or_default();
     let env_cargo = std::env::var("CARGO").unwrap_or_default();
     if !env_rustc.is_empty() && rustc_has_target(&env_rustc, target) {
@@ -304,6 +315,29 @@ fn rustup_cargo_and_rustc(target: &str) -> (String, String) {
             env_rustc
         },
     )
+}
+
+fn configured_embed_tools() -> Option<(String, String)> {
+    configured_embed_tools_from(
+        std::env::var("MVM_EMBED_CARGO").ok(),
+        std::env::var("MVM_EMBED_RUSTC").ok(),
+    )
+}
+
+fn configured_embed_tools_from(
+    embed_cargo: Option<String>,
+    embed_rustc: Option<String>,
+) -> Option<(String, String)> {
+    let rustc = embed_rustc?.trim().to_string();
+    assert!(
+        !rustc.is_empty(),
+        "MVM_EMBED_RUSTC must not be empty when set"
+    );
+    let cargo = embed_cargo
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "cargo".to_string());
+    Some((cargo, rustc))
 }
 
 fn rustc_has_target(rustc: &str, target: &str) -> bool {
@@ -400,5 +434,27 @@ mod tests {
         let toolchain: toml::Value =
             toml::from_str("[targets]\naarch64 = \"aarch64-unknown-linux-musl\"\n").unwrap();
         let _ = resolve_target_for_arch(&toolchain, "riscv64");
+    }
+
+    #[test]
+    fn configured_embed_tools_prefers_explicit_rustc() {
+        assert_eq!(
+            configured_embed_tools_from(
+                Some("/nix/store/cargo/bin/cargo".to_string()),
+                Some("/nix/store/rustc/bin/rustc".to_string()),
+            ),
+            Some((
+                "/nix/store/cargo/bin/cargo".to_string(),
+                "/nix/store/rustc/bin/rustc".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn configured_embed_tools_defaults_cargo_when_only_rustc_is_set() {
+        assert_eq!(
+            configured_embed_tools_from(None, Some("/toolchain/bin/rustc".to_string())),
+            Some(("cargo".to_string(), "/toolchain/bin/rustc".to_string()))
+        );
     }
 }
