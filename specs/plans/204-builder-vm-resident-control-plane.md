@@ -164,11 +164,34 @@ Add structural tests that prove:
 
 ### B. Host client and lifecycle
 
-- [ ] Add a host-side builder client that connects over vsock.
-- [ ] Thread operation ids through progress/log rendering.
-- [ ] Add timeout, cancellation, and daemon-not-ready error handling.
+- [x] Add a host-side builder client that connects over vsock.
+      `mvm_build::builderd_client::BuilderdClient` — `connect()` (over the
+      shared `connect_with_timeout` + `perform_handshake`, factored out of
+      the readiness probe), `run_operation()` (one operation per connection:
+      write the request, stream `OperationEvent::{Progress,Log}` to a
+      caller sink, return a typed `OperationOutcome::{Artifact,StorePath,
+      Failed,Cancelled}`), and `request_cancel()`. Integration-tested end
+      to end against the real `serve_connection` daemon core plus
+      `UnixStream`-pair tests for every streamed/terminal/error path
+      (11 tests).
+- [x] Thread operation ids through progress/log rendering.
+      The client correlates every response frame to the in-flight
+      request's `OperationId` and rejects a mismatched or out-of-band
+      frame as `BuilderdClientError::Protocol`; `OperationEvent`s handed to
+      the sink are already correlated, so the renderer keys on one op.
+- [x] Add timeout, cancellation, and daemon-not-ready error handling.
+      Typed `BuilderdClientError::{NotReady,VersionMismatch,Transport,
+      Timeout,Protocol}`; a read timeout before the terminal frame maps to
+      `Timeout`, a missing/refused socket to `NotReady`, a version refusal
+      to `VersionMismatch`. `request_cancel()` writes a `CancelJob` and the
+      `Cancelled` terminal flows back through `run_operation`. (Full
+      mid-flight async cancellation from a second handle is a transport
+      concern that lands with the listener.)
 - [ ] Ensure `MVM_DATA_DIR` / cache-dir isolation stays per worktree.
 - [ ] Keep all git operations host-side and outside the builder VM.
+      (Client is transport-only and starts/stops no VM; the lifecycle
+      owner connects it to an already-running socket. Asserted by the
+      module contract; revisit when the lifecycle owner lands.)
 
 ### C. Typed Nix operations
 

@@ -12,6 +12,10 @@ pub mod builder_vm_runtime;
 /// daemon: stateless request dispatch + the framed connection serve
 /// loop. The bin entrypoint and AF_VSOCK listener land with boot wiring.
 pub mod builderd;
+/// Host-side client for the resident `mvm-builderd` daemon: connect +
+/// handshake, run one typed operation per connection, stream
+/// progress/log events, and surface a typed terminal outcome.
+pub mod builderd_client;
 /// Typed allowlisted control-plane protocol for the resident
 /// `mvm-builderd` builder-VM service (the long-term replacement for the
 /// controlled-shell-job channel in `builder_protocol`).

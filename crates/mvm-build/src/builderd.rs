@@ -172,6 +172,59 @@ pub enum BuilderdReadiness {
     },
 }
 
+/// Connect to a daemon control socket and arm both read and write
+/// timeouts. Shared by the readiness probe and the host client so the
+/// connect convention lives in one place.
+pub(crate) fn connect_with_timeout(
+    socket_path: &Path,
+    timeout: Duration,
+) -> std::io::Result<UnixStream> {
+    let stream = UnixStream::connect(socket_path)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    Ok(stream)
+}
+
+/// Classified outcome of the protocol handshake on a connected stream.
+/// Shared by the readiness probe and the host client so the handshake
+/// wire is interpreted in exactly one place.
+pub(crate) enum HandshakeOutcome {
+    /// Daemon agreed on this protocol version.
+    Agreed(u32),
+    /// Daemon refused our version fail-closed; detail is its message.
+    VersionRefused(String),
+    /// Connected, but the reply was not a handshake answer.
+    Unexpected(String),
+    /// Transport error writing or reading the handshake.
+    Transport(String),
+}
+
+/// Write our [`BuilderRequest::Handshake`] on an already-connected
+/// stream (timeouts pre-armed by the caller), read one reply, and
+/// classify it.
+pub(crate) fn perform_handshake(stream: &mut UnixStream) -> HandshakeOutcome {
+    let handshake = BuilderRequest::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+    };
+    if let Err(e) = mvm_guest::vsock::write_frame(stream, &handshake) {
+        return HandshakeOutcome::Transport(format!("handshake write failed: {e}"));
+    }
+    match mvm_guest::vsock::read_frame::<BuilderResponse>(stream) {
+        Ok(BuilderResponse::Accepted {
+            protocol_version, ..
+        }) => HandshakeOutcome::Agreed(protocol_version),
+        Ok(BuilderResponse::Failed {
+            category: FailureCategory::Version,
+            message,
+            ..
+        }) => HandshakeOutcome::VersionRefused(message),
+        Ok(other) => {
+            HandshakeOutcome::Unexpected(format!("unexpected handshake response: {other:?}"))
+        }
+        Err(e) => HandshakeOutcome::Transport(format!("handshake read failed: {e}")),
+    }
+}
+
 /// Probe a builder daemon's readiness by connecting to `socket_path`
 /// and completing a [`BuilderRequest::Handshake`] within `timeout`.
 ///
@@ -183,7 +236,7 @@ pub fn probe_builderd_readiness(socket_path: &Path, timeout: Duration) -> Builde
     if !socket_path.exists() {
         return BuilderdReadiness::NotRunning;
     }
-    let mut stream = match UnixStream::connect(socket_path) {
+    let mut stream = match connect_with_timeout(socket_path, timeout) {
         Ok(s) => s,
         Err(e) => {
             return BuilderdReadiness::Unreachable {
@@ -191,39 +244,12 @@ pub fn probe_builderd_readiness(socket_path: &Path, timeout: Duration) -> Builde
             };
         }
     };
-    if let Err(e) = stream
-        .set_read_timeout(Some(timeout))
-        .and_then(|()| stream.set_write_timeout(Some(timeout)))
-    {
-        return BuilderdReadiness::Unreachable {
-            detail: format!("set timeout failed: {e}"),
-        };
-    }
-    let handshake = BuilderRequest::Handshake {
-        protocol_version: PROTOCOL_VERSION,
-    };
-    if let Err(e) = mvm_guest::vsock::write_frame(&mut stream, &handshake) {
-        return BuilderdReadiness::Unreachable {
-            detail: format!("handshake write failed: {e}"),
-        };
-    }
-    match mvm_guest::vsock::read_frame::<BuilderResponse>(&mut stream) {
-        Ok(BuilderResponse::Accepted {
-            protocol_version, ..
-        }) => BuilderdReadiness::Ready {
-            version: protocol_version,
-        },
-        Ok(BuilderResponse::Failed {
-            category: FailureCategory::Version,
-            message,
-            ..
-        }) => BuilderdReadiness::VersionMismatch { detail: message },
-        Ok(other) => BuilderdReadiness::Unreachable {
-            detail: format!("unexpected handshake response: {other:?}"),
-        },
-        Err(e) => BuilderdReadiness::Unreachable {
-            detail: format!("handshake read failed: {e}"),
-        },
+    match perform_handshake(&mut stream) {
+        HandshakeOutcome::Agreed(version) => BuilderdReadiness::Ready { version },
+        HandshakeOutcome::VersionRefused(detail) => BuilderdReadiness::VersionMismatch { detail },
+        HandshakeOutcome::Unexpected(detail) | HandshakeOutcome::Transport(detail) => {
+            BuilderdReadiness::Unreachable { detail }
+        }
     }
 }
 
