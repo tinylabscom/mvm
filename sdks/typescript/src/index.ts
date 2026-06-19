@@ -85,6 +85,16 @@ export type {
   SandboxInfo,
 } from "./_sandbox.js";
 
+// Machine-oriented host SDK wrappers. These shell to `mvmctl machine ...` so
+// admission/audit/policy stay in the CLI path.
+export { Machine, MachineError } from "./_machine.js";
+export type {
+  MachineCreateOptions,
+  MachineResult,
+  MachineRunOptions,
+  MachineStartOptions,
+} from "./_machine.js";
+
 // Typed Sandbox presets (Phase C).
 export { BrowserSandbox, CodeError, CodeSandbox } from "./_helpers.js";
 export type { BrowserSandboxOptions } from "./_helpers.js";

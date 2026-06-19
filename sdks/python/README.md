@@ -94,6 +94,34 @@ conveniences for build-time emission and introspection. Production microVMs are
 observed through `mvmctl` output streams — there are no host-side `.remote()`
 calls on the prod path.
 
+## Machine lifecycle wrappers
+
+`mv.Machine` mirrors the beginner `mvmctl machine ...` command group for host
+automation. These wrappers deliberately shell to `mvmctl machine ...`; OCI pull,
+admission, receipts, audit, networking, and persistent machine state stay owned
+by the CLI instead of being reimplemented in Python.
+
+```python
+import mvm as mv
+
+result = mv.Machine.run(
+    image="alpine:latest",
+    command=["uname", "-a"],
+    net=True,
+    allow_hosts=["example.com:443"],
+)
+print(result.stdout)
+
+vm = mv.Machine.create(name="devbox", manifest="mvm.toml", profile="dev")
+vm.start()
+vm.exec(["echo", "hello"])
+vm.stop()
+```
+
+Set `MVM_CLI_BIN=/path/to/mvmctl` to point the SDK at a local or test CLI
+binary. CLI process failures raise `mv.MachineError` with `argv`, `exit_code`,
+and captured `stderr`.
+
 ## Optional extras
 
 ```sh
