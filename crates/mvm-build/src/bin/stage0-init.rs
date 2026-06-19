@@ -316,6 +316,15 @@ mod linux {
             bind_mount(STAGE0_NIX_STORE_MOUNT, NIX_TARGET)?;
             return Ok(());
         }
+        if persistent_nix_store_matches_seed(&seed_store)? {
+            std::fs::write(STAGE0_NIX_STORE_MARKER, expected_marker)
+                .map_err(|e| format!("write {STAGE0_NIX_STORE_MARKER}: {e}"))?;
+            eprintln!(
+                "stage0-init: adopting host-prepopulated Stage 0 Nix store at {STAGE0_NIX_STORE_DEV}"
+            );
+            bind_mount(STAGE0_NIX_STORE_MOUNT, NIX_TARGET)?;
+            return Ok(());
+        }
 
         eprintln!(
             "stage0-init: initializing persistent Stage 0 Nix store at {STAGE0_NIX_STORE_DEV}"
@@ -405,6 +414,14 @@ mod linux {
         Path::new(STAGE0_NIX_STORE_MOUNT).join("store").is_dir()
             && std::fs::read_to_string(STAGE0_NIX_STORE_MARKER)
                 .is_ok_and(|marker| marker == expected_marker)
+    }
+
+    fn persistent_nix_store_matches_seed(seed_store: &Path) -> Result<bool, String> {
+        let mounted_store = Path::new(STAGE0_NIX_STORE_MOUNT).join("store");
+        if !mounted_store.is_dir() {
+            return Ok(false);
+        }
+        Ok(seed_store_entries_hash(&mounted_store)? == seed_store_entries_hash(seed_store)?)
     }
 
     fn stage0_nix_store_marker(seed_store: &Path) -> Result<String, String> {
