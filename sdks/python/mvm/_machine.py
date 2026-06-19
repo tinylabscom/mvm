@@ -156,6 +156,46 @@ def _machine_run_argv(
     return argv
 
 
+def _machine_create_argv(
+    *,
+    name: str,
+    image: str | None = None,
+    manifest: str | None = None,
+    net: bool = False,
+    allow_hosts: Iterable[str] | None = None,
+    cpus: int | None = None,
+    memory: str | None = None,
+    mem_initial: str | None = None,
+    profile: str | None = None,
+    force: bool = False,
+    json: bool = False,
+) -> list[str]:
+    name = _require_non_empty_str(name, "name")
+    if image is not None and manifest is not None:
+        raise ValueError("Machine.create accepts image OR manifest, not both")
+    argv = ["create", "--name", name]
+    if image is not None:
+        argv.extend(["--image", _require_non_empty_str(image, "image")])
+    if manifest is not None:
+        argv.extend(["--manifest", _require_non_empty_str(manifest, "manifest")])
+    if net:
+        argv.append("--net")
+    _append_repeated(argv, "--allow-host", allow_hosts)
+    if cpus is not None:
+        argv.extend(["--cpus", str(cpus)])
+    if memory is not None:
+        argv.extend(["--memory", _require_non_empty_str(memory, "memory")])
+    if mem_initial is not None:
+        argv.extend(["--mem-initial", _require_non_empty_str(mem_initial, "mem_initial")])
+    if profile is not None:
+        argv.extend(["--profile", _require_non_empty_str(profile, "profile")])
+    if force:
+        argv.append("--force")
+    if json:
+        argv.append("--json")
+    return argv
+
+
 class Machine:
     """Persistent machine handle plus ephemeral ``machine run`` helpers."""
 
@@ -212,30 +252,21 @@ class Machine:
         force: bool = False,
         json: bool = False,
     ) -> "Machine":
-        _require_non_empty_str(name, "name")
-        if image is not None and manifest is not None:
-            raise ValueError("Machine.create accepts image OR manifest, not both")
-        argv = ["create", "--name", name]
-        if image is not None:
-            argv.extend(["--image", _require_non_empty_str(image, "image")])
-        if manifest is not None:
-            argv.extend(["--manifest", _require_non_empty_str(manifest, "manifest")])
-        if net:
-            argv.append("--net")
-        _append_repeated(argv, "--allow-host", allow_hosts)
-        if cpus is not None:
-            argv.extend(["--cpus", str(cpus)])
-        if memory is not None:
-            argv.extend(["--memory", _require_non_empty_str(memory, "memory")])
-        if mem_initial is not None:
-            argv.extend(["--mem-initial", _require_non_empty_str(mem_initial, "mem_initial")])
-        if profile is not None:
-            argv.extend(["--profile", _require_non_empty_str(profile, "profile")])
-        if force:
-            argv.append("--force")
-        if json:
-            argv.append("--json")
-        _run_machine(argv)
+        _run_machine(
+            _machine_create_argv(
+                name=name,
+                image=image,
+                manifest=manifest,
+                net=net,
+                allow_hosts=allow_hosts,
+                cpus=cpus,
+                memory=memory,
+                mem_initial=mem_initial,
+                profile=profile,
+                force=force,
+                json=json,
+            )
+        )
         return Machine(name)
 
     def start(

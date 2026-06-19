@@ -1,0 +1,27 @@
+run
+--image
+alpine:latest
+--allow-host
+api.example.com
+--cpus
+4
+--memory
+1G
+--profile
+dev
+--add-dir
+/tmp/mvm-sdk-src:/workspace:ro
+--env
+TOKEN=secret
+--env
+MODE=test
+--timeout
+30
+--receipt
+/tmp/mvm-sdk-machine.receipt.json
+--json
+--dry-run
+--
+sh
+-lc
+echo ok

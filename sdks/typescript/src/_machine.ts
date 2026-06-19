@@ -143,6 +143,29 @@ export function machineRunArgv(options: MachineRunOptions): string[] {
   return argv;
 }
 
+export function machineCreateArgv(options: MachineCreateOptions): string[] {
+  const name = requireString(options.name, "name");
+  if (options.image !== undefined && options.manifest !== undefined) {
+    throw new TypeError("Machine.create accepts image OR manifest, not both");
+  }
+  const argv = ["create", "--name", name];
+  if (options.image !== undefined) argv.push("--image", requireString(options.image, "image"));
+  if (options.manifest !== undefined) {
+    argv.push("--manifest", requireString(options.manifest, "manifest"));
+  }
+  if (options.net) argv.push("--net");
+  appendRepeated(argv, "--allow-host", options.allowHosts);
+  if (options.cpus !== undefined) argv.push("--cpus", String(options.cpus));
+  if (options.memory !== undefined) argv.push("--memory", requireString(options.memory, "memory"));
+  if (options.memInitial !== undefined) {
+    argv.push("--mem-initial", requireString(options.memInitial, "memInitial"));
+  }
+  if (options.profile !== undefined) argv.push("--profile", requireString(options.profile, "profile"));
+  if (options.force) argv.push("--force");
+  if (options.json) argv.push("--json");
+  return argv;
+}
+
 export class Machine {
   readonly name: string;
 
@@ -155,27 +178,8 @@ export class Machine {
   }
 
   static create(options: MachineCreateOptions): Machine {
-    const name = requireString(options.name, "name");
-    if (options.image !== undefined && options.manifest !== undefined) {
-      throw new TypeError("Machine.create accepts image OR manifest, not both");
-    }
-    const argv = ["create", "--name", name];
-    if (options.image !== undefined) argv.push("--image", requireString(options.image, "image"));
-    if (options.manifest !== undefined) {
-      argv.push("--manifest", requireString(options.manifest, "manifest"));
-    }
-    if (options.net) argv.push("--net");
-    appendRepeated(argv, "--allow-host", options.allowHosts);
-    if (options.cpus !== undefined) argv.push("--cpus", String(options.cpus));
-    if (options.memory !== undefined) argv.push("--memory", requireString(options.memory, "memory"));
-    if (options.memInitial !== undefined) {
-      argv.push("--mem-initial", requireString(options.memInitial, "memInitial"));
-    }
-    if (options.profile !== undefined) argv.push("--profile", requireString(options.profile, "profile"));
-    if (options.force) argv.push("--force");
-    if (options.json) argv.push("--json");
-    runMachine(argv);
-    return new Machine(name);
+    runMachine(machineCreateArgv(options));
+    return new Machine(options.name);
   }
 
   start(options: MachineStartOptions = {}): MachineResult {
