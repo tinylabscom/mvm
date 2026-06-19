@@ -245,6 +245,9 @@ pub(in crate::commands) enum SnapshotCmd {
         /// VM name whose snapshot to remove
         #[arg(value_parser = clap_vm_name)]
         name: String,
+        /// Output the removal result as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -255,7 +258,7 @@ pub(in crate::commands) fn run_snapshot(
 ) -> Result<()> {
     match args.command {
         SnapshotCmd::Ls { json } => snap_ls(json),
-        SnapshotCmd::Rm { name } => snap_rm(&name),
+        SnapshotCmd::Rm { name, json } => snap_rm(&name, json),
     }
 }
 
@@ -304,7 +307,15 @@ fn snap_ls(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn snap_rm(name: &str) -> Result<()> {
+#[derive(serde::Serialize)]
+struct SnapshotRemoveJson<'a> {
+    schema_version: u8,
+    action: &'static str,
+    vm_name: &'a str,
+    removed: bool,
+}
+
+fn snap_rm(name: &str, json: bool) -> Result<()> {
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     let removed = mvm::vm::instance_snapshot::delete_instance_snapshot(name)?;
     if !removed {
@@ -315,7 +326,16 @@ fn snap_rm(name: &str) -> Result<()> {
         let _ = registry.set_paused(name, false);
         let _ = registry.save(&registry_path);
     }
-    println!("{}: snapshot removed", name);
+    if json {
+        crate::json_out::emit_json(&SnapshotRemoveJson {
+            schema_version: 1,
+            action: "rm",
+            vm_name: name,
+            removed: true,
+        })?;
+    } else {
+        println!("{}: snapshot removed", name);
+    }
     mvm_core::audit_emit!(SnapshotDelete, vm: name);
     Ok(())
 }

@@ -1855,6 +1855,19 @@ fn test_snapshot_ls_json_parses() {
     ));
 }
 
+#[test]
+fn test_snapshot_rm_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "snapshot", "rm", "myvm", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Snapshot(pause::SnapshotArgs {
+                command: pause::SnapshotCmd::Rm { json: true, .. }
+            })
+        })
+    ));
+}
+
 // --- Checkpoint CLI tests ---
 
 #[test]
@@ -1893,6 +1906,29 @@ fn test_checkpoint_fork_parses() {
         ])
         .is_ok()
     );
+}
+
+#[test]
+fn test_checkpoint_fork_json_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "vm",
+        "checkpoint",
+        "fork",
+        "ckpt-abc",
+        "--new-id",
+        "child",
+        "--json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Checkpoint(checkpoint::CheckpointArgs {
+                command: checkpoint::CheckpointCmd::Fork { json: true, .. }
+            })
+        })
+    ));
 }
 
 #[test]
@@ -1951,6 +1987,41 @@ fn test_checkpoint_create_vm_full_parses() {
 #[test]
 fn test_checkpoint_restore_parses() {
     assert!(Cli::try_parse_from(["mvmctl", "vm", "checkpoint", "restore", "ckpt-abc"]).is_ok());
+}
+
+#[test]
+fn test_checkpoint_restore_json_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "vm",
+        "checkpoint",
+        "restore",
+        "ckpt-abc",
+        "--json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Checkpoint(checkpoint::CheckpointArgs {
+                command: checkpoint::CheckpointCmd::Restore { json: true, .. }
+            })
+        })
+    ));
+}
+
+#[test]
+fn test_checkpoint_rm_json_parses() {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "vm", "checkpoint", "rm", "ckpt-abc", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Checkpoint(checkpoint::CheckpointArgs {
+                command: checkpoint::CheckpointCmd::Rm { json: true, .. }
+            })
+        })
+    ));
 }
 
 #[test]

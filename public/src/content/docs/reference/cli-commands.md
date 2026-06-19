@@ -23,7 +23,7 @@ verification under `trust`. Domains that already own their own subcommands
 | Group / top-level | Commands |
 |--------|----------|
 | Daily drivers (top-level) | `up`, `run`, `invoke`, `ls`, `console`, `down`, `logs`, `dev`, `doctor`, `init` |
-| `vm <sub>` | `pause`, `resume`, `snapshot`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
+| `vm <sub>` | `pause`, `resume`, `snapshot`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
 | `build <sub>` | `image` (the former `build`), `compile`, `validate`, `kernel` |
 | `ops <sub>` | `metrics`, `bench`, `config`, `mcp` |
 | `env <sub>` | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign` |
@@ -423,17 +423,20 @@ host registry records.
 
 ## Checkpoint
 
-`mvmctl checkpoint` manages memory-state checkpoints for Vz-backed VMs (`vm-full` class). `mvmctl snapshot ls` / `mvmctl snapshot rm` remain for Firecracker sealed snapshots.
+`mvmctl vm checkpoint` manages memory-state checkpoints for Vz-backed VMs (`vm-full` class). `mvmctl vm snapshot ls` / `mvmctl vm snapshot rm` remain for Firecracker sealed snapshots.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl checkpoint create <name> --class <class>` | Capture a checkpoint. `--class vm-full` saves full machine state (memory + disk) via Vz's `saveMachineStateToURL`. Records content hash in the audit chain. |
-| `mvmctl checkpoint restore <name> --name <checkpoint>` | Restore a previously created checkpoint. Re-hashes content against the recorded audit entry before loading. |
-| `mvmctl checkpoint fork <name> --name <checkpoint> --into <new-name>` | Restore a checkpoint into a new VM identity (new name, separate audit lineage). |
-| `mvmctl checkpoint ls [<name>]` | List checkpoints for a VM, or all VMs if name is omitted. |
-| `mvmctl checkpoint rm <name> --name <checkpoint>` | Delete a named checkpoint and its blobs. |
+| `mvmctl vm checkpoint create <name> [--class fs-quick\|vm-full] [--tag <tag>] [--json]` | Capture a checkpoint. `--class vm-full` saves full machine state (memory + disk) via Vz's `saveMachineStateToURL`. Records content hash in the audit chain. |
+| `mvmctl vm checkpoint restore <checkpoint> [--json]` | Restore a previously created `vm_full` checkpoint into the original VM identity. Re-hashes content against the recorded metadata before loading. |
+| `mvmctl vm checkpoint fork <checkpoint> [--new-id <name>] [--boot] [--json]` | Restore a checkpoint into a new VM identity (new name, separate audit lineage). `vm_full` forks auto-boot; `fs_quick` forks boot only with `--boot`. |
+| `mvmctl vm checkpoint ls [--json]` | List checkpoints. |
+| `mvmctl vm checkpoint diff <a> <b> [--json]` | Compare two checkpoint metadata/content manifests. |
+| `mvmctl vm checkpoint rm <checkpoint> [--json]` | Delete a checkpoint and its blobs. |
+| `mvmctl vm snapshot ls [--json]` | List sealed Firecracker instance snapshots. |
+| `mvmctl vm snapshot rm <name> [--json]` | Delete a sealed Firecracker instance snapshot. |
 
-Checkpoint blobs are stored under `~/.mvm/vms/<name>/checkpoints/<checkpoint-name>/`. The audit chain records `checkpoint.created` and `checkpoint.restored` entries with content hashes; hash drift between creation and restore is flagged in the restore entry rather than aborting, so operators can review transfers between hosts.
+Checkpoint blobs are stored under the configured checkpoint store (`MVM_DATA_DIR` / `~/.mvm` via the core path helpers). The audit chain records `checkpoint.created`, `checkpoint.restored`, and `checkpoint.forked` entries with content hashes; restore and fork refuse tampered checkpoint content before booting.
 
 ## File Copy
 

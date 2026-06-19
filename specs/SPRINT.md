@@ -45,6 +45,17 @@ plan 25 sequences the work into six independently-shippable workstreams.
 ## Planning updates
 
 - [x] Advanced
+      [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
+      WS-3 checkpoint/snapshot JSON coverage: `mvmctl vm checkpoint restore`,
+      `rm`, and `fork` now accept `--json` and emit schema-versioned mutation
+      results after the underlying restore/delete/fork succeeds; `mvmctl vm
+      snapshot rm --json` mirrors the existing snapshot list JSON. Parser
+      tests pin every new flag, and the CLI reference now documents the grouped
+      `mvmctl vm checkpoint` / `mvmctl vm snapshot` surface instead of stale
+      top-level `mvmctl checkpoint` examples. Remaining Plan 189 WS-3 work is
+      linux-native richer status detail; WS-1 save/restore live acceptance and
+      WS-4 base pinning remain open.
+- [x] Advanced
       [`plans/118-supervisor-standby-pool-and-live-bench.md`](plans/118-supervisor-standby-pool-and-live-bench.md)
       live libkrun follow-up: x86_64 libkrun starts now carry an explicit
       `KernelFormat`, reuse the extracted sibling ELF `vmlinux`, and the
