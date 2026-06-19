@@ -471,10 +471,9 @@ impl LibkrunBuilderVm {
             .with_console_output(path_to_str(&console_log, "console_log")?)
             .with_vsock_socket_dir(path_to_str(&vm_state_dir, "vm_state_dir")?)
             // Persistent /nix store disk — the only block device on a RootDir
-            // guest, so it enumerates as /dev/vda. Attached for the production
-            // persistent-store path; `stage0-init` currently copies the seed
-            // closure into a tmpfs `/nix` (overlay-over-virtiofs writes fail in
-            // libkrun), so the disk is a follow-up, not yet formatted.
+            // guest, so it enumerates as /dev/vda. `stage0-init` mounts and
+            // reuses it when it is ext4, formats it when the seed carries
+            // mkfs.ext4, and otherwise falls back to the tmpfs seed copy.
             .add_disk(
                 "nix-store",
                 path_to_str(nix_store_lock.path(), "nix_store_img")?,

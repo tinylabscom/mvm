@@ -427,6 +427,14 @@ Work needed for the hot path:
 - Measure `machine run --image alpine -- true` as phases: image-cache resolve,
   admission, config/secrets drive creation, backend start, vsock ready, command
   exit, teardown.
+- Measure Stage 0 bootstrap separately from normal machine hot start. The active
+  branch now caches the host materialized Stage 0 root, prefers verified native
+  `tar -xJf --strip-components 1` for cold extraction, and makes libkrun
+  Stage 0 PID 1 attempt persistent `/dev/vda` Nix-store reuse with a
+  seed-fingerprint marker. If the current seed cannot format a blank disk
+  because `mkfs.ext4` is absent, it falls back to the tmpfs seed copy; Linux
+  PID-1 proof and live cold/warm timing are still required before making a
+  public speed claim.
 - Avoid config/secrets drive creation when the effective content is empty or
   already cached by digest.
 - Prefer warm-pool/snapshot restore only when the security posture is unchanged
@@ -1189,6 +1197,17 @@ change:
             injected `/init` currently forks the agent as root (dev-tier acceptable).
       - [ ] Guest egress for OCI images: alpine lacks `udhcpc`, so netinit's DHCP leg is a
             no-op (deny-all default makes this moot today; revisit with `--net`).
+- [x] **Stage 0 bootstrap materialization/cache performance substrate.** The
+      Plan 200 auth-proof branch now avoids repeating the slow cold Stage 0
+      root materialization path when the verified input marker matches, prefers
+      native `tar -xJf --strip-components 1` after SHA-256 verification with
+      pure-Rust extraction as fallback, and teaches libkrun Stage 0 PID 1 to
+      mount/reuse the dedicated `nix-store-stage0-<arch>.img` (`/dev/vda`) by
+      seed-store fingerprint. If the current seed lacks `mkfs.ext4` and the disk
+      is still blank, bootstrap falls back to the prior tmpfs seed copy rather
+      than blocking. Host tests/clippy cover the touched paths; Linux PID-1
+      compile/proof plus live timing remain required before making any public
+      latency claim.
 - [x] **`up` egress enforcement on libkrun/Vz is gated off by default AND drops an explicit
       `--network-allow` when on (claim-10 relevant; two bugs).** Diagnosed live + by code
       trace 2026-06-16 and fixed 2026-06-17 (Firecracker is unaffected — it enforces via nftables regardless).
@@ -1326,6 +1345,9 @@ follow-ups:
       example.com`
 - [ ] Hardware-gated Linux/KVM perf smoke: cached image hot start reaches the
       accepted phase target.
+- [ ] Stage 0 bootstrap perf proof: Linux PID-1 compile/proof for persistent
+      `/dev/vda` Nix-store reuse plus live cold/warm timing for materialized
+      root extraction and in-guest Nix-store setup.
 - [x] SDK suites: Python, TypeScript, and Rust machine lifecycle wrappers.
       Python and TypeScript focused machine wrapper suites are green from the
       previous SDK slice; Rust builder/fake-CLI lifecycle tests are green in
