@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as mvm from "../src/index.js";
-import { machineRunArgv } from "../src/_machine.js";
+import { machineCreateArgv, machineRunArgv } from "../src/_machine.js";
 
 let tmpDir: string;
 
@@ -77,6 +77,23 @@ describe("Machine.run", () => {
     })).toEqual(readArgvFixture("run-allow-host-receipt"));
   });
 
+  it("emits the shared admission parity argv fixture", () => {
+    expect(machineRunArgv({
+      image: "alpine:latest",
+      command: ["sh", "-lc", "echo ok"],
+      allowHosts: ["api.example.com"],
+      cpus: 4,
+      memory: "1G",
+      profile: "dev",
+      addDirs: ["/tmp/mvm-sdk-src:/workspace:ro"],
+      env: ["TOKEN=secret", "MODE=test"],
+      timeout: 30,
+      receipt: "/tmp/mvm-sdk-machine.receipt.json",
+      json: true,
+      dryRun: true,
+    })).toEqual(readArgvFixture("run-admission"));
+  });
+
   it("shells to mvmctl machine run", () => {
     const script = writeFixtureMvmctl(0, "hello\n");
     process.env.MVM_CLI_BIN = script;
@@ -108,6 +125,16 @@ describe("Machine.run", () => {
 });
 
 describe("Machine persistent lifecycle", () => {
+  it("emits the shared manifest create argv fixture", () => {
+    expect(machineCreateArgv({
+      name: "web",
+      manifest: "mvm.toml",
+      profile: "dev",
+      force: true,
+      json: true,
+    })).toEqual(readArgvFixture("create-manifest"));
+  });
+
   it("shells create/start/exec/shell/stop through mvmctl machine", () => {
     const script = writeFixtureMvmctl();
     process.env.MVM_CLI_BIN = script;

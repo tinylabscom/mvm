@@ -1183,11 +1183,42 @@ pub(in crate::commands) struct RunSecuritySummary {
     pub dry_run: bool,
     pub will_execute: bool,
     pub image_kind: &'static str,
+    pub cpus: u32,
+    pub memory: String,
+    pub memory_mib: u32,
+    pub profile: String,
     pub receipt_requested: bool,
     pub preflight_network_posture: String,
     pub preflight_egress_enforcement: String,
     pub receipt_network_posture: String,
     pub receipt_egress_enforcement: String,
+    pub preflight_command: String,
+    pub receipt_command: String,
+    pub preflight_env_keys: Vec<String>,
+    pub receipt_env_keys: Vec<String>,
+    pub preflight_add_dirs: Vec<RunSecurityAddDir>,
+    pub receipt_add_dirs: Vec<RunSecurityAddDir>,
+    pub preflight_timeout_secs: u64,
+    pub receipt_timeout_secs: u64,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::commands) struct RunSecurityAddDir {
+    pub host_path_sha256: String,
+    pub guest_path: String,
+    pub read_only: bool,
+}
+
+#[cfg(test)]
+impl From<ReceiptAddDir> for RunSecurityAddDir {
+    fn from(dir: ReceiptAddDir) -> Self {
+        Self {
+            host_path_sha256: dir.host_path_sha256,
+            guest_path: dir.guest_path,
+            read_only: dir.read_only,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1206,11 +1237,28 @@ pub(in crate::commands) fn test_run_security_summary(
         dry_run: preflight.dry_run,
         will_execute: preflight.will_execute,
         image_kind,
+        cpus: preflight.resources.cpus,
+        memory: preflight.resources.memory,
+        memory_mib: preflight.resources.memory_mib,
+        profile: preflight.invocation.profile,
         receipt_requested: preflight.receipt.requested,
         preflight_network_posture: preflight.invocation.network_posture,
         preflight_egress_enforcement: preflight.invocation.egress_enforcement,
         receipt_network_posture: receipt.network_posture,
         receipt_egress_enforcement: receipt.egress_enforcement,
+        preflight_command: preflight.invocation.command.describe(),
+        receipt_command: receipt.command.describe(),
+        preflight_env_keys: preflight.invocation.env_keys,
+        receipt_env_keys: receipt.env_keys,
+        preflight_add_dirs: preflight
+            .invocation
+            .add_dirs
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        receipt_add_dirs: receipt.add_dirs.into_iter().map(Into::into).collect(),
+        preflight_timeout_secs: preflight.invocation.timeout_secs,
+        receipt_timeout_secs: receipt.timeout_secs,
     })
 }
 

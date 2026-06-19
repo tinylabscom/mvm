@@ -1467,6 +1467,75 @@ mod tests {
         .collect()
     }
 
+    fn assert_sdk_run_admission_inputs(summary: super::super::vm::exec::RunSecuritySummary) {
+        assert!(summary.dry_run);
+        assert!(!summary.will_execute);
+        assert_eq!(summary.image_kind, "oci");
+        assert_eq!(summary.cpus, 4);
+        assert_eq!(summary.memory, "1G");
+        assert_eq!(summary.memory_mib, 1024);
+        assert_eq!(summary.profile, "dev");
+        assert!(summary.receipt_requested);
+        assert_eq!(
+            summary.preflight_network_posture,
+            "allow-list:api.example.com:443"
+        );
+        assert_eq!(
+            summary.receipt_network_posture,
+            summary.preflight_network_posture
+        );
+        assert_eq!(
+            summary.receipt_egress_enforcement,
+            "firecracker:l4-host-port"
+        );
+        assert_eq!(summary.preflight_command, summary.receipt_command);
+        assert!(summary.preflight_command.contains("argv_len=3"));
+        assert!(!summary.preflight_command.contains("echo ok"));
+        assert_eq!(summary.preflight_env_keys, ["MODE", "TOKEN"]);
+        assert_eq!(summary.receipt_env_keys, summary.preflight_env_keys);
+        assert_eq!(summary.preflight_add_dirs, summary.receipt_add_dirs);
+        assert_eq!(summary.preflight_add_dirs.len(), 1);
+        let add_dir = &summary.preflight_add_dirs[0];
+        assert_eq!(add_dir.guest_path, "/workspace");
+        assert!(add_dir.read_only);
+        assert!(!add_dir.host_path_sha256.contains("/tmp/mvm-sdk-src"));
+        assert_eq!(summary.preflight_timeout_secs, 30);
+        assert_eq!(summary.receipt_timeout_secs, 30);
+    }
+
+    fn assert_manifest_fixture_reaches_unknown_key_gate(mut sdk_args: Vec<String>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = dir.path().join("mvm.toml");
+        std::fs::write(
+            &manifest,
+            "image = \"alpine:latest\"\nnetwork_typo = true\n",
+        )
+        .expect("manifest");
+        let manifest_slot = sdk_args
+            .iter()
+            .position(|arg| arg == "mvm.toml")
+            .expect("fixture carries manifest path");
+        sdk_args[manifest_slot] = manifest.display().to_string();
+
+        let action = parse_owned(&sdk_args).expect("sdk args parse as CLI machine create");
+        let MachineAction::Create(args) = action else {
+            panic!("expected create action");
+        };
+        let err = args
+            .into_spec()
+            .expect_err("CLI manifest parser must reject unknown SDK-provided keys");
+        let chain = err
+            .chain()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            chain.contains("unknown field") || chain.contains("unknown key"),
+            "unexpected error chain: {chain}"
+        );
+    }
+
     #[test]
     fn run_parses_image_and_trailing_argv() {
         let args = parse_run(&["run", "--image", "alpine", "--", "echo", "hello"]).expect("parse");
@@ -1652,6 +1721,35 @@ mod tests {
     }
 
     #[test]
+    fn rust_sdk_machine_run_matches_cli_admission_and_receipt_inputs() {
+        let sdk_args = mvm_sdk::MachineRun::builder()
+            .image("alpine:latest")
+            .allow_host("api.example.com")
+            .cpus(4)
+            .memory("1G")
+            .profile("dev")
+            .add_dir("/tmp/mvm-sdk-src:/workspace:ro")
+            .env("TOKEN=secret")
+            .env("MODE=test")
+            .timeout(30)
+            .receipt("/tmp/mvm-sdk-machine.receipt.json")
+            .json(true)
+            .dry_run(true)
+            .command(["sh", "-lc", "echo ok"])
+            .machine_args()
+            .expect("sdk machine run args");
+        assert_eq!(sdk_args, sdk_machine_fixture("run-admission"));
+
+        let run = parse_owned_run(&sdk_args)
+            .expect("sdk args parse as CLI machine run")
+            .into_run_args();
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+            .expect("CLI receipt input accepts SDK args");
+
+        assert_sdk_run_admission_inputs(summary);
+    }
+
+    #[test]
     fn python_typescript_machine_run_default_fixture_uses_cli_default_deny_preflight() {
         let sdk_args = sdk_machine_fixture("run-default");
         let run = parse_owned_run(&sdk_args)
@@ -1694,36 +1792,34 @@ mod tests {
     }
 
     #[test]
+    fn python_typescript_machine_run_fixture_matches_cli_admission_and_receipt_inputs() {
+        let sdk_args = sdk_machine_fixture("run-admission");
+        let run = parse_owned_run(&sdk_args)
+            .expect("Python/TypeScript SDK fixture parses as CLI machine run")
+            .into_run_args();
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+            .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
+
+        assert_sdk_run_admission_inputs(summary);
+    }
+
+    #[test]
     fn rust_sdk_machine_create_manifest_reaches_cli_unknown_key_gate() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let manifest = dir.path().join("mvm.toml");
-        std::fs::write(
-            &manifest,
-            "image = \"alpine:latest\"\nnetwork_typo = true\n",
-        )
-        .expect("manifest");
         let sdk_args = mvm_sdk::MachineCreate::builder("web")
-            .manifest(manifest.display().to_string())
+            .manifest("mvm.toml")
+            .profile("dev")
+            .force(true)
+            .json(true)
             .machine_args()
             .expect("sdk machine create args");
+        assert_eq!(sdk_args, sdk_machine_fixture("create-manifest"));
 
-        let action = parse_owned(&sdk_args).expect("sdk args parse as CLI machine create");
-        let MachineAction::Create(args) = action else {
-            panic!("expected create action");
-        };
-        let err = args
-            .into_spec()
-            .expect_err("CLI manifest parser must reject unknown SDK-provided keys");
-        let chain = err
-            .chain()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
+        assert_manifest_fixture_reaches_unknown_key_gate(sdk_args);
+    }
 
-        assert!(
-            chain.contains("unknown field") || chain.contains("unknown key"),
-            "unexpected error chain: {chain}"
-        );
+    #[test]
+    fn python_typescript_machine_create_manifest_fixture_reaches_cli_unknown_key_gate() {
+        assert_manifest_fixture_reaches_unknown_key_gate(sdk_machine_fixture("create-manifest"));
     }
 
     #[test]

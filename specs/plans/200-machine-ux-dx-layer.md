@@ -978,24 +978,29 @@ Required behavior:
       invoking Nix or a VM. Python/TypeScript `Machine.run` argv now shares
       checked-in fixtures with the Rust CLI parser/preflight tests, proving the
       default-deny and allow-host receipt posture is CLI-owned for those SDKs
-      too. Live admission-path proof remains.
+      too. Shared richer fixtures now also prove the SDK argv reaches the same
+      VM-free admission/preflight/receipt fields without invoking Nix or a VM.
+      Live admission-path proof remains.
 - [~] Add SDK/CLI parity tests proving equivalent admission inputs, effective
       policy, and receipt/audit summaries for the same machine config. Rust SDK
       `MachineRun` builder output now feeds the CLI `machine run` parser and
       preflight/receipt summary path, proving SDK default-deny and
       `--allow-host` posture matches the CLI for dry-run receipts.
       Python/TypeScript shared argv fixtures now feed the same CLI parser and
-      preflight/receipt summary path for default-deny and allow-host receipts.
-      Remaining: full admission-input equivalence, artifact verification, audit
-      summary parity, and live admission proof.
+      preflight/receipt summary path for default-deny and allow-host receipts;
+      the richer shared fixture now covers CPU/memory/profile, sorted env-key
+      redaction, host-path hashing for volume shares, timeout propagation,
+      command hashing, effective policy, and receipt-input parity. Remaining:
+      artifact verification and live admission proof.
 - [~] Add SDK negative tests proving wrappers cannot bypass artifact
       verification, network default-deny, unknown-key rejection, or
       `image`/`flake` conflict rejection. Python, TypeScript, and Rust now
       reject source conflicts or invalid commands at the wrapper boundary;
       Rust SDK `MachineCreate --manifest` argv now reaches the CLI manifest
-      parser and proves strict unknown-key rejection is still owned by the CLI.
-      Artifact-verification, receipt/audit non-bypass, live non-bypass, and
-      Python/TS strict-manifest unknown-key proof remain.
+      parser and proves strict unknown-key rejection is still owned by the CLI;
+      Python/TypeScript shared create-manifest fixtures now reach that same CLI
+      strict-manifest unknown-key gate. Artifact-verification and live
+      non-bypass proof remain.
 
 ### D. Agent-safe auth and volumes
 

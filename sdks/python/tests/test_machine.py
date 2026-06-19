@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 import mvm
-from mvm._machine import _machine_run_argv
+from mvm._machine import _machine_create_argv, _machine_run_argv
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +58,33 @@ def test_machine_run_allow_host_receipt_argv_matches_cli_preflight_fixture() -> 
         json=True,
         dry_run=True,
     ) == _fixture("run-allow-host-receipt")
+
+
+def test_machine_run_admission_argv_matches_cli_parity_fixture() -> None:
+    assert _machine_run_argv(
+        image="alpine:latest",
+        command=["sh", "-lc", "echo ok"],
+        allow_hosts=["api.example.com"],
+        cpus=4,
+        memory="1G",
+        profile="dev",
+        add_dirs=["/tmp/mvm-sdk-src:/workspace:ro"],
+        env=["TOKEN=secret", "MODE=test"],
+        timeout=30,
+        receipt="/tmp/mvm-sdk-machine.receipt.json",
+        json=True,
+        dry_run=True,
+    ) == _fixture("run-admission")
+
+
+def test_machine_create_manifest_argv_matches_cli_unknown_key_fixture() -> None:
+    assert _machine_create_argv(
+        name="web",
+        manifest="mvm.toml",
+        profile="dev",
+        force=True,
+        json=True,
+    ) == _fixture("create-manifest")
 
 
 def test_machine_run_shells_to_cli_machine_run(tmp_path: Path) -> None:

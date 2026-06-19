@@ -115,8 +115,9 @@ plan 25 sequences the work into six independently-shippable workstreams.
       embedders can build `run/create/start/exec/shell/stop` calls that shell
       only to `mvmctl machine ...`. Fake-CLI tests pin argv parity, lifecycle
       routing, conflict/empty-command validation, and structured failed-process
-      errors. Deeper admission-input, receipt/audit-summary,
-      artifact-verification, and live non-bypass proofs remain open.
+      errors. Deeper admission-input, receipt/audit-summary, Python/TypeScript
+      unknown-key parity, artifact-verification, and live non-bypass proofs
+      remain open.
 - [x] Advanced [`plans/200-machine-ux-dx-layer.md`](plans/200-machine-ux-dx-layer.md)
       C2 SDK/CLI parity proof for Rust. Rust SDK `MachineRun` builder output
       now round-trips through the real CLI `machine run` parser into the
@@ -125,8 +126,8 @@ plan 25 sequences the work into six independently-shippable workstreams.
       invoking Nix or booting a VM. Rust SDK `MachineCreate --manifest` argv now
       also reaches the CLI manifest parser and proves strict unknown-key
       rejection remains CLI-owned. Remaining C2 proof: full admission-input and
-      audit-summary parity, artifact-verification non-bypass, Python/TS
-      parser/preflight parity, and live admission proof.
+      audit-summary parity, artifact-verification non-bypass, and live
+      admission proof.
 - [x] Advanced [`plans/200-machine-ux-dx-layer.md`](plans/200-machine-ux-dx-layer.md)
       C2 SDK/CLI parser/preflight parity for Python and TypeScript. Both SDKs
       now build `Machine.run` argv through testable helper seams, and shared
@@ -137,6 +138,17 @@ plan 25 sequences the work into six independently-shippable workstreams.
       invoking Nix or booting a VM. Remaining C2 proof: full admission-input and
       audit-summary parity, artifact-verification non-bypass, and live
       admission proof.
+- [x] Advanced [`plans/200-machine-ux-dx-layer.md`](plans/200-machine-ux-dx-layer.md)
+      C2 SDK/CLI admission-input and unknown-key parity. Rust,
+      Python, and TypeScript now share richer `machine run` argv fixtures that
+      the Rust CLI tests parse through `machine run` and the `mvmctl run`
+      dry-run/preflight + receipt-summary seam, proving CPU/memory/profile,
+      sorted env-key redaction, volume host-path hashing, timeout propagation,
+      command hashing, effective policy, and receipt-input parity stay
+      CLI-owned without invoking Nix or booting a VM. Python/TypeScript
+      `Machine.create --manifest` fixtures now also reach the CLI strict
+      manifest unknown-key gate. Remaining C2 proof: artifact-verification
+      non-bypass and live admission/non-bypass proof.
 - [x] Implemented [`plans/202-host-services-daemon.md`](plans/202-host-services-daemon.md) Phase 4a — host-agent registration journal. `mvm-host-agent` now persists the live per-tenant `RegisterVm` set as a deterministic `registrations.json` snapshot beside the control socket, rewrites it after successful register/deregister, and replays it after the signer helper is ready on daemon startup. Replay goes through the normal register path, preserving tenant checks, path-safe `vm_id` validation, broker-socket rebinding, and signer-helper chain reopening. Focused coverage: stable journal snapshot round-trip, deregister cleanup, and daemon restart rebinding a journaled broker socket. Phase 4b supervised daemon restart now lands on top of that journal.
 - [ ] Added [`plans/201-warm-lease-and-batched-exec.md`](plans/201-warm-lease-and-batched-exec.md) — a DX-ergonomics plan layering over the Plan 118 standby pool + Plan 169 agent-RPC. Two caller-convenience gaps: no RAII claim/release (callers hand-wire `select_idle_compatible`→`mark_claimed`→`claim_standby`→`remove` + own stop/replenish), and no batched guest exec (stage→compile→run pays three reconnects). Adds a `WarmLease` handle (`acquire`/`Drop`/`release`; release **stops + replenishes a fresh standby, never reuses a dirty VM** — the security-correct inverse of the borrow-pool prior art, matching the Vz saved-state model + claim 1) and a batched stage→run `ExecBuilder` (Tier 1 one-stream pipelining now; opt-in `GuestRequest::ExecBatch` later, `dev-shell`-gated argv with a no-argv `RunEntrypoint` terminal for prod loops; `ExecOutcome` gains duration + peak RSS). No new backend/transport; admission + audit path untouched; all but the example testable on the mock backend + mock guest agent. **PROPOSED**, docs-only (#937).
 - [x] Landed template-identifier path-traversal hardening from the 2026-06-16
