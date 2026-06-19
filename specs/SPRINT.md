@@ -195,6 +195,7 @@ plan 25 sequences the work into six independently-shippable workstreams.
 - [x] [`plans/200-machine-ux-dx-layer.md`](plans/200-machine-ux-dx-layer.md) WS-B follow-up (b) — **`up` egress enforcement fixed for libkrun/Vz**. The live diagnosis found two claim-10 bugs: default `up` did not thread `plan_json`, so libkrun/Vz used gvproxy-direct with no bridge enforcement; with `MVM_GATEWAY_BRIDGE=1`, the synthesized plan's `local-default` bundle shadowed explicit `--network-allow`, producing deny-all instead of the requested allow-list. Fixed: libkrun/Vz admitted workload boots now thread the signed plan by default (`should_thread_signed_plan(false, "libkrun"|"vz")`), selecting the hard-fail gateway bridge; non-deny resolved `NetworkPolicy` values synthesize a generated in-memory `PolicyBundle`, set all signed plan policy refs to that generated ref, and pass it as `bundle_json`, with host allow-lists pinned into TCP `/32`/`/128` L4 rows and unresolvable hosts failing closed. Deny-all remains `local-default`; Firecracker remains nftables-default and only uses `MVM_GATEWAY_BRIDGE=1` for its sidecar. Transient `run` now carries the generated bundle in its session substrate too, and open-mode bundle lowering maps to `CanonicalEgress::Unrestricted`. ADR-002 posture note added. Tests: `mvm-cli --lib` (1011 passed, 1 ignored), targeted generated-bundle/threading tests, and `mvm-hostd::open_mode_lowers_to_unrestricted_egress`.
 - [x] [`plans/200-machine-ux-dx-layer.md`](plans/200-machine-ux-dx-layer.md) WS-B follow-up (c) — **deterministic libkrun/Vz egress matrix hardening + post-fix verification**. Re-audited the whole `up` egress path after follow-up (b) landed: the threading chain (`up` → `VmStartConfig` → `SupervisorConfig` → `run_with_bridge` → `run_bridge_inner`), the bridge-vs-legacy dispatch (`tenant_id` present ⇒ bridge), and the data-path wiring (`configure_with_gateway_for_bridge` binds libkrun- and gvproxy-facing sockets; the ingress return keys on libkrun's bound peer pathname) all read correct, and `run_bridge_inner` routes the resolved `flow_policy` to **every** endpoint arm (no `cfg.policy`/`AllowAll` footgun left). The bare lowering (`bare_network_policy_egress`) is correct for all three matrix verdicts: unrestricted opens + `CanonicalEgress::Unrestricted` (verdict 0), allow-list narrows to host:port (verdict 2), deny-all drops at flow-open (verdict 3). Closed the deterministic coverage gaps that let the "drops every flow regardless of policy" class hide: added `bare_unrestricted_policy_forwards_egress_through_the_live_bridge` (libkrun) + `bare_unrestricted_policy_forwards_egress_through_the_live_vz_bridge` (Vz) — the verdict-0 sibling of the existing deny-all/allow-list live-bridge tests — and `live_bridge_relays_ingress_reply_back_to_the_guest`, the first full-duplex test of the internet→guest return leg (a broken return path would time out every probe and *look* like deny-all under any policy). All run on real Unix datagram sockets, no VM. **Remaining = the live VM matrix re-run on a quiet macOS-26 box** (`up --network-preset unrestricted` ⇒ 0, default ⇒ 3, `--network-allow 1.1.1.1:443` ⇒ 2 against `examples/egress-probe`); deferred because the dev box is saturated with parallel live benchmarks. fmt/clippy `-D warnings`/spec-ref+spec-number gates clean; cfg(linux) `mvm-hostd` tests cross-compiled with cargo-zigbuild.
 - [x] [`plans/200-machine-ux-dx-layer.md`](plans/200-machine-ux-dx-layer.md) WS-B follow-up (d) — **live matrix run exposed + fixed a real libkrun bridge ingress-return bug**. Running the deferred matrix on a quiet box (libkrun, `examples/egress-probe`, `MVM_GATEWAY_BRIDGE=1`) returned verdict **3 for ALL policies** — including `unrestricted` (want 0). The chain-signed audit chain isolated it precisely: the bridge's policy was always correct (deny ⇒ `flow_closed policy_dropped`, allow ⇒ `l4 drop` of the unlisted host, unrestricted ⇒ `flow_opened` egress **and** ingress), but the guest never saw a response — so the break was bridge→guest ingress delivery, not policy. Root cause: `run_libkrun_gvproxy_bridge` returned internet→guest frames to `peer.as_pathname()` (the recvfrom source of the guest's egress), but libkrun binds/listens for the return path on a derived `<listen>-krun.sock` sibling, and on macOS the recvfrom source is not a usable reply target — so every inbound frame was silently dropped and the guest saw a deny-all regardless of policy. Confirmed by `lsof`/VM-dir capture (`bridge-libkrun.sock-krun.sock` is libkrun's bound reply socket) and matches the rvproxy native-gateway fix precedent. Fix: reply to the derived path via a new `libkrun_reply_path` helper; dropped the unused `libkrun_peer` recvfrom-source cache. Rewrote `live_bridge_relays_ingress_reply_back_to_the_guest` to model real libkrun (reply listener on the derived path, egress from a separate unnamed sender) so it now fails if the return path regresses to the recvfrom source. **Live matrix now passes 0 / 3 / 2** on current `origin/main` (`unrestricted` ⇒ 0, default deny ⇒ 3, `--network-allow 1.1.1.1:443` ⇒ 2). Egress stays deny-by-default; no AllowAll gate introduced; receipt tier unchanged. Note: follow-up (c)'s deterministic ingress test used a *bound* client and so masked this — only the live VM run caught it. 43 mvm-hostd bridge tests green; fmt/clippy `-D warnings`/spec gates clean; cfg(linux) `mvm-hostd`+`mvm-vm-host` bins cross-compiled with cargo-zigbuild.
+- [x] [`plans/200-machine-ux-dx-layer.md`](plans/200-machine-ux-dx-layer.md) WS-B follow-up (e) — **Vz `up --wait` verdict-capture implemented** (the last live-validation gap from (d)). Extracted libkrun's `wait()` poll into a shared `mvm_backend::workload_wait` module (`read_exit_status_from` + `wait_for_workload_exit`, state-dir based, backend-agnostic); libkrun's `wait()` now delegates to it; added `VmBackend::wait` for the Vz backend delegating to the same helper (the vz supervisor already persists `<vm_state_dir>/workload.exit`, `vz_objc.rs` ~468); relaxed both `up.rs` `--wait` gates from `== "libkrun"` to `matches!(.., "libkrun"|"vz")`. `workload_wait` unit tests (read nonzero/zero/absent + staged-exit) pass; clippy `-D warnings` + nightly fmt + spec gates + linux cross-compile (`-p mvm-backend`) clean. Additive + safe: if a vz workload fails to boot, `up` errors before reaching `wait`, exactly as today. **Live-vz `0/3/2` NOT yet proven** — surfaced a separate **vz one-shot workload-boot failure** (`boot vz guest: supervisor exited before writing PID file (exit 1)`, empty `console.log`, all three matrix cases fail identically at boot — not policy/`wait`), filed as a deferred follow-up in the plan. The `wait()` logic rides the exact shared path proven live `0/3/2` on libkrun, so the gap is the vz boot, not the capture.
 - [x] [`plans/200-machine-ux-dx-layer.md`](plans/200-machine-ux-dx-layer.md) WS-B product closeout — **local image sources are implemented and status-synced**. `commands/image/source.rs` classifies registry refs, `oci-archive:<path>`, `-` / `oci-archive:-`, and `rootfs-dir:<path>` without filesystem probing; `resolve_or_pull_run_image` routes registry refs through the existing pull/cache path, local archives/stdin through `read_oci_archive` + the hardened `unpack_layer` + ext4 materialization path, and rootfs-dir through dev-only architecture probing + local-source provenance. Prod mode refuses local sources because they carry no registry/cosign provenance. Added a regression test proving a local OCI archive with a traversal entry inside a layer reaches the hardened unpack refusal path before materialization. Persistent verbs, `mvm.toml` machine mapping, SDK parity, and portable artifacts remain.
 - [x] [`plans/200-machine-ux-dx-layer.md`](plans/200-machine-ux-dx-layer.md) bookkeeping reconciliation — the deferred MCP code-run checkbox is now status-synced with the already-landed work: cold MCP code-run routes through admission in #1017 and warm MCP code-run in #1023, so deny-all is enforced on the libkrun/Vz gateway bridge (FC already enforced through nftables). No code change; this closes the Plan 200 vs `REFACTOR-STATUS.md` mismatch.
 - [x] [`plans/200-machine-ux-dx-layer.md`](plans/200-machine-ux-dx-layer.md) WS-C persistent machine start and C1 parser expansion — `machine start --name <name>` now resolves the persisted `MachineSpec`, reuses the OCI cache/materialization path, emits OCI provenance plus admitted boot audit, and launches through a shared persistent-image boot helper built from the existing `up` admission substrate. In the same slice, `mvm-core::domain::manifest::Manifest` grew the machine-oriented schema fields (`cpus` with legacy `vcpus` alias, `net`, `[network].allow_hosts`, `[auth].ssh_agent`, `[dev].init`, `[dev].volumes`) plus parser-level validation and a typed machine-workflow projection. Verified with focused `mvm-cli` machine tests, `audit_total_coverage`, `mvm-core` manifest tests, and workspace clippy `--all-targets -D warnings`. Full runtime mapping of those manifest fields into durable machine specs remains open.
@@ -3058,6 +3059,70 @@ until explicitly directed.
   runner exists (the unwitnessed-claim anti-pattern ADR-002 guards against).
 - Any production isolation claim for Tier 0 — it is single-principal dev preview,
   by design.
+
+## Sprint 63 — Resident builder control plane + residency model (proposed)  [`plans/205-resident-builder-control-plane.md`](plans/205-resident-builder-control-plane.md) | [`adrs/090-resident-daemon-trust-gradient-and-residency.md`](adrs/090-resident-daemon-trust-gradient-and-residency.md)
+
+### Why this sprint
+
+The worst-felt latency is the per-session builder bring-up (boot or rebuild before any
+useful work), with cold acquisition on a fresh machine second. The fix is to make the
+builder *resident* — but "keep the builder running and let it be the daemon" is only
+safe if it does not move authority into a guest. Sprint 63 commits to the redesign that
+makes builds instant while keeping ADR-002's host-trusted/guest-untrusted posture
+intact. It is an umbrella over Plans 118/152/159/196/202/204; it owns the trust gradient
+and the residency model and consumes the in-flight pieces rather than rebuilding them.
+
+### Load-bearing decisions (ADR-090)
+
+- **Three-daemon trust gradient.** Host control daemon (keys, admission, audit chain,
+  pool + lifecycle) stays host-side in the TCB and, under the fleet, per-tenant
+  (ADR-084 / Plan 202). Builder daemon (`mvm-builderd`, Plan 204) is dev-tier
+  (ADR-088), resident, build-only — the only daemon that may go resident for speed.
+  Workload guest agent is the prod-stripped runt with zero authority. Authority
+  decreases monotonically host→builder→workload; keys/admission/audit never cross the
+  host→builder vsock line.
+- **Residency slider.** One standby-pool (Plan 118) `min`+idle knob spans always-warm
+  (`min ≥ 1`, no boot latency) ⇄ parked-snapshot-resume (`min = 0`, no idle RAM,
+  sub-second resume via Plan 159 / Plan 175). Per-host default, user-overridable. Not
+  two code paths.
+- **No claim regression.** Snapshot/resume applies only to the dev-tier builder VM.
+  Claim-11 prod-dep volumes stay safe via host-side content-addressed admit-time
+  re-verification, independent of how the builder booted. The typed allowlisted
+  `BuilderRequest` protocol (Plan 204) means residency shrinks the attack surface.
+
+### Workstream breakdown (see Plan 205)
+
+- **A — Trust-gradient invariant**  🔴 proposed — codify + structural tests (no key /
+  admission / prod do_exec / console below the host line; host daemon stays per-tenant).
+- **B — Residency policy over the standby pool**  🔴 proposed — `min`+idle, warm↔parked
+  transitions, per-host default + override, doctor reporting.
+- **C — Resident builder daemon**  🔴 proposed — `mvm-builderd` long-lived across
+  invocations, session reuse with hot store (Plan 196), readiness/crash-recovery.
+- **D — Snapshot park/resume**  🔴 proposed — Vz snapshot (Plan 159) into parked state,
+  FC leg via Plan 175, freshness keyed to the builder fingerprint (Plan 195).
+- **E — Cold acquisition**  🔴 proposed — first-boot snapshot bake, source-checkout stays
+  release-artifact-free, doctor never-built/parked/warm.
+- **F — Docs and posture**  🔴 proposed — "what runs where" table, residency default +
+  tradeoff, threat-model delta.
+
+### Sprint 63 success criteria
+
+- A second `mvmctl` command in a session triggers no builder boot (warm) or a
+  sub-second resume (parked) — measured, not asserted.
+- Residency is one policy with a per-host default and an override; `mvmctl doctor`
+  reports the live state.
+- The trust-gradient invariant has passing structural tests; no signing key, admission
+  authority, or audit writer exists below the host→builder vsock line.
+- Claim-11 volumes still fail closed on a resumed builder; no ADR-002 numbered claim
+  regresses; `xtask check-claim-catalog` stays green.
+
+### Non-goals (explicit — see Plan 205 §Non-goals)
+
+- Moving keys / admission / audit into the builder VM.
+- Collapsing the per-tenant host security daemons (Plan 202) into one global key holder.
+- Letting the workload guest agent grow authority or hold secrets.
+- Reimplementing the builder protocol (consume Plan 204).
+- Requiring host Nix for normal builds or runs (ADR-089 holds).
 
 ## Completed Sprints
 
