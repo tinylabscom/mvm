@@ -159,6 +159,12 @@ pub fn serve_connection_with_executor(
 pub struct OpExecResult {
     /// Process exit code (0 = success).
     pub exit_code: i32,
+    /// Captured stdout. Build/eval operations read their output here —
+    /// e.g. the `/nix/store/...` path `nix build --print-out-paths`
+    /// emits, or the `storePath` JSON `nix flake prefetch --json` emits.
+    /// These commands print paths, not bulk data; the build log proper
+    /// streams as `LogChunk`s.
+    pub stdout: String,
     /// Tail of the process's stderr, capped by the caller, for the
     /// failure message. Never the full stream — that goes out as
     /// streamed [`BuilderResponse::LogChunk`]s by the daemon.
@@ -191,6 +197,7 @@ impl OpExecutor for CommandExecutor {
         let output = std::process::Command::new(program).args(rest).output()?;
         Ok(OpExecResult {
             exit_code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr_tail: tail_lines(&String::from_utf8_lossy(&output.stderr), 20),
         })
     }
@@ -258,10 +265,193 @@ pub fn dispatch_flake_check(
     }
 }
 
+/// The `nix build` argv for a [`BuilderRequest::BuildGuestImage`] /
+/// [`BuilderRequest::BuildHostTool`]. `--no-link` skips the `result`
+/// symlink and `--print-out-paths` writes the realised `/nix/store/...`
+/// path(s) to stdout so the daemon can report provenance. Pure for
+/// testing.
+pub fn nix_build_argv(flake_ref: &str, attr_path: &str) -> Vec<String> {
+    vec![
+        "nix".to_string(),
+        "build".to_string(),
+        format!("{flake_ref}#{attr_path}"),
+        "--no-link".to_string(),
+        "--print-out-paths".to_string(),
+    ]
+}
+
+/// The last non-empty line of `stdout` — the store path
+/// `nix build --print-out-paths` emits last. Trims surrounding
+/// whitespace.
+fn last_out_path(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(String::from)
+}
+
+/// Map a `nix build` result to its terminal response. A clean exit with
+/// an out-path is [`BuilderResponse::ArtifactReady`] (the artifact lives
+/// at the store path, reachable via the builder VM's `/nix`; a
+/// copy-to-mounted-output step is a later addition). A non-zero exit is
+/// a [`FailureCategory::NixBuild`] failure.
+fn nix_build_outcome(op: OperationId, result: &OpExecResult) -> BuilderResponse {
+    if result.exit_code != 0 {
+        return BuilderResponse::Failed {
+            op,
+            category: FailureCategory::NixBuild,
+            message: format!(
+                "nix build failed (exit {}): {}",
+                result.exit_code, result.stderr_tail
+            ),
+            retryable: false,
+        };
+    }
+    match last_out_path(&result.stdout) {
+        Some(path) => BuilderResponse::ArtifactReady {
+            op,
+            artifact_path: path.clone(),
+            store_path: Some(path),
+        },
+        None => BuilderResponse::Failed {
+            op,
+            category: FailureCategory::NixBuild,
+            message: "nix build succeeded but printed no out-path".to_string(),
+            retryable: false,
+        },
+    }
+}
+
+/// Run a `nix build` (shared by [`BuilderRequest::BuildGuestImage`] and
+/// [`BuilderRequest::BuildHostTool`]) through `executor` and classify
+/// the result. An executor error is a retryable
+/// [`FailureCategory::Internal`] failure.
+pub fn dispatch_nix_build(
+    op: OperationId,
+    flake_ref: &str,
+    attr_path: &str,
+    executor: &dyn OpExecutor,
+) -> BuilderResponse {
+    match executor.run(&nix_build_argv(flake_ref, attr_path)) {
+        Ok(result) => nix_build_outcome(op, &result),
+        Err(e) => BuilderResponse::Failed {
+            op,
+            category: FailureCategory::Internal,
+            message: format!("failed to run nix build: {e}"),
+            retryable: true,
+        },
+    }
+}
+
+/// The `nix flake prefetch --json` argv for a
+/// [`BuilderRequest::PrefetchSource`]. `--json` makes the resolved
+/// `storePath` machine-readable on stdout.
+pub fn prefetch_source_argv(source_ref: &str) -> Vec<String> {
+    vec![
+        "nix".to_string(),
+        "flake".to_string(),
+        "prefetch".to_string(),
+        source_ref.to_string(),
+        "--json".to_string(),
+    ]
+}
+
+/// Extract `storePath` from `nix flake prefetch --json` stdout.
+fn parse_prefetch_store_path(stdout: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(stdout)
+        .ok()?
+        .get("storePath")?
+        .as_str()
+        .map(String::from)
+}
+
+/// Run a [`BuilderRequest::PrefetchSource`] through `executor`. Success
+/// is [`BuilderResponse::StorePathReady`] (prefetch ensures presence, so
+/// `already_present` is reported `false`). A non-zero exit is a
+/// retryable [`FailureCategory::Fetch`] failure (network/missing input);
+/// an executor error is a retryable [`FailureCategory::Internal`].
+pub fn dispatch_prefetch_source(
+    op: OperationId,
+    source_ref: &str,
+    executor: &dyn OpExecutor,
+) -> BuilderResponse {
+    let result = match executor.run(&prefetch_source_argv(source_ref)) {
+        Ok(result) => result,
+        Err(e) => {
+            return BuilderResponse::Failed {
+                op,
+                category: FailureCategory::Internal,
+                message: format!("failed to run nix flake prefetch: {e}"),
+                retryable: true,
+            };
+        }
+    };
+    if result.exit_code != 0 {
+        return BuilderResponse::Failed {
+            op,
+            category: FailureCategory::Fetch,
+            message: format!(
+                "nix flake prefetch failed (exit {}): {}",
+                result.exit_code, result.stderr_tail
+            ),
+            retryable: true,
+        };
+    }
+    match parse_prefetch_store_path(&result.stdout) {
+        Some(store_path) => BuilderResponse::StorePathReady {
+            op,
+            store_path,
+            already_present: false,
+        },
+        None => BuilderResponse::Failed {
+            op,
+            category: FailureCategory::Fetch,
+            message: "nix flake prefetch produced no storePath".to_string(),
+            retryable: false,
+        },
+    }
+}
+
+/// The `nix path-info` argv for a [`BuilderRequest::QueryStorePath`]. It
+/// exits zero iff the path is a valid, present store path.
+pub fn query_store_path_argv(store_path: &str) -> Vec<String> {
+    vec![
+        "nix".to_string(),
+        "path-info".to_string(),
+        store_path.to_string(),
+    ]
+}
+
+/// Run a [`BuilderRequest::QueryStorePath`] through `executor`. The
+/// query itself always succeeds: a clean exit means the path is present
+/// (`already_present = true`), a non-zero exit means absent
+/// (`already_present = false`) — both are [`BuilderResponse::StorePathReady`].
+/// Only an executor (spawn) error is a failure.
+pub fn dispatch_query_store_path(
+    op: OperationId,
+    store_path: &str,
+    executor: &dyn OpExecutor,
+) -> BuilderResponse {
+    match executor.run(&query_store_path_argv(store_path)) {
+        Ok(result) => BuilderResponse::StorePathReady {
+            op,
+            store_path: store_path.to_string(),
+            already_present: result.exit_code == 0,
+        },
+        Err(e) => BuilderResponse::Failed {
+            op,
+            category: FailureCategory::Internal,
+            message: format!("failed to run nix path-info: {e}"),
+            retryable: true,
+        },
+    }
+}
+
 /// Dispatch with an [`OpExecutor`]: recognized build/eval operations
 /// that have a handler run through the executor; everything else falls
-/// back to the stateless [`dispatch`] (which still answers
-/// [`FailureCategory::Unsupported`] for the not-yet-implemented ops).
+/// back to the stateless [`dispatch`] (Handshake / Probe / CancelJob).
 pub fn dispatch_with_executor(
     request: &BuilderRequest,
     executor: &dyn OpExecutor,
@@ -269,6 +459,26 @@ pub fn dispatch_with_executor(
     match request {
         BuilderRequest::FlakeCheck { op, flake_path } => {
             dispatch_flake_check(*op, flake_path, executor)
+        }
+        BuilderRequest::BuildGuestImage {
+            op,
+            flake_ref,
+            attr_path,
+            // The cache short-circuit on `fingerprint` is a later
+            // addition; this handler always builds.
+            fingerprint: _,
+        }
+        | BuilderRequest::BuildHostTool {
+            op,
+            flake_ref,
+            attr_path,
+            fingerprint: _,
+        } => dispatch_nix_build(*op, flake_ref, attr_path, executor),
+        BuilderRequest::PrefetchSource { op, source_ref } => {
+            dispatch_prefetch_source(*op, source_ref, executor)
+        }
+        BuilderRequest::QueryStorePath { op, store_path } => {
+            dispatch_query_store_path(*op, store_path, executor)
         }
         other => dispatch(other),
     }
@@ -593,9 +803,15 @@ mod tests {
 
     impl FakeExecutor {
         fn ok(exit_code: i32, stderr_tail: &str) -> Self {
+            Self::full(exit_code, "", stderr_tail)
+        }
+        /// Like [`Self::ok`] but with scripted stdout (build/prefetch
+        /// ops read their store path from stdout).
+        fn full(exit_code: i32, stdout: &str, stderr_tail: &str) -> Self {
             Self {
                 result: Ok(OpExecResult {
                     exit_code,
+                    stdout: stdout.to_string(),
                     stderr_tail: stderr_tail.to_string(),
                 }),
                 seen: std::cell::RefCell::new(None),
@@ -687,39 +903,264 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_with_executor_routes_flake_check_but_delegates_others() {
-        let exec = FakeExecutor::ok(0, "");
+    fn dispatch_with_executor_routes_build_ops_but_delegates_control_ops() {
+        // A clean build emits an out-path on stdout.
+        let exec = FakeExecutor::full(0, "/nix/store/aaaa-img\n", "");
         // FlakeCheck reaches the executor → Completed.
-        let resp = dispatch_with_executor(
-            &BuilderRequest::FlakeCheck {
-                op: op(),
-                flake_path: "/work/nix".to_string(),
-            },
-            &exec,
+        assert!(matches!(
+            dispatch_with_executor(
+                &BuilderRequest::FlakeCheck {
+                    op: op(),
+                    flake_path: "/work/nix".to_string(),
+                },
+                &exec,
+            ),
+            BuilderResponse::Completed { .. }
+        ));
+        // BuildGuestImage now reaches the executor → ArtifactReady.
+        assert!(matches!(
+            dispatch_with_executor(
+                &BuilderRequest::BuildGuestImage {
+                    op: op(),
+                    flake_ref: "path:.".to_string(),
+                    attr_path: "packages.aarch64-linux.default".to_string(),
+                    fingerprint: None,
+                },
+                &exec,
+            ),
+            BuilderResponse::ArtifactReady { .. }
+        ));
+        // Control ops still delegate to the stateless dispatch.
+        assert!(matches!(
+            dispatch_with_executor(&BuilderRequest::Probe { op: op() }, &exec),
+            BuilderResponse::Accepted { .. }
+        ));
+        assert!(matches!(
+            dispatch_with_executor(&BuilderRequest::CancelJob { target: op() }, &exec),
+            BuilderResponse::Cancelled { .. }
+        ));
+    }
+
+    #[test]
+    fn nix_build_argv_targets_the_flake_attr_with_print_out_paths() {
+        assert_eq!(
+            nix_build_argv("path:.", "packages.aarch64-linux.default"),
+            vec![
+                "nix".to_string(),
+                "build".to_string(),
+                "path:.#packages.aarch64-linux.default".to_string(),
+                "--no-link".to_string(),
+                "--print-out-paths".to_string(),
+            ]
         );
-        assert!(matches!(resp, BuilderResponse::Completed { .. }));
-        // A still-unimplemented op falls back to the stateless dispatch.
-        let resp = dispatch_with_executor(
+    }
+
+    #[test]
+    fn nix_build_clean_exit_reports_artifact_from_last_out_path() {
+        let exec = FakeExecutor::full(0, "/nix/store/bbbb-old\n/nix/store/cccc-img\n", "");
+        match dispatch_nix_build(op(), "path:.", "x", &exec) {
+            BuilderResponse::ArtifactReady {
+                artifact_path,
+                store_path,
+                ..
+            } => {
+                assert_eq!(artifact_path, "/nix/store/cccc-img");
+                assert_eq!(store_path, Some("/nix/store/cccc-img".to_string()));
+            }
+            other => panic!("expected ArtifactReady, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nix_build_clean_exit_without_out_path_is_nix_build_failure() {
+        let exec = FakeExecutor::full(0, "   \n", "");
+        assert!(matches!(
+            dispatch_nix_build(op(), "path:.", "x", &exec),
+            BuilderResponse::Failed {
+                category: FailureCategory::NixBuild,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn nix_build_nonzero_exit_is_nix_build_failure() {
+        let exec = FakeExecutor::full(1, "", "error: builder failed");
+        match dispatch_nix_build(op(), "path:.", "x", &exec) {
+            BuilderResponse::Failed {
+                category, message, ..
+            } => {
+                assert_eq!(category, FailureCategory::NixBuild);
+                assert!(message.contains("builder failed"), "{message}");
+            }
+            other => panic!("expected Failed/NixBuild, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nix_build_executor_error_is_internal_and_retryable() {
+        match dispatch_nix_build(op(), "path:.", "x", &FakeExecutor::erroring()) {
+            BuilderResponse::Failed {
+                category,
+                retryable,
+                ..
+            } => {
+                assert_eq!(category, FailureCategory::Internal);
+                assert!(retryable);
+            }
+            other => panic!("expected Failed/Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_host_tool_uses_the_same_nix_build_path() {
+        let exec = FakeExecutor::full(0, "/nix/store/dddd-tool\n", "");
+        assert!(matches!(
+            dispatch_with_executor(
+                &BuilderRequest::BuildHostTool {
+                    op: op(),
+                    flake_ref: "path:.".to_string(),
+                    attr_path: "packages.aarch64-linux.mvm-host-vm-init".to_string(),
+                    fingerprint: Some("blake3:abcd".to_string()),
+                },
+                &exec,
+            ),
+            BuilderResponse::ArtifactReady { .. }
+        ));
+    }
+
+    #[test]
+    fn prefetch_source_argv_requests_json() {
+        assert_eq!(
+            prefetch_source_argv("github:nixos/nixpkgs"),
+            vec![
+                "nix".to_string(),
+                "flake".to_string(),
+                "prefetch".to_string(),
+                "github:nixos/nixpkgs".to_string(),
+                "--json".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn prefetch_clean_exit_parses_store_path_json() {
+        let exec = FakeExecutor::full(
+            0,
+            r#"{"hash":"sha256-abc","storePath":"/nix/store/eeee-src"}"#,
+            "",
+        );
+        match dispatch_prefetch_source(op(), "github:nixos/nixpkgs", &exec) {
+            BuilderResponse::StorePathReady {
+                store_path,
+                already_present,
+                ..
+            } => {
+                assert_eq!(store_path, "/nix/store/eeee-src");
+                assert!(!already_present);
+            }
+            other => panic!("expected StorePathReady, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prefetch_nonzero_exit_is_retryable_fetch_failure() {
+        let exec = FakeExecutor::full(1, "", "error: unable to download");
+        match dispatch_prefetch_source(op(), "github:x/y", &exec) {
+            BuilderResponse::Failed {
+                category,
+                retryable,
+                ..
+            } => {
+                assert_eq!(category, FailureCategory::Fetch);
+                assert!(retryable);
+            }
+            other => panic!("expected Failed/Fetch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prefetch_clean_exit_without_store_path_is_fetch_failure() {
+        let exec = FakeExecutor::full(0, "not json", "");
+        assert!(matches!(
+            dispatch_prefetch_source(op(), "github:x/y", &exec),
+            BuilderResponse::Failed {
+                category: FailureCategory::Fetch,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn query_store_path_argv_uses_path_info() {
+        assert_eq!(
+            query_store_path_argv("/nix/store/ffff-foo"),
+            vec![
+                "nix".to_string(),
+                "path-info".to_string(),
+                "/nix/store/ffff-foo".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn query_store_path_present_when_exit_zero_absent_otherwise() {
+        let present = FakeExecutor::ok(0, "");
+        match dispatch_query_store_path(op(), "/nix/store/ffff-foo", &present) {
+            BuilderResponse::StorePathReady {
+                store_path,
+                already_present,
+                ..
+            } => {
+                assert_eq!(store_path, "/nix/store/ffff-foo");
+                assert!(already_present);
+            }
+            other => panic!("expected StorePathReady present, got {other:?}"),
+        }
+        let absent = FakeExecutor::ok(1, "path is not valid");
+        assert!(matches!(
+            dispatch_query_store_path(op(), "/nix/store/ffff-foo", &absent),
+            BuilderResponse::StorePathReady {
+                already_present: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn query_store_path_executor_error_is_internal() {
+        assert!(matches!(
+            dispatch_query_store_path(op(), "/nix/store/x", &FakeExecutor::erroring()),
+            BuilderResponse::Failed {
+                category: FailureCategory::Internal,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn serve_connection_with_executor_runs_a_build_over_the_wire() {
+        let (mut client, mut server) = UnixStream::pair().expect("socketpair");
+        mvm_guest::vsock::write_frame(
+            &mut client,
             &BuilderRequest::BuildGuestImage {
                 op: op(),
                 flake_ref: "path:.".to_string(),
                 attr_path: "packages.aarch64-linux.default".to_string(),
                 fingerprint: None,
             },
-            &exec,
+        )
+        .expect("write");
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("half-close");
+        let exec = FakeExecutor::full(0, "/nix/store/gggg-img\n", "");
+        serve_connection_with_executor(&mut server, &exec).expect("serve");
+        let resp = mvm_guest::vsock::read_frame::<BuilderResponse>(&mut client).expect("read");
+        assert!(
+            matches!(resp, BuilderResponse::ArtifactReady { op: got, store_path: Some(p), .. }
+                if got == op() && p == "/nix/store/gggg-img")
         );
-        assert!(matches!(
-            resp,
-            BuilderResponse::Failed {
-                category: FailureCategory::Unsupported,
-                ..
-            }
-        ));
-        // Handshake/Probe still work through the executor-aware path.
-        assert!(matches!(
-            dispatch_with_executor(&BuilderRequest::Probe { op: op() }, &exec),
-            BuilderResponse::Accepted { .. }
-        ));
     }
 
     #[test]
