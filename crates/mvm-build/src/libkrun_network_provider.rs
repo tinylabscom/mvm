@@ -11,19 +11,15 @@
 //! is a no-op. The actual `krun_add_net_*` wiring happens later, when the
 //! supervisor consumes the resolved `NetworkingPreference`.
 //!
-//! claim-10: the provider only chooses between the two existing gvproxy/passt →
-//! gateway-bridge paths; there is no no-gateway / TSI bypass to select (TSI was
-//! removed). Every guest byte still transits the gateway-bridge chokepoint, so
-//! routing the selection through the trait does not move the enforcement point.
+//! claim-10: the provider only chooses among virtio-net gateway paths
+//! (native/gvproxy/passt); there is no no-gateway / TSI bypass to select (TSI
+//! was removed). The native path feeds rvproxy's flow-audit export into the
+//! chain signer, while gvproxy/passt keep the gateway-bridge chokepoint.
 //!
-//! Scope: this is the additive provider only. The two live
-//! selection sites still inline their own choice and **diverge** — the workload
-//! path (`mvm_backend::libkrun::build_supervisor_config`) hardcodes
-//! `cfg!(target_os = "macos")` (per-OS default, ignores `MVM_NETWORKING`),
-//! while the builder path ([`apply_networking_mode`](crate::libkrun_builder))
-//! honors `MVM_NETWORKING` via `resolve_networking_mode`. Re-pointing both
-//! through this provider must first reconcile that divergence, so it is deferred
-//! rather than silently changing the workload selection.
+//! Scope: this provider is still a config producer only. Both the builder path
+//! ([`apply_networking_mode`](crate::libkrun_builder)) and the workload base
+//! config resolve the same [`NetworkingPreference`] helper; re-pointing them
+//! through this provider is a cleanup, not a behavior gate.
 
 use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::protocol::vm_backend::VmId;

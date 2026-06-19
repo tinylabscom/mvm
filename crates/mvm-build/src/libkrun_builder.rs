@@ -143,18 +143,18 @@ pub enum NetworkingPreference {
     /// `passt` binary on `$PATH`. The supervisor process spawns
     /// passt as a child and hands its fd to libkrun.
     Passt,
-    /// virtio-net via gvproxy. macOS default; works on Linux too.
+    /// virtio-net via gvproxy. Historical macOS fallback; works on Linux too.
     /// Requires libkrun-sys + the `gvproxy` binary on `$PATH`. The
     /// supervisor spawns gvproxy with `-listen-vfkit unixgram://…`
     /// and libkrun connects to the listener path.
     Gvproxy,
-    /// virtio-net via the in-house native gateway. Opt-in only
-    /// (`MVM_NETWORKING=native`); the default never selects it. The
-    /// native gateway speaks the same `-listen-vfkit` unixgram protocol
-    /// as gvproxy, so it reuses the gvproxy vfkit backend wholesale —
-    /// the only difference is the binary, located via `MVM_GATEWAY_BIN`.
-    /// `resolve_networking_mode` falls back to the per-OS default when
-    /// `native` is requested without `MVM_GATEWAY_BIN`.
+    /// virtio-net via the in-house native gateway. The native gateway speaks
+    /// the same `-listen-vfkit` unixgram protocol as gvproxy, so it reuses the
+    /// gvproxy vfkit backend wholesale — the only difference is the binary,
+    /// located via `MVM_GATEWAY_BIN`. macOS selects native by default once
+    /// `MVM_GATEWAY_BIN` is configured; callers can still pin gvproxy with
+    /// `MVM_NETWORKING=gvproxy`. An explicit `MVM_NETWORKING=native` falls back
+    /// to the per-OS default when no candidate binary is configured.
     Native,
 }
 
@@ -183,15 +183,26 @@ fn apply_networking_mode(
     })
 }
 
+fn native_gateway_bin_configured() -> bool {
+    std::env::var_os("MVM_GATEWAY_BIN").is_some_and(|v| !v.is_empty())
+}
+
 /// Per-host-OS default networking backend.
 ///
-/// macOS → [`Gvproxy`](NetworkingPreference::Gvproxy) because passt
-/// does not build there (the Homebrew formula refuses with "Linux is
-/// required for this software"); everything else (Linux today) →
-/// [`Passt`](NetworkingPreference::Passt).
+/// macOS → [`Native`](NetworkingPreference::Native) once `MVM_GATEWAY_BIN`
+/// points at the candidate rvproxy binary; otherwise it keeps the historical
+/// [`Gvproxy`](NetworkingPreference::Gvproxy) fallback so machines still boot
+/// on hosts without rvproxy installed. Linux stays
+/// [`Passt`](NetworkingPreference::Passt) by default until the Firecracker/passt
+/// replacement is cut over; an explicit `MVM_NETWORKING=native` can still opt a
+/// libkrun caller into the native vfkit-compatible path.
 pub fn default_networking_mode() -> NetworkingPreference {
     if cfg!(target_os = "macos") {
-        NetworkingPreference::Gvproxy
+        if native_gateway_bin_configured() {
+            NetworkingPreference::Native
+        } else {
+            NetworkingPreference::Gvproxy
+        }
     } else {
         NetworkingPreference::Passt
     }
@@ -200,12 +211,14 @@ pub fn default_networking_mode() -> NetworkingPreference {
 /// Read `MVM_NETWORKING` from the env. Accepts `passt`, `gvproxy`,
 /// and `native` (case-insensitive); anything else falls back to the
 /// per-OS default and emits a warning so a typo is visible without
-/// aborting. `native` additionally requires `MVM_GATEWAY_BIN` to name
-/// the gateway binary, or it falls back to the per-OS default too.
+/// aborting. On macOS, no env override means "native when the rvproxy
+/// candidate is configured, otherwise gvproxy." `native` additionally requires
+/// `MVM_GATEWAY_BIN` to name the gateway binary, or it falls back to the per-OS
+/// default too.
 ///
-/// Per-OS dispatch is macOS → gvproxy, Linux → passt. TSI was
-/// removed entirely — it bypassed virtio-net (no host fd to splice),
-/// which violates the claim-10 no-bypass invariant.
+/// Per-OS dispatch is macOS → native-with-candidate or gvproxy fallback, Linux
+/// → passt. TSI was removed entirely — it bypassed virtio-net (no host fd to
+/// splice), which violates the claim-10 no-bypass invariant.
 /// `MVM_NETWORKING=tsi` is no longer accepted; the value is
 /// treated as unknown and falls back to the per-OS gateway
 /// default with a warning. Pin a specific gateway across OS via
@@ -241,7 +254,7 @@ pub fn resolve_networking_mode() -> NetworkingPreference {
         // with a warning rather than silently spawning the wrong gateway —
         // same fail-safe shape as the passt-on-macOS fallback above.
         Some("native") => {
-            if std::env::var_os("MVM_GATEWAY_BIN").is_some_and(|v| !v.is_empty()) {
+            if native_gateway_bin_configured() {
                 NetworkingPreference::Native
             } else {
                 let fallback = default_networking_mode();
@@ -2363,8 +2376,10 @@ mod tests {
     #[test]
     fn resolve_networking_mode_parses_env() {
         let mut env = TestEnv::new();
-        // Default is per-OS — macOS → Gvproxy, others → Passt.
+        // Default is per-OS — macOS → native when a candidate is configured,
+        // otherwise gvproxy; others → passt.
         env.remove("MVM_NETWORKING");
+        env.remove("MVM_GATEWAY_BIN");
         assert_eq!(resolve_networking_mode(), default_networking_mode());
 
         env.set("MVM_NETWORKING", " passt ");
@@ -2384,6 +2399,14 @@ mod tests {
         env.set("MVM_NETWORKING", " gvproxy ");
         assert_eq!(resolve_networking_mode(), NetworkingPreference::Gvproxy);
 
+        env.set("MVM_GATEWAY_BIN", "/path/to/gateway");
+        assert_eq!(
+            resolve_networking_mode(),
+            NetworkingPreference::Gvproxy,
+            "an explicit gvproxy pin must override the macOS native default"
+        );
+        env.remove("MVM_GATEWAY_BIN");
+
         env.set("MVM_NETWORKING", "");
         assert_eq!(resolve_networking_mode(), default_networking_mode());
 
@@ -2393,7 +2416,6 @@ mod tests {
 
         // `native` requires MVM_GATEWAY_BIN to name the gateway binary;
         // without it, it falls back (fail-safe, no wrong-gateway spawn).
-        env.remove("MVM_GATEWAY_BIN");
         env.set("MVM_NETWORKING", "native");
         assert_eq!(
             resolve_networking_mode(),
@@ -2432,12 +2454,29 @@ mod tests {
 
     #[test]
     fn default_networking_mode_matches_host_os() {
+        let mut env = TestEnv::new();
+        env.remove("MVM_GATEWAY_BIN");
         let expected = if cfg!(target_os = "macos") {
             NetworkingPreference::Gvproxy
         } else {
             NetworkingPreference::Passt
         };
         assert_eq!(default_networking_mode(), expected);
+    }
+
+    #[test]
+    fn macos_default_selects_native_when_gateway_binary_is_configured() {
+        let mut env = TestEnv::new();
+        env.remove("MVM_NETWORKING");
+        env.set("MVM_GATEWAY_BIN", "/path/to/rvproxy");
+
+        let expected = if cfg!(target_os = "macos") {
+            NetworkingPreference::Native
+        } else {
+            NetworkingPreference::Passt
+        };
+        assert_eq!(default_networking_mode(), expected);
+        assert_eq!(resolve_networking_mode(), expected);
     }
 
     #[test]
