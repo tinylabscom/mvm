@@ -1164,6 +1164,7 @@ fn run_status(pool: &SupervisorStandbyPool, json: bool) -> Result<()> {
                 state: match h.state {
                     StandbyState::Idle => "idle",
                     StandbyState::Claimed => "claimed",
+                    StandbyState::Parked => "parked",
                 },
                 pid: h.pid,
                 kernel_sha256: h.kernel_sha256.clone(),
