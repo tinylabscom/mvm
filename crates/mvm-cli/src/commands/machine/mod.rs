@@ -1434,8 +1434,22 @@ mod tests {
         TestCli::try_parse_from(full).map(|cli| cli.action)
     }
 
+    fn parse_owned(argv: &[String]) -> Result<MachineAction, clap::Error> {
+        let full = std::iter::once("machine".to_string())
+            .chain(argv.iter().cloned())
+            .collect::<Vec<_>>();
+        TestCli::try_parse_from(full).map(|cli| cli.action)
+    }
+
     fn parse_run(argv: &[&str]) -> Result<MachineRunArgs, clap::Error> {
         parse(argv).map(|action| match action {
+            MachineAction::Run(r) => r,
+            other => panic!("expected run action, got {other:?}"),
+        })
+    }
+
+    fn parse_owned_run(argv: &[String]) -> Result<MachineRunArgs, clap::Error> {
+        parse_owned(argv).map(|action| match action {
             MachineAction::Run(r) => r,
             other => panic!("expected run action, got {other:?}"),
         })
@@ -1565,6 +1579,97 @@ mod tests {
         assert!(run.json);
         assert!(run.dry_run);
         assert_eq!(run.argv, vec!["echo", "hi"]);
+    }
+
+    #[test]
+    fn rust_sdk_machine_run_uses_cli_default_deny_preflight() {
+        let sdk_args = mvm_sdk::MachineRun::builder()
+            .image("alpine:latest")
+            .command(["true"])
+            .dry_run(true)
+            .json(true)
+            .machine_args()
+            .expect("sdk machine run args");
+
+        let run = parse_owned_run(&sdk_args)
+            .expect("sdk args parse as CLI machine run")
+            .into_run_args();
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+            .expect("CLI preflight accepts SDK args");
+
+        assert!(summary.dry_run);
+        assert!(!summary.will_execute);
+        assert_eq!(summary.image_kind, "oci");
+        assert_eq!(summary.preflight_network_posture, "deny-all");
+        assert_eq!(summary.preflight_egress_enforcement, "flow-drop");
+        assert_eq!(summary.receipt_network_posture, "deny-all");
+        assert_eq!(summary.receipt_egress_enforcement, "flow-drop");
+    }
+
+    #[test]
+    fn rust_sdk_machine_run_allow_host_matches_cli_receipt_posture() {
+        let sdk_args = mvm_sdk::MachineRun::builder()
+            .image("alpine:latest")
+            .allow_host("api.example.com")
+            .receipt("/tmp/mvm-sdk-machine.receipt.json")
+            .dry_run(true)
+            .json(true)
+            .command(["true"])
+            .machine_args()
+            .expect("sdk machine run args");
+
+        let run = parse_owned_run(&sdk_args)
+            .expect("sdk args parse as CLI machine run")
+            .into_run_args();
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+            .expect("CLI receipt input accepts SDK args");
+
+        assert_eq!(
+            summary.preflight_network_posture,
+            "allow-list:api.example.com:443"
+        );
+        assert!(summary.receipt_requested);
+        assert_eq!(
+            summary.receipt_network_posture,
+            summary.preflight_network_posture
+        );
+        assert_eq!(
+            summary.receipt_egress_enforcement,
+            "firecracker:l4-host-port"
+        );
+    }
+
+    #[test]
+    fn rust_sdk_machine_create_manifest_reaches_cli_unknown_key_gate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = dir.path().join("mvm.toml");
+        std::fs::write(
+            &manifest,
+            "image = \"alpine:latest\"\nnetwork_typo = true\n",
+        )
+        .expect("manifest");
+        let sdk_args = mvm_sdk::MachineCreate::builder("web")
+            .manifest(manifest.display().to_string())
+            .machine_args()
+            .expect("sdk machine create args");
+
+        let action = parse_owned(&sdk_args).expect("sdk args parse as CLI machine create");
+        let MachineAction::Create(args) = action else {
+            panic!("expected create action");
+        };
+        let err = args
+            .into_spec()
+            .expect_err("CLI manifest parser must reject unknown SDK-provided keys");
+        let chain = err
+            .chain()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            chain.contains("unknown field") || chain.contains("unknown key"),
+            "unexpected error chain: {chain}"
+        );
     }
 
     #[test]
