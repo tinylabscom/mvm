@@ -10,6 +10,34 @@ per ADR-0003 (mvmforge-origin):
   TypeScript) and transport (subprocess to `mvmctl invoke`, or socket
   to `mvmd` once that wiring lands). Hand-edited.
 
+## Machine lifecycle wrappers
+
+Python, TypeScript, and Rust expose machine-oriented lifecycle wrappers that
+mirror the beginner `mvmctl machine ...` command group. These wrappers are thin
+host automation surfaces: they route through `mvmctl machine ...` instead of
+reimplementing OCI pull, admission, artifact verification, networking, receipts,
+audit, or persistent machine state.
+
+- Python: `mvm.Machine.run/create/start/exec/shell/stop`
+- TypeScript: `Machine.run/create/start/exec/shell/stop`
+- Rust: `mvm_sdk::{MachineRun, MachineCreate, Machine}` builders
+
+The Rust API is builder-oriented for embedders:
+
+```rust
+use mvm_sdk::{Machine, MachineRun};
+
+let result = MachineRun::builder()
+    .image("alpine")
+    .net(true)
+    .command(["uname", "-a"])
+    .run()?;
+
+let vm = Machine::named("devbox")?;
+vm.exec(["echo", "hello"]).run()?;
+# Ok::<(), mvm_sdk::MachineError>(())
+```
+
 ## Single source of truth
 
 Rust crate `crates/mvm-ir` (`Workload` struct, `schemars` derive)

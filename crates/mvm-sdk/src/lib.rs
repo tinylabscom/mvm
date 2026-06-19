@@ -40,11 +40,17 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! Machine lifecycle wrappers are available through [`MachineRun`],
+//! [`MachineCreate`], and [`Machine`]. They shell to `mvmctl machine ...` so
+//! OCI pull, admission, artifact verification, networking, receipts, audit, and
+//! persistent machine state remain owned by the CLI path.
 
 mod builder;
 mod ctor;
 mod emit;
 mod error;
+pub mod machine;
 
 /// The canonical `Workload` IR — validate, canonicalize, hash, hooks,
 /// addon, version. The SDK is its only consumer alongside mvm-cli (mvmd
@@ -96,6 +102,11 @@ pub use ctor::resources::resources;
 pub use ctor::source::{local_path, nix_derivation, oci_image};
 pub use emit::{emit, emit_json};
 pub use error::{BuildError, EmitError};
+pub use machine::{
+    MVM_CLI_BIN_ENV, Machine, MachineClient, MachineCreate, MachineCreateBuilder, MachineError,
+    MachineExecBuilder, MachineResult, MachineRun, MachineRunBuilder, MachineShellBuilder,
+    MachineStartBuilder, MachineStopBuilder,
+};
 
 // Runtime record-mode lowering. The CLI's
 // `mvmctl compile --from-recording` and the auto-exec path both

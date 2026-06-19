@@ -4,8 +4,8 @@
 `--net`/`--allow-host`, local image sources, persistent spec verbs
 (`create`/`start`/`ls`/`inspect`/`rm`), and running-VM wrappers
 (`exec`/`shell`/`stop`) shipped; full `mvm.toml` machine runtime mapping,
-Python/TypeScript SDK machine wrappers, and dev-tier persistent-machine
-ssh-agent forwarding shipped; Rust SDK builders, deeper SDK/CLI parity,
+Python/TypeScript/Rust SDK machine wrappers, and dev-tier persistent-machine
+ssh-agent forwarding shipped; deeper SDK/CLI parity,
 scenario docs, portable artifacts, perf/smoke coverage, and
 duplicate-major/binary-size budgets remain
 **Owner:** mvm
@@ -321,9 +321,9 @@ Gaps to close:
   support.
 - The install story still has optional Nix material that can be misread as a
   prerequisite; beginner docs must lead with "no host Nix required."
-- The existing SDKs do not yet present the same `machine` lifecycle vocabulary
-  across Python, TypeScript, and Rust.
-- SDKs do not yet prove that their machine wrappers reuse the same
+- Python, TypeScript, and Rust now present the same `machine` lifecycle
+  vocabulary for run/create/start/exec/shell/stop host automation.
+- SDKs do not yet fully prove that their machine wrappers reuse the same
   admission/audit/artifact verification path as the CLI instead of becoming a
   parallel launch surface.
 - Portable artifacts exist at the lower layers, but users do not yet get a
@@ -962,21 +962,26 @@ Required behavior:
       wrapper with structured `MachineError`; fake-CLI tests pin `run`,
       persistent lifecycle, conflict rejection, empty-command rejection, and
       failed-process errors.
-- [ ] Add Rust `mvm-sdk` machine lifecycle builders for embedders that do not
-      want to shell out.
-- [ ] Keep structured errors aligned across Python, TypeScript, and Rust.
-      Python and TypeScript now expose `MachineError`; Rust alignment remains.
-- [ ] Add SDK tests proving no host Nix is invoked for image-backed machine
-      runs. Python and TypeScript fake-CLI tests prove these wrappers emit only
-      `mvmctl machine ...` argv and never call `nix` or legacy `up` paths; Rust
-      and live admission-path proof remain.
+- [x] Add Rust `mvm-sdk` machine lifecycle builders for embedders. Landed as
+      `MachineRun`, `MachineCreate`, and persistent `Machine` lifecycle
+      builders backed by `MachineClient`; they shell only to `mvmctl machine
+      ...` so the CLI remains the admission/audit/artifact owner.
+- [x] Keep structured errors aligned across Python, TypeScript, and Rust.
+      Python/TypeScript expose `MachineError`; Rust now exposes `MachineError`
+      with invalid-input, spawn, failed-process, argv, exit-code, and stderr
+      fields.
+- [~] Add SDK tests proving no host Nix is invoked for image-backed machine
+      runs. Python, TypeScript, and Rust fake-CLI tests prove these wrappers
+      emit only `mvmctl machine ...` argv and never call `nix` or legacy `up`
+      paths; live admission-path proof remains.
 - [ ] Add SDK/CLI parity tests proving equivalent admission inputs, effective
       policy, and receipt/audit summaries for the same machine config.
 - [ ] Add SDK negative tests proving wrappers cannot bypass artifact
       verification, network default-deny, unknown-key rejection, or
-      `image`/`flake` conflict rejection. Python and TypeScript now reject
-      image+manifest/source conflicts at the wrapper boundary; artifact,
-      network, unknown-key, and receipt/audit non-bypass coverage remains.
+      `image`/`flake` conflict rejection. Python, TypeScript, and Rust now
+      reject source conflicts or invalid commands at the wrapper boundary;
+      artifact, network, unknown-key, and receipt/audit non-bypass coverage
+      remains.
 
 ### D. Agent-safe auth and volumes
 
@@ -1263,9 +1268,10 @@ follow-ups:
       example.com`
 - [ ] Hardware-gated Linux/KVM perf smoke: cached image hot start reaches the
       accepted phase target.
-- [ ] SDK suites: Python, TypeScript, and Rust machine lifecycle wrappers.
-      Python and TypeScript focused machine wrapper suites are green; Rust
-      machine builders/tests remain.
+- [x] SDK suites: Python, TypeScript, and Rust machine lifecycle wrappers.
+      Python and TypeScript focused machine wrapper suites are green from the
+      previous SDK slice; Rust builder/fake-CLI lifecycle tests are green in
+      this slice.
 - [ ] Portable artifact tamper/rejection tests.
 - [ ] macOS smoke on the default supported backend for `machine run --image
       alpine -- uname -a`
