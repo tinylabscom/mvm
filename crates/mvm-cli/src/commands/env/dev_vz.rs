@@ -3192,9 +3192,7 @@ fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
 /// 1. The flake itself (`flake.nix` + `flake.lock`) — controls
 ///    which `nixpkgs` rev, which `mkGuest` shape, which `microvm.nix`,
 ///    which packages get installed.
-/// 2. The workspace `Cargo.lock` — the dep closure of every Rust
-///    binary baked into the rootfs.
-/// 3. The embedded host-binary bytes — `build.rs` cross-compiles the
+/// 2. The embedded host-binary bytes — `build.rs` cross-compiles the
 ///    in-VM PID-1 + egress-proxy binaries (`cargo build -p mvm-build
 ///    --bin <name>`) and embeds the bytes in mvmctl; injected into the
 ///    rootfs at boot. The byte hash captures the bin source, the
@@ -3202,7 +3200,14 @@ fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
 ///    shot — strictly more than the per-crate `src/` hash this replaced
 ///    (which also broke when the two former top-level `crates/<name>/`
 ///    crates were folded into `crates/mvm-build/src/bin/`).
-/// 4. The shared Nix library (`nix/lib`) the flake imports.
+/// 3. The shared Nix library (`nix/lib`) the flake imports.
+///
+/// The workspace `Cargo.lock` is deliberately not hashed. The builder-VM
+/// flake forbids `rustPlatform.buildRustPackage`, so the only Rust binaries
+/// baked into the image are the embedded host binaries, whose byte hashes are
+/// already folded into layer 2. `build.rs` watches `Cargo.lock` and
+/// `crates/mvm-build/src` so dependency or library changes that affect those
+/// binaries rebuild the bytes before this fingerprint is computed.
 ///
 /// Pre-2026-05 this function only hashed (1), so contributor edits to
 /// the in-VM binaries silently reused the cached `rootfs.ext4`,
@@ -3323,8 +3328,8 @@ fn hash_named_file(hasher: &mut Sha256, name: &str, path: &std::path::Path) -> R
 
 /// Hash every regular file under `dir` recursively, keyed by
 /// `<prefix>/<relative-path>` so the fingerprint reflects directory
-/// structure. Skips hidden entries and `target/` — neither is an
-/// input to `rustPlatform.buildRustPackage`.
+/// structure. Skips hidden entries and `target/`, which are local build/editor
+/// artifacts rather than builder-VM source inputs.
 fn hash_dir_recursive(hasher: &mut Sha256, prefix: &str, dir: &std::path::Path) -> Result<()> {
     let files = walk_source_dir_sorted(dir)
         .with_context(|| format!("walking builder VM source dir {}", dir.display()))?;
@@ -4259,13 +4264,11 @@ mod dev_status_image_tests {
         std::fs::write(dir.join("flake.lock"), "{\"nodes\":{}}").expect("write lock");
     }
 
-    /// Stage the workspace prerequisites that `builder_vm_source_fingerprint`
-    /// reads beyond the flake dir: a `Cargo.lock` at the workspace root.
-    /// Without it, a test calling the fingerprint helper against a fresh
-    /// tempdir-rooted flake at `<tmp>/nix/images/builder-vm` blows up with
-    /// `builder VM source fingerprint missing <tmp>/Cargo.lock`. (The
-    /// in-VM binary identity comes from the embedded host-binary bytes,
-    /// not on-disk crate dirs, so no crate stubs are needed.)
+    /// Stage the workspace shape that `builder_vm_source_fingerprint`
+    /// expects beyond the flake dir. `Cargo.lock` is intentionally present so
+    /// cache-status tests mirror the real workspace layout, but it is not a
+    /// fingerprint input; in-VM binary identity comes from the embedded
+    /// host-binary bytes, not on-disk crate dirs.
     ///
     /// Matches `builder_vm_bootstrap_tests::write_builder_vm_workspace`
     /// in shape; lives here as well because the two test mods are
@@ -5595,7 +5598,7 @@ mod builder_vm_bootstrap_tests {
     /// In-VM binary identity now rides on the embedded host-binary
     /// bytes (see `fold_embedded_binary_identity`), so the old per-crate
     /// `crates/<name>/{Cargo.toml,src}` stubs are gone. `nix/lib` is
-    /// present because the flake imports it (Layer 5) and the dir-walker
+    /// present because the flake imports it (Layer 3) and the dir-walker
     /// skip tests exercise it.
     ///
     /// Returns the path of the `nix/images/builder-vm/` dir — the
@@ -5718,7 +5721,7 @@ mod builder_vm_bootstrap_tests {
         let baseline =
             builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("baseline fingerprint");
 
-        // The `nix/lib` walk (Layer 5) skips `target/`. Drop junk in a
+        // The `nix/lib` walk (Layer 3) skips `target/`. Drop junk in a
         // `target/` under the walked dir; the fingerprint must ignore it.
         let lib_target = tmp.path().join("nix/lib/target/debug");
         std::fs::create_dir_all(&lib_target).expect("mkdir nix/lib/target");
