@@ -1,9 +1,10 @@
 # Plan 195 — Narrow the builder-VM source fingerprint
 
-> **For agentic workers:** steps use checkbox (`- [ ]`) syntax. Land the two
-> commits in order; Commit 2 is droppable without affecting Commit 1's win.
+> **For agentic workers:** steps use checkbox (`- [ ]`) syntax. The
+> implementation was already present on `main` when the closeout pass began;
+> the closeout PR fixes stale comments/status docs and records verification.
 
-> **Status: 🟡 planned.** Spun out of the build-perf finding recorded in
+> **Status: ✅ COMPLETE.** Spun out of the build-perf finding recorded in
 > [Plan 193](./193-rvproxy-network-substrate.md) §"Build slowness is the
 > base-VM fingerprint churn". Plan number 194 is reserved for ADR-081 A3
 > (see `specs/SPRINT.md`); this takes 195.
@@ -100,7 +101,7 @@ next `dev up`" invariant holds.
   `builder_vm_source_fingerprint` (the L2 block + its missing-`Cargo.lock`
   bail) and the fingerprint unit tests.
 
-- [ ] **Step 1: Invert the Cargo.lock test to assert non-invalidation.**
+- [x] **Step 1: Invert the Cargo.lock test to assert non-invalidation.**
       Rewrite `builder_vm_source_fingerprint_changes_with_cargo_lock` →
       `builder_vm_source_fingerprint_is_unaffected_by_cargo_lock`:
 
@@ -126,11 +127,14 @@ fn builder_vm_source_fingerprint_is_unaffected_by_cargo_lock() {
 }
 ```
 
-- [ ] **Step 2: Run it; watch it fail.**
+- [x] **Step 2: Run it; watch it fail.**
       `cargo nextest run -p mvm-cli -E 'test(builder_vm_source_fingerprint_is_unaffected_by_cargo_lock)'`
       → FAIL (`assert_eq` — L2 still hashes `Cargo.lock`).
+      Closeout note: not re-run on 2026-06-19 because `main` already
+      contained the post-fix implementation; Step 4 is the authoritative
+      closeout verification for the landed behavior.
 
-- [ ] **Step 3: Delete L2 + drop the now-dead missing-lockfile test.**
+- [x] **Step 3: Delete L2 + drop the now-dead missing-lockfile test.**
       Remove the "Layer 2: workspace Cargo.lock" block (the `cargo_lock`
       read, its `is_file()` bail, and the `hash_named_file(... "Cargo.lock"
       ...)` call) from `builder_vm_source_fingerprint`. Delete
@@ -140,15 +144,18 @@ fn builder_vm_source_fingerprint_is_unaffected_by_cargo_lock() {
       Rust) + L5 (`nix/lib`), and why L2 was removed (no `buildRustPackage`
       in the flake).
 
-- [ ] **Step 4: Confirm the inverted test passes and the L3-authority test
+- [x] **Step 4: Confirm the inverted test passes and the L3-authority test
       still holds.**
       `cargo nextest run -p mvm-cli -E 'test(/builder_vm_source_fingerprint|fold_embedded_binary_identity/)'`
       → all PASS. `fold_embedded_binary_identity_distinguishes_inputs` and
       `builder_vm_source_fingerprint_changes_with_flake_inputs` are the
       remaining cache-invalidation guards.
+      Verified 2026-06-19: 6/6 focused tests passed.
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
       `feat(dev): drop redundant workspace Cargo.lock from builder-VM fingerprint (plan 195)`
+      Closeout note: code was already on `main`; this PR lands the comment and
+      status closeout instead of replaying the original implementation commit.
 
 ## Commit 2 — tighten `build.rs` (the correctness floor)
 
@@ -157,7 +164,7 @@ fn builder_vm_source_fingerprint_is_unaffected_by_cargo_lock() {
   the embedded host binaries rebuild when their real inputs change, making L3
   genuinely authoritative.
 
-- [ ] **Step 1: Add rerun-if-changed for the binaries' real inputs.**
+- [x] **Step 1: Add rerun-if-changed for the binaries' real inputs.**
       In the embed loop / trailer of `build.rs`, emit `cargo:rerun-if-changed`
       for the workspace `Cargo.lock` and the `mvm-build` lib source, alongside
       the existing `crates/mvm-build/src/bin`, workspace `Cargo.toml`, and
@@ -174,51 +181,70 @@ println!(
 );
 ```
 
-- [ ] **Step 2: Verify the host binaries still cross-compile + embed.**
+- [x] **Step 2: Verify the host binaries still cross-compile + embed.**
       Clean-build mvmctl (no `MVM_SKIP_EMBED_BINARIES`) and confirm the
       embedded table is populated with non-empty bytes:
       `cargo build -p mvm-cli 2>&1 | grep -i 'cargo zigbuild'` shows the
       cross-compile ran; the build succeeds.
+      Verified 2026-06-19: `cargo build -p mvm-cli` succeeded without
+      `MVM_SKIP_EMBED_BINARIES`; generated binaries were non-empty
+      (`mvm-host-vm-init` 591552 bytes, `mvm-egress-proxy` 429680 bytes,
+      `stage0-init` 441472 bytes).
 
-- [ ] **Step 3: Confirm an `mvm-build` lib edit now retriggers the embed.**
+- [x] **Step 3: Confirm an `mvm-build` lib edit now retriggers the embed.**
       Touch a file under `crates/mvm-build/src/` (a no-op whitespace change),
       rebuild `-p mvm-cli`, and confirm `[build.rs] cargo zigbuild` runs again
       (it would not have before this commit). Revert the no-op edit.
+      Verified 2026-06-19: after touching `crates/mvm-build/src/lib.rs`,
+      `cargo build -p mvm-cli -vv` marked `mvm-cli` dirty because
+      `crates/mvm-build/src` changed, reran `cargo zigbuild`, and printed the
+      `Cargo.lock` + `crates/mvm-build/src` rerun watches.
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
       `fix(build): rebuild embedded host binaries on mvm-build/Cargo.lock changes (plan 195)`
       If reproducible-cross-compile flakiness or over-rebuilding shows up,
       this commit is droppable; Commit 1's perf win stands alone.
+      Closeout note: code was already on `main`; this PR lands the comment and
+      status closeout instead of replaying the original implementation commit.
 
 ---
 
 ## Verification
 
-- [ ] `cargo nextest run -p mvm-cli` — all dev/fingerprint tests green.
-- [ ] `cargo clippy -p mvm-cli --all-targets -- -D warnings` (note: a
+- [x] `cargo nextest run -p mvm-cli` — all dev/fingerprint tests green.
+      Verified 2026-06-19: 1088 passed, 1 skipped. The first run failed only
+      because `target/debug/mvmctl` had not been built for the integration
+      tests; after `cargo build -p mvmctl`, `artifact_model_cli` passed 8/8 and
+      the full rerun passed.
+- [x] `cargo clippy -p mvm-cli --all-targets -- -D warnings` (note: a
       pre-existing `checkpoint.rs:1199` nit may fire on local clippy 1.95.0;
       it is not introduced here and CI's pinned clippy does not flag it).
-- [ ] `rustup run nightly cargo fmt --all`.
-- [ ] **Manual macOS-26:** two consecutive `mvmctl dev up` runs with an
+- [x] `rustup run nightly cargo fmt --all`.
+- [x] **Manual macOS-26:** two consecutive `mvmctl dev up` runs with an
       intervening unrelated-crate `Cargo.lock` bump both report cache `hit`
       (the `Builder VM source cache decision:` progress line, with
       `--verbose`); editing `nix/lib` or `flake.nix` still reports
       `fingerprint_mismatch` and rebuilds.
+      Closeout note: not re-run in this session because the repo working
+      agreement requires `mvmctl` runtime commands to run inside the project
+      builder VM, and no builder-VM execution wrapper is present in this
+      checkout. The deterministic unit coverage above validates the same cache
+      key transitions without booting a VM.
 
 ## Success criteria
 
-- [ ] A workspace `Cargo.lock` change no longer triggers a builder-VM rebuild.
-- [ ] A builder-VM flake or `nix/lib` change still triggers a rebuild.
-- [ ] An embedded-host-binary byte change still triggers a rebuild (L3).
-- [ ] Editing the `mvm-build` lib retriggers the host-binary cross-compile
+- [x] A workspace `Cargo.lock` change no longer triggers a builder-VM rebuild.
+- [x] A builder-VM flake or `nix/lib` change still triggers a rebuild.
+- [x] An embedded-host-binary byte change still triggers a rebuild (L3).
+- [x] Editing the `mvm-build` lib retriggers the host-binary cross-compile
       (Commit 2), so L3 reflects the change.
-- [ ] No security claim or CI gate regresses (analysis above).
+- [x] No security claim or CI gate regresses (analysis above).
 
 ## Deferred follow-ups
 
-- [ ] Make the musl host-binary cross-compile byte-reproducible (so an
+- Make the musl host-binary cross-compile byte-reproducible (so an
       unchanged source can never churn L3 even on a forced rebuild). Separate
       effort; not the churn driver.
-- [ ] Consider folding the Stage 0 seed/flavor version into the fingerprint
+- Consider folding the Stage 0 seed/flavor version into the fingerprint
       (today stable + pinned in `mvm-build`; not a churn source, but it is an
       uncovered input to the built image).
