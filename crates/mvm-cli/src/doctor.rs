@@ -429,6 +429,55 @@ fn host_agent_daemon_check() -> Check {
     }
 }
 
+/// Probe timeout for the resident builder-daemon readiness check. Short
+/// so `doctor` stays responsive even when a stale socket is present.
+const BUILDERD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Summarize resident builder-daemon (`mvm-builderd`) readiness across the
+/// persistent builder VMs under `vms_root`. Each builder VM exposes its
+/// typed control socket at `<vm_state_dir>/vsock-<BUILDERD_CONTROL_PORT>.sock`;
+/// every present socket is probed with a bounded handshake. Informational:
+/// absence just means no builder VM is running, so `ok` stays true.
+fn builderd_daemon_summary(vms_root: &std::path::Path) -> String {
+    let Ok(entries) = std::fs::read_dir(vms_root) else {
+        return "absent (no builder VM yet; run `mvmctl dev up`)".to_string();
+    };
+    let mut lines = Vec::new();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let sock = mvm_build::builderd::builderd_control_socket_path(&dir);
+        if !sock.exists() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let readiness =
+            mvm_build::builderd::probe_builderd_readiness(&sock, BUILDERD_PROBE_TIMEOUT);
+        lines.push(format!(
+            "{name}: {}",
+            mvm_build::builderd::readiness_summary(&readiness)
+        ));
+    }
+    lines.sort();
+    if lines.is_empty() {
+        return "absent (no builder daemon; run `mvmctl dev up`)".to_string();
+    }
+    lines.join("; ")
+}
+
+/// Resident builder-daemon readiness. Informational.
+fn builderd_daemon_check() -> Check {
+    let vms_root = mvm_build::builder_vm::builder_vm_cache_dir().join("vms");
+    Check {
+        name: "builder daemon",
+        category: "platform",
+        ok: true,
+        info: builderd_daemon_summary(&vms_root),
+    }
+}
+
 pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     // ── Prerequisites (user must install before bootstrap) ───────
     let mut checks = vec![
@@ -490,6 +539,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(builder_egress_check());
     checks.push(registry_drift_check());
     checks.push(host_agent_daemon_check());
+    checks.push(builderd_daemon_check());
 
     checks.push(disk_space_check(false));
 
@@ -3909,5 +3959,52 @@ mod tests {
         std::fs::write(dead.join("control.sock"), "").unwrap();
         let s = host_agent_daemon_summary(root.path());
         assert!(s.contains("stale: acme"), "got {s:?}");
+    }
+
+    #[test]
+    fn builderd_daemon_check_is_informational_platform_check() {
+        let c = builderd_daemon_check();
+        assert_eq!(c.name, "builder daemon");
+        assert_eq!(c.category, "platform");
+        assert!(
+            c.ok,
+            "builder-daemon readiness is informational, never blocking"
+        );
+    }
+
+    #[test]
+    fn builderd_daemon_summary_absent_when_root_missing_or_empty() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(builderd_daemon_summary(&root.path().join("missing")).starts_with("absent"));
+        // An empty vms root, and a builder-VM dir with no control socket,
+        // both read as absent (nothing to probe).
+        assert!(builderd_daemon_summary(root.path()).starts_with("absent"));
+        std::fs::create_dir_all(root.path().join("mvm-persistent-builder-vm-x")).unwrap();
+        assert!(builderd_daemon_summary(root.path()).starts_with("absent"));
+    }
+
+    #[test]
+    fn builderd_daemon_summary_reports_ready_for_a_live_daemon() {
+        use std::os::unix::net::UnixListener;
+        // A builder-VM state dir whose control socket is served by the
+        // real `serve_connection` loop reports "ready". Bind under a short
+        // /tmp root with a short dir name — the full socket path must fit
+        // under the AF_UNIX SUN_LEN limit (~104 bytes on macOS).
+        let root = tempfile::Builder::new()
+            .prefix("mvmbd")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let vm_dir = root.path().join("bv");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let sock = mvm_build::builderd::builderd_control_socket_path(&vm_dir);
+        let listener = UnixListener::bind(&sock).expect("bind");
+        let handle = std::thread::spawn(move || {
+            let (mut conn, _addr) = listener.accept().expect("accept");
+            mvm_build::builderd::serve_connection(&mut conn).expect("serve");
+        });
+
+        let s = builderd_daemon_summary(root.path());
+        assert!(s.contains("bv: ready"), "got {s:?}");
+        handle.join().expect("server thread");
     }
 }

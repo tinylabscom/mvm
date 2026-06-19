@@ -45,6 +45,15 @@ pub const BUILDER_DISPATCH_PORT: u32 = 21471;
 /// on each side catch divergence.
 pub const WORKLOAD_FORWARD_PORT: u32 = 21472;
 
+/// AF_VSOCK port the resident builder-VM control daemon (`mvm-builderd`)
+/// listens on. Carries the typed `mvm_build::builderd_protocol`
+/// `BuilderRequest`/`BuilderResponse` wire — the allowlisted control
+/// plane, distinct from the legacy controlled-shell-job
+/// [`BUILDER_DISPATCH_PORT`] channel. The host opens the corresponding
+/// per-port Unix-socket proxy at `<vm_state_dir>/vsock-21473.sock` and
+/// speaks the typed protocol; the daemon's listener binds the guest end.
+pub const BUILDERD_CONTROL_PORT: u32 = 21473;
+
 /// Encode the workload-forward multiplex handshake the in-host-VM
 /// forwarder reads before splicing: a u32-BE length prefix
 /// followed by UTF-8 `"<workload_id> <port>"`. The host's

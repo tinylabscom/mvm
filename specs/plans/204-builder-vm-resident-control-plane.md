@@ -148,7 +148,19 @@ Add structural tests that prove:
 - [ ] Add builder-VM image wiring so the daemon starts on boot (also lands
       the `mvm-builderd` bin entrypoint + AF_VSOCK listener over
       `serve_connection`).
-- [ ] Add `mvmctl doctor` visibility for builder daemon readiness.
+- [x] Add `mvmctl doctor` visibility for builder daemon readiness.
+      Host-side readiness probe landed in `mvm_build::builderd`
+      (`probe_builderd_readiness` over a `Handshake` →
+      `BuilderdReadiness::{Ready,VersionMismatch,NotRunning,Unreachable}`,
+      `readiness_summary`, `builderd_control_socket_path` matching the
+      `persistent_builder::dispatch_socket_path` convention on the new
+      `BUILDERD_CONTROL_PORT` 21473). `mvmctl doctor` gained an
+      informational `builder daemon` platform check that scans the
+      persistent builder-VM `vms/` root and probes each present control
+      socket (always `ok` — absence is the normal "builder VM down" state).
+      Probe + summary + doctor-scan tested with a real `UnixListener`
+      driving `serve_connection` end-to-end (no VM boot). Doubles as the
+      first WS-B host-client leg.
 
 ### B. Host client and lifecycle
 

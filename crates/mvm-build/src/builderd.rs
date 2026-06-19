@@ -23,6 +23,8 @@
 
 use std::io::ErrorKind;
 use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::builderd_protocol::{
     BuilderRequest, BuilderResponse, FailureCategory, OperationId, PROTOCOL_VERSION,
@@ -122,6 +124,117 @@ pub fn serve_connection(stream: &mut UnixStream) -> std::io::Result<()> {
                 return Err(std::io::Error::other(e.to_string()));
             }
         }
+    }
+}
+
+// ============================================================================
+// Host-side client (readiness probe)
+// ============================================================================
+
+/// The per-port vsock socket the resident daemon's control channel is
+/// reachable at, for a builder VM rooted at `vm_state_dir`. Mirrors
+/// `persistent_builder::dispatch_socket_path` — the same
+/// `<vm_state_dir>/vsock-<port>.sock` convention, on the dedicated
+/// builder-control port. Single source of truth shared by the host
+/// client here and the daemon's listener config once boot wiring lands.
+pub fn builderd_control_socket_path(vm_state_dir: &Path) -> PathBuf {
+    vm_state_dir.join(mvm_core::config::vsock_socket_filename(
+        mvm_guest::builder_agent::BUILDERD_CONTROL_PORT,
+    ))
+}
+
+/// Outcome of a host-side readiness probe against a builder daemon's
+/// control socket. Surfaced by `mvmctl doctor` and used by the host
+/// client to decide whether the daemon is usable before sending real
+/// operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuilderdReadiness {
+    /// The daemon answered a handshake and agreed a protocol version.
+    Ready {
+        /// Protocol version the daemon speaks.
+        version: u32,
+    },
+    /// The daemon answered but refused our protocol version
+    /// (fail-closed). The daemon and host need a compatible build.
+    VersionMismatch {
+        /// The daemon's human-readable refusal detail.
+        detail: String,
+    },
+    /// No control socket exists — the daemon is not running (e.g. the
+    /// builder VM is down). The expected first-run state; non-blocking.
+    NotRunning,
+    /// A control socket exists but the daemon did not complete a clean
+    /// handshake (connect refused, timed out, or answered unexpectedly).
+    /// Usually a stale socket from a crashed daemon.
+    Unreachable {
+        /// Diagnostic detail for the operator.
+        detail: String,
+    },
+}
+
+/// Probe a builder daemon's readiness by connecting to `socket_path`
+/// and completing a [`BuilderRequest::Handshake`] within `timeout`.
+///
+/// Pure transport over the typed protocol — no side effects beyond the
+/// connection. A missing socket is [`BuilderdReadiness::NotRunning`]
+/// (the normal "builder VM down" case), so callers treat absence as
+/// informational, not a failure.
+pub fn probe_builderd_readiness(socket_path: &Path, timeout: Duration) -> BuilderdReadiness {
+    if !socket_path.exists() {
+        return BuilderdReadiness::NotRunning;
+    }
+    let mut stream = match UnixStream::connect(socket_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return BuilderdReadiness::Unreachable {
+                detail: format!("connect failed: {e}"),
+            };
+        }
+    };
+    if let Err(e) = stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+    {
+        return BuilderdReadiness::Unreachable {
+            detail: format!("set timeout failed: {e}"),
+        };
+    }
+    let handshake = BuilderRequest::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+    };
+    if let Err(e) = mvm_guest::vsock::write_frame(&mut stream, &handshake) {
+        return BuilderdReadiness::Unreachable {
+            detail: format!("handshake write failed: {e}"),
+        };
+    }
+    match mvm_guest::vsock::read_frame::<BuilderResponse>(&mut stream) {
+        Ok(BuilderResponse::Accepted {
+            protocol_version, ..
+        }) => BuilderdReadiness::Ready {
+            version: protocol_version,
+        },
+        Ok(BuilderResponse::Failed {
+            category: FailureCategory::Version,
+            message,
+            ..
+        }) => BuilderdReadiness::VersionMismatch { detail: message },
+        Ok(other) => BuilderdReadiness::Unreachable {
+            detail: format!("unexpected handshake response: {other:?}"),
+        },
+        Err(e) => BuilderdReadiness::Unreachable {
+            detail: format!("handshake read failed: {e}"),
+        },
+    }
+}
+
+/// One-line human summary of a [`BuilderdReadiness`] for `mvmctl
+/// doctor`. Pure so the mapping is unit-testable without a socket.
+pub fn readiness_summary(readiness: &BuilderdReadiness) -> String {
+    match readiness {
+        BuilderdReadiness::Ready { version } => format!("ready (protocol v{version})"),
+        BuilderdReadiness::VersionMismatch { detail } => format!("version mismatch — {detail}"),
+        BuilderdReadiness::NotRunning => "not running".to_string(),
+        BuilderdReadiness::Unreachable { detail } => format!("unreachable — {detail}"),
     }
 }
 
@@ -294,5 +407,92 @@ mod tests {
         let (client, mut server) = UnixStream::pair().expect("socketpair");
         drop(client);
         serve_connection(&mut server).expect("immediate eof is Ok");
+    }
+
+    // ---- host-side readiness probe ------------------------------------
+
+    #[test]
+    fn control_socket_path_uses_builderd_port() {
+        let p = builderd_control_socket_path(Path::new("/var/lib/mvm/vm-foo"));
+        assert_eq!(
+            p,
+            Path::new(&format!(
+                "/var/lib/mvm/vm-foo/vsock-{}.sock",
+                mvm_guest::builder_agent::BUILDERD_CONTROL_PORT
+            ))
+        );
+    }
+
+    #[test]
+    fn probe_reports_not_running_when_socket_absent() {
+        let missing = std::path::Path::new("/nonexistent/mvm/builderd/vsock-21473.sock");
+        assert_eq!(
+            probe_builderd_readiness(missing, Duration::from_millis(100)),
+            BuilderdReadiness::NotRunning
+        );
+    }
+
+    #[test]
+    fn probe_reports_ready_against_a_live_daemon() {
+        use std::os::unix::net::UnixListener;
+        // Stand up the real serve loop behind a UnixListener and probe
+        // it end-to-end over the typed handshake.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("vsock-21473.sock");
+        let listener = UnixListener::bind(&sock).expect("bind");
+        let handle = std::thread::spawn(move || {
+            // Serve exactly one connection then return.
+            let (mut conn, _addr) = listener.accept().expect("accept");
+            serve_connection(&mut conn).expect("serve");
+        });
+
+        let readiness = probe_builderd_readiness(&sock, Duration::from_secs(2));
+        assert_eq!(
+            readiness,
+            BuilderdReadiness::Ready {
+                version: PROTOCOL_VERSION
+            }
+        );
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn probe_reports_unreachable_on_stale_socket() {
+        use std::os::unix::net::UnixListener;
+        // A bound socket whose owner never accepts/serves: connect
+        // succeeds (queued), but the handshake read times out. Models a
+        // crashed daemon that left its socket behind.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("vsock-21473.sock");
+        let _listener = UnixListener::bind(&sock).expect("bind");
+        let readiness = probe_builderd_readiness(&sock, Duration::from_millis(150));
+        assert!(
+            matches!(readiness, BuilderdReadiness::Unreachable { .. }),
+            "expected Unreachable, got {readiness:?}"
+        );
+    }
+
+    #[test]
+    fn readiness_summary_maps_every_variant() {
+        assert_eq!(
+            readiness_summary(&BuilderdReadiness::Ready { version: 1 }),
+            "ready (protocol v1)"
+        );
+        assert_eq!(
+            readiness_summary(&BuilderdReadiness::NotRunning),
+            "not running"
+        );
+        assert!(
+            readiness_summary(&BuilderdReadiness::VersionMismatch {
+                detail: "speaks 2".to_string()
+            })
+            .starts_with("version mismatch")
+        );
+        assert!(
+            readiness_summary(&BuilderdReadiness::Unreachable {
+                detail: "boom".to_string()
+            })
+            .starts_with("unreachable")
+        );
     }
 }
