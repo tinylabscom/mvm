@@ -1907,7 +1907,10 @@ struct BuildHeartbeat {
 #[cfg(feature = "builder-vm")]
 impl BuildHeartbeat {
     fn start(activity: &'static str) -> Self {
-        Self::start_with(activity, BUILD_HEARTBEAT_INTERVAL, ui::info)
+        // `notice`, not `info`: the heartbeat is always-on liveness — the only
+        // feedback during a multi-minute silent build — so it must survive the
+        // default quiet mode where `info` chatter is suppressed.
+        Self::start_with(activity, BUILD_HEARTBEAT_INTERVAL, ui::notice)
     }
 
     /// Injectable core: `interval` and `emit` are parameters so a test can drive
@@ -2317,7 +2320,7 @@ fn run_stage0_rootfs_with_external_kernel(
 }
 
 /// Render the compile heartbeat line. Pure (testable); the live
-/// heartbeat thread routes it through `ui::info`.
+/// heartbeat thread routes it through `ui::notice` (always-on liveness).
 #[cfg(feature = "builder-vm")]
 fn format_compile_elapsed(elapsed: std::time::Duration) -> String {
     let secs = elapsed.as_secs();
@@ -2452,7 +2455,10 @@ pub(crate) fn build_kernel_via_stage0(
                     std::thread::sleep(std::time::Duration::from_millis(500));
                     ticks += 1;
                     if ticks.is_multiple_of(40) {
-                        ui::info(&format_compile_elapsed(start.elapsed()));
+                        // `notice`, not `info`: this heartbeat only runs in the
+                        // quiet (non-verbose) branch, the very mode where `info`
+                        // chatter is suppressed — so it must be always-on.
+                        ui::notice(&format_compile_elapsed(start.elapsed()));
                     }
                 }
             }))

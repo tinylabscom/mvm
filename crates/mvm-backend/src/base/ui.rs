@@ -8,8 +8,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
-/// Enable verbose `[mvm]` chatter (info/success/warn/step). Errors are
-/// always printed regardless. Called once at CLI startup based on
+/// Enable opt-in `[mvm]` chatter (info/success/step/progress). The
+/// chrome is off by default — like every other tracing/`RUST_LOG`
+/// consumer — and only narrates when the user opts in. Errors,
+/// warnings, banners, status tables, and interactive prompts always
+/// print regardless. Called once at CLI startup based on
 /// `--verbose`/`--debug` or the presence of `RUST_LOG`.
 pub fn set_verbose(on: bool) {
     VERBOSE.store(on, Ordering::Relaxed);
@@ -47,6 +50,16 @@ fn chrome_to_stderr() -> bool {
     is_chrome_routed_to_stderr()
 }
 
+/// Whether opt-in `[mvm]` chatter (`info` / `success` / `step` /
+/// `progress`) should print. Keyed off the same verbosity toggle as
+/// tracing's `RUST_LOG`, so the chrome is off by default and follows
+/// the user's logging choice rather than being always-on. Errors,
+/// warnings, banners, status tables, and interactive prompts are not
+/// chatter and print regardless.
+fn chatter_enabled() -> bool {
+    is_verbose()
+}
+
 // ---------------------------------------------------------------------------
 // Colored message helpers
 // ---------------------------------------------------------------------------
@@ -55,8 +68,12 @@ fn prefix() -> String {
     "[mvm]".bold().cyan().to_string()
 }
 
-/// Print an informational message: `[mvm]` message
+/// Print an informational message: `[mvm]` message. Opt-in chatter —
+/// suppressed unless `--verbose`/`--debug` or `RUST_LOG` is set.
 pub fn info(msg: &str) {
+    if !chatter_enabled() {
+        return;
+    }
     if chrome_to_stderr() {
         eprintln!("{} {}", prefix(), msg);
     } else {
@@ -64,8 +81,12 @@ pub fn info(msg: &str) {
     }
 }
 
-/// Print a success message: `[mvm]` message (in green)
+/// Print a success message: `[mvm]` message (in green). Opt-in chatter —
+/// suppressed unless `--verbose`/`--debug` or `RUST_LOG` is set.
 pub fn success(msg: &str) {
+    if !chatter_enabled() {
+        return;
+    }
     if chrome_to_stderr() {
         eprintln!("{} {}", prefix(), msg.green());
     } else {
@@ -87,8 +108,25 @@ pub fn warn(msg: &str) {
     }
 }
 
-/// Print a numbered step: `[mvm]` Step n/total: message
+/// Print an always-on liveness/notice line: `[mvm]` message. Unlike the opt-in
+/// chatter helpers, this prints regardless of verbosity — reserved for the
+/// case where a periodic line is the *only* feedback that a long, silent
+/// blocking step is alive (e.g. the Stage 0 builder-image build's heartbeat),
+/// which must remain visible in the default quiet mode.
+pub fn notice(msg: &str) {
+    if chrome_to_stderr() {
+        eprintln!("{} {}", prefix(), msg);
+    } else {
+        println!("{} {}", prefix(), msg);
+    }
+}
+
+/// Print a numbered step: `[mvm]` Step n/total: message. Opt-in chatter —
+/// suppressed unless `--verbose`/`--debug` or `RUST_LOG` is set.
 pub fn step(n: u32, total: u32, msg: &str) {
+    if !chatter_enabled() {
+        return;
+    }
     let formatted = format!(
         "\n{} {} {}",
         prefix(),
@@ -106,7 +144,7 @@ pub fn step(n: u32, total: u32, msg: &str) {
 /// troubleshooting (e.g. "auto-starting dev VM…"). Suppressed by default;
 /// shown when `--verbose`/`--debug` is passed or `RUST_LOG` is set.
 pub fn progress(msg: &str) {
-    if !is_verbose() {
+    if !chatter_enabled() {
         return;
     }
     if chrome_to_stderr() {
@@ -195,4 +233,29 @@ pub fn spinner(msg: &str) -> ProgressBar {
     pb.set_message(msg.to_string());
     pb.enable_steady_tick(std::time::Duration::from_millis(80));
     pb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // `VERBOSE` is a process-global atomic; serialize the toggle tests
+    // so they don't race each other under nextest's process-parallel
+    // runner sharing this address space.
+    static GUARD: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn chatter_follows_verbose_toggle() {
+        let _g = GUARD.lock().unwrap();
+        let prev = is_verbose();
+
+        set_verbose(false);
+        assert!(!chatter_enabled(), "chatter is off by default");
+
+        set_verbose(true);
+        assert!(chatter_enabled(), "chatter opts in with verbose/RUST_LOG");
+
+        set_verbose(prev);
+    }
 }
