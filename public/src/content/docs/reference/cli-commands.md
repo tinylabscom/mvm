@@ -69,8 +69,10 @@ verification under `trust`. Domains that already own their own subcommands
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl env bootstrap` | Full setup from scratch: Homebrew deps (macOS), Firecracker, kernel, rootfs (idempotent — safe to re-run) |
-| `mvmctl env bootstrap --production` | Production mode (skip Homebrew, assume Linux with apt) |
+| `mvmctl bootstrap` | Prepare the environment: host tooling **and pre-fetch the builder VM image** so the first `dev up` is fast (no first-run download/build on the hot path). `install.sh` runs this automatically unless `MVM_SKIP_BUILDER_PREFETCH=1`. Idempotent — safe to re-run |
+| `mvmctl bootstrap --production` | Production mode (skip Homebrew, assume Linux with apt) |
+| `mvmctl env bootstrap` | Same as `mvmctl bootstrap` (the `env`-grouped form) |
+| `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects Vz on macOS 26+ Apple Silicon and retries with libkrun when that auto-selected Vz builder path fails; native KVM is used on Linux. |
 | `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects Vz on macOS 26+ Apple Silicon and retries with libkrun when that auto-selected Vz builder path fails; native KVM is used on Linux. |
 | `mvmctl dev up --project ~/dir` | Auto-bootstrap then cd into a project directory |
 | `mvmctl dev up --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |

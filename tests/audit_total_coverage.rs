@@ -350,6 +350,9 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Environment / installer surfaces. Plan 178 (D5) — bootstrap/cleanup/
     // uninstall/update/sign grouped under `env <sub>`.
     ("env", AuditPosture::DelegatesToSub(ENV_SUB)),
+    // Top-level `mvmctl bootstrap` — installer surface (host tooling + builder
+    // VM image prefetch). Same posture as `env bootstrap` and `init`.
+    ("bootstrap", AuditPosture::InteractiveOrControl),
     ("dev", AuditPosture::InteractiveOrControl),
     ("doctor", AuditPosture::ReadOnly),
     ("shell-init", AuditPosture::InteractiveOrControl),

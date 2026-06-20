@@ -33,7 +33,11 @@ fn make_tarball(target: &str) -> Vec<u8> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
     let dir = format!("mvmctl-{target}");
-    let stub = b"#!/bin/sh\necho 'mvmctl 9.9.9'\n";
+    // The stub records its argv to `$MVM_TEST_INVOCATION_LOG` (default
+    // /dev/null, so tests that don't set it are unaffected) so a test can
+    // assert whether install.sh invoked `mvmctl bootstrap`.
+    let stub =
+        b"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${MVM_TEST_INVOCATION_LOG:-/dev/null}\"\necho 'mvmctl 9.9.9'\n";
     let mut tar = tar::Builder::new(Vec::new());
     let mut hdr = tar::Header::new_gnu();
     hdr.set_size(stub.len() as u64);
@@ -140,6 +144,53 @@ fn install_sh_downloads_verifies_and_installs() {
     assert!(
         install_dir.path().join("mvmctl").exists(),
         "binary installed"
+    );
+}
+
+#[test]
+fn install_sh_prefetches_builder_image_by_default_and_skips_on_optout() {
+    let target = host_target();
+    let tarball = make_tarball(target);
+    let archive = format!("mvmctl-{target}.tar.gz");
+    let checks = format!("{}  {}\n", sha256_hex(&tarball), archive);
+    let routes = vec![
+        (
+            format!("/tinylabscom/mvm/releases/download/v9.9.9/{archive}"),
+            tarball.clone(),
+        ),
+        (
+            "/tinylabscom/mvm/releases/download/v9.9.9/checksums-sha256.txt".to_string(),
+            checks.into_bytes(),
+        ),
+    ];
+    let (base, _stop) = serve(routes);
+
+    let run = |skip_prefetch: bool| -> String {
+        let install_dir = tempfile::tempdir().unwrap();
+        let log = install_dir.path().join("invocations.log");
+        let mut cmd = Command::new("sh");
+        cmd.arg(repo_root().join("install.sh"))
+            .env("MVM_VERSION", "v9.9.9")
+            .env("MVM_UPDATE_DOWNLOAD_URL", &base)
+            .env("MVM_INSTALL_DIR", install_dir.path())
+            .env("MVM_SKIP_CODESIGN", "1")
+            .env("MVM_TEST_INVOCATION_LOG", &log);
+        if skip_prefetch {
+            cmd.env("MVM_SKIP_BUILDER_PREFETCH", "1");
+        }
+        assert!(cmd.status().unwrap().success(), "install.sh should succeed");
+        std::fs::read_to_string(&log).unwrap_or_default()
+    };
+
+    // Default: install.sh runs `mvmctl bootstrap`.
+    assert!(
+        run(false).contains("bootstrap"),
+        "default install must prefetch via `mvmctl bootstrap`"
+    );
+    // Opt-out: MVM_SKIP_BUILDER_PREFETCH=1 suppresses the prefetch.
+    assert!(
+        !run(true).contains("bootstrap"),
+        "MVM_SKIP_BUILDER_PREFETCH=1 must skip the prefetch"
     );
 }
 

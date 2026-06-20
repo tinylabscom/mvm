@@ -1,3 +1,4 @@
+mod bootstrap;
 mod build;
 mod bundle;
 mod catalog;
@@ -68,6 +69,12 @@ pub(in crate::commands) struct Cli {
 pub(in crate::commands) enum Commands {
     /// Environment / install lifecycle (bootstrap, update, sign, …)
     Env(env::group::Args),
+    /// Prepare the environment + pre-fetch the builder VM image
+    ///
+    /// Runs host-tooling setup and pre-acquires the builder VM image so the
+    /// first `dev up` is fast. Run automatically by install.sh unless
+    /// `MVM_SKIP_BUILDER_PREFETCH=1`.
+    Bootstrap(bootstrap::Args),
     /// Manage the local dev VM
     Dev(env::dev::Args),
     /// Show console logs from a running microVM
@@ -271,6 +278,7 @@ pub fn run() -> Result<()> {
 
     let result = match cli.command.clone() {
         Commands::Env(a) => env::group::run(&cli, a, &cfg),
+        Commands::Bootstrap(a) => bootstrap::run(&cli, a, &cfg),
         Commands::Dev(a) => env::dev::run(&cli, a, &cfg),
         Commands::Logs(a) => vm::logs::run(&cli, a, &cfg),
         Commands::Ls(a) => vm::ps::run(&cli, a, &cfg),
