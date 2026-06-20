@@ -1959,6 +1959,8 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         config_files: &[],
         secret_files: &[],
         port_mappings: &[],
+        // Persistent named machines are long-lived; they are not transient
+        // auto-named launches and are never claimed from the warm standby pool.
         warm_pool_size: 0,
         network_policy,
     }
