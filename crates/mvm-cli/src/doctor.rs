@@ -1681,16 +1681,45 @@ fn builder_residency_check() -> Check {
     } else {
         "ephemeral per build (cold)"
     };
-    let session = if mvm_build::persistent_builder::read_active_session().is_some() {
-        "persistent builder active"
-    } else {
-        "no persistent builder"
-    };
+    let vms_root = mvm_build::builder_vm::builder_vm_cache_dir().join("vms");
+    let session = builder_residency_session_summary(
+        policy.kind(),
+        mvm_build::persistent_builder::read_active_session().is_some(),
+        builder_vz_snapshot_present(&vms_root),
+    );
     Check {
         name: "builder residency",
         category: "platform",
         ok: true,
         info: format!("{} — builds {} — {}", policy.label(), routing, session),
+    }
+}
+
+#[cfg(feature = "builder-vm")]
+fn builder_vz_snapshot_present(vms_root: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(vms_root) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let dir = entry.path();
+        dir.is_dir() && mvm_build::vz_builder::builder_snapshot_path(&dir).is_file()
+    })
+}
+
+#[cfg(feature = "builder-vm")]
+fn builder_residency_session_summary(
+    kind: mvm_core::residency::ResidencyKind,
+    persistent_active: bool,
+    vz_snapshot_present: bool,
+) -> &'static str {
+    match kind {
+        mvm_core::residency::ResidencyKind::Parked if vz_snapshot_present => {
+            "parked (snapshot present)"
+        }
+        mvm_core::residency::ResidencyKind::Parked => "parked (no snapshot)",
+        _ if persistent_active => "persistent builder active",
+        _ if vz_snapshot_present => "parked snapshot present",
+        _ => "no persistent builder",
     }
 }
 
@@ -4137,6 +4166,45 @@ mod tests {
             c.info.contains("uses persistent") || c.info.contains("ephemeral"),
             "info was {:?}",
             c.info
+        );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn builder_vz_snapshot_present_detects_state_vzsave_under_vms_root() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!builder_vz_snapshot_present(root.path()));
+        let vm_dir = root.path().join("mvm-persistent-builder-vz-dev");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        assert!(!builder_vz_snapshot_present(root.path()));
+        std::fs::write(
+            mvm_build::vz_builder::builder_snapshot_path(&vm_dir),
+            b"snapshot",
+        )
+        .unwrap();
+        assert!(builder_vz_snapshot_present(root.path()));
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn builder_residency_session_summary_names_parked_snapshot_state() {
+        use mvm_core::residency::ResidencyKind;
+
+        assert_eq!(
+            builder_residency_session_summary(ResidencyKind::Parked, false, true),
+            "parked (snapshot present)"
+        );
+        assert_eq!(
+            builder_residency_session_summary(ResidencyKind::Parked, false, false),
+            "parked (no snapshot)"
+        );
+        assert_eq!(
+            builder_residency_session_summary(ResidencyKind::Warm, true, false),
+            "persistent builder active"
+        );
+        assert_eq!(
+            builder_residency_session_summary(ResidencyKind::Warm, false, true),
+            "parked snapshot present"
         );
     }
 }

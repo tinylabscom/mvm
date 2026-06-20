@@ -3164,7 +3164,8 @@ and the residency model and consumes the in-flight pieces rather than rebuilding
   builder fingerprint). Builder-residency decisions now carry `BuilderResidencyAction` plus
   builder snapshot freshness checks (#1121). Follow-up slice: the explicit Vz dev-builder
   park/restore path is wired (`mvmctl dev park` saves `state.vzsave`, next `dev up` restores
-  before cold-boot fallback, `dev status` reports `parked`); idle-trigger automation, FC leg
+  before cold-boot fallback, `dev status` reports `parked`, `doctor` reports parked
+  snapshot-present/no-snapshot state); idle-trigger automation, FC leg
   (Plan 175), and live macOS-26 resume timing remain deferred.
 - **E — Cold acquisition**  ✅ #1102 — `mvmctl bootstrap` pre-fetches the builder VM image
   (instant first run); source-checkout stays release-artifact-free.
