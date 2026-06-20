@@ -545,10 +545,10 @@ git commit -m "feat(plan-205): machine-checked trust-gradient ledger via xtask c
 
 ---
 
-## Deferred (one-step follow-up once Plan 204 lands `mvm-builderd`)
+## Deferred (DONE — Plan 204 landed `mvm-builderd`, #1091)
 
-- Add `scripts/check-builderd-no-authority.sh` (same shape as Task 1, target `mvm-builderd`, assert `load_host_signing_key` / `admit_for_run` absent); wire a `builderd-no-authority` security.yml lane.
-- Add the builder row to `specs/claims/trust-gradient.md`: `| 1 | builder | mvm-builderd | signing-key, plan-admission, audit-writer | ci:builderd-no-authority |`. The monotonic check (2 > 1 > 0) and witness resolution then cover all three daemons.
+- [x] Add `scripts/check-builderd-no-authority.sh` (same shape as Task 1, target `mvm-builderd`, assert `load_host_signing_key` / `host_signer` / `admit_for_run` absent); wire a `builderd-no-authority` security.yml lane.
+- [x] Add the builder row to `specs/claims/trust-gradient.md`: `| 1 | builder | mvm-builderd | signing-key, plan-admission, audit-writer | ci:builderd-no-authority |`. The monotonic check (2 > 1 > 0) and witness resolution now cover all three daemons (`check-trust-gradient: clean (3 rows)`).
 
 ## Sequencing for the rest of Plan 205 (not built here)
 
