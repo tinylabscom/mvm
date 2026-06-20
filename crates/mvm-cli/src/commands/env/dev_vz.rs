@@ -31,6 +31,8 @@ pub(in crate::commands) const DEV_VM_NAME: &str = "mvm-dev";
 /// `~/.cache/mvm/builder-vm/vms/mvm-persistent-builder-vz-dev/` and reap it.
 #[cfg(feature = "builder-vm")]
 const DEV_VM_SESSION_ID: &str = "dev";
+#[cfg(feature = "builder-vm")]
+const DEV_VZ_ACTIVITY_FILE: &str = "last-activity-unix-secs";
 const BUILDER_VM_SOURCE_FINGERPRINT_FILE: &str = ".mvm-source.sha256";
 const BUILDER_VM_ARTIFACT_DIGEST_FILE: &str = ".mvm-artifacts.sha256";
 const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
@@ -363,6 +365,127 @@ fn wait_for_dev_vm_ready(console_log: &std::path::Path) -> Result<()> {
     }
 }
 
+#[cfg(feature = "builder-vm")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VzDevResidencyDecision {
+    Keep,
+    Park,
+    Teardown,
+}
+
+#[cfg(feature = "builder-vm")]
+fn decide_vz_dev_residency(
+    policy: &mvm_core::residency::ResidencyPolicy,
+    running: bool,
+    last_activity_unix_secs: Option<u64>,
+    now_unix_secs: u64,
+) -> VzDevResidencyDecision {
+    if !running {
+        return VzDevResidencyDecision::Keep;
+    }
+    match policy.kind() {
+        mvm_core::residency::ResidencyKind::Cold => VzDevResidencyDecision::Teardown,
+        mvm_core::residency::ResidencyKind::Parked => VzDevResidencyDecision::Park,
+        mvm_core::residency::ResidencyKind::Warm => {
+            let Some(threshold) = policy.idle_timeout() else {
+                return VzDevResidencyDecision::Keep;
+            };
+            let Some(last) = last_activity_unix_secs else {
+                return VzDevResidencyDecision::Keep;
+            };
+            let idle = std::time::Duration::from_secs(now_unix_secs.saturating_sub(last));
+            match mvm_core::residency::decide_builder_residency_action(
+                policy.kind(),
+                idle,
+                threshold,
+            ) {
+                mvm_core::residency::BuilderResidencyAction::Keep => VzDevResidencyDecision::Keep,
+                mvm_core::residency::BuilderResidencyAction::Park => VzDevResidencyDecision::Park,
+                mvm_core::residency::BuilderResidencyAction::Teardown => {
+                    VzDevResidencyDecision::Teardown
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "builder-vm")]
+fn dev_vz_activity_path(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir.join(DEV_VZ_ACTIVITY_FILE)
+}
+
+#[cfg(feature = "builder-vm")]
+fn current_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[cfg(feature = "builder-vm")]
+fn read_dev_vz_last_activity(state_dir: &std::path::Path) -> Option<u64> {
+    let body = std::fs::read_to_string(dev_vz_activity_path(state_dir)).ok()?;
+    body.trim().parse().ok()
+}
+
+#[cfg(feature = "builder-vm")]
+fn touch_dev_vz_activity_at(
+    state_dir: &std::path::Path,
+    now_unix_secs: u64,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(state_dir)?;
+    std::fs::write(dev_vz_activity_path(state_dir), now_unix_secs.to_string())
+}
+
+#[cfg(feature = "builder-vm")]
+pub(in crate::commands) fn touch_dev_vz_activity_now() {
+    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
+    let _ = touch_dev_vz_activity_at(&state_dir, current_unix_secs());
+}
+
+#[cfg(feature = "builder-vm")]
+fn enforce_dev_vz_cold_policy_on_entry(state_dir: &std::path::Path) -> bool {
+    let (policy, _source) = mvm_core::residency::resolve_residency();
+    if !matches!(policy.kind(), mvm_core::residency::ResidencyKind::Cold) {
+        return false;
+    }
+    remove_dev_vz_snapshot_markers(state_dir);
+    if !mvm_build::vz_builder::persistent_vz_supervisor_alive(state_dir) {
+        return false;
+    }
+    mvm_build::vz_builder::stop_persistent_vz_by_pid_file(state_dir);
+    let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
+    true
+}
+
+#[cfg(feature = "builder-vm")]
+fn enforce_dev_vz_residency_policy() -> Result<Option<VzDevResidencyDecision>> {
+    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
+    let running = mvm_build::vz_builder::persistent_vz_supervisor_alive(&state_dir);
+    let (policy, _source) = mvm_core::residency::resolve_residency();
+    let decision = decide_vz_dev_residency(
+        &policy,
+        running,
+        read_dev_vz_last_activity(&state_dir),
+        current_unix_secs(),
+    );
+    match decision {
+        VzDevResidencyDecision::Keep => Ok(None),
+        VzDevResidencyDecision::Park => {
+            mvm_build::vz_builder::park_persistent_vz_builder(&state_dir)
+                .map_err(|e| anyhow::anyhow!("Failed to park dev VM by residency policy: {e}"))?;
+            let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
+            Ok(Some(decision))
+        }
+        VzDevResidencyDecision::Teardown => {
+            mvm_build::vz_builder::stop_persistent_vz_by_pid_file(&state_dir);
+            let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
+            remove_dev_vz_snapshot_markers(&state_dir);
+            Ok(Some(decision))
+        }
+    }
+}
+
 /// Boot the dev VM via the Vz supervisor, optionally opening an
 /// interactive console.
 #[cfg(feature = "builder-vm")]
@@ -374,6 +497,11 @@ pub(super) fn cmd_dev_vz(
 ) -> Result<&'static str> {
     ui::progress("Starting dev environment via Vz (Virtualization.framework)...");
 
+    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
+    if enforce_dev_vz_cold_policy_on_entry(&state_dir) {
+        ui::info("Stopped existing dev VM because MVM_RESIDENCY=cold; cold-booting.");
+    }
+
     if is_vz_dev_running() {
         if base_ref.is_some() {
             anyhow::bail!(
@@ -381,6 +509,7 @@ pub(super) fn cmd_dev_vz(
                  run `mvmctl dev down` first"
             );
         }
+        touch_dev_vz_activity_now();
         if open_shell {
             ui::progress("Dev VM already running. Opening shell...");
             console_interactive(DEV_VM_NAME)?;
@@ -392,7 +521,6 @@ pub(super) fn cmd_dev_vz(
 
     // Reap a dead-but-not-reaped supervisor from a prior session so the
     // fresh start binds a clean state dir.
-    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
     mvm_build::vz_builder::stop_persistent_vz_by_pid_file(&state_dir);
     let console_log = state_dir.join("console.log");
     let allows_persistent = mvm_core::residency::resolve_residency()
@@ -409,6 +537,7 @@ pub(super) fn cmd_dev_vz(
         match mvm_build::vz_builder::restore_persistent_vz_builder_from_snapshot(&state_dir) {
             Ok(_) => {
                 wait_for_dev_vm_ready(&console_log)?;
+                touch_dev_vz_activity_now();
                 ui::success("Dev VM restored from parked snapshot.");
                 if open_shell {
                     ui::info("");
@@ -491,6 +620,7 @@ pub(super) fn cmd_dev_vz(
     drop(handle);
 
     wait_for_dev_vm_ready(&console_log)?;
+    touch_dev_vz_activity_now();
 
     ui::success("Dev VM ready.");
     ui::info("  Shell:      mvmctl dev shell");
@@ -628,6 +758,25 @@ pub(in crate::commands) fn cmd_dev_vz_down(json: bool, reset: bool) -> Result<bo
 
 /// Show dev VM status.
 pub(super) fn cmd_dev_vz_status(json: bool) -> Result<()> {
+    #[cfg(feature = "builder-vm")]
+    {
+        match enforce_dev_vz_residency_policy() {
+            Ok(Some(decision)) if !json => match decision {
+                VzDevResidencyDecision::Park => {
+                    ui::info("Dev VM parked by residency policy.");
+                }
+                VzDevResidencyDecision::Teardown => {
+                    ui::info("Dev VM stopped by cold residency policy.");
+                }
+                VzDevResidencyDecision::Keep => {}
+            },
+            Ok(_) => {}
+            Err(e) if !json => {
+                ui::warn(&format!("Dev VM residency policy enforcement failed: {e}"));
+            }
+            Err(e) => return Err(e),
+        }
+    }
     let running = is_vz_dev_running();
     let state = if running {
         "running"
@@ -7079,5 +7228,77 @@ mod autopark_gating_tests {
     fn resume_requires_a_present_snapshot() {
         assert!(should_resume(true, true));
         assert!(!should_resume(true, false));
+    }
+}
+
+#[cfg(all(test, feature = "builder-vm"))]
+mod vz_residency_keeper_tests {
+    use super::{
+        VzDevResidencyDecision, decide_vz_dev_residency, read_dev_vz_last_activity,
+        touch_dev_vz_activity_at,
+    };
+    use mvm_core::residency::ResidencyPolicy;
+
+    #[test]
+    fn not_running_keeps_for_every_residency() {
+        for policy in [
+            ResidencyPolicy::cold(),
+            ResidencyPolicy::parked(),
+            ResidencyPolicy::always_warm(),
+        ] {
+            assert_eq!(
+                decide_vz_dev_residency(&policy, false, Some(0), 10_000),
+                VzDevResidencyDecision::Keep
+            );
+        }
+    }
+
+    #[test]
+    fn cold_running_tears_down() {
+        assert_eq!(
+            decide_vz_dev_residency(&ResidencyPolicy::cold(), true, Some(100), 200),
+            VzDevResidencyDecision::Teardown
+        );
+    }
+
+    #[test]
+    fn parked_running_parks() {
+        assert_eq!(
+            decide_vz_dev_residency(&ResidencyPolicy::parked(), true, Some(100), 200),
+            VzDevResidencyDecision::Park
+        );
+    }
+
+    #[test]
+    fn warm_without_activity_keeps() {
+        assert_eq!(
+            decide_vz_dev_residency(&ResidencyPolicy::always_warm(), true, None, 2_000),
+            VzDevResidencyDecision::Keep
+        );
+    }
+
+    #[test]
+    fn warm_at_idle_threshold_keeps() {
+        assert_eq!(
+            decide_vz_dev_residency(&ResidencyPolicy::always_warm(), true, Some(0), 1_200),
+            VzDevResidencyDecision::Keep
+        );
+    }
+
+    #[test]
+    fn warm_past_idle_threshold_parks() {
+        assert_eq!(
+            decide_vz_dev_residency(&ResidencyPolicy::always_warm(), true, Some(0), 1_201),
+            VzDevResidencyDecision::Park
+        );
+    }
+
+    #[test]
+    fn activity_timestamp_round_trips_through_state_dir() {
+        let tmp = tempfile::tempdir().expect("create temporary dev vz state dir");
+
+        touch_dev_vz_activity_at(tmp.path(), 55).expect("write dev vz activity timestamp");
+
+        assert_eq!(read_dev_vz_last_activity(tmp.path()), Some(55));
     }
 }

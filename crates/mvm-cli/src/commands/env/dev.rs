@@ -690,6 +690,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 if !dev_vz::is_vz_dev_running() {
                     anyhow::bail!("Dev VM is not running. Start it with: mvmctl dev up");
                 }
+                #[cfg(feature = "builder-vm")]
+                dev_vz::touch_dev_vz_activity_now();
                 console::console_interactive(dev_vz::DEV_VM_NAME)
                     .context("Dev VM is running, but console attach failed")
             }
