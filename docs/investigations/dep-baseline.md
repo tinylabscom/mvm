@@ -108,18 +108,29 @@ achievable by configuration**. Removing aws-lc requires one of:
    Slow (depends on maintainers).
 4. **Defer B4** — accept aws-lc while we use `oci-client`.
 
-### Decision (2026-06-20): option 3 + 4 — upstream FR, rehome to roadmap
+### Decision (2026-06-20): option 3 — upstream the feature, rehome to roadmap
 
-Picked **rehome + upstream** over a fork-now (option 1). Two reasons: (a) it
-is the last and lowest-value dependency-reduction target, and the refactor
-should not stall on it; (b) the bounded fork is not even guaranteed to work —
-reqwest 0.13's `rustls-no-provider` path still pulls `rustls-platform-verifier`,
-which can re-introduce aws-lc on some targets, so the fork could land and leave
-`cargo tree -i aws-lc-rs` non-empty. The durable fix is an upstream
-`oci-client` `rustls-tls-ring` feature (option 3); until it lands, the D1
-forbidden-dep gate + D2 duplicate-major ratchet keep the regression closed and
-the `reqwest` 0.12/0.13 split is a recorded D2 baseline entry, not an open cut.
+Picked **upstream + rehome** over a fork-now (option 1). The fix lives on
+`oci-client` itself (its only rustls option hardcodes aws-lc via both
+`reqwest/rustls` and `jsonwebtoken/aws_lc_rs`), so the durable form is an
+upstream feature, now filed as **[oras-project/rust-oci-client#274][pr274]**:
+`rustls-tls-no-provider = ["reqwest/rustls-no-provider", "jsonwebtoken/rust_crypto"]`,
+mirroring reqwest's own `rustls-no-provider` (consumer installs the ring
+provider). **Validated locally against upstream `main`:** with that feature
+`cargo tree --no-default-features --features rustls-tls-no-provider -i aws-lc-rs`
+is **empty** and the crate builds — correcting an earlier worry in this doc,
+`rustls-platform-verifier` is provider-agnostic and does **not** re-drag aws-lc.
+
+So the bounded fork *would* work; we rehome rather than carry one because a
+one-line upstream feature is cleaner than a maintained `[patch.crates-io]`. Once
+#274 lands it is a plain `oci-client` bump + feature flip + ring-provider install
+(and that collapses the `reqwest` 0.12/0.13 split too); a `[patch.crates-io]`
+bridge to the proven branch is available if we want aws-lc gone sooner. Until
+then the D1 forbidden-dep gate + D2 duplicate-major ratchet keep the regression
+closed and the `reqwest` split is a recorded D2 baseline entry, not an open cut.
 B4 + C1 are tracked on the dependency roadmap, not as refactor-close blockers.
+
+[pr274]: https://github.com/oras-project/rust-oci-client/pull/274
 
 **Net conclusion for Phase B:** there are **no quick mechanical cuts
 left**. The real reductions are (a) **B3** `pgp` −168 (a *security
