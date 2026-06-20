@@ -86,7 +86,7 @@ fn host_arch() -> &'static str {
 
 pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     match args.cmd {
-        Cmd::Build(b) => run_build(b, cli.verbose),
+        Cmd::Build(b) => run_build(b, cli.verbose > 0),
     }
 }
 
