@@ -390,8 +390,19 @@ class GuestRequest10:
     RunEntrypoint: RunEntrypoint
 
 
-class GuestRequest11(Enum):
-    PostRestore = 'PostRestore'
+TokenItem = int
+
+
+@dataclass
+class PostRestore:
+    token: Optional[List[TokenItem]] = field(
+        default_factory=lambda: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    )
+
+
+@dataclass
+class GuestRequest11:
+    PostRestore: PostRestore
 
 
 class GuestRequest12(Enum):
@@ -783,6 +794,7 @@ class GuestResponse13:
 class PostRestoreAck:
     success: bool
     detail: Optional[str] = None
+    reseeded: Optional[bool] = False
 
 
 @dataclass

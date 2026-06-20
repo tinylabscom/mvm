@@ -57,7 +57,32 @@ export type GuestRequest =
         timeout_secs: number;
       };
     }
-  | "PostRestore"
+  | {
+      PostRestore: {
+        /**
+         * @minItems 16
+         * @maxItems 16
+         */
+        token?: [
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+          number
+        ];
+      };
+    }
   | "FsDiff"
   | {
       StartPortForward: {
@@ -334,6 +359,10 @@ export type GuestResponse =
   | {
       PostRestoreAck: {
         detail?: string | null;
+        /**
+         * `true` iff the delivered generation token changed and the guest reseeded its CSPRNG (a fresh clone). `false` for an unchanged/zero token (a plain wake or no-rotation restore). Defaults to `false` on the wire for forward-compat with a pre-rotation ack.
+         */
+        reseeded?: boolean;
         success: boolean;
       };
     }
