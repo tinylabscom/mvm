@@ -140,6 +140,34 @@ impl VmBackend for FirecrackerBackend {
         SnapshotCapability::LiveMemory
     }
 
+    fn warm_start(
+        &self,
+        config: &VmStartConfig,
+        requested: SnapshotCapability,
+    ) -> std::result::Result<VmId, mvm_core::vm_backend::WarmStartError> {
+        use mvm_core::vm_backend::WarmStartError;
+        // Fail closed on an over-request rather than silently degrading — the
+        // same gate the trait default applies (C4).
+        let available = self.snapshot_capability();
+        if !available.satisfies(requested) {
+            return Err(WarmStartError::Unsupported {
+                requested,
+                available,
+                hint: format!(
+                    "this backend warm-starts at the '{}' tier; re-run with that tier \
+                     or `mvmctl up` for a cold boot",
+                    available.label()
+                ),
+            });
+        }
+        // Mint a fresh generation token so two clones of one snapshot reseed to
+        // distinct CSPRNG state, then load + resume + deliver it.
+        let token = mvm_core::crypto::vmgenid::fresh_generation_token(&config.name).token;
+        microvm::warm_restore_instance(&config.name, token)
+            .map_err(|e| WarmStartError::Failed(format!("{e:#}")))?;
+        Ok(VmId(config.name.clone()))
+    }
+
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
         // Fail closed when KVM is absent rather than letting the
         // Firecracker boot fault deep in the API handshake. Firecracker
@@ -1139,5 +1167,46 @@ mod tests {
         assert_eq!(BackendTier::Tier1.label(), "tier1-hardened");
         assert_eq!(BackendTier::Tier2.label(), "tier2-fast-local");
         assert_eq!(BackendTier::Tier3.label(), "tier3-fallback");
+    }
+
+    #[test]
+    fn warm_start_on_libkrun_refuses_live_memory_with_typed_hint() {
+        use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
+        // libkrun is disk-only: a live-memory warm-start request must fail
+        // closed with the typed Unsupported variant + a recovery hint, never a
+        // silent cold boot.
+        let backend = AnyBackend::from_hypervisor("libkrun");
+        let config = VmStartConfig {
+            name: "ghost".to_string(),
+            ..Default::default()
+        };
+        let err = backend
+            .warm_start(&config, SnapshotCapability::LiveMemory)
+            .expect_err("disk-only backend must refuse a live-memory request");
+        match err {
+            WarmStartError::Unsupported {
+                requested,
+                available,
+                hint,
+            } => {
+                assert_eq!(requested, SnapshotCapability::LiveMemory);
+                assert_eq!(available, SnapshotCapability::DiskOnly);
+                assert!(hint.contains("disk-only"), "hint names the tier: {hint}");
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn warm_start_on_firecracker_admits_the_live_memory_tier() {
+        use mvm_core::vm_backend::SnapshotCapability;
+        // Firecracker advertises the live-memory tier, so the C4 gate admits a
+        // live-memory request (the restore itself needs a live KVM VM and is
+        // exercised on the gated lane, not here).
+        let fc = FirecrackerBackend;
+        assert!(
+            fc.snapshot_capability()
+                .satisfies(SnapshotCapability::LiveMemory)
+        );
     }
 }
