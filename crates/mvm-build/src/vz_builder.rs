@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::builder_vm::{
     BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmDisk, BuilderVmError,
@@ -39,12 +39,13 @@ use crate::builder_vm::{
 };
 use crate::builder_vm_runtime::{
     NixStoreImageLock, acquire_nix_store_image_lock, builder_vm_timeout, finalize_flake_job,
-    finalize_install_job, stage_job_dir, supervisor_exit_error,
+    finalize_install_job, read_job_result, shell_job_exit_error, stage_job_dir,
+    stage_shell_job_dir, supervisor_exit_error,
 };
 use crate::host_gvproxy;
 use crate::libkrun_builder::{
-    BuilderVmImage, DISPATCH_SOCK_MARKER, builder_vm_cache_dir, ensure_builder_vm_image,
-    ensure_utf8_path, host_arch_tag, unique_job_id,
+    BuilderShellJob, BuilderShellResult, BuilderVmImage, DISPATCH_SOCK_MARKER,
+    builder_vm_cache_dir, ensure_builder_vm_image, ensure_utf8_path, host_arch_tag, unique_job_id,
 };
 
 /// Standard kernel cmdline the Vz supervisor pairs with the builder
@@ -611,6 +612,194 @@ impl VzBuilderVm {
         }
         Ok(())
     }
+
+    fn validate_shell_job(&self, job: &BuilderShellJob) -> Result<(), BuilderVmError> {
+        ensure_utf8_path(&job.work_dir, "work_dir")?;
+        ensure_utf8_path(&job.artifact_out, "artifact_out")?;
+        for disk in &job.extra_disks {
+            ensure_utf8_path(&disk.path, "extra_disk")?;
+            if disk.id.trim().is_empty() {
+                return Err(BuilderVmError::ExtractionFailed(
+                    "extra disk id is empty".to_string(),
+                ));
+            }
+            if !disk.path.is_file() {
+                return Err(BuilderVmError::ExtractionFailed(format!(
+                    "extra disk path does not exist or is not a file: {}",
+                    disk.path.display()
+                )));
+            }
+        }
+        if !job.work_dir.is_dir() {
+            return Err(BuilderVmError::ExtractionFailed(format!(
+                "shell job work_dir must be a directory: {}",
+                job.work_dir.display()
+            )));
+        }
+        std::fs::create_dir_all(&job.artifact_out).map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!(
+                "creating artifact_out {}: {e}",
+                job.artifact_out.display()
+            ))
+        })?;
+        if job.script.trim().is_empty() {
+            return Err(BuilderVmError::NixBuildFailed(
+                "builder shell script is empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Run a narrow builder shell job on the Vz builder backend.
+    ///
+    /// This mirrors the libkrun/QEMU shell-job contract used by OCI
+    /// rootfs materialization: `/work` is the input tree, `/out` is
+    /// the artifact directory, `/job/cmd.sh` is executed by
+    /// `mvm-host-vm-init`, and caller extra disks enumerate after the
+    /// persistent Nix-store disk.
+    pub fn run_shell_script(
+        &self,
+        job: &BuilderShellJob,
+    ) -> Result<BuilderShellResult, BuilderVmError> {
+        self.validate_shell_job(job)?;
+
+        if !mvm_core::platform::current().has_vz() {
+            return Err(BuilderVmError::ExtractionFailed(
+                "Apple Virtualization.framework is not available on this host. \
+                 Requires macOS 13 or later."
+                    .to_string(),
+            ));
+        }
+
+        let supervisor_path = match &self.supervisor_path_override {
+            Some(p) => p.clone(),
+            None => resolve_vz_supervisor_path()?,
+        };
+        let image = match &self.image_override {
+            Some(image) => image.clone(),
+            None => ensure_builder_vm_image()?,
+        };
+        if let BuilderVmImage::RootDir { .. } = image {
+            return Err(BuilderVmError::ExtractionFailed(
+                "VzBuilderVm shell jobs require a Rootfs builder image; RootDir is libkrun-specific \
+                 (krun_set_root has no Vz analog)"
+                    .to_string(),
+            ));
+        }
+
+        let nix_store_lock = acquire_nix_store_image_lock(
+            &builder_vm_cache_dir(),
+            host_arch_tag(),
+            u64::from(self.nix_store_mib),
+        )?;
+        let job_id = unique_job_id();
+        let job_dir = builder_vm_cache_dir().join("jobs").join(&job_id);
+        stage_shell_job_dir(&job_dir, &job.script)?;
+        tracing::info!(
+            job_dir = %job_dir.display(),
+            "Vz builder VM shell job dir staged"
+        );
+
+        let vm_name = vz_shell_vm_name(&job_id);
+        let vm_state_dir = builder_vm_cache_dir().join("vms").join(&vm_name);
+        std::fs::create_dir_all(&vm_state_dir).map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!(
+                "creating Vz builder shell VM state dir {}: {e}",
+                vm_state_dir.display()
+            ))
+        })?;
+        let gvproxy = host_gvproxy::spawn_detached(&vm_state_dir).map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("spawn gvproxy for Vz builder shell VM: {e}"))
+        })?;
+        let _gvproxy_guard = BuilderGvproxyGuard {
+            state_dir: vm_state_dir.clone(),
+        };
+
+        let backend = VzBuilderBackend::new_with_rootfs_image(supervisor_path, image.clone())?;
+        let (kernel_path, kernel_cmdline) = match &image {
+            BuilderVmImage::Rootfs {
+                kernel_path,
+                cmdline,
+                ..
+            } => (kernel_path.clone(), cmdline.clone()),
+            BuilderVmImage::RootDir { .. } => unreachable!(),
+        };
+        let run_config = BuilderVmRunConfig {
+            name: vm_name,
+            kernel_path,
+            kernel_cmdline,
+            initrd_path: None,
+            vcpus: self.vcpus,
+            memory_mib: self.memory_mib,
+            vsock_ports: Vec::new(),
+            vm_state_dir: vm_state_dir.clone(),
+        };
+        let virtio_mounts = vec![
+            BuilderVmMount {
+                tag: "work".to_string(),
+                host_path: job.work_dir.clone(),
+                read_only: true,
+            },
+            BuilderVmMount {
+                tag: "out".to_string(),
+                host_path: job.artifact_out.clone(),
+                read_only: false,
+            },
+            BuilderVmMount {
+                tag: "job".to_string(),
+                host_path: job_dir.clone(),
+                read_only: false,
+            },
+        ];
+        let mut extra_disks = vec![BuilderVmDisk {
+            id: "nix-store".to_string(),
+            host_path: nix_store_lock.path().to_path_buf(),
+            read_only: false,
+        }];
+        extra_disks.extend(job.extra_disks.iter().map(|disk| BuilderVmDisk {
+            id: disk.id.clone(),
+            host_path: disk.path.clone(),
+            read_only: disk.read_only,
+        }));
+
+        let exit_info = backend.run_attached_with_mounts_gvproxy(
+            &run_config,
+            &virtio_mounts,
+            &extra_disks,
+            builder_vm_timeout()?,
+            Some(&gvproxy),
+        )?;
+        if let Some(panic_line) = exit_info.panic_line {
+            return Err(BuilderVmError::SeedKernelPanic {
+                panic_line,
+                console_log_path: backend
+                    .console_log_path(&vm_state_dir)
+                    .display()
+                    .to_string(),
+            });
+        }
+        match exit_info.exit_code {
+            Some(0) => {}
+            Some(other) => return Err(supervisor_exit_error(other, &vm_state_dir)),
+            None => {
+                return Err(BuilderVmError::NixBuildFailed(format!(
+                    "Vz builder shell supervisor exited without a status code. \
+                     Console log at {}.",
+                    backend.console_log_path(&vm_state_dir).display(),
+                )));
+            }
+        }
+
+        let result = read_job_result(&job_dir)?;
+        if result.exit_code != 0 {
+            return Err(shell_job_exit_error(result.exit_code, &result.stderr_tail));
+        }
+        drop(nix_store_lock);
+        Ok(BuilderShellResult {
+            job_dir,
+            vm_state_dir,
+        })
+    }
 }
 
 impl BuilderVm for VzBuilderVm {
@@ -879,6 +1068,10 @@ impl BuilderVm for VzBuilderVm {
         // backends share `~/.cache/mvm/builder-vm/jobs/`).
         Ok(())
     }
+}
+
+fn vz_shell_vm_name(job_id: &str) -> String {
+    format!("vzsh-{job_id}")
 }
 
 /// Resolve the absolute path to the `mvm-vz-supervisor` binary.
@@ -1410,7 +1603,9 @@ fn vz_persistent_guest_vsock_ports(expose_guest_agent: bool) -> Vec<u32> {
 
 const BUILDER_SUPERVISOR_CONFIG_FILE: &str = "supervisor-config.json";
 const BUILDER_SNAPSHOT_FILE: &str = "state.vzsave";
-const VZ_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
+const VZ_CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+const VZ_CONTROL_READ_POLL_TIMEOUT: Duration = Duration::from_millis(250);
+const VZ_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Result of parking a persistent Vz builder. The snapshot and matching
 /// machine-id sidecar are the two files required to restore the guest's memory
@@ -1487,7 +1682,7 @@ pub fn park_persistent_vz_builder(
 ) -> Result<ParkedVzBuilderSnapshot, BuilderVmError> {
     let snapshot_path = builder_snapshot_path(state_dir);
     save_persistent_vz_builder_snapshot(state_dir, &snapshot_path)?;
-    stop_persistent_vz_by_pid_file(state_dir);
+    kill_persistent_vz_by_pid_file(state_dir);
     Ok(ParkedVzBuilderSnapshot {
         machine_id_path: builder_snapshot_machine_id_path(&snapshot_path),
         snapshot_path,
@@ -1518,7 +1713,7 @@ fn save_persistent_vz_builder_snapshot(
         .map(PathBuf::from)
         .unwrap_or_else(|| state_dir.join("control.sock"));
     remove_stale_builder_snapshot(snapshot_path)?;
-    let command = format!("SAVE {}", snapshot_path.display());
+    let command = format!("SAVE_PARK {}", snapshot_path.display());
     send_builder_vz_control_command(&socket_path, &command)?;
     let machine_id_path = builder_snapshot_machine_id_path(snapshot_path);
     if !snapshot_path.is_file() {
@@ -1651,8 +1846,12 @@ fn send_builder_vz_control_command(
             socket_path.display()
         ))
     })?;
-    stream.set_read_timeout(Some(VZ_CONTROL_TIMEOUT)).ok();
-    stream.set_write_timeout(Some(VZ_CONTROL_TIMEOUT)).ok();
+    stream
+        .set_read_timeout(Some(VZ_CONTROL_READ_POLL_TIMEOUT))
+        .ok();
+    stream
+        .set_write_timeout(Some(VZ_CONTROL_WRITE_TIMEOUT))
+        .ok();
     stream.write_all(command.as_bytes()).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!("write Vz control command {command:?}: {e}"))
     })?;
@@ -1660,20 +1859,53 @@ fn send_builder_vz_control_command(
         .write_all(b"\n")
         .map_err(|e| BuilderVmError::ExtractionFailed(format!("write Vz control newline: {e}")))?;
 
+    let line = read_builder_vz_control_response(&mut stream, Instant::now())?;
+    parse_builder_vz_control_response(command, line)
+}
+
+#[cfg(unix)]
+fn read_builder_vz_control_response<R: Read>(
+    reader: &mut R,
+    started_at: Instant,
+) -> Result<String, BuilderVmError> {
+    let deadline = started_at + VZ_CONTROL_RESPONSE_TIMEOUT;
     let mut response = Vec::with_capacity(64);
     let mut buf = [0u8; 1];
     loop {
-        let n = stream.read(&mut buf).map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("read Vz control response: {e}"))
-        })?;
-        if n == 0 || buf[0] == b'\n' {
-            break;
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(_) if buf[0] == b'\n' => break,
+            Ok(_) => response.push(buf[0]),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if Instant::now() >= deadline {
+                    return Err(BuilderVmError::ExtractionFailed(format!(
+                        "timed out waiting for Vz control response after {:?}",
+                        VZ_CONTROL_RESPONSE_TIMEOUT
+                    )));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => {
+                return Err(BuilderVmError::ExtractionFailed(format!(
+                    "read Vz control response: {e}"
+                )));
+            }
         }
-        response.push(buf[0]);
     }
-    let line = String::from_utf8(response).map_err(|e| {
+    String::from_utf8(response).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!("Vz control response was not UTF-8: {e}"))
-    })?;
+    })
+}
+
+fn parse_builder_vz_control_response(
+    command: &str,
+    line: String,
+) -> Result<String, BuilderVmError> {
     if let Some(rest) = line.strip_prefix("ERR") {
         return Err(BuilderVmError::ExtractionFailed(format!(
             "Vz builder supervisor refused {command:?}: {}",
@@ -1872,6 +2104,14 @@ pub fn dev_builder_vz_console_log() -> PathBuf {
 /// `VzBackend::stop` reap ladder without depending on its private
 /// helpers across the crate boundary.
 pub fn stop_persistent_vz_by_pid_file(state_dir: &Path) -> bool {
+    stop_persistent_vz_by_pid_file_inner(state_dir, libc::SIGTERM)
+}
+
+fn kill_persistent_vz_by_pid_file(state_dir: &Path) -> bool {
+    stop_persistent_vz_by_pid_file_inner(state_dir, libc::SIGKILL)
+}
+
+fn stop_persistent_vz_by_pid_file_inner(state_dir: &Path, signal: libc::c_int) -> bool {
     // Best-effort reap of the VM's host-side gvproxy. The supervisor
     // detaches it, so `dev down` owns its teardown. Idempotent (a
     // missing PID sidecar is a clean no-op), so it's safe even on the
@@ -1886,9 +2126,9 @@ pub fn stop_persistent_vz_by_pid_file(state_dir: &Path) -> bool {
         let _ = std::fs::remove_file(&pid_path);
         return false;
     }
-    // SAFETY: pid was just probed alive; a SIGTERM that races a natural
+    // SAFETY: pid was just probed alive; a signal that races a natural
     // exit returns ESRCH, which is benign.
-    unsafe { libc::kill(pid, libc::SIGTERM) };
+    unsafe { libc::kill(pid, signal) };
     let deadline = std::time::Instant::now() + PERSISTENT_VZ_STOP_TIMEOUT;
     while std::time::Instant::now() < deadline {
         if !pid_alive(pid) {
@@ -2011,6 +2251,33 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
+    struct WouldBlockThenResponse {
+        returned_would_block: bool,
+        response: std::io::Cursor<Vec<u8>>,
+    }
+
+    #[cfg(unix)]
+    impl WouldBlockThenResponse {
+        fn new(response: &[u8]) -> Self {
+            Self {
+                returned_would_block: false,
+                response: std::io::Cursor::new(response.to_vec()),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl std::io::Read for WouldBlockThenResponse {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.returned_would_block {
+                self.returned_would_block = true;
+                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+            }
+            self.response.read(buf)
+        }
+    }
+
     #[test]
     fn builder_snapshot_paths_live_under_state_dir() {
         let state_dir = Path::new("/abs/cache/vms/mvm-persistent-builder-vz-dev");
@@ -2035,6 +2302,16 @@ mod tests {
         let response = send_builder_vz_control_command(&socket_path, "STATUS").expect("ok");
         assert_eq!(response, "saved");
         assert_eq!(handle.join().expect("join fake supervisor"), "STATUS");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builder_vz_control_client_retries_would_block_response_reads() {
+        let mut reader = WouldBlockThenResponse::new(b"OK saved\n");
+        let line =
+            read_builder_vz_control_response(&mut reader, Instant::now()).expect("read response");
+        let response = parse_builder_vz_control_response("SAVE /tmp/snap", line).expect("ok");
+        assert_eq!(response, "saved");
     }
 
     #[cfg(unix)]
@@ -2118,7 +2395,7 @@ mod tests {
         save_persistent_vz_builder_snapshot(state_dir, &snapshot_path).expect("save snapshot");
         assert_eq!(
             handle.join().expect("join fake supervisor"),
-            format!("SAVE {}", snapshot_path.display())
+            format!("SAVE_PARK {}", snapshot_path.display())
         );
         assert_eq!(
             std::fs::read(&snapshot_path).expect("read snapshot"),
@@ -2470,6 +2747,88 @@ mod tests {
         assert!(
             matches!(err, BuilderVmError::ExtractionFailed(ref msg) if msg.contains("does not exist")),
             "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn vz_builder_vm_validate_shell_job_creates_artifact_out() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let work = scratch.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let extra_disk = scratch.path().join("rootfs.ext4");
+        std::fs::File::create(&extra_disk)
+            .unwrap()
+            .set_len(4096)
+            .unwrap();
+        let artifact_out = scratch.path().join("nested").join("out");
+        let job = BuilderShellJob {
+            work_dir: work,
+            artifact_out: artifact_out.clone(),
+            script: "true".to_string(),
+            extra_disks: vec![crate::libkrun_builder::BuilderExtraDisk {
+                id: "oci-rootfs".to_string(),
+                path: extra_disk,
+                read_only: false,
+            }],
+        };
+
+        VzBuilderVm::new().validate_shell_job(&job).unwrap();
+        assert!(artifact_out.is_dir(), "artifact_out must be created");
+    }
+
+    #[test]
+    fn vz_builder_vm_validate_shell_job_rejects_missing_extra_disk() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let work = scratch.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let job = BuilderShellJob {
+            work_dir: work,
+            artifact_out: scratch.path().join("out"),
+            script: "true".to_string(),
+            extra_disks: vec![crate::libkrun_builder::BuilderExtraDisk {
+                id: "oci-rootfs".to_string(),
+                path: scratch.path().join("missing.ext4"),
+                read_only: false,
+            }],
+        };
+
+        let err = VzBuilderVm::new().validate_shell_job(&job).unwrap_err();
+        assert!(
+            matches!(err, BuilderVmError::ExtractionFailed(ref msg) if msg.contains("extra disk path")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn vz_builder_vm_validate_shell_job_rejects_empty_script() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let work = scratch.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let job = BuilderShellJob {
+            work_dir: work,
+            artifact_out: scratch.path().join("out"),
+            script: " \n ".to_string(),
+            extra_disks: Vec::new(),
+        };
+
+        let err = VzBuilderVm::new().validate_shell_job(&job).unwrap_err();
+        assert!(
+            matches!(err, BuilderVmError::NixBuildFailed(ref msg) if msg.contains("empty")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn vz_shell_vm_name_keeps_gvproxy_reply_socket_under_macos_limit() {
+        let vm_name = vz_shell_vm_name("1781993470214-14925");
+        let path = Path::new("/tmp/mvm-plan205-live-proof3/cache/builder-vm/vms")
+            .join(vm_name)
+            .join("vz-net-reply.sock");
+
+        assert!(
+            path.to_string_lossy().len() <= 103,
+            "path must fit macOS sockaddr_un: {}",
+            path.display()
         );
     }
 
