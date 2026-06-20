@@ -84,6 +84,15 @@ host-only control socket, `<snapshot>.machine-id` sidecar, and persisted
 `SupervisorConfig` replay. This is CI-tested without booting a VM; live macOS
 timing proof remains the acceptance gate.
 
+The invocation-driven keeper shape is also landed for the libkrun
+`persistent-builder` session: the session record now carries
+`last_activity_unix_secs`, dispatch touches it before/after use, and the next
+build invocation applies the resolved residency policy. `MVM_RESIDENCY=cold`
+actively tears down that live session before single-shot fallback, while
+idle `Park` decisions degrade to teardown because the libkrun path has no
+snapshot primitive. Vz dev-builder idle auto-park and the live timing proof
+remain open.
+
 ## Design
 
 ### Trust gradient (ADR-090 §1)
@@ -136,8 +145,10 @@ typed allowlisted protocol, so residency shrinks rather than widens the attack s
 - [x] Make `mvm-builderd` long-lived across `mvmctl` invocations (consume Plan 204's
       protocol; do not reimplement it) (#1091).
 - [~] Add session reuse: a second command reuses the resident builder, store, and page
-      cache (Plan 196) without re-boot. The resident daemon substrate is present;
-      live no-boot proof remains part of the final latency gate.
+      cache (Plan 196) without re-boot. The resident daemon substrate is present,
+      activity is persisted on the libkrun persistent-builder session, and
+      cold/idle policy is enforced on the next build invocation; live no-boot
+      proof remains part of the final latency gate.
 - [~] Add readiness, version-skew, and crash-recovery handling for the resident daemon.
       Readiness/protocol handling lives in Plan 204; crash-recovery closeout remains
       in that lifecycle lane.
@@ -167,7 +178,8 @@ typed allowlisted protocol, so residency shrinks rather than widens the attack s
 - [~] Add doctor visibility for builder residency. #1114 reports resolved builder
       residency policy and persistent-session presence; the Vz parked-snapshot
       slice adds `parked (snapshot present)` / `parked (no snapshot)` wording.
-      Idle-age detail remains live-lane follow-up.
+      Idle-age detail remains follow-up even though the hidden
+      `persistent-builder` session now records activity timestamps.
 
 ### F. Docs and posture
 
@@ -223,7 +235,8 @@ Notes:
 - [x] Residency policy unit tests: warm/parked transitions, idle demotion, default
       resolution, override (#1094/#1099/#1114).
 - [~] Resident-daemon reuse test: second request reuses the live builder + hot store.
-      Substrate is in place; live no-boot proof remains open.
+      Substrate is in place and the libkrun persistent-builder session now has
+      CI-tested activity/keeper decisions; live no-boot proof remains open.
 - [x] Builder snapshot freshness test: stale builder residency inputs refuse reuse (#1121).
 - [~] Claim-11 admit-time re-verification holds on a resumed builder. The design remains
       host-side and content-addressed; resumed-builder live proof remains open.

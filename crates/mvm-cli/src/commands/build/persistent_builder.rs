@@ -48,7 +48,9 @@ use mvm_build::builder_vm::BuilderJob;
 use mvm_build::libkrun_builder::{
     DISPATCH_SOCK_MARKER, LibkrunPersistentHostVm, PersistentVmHandle,
 };
-use mvm_build::persistent_builder::{DispatchOutcome, PersistentBuilderSupervisor};
+use mvm_build::persistent_builder::{
+    DispatchOutcome, PersistentBuilderSupervisor, current_unix_secs,
+};
 
 use crate::commands::Cli;
 
@@ -116,13 +118,20 @@ struct SessionRecord {
     /// `libc::kill(pid, 0)` to check liveness before attempting
     /// shutdown.
     supervisor_pid: u32,
+    /// Last successful host-side activity. Optional for backward compatibility
+    /// with older session records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_activity_unix_secs: Option<u64>,
 }
 
 fn session_record_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    home.join(".mvm")
+    mvm_core::config::mvm_data_dir_strict()
+        .unwrap_or_else(|_| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join(".mvm")
+        })
         .join("run")
         .join("persistent-builder.json")
 }
@@ -198,6 +207,7 @@ fn run_start(args: StartArgs) -> Result<()> {
         job_dir: handle.job_dir().to_path_buf(),
         workspace_root: workspace,
         supervisor_pid,
+        last_activity_unix_secs: Some(current_unix_secs()),
     };
     write_session_record(&record)?;
 
@@ -235,6 +245,7 @@ fn run_submit(args: SubmitArgs) -> Result<()> {
     let attr = args
         .attr
         .unwrap_or_else(|| format!("packages.{}-linux.default", host_arch_for_attr()));
+    let _ = mvm_build::persistent_builder::touch_active_session(current_unix_secs());
     let job_dir_relpath = stage_flake_cmd_sh(&record.job_dir, &args.flake, &attr)?;
 
     let supervisor = PersistentBuilderSupervisor::new(&record.dispatch_socket_path)
@@ -249,6 +260,7 @@ fn run_submit(args: SubmitArgs) -> Result<()> {
             job_dir_relpath.clone(),
         )
         .context("PersistentBuilderSupervisor::submit")?;
+    let _ = mvm_build::persistent_builder::touch_active_session(current_unix_secs());
 
     print_outcome(&outcome);
 
@@ -375,6 +387,9 @@ fn run_status() -> Result<()> {
                 record.supervisor_pid,
                 if alive { "alive" } else { "stale" }
             );
+            if let Some(last) = record.last_activity_unix_secs {
+                println!("last_activity_unix_secs: {last}");
+            }
         }
         Err(e) => {
             println!("no persistent-builder session ({e})");
@@ -675,6 +690,7 @@ mod tests {
             job_dir: PathBuf::from("/tmp/jobs"),
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
+            last_activity_unix_secs: Some(1234567890),
         };
         let json = serde_json::to_vec(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_slice(&json).expect("deserialize");

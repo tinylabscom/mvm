@@ -1,7 +1,9 @@
 # Plan 205 — Builder residency Step 2 (live-coupled mechanism) — Follow-up plan
 
 **Status:** In progress. Explicit Vz dev-builder snapshot park/restore is wired
-and CI-tested; idle-policy automation and live macOS-26 timing proof remain open.
+and CI-tested; the libkrun persistent-builder path now tracks activity and
+honors invocation-driven cold/idle teardown. Vz idle auto-park and live
+macOS-26 timing proof remain open.
 **Depends on:** Step 1 (`specs/notes/plan-205-builder-residency-step1-execution.md`, merged) and Plan 204's `mvm-builderd`.
 
 ## Why this is a separate, deferred plan
@@ -15,8 +17,11 @@ Step 1 made `MVM_RESIDENCY` govern the **routing** decision (cold → ephemeral 
   `mvmctl dev park` snapshots/stops the Vz dev builder and the next `dev up`
   restores an existing `state.vzsave`. The remaining gap is policy automation
   (park after idle/build) and the live timing proof.
-- `MVM_RESIDENCY=cold` skips the persistent builder for *new* builds but does **not** tear down a builder that is already running.
-- There is no builder **idle timeout** — a persistent builder stays up until explicit `dev down` / `persistent-builder stop`.
+- `MVM_RESIDENCY=cold` skips the persistent builder for *new* builds and, on the
+  next build invocation, actively tears down a live libkrun `persistent-builder`
+  session before falling through to the single-shot builder.
+- Vz dev-builder idle automation is still open — the explicit `dev park` path
+  exists, but a running Vz dev builder is not yet auto-parked by policy timeout.
 
 ## Workstreams
 
@@ -27,15 +32,15 @@ Step 1 made `MVM_RESIDENCY` govern the **routing** decision (cold → ephemeral 
 - [ ] Live macOS-26 proof: a parked builder restores and serves a build via `mvm-builderd` without a cold boot.
 
 ### S2.2 — Idle-timeout keeper
-- [ ] A mechanism that demotes a persistent builder after `ResidencyPolicy::idle_timeout()` of inactivity: `parked` → snapshot+suspend (S2.1), `cold` → teardown, `warm` → keep. Track last-activity on the persistent-builder session record.
-- [ ] Decide the keeper shape (a check on the next `mvmctl` invocation vs. a lightweight background timer) — prefer the invocation-driven check first (no new daemon), escalate to a keeper only if needed. Pure decision function (`policy + idle_secs + now → Keep | Park | Teardown`) unit-tested; the live action gated.
+- [~] A mechanism that demotes a persistent builder after `ResidencyPolicy::idle_timeout()` of inactivity: the libkrun `persistent-builder` session record now carries `last_activity_unix_secs`, build dispatch touches it before/after use, and the next build invocation applies policy. Because that path has no memory snapshot primitive, `Park` degrades to teardown; Vz dev-builder idle auto-park remains open.
+- [x] Decide the keeper shape (a check on the next `mvmctl` invocation vs. a lightweight background timer) — shipped as invocation-driven first (no new daemon). Pure decision tests cover fresh warm keep, `cold` teardown, snapshot-unavailable idle teardown, and old records without `last_activity_unix_secs`.
 
 ### S2.3 — `dev up` / warm auto-start
 - [ ] When the resolved policy is `warm` and no persistent builder is active, `dev up` (and optionally the first build) auto-starts a persistent builder so warm actually keeps one ready — the deferred auto-start noted in `persistent_builder.rs`.
 - [ ] Respect explicit user lifecycle: `persistent-builder start`/`stop` always win; auto-start only fills the warm default.
 
 ### S2.4 — Active teardown on `cold`
-- [ ] When the policy is `cold`, stop a running persistent builder (not just skip routing for new builds) — so `MVM_RESIDENCY=cold` truly means "no resident builder." Reuse the existing `persistent-builder stop` teardown.
+- [~] When the policy is `cold`, stop a running persistent builder (not just skip routing for new builds) — the libkrun `persistent-builder` session is stopped best-effort on the next build invocation before single-shot fallback. Vz dev-builder cold-policy teardown remains open with the Vz idle keeper.
 
 ## Acceptance
 
