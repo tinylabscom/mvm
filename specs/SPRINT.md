@@ -46,6 +46,16 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 - [x] Advanced
       [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
+      WS-1 save/restore surface: `mvmctl vm save <name> [--tag] [--json]`
+      and `mvmctl vm restore <checkpoint> [--json]` now exist as first-class
+      aliases over the existing `vm-full` checkpoint primitive, reusing the
+      same sealed content, audit binding, and JSON shapes rather than adding a
+      parallel VZ supervisor path. Both aliases fail closed on the Vz
+      `snapshot_capability()` tier before mutating checkpoint state; parser,
+      audit-coverage, and entry-convergence tests pin the surface. Remaining
+      WS-1 work is the live macOS save → stop → restore acceptance proof.
+- [x] Advanced
+      [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
       WS-3 checkpoint/snapshot JSON coverage: `mvmctl vm checkpoint restore`,
       `rm`, and `fork` now accept `--json` and emit schema-versioned mutation
       results after the underlying restore/delete/fork succeeds; `mvmctl vm

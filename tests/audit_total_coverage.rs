@@ -112,6 +112,8 @@ const VM_SUB: &[(&str, AuditPosture)] = &[
     ("pause", AuditPosture::Emits("VmStop")),
     ("resume", AuditPosture::Emits("VmStart")),
     ("snapshot", AuditPosture::DelegatesToSub(SNAPSHOT_SUB)),
+    ("save", AuditPosture::Emits("CheckpointCreated")),
+    ("restore", AuditPosture::Emits("CheckpointRestored")),
     ("checkpoint", AuditPosture::DelegatesToSub(CHECKPOINT_SUB)),
     ("cp", AuditPosture::Emits("VmFileCopy")),
     ("fs", AuditPosture::Emits("VmFsMutate")),

@@ -1868,6 +1868,33 @@ fn test_snapshot_rm_json_parses() {
     ));
 }
 
+#[test]
+fn test_vm_save_json_parses() {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "vm", "save", "myvm", "--tag", "gold", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Save(checkpoint::SaveArgs {
+                name,
+                tag: Some(tag),
+                json: true,
+            })
+        }) if name == "myvm" && tag == "gold"
+    ));
+}
+
+#[test]
+fn test_vm_restore_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "restore", "ckpt-abc", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Restore(checkpoint::RestoreArgs { id, json: true })
+        }) if id == "ckpt-abc"
+    ));
+}
+
 // --- Checkpoint CLI tests ---
 
 #[test]
@@ -3504,6 +3531,8 @@ fn state_touching_commands_trigger_entry_convergence() {
     assert!(touches(&["mvmctl", "down"]));
     assert!(touches(&["mvmctl", "console", "myvm"]));
     assert!(touches(&["mvmctl", "vm", "pause", "myvm"]));
+    assert!(touches(&["mvmctl", "vm", "save", "myvm"]));
+    assert!(touches(&["mvmctl", "vm", "restore", "ckpt-myvm"]));
     assert!(touches(&["mvmctl", "ls"]));
     assert!(touches(&["mvmctl", "dev", "status"]));
 }

@@ -18,6 +18,8 @@
 > **Status: 🟡 in progress.** Spun out of [Plan 177](./177-backend-consolidation.md)
 > §"deferred follow-ups". WS-3 lifecycle/checkpoint verbs landed:
 > `dev status/down/up --json` and `vm checkpoint`/`vm snapshot` JSON coverage.
+> WS-1 first-class `vm save` / `vm restore` aliases landed; live acceptance
+> remains hardware-gated.
 >
 > **Priority update 2026-06-15:** Plan 200 owns the new beginner-facing
 > `mvmctl machine` lifecycle. This plan should stay limited to VZ-specific
@@ -49,13 +51,17 @@ The supervisor already implements `saveMachineStateToURL` / `restoreMachineState
 pause→save→resume fix is in). Expose it as first-class verbs rather than an
 internal primitive.
 
-- [ ] who-calls audit: confirm the snapshot/restore entrypoints + which
-      verbs (`mvmctl vm save/restore`? `mvmctl checkpoint`?) the existing
-      surface already has vs. needs (overlaps Plan 159 WS-2 checkpoint/fork —
-      reuse, don't fork).
-- [ ] honest capability gating: `save`/`restore` refuse cleanly on a backend
-      whose `snapshot_capability()` is `Unsupported` (Linux/older macOS), with
-      the tier surfaced via `doctor`.
+- [x] who-calls audit: existing Vz save/restore lives under
+      `mvmctl vm checkpoint create --class vm-full` and
+      `mvmctl vm checkpoint restore`; Plan 189 should expose ergonomic
+      `mvmctl vm save` / `mvmctl vm restore` aliases over that primitive, not
+      fork a parallel supervisor path.
+- [x] honest capability gating: `save`/`restore` check the Vz
+      `snapshot_capability()` tier and refuse before checkpoint mutation unless
+      the host reports `save-restore`; doctor already surfaces the same tier.
+      Parser tests pin both aliases, audit coverage classifies them as
+      `CheckpointCreated` / `CheckpointRestored`, and lifecycle convergence
+      runs on entry.
 - [ ] acceptance: round-trip a vz VM through save → stop → restore on macOS-26
       hardware; state preserved.
 
