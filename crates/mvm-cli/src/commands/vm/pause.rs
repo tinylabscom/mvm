@@ -54,6 +54,12 @@ pub(in crate::commands) struct ResumeArgs {
     /// `firecracker`. See `pause --help` for the `mock` variant.
     #[arg(long, default_value = "firecracker")]
     pub hypervisor: String,
+    /// Drive the resume through the backend's live-memory warm-start path
+    /// (`VmBackend::warm_start`) instead of the plain verify-and-resume.
+    /// Fails closed with a typed recovery hint on a backend that can't
+    /// warm-start at the live-memory tier (e.g. libkrun is disk-only).
+    #[arg(long)]
+    pub warm: bool,
 }
 
 /// A running VM whose state dir carries a `vz.pid` marker is a Vz VM — it gets
@@ -144,6 +150,39 @@ pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConf
     Ok(())
 }
 
+/// Drive a `--warm` resume through the backend's `warm_start` path. Picks the
+/// backend from the hypervisor selector, requests the live-memory tier, and
+/// renders a `WarmStartError` cleanly: an over-request on a disk-only backend
+/// (libkrun) surfaces the typed recovery hint and exits nonzero rather than
+/// silently cold-booting.
+fn run_warm_start(name: &str, hypervisor: &str) -> Result<()> {
+    use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
+
+    let backend = AnyBackend::from_hypervisor(hypervisor);
+    let config = VmStartConfig {
+        name: name.to_string(),
+        ..Default::default()
+    };
+    match backend.warm_start(&config, SnapshotCapability::LiveMemory) {
+        Ok(_) => {
+            let registry_path = mvm::vm::name_registry::registry_path();
+            if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
+                let _ = registry.set_paused(name, false);
+                let _ = registry.touch_last_active(name, mvm_core::time::utc_now());
+                let _ = registry.save(&registry_path);
+            }
+            println!("{name}: warm-started (live-memory resume, VMGenID rotated)");
+            mvm_core::audit_emit!(WorkloadWake, vm: name, "warm_start backend={hypervisor}");
+            Ok(())
+        }
+        Err(e @ WarmStartError::Unsupported { .. }) => {
+            // Fail closed: name the tier mismatch + recovery hint, exit nonzero.
+            Err(anyhow::anyhow!("{e}"))
+        }
+        Err(e) => Err(anyhow::anyhow!("{e}")).with_context(|| format!("warm-starting VM {name:?}")),
+    }
+}
+
 pub(in crate::commands) fn run_resume(
     _cli: &Cli,
     args: ResumeArgs,
@@ -169,6 +208,15 @@ pub(in crate::commands) fn run_resume(
         mvm_core::audit_emit!(WorkloadWake, vm: &args.name, "backend=vz");
         return Ok(());
     }
+    // `--warm` routes the resume through the backend's live-memory
+    // warm-start path (`VmBackend::warm_start`). It mints a fresh VMGenID
+    // token, loads + resumes the sealed snapshot, and delivers the token so
+    // the guest reseeds — and fails closed with a typed recovery hint on a
+    // backend that can't satisfy the live-memory tier (e.g. libkrun).
+    if args.warm {
+        return run_warm_start(&args.name, &args.hypervisor);
+    }
+
     // For resume the VM may not yet be running — the snapshot
     // restore path is what brings it back. We still need a
     // Firecracker socket the orchestrator can talk to. v1
@@ -228,7 +276,10 @@ pub(in crate::commands) fn run_resume(
 }
 
 fn firecracker_socket(vm_dir: &str) -> PathBuf {
-    PathBuf::from(format!("{vm_dir}/runtime/firecracker.socket"))
+    // The control socket `start_vm_firecracker` actually creates — `fc.socket`
+    // in the VM dir. (Was `runtime/firecracker.socket`, a path nothing in the
+    // tree ever creates, so pause/resume could never find a live VM.)
+    PathBuf::from(format!("{vm_dir}/fc.socket"))
 }
 
 // `mvmctl snapshot ls / rm` lives next to pause/resume because
