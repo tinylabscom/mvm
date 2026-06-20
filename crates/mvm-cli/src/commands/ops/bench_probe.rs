@@ -52,6 +52,7 @@ pub fn resolve_probe_image() -> Result<ProbeImage> {
 pub fn admit_probe_plan(
     rootfs: &std::path::Path,
     vm_name: &str,
+    backend_name: &str,
     keys_dir: Option<&std::path::Path>,
 ) -> Result<AdmittedPlan> {
     let sha = mvm_core::crypto::image_verify::sha256_file(rootfs)
@@ -59,7 +60,7 @@ pub fn admit_probe_plan(
     let input = SynthesisInput {
         vm_name,
         tenant: Some("bench"),
-        backend_name: "libkrun",
+        backend_name,
         image_name: vm_name,
         image_sha256: &sha,
         image_cosign_bundle: None,
@@ -167,7 +168,7 @@ pub fn boot_hold_once(vm_name: &str) -> Result<HeldProbeVm> {
     let img = resolve_probe_image()?;
     // `None` keys_dir → the real ~/.mvm/keys host signer, so the
     // supervisor's in-process re-verify trusts the plan signature.
-    let admitted = admit_probe_plan(std::path::Path::new(&img.rootfs), vm_name, None)?;
+    let admitted = admit_probe_plan(std::path::Path::new(&img.rootfs), vm_name, "libkrun", None)?;
 
     let mut cfg = VmStartConfig {
         name: vm_name.to_string(),
@@ -185,6 +186,7 @@ pub fn boot_hold_once(vm_name: &str) -> Result<HeldProbeVm> {
 
     let (pid, pid_seen) = wait_for_pid_file(vm_name)?;
     let (connected, ready) = wait_for_ready(vm_name)?;
+    record_boot_timing_report(vm_name)?;
 
     let marks = BootMarks {
         start,
@@ -256,6 +258,16 @@ fn wait_for_ready(vm_name: &str) -> Result<(std::time::Instant, std::time::Insta
     }
 }
 
+/// Record the guest-monotonic boot timing cross-check next to the
+/// bench reports. The host-clock spans remain the regression metric;
+/// this sidecar exists only to audit the guest's own phase timing.
+#[cfg(feature = "libkrun-live")]
+fn record_boot_timing_report(vm_name: &str) -> Result<()> {
+    let report = crate::commands::vm::wait::fetch_readiness(vm_name)
+        .with_context(|| format!("fetching readiness report for {vm_name}"))?;
+    super::bench::write_boot_timing_sidecar(vm_name, &report.boot_millis)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,9 +299,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let rootfs = tmp.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"not a real rootfs but hashable").unwrap();
-        let admitted = admit_probe_plan(&rootfs, "bench-probe", Some(tmp.path())).unwrap();
+        let admitted =
+            admit_probe_plan(&rootfs, "bench-probe", "libkrun", Some(tmp.path())).unwrap();
         // The admitted plan binds the workload name we passed.
         assert_eq!(admitted.plan.image.name, "bench-probe");
         assert_eq!(admitted.plan.resources.mem_mib, u64::from(PROBE_MEM_MIB));
+    }
+
+    #[test]
+    fn admit_probe_plan_generates_distinct_nonces_per_boot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"not a real rootfs but hashable").unwrap();
+
+        let first =
+            admit_probe_plan(&rootfs, "bench-probe-a", "firecracker", Some(tmp.path())).unwrap();
+        let second =
+            admit_probe_plan(&rootfs, "bench-probe-b", "firecracker", Some(tmp.path())).unwrap();
+
+        assert_ne!(first.plan.nonce, second.plan.nonce);
     }
 }

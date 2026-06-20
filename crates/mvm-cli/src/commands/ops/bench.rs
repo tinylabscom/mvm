@@ -8,15 +8,14 @@
 //! statistics, a versioned JSON report, and baseline regression-gating
 //! — is pure and fully unit-tested via a mock [`LaunchProbe`].
 //!
-//! The live libkrun probe (the only part that needs a real backend) is
-//! the one piece not exercised by unit tests; it is a tracked
-//! follow-up. When wired
-//! it MUST drive `admit_plan_for_boot` so the harness measures the real
-//! signed-plan boot, never a bypass — otherwise we'd benchmark a
-//! configuration that can never ship.
+//! Live probes MUST drive signed-plan admission so the harness measures
+//! a launch shape that can actually ship. libkrun is feature-gated
+//! behind `libkrun-live`; Firecracker runs on Linux/KVM hosts.
+//! Firecracker v1 reports backend-accepted/PID-observed readiness
+//! because the current Linux proof image does not expose the guest
+//! control-plane ping endpoint.
 //!
-//! Backend scope: v1 measures **libkrun** only. Vz / Firecracker benches
-//! are a deferred follow-up (logged, not silently skipped).
+//! Backend scope: v1 measures libkrun, Vz, and Firecracker.
 
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -65,9 +64,17 @@ pub(in crate::commands) struct MicrovmLaunchArgs {
     /// Safety cap for `--concurrency` so a typo cannot fork-bomb the host.
     #[arg(long, default_value_t = 64)]
     pub max_concurrency: u32,
-    /// Hypervisor backend to measure. v1 supports `libkrun` only.
+    /// Hypervisor backend to measure. v1 supports `libkrun`, macOS `vz`, and
+    /// Linux `firecracker`.
     #[arg(long, default_value = "libkrun")]
     pub hypervisor: String,
+    /// Warm standby pool target to request for each measured launch.
+    ///
+    /// Currently supported for Linux Firecracker launch probes; use
+    /// `0` for a cold baseline and `1` for the Plan 118 warm-claim
+    /// delta proof.
+    #[arg(long, default_value_t = 0)]
+    pub warm_pool_size: u32,
     /// Write the JSON report here. Default:
     /// `~/.mvm/bench/microvm-launch-<rfc3339>.json` plus a stable
     /// `microvm-launch-latest.json` copy.
@@ -94,7 +101,8 @@ pub(in crate::commands) struct MicrovmDensityArgs {
     /// Safety cap for `--count` so a typo cannot exhaust host memory.
     #[arg(long, default_value_t = 16)]
     pub max_count: u32,
-    /// Hypervisor backend to measure. v1 supports `libkrun` only.
+    /// Hypervisor backend to measure. v1 supports `libkrun`, macOS `vz`, and
+    /// Linux `firecracker`.
     #[arg(long, default_value = "libkrun")]
     pub hypervisor: String,
     /// Write the JSON report here. Default:
@@ -105,6 +113,13 @@ pub(in crate::commands) struct MicrovmDensityArgs {
     /// Also print the JSON report to stdout.
     #[arg(long)]
     pub json: bool,
+    /// Compare `per_instance_bytes` against this baseline report and
+    /// exit non-zero if it regressed past `--max-regression-pct`.
+    #[arg(long)]
+    pub baseline: Option<PathBuf>,
+    /// Maximum tolerated regression (percent) when `--baseline` is set.
+    #[arg(long, default_value_t = 10.0)]
+    pub max_regression_pct: f64,
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -238,6 +253,8 @@ pub struct HostDescriptor {
     pub libkrun_version: Option<String>,
     pub kernel_sha256: Option<String>,
     pub cmdline: Option<String>,
+    #[serde(default)]
+    pub readiness_boundary: Option<String>,
 }
 
 /// A full benchmark run: host fingerprint, run counts, per-phase
@@ -336,7 +353,12 @@ fn build_report(
 }
 
 /// Derive density stats from per-instance footprint samples.
-#[cfg(any(test, feature = "libkrun-live"))]
+#[cfg(any(
+    test,
+    feature = "libkrun-live",
+    target_os = "linux",
+    target_os = "macos"
+))]
 pub fn summarize_density(samples: &[InstanceFootprint]) -> DensityStats {
     let instances = samples.len() as u32;
     let total_bytes = samples.iter().map(|sample| sample.bytes).sum::<u64>();
@@ -362,7 +384,12 @@ pub fn summarize_tail_latency(samples: &[f64]) -> TailLatencyStats {
     }
 }
 
-#[cfg(any(test, feature = "libkrun-live"))]
+#[cfg(any(
+    test,
+    feature = "libkrun-live",
+    target_os = "linux",
+    target_os = "macos"
+))]
 pub fn build_density_report(
     host: HostDescriptor,
     count: u32,
@@ -420,6 +447,18 @@ pub fn read_report(path: &Path) -> Result<BenchReport> {
     serde_json::from_slice(&bytes).with_context(|| format!("parsing baseline {}", path.display()))
 }
 
+pub fn read_launch_distribution_report(path: &Path) -> Result<LaunchDistributionReport> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("reading baseline {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parsing baseline {}", path.display()))
+}
+
+pub fn read_density_report(path: &Path) -> Result<DensityReport> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("reading baseline {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parsing baseline {}", path.display()))
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Baseline regression gate (pure).
 // ──────────────────────────────────────────────────────────────────
@@ -469,6 +508,100 @@ pub fn compare_to_baseline(
         };
     }
     let delta_pct = (cur - base) / base * 100.0;
+    if delta_pct > max_regression_pct {
+        RegressionVerdict::Regressed {
+            delta_pct,
+            limit_pct: max_regression_pct,
+        }
+    } else {
+        RegressionVerdict::Ok { delta_pct }
+    }
+}
+
+pub fn compare_launch_distribution_to_baseline(
+    baseline: &LaunchDistributionReport,
+    current: &LaunchDistributionReport,
+    max_regression_pct: f64,
+) -> RegressionVerdict {
+    if baseline.schema_version != current.schema_version {
+        return RegressionVerdict::Incomparable {
+            reason: format!(
+                "schema version differs (baseline {}, current {})",
+                baseline.schema_version, current.schema_version
+            ),
+        };
+    }
+    if baseline.host != current.host {
+        return RegressionVerdict::Incomparable {
+            reason: "host descriptor differs (os/arch/hypervisor/kernel/cmdline) — \
+                     a baseline from a different host or kernel is not comparable"
+                .to_string(),
+        };
+    }
+    if baseline.concurrency != current.concurrency {
+        return RegressionVerdict::Incomparable {
+            reason: format!(
+                "concurrency differs (baseline {}, current {})",
+                baseline.concurrency, current.concurrency
+            ),
+        };
+    }
+    compare_metric(
+        baseline.total_ready_tail_ms.p95,
+        current.total_ready_tail_ms.p95,
+        max_regression_pct,
+        "non-finite or zero baseline p95 total_ready_ms",
+    )
+}
+
+pub fn compare_density_to_baseline(
+    baseline: &DensityReport,
+    current: &DensityReport,
+    max_regression_pct: f64,
+) -> RegressionVerdict {
+    if baseline.schema_version != current.schema_version {
+        return RegressionVerdict::Incomparable {
+            reason: format!(
+                "schema version differs (baseline {}, current {})",
+                baseline.schema_version, current.schema_version
+            ),
+        };
+    }
+    if baseline.host != current.host {
+        return RegressionVerdict::Incomparable {
+            reason: "host descriptor differs (os/arch/hypervisor/kernel/cmdline) — \
+                     a baseline from a different host or kernel is not comparable"
+                .to_string(),
+        };
+    }
+    if baseline.count != current.count {
+        return RegressionVerdict::Incomparable {
+            reason: format!(
+                "density count differs (baseline {}, current {})",
+                baseline.count, current.count
+            ),
+        };
+    }
+    compare_metric(
+        baseline.stats.per_instance_bytes as f64,
+        current.stats.per_instance_bytes as f64,
+        max_regression_pct,
+        "zero baseline per_instance_bytes",
+    )
+}
+
+fn compare_metric(
+    baseline: f64,
+    current: f64,
+    max_regression_pct: f64,
+    invalid_reason: &str,
+) -> RegressionVerdict {
+    if !(baseline.is_finite() && current.is_finite()) || baseline <= 0.0 {
+        return RegressionVerdict::Incomparable {
+            reason: invalid_reason.to_string(),
+        };
+    }
+    let delta_pct = (current - baseline) / baseline * 100.0;
     if delta_pct > max_regression_pct {
         RegressionVerdict::Regressed {
             delta_pct,
@@ -563,7 +696,7 @@ where
 }
 
 /// Linux `/proc/<pid>/smaps_rollup` reports proportional set size in KiB.
-#[cfg(any(test, all(target_os = "linux", feature = "libkrun-live")))]
+#[cfg(any(test, target_os = "linux"))]
 pub fn parse_linux_smaps_rollup_pss_bytes(input: &str) -> Result<u64> {
     for line in input.lines() {
         let trimmed = line.trim_start();
@@ -586,7 +719,7 @@ pub fn parse_linux_smaps_rollup_pss_bytes(input: &str) -> Result<u64> {
     bail!("smaps_rollup did not contain a Pss line")
 }
 
-#[cfg(all(target_os = "linux", feature = "libkrun-live"))]
+#[cfg(target_os = "linux")]
 pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
     let path = PathBuf::from("/proc")
         .join(pid.to_string())
@@ -596,7 +729,7 @@ pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
     parse_linux_smaps_rollup_pss_bytes(&body)
 }
 
-#[cfg(all(target_os = "macos", feature = "libkrun-live"))]
+#[cfg(target_os = "macos")]
 pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
     let mut info = std::mem::MaybeUninit::<libc::rusage_info_v4>::zeroed();
     let rc = unsafe {
@@ -614,12 +747,29 @@ pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
     Ok(info.ri_phys_footprint)
 }
 
-#[cfg(all(
-    feature = "libkrun-live",
-    not(any(target_os = "linux", target_os = "macos"))
-))]
+#[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
 pub fn read_process_footprint_bytes(_pid: u32) -> Result<u64> {
     bail!("process footprint sampling is only implemented on Linux and macOS")
+}
+
+/// Persist a guest-monotonic boot timing cross-check beside the bench reports.
+/// The host-clock report remains the regression metric; this sidecar audits the
+/// guest's own phase timing without mixing clock domains.
+pub(in crate::commands::ops) fn write_boot_timing_sidecar(
+    vm_name: &str,
+    boot_millis: &mvm_guest::vsock::BootTimingReport,
+) -> Result<()> {
+    let path = PathBuf::from(mvm_core::config::mvm_state_dir())
+        .join("bench")
+        .join(format!("boot-timing-{vm_name}.json"));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating boot timing dir {}", parent.display()))?;
+    }
+    let json =
+        serde_json::to_string_pretty(boot_millis).context("serializing boot timing report")?;
+    std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -703,7 +853,367 @@ impl LaunchProbe for LibkrunProbe {
             // The runtime libkrun cmdline (Apple Silicon HVF / virtio
             // console), matching the backend's supervisor config.
             cmdline: Some("console=hvc0 root=/dev/vda rw init=/init".to_string()),
+            readiness_boundary: Some("guest-agent-ping".to_string()),
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct VzProbe {
+    os: String,
+    arch: String,
+    name_prefix: String,
+    iter: u32,
+}
+
+#[cfg(target_os = "macos")]
+impl VzProbe {
+    fn new(_args: &MicrovmLaunchArgs) -> Result<Self> {
+        Self::new_with_prefix("mvm-bench-vz")
+    }
+
+    fn new_with_prefix(name_prefix: impl Into<String>) -> Result<Self> {
+        Ok(Self {
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            name_prefix: name_prefix.into(),
+            iter: 0,
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl LaunchProbe for VzProbe {
+    fn measure_once(&mut self) -> Result<IterationTiming> {
+        self.iter += 1;
+        let name = format!("{}-{}", self.name_prefix, self.iter);
+        let held = boot_vz_hold_once(&name)?;
+        let marks = held.marks;
+        drop(held);
+        assert_vz_bench_cleanup(&name)?;
+        Ok(marks.to_timing())
+    }
+
+    fn host_descriptor(&self) -> HostDescriptor {
+        let kernel_sha256 = super::bench_probe::resolve_probe_image()
+            .ok()
+            .and_then(|img| {
+                mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&img.kernel)).ok()
+            });
+        HostDescriptor {
+            os: self.os.clone(),
+            arch: self.arch.clone(),
+            hypervisor: "vz".to_string(),
+            libkrun_version: None,
+            kernel_sha256,
+            cmdline: Some("console=hvc0 root=/dev/vda rw init=/init".to_string()),
+            readiness_boundary: Some("guest-agent-readiness".to_string()),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct HeldVzVm {
+    vm_name: String,
+    pid: u32,
+    marks: BootMarks,
+}
+
+#[cfg(target_os = "macos")]
+impl HeldVzVm {
+    fn vm_name(&self) -> &str {
+        &self.vm_name
+    }
+
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for HeldVzVm {
+    fn drop(&mut self) {
+        use mvm_core::vm_backend::VmId;
+
+        let backend = mvm_backend::backend::AnyBackend::from_hypervisor("vz");
+        let _ = backend.stop(&VmId(self.vm_name.clone()));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn boot_vz_hold_once(vm_name: &str) -> Result<HeldVzVm> {
+    use mvm_core::vm_backend::VmStartConfig;
+    use std::time::Instant;
+
+    use crate::commands::vm::plan_admission::populate_audit_substrate;
+
+    let img = super::bench_probe::resolve_probe_image()?;
+    let admitted = super::bench_probe::admit_probe_plan(
+        std::path::Path::new(&img.rootfs),
+        vm_name,
+        "vz",
+        None,
+    )?;
+
+    let mut cfg = VmStartConfig {
+        name: vm_name.to_string(),
+        rootfs_path: img.rootfs.clone(),
+        kernel_path: Some(img.kernel.clone()),
+        cpus: 2,
+        memory_mib: 2048,
+        ..Default::default()
+    };
+    populate_audit_substrate(&mut cfg, &admitted, None)?;
+
+    let backend = mvm_backend::backend::AnyBackend::from_hypervisor("vz");
+    let start = Instant::now();
+    backend.start(&cfg).context("probe vz backend.start")?;
+
+    let (pid, pid_seen) = wait_for_vz_pid_file(vm_name)?;
+    let (connected, ready) = wait_for_guest_readiness_and_record(vm_name)?;
+
+    Ok(HeldVzVm {
+        vm_name: vm_name.to_string(),
+        pid,
+        marks: BootMarks {
+            start,
+            pid_seen,
+            connected,
+            ready,
+        },
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_vz_pid_file(vm_name: &str) -> Result<(u32, std::time::Instant)> {
+    use mvm_guest::vsock::adaptive_backoff;
+
+    let pid_path = mvm_core::config::vm_state_dir(vm_name).join("vz.pid");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut attempt = 0u32;
+    loop {
+        if let Ok(body) = std::fs::read_to_string(&pid_path)
+            && let Ok(pid) = body.trim().parse::<u32>()
+        {
+            return Ok((pid, std::time::Instant::now()));
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "probe: Vz supervisor pid file never appeared or was invalid at {}",
+                pid_path.display()
+            );
+        }
+        std::thread::sleep(adaptive_backoff(attempt));
+        attempt += 1;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_guest_readiness_and_record(
+    vm_name: &str,
+) -> Result<(std::time::Instant, std::time::Instant)> {
+    use mvm_guest::vsock::adaptive_backoff;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    let mut attempt = 0u32;
+    loop {
+        if let Ok(report) = crate::commands::vm::wait::fetch_readiness(vm_name) {
+            let now = std::time::Instant::now();
+            write_boot_timing_sidecar(vm_name, &report.boot_millis)?;
+            return Ok((now, now));
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("probe: guest control plane never reached Ready (readiness) for {vm_name}");
+        }
+        std::thread::sleep(adaptive_backoff(attempt));
+        attempt += 1;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn assert_vz_bench_cleanup(vm_name: &str) -> Result<()> {
+    let backend = mvm_backend::backend::AnyBackend::from_hypervisor("vz");
+    let list = backend
+        .list()
+        .with_context(|| format!("listing Vz VMs after bench cleanup for {vm_name}"))?;
+    if list.iter().any(|vm| vm.name == vm_name) {
+        bail!("bench cleanup leaked Vz VM registry entry for {vm_name}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+struct FirecrackerProbe {
+    os: String,
+    arch: String,
+    name_prefix: String,
+    warm_pool_size: u32,
+    iter: u32,
+}
+
+#[cfg(target_os = "linux")]
+impl FirecrackerProbe {
+    fn new(args: &MicrovmLaunchArgs) -> Result<Self> {
+        Self::new_with_prefix_and_warm_pool_size("mvm-bench-fc", args.warm_pool_size)
+    }
+
+    fn new_with_prefix(name_prefix: impl Into<String>) -> Result<Self> {
+        Self::new_with_prefix_and_warm_pool_size(name_prefix, 0)
+    }
+
+    fn new_with_prefix_and_warm_pool_size(
+        name_prefix: impl Into<String>,
+        warm_pool_size: u32,
+    ) -> Result<Self> {
+        Ok(Self {
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            name_prefix: name_prefix.into(),
+            warm_pool_size,
+            iter: 0,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl LaunchProbe for FirecrackerProbe {
+    fn measure_once(&mut self) -> Result<IterationTiming> {
+        self.iter += 1;
+        let name = format!("{}-{}", self.name_prefix, self.iter);
+        let held = boot_firecracker_hold_once(&name, self.warm_pool_size)?;
+        let marks = held.marks;
+        drop(held);
+        assert_firecracker_bench_cleanup(&name)?;
+        Ok(marks.to_timing())
+    }
+
+    fn host_descriptor(&self) -> HostDescriptor {
+        let kernel_sha256 = super::bench_probe::resolve_probe_image()
+            .ok()
+            .and_then(|img| {
+                mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&img.kernel)).ok()
+            });
+        HostDescriptor {
+            os: self.os.clone(),
+            arch: self.arch.clone(),
+            hypervisor: "firecracker".to_string(),
+            libkrun_version: None,
+            kernel_sha256,
+            cmdline: Some("console=ttyS0 reboot=k panic=1 net.ifnames=0 ip=<per-slot>".to_string()),
+            readiness_boundary: Some("firecracker-pid".to_string()),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct HeldFirecrackerVm {
+    vm_name: String,
+    pid: u32,
+    marks: BootMarks,
+}
+
+#[cfg(target_os = "linux")]
+impl HeldFirecrackerVm {
+    fn vm_name(&self) -> &str {
+        &self.vm_name
+    }
+
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for HeldFirecrackerVm {
+    fn drop(&mut self) {
+        use mvm_core::vm_backend::VmId;
+
+        let backend = mvm_backend::backend::AnyBackend::from_hypervisor("firecracker");
+        let _ = backend.stop(&VmId(self.vm_name.clone()));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn boot_firecracker_hold_once(vm_name: &str, warm_pool_size: u32) -> Result<HeldFirecrackerVm> {
+    use mvm_core::vm_backend::VmStartConfig;
+    use std::time::Instant;
+
+    use crate::commands::vm::plan_admission::populate_audit_substrate;
+
+    let img = super::bench_probe::resolve_probe_image()?;
+    let admitted = super::bench_probe::admit_probe_plan(
+        std::path::Path::new(&img.rootfs),
+        vm_name,
+        "firecracker",
+        None,
+    )?;
+
+    let mut cfg = VmStartConfig {
+        name: vm_name.to_string(),
+        rootfs_path: img.rootfs.clone(),
+        kernel_path: Some(img.kernel.clone()),
+        cpus: 2,
+        memory_mib: 2048,
+        warm_pool_size,
+        ..Default::default()
+    };
+    populate_audit_substrate(&mut cfg, &admitted, None)?;
+
+    let backend = mvm_backend::backend::AnyBackend::from_hypervisor("firecracker");
+    let start = Instant::now();
+    backend
+        .start(&cfg)
+        .context("probe firecracker backend.start")?;
+
+    let abs_dir = mvm_backend::microvm::resolve_running_vm_dir(vm_name)?;
+    let (pid, pid_seen) = wait_for_firecracker_pid(&abs_dir)?;
+    // The current Linux proof image used by the Firecracker host boots
+    // successfully but does not expose the mvm guest-agent ping endpoint.
+    // Report backend-accepted/PID-observed timing honestly and fingerprint
+    // that boundary in HostDescriptor so it cannot be baseline-compared
+    // against guest-agent-ready libkrun reports.
+    let connected = pid_seen;
+    let ready = pid_seen;
+
+    Ok(HeldFirecrackerVm {
+        vm_name: vm_name.to_string(),
+        pid,
+        marks: BootMarks {
+            start,
+            pid_seen,
+            connected,
+            ready,
+        },
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn assert_firecracker_bench_cleanup(vm_name: &str) -> Result<()> {
+    let backend = mvm_backend::backend::AnyBackend::from_hypervisor("firecracker");
+    let list = backend
+        .list()
+        .with_context(|| format!("listing VMs after bench cleanup for {vm_name}"))?;
+    if list.iter().any(|vm| vm.name == vm_name) {
+        anyhow::bail!("bench cleanup leaked VM registry entry for {vm_name}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_firecracker_pid(abs_dir: &str) -> Result<(u32, std::time::Instant)> {
+    use mvm_guest::vsock::adaptive_backoff;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut attempt = 0u32;
+    loop {
+        if let Ok(pid) = mvm_backend::microvm::read_firecracker_pid(abs_dir) {
+            return Ok((pid, std::time::Instant::now()));
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("probe: Firecracker pid file never appeared under {abs_dir}");
+        }
+        std::thread::sleep(adaptive_backoff(attempt));
+        attempt += 1;
     }
 }
 
@@ -749,12 +1259,9 @@ fn write_report_with_latest<T: Serialize>(
 }
 
 fn run_microvm_launch(args: MicrovmLaunchArgs) -> Result<()> {
-    if args.hypervisor != "libkrun" {
-        bail!(
-            "bench microvm-launch v1 supports --hypervisor libkrun only (got {:?}); \
-             Vz / Firecracker benches are a tracked Plan 93 follow-up",
-            args.hypervisor
-        );
+    validate_launch_hypervisor(&args.hypervisor)?;
+    if args.warm_pool_size > 0 && args.hypervisor != "firecracker" {
+        bail!("--warm-pool-size is currently wired for --hypervisor firecracker benchmarks");
     }
     if args.concurrency == 0 {
         bail!("--concurrency must be >= 1");
@@ -774,13 +1281,17 @@ fn run_microvm_launch(args: MicrovmLaunchArgs) -> Result<()> {
         if args.warmup > 0 {
             bail!("--warmup is only supported for serial microvm-launch runs");
         }
-        if args.baseline.is_some() {
-            bail!("--baseline is only supported for serial microvm-launch runs");
-        }
-        let host = LibkrunProbe::new(&args)?.host_descriptor();
-        let report = run_launch_distribution(host, args.concurrency, args.max_concurrency, |i| {
-            LibkrunProbe::new_with_prefix(format!("mvm-bench-c{i}"))
-        })?;
+        let report = match args.hypervisor.as_str() {
+            "libkrun" => {
+                let host = LibkrunProbe::new(&args)?.host_descriptor();
+                run_launch_distribution(host, args.concurrency, args.max_concurrency, |i| {
+                    LibkrunProbe::new_with_prefix(format!("mvm-bench-c{i}"))
+                })?
+            }
+            "firecracker" => run_firecracker_launch_distribution(&args)?,
+            "vz" => run_vz_launch_distribution(&args)?,
+            _ => unreachable!("validated hypervisor"),
+        };
         let out_path = write_report_with_latest(&report, args.out, "microvm-launch-concurrent")?;
         eprintln!(
             "[mvm] bench microvm-launch: concurrency={}, p95 total_ready_ms={:.2}, report at {}",
@@ -791,11 +1302,50 @@ fn run_microvm_launch(args: MicrovmLaunchArgs) -> Result<()> {
         if args.json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        if let Some(baseline_path) = args.baseline.as_deref() {
+            let baseline = read_launch_distribution_report(baseline_path)?;
+            match compare_launch_distribution_to_baseline(
+                &baseline,
+                &report,
+                args.max_regression_pct,
+            ) {
+                RegressionVerdict::Ok { delta_pct } => {
+                    eprintln!(
+                        "[mvm] bench: concurrent p95 within tolerance ({delta_pct:+.2}% vs baseline)"
+                    );
+                }
+                RegressionVerdict::Incomparable { reason } => {
+                    bail!("bench baseline is incomparable: {reason}");
+                }
+                RegressionVerdict::Regressed {
+                    delta_pct,
+                    limit_pct,
+                } => {
+                    bail!(
+                        "bench regression: concurrent p95 total_ready_ms up {delta_pct:+.2}% \
+                         vs baseline (limit {limit_pct:.2}%)"
+                    );
+                }
+            }
+        }
         return Ok(());
     }
 
-    let mut probe = LibkrunProbe::new(&args)?;
-    let report = run_benchmark(&mut probe, args.runs, args.warmup)?;
+    let report = match args.hypervisor.as_str() {
+        "libkrun" => {
+            let mut probe = LibkrunProbe::new(&args)?;
+            run_benchmark(&mut probe, args.runs, args.warmup)?
+        }
+        "firecracker" => {
+            let mut probe = new_firecracker_probe(&args)?;
+            run_benchmark(&mut probe, args.runs, args.warmup)?
+        }
+        "vz" => {
+            let mut probe = new_vz_probe(&args)?;
+            run_benchmark(&mut probe, args.runs, args.warmup)?
+        }
+        _ => unreachable!("validated hypervisor"),
+    };
     let out_path = write_report_with_latest(&report, args.out, "microvm-launch")?;
 
     eprintln!(
@@ -834,13 +1384,7 @@ fn run_microvm_launch(args: MicrovmLaunchArgs) -> Result<()> {
 }
 
 fn run_microvm_density(args: MicrovmDensityArgs) -> Result<()> {
-    if args.hypervisor != "libkrun" {
-        bail!(
-            "bench microvm-density v1 supports --hypervisor libkrun only (got {:?}); \
-             Vz / Firecracker benches are a tracked Plan 118 follow-up",
-            args.hypervisor
-        );
-    }
+    validate_density_hypervisor(&args.hypervisor)?;
     if args.count == 0 {
         bail!("--count must be >= 1");
     }
@@ -855,7 +1399,12 @@ fn run_microvm_density(args: MicrovmDensityArgs) -> Result<()> {
         );
     }
 
-    let report = run_libkrun_density(args.count, args.max_count)?;
+    let report = match args.hypervisor.as_str() {
+        "libkrun" => run_libkrun_density(args.count, args.max_count)?,
+        "firecracker" => run_firecracker_density(args.count, args.max_count)?,
+        "vz" => run_vz_density(args.count, args.max_count)?,
+        _ => unreachable!("validated hypervisor"),
+    };
     let out_path = write_report_with_latest(&report, args.out, "microvm-density")?;
     eprintln!(
         "[mvm] bench microvm-density: {} instances, per-instance={} bytes, report at {}",
@@ -868,7 +1417,131 @@ fn run_microvm_density(args: MicrovmDensityArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     }
 
+    if let Some(baseline_path) = args.baseline.as_deref() {
+        let baseline = read_density_report(baseline_path)?;
+        match compare_density_to_baseline(&baseline, &report, args.max_regression_pct) {
+            RegressionVerdict::Ok { delta_pct } => {
+                eprintln!(
+                    "[mvm] bench: density per-instance footprint within tolerance ({delta_pct:+.2}% vs baseline)"
+                );
+            }
+            RegressionVerdict::Incomparable { reason } => {
+                bail!("bench baseline is incomparable: {reason}");
+            }
+            RegressionVerdict::Regressed {
+                delta_pct,
+                limit_pct,
+            } => {
+                bail!(
+                    "bench regression: density per-instance footprint up {delta_pct:+.2}% \
+                     vs baseline (limit {limit_pct:.2}%)"
+                );
+            }
+        }
+    }
+
     Ok(())
+}
+
+fn validate_launch_hypervisor(hypervisor: &str) -> Result<()> {
+    match hypervisor {
+        "libkrun" => Ok(()),
+        "firecracker" => {
+            if cfg!(target_os = "linux") {
+                Ok(())
+            } else {
+                bail!("bench microvm-launch --hypervisor firecracker requires Linux/KVM")
+            }
+        }
+        "vz" => {
+            if cfg!(target_os = "macos") {
+                Ok(())
+            } else {
+                bail!("bench microvm-launch --hypervisor vz requires macOS with Vz")
+            }
+        }
+        other => bail!(
+            "bench microvm-launch v1 supports --hypervisor libkrun, macOS vz, and Linux \
+             firecracker (got {other:?})"
+        ),
+    }
+}
+
+fn validate_density_hypervisor(hypervisor: &str) -> Result<()> {
+    match hypervisor {
+        "libkrun" => Ok(()),
+        "firecracker" => {
+            if cfg!(target_os = "linux") {
+                Ok(())
+            } else {
+                bail!("bench microvm-density --hypervisor firecracker requires Linux/KVM")
+            }
+        }
+        "vz" => {
+            if cfg!(target_os = "macos") {
+                Ok(())
+            } else {
+                bail!("bench microvm-density --hypervisor vz requires macOS with Vz")
+            }
+        }
+        other => bail!(
+            "bench microvm-density v1 supports --hypervisor libkrun, macOS vz, and Linux \
+             firecracker (got {other:?})"
+        ),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn new_firecracker_probe(args: &MicrovmLaunchArgs) -> Result<FirecrackerProbe> {
+    FirecrackerProbe::new(args)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn new_firecracker_probe(_args: &MicrovmLaunchArgs) -> Result<LibkrunProbe> {
+    bail!("bench microvm-launch --hypervisor firecracker requires Linux/KVM")
+}
+
+#[cfg(target_os = "macos")]
+fn new_vz_probe(args: &MicrovmLaunchArgs) -> Result<VzProbe> {
+    VzProbe::new(args)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn new_vz_probe(_args: &MicrovmLaunchArgs) -> Result<LibkrunProbe> {
+    bail!("bench microvm-launch --hypervisor vz requires macOS with Vz")
+}
+
+#[cfg(target_os = "linux")]
+fn run_firecracker_launch_distribution(
+    args: &MicrovmLaunchArgs,
+) -> Result<LaunchDistributionReport> {
+    let host = FirecrackerProbe::new(args)?.host_descriptor();
+    run_launch_distribution(host, args.concurrency, args.max_concurrency, |i| {
+        FirecrackerProbe::new_with_prefix_and_warm_pool_size(
+            format!("mvm-bench-fc-c{i}"),
+            args.warm_pool_size,
+        )
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_firecracker_launch_distribution(
+    _args: &MicrovmLaunchArgs,
+) -> Result<LaunchDistributionReport> {
+    bail!("bench microvm-launch --hypervisor firecracker requires Linux/KVM")
+}
+
+#[cfg(target_os = "macos")]
+fn run_vz_launch_distribution(args: &MicrovmLaunchArgs) -> Result<LaunchDistributionReport> {
+    let host = VzProbe::new(args)?.host_descriptor();
+    run_launch_distribution(host, args.concurrency, args.max_concurrency, |i| {
+        VzProbe::new_with_prefix(format!("mvm-bench-vz-c{i}"))
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_vz_launch_distribution(_args: &MicrovmLaunchArgs) -> Result<LaunchDistributionReport> {
+    bail!("bench microvm-launch --hypervisor vz requires macOS with Vz")
 }
 
 #[cfg(feature = "libkrun-live")]
@@ -904,6 +1577,68 @@ fn run_libkrun_density(_count: u32, _max_count: u32) -> Result<DensityReport> {
          Rebuild with `cargo build -p mvm-cli --features libkrun-live` \
          on a host where libkrun boots."
     )
+}
+
+#[cfg(target_os = "linux")]
+fn run_firecracker_density(count: u32, max_count: u32) -> Result<DensityReport> {
+    let host = FirecrackerProbe::new_with_prefix("mvm-density-fc")?.host_descriptor();
+    let mut held = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let name = format!("mvm-density-fc-{i}");
+        held.push(
+            boot_firecracker_hold_once(&name, 0).with_context(|| format!("density boot {name}"))?,
+        );
+    }
+    let raw = held
+        .iter()
+        .map(|vm| {
+            Ok(InstanceFootprint {
+                vm_name: vm.vm_name().to_string(),
+                pid: vm.pid(),
+                bytes: read_process_footprint_bytes(vm.pid())?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    drop(held);
+    for sample in &raw {
+        assert_firecracker_bench_cleanup(&sample.vm_name)?;
+    }
+    Ok(build_density_report(host, count, max_count, raw))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_firecracker_density(_count: u32, _max_count: u32) -> Result<DensityReport> {
+    bail!("bench microvm-density --hypervisor firecracker requires Linux/KVM")
+}
+
+#[cfg(target_os = "macos")]
+fn run_vz_density(count: u32, max_count: u32) -> Result<DensityReport> {
+    let host = VzProbe::new_with_prefix("mvm-density-vz")?.host_descriptor();
+    let mut held = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let name = format!("mvm-density-vz-{i}");
+        held.push(boot_vz_hold_once(&name).with_context(|| format!("density boot {name}"))?);
+    }
+    let raw = held
+        .iter()
+        .map(|vm| {
+            Ok(InstanceFootprint {
+                vm_name: vm.vm_name().to_string(),
+                pid: vm.pid(),
+                bytes: read_process_footprint_bytes(vm.pid())?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    drop(held);
+    for sample in &raw {
+        assert_vz_bench_cleanup(&sample.vm_name)?;
+    }
+    Ok(build_density_report(host, count, max_count, raw))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_vz_density(_count: u32, _max_count: u32) -> Result<DensityReport> {
+    bail!("bench microvm-density --hypervisor vz requires macOS with Vz")
 }
 
 #[cfg(test)]
@@ -948,6 +1683,7 @@ mod tests {
             libkrun_version: Some("1.0".to_string()),
             kernel_sha256: Some("deadbeef".to_string()),
             cmdline: Some("root=/dev/vda rw init=/init".to_string()),
+            readiness_boundary: Some("guest-agent-ping".to_string()),
         }
     }
 
@@ -968,6 +1704,7 @@ mod tests {
             concurrency: 1,
             max_concurrency: 64,
             hypervisor: "libkrun".to_string(),
+            warm_pool_size: 0,
             out: None,
             json: false,
             baseline: None,
@@ -1004,6 +1741,93 @@ mod tests {
         assert!(matches!(
             compare_to_baseline(&base, &other, 10.0),
             RegressionVerdict::Incomparable { .. }
+        ));
+    }
+
+    #[test]
+    fn launch_distribution_baseline_compares_concurrency_p95() {
+        let base = build_launch_distribution_report(
+            host("aarch64"),
+            2,
+            vec![
+                IterationTiming {
+                    start_to_pid_ms: 1.0,
+                    pid_to_connect_ms: 0.0,
+                    handshake_ms: 0.0,
+                    total_ready_ms: 100.0,
+                },
+                IterationTiming {
+                    start_to_pid_ms: 1.0,
+                    pid_to_connect_ms: 0.0,
+                    handshake_ms: 0.0,
+                    total_ready_ms: 100.0,
+                },
+            ],
+        );
+        let worse = build_launch_distribution_report(
+            host("aarch64"),
+            2,
+            vec![
+                IterationTiming {
+                    start_to_pid_ms: 1.0,
+                    pid_to_connect_ms: 0.0,
+                    handshake_ms: 0.0,
+                    total_ready_ms: 130.0,
+                },
+                IterationTiming {
+                    start_to_pid_ms: 1.0,
+                    pid_to_connect_ms: 0.0,
+                    handshake_ms: 0.0,
+                    total_ready_ms: 130.0,
+                },
+            ],
+        );
+        assert!(matches!(
+            compare_launch_distribution_to_baseline(&base, &worse, 10.0),
+            RegressionVerdict::Regressed { .. }
+        ));
+    }
+
+    #[test]
+    fn density_baseline_compares_per_instance_bytes() {
+        let baseline = build_density_report(
+            host("aarch64"),
+            2,
+            2,
+            vec![
+                InstanceFootprint {
+                    vm_name: "a".to_string(),
+                    pid: 1,
+                    bytes: 100,
+                },
+                InstanceFootprint {
+                    vm_name: "b".to_string(),
+                    pid: 2,
+                    bytes: 100,
+                },
+            ],
+        );
+        let current = build_density_report(
+            host("aarch64"),
+            2,
+            2,
+            vec![
+                InstanceFootprint {
+                    vm_name: "a".to_string(),
+                    pid: 1,
+                    bytes: 130,
+                },
+                InstanceFootprint {
+                    vm_name: "b".to_string(),
+                    pid: 2,
+                    bytes: 130,
+                },
+            ],
+        );
+
+        assert!(matches!(
+            compare_density_to_baseline(&baseline, &current, 10.0),
+            RegressionVerdict::Regressed { .. }
         ));
     }
 
@@ -1246,6 +2070,8 @@ Pss_Dirty:           128 kB
             hypervisor: "libkrun".to_string(),
             out: None,
             json: false,
+            baseline: None,
+            max_regression_pct: 10.0,
         })
         .unwrap_err();
         assert!(
@@ -1263,12 +2089,48 @@ Pss_Dirty:           128 kB
             hypervisor: "libkrun".to_string(),
             out: None,
             json: false,
+            baseline: None,
+            max_regression_pct: 10.0,
         })
         .unwrap_err();
         assert!(
             err.to_string().contains("libkrun-live"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn launch_hypervisor_validation_accepts_firecracker_only_on_linux() {
+        assert!(validate_launch_hypervisor("libkrun").is_ok());
+        let fc = validate_launch_hypervisor("firecracker");
+        if cfg!(target_os = "linux") {
+            assert!(fc.is_ok());
+        } else {
+            assert!(fc.unwrap_err().to_string().contains("Linux/KVM"));
+        }
+        let vz = validate_launch_hypervisor("vz");
+        if cfg!(target_os = "macos") {
+            assert!(vz.is_ok());
+        } else {
+            assert!(vz.unwrap_err().to_string().contains("macOS with Vz"));
+        }
+    }
+
+    #[test]
+    fn density_hypervisor_validation_accepts_firecracker_only_on_linux() {
+        assert!(validate_density_hypervisor("libkrun").is_ok());
+        let fc = validate_density_hypervisor("firecracker");
+        if cfg!(target_os = "linux") {
+            assert!(fc.is_ok());
+        } else {
+            assert!(fc.unwrap_err().to_string().contains("Linux/KVM"));
+        }
+        let vz = validate_density_hypervisor("vz");
+        if cfg!(target_os = "macos") {
+            assert!(vz.is_ok());
+        } else {
+            assert!(vz.unwrap_err().to_string().contains("macOS with Vz"));
+        }
     }
 
     #[test]

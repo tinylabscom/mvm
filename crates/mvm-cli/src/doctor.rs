@@ -3221,7 +3221,7 @@ mod tests {
         assert_eq!(
             ordered_standby_pool,
             vec![
-                ("firecracker".to_string(), false),
+                ("firecracker".to_string(), true),
                 ("libkrun".to_string(), true),
                 ("qemu".to_string(), false),
                 ("vz".to_string(), vz_standby),
@@ -3232,8 +3232,9 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_standby_pool_per_backend() {
         let r = collect_warm_start_support();
-        // libkrun and Vz (on macOS 14+) implement the standby pool; FC and QEMU do not.
-        // Report honest values for every backend; none may be silently dropped.
+        // Firecracker, libkrun, and Vz (on macOS 14+) implement the standby pool;
+        // QEMU does not. Report honest values for every backend; none may be silently dropped.
+        assert_eq!(r.standby_pool.get("firecracker"), Some(&true));
         assert_eq!(r.standby_pool.get("libkrun"), Some(&true));
         let vz_standby = AnyBackend::from_hypervisor("vz").supports_standby_pool();
         assert_eq!(r.standby_pool.get("vz"), Some(&vz_standby));
@@ -3255,7 +3256,10 @@ mod tests {
         assert!(fc.tap_networking, "firecracker uses a host TAP device");
         assert!(fc.vsock);
         assert!(fc.balloon);
-        assert!(!fc.standby_pool);
+        assert!(
+            fc.standby_pool,
+            "Firecracker implements live standby warm-spawn"
+        );
 
         let krun = by("libkrun").unwrap();
         assert_eq!(krun.snapshot_tier, "disk-only");
@@ -3266,7 +3270,7 @@ mod tests {
         assert!(krun.vsock);
         assert!(
             krun.standby_pool,
-            "only libkrun pre-pays spawn latency today"
+            "libkrun still pre-pays spawn latency through the supervisor pool"
         );
 
         let qemu = by("qemu").unwrap();

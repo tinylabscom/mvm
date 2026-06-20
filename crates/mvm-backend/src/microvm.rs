@@ -775,6 +775,50 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
         return Ok(());
     }
 
+    run_configured_firecracker(config, &abs_dir, &abs_socket, true)
+}
+
+/// Finish launching a Firecracker VM whose daemon has already been started in
+/// the slot directory. Used by the standby pool: warming pays the daemon spawn
+/// cost; claiming still configures the exact admitted workload before
+/// `InstanceStart`.
+#[instrument(skip_all, fields(name = %config.name))]
+pub fn run_from_prestarted_build(
+    config: &FlakeRunConfig,
+    abs_dir: &str,
+    abs_socket: &str,
+) -> Result<()> {
+    config.validate()?;
+    require_linux_env()?;
+
+    let expected_dir = resolve_vm_dir(&config.slot)?;
+    if expected_dir != abs_dir {
+        anyhow::bail!(
+            "prestarted Firecracker dir mismatch for '{}': expected {}, got {}",
+            config.slot.name,
+            expected_dir,
+            abs_dir
+        );
+    }
+    let pid_file = format!("{}/fc.pid", abs_dir);
+    if !firecracker::is_vm_running(&pid_file)? {
+        anyhow::bail!(
+            "prestarted Firecracker daemon for '{}' is not running",
+            config.slot.name
+        );
+    }
+
+    run_configured_firecracker(config, abs_dir, abs_socket, false)
+}
+
+fn run_configured_firecracker(
+    config: &FlakeRunConfig,
+    abs_dir: &str,
+    abs_socket: &str,
+    start_daemon: bool,
+) -> Result<()> {
+    let slot = &config.slot;
+
     // Provision the VM's bridge+TAP network + egress policy through the
     // NetworkProvider seam. `provision` is transactional
     // — it drops the TAP itself if the policy apply fails — and the TapGuard
@@ -818,7 +862,7 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     // endpoint + nft redirect below) runs unconditionally.
     #[cfg(target_os = "linux")]
     let mut bridge_guard = if std::env::var("MVM_GATEWAY_BRIDGE").as_deref() == Ok("1") {
-        spawn_fc_bridge(&config.slot.name, &abs_dir)?
+        spawn_fc_bridge(&config.slot.name, abs_dir)?
     } else {
         tracing::debug!(
             vm = %config.slot.name,
@@ -827,9 +871,11 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
         AttachedBridgeGuard { child: None }
     };
 
-    // Start Firecracker daemon in per-VM directory
-    start_vm_firecracker(&abs_dir, &abs_socket)?;
-    let mut fc_guard = FirecrackerGuard::new(&abs_dir);
+    if start_daemon {
+        // Start Firecracker daemon in per-VM directory.
+        start_vm_firecracker(abs_dir, abs_socket)?;
+    }
+    let mut fc_guard = FirecrackerGuard::new(abs_dir);
 
     // Spawn the substitution endpoint BEFORE configuring boot args,
     // so the placeholders it mints land in
@@ -842,19 +888,19 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     let mut endpoint_guard = spawn_egress_endpoint(config)?;
 
     // Configure VM via Firecracker API
-    configure_flake_microvm(config, &abs_dir, &abs_socket)?;
+    configure_flake_microvm(config, abs_dir, abs_socket)?;
 
     // Boot the instance
     ui::info("Starting microVM...");
     std::thread::sleep(std::time::Duration::from_millis(15));
     api_put_socket(
-        &abs_socket,
+        abs_socket,
         "/actions",
         r#"{"action_type": "InstanceStart"}"#,
     )?;
 
     // Make vsock socket accessible to the current user
-    let vsock = firecracker_vsock_uds_path(&abs_dir);
+    let vsock = firecracker_vsock_uds_path(abs_dir);
     if let Err(e) = run_in_vm(&format!(
         "sudo chmod 0666 {vsock} 2>/dev/null",
         vsock = vsock,
@@ -863,7 +909,7 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     }
 
     // Persist run info for `mvm status`
-    write_vm_run_info(config, &abs_dir)?;
+    write_vm_run_info(config, abs_dir)?;
 
     // VM is healthy. Detach the bridge guard so its child outlives
     // this stack frame; persist the bridge PID to
@@ -877,7 +923,7 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     // workload is fine. The next `stop_vm` reaps any orphan via the
     // PID file if it was persisted.
     #[cfg(target_os = "linux")]
-    if let Err(e) = detach_and_spawn_bridge_watchdog(&config.slot.name, &abs_dir, &mut bridge_guard)
+    if let Err(e) = detach_and_spawn_bridge_watchdog(&config.slot.name, abs_dir, &mut bridge_guard)
     {
         warn!(
             vm = %config.slot.name,
@@ -925,6 +971,16 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     ]);
 
     Ok(())
+}
+
+/// Read the pid recorded by [`start_vm_firecracker`].
+pub fn read_firecracker_pid(abs_dir: &str) -> Result<u32> {
+    let q_dir = shell_quote(abs_dir);
+    let output = run_in_vm_stdout(&format!("cat {q_dir}/fc.pid"))?;
+    output
+        .trim()
+        .parse::<u32>()
+        .with_context(|| format!("parse Firecracker pid from {abs_dir}/fc.pid"))
 }
 
 /// Restore a Firecracker VM from a template snapshot (instant start).
@@ -1863,6 +1919,20 @@ pub fn allocate_slot(name: &str) -> Result<VmSlot> {
         .rev()
         .find_map(|line| line.trim().parse::<u8>().ok())
         .ok_or_else(|| anyhow::anyhow!("No free VM slots available (max 253 VMs)"))?;
+    Ok(VmSlot::new(name, index))
+}
+
+/// Recreate a slot from a previously reserved VM directory.
+pub fn read_reserved_slot(name: &str) -> Result<VmSlot> {
+    let q_name = shell_quote(name);
+    let output = run_in_vm_stdout(&format!("cat {}/{}/run-info.json", VMS_DIR, q_name))?;
+    let value: serde_json::Value =
+        serde_json::from_str(output.trim()).with_context(|| format!("parse slot for {name}"))?;
+    let index = value
+        .get("slot_index")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| u8::try_from(n).ok())
+        .ok_or_else(|| anyhow::anyhow!("reserved slot for '{name}' has no valid slot_index"))?;
     Ok(VmSlot::new(name, index))
 }
 

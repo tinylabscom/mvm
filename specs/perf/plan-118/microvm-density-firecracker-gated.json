@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "host": {
+    "os": "linux",
+    "arch": "x86_64",
+    "hypervisor": "firecracker",
+    "libkrun_version": null,
+    "kernel_sha256": "f78cd547954abef8730a60ca3b8df92458d8484653c559f1121526519219c306",
+    "cmdline": "console=ttyS0 reboot=k panic=1 net.ifnames=0 ip=<per-slot>",
+    "readiness_boundary": "firecracker-pid"
+  },
+  "count": 2,
+  "max_count": 2,
+  "stats": {
+    "instances": 2,
+    "total_bytes": 139343872,
+    "per_instance_bytes": 69671936,
+    "min_instance_bytes": 50850816,
+    "max_instance_bytes": 88493056
+  },
+  "raw": [
+    {
+      "vm_name": "mvm-density-fc-0",
+      "pid": 987739,
+      "bytes": 88493056
+    },
+    {
+      "vm_name": "mvm-density-fc-1",
+      "pid": 987950,
+      "bytes": 50850816
+    }
+  ]
+}

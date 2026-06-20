@@ -215,7 +215,7 @@ fn print_timing(label: &str, ms: Option<u64>) {
 
 /// Single readiness round-trip over vsock. Used by `wait`,
 /// `boot-report`, and `up --timings`.
-pub(in crate::commands::vm) fn fetch_readiness(vm_name: &str) -> Result<ReadinessReport> {
+pub(in crate::commands) fn fetch_readiness(vm_name: &str) -> Result<ReadinessReport> {
     let transport: Box<dyn VsockTransport> = vsock_transport::for_vm(vm_name)?;
     let mut stream = transport.connect(GUEST_AGENT_PORT)?;
     let _ = negotiate_protocol(&mut stream, vec![GuestCapability::Readiness])?;

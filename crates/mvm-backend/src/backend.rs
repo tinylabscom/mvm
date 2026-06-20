@@ -1,14 +1,15 @@
 use crate::catalog;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use mvm_core::vm_backend::{
-    BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, StartMode, VmBackend,
-    VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, StandbyClaim,
+    StandbyError, StandbyHandle, StandbySpec, StandbyState, StartMode, VmBackend, VmCapabilities,
+    VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
 // Every backend variant + the FC support modules live in this crate.
 // `microvm`, `image` are siblings under `crate::`; the substrate
 // (`config`, `shell`, `runtime_meta`) lives in `crate::base`.
-use crate::base::config::{PortMapping, VMS_DIR};
+use crate::base::config::{PortMapping, VMS_DIR, VmSlot};
 use crate::base::shell::run_in_vm_stdout;
 use crate::image::RuntimeVolume;
 use crate::libkrun::LibkrunBackend;
@@ -30,21 +31,16 @@ impl FirecrackerConfig {
     /// Convert a backend-agnostic `VmStartConfig` into a Firecracker-specific
     /// `FlakeRunConfig`, allocating a network slot automatically.
     pub fn from_start_config(config: &VmStartConfig) -> Result<Self> {
-        // Firecracker has no virtio-fs — a directory share can't be
-        // attached. Disk-image volumes (host:/guest:SIZE) are fine.
-        if let Some(v) = config
-            .volumes
-            .iter()
-            .find(|v| matches!(v.kind, mvm_core::vm_backend::VmVolumeKind::DirShare))
-        {
-            anyhow::bail!(
-                "Firecracker has no virtio-fs, so directory share '{}' -> '{}' isn't supported; \
-                 use a disk-image volume instead (host:/guest:SIZE).",
-                v.host,
-                v.guest
-            );
-        }
+        validate_firecracker_start_config(config)?;
         let slot = microvm::allocate_slot(&config.name)?;
+        Self::from_start_config_with_slot(config, slot)
+    }
+
+    /// Convert a launch config using a slot that has already been reserved.
+    /// Firecracker standbys reserve their slot when the daemon is warmed, then
+    /// reuse that same slot when the standby is claimed.
+    pub fn from_start_config_with_slot(config: &VmStartConfig, slot: VmSlot) -> Result<Self> {
+        validate_firecracker_start_config(config)?;
         let run_config = FlakeRunConfig {
             name: config.name.clone(),
             slot,
@@ -106,12 +102,91 @@ impl FirecrackerConfig {
     }
 }
 
+fn validate_firecracker_start_config(config: &VmStartConfig) -> Result<()> {
+    if let Some(v) = config
+        .volumes
+        .iter()
+        .find(|v| matches!(v.kind, mvm_core::vm_backend::VmVolumeKind::DirShare))
+    {
+        anyhow::bail!(
+            "Firecracker has no virtio-fs, so directory share '{}' -> '{}' isn't supported; \
+             use a disk-image volume instead (host:/guest:SIZE).",
+            v.host,
+            v.guest
+        );
+    }
+    Ok(())
+}
+
 /// Firecracker backend implementation.
 ///
 /// Wraps the existing free functions in [`microvm`] and [`firecracker`]
 /// behind the [`VmBackend`] trait. This is a thin adapter — all real
 /// work is delegated to the existing implementation.
 pub struct FirecrackerBackend;
+
+fn firecracker_spawn_standby(spec: &StandbySpec) -> Result<StandbyHandle> {
+    #[cfg(target_os = "linux")]
+    if !crate::qemu::kvm_available() {
+        anyhow::bail!("Firecracker standby requires /dev/kvm, which is not available on this host");
+    }
+
+    let slot = microvm::allocate_slot(&spec.id)
+        .with_context(|| format!("reserve Firecracker slot for standby '{}'", spec.id))?;
+    let mut slot_reservation = microvm::SlotReservationGuard::new(&slot);
+    let abs_dir = microvm::resolve_vm_dir(&slot)?;
+    let abs_socket = format!("{}/fc.socket", abs_dir);
+    microvm::start_vm_firecracker(&abs_dir, &abs_socket)
+        .with_context(|| format!("prestart Firecracker daemon for standby '{}'", spec.id))?;
+    let pid = microvm::read_firecracker_pid(&abs_dir)
+        .with_context(|| format!("read Firecracker pid for standby '{}'", spec.id))?;
+    slot_reservation.defuse();
+    Ok(StandbyHandle {
+        id: spec.id.clone(),
+        control_socket: std::path::PathBuf::from(abs_socket),
+        pid,
+        kernel_sha256: spec.kernel_sha256.clone(),
+        vcpus: spec.vcpus,
+        mem_mib: spec.mem_mib,
+        binding_nonce: spec.binding_nonce.clone(),
+        spawned_unix_secs: crate::standby_pool::now_unix_secs(),
+        state: StandbyState::Idle,
+        image_sha256: spec.image_sha256.clone(),
+    })
+}
+
+fn firecracker_claim_standby(handle: &StandbyHandle, claim: &StandbyClaim) -> Result<VmId> {
+    let mut start_config = claim
+        .start_config
+        .clone()
+        .context("Firecracker standby claim requires the original VmStartConfig")?;
+    start_config.name = handle.id.clone();
+    start_config.rootfs_path = claim.rootfs_path.clone();
+    start_config.tenant_id = Some(claim.tenant_id.clone());
+    start_config.plan_json = (!claim.plan_json.is_empty()).then(|| claim.plan_json.clone());
+    start_config.bundle_json = claim.bundle_json.clone();
+    start_config.network_policy = claim.network_policy.clone();
+
+    let slot = microvm::read_reserved_slot(&handle.id)
+        .with_context(|| format!("read reserved Firecracker slot for '{}'", handle.id))?;
+    let mut slot_reservation = microvm::SlotReservationGuard::new(&slot);
+    let fc_config = FirecrackerConfig::from_start_config_with_slot(&start_config, slot)?;
+    let abs_dir = microvm::resolve_vm_dir(&fc_config.run_config.slot)?;
+    let resolved_socket = format!("{}/fc.socket", abs_dir);
+    if std::path::Path::new(&resolved_socket) != handle.control_socket {
+        anyhow::bail!(
+            "Firecracker standby '{}' socket mismatch: handle {}, slot {}",
+            handle.id,
+            handle.control_socket.display(),
+            resolved_socket
+        );
+    }
+
+    microvm::run_from_prestarted_build(&fc_config.run_config, &abs_dir, &resolved_socket)
+        .with_context(|| format!("claim Firecracker standby '{}'", handle.id))?;
+    slot_reservation.defuse();
+    Ok(VmId(handle.id.clone()))
+}
 
 impl VmBackend for FirecrackerBackend {
     fn name(&self) -> &str {
@@ -203,6 +278,26 @@ impl VmBackend for FirecrackerBackend {
         microvm::run_from_build(&fc_config.run_config)?;
         slot_reservation.defuse();
         Ok(VmId(fc_config.run_config.name.clone()))
+    }
+
+    fn supports_standby_pool(&self) -> bool {
+        true
+    }
+
+    fn spawn_standby(
+        &self,
+        spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        firecracker_spawn_standby(spec).map_err(|e| StandbyError::SpawnFailed(e.to_string()))
+    }
+
+    fn claim_standby(
+        &self,
+        handle: &StandbyHandle,
+        claim: &StandbyClaim,
+    ) -> std::result::Result<VmId, StandbyError> {
+        firecracker_claim_standby(handle, claim)
+            .map_err(|e| StandbyError::ClaimFailed(e.to_string()))
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
@@ -682,6 +777,96 @@ mod tests {
         assert!(caps.snapshots);
         assert!(caps.vsock);
         assert!(caps.tap_networking);
+    }
+
+    #[test]
+    fn firecracker_reports_standby_pool_support() {
+        let backend = FirecrackerBackend;
+        assert!(backend.supports_standby_pool());
+    }
+
+    #[test]
+    fn firecracker_config_reuses_reserved_slot() {
+        let slot = VmSlot::new("standby-a", 7);
+        let config = VmStartConfig {
+            name: "standby-a".into(),
+            rootfs_path: "/images/rootfs.ext4".into(),
+            kernel_path: Some("/kernels/vmlinux".into()),
+            cpus: 2,
+            memory_mib: 1024,
+            ..Default::default()
+        };
+
+        let fc = FirecrackerConfig::from_start_config_with_slot(&config, slot.clone())
+            .expect("slot-backed config");
+
+        assert_eq!(fc.run_config.name, "standby-a");
+        assert_eq!(fc.run_config.slot.index, slot.index);
+        assert_eq!(fc.run_config.slot.tap_dev, slot.tap_dev);
+        assert_eq!(fc.run_config.vmlinux_path, "/kernels/vmlinux");
+        assert_eq!(fc.run_config.rootfs_path, "/images/rootfs.ext4");
+    }
+
+    #[test]
+    fn firecracker_config_rejects_dirshare_before_claim() {
+        let config = VmStartConfig {
+            name: "standby-a".into(),
+            rootfs_path: "/images/rootfs.ext4".into(),
+            kernel_path: Some("/kernels/vmlinux".into()),
+            volumes: vec![mvm_core::vm_backend::VmVolume {
+                host: "/host".into(),
+                guest: "/guest".into(),
+                size: String::new(),
+                read_only: true,
+                kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
+                encrypted: false,
+            }],
+            ..Default::default()
+        };
+
+        let err = match FirecrackerConfig::from_start_config_with_slot(
+            &config,
+            VmSlot::new("standby-a", 7),
+        ) {
+            Ok(_) => panic!("dir shares are unsupported"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("Firecracker has no virtio-fs"));
+    }
+
+    #[test]
+    fn firecracker_claim_requires_start_config() {
+        let handle = StandbyHandle {
+            id: "standby-a".into(),
+            control_socket: "/tmp/fc.socket".into(),
+            pid: 123,
+            kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 1024,
+            binding_nonce: "ab".repeat(32),
+            spawned_unix_secs: 1,
+            state: StandbyState::Idle,
+            image_sha256: None,
+        };
+        let claim = StandbyClaim {
+            start_config: None,
+            rootfs_path: "/images/rootfs.ext4".into(),
+            tenant_id: "tenant-a".into(),
+            audit_dir: "/audit".into(),
+            gateway_audit_socket: "/audit/gateway.sock".into(),
+            gateway_events_socket: None,
+            plan_json: "{}".into(),
+            bundle_json: None,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+        };
+
+        let err = firecracker_claim_standby(&handle, &claim).expect_err("missing config fails");
+
+        assert!(
+            err.to_string()
+                .contains("requires the original VmStartConfig")
+        );
     }
 
     #[test]
