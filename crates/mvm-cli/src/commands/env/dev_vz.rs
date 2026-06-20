@@ -3950,38 +3950,69 @@ mod builder_backend_attempt_order_tests {
 /// `--flake`/`--template`/`--image` was supplied. Returns `(kernel, rootfs)`;
 /// the verity + `mvm-meta.json` sidecars land alongside the rootfs.
 ///
-/// - **Prod** downloads the published, verity-sealed prod image (the
-///   `default-microvm-*` release assets), hash-verified.
-/// - **Dev** builds the accessible dev variant locally from the in-repo flake
-///   via the builder VM — dev images are never published.
+/// Both modes build locally from the in-repo `default-tenant` flake when run
+/// from a source checkout — the "source-checkout builds never depend on
+/// mvm-published artifacts" invariant. The published release image is an
+/// end-user fallback only:
+///
+/// - **Prod** builds the verity-sealed `default` variant locally on a source
+///   checkout, else downloads the published, hash-verified `default-microvm-*`
+///   release assets.
+/// - **Dev** builds the accessible `dev` variant locally — dev images are never
+///   published, so there is no download path.
 pub(crate) fn ensure_default_microvm_image(
     mode: mvm_build::pipeline::BuildMode,
 ) -> Result<(String, String)> {
     use mvm_build::pipeline::BuildMode;
     let base = format!("{}/default-microvm", mvm_core::config::mvm_cache_dir());
     match mode {
-        BuildMode::Prod => {
-            let cache_dir = format!("{base}/prod");
-            std::fs::create_dir_all(&cache_dir)?;
-            let kernel_path = format!("{cache_dir}/vmlinux");
-            let rootfs_path = format!("{cache_dir}/rootfs.ext4");
-            // All five must be present before skipping the download — an older
-            // cache has only vmlinux + rootfs.ext4 and would
-            // fail admission (no overlay-aware sidecar, no verity).
-            let required = [
-                kernel_path.clone(),
-                rootfs_path.clone(),
-                format!("{cache_dir}/mvm-meta.json"),
-                format!("{cache_dir}/rootfs.verity"),
-                format!("{cache_dir}/rootfs.roothash"),
-            ];
-            if required.iter().all(|p| std::path::Path::new(p).exists()) {
-                return Ok((kernel_path, rootfs_path));
-            }
-            download_default_microvm_image(&cache_dir, &kernel_path, &rootfs_path)
-        }
+        BuildMode::Prod => ensure_default_microvm_prod_image(&format!("{base}/prod")),
         BuildMode::Dev => ensure_default_microvm_dev_image(&format!("{base}/dev")),
     }
+}
+
+/// Prod-mode default image. On a source checkout (the in-repo `builder-vm` flake
+/// resolves and this mvmctl carries the `builder-vm` feature) it builds the
+/// verity-sealed `default` variant locally via the builder VM, honoring the
+/// "source-checkout builds never depend on mvm-published artifacts" invariant.
+/// An end-user mvmctl (no in-repo flake, or built without `builder-vm`)
+/// downloads the published, hash-verified release image instead.
+fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)> {
+    std::fs::create_dir_all(cache_dir)?;
+    let kernel_path = format!("{cache_dir}/vmlinux");
+    let rootfs_path = format!("{cache_dir}/rootfs.ext4");
+    // All five must be present before reusing the cache — an older 2-file cache
+    // (vmlinux + rootfs.ext4) fails admission: no overlay-aware sidecar, no verity.
+    let required = [
+        kernel_path.clone(),
+        rootfs_path.clone(),
+        format!("{cache_dir}/mvm-meta.json"),
+        format!("{cache_dir}/rootfs.verity"),
+        format!("{cache_dir}/rootfs.roothash"),
+    ];
+    if required.iter().all(|p| std::path::Path::new(p).exists()) {
+        return Ok((kernel_path, rootfs_path));
+    }
+    if let Some(built) = try_build_prod_default_locally(cache_dir)? {
+        return Ok(built);
+    }
+    download_default_microvm_image(cache_dir, &kernel_path, &rootfs_path)
+}
+
+/// Source-checkout local build of the prod default image. `Some` when the
+/// in-repo `builder-vm` flake resolves; `None` (→ caller downloads) otherwise.
+#[cfg(feature = "builder-vm")]
+fn try_build_prod_default_locally(cache_dir: &str) -> Result<Option<(String, String)>> {
+    if find_builder_vm_flake().is_err() {
+        return Ok(None);
+    }
+    ui::info("Building the prod default microVM image locally (source checkout)...");
+    build_default_microvm_via_libkrun(cache_dir, DefaultMicrovmVariant::Prod).map(Some)
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn try_build_prod_default_locally(_cache_dir: &str) -> Result<Option<(String, String)>> {
+    Ok(None)
 }
 
 /// Dev-mode default image: build the accessible `dev` variant locally from the
@@ -3999,7 +4030,45 @@ fn ensure_default_microvm_dev_image(cache_dir: &str) -> Result<(String, String)>
         return Ok((kernel_path, rootfs_path));
     }
     ui::info("Building the dev default microVM image locally (dev mode)...");
-    build_default_microvm_dev_via_libkrun(cache_dir)
+    build_default_microvm_via_libkrun(cache_dir, DefaultMicrovmVariant::Dev)
+}
+
+/// Which default-microVM variant to build from the in-repo `default-tenant`
+/// flake. `Prod` maps to the `default` attr the release job ships
+/// (verity-sealed, 5 outputs); `Dev` maps to the accessible `dev` attr (3
+/// outputs, no verity sidecars).
+#[cfg(feature = "builder-vm")]
+#[derive(Clone, Copy)]
+enum DefaultMicrovmVariant {
+    Dev,
+    Prod,
+}
+
+#[cfg(feature = "builder-vm")]
+impl DefaultMicrovmVariant {
+    /// Flake attribute under `packages.<system>`. `default` is the prod variant
+    /// `release.yml` builds; `dev` is the accessible variant.
+    fn attr(self) -> &'static str {
+        match self {
+            DefaultMicrovmVariant::Dev => "dev",
+            DefaultMicrovmVariant::Prod => "default",
+        }
+    }
+
+    /// Output basenames the builder VM must emit for this variant. Prod adds the
+    /// dm-verity sidecars the sealed boot + `admit_overlay_aware` require.
+    fn required_outputs(self) -> &'static [&'static str] {
+        match self {
+            DefaultMicrovmVariant::Dev => &["vmlinux", "rootfs.ext4", "mvm-meta.json"],
+            DefaultMicrovmVariant::Prod => &[
+                "vmlinux",
+                "rootfs.ext4",
+                "mvm-meta.json",
+                "rootfs.verity",
+                "rootfs.roothash",
+            ],
+        }
+    }
 }
 
 #[cfg(not(feature = "builder-vm"))]
@@ -4011,12 +4080,15 @@ fn ensure_default_microvm_dev_image(_cache_dir: &str) -> Result<(String, String)
     )
 }
 
-/// Build the bundled **dev** default microVM image via the libkrun builder VM:
-/// `nix build nix/images/default-tenant#packages.<sys>.dev` inside the guest,
-/// extracting `vmlinux` + `rootfs.ext4` + `mvm-meta.json` to `out_dir`. Mirrors
+/// Build a bundled default microVM `variant` via the libkrun builder VM:
+/// `nix build nix/images/default-tenant#packages.<sys>.<attr>` inside the guest,
+/// extracting the variant's outputs to `out_dir`. Mirrors
 /// [`build_image_via_libkrun`] but targets the default-tenant flake.
 #[cfg(feature = "builder-vm")]
-fn build_default_microvm_dev_via_libkrun(out_dir: &str) -> Result<(String, String)> {
+fn build_default_microvm_via_libkrun(
+    out_dir: &str,
+    variant: DefaultMicrovmVariant,
+) -> Result<(String, String)> {
     use mvm_build::builder_backend_select::{
         resolve_builder_backend_with_override, resolve_choice, resolve_env_override,
     };
@@ -4047,7 +4119,7 @@ fn build_default_microvm_dev_via_libkrun(out_dir: &str) -> Result<(String, Strin
 
     let job = BuilderJob::Flake {
         flake_ref: "path:/work/nix/images/default-tenant".to_string(),
-        attr_path: format!("packages.{}.dev", host_system_linux()),
+        attr_path: format!("packages.{}.{}", host_system_linux(), variant.attr()),
     };
     let mounts = BuilderMounts {
         flake_src: workspace_root,
@@ -4085,18 +4157,14 @@ fn build_default_microvm_dev_via_libkrun(out_dir: &str) -> Result<(String, Strin
         return Err(err);
     }
 
-    let kernel = format!("{out_dir}/vmlinux");
-    let rootfs = format!("{out_dir}/rootfs.ext4");
-    let meta = format!("{out_dir}/mvm-meta.json");
-    for (label, p) in [
-        ("vmlinux", &kernel),
-        ("rootfs.ext4", &rootfs),
-        ("mvm-meta.json", &meta),
-    ] {
-        if !std::path::Path::new(p).exists() {
+    for label in variant.required_outputs() {
+        let p = format!("{out_dir}/{label}");
+        if !std::path::Path::new(&p).exists() {
             anyhow::bail!("builder VM exited cleanly but did not produce {label} at {p}");
         }
     }
+    let kernel = format!("{out_dir}/vmlinux");
+    let rootfs = format!("{out_dir}/rootfs.ext4");
     Ok((kernel, rootfs))
 }
 
@@ -4160,6 +4228,39 @@ mod default_microvm_tests {
                 "/cache/dm/mvm-meta.json",
             ],
             "local dests must be the rootfs siblings the backend + admit gate expect",
+        );
+    }
+}
+
+#[cfg(all(test, feature = "builder-vm"))]
+mod default_microvm_variant_tests {
+    use super::DefaultMicrovmVariant;
+
+    #[test]
+    fn prod_variant_targets_release_default_attr_with_verity_outputs() {
+        // `release.yml`'s default-microvm job builds `packages.<sys>.default`;
+        // the local prod build must target the same attr.
+        assert_eq!(DefaultMicrovmVariant::Prod.attr(), "default");
+        let prod = DefaultMicrovmVariant::Prod.required_outputs();
+        for f in [
+            "vmlinux",
+            "rootfs.ext4",
+            "mvm-meta.json",
+            "rootfs.verity",
+            "rootfs.roothash",
+        ] {
+            assert!(prod.contains(&f), "prod must emit {f}");
+        }
+    }
+
+    #[test]
+    fn dev_variant_targets_dev_attr_without_verity() {
+        assert_eq!(DefaultMicrovmVariant::Dev.attr(), "dev");
+        let dev = DefaultMicrovmVariant::Dev.required_outputs();
+        assert!(dev.contains(&"mvm-meta.json"));
+        assert!(
+            !dev.contains(&"rootfs.verity") && !dev.contains(&"rootfs.roothash"),
+            "dev is accessible/unsealed — no verity sidecars",
         );
     }
 }
