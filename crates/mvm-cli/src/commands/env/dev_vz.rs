@@ -219,7 +219,7 @@ pub(in crate::commands) fn dev_vsock_proxy_path() -> String {
 /// file under the stable state dir.
 /// Stop the Vz dev VM. Returns whether a live VM was reaped. Prints the
 /// human result line only when `!json` (the dispatch emits the JSON form).
-pub(super) fn cmd_dev_vz_down(json: bool) -> Result<bool> {
+pub(in crate::commands) fn cmd_dev_vz_down(json: bool) -> Result<bool> {
     #[cfg(feature = "builder-vm")]
     {
         let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
@@ -2511,6 +2511,35 @@ fn validate_builder_vm_stage0_artifacts(dir: &std::path::Path) -> Result<()> {
             dir.display()
         )
     })
+}
+
+/// Whether a Stage 0 bootstrap is currently in flight on this host — i.e. the
+/// shared advisory lock at `~/.cache/mvm/builder-vm/stage0.lock` is held by a
+/// live `dev up`/`build`. Non-blocking: tries the lock and reports contention,
+/// releasing immediately if it acquires. `cache repair` consults this before
+/// clearing the builder store so it never yanks the store from an active build.
+pub(in crate::commands) fn stage0_bootstrap_in_flight() -> bool {
+    let builder_vm = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("builder-vm");
+    stage0_bootstrap_in_flight_at(&builder_vm)
+}
+
+/// Inner form of [`stage0_bootstrap_in_flight`] with an explicit `builder-vm`
+/// root, so tests exercise it against a tempdir without touching `MVM_CACHE_DIR`.
+fn stage0_bootstrap_in_flight_at(builder_vm: &std::path::Path) -> bool {
+    use mvm_core::atomic_io::FileLock;
+    // A fresh host with no builder-vm dir has nothing in flight. (Without this
+    // guard `try_acquire` would error on the missing parent and we'd read it as
+    // "in flight" — the lock anchor's parent isn't auto-created here.)
+    if !builder_vm.is_dir() {
+        return false;
+    }
+    // Only a successfully-acquired lock proves nobody else holds it. Treat both
+    // "held" (Ok(None)) and an I/O error as "assume in flight" — repair is the
+    // destructive path, so fail safe toward refusing.
+    !matches!(
+        FileLock::try_acquire(&builder_vm.join("stage0")),
+        Ok(Some(_))
+    )
 }
 
 /// Outcome of [`sweep_orphaned_stage0_staging_dirs`]:
@@ -5345,6 +5374,36 @@ mod builder_vm_bootstrap_tests {
         assert!(
             tmp.path().join("nested/builder-vm/stage0.lock").exists(),
             "lock file must be created at the constructed parent path"
+        );
+    }
+
+    /// `stage0_bootstrap_in_flight_at` — the guard `cache repair` consults —
+    /// reports false on a missing/idle builder-vm dir and true only while the
+    /// shared Stage 0 lock is actually held.
+    #[test]
+    fn stage0_in_flight_tracks_the_lock() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let builder_vm = tmp.path().join("builder-vm");
+
+        // Missing dir → nothing in flight (fresh host).
+        assert!(!stage0_bootstrap_in_flight_at(&builder_vm));
+
+        std::fs::create_dir_all(&builder_vm).expect("mkdir builder-vm");
+        // Present but unlocked → idle.
+        assert!(!stage0_bootstrap_in_flight_at(&builder_vm));
+
+        // Hold the same lock a live bootstrap takes (anchor = `<root>/stage0`).
+        let out_dir = builder_vm.join("aarch64");
+        let guard = acquire_stage0_lock_uncontended(out_dir.to_str().expect("utf-8"));
+        assert!(
+            stage0_bootstrap_in_flight_at(&builder_vm),
+            "a held Stage 0 lock must read as in-flight"
+        );
+
+        drop(guard);
+        assert!(
+            !stage0_bootstrap_in_flight_at(&builder_vm),
+            "releasing the lock must clear the in-flight signal"
         );
     }
 
