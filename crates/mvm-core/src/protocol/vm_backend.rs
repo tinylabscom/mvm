@@ -659,6 +659,15 @@ pub enum StandbyState {
     Idle,
     /// An attach was sent; the standby is booting or has booted.
     Claimed,
+    /// Aged out of the warm set but kept as a claimable saved-state snapshot.
+    Parked,
+}
+
+impl StandbyState {
+    /// A launch may claim a standby that is warm (`Idle`) or parked.
+    pub fn is_claimable(&self) -> bool {
+        matches!(self, StandbyState::Idle | StandbyState::Parked)
+    }
 }
 
 /// What to attach to a claimed standby — the workload-specific half (the admitted,
@@ -1212,6 +1221,21 @@ mod tests {
         assert_err(&StandbyError::Unsupported {
             backend: "x".into(),
         });
+    }
+
+    #[test]
+    fn standby_state_parked_serde_roundtrips_snake_case() {
+        let j = serde_json::to_string(&StandbyState::Parked).unwrap();
+        assert_eq!(j, "\"parked\"");
+        let back: StandbyState = serde_json::from_str("\"parked\"").unwrap();
+        assert_eq!(back, StandbyState::Parked);
+    }
+
+    #[test]
+    fn idle_and_parked_are_claimable_claimed_is_not() {
+        assert!(StandbyState::Idle.is_claimable());
+        assert!(StandbyState::Parked.is_claimable());
+        assert!(!StandbyState::Claimed.is_claimable());
     }
 
     fn sample_standby_spec() -> StandbySpec {
