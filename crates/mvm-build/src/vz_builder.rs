@@ -1362,7 +1362,14 @@ fn build_vz_persistent_supervisor_config(
             events_ingest_socket_path: None,
         }),
         balloon: None,
-        control_socket_path: None,
+        // Enables the idle snapshot-park: the supervisor binds this socket so a
+        // later slice can send SAVE/RESTORE commands.
+        control_socket_path: Some(
+            vm_state_dir
+                .join("control.sock")
+                .to_string_lossy()
+                .into_owned(),
+        ),
         startup_mode: crate::vz::StartupMode::Boot,
         // Builder VMs are trusted dev-tier — no claim-10 flow audit.
         tenant_id: None,
@@ -2227,6 +2234,35 @@ mod tests {
         // Boot startup; persistent Vz doesn't yet restore from a saved
         // snapshot.
         assert!(matches!(cfg.startup_mode, crate::vz::StartupMode::Boot));
+    }
+
+    #[test]
+    fn persistent_config_enables_control_socket_for_snapshot_park() {
+        let scratch = tempfile::tempdir().unwrap();
+        let vm_name = "mvm-persistent-builder-vz-test";
+        let vm_state_dir = scratch.path().join("vms").join(vm_name);
+        let workspace = scratch.path().join("work");
+        let job_dir = scratch.path().join("job");
+        let nix_store = scratch.path().join("nix-store.img");
+        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+            vm_name,
+            vm_state_dir: &vm_state_dir,
+            image: &rootfs_image(),
+            workspace_root: &workspace,
+            job_dir: &job_dir,
+            nix_store_img: &nix_store,
+            vcpus: 4,
+            memory_mib: 8192,
+            expose_guest_agent: false,
+            gvproxy: None,
+        })
+        .expect("config");
+        let sock = cfg.control_socket_path.expect("control socket enabled");
+        assert!(sock.ends_with("control.sock"), "got {sock:?}");
+        assert!(
+            sock.starts_with(&cfg.vm_state_dir),
+            "socket must live under the VM state dir, got {sock:?}"
+        );
     }
 
     #[test]
