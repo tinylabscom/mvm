@@ -1374,7 +1374,11 @@ mod tests {
         assert_eq!(child.parent.as_ref().unwrap(), &parent.id);
         assert_eq!(child.vm_name, "childvm");
         assert_eq!(child.content, parent.content);
-        let names: Vec<_> = child.content.iter().map(|blob| blob.name.as_str()).collect();
+        let names: Vec<_> = child
+            .content
+            .iter()
+            .map(|blob| blob.name.as_str())
+            .collect();
         assert_eq!(
             names,
             vec![
