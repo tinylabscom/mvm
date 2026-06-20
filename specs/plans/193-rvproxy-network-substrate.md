@@ -6,17 +6,18 @@
 > syntax.
 
 **Status: 🟡 in progress — rvproxy R2 is available; mvm-side native parity is
-partly landed and macOS/libkrun now selects the native candidate by default when
-configured.** The matching requirements doc lives in the sibling repo at
+partly landed, admitted libkrun/Vz workload starts already thread the bridge
+handoff by default, and macOS/libkrun now selects the native candidate by default
+when configured.** The matching requirements doc lives in the sibling repo at
 `rvproxy/specs/plans/014-mvm-adoption-requirements.md`; rvproxy's own
 `docs/mvm-integration.md` + `specs/plans/008-orchestration-plane.md` define the
 contract. WS-1 transport, WS-1.5 parity scaffold, native config emission/launch,
 native flow-audit refeed, and binary-discriminating native enforcement witnesses
 are landed. The macOS/libkrun default selection now chooses native when
 `MVM_GATEWAY_BIN` is configured, while explicit `MVM_NETWORKING=gvproxy` and the
-no-candidate fallback remain available. Remaining cutover work is deleting the
-splice/Plan-141 hooks, adding the transparent terminator, and making the parity
-gate required.
+no-candidate fallback remain available. Remaining cutover work is adding the
+transparent terminator requirement, making the parity gate required, then
+deleting the splice/Plan-141 hooks.
 
 > **Priority update 2026-06-15:** Plan 200 consumes this plan as security/network
 > substrate. `mvmctl machine --net` and `allow-host` must use the current
@@ -291,6 +292,13 @@ own internal default).
         by default, and an explicit `MVM_NETWORKING=gvproxy` pin still overrides
         the native default. Covered by hermetic env-selection tests; this does
         not delete the splice or change branch-protection settings.
+  - [x] **2d task 2e — admitted libkrun/Vz bridge handoff status reconciled.**
+        The default admitted workload path already threads `plan_json` for
+        libkrun and Vz (`should_thread_signed_plan(false, "libkrun"|"vz")`), so
+        it is no longer correct to list a future `MVM_GATEWAY_BRIDGE` default
+        flip for those backends. Firecracker's separate bridge sidecar remains
+        explicitly gated because Firecracker already enforces
+        `VmStartConfig.network_policy` through nftables on its default path.
   - [ ] **2d — remaining: splice deletion.** Delete the splice + Plan-141
         `on_packet` hooks once the native audit feed is the sole path and the
         transparent terminator/parity-required gates are in place. Design + the

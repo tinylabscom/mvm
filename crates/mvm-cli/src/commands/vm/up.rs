@@ -4620,7 +4620,7 @@ mod resolve_deps_volume_tests {
     fn qemu_threads_signed_plan_for_substitution_endpoint() {
         // The QEMU per-VM substitution endpoint reads config.plan_json /
         // tenant_id to spawn when the plan carries secrets — it must be threaded
-        // even with the libkrun/Vz gateway bridge off (the default).
+        // independent of the Firecracker bridge sidecar opt-in.
         assert!(should_thread_signed_plan(false, "qemu"));
         assert!(should_thread_signed_plan(true, "qemu"));
     }
@@ -4633,6 +4633,15 @@ mod resolve_deps_volume_tests {
         assert!(should_thread_signed_plan(false, "libkrun"));
         assert!(should_thread_signed_plan(false, "vz"));
         assert!(should_thread_signed_plan(true, "libkrun"));
+    }
+
+    #[test]
+    fn firecracker_bridge_sidecar_remains_explicit_opt_in() {
+        // Firecracker's default path already enforces VmStartConfig.network_policy
+        // through nftables; the separate mvm-firecracker-bridge sidecar remains
+        // behind MVM_GATEWAY_BRIDGE=1 until its lane is proven.
+        assert!(!should_thread_signed_plan(false, "firecracker"));
+        assert!(should_thread_signed_plan(true, "firecracker"));
     }
 
     #[test]
