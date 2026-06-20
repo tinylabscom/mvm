@@ -21,8 +21,9 @@
 //!   forward OCI xattrs through unpack today anyway).
 //! - `-b 4096` — fixed block size.
 //! - `-t ext4` — fixed FS type.
-//! - `-O ^orphan_file` — disable the orphan-file feature (default-on in
-//!   e2fsprogs >= 1.47); its inode bytes vary run-to-run.
+//! - `-O ^has_journal,^orphan_file` — disable mutable ext4 features that can
+//!   carry run-specific bytes. The OCI rootfs is mounted read-only and sealed
+//!   with dm-verity, so a journal is not useful there.
 //!
 //! ## Host support
 //!
@@ -36,6 +37,9 @@
 use crate::oci_to_rootfs::error::OciUnpackError;
 use crate::oci_to_rootfs::unpack::StagedRootfs;
 use std::path::{Path, PathBuf};
+
+#[cfg(any(target_os = "linux", test))]
+const DISABLED_EXT4_FEATURES: &str = "^has_journal,^orphan_file";
 
 /// Knobs for [`materialize_to_ext4`]. Defaults produce a
 /// byte-deterministic image suitable for verity
@@ -203,13 +207,11 @@ fn run_mke2fs(
     cmd.env("SOURCE_DATE_EPOCH", options.source_date_epoch.to_string())
         .args(["-F"]) // overwrite the preallocated output file
         .args(["-t", "ext4"])
-        // Disable `orphan_file`: e2fsprogs >= 1.47 enables it by default,
-        // and it allocates an orphan-file inode whose on-disk bytes vary
-        // between otherwise-identical runs — defeating the verity
-        // cache's byte-determinism (and `^metadata_csum_seed` is moot
-        // because `-U` already pins the seed). It's only a crash-recovery
-        // optimization, irrelevant for a read-only verity rootfs.
-        .args(["-O", "^orphan_file"])
+        // Disable features that can carry run-specific bytes. The journal and
+        // orphan-file are crash-recovery machinery, irrelevant for a read-only
+        // dm-verity rootfs, and they defeat byte-deterministic sealing on some
+        // e2fsprogs versions.
+        .args(["-O", DISABLED_EXT4_FEATURES])
         .args(["-L", &options.label])
         .args(["-U", &options.uuid])
         .args([
@@ -291,6 +293,19 @@ mod tests {
         // Padding is large enough to absorb mke2fs overhead but
         // not so large that small images pay an outsized cost.
         assert_eq!(o.size_padding_bytes, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn mutable_ext4_features_are_disabled_for_determinism() {
+        let disabled: Vec<&str> = DISABLED_EXT4_FEATURES.split(',').collect();
+        assert!(
+            disabled.contains(&"^has_journal"),
+            "journal bytes are not stable enough for verity-cache determinism"
+        );
+        assert!(
+            disabled.contains(&"^orphan_file"),
+            "orphan-file bytes are not stable enough for verity-cache determinism"
+        );
     }
 
     #[test]
