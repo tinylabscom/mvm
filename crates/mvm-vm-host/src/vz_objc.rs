@@ -1251,7 +1251,10 @@ async fn run_port_proxy(conn: VmConn, listener: UnixListener, port: u32) {
                         tracing::debug!(port, error = %e, "vsock bridge closed with error");
                     }
                 }
-                Err(e) => tracing::warn!(port, error = %e, "vsock connect to guest failed"),
+                // Expected during boot: the host polls the agent port while
+                // the guest is still initialising; retries resolve once the
+                // agent is ready.
+                Err(e) => tracing::debug!(port, error = %e, "vsock connect to guest failed"),
             }
         });
     }

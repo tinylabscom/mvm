@@ -11,13 +11,25 @@ pub enum LogFormat {
     Json,
 }
 
+/// The default tracing filter for a `-v` count when `RUST_LOG` is unset.
+/// 0 = quiet (errors only); each `-v` widens it.
+fn filter_for_verbosity(verbosity: u8) -> &'static str {
+    match verbosity {
+        0 => "error",
+        1 => "mvm=info,warn",
+        2 => "debug",
+        _ => "trace",
+    }
+}
+
 /// Initialize the global tracing subscriber.
 ///
-/// Call once at program startup. Respects `RUST_LOG` env var for filtering.
-/// Default filter: `mvm=info` (show info+ from mvm, warnings from dependencies).
-pub fn init(format: LogFormat) {
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("mvm=info,warn"));
+/// Call once at program startup. Without `-v` the filter is `error` (quiet by
+/// default). Each `-v` widens it: `-v` → `mvm=info,warn`, `-vv` → `debug`,
+/// `-vvv` → `trace`. `RUST_LOG=<filter>` overrides verbosity entirely.
+pub fn init(format: LogFormat, verbosity: u8) {
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(filter_for_verbosity(verbosity)));
 
     match format {
         LogFormat::Human => {
@@ -49,5 +61,13 @@ mod tests {
         assert_eq!(LogFormat::Human, LogFormat::Human);
         assert_eq!(LogFormat::Json, LogFormat::Json);
         assert_ne!(LogFormat::Human, LogFormat::Json);
+    }
+
+    #[test]
+    fn test_filter_for_verbosity() {
+        assert_eq!(filter_for_verbosity(0), "error");
+        assert!(filter_for_verbosity(1).contains("info"));
+        assert_eq!(filter_for_verbosity(2), "debug");
+        assert_eq!(filter_for_verbosity(5), "trace");
     }
 }
