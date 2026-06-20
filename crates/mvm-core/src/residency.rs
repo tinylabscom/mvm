@@ -7,6 +7,15 @@ use std::time::Duration;
 
 pub const MVM_RESIDENCY_ENV: &str = "MVM_RESIDENCY";
 
+/// Which residency a policy expresses — the typed discriminant behind the three
+/// constructors, so callers branch on intent rather than the display label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidencyKind {
+    Warm,
+    Parked,
+    Cold,
+}
+
 /// How warm the standby pool is kept. `warm_target` standbys are held live;
 /// `idle_timeout`, when set, is how long a warm standby may sit idle before it
 /// is eligible for demotion to a parked snapshot (demotion handled elsewhere).
@@ -15,6 +24,7 @@ pub struct ResidencyPolicy {
     warm_target: u32,
     idle_timeout: Option<Duration>,
     label: &'static str,
+    kind: ResidencyKind,
 }
 
 impl ResidencyPolicy {
@@ -24,6 +34,7 @@ impl ResidencyPolicy {
             warm_target: 1,
             idle_timeout: Some(Duration::from_secs(20 * 60)),
             label: "always-warm",
+            kind: ResidencyKind::Warm,
         }
     }
     /// Hold nothing warm; resume from a parked snapshot on demand.
@@ -32,6 +43,7 @@ impl ResidencyPolicy {
             warm_target: 0,
             idle_timeout: None,
             label: "parked",
+            kind: ResidencyKind::Parked,
         }
     }
     /// Hold nothing warm and keep no snapshot; cold-boot on demand.
@@ -40,6 +52,7 @@ impl ResidencyPolicy {
             warm_target: 0,
             idle_timeout: None,
             label: "cold",
+            kind: ResidencyKind::Cold,
         }
     }
 
@@ -51,6 +64,15 @@ impl ResidencyPolicy {
     }
     pub fn label(&self) -> &'static str {
         self.label
+    }
+    pub fn kind(&self) -> ResidencyKind {
+        self.kind
+    }
+    /// Whether builds may use (and keep) the persistent builder VM under this
+    /// policy. Only `Cold` opts out — it routes builds through the single-shot
+    /// builder that boots and tears down per build.
+    pub fn allows_persistent_builder(&self) -> bool {
+        !matches!(self.kind, ResidencyKind::Cold)
     }
 }
 
@@ -172,5 +194,19 @@ mod tests {
             effective_warm_pool_size(None),
             resolve_residency().0.warm_target()
         );
+    }
+
+    #[test]
+    fn kind_matches_constructor() {
+        assert_eq!(ResidencyPolicy::always_warm().kind(), ResidencyKind::Warm);
+        assert_eq!(ResidencyPolicy::parked().kind(), ResidencyKind::Parked);
+        assert_eq!(ResidencyPolicy::cold().kind(), ResidencyKind::Cold);
+    }
+
+    #[test]
+    fn only_cold_disallows_the_persistent_builder() {
+        assert!(ResidencyPolicy::always_warm().allows_persistent_builder());
+        assert!(ResidencyPolicy::parked().allows_persistent_builder());
+        assert!(!ResidencyPolicy::cold().allows_persistent_builder());
     }
 }
