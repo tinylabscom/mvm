@@ -279,6 +279,9 @@ const ARTIFACT_SUB: &[(&str, AuditPosture)] = &[
     ("verify", AuditPosture::ReadOnly),
     // Plan 76 follow-up — read manifest without signature check.
     ("inspect", AuditPosture::ReadOnly),
+    // Plan 200 — verify a `.mvm` then extract its payload to disk. Produces
+    // local files only (like `pack`); no host audit-chain emission.
+    ("extract", AuditPosture::ReadOnly),
     // Plan 134 — architecture-aware artifact-model commands. All static
     // (read manifest / validate / emit a Firecracker config / build an
     // artifact via the builder); none touch the host audit chain — like

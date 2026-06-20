@@ -21,8 +21,8 @@ use mvm_backend::artifacts::manifest::ArtifactManifest;
 use mvm_backend::artifacts::traits::{ArtifactError, ArtifactValidator, BackendConfigWriter};
 use mvm_backend::artifacts::{FirecrackerConfigWriter, StaticValidator};
 use mvm_build::packed_artifact::{
-    ArtifactProfile, PackInputs, SecurityPosture, inspect_unverified, pack as pack_artifact,
-    verify as verify_artifact,
+    ArtifactProfile, PackInputs, SecurityPosture, extract as extract_artifact, inspect_unverified,
+    pack as pack_artifact, verify as verify_artifact,
 };
 use mvm_core::arch::GuestArch;
 use mvm_core::config::mvm_data_dir;
@@ -55,6 +55,12 @@ pub(in crate::commands) enum Cmd {
     /// operator decides whether to trust the producer. For trust
     /// checks use `mvmctl artifact verify`.
     Inspect(InspectArgs),
+    /// Verify a `.mvm` artifact and extract its payload files to a
+    /// directory. Verification runs first (signature, hashes, format
+    /// version, sealed-prod verity, traversal safety); only manifest-
+    /// listed files are written, so a tampered or traversal-laden
+    /// archive never lands a byte on disk. Exits 65 on a verify failure.
+    Extract(ExtractArgs),
     // ── Artifact-model commands ───────────────────────────
     /// Print the build-level ArtifactManifest for an artifact directory.
     ///
@@ -161,6 +167,25 @@ pub(in crate::commands) struct VerifyArgs {
     pub json: bool,
 }
 
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct ExtractArgs {
+    /// Path to the `.mvm` artifact to verify and extract.
+    pub path: PathBuf,
+    /// Directory to extract the verified payload into. Created if it
+    /// does not exist. Manifest-listed files land at their in-archive
+    /// paths (e.g. `kernel/vmlinux`, `rootfs/rootfs.ext4`).
+    #[arg(long, short = 'o')]
+    pub out: PathBuf,
+    /// Path to the verifying-key file (32-byte Ed25519 public key, raw
+    /// bytes). Defaults to the host signer's public half at
+    /// `~/.mvm/keys/host-signer.pub`.
+    #[arg(long)]
+    pub key: Option<PathBuf>,
+    /// Print the verified manifest as JSON on success.
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 #[clap(rename_all = "kebab-case")]
 pub(in crate::commands) enum CliProfile {
@@ -232,6 +257,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         Cmd::Pack(a) => run_pack(a),
         Cmd::Verify(a) => run_verify(a),
         Cmd::Inspect(a) => run_inspect(a),
+        Cmd::Extract(a) => run_extract(a),
         Cmd::ModelInspect(a) => run_model_inspect(a),
         Cmd::ModelValidate(a) => run_model_validate(a),
         Cmd::ModelConfig(a) => run_model_config(a),
@@ -311,10 +337,11 @@ fn run_pack(args: PackArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_verify(args: VerifyArgs) -> Result<()> {
-    use ed25519_dalek::VerifyingKey;
-    let key_bytes = match args.key {
-        Some(p) => std::fs::read(&p).with_context(|| format!("read {}", p.display()))?,
+/// Resolve the Ed25519 verifying key: an explicit `--key <path>` file, or
+/// the host signer's public half by default. Shared by `verify` and `extract`.
+fn resolve_verifying_key(key: Option<&Path>) -> Result<ed25519_dalek::VerifyingKey> {
+    let key_bytes = match key {
+        Some(p) => std::fs::read(p).with_context(|| format!("read {}", p.display()))?,
         None => {
             let signer = host_signer::load_or_init().context("load host signer")?;
             std::fs::read(&signer.public_path)
@@ -329,7 +356,11 @@ fn run_verify(args: VerifyArgs) -> Result<()> {
     }
     let mut buf = [0u8; 32];
     buf.copy_from_slice(&key_bytes);
-    let verifying = VerifyingKey::from_bytes(&buf).context("parse Ed25519 verifying key")?;
+    ed25519_dalek::VerifyingKey::from_bytes(&buf).context("parse Ed25519 verifying key")
+}
+
+fn run_verify(args: VerifyArgs) -> Result<()> {
+    let verifying = resolve_verifying_key(args.key.as_deref())?;
 
     match verify_artifact(&args.path, &verifying) {
         Ok(manifest) => {
@@ -348,6 +379,32 @@ fn run_verify(args: VerifyArgs) -> Result<()> {
         }
         Err(e) => {
             crate::ui::warn(&format!("{}: verify failed: {e}", args.path.display()));
+            std::process::exit(65);
+        }
+    }
+}
+
+fn run_extract(args: ExtractArgs) -> Result<()> {
+    let verifying = resolve_verifying_key(args.key.as_deref())?;
+
+    match extract_artifact(&args.path, &verifying, &args.out) {
+        Ok(manifest) => {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&manifest)?);
+            } else {
+                crate::ui::success(&format!(
+                    "{}: extracted {} files to {} ({}, profile={:?})",
+                    args.path.display(),
+                    manifest.files.len(),
+                    args.out.display(),
+                    manifest.target_arch,
+                    manifest.security.profile
+                ));
+            }
+            Ok(())
+        }
+        Err(e) => {
+            crate::ui::warn(&format!("{}: extract failed: {e}", args.path.display()));
             std::process::exit(65);
         }
     }
