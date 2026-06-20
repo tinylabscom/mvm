@@ -338,8 +338,11 @@ fn run_pack(args: PackArgs) -> Result<()> {
 }
 
 /// Resolve the Ed25519 verifying key: an explicit `--key <path>` file, or
-/// the host signer's public half by default. Shared by `verify` and `extract`.
-fn resolve_verifying_key(key: Option<&Path>) -> Result<ed25519_dalek::VerifyingKey> {
+/// the host signer's public half by default. Shared by `verify`, `extract`,
+/// and `machine check-artifact`.
+pub(in crate::commands) fn resolve_verifying_key(
+    key: Option<&Path>,
+) -> Result<ed25519_dalek::VerifyingKey> {
     let key_bytes = match key {
         Some(p) => std::fs::read(p).with_context(|| format!("read {}", p.display()))?,
         None => {
