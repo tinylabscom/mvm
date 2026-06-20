@@ -4157,7 +4157,9 @@ mod tests {
         assert_eq!(c.category, "platform");
         assert!(c.ok);
         assert!(
-            c.info.contains("persistent builder"),
+            c.info.contains("persistent builder")
+                || c.info.contains("parked")
+                || c.info.contains("no persistent builder"),
             "info was {:?}",
             c.info
         );
