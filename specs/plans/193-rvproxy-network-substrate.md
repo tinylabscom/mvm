@@ -15,9 +15,10 @@ contract. WS-1 transport, WS-1.5 parity scaffold, native config emission/launch,
 native flow-audit refeed, and binary-discriminating native enforcement witnesses
 are landed. The macOS/libkrun default selection now chooses native when
 `MVM_GATEWAY_BIN` is configured, while explicit `MVM_NETWORKING=gvproxy` and the
-no-candidate fallback remain available. Remaining cutover work is adding the
-transparent terminator requirement, making the parity gate required, then
-deleting the splice/Plan-141 hooks.
+no-candidate fallback remain available. Remaining cutover work is making the
+parity gate required, then deleting the splice/Plan-141 hooks only after
+rvproxy provides the macOS transparent `:80`/`:443` interception path recorded
+by the requirement below.
 
 > **Priority update 2026-06-15:** Plan 200 consumes this plan as security/network
 > substrate. `mvmctl machine --net` and `allow-host` must use the current
@@ -299,10 +300,17 @@ own internal default).
         flip for those backends. Firecracker's separate bridge sidecar remains
         explicitly gated because Firecracker already enforces
         `VmStartConfig.network_policy` through nftables on its default path.
+  - [x] **2d task 2f — transparent terminator requirement captured.**
+        `EgressSubstitutionTransport` now exposes separate proxy-aware
+        substitution vs transparent `:80`/`:443` terminator capability, and
+        `require_transparent_egress_terminator(&dyn WorkloadBackend)` refuses
+        libkrun/Vz/mock while accepting Firecracker's nft terminator leg. This
+        does not implement macOS interception; it makes that rvproxy capability
+        an explicit splice-deletion prerequisite instead of an implied comment.
   - [ ] **2d — remaining: splice deletion.** Delete the splice + Plan-141
         `on_packet` hooks once the native audit feed is the sole path and the
-        transparent terminator/parity-required gates are in place. Design + the
-        R2 contract are in "## WS-2 design" below.
+        transparent terminator implementation/parity-required gates are in
+        place. Design + the R2 contract are in "## WS-2 design" below.
 - [ ] **WS-3 — backend cutover.** Replace the gvproxy spawn
       (`mvm-build/host_gvproxy.rs`, `libkrun-sys/gvproxy.rs`) + passt with
       `rvproxy run --config` per the integration contract; drop the Homebrew
@@ -423,10 +431,10 @@ the splice is deleted. The splice (`gateway_bridge` + the Plan 141 per-backend
 ### Dependency
 
 rvproxy R2 shipped, and mvm has consumed the subprocess-facing pieces needed for
-native config emission plus flow-audit JSONL refeed. Remaining dependency work is
-the cutover contract: keep the native parity gate green by default, add the
-transparent terminator requirement, and only then delete the splice and default
-to the native path.
+native config emission plus flow-audit JSONL refeed. Remaining dependency work
+is the cutover contract: keep the native parity gate green by default, make it
+required, land the rvproxy transparent terminator implementation for
+macOS/Vz/libkrun, and only then delete the splice and default to the native path.
 
 ## Cross-repo dependency
 rvproxy `specs/plans/014-mvm-adoption-requirements.md` (mvm-authored requirements)
