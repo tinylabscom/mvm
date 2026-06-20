@@ -5262,6 +5262,14 @@ mod dev_status_image_tests {
 
     #[test]
     fn dev_status_json_is_versioned_and_privacy_safe() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set(
+            tmp.path(),
+            &tmp.path().join("data"),
+            &tmp.path().join("cache"),
+        );
+
         // A VM-backed report carries the backend, the fixed dev VM name,
         // the state, and a guest-probed kernel version — but never a local
         // artifact path. Digest-bearing base provenance is reported only
