@@ -268,13 +268,22 @@ arm lands with the daemon's image baking (boot-gated).
 
 ### E. UX and docs
 
-- [ ] Update installation docs: host `mvmctl` is required, host Nix is optional.
-- [ ] Update architecture docs with host control plane vs builder execution
-      plane.
-- [ ] Update troubleshooting docs for builder-daemon readiness, cancellation,
-      and log collection.
-- [ ] Document that guest images do not contain `mvmctl` or `mvm-builderd`.
+- [~] Update installation docs: host `mvmctl` is required, host Nix is optional.
+      Host-Nix-optional is now documented in `guides/builder-vm.md`; the
+      `getting-started/installation.md` edit is deferred (a parallel Plan 200
+      docs session owns that file) to avoid a collision.
+- [x] Update architecture docs with host control plane vs builder execution
+      plane. `guides/builder-vm.md` → "Resident builder control plane" section:
+      `mvm-builderd` resident daemon, typed allowlisted vsock requests, no
+      shell, `mvmctl doctor` "builder daemon" readiness line.
+- [x] Update troubleshooting docs for builder-daemon readiness, cancellation,
+      and log collection. `guides/troubleshooting.md` → "Builds hang or fail
+      with the builder daemon not ready" (doctor readiness probe, recycle,
+      host-driven cancellation).
+- [x] Document that guest images do not contain `mvmctl` or `mvm-builderd`.
+      Covered in the builder-vm.md section ("Guest images stay tool-free").
 - [ ] Add a concise "what runs where" table for users and contributors.
+      (`guides/builder-vm.md` already carries a "What Runs Where" table.)
 
 ## Acceptance
 
