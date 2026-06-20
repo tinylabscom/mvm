@@ -44,6 +44,53 @@ tier, per-VM marker file, started-VM probe order, and the listing/support sets t
 doctor` and `mvmctl ls` read. Both enum (`AnyBackend`) and trait-object (`Arc<dyn VmBackend>`)
 consumers construct from the same descriptors via `instantiate` / `instantiate_dyn`.
 
+## What runs where: the trust gradient
+
+mvm runs long-lived processes in three layers, one per trust tier. Authority decreases as
+you move away from the host, and each layer is trusted accordingly (see ADR-002 and ADR-090).
+
+| Layer | Process | Owns | Authority | Trust |
+|-------|---------|------|-----------|-------|
+| Host | the `mvmctl` control plane (plus, under the fleet, per-tenant signer/audit daemons) | host signing keys, plan admission, the chain-signed audit log, VM + pool lifecycle | full | trusted (TCB) |
+| Builder VM | the Linux builder environment (Nix + the builder store) | building guest/workload images | build-only | trusted to build; dev-tier |
+| Workload microVM | the guest agent | answering vsock RPCs for its one workload | none | untrusted |
+
+The governing rule: **a process never holds authority above its trust tier, and authority
+only ever decreases host → builder → workload.** Host signing keys, plan admission, and the
+audit chain never cross the host→builder boundary. The workload guest agent is the deliberate
+runt — a sealed production build links no `do_exec` and no console (claims 4 and 15) and holds
+no signing key or admission code. `mvmctl`'s `check-trust-gradient` lint machine-checks this
+ledger (`specs/claims/trust-gradient.md`) on every PR; the ledger carries the host and workload
+rows today, and the builder row is added once the resident builder daemon (`mvm-builderd`) exists.
+
+What is installed where:
+
+- The **host** has `mvmctl` (and, under the fleet, the per-tenant `mvm-host-agent` +
+  `mvm-signer-helper` daemons). Host Nix is optional.
+- The **builder VM** owns Nix and the build toolchain. Making the builder a *resident* typed
+  vsock service (`mvm-builderd`) is the direction recorded in ADR-089 / Plan 204; today builder
+  work is controlled job execution, not yet a resident daemon.
+- **Workload microVM images** contain neither `mvmctl` nor builder tooling — only the minimal
+  guest agent baked by `mkGuest`.
+
+### Residency: how warm the standby pool is kept
+
+The standby pool is governed by a single residency policy (ADR-090), surfaced on `mvmctl
+doctor`'s `residency` line as `<policy> — <source> — warm_target=N[, idle=Nm]`.
+
+- `MVM_RESIDENCY=warm|parked|cold` overrides the policy. Unset, it resolves to a per-host
+  default: **macOS 26+ Apple Silicon defaults to `warm`** (a compatible standby is kept ready,
+  so a command does not pay a builder/VM boot); **every other host, including CI, defaults to
+  `parked`** (nothing is held warm; resume on demand).
+- The trade-off is resource cost vs. first-command latency: `warm` keeps a standby ready,
+  `parked`/`cold` hold none.
+- On the snapshot-capable macOS backend a standby is a captured saved state; when one ages
+  past the warm TTL the pool **demotes it to `parked`** — kept as a claimable saved-state
+  snapshot rather than discarded — and resumes it on the next compatible claim (matched on
+  `kernel_sha256` + image digest). On the live-process backend (libkrun) a standby cannot be
+  snapshotted, so an idle one is reaped to cold. `mvmctl pool status` reports `idle`,
+  `claimed`, and `parked` counts.
+
 ## Workspace Structure
 
 The workspace is organized by responsibility rather than by platform:

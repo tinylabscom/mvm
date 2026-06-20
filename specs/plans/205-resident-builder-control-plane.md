@@ -135,11 +135,12 @@ typed allowlisted protocol, so residency shrinks rather than widens the attack s
 
 ### F. Docs and posture
 
-- [ ] Add a "what runs where" table (host control / builder daemon / workload agent)
-      for users and contributors.
-- [ ] Document the residency default, the override, and the RAM-vs-latency tradeoff.
-- [ ] Write the threat-model delta: residency changes the builder lifecycle, not the
-      trust boundary; enumerate why each claim is unaffected.
+- [x] Add a "what runs where" table (host control / builder daemon / workload agent)
+      for users and contributors. — `reference/architecture.md` §"What runs where".
+- [x] Document the residency default, the override, and the RAM-vs-latency tradeoff. —
+      `reference/architecture.md` §"Residency".
+- [x] Write the threat-model delta: residency changes the builder lifecycle, not the
+      trust boundary; enumerate why each claim is unaffected. — ADR-090 §"Threat-model delta".
 
 ## Acceptance
 

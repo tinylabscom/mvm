@@ -180,3 +180,28 @@ residency policy over the standby pool; make `mvm-builderd` resident across `mvm
 invocations (consuming Plan 204's protocol, not reimplementing it); wire snapshot
 park/resume into the parked state; add the cold-acquisition snapshot-bake; document
 "what runs where." No user command rename is required.
+
+## Threat-model delta (residency landed)
+
+The residency policy (Plan 205 WS-B) and parked-standby demotion (WS-D) are in the tree. This
+section records why neither changes the trust boundary or weakens an ADR-002 claim:
+
+- **Keys, admission, and audit stay host-side at every residency setting.** Residency only
+  changes how warm the standby pool is kept and whether an idle standby is parked or reaped.
+  The host control plane — signing keys, plan admission, the chain-signed audit log — is
+  untouched. No claim 8 / 12 / 13 surface moves.
+- **A parked standby is still admitted from content-addressed inputs.** A standby is a
+  kernel + supervisor saved state carrying no workload; the workload is attached at claim time
+  from the admitted, signed `ExecutionPlan` (claim 8) only after a compatibility check on
+  `kernel_sha256` + image digest (`StandbyCompat`). A parked standby cannot be claimed for an
+  incompatible image, and how long it sat parked changes nothing the admission path verifies.
+- **Demotion is gated by the dev-tier saved-state shape (`is_saved_state()`, pid 0).** Parking
+  applies only to a backend whose standby is already a captured saved state (the macOS managed
+  backend); the live-process backend reaps to cold. No production workload's posture is
+  snapshotted or resumed — the workload rootfs is dm-verity sealed (claim 3) and re-verified
+  independent of the standby it was claimed from.
+- **No new guest-reachable surface.** Residency is host-side pool bookkeeping (the reaper and
+  the selection predicate). The guest wire is unchanged and the workload agent gains nothing.
+
+Net: residency changes the builder/standby *lifecycle*, not the trust gradient. Claims 1–15
+are unaffected, and `check-trust-gradient` continues to machine-check the gradient on every PR.
