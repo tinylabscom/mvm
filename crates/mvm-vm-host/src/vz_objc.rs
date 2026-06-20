@@ -1251,9 +1251,12 @@ async fn run_port_proxy(conn: VmConn, listener: UnixListener, port: u32) {
                         tracing::debug!(port, error = %e, "vsock bridge closed with error");
                     }
                 }
-                // Expected during boot: the host polls the agent port while
-                // the guest is still initialising; retries resolve once the
-                // agent is ready.
+                // Expected and non-fatal: while the guest is still booting, the
+                // agent isn't listening yet, so a host dial (e.g. mvmctl's
+                // readiness retries on the agent port) is reset. The caller
+                // retries; a genuine "agent never came up" is surfaced by the
+                // caller's boot deadline, not here. Logging this at warn spammed
+                // ~25 lines on every healthy boot — keep it at debug.
                 Err(e) => tracing::debug!(port, error = %e, "vsock connect to guest failed"),
             }
         });
