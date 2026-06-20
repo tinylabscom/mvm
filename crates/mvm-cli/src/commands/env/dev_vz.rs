@@ -222,6 +222,31 @@ fn dev_vz_snapshot_exists() -> bool {
     mvm_build::vz_builder::builder_snapshot_path(&state_dir).is_file()
 }
 
+/// Whether `dev down` should park (snapshot-save) the resident builder before
+/// stopping: residency keeps a persistent builder, the VM is live, and this is
+/// not a `--reset` stop (reset wants a clean cold boot next time).
+#[cfg(feature = "builder-vm")]
+fn should_park(allows_persistent: bool, alive: bool, reset: bool) -> bool {
+    allows_persistent && alive && !reset
+}
+
+/// Whether `dev up` should resume from a parked snapshot rather than cold-boot:
+/// residency keeps a persistent builder and a parked snapshot is present.
+#[cfg(feature = "builder-vm")]
+fn should_resume(allows_persistent: bool, snapshot_present: bool) -> bool {
+    allows_persistent && snapshot_present
+}
+
+/// Discard a parked snapshot (+ its machine-id sidecar) so a later `dev up`
+/// cold-boots instead of resuming a builder we no longer want resident.
+#[cfg(feature = "builder-vm")]
+fn remove_dev_vz_snapshot_markers(state_dir: &std::path::Path) {
+    let snap = mvm_build::vz_builder::builder_snapshot_path(state_dir);
+    let mid = mvm_build::vz_builder::builder_snapshot_machine_id_path(&snap);
+    let _ = std::fs::remove_file(&snap);
+    let _ = std::fs::remove_file(&mid);
+}
+
 #[cfg(not(feature = "builder-vm"))]
 fn dev_vz_snapshot_exists() -> bool {
     false
@@ -277,7 +302,10 @@ pub(super) fn cmd_dev_vz(
     let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
     mvm_build::vz_builder::stop_persistent_vz_by_pid_file(&state_dir);
     let console_log = state_dir.join("console.log");
-    if dev_vz_snapshot_exists() {
+    let allows_persistent = mvm_core::residency::resolve_residency()
+        .0
+        .allows_persistent_builder();
+    if should_resume(allows_persistent, dev_vz_snapshot_exists()) {
         match mvm_build::vz_builder::restore_persistent_vz_builder_from_snapshot(&state_dir) {
             Ok(_) => {
                 wait_for_dev_vm_ready(&console_log)?;
@@ -289,11 +317,18 @@ pub(super) fn cmd_dev_vz(
                 return Ok("restored");
             }
             Err(e) => {
+                // The snapshot is unusable; discard it so the next `dev up`
+                // cold-boots cleanly instead of retrying the same failed restore.
+                remove_dev_vz_snapshot_markers(&state_dir);
                 ui::warn(&format!(
-                    "parked dev VM restore failed; falling back to cold boot: {e}"
+                    "parked dev VM restore failed; discarded snapshot, cold-booting: {e}"
                 ));
             }
         }
+    } else if dev_vz_snapshot_exists() {
+        // Residency no longer keeps a resident builder (cold): drop the stale
+        // snapshot so we cold-boot cleanly rather than waking an unwanted VM.
+        remove_dev_vz_snapshot_markers(&state_dir);
     }
 
     // Ensure the boot image exists before launching. `--base` resolves
@@ -433,14 +468,42 @@ pub(in crate::commands) fn dev_vsock_proxy_path() -> String {
 /// file under the stable state dir.
 /// Stop the Vz dev VM. Returns whether a live VM was reaped. Prints the
 /// human result line only when `!json` (the dispatch emits the JSON form).
-pub(in crate::commands) fn cmd_dev_vz_down(json: bool) -> Result<bool> {
+pub(in crate::commands) fn cmd_dev_vz_down(json: bool, reset: bool) -> Result<bool> {
     #[cfg(feature = "builder-vm")]
     {
         let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
+        let allows_persistent = mvm_core::residency::resolve_residency()
+            .0
+            .allows_persistent_builder();
+        let alive = mvm_build::vz_builder::persistent_vz_supervisor_alive(&state_dir);
+
+        if should_park(allows_persistent, alive, reset) {
+            match mvm_build::vz_builder::park_persistent_vz_builder(&state_dir) {
+                Ok(_) => {
+                    // park_persistent_vz_builder already stopped the supervisor.
+                    let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
+                    if !json {
+                        ui::success("Parked dev VM — next `dev up` resumes from snapshot.");
+                    }
+                    return Ok(true);
+                }
+                Err(e) => {
+                    // Park failed: fall through to a normal stop so we never
+                    // leave a half-parked, still-running VM.
+                    if !json {
+                        ui::warn(&format!("Park failed ({e}); stopping normally."));
+                    }
+                }
+            }
+        }
+
         let was_running = mvm_build::vz_builder::stop_persistent_vz_by_pid_file(&state_dir);
         // Drop the per-VM vsock dir so a stale socket can't fool the
         // liveness probe on the next `dev status`.
         let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
+        // Not parking (cold residency or `--reset`): discard any stale snapshot
+        // so a later `dev up` cold-boots instead of resuming an old builder.
+        remove_dev_vz_snapshot_markers(&state_dir);
         if !json {
             if was_running {
                 ui::success("Dev VM stopped.");
@@ -452,6 +515,7 @@ pub(in crate::commands) fn cmd_dev_vz_down(json: bool) -> Result<bool> {
     }
     #[cfg(not(feature = "builder-vm"))]
     {
+        let _ = reset;
         if !json {
             ui::info("Dev VM is not running.");
         }
@@ -6776,5 +6840,40 @@ mod heartbeat_tests {
             format_compile_elapsed(Duration::from_secs(130)),
             "still compiling… (2m10s elapsed)"
         );
+    }
+}
+
+#[cfg(all(test, feature = "builder-vm"))]
+mod autopark_gating_tests {
+    use super::{should_park, should_resume};
+
+    #[test]
+    fn cold_residency_never_parks_or_resumes() {
+        assert!(!should_park(false, true, false));
+        assert!(!should_park(false, false, false));
+        assert!(!should_resume(false, true));
+        assert!(!should_resume(false, false));
+    }
+
+    #[test]
+    fn warm_alive_no_reset_parks() {
+        assert!(should_park(true, true, false));
+    }
+
+    #[test]
+    fn park_requires_a_live_vm() {
+        assert!(!should_park(true, false, false));
+    }
+
+    #[test]
+    fn reset_suppresses_park() {
+        assert!(!should_park(true, true, true));
+        assert!(!should_park(true, false, true));
+    }
+
+    #[test]
+    fn resume_requires_a_present_snapshot() {
+        assert!(should_resume(true, true));
+        assert!(!should_resume(true, false));
     }
 }
