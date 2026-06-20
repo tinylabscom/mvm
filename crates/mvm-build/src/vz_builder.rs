@@ -1177,6 +1177,8 @@ impl VzPersistentBuilderVm {
             gvproxy: Some(&gvproxy),
         })?;
 
+        persist_builder_supervisor_config(&vm_state_dir, &cfg)?;
+
         let child = spawn_vz_supervisor_in_background(&supervisor_path, &cfg)?;
 
         // Supervisor is up; hand gvproxy's lifetime to the detached VM.
@@ -1362,7 +1364,14 @@ fn build_vz_persistent_supervisor_config(
             events_ingest_socket_path: None,
         }),
         balloon: None,
-        control_socket_path: None,
+        // Enables the idle snapshot-park: the supervisor binds this socket so a
+        // later slice can send SAVE/RESTORE commands.
+        control_socket_path: Some(
+            vm_state_dir
+                .join("control.sock")
+                .to_string_lossy()
+                .into_owned(),
+        ),
         startup_mode: crate::vz::StartupMode::Boot,
         // Builder VMs are trusted dev-tier — no claim-10 flow audit.
         tenant_id: None,
@@ -1395,6 +1404,27 @@ fn vz_persistent_guest_vsock_ports(expose_guest_agent: bool) -> Vec<u32> {
         );
     }
     ports
+}
+
+const BUILDER_SUPERVISOR_CONFIG_FILE: &str = "supervisor-config.json";
+
+/// Write the builder's `SupervisorConfig` to `<state_dir>/supervisor-config.json`
+/// so a later snapshot-restore can reload it and flip `startup_mode` to `Restore`.
+fn persist_builder_supervisor_config(
+    state_dir: &Path,
+    cfg: &crate::vz::SupervisorConfig,
+) -> Result<PathBuf, BuilderVmError> {
+    let path = state_dir.join(BUILDER_SUPERVISOR_CONFIG_FILE);
+    let json = serde_json::to_vec_pretty(cfg).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("serialising builder SupervisorConfig: {e}"))
+    })?;
+    std::fs::write(&path, &json).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "writing builder SupervisorConfig to {}: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(path)
 }
 
 /// Spawn `mvm-vz-supervisor` in the background with the
@@ -2230,6 +2260,35 @@ mod tests {
     }
 
     #[test]
+    fn persistent_config_enables_control_socket_for_snapshot_park() {
+        let scratch = tempfile::tempdir().unwrap();
+        let vm_name = "mvm-persistent-builder-vz-test";
+        let vm_state_dir = scratch.path().join("vms").join(vm_name);
+        let workspace = scratch.path().join("work");
+        let job_dir = scratch.path().join("job");
+        let nix_store = scratch.path().join("nix-store.img");
+        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+            vm_name,
+            vm_state_dir: &vm_state_dir,
+            image: &rootfs_image(),
+            workspace_root: &workspace,
+            job_dir: &job_dir,
+            nix_store_img: &nix_store,
+            vcpus: 4,
+            memory_mib: 8192,
+            expose_guest_agent: false,
+            gvproxy: None,
+        })
+        .expect("config");
+        let sock = cfg.control_socket_path.expect("control socket enabled");
+        assert!(sock.ends_with("control.sock"), "got {sock:?}");
+        assert!(
+            sock.starts_with(&cfg.vm_state_dir),
+            "socket must live under the VM state dir, got {sock:?}"
+        );
+    }
+
+    #[test]
     fn build_vz_persistent_supervisor_config_wires_gvproxy_when_present() {
         let scratch = tempfile::tempdir().unwrap();
         let vm_name = "mvm-persistent-builder-vz-net";
@@ -2445,5 +2504,43 @@ mod tests {
         assert!(!stop_persistent_vz_by_pid_file(scratch.path()));
         // The stale file is unlinked on the dead-pid path.
         assert!(!scratch.path().join(PERSISTENT_VZ_PID_FILE).exists());
+    }
+
+    #[test]
+    fn persist_builder_supervisor_config_roundtrips_and_lands_under_state_dir() {
+        let scratch = tempfile::tempdir().unwrap();
+        let vm_name = "mvm-persistent-builder-vz-test";
+        let vm_state_dir = scratch.path().join("vms").join(vm_name);
+        std::fs::create_dir_all(&vm_state_dir).unwrap();
+        let workspace = scratch.path().join("work");
+        let job_dir = scratch.path().join("job");
+        let nix_store = scratch.path().join("nix-store.img");
+        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+            vm_name,
+            vm_state_dir: &vm_state_dir,
+            image: &rootfs_image(),
+            workspace_root: &workspace,
+            job_dir: &job_dir,
+            nix_store_img: &nix_store,
+            vcpus: 4,
+            memory_mib: 8192,
+            expose_guest_agent: false,
+            gvproxy: None,
+        })
+        .expect("config");
+
+        let written = persist_builder_supervisor_config(&vm_state_dir, &cfg).expect("persist");
+
+        assert_eq!(written, vm_state_dir.join(BUILDER_SUPERVISOR_CONFIG_FILE));
+        assert!(written.exists(), "config file not written");
+
+        let raw = std::fs::read(&written).unwrap();
+        let reloaded: crate::vz::SupervisorConfig =
+            serde_json::from_slice(&raw).expect("deserialise");
+        assert!(
+            reloaded.control_socket_path.is_some(),
+            "control_socket_path must survive the round-trip"
+        );
+        assert_eq!(reloaded.name, vm_name);
     }
 }
