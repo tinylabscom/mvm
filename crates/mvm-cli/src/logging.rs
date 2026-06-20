@@ -13,7 +13,7 @@ pub enum LogFormat {
 
 /// The default tracing filter for a `-v` count when `RUST_LOG` is unset.
 /// 0 = quiet (errors only); each `-v` widens it.
-fn filter_for_verbosity(verbosity: u8) -> &'static str {
+pub fn filter_for_verbosity(verbosity: u8) -> &'static str {
     match verbosity {
         0 => "error",
         1 => "mvm=info,warn",

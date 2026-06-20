@@ -195,6 +195,16 @@ pub fn run() -> Result<()> {
     let verbose = cli.verbose > 0 || std::env::var_os("RUST_LOG").is_some();
     mvm::ui::set_verbose(verbose);
 
+    // Propagate the chosen verbosity to spawned child processes (drainer,
+    // supervisor, …) which read RUST_LOG. Only when the user asked for more
+    // than the quiet default and hasn't set RUST_LOG themselves.
+    // SAFETY: set at startup before any worker threads are spawned.
+    if cli.verbose > 0 && std::env::var_os("RUST_LOG").is_none() {
+        unsafe {
+            std::env::set_var("RUST_LOG", logging::filter_for_verbosity(cli.verbose));
+        }
+    }
+
     // Initialize logging.
     //
     // The MCP stdio subcommand needs *exclusive* control of stdout so

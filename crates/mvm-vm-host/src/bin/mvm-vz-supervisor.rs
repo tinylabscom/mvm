@@ -141,8 +141,13 @@ fn main() -> anyhow::Result<()> {
     // Sign + re-exec before anything else (preserves the stdin pipe).
     ensure_self_signed();
 
+    // Default to quiet (errors only); honor RUST_LOG when set.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error")),
+        )
         .init();
 
     let mut raw = String::new();
