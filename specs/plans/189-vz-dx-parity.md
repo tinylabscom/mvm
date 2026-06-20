@@ -153,6 +153,12 @@ WS-2 / Plan 140 — add `--json` there, don't fork).
       `CONSOLE_PORT_BASE + session_id` contract. The Vz `dev shell` path keeps
       the actual attach error context instead of rewriting every console
       failure as "owned by another process."
+- [x] source-checkout Vz helper freshness — local `cargo run` workflows now
+      auto-build stale/missing adjacent/source-tree `mvm-vz-supervisor` and
+      `mvm-vz-drainer` sidecars before launch. Regression:
+      `ExecutionPlan.auth` schema-v6 plans can no longer be paired with a
+      stale schema-v5 `mvm-vz-drainer` that fails closed after the VM start
+      sequence has already begun.
 - [ ] linux-native richer `--json` — today it collapses to a single `state`
       (`ready`/`not-ready`/`no-kvm`); surface the kvm/firecracker/assets detail
       as a typed shape if a Linux consumer needs it.

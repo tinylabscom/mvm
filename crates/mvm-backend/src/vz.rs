@@ -43,7 +43,7 @@ use mvm_build::vz;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Apple Virtualization.framework backend.
 ///
@@ -2087,18 +2087,31 @@ pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
             path.display()
         );
     }
+    let workspace_root = workspace_root_from_manifest_dir();
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let candidate = dir.join("mvm-vz-supervisor");
-        if candidate.is_file() {
-            return Ok(candidate);
+        if let Some(workspace_root) = workspace_root.as_deref()
+            && is_source_checkout_helper_dir(dir, workspace_root)
+        {
+            ensure_source_checkout_vz_helpers(workspace_root, dir)?;
+            let candidate = dir.join("mvm-vz-supervisor");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        } else {
+            let candidate = dir.join("mvm-vz-supervisor");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
         }
     }
     // Source-checkout layout. CARGO_MANIFEST_DIR points at the
     // current crate; the workspace root is two `..` above.
-    if let Some(workspace_root) = workspace_root_from_manifest_dir() {
-        let candidate = vz::source_tree_binary_path(&workspace_root);
+    if let Some(workspace_root) = workspace_root.as_deref() {
+        let helper_dir = workspace_root.join("target").join("debug");
+        ensure_source_checkout_vz_helpers(workspace_root, &helper_dir)?;
+        let candidate = vz::source_tree_binary_path(workspace_root);
         if candidate.is_file() {
             return Ok(candidate);
         }
@@ -2130,6 +2143,127 @@ fn workspace_root_from_manifest_dir() -> Option<PathBuf> {
     // `crates/mvm-backend` → workspace root is two `..` up.
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest_dir.parent()?.parent().map(Path::to_path_buf)
+}
+
+const VZ_HELPER_BINARIES: [&str; 2] = ["mvm-vz-supervisor", "mvm-vz-drainer"];
+
+fn is_source_checkout_helper_dir(helper_dir: &Path, workspace_root: &Path) -> bool {
+    helper_dir.starts_with(workspace_root) && source_checkout_helper_profile(helper_dir).is_some()
+}
+
+fn source_checkout_helper_profile(helper_dir: &Path) -> Option<&'static str> {
+    match helper_dir.file_name()?.to_str()? {
+        "debug" => Some("debug"),
+        "release" => Some("release"),
+        _ => None,
+    }
+}
+
+fn ensure_source_checkout_vz_helpers(workspace_root: &Path, helper_dir: &Path) -> Result<()> {
+    let helper_paths: Vec<PathBuf> = VZ_HELPER_BINARIES
+        .iter()
+        .map(|name| helper_dir.join(name))
+        .collect();
+    let input_roots = source_checkout_vz_helper_inputs(workspace_root);
+    if !helper_binaries_need_rebuild(&helper_paths, &input_roots)? {
+        return Ok(());
+    }
+
+    ui::info(
+        "Building Vz helper binaries for this source checkout \
+         (mvm-vz-supervisor, mvm-vz-drainer)...",
+    );
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut args = vec![
+        "build",
+        "-p",
+        "mvm-vm-host",
+        "--bin",
+        "mvm-vz-supervisor",
+        "--bin",
+        "mvm-vz-drainer",
+    ];
+    if source_checkout_helper_profile(helper_dir) == Some("release") {
+        args.push("--release");
+    }
+    let status = Command::new(&cargo)
+        .current_dir(workspace_root)
+        .args(args)
+        .status()
+        .map_err(|e| anyhow!("spawn cargo to build Vz helper binaries: {e}"))?;
+    if !status.success() {
+        bail!("cargo build for Vz helper binaries failed with status {status}");
+    }
+    Ok(())
+}
+
+fn source_checkout_vz_helper_inputs(workspace_root: &Path) -> Vec<PathBuf> {
+    [
+        workspace_root.join("Cargo.toml"),
+        workspace_root.join("Cargo.lock"),
+        workspace_root.join("crates/mvm-vm-host/src"),
+        workspace_root.join("crates/mvm-core/src"),
+        workspace_root.join("crates/mvm-build/src"),
+    ]
+    .into()
+}
+
+fn helper_binaries_need_rebuild(helper_paths: &[PathBuf], input_roots: &[PathBuf]) -> Result<bool> {
+    let mut oldest_helper: Option<SystemTime> = None;
+    for helper in helper_paths {
+        let Ok(meta) = std::fs::metadata(helper) else {
+            return Ok(true);
+        };
+        let modified = meta
+            .modified()
+            .with_context(|| format!("reading mtime for {}", helper.display()))?;
+        oldest_helper = Some(match oldest_helper {
+            Some(current) => current.min(modified),
+            None => modified,
+        });
+    }
+    let Some(oldest_helper) = oldest_helper else {
+        return Ok(true);
+    };
+    let newest_input = newest_modified_input(input_roots)?;
+    Ok(newest_input.is_some_and(|modified| modified > oldest_helper))
+}
+
+fn newest_modified_input(input_roots: &[PathBuf]) -> Result<Option<SystemTime>> {
+    let mut newest = None;
+    for root in input_roots {
+        newest = max_system_time(newest, newest_modified_under(root)?);
+    }
+    Ok(newest)
+}
+
+fn newest_modified_under(path: &Path) -> Result<Option<SystemTime>> {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Ok(None);
+    };
+    let mut newest = Some(
+        meta.modified()
+            .with_context(|| format!("reading mtime for {}", path.display()))?,
+    );
+    if meta.is_dir() {
+        for entry in
+            std::fs::read_dir(path).with_context(|| format!("reading dir {}", path.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("reading dir entry under {}", path.display()))?;
+            newest = max_system_time(newest, newest_modified_under(&entry.path())?);
+        }
+    }
+    Ok(newest)
+}
+
+fn max_system_time(a: Option<SystemTime>, b: Option<SystemTime>) -> Option<SystemTime> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
 }
 
 /// Spawn the `mvm-vz-drainer` sibling. Returns an
@@ -2299,14 +2433,41 @@ fn reap_drainer(state_dir: &Path) {
 ///    artifacts"); this matters during local dev when `mvmctl` is
 ///    `cargo run` from the workspace root.
 fn resolve_vz_drainer_path() -> Result<PathBuf> {
-    let env_override = std::env::var_os("MVM_VZ_DRAINER_PATH").map(PathBuf::from);
-    let current_exe = std::env::current_exe().ok();
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    resolve_vz_drainer_path_inner(
-        env_override.as_deref(),
-        current_exe.as_deref(),
-        &manifest_dir,
-    )
+    if let Some(p) = std::env::var_os("MVM_VZ_DRAINER_PATH") {
+        return resolve_vz_drainer_path_inner(Some(Path::new(&p)), None, &manifest_dir);
+    }
+
+    let workspace_root = manifest_dir.parent().and_then(Path::parent);
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        if let Some(workspace_root) = workspace_root
+            && is_source_checkout_helper_dir(dir, workspace_root)
+        {
+            ensure_source_checkout_vz_helpers(workspace_root, dir)?;
+            let candidate = dir.join("mvm-vz-drainer");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        } else {
+            let candidate = dir.join("mvm-vz-drainer");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    if let Some(workspace_root) = workspace_root {
+        let helper_dir = workspace_root.join("target").join("debug");
+        ensure_source_checkout_vz_helpers(workspace_root, &helper_dir)?;
+        let candidate = helper_dir.join("mvm-vz-drainer");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    resolve_vz_drainer_path_inner(None, None, &manifest_dir)
 }
 
 /// Pure resolver — exercised directly from tests without touching
@@ -2917,6 +3078,90 @@ mod tests {
             msg.contains("mvm-vz-drainer") && msg.contains("MVM_VZ_DRAINER_PATH"),
             "error names the binary + override env var: {msg}"
         );
+    }
+
+    #[test]
+    fn source_checkout_helper_dir_is_limited_to_workspace_debug_or_release_dirs() {
+        let root = Path::new("/tmp/mvm-src");
+        assert!(is_source_checkout_helper_dir(
+            Path::new("/tmp/mvm-src/target/debug"),
+            root
+        ));
+        assert_eq!(
+            source_checkout_helper_profile(Path::new("/tmp/mvm-src/target/debug")),
+            Some("debug")
+        );
+        assert!(is_source_checkout_helper_dir(
+            Path::new("/tmp/mvm-src/.mvm-test/target/release"),
+            root
+        ));
+        assert_eq!(
+            source_checkout_helper_profile(Path::new("/tmp/mvm-src/.mvm-test/target/release")),
+            Some("release")
+        );
+        assert!(!is_source_checkout_helper_dir(
+            Path::new("/tmp/mvm-src/.cargo/bin"),
+            root
+        ));
+        assert!(!is_source_checkout_helper_dir(
+            Path::new("/opt/homebrew/bin"),
+            root
+        ));
+    }
+
+    #[test]
+    fn helper_binaries_need_rebuild_when_any_helper_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let helper = tmp.path().join("mvm-vz-supervisor");
+        let missing = tmp.path().join("mvm-vz-drainer");
+        std::fs::write(&helper, b"helper").unwrap();
+        let input = tmp.path().join("Cargo.lock");
+        std::fs::write(&input, b"lock").unwrap();
+
+        assert!(
+            helper_binaries_need_rebuild(&[helper, missing], &[input])
+                .expect("freshness check succeeds")
+        );
+    }
+
+    #[test]
+    fn helper_binaries_skip_rebuild_when_helpers_are_newer_than_inputs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("Cargo.lock");
+        std::fs::write(&input, b"lock").unwrap();
+        sleep_for_mtime_tick();
+        let supervisor = tmp.path().join("mvm-vz-supervisor");
+        let drainer = tmp.path().join("mvm-vz-drainer");
+        std::fs::write(&supervisor, b"supervisor").unwrap();
+        std::fs::write(&drainer, b"drainer").unwrap();
+
+        assert!(
+            !helper_binaries_need_rebuild(&[supervisor, drainer], &[input])
+                .expect("freshness check succeeds")
+        );
+    }
+
+    #[test]
+    fn helper_binaries_need_rebuild_when_source_input_is_newer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let supervisor = tmp.path().join("mvm-vz-supervisor");
+        let drainer = tmp.path().join("mvm-vz-drainer");
+        std::fs::write(&supervisor, b"supervisor").unwrap();
+        std::fs::write(&drainer, b"drainer").unwrap();
+        sleep_for_mtime_tick();
+        let input_dir = tmp.path().join("crates").join("mvm-core").join("src");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        let input = input_dir.join("execution_plan.rs");
+        std::fs::write(&input, b"pub const SCHEMA_VERSION: u32 = 6;").unwrap();
+
+        assert!(
+            helper_binaries_need_rebuild(&[supervisor, drainer], &[input_dir])
+                .expect("freshness check succeeds")
+        );
+    }
+
+    fn sleep_for_mtime_tick() {
+        std::thread::sleep(Duration::from_millis(25));
     }
 
     #[test]

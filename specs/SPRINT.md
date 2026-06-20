@@ -78,6 +78,16 @@ plan 25 sequences the work into six independently-shippable workstreams.
       the real attach error context instead of rewriting every failure as
       "owned by another process." Focused CLI, Vz-config, check, and clippy
       gates are recorded in the PR.
+- [x] Hardened
+      [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
+      WS-3 source-checkout Vz helper freshness after the live
+      `ExecutionPlan.auth` decode failure on `cargo run -- run -- ...`: local
+      source-checkout launches now check adjacent/source-tree
+      `mvm-vz-supervisor` and `mvm-vz-drainer` outputs against `Cargo.lock`,
+      workspace `Cargo.toml`, `crates/mvm-vm-host/src`, `crates/mvm-core/src`,
+      and `crates/mvm-build/src`, then run the narrow helper build only when a
+      helper is missing or stale. Release-installed sidecars and explicit
+      `MVM_VZ_*_PATH` overrides keep their existing behavior.
 - [x] Advanced
       [`plans/118-supervisor-standby-pool-and-live-bench.md`](plans/118-supervisor-standby-pool-and-live-bench.md)
       live libkrun follow-up: x86_64 libkrun starts now carry an explicit
