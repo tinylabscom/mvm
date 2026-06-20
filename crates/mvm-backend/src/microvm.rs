@@ -1128,13 +1128,14 @@ pub fn restore_from_template_snapshot(
 /// Warm-restore an instance from its sealed snapshot into its already-running
 /// (paused) Firecracker, then deliver the VMGenID token so the guest reseeds.
 ///
-/// Precondition: `pause` sealed the instance and left its Firecracker alive and
-/// paused. Verifies the snapshot's integrity sidecar *before* touching the VMM
-/// (a tampered snapshot is refused), loads `vmstate.bin` + `mem.bin` back via
-/// `PUT /snapshot/load` with `resume_vm`, waits for the guest agent, and
-/// signals post-restore carrying `token` so the guest rotates its VMGenID
-/// (distinct clones diverge). The host-side counterpart of `mvmctl vm resume`,
-/// reachable from the backend layer for `FirecrackerBackend::warm_start`.
+/// Precondition: a sealed snapshot from `pause` exists for `name`. Verifies the
+/// snapshot's integrity sidecar *before* touching the VMM (a tampered snapshot
+/// is refused), stops any paused Firecracker, boots a fresh blank VMM, loads
+/// `vmstate.bin` + `mem.bin` into it via `PUT /snapshot/load` with `resume_vm`,
+/// waits for the guest agent, and signals post-restore carrying `token` so the
+/// guest rotates its VMGenID (distinct clones diverge). The host-side
+/// counterpart of `mvmctl vm resume`, reachable from the backend layer for
+/// `FirecrackerBackend::warm_start`.
 pub fn warm_restore_instance(
     name: &str,
     token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
@@ -1147,46 +1148,71 @@ pub fn warm_restore_instance(
     // not a `runtime/` variant.
     let socket = format!("{vm_dir}/fc.socket");
     let pid_file = format!("{vm_dir}/fc.pid");
-    if !firecracker::is_vm_running(&pid_file)? {
-        anyhow::bail!(
-            "VM '{name}' Firecracker is not running — warm-start resumes a paused VM; \
-             `mvmctl up` for a cold boot"
-        );
-    }
 
     let snapshot_dir = mvm_core::config::instance_snapshot_dir(name);
     let snapshot_dir = snapshot_dir.to_string_lossy().into_owned();
+    if !std::path::Path::new(&format!("{snapshot_dir}/vmstate.bin")).exists() {
+        anyhow::bail!(
+            "no sealed snapshot at {snapshot_dir} for VM '{name}' — `mvmctl vm pause {name}` \
+             first, or `mvmctl up` for a cold boot"
+        );
+    }
     // Refuse a tampered snapshot before any VMM interaction.
     crate::base::snapshot_integrity::verify_snapshot_artifacts(&snapshot_dir)?;
 
     let vmstate = format!("{snapshot_dir}/vmstate.bin");
     let mem = format!("{snapshot_dir}/mem.bin");
 
-    // Load + resume in a single call (resume_vm).
+    // Firecracker refuses `/snapshot/load` on a VMM that already started a
+    // microVM ("operation not supported after starting the microVM"), so stop
+    // the paused FC and bring up a fresh blank VMM to load the sealed snapshot
+    // into. `start_vm_firecracker` clears the stale `fc.socket` + `runtime/v.sock`
+    // first — otherwise the restored vsock device fails to bind (AddrInUse).
+    if firecracker::is_vm_running(&pid_file)? {
+        let q_pid = shell_quote(&pid_file);
+        let _ = run_in_vm(&format!(
+            "sudo kill -9 \"$(cat {q_pid})\" 2>/dev/null; sleep 1"
+        ));
+    }
+    start_vm_firecracker(&vm_dir, &socket)
+        .with_context(|| format!("starting fresh Firecracker for warm-start of '{name}'"))?;
+
+    // Load + resume into the fresh VMM in a single call (resume_vm).
     let q_socket = shell_quote(&socket);
     run_in_vm(&format!(
         r#"sudo curl -fsS -X PUT --unix-socket {q_socket} \
             -H 'Content-Type: application/json' \
-            -d '{{"snapshot_path":"{vmstate}","mem_backend":{{"backend_type":"File","backend_path":"{mem}"}},"enable_diff_snapshots":false,"resume_vm":true}}' \
+            -d '{{"snapshot_path":"{vmstate}","mem_backend":{{"backend_type":"File","backend_path":"{mem}"}},"resume_vm":true}}' \
             'http://localhost/snapshot/load'"#,
     ))
     .with_context(|| format!("PUT /snapshot/load for warm-start of '{name}'"))?;
 
-    // Deliver the generation token so the guest reseeds its CSPRNG.
+    // The VM is restored and resumed at this point. Delivering the VMGenID
+    // token (so the guest reseeds) is best-effort — the agent re-accepts on
+    // the recreated vsock a beat after resume, and a missed signal is safe to
+    // re-send. A racy signal must not fail an otherwise-successful warm-start
+    // (mirrors `restore_from_template_snapshot`'s post-restore policy).
     let vsock = firecracker_vsock_uds_path(&vm_dir);
     let mut agent_ready = false;
-    for _ in 0..30 {
+    for _ in 0..60 {
         if mvm_guest::vsock::ping_at(&vsock).unwrap_or(false) {
             agent_ready = true;
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
     if !agent_ready {
-        anyhow::bail!("guest agent not reachable after warm-start resume of '{name}'");
+        warn!(
+            "warm-start of '{name}': guest agent not reachable to deliver VMGenID token; the VM is resumed but did not reseed — re-run resume to retry"
+        );
+        return Ok(());
     }
-    if !mvm_guest::vsock::post_restore_at(&vsock, token)? {
-        anyhow::bail!("guest did not acknowledge post-restore after warm-start of '{name}'");
+    match mvm_guest::vsock::post_restore_at(&vsock, token) {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!("warm-start of '{name}': guest did not acknowledge post-restore (VM is resumed)")
+        }
+        Err(e) => warn!("warm-start of '{name}': post-restore signal failed: {e} (VM is resumed)"),
     }
     Ok(())
 }
