@@ -17,7 +17,7 @@
 //! nested KVM and a Hyper-V managed Linux builder are future backend
 //! projects, not supported local paths today.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::ui;
@@ -647,15 +647,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 if !dev_vz::is_vz_dev_running() {
                     anyhow::bail!("Dev VM is not running. Start it with: mvmctl dev up");
                 }
-                // Try connecting — the VM may be in another process
-                match console::console_interactive(dev_vz::DEV_VM_NAME) {
-                    Ok(()) => Ok(()),
-                    Err(_) => anyhow::bail!(
-                        "Dev VM is running but owned by another process.\n\
-                         Use the terminal where you ran 'mvmctl dev up',\n\
-                         or restart with: mvmctl dev down && mvmctl dev up"
-                    ),
-                }
+                console::console_interactive(dev_vz::DEV_VM_NAME)
+                    .context("Dev VM is running, but console attach failed")
             }
             DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_shell(),
             DevBackend::Unsupported => bail_no_dev_backend(),
