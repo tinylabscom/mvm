@@ -90,8 +90,11 @@ The invocation-driven keeper shape is also landed for the libkrun
 build invocation applies the resolved residency policy. `MVM_RESIDENCY=cold`
 actively tears down that live session before single-shot fallback, while
 idle `Park` decisions degrade to teardown because the libkrun path has no
-snapshot primitive. Vz dev-builder idle auto-park and the live timing proof
-remain open.
+snapshot primitive. The Vz dev-builder path now auto-parks on non-reset
+`dev down` when residency keeps a builder resident, resumes only when the
+current residency policy still allows a resident builder, and discards stale
+snapshots for cold/reset/cache-clear/failed-restore paths. Idle-timeout
+auto-park and the live timing proof remain open.
 
 ## Design
 
@@ -163,6 +166,10 @@ typed allowlisted protocol, so residency shrinks rather than widens the attack s
       snapshots + stops the VM, and the next `mvmctl dev up` restores before
       cold-boot fallback. Unit/CLI tests cover command framing, stale-snapshot
       replacement, restore config rewriting, parser, and JSON output.
+- [x] Wire Vz dev-builder auto-park on non-reset `dev down`: resident policy + live VM
+      now snapshots before stopping, while cold policy, `--reset`, rebuild, cache-clear,
+      and failed restore paths discard stale snapshot markers instead of accidentally
+      resuming an unwanted builder.
 - [~] Wire the Firecracker leg via Plan 175 when available; until then `min = 0` on FC
       falls back to fast boot, not a stub. FC/libkrun currently reap to cold.
 - [x] Key builder snapshot freshness/invalidation to builder residency inputs (#1121).

@@ -2,7 +2,8 @@
 
 **Status:** In progress. Explicit Vz dev-builder snapshot park/restore is wired
 and CI-tested; the libkrun persistent-builder path now tracks activity and
-honors invocation-driven cold/idle teardown. Vz idle auto-park and live
+honors invocation-driven cold/idle teardown; Vz `dev down` now auto-parks a
+live builder when residency keeps it resident. Idle-timeout auto-park and live
 macOS-26 timing proof remain open.
 **Depends on:** Step 1 (`specs/notes/plan-205-builder-residency-step1-execution.md`, merged) and Plan 204's `mvm-builderd`.
 
@@ -21,13 +22,15 @@ Step 1 made `MVM_RESIDENCY` govern the **routing** decision (cold → ephemeral 
   next build invocation, actively tears down a live libkrun `persistent-builder`
   session before falling through to the single-shot builder.
 - Vz dev-builder idle automation is still open — the explicit `dev park` path
-  exists, but a running Vz dev builder is not yet auto-parked by policy timeout.
+  exists and `dev down` auto-parks a running non-reset Vz dev builder, but a
+  running Vz dev builder is not yet auto-parked by policy timeout.
 
 ## Workstreams
 
 ### S2.1 — Builder VM snapshot-park (the `parked` mechanism)
 - [x] Wire vz saved-state (the Plan 159 snapshot path) into the persistent builder boot path so an idle persistent builder can be snapshotted to `~/.cache/mvm/builder-vm/vms/<vm>/state.vzsave` and restored on the next build instead of cold-booting. Implemented for the stable Vz dev-builder session (`mvm-persistent-builder-vz-dev`): `mvm-build::vz_builder` sends `SAVE <state.vzsave>` over the host-only control socket, verifies the `<snapshot>.machine-id` sidecar, stops the supervisor, reloads persisted `SupervisorConfig` in `Restore` mode, respawns gvproxy, and starts a fresh supervisor.
 - [~] On `parked`: after a build (or on idle), snapshot + suspend; on the next build, detect the snapshot and restore (sub-second) rather than reusing a live VM or cold-booting. Explicit operator path exists (`mvmctl dev park`; next `mvmctl dev up` restores before cold-boot fallback). Idle/build-triggered demotion remains S2.2.
+- [x] `dev down` auto-parks the Vz dev builder when residency keeps a persistent builder, the VM is live, and the stop is not `--reset`; `dev up` resumes only when residency still allows a resident builder, and cold/reset/cache-clear paths discard stale snapshots rather than waking an unwanted builder.
 - [x] `parked` stops degrading-to-warm once this lands; `doctor`'s `builder residency` line reports `parked (snapshot present)` vs `parked (no snapshot)`. `mvmctl dev status` reports `parked` when a Vz dev-builder snapshot is present; `mvmctl doctor`'s `builder residency` check now scans the builder-VM `vms/` root for Vz `state.vzsave` snapshots.
 - [ ] Live macOS-26 proof: a parked builder restores and serves a build via `mvm-builderd` without a cold boot.
 
@@ -69,10 +72,15 @@ Step 1 made `MVM_RESIDENCY` govern the **routing** decision (cold → ephemeral 
 - `mvmctl dev up` detects an existing Vz dev-builder snapshot and attempts
   restore before falling back to cold boot; `dev status` reports `parked` when
   the snapshot exists.
+- `mvmctl dev down` now parks the Vz dev builder automatically for non-reset
+  resident stops. `--reset`, rebuild, cache-clear, cold residency, and failed
+  restore paths remove stale snapshot markers so the next `dev up` cold-boots
+  cleanly.
 - `mvmctl doctor`'s `builder residency` line reports `parked (snapshot present)`
   vs `parked (no snapshot)` under the parked policy.
 - CI coverage: `cargo test -p mvm-build --features builder-vm vz_builder::tests`,
   `cargo test -p mvm-cli --features builder-vm test_dev_park`,
   `cargo test -p mvm-cli --features builder-vm dev_park_json_reports`,
+  `cargo nextest run -p mvm-cli --features builder-vm -E 'test(autopark_gating)'`,
   `cargo check -p mvm-build -p mvm-cli --features builder-vm`, and
   `cargo clippy -p mvm-build -p mvm-cli --features builder-vm --all-targets -- -D warnings`.
