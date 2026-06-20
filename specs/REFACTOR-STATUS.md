@@ -625,11 +625,11 @@ PLAN 182 — Trait hygiene + backend catalog      ✅ DONE
       this host (not an assertion failure), and CI runs the full aggregate green
 
 PLAN 175 — Firecracker live-memory warm-start    🟡 STARTED — T1 host/unit landed; T2–T4 + live gating remain (live-KVM-gated; Plan 123 C2 carve-out)
-  [ ] C4 warm-start CLI/RPC wiring — carved out → Plan 175 (rides C2)
-  [~] T1 VMGenID delivery on PostRestore — host/unit DONE (token payload + GenIdReseeder dispatch, both senders mint); Step-3 live snapshot/restore gated on T4 driver
+  [x] C4 warm-start CLI/RPC wiring — landed via T4 (FirecrackerBackend::warm_start + `mvmctl vm resume --warm`)
+  [~] T1 VMGenID delivery on PostRestore — host/unit DONE (token payload + GenIdReseeder dispatch, both senders mint); Step-3 live snapshot/restore gated on a bootable workload image
   [ ] T2 UFFD/NBD/hugepages fast-resume substrate (diff snapshot + lazy paging)
   [ ] T3 SIGUSR1 "primed" ready-barrier for a deterministic warm base
-  [ ] T4 FirecrackerBackend::warm_start override + mvmctl verb + agent_ping e2e
+  [~] T4 FirecrackerBackend::warm_start override + `mvmctl vm resume --warm` + unit gate — CODE DONE (full-mem-load restore via microvm::warm_restore_instance; libkrun→typed Unsupported); also fixed the pre-existing fc.socket-vs-runtime/firecracker.socket path bug that broke pause/resume. Live agent_ping e2e blocked on a bootable workload image (cached prod default-microvm dm-verity-panics on this box; no dev image cached)
   (Vz=152 WS-C; libkrun disk-only done #741; reflink clone = 123 C4 follow-up)
 
 PLAN 126 — Dependency reduction                 🟢 cuts+gates landed; aws-lc/reqwest-unify rehomed (oci-client-upstream-gated)
