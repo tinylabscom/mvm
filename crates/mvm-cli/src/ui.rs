@@ -1,56 +1,46 @@
-use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
+//! CLI-side surface for `[mvm]` chrome. Every helper is a thin
+//! delegation to [`mvm::ui`] so the verbosity gate (info/success/step/
+//! progress are opt-in; errors/warnings/banners/status/prompts always
+//! print) lives in exactly one place. Only [`format_timed`] /
+//! [`timed_step`] are CLI-local, and `timed_step` routes through the
+//! gated [`info`] so it follows the same toggle.
+
+use indicatif::ProgressBar;
 
 // ---------------------------------------------------------------------------
-// Verbosity (CLI-side mirror of mvm::ui)
+// Message helpers (delegate to mvm::ui)
 // ---------------------------------------------------------------------------
 
-/// Print a progress / chatter message that's only useful when troubleshooting.
-/// Suppressed by default; shown when `--verbose`/`--debug` is passed or
-/// `RUST_LOG` is set. Delegates to [`mvm::ui::progress`] so both
-/// crates honor the same toggle.
+/// Print a progress / chatter message that's only useful when
+/// troubleshooting. Opt-in: shown when `--verbose`/`--debug` is passed
+/// or `RUST_LOG` is set.
 pub fn progress(msg: &str) {
     mvm::ui::progress(msg);
 }
 
-// ---------------------------------------------------------------------------
-// Colored message helpers
-// ---------------------------------------------------------------------------
-
-fn prefix() -> String {
-    "[mvm]".bold().cyan().to_string()
-}
-
-/// Print an informational message: [mvm] message
+/// Print an informational message: `[mvm]` message. Opt-in chatter.
 pub fn info(msg: &str) {
-    if mvm::ui::is_chrome_routed_to_stderr() {
-        eprintln!("{} {}", prefix(), msg);
-    } else {
-        println!("{} {}", prefix(), msg);
-    }
+    mvm::ui::info(msg);
 }
 
-/// Print a success message: [mvm] message (in green)
+/// Print a success message: `[mvm]` message (in green). Opt-in chatter.
 pub fn success(msg: &str) {
-    if mvm::ui::is_chrome_routed_to_stderr() {
-        eprintln!("{} {}", prefix(), msg.green());
-    } else {
-        println!("{} {}", prefix(), msg.green());
-    }
+    mvm::ui::success(msg);
 }
 
-/// Print an error message: [mvm] ERROR: message (in red)
+/// Print an error message: `[mvm]` message (in red). Always printed.
 pub fn error(msg: &str) {
-    eprintln!("{} {}", "[mvm]".bold().red(), msg.red());
+    mvm::ui::error(msg);
 }
 
-/// Print a warning message: [mvm] message (in yellow)
+/// Print a warning message: `[mvm]` message (in yellow). Always printed.
 pub fn warn(msg: &str) {
-    if mvm::ui::is_chrome_routed_to_stderr() {
-        eprintln!("{} {}", prefix(), msg.yellow());
-    } else {
-        println!("{} {}", prefix(), msg.yellow());
-    }
+    mvm::ui::warn(msg);
+}
+
+/// Print a numbered step: `[mvm]` Step n/total: message. Opt-in chatter.
+pub fn step(n: u32, total: u32, msg: &str) {
+    mvm::ui::step(n, total, msg);
 }
 
 /// Format a completed timed step's message: `<label> … <secs>s`.
@@ -61,105 +51,40 @@ pub fn format_timed(label: &str, elapsed: std::time::Duration) -> String {
 
 /// Print a completed timed step: `[mvm] <label> … <secs>s`. Used for
 /// Stage 0 per-step progress so the user's perceived speed matches the
-/// actual per-step wall-clock.
+/// actual per-step wall-clock. Opt-in chatter (routes through [`info`]).
 pub fn timed_step(label: &str, elapsed: std::time::Duration) {
     info(&format_timed(label, elapsed));
 }
 
-/// Print a numbered step: [mvm] Step n/total: message
-pub fn step(n: u32, total: u32, msg: &str) {
-    let formatted = format!(
-        "\n{} {} {}",
-        prefix(),
-        format!("Step {}/{}:", n, total).bold().yellow(),
-        msg,
-    );
-    if mvm::ui::is_chrome_routed_to_stderr() {
-        eprintln!("{formatted}");
-    } else {
-        println!("{formatted}");
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Banner
+// Banner / status / prompts / spinners (always printed; delegate)
 // ---------------------------------------------------------------------------
 
-/// Print a green bold banner box.
+/// Print a green bold banner box. Always printed (carries actionable
+/// command results like the guest IP and next-step verbs).
 pub fn banner(lines: &[&str]) {
-    let width = lines.iter().map(|l| l.len()).max().unwrap_or(0) + 4;
-    let rule = "=".repeat(width);
-
-    println!();
-    println!("{}", rule.bold().green());
-    for line in lines {
-        let pad = width - line.len() - 4;
-        println!(
-            "{}",
-            format!("  {}{}  ", line, " ".repeat(pad)).bold().green()
-        );
-    }
-    println!("{}", rule.bold().green());
-    println!();
+    mvm::ui::banner(lines);
 }
-
-// ---------------------------------------------------------------------------
-// Status table
-// ---------------------------------------------------------------------------
 
 /// Print the status header.
 pub fn status_header() {
-    println!("{}", "mvmctl status".bold());
-    println!("{}", "-------------".dimmed());
+    mvm::ui::status_header();
 }
 
 /// Print a status line with a bold label and a colored value.
-/// Recognized values: "Running", "Stopped", "Not running", etc.
 pub fn status_line(label: &str, value: &str) {
-    let colored_value = if value.starts_with("Running") {
-        value.green().to_string()
-    } else if value == "Stopped" {
-        value.yellow().to_string()
-    } else if value.starts_with("Not ") || value == "-" {
-        value.dimmed().to_string()
-    } else if value.starts_with("Starting") {
-        value.yellow().to_string()
-    } else {
-        value.to_string()
-    };
-
-    println!("{} {}", format!("{:<14}", label).bold(), colored_value);
+    mvm::ui::status_line(label, value);
 }
-
-// ---------------------------------------------------------------------------
-// Interactive prompts
-// ---------------------------------------------------------------------------
 
 /// Show an interactive confirmation prompt. Returns true if confirmed.
 pub fn confirm(msg: &str) -> bool {
-    inquire::Confirm::new(msg)
-        .with_default(false)
-        .prompt()
-        .unwrap_or(false)
+    mvm::ui::confirm(msg)
 }
-
-// ---------------------------------------------------------------------------
-// Spinners
-// ---------------------------------------------------------------------------
 
 /// Create and start a spinner with the given message.
 /// Call `.finish_with_message()` or `.finish_and_clear()` when done.
 pub fn spinner(msg: &str) -> ProgressBar {
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
-            .template("{spinner:.cyan} {msg}")
-            .expect("invalid spinner template"),
-    );
-    pb.set_message(msg.to_string());
-    pb.enable_steady_tick(std::time::Duration::from_millis(80));
-    pb
+    mvm::ui::spinner(msg)
 }
 
 #[cfg(test)]
