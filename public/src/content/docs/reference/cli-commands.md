@@ -79,14 +79,14 @@ verification under `trust`. Domains that already own their own subcommands
 | `mvmctl dev up --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
 | `mvmctl dev up --shell` (or `-s`) | Force opening an interactive shell after starting (the default behavior) |
 | `mvmctl dev up --no-shell` | Start the dev VM without attaching an interactive shell |
-| `mvmctl dev up --base <template[@revision]\|slot[@revision]\|bundle-sha>` | On the Vz backend, boot the dev VM from a built template/manifest-slot revision or installed bundle instead of the default dev image. Unknown or unbuilt bases fail before launch; changing the base of an already-running dev VM requires `mvmctl dev down` first. |
+| `mvmctl dev up --base <template[@revision]\|slot[@revision]\|bundle-sha>` | On the Vz backend, boot the dev VM from a built template/manifest-slot revision or installed bundle instead of the default dev image. Unknown or unbuilt bases fail before launch; changing the base of an already-running or parked dev VM requires `mvmctl dev down` first. |
 | `mvmctl dev down` | Stop the dev VM |
 | `mvmctl dev down --reset` | Also delete the cached dev image so the next `dev up` rebuilds from local source |
 | `mvmctl dev park` | Vz only: snapshot and stop the running dev VM so the next `dev up` restores from the parked state |
 | `mvmctl dev shell` | Open a shell in the running dev VM |
 | `mvmctl dev shell --project ~/dir` | Open shell and cd into a project directory |
 | `mvmctl dev status` | Show dev environment backend, running state, cached image paths, and safe builder-cache readiness reason |
-| `mvmctl dev status --json` | Emit schema-versioned dev status JSON; Linux-native hosts include typed KVM, Firecracker, and base-asset readiness labels |
+| `mvmctl dev status --json` | Emit schema-versioned dev status JSON; Vz pinned-base dev VMs include a `base` object with `id`, `revision`, and `rootfs_fingerprint`, while Linux-native hosts include typed KVM, Firecracker, and base-asset readiness labels |
 | `mvmctl dev cache inspect` | Inspect dev image and builder-cache readiness without rebuilding, booting, or printing local artifact paths |
 | `mvmctl dev cache inspect --json` | Emit the sanitized dev-cache inspection as structured JSON |
 | `mvmctl dev rebuild` | Stop, clear cache, and rebuild + restart the dev VM |

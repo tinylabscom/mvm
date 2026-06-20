@@ -190,6 +190,12 @@ starts from a known closure (the DX the reference SDK offers via image refs).
       template/slot revision directories for exact pins, requires `vmlinux` +
       `rootfs.ext4`, refuses path-traversal components, and refuses changing
       the base of an already-running dev VM.
+- [x] proof surface: pinned Vz dev starts persist a privacy-safe base
+      provenance record under the dev VM state dir and `dev status --json`
+      reports `{ id, revision, rootfs_fingerprint }` while omitting host
+      artifact paths. Default starts and `dev down` clear the record, and
+      `dev up --base` refuses parked snapshots rather than silently restoring
+      an older base.
 - [ ] acceptance: `dev up`/fork from a pinned base reproducibly yields the same
       rootfs fingerprint.
 

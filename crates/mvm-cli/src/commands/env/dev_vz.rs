@@ -6,7 +6,7 @@
 //! route here.
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[cfg(feature = "builder-vm")]
@@ -34,6 +34,8 @@ const DEV_VM_SESSION_ID: &str = "dev";
 const BUILDER_VM_SOURCE_FINGERPRINT_FILE: &str = ".mvm-source.sha256";
 const BUILDER_VM_ARTIFACT_DIGEST_FILE: &str = ".mvm-artifacts.sha256";
 const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
+#[cfg(feature = "builder-vm")]
+const DEV_BASE_PROVENANCE_FILE: &str = "dev-base.json";
 /// Absolute path the builder-VM rootfs must carry for the steady-state
 /// VM to boot (`init=/sbin/mvm-host-vm-init` on the kernel cmdline).
 /// `verify_stage0_rootfs_has_init` looks this inode up directly via a
@@ -116,6 +118,21 @@ struct ResolvedDevBaseImage {
     rootfs_path: std::path::PathBuf,
 }
 
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+struct DevBaseProvenance {
+    schema_version: u8,
+    id: String,
+    revision: String,
+    rootfs_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub(super) struct DevBaseStatusJson {
+    pub id: String,
+    pub revision: String,
+    pub rootfs_fingerprint: String,
+}
+
 fn is_safe_base_component(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -182,6 +199,82 @@ fn dev_base_artifacts_from_revision_dir(
         kernel_path,
         rootfs_path,
     })
+}
+
+#[cfg(feature = "builder-vm")]
+fn dev_base_provenance_path(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir.join(DEV_BASE_PROVENANCE_FILE)
+}
+
+#[cfg(feature = "builder-vm")]
+fn write_dev_base_provenance(
+    state_dir: &std::path::Path,
+    base: &ResolvedDevBaseImage,
+) -> Result<DevBaseProvenance> {
+    let rootfs_fingerprint = mvm_core::crypto::image_verify::sha256_file_cached(&base.rootfs_path)
+        .with_context(|| {
+            format!(
+                "fingerprinting pinned dev base rootfs {}",
+                base.rootfs_path.display()
+            )
+        })?;
+    let provenance = DevBaseProvenance {
+        schema_version: 1,
+        id: base.id.clone(),
+        revision: base.revision.clone(),
+        rootfs_fingerprint,
+    };
+    std::fs::create_dir_all(state_dir)
+        .with_context(|| format!("creating dev VM state dir {}", state_dir.display()))?;
+    let json = serde_json::to_vec_pretty(&provenance).context("serializing dev base provenance")?;
+    std::fs::write(dev_base_provenance_path(state_dir), json)
+        .with_context(|| format!("writing {}", dev_base_provenance_path(state_dir).display()))?;
+    Ok(provenance)
+}
+
+#[cfg(feature = "builder-vm")]
+fn read_dev_base_provenance(state_dir: &std::path::Path) -> Option<DevBaseProvenance> {
+    let path = dev_base_provenance_path(state_dir);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "could not read dev base provenance");
+            return None;
+        }
+    };
+    match serde_json::from_slice::<DevBaseProvenance>(&bytes) {
+        Ok(provenance) if provenance.schema_version == 1 => Some(provenance),
+        Ok(provenance) => {
+            tracing::warn!(
+                schema_version = provenance.schema_version,
+                path = %path.display(),
+                "ignoring unsupported dev base provenance schema"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "could not parse dev base provenance");
+            None
+        }
+    }
+}
+
+#[cfg(feature = "builder-vm")]
+fn remove_dev_base_provenance(state_dir: &std::path::Path) {
+    let path = dev_base_provenance_path(state_dir);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "could not remove dev base provenance")
+        }
+    }
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn read_dev_base_provenance(_state_dir: &std::path::Path) -> Option<DevBaseProvenance> {
+    None
 }
 
 /// Connect to the dev VM's guest agent over its Vz per-port vsock
@@ -305,7 +398,14 @@ pub(super) fn cmd_dev_vz(
     let allows_persistent = mvm_core::residency::resolve_residency()
         .0
         .allows_persistent_builder();
-    if should_resume(allows_persistent, dev_vz_snapshot_exists()) {
+    let snapshot_present = dev_vz_snapshot_exists();
+    if snapshot_present && base_ref.is_some() {
+        anyhow::bail!(
+            "`mvmctl dev up --base` cannot change the base of a parked dev VM; \
+             run `mvmctl dev down` first"
+        );
+    }
+    if should_resume(allows_persistent, snapshot_present) {
         match mvm_build::vz_builder::restore_persistent_vz_builder_from_snapshot(&state_dir) {
             Ok(_) => {
                 wait_for_dev_vm_ready(&console_log)?;
@@ -337,6 +437,7 @@ pub(super) fn cmd_dev_vz(
     let image = match base_ref {
         Some(base) => {
             let resolved = resolve_dev_base_image(base)?;
+            write_dev_base_provenance(&state_dir, &resolved)?;
             ui::info(&format!(
                 "Using pinned dev base {}@{}",
                 resolved.id, resolved.revision
@@ -348,6 +449,7 @@ pub(super) fn cmd_dev_vz(
             }
         }
         None => {
+            remove_dev_base_provenance(&state_dir);
             let (kernel, rootfs) = ensure_dev_image()?;
             mvm_build::libkrun_builder::BuilderVmImage::Rootfs {
                 kernel_path: std::path::PathBuf::from(&kernel),
@@ -504,6 +606,7 @@ pub(in crate::commands) fn cmd_dev_vz_down(json: bool, reset: bool) -> Result<bo
         // Not parking (cold residency or `--reset`): discard any stale snapshot
         // so a later `dev up` cold-boots instead of resuming an old builder.
         remove_dev_vz_snapshot_markers(&state_dir);
+        remove_dev_base_provenance(&state_dir);
         if !json {
             if was_running {
                 ui::success("Dev VM stopped.");
@@ -780,6 +883,8 @@ pub(super) struct DevStatusJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub builder_cache: Option<BuilderVmCacheJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<DevBaseStatusJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub linux_native: Option<LinuxNativeDevStatusJson>,
 }
 
@@ -815,6 +920,7 @@ pub(super) fn build_dev_status_json(
         builder_cache: Some(builder_vm_cache_json(
             &resolve_builder_vm_cache_status_summary(),
         )),
+        base: resolve_dev_base_status_json(),
         linux_native: None,
     }
 }
@@ -833,6 +939,7 @@ pub(super) fn build_dev_status_json_vmless(
         guest_kernel: None,
         dev_image: None,
         builder_cache: None,
+        base: None,
         linux_native: None,
     }
 }
@@ -857,6 +964,7 @@ pub(super) fn build_dev_status_json_linux_native(
         guest_kernel: None,
         dev_image: None,
         builder_cache: None,
+        base: None,
         linux_native: Some(LinuxNativeDevStatusJson {
             kvm: LinuxNativeComponentJson {
                 state: if has_kvm { "present" } else { "missing" },
@@ -877,6 +985,24 @@ pub(super) fn build_dev_status_json_linux_native(
             },
         }),
     }
+}
+
+fn resolve_dev_base_status_json() -> Option<DevBaseStatusJson> {
+    let state_dir = {
+        #[cfg(feature = "builder-vm")]
+        {
+            mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID)
+        }
+        #[cfg(not(feature = "builder-vm"))]
+        {
+            std::path::PathBuf::new()
+        }
+    };
+    read_dev_base_provenance(&state_dir).map(|provenance| DevBaseStatusJson {
+        id: provenance.id,
+        revision: provenance.revision,
+        rootfs_fingerprint: provenance.rootfs_fingerprint,
+    })
 }
 
 /// Machine-readable result of a `dev down` (and, later, `dev up`)
@@ -5138,7 +5264,8 @@ mod dev_status_image_tests {
     fn dev_status_json_is_versioned_and_privacy_safe() {
         // A VM-backed report carries the backend, the fixed dev VM name,
         // the state, and a guest-probed kernel version — but never a local
-        // artifact path or digest (same privacy floor as cache-inspect).
+        // artifact path. Digest-bearing base provenance is reported only
+        // under the explicit `base.rootfs_fingerprint` acceptance field.
         let report = build_dev_status_json("vz", "running", Some("6.1.0-mvm".to_string()));
         assert_eq!(report.schema_version, 1);
         assert_eq!(report.backend, "vz");
@@ -5147,6 +5274,7 @@ mod dev_status_image_tests {
         assert_eq!(report.guest_kernel.as_deref(), Some("6.1.0-mvm"));
         assert!(report.dev_image.is_some());
         assert!(report.builder_cache.is_some());
+        assert!(report.base.is_none());
         assert!(report.linux_native.is_none());
 
         let json = crate::json_out::to_json_string(&report).expect("serialize");
@@ -5158,7 +5286,75 @@ mod dev_status_image_tests {
         assert!(!json.contains("/private/tmp"));
         assert!(!json.contains("rootfs.ext4"));
         assert!(!json.contains("vmlinux"));
-        assert!(!json.contains("sha256"));
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn dev_base_provenance_roundtrips_without_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&rootfs, b"deterministic-rootfs").unwrap();
+        std::fs::write(&kernel, b"kernel").unwrap();
+        let base = ResolvedDevBaseImage {
+            id: "base-a".to_string(),
+            revision: "rev-1".to_string(),
+            kernel_path: kernel,
+            rootfs_path: rootfs.clone(),
+        };
+
+        let provenance = write_dev_base_provenance(tmp.path(), &base).expect("write provenance");
+        assert_eq!(provenance.schema_version, 1);
+        assert_eq!(provenance.id, "base-a");
+        assert_eq!(provenance.revision, "rev-1");
+        assert_eq!(
+            provenance.rootfs_fingerprint,
+            mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap()
+        );
+
+        let roundtrip = read_dev_base_provenance(tmp.path()).expect("read provenance");
+        assert_eq!(roundtrip, provenance);
+        let json = std::fs::read_to_string(dev_base_provenance_path(tmp.path())).unwrap();
+        assert!(json.contains("\"rootfs_fingerprint\""));
+        assert!(!json.contains(rootfs.to_string_lossy().as_ref()));
+        assert!(!json.contains("rootfs.ext4"));
+        assert!(!json.contains("vmlinux"));
+
+        remove_dev_base_provenance(tmp.path());
+        assert!(read_dev_base_provenance(tmp.path()).is_none());
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn dev_status_json_reports_active_base_fingerprint() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_CACHE_DIR", tmp.path().join("cache"));
+        env.set("MVM_DATA_DIR", tmp.path().join("data"));
+
+        let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let provenance = DevBaseProvenance {
+            schema_version: 1,
+            id: "template-a".to_string(),
+            revision: "rev-abc".to_string(),
+            rootfs_fingerprint: "0123456789abcdef".repeat(4),
+        };
+        let json = serde_json::to_vec_pretty(&provenance).unwrap();
+        std::fs::write(dev_base_provenance_path(&state_dir), json).unwrap();
+
+        let report = build_dev_status_json("vz", "running", None);
+        let base = report.base.as_ref().expect("base status");
+        assert_eq!(base.id, "template-a");
+        assert_eq!(base.revision, "rev-abc");
+        assert_eq!(base.rootfs_fingerprint, "0123456789abcdef".repeat(4));
+
+        let serialized = crate::json_out::to_json_string(&report).expect("serialize");
+        assert!(serialized.contains("\"base\""));
+        assert!(serialized.contains("\"rootfs_fingerprint\""));
+        assert!(!serialized.contains(state_dir.to_string_lossy().as_ref()));
+        assert!(!serialized.contains("rootfs.ext4"));
+        assert!(!serialized.contains("vmlinux"));
     }
 
     #[test]

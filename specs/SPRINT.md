@@ -107,6 +107,15 @@ plan 25 sequences the work into six independently-shippable workstreams.
       silently reusing a different base. Remaining WS-4 work is live
       reproducible-rootfs fingerprint acceptance for pinned `dev up`/fork.
 - [x] Advanced
+      [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
+      WS-4 pinned-base proof surface. Vz `dev up --base` now records the
+      resolved `{ id, revision, rootfs_fingerprint }` in dev VM state and
+      `dev status --json` reports it without host artifact paths, giving the
+      live acceptance a direct comparison point against checkpoint/fork content
+      hashes. Default starts and `dev down` clear stale base provenance, and
+      `dev up --base` now refuses parked snapshots instead of restoring an
+      older base while ignoring the requested ref.
+- [x] Advanced
       [`plans/118-supervisor-standby-pool-and-live-bench.md`](plans/118-supervisor-standby-pool-and-live-bench.md)
       live libkrun follow-up: x86_64 libkrun starts now carry an explicit
       `KernelFormat`, reuse the extracted sibling ELF `vmlinux`, and the
