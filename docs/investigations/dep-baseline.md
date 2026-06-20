@@ -121,14 +121,30 @@ provider). **Validated locally against upstream `main`:** with that feature
 is **empty** and the crate builds — correcting an earlier worry in this doc,
 `rustls-platform-verifier` is provider-agnostic and does **not** re-drag aws-lc.
 
-So the bounded fork *would* work; we rehome rather than carry one because a
-one-line upstream feature is cleaner than a maintained `[patch.crates-io]`. Once
-#274 lands it is a plain `oci-client` bump + feature flip + ring-provider install
-(and that collapses the `reqwest` 0.12/0.13 split too); a `[patch.crates-io]`
-bridge to the proven branch is available if we want aws-lc gone sooner. Until
-then the D1 forbidden-dep gate + D2 duplicate-major ratchet keep the regression
-closed and the `reqwest` split is a recorded D2 baseline entry, not an open cut.
-B4 + C1 are tracked on the dependency roadmap, not as refactor-close blockers.
+So the bounded fork removes aws-lc; we rehome rather than carry one because a
+one-line upstream feature is cleaner than a maintained `[patch.crates-io]`.
+
+**Bridge spike (2026-06-20) — B4 is bigger than a bump + flip.** A full in-tree
+`[patch.crates-io]` onto the fork was built and tested: mvm-oci builds and its 96
+tests pass (after `new_client` installs the ring provider as the process default
+— `reqwest/rustls-no-provider` resolves the provider at client-build time, so the
+guard is required and the hermetic-registry tests, which build raw clients, must
+install it too), and workspace `cargo tree -i aws-lc-rs` is empty. **But** the
+aws-lc-free JWT backend `jsonwebtoken/rust_crypto` pulls the **RustCrypto 0.11**
+line — `sha2`/`digest` 0.11, `block-buffer` 0.12, `crypto-common` 0.2,
+`const-oid` 0.10 — duplicating the workspace's pinned **0.10** stack, which trips
+`cargo deny check bans` (the D2 duplicate-major ratchet). This is inherent to
+`oci-client` 0.17's `jsonwebtoken` 10.x, **not** the bridge: the released
+post-#274 version drags the same split. So completing B4 also needs a
+workspace-wide RustCrypto 0.10→0.11 migration (or skipping 5 duplicate majors) —
+a dependency-*reduction* PR that adds 5 duplicate majors is self-defeating, so
+the bridge was abandoned. A `[patch.crates-io]` bridge remains *possible* if we
+accept those skips, but it is no longer "free."
+
+Until B4 is done the D1 forbidden-dep gate + D2 duplicate-major ratchet keep the
+regression closed and the `reqwest` split is a recorded D2 baseline entry, not an
+open cut. B4 + C1 are tracked on the dependency roadmap, not as refactor-close
+blockers.
 
 [pr274]: https://github.com/oras-project/rust-oci-client/pull/274
 
