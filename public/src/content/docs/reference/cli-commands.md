@@ -600,10 +600,14 @@ flow and the distinction between build time and runtime boot time.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl cache info` | Show cache directory path and disk usage |
-| `mvmctl cache prune` | Remove stale temp files from the cache |
+| `mvmctl cache info` | Show cache directory path, disk usage, and a per-entry footprint breakdown (unrecognized entries are flagged) |
+| `mvmctl cache prune` | Remove stale temp files; report (but don't delete) unrecognized top-level cache dirs |
 | `mvmctl cache prune --dry-run` | Show what would be removed without deleting |
 | `mvmctl cache prune --orphan-builds` | Also sweep orphaned builds — built artifacts whose source `mvm.toml` is gone (equivalent to `mvmctl manifest prune --orphans`) |
+| `mvmctl cache prune --orphan-dirs` | Also remove unrecognized top-level cache dirs (leftovers from a removed subsystem) |
+| `mvmctl cache prune --deep` | Reclaim regenerable caches too — Stage 0 blobs, the prebuilt default microVM image, pulled OCI layers (each costs a re-fetch/rebuild next time). Implies `--orphan-dirs` |
+| `mvmctl cache repair` | Clear a degraded builder VM store so the next `dev up`/`build` cold-rebuilds it. Refuses while a Stage 0 bootstrap is in flight; auto-stops a running dev builder first |
+| `mvmctl cache repair --force` | Clear the store even while a Stage 0 bootstrap lock is held (use only if the lock is stale, e.g. after a crash) |
 
 ## Security
 

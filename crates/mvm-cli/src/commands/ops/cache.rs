@@ -41,6 +41,21 @@ pub(in crate::commands) enum CacheAction {
         /// processes.
         #[arg(long)]
         no_reap_orphans: bool,
+        /// Also remove unrecognized top-level entries in the cache root —
+        /// directories left behind by a subsystem that has since been removed
+        /// (their disk is never reclaimed otherwise). Without this flag prune
+        /// only *reports* them; with it they are deleted. The set of recognized
+        /// entries is the hand-maintained [`RECOGNIZED_CACHE_ENTRIES`] list, so
+        /// removal is opt-in: a genuinely-current dir missing from that list
+        /// would otherwise be misread as orphan cruft.
+        #[arg(long)]
+        orphan_dirs: bool,
+        /// Reclaim regenerable caches too — the Stage 0 vendored blobs
+        /// (`stage0/`), the prebuilt default microVM image (`default-microvm/`),
+        /// and pulled OCI layers (`oci/`). These cost a re-fetch or rebuild the
+        /// next time they're needed, so they're opt-in. Implies `--orphan-dirs`.
+        #[arg(long)]
+        deep: bool,
     },
     /// Show cache directory path and disk usage
     Info {
@@ -59,6 +74,13 @@ pub(in crate::commands) enum CacheAction {
         /// Emit machine-readable JSON to stdout
         #[arg(long)]
         json: bool,
+        /// Clear the store even while a Stage 0 bootstrap is in flight. By
+        /// default repair refuses if the Stage 0 advisory lock is held (another
+        /// `dev up`/`build` is mid-bootstrap) so it never yanks the store from
+        /// an active build. Only pass this if you are certain the lock is stale
+        /// (e.g. left by a crashed run).
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -69,8 +91,20 @@ struct CacheInfo {
     exists: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     disk_usage_bytes: Option<u64>,
+    /// Per-top-level-entry footprint, largest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    entries: Vec<CacheDirEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     detail_lines: Vec<String>,
+}
+
+/// One row of the `cache info` per-entry breakdown.
+#[derive(serde::Serialize)]
+struct CacheDirEntry {
+    name: String,
+    bytes: u64,
+    /// `false` for an entry no current subsystem owns (orphan cruft).
+    recognized: bool,
 }
 
 fn collect_cache_info() -> Result<CacheInfo> {
@@ -81,10 +115,22 @@ fn collect_cache_info() -> Result<CacheInfo> {
             cache_dir,
             exists: false,
             disk_usage_bytes: None,
+            entries: Vec::new(),
             detail_lines: Vec::new(),
         });
     }
     let disk_usage_bytes = dir_size(path);
+    let entries = cache_dir_breakdown(path)
+        .into_iter()
+        .map(|(name, bytes)| {
+            let recognized = RECOGNIZED_CACHE_ENTRIES.contains(&name.as_str());
+            CacheDirEntry {
+                name,
+                bytes,
+                recognized,
+            }
+        })
+        .collect();
     let stage0_dir = mvm_build::stage0::stage0_cache_dir();
     let blob_filenames: Vec<&str> = mvm_build::stage0::assets_for_host_arch()
         .iter()
@@ -95,6 +141,7 @@ fn collect_cache_info() -> Result<CacheInfo> {
         cache_dir,
         exists: true,
         disk_usage_bytes: Some(disk_usage_bytes),
+        entries,
         detail_lines,
     })
 }
@@ -118,6 +165,16 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 "Disk usage: {}",
                 human_bytes(info.disk_usage_bytes.unwrap_or(0))
             );
+            // Per-entry breakdown (largest first) so the operator can see what
+            // is actually consuming the cache before reclaiming. An unrecognized
+            // entry is orphan cruft — `cache prune --orphan-dirs` reclaims it.
+            if !info.entries.is_empty() {
+                println!("By entry:");
+                for e in &info.entries {
+                    let tag = if e.recognized { "" } else { "  (unrecognized)" };
+                    println!("  {:<22} {}{tag}", e.name, human_bytes(e.bytes));
+                }
+            }
             // Surface vendored-blob ages, the cross-target builder-VM
             // cache size, assembled rootfs ages, and the last Stage 0
             // source fingerprint.
@@ -126,7 +183,36 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             }
             Ok(())
         }
-        CacheAction::Repair { dry_run, json } => {
+        CacheAction::Repair {
+            dry_run,
+            json,
+            force,
+        } => {
+            use super::super::env::dev_vz;
+
+            // Guard 1 — never yank the store from an in-flight bootstrap. A
+            // held Stage 0 lock means another `dev up`/`build` is mid-bootstrap.
+            // `--force` overrides (for a stale lock left by a crash).
+            if !force && dev_vz::stage0_bootstrap_in_flight() {
+                anyhow::bail!(
+                    "a Stage 0 builder bootstrap appears to be in progress (lock held at \
+                     {}/builder-vm/stage0.lock). Refusing to clear the builder store from under \
+                     a live build. Wait for it to finish, or pass --force if you are certain the \
+                     lock is stale (e.g. after a crash).",
+                    cache_dir,
+                );
+            }
+
+            // Guard 2 — a clear requires the persistent dev builder down (it
+            // holds the store's flock for its lifetime). Stop it first; the next
+            // `dev up` restarts it. Skipped under --dry-run (which mutates
+            // nothing). The stop is the reversible half of repair, so we do it
+            // automatically rather than refuse.
+            if !dry_run && dev_vz::is_vz_dev_running() {
+                ui::warn("A dev builder VM is running; stopping it before clearing the store.");
+                let _ = dev_vz::cmd_dev_vz_down(/* json = */ false);
+            }
+
             let repair = mvm_build::builder_vm::clear_builder_store(dry_run)
                 .map_err(|e| anyhow::anyhow!("clearing builder store: {e}"))?;
             if json {
@@ -163,7 +249,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             dry_run,
             orphan_builds,
             no_reap_orphans,
+            orphan_dirs,
+            deep,
         } => {
+            // `--deep` is the "reclaim everything regenerable" sledgehammer; it
+            // subsumes the orphan-dir sweep.
+            let orphan_dirs = orphan_dirs || deep;
             // Reap orphaned per-VM helpers by default (liveness-aware: live VMs
             // are spared). Done first so subsequent steps see a clean process
             // list and so the sweeper can drop the per-VM cache dirs along with
@@ -350,6 +441,55 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             }
 
+            // Orphan top-level dirs (e.g. a removed subsystem's leftovers).
+            // Reported by default; removed only with `--orphan-dirs`/`--deep`
+            // so an allowlist gap can never auto-delete a live cache.
+            let orphans = classify_orphan_entries(path);
+            if !orphans.is_empty() {
+                if orphan_dirs {
+                    let (n, b) = reclaim_entries(&orphans, "unrecognized cache entry", dry_run);
+                    removed += n;
+                    freed += b;
+                } else {
+                    let total: u64 = orphans.iter().map(|e| e.bytes).sum();
+                    ui::info(&format!(
+                        "{} unrecognized cache entr{} ({} total) not removed — \
+                         re-run with `--orphan-dirs` to reclaim:",
+                        orphans.len(),
+                        if orphans.len() == 1 { "y" } else { "ies" },
+                        human_bytes(total),
+                    ));
+                    for e in &orphans {
+                        ui::info(&format!(
+                            "  {} ({})",
+                            e.path.display(),
+                            human_bytes(e.bytes)
+                        ));
+                    }
+                }
+            }
+
+            // `--deep`: reclaim regenerable caches (Stage 0 blobs, the prebuilt
+            // default microVM image, pulled OCI layers). Opt-in: each costs a
+            // re-fetch/rebuild next time it's needed.
+            if deep {
+                let targets = regenerable_cache_targets(path);
+                if targets.is_empty() {
+                    ui::info("No regenerable caches to reclaim.");
+                } else {
+                    for (entry, label) in &targets {
+                        ui::info(&format!("  {label}"));
+                        let (n, b) = reclaim_entries(
+                            std::slice::from_ref(entry),
+                            "regenerable cache",
+                            dry_run,
+                        );
+                        removed += n;
+                        freed += b;
+                    }
+                }
+            }
+
             if removed == 0 {
                 ui::info("Nothing to prune.");
             } else if dry_run {
@@ -383,6 +523,167 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             Ok(())
         }
     }
+}
+
+/// Top-level entries any current mvm subsystem creates under
+/// `mvm_cache_dir()`. The orphan-dir sweep (`prune --orphan-dirs`) treats
+/// anything *not* on this list as cruft left by a removed subsystem.
+///
+/// CONTRACT: when you add a new top-level cache dir or file anywhere in the
+/// workspace, add its name here in the same change — otherwise `cache prune`
+/// will report (and, with `--orphan-dirs`, delete) a live cache as orphaned.
+/// `recognized_cache_entries_cover_known_dirs` guards the obvious set.
+const RECOGNIZED_CACHE_ENTRIES: &[&str] = &[
+    "builder-vm",        // builder VM store, per-arch artifacts, per-VM scratch
+    "builder-store",     // dev_build host-side staging store
+    "stage0",            // vendored Stage 0 bootstrap blobs
+    "oci",               // pulled OCI layers / blobs / manifests
+    "default-microvm",   // prebuilt default microVM image (kernel + rootfs)
+    "libkrunfw",         // kernel extracted from the libkrunfw dylib
+    "host-bins",         // cross-compiled embedded host-vm binaries
+    "guest-agent",       // built guest-agent staging
+    "docker-nix-store",  // legacy Stage 0 store mount point
+    "builder-nix-store", // legacy builder store mount point
+    "dev",               // host-backed dev Nix-store overlay (dev down --reset)
+    "runtime",           // runtime scratch
+    "linux-builder.log", // host-side build log
+];
+
+/// Regenerable caches reclaimed by `prune --deep`: expensive to refetch or
+/// rebuild, so never swept by the safe default. Each tuple is
+/// `(name, human label)`; the dir is `cache_root/<name>`.
+const REGENERABLE_CACHE_ENTRIES: &[(&str, &str)] = &[
+    (
+        "stage0",
+        "Stage 0 vendored blobs (re-fetched on next cold bootstrap)",
+    ),
+    (
+        "default-microvm",
+        "prebuilt default microVM image (rebuilt on next default-image use)",
+    ),
+    ("oci", "pulled OCI layers (re-pulled on next image pull)"),
+];
+
+/// A reclaimable cache entry: its path and real on-disk footprint.
+struct CacheEntry {
+    path: std::path::PathBuf,
+    bytes: u64,
+}
+
+/// Top-level entries under `cache_root` that aren't in
+/// [`RECOGNIZED_CACHE_ENTRIES`] — orphan cruft from removed subsystems.
+/// Side-effect-free (stats only) so it's hermetically testable. Sorted by
+/// descending footprint so the biggest reclaim shows first.
+fn classify_orphan_entries(cache_root: &std::path::Path) -> Vec<CacheEntry> {
+    let Ok(entries) = std::fs::read_dir(cache_root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<CacheEntry> = entries
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| !RECOGNIZED_CACHE_ENTRIES.contains(&n))
+                .unwrap_or(false)
+        })
+        .map(|e| {
+            let path = e.path();
+            let bytes = if path.is_dir() {
+                dir_size(&path)
+            } else {
+                path.metadata()
+                    .map(|m| file_allocated_bytes(&m))
+                    .unwrap_or(0)
+            };
+            CacheEntry { path, bytes }
+        })
+        .collect();
+    out.sort_by_key(|e| std::cmp::Reverse(e.bytes));
+    out
+}
+
+/// Regenerable caches present under `cache_root`, in
+/// [`REGENERABLE_CACHE_ENTRIES`] order. Side-effect-free; only existing dirs
+/// are returned.
+fn regenerable_cache_targets(cache_root: &std::path::Path) -> Vec<(CacheEntry, &'static str)> {
+    REGENERABLE_CACHE_ENTRIES
+        .iter()
+        .filter_map(|(name, label)| {
+            let path = cache_root.join(name);
+            path.is_dir().then(|| {
+                (
+                    CacheEntry {
+                        bytes: dir_size(&path),
+                        path,
+                    },
+                    *label,
+                )
+            })
+        })
+        .collect()
+}
+
+/// Per-top-level-entry on-disk breakdown of the cache root, sorted by
+/// descending real footprint (sparse images count allocated blocks, not their
+/// cap). Drives the `cache info` table. Side-effect-free.
+fn cache_dir_breakdown(cache_root: &std::path::Path) -> Vec<(String, u64)> {
+    let Ok(entries) = std::fs::read_dir(cache_root) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<(String, u64)> = entries
+        .flatten()
+        .map(|e| {
+            let path = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            let bytes = if path.is_dir() {
+                dir_size(&path)
+            } else {
+                path.metadata()
+                    .map(|m| file_allocated_bytes(&m))
+                    .unwrap_or(0)
+            };
+            (name, bytes)
+        })
+        .collect();
+    rows.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
+    rows
+}
+
+/// Remove (or, under `dry_run`, just tally) a set of reclaimable entries.
+/// Returns `(count, bytes)` actually removed/would-remove. Each path is
+/// printed so the operator sees exactly what goes.
+fn reclaim_entries(entries: &[CacheEntry], kind: &str, dry_run: bool) -> (u64, u64) {
+    let mut removed = 0u64;
+    let mut freed = 0u64;
+    for e in entries {
+        if dry_run {
+            println!(
+                "Would remove {kind}: {} ({})",
+                e.path.display(),
+                human_bytes(e.bytes)
+            );
+        } else {
+            let res = if e.path.is_dir() {
+                std::fs::remove_dir_all(&e.path)
+            } else {
+                std::fs::remove_file(&e.path)
+            };
+            match res {
+                Ok(()) => println!(
+                    "Removed {kind}: {} ({})",
+                    e.path.display(),
+                    human_bytes(e.bytes)
+                ),
+                Err(err) => {
+                    ui::warn(&format!("could not remove {}: {err}", e.path.display()));
+                    continue;
+                }
+            }
+        }
+        removed += 1;
+        freed += e.bytes;
+    }
+    (removed, freed)
 }
 
 /// Remove untagged checkpoints older than `max_age_secs`. Tagged checkpoints
@@ -802,5 +1103,120 @@ mod tests {
         assert!(joined.contains("--delete-older-than 14d"));
         // The non-matching file is not reported as a store image.
         assert!(!joined.contains("rootfs.ext4"));
+    }
+
+    /// The on-disk dirs we know mvm creates must all be recognized, so the
+    /// orphan sweep never deletes a live cache. Guards the allowlist contract.
+    #[test]
+    fn recognized_cache_entries_cover_known_dirs() {
+        for known in [
+            "builder-vm",
+            "stage0",
+            "oci",
+            "default-microvm",
+            "builder-store",
+            "libkrunfw",
+            "host-bins",
+            "guest-agent",
+        ] {
+            assert!(
+                RECOGNIZED_CACHE_ENTRIES.contains(&known),
+                "{known} is created by a current subsystem but is not in the allowlist"
+            );
+        }
+        // Every regenerable target must itself be recognized (else `prune`
+        // would both reclaim it under `--deep` and flag it as orphan).
+        for (name, _) in REGENERABLE_CACHE_ENTRIES {
+            assert!(
+                RECOGNIZED_CACHE_ENTRIES.contains(name),
+                "{name} not recognized"
+            );
+        }
+    }
+
+    /// Orphan classification flags only unrecognized entries and sorts the
+    /// result largest-first.
+    #[test]
+    fn classify_orphan_entries_flags_unrecognized_largest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Recognized dirs — must be skipped.
+        std::fs::create_dir_all(root.join("stage0")).unwrap();
+        std::fs::create_dir_all(root.join("builder-vm")).unwrap();
+        // Orphans: a small one and a bigger one.
+        std::fs::create_dir_all(root.join("ur-seed")).unwrap();
+        std::fs::write(root.join("ur-seed/big.bin"), vec![0u8; 8192]).unwrap();
+        std::fs::create_dir_all(root.join("old-subsystem")).unwrap();
+        std::fs::write(root.join("old-subsystem/small.bin"), b"hi").unwrap();
+
+        let orphans = classify_orphan_entries(root);
+        let names: Vec<String> = orphans
+            .iter()
+            .map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["ur-seed", "old-subsystem"],
+            "largest first; recognized skipped"
+        );
+        assert!(orphans[0].bytes >= orphans[1].bytes);
+    }
+
+    /// `--deep` targets resolve only to regenerable dirs that actually exist.
+    #[test]
+    fn regenerable_targets_only_existing_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("stage0")).unwrap();
+        std::fs::write(root.join("stage0/blob"), vec![0u8; 4096]).unwrap();
+        std::fs::create_dir_all(root.join("oci")).unwrap();
+        // default-microvm absent → not a target.
+
+        let targets = regenerable_cache_targets(root);
+        let names: Vec<String> = targets
+            .iter()
+            .map(|(e, _)| e.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["stage0", "oci"]);
+        assert!(targets[0].0.bytes >= 4096);
+    }
+
+    /// `reclaim_entries` removes on the live path, tallies without touching disk
+    /// under dry-run.
+    #[test]
+    fn reclaim_entries_dry_run_is_a_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path().join("victim");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("f"), vec![0u8; 2048]).unwrap();
+        let entries = vec![CacheEntry {
+            bytes: dir_size(&d),
+            path: d.clone(),
+        }];
+
+        let (n, b) = reclaim_entries(&entries, "test", /* dry_run = */ true);
+        assert_eq!(n, 1);
+        assert!(b >= 2048);
+        assert!(d.exists(), "dry-run must not remove anything");
+
+        let (n, _) = reclaim_entries(&entries, "test", /* dry_run = */ false);
+        assert_eq!(n, 1);
+        assert!(!d.exists(), "live run must remove the entry");
+    }
+
+    /// `cache info`'s breakdown is sorted largest-first and tags unrecognized
+    /// entries.
+    #[test]
+    fn cache_dir_breakdown_sorted_and_includes_all_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("stage0")).unwrap();
+        std::fs::write(root.join("stage0/a"), vec![0u8; 1024]).unwrap();
+        std::fs::create_dir_all(root.join("ur-seed")).unwrap();
+        std::fs::write(root.join("ur-seed/a"), vec![0u8; 8192]).unwrap();
+
+        let rows = cache_dir_breakdown(root);
+        assert_eq!(rows[0].0, "ur-seed", "largest entry first");
+        assert!(rows.iter().any(|(n, _)| n == "stage0"));
     }
 }

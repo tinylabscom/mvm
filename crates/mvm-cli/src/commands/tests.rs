@@ -2928,6 +2928,7 @@ fn test_cache_prune_dry_run() {
                     dry_run,
                     orphan_builds,
                     no_reap_orphans,
+                    ..
                 },
         }) => {
             assert!(dry_run);
@@ -2949,6 +2950,7 @@ fn test_cache_prune_orphan_builds_flag() {
                     dry_run,
                     orphan_builds,
                     no_reap_orphans,
+                    ..
                 },
         }) => {
             assert!(!dry_run);
@@ -2973,6 +2975,7 @@ fn test_cache_prune_no_reap_orphans_flag() {
                     dry_run,
                     orphan_builds,
                     no_reap_orphans,
+                    ..
                 },
         }) => {
             assert!(!dry_run);
@@ -3000,7 +3003,7 @@ fn test_cache_prune_reaps_orphans_by_default() {
 
 #[test]
 fn test_cache_prune_combined_flags() {
-    // All three sweep flags should compose so users can do a single
+    // All sweep flags should compose so users can do a single
     // "clean everything" pass.
     let cli = Cli::try_parse_from([
         "mvmctl",
@@ -3009,6 +3012,8 @@ fn test_cache_prune_combined_flags() {
         "--dry-run",
         "--orphan-builds",
         "--no-reap-orphans",
+        "--orphan-dirs",
+        "--deep",
     ])
     .unwrap();
     match cli.command {
@@ -3018,13 +3023,28 @@ fn test_cache_prune_combined_flags() {
                     dry_run,
                     orphan_builds,
                     no_reap_orphans,
+                    orphan_dirs,
+                    deep,
                 },
         }) => {
             assert!(dry_run);
             assert!(orphan_builds);
             assert!(no_reap_orphans);
+            assert!(orphan_dirs);
+            assert!(deep);
         }
         _ => panic!("Expected Cache Prune command"),
+    }
+}
+
+#[test]
+fn test_cache_repair_force_flag() {
+    let cli = Cli::try_parse_from(["mvmctl", "cache", "repair", "--force"]).unwrap();
+    match cli.command {
+        Commands::Cache(cache::Args {
+            action: CacheAction::Repair { force, .. },
+        }) => assert!(force),
+        _ => panic!("Expected Cache Repair command"),
     }
 }
 
