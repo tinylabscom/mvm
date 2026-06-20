@@ -95,3 +95,24 @@ Run the test → PASS.
 - Dispatch chokepoint (`pipeline/dev_build.rs:595`): if the active session has a `snapshot_path`, RESTORE instead of cold-boot.
 - A `mvmctl persistent-builder park` verb (explicit) for the first live proof; the keeper (Slice 3) calls the same primitive on idle.
 - **Live macOS-26 validation:** start persistent builder → `park` (SAVE, idle) → `supervisor-config.json` + snapshot + `.machine-id` on disk, builder stopped → next build RESTOREs (no cold boot) → build succeeds; `/nix-store` intact.
+
+---
+
+# Slice 2 — auto-park on `dev down`, auto-resume on `dev up` (Option A, residency-gated)
+
+**Decision:** park/resume hooks the **Vz `dev` lifecycle** (`dev_vz.rs`), not the libkrun `persistent-builder` CLI verb (that path is libkrun-only). State is keyed on the **stable** `persistent_vz_state_dir(DEV_VM_SESSION_ID)` — a parked builder = a snapshot file present in that dir + supervisor stopped. Gated on the shipped residency policy: `Cold` → full stop / no resume (current behavior); `Warm`/`Parked` → park on down, resume on up.
+
+## Task 1 (mvm-build `vz_builder.rs`): the save/restore/parked primitives
+- `pub fn builder_snapshot_save(state_dir: &Path) -> Result<PathBuf, BuilderVmError>`: snapshot = `<state_dir>/parked.vzsnapshot` (absolute); `send_builder_control_command(<state_dir>/control.sock, &format!("SAVE {abs}"))`; treat a response not starting with `OK` as an error; return the snapshot path. (SAVE pauses→saves→resumes; the supervisor writes `<snapshot>.machine-id`.)
+- `pub fn builder_snapshot_restore(state_dir: &Path, supervisor_path_override: Option<&Path>) -> Result<VzPersistentVmHandle, BuilderVmError>`: mirror the **tail** of `start()` — (1) re-acquire `acquire_nix_store_image_lock`; (2) read `<state_dir>/supervisor-config.json` → `vz::SupervisorConfig`; (3) `builder_restore_config(cfg, &snapshot, machine_id_if_present)`; (4) `host_gvproxy::spawn_detached(state_dir)` + guard; (5) `spawn_vz_supervisor_in_background(supervisor_path, &restore_cfg)`; (6) `defuse()`; (7) return a `VzPersistentVmHandle` carrying the lock + child. Do NOT re-persist the Restore config (keep the on-disk Boot config for future cycles). Do NOT call `ensure_builder_vm_image`/`stage_persistent_vz_job_dir` (snapshot carries guest state; shares re-attach from the persisted config).
+- `pub fn is_builder_parked(state_dir: &Path) -> bool`: `<state_dir>/parked.vzsnapshot` AND `<state_dir>/supervisor-config.json` both exist.
+- `pub fn parked_snapshot_path(state_dir: &Path) -> PathBuf` = `<state_dir>/parked.vzsnapshot`.
+- Unit tests: path helpers; `is_builder_parked` true only when both files present; (save/restore are live — covered in validation).
+
+## Task 2 (mvm-cli `dev_vz.rs`): wire into up/down, residency-gated
+- `cmd_dev_vz_down`: when residency `kind() != Cold` AND the supervisor is alive → `builder_snapshot_save(&state_dir)` (park) BEFORE `stop_persistent_vz_by_pid_file`; on save error, log + fall back to a plain stop (never leave a half-parked VM). Log "Parked dev VM (resume is instant)". `--reset` and `Cold` → current full stop; on either, remove a stale `parked.vzsnapshot`(+`.machine-id`).
+- `cmd_dev_vz_up`: before the cold `VzPersistentBuilderVm::start()`, when residency `kind() != Cold` AND `is_builder_parked(&state_dir)` → `builder_snapshot_restore(&state_dir, …)` instead; on success remove the snapshot marker (consumed) + log "Resumed dev VM from snapshot"; on restore error, clean the marker + fall back to cold boot. `Cold` → clean any stale marker + cold boot.
+- Unit tests: the gating decision (residency kind + parked-present → {park, plain-stop} / {resume, cold-boot}).
+
+## Live validation (macOS-26, deterministic)
+`dev up` (cold) → `dev down` (parks: `parked.vzsnapshot`+`.machine-id` present, supervisor reaped) → `dev up` (resumes: no cold boot, fast) → `dev status` running / a `dev shell` command works → `MVM_RESIDENCY=cold dev down` fully stops + clears the marker.
