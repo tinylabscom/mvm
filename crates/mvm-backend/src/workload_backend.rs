@@ -27,6 +27,19 @@ pub enum EgressSubstitutionTransport {
     None,
 }
 
+impl EgressSubstitutionTransport {
+    /// Whether this transport can carry proxy-aware substitution requests.
+    pub fn supports_proxy_aware_substitution(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Whether this transport can transparently intercept ordinary guest
+    /// `:80`/`:443` egress and deliver it to the host terminator.
+    pub fn supports_transparent_terminator(self) -> bool {
+        matches!(self, Self::NftTerminator)
+    }
+}
+
 /// Type-level permission to carry an untrusted workload.
 pub trait WorkloadBackend: VmBackend {
     /// How this backend carries the egress substitution channel. No default:
@@ -73,6 +86,23 @@ pub fn require_workload_backend(backend: &AnyBackend) -> Result<&dyn WorkloadBac
     })
 }
 
+/// Require the backend's substitution transport to include the transparent
+/// `:80`/`:443` terminator leg. Proxy-aware substitution alone is not enough
+/// for deleting the in-line gateway splice because non-proxy-aware workloads
+/// would otherwise lose SDK-free egress substitution.
+pub fn require_transparent_egress_terminator(backend: &dyn WorkloadBackend) -> Result<()> {
+    if backend
+        .egress_substitution_transport()
+        .supports_transparent_terminator()
+    {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "backend `{}` does not provide a transparent :80/:443 egress terminator",
+        backend.name()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,34 +121,34 @@ mod tests {
 
     #[test]
     fn firecracker_declares_nft_terminator() {
-        assert_eq!(
-            FirecrackerBackend.egress_substitution_transport(),
-            EgressSubstitutionTransport::NftTerminator
-        );
+        let transport = FirecrackerBackend.egress_substitution_transport();
+        assert_eq!(transport, EgressSubstitutionTransport::NftTerminator);
+        assert!(transport.supports_proxy_aware_substitution());
+        assert!(transport.supports_transparent_terminator());
     }
 
     #[test]
     fn libkrun_declares_vsock_uds_channel() {
-        assert_eq!(
-            LibkrunBackend.egress_substitution_transport(),
-            EgressSubstitutionTransport::VsockUdsChannel
-        );
+        let transport = LibkrunBackend.egress_substitution_transport();
+        assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
+        assert!(transport.supports_proxy_aware_substitution());
+        assert!(!transport.supports_transparent_terminator());
     }
 
     #[test]
     fn vz_declares_vsock_uds_channel() {
-        assert_eq!(
-            VzBackend.egress_substitution_transport(),
-            EgressSubstitutionTransport::VsockUdsChannel
-        );
+        let transport = VzBackend.egress_substitution_transport();
+        assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
+        assert!(transport.supports_proxy_aware_substitution());
+        assert!(!transport.supports_transparent_terminator());
     }
 
     #[test]
     fn mock_declares_none() {
-        assert_eq!(
-            MockBackend::new().egress_substitution_transport(),
-            EgressSubstitutionTransport::None
-        );
+        let transport = MockBackend::new().egress_substitution_transport();
+        assert_eq!(transport, EgressSubstitutionTransport::None);
+        assert!(!transport.supports_proxy_aware_substitution());
+        assert!(!transport.supports_transparent_terminator());
     }
 
     #[test]
@@ -143,5 +173,30 @@ mod tests {
             err.to_string().contains("not a workload backend"),
             "refusal must explain the bar, got: {err}"
         );
+    }
+
+    #[test]
+    fn transparent_egress_terminator_requirement_accepts_firecracker() {
+        require_transparent_egress_terminator(&FirecrackerBackend)
+            .expect("firecracker declares the nft terminator leg");
+    }
+
+    #[test]
+    fn transparent_egress_terminator_requirement_refuses_proxy_only_backends() {
+        let mock = MockBackend::new();
+        for backend in [
+            &LibkrunBackend as &dyn WorkloadBackend,
+            &VzBackend as &dyn WorkloadBackend,
+            &mock as &dyn WorkloadBackend,
+        ] {
+            let err = match require_transparent_egress_terminator(backend) {
+                Ok(()) => panic!("{} should not satisfy the terminator gate", backend.name()),
+                Err(e) => e,
+            };
+            assert!(
+                err.to_string().contains("transparent :80/:443"),
+                "refusal must name the missing terminator leg, got: {err}"
+            );
+        }
     }
 }
