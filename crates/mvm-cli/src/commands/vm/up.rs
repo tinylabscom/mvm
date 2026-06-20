@@ -1311,7 +1311,7 @@ pub(in crate::commands) struct Args {
     /// (virtio-fs); `host:/guest:SIZE` is an ext4 disk image. Read-only
     /// by default — append `:rw` to grant writes. Guest path must be
     /// under /data, /work, or /mnt (system mounts are read-only).
-    #[arg(short, long, value_parser = clap_volume_spec)]
+    #[arg(long, value_parser = clap_volume_spec)]
     pub volume: Vec<String>,
     /// Hypervisor backend (firecracker, libkrun, qemu, vz). Default: auto-detect per host
     #[arg(long, default_value = "firecracker")]
