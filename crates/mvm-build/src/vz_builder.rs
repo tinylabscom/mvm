@@ -31,6 +31,7 @@ use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::thread;
 use std::time::Duration;
 
+use crate::builder_control;
 use crate::builder_vm::{
     BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmDisk, BuilderVmError,
     BuilderVmExitInfo, BuilderVmMount, BuilderVmRunConfig, VmBackendForBuilder,
@@ -1427,6 +1428,147 @@ fn persist_builder_supervisor_config(
     Ok(path)
 }
 
+/// Path where `builder_snapshot_save` writes the parked VM state.
+/// Callers that want to check for an existing snapshot before starting
+/// a cold boot use this alongside `is_builder_parked`.
+pub fn parked_snapshot_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("parked.vzsnapshot")
+}
+
+/// Returns `true` when the persistent builder is in a parked (saved)
+/// state: both the snapshot file and the persisted `SupervisorConfig`
+/// are present under `state_dir`. Either file alone means an incomplete
+/// park — treat as not-parked so the caller falls back to a cold boot.
+pub fn is_builder_parked(state_dir: &Path) -> bool {
+    parked_snapshot_path(state_dir).exists()
+        && state_dir.join(BUILDER_SUPERVISOR_CONFIG_FILE).exists()
+}
+
+/// Send a `SAVE` command to the builder VM's control socket, writing
+/// the guest machine state to `<state_dir>/parked.vzsnapshot`.
+///
+/// The supervisor pauses the guest, saves its state (including the
+/// machine-id sidecar at `<snapshot>.machine-id`), then resumes it
+/// before replying. The caller must quiesce the builder (no in-flight
+/// dispatch) before calling this — `SAVE` is only safe on an idle VM.
+///
+/// Returns the absolute path of the written snapshot on success.
+pub fn builder_snapshot_save(state_dir: &Path) -> Result<PathBuf, BuilderVmError> {
+    let snapshot = parked_snapshot_path(state_dir);
+    let control = state_dir.join("control.sock");
+    let resp = builder_control::send_builder_control_command(
+        &control,
+        &format!("SAVE {}", snapshot.display()),
+    )?;
+    if !resp.starts_with("OK") {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "builder SAVE refused: {resp}"
+        )));
+    }
+    Ok(snapshot)
+}
+
+/// Restore a previously parked builder VM from
+/// `<state_dir>/parked.vzsnapshot`.
+///
+/// Reads the persisted `SupervisorConfig` written by `start()`, flips
+/// `startup_mode` to `Restore`, re-acquires the nix-store lock,
+/// spawns gvproxy, and spawns the supervisor. Returns a
+/// `VzPersistentVmHandle` identical in shape to the one `start()`
+/// returns so callers can treat cold-boot and resume paths uniformly.
+///
+/// Does NOT re-persist the Restore config — the on-disk Boot config is
+/// kept intact for future park/resume cycles.
+/// Does NOT call `ensure_builder_vm_image` or `stage_persistent_vz_job_dir`
+/// — the snapshot carries guest state; virtio-fs shares re-attach via
+/// the persisted config.
+pub fn builder_snapshot_restore(
+    state_dir: &Path,
+    supervisor_path_override: Option<&Path>,
+) -> Result<VzPersistentVmHandle, BuilderVmError> {
+    let supervisor_path = match supervisor_path_override {
+        Some(p) => p.to_path_buf(),
+        None => resolve_vz_supervisor_path()?,
+    };
+
+    let config_path = state_dir.join(BUILDER_SUPERVISOR_CONFIG_FILE);
+    let raw = std::fs::read(&config_path).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "reading persisted SupervisorConfig from {}: {e}",
+            config_path.display()
+        ))
+    })?;
+    let persisted: crate::vz::SupervisorConfig = serde_json::from_slice(&raw).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "deserialising SupervisorConfig from {}: {e}",
+            config_path.display()
+        ))
+    })?;
+
+    // Derive nix_store_mib from the persisted config's nix-store disk entry
+    // if present. The disk list records the path; we check its size on disk
+    // and fall back to the standard default so restore is self-contained.
+    let nix_store_mib = persisted
+        .disks
+        .iter()
+        .find(|d| d.id == "nix-store")
+        .and_then(|d| {
+            std::fs::metadata(&d.path).ok().map(|m| {
+                u32::try_from(m.len() / (1024 * 1024)).unwrap_or(VZ_BUILDER_DEFAULT_NIX_STORE_MIB)
+            })
+        })
+        .unwrap_or(VZ_BUILDER_DEFAULT_NIX_STORE_MIB);
+
+    let nix_store_lock = acquire_nix_store_image_lock(
+        &builder_vm_cache_dir(),
+        host_arch_tag(),
+        u64::from(nix_store_mib),
+    )?;
+
+    let snapshot = parked_snapshot_path(state_dir);
+    let machine_id_path = {
+        let p = {
+            let mut s = snapshot.clone().into_os_string();
+            s.push(".machine-id");
+            PathBuf::from(s)
+        };
+        p.exists().then_some(p)
+    };
+
+    let restore_cfg = builder_control::builder_restore_config(
+        persisted.clone(),
+        &snapshot,
+        machine_id_path.as_deref(),
+    )?;
+
+    let _gvproxy = host_gvproxy::spawn_detached(state_dir).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("spawn gvproxy for Vz builder VM restore: {e}"))
+    })?;
+    let gvproxy_guard = BuilderGvproxyGuard {
+        state_dir: state_dir.to_path_buf(),
+    };
+
+    let child = spawn_vz_supervisor_in_background(&supervisor_path, &restore_cfg)?;
+    gvproxy_guard.defuse();
+
+    let vm_name = &persisted.name;
+    let prefix = "mvm-persistent-builder-vz-";
+    let session_id = vm_name
+        .strip_prefix(prefix)
+        .unwrap_or(vm_name.as_str())
+        .to_string();
+
+    let job_dir = builder_vm_cache_dir().join("jobs").join(&session_id);
+
+    Ok(VzPersistentVmHandle {
+        vm_state_dir: state_dir.to_path_buf(),
+        job_dir,
+        session_id,
+        supervisor: Some(child),
+        _nix_store_lock: nix_store_lock,
+    })
+}
+
 /// Spawn `mvm-vz-supervisor` in the background with the
 /// `SupervisorConfig` JSON piped to its stdin. Same shape libkrun's
 /// `spawn_supervisor_in_background` uses for the persistent VM;
@@ -2542,5 +2684,44 @@ mod tests {
             "control_socket_path must survive the round-trip"
         );
         assert_eq!(reloaded.name, vm_name);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Slice 2 Task 1: parked_snapshot_path / is_builder_parked
+    // ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parked_snapshot_path_returns_parked_vzsnapshot_under_state_dir() {
+        let scratch = tempfile::tempdir().unwrap();
+        let snap = parked_snapshot_path(scratch.path());
+        assert_eq!(snap, scratch.path().join("parked.vzsnapshot"));
+    }
+
+    #[test]
+    fn is_builder_parked_false_when_neither_file_present() {
+        let scratch = tempfile::tempdir().unwrap();
+        assert!(!is_builder_parked(scratch.path()));
+    }
+
+    #[test]
+    fn is_builder_parked_false_when_only_snapshot_present() {
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(scratch.path().join("parked.vzsnapshot"), b"").unwrap();
+        assert!(!is_builder_parked(scratch.path()));
+    }
+
+    #[test]
+    fn is_builder_parked_false_when_only_config_present() {
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(scratch.path().join(BUILDER_SUPERVISOR_CONFIG_FILE), b"{}").unwrap();
+        assert!(!is_builder_parked(scratch.path()));
+    }
+
+    #[test]
+    fn is_builder_parked_true_when_both_files_present() {
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(scratch.path().join("parked.vzsnapshot"), b"").unwrap();
+        std::fs::write(scratch.path().join(BUILDER_SUPERVISOR_CONFIG_FILE), b"{}").unwrap();
+        assert!(is_builder_parked(scratch.path()));
     }
 }
