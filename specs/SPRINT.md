@@ -97,6 +97,16 @@ plan 25 sequences the work into six independently-shippable workstreams.
       artifact filenames, or digests leak, and the CLI reference documents the
       schema-versioned status form.
 - [x] Advanced
+      [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
+      WS-4 base pinning. `mvmctl dev up --base <template[@revision]|slot[@revision]|bundle-sha>`
+      now boots the Vz dev VM from the existing template/manifest-slot/bundle
+      artifact registry instead of creating a parallel base registry. Current
+      refs reuse `template_artifacts_dispatched`; exact template/slot revision
+      pins require existing `vmlinux` and `rootfs.ext4` artifacts and reject
+      path-traversal components. A running dev VM refuses `--base` rather than
+      silently reusing a different base. Remaining WS-4 work is live
+      reproducible-rootfs fingerprint acceptance for pinned `dev up`/fork.
+- [x] Advanced
       [`plans/118-supervisor-standby-pool-and-live-bench.md`](plans/118-supervisor-standby-pool-and-live-bench.md)
       live libkrun follow-up: x86_64 libkrun starts now carry an explicit
       `KernelFormat`, reuse the extracted sibling ELF `vmlinux`, and the

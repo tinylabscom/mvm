@@ -21,7 +21,10 @@
 > Linux-native `dev status --json` now carries typed readiness detail for
 > KVM, Firecracker, and base assets without leaking host paths or digests.
 > WS-1 first-class `vm save` / `vm restore` aliases landed; live acceptance
-> remains hardware-gated.
+> remains hardware-gated. WS-4 base references now have a first Vz dev slice:
+> `mvmctl dev up --base <template[@revision]|slot[@revision]|bundle-sha>`
+> resolves through the existing template/slot/bundle artifact registry and
+> fails closed on unknown or unbuilt bases before launch.
 >
 > **Priority update 2026-06-15:** Plan 200 owns the new beginner-facing
 > `mvmctl machine` lifecycle. This plan should stay limited to VZ-specific
@@ -176,11 +179,17 @@ WS-2 / Plan 140 — add `--json` there, don't fork).
 Pin a vz VM to a named base image / revision so a `dev up` / fork reproducibly
 starts from a known closure (the DX the reference SDK offers via image refs).
 
-- [ ] design: how a base ref is named, stored, and resolved (reuse the
-      artifact-model / template machinery — Plan 134 / template verbs — don't
-      add a parallel registry).
-- [ ] wire base-ref resolution into the vz boot path; fail closed on an
-      unknown/unbuilt base.
+- [x] design: base refs are CLI refs over the existing artifact registry, not
+      a new registry: `template`, `template@revision`, `slot-sha`,
+      `slot-sha@revision`, or installed `bundle-sha`. Legacy templates and
+      manifest slots store revisions under the existing `templates/` layout;
+      bundles remain content-addressed and reject `@revision`.
+- [x] wire base-ref resolution into the Vz dev boot path; fail closed on an
+      unknown/unbuilt base. `mvmctl dev up --base` resolves through
+      `template_artifacts_dispatched` for current refs and through existing
+      template/slot revision directories for exact pins, requires `vmlinux` +
+      `rootfs.ext4`, refuses path-traversal components, and refuses changing
+      the base of an already-running dev VM.
 - [ ] acceptance: `dev up`/fork from a pinned base reproducibly yields the same
       rootfs fingerprint.
 
@@ -190,7 +199,7 @@ starts from a known closure (the DX the reference SDK offers via image refs).
 - [ ] `save`/`restore` are first-class verbs, honestly gated by backend tier.
 - [ ] Cached fast-boot is the default; cache decisions are observable.
 - [x] Every vz lifecycle verb has a stable `--json` form.
-- [ ] Base pinning reuses the existing artifact/template machinery (no parallel
+- [x] Base pinning reuses the existing artifact/template machinery (no parallel
       registry).
 - [ ] No security-claim regressions; no duplication of Plan 159/140/148
       primitives — only the DX/UX layer on top.

@@ -65,6 +65,125 @@ fn dev_image_cmdline() -> String {
     }
 }
 
+/// User-facing base-image reference accepted by `mvmctl dev up --base`.
+///
+/// The `id` is resolved by the existing template dispatcher, so it may be a
+/// legacy template name, manifest slot hash, or installed bundle sha. A
+/// revision pin (`name@revision`) is supported for template/slot bases only;
+/// bundles are already content-addressed by their sha.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DevBaseRef {
+    id: String,
+    revision: Option<String>,
+}
+
+impl DevBaseRef {
+    pub(super) fn parse(raw: &str) -> Result<Self> {
+        let (id, revision) = match raw.split_once('@') {
+            Some((id, revision)) => {
+                if revision.is_empty() {
+                    anyhow::bail!("dev base revision cannot be empty");
+                }
+                (id, Some(revision.to_string()))
+            }
+            None => (raw, None),
+        };
+        if id.is_empty() {
+            anyhow::bail!("dev base id cannot be empty");
+        }
+        if !mvm_core::manifest::is_slot_hash_dirname(id) {
+            mvm_core::naming::validate_template_name(id)
+                .with_context(|| format!("invalid dev base template name: {id:?}"))?;
+        }
+        if let Some(rev) = revision.as_deref()
+            && !is_safe_base_component(rev)
+        {
+            anyhow::bail!("invalid dev base revision: {rev:?}");
+        }
+        Ok(Self {
+            id: id.to_string(),
+            revision,
+        })
+    }
+}
+
+#[cfg(feature = "builder-vm")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedDevBaseImage {
+    id: String,
+    revision: String,
+    kernel_path: std::path::PathBuf,
+    rootfs_path: std::path::PathBuf,
+}
+
+fn is_safe_base_component(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+#[cfg(feature = "builder-vm")]
+fn resolve_dev_base_image(base: &DevBaseRef) -> Result<ResolvedDevBaseImage> {
+    match base.revision.as_deref() {
+        Some(revision) => resolve_dev_base_pinned_revision(&base.id, revision),
+        None => {
+            let (_spec, kernel, _initrd, rootfs, revision) =
+                mvm::vm::template::lifecycle::template_artifacts_dispatched(&base.id)
+                    .with_context(|| format!("resolving dev base {:?}", base.id))?;
+            Ok(ResolvedDevBaseImage {
+                id: base.id.clone(),
+                revision,
+                kernel_path: std::path::PathBuf::from(kernel),
+                rootfs_path: std::path::PathBuf::from(rootfs),
+            })
+        }
+    }
+}
+
+#[cfg(feature = "builder-vm")]
+fn resolve_dev_base_pinned_revision(id: &str, revision: &str) -> Result<ResolvedDevBaseImage> {
+    let rev_dir = if mvm_core::manifest::is_slot_hash_dirname(id) {
+        let slot_dir = std::path::PathBuf::from(mvm_core::manifest::slot_dir(id));
+        if !slot_dir.exists() {
+            anyhow::bail!(
+                "dev base {id}@{revision} is not a built template slot; bundle bases are \
+                 content-addressed, so omit @revision for installed bundle shas"
+            );
+        }
+        mvm::vm::template::lifecycle::template_load_slot(id)
+            .with_context(|| format!("loading dev base slot {id}"))?;
+        std::path::PathBuf::from(mvm_core::manifest::slot_revision_dir(id, revision))
+    } else {
+        mvm::vm::template::lifecycle::template_load(id)
+            .with_context(|| format!("loading dev base template {id:?}"))?;
+        std::path::PathBuf::from(mvm_core::template::template_revision_dir(id, revision))
+    };
+    dev_base_artifacts_from_revision_dir(id, revision, &rev_dir)
+}
+
+#[cfg(feature = "builder-vm")]
+fn dev_base_artifacts_from_revision_dir(
+    id: &str,
+    revision: &str,
+    rev_dir: &std::path::Path,
+) -> Result<ResolvedDevBaseImage> {
+    let kernel_path = rev_dir.join("vmlinux");
+    if !kernel_path.is_file() {
+        anyhow::bail!("dev base {id}@{revision} has no vmlinux artifact");
+    }
+    let rootfs_path = rev_dir.join("rootfs.ext4");
+    if !rootfs_path.is_file() {
+        anyhow::bail!("dev base {id}@{revision} has no rootfs artifact");
+    }
+    Ok(ResolvedDevBaseImage {
+        id: id.to_string(),
+        revision: revision.to_string(),
+        kernel_path,
+        rootfs_path,
+    })
+}
+
 /// Connect to the dev VM's guest agent over its Vz per-port vsock
 /// socket. The dev VM is a persistent Vz builder; its socket lives in
 /// the builder cache (not the data-dir path `VzTransport::for_vm`
@@ -129,10 +248,21 @@ fn wait_for_dev_vm_ready(console_log: &std::path::Path) -> Result<()> {
 /// Boot the dev VM via the Vz supervisor, optionally opening an
 /// interactive console.
 #[cfg(feature = "builder-vm")]
-pub(super) fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result<&'static str> {
+pub(super) fn cmd_dev_vz(
+    cpus: u32,
+    memory_gib: u32,
+    open_shell: bool,
+    base_ref: Option<&DevBaseRef>,
+) -> Result<&'static str> {
     ui::progress("Starting dev environment via Vz (Virtualization.framework)...");
 
     if is_vz_dev_running() {
+        if base_ref.is_some() {
+            anyhow::bail!(
+                "`mvmctl dev up --base` cannot change the base of an already-running dev VM; \
+                 run `mvmctl dev down` first"
+            );
+        }
         if open_shell {
             ui::progress("Dev VM already running. Opening shell...");
             console_interactive(DEV_VM_NAME)?;
@@ -166,8 +296,31 @@ pub(super) fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result
         }
     }
 
-    // Ensure dev image exists (build if needed — runs in this process).
-    let (kernel, rootfs) = ensure_dev_image()?;
+    // Ensure the boot image exists before launching. `--base` resolves
+    // through the same template/slot/bundle artifact registry as `mvmctl up`;
+    // the default path keeps the source-checkout dev-image fast path.
+    let image = match base_ref {
+        Some(base) => {
+            let resolved = resolve_dev_base_image(base)?;
+            ui::info(&format!(
+                "Using pinned dev base {}@{}",
+                resolved.id, resolved.revision
+            ));
+            mvm_build::libkrun_builder::BuilderVmImage::Rootfs {
+                kernel_path: resolved.kernel_path,
+                rootfs_path: resolved.rootfs_path,
+                cmdline: dev_image_cmdline(),
+            }
+        }
+        None => {
+            let (kernel, rootfs) = ensure_dev_image()?;
+            mvm_build::libkrun_builder::BuilderVmImage::Rootfs {
+                kernel_path: std::path::PathBuf::from(&kernel),
+                rootfs_path: std::path::PathBuf::from(&rootfs),
+                cmdline: dev_image_cmdline(),
+            }
+        }
+    };
 
     // Lock ~/.mvm and ~/.cache/mvm to 0700 on every `dev up`. Idempotent.
     mvm_core::config::ensure_data_dir().with_context(|| "locking down data dir to mode 0700")?;
@@ -178,11 +331,6 @@ pub(super) fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result
     ));
 
     let memory_mib = memory_gib.saturating_mul(1024);
-    let image = mvm_build::libkrun_builder::BuilderVmImage::Rootfs {
-        kernel_path: std::path::PathBuf::from(&kernel),
-        rootfs_path: std::path::PathBuf::from(&rootfs),
-        cmdline: dev_image_cmdline(),
-    };
 
     // The Vz supervisor detaches: `start()` spawns it as a background
     // child that writes `builder.pid` under the stable state dir and
@@ -220,7 +368,12 @@ pub(super) fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result
 }
 
 #[cfg(not(feature = "builder-vm"))]
-pub(super) fn cmd_dev_vz(_cpus: u32, _memory_gib: u32, _open_shell: bool) -> Result<&'static str> {
+pub(super) fn cmd_dev_vz(
+    _cpus: u32,
+    _memory_gib: u32,
+    _open_shell: bool,
+    _base_ref: Option<&DevBaseRef>,
+) -> Result<&'static str> {
     anyhow::bail!(
         "the dev VM is built locally via the builder VM, but this mvmctl was \
          compiled without the `builder-vm` feature."
@@ -5067,6 +5220,46 @@ mod dev_status_image_tests {
 
         let missing = build_dev_park_json("vz", false);
         assert_eq!(missing.outcome, "not-running");
+    }
+
+    #[test]
+    fn dev_base_ref_parses_template_and_revision() {
+        let base = DevBaseRef::parse("dev-base@rev-2026.06").expect("parse");
+        assert_eq!(base.id, "dev-base");
+        assert_eq!(base.revision.as_deref(), Some("rev-2026.06"));
+
+        let slot = "a".repeat(64);
+        let base = DevBaseRef::parse(&slot).expect("slot hash parse");
+        assert_eq!(base.id, slot);
+        assert!(base.revision.is_none());
+    }
+
+    #[test]
+    fn dev_base_ref_rejects_empty_or_traversal_components() {
+        assert!(DevBaseRef::parse("").is_err());
+        assert!(DevBaseRef::parse("dev-base@").is_err());
+        assert!(DevBaseRef::parse("dev-base@../rev").is_err());
+        assert!(DevBaseRef::parse("../dev-base").is_err());
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn dev_base_artifact_resolution_requires_kernel_and_rootfs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let rev_dir = tmp.path().join("rev-a");
+        std::fs::create_dir_all(&rev_dir).expect("mkdir");
+        std::fs::write(rev_dir.join("vmlinux"), b"kernel").expect("kernel");
+        let err = dev_base_artifacts_from_revision_dir("dev-base", "rev-a", &rev_dir)
+            .expect_err("missing rootfs must fail");
+        assert!(format!("{err}").contains("rootfs"));
+
+        std::fs::write(rev_dir.join("rootfs.ext4"), b"rootfs").expect("rootfs");
+        let resolved =
+            dev_base_artifacts_from_revision_dir("dev-base", "rev-a", &rev_dir).expect("resolve");
+        assert_eq!(resolved.id, "dev-base");
+        assert_eq!(resolved.revision, "rev-a");
+        assert_eq!(resolved.kernel_path, rev_dir.join("vmlinux"));
+        assert_eq!(resolved.rootfs_path, rev_dir.join("rootfs.ext4"));
     }
 }
 
