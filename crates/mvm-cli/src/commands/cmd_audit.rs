@@ -169,6 +169,7 @@ impl Commands {
         match self {
             // `env <sub>` delegates (bootstrap/cleanup/uninstall/update/sign).
             Commands::Env(a) => a.action.verb_name(),
+            Commands::Bootstrap(_) => "bootstrap",
             Commands::Dev(_) => "dev",
             Commands::Logs(_) => "logs",
             Commands::Ls(_) => "ls",
