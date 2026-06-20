@@ -58,7 +58,8 @@ pub(in crate::commands) struct Cli {
 
     /// Increase log verbosity: -v (info), -vv (debug), -vvv (trace).
     /// Default is quiet (errors only). `RUST_LOG=<filter>` overrides.
-    #[arg(short = 'v', long = "verbose", global = true, action = clap::ArgAction::Count)]
+    /// Place before the subcommand, e.g. `mvmctl -vv run -- …`.
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     pub verbose: u8,
 
     #[command(subcommand)]

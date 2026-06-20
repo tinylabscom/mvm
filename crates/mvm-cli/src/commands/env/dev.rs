@@ -200,7 +200,7 @@ pub(in crate::commands) enum DevAction {
         /// attaches an ext4 disk image. Read-only by default — append
         /// `:rw` to grant writes. Guest path must be under /data, /work,
         /// or /mnt (system mounts stay read-only).
-        #[arg(long, value_parser = clap_volume_spec)]
+        #[arg(long, short = 'v', value_parser = clap_volume_spec)]
         volume: Vec<String>,
         /// Emit a machine-readable JSON result after boot instead of text.
         /// Implies non-interactive (`--no-shell`); chrome goes to stderr.
@@ -247,7 +247,7 @@ pub(in crate::commands) enum DevAction {
         shell: bool,
         /// Attach a custom volume (repeatable). Appends to `MVM_VOLUMES`.
         /// See `mvmctl dev up --help` for the spec grammar.
-        #[arg(long, value_parser = clap_volume_spec)]
+        #[arg(long, short = 'v', value_parser = clap_volume_spec)]
         volume: Vec<String>,
     },
     /// Import a dev image from local files (air-gapped install).
