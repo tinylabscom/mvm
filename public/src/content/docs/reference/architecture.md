@@ -60,7 +60,8 @@ only ever decreases host → builder → workload.** Host signing keys, plan adm
 audit chain never cross the host→builder boundary. The workload guest agent is the deliberate
 runt — a sealed production build links no `do_exec` and no console (claims 4 and 15) and holds
 no signing key or admission code. `mvmctl`'s `check-trust-gradient` lint machine-checks this
-ledger (`specs/claims/trust-gradient.md`) on every PR.
+ledger (`specs/claims/trust-gradient.md`) on every PR; the ledger carries the host and workload
+rows today, and the builder row is added once the resident builder daemon (`mvm-builderd`) exists.
 
 What is installed where:
 
