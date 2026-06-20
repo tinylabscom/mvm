@@ -613,7 +613,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         DevAction::Down { reset, json } => {
             let was_running = match backend {
                 DevBackend::Libkrun => cmd_dev_libkrun_down(json),
-                DevBackend::Vz => dev_vz::cmd_dev_vz_down(json),
+                DevBackend::Vz => dev_vz::cmd_dev_vz_down(json, reset),
                 DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_down(json),
                 // Nothing to stop on unsupported hosts. The gc-root
                 // cleanup below still runs.
@@ -692,7 +692,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             // re-up).
             let _ = match backend {
                 DevBackend::Libkrun => cmd_dev_libkrun_down(false),
-                DevBackend::Vz => dev_vz::cmd_dev_vz_down(false),
+                DevBackend::Vz => dev_vz::cmd_dev_vz_down(false, /* reset = */ true),
                 DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_down(false),
                 DevBackend::Unsupported => Ok(false),
             };

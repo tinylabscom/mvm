@@ -222,7 +222,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // automatically rather than refuse.
             if !dry_run && dev_vz::is_vz_dev_running() {
                 ui::warn("A dev builder VM is running; stopping it before clearing the store.");
-                let _ = dev_vz::cmd_dev_vz_down(/* json = */ false);
+                let _ = dev_vz::cmd_dev_vz_down(/* json = */ false, /* reset = */ true);
             }
 
             let repair = mvm_build::builder_vm::clear_builder_store(dry_run)
