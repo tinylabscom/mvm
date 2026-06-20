@@ -489,4 +489,23 @@ mod tests {
         assert!(pool.load("vz-keep").is_ok());
         assert_eq!(pool.load("vz-old").unwrap().state, StandbyState::Parked);
     }
+
+    #[test]
+    fn reap_keeps_parked_at_exact_parked_ttl_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let now = 1_000_000u64;
+        let ttl_secs = 3_600u64;
+        let mut h = saved_handle("p_edge", "aa", "img", StandbyState::Parked);
+        h.spawned_unix_secs = now - ttl_secs * 6; // exactly 6×ttl
+        pool.record(&h).unwrap();
+        let reaped = pool
+            .reap_stale(std::time::Duration::from_secs(ttl_secs), now)
+            .unwrap();
+        assert!(
+            !reaped.contains(&"p_edge".to_string()),
+            "exact boundary kept (strict >)"
+        );
+        assert_eq!(pool.load("p_edge").unwrap().state, StandbyState::Parked);
+    }
 }

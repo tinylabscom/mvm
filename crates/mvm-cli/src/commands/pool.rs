@@ -1132,6 +1132,7 @@ fn run_warm(
 struct PoolStatus {
     idle: usize,
     claimed: usize,
+    parked: usize,
     standbys: Vec<PoolStatusEntry>,
 }
 
@@ -1153,10 +1154,15 @@ fn run_status(pool: &SupervisorStandbyPool, json: bool) -> Result<()> {
         .iter()
         .filter(|h| h.state == StandbyState::Idle)
         .count();
-    let claimed = standbys.len() - idle;
+    let parked = standbys
+        .iter()
+        .filter(|h| h.state == StandbyState::Parked)
+        .count();
+    let claimed = standbys.len() - idle - parked;
     let report = PoolStatus {
         idle,
         claimed,
+        parked,
         standbys: standbys
             .iter()
             .map(|h| PoolStatusEntry {
@@ -1178,7 +1184,7 @@ fn run_status(pool: &SupervisorStandbyPool, json: bool) -> Result<()> {
         crate::json_out::emit_json(&report)?;
         return Ok(());
     }
-    println!("Supervisor standby pool: {idle} idle, {claimed} claimed");
+    println!("Supervisor standby pool: {idle} idle, {claimed} claimed, {parked} parked");
     for e in &report.standbys {
         let image_tag = e
             .image_sha256
