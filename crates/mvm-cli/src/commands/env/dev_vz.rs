@@ -317,8 +317,11 @@ pub(super) fn cmd_dev_vz(
                 return Ok("restored");
             }
             Err(e) => {
+                // The snapshot is unusable; discard it so the next `dev up`
+                // cold-boots cleanly instead of retrying the same failed restore.
+                remove_dev_vz_snapshot_markers(&state_dir);
                 ui::warn(&format!(
-                    "parked dev VM restore failed; falling back to cold boot: {e}"
+                    "parked dev VM restore failed; discarded snapshot, cold-booting: {e}"
                 ));
             }
         }
