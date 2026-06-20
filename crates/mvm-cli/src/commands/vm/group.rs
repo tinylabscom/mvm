@@ -30,6 +30,10 @@ pub(in crate::commands) enum VmCmd {
     Resume(pause::ResumeArgs),
     /// Manage sealed instance snapshots (`ls`, `rm`)
     Snapshot(pause::SnapshotArgs),
+    /// Save a running Vz VM's memory + disk state
+    Save(checkpoint::SaveArgs),
+    /// Restore a Vz VM from a saved memory checkpoint
+    Restore(checkpoint::RestoreArgs),
     /// Capture, list, remove, or fork rootfs checkpoints
     Checkpoint(checkpoint::CheckpointArgs),
     /// Copy one file between the host and a running VM
@@ -60,14 +64,18 @@ pub(in crate::commands) enum VmCmd {
 
 impl VmCmd {
     /// Whether this VM op warrants the reconcile-on-entry convergence pass.
-    /// Only the running-VM lifecycle ops (pause/resume/snapshot) converge stale
-    /// dead records first; registry-record and guest-RPC ops (set-ttl, cp, fs,
-    /// wait, forward, …) must not, or convergence would sweep a registered VM
-    /// whose process isn't live before the op reads its record.
+    /// Only the running-VM lifecycle ops converge stale dead records first;
+    /// registry-record and guest-RPC ops (set-ttl, cp, fs, wait, forward, …)
+    /// must not, or convergence would sweep a registered VM whose process
+    /// isn't live before the op reads its record.
     pub(in crate::commands) fn touches_vm_state(&self) -> bool {
         matches!(
             self,
-            VmCmd::Pause(_) | VmCmd::Resume(_) | VmCmd::Snapshot(_)
+            VmCmd::Pause(_)
+                | VmCmd::Resume(_)
+                | VmCmd::Snapshot(_)
+                | VmCmd::Save(_)
+                | VmCmd::Restore(_)
         )
     }
 
@@ -80,6 +88,8 @@ impl VmCmd {
             VmCmd::Pause(_) => "pause",
             VmCmd::Resume(_) => "resume",
             VmCmd::Snapshot(_) => "snapshot",
+            VmCmd::Save(_) => "save",
+            VmCmd::Restore(_) => "restore",
             VmCmd::Checkpoint(_) => "checkpoint",
             VmCmd::Cp(_) => "cp",
             VmCmd::Fs(_) => "fs",
@@ -101,6 +111,8 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         VmCmd::Pause(a) => pause::run_pause(cli, a, cfg),
         VmCmd::Resume(a) => pause::run_resume(cli, a, cfg),
         VmCmd::Snapshot(a) => pause::run_snapshot(cli, a, cfg),
+        VmCmd::Save(a) => checkpoint::run_save(cli, a),
+        VmCmd::Restore(a) => checkpoint::run_restore(cli, a),
         VmCmd::Checkpoint(a) => checkpoint::run_checkpoint(cli, a),
         VmCmd::Cp(a) => cp::run(cli, a, cfg),
         VmCmd::Fs(a) => fs::run(cli, a, cfg),

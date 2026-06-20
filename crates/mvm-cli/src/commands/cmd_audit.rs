@@ -138,10 +138,10 @@ impl Commands {
     /// of caches, build/compile, config, …) skip it. `reconcile` itself
     /// is excluded — it *is* the convergence pass, run with its own opts.
     pub(super) fn touches_vm_state(&self) -> bool {
-        // `vm <sub>` only converges for the running-VM lifecycle ops
-        // (pause/resume/snapshot); registry-record/guest-RPC subs (set-ttl,
-        // cp, fs, …) opt out so convergence doesn't sweep a registered VM
-        // whose process isn't live before the op reads its record.
+        // `vm <sub>` only converges for running-VM lifecycle ops
+        // (pause/resume/snapshot/save/restore); registry-record and guest-RPC
+        // subs (set-ttl, cp, fs, …) opt out so convergence doesn't sweep a
+        // registered VM whose process isn't live before the op reads its record.
         if let Commands::Vm(a) = self {
             return a.action.touches_vm_state();
         }

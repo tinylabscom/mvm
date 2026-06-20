@@ -20,6 +20,7 @@ use mvm_backend::checkpoint::{
 use mvm_backend::vz::supervisor_config_path;
 use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
 use mvm_core::config::vm_state_dir;
+use mvm_core::vm_backend::{SnapshotCapability, VmBackend};
 use mvm_hostd::audit::bind::class_str;
 
 use super::Cli;
@@ -30,6 +31,28 @@ use crate::ui;
 pub(in crate::commands) struct CheckpointArgs {
     #[command(subcommand)]
     pub command: CheckpointCmd,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct SaveArgs {
+    /// Name of the running Vz VM to save.
+    #[arg(value_parser = clap_vm_name)]
+    pub name: String,
+    /// Optional human label recorded on the checkpoint.
+    #[arg(long)]
+    pub tag: Option<String>,
+    /// Output the sealed checkpoint metadata as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct RestoreArgs {
+    /// Checkpoint id to restore.
+    pub id: String,
+    /// Output the restore result as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Which kind of checkpoint to capture. `fs-quick` clones the rootfs of a
@@ -159,6 +182,14 @@ pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> R
         ),
         CheckpointCmd::Diff { a, b, json } => diff(&a, &b, json),
     }
+}
+
+pub(in crate::commands) fn run_save(_cli: &Cli, args: SaveArgs) -> Result<()> {
+    create_vm_full(&args.name, args.tag, args.json)
+}
+
+pub(in crate::commands) fn run_restore(_cli: &Cli, args: RestoreArgs) -> Result<()> {
+    restore(&args.id, args.json)
 }
 
 #[derive(Serialize)]
@@ -327,6 +358,20 @@ fn supervisor_config_digest(state_dir: &std::path::Path) -> String {
     mvm_core::crypto::image_verify::sha256_file(&cfg_path).unwrap_or_default()
 }
 
+fn ensure_save_restore_supported(action: &str) -> Result<()> {
+    let backend = mvm_backend::vz::VzBackend;
+    let available = backend.snapshot_capability();
+    if !available.satisfies(SnapshotCapability::SaveRestore) {
+        bail!(
+            "vm {action} requires Vz save/restore support, but backend '{}' reports \
+             snapshot tier '{}' on this host",
+            backend.name(),
+            available.label()
+        );
+    }
+    Ok(())
+}
+
 fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
     let rootfs = resolve_quiesced_vm_rootfs(name)?;
     let state_dir = vm_state_dir(name);
@@ -374,6 +419,7 @@ fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
 /// fs_quick — a vm_full checkpoint carries memory, so the VM must be live (the
 /// library's `VzVmFullControl` pauses/saves/resumes it).
 fn create_vm_full(name: &str, tag: Option<String>, json: bool) -> Result<()> {
+    ensure_save_restore_supported("save")?;
     if !vm_is_running(name) {
         bail!("checkpoint --class vm-full requires a running VM; start '{name}' first");
     }
@@ -570,6 +616,7 @@ fn rm(id: &str, json: bool) -> Result<()> {
 /// checkpoint. The library verifies the manifest, then materializes the saved
 /// {rootfs, memory, machine-id} back into the original VM and resumes it.
 fn restore(id: &str, json: bool) -> Result<()> {
+    ensure_save_restore_supported("restore")?;
     let checkpoint = validated_checkpoint_id(id)?;
     let store = CheckpointStore::open();
     let meta = store.read_meta(&checkpoint)?;
