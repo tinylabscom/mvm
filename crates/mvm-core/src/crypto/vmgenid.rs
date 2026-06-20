@@ -67,7 +67,7 @@ pub struct GenIdState {
 
 impl GenIdState {
     /// Seed the tracker with the token present at first boot/resume.
-    pub fn new(initial: [u8; GENID_BYTES]) -> Self {
+    pub const fn new(initial: [u8; GENID_BYTES]) -> Self {
         Self { current: initial }
     }
 

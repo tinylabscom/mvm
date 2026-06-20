@@ -1135,6 +1135,27 @@ static WARM_POOL: OnceLock<Option<Arc<WorkerPool>>> = OnceLock::new();
 /// breaks when it flips.
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Process-resident VMGenID reseeder. Seeded with the all-zero baseline so the
+/// first non-zero token delivered on a `PostRestore` resume counts as a
+/// clone-divergence and reseeds the CSPRNG. The reseeder's state rides the VM
+/// memory snapshot, so two clones restored from one snapshot both diverge from
+/// the captured value when the host hands each a distinct fresh token.
+static GENID_RESEEDER: Mutex<mvm_guest::genid::GenIdReseeder> = Mutex::new(
+    mvm_guest::genid::GenIdReseeder::new([0u8; mvm_core::crypto::vmgenid::GENID_BYTES]),
+);
+
+/// Dispatch a token delivered on `PostRestore` to the resident reseeder. A
+/// poisoned lock degrades to "no rotation" rather than panicking the handler —
+/// the remount/restart work still needs to run.
+fn reseed_on_post_restore(
+    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+) -> mvm_guest::genid::GenIdAction {
+    match GENID_RESEEDER.lock() {
+        Ok(mut r) => r.on_post_restore_token(token),
+        Err(_) => mvm_guest::genid::GenIdAction::Unchanged,
+    }
+}
+
 /// Counts shutdown signals delivered. ≥2 means the operator has
 /// asked twice — escalate to `_exit` and skip the drain.
 static SHUTDOWN_SIGNAL_COUNT: AtomicU8 = AtomicU8::new(0);
@@ -2089,8 +2110,17 @@ fn handle_client(
             probes: build_probe_reports(probe_state),
         },
 
-        GuestRequest::PostRestore => {
-            // Send SIGUSR1 to PID 1 to trigger drive remount + service restart.
+        GuestRequest::PostRestore { token } => {
+            // First, rotate the VMGenID: feed the host-minted token to the
+            // process-resident reseeder. Its state is captured in the snapshot,
+            // so two clones of one snapshot both diverge from the captured
+            // value when the host delivers each a distinct fresh token. A
+            // zero token (no-rotation restore) is a no-op.
+            let reseeded = matches!(
+                reseed_on_post_restore(token),
+                mvm_guest::genid::GenIdAction::Reseeded
+            );
+            // Then send SIGUSR1 to PID 1 to trigger drive remount + service restart.
             let result = std::process::Command::new("kill")
                 .args(["-USR1", "1"])
                 .output();
@@ -2098,6 +2128,7 @@ fn handle_client(
                 Ok(out) if out.status.success() => GuestResponse::PostRestoreAck {
                     success: true,
                     detail: Some("post-restore signal sent to init".to_string()),
+                    reseeded,
                 },
                 Ok(out) => GuestResponse::PostRestoreAck {
                     success: false,
@@ -2105,10 +2136,12 @@ fn handle_client(
                         "kill failed: {}",
                         String::from_utf8_lossy(&out.stderr)
                     )),
+                    reseeded,
                 },
                 Err(e) => GuestResponse::PostRestoreAck {
                     success: false,
                     detail: Some(format!("failed to send signal: {}", e)),
+                    reseeded,
                 },
             }
         }
