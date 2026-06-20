@@ -157,6 +157,28 @@ jobs:
       - name: No host-signer / admission symbols in the production agent
         run: ./scripts/check-prod-agent-no-authority.sh
 
+  builderd-no-authority:
+    name: builder daemon carries no host-authority symbols
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-builderd-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-builderd-
+
+      - name: No host-signer / admission symbols in the builder daemon
+        run: ./scripts/check-builderd-no-authority.sh
+
   # ── Lane 2b: Seccomp tier functional denial (ADR-002 §W2.4) ───────
   # Tier-structure unit tests in `mvm-security` cover cumulative-subset
   # and serde shapes; they don't exercise the BPF program at runtime.
