@@ -38,6 +38,14 @@ pub fn warn(msg: &str) {
     mvm::ui::warn(msg);
 }
 
+/// Print an always-on liveness/notice line: `[mvm]` message. Unlike [`info`],
+/// this is *not* gated on verbosity — it's for the rare case where a periodic
+/// line is the only signal a long, silent blocking step is alive (the Stage 0
+/// builder-image build), so it must show even in the default quiet mode.
+pub fn notice(msg: &str) {
+    mvm::ui::notice(msg);
+}
+
 /// Print a numbered step: `[mvm]` Step n/total: message. Opt-in chatter.
 pub fn step(n: u32, total: u32, msg: &str) {
     mvm::ui::step(n, total, msg);
@@ -54,6 +62,19 @@ pub fn format_timed(label: &str, elapsed: std::time::Duration) -> String {
 /// actual per-step wall-clock. Opt-in chatter (routes through [`info`]).
 pub fn timed_step(label: &str, elapsed: std::time::Duration) {
     info(&format_timed(label, elapsed));
+}
+
+/// Format a liveness heartbeat for a long, silent blocking step: `<activity>
+/// still running — <secs>s elapsed …`. The Stage 0 builder-image build runs
+/// `nix` inside the guest with no host-visible output until it completes, so a
+/// periodic line is the only way to distinguish "working" from "hung". Pure
+/// (testable); the ticker routes it through [`notice`] — an always-on liveness
+/// signal, not gated chatter, since it's the *only* feedback during the block.
+pub fn format_heartbeat(activity: &str, elapsed: std::time::Duration) -> String {
+    format!(
+        "{activity} still running — {}s elapsed (the in-guest nix build is silent until it finishes; this is normal, not a hang)",
+        elapsed.as_secs()
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -104,5 +125,15 @@ mod tests {
             format_timed("nix build", std::time::Duration::from_millis(12_345)),
             "nix build … 12.3s"
         );
+    }
+
+    #[test]
+    fn format_heartbeat_names_activity_whole_seconds_and_reassures() {
+        let line = format_heartbeat("Builder VM image build", std::time::Duration::from_secs(40));
+        assert!(line.starts_with("Builder VM image build still running — 40s elapsed"));
+        // Reassurance text is the whole point — it must say silence is expected.
+        assert!(line.contains("not a hang"));
+        // Whole seconds, no fractional noise.
+        assert!(!line.contains("40.0"));
     }
 }

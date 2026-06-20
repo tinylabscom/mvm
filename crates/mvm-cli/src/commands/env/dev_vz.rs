@@ -97,6 +97,35 @@ pub(in crate::commands) fn is_vz_dev_running() -> bool {
     }
 }
 
+#[cfg(feature = "builder-vm")]
+fn dev_vz_snapshot_exists() -> bool {
+    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
+    mvm_build::vz_builder::builder_snapshot_path(&state_dir).is_file()
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn dev_vz_snapshot_exists() -> bool {
+    false
+}
+
+#[cfg(feature = "builder-vm")]
+fn wait_for_dev_vm_ready(console_log: &std::path::Path) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if std::time::Instant::now() > deadline {
+            anyhow::bail!(
+                "Dev VM did not become ready within 60 seconds.\n\
+                 Check the console log: {}",
+                console_log.display()
+            );
+        }
+        if dev_vm_guest_agent_connect().is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
 /// Boot the dev VM via the Vz supervisor, optionally opening an
 /// interactive console.
 #[cfg(feature = "builder-vm")]
@@ -117,6 +146,25 @@ pub(super) fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result
     // fresh start binds a clean state dir.
     let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
     mvm_build::vz_builder::stop_persistent_vz_by_pid_file(&state_dir);
+    let console_log = state_dir.join("console.log");
+    if dev_vz_snapshot_exists() {
+        match mvm_build::vz_builder::restore_persistent_vz_builder_from_snapshot(&state_dir) {
+            Ok(_) => {
+                wait_for_dev_vm_ready(&console_log)?;
+                ui::success("Dev VM restored from parked snapshot.");
+                if open_shell {
+                    ui::info("");
+                    let _ = console_interactive(DEV_VM_NAME);
+                }
+                return Ok("restored");
+            }
+            Err(e) => {
+                ui::warn(&format!(
+                    "parked dev VM restore failed; falling back to cold boot: {e}"
+                ));
+            }
+        }
+    }
 
     // Ensure dev image exists (build if needed — runs in this process).
     let (kernel, rootfs) = ensure_dev_image()?;
@@ -157,22 +205,7 @@ pub(super) fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result
     // optional explicit kill, which we don't call).
     drop(handle);
 
-    // Wait for the guest agent (≤60s), then point at the console log on
-    // timeout.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        if std::time::Instant::now() > deadline {
-            anyhow::bail!(
-                "Dev VM did not become ready within 60 seconds.\n\
-                 Check the console log: {}",
-                console_log.display()
-            );
-        }
-        if dev_vm_guest_agent_connect().is_ok() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
+    wait_for_dev_vm_ready(&console_log)?;
 
     ui::success("Dev VM ready.");
     ui::info("  Shell:      mvmctl dev shell");
@@ -192,6 +225,34 @@ pub(super) fn cmd_dev_vz(_cpus: u32, _memory_gib: u32, _open_shell: bool) -> Res
         "the dev VM is built locally via the builder VM, but this mvmctl was \
          compiled without the `builder-vm` feature."
     )
+}
+
+pub(in crate::commands) fn cmd_dev_vz_park(json: bool) -> Result<bool> {
+    #[cfg(feature = "builder-vm")]
+    {
+        let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
+        if !mvm_build::vz_builder::persistent_vz_supervisor_alive(&state_dir) {
+            if !json {
+                ui::info("Dev VM is not running.");
+            }
+            return Ok(false);
+        }
+        let parked = mvm_build::vz_builder::park_persistent_vz_builder(&state_dir)
+            .map_err(|e| anyhow::anyhow!("Failed to park dev VM: {e}"))?;
+        let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
+        if !json {
+            ui::success("Dev VM parked.");
+            ui::info(&format!("  Snapshot: {}", parked.snapshot_path.display()));
+        }
+        Ok(true)
+    }
+    #[cfg(not(feature = "builder-vm"))]
+    {
+        if !json {
+            ui::info("Dev VM is not running.");
+        }
+        Ok(false)
+    }
 }
 
 /// Host-side path of the dev VM's guest-agent vsock socket. The console
@@ -248,7 +309,13 @@ pub(in crate::commands) fn cmd_dev_vz_down(json: bool) -> Result<bool> {
 /// Show dev VM status.
 pub(super) fn cmd_dev_vz_status(json: bool) -> Result<()> {
     let running = is_vz_dev_running();
-    let state = if running { "running" } else { "stopped" };
+    let state = if running {
+        "running"
+    } else if cfg!(feature = "builder-vm") && dev_vz_snapshot_exists() {
+        "parked"
+    } else {
+        "stopped"
+    };
     let kernel = if running { probe_dev_vm_kernel() } else { None };
 
     if json {
@@ -495,6 +562,20 @@ pub(super) struct DevStatusJson {
     pub dev_image: Option<DevImageCacheJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub builder_cache: Option<BuilderVmCacheJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linux_native: Option<LinuxNativeDevStatusJson>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(super) struct LinuxNativeDevStatusJson {
+    pub kvm: LinuxNativeComponentJson,
+    pub firecracker: LinuxNativeComponentJson,
+    pub base_assets: LinuxNativeComponentJson,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(super) struct LinuxNativeComponentJson {
+    pub state: &'static str,
 }
 
 /// Build the status report for a VM-backed dev backend (vz / libkrun):
@@ -517,6 +598,7 @@ pub(super) fn build_dev_status_json(
         builder_cache: Some(builder_vm_cache_json(
             &resolve_builder_vm_cache_status_summary(),
         )),
+        linux_native: None,
     }
 }
 
@@ -534,6 +616,49 @@ pub(super) fn build_dev_status_json_vmless(
         guest_kernel: None,
         dev_image: None,
         builder_cache: None,
+        linux_native: None,
+    }
+}
+
+pub(super) fn build_dev_status_json_linux_native(
+    has_kvm: bool,
+    firecracker_installed: bool,
+    base_assets_present: bool,
+) -> DevStatusJson {
+    let state = if !has_kvm {
+        "no-kvm"
+    } else if firecracker_installed && base_assets_present {
+        "ready"
+    } else {
+        "not-ready"
+    };
+    DevStatusJson {
+        schema_version: 1,
+        backend: "linux-native",
+        vm_name: None,
+        state,
+        guest_kernel: None,
+        dev_image: None,
+        builder_cache: None,
+        linux_native: Some(LinuxNativeDevStatusJson {
+            kvm: LinuxNativeComponentJson {
+                state: if has_kvm { "present" } else { "missing" },
+            },
+            firecracker: LinuxNativeComponentJson {
+                state: if firecracker_installed {
+                    "present"
+                } else {
+                    "missing"
+                },
+            },
+            base_assets: LinuxNativeComponentJson {
+                state: if base_assets_present {
+                    "present"
+                } else {
+                    "missing"
+                },
+            },
+        }),
     }
 }
 
@@ -578,6 +703,16 @@ pub(super) fn build_dev_down_json(
             "not-running"
         },
         reset,
+    }
+}
+
+pub(super) fn build_dev_park_json(backend: &'static str, parked: bool) -> DevLifecycleJson {
+    DevLifecycleJson {
+        schema_version: 1,
+        backend,
+        action: "park",
+        outcome: if parked { "parked" } else { "not-running" },
+        reset: false,
     }
 }
 
@@ -1717,6 +1852,11 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
             // removed; `nix/images/builder/flake.nix` is deleted.
             #[cfg(feature = "builder-vm")]
             {
+                // The Stage 0 build runs `nix` inside the guest with no
+                // host-visible output for minutes; a liveness heartbeat keeps it
+                // from reading as a hang. Dropped (thread stopped) when the build
+                // returns.
+                let _heartbeat = BuildHeartbeat::start("Builder VM image build");
                 bootstrap_builder_vm_image_via_root_dir_stage0(
                     &flake_dir,
                     &out_dir,
@@ -1745,6 +1885,74 @@ fn builder_vm_host_arch() -> &'static str {
         "aarch64"
     } else {
         "x86_64"
+    }
+}
+
+/// Cadence of [`BuildHeartbeat`] liveness lines. ~20s keeps a multi-minute
+/// Stage 0 build under ~20 lines while never leaving the user wondering for long.
+#[cfg(feature = "builder-vm")]
+const BUILD_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// RAII liveness ticker for a long, silent blocking step. While alive, a thread
+/// emits a periodic [`ui::format_heartbeat`] line so the operation can't be
+/// mistaken for a hang — the Stage 0 builder-image build runs `nix` inside the
+/// guest with no host-visible output until it completes. Stops + joins on drop,
+/// so the build's own return is the natural end of the heartbeat.
+#[cfg(feature = "builder-vm")]
+struct BuildHeartbeat {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(feature = "builder-vm")]
+impl BuildHeartbeat {
+    fn start(activity: &'static str) -> Self {
+        // `notice`, not `info`: the heartbeat is always-on liveness — the only
+        // feedback during a multi-minute silent build — so it must survive the
+        // default quiet mode where `info` chatter is suppressed.
+        Self::start_with(activity, BUILD_HEARTBEAT_INTERVAL, ui::notice)
+    }
+
+    /// Injectable core: `interval` and `emit` are parameters so a test can drive
+    /// a tight cadence into a counter instead of stdout.
+    fn start_with(
+        activity: &'static str,
+        interval: std::time::Duration,
+        emit: impl Fn(&str) + Send + 'static,
+    ) -> Self {
+        use std::sync::atomic::Ordering;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = std::sync::Arc::clone(&stop);
+        // Poll finely so `drop` is responsive; emit only once per `interval`.
+        let poll = interval.min(std::time::Duration::from_millis(250));
+        let handle = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let mut next = interval;
+            while !thread_stop.load(Ordering::Relaxed) {
+                std::thread::sleep(poll);
+                if thread_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if start.elapsed() >= next {
+                    emit(&ui::format_heartbeat(activity, start.elapsed()));
+                    next += interval;
+                }
+            }
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+#[cfg(feature = "builder-vm")]
+impl Drop for BuildHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
     }
 }
 
@@ -2112,7 +2320,7 @@ fn run_stage0_rootfs_with_external_kernel(
 }
 
 /// Render the compile heartbeat line. Pure (testable); the live
-/// heartbeat thread routes it through `ui::info`.
+/// heartbeat thread routes it through `ui::notice` (always-on liveness).
 #[cfg(feature = "builder-vm")]
 fn format_compile_elapsed(elapsed: std::time::Duration) -> String {
     let secs = elapsed.as_secs();
@@ -2247,7 +2455,10 @@ pub(crate) fn build_kernel_via_stage0(
                     std::thread::sleep(std::time::Duration::from_millis(500));
                     ticks += 1;
                     if ticks.is_multiple_of(40) {
-                        ui::info(&format_compile_elapsed(start.elapsed()));
+                        // `notice`, not `info`: this heartbeat only runs in the
+                        // quiet (non-verbose) branch, the very mode where `info`
+                        // chatter is suppressed — so it must be always-on.
+                        ui::notice(&format_compile_elapsed(start.elapsed()));
                     }
                 }
             }))
@@ -4719,6 +4930,7 @@ mod dev_status_image_tests {
         assert_eq!(report.guest_kernel.as_deref(), Some("6.1.0-mvm"));
         assert!(report.dev_image.is_some());
         assert!(report.builder_cache.is_some());
+        assert!(report.linux_native.is_none());
 
         let json = crate::json_out::to_json_string(&report).expect("serialize");
         assert!(json.contains("\"backend\": \"vz\""));
@@ -4752,11 +4964,53 @@ mod dev_status_image_tests {
         assert!(report.vm_name.is_none());
         assert!(report.dev_image.is_none());
         assert!(report.builder_cache.is_none());
+        assert!(report.linux_native.is_none());
         let json = crate::json_out::to_json_string(&report).expect("serialize");
         assert!(json.contains("\"backend\": \"linux-native\""));
         assert!(!json.contains("\"vm_name\""));
         assert!(!json.contains("\"dev_image\""));
         assert!(!json.contains("\"builder_cache\""));
+    }
+
+    #[test]
+    fn dev_status_json_linux_native_reports_typed_safe_detail() {
+        let report = build_dev_status_json_linux_native(true, false, true);
+        assert_eq!(report.backend, "linux-native");
+        assert_eq!(report.state, "not-ready");
+        assert!(report.vm_name.is_none());
+        assert!(report.dev_image.is_none());
+        assert!(report.builder_cache.is_none());
+        let detail = report.linux_native.as_ref().expect("linux detail");
+        assert_eq!(detail.kvm.state, "present");
+        assert_eq!(detail.firecracker.state, "missing");
+        assert_eq!(detail.base_assets.state, "present");
+
+        let json = crate::json_out::to_json_string(&report).expect("serialize");
+        assert!(json.contains("\"linux_native\""));
+        assert!(json.contains("\"firecracker\""));
+        assert!(json.contains("\"base_assets\""));
+        assert!(!json.contains("/dev/kvm"));
+        assert!(!json.contains("/Users"));
+        assert!(!json.contains("/private/tmp"));
+        assert!(!json.contains("rootfs.ext4"));
+        assert!(!json.contains("vmlinux"));
+        assert!(!json.contains("sha256"));
+    }
+
+    #[test]
+    fn dev_status_json_linux_native_state_tracks_readiness() {
+        assert_eq!(
+            build_dev_status_json_linux_native(false, true, true).state,
+            "no-kvm"
+        );
+        assert_eq!(
+            build_dev_status_json_linux_native(true, true, false).state,
+            "not-ready"
+        );
+        assert_eq!(
+            build_dev_status_json_linux_native(true, true, true).state,
+            "ready"
+        );
     }
 
     #[test]
@@ -4797,6 +5051,22 @@ mod dev_status_image_tests {
 
         let already = build_dev_up_json("libkrun", "already-running");
         assert_eq!(already.outcome, "already-running");
+    }
+
+    #[test]
+    fn dev_park_json_reports_parked_and_not_running() {
+        let parked = build_dev_park_json("vz", true);
+        assert_eq!(parked.schema_version, 1);
+        assert_eq!(parked.backend, "vz");
+        assert_eq!(parked.action, "park");
+        assert_eq!(parked.outcome, "parked");
+        let json = crate::json_out::to_json_string(&parked).expect("serialize");
+        assert!(json.contains("\"action\": \"park\""));
+        assert!(json.contains("\"outcome\": \"parked\""));
+        assert!(!json.contains("\"reset\""));
+
+        let missing = build_dev_park_json("vz", false);
+        assert_eq!(missing.outcome, "not-running");
     }
 }
 
@@ -5187,6 +5457,37 @@ mod builder_vm_bootstrap_tests {
     //! `find_builder_vm_flake` + `bootstrap_builder_vm_image`.
     use super::*;
     use std::io::Write;
+
+    #[test]
+    #[cfg(feature = "builder-vm")]
+    fn build_heartbeat_emits_while_alive_and_stops_on_drop() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let sink = Arc::clone(&count);
+        // Tight 10ms cadence into a counter (not stdout) so the test is fast and
+        // deterministic-ish; a generous window then asserts it ticked.
+        let hb = BuildHeartbeat::start_with(
+            "Test build",
+            std::time::Duration::from_millis(10),
+            move |_line| {
+                sink.fetch_add(1, Ordering::Relaxed);
+            },
+        );
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let while_alive = count.load(Ordering::Relaxed);
+        assert!(while_alive >= 1, "heartbeat should tick while alive");
+
+        drop(hb); // joins the thread — no further emits after this returns
+        let after_drop = count.load(Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            after_drop,
+            "no heartbeat ticks after drop joins the thread"
+        );
+    }
 
     #[test]
     fn find_builder_vm_flake_resolves_to_in_repo_path() {

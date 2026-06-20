@@ -3210,6 +3210,28 @@ fn test_dev_down_json_and_reset_flags_parse() {
 }
 
 #[test]
+fn test_dev_park_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "park"]).unwrap();
+    match cli.command {
+        Commands::Dev(dev::Args {
+            action: Some(DevAction::Park { json }),
+        }) => assert!(!json, "bare `dev park` defaults to text output"),
+        _ => panic!("Expected Dev Park command"),
+    }
+}
+
+#[test]
+fn test_dev_park_json_flag_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "park", "--json"]).unwrap();
+    match cli.command {
+        Commands::Dev(dev::Args {
+            action: Some(DevAction::Park { json }),
+        }) => assert!(json, "`--json` requests machine-readable output"),
+        _ => panic!("Expected Dev Park command"),
+    }
+}
+
+#[test]
 fn test_dev_up_json_flag_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "dev", "up", "--json"]).unwrap();
     match cli.command {

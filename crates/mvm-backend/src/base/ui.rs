@@ -108,6 +108,19 @@ pub fn warn(msg: &str) {
     }
 }
 
+/// Print an always-on liveness/notice line: `[mvm]` message. Unlike the opt-in
+/// chatter helpers, this prints regardless of verbosity — reserved for the
+/// case where a periodic line is the *only* feedback that a long, silent
+/// blocking step is alive (e.g. the Stage 0 builder-image build's heartbeat),
+/// which must remain visible in the default quiet mode.
+pub fn notice(msg: &str) {
+    if chrome_to_stderr() {
+        eprintln!("{} {}", prefix(), msg);
+    } else {
+        println!("{} {}", prefix(), msg);
+    }
+}
+
 /// Print a numbered step: `[mvm]` Step n/total: message. Opt-in chatter —
 /// suppressed unless `--verbose`/`--debug` or `RUST_LOG` is set.
 pub fn step(n: u32, total: u32, msg: &str) {

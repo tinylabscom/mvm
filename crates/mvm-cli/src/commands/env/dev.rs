@@ -217,6 +217,12 @@ pub(in crate::commands) enum DevAction {
         #[arg(long)]
         json: bool,
     },
+    /// Snapshot and stop the Vz dev VM so the next `dev up` restores it.
+    Park {
+        /// Emit a machine-readable JSON result instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Open a shell in the running dev VM.
     Shell {
         /// Project directory to cd into inside the VM.
@@ -629,6 +635,29 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                     dev_backend_report_name(backend),
                     was_running,
                     reset_done,
+                ));
+            }
+            Ok(())
+        }
+        DevAction::Park { json } => {
+            let parked = match backend {
+                DevBackend::Vz => dev_vz::cmd_dev_vz_park(json),
+                DevBackend::Libkrun => anyhow::bail!(
+                    "`mvmctl dev park` is only supported by the Vz dev backend; \
+                     libkrun has no persistent memory snapshot"
+                ),
+                DevBackend::LinuxKvm => {
+                    anyhow::bail!("`mvmctl dev park` is only supported by the Vz dev backend")
+                }
+                DevBackend::Unsupported => {
+                    bail_no_dev_backend()?;
+                    unreachable!("bail_no_dev_backend always returns Err")
+                }
+            }?;
+            if json {
+                return crate::json_out::emit_json(&dev_vz::build_dev_park_json(
+                    dev_backend_report_name(backend),
+                    parked,
                 ));
             }
             Ok(())
