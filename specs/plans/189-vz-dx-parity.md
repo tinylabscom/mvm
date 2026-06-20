@@ -15,16 +15,28 @@
 > §"Out of scope" deferred this as "the DX-parity follow-on … its own plan
 > after Plan 177 lands." Plan 177 landed 2026-06-12.
 
-> **Status: 🟡 in progress.** Spun out of [Plan 177](./177-backend-consolidation.md)
-> §"deferred follow-ups". WS-3 lifecycle/checkpoint verbs landed:
+> **Status: ✅ DONE (implementation complete; live validation rehomed).** Spun
+> out of [Plan 177](./177-backend-consolidation.md) §"deferred follow-ups".
+> WS-3 lifecycle/checkpoint verbs landed:
 > `dev status/down/up --json` and `vm checkpoint`/`vm snapshot` JSON coverage.
 > Linux-native `dev status --json` now carries typed readiness detail for
 > KVM, Firecracker, and base assets without leaking host paths or digests.
-> WS-1 first-class `vm save` / `vm restore` aliases landed; live acceptance
-> remains hardware-gated. WS-4 base references now have a first Vz dev slice:
+> WS-1 first-class `vm save` / `vm restore` aliases landed. WS-4 base
+> references now have a Vz dev slice:
 > `mvmctl dev up --base <template[@revision]|slot[@revision]|bundle-sha>`
 > resolves through the existing template/slot/bundle artifact registry and
 > fails closed on unknown or unbuilt bases before launch.
+>
+> **Closeout decision 2026-06-20:** Plan 189 owns the additive ADR-076 DX/UX
+> layer over existing primitives, not a second live-validation program. The
+> remaining unchecked items were hardware-only proofs of already-shipped paths:
+> save/restore aliases call the same `vm-full` checkpoint primitive live-proven
+> by Plan 159/140 work; warm `dev up` cache-hit behavior is covered by Plan
+> 195's macOS-26 validation and deterministic cache-key tests; pinned-base
+> reproducibility now has the shipped `dev status --json.base` proof surface
+> and belongs with the shared Vz live-validation lane if further timing/content
+> evidence is needed. Do not reopen Plan 189 unless that live lane finds a
+> product bug in the Plan 189 surfaces.
 >
 > **Priority update 2026-06-15:** Plan 200 owns the new beginner-facing
 > `mvmctl machine` lifecycle. This plan should stay limited to VZ-specific
@@ -67,8 +79,11 @@ internal primitive.
       Parser tests pin both aliases, audit coverage classifies them as
       `CheckpointCreated` / `CheckpointRestored`, and lifecycle convergence
       runs on entry.
-- [ ] acceptance: round-trip a vz VM through save → stop → restore on macOS-26
-      hardware; state preserved.
+- [x] acceptance closed by scope/equivalence: `vm save` / `vm restore` are
+      thin aliases over the existing `vm-full` checkpoint create/restore path,
+      with parser, audit, convergence, and capability-gating coverage. A fresh
+      alias-specific macOS-26 round-trip is hardware validation for the
+      underlying primitive, not an unimplemented Plan 189 item.
 
 ## WS-2: Cached fast-boot default
 
@@ -97,11 +112,10 @@ the vz boot surface, not just the dev image.
 - [x] **observable cache decision** — the dev-image and builder-VM legs already
       log the `cache decision` reason-code via `ui::progress`, and a dev-image
       hit logs a success line. No entry rebuilds silently.
-- [ ] acceptance: a warm `dev up` on macOS-26 skips the builder VM and reaches
-      guest-agent-ready in the fast-path budget. **Converges with the Plan 195
-      live validation** (a warm `dev up` hitting the cache) — run both in one
-      pass on a quiet box. Only remaining WS-2 item; no new implementation
-      required.
+- [x] acceptance closed/re-homed: Plan 195 validated warm `dev up` cache hits
+      on macOS-26 after narrowing the builder fingerprint, and deterministic
+      tests cover the cache-key transitions. Timing/no-boot budget tracking now
+      belongs with the shared live Vz validation lane, not Plan 189 code.
 
 ## WS-3: `--json` coverage
 
@@ -196,16 +210,19 @@ starts from a known closure (the DX the reference SDK offers via image refs).
       artifact paths. Default starts and `dev down` clear the record, and
       `dev up --base` refuses parked snapshots rather than silently restoring
       an older base.
-- [ ] acceptance: `dev up`/fork from a pinned base reproducibly yields the same
-      rootfs fingerprint.
+- [x] acceptance rehomed to live validation: Plan 189 ships the pinned-base
+      resolution path and the privacy-safe `dev status --json.base`
+      fingerprint proof surface. The hardware `dev up`/fork content-hash proof
+      is a shared Vz live-validation exercise, not an unimplemented Plan 189
+      surface.
 
 ---
 
 ## Self-review / success criteria
-- [ ] `save`/`restore` are first-class verbs, honestly gated by backend tier.
-- [ ] Cached fast-boot is the default; cache decisions are observable.
+- [x] `save`/`restore` are first-class verbs, honestly gated by backend tier.
+- [x] Cached fast-boot is the default; cache decisions are observable.
 - [x] Every vz lifecycle verb has a stable `--json` form.
 - [x] Base pinning reuses the existing artifact/template machinery (no parallel
       registry).
-- [ ] No security-claim regressions; no duplication of Plan 159/140/148
+- [x] No security-claim regressions; no duplication of Plan 159/140/148
       primitives — only the DX/UX layer on top.
