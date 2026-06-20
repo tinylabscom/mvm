@@ -1755,6 +1755,7 @@ fn builder_vm_host_arch() -> &'static str {
 
 /// Cadence of [`BuildHeartbeat`] liveness lines. ~20s keeps a multi-minute
 /// Stage 0 build under ~20 lines while never leaving the user wondering for long.
+#[cfg(feature = "builder-vm")]
 const BUILD_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// RAII liveness ticker for a long, silent blocking step. While alive, a thread
@@ -1762,11 +1763,13 @@ const BUILD_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_
 /// mistaken for a hang — the Stage 0 builder-image build runs `nix` inside the
 /// guest with no host-visible output until it completes. Stops + joins on drop,
 /// so the build's own return is the natural end of the heartbeat.
+#[cfg(feature = "builder-vm")]
 struct BuildHeartbeat {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+#[cfg(feature = "builder-vm")]
 impl BuildHeartbeat {
     fn start(activity: &'static str) -> Self {
         Self::start_with(activity, BUILD_HEARTBEAT_INTERVAL, ui::info)
@@ -1805,6 +1808,7 @@ impl BuildHeartbeat {
     }
 }
 
+#[cfg(feature = "builder-vm")]
 impl Drop for BuildHeartbeat {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -5255,6 +5259,7 @@ mod builder_vm_bootstrap_tests {
     use std::io::Write;
 
     #[test]
+    #[cfg(feature = "builder-vm")]
     fn build_heartbeat_emits_while_alive_and_stops_on_drop() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
