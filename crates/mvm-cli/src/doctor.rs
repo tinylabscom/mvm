@@ -538,6 +538,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(libkrun_check(plat));
     checks.push(builder_backend_check(plat));
     checks.push(residency_check());
+    checks.push(builder_residency_check());
     checks.push(network_backend_check(plat));
     checks.push(ts_runner_check());
     checks.push(stage0_status_check());
@@ -1662,6 +1663,45 @@ fn residency_check() -> Check {
             policy.warm_target(),
             idle
         ),
+    }
+}
+
+/// Informational check: the residency policy's effect on builder routing
+/// and whether a persistent builder session is currently live.
+///
+/// The check never fails — the routing choice is always observable via
+/// `MVM_RESIDENCY` and the session state is a best-effort filesystem probe.
+/// The two axes together let an operator understand what `mvmctl build image`
+/// will do before invoking it.
+#[cfg(feature = "builder-vm")]
+fn builder_residency_check() -> Check {
+    let (policy, _source) = mvm_core::residency::resolve_residency();
+    let routing = if policy.allows_persistent_builder() {
+        "uses persistent when active"
+    } else {
+        "ephemeral per build (cold)"
+    };
+    let session = if mvm_build::persistent_builder::read_active_session().is_some() {
+        "persistent builder active"
+    } else {
+        "no persistent builder"
+    };
+    Check {
+        name: "builder residency",
+        category: "platform",
+        ok: true,
+        info: format!("{} — builds {} — {}", policy.label(), routing, session),
+    }
+}
+
+/// Stub when the `builder-vm` feature is off.
+#[cfg(not(feature = "builder-vm"))]
+fn builder_residency_check() -> Check {
+    Check {
+        name: "builder residency",
+        category: "platform",
+        ok: true,
+        info: "n/a (mvm-cli built without `builder-vm` feature)".to_string(),
     }
 }
 
@@ -4076,6 +4116,25 @@ mod tests {
         assert!(c.info.contains("warm_target="), "info was {:?}", c.info);
         assert!(
             c.info.contains("auto-detected") || c.info.contains("override"),
+            "info was {:?}",
+            c.info
+        );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn builder_residency_check_reports_policy_and_session_state() {
+        let c = builder_residency_check();
+        assert_eq!(c.category, "platform");
+        assert!(c.ok);
+        assert!(
+            c.info.contains("persistent builder"),
+            "info was {:?}",
+            c.info
+        );
+        // names the builder routing effect
+        assert!(
+            c.info.contains("uses persistent") || c.info.contains("ephemeral"),
             "info was {:?}",
             c.info
         );
