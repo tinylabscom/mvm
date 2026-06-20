@@ -3129,18 +3129,24 @@ and the residency model and consumes the in-flight pieces rather than rebuilding
   `mvm-builderd`. `check-trust-gradient: clean (3 rows)` — all three tiers machine-checked.
 - **B — Residency policy over the standby pool**  ✅ #1094 — `mvm-core::residency`
   (`MVM_RESIDENCY` warm⇄parked, per-host default AS=warm/CI=parked), `effective_warm_pool_size`
-  wired into `up`, `mvmctl doctor` residency line. Idle→parked demotion delivered by D.
+  wired into `up`, `mvmctl doctor` residency line. Idle→parked demotion delivered by D;
+  builder builds honor `MVM_RESIDENCY=cold` by taking the ephemeral-builder path instead of
+  the persistent builder (#1114).
 - **C — Resident builder daemon**  ✅ delivered by Plan 204 (#1091) — `mvm-builderd` is the
   resident builder-VM control daemon (typed vsock, no shell). Session-reuse/crash-recovery
   lifecycle is Plan 204's domain.
 - **D — Snapshot park/resume**  ✅ #1099 — `StandbyState::Parked`; reaper demotes idle
   saved-state (vz) standbys, libkrun reaps to cold; claim resumes via the existing saved-state
   path; `pool status` parked count. Freshness = existing `StandbyCompat` (corrected; not the
-  builder fingerprint). FC leg (Plan 175) and live macOS-26 resume timing deferred.
+  builder fingerprint). Builder-residency decisions now carry `BuilderResidencyAction` plus
+  builder snapshot freshness checks (#1121). FC leg (Plan 175) and live macOS-26 resume timing
+  deferred.
 - **E — Cold acquisition**  ✅ #1102 — `mvmctl bootstrap` pre-fetches the builder VM image
   (instant first run); source-checkout stays release-artifact-free.
 - **F — Docs and posture**  ✅ #1103 — "what runs where" + residency in `reference/architecture.md`;
-  threat-model delta in ADR-090.
+  threat-model delta in ADR-090. The benign `host_signer` trust-gate false-positive is closed
+  (#1123), and persistent OCI machines document `warm_pool_size = 0` as intentional because
+  named machines do not use the warm pool.
 
 ### Sprint 63 success criteria
 
@@ -3152,6 +3158,8 @@ and the residency model and consumes the in-flight pieces rather than rebuilding
   authority, or audit writer exists below the host→builder vsock line.
 - Claim-11 volumes still fail closed on a resumed builder; no ADR-002 numbered claim
   regresses; `xtask check-claim-catalog` stays green.
+- Remaining Plan 205 closeout is live-gated: macOS-26 warm→parked demotion/resume timing
+  and the live-coupled OCI `run --image` residency path.
 
 ### Non-goals (explicit — see Plan 205 §Non-goals)
 
