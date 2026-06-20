@@ -1,4 +1,4 @@
-name: rvproxy gateway parity (manual)
+name: rvproxy gateway parity
 
 # Cross-repo parity gate for the macOS/libkrun egress-gateway default flip from
 # upstream gvproxy to first-party rvproxy (ADR-082 / Plan 193 WS-1.5). Builds the
@@ -7,33 +7,22 @@ name: rvproxy gateway parity (manual)
 # rvproxy (candidate). The gateway is the claim-10 chokepoint, so the default
 # must not flip on a binary that diverges from the proven one.
 #
-# Operator-triggered only: macos-latest is the target platform (libkrun unixgram)
-# and where gvproxy installs cleanly, but it is ~10x ubuntu cost (ADR-038), so
-# this stays off the day-to-day ci.yml surface. Promote to a paths-filtered
-# pull_request trigger once the default flip is on the table and the team accepts
-# the macOS minutes — see Plan 193 WS-1.5.
+# macos-latest is the target platform (libkrun unixgram) and where gvproxy
+# installs cleanly, but it is ~10x ubuntu cost (ADR-038), so the expensive
+# parity job only runs when gateway-contract files change (or by manual
+# dispatch). The final `rvproxy gateway parity` job is the cheap, always-present
+# required-check shim: it passes on unrelated PRs and fails if a relevant PR's
+# macOS parity run fails or is skipped.
 #
 # Requires the RVPROXY_CHECKOUT_TOKEN secret: a token with read access to
 # tinylabscom/rvproxy. Absent it, the candidate cannot be built and the gate
 # fails closed (a parity claim with no candidate is not a pass).
 
 on:
-  # Paths-filtered PR trigger: re-validate the gateway contract whenever the
-  # claim-10 chokepoint or the gate itself changes. macos-latest is ~10x ubuntu
-  # cost (ADR-038), so the filter keeps it off unrelated PRs. Same-repo branches
-  # see the RVPROXY_CHECKOUT_TOKEN secret; fork PRs do not and would fail closed
-  # (mvm is internal — no external forks). Making this a required check is a
-  # separate branch-protection decision.
+  # The workflow itself must run on every PR so branch protection can require a
+  # stable context. A cheap changes job below decides whether to pay for the
+  # macOS parity run.
   pull_request:
-    paths:
-      - "scripts/rvproxy-gateway-parity.sh"
-      - ".github/workflows/rvproxy-parity.yml"
-      - "crates/mvm-hostd/src/supervisor/gateway_bridge.rs"
-      - "crates/mvm-hostd/src/supervisor/network/**"
-      - "crates/mvm-hostd/tests/egress_secret_leak_gate.rs"
-      - "crates/deps/libkrun-sys/src/gvproxy.rs"
-      - "crates/mvm-build/src/libkrun_builder.rs"
-      - "crates/mvm-build/src/libkrun_network_provider.rs"
   workflow_dispatch:
     inputs:
       rvproxy_ref:
@@ -56,8 +45,41 @@ env:
   RVPROXY_DEFAULT_REF: "92125e839bb6dce435ce4fccc8358b1f5d317843"
 
 jobs:
+  changes:
+    name: rvproxy gateway parity changes
+    runs-on: ubuntu-latest
+    outputs:
+      gateway: ${{ steps.filter.outputs.gateway }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - id: filter
+        name: Detect gateway contract changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "gateway=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          changed="$RUNNER_TEMP/rvproxy-parity-changed-files.txt"
+          git diff --name-only "$base" "$head" | tee "$changed"
+
+          if grep -Eq '^(scripts/rvproxy-gateway-parity\.sh|\.github/workflows/rvproxy-parity\.yml|crates/mvm-hostd/src/supervisor/gateway_bridge\.rs|crates/mvm-hostd/src/supervisor/network/|crates/mvm-hostd/tests/egress_secret_leak_gate\.rs|crates/deps/libkrun-sys/src/gvproxy\.rs|crates/mvm-build/src/libkrun_builder\.rs|crates/mvm-build/src/libkrun_network_provider\.rs)' "$changed"; then
+            echo "gateway=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "gateway=false" >> "$GITHUB_OUTPUT"
+          fi
+
   parity:
     name: rvproxy vs gvproxy parity
+    needs: changes
+    if: needs.changes.outputs.gateway == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -105,3 +127,37 @@ jobs:
           set -euo pipefail
           RVPROXY_BIN="$RVPROXY_BIN" GVPROXY_BIN="$(command -v gvproxy)" \
             scripts/rvproxy-gateway-parity.sh
+
+  required:
+    name: rvproxy gateway parity
+    runs-on: ubuntu-latest
+    needs:
+      - changes
+      - parity
+    if: always()
+    steps:
+      - name: Enforce parity result when relevant
+        shell: bash
+        run: |
+          set -euo pipefail
+          changes="${{ needs.changes.result }}"
+          gateway="${{ needs.changes.outputs.gateway }}"
+          parity="${{ needs.parity.result }}"
+
+          if [[ "$changes" != "success" ]]; then
+            echo "::error::Gateway-contract change detection failed; result was '$changes'."
+            exit 1
+          fi
+
+          if [[ "$gateway" != "true" ]]; then
+            echo "No gateway-contract changes; rvproxy parity is not required for this PR."
+            exit 0
+          fi
+
+          if [[ "$parity" == "success" ]]; then
+            echo "Gateway-contract changes detected; macOS rvproxy parity passed."
+            exit 0
+          fi
+
+          echo "::error::Gateway-contract changes require the macOS rvproxy parity job to pass; result was '$parity'."
+          exit 1
