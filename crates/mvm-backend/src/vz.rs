@@ -42,7 +42,7 @@ use mvm_build::host_gvproxy;
 use mvm_build::vz;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Apple Virtualization.framework backend.
@@ -158,6 +158,7 @@ fn pool_seed_config_path(pool_root: &Path, standby_id: &str) -> PathBuf {
 /// PID file before killing the child and bailing. Matches the libkrun
 /// path's budget.
 const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
+const POST_PID_STABILITY_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// How long [`VzBackend::stop`] waits after `SIGTERM` before escalating
 /// to `SIGKILL`. Vz's graceful-stop callback runs on the supervisor's
@@ -368,6 +369,13 @@ impl VmBackend for VzBackend {
             // cadence rounds every `up` up by that much. Cheap to spin finer.
             std::thread::sleep(Duration::from_millis(5));
         }
+        wait_for_supervisor_stability(
+            &mut child,
+            &pid_file,
+            &console_log,
+            &supervisor_path,
+            POST_PID_STABILITY_TIMEOUT,
+        )?;
 
         // Vz supervisor booted cleanly. Detach the
         // drainer so it survives `start()`'s stack frame; record its
@@ -2580,6 +2588,42 @@ fn stale_supervisor_hint(supervisor_path: &Path) -> String {
     }
 }
 
+fn wait_for_supervisor_stability(
+    child: &mut Child,
+    pid_file: &Path,
+    console_log: &Path,
+    supervisor_path: &Path,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !pid_file.exists() {
+            bail!(
+                "supervisor removed PID file immediately after launch ({}). \
+                 Check stderr above for VZ runtime errors.{} Console log: {}",
+                pid_file.display(),
+                stale_supervisor_hint(supervisor_path),
+                console_log.display()
+            );
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| anyhow!("poll supervisor child after PID file: {e}"))?
+        {
+            bail!(
+                "supervisor exited immediately after writing PID file (status: {status}). \
+                 Check stderr above for VZ runtime errors.{} Console log: {}",
+                stale_supervisor_hint(supervisor_path),
+                console_log.display()
+            );
+        }
+        if Instant::now() >= deadline {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Pure core of [`stale_supervisor_hint`]: a rebuild hint when `bin_mtime` is
 /// older than `self_mtime`. `None` when either mtime is unknown or the binary is
 /// at-least-as-new — so an installed release (bins share an install time) never
@@ -2633,6 +2677,70 @@ mod tests {
         // A path that doesn't exist has no mtime → empty (no false hint).
         let missing = std::path::Path::new("/nonexistent/mvm-vz-supervisor");
         assert_eq!(stale_supervisor_hint(missing), "");
+    }
+
+    #[test]
+    fn supervisor_stability_accepts_child_that_keeps_pid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_file = tmp.path().join("vz.pid");
+        let console_log = tmp.path().join("console.log");
+        let supervisor = tmp.path().join("mvm-vz-supervisor");
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("printf '%s\n' $$ > \"$PID_FILE\"; sleep 1")
+            .env("PID_FILE", &pid_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        while !pid_file.exists() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        wait_for_supervisor_stability(
+            &mut child,
+            &pid_file,
+            &console_log,
+            &supervisor,
+            Duration::from_millis(20),
+        )
+        .unwrap();
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn supervisor_stability_rejects_immediate_exit_after_pid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_file = tmp.path().join("vz.pid");
+        let console_log = tmp.path().join("console.log");
+        let supervisor = tmp.path().join("mvm-vz-supervisor");
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("printf '%s\n' $$ > \"$PID_FILE\"; rm -f \"$PID_FILE\"; exit 7")
+            .env("PID_FILE", &pid_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let err = wait_for_supervisor_stability(
+            &mut child,
+            &pid_file,
+            &console_log,
+            &supervisor,
+            Duration::from_millis(50),
+        )
+        .expect_err("immediate supervisor exit should fail start");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("supervisor") && msg.contains("PID file"),
+            "error must explain the post-PID failure: {msg}"
+        );
+        let _ = child.wait();
     }
 
     #[test]
