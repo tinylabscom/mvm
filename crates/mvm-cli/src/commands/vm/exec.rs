@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-use super::super::env::dev_vz::ensure_default_microvm_image;
+use super::super::env::dev_vz::{ensure_default_microvm_image, ensure_workload_kernel};
 use super::Cli;
 use super::audit_chain::AuditEmitter;
 use super::host_signer::{PUBLIC_FILENAME, host_signer_id, load_or_init};
@@ -617,10 +617,14 @@ fn build_exec_request(
                     auth_source
                 );
             }
-            // `exec` is interactive (dev): a sealed prod image refuses
-            // console/exec, so the default image must be the dev variant.
-            let (kernel_path, _default_rootfs_path) =
-                ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
+            // An `--image` run boots the materialized OCI rootfs (with its
+            // injected agent), so we need only a workload kernel. Resolve just
+            // the kernel — the published `vmlinux-<arch>-workload` download for
+            // an end-user mvmctl (no Nix), or a local `workload-kernel` build on
+            // a source checkout — rather than building/downloading a whole
+            // default image whose rootfs we'd discard. Per Plan 200, the OCI
+            // path avoids Nix (end users) and a ~220 MB unused-rootfs fetch.
+            let kernel_path = ensure_workload_kernel()?;
             crate::exec::ImageSource::Prebuilt {
                 kernel_path,
                 rootfs_path: cached.rootfs_path.display().to_string(),
