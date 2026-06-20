@@ -467,6 +467,31 @@ mod tests {
     }
 
     #[test]
+    fn paired_kernel_prefers_sibling_vmlinux_else_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("dev");
+        std::fs::create_dir_all(&dir).unwrap();
+        let rootfs = dir.join("rootfs.ext4");
+        std::fs::write(&rootfs, b"r").unwrap();
+
+        // No sibling kernel yet → fall back to the supplied default.
+        assert_eq!(
+            paired_kernel_for_rootfs(&rootfs, "/default/vmlinux"),
+            "/default/vmlinux",
+        );
+
+        // Sibling `vmlinux` present → pair with it (so the standby's kernel_sha
+        // matches the launch's, which boots that same sibling): a dev rootfs
+        // pairs with the dev kernel, not the prod one.
+        let sib = dir.join("vmlinux");
+        std::fs::write(&sib, b"k").unwrap();
+        assert_eq!(
+            paired_kernel_for_rootfs(&rootfs, "/default/vmlinux"),
+            sib.to_string_lossy(),
+        );
+    }
+
+    #[test]
     fn standby_spec_socket_is_short_and_nonce_derived_state_under_vms() {
         let tmp = tempfile::tempdir().unwrap();
         let kp = tmp.path().join("vmlinux");
@@ -1030,7 +1055,7 @@ struct WarmShape {
 fn resolve_warm_shape(cfg: &MvmConfig, rootfs_override: Option<&str>) -> Result<WarmShape> {
     let backend_name = super::shared::resolve_effective_hypervisor("firecracker");
     let backend = AnyBackend::from_hypervisor(&backend_name);
-    let (kernel, default_rootfs) =
+    let (default_kernel, default_rootfs) =
         ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Prod)
             .context("resolve default-microvm kernel for the warm pool")?;
     let vcpus = u8::try_from(cfg.default_cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
@@ -1044,14 +1069,40 @@ fn resolve_warm_shape(cfg: &MvmConfig, rootfs_override: Option<&str>) -> Result<
     } else {
         None
     };
+    // A Vz saved-standby must boot the kernel that pairs with ITS rootfs variant
+    // — the `vmlinux` shipped beside the rootfs (dev rootfs ↔ dev kernel, prod ↔
+    // prod). The claiming launch computes its compat `kernel_sha256` from that
+    // same sibling kernel, so baking an unrelated kernel (the former always-prod
+    // resolution) makes the claim fail open to cold boot even when the image
+    // matches — exactly the dev `up` / transient-`run` miss. libkrun is
+    // image-agnostic (its kernel identity is a constant) and keeps the default.
+    let kernel = match &image {
+        Some(img) => std::path::PathBuf::from(paired_kernel_for_rootfs(img, &default_kernel)),
+        None => std::path::PathBuf::from(default_kernel),
+    };
     Ok(WarmShape {
         backend,
         backend_name,
-        kernel: std::path::PathBuf::from(kernel),
+        kernel,
         image,
         vcpus,
         mem_mib: cfg.default_memory_mib,
     })
+}
+
+/// The kernel that pairs with a default-microVM `rootfs`: the `vmlinux` shipped
+/// beside it in its variant directory. A Vz saved-standby must boot the same
+/// kernel the claiming launch will (which is this sibling), or its
+/// `kernel_sha256` never matches and the warm claim fails open to cold boot.
+/// Falls back to `default_kernel` when no sibling exists (a non-default
+/// `--rootfs`).
+fn paired_kernel_for_rootfs(rootfs: &Path, default_kernel: &str) -> String {
+    rootfs
+        .parent()
+        .map(|d| d.join("vmlinux"))
+        .filter(|k| k.exists())
+        .map(|k| k.to_string_lossy().into_owned())
+        .unwrap_or_else(|| default_kernel.to_string())
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
