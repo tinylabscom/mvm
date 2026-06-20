@@ -102,6 +102,7 @@ pub(in crate::commands) fn is_vz_dev_running() -> bool {
 /// Returns `true` only when residency allows a persistent builder, the VM is
 /// live, and this is not a `--reset` stop (reset implies a clean cold boot
 /// next time, so there is nothing useful to save).
+#[cfg(feature = "builder-vm")]
 pub(crate) fn should_park(allows_persistent: bool, alive: bool, reset: bool) -> bool {
     allows_persistent && alive && !reset
 }
@@ -110,6 +111,7 @@ pub(crate) fn should_park(allows_persistent: bool, alive: bool, reset: bool) -> 
 ///
 /// Returns `true` only when residency allows a persistent builder and a valid
 /// parked snapshot is present in the builder state dir.
+#[cfg(feature = "builder-vm")]
 pub(crate) fn should_resume(allows_persistent: bool, parked: bool) -> bool {
     allows_persistent && parked
 }
@@ -6404,7 +6406,7 @@ mod heartbeat_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "builder-vm"))]
 mod park_resume_gating_tests {
     use super::{should_park, should_resume};
 
