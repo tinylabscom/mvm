@@ -17,9 +17,11 @@ are landed. The macOS/libkrun default selection now chooses native when
 `MVM_GATEWAY_BIN` is configured, while explicit `MVM_NETWORKING=gvproxy` and the
 no-candidate fallback remain available. The parity workflow now has a stable
 required-check shim, and `rvproxy gateway parity` is now required by `main`
-branch protection on PR and merge-group SHAs. Remaining cutover work is deleting the splice/Plan-141 hooks only after
-rvproxy provides the macOS transparent `:80`/`:443` interception path recorded
-by the requirement below.
+branch protection on PR and merge-group SHAs. Remaining cutover work is blocked
+on rvproxy exposing a typed transparent `:80`/`:443` interception
+config/contract; mvm must not mark libkrun/Vz as transparent-terminator-capable
+until that schema exists. After rvproxy lands it, mvm wires the config and only
+then deletes the splice/Plan-141 hooks.
 
 > **Priority update 2026-06-15:** Plan 200 consumes this plan as security/network
 > substrate. `mvmctl machine --net` and `allow-host` must use the current
@@ -312,6 +314,14 @@ own internal default).
         libkrun/Vz/mock while accepting Firecracker's nft terminator leg. This
         does not implement macOS interception; it makes that rvproxy capability
         an explicit splice-deletion prerequisite instead of an implied comment.
+  - [x] **2d task 2h — transparent terminator blocker classified.**
+        The local rvproxy schema has no typed transparent `:80`/`:443`
+        interception section or host-terminator destination yet (`RvproxyConfig`
+        exposes network/backend/transport/api/dns/policy/audit/transforms;
+        `GatewayConfig` exposes policy/flow fields only). mvm therefore keeps
+        libkrun/Vz at `VsockUdsChannel` and cannot honestly satisfy
+        `supports_transparent_terminator()` for them until rvproxy lands the
+        contract.
   - [x] **2d task 2g — required-check shim for parity gate.**
         `.github/workflows/rvproxy-parity.yml` now emits a stable
         `rvproxy gateway parity` check on every PR. It detects gateway-contract
@@ -321,10 +331,13 @@ own internal default).
         safe to add to branch protection without hanging unrelated PRs. The
         `rvproxy gateway parity` context is now required by `main` branch
         protection on PR and merge-group SHAs.
-  - [ ] **2d — remaining: splice deletion.** Delete the splice + Plan-141
-        `on_packet` hooks once the native audit feed is the sole path and the
-        transparent terminator implementation/parity-required gates are in
-        place. Design + the R2 contract are in "## WS-2 design" below.
+  - [ ] **2d — remaining: transparent terminator wiring + splice deletion.**
+        First land the rvproxy transparent-interception schema/implementation,
+        then wire mvm's native rvproxy config to the host terminator and update
+        libkrun/Vz capability tests. Delete the splice + Plan-141 `on_packet`
+        hooks only after the native audit feed is the sole path and the
+        transparent terminator/parity-required gates are in place. Design + the
+        R2 contract are in "## WS-2 design" below.
 - [ ] **WS-3 — backend cutover.** Replace the gvproxy spawn
       (`mvm-build/host_gvproxy.rs`, `libkrun-sys/gvproxy.rs`) + passt with
       `rvproxy run --config` per the integration contract; drop the Homebrew
@@ -446,9 +459,10 @@ the splice is deleted. The splice (`gateway_bridge` + the Plan 141 per-backend
 
 rvproxy R2 shipped, and mvm has consumed the subprocess-facing pieces needed for
 native config emission plus flow-audit JSONL refeed. Remaining dependency work
-is the cutover contract: add the stable `rvproxy gateway parity` check to
-branch protection, land the rvproxy transparent terminator implementation for
-macOS/Vz/libkrun, and only then delete the splice and default to the native path.
+is the cutover contract: keep the stable `rvproxy gateway parity` check required,
+land the rvproxy transparent-terminator schema/implementation for
+macOS/Vz/libkrun, wire mvm once that schema exists, and only then delete the
+splice and default to the native path.
 
 ## Cross-repo dependency
 rvproxy `specs/plans/014-mvm-adoption-requirements.md` (mvm-authored requirements)
