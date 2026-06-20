@@ -643,6 +643,13 @@ pub struct SessionRecord {
     /// PID of the libkrun supervisor child. Used to check the
     /// session is alive before routing through it.
     pub supervisor_pid: u32,
+    /// Path to a saved Vz machine-state snapshot. When `Some`, the
+    /// next start of the persistent builder VM will restore from this
+    /// snapshot instead of cold-booting. `None` means the VM starts
+    /// fresh. Old JSON records without this field deserialize to
+    /// `None` (backward-compatible via `#[serde(default)]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_path: Option<PathBuf>,
 }
 
 /// On-disk location of the session record. Returns `None` only if
@@ -1061,11 +1068,54 @@ mod tests {
             job_dir: PathBuf::from("/tmp/jobs"),
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
+            snapshot_path: None,
         };
         let json = serde_json::to_vec(&record).unwrap();
         let back: SessionRecord = serde_json::from_slice(&json).unwrap();
         assert_eq!(back.session_id, "abc");
         assert_eq!(back.supervisor_pid, 4242);
+    }
+
+    #[test]
+    fn snapshot_path_some_roundtrips_through_json() {
+        let record = SessionRecord {
+            session_id: "snap-test".to_string(),
+            dispatch_socket_path: PathBuf::from("/tmp/sock"),
+            job_dir: PathBuf::from("/tmp/jobs"),
+            workspace_root: PathBuf::from("/work"),
+            supervisor_pid: 1234,
+            snapshot_path: Some(PathBuf::from("/abs/builder-snap.vzsnap")),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        // Field appears in the JSON when Some.
+        assert!(
+            json.contains("snapshot_path"),
+            "snapshot_path should appear when Some: {json}"
+        );
+        let back: SessionRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.snapshot_path.as_deref(),
+            Some(std::path::Path::new("/abs/builder-snap.vzsnap")),
+        );
+    }
+
+    #[test]
+    fn snapshot_path_defaults_to_none_when_field_absent_in_json() {
+        // Old JSON written before snapshot_path was introduced must
+        // deserialize cleanly with snapshot_path = None.
+        let json = r#"{
+            "session_id": "old",
+            "dispatch_socket_path": "/tmp/sock",
+            "job_dir": "/tmp/jobs",
+            "workspace_root": "/work",
+            "supervisor_pid": 99
+        }"#;
+        let record: SessionRecord =
+            serde_json::from_str(json).expect("old JSON without snapshot_path must parse");
+        assert!(
+            record.snapshot_path.is_none(),
+            "missing field must default to None"
+        );
     }
 
     #[test]
@@ -1125,6 +1175,7 @@ mod tests {
             job_dir: PathBuf::from("/tmp"),
             workspace_root: PathBuf::from("/tmp"),
             supervisor_pid: DEFINITELY_DEAD_PID,
+            snapshot_path: None,
         };
         std::fs::write(
             run_dir.join("persistent-builder.json"),

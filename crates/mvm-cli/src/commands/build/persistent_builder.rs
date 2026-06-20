@@ -116,6 +116,12 @@ struct SessionRecord {
     /// `libc::kill(pid, 0)` to check liveness before attempting
     /// shutdown.
     supervisor_pid: u32,
+    /// Path to a saved Vz machine-state snapshot. When `Some`, the
+    /// next start of the persistent builder VM restores from this
+    /// snapshot instead of cold-booting. Old JSON without this
+    /// field deserializes to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot_path: Option<PathBuf>,
 }
 
 fn session_record_path() -> PathBuf {
@@ -198,6 +204,7 @@ fn run_start(args: StartArgs) -> Result<()> {
         job_dir: handle.job_dir().to_path_buf(),
         workspace_root: workspace,
         supervisor_pid,
+        snapshot_path: None,
     };
     write_session_record(&record)?;
 
@@ -675,6 +682,7 @@ mod tests {
             job_dir: PathBuf::from("/tmp/jobs"),
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
+            snapshot_path: None,
         };
         let json = serde_json::to_vec(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_slice(&json).expect("deserialize");
