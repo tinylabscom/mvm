@@ -3187,9 +3187,12 @@ and the residency model and consumes the in-flight pieces rather than rebuilding
   before cold-boot fallback, `dev status` reports `parked`, `doctor` reports parked
   snapshot-present/no-snapshot state). Vz `dev down` now auto-parks a live non-reset
   dev builder under resident policy, and cold/reset/cache-clear/failed-restore paths discard
-  stale snapshot markers instead of accidentally resuming. The libkrun persistent-builder
-  keeper degrades idle `Park` to teardown because that path has no snapshot primitive; Vz
-  idle-timeout automation, FC leg (Plan 175), and live macOS-26 resume timing remain deferred.
+  stale snapshot markers instead of accidentally resuming. The Vz dev-builder now records
+  activity and enforces the invocation-driven keeper on `dev status`/`dev up`: warm parks
+  after the idle threshold, parked parks a live builder, and cold tears down before cold
+  boot. The libkrun persistent-builder keeper degrades idle `Park` to teardown because
+  that path has no snapshot primitive; FC leg (Plan 175), live macOS-26 resume timing,
+  and live-coupled OCI residency remain deferred.
 - **E — Cold acquisition**  ✅ #1102 — `mvmctl bootstrap` pre-fetches the builder VM image
   (instant first run); source-checkout stays release-artifact-free.
 - **F — Docs and posture**  ✅ #1103 — "what runs where" + residency in `reference/architecture.md`;
@@ -3207,9 +3210,9 @@ and the residency model and consumes the in-flight pieces rather than rebuilding
   authority, or audit writer exists below the host→builder vsock line.
 - Claim-11 volumes still fail closed on a resumed builder; no ADR-002 numbered claim
   regresses; `xtask check-claim-catalog` stays green.
-- Remaining Plan 205 closeout is live-gated/policy-gated: Vz idle-timeout warm→parked
-  demotion for the builder, macOS-26 parked-restore timing proof via `mvm-builderd`, and
-  the live-coupled OCI `run --image` residency path.
+- Remaining Plan 205 closeout is live-gated/policy-gated: macOS-26 parked-restore timing
+  proof via `mvm-builderd`, warm no-boot proof, and the live-coupled OCI `run --image`
+  residency path.
 
 ### Non-goals (explicit — see Plan 205 §Non-goals)
 

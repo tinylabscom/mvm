@@ -93,8 +93,12 @@ idle `Park` decisions degrade to teardown because the libkrun path has no
 snapshot primitive. The Vz dev-builder path now auto-parks on non-reset
 `dev down` when residency keeps a builder resident, resumes only when the
 current residency policy still allows a resident builder, and discards stale
-snapshots for cold/reset/cache-clear/failed-restore paths. Idle-timeout
-auto-park and the live timing proof remain open.
+snapshots for cold/reset/cache-clear/failed-restore paths. The Vz dev-builder
+also records last activity and applies the same invocation-driven keeper on
+`dev status`/`dev up`: `warm` parks after the idle threshold, `parked` parks a
+running VM immediately, and `cold` tears down a live Vz dev builder before a
+fresh cold boot. Live macOS-26 no-boot/restore timing proof and the
+live-coupled OCI `run --image` residency path remain open.
 
 ## Design
 
@@ -170,6 +174,10 @@ typed allowlisted protocol, so residency shrinks rather than widens the attack s
       now snapshots before stopping, while cold policy, `--reset`, rebuild, cache-clear,
       and failed restore paths discard stale snapshot markers instead of accidentally
       resuming an unwanted builder.
+- [x] Wire invocation-driven Vz dev-builder residency keeper: activity timestamps are
+      updated on `dev up`/restore/shell, `dev status` applies idle policy and parks or
+      tears down a live Vz builder, and `MVM_RESIDENCY=cold` on `dev up` tears down
+      any existing live builder before cold boot.
 - [~] Wire the Firecracker leg via Plan 175 when available; until then `min = 0` on FC
       falls back to fast boot, not a stub. FC/libkrun currently reap to cold.
 - [x] Key builder snapshot freshness/invalidation to builder residency inputs (#1121).
@@ -186,7 +194,8 @@ typed allowlisted protocol, so residency shrinks rather than widens the attack s
       residency policy and persistent-session presence; the Vz parked-snapshot
       slice adds `parked (snapshot present)` / `parked (no snapshot)` wording.
       Idle-age detail remains follow-up even though the hidden
-      `persistent-builder` session now records activity timestamps.
+      `persistent-builder` and Vz dev-builder sessions now record activity
+      timestamps.
 
 ### F. Docs and posture
 

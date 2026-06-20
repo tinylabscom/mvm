@@ -3,8 +3,9 @@
 **Status:** In progress. Explicit Vz dev-builder snapshot park/restore is wired
 and CI-tested; the libkrun persistent-builder path now tracks activity and
 honors invocation-driven cold/idle teardown; Vz `dev down` now auto-parks a
-live builder when residency keeps it resident. Idle-timeout auto-park and live
-macOS-26 timing proof remain open.
+live builder when residency keeps it resident; Vz `dev status`/`dev up` now
+apply invocation-driven idle/cold policy against the live dev builder. Live
+macOS-26 timing proof remains open.
 **Depends on:** Step 1 (`specs/notes/plan-205-builder-residency-step1-execution.md`, merged) and Plan 204's `mvm-builderd`.
 
 ## Why this is a separate, deferred plan
@@ -21,9 +22,10 @@ Step 1 made `MVM_RESIDENCY` govern the **routing** decision (cold → ephemeral 
 - `MVM_RESIDENCY=cold` skips the persistent builder for *new* builds and, on the
   next build invocation, actively tears down a live libkrun `persistent-builder`
   session before falling through to the single-shot builder.
-- Vz dev-builder idle automation is still open — the explicit `dev park` path
-  exists and `dev down` auto-parks a running non-reset Vz dev builder, but a
-  running Vz dev builder is not yet auto-parked by policy timeout.
+- Vz dev-builder idle automation is invocation-driven: the explicit `dev park`
+  path exists, `dev down` auto-parks a running non-reset Vz dev builder, and
+  `dev status` parks a running warm builder after the policy idle timeout. The
+  remaining gap is live macOS-26 restore/timing proof.
 
 ## Workstreams
 
@@ -31,19 +33,23 @@ Step 1 made `MVM_RESIDENCY` govern the **routing** decision (cold → ephemeral 
 - [x] Wire vz saved-state (the Plan 159 snapshot path) into the persistent builder boot path so an idle persistent builder can be snapshotted to `~/.cache/mvm/builder-vm/vms/<vm>/state.vzsave` and restored on the next build instead of cold-booting. Implemented for the stable Vz dev-builder session (`mvm-persistent-builder-vz-dev`): `mvm-build::vz_builder` sends `SAVE <state.vzsave>` over the host-only control socket, verifies the `<snapshot>.machine-id` sidecar, stops the supervisor, reloads persisted `SupervisorConfig` in `Restore` mode, respawns gvproxy, and starts a fresh supervisor.
 - [~] On `parked`: after a build (or on idle), snapshot + suspend; on the next build, detect the snapshot and restore (sub-second) rather than reusing a live VM or cold-booting. Explicit operator path exists (`mvmctl dev park`; next `mvmctl dev up` restores before cold-boot fallback). Idle/build-triggered demotion remains S2.2.
 - [x] `dev down` auto-parks the Vz dev builder when residency keeps a persistent builder, the VM is live, and the stop is not `--reset`; `dev up` resumes only when residency still allows a resident builder, and cold/reset/cache-clear paths discard stale snapshots rather than waking an unwanted builder.
+- [x] `dev status` / `dev up` apply the invocation-driven Vz dev-builder keeper:
+      activity timestamps are touched on start/restore/reuse/shell, warm parks
+      after `ResidencyPolicy::idle_timeout()`, parked parks any live builder,
+      and cold tears down a live builder before cold boot.
 - [x] `parked` stops degrading-to-warm once this lands; `doctor`'s `builder residency` line reports `parked (snapshot present)` vs `parked (no snapshot)`. `mvmctl dev status` reports `parked` when a Vz dev-builder snapshot is present; `mvmctl doctor`'s `builder residency` check now scans the builder-VM `vms/` root for Vz `state.vzsave` snapshots.
 - [ ] Live macOS-26 proof: a parked builder restores and serves a build via `mvm-builderd` without a cold boot.
 
 ### S2.2 — Idle-timeout keeper
-- [~] A mechanism that demotes a persistent builder after `ResidencyPolicy::idle_timeout()` of inactivity: the libkrun `persistent-builder` session record now carries `last_activity_unix_secs`, build dispatch touches it before/after use, and the next build invocation applies policy. Because that path has no memory snapshot primitive, `Park` degrades to teardown; Vz dev-builder idle auto-park remains open.
-- [x] Decide the keeper shape (a check on the next `mvmctl` invocation vs. a lightweight background timer) — shipped as invocation-driven first (no new daemon). Pure decision tests cover fresh warm keep, `cold` teardown, snapshot-unavailable idle teardown, and old records without `last_activity_unix_secs`.
+- [x] A mechanism that demotes a persistent builder after `ResidencyPolicy::idle_timeout()` of inactivity: the libkrun `persistent-builder` session record carries `last_activity_unix_secs`, build dispatch touches it before/after use, and the next build invocation applies policy. Because that path has no memory snapshot primitive, `Park` degrades to teardown. The Vz dev-builder records its own activity timestamp and `dev status` applies the same policy, parking warm builders after the idle threshold and tearing down under cold policy.
+- [x] Decide the keeper shape (a check on the next `mvmctl` invocation vs. a lightweight background timer) — shipped as invocation-driven first (no new daemon). Pure decision tests cover fresh warm keep, `cold` teardown, snapshot-unavailable idle teardown, old records without `last_activity_unix_secs`, Vz warm threshold behavior, and Vz activity timestamp round-trip.
 
 ### S2.3 — `dev up` / warm auto-start
 - [ ] When the resolved policy is `warm` and no persistent builder is active, `dev up` (and optionally the first build) auto-starts a persistent builder so warm actually keeps one ready — the deferred auto-start noted in `persistent_builder.rs`.
 - [ ] Respect explicit user lifecycle: `persistent-builder start`/`stop` always win; auto-start only fills the warm default.
 
 ### S2.4 — Active teardown on `cold`
-- [~] When the policy is `cold`, stop a running persistent builder (not just skip routing for new builds) — the libkrun `persistent-builder` session is stopped best-effort on the next build invocation before single-shot fallback. Vz dev-builder cold-policy teardown remains open with the Vz idle keeper.
+- [x] When the policy is `cold`, stop a running persistent builder (not just skip routing for new builds) — the libkrun `persistent-builder` session is stopped best-effort on the next build invocation before single-shot fallback, and the Vz dev-builder is stopped on `dev status` or `dev up` entry before cold boot.
 
 ## Acceptance
 
@@ -76,6 +82,10 @@ Step 1 made `MVM_RESIDENCY` govern the **routing** decision (cold → ephemeral 
   resident stops. `--reset`, rebuild, cache-clear, cold residency, and failed
   restore paths remove stale snapshot markers so the next `dev up` cold-boots
   cleanly.
+- `mvmctl dev status` now enforces the Vz dev-builder keeper before reporting
+  state: warm builders idle past the policy threshold are parked, parked policy
+  parks a live builder, and cold policy tears it down. `dev up` applies the cold
+  policy at entry so a stale live builder cannot be reused under `cold`.
 - `mvmctl doctor`'s `builder residency` line reports `parked (snapshot present)`
   vs `parked (no snapshot)` under the parked policy.
 - CI coverage: `cargo test -p mvm-build --features builder-vm vz_builder::tests`,
