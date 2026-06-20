@@ -76,6 +76,40 @@ impl ResidencyPolicy {
     }
 }
 
+/// What the builder-residency keeper should do with a builder VM idle past its
+/// threshold. Pure decision; the live action (snapshot / kill) is applied
+/// elsewhere and may degrade Park->Teardown on a snapshot-incapable backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuilderResidencyAction {
+    Keep,
+    Park,
+    Teardown,
+}
+
+/// Decide what to do with a builder VM given the residency policy kind and how
+/// long it has been idle. Not strictly past the threshold -> Keep. Strictly
+/// past: Warm and Parked park (snapshot-and-suspend), Cold tears down.
+pub fn decide_builder_residency_action(
+    kind: ResidencyKind,
+    idle: std::time::Duration,
+    threshold: std::time::Duration,
+) -> BuilderResidencyAction {
+    if idle <= threshold {
+        return BuilderResidencyAction::Keep;
+    }
+    match kind {
+        ResidencyKind::Warm | ResidencyKind::Parked => BuilderResidencyAction::Park,
+        ResidencyKind::Cold => BuilderResidencyAction::Teardown,
+    }
+}
+
+/// Whether a parked builder snapshot is still usable for the current builder
+/// source: fresh only if the source fingerprint it was captured at matches the
+/// current one (a flake / embedded-binary / nix-lib change invalidates it).
+pub fn builder_snapshot_fresh(captured_fingerprint: &str, current_fingerprint: &str) -> bool {
+    !captured_fingerprint.is_empty() && captured_fingerprint == current_fingerprint
+}
+
 /// Where a resolved policy came from — for observability in `doctor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidencySource {
@@ -208,5 +242,70 @@ mod tests {
         assert!(ResidencyPolicy::always_warm().allows_persistent_builder());
         assert!(ResidencyPolicy::parked().allows_persistent_builder());
         assert!(!ResidencyPolicy::cold().allows_persistent_builder());
+    }
+
+    #[test]
+    fn decide_keep_when_idle_below_threshold() {
+        let threshold = Duration::from_secs(300);
+        let idle = Duration::from_secs(100);
+        assert_eq!(
+            decide_builder_residency_action(ResidencyKind::Warm, idle, threshold),
+            BuilderResidencyAction::Keep,
+        );
+    }
+
+    #[test]
+    fn decide_keep_at_exact_threshold_boundary() {
+        let threshold = Duration::from_secs(300);
+        assert_eq!(
+            decide_builder_residency_action(ResidencyKind::Cold, threshold, threshold),
+            BuilderResidencyAction::Keep,
+        );
+    }
+
+    #[test]
+    fn decide_park_when_warm_past_threshold() {
+        let threshold = Duration::from_secs(300);
+        let idle = Duration::from_secs(301);
+        assert_eq!(
+            decide_builder_residency_action(ResidencyKind::Warm, idle, threshold),
+            BuilderResidencyAction::Park,
+        );
+    }
+
+    #[test]
+    fn decide_park_when_parked_past_threshold() {
+        let threshold = Duration::from_secs(300);
+        let idle = Duration::from_secs(301);
+        assert_eq!(
+            decide_builder_residency_action(ResidencyKind::Parked, idle, threshold),
+            BuilderResidencyAction::Park,
+        );
+    }
+
+    #[test]
+    fn decide_teardown_when_cold_past_threshold() {
+        let threshold = Duration::from_secs(300);
+        let idle = Duration::from_secs(301);
+        assert_eq!(
+            decide_builder_residency_action(ResidencyKind::Cold, idle, threshold),
+            BuilderResidencyAction::Teardown,
+        );
+    }
+
+    #[test]
+    fn snapshot_fresh_equal_nonempty_fingerprints() {
+        assert!(builder_snapshot_fresh("abc123", "abc123"));
+    }
+
+    #[test]
+    fn snapshot_fresh_differing_fingerprints_is_stale() {
+        assert!(!builder_snapshot_fresh("abc123", "xyz789"));
+    }
+
+    #[test]
+    fn snapshot_fresh_empty_captured_is_invalid() {
+        assert!(!builder_snapshot_fresh("", "abc123"));
+        assert!(!builder_snapshot_fresh("", ""));
     }
 }
