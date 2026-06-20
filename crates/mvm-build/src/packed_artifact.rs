@@ -417,6 +417,52 @@ pub fn verify(path: &Path, verifying_key: &VerifyingKey) -> Result<Manifest, Art
     Ok(manifest)
 }
 
+/// Verify a `.mvm` artifact and extract its payload files into `dest`.
+///
+/// Extraction happens *only after* full verification (signature, hashes,
+/// format version, sealed-prod verity, size caps). Only files declared in
+/// the verified manifest are written, each through the same
+/// `entry_path_string` safety check `verify` uses (absolute paths and
+/// non-normal components like `..` are rejected), so a tampered or
+/// traversal-laden archive never lands a byte under `dest`. Returns the
+/// verified `Manifest`. Missing parent directories under `dest` are created.
+pub fn extract(
+    path: &Path,
+    verifying_key: &VerifyingKey,
+    dest: &Path,
+) -> Result<Manifest, ArtifactError> {
+    // Full verification first: refuses tampered / wrong-key / unknown-version
+    // / sealed-prod-missing-verity / oversize / traversal artifacts before a
+    // single payload byte is written.
+    let manifest = verify(path, verifying_key)?;
+
+    // Write pass: re-read the archive and emit only manifest-listed files,
+    // re-checking path safety per entry (defense in depth — `verify` already
+    // ran the same check).
+    let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let gz = GzDecoder::new(f);
+    let mut archive = Archive::new(gz);
+    for entry in archive.entries().context("iterate archive")? {
+        let mut entry = entry.context("read tar entry")?;
+        validate_entry_meta(&entry)?;
+        let path_str = entry_path_string(&entry)?;
+        if path_str == MANIFEST_FILENAME || path_str == SIGNATURE_FILENAME {
+            continue;
+        }
+        if !manifest.files.contains_key(&path_str) {
+            return Err(ArtifactError::UnexpectedFile { path: path_str });
+        }
+        let out = dest.join(&path_str);
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+        }
+        let mut writer = File::create(&out).with_context(|| format!("create {}", out.display()))?;
+        std::io::copy(&mut entry, &mut writer)
+            .with_context(|| format!("write {}", out.display()))?;
+    }
+    Ok(manifest)
+}
+
 // ============================================================================
 // Errors
 // ============================================================================
@@ -698,6 +744,53 @@ mod tests {
         assert!(mf.files.contains_key("kernel/vmlinux"));
         assert!(mf.files.contains_key("rootfs/rootfs.ext4"));
         assert!(mf.files.contains_key("cmdline.txt"));
+    }
+
+    #[test]
+    fn extract_writes_verified_payload_to_dest() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = write_fixture(dir.path(), "vmlinux", b"kernel bytes");
+        let r = write_fixture(dir.path(), "rootfs.ext4", b"rootfs bytes");
+        let c = write_fixture(dir.path(), "cmdline.txt", b"console=hvc0");
+        let key = test_keypair();
+        let out = dir.path().join("out.mvm");
+        pack(&dev_inputs(&k, &r, &c), &key, &out).unwrap();
+
+        let dest = dir.path().join("extracted");
+        let mf = extract(&out, &key.verifying_key(), &dest).unwrap();
+
+        assert_eq!(mf.target_arch, GuestArch::Aarch64);
+        assert_eq!(
+            fs::read(dest.join("kernel/vmlinux")).unwrap(),
+            b"kernel bytes"
+        );
+        assert_eq!(
+            fs::read(dest.join("rootfs/rootfs.ext4")).unwrap(),
+            b"rootfs bytes"
+        );
+        assert_eq!(fs::read(dest.join("cmdline.txt")).unwrap(), b"console=hvc0");
+    }
+
+    #[test]
+    fn extract_writes_nothing_when_verification_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = write_fixture(dir.path(), "vmlinux", b"kernel bytes");
+        let r = write_fixture(dir.path(), "rootfs.ext4", b"rootfs bytes");
+        let c = write_fixture(dir.path(), "cmdline.txt", b"console=hvc0");
+        let key = test_keypair();
+        let out = dir.path().join("out.mvm");
+        pack(&dev_inputs(&k, &r, &c), &key, &out).unwrap();
+
+        // A different key fails the signature check; extraction must abort
+        // before writing any payload — a portable artifact is never a bypass.
+        let wrong_key = test_keypair();
+        let dest = dir.path().join("extracted");
+        let err = extract(&out, &wrong_key.verifying_key(), &dest).unwrap_err();
+        assert!(matches!(err, ArtifactError::SignatureMismatch));
+        assert!(
+            !dest.join("kernel/vmlinux").exists(),
+            "no payload may land on disk when verification fails"
+        );
     }
 
     #[test]
