@@ -593,6 +593,15 @@ fn dev_build_via_builder_vm_uncached(
     // mid-dispatch) falls back to single-shot with a warning —
     // the single-shot path is the safety net.
     let residency = mvm_core::residency::resolve_residency().0;
+    if let Some(reason) = crate::persistent_builder::enforce_active_session_policy(
+        &residency,
+        crate::persistent_builder::current_unix_secs(),
+    ) {
+        tracing::info!(
+            ?reason,
+            "persistent builder session stopped by residency policy"
+        );
+    }
     if persistent_routing_allowed(&residency, persistent_dispatch_disabled())
         && let Some(record) = crate::persistent_builder::read_active_session()
     {

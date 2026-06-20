@@ -3172,7 +3172,9 @@ and the residency model and consumes the in-flight pieces rather than rebuilding
   (`MVM_RESIDENCY` warm⇄parked, per-host default AS=warm/CI=parked), `effective_warm_pool_size`
   wired into `up`, `mvmctl doctor` residency line. Idle→parked demotion delivered by D;
   builder builds honor `MVM_RESIDENCY=cold` by taking the ephemeral-builder path instead of
-  the persistent builder (#1114).
+  the persistent builder (#1114). The hidden libkrun `persistent-builder` session now records
+  `last_activity_unix_secs`; build dispatch touches it before/after use, and the next build
+  invocation actively tears down a live session under `MVM_RESIDENCY=cold`.
 - **C — Resident builder daemon**  ✅ delivered by Plan 204 (#1091) — `mvm-builderd` is the
   resident builder-VM control daemon (typed vsock, no shell). Session-reuse/crash-recovery
   lifecycle is Plan 204's domain.
@@ -3183,7 +3185,8 @@ and the residency model and consumes the in-flight pieces rather than rebuilding
   builder snapshot freshness checks (#1121). Follow-up slice: the explicit Vz dev-builder
   park/restore path is wired (`mvmctl dev park` saves `state.vzsave`, next `dev up` restores
   before cold-boot fallback, `dev status` reports `parked`, `doctor` reports parked
-  snapshot-present/no-snapshot state); idle-trigger automation, FC leg
+  snapshot-present/no-snapshot state). The libkrun persistent-builder keeper degrades idle
+  `Park` to teardown because that path has no snapshot primitive; Vz idle-trigger automation, FC leg
   (Plan 175), and live macOS-26 resume timing remain deferred.
 - **E — Cold acquisition**  ✅ #1102 — `mvmctl bootstrap` pre-fetches the builder VM image
   (instant first run); source-checkout stays release-artifact-free.
@@ -3202,7 +3205,7 @@ and the residency model and consumes the in-flight pieces rather than rebuilding
   authority, or audit writer exists below the host→builder vsock line.
 - Claim-11 volumes still fail closed on a resumed builder; no ADR-002 numbered claim
   regresses; `xtask check-claim-catalog` stays green.
-- Remaining Plan 205 closeout is live-gated/policy-gated: idle-driven warm→parked demotion
+- Remaining Plan 205 closeout is live-gated/policy-gated: Vz idle-driven warm→parked demotion
   for the builder, macOS-26 parked-restore timing proof via `mvm-builderd`, and the
   live-coupled OCI `run --image` residency path.
 

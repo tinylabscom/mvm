@@ -26,7 +26,7 @@
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
@@ -643,6 +643,78 @@ pub struct SessionRecord {
     /// PID of the libkrun supervisor child. Used to check the
     /// session is alive before routing through it.
     pub supervisor_pid: u32,
+    /// Last known successful host-side activity against the session.
+    ///
+    /// Optional for backward compatibility with session records written before
+    /// the invocation-driven keeper. Missing means "unknown", and the keeper
+    /// treats it as active at the current observation time rather than tearing
+    /// down an upgraded user's existing builder immediately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_unix_secs: Option<u64>,
+}
+
+/// Why the invocation-driven keeper should stop the persistent builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuilderSessionTeardownReason {
+    /// `MVM_RESIDENCY=cold` means no resident builder should remain alive.
+    ColdPolicy,
+    /// Policy requested a parked snapshot after idle, but this libkrun-backed
+    /// persistent-builder session has no memory snapshot primitive.
+    SnapshotUnavailable,
+}
+
+/// Pure decision for a live persistent-builder session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuilderSessionPolicyDecision {
+    Keep,
+    Teardown(BuilderSessionTeardownReason),
+}
+
+/// Decide what the keeper should do with a live persistent-builder session.
+///
+/// The Vz dev-builder has a real snapshot path; this hidden
+/// `persistent-builder` session is currently libkrun-backed, so a policy-level
+/// `Park` decision degrades to teardown rather than pretending a snapshot was
+/// captured.
+pub fn decide_builder_session_policy(
+    record: &SessionRecord,
+    policy: &mvm_core::residency::ResidencyPolicy,
+    now_unix_secs: u64,
+) -> BuilderSessionPolicyDecision {
+    if matches!(policy.kind(), mvm_core::residency::ResidencyKind::Cold) {
+        return BuilderSessionPolicyDecision::Teardown(BuilderSessionTeardownReason::ColdPolicy);
+    }
+
+    let Some(threshold) = builder_session_idle_threshold(policy) else {
+        return BuilderSessionPolicyDecision::Keep;
+    };
+    let idle = session_idle_duration(record, now_unix_secs);
+    match mvm_core::residency::decide_builder_residency_action(policy.kind(), idle, threshold) {
+        mvm_core::residency::BuilderResidencyAction::Keep => BuilderSessionPolicyDecision::Keep,
+        mvm_core::residency::BuilderResidencyAction::Park => {
+            BuilderSessionPolicyDecision::Teardown(
+                BuilderSessionTeardownReason::SnapshotUnavailable,
+            )
+        }
+        mvm_core::residency::BuilderResidencyAction::Teardown => {
+            BuilderSessionPolicyDecision::Teardown(BuilderSessionTeardownReason::ColdPolicy)
+        }
+    }
+}
+
+fn builder_session_idle_threshold(
+    policy: &mvm_core::residency::ResidencyPolicy,
+) -> Option<Duration> {
+    match policy.kind() {
+        mvm_core::residency::ResidencyKind::Cold => Some(Duration::ZERO),
+        mvm_core::residency::ResidencyKind::Parked => Some(Duration::ZERO),
+        mvm_core::residency::ResidencyKind::Warm => policy.idle_timeout(),
+    }
+}
+
+fn session_idle_duration(record: &SessionRecord, now_unix_secs: u64) -> Duration {
+    let last = record.last_activity_unix_secs.unwrap_or(now_unix_secs);
+    Duration::from_secs(now_unix_secs.saturating_sub(last))
 }
 
 /// On-disk location of the session record. Returns `None` only if
@@ -667,6 +739,72 @@ pub fn read_active_session() -> Option<SessionRecord> {
         return None;
     }
     Some(record)
+}
+
+/// Mark the active session as used. Best-effort: a failed touch should not make
+/// a build fail, but it gives the invocation-driven keeper a durable activity
+/// signal on the next command.
+pub fn touch_active_session(now_unix_secs: u64) -> std::io::Result<bool> {
+    let Some(path) = session_record_path() else {
+        return Ok(false);
+    };
+    let body = match std::fs::read(&path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let mut record: SessionRecord = serde_json::from_slice(&body).map_err(std::io::Error::other)?;
+    if !supervisor_alive(record.supervisor_pid) {
+        return Ok(false);
+    }
+    record.last_activity_unix_secs = Some(now_unix_secs);
+    let body = serde_json::to_vec_pretty(&record).map_err(std::io::Error::other)?;
+    std::fs::write(path, body)?;
+    Ok(true)
+}
+
+/// Apply the resolved residency policy to any active libkrun persistent-builder
+/// session. Returns the teardown reason when it stopped a session. Errors are
+/// intentionally swallowed by the caller-facing API: residency enforcement must
+/// not make the single-shot fallback unavailable.
+pub fn enforce_active_session_policy(
+    policy: &mvm_core::residency::ResidencyPolicy,
+    now_unix_secs: u64,
+) -> Option<BuilderSessionTeardownReason> {
+    let record = read_active_session()?;
+    let BuilderSessionPolicyDecision::Teardown(reason) =
+        decide_builder_session_policy(&record, policy, now_unix_secs)
+    else {
+        return None;
+    };
+
+    let supervisor = PersistentBuilderSupervisor::new(&record.dispatch_socket_path);
+    let _ = supervisor.shutdown();
+    terminate_supervisor(record.supervisor_pid);
+    if let Some(path) = session_record_path() {
+        let _ = std::fs::remove_file(path);
+    }
+    Some(reason)
+}
+
+fn terminate_supervisor(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        // SAFETY: `kill(SIGTERM)` targets the PID recorded in the session file.
+        // It does not dereference pointers or share memory with Rust.
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
+pub fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs()
 }
 
 /// `kill(pid, 0)` — checks the process exists without signalling.
@@ -844,6 +982,7 @@ impl crate::builder_vm::BuilderVm for PersistentBuilderVm {
             BuilderJob::Install { .. } => unreachable!("handled above"),
         };
 
+        let _ = touch_active_session(current_unix_secs());
         let job_id = stage_flake_dispatch_job(&self.session.job_dir, flake_ref, attr_path)
             .map_err(|e| {
                 BuilderVmError::ExtractionFailed(format!("staging persistent dispatch job: {e}"))
@@ -854,6 +993,7 @@ impl crate::builder_vm::BuilderVm for PersistentBuilderVm {
         let outcome = supervisor
             .submit(job.clone(), job_id.clone())
             .map_err(|e| BuilderVmError::NixBuildFailed(format!("persistent dispatch: {e}")))?;
+        let _ = touch_active_session(current_unix_secs());
         if outcome.exit_code != 0 {
             return Err(BuilderVmError::NixBuildFailed(format!(
                 "persistent dispatch exit {} — stderr tail:\n{}",
@@ -1061,11 +1201,13 @@ mod tests {
             job_dir: PathBuf::from("/tmp/jobs"),
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
+            last_activity_unix_secs: Some(1234567890),
         };
         let json = serde_json::to_vec(&record).unwrap();
         let back: SessionRecord = serde_json::from_slice(&json).unwrap();
         assert_eq!(back.session_id, "abc");
         assert_eq!(back.supervisor_pid, 4242);
+        assert_eq!(back.last_activity_unix_secs, Some(1234567890));
     }
 
     #[test]
@@ -1079,11 +1221,132 @@ mod tests {
             "dispatch_socket_path": "/home/u/.mvm/vms/foo/vsock-21471.sock",
             "job_dir": "/home/u/.mvm/jobs/foo",
             "workspace_root": "/work",
-            "supervisor_pid": 7777
+            "supervisor_pid": 7777,
+            "last_activity_unix_secs": 1234567890
         }"#;
         let record: SessionRecord = serde_json::from_str(json).expect("parse mvm-cli shape");
         assert_eq!(record.session_id, "abc123");
         assert_eq!(record.supervisor_pid, 7777);
+        assert_eq!(record.last_activity_unix_secs, Some(1234567890));
+    }
+
+    #[test]
+    fn session_record_defaults_missing_last_activity_to_none() {
+        let json = r#"{
+            "session_id": "abc123",
+            "dispatch_socket_path": "/home/u/.mvm/vms/foo/vsock-21471.sock",
+            "job_dir": "/home/u/.mvm/jobs/foo",
+            "workspace_root": "/work",
+            "supervisor_pid": 7777
+        }"#;
+        let record: SessionRecord = serde_json::from_str(json).expect("parse old shape");
+        assert_eq!(record.last_activity_unix_secs, None);
+        assert_eq!(
+            decide_builder_session_policy(
+                &record,
+                &mvm_core::residency::ResidencyPolicy::always_warm(),
+                1234567890 + 3600,
+            ),
+            BuilderSessionPolicyDecision::Keep,
+            "old records must not be torn down immediately after upgrade"
+        );
+    }
+
+    #[test]
+    fn builder_session_policy_keeps_fresh_warm_session() {
+        let record = SessionRecord {
+            session_id: "abc".to_string(),
+            dispatch_socket_path: PathBuf::from("/tmp/sock"),
+            job_dir: PathBuf::from("/tmp/jobs"),
+            workspace_root: PathBuf::from("/work"),
+            supervisor_pid: 4242,
+            last_activity_unix_secs: Some(1000),
+        };
+        assert_eq!(
+            decide_builder_session_policy(
+                &record,
+                &mvm_core::residency::ResidencyPolicy::always_warm(),
+                1000 + 60,
+            ),
+            BuilderSessionPolicyDecision::Keep,
+        );
+    }
+
+    #[test]
+    fn builder_session_policy_tears_down_cold_immediately() {
+        let record = SessionRecord {
+            session_id: "abc".to_string(),
+            dispatch_socket_path: PathBuf::from("/tmp/sock"),
+            job_dir: PathBuf::from("/tmp/jobs"),
+            workspace_root: PathBuf::from("/work"),
+            supervisor_pid: 4242,
+            last_activity_unix_secs: Some(1000),
+        };
+        assert_eq!(
+            decide_builder_session_policy(
+                &record,
+                &mvm_core::residency::ResidencyPolicy::cold(),
+                1001,
+            ),
+            BuilderSessionPolicyDecision::Teardown(BuilderSessionTeardownReason::ColdPolicy),
+        );
+    }
+
+    #[test]
+    fn builder_session_policy_tears_down_when_snapshot_unavailable() {
+        let record = SessionRecord {
+            session_id: "abc".to_string(),
+            dispatch_socket_path: PathBuf::from("/tmp/sock"),
+            job_dir: PathBuf::from("/tmp/jobs"),
+            workspace_root: PathBuf::from("/work"),
+            supervisor_pid: 4242,
+            last_activity_unix_secs: Some(1000),
+        };
+        assert_eq!(
+            decide_builder_session_policy(
+                &record,
+                &mvm_core::residency::ResidencyPolicy::always_warm(),
+                1000 + 20 * 60 + 1,
+            ),
+            BuilderSessionPolicyDecision::Teardown(
+                BuilderSessionTeardownReason::SnapshotUnavailable
+            ),
+        );
+    }
+
+    #[test]
+    fn touch_active_session_updates_live_record_timestamp() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let run_dir = scratch.path().join(".mvm").join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let record = SessionRecord {
+            session_id: "x".to_string(),
+            dispatch_socket_path: PathBuf::from("/dev/null"),
+            job_dir: PathBuf::from("/tmp"),
+            workspace_root: PathBuf::from("/tmp"),
+            supervisor_pid: std::process::id(),
+            last_activity_unix_secs: Some(1),
+        };
+        std::fs::write(
+            run_dir.join("persistent-builder.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        let old = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", scratch.path());
+        }
+        let touched = touch_active_session(55).expect("touch active session");
+        unsafe {
+            match old {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        assert!(touched);
+        let body = std::fs::read(run_dir.join("persistent-builder.json")).unwrap();
+        let back: SessionRecord = serde_json::from_slice(&body).unwrap();
+        assert_eq!(back.last_activity_unix_secs, Some(55));
     }
 
     #[test]
@@ -1125,6 +1388,7 @@ mod tests {
             job_dir: PathBuf::from("/tmp"),
             workspace_root: PathBuf::from("/tmp"),
             supervisor_pid: DEFINITELY_DEAD_PID,
+            last_activity_unix_secs: Some(1234567890),
         };
         std::fs::write(
             run_dir.join("persistent-builder.json"),
