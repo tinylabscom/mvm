@@ -2,6 +2,10 @@ pub mod app_deps;
 pub mod app_deps_gate;
 pub mod artifacts;
 pub mod backend;
+/// Host-side control-socket client for the persistent Vz builder VM.
+/// Mirrors the minimal line-framed protocol the Vz supervisor exposes,
+/// without depending on `mvm-backend` (which sits above `mvm-build`).
+pub mod builder_control;
 /// Vsock dispatch wire types for the persistent builder VM.
 pub mod builder_protocol;
 pub mod builder_vm;
