@@ -1359,8 +1359,14 @@ mod tests {
         )
         .unwrap();
 
-        // All three blobs cloned into the child dir.
-        for name in ["rootfs.ext4", "memory.bin", "machine-id"] {
+        // All vm_full blobs cloned into the child dir, including the launch
+        // config needed to survive stop/restart state-dir reaping.
+        for name in [
+            "rootfs.ext4",
+            "memory.bin",
+            "machine-id",
+            crate::vz::SUPERVISOR_CONFIG_FILE_NAME,
+        ] {
             assert!(dest.join(name).exists(), "{name} not cloned");
         }
         // Lineage + class + content carried over.
@@ -1368,7 +1374,16 @@ mod tests {
         assert_eq!(child.parent.as_ref().unwrap(), &parent.id);
         assert_eq!(child.vm_name, "childvm");
         assert_eq!(child.content, parent.content);
-        assert_eq!(child.content.len(), 3);
+        let names: Vec<_> = child.content.iter().map(|blob| blob.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "rootfs.ext4",
+                "memory.bin",
+                "machine-id",
+                crate::vz::SUPERVISOR_CONFIG_FILE_NAME,
+            ]
+        );
 
         // Spawner invoked with the rewritten child config.
         let cfg = spawner.seen.borrow().clone().unwrap();
