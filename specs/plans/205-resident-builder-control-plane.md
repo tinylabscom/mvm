@@ -146,12 +146,39 @@ typed allowlisted protocol, so residency shrinks rather than widens the attack s
 Plan 205 is done when:
 
 - a second `mvmctl` command in a session triggers no builder boot (warm) or a
-  sub-second resume (parked) — measured, not asserted;
+  sub-second resume (parked) — held to the **latency budget** below, CI-gated,
+  not asserted;
 - the residency posture is a single policy with a per-host default and an override;
 - the trust-gradient invariant has passing structural tests, and no signing key,
   admission authority, or audit writer exists below the host→builder vsock line;
 - claim-11 volumes still fail closed on a resumed builder via host-side re-verification;
 - `mvmctl doctor` reports residency state; docs explain host/builder/workload split.
+
+## Latency budget (the "instant" bar)
+
+"Feels instant" is an acceptance gate, not prose. The residency slider must hold
+these budgets; a regression fails the build.
+
+| Path | Budget (P50) | How it is gated |
+|---|---|---|
+| Warm (`min ≥ 1`), Nth command in a session | **no builder boot occurs**; the only added latency is the control round-trip (handshake + dispatch) to the resident `mvm-builderd`: **< 50 ms** | deterministic in the PR matrix — assert the warm path takes the resident-daemon branch (no boot) and measure the round-trip against a live local daemon (no VM) |
+| Parked (`min = 0`), resume-on-demand | snapshot restore **< 100 ms** (ADR-090 §2) | backend-bearing live lane: Vz/macOS (Plan 159) and FC/KVM (Plan 175) |
+| Cold acquisition, second-ever boot | a **restore**, not a cold boot — within the parked budget | first boot bakes a snapshot (WS-E); the second boot is measured ≤ the parked-resume budget |
+
+Notes:
+
+- GitHub Actions can enforce the *invariant* deterministically (warm reuses with
+  no boot; the control-plane budget); the full **resume-ms** number needs a
+  runner with the backend, so it rides the existing host-gated live-bench lanes
+  (mirroring Plan 118 `bench microvm-launch` and the macOS live lanes), not the
+  default PR matrix. Both are required checks for "done".
+- A P95 ceiling of 2× the P50 budget guards tail latency.
+- These are the *initial* bar — tighten as the warm/parked paths land; never
+  loosen silently (log any cap, per the ADR-002 no-silent-caps discipline).
+- The first-ever **image-download** cost is explicitly *out* of this budget: it
+  is paid once at install/prefetch time (ADR-089 `mvmctl bootstrap` prefetch /
+  the install script), never on the per-command hot path. The budget measures
+  bring-up given the image is present.
 
 ## Verification
 
@@ -161,7 +188,10 @@ Plan 205 is done when:
 - [ ] Resident-daemon reuse test: second request reuses the live builder + hot store.
 - [ ] Snapshot freshness test: changed builder fingerprint refuses a stale resume.
 - [ ] Claim-11 admit-time re-verification holds on a resumed builder.
-- [ ] Measured latency: warm second command, and parked-resume first command.
+- [ ] Latency gate (the "instant" bar): the warm-path no-boot + control-plane
+      `< 50 ms` assertion runs in the PR matrix; the parked-resume `< 100 ms` P50
+      (P95 ≤ 2×) runs on the backend-bearing Vz/FC live lane; a regression past
+      either budget fails the build. (See the Latency budget table.)
 - [ ] `cargo test --workspace`.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`.
 
