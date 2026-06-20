@@ -214,6 +214,9 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("exec", AuditPosture::InteractiveOrControl),
     ("shell", AuditPosture::InteractiveOrControl),
     ("stop", AuditPosture::InteractiveOrControl),
+    // Plan 200 — verify a portable `.mvm` + preview its admission. Read-only:
+    // no extraction, no boot, no audit-chain emission.
+    ("check-artifact", AuditPosture::ReadOnly),
 ];
 
 const VOLUME_SUB: &[(&str, AuditPosture)] = &[

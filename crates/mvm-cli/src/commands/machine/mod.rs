@@ -14,6 +14,8 @@
 //! transient runner, while `exec` / `shell` / `stop` stay thin wrappers over
 //! the existing running-VM surfaces.
 
+mod portable;
+
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use clap::{Args as ClapArgs, Subcommand};
@@ -73,6 +75,11 @@ pub(in crate::commands) enum MachineAction {
     Shell(MachineShellArgs),
     /// Stop an already-started named machine
     Stop(MachineStopArgs),
+    /// Verify a portable `.mvm` artifact and preview how `machine run` would
+    /// admit it (arch, profile, seccomp, egress, volumes). Read-only: no
+    /// extraction, no boot.
+    #[command(name = "check-artifact")]
+    CheckArtifact(portable::CheckArtifactArgs),
 }
 
 /// Ephemeral image-backed run. Mirrors the relevant subset of `mvmctl run`'s
@@ -1417,6 +1424,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Exec(exec_args) => exec_machine(cli, exec_args, cfg),
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
+        MachineAction::CheckArtifact(a) => portable::run_check_artifact(a),
     }
 }
 
