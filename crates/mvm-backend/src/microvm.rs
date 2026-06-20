@@ -1142,8 +1142,11 @@ pub fn warm_restore_instance(
     require_linux_env()?;
 
     let vm_dir = resolve_running_vm_dir(name)?;
-    let socket = format!("{vm_dir}/runtime/firecracker.socket");
-    let pid_file = format!("{vm_dir}/runtime/firecracker.pid");
+    // The control socket + pid file every other FC op in this module uses
+    // (`start_vm_firecracker`, `resume_vm`, balloon, …) — `{dir}/fc.socket`,
+    // not a `runtime/` variant.
+    let socket = format!("{vm_dir}/fc.socket");
+    let pid_file = format!("{vm_dir}/fc.pid");
     if !firecracker::is_vm_running(&pid_file)? {
         anyhow::bail!(
             "VM '{name}' Firecracker is not running — warm-start resumes a paused VM; \

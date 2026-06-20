@@ -1191,7 +1191,10 @@ mod tests {
             } => {
                 assert_eq!(requested, SnapshotCapability::LiveMemory);
                 assert_eq!(available, SnapshotCapability::DiskOnly);
-                assert!(hint.contains("disk-only"), "hint names the tier: {hint}");
+                // The recovery hint points at a cold boot rather than a silent
+                // degrade (libkrun overrides with a richer message; the stable
+                // phrase both it and the default share is the cold-boot hint).
+                assert!(hint.contains("cold boot"), "hint offers recovery: {hint}");
             }
             other => panic!("expected Unsupported, got {other:?}"),
         }

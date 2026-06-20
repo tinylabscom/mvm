@@ -276,7 +276,10 @@ pub(in crate::commands) fn run_resume(
 }
 
 fn firecracker_socket(vm_dir: &str) -> PathBuf {
-    PathBuf::from(format!("{vm_dir}/runtime/firecracker.socket"))
+    // The control socket `start_vm_firecracker` actually creates — `fc.socket`
+    // in the VM dir. (Was `runtime/firecracker.socket`, a path nothing in the
+    // tree ever creates, so pause/resume could never find a live VM.)
+    PathBuf::from(format!("{vm_dir}/fc.socket"))
 }
 
 // `mvmctl snapshot ls / rm` lives next to pause/resume because
