@@ -91,13 +91,19 @@ as `min` warm instances plus an idle timeout — not two implementations.
 
 ```text
  Parked (snapshot on disk)  ◀── idle-timeout ──  Warm (resident)
-   │   resume <100ms ─────────────────────────────▶  │
+   │   resume ≈ cold boot ───────────────────────────▶  │
  min=0: no idle RAM (resume-on-demand)     min≥1: no boot latency (always-resident)
 ```
 
-- `min ≥ 1` keeps a builder warm: zero per-command boot latency.
+- `min ≥ 1` keeps a builder warm: zero per-command boot latency. This is the
+  "instant" path — no VM boot, only a control round-trip to the resident daemon.
 - `min = 0` parks the builder as a snapshot (Plan 159 for Vz, Plan 175 for Firecracker)
-  and resumes it on demand in well under a second.
+  and resumes it on demand. The resume is a full guest-memory restore, so it costs about
+  what a cold boot of the same closure does — single-digit seconds (~2.3 s measured for a
+  512 MiB builder, 2026-06-13). `min = 0` trades resume latency for zero idle RAM; it is
+  not a sub-second path, and the earlier "<100 ms" figure conflated the control-plane
+  resume signal with the memory restore. Its bar is "no slower than a cold boot of the
+  same closure," not "instant."
 - The idle timeout demotes warm→parked; the next command promotes parked→warm.
 - Each host picks a default (for example, an Apple-silicon dev box defaults warm; CI
   defaults parked). The mechanism is identical either way.

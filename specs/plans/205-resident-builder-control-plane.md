@@ -15,7 +15,8 @@ Make builder bring-up disappear from the steady state without moving any authori
 into a guest. Concretely:
 
 - the per-session builder boot (the top latency pain) is gone — the builder is already
-  warm, or resumes from a snapshot in under a second;
+  warm (no boot at all), or resumes from a snapshot no slower than a cold boot of the
+  same closure while costing zero idle RAM;
 - cold acquisition on a fresh machine is a one-time event whose second boot is a
   restore, with no release-pipeline dependency for source checkouts;
 - the three long-lived daemons (host control, builder, workload agent) sit on an
@@ -113,7 +114,7 @@ cross the host→builder vsock line — is codified and tested (Workstream A).
 ### Residency slider (ADR-090 §2)
 
 `min` warm builders + idle timeout select a point between always-resident (`min ≥ 1`)
-and parked-and-resumed (`min = 0`, snapshot on disk, sub-second resume). One mechanism
+and parked-and-resumed (`min = 0`, snapshot on disk, resume ≈ cold boot, zero idle RAM). One mechanism
 over the Plan 118 pool. Per-host default, user-overridable. `mvmctl doctor` reports the
 live residency state (warm / parked / cold) and the resolved default's source.
 
@@ -211,8 +212,8 @@ typed allowlisted protocol, so residency shrinks rather than widens the attack s
 Plan 205 is done when:
 
 - a second `mvmctl` command in a session triggers no builder boot (warm) or a
-  sub-second resume (parked) — held to the **latency budget** below, CI-gated,
-  not asserted;
+  parked resume no slower than a cold boot of the same closure — held to the
+  **latency budget** below, CI-gated, not asserted;
 - the residency posture is a single policy with a per-host default and an override;
 - the trust-gradient invariant has passing structural tests, and no signing key,
   admission authority, or audit writer exists below the host→builder vsock line;
@@ -226,8 +227,8 @@ these budgets; a regression fails the build.
 
 | Path | Budget (P50) | How it is gated |
 |---|---|---|
-| Warm (`min ≥ 1`), Nth command in a session | **no builder boot occurs**; the only added latency is the control round-trip (handshake + dispatch) to the resident `mvm-builderd`: **< 50 ms** | deterministic in the PR matrix — assert the warm path takes the resident-daemon branch (no boot) and measure the round-trip against a live local daemon (no VM) |
-| Parked (`min = 0`), resume-on-demand | snapshot restore **< 100 ms** (ADR-090 §2) | backend-bearing live lane: Vz/macOS (Plan 159) and FC/KVM (Plan 175) |
+| Warm (`min ≥ 1`), Nth command in a session | **no builder boot occurs**; the only added latency is the control round-trip (handshake + dispatch) to the resident `mvm-builderd`: **< 50 ms**. This is the only "instant" path. | deterministic in the PR matrix — assert the warm path takes the resident-daemon branch (no boot) and measure the round-trip against a live local daemon (no VM) |
+| Parked (`min = 0`), resume-on-demand | a full guest-memory restore: **≤ a cold boot of the same closure** (single-digit seconds; ~2.3 s measured for a 512 MiB builder, 2026-06-13). Parked trades resume latency for zero idle RAM — its bar is "no slower than cold boot," not "instant." The sub-100 ms figure applies only to the control-plane resume *signal* (decide + dispatch), never the memory restore. | backend-bearing live lane: Vz/macOS (Plan 159) and FC/KVM (Plan 175) — assert `resume-ms ≤ cold-boot-ms` for the same closure |
 | Cold acquisition, second-ever boot | a **restore**, not a cold boot — within the parked budget | first boot bakes a snapshot (WS-E); the second boot is measured ≤ the parked-resume budget |
 
 Notes:
@@ -257,13 +258,32 @@ Notes:
 - [~] Claim-11 admit-time re-verification holds on a resumed builder. The design remains
       host-side and content-addressed; resumed-builder live proof remains open.
 - [~] Latency gate (the "instant" bar): the warm-path no-boot + control-plane
-      `< 50 ms` assertion runs in the PR matrix; the parked-resume `< 100 ms` P50
-      (P95 ≤ 2×) runs on the backend-bearing Vz/FC live lane; a regression past
-      either budget fails the build. (See the Latency budget table.)
+      `< 50 ms` assertion runs in the PR matrix; the parked-resume budget
+      (`resume-ms ≤ cold-boot-ms` for the same closure, P95 ≤ 2× P50) runs on the
+      backend-bearing Vz/FC live lane; a regression past either budget fails the
+      build. (See the Latency budget table.) The parked bar is "no slower than a
+      cold boot," not sub-second — the resume is a full memory restore.
 - [~] `cargo test --workspace` for all landed slices passed in their PRs; plan-wide
       final live-gated acceptance is still open.
 - [~] `cargo clippy --workspace --all-targets -- -D warnings` for all landed slices
       passed in their PRs; plan-wide final live-gated acceptance is still open.
+
+### Deferred follow-ups
+
+- [x] Reconcile the parked-resume latency budget with the team's own ~2.3 s live
+      measurement (was `< 100 ms`, physically impossible for a 512 MiB memory
+      restore). The parked bar is now "≤ a cold boot of the same closure"; the
+      `< 50 ms` / sub-100 ms figures scope to the warm control round-trip and the
+      control-plane resume signal, never the memory restore. ADR-090 §2 updated to
+      match (the diagram + prose no longer claim a sub-second memory resume).
+- [ ] Build `bench residency-resume`: instrument resume-ms on the parked→warm
+      promotion and assert `resume-ms ≤ cold-boot-ms` for the same closure on the
+      backend-bearing Vz/FC live lane (mirrors Plan 118 `bench microvm-launch`).
+      Blocked on the instrumentation below.
+- [ ] Add a force-demotion hook so the live bench can park on demand (today
+      demotion is TTL-gated at ~20 min idle with no force knob), and extend
+      `MVM_RESIDENCY` (or a sibling override) with an idle/force-park override so
+      the parked path is reachable without waiting out the timeout.
 
 ## Security Notes
 
