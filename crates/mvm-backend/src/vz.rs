@@ -137,7 +137,7 @@ const DRAINER_PID_FILE_NAME: &str = "vz-drainer.pid";
 /// `snapshot_restore` can replay the same shape with
 /// `startup_mode` flipped. Mode 0600 — same tier as the audit
 /// chain and the host signer.
-const SUPERVISOR_CONFIG_FILE_NAME: &str = "supervisor-config.json";
+pub(crate) const SUPERVISOR_CONFIG_FILE_NAME: &str = "supervisor-config.json";
 
 /// Canonical path to a VM's persisted supervisor config inside its state dir.
 /// The single source of truth for the file name so callers (e.g. the
@@ -1046,6 +1046,7 @@ impl crate::checkpoint::VmFullRestore for VzBackend {
         rootfs_src: &std::path::Path,
         memory: &std::path::Path,
         machine_id: &std::path::Path,
+        config_src: Option<&std::path::Path>,
     ) -> anyhow::Result<()> {
         restore_with_spawn(
             self,
@@ -1053,6 +1054,7 @@ impl crate::checkpoint::VmFullRestore for VzBackend {
             rootfs_src,
             memory,
             machine_id,
+            config_src,
             |backend, vm, mem, mid| {
                 backend
                     .snapshot_restore(&VmId(vm.to_string()), mem, Some(mid))
@@ -1070,9 +1072,16 @@ fn restore_with_spawn(
     rootfs_src: &std::path::Path,
     memory: &std::path::Path,
     machine_id: &std::path::Path,
+    config_src: Option<&std::path::Path>,
     do_restore: impl FnOnce(&VzBackend, &str, &std::path::Path, &std::path::Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     refuse_if_running(target_vm)?;
+    // Rebuild the state dir the stop reaped before anything reads it: restore
+    // resolves the rootfs target and spawns the supervisor from this config.
+    if let Some(config_src) = config_src {
+        let target_config = supervisor_config_path(&vm_state_dir(target_vm));
+        crate::checkpoint::reconstruct_state_config(config_src, &target_config)?;
+    }
     use crate::checkpoint::VmFullControl as _;
     let target_rootfs = VzVmFullControl::new(target_vm)
         .rootfs_path()
@@ -1418,6 +1427,9 @@ fn vz_spawn_standby(
         id: pool_id.clone(),
         vm_name: spec.id.clone(),
         supervisor_config_digest: cfg_digest,
+        // The seed's own state dir is torn down at stop, so capture from the
+        // durable copy just persisted into the pool dir.
+        supervisor_config_src: pool_seed_config_path(&pool_root, &spec.id),
         tag: None,
         created_unix: crate::standby_pool::now_unix_secs(),
     };
@@ -3593,6 +3605,7 @@ mod tests {
                 std::path::Path::new("/nonexistent/rootfs.ext4"),
                 std::path::Path::new("/nonexistent/memory.bin"),
                 std::path::Path::new("/nonexistent/machine-id"),
+                None,
             )
             .expect_err("must refuse restore into a running VM");
 
@@ -3694,6 +3707,7 @@ mod tests {
             &src_rootfs,
             Path::new("/abs/memory.bin"),
             Path::new("/abs/machine-id"),
+            None,
             |_, _, _, _| anyhow::bail!("injected spawn failure"),
         )
         .expect_err("injected failure must propagate");
@@ -3750,6 +3764,7 @@ mod tests {
             &src_rootfs,
             Path::new("/abs/memory.bin"),
             Path::new("/abs/machine-id"),
+            None,
             |_, _, _, _| panic!("spawn must not be called when target already exists"),
         )
         .expect_err("pre-existing target must error");

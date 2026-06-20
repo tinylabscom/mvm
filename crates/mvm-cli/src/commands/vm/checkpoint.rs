@@ -435,6 +435,7 @@ fn create_vm_full(name: &str, tag: Option<String>, json: bool) -> Result<()> {
             id,
             vm_name: name.to_string(),
             supervisor_config_digest: supervisor_config_digest(&state_dir),
+            supervisor_config_src: supervisor_config_path(&state_dir),
             tag,
             created_unix: now,
         },

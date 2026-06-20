@@ -408,6 +408,9 @@ pub struct CaptureVmFullParams {
     pub id: CheckpointId,
     pub vm_name: String,
     pub supervisor_config_digest: String,
+    /// The live VM's persisted supervisor config, copied into the checkpoint so
+    /// restore can rebuild the state dir (every stop reaps the live one).
+    pub supervisor_config_src: PathBuf,
     pub tag: Option<String>,
     pub created_unix: u64,
 }
@@ -446,6 +449,18 @@ pub fn capture_vm_full(
     captured?;
     resumed.context("resuming VM after vm_full capture")?;
 
+    // Persist the launch config into the checkpoint. Restore needs it to resolve
+    // the target rootfs path and to spawn the supervisor, but every stop reaps
+    // the VM's state dir — so without storing it here the round-trip is
+    // unreachable. (Static during the pause window; copied after resume.)
+    let config_dst = content_dir.join(crate::vz::SUPERVISOR_CONFIG_FILE_NAME);
+    std::fs::copy(&params.supervisor_config_src, &config_dst).with_context(|| {
+        format!(
+            "copying supervisor config {} into checkpoint",
+            params.supervisor_config_src.display()
+        )
+    })?;
+
     let content = vec![
         ContentBlob {
             name: "rootfs.ext4".into(),
@@ -458,6 +473,10 @@ pub fn capture_vm_full(
         ContentBlob {
             name: "machine-id".into(),
             sha256: sha256_file_hex(&machine_id)?,
+        },
+        ContentBlob {
+            name: crate::vz::SUPERVISOR_CONFIG_FILE_NAME.into(),
+            sha256: sha256_file_hex(&config_dst)?,
         },
     ];
     let meta = CheckpointMeta::builder(params.id, CheckpointClass::VmFull, params.vm_name)
@@ -476,13 +495,41 @@ pub trait VmFullRestore {
     /// Materialize `rootfs_src` onto the target VM's rootfs, then restore the
     /// machine `memory` + `machine_id`, and resume. The target must already be
     /// stopped — callers must ensure no live supervisor is racing the rootfs.
+    ///
+    /// `config_src`, when present, is the launch config persisted in the
+    /// checkpoint; the backend rebuilds the target state dir from it (every stop
+    /// reaps the live one). `None` for legacy checkpoints — fall through to the
+    /// existing live-state-dir behavior.
     fn restore(
         &self,
         target_vm: &str,
         rootfs_src: &Path,
         memory: &Path,
         machine_id: &Path,
+        config_src: Option<&Path>,
     ) -> Result<()>;
+}
+
+/// Rebuild a stopped VM's persisted supervisor config at `target_config` from
+/// the checkpoint's `config_src`, unless one is already present. Restore needs
+/// it to resolve the rootfs target + spawn the supervisor, but the per-VM
+/// drainer reaps the state dir on every stop. Side-effect-free when the target
+/// already exists, so it's safe to call unconditionally.
+pub(crate) fn reconstruct_state_config(config_src: &Path, target_config: &Path) -> Result<()> {
+    if target_config.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = target_config.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating restore target state dir {}", parent.display()))?;
+    }
+    std::fs::copy(config_src, target_config).with_context(|| {
+        format!(
+            "reconstructing supervisor config at {} from checkpoint",
+            target_config.display()
+        )
+    })?;
+    Ok(())
 }
 
 pub struct RestoreParams {
@@ -509,11 +556,20 @@ pub fn restore_checkpoint(
     }
     verify_content(store, &meta)?;
     let dir = store.content_dir(&meta.id);
+
+    // The checkpoint carries the launch config (for checkpoints captured after
+    // this landed). Hand it to the restore seam so the backend can rebuild the
+    // target state dir the stop reaped. Older checkpoints lack it → `None`, and
+    // the backend falls through to its legacy live-state-dir behavior.
+    let stored_config = dir.join(crate::vz::SUPERVISOR_CONFIG_FILE_NAME);
+    let config_src = stored_config.is_file().then_some(stored_config.as_path());
+
     restore.restore(
         &params.target_vm,
         &dir.join("rootfs.ext4"),
         &dir.join("memory.bin"),
         &dir.join("machine-id"),
+        config_src,
     )
 }
 
@@ -1031,12 +1087,15 @@ mod tests {
             rootfs,
             events: RefCell::new(vec![]),
         };
+        let config = tmp.path().join("supervisor-config.json");
+        std::fs::write(&config, b"{\"cfg\":true}").unwrap();
         let meta = capture_vm_full(
             &store,
             CaptureVmFullParams {
                 id: CheckpointId::new("v1"),
                 vm_name: "vm".into(),
                 supervisor_config_digest: "d".into(),
+                supervisor_config_src: config,
                 tag: None,
                 created_unix: 9,
             },
@@ -1050,12 +1109,16 @@ mod tests {
             names.contains(&"rootfs.ext4")
                 && names.contains(&"memory.bin")
                 && names.contains(&"machine-id")
+                // The launch config is now captured so restore can rebuild the
+                // reaped state dir.
+                && names.contains(&"supervisor-config.json")
         );
         verify_content(&store, &meta).unwrap();
     }
 
     struct MockRestore {
         seen: RefCell<Option<(String, PathBuf, PathBuf, PathBuf)>>,
+        config_seen: RefCell<Option<PathBuf>>,
     }
     impl VmFullRestore for MockRestore {
         fn restore(
@@ -1064,6 +1127,7 @@ mod tests {
             rootfs_src: &Path,
             memory: &Path,
             machine_id: &Path,
+            config_src: Option<&Path>,
         ) -> Result<()> {
             *self.seen.borrow_mut() = Some((
                 target_vm.to_string(),
@@ -1071,6 +1135,7 @@ mod tests {
                 memory.to_path_buf(),
                 machine_id.to_path_buf(),
             ));
+            *self.config_seen.borrow_mut() = config_src.map(Path::to_path_buf);
             Ok(())
         }
     }
@@ -1078,6 +1143,8 @@ mod tests {
     fn seed_vm_full_checkpoint(store: &CheckpointStore, tmp: &Path, id: &str) -> CheckpointMeta {
         let rootfs = tmp.join("live.ext4");
         std::fs::write(&rootfs, b"disk").unwrap();
+        let config = tmp.join(format!("{id}-supervisor-config.json"));
+        std::fs::write(&config, b"{\"cfg\":true}").unwrap();
         let ctl = MockControl {
             rootfs,
             events: RefCell::new(vec![]),
@@ -1088,6 +1155,7 @@ mod tests {
                 id: CheckpointId::new(id),
                 vm_name: "origin".into(),
                 supervisor_config_digest: "d".into(),
+                supervisor_config_src: config,
                 tag: None,
                 created_unix: 1,
             },
@@ -1103,6 +1171,7 @@ mod tests {
         let ckpt = seed_vm_full_checkpoint(&store, tmp.path(), "v1");
         let restore = MockRestore {
             seen: RefCell::new(None),
+            config_seen: RefCell::new(None),
         };
         restore_checkpoint(
             &store,
@@ -1119,6 +1188,29 @@ mod tests {
         assert_eq!(r, cdir.join("rootfs.ext4"));
         assert_eq!(m, cdir.join("memory.bin"));
         assert_eq!(mid, cdir.join("machine-id"));
+        // The stored launch config is handed to the seam so the backend can
+        // rebuild the reaped state dir.
+        assert_eq!(
+            restore.config_seen.borrow().clone(),
+            Some(cdir.join("supervisor-config.json"))
+        );
+    }
+
+    #[test]
+    fn reconstruct_state_config_writes_when_absent_and_is_a_noop_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src.json");
+        std::fs::write(&src, b"FROM-CHECKPOINT").unwrap();
+
+        // Absent target → reconstructed (parent dir created) from the source.
+        let target = tmp.path().join("vms/origin/supervisor-config.json");
+        reconstruct_state_config(&src, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"FROM-CHECKPOINT");
+
+        // Present target → left untouched (a live config wins, never clobbered).
+        std::fs::write(&target, b"LIVE").unwrap();
+        reconstruct_state_config(&src, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"LIVE");
     }
 
     #[test]
@@ -1128,6 +1220,7 @@ mod tests {
         let fsq = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
         let restore = MockRestore {
             seen: RefCell::new(None),
+            config_seen: RefCell::new(None),
         };
         let err = restore_checkpoint(
             &store,
@@ -1154,6 +1247,7 @@ mod tests {
         std::fs::write(&blob, b"tampered").unwrap();
         let restore = MockRestore {
             seen: RefCell::new(None),
+            config_seen: RefCell::new(None),
         };
         let err = restore_checkpoint(
             &store,
@@ -1265,8 +1359,14 @@ mod tests {
         )
         .unwrap();
 
-        // All three blobs cloned into the child dir.
-        for name in ["rootfs.ext4", "memory.bin", "machine-id"] {
+        // All vm_full blobs cloned into the child dir, including the launch
+        // config needed to survive stop/restart state-dir reaping.
+        for name in [
+            "rootfs.ext4",
+            "memory.bin",
+            "machine-id",
+            crate::vz::SUPERVISOR_CONFIG_FILE_NAME,
+        ] {
             assert!(dest.join(name).exists(), "{name} not cloned");
         }
         // Lineage + class + content carried over.
@@ -1274,7 +1374,20 @@ mod tests {
         assert_eq!(child.parent.as_ref().unwrap(), &parent.id);
         assert_eq!(child.vm_name, "childvm");
         assert_eq!(child.content, parent.content);
-        assert_eq!(child.content.len(), 3);
+        let names: Vec<_> = child
+            .content
+            .iter()
+            .map(|blob| blob.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "rootfs.ext4",
+                "memory.bin",
+                "machine-id",
+                crate::vz::SUPERVISOR_CONFIG_FILE_NAME,
+            ]
+        );
 
         // Spawner invoked with the rewritten child config.
         let cfg = spawner.seen.borrow().clone().unwrap();
