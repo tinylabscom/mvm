@@ -44,6 +44,16 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 ## Planning updates
 
+- [x] Closed
+      [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
+      as implementation-complete. The shipped ADR-076 DX/UX layer includes
+      save/restore aliases, Vz lifecycle JSON coverage, structured-stdout
+      hardening, Vz dev-shell reachability, source-checkout helper freshness,
+      linux-native status detail, and pinned-base resolution/provenance. The
+      remaining macOS-26 save/restore, warm `dev up`, and pinned-base
+      fork/rootfs checks are live validation for already-shipped primitives and
+      are rehomed to the shared Vz live-validation lane, not left as Plan 189
+      implementation blockers.
 - [x] Advanced
       [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
       WS-1 save/restore surface: `mvmctl vm save <name> [--tag] [--json]`
@@ -52,8 +62,10 @@ plan 25 sequences the work into six independently-shippable workstreams.
       same sealed content, audit binding, and JSON shapes rather than adding a
       parallel VZ supervisor path. Both aliases fail closed on the Vz
       `snapshot_capability()` tier before mutating checkpoint state; parser,
-      audit-coverage, and entry-convergence tests pin the surface. Remaining
-      WS-1 work is the live macOS save → stop → restore acceptance proof.
+      audit-coverage, and entry-convergence tests pin the surface. The
+      alias-specific live macOS save → stop → restore check is rehomed because
+      it validates the existing checkpoint primitive rather than unimplemented
+      Plan 189 code.
 - [x] Advanced
       [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
       WS-3 checkpoint/snapshot JSON coverage: `mvmctl vm checkpoint restore`,
@@ -62,9 +74,8 @@ plan 25 sequences the work into six independently-shippable workstreams.
       snapshot rm --json` mirrors the existing snapshot list JSON. Parser
       tests pin every new flag, and the CLI reference now documents the grouped
       `mvmctl vm checkpoint` / `mvmctl vm snapshot` surface instead of stale
-      top-level `mvmctl checkpoint` examples. Remaining Plan 189 WS-3 work is
-      linux-native richer status detail; WS-1 save/restore live acceptance and
-      WS-4 base pinning remain open.
+      top-level `mvmctl checkpoint` examples. Later Plan 189 slices completed
+      linux-native richer status detail and base pinning, so WS-3 is closed.
 - [x] Hardened
       [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
       WS-3 scriptability/dev-shell parity after the live `ls --all --json` /
@@ -104,8 +115,8 @@ plan 25 sequences the work into six independently-shippable workstreams.
       refs reuse `template_artifacts_dispatched`; exact template/slot revision
       pins require existing `vmlinux` and `rootfs.ext4` artifacts and reject
       path-traversal components. A running dev VM refuses `--base` rather than
-      silently reusing a different base. Remaining WS-4 work is live
-      reproducible-rootfs fingerprint acceptance for pinned `dev up`/fork.
+      silently reusing a different base. Live reproducible-rootfs fingerprint
+      acceptance for pinned `dev up`/fork is rehomed to shared Vz validation.
 - [x] Advanced
       [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
       WS-4 pinned-base proof surface. Vz `dev up --base` now records the
