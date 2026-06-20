@@ -1168,6 +1168,15 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
                 exit_code: None,
                 panic_line: Some(panic_line),
             }),
+            Ok(WaitOutcome::GuestHalted { halt_line, .. }) => {
+                // A halt is a build failure, not a clean exit — surface it as a
+                // non-zero exit with the halt reason so the runtime treats the
+                // job as failed instead of waiting to the wall-clock timeout.
+                Ok(BuilderVmExitInfo {
+                    exit_code: Some(1),
+                    panic_line: Some(halt_line),
+                })
+            }
             Ok(WaitOutcome::Timeout) => Err(BuilderVmError::NixBuildFailed(format!(
                 "builder VM exceeded {} seconds wall-clock; killed. Console log at {}.",
                 timeout.as_secs(),
@@ -1641,6 +1650,13 @@ fn spawn_supervisor_and_wait(
             panic_line,
             console_log_path,
         }),
+        Ok(WaitOutcome::GuestHalted {
+            halt_line,
+            console_log_path,
+        }) => Err(BuilderVmError::NixBuildFailed(format!(
+            "builder VM build failed — the guest halted ({halt_line}). Console tail:\n{}\nFull log: {console_log_path}",
+            read_console_tail(&console_log_path, 15),
+        ))),
         Ok(WaitOutcome::Timeout) => Err(BuilderVmError::NixBuildFailed(format!(
             "builder VM exceeded {} seconds wall-clock; killed. Console log at {}/console.log.",
             timeout.as_secs(),
@@ -1791,7 +1807,26 @@ enum WaitOutcome {
         panic_line: String,
         console_log_path: String,
     },
+    /// The guest reached a halt without a clean power-off — emitted when a
+    /// Stage 0 / builder build fails and the kernel can't power off (`reboot:
+    /// Power off not available: System halted instead`). The supervisor's
+    /// blocking `start_enter` never returns on a halt, so detecting this is what
+    /// lets the host fail fast with the guest's error instead of waiting to the
+    /// wall-clock timeout.
+    GuestHalted {
+        halt_line: String,
+        console_log_path: String,
+    },
     Timeout,
+}
+
+/// Terminal guest states the console watcher detects: either a kernel panic or
+/// a halt (the latter is the failure mode a build error reaches when the guest
+/// can't power off).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Terminal {
+    Panic,
+    Halt,
 }
 
 /// Poll interval for the panic-detector watcher in production. Keeping
@@ -1838,16 +1873,16 @@ fn wait_with_panic_detector_until(
 ) -> std::io::Result<WaitOutcome> {
     let deadline = timeout.map(|duration| Instant::now() + duration);
 
-    let panic_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let terminal: Arc<Mutex<Option<(Terminal, String)>>> = Arc::new(Mutex::new(None));
     let stop = Arc::new(AtomicBool::new(false));
     let watcher = console_log.map(|console_log| {
-        let watcher_panic = Arc::clone(&panic_line);
+        let watcher_terminal = Arc::clone(&terminal);
         let watcher_stop = Arc::clone(&stop);
         let watcher_path = console_log.to_path_buf();
         std::thread::spawn(move || {
             panic_watcher(
                 &watcher_path,
-                &watcher_panic,
+                &watcher_terminal,
                 &watcher_stop,
                 poll_interval,
                 verbose,
@@ -1861,9 +1896,9 @@ fn wait_with_panic_detector_until(
             Ok(None) => {}
             Err(e) => break Err(e),
         }
-        if panic_line
+        if terminal
             .lock()
-            .expect("panic detector state lock poisoned")
+            .expect("terminal detector state lock poisoned")
             .is_some()
         {
             // Best-effort kill; the supervisor is wedged inside
@@ -1902,18 +1937,27 @@ fn wait_with_panic_detector_until(
     }
 
     let status = wait_result?;
-    let captured = panic_line
+    let captured = terminal
         .lock()
-        .expect("panic detector state lock poisoned")
+        .expect("terminal detector state lock poisoned")
         .take();
     match captured {
-        Some(line) => Ok(WaitOutcome::KernelPanic {
-            panic_line: line,
-            console_log_path: console_log
-                .expect("panic line can only be captured when console log exists")
+        Some((kind, line)) => {
+            let console_log_path = console_log
+                .expect("a terminal line can only be captured when console log exists")
                 .display()
-                .to_string(),
-        }),
+                .to_string();
+            Ok(match kind {
+                Terminal::Panic => WaitOutcome::KernelPanic {
+                    panic_line: line,
+                    console_log_path,
+                },
+                Terminal::Halt => WaitOutcome::GuestHalted {
+                    halt_line: line,
+                    console_log_path,
+                },
+            })
+        }
         None => Ok(WaitOutcome::Clean(status.code().unwrap_or(-1))),
     }
 }
@@ -1939,8 +1983,8 @@ fn echo_console_chunk(sink: &mut impl Write, verbose: bool, chunk: &[u8]) {
     }
 }
 
-/// Tail `console_log` for the kernel panic banner. On match, stores
-/// the matching line into `panic_line` and returns. Polls every
+/// Tail `console_log` for a terminal guest banner (kernel panic or halt). On
+/// match, stores the `(kind, line)` into `terminal` and returns. Polls every
 /// `poll_interval` until either a match is found or `stop` is set.
 ///
 /// Two robustness details that matter:
@@ -1958,7 +2002,7 @@ fn echo_console_chunk(sink: &mut impl Write, verbose: bool, chunk: &[u8]) {
 ///    match across reads still succeeds.
 fn panic_watcher(
     console_log: &Path,
-    panic_line: &Arc<Mutex<Option<String>>>,
+    terminal: &Arc<Mutex<Option<(Terminal, String)>>>,
     stop: &Arc<AtomicBool>,
     poll_interval: Duration,
     verbose: bool,
@@ -1978,8 +2022,8 @@ fn panic_watcher(
             if f.read_to_end(&mut chunk).is_ok() && !chunk.is_empty() {
                 echo_console_chunk(&mut std::io::stderr(), verbose, &chunk);
                 buf.extend_from_slice(&chunk);
-                if let Some(line) = find_panic_line_in(&buf) {
-                    *panic_line.lock().unwrap() = Some(line);
+                if let Some(found) = find_terminal_line_in(&buf) {
+                    *terminal.lock().unwrap() = Some(found);
                     return;
                 }
                 // Trim buf to the last PANIC_WATCHER_BUFFER_CAP bytes
@@ -1997,19 +2041,35 @@ fn panic_watcher(
     }
 }
 
-/// Scan `buf` for the kernel panic banner. On match, return the
-/// containing line decoded as a UTF-8 string (lossy decoding — kernel
-/// log output is ASCII in practice but we don't want a stray non-UTF-8
-/// byte to silently drop the panic detection).
-fn find_panic_line_in(buf: &[u8]) -> Option<String> {
-    // Cheap pre-check before the lossy UTF-8 conversion.
-    let needle = KERNEL_PANIC_BANNER.as_bytes();
-    let idx = buf.windows(needle.len()).position(|w| w == needle)?;
-    // Walk back to the previous newline (or start of buffer) and
-    // forward to the next newline so the returned line is the full
-    // banner with its detail (the kernel writes
-    // `Kernel panic - not syncing: Requested init ... failed (error N).`
-    // on a single line).
+/// The kernel's halt banner. Emitted when the guest can't power off and halts
+/// instead — the terminal state a Stage 0 / builder build failure reaches
+/// (`reboot: Power off not available: System halted instead`). The supervisor's
+/// blocking `start_enter` never returns on a halt, so detecting this is what
+/// distinguishes "build failed, give up" from "still building."
+const GUEST_HALT_BANNER: &str = "System halted";
+
+/// Scan `buf` for a terminal guest banner — a kernel panic or a halt — and
+/// return its kind plus the containing line (lossy UTF-8; kernel log output is
+/// ASCII in practice but a stray non-UTF-8 byte must not silently drop
+/// detection). Panic takes precedence: it's the more specific kernel state.
+fn find_terminal_line_in(buf: &[u8]) -> Option<(Terminal, String)> {
+    if let Some(idx) = find_subslice(buf, KERNEL_PANIC_BANNER.as_bytes()) {
+        return Some((Terminal::Panic, extract_line(buf, idx)));
+    }
+    if let Some(idx) = find_subslice(buf, GUEST_HALT_BANNER.as_bytes()) {
+        return Some((Terminal::Halt, extract_line(buf, idx)));
+    }
+    None
+}
+
+fn find_subslice(buf: &[u8], needle: &[u8]) -> Option<usize> {
+    buf.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Extract the full line containing byte index `idx`: walk back to the previous
+/// newline (or start) and forward to the next (or end), so the banner's detail
+/// is included (e.g. `Kernel panic - not syncing: Requested init ... (error N)`).
+fn extract_line(buf: &[u8], idx: usize) -> String {
     let line_start = buf[..idx]
         .iter()
         .rposition(|&b| b == b'\n')
@@ -2020,10 +2080,21 @@ fn find_panic_line_in(buf: &[u8]) -> Option<String> {
         .position(|&b| b == b'\n')
         .map(|i| idx + i)
         .unwrap_or(buf.len());
-    let line = String::from_utf8_lossy(&buf[line_start..line_end])
+    String::from_utf8_lossy(&buf[line_start..line_end])
         .trim_end_matches('\r')
-        .to_string();
-    Some(line)
+        .to_string()
+}
+
+/// Last `max_lines` non-empty lines of a console log, for surfacing the guest's
+/// actual error in a halt failure (the build error sits just above the halt
+/// banner). Best-effort: an unreadable/missing log yields an empty string.
+fn read_console_tail(console_log_path: &str, max_lines: usize) -> String {
+    let Ok(contents) = std::fs::read_to_string(console_log_path) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
 }
 
 /// Render a Path as a `&str` or surface a clear error if it
@@ -2982,48 +3053,77 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn find_panic_line_in_returns_none_when_banner_absent() {
+    fn find_terminal_line_in_returns_none_when_no_banner() {
         let buf = b"some boot log\nanother line\nfinal line\n";
-        assert_eq!(find_panic_line_in(buf), None);
+        assert_eq!(find_terminal_line_in(buf), None);
     }
 
     #[test]
-    fn find_panic_line_in_extracts_full_line_when_banner_present() {
+    fn find_terminal_line_in_extracts_full_panic_line() {
         let buf = b"[ 0.05 ] EXT4-fs: mounted\n\
                     [ 0.08 ] Kernel panic - not syncing: Requested init /sbin/foo failed (error -2).\n\
                     [ 0.09 ] more output\n";
-        let line = find_panic_line_in(buf).expect("must match");
+        let (kind, line) = find_terminal_line_in(buf).expect("must match");
+        assert_eq!(kind, Terminal::Panic);
         assert!(line.contains("Kernel panic - not syncing"));
         assert!(line.contains("Requested init /sbin/foo failed"));
         assert!(!line.contains('\n'));
     }
 
     #[test]
-    fn find_panic_line_in_handles_buffer_with_no_trailing_newline() {
-        // Watcher may read partial output where the panic line is at
-        // the end with no `\n` yet. The scanner still returns the
-        // whole bufferred line so the watcher can fire immediately
-        // instead of waiting for the next newline.
+    fn find_terminal_line_in_handles_buffer_with_no_trailing_newline() {
+        // Watcher may read partial output where the line is at the end with no
+        // `\n` yet; the scanner returns the buffered line so it fires immediately.
         let buf = b"[ 0.05 ] booting\n[ 0.08 ] Kernel panic - not syncing: detail";
-        let line = find_panic_line_in(buf).expect("must match");
+        let (_, line) = find_terminal_line_in(buf).expect("must match");
         assert!(line.contains("Kernel panic - not syncing: detail"));
     }
 
     #[test]
-    fn find_panic_line_in_trims_trailing_carriage_return() {
-        // Some console drivers emit `\r\n`; the line should be the
-        // banner without the trailing `\r`.
+    fn find_terminal_line_in_trims_trailing_carriage_return() {
         let buf = b"[ 0.08 ] Kernel panic - not syncing: oops\r\nnext line\n";
-        let line = find_panic_line_in(buf).expect("must match");
+        let (_, line) = find_terminal_line_in(buf).expect("must match");
         assert!(!line.ends_with('\r'), "got {line:?}");
         assert!(line.ends_with(": oops"));
     }
 
     #[test]
-    fn find_panic_line_in_returns_match_at_start_of_buffer() {
+    fn find_terminal_line_in_returns_match_at_start_of_buffer() {
         let buf = b"Kernel panic - not syncing: first thing\nsubsequent\n";
-        let line = find_panic_line_in(buf).expect("must match");
+        let (kind, line) = find_terminal_line_in(buf).expect("must match");
+        assert_eq!(kind, Terminal::Panic);
         assert_eq!(line, "Kernel panic - not syncing: first thing");
+    }
+
+    #[test]
+    fn find_terminal_line_in_detects_guest_halt() {
+        // The exact shape a Stage 0 build failure reaches: build fails, the
+        // kernel can't power off, the guest halts. This must be detected so the
+        // host fails fast instead of waiting to the wall-clock timeout.
+        let buf = b"stage0-init: build failed: nix build exit 1\n\
+                    [ 1.009 ] reboot: Power off not available: System halted instead\n";
+        let (kind, line) = find_terminal_line_in(buf).expect("must match");
+        assert_eq!(kind, Terminal::Halt);
+        assert!(line.contains("System halted"));
+    }
+
+    #[test]
+    fn find_terminal_line_in_prefers_panic_over_halt() {
+        // A panic is the more specific kernel state; if both appear, report panic.
+        let buf = b"Kernel panic - not syncing: oops\nSystem halted\n";
+        let (kind, _) = find_terminal_line_in(buf).expect("must match");
+        assert_eq!(kind, Terminal::Panic);
+    }
+
+    #[test]
+    fn read_console_tail_returns_last_nonempty_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("console.log");
+        std::fs::write(&log, "a\n\nb\nc\n\nd\n").unwrap();
+        let tail = read_console_tail(log.to_str().unwrap(), 2);
+        assert_eq!(tail, "c\nd");
+        // Missing file → empty, never panics.
+        assert_eq!(read_console_tail("/nonexistent/console.log", 5), "");
     }
 
     #[cfg(unix)]
@@ -3130,6 +3230,56 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "panic detector did not kill the child promptly: {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_with_panic_detector_fails_fast_on_guest_halt() {
+        // Regression for the host-hangs-on-build-failure bug: a Stage 0 build
+        // failure halts the guest (no clean power-off), the supervisor's
+        // start_enter never returns, and without halt detection the host would
+        // block to the wall-clock timeout. We must kill + return GuestHalted.
+        let scratch = TempDir::new().unwrap();
+        let console = scratch.path().join("console.log");
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sh");
+
+        let console_writer = console.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            std::fs::write(
+                &console_writer,
+                b"stage0-init: build failed: nix build exit 1\n\
+                  [ 1.009 ] reboot: Power off not available: System halted instead\n",
+            )
+            .expect("write console log fixture");
+        });
+
+        let start = std::time::Instant::now();
+        let outcome =
+            wait_with_panic_detector(&mut child, Some(&console), Duration::from_millis(10), false)
+                .expect("ok");
+        let elapsed = start.elapsed();
+        writer.join().expect("writer thread join");
+
+        match outcome {
+            WaitOutcome::GuestHalted { halt_line, .. } => {
+                assert!(
+                    halt_line.contains("System halted"),
+                    "halt_line: {halt_line:?}"
+                );
+            }
+            other => panic!("expected GuestHalted, got {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "halt detector did not kill the child promptly: {elapsed:?}"
         );
     }
 
