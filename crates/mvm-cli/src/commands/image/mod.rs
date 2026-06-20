@@ -109,6 +109,13 @@ pub(in crate::commands) struct CachedOciImage {
     config_path: Option<String>,
     #[serde(default)]
     rootfs_path: Option<String>,
+    /// Runtime identity (crate version + epoch) of the guest agent/netinit
+    /// baked into `rootfs_path`. A mismatch with the running mvmctl forces
+    /// re-materialization so a stale agent — e.g. one predating the dev-shell
+    /// exec handler — is never reused. Absent on entries written before the
+    /// tag existed, which therefore read as stale and re-materialize.
+    #[serde(default)]
+    runtime_tag: Option<String>,
     #[serde(default)]
     claims_path: Option<String>,
     #[serde(default)]
@@ -422,6 +429,27 @@ pub(in crate::commands) fn oci_cache_root() -> PathBuf {
     PathBuf::from(mvm_core::config::mvm_cache_dir()).join("oci")
 }
 
+/// Bump when the injected OCI runtime (guest agent, netinit, or `/init`
+/// script) changes such that already-materialized rootfs images must be
+/// re-sealed. Folded with the crate version into [`oci_runtime_tag`]; a
+/// stale rootfs then re-materializes instead of booting an outdated agent.
+/// Epoch 1 introduces the dev-shell exec handler in the OCI agent.
+const OCI_RUNTIME_EPOCH: u32 = 1;
+
+/// Identity of the guest runtime the running mvmctl bakes into an OCI rootfs.
+/// Cheap and build-free (no agent cross-compile) so it can gate the cache-hit
+/// path without forcing a rebuild on hosts that only have a warm rootfs cache.
+fn oci_runtime_tag() -> String {
+    format!("{}.{}", env!("CARGO_PKG_VERSION"), OCI_RUNTIME_EPOCH)
+}
+
+/// Whether a cached image's materialized rootfs can be booted as-is: it must
+/// exist and carry the current runtime tag. A `None` tag (pre-tag entry) or a
+/// mismatch means the baked agent may be outdated, so the rootfs is stale.
+fn cached_rootfs_is_current(cached: &CachedOciImage, runtime_tag: &str) -> bool {
+    cached.rootfs_path.is_some() && cached.runtime_tag.as_deref() == Some(runtime_tag)
+}
+
 pub(in crate::commands) fn resolve_or_pull_run_image(
     cache_root: &Path,
     reference: &str,
@@ -446,11 +474,14 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
         bail!("mvmctl run --image --prod requires a digest-pinned reference");
     }
     let canonical = image_ref.canonical();
+    let runtime_tag = oci_runtime_tag();
     let (image, pulled, trust_from_pull, auth_source_from_pull) = match load_index(cache_root)
         .ok()
         .and_then(|index| find_image(&index, &canonical).cloned())
     {
-        Some(cached) if cached.rootfs_path.is_some() => (cached, false, None, None),
+        Some(cached) if cached_rootfs_is_current(&cached, &runtime_tag) => {
+            (cached, false, None, None)
+        }
         _ => {
             let (cached, trust, auth_source) =
                 pull_image_ref(cache_root, image_ref.clone(), reference, prod)?;
@@ -623,7 +654,7 @@ fn ingest_archive_from_reader<R: Read>(
             .with_context(|| format!("unpack layer {}", layer.descriptor.digest))?;
     }
 
-    let rootfs_rel = format!("rootfs/{manifest_hex}/rootfs.ext4");
+    let rootfs_rel = format!("rootfs/{manifest_hex}-{}/rootfs.ext4", oci_runtime_tag());
     let rootfs_abs = cache_root.join(&rootfs_rel);
     inject_runtime_and_materialize(
         cache_root,
@@ -1010,7 +1041,8 @@ fn pull_image_ref(
         });
     }
 
-    let rootfs_path = format!("rootfs/{manifest_hex}/rootfs.ext4");
+    let runtime_tag = oci_runtime_tag();
+    let rootfs_path = format!("rootfs/{manifest_hex}-{runtime_tag}/rootfs.ext4");
     let rootfs_abs = cache_root.join(&rootfs_path);
     inject_runtime_and_materialize(
         cache_root,
@@ -1053,6 +1085,7 @@ fn pull_image_ref(
         manifest_path,
         config_path,
         rootfs_path: Some(rootfs_path),
+        runtime_tag: Some(runtime_tag),
         claims_path: Some(claims_path),
         layers: cached_layers,
     };
@@ -1587,6 +1620,7 @@ mod tests {
             manifest_path: "manifests/alpine.json".to_string(),
             config_path: Some("configs/alpine.json".to_string()),
             rootfs_path: None,
+            runtime_tag: None,
             claims_path: Some("claims/alpine.json".to_string()),
             layers: vec![CachedOciLayer {
                 digest: "sha256:layer".to_string(),
@@ -1883,6 +1917,7 @@ mod tests {
         let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
         image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
+        image.runtime_tag = Some(oci_runtime_tag());
         write_index(
             tmp.path(),
             &OciCacheIndex {
@@ -1910,6 +1945,28 @@ mod tests {
             resolved.provenance.layer_digests,
             vec!["sha256:layer".to_string()]
         );
+    }
+
+    #[test]
+    fn stale_runtime_tag_marks_rootfs_not_current() {
+        let mut image = sample_image("docker.io/library/alpine:3.20", "sha256:dead", "blobs/a");
+        image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
+        let current = oci_runtime_tag();
+
+        // Pre-tag entry (None): the baked agent predates the tag, so stale.
+        assert!(!cached_rootfs_is_current(&image, &current));
+
+        // A different epoch/version means a different injected runtime — stale.
+        image.runtime_tag = Some("0.0.0.0".to_string());
+        assert!(!cached_rootfs_is_current(&image, &current));
+
+        // Matching tag is the only current case.
+        image.runtime_tag = Some(current.clone());
+        assert!(cached_rootfs_is_current(&image, &current));
+
+        // A current tag with no materialized rootfs is still not bootable.
+        image.rootfs_path = None;
+        assert!(!cached_rootfs_is_current(&image, &current));
     }
 
     #[test]
