@@ -141,6 +141,19 @@ a dependency-*reduction* PR that adds 5 duplicate majors is self-defeating, so
 the bridge was abandoned. A `[patch.crates-io]` bridge remains *possible* if we
 accept those skips, but it is no longer "free."
 
+**The RustCrypto migration is itself blocked upstream (feasibility checked
+2026-06-20).** mvm's stack: `aes-gcm 0.10.3`, `ed25519-dalek 2.2`, `hmac 0.12`,
+`hkdf 0.12`, `aead 0.5`, `cipher 0.4`, `sha2`/`sha1`/`digest` 0.10. On the new
+generation `sha2 0.11`, `digest 0.11`, `crypto-common 0.2`, `hmac 0.13`,
+`hkdf 0.13`, `aead 0.6`, `cipher 0.5` are all **stable** — but the two
+cornerstones are not: `aes-gcm` latest stable is `0.10.3` (newest `0.11.0-rc.4`)
+and `ed25519-dalek` latest stable is `2.2.0` (newest `3.0.0-rc.1`). Shipping RC
+crypto for AEAD (snapshot/secret_store) and signing (host signer / audit chain /
+attestation) is a non-starter under ADR-002, and a partial migration just
+recreates the split. **So B4 is gated on upstream stable `aes-gcm 0.11` +
+`ed25519-dalek 3.0` — revisit then** (and re-check the others have not moved off
+the line in the interim).
+
 Until B4 is done the D1 forbidden-dep gate + D2 duplicate-major ratchet keep the
 regression closed and the `reqwest` split is a recorded D2 baseline entry, not an
 open cut. B4 + C1 are tracked on the dependency roadmap, not as refactor-close
