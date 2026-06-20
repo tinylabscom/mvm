@@ -350,7 +350,8 @@ impl VmBackend for VzBackend {
             {
                 bail!(
                     "supervisor exited before writing PID file (status: {status}). \
-                     Check stderr above for VZ configuration errors. Console log: {}",
+                     Check stderr above for VZ configuration errors.{} Console log: {}",
+                    stale_supervisor_hint(&supervisor_path),
                     console_log.display()
                 );
             }
@@ -2381,6 +2382,46 @@ fn refuse_if_running(target_vm: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Rebuild command for the Vz per-VM host binaries (the objc2 supervisor + the
+/// drainer sibling). `cargo run`/`test` never rebuilds these separate bin crates.
+const VZ_AUX_REBUILD_CMD: &str =
+    "cargo build -p mvm-vm-host --bin mvm-vz-supervisor --bin mvm-vz-drainer";
+
+fn mtime_of(p: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
+/// A leading-space hint, ready to interpolate into the boot-failure message,
+/// when `supervisor_path` looks stale relative to the running `mvmctl` — else
+/// `""`. In a source checkout `cargo run` rebuilds only `mvmctl`, leaving the
+/// separate `mvm-vz-*` bin crates behind; they then reject a newer
+/// `ExecutionPlan`/`SupervisorConfig` via `deny_unknown_fields` and exit before
+/// booting (the cryptic `unknown field` failure). Consulted only on that failure
+/// path, so a false positive merely appends a rebuild suggestion to an already-
+/// failing boot.
+fn stale_supervisor_hint(supervisor_path: &Path) -> String {
+    let self_mtime = std::env::current_exe().ok().as_deref().and_then(mtime_of);
+    match stale_aux_binary_hint(mtime_of(supervisor_path), self_mtime, VZ_AUX_REBUILD_CMD) {
+        Some(h) => format!(" {h}"),
+        None => String::new(),
+    }
+}
+
+/// Pure core of [`stale_supervisor_hint`]: a rebuild hint when `bin_mtime` is
+/// older than `self_mtime`. `None` when either mtime is unknown or the binary is
+/// at-least-as-new — so an installed release (bins share an install time) never
+/// trips it; only a source checkout's stale aux binary does.
+fn stale_aux_binary_hint(
+    bin_mtime: Option<std::time::SystemTime>,
+    self_mtime: Option<std::time::SystemTime>,
+    rebuild_cmd: &str,
+) -> Option<String> {
+    let (bin, me) = (bin_mtime?, self_mtime?);
+    (bin < me).then(|| {
+        format!("The supervisor binary is older than mvmctl and may be stale — rebuild it: {rebuild_cmd}")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2388,6 +2429,37 @@ mod tests {
     #[test]
     fn name_is_vz() {
         assert_eq!(VzBackend.name(), "vz");
+    }
+
+    #[test]
+    fn stale_aux_hint_fires_only_when_binary_predates_mvmctl() {
+        use std::time::{Duration, SystemTime};
+        let base = SystemTime::UNIX_EPOCH;
+        let newer = base + Duration::from_secs(100);
+        let cmd = "cargo build -p mvm-vm-host";
+
+        // Binary older than mvmctl → hint naming the rebuild command.
+        let hint = stale_aux_binary_hint(Some(base), Some(newer), cmd).expect("expected a hint");
+        assert!(
+            hint.contains(cmd),
+            "hint must name the rebuild command: {hint}"
+        );
+        assert!(hint.contains("stale"));
+
+        // At-least-as-new binary → no hint (installed release, equal mtimes).
+        assert!(stale_aux_binary_hint(Some(newer), Some(base), cmd).is_none());
+        assert!(stale_aux_binary_hint(Some(base), Some(base), cmd).is_none());
+
+        // Unknown mtime on either side → no hint (don't guess).
+        assert!(stale_aux_binary_hint(None, Some(newer), cmd).is_none());
+        assert!(stale_aux_binary_hint(Some(base), None, cmd).is_none());
+    }
+
+    #[test]
+    fn stale_supervisor_hint_formats_with_leading_space_or_empty() {
+        // A path that doesn't exist has no mtime → empty (no false hint).
+        let missing = std::path::Path::new("/nonexistent/mvm-vz-supervisor");
+        assert_eq!(stale_supervisor_hint(missing), "");
     }
 
     #[test]
