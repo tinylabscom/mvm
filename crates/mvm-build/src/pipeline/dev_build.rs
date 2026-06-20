@@ -586,12 +586,14 @@ fn dev_build_via_builder_vm_uncached(
     mode: BuildMode,
 ) -> Result<DevBuildResult> {
     // When a persistent-builder session is alive AND the user
-    // hasn't opted out via `MVM_NO_PERSISTENT_BUILDER=1`, route
-    // through the persistent supervisor. Any error here (incl.
-    // supervisor crash mid-dispatch) falls back to single-shot
-    // silently with a warning — the single-shot path is the
-    // safety net.
-    if !persistent_dispatch_disabled()
+    // hasn't opted out via `MVM_NO_PERSISTENT_BUILDER=1` AND the
+    // residency policy is not `cold`, route through the persistent
+    // supervisor. Cold always boots a single-shot builder that tears
+    // down per build. Any dispatch error (incl. supervisor crash
+    // mid-dispatch) falls back to single-shot with a warning —
+    // the single-shot path is the safety net.
+    let residency = mvm_core::residency::resolve_residency().0;
+    if persistent_routing_allowed(&residency, persistent_dispatch_disabled())
         && let Some(record) = crate::persistent_builder::read_active_session()
     {
         tracing::info!(
@@ -630,6 +632,17 @@ fn persistent_dispatch_disabled() -> bool {
     std::env::var_os("MVM_NO_PERSISTENT_BUILDER")
         .map(|v| !v.is_empty())
         .unwrap_or(false)
+}
+
+/// Whether a build may route to the persistent builder: the user has not opted
+/// out (`MVM_NO_PERSISTENT_BUILDER`) and the residency policy is not `cold`
+/// (cold builds boot a single-shot builder that boots and tears down per build).
+#[cfg(feature = "builder-vm")]
+fn persistent_routing_allowed(
+    policy: &mvm_core::residency::ResidencyPolicy,
+    dispatch_disabled: bool,
+) -> bool {
+    !dispatch_disabled && policy.allows_persistent_builder()
 }
 
 /// Resolve the in-repo mvm workspace to build a user
@@ -2025,5 +2038,27 @@ mod tests {
     fn build_mode_helper_classifies_correctly() {
         assert!(BuildMode::Dev.injects_dev_override());
         assert!(!BuildMode::Prod.injects_dev_override());
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn persistent_routing_blocked_by_cold_or_opt_out() {
+        use mvm_core::residency::ResidencyPolicy;
+        // warm/parked + not opted out → allowed
+        assert!(persistent_routing_allowed(
+            &ResidencyPolicy::always_warm(),
+            false
+        ));
+        assert!(persistent_routing_allowed(
+            &ResidencyPolicy::parked(),
+            false
+        ));
+        // cold → blocked even when not opted out
+        assert!(!persistent_routing_allowed(&ResidencyPolicy::cold(), false));
+        // explicit opt-out always blocks
+        assert!(!persistent_routing_allowed(
+            &ResidencyPolicy::always_warm(),
+            true
+        ));
     }
 }
