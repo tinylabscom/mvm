@@ -464,6 +464,7 @@ pub const VZ_BUILDER_DEFAULT_MEMORY_MIB: u32 = crate::libkrun_builder::DEFAULT_M
 /// [`crate::libkrun_builder::DEFAULT_NIX_STORE_MIB`] so swapping backends
 /// doesn't change the on-disk cache footprint.
 pub const VZ_BUILDER_DEFAULT_NIX_STORE_MIB: u32 = crate::libkrun_builder::DEFAULT_NIX_STORE_MIB;
+const VZ_DEV_CONSOLE_DATA_PORT_COUNT: u32 = 128;
 
 /// Vz parallel of [`crate::libkrun_builder::LibkrunBuilderVm`]. Implements
 /// [`BuilderVm::run_build`] against the [`VzBuilderBackend`] seam,
@@ -1341,19 +1342,7 @@ fn build_vz_persistent_supervisor_config(
             },
         ],
         vsock: crate::vz::VsockConfig {
-            ports: {
-                let mut ports = vec![mvm_guest::builder_agent::BUILDER_DISPATCH_PORT];
-                // The resident builder control daemon's typed control
-                // plane, reached at `<vsock_dir>/vsock-21473.sock`.
-                ports.push(mvm_guest::builder_agent::BUILDERD_CONTROL_PORT);
-                // The long-lived dev VM additionally serves the guest
-                // agent so `dev shell` / `console` / `status` can reach
-                // it; the warm-pool builder leaves it closed.
-                if expose_guest_agent {
-                    ports.push(mvm_guest::vsock::GUEST_AGENT_PORT);
-                }
-                ports
-            },
+            ports: vz_persistent_guest_vsock_ports(expose_guest_agent),
             socket_dir: vsock_dir,
             // The builder VM has no egress-substitution endpoint; no host-listen
             // ports.
@@ -1386,6 +1375,26 @@ fn build_vz_persistent_supervisor_config(
         gateway_audit_socket: None,
         signing_key_path: None,
     })
+}
+
+fn vz_persistent_guest_vsock_ports(expose_guest_agent: bool) -> Vec<u32> {
+    let mut ports = vec![mvm_guest::builder_agent::BUILDER_DISPATCH_PORT];
+    // The resident builder control daemon's typed control plane, reached at
+    // `<vsock_dir>/vsock-21473.sock`.
+    ports.push(mvm_guest::builder_agent::BUILDERD_CONTROL_PORT);
+    // The long-lived dev VM additionally serves the guest agent plus dev-only
+    // PTY data sockets. Vz's host proxy is configured with a static port list
+    // at VM start, while `ConsoleOpen` returns dynamic
+    // `CONSOLE_PORT_BASE + session_id` ports. Pre-open a bounded dev range so
+    // repeated `mvmctl dev shell` attaches can reach the data channel.
+    if expose_guest_agent {
+        ports.push(mvm_guest::vsock::GUEST_AGENT_PORT);
+        ports.extend(
+            (1..=VZ_DEV_CONSOLE_DATA_PORT_COUNT)
+                .map(|offset| mvm_guest::vsock::CONSOLE_PORT_BASE + offset),
+        );
+    }
+    ports
 }
 
 /// Spawn `mvm-vz-supervisor` in the background with the
@@ -2391,11 +2400,21 @@ mod tests {
         .expect("config builds");
         assert_eq!(
             with_agent.vsock.ports,
-            vec![
-                mvm_guest::builder_agent::BUILDER_DISPATCH_PORT,
-                mvm_guest::builder_agent::BUILDERD_CONTROL_PORT,
-                mvm_guest::vsock::GUEST_AGENT_PORT,
-            ]
+            vz_persistent_guest_vsock_ports(true)
+        );
+        assert!(
+            with_agent
+                .vsock
+                .ports
+                .contains(&(mvm_guest::vsock::CONSOLE_PORT_BASE + 1)),
+            "Vz dev shell must expose the first PTY data port"
+        );
+        assert!(
+            with_agent
+                .vsock
+                .ports
+                .contains(&(mvm_guest::vsock::CONSOLE_PORT_BASE + VZ_DEV_CONSOLE_DATA_PORT_COUNT)),
+            "Vz dev shell must expose the configured PTY data range"
         );
     }
 

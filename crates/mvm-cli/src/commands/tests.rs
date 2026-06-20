@@ -3544,6 +3544,13 @@ fn touches(argv: &[&str]) -> bool {
         .touches_vm_state()
 }
 
+fn emits_machine_readable_stdout(argv: &[&str]) -> bool {
+    Cli::try_parse_from(argv)
+        .unwrap()
+        .command
+        .emits_machine_readable_stdout()
+}
+
 #[test]
 fn state_touching_commands_trigger_entry_convergence() {
     // Lifecycle mutate/read commands run the cheap converge pass.
@@ -3566,4 +3573,54 @@ fn read_only_and_vm_agnostic_commands_skip_entry_convergence() {
     // `reconcile` is the convergence verb itself — must not double-run on entry.
     assert!(!touches(&["mvmctl", "reconcile"]));
     assert!(!touches(&["mvmctl", "reconcile", "--dry-run"]));
+}
+
+#[test]
+fn state_touching_json_commands_reserve_stdout_before_entry_convergence() {
+    // Regression: `ls --json` runs reconcile-on-entry before dispatch; if
+    // chrome is still stdout-routed, a dev-VM hint can precede the JSON array.
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "ls", "--all", "--json"
+    ]));
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "dev", "status", "--json"
+    ]));
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "dev", "up", "--json"
+    ]));
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "dev", "down", "--json"
+    ]));
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "dev", "cache", "inspect", "--json"
+    ]));
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl",
+        "run",
+        "--json",
+        "--",
+        "/bin/true"
+    ]));
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl",
+        "up",
+        "--up-json"
+    ]));
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "vm", "save", "myvm", "--json"
+    ]));
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl",
+        "vm",
+        "restore",
+        "ckpt-myvm",
+        "--json"
+    ]));
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "vm", "snapshot", "ls", "--json"
+    ]));
+
+    assert!(!emits_machine_readable_stdout(&["mvmctl", "ls"]));
+    assert!(!emits_machine_readable_stdout(&["mvmctl", "dev", "status"]));
+    assert!(!emits_machine_readable_stdout(&["mvmctl", "up"]));
 }

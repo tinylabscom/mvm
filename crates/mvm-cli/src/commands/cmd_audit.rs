@@ -132,6 +132,27 @@ fn emit_unbound(recorder: &Recorder, event: String, extras: Vec<(String, String)
 }
 
 impl Commands {
+    /// Whether this command emits a structured payload on stdout and must
+    /// reserve that channel before reconcile-on-entry or other startup chrome.
+    pub(super) fn emits_machine_readable_stdout(&self) -> bool {
+        match self {
+            Commands::Dev(a) => match &a.action {
+                Some(super::env::dev::DevAction::Up { json, .. })
+                | Some(super::env::dev::DevAction::Down { json, .. })
+                | Some(super::env::dev::DevAction::Status { json }) => *json,
+                Some(super::env::dev::DevAction::Cache {
+                    action: super::env::dev::DevCacheAction::Inspect { json },
+                }) => *json,
+                _ => false,
+            },
+            Commands::Ls(a) => a.json,
+            Commands::Up(a) => a.up_json,
+            Commands::Run(a) => a.json,
+            Commands::Vm(a) => a.action.emits_machine_readable_stdout(),
+            _ => false,
+        }
+    }
+
     /// Whether this command reads or mutates VM lifecycle state and so
     /// warrants the cheap reconcile-on-entry convergence pass.
     /// Read-only, VM-agnostic commands (`doctor`, `ls`

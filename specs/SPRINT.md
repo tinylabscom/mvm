@@ -65,6 +65,19 @@ plan 25 sequences the work into six independently-shippable workstreams.
       top-level `mvmctl checkpoint` examples. Remaining Plan 189 WS-3 work is
       linux-native richer status detail; WS-1 save/restore live acceptance and
       WS-4 base pinning remain open.
+- [x] Hardened
+      [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
+      WS-3 scriptability/dev-shell parity after the live `ls --all --json` /
+      `dev shell` report: the top-level dispatcher now routes `[mvm]` chrome
+      to stderr before reconcile-on-entry for structured-stdout commands
+      (`ls --json`, `dev * --json`, `run --json`, `up --up-json`, and grouped
+      Vz save/restore/snapshot JSON), so pre-dispatch dev-VM hints cannot
+      corrupt JSON stdout. The Vz persistent dev VM now exposes the bounded
+      PTY data-port range (`20001..20128`) alongside the guest-agent port, so
+      `ConsoleOpen`'s returned data socket is reachable; `dev shell` now keeps
+      the real attach error context instead of rewriting every failure as
+      "owned by another process." Focused CLI, Vz-config, check, and clippy
+      gates are recorded in the PR.
 - [x] Advanced
       [`plans/118-supervisor-standby-pool-and-live-bench.md`](plans/118-supervisor-standby-pool-and-live-bench.md)
       live libkrun follow-up: x86_64 libkrun starts now carry an explicit

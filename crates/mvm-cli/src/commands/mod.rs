@@ -231,6 +231,13 @@ pub fn run() -> Result<()> {
         return ssh_agent_proxy::run(a);
     }
 
+    // Commands that promise a machine-readable stdout payload must reserve
+    // stdout before any pre-dispatch side effects (notably reconcile-on-entry
+    // and dev-VM hints) can emit friendly `[mvm]` chrome.
+    if cli.command.emits_machine_readable_stdout() {
+        mvm::ui::set_chrome_to_stderr(true);
+    }
+
     // Install Ctrl-C / SIGTERM handler for graceful shutdown.
     let pids = Arc::clone(&CHILD_PIDS);
     if let Err(e) = ctrlc::set_handler(move || {

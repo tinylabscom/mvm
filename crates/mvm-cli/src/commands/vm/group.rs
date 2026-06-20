@@ -63,6 +63,18 @@ pub(in crate::commands) enum VmCmd {
 }
 
 impl VmCmd {
+    /// Whether this grouped VM op emits structured output on stdout.
+    pub(in crate::commands) fn emits_machine_readable_stdout(&self) -> bool {
+        match self {
+            VmCmd::Snapshot(a) => match &a.command {
+                pause::SnapshotCmd::Ls { json } | pause::SnapshotCmd::Rm { json, .. } => *json,
+            },
+            VmCmd::Save(a) => a.json,
+            VmCmd::Restore(a) => a.json,
+            _ => false,
+        }
+    }
+
     /// Whether this VM op warrants the reconcile-on-entry convergence pass.
     /// Only the running-VM lifecycle ops converge stale dead records first;
     /// registry-record and guest-RPC ops (set-ttl, cp, fs, wait, forward, …)
