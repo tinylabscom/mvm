@@ -30,15 +30,24 @@ else
   fail=1
 fi
 
-for sym in load_host_signing_key host_signer admit_for_run; do
-  if grep -qE "mvm_(guest_agent|core|hostd|backend|cli).*${sym}" <<<"$prod_syms"; then
+# Check absence of each host-authority symbol with the appropriate prefix scope.
+# `host_signer` is narrowed to `mvm_hostd` only: `mvm_core::protocol::host_signer`
+# is a benign wire-type module, not the signing authority, so the broad alternation
+# would false-positive on any binary that links mvm-core.
+check_absent() {
+  local sym="$1" prefix="$2"
+  if grep -qE "${prefix}.*${sym}" <<<"$prod_syms"; then
     echo "::error::host authority symbol \`${sym}\` is PRESENT in the production agent." >&2
-    grep -E "mvm_(guest_agent|core|hostd|backend|cli).*${sym}" <<<"$prod_syms" >&2 || true
+    grep -E "${prefix}.*${sym}" <<<"$prod_syms" >&2 || true
     fail=1
   else
     echo "ok: ${sym} absent from the production agent"
   fi
-done
+}
+
+check_absent load_host_signing_key 'mvm_(guest_agent|core|hostd|backend|cli)'
+check_absent admit_for_run         'mvm_(guest_agent|core|hostd|backend|cli)'
+check_absent host_signer           'mvm_hostd'
 
 if [ "$fail" -ne 0 ]; then
   echo "::error::Production guest-agent authority contract FAILED — see annotations above." >&2
