@@ -23,6 +23,12 @@ on:
   # stable context. A cheap changes job below decides whether to pay for the
   # macOS parity run.
   pull_request:
+  # …and on every merge_group: when `rvproxy gateway parity` is a *required*
+  # check, the merge queue evaluates it on the merge_group ref, so the workflow
+  # must run there too — otherwise the queue waits forever for a context that
+  # never appears, deadlocking every PR. The `changes` job reads the merge_group
+  # base/head below since `github.event.pull_request` is null on this event.
+  merge_group:
   workflow_dispatch:
     inputs:
       rvproxy_ref:
@@ -65,8 +71,15 @@ jobs:
             exit 0
           fi
 
-          base="${{ github.event.pull_request.base.sha }}"
-          head="${{ github.event.pull_request.head.sha }}"
+          # On a merge_group (the merge queue) the pull_request context is null;
+          # the event carries the queued range as merge_group.base_sha/head_sha.
+          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+            base="${{ github.event.merge_group.base_sha }}"
+            head="${{ github.event.merge_group.head_sha }}"
+          else
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          fi
           changed="$RUNNER_TEMP/rvproxy-parity-changed-files.txt"
           git diff --name-only "$base" "$head" | tee "$changed"
 
