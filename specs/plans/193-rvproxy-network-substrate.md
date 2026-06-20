@@ -15,8 +15,9 @@ contract. WS-1 transport, WS-1.5 parity scaffold, native config emission/launch,
 native flow-audit refeed, and binary-discriminating native enforcement witnesses
 are landed. The macOS/libkrun default selection now chooses native when
 `MVM_GATEWAY_BIN` is configured, while explicit `MVM_NETWORKING=gvproxy` and the
-no-candidate fallback remain available. Remaining cutover work is making the
-parity gate required, then deleting the splice/Plan-141 hooks only after
+no-candidate fallback remain available. The parity workflow now has a stable
+required-check shim; post-merge branch-protection activation is the remaining
+settings step. Remaining cutover work is deleting the splice/Plan-141 hooks only after
 rvproxy provides the macOS transparent `:80`/`:443` interception path recorded
 by the requirement below.
 
@@ -113,8 +114,11 @@ own internal default).
       enforcement witnesses green). Triggers: `workflow_dispatch` + a
       paths-filtered `pull_request` (gateway-contract files; macos-latest is
       ~10× ubuntu cost per ADR-038, so the filter keeps it off unrelated PRs).
-      Scaffold complete. Remaining activation = make it a **required** check in
-      branch protection (a settings decision, not code), and bump
+      Scaffold complete. The required-check shim is now in the workflow:
+      `rvproxy gateway parity` runs on every PR, passes cheaply when no
+      gateway-contract files changed, and requires the macOS
+      `rvproxy vs gvproxy parity` job to pass when they did. Remaining
+      activation = add `rvproxy gateway parity` to branch protection, and bump
       `RVPROXY_DEFAULT_REF` as rvproxy lands gateway changes.
 - [ ] **WS-2 — flow-decision + audit seam.** Port `gateway_bridge`'s
       `PlanFlowPolicy` deny-by-default gate + flow-audit onto rvproxy's native
@@ -307,6 +311,13 @@ own internal default).
         libkrun/Vz/mock while accepting Firecracker's nft terminator leg. This
         does not implement macOS interception; it makes that rvproxy capability
         an explicit splice-deletion prerequisite instead of an implied comment.
+  - [x] **2d task 2g — required-check shim for parity gate.**
+        `.github/workflows/rvproxy-parity.yml` now emits a stable
+        `rvproxy gateway parity` check on every PR. It detects gateway-contract
+        path changes in a cheap Ubuntu job; unrelated PRs pass without spending
+        macOS minutes, while relevant PRs must pass the macOS
+        `rvproxy vs gvproxy parity` candidate/control run. This makes the gate
+        safe to add to branch protection without hanging unrelated PRs.
   - [ ] **2d — remaining: splice deletion.** Delete the splice + Plan-141
         `on_packet` hooks once the native audit feed is the sole path and the
         transparent terminator implementation/parity-required gates are in
@@ -432,8 +443,8 @@ the splice is deleted. The splice (`gateway_bridge` + the Plan 141 per-backend
 
 rvproxy R2 shipped, and mvm has consumed the subprocess-facing pieces needed for
 native config emission plus flow-audit JSONL refeed. Remaining dependency work
-is the cutover contract: keep the native parity gate green by default, make it
-required, land the rvproxy transparent terminator implementation for
+is the cutover contract: add the stable `rvproxy gateway parity` check to
+branch protection, land the rvproxy transparent terminator implementation for
 macOS/Vz/libkrun, and only then delete the splice and default to the native path.
 
 ## Cross-repo dependency
