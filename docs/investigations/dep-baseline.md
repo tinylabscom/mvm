@@ -108,6 +108,19 @@ achievable by configuration**. Removing aws-lc requires one of:
    Slow (depends on maintainers).
 4. **Defer B4** — accept aws-lc while we use `oci-client`.
 
+### Decision (2026-06-20): option 3 + 4 — upstream FR, rehome to roadmap
+
+Picked **rehome + upstream** over a fork-now (option 1). Two reasons: (a) it
+is the last and lowest-value dependency-reduction target, and the refactor
+should not stall on it; (b) the bounded fork is not even guaranteed to work —
+reqwest 0.13's `rustls-no-provider` path still pulls `rustls-platform-verifier`,
+which can re-introduce aws-lc on some targets, so the fork could land and leave
+`cargo tree -i aws-lc-rs` non-empty. The durable fix is an upstream
+`oci-client` `rustls-tls-ring` feature (option 3); until it lands, the D1
+forbidden-dep gate + D2 duplicate-major ratchet keep the regression closed and
+the `reqwest` 0.12/0.13 split is a recorded D2 baseline entry, not an open cut.
+B4 + C1 are tracked on the dependency roadmap, not as refactor-close blockers.
+
 **Net conclusion for Phase B:** there are **no quick mechanical cuts
 left**. The real reductions are (a) **B3** `pgp` −168 (a *security
 decision* — drop/gate the Alpine PGP verify), and (b) **B4** −16 + the C
