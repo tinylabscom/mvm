@@ -42,7 +42,7 @@ fn main() -> ExitCode {
 mod linux {
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
-    use std::process::{Command, ExitCode};
+    use std::process::{Command, ExitCode, Stdio};
 
     /// Where nix runs from (its store paths are absolute `/nix/store/...`).
     const NIX_TARGET: &str = "/nix";
@@ -553,50 +553,87 @@ mod linux {
         let flake_ref = format!("path:/work/nix/images/builder-vm#packages.{arch}-linux.{attr}");
 
         eprintln!("stage0-init: building {flake_ref} (output_mode={mode})");
-        let out = Command::new(&nix)
-            .args([
-                "build",
-                &flake_ref,
-                "--extra-experimental-features",
-                "nix-command flakes",
-                // Single-user root bootstrap: the seed has no `nixbld` build
-                // users + no daemon, so build directly as root (empty
-                // build-users-group). Keep the DEFAULT sandbox — it gives
-                // each build a clean env (its own /bin/sh + toolchain),
-                // independent of the minimal seed rootfs; disabling it makes
-                // builds fail on the seed's missing `/bin`, `gcc`, etc.
-                "--option",
-                "build-users-group",
-                "",
-                "--option",
-                "connect-timeout",
-                "30",
-                "--max-jobs",
-                "1",
-                "--no-link",
-                "--no-write-lock-file",
-                "--impure",
-                "--print-out-paths",
-                "--print-build-logs",
-            ])
-            .output()
-            .map_err(|e| format!("spawn nix build: {e}"))?;
-        // nix's --print-build-logs go to stderr; surface them to the console.
-        std::io::Write::write_all(&mut std::io::stderr(), &out.stderr).ok();
+        let mut cmd = Command::new(&nix);
+        cmd.args([
+            "build",
+            &flake_ref,
+            "--extra-experimental-features",
+            "nix-command flakes",
+            // Single-user root bootstrap: the seed has no `nixbld` build
+            // users + no daemon, so build directly as root (empty
+            // build-users-group). Keep the DEFAULT sandbox — it gives
+            // each build a clean env (its own /bin/sh + toolchain),
+            // independent of the minimal seed rootfs; disabling it makes
+            // builds fail on the seed's missing `/bin`, `gcc`, etc.
+            "--option",
+            "build-users-group",
+            "",
+            "--option",
+            "connect-timeout",
+            "30",
+            "--max-jobs",
+            "1",
+            "--no-link",
+            "--no-write-lock-file",
+            "--impure",
+            "--print-out-paths",
+            "--print-build-logs",
+        ]);
+        // Echo nix's `--print-build-logs` to the guest's own stderr, which the
+        // host captures to `console.log` live — that's what makes the otherwise-
+        // silent multi-minute build tailable from the host.
+        let (status, stderr_log, stdout) =
+            run_streaming(cmd, &mut std::io::stderr()).map_err(|e| format!("nix build: {e}"))?;
+
         // Persist the full log to /out (a virtio-fs share) for host-side
         // post-mortem at ~/.cache/mvm/builder-vm/.../nix-stderr.log.
-        let _ = std::fs::write("/out/nix-stderr.log", &out.stderr);
-        if !out.status.success() {
-            return Err(format!(
-                "nix build exit {}",
-                out.status.code().unwrap_or(-1)
-            ));
+        let _ = std::fs::write("/out/nix-stderr.log", &stderr_log);
+        if !status.success() {
+            return Err(format!("nix build exit {}", status.code().unwrap_or(-1)));
         }
-        let store_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let store_path = stdout.trim().to_string();
         if store_path.is_empty() {
             return Err("nix build emitted no /nix/store path".into());
         }
         copy_artifacts(Path::new(&store_path), &mode)
+    }
+
+    /// Spawn `cmd`, streaming its stderr line-by-line to `live` (flushed per
+    /// line so a host tailing the console sees progress as it arrives) while
+    /// accumulating the full stderr for a post-mortem log, and capturing stdout
+    /// (nix's single trailing out-path). Returns `(status, stderr_log, stdout)`.
+    ///
+    /// Draining stderr to EOF before reading stdout can't deadlock here: nix
+    /// writes only the short out-path to stdout (well under the pipe buffer), so
+    /// it never blocks waiting for us to read it.
+    fn run_streaming(
+        mut cmd: Command,
+        live: &mut dyn std::io::Write,
+    ) -> Result<(std::process::ExitStatus, Vec<u8>, String), String> {
+        use std::io::{BufRead, Read};
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("spawn: {e}"))?;
+
+        let mut stderr_log: Vec<u8> = Vec::new();
+        if let Some(child_stderr) = child.stderr.take() {
+            let reader = std::io::BufReader::new(child_stderr);
+            for chunk in reader.split(b'\n') {
+                let Ok(mut chunk) = chunk else { break };
+                chunk.push(b'\n');
+                let _ = live.write_all(&chunk);
+                let _ = live.flush();
+                stderr_log.extend_from_slice(&chunk);
+            }
+        }
+        let mut stdout = String::new();
+        if let Some(mut child_stdout) = child.stdout.take() {
+            let _ = child_stdout.read_to_string(&mut stdout);
+        }
+        let status = child.wait().map_err(|e| format!("wait: {e}"))?;
+        Ok((status, stderr_log, stdout))
     }
 
     /// Output by mode: image = kernel + rootfs.ext4 + cmdline; kernel =
@@ -776,6 +813,41 @@ mod linux {
                 eprintln!("stage0-init: reboot syscall failed: {e}");
                 ExitCode::FAILURE
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::run_streaming;
+        use std::process::Command;
+
+        #[test]
+        fn streams_stderr_live_keeps_full_log_and_captures_stdout() {
+            // Mimic nix: build logs to stderr, the out-path to stdout.
+            let mut cmd = Command::new("sh");
+            cmd.args([
+                "-c",
+                "printf 'log1\\nlog2\\n' >&2; printf '/nix/store/abc\\n'",
+            ]);
+            let mut live: Vec<u8> = Vec::new();
+            let (status, stderr_log, stdout) = run_streaming(cmd, &mut live).unwrap();
+            assert!(status.success());
+            // Echoed live to the console sink…
+            assert_eq!(live, b"log1\nlog2\n");
+            // …and accumulated for the post-mortem log.
+            assert_eq!(stderr_log, b"log1\nlog2\n");
+            // out-path captured from stdout.
+            assert_eq!(stdout.trim(), "/nix/store/abc");
+        }
+
+        #[test]
+        fn propagates_nonzero_exit_with_log() {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", "echo boom >&2; exit 7"]);
+            let mut live: Vec<u8> = Vec::new();
+            let (status, stderr_log, _stdout) = run_streaming(cmd, &mut live).unwrap();
+            assert_eq!(status.code(), Some(7));
+            assert_eq!(stderr_log, b"boom\n");
         }
     }
 }
