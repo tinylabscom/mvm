@@ -76,13 +76,14 @@ impl SupervisorStandbyPool {
         Ok(out)
     }
 
-    /// Pick a live, idle standby compatible with `want` (kernel + fixed resources + image)
+    /// Pick a claimable standby compatible with `want` (kernel + fixed resources + image)
     /// — the claim candidate. `None` means "no compatible warm standby; cold-boot." Skips
     /// claimed and dead entries. Saved-state standbys (pid=0) are considered live: their
-    /// TTL controls expiry, not a process liveness check.
+    /// TTL controls expiry, not a process liveness check. Both `Idle` and `Parked`
+    /// standbys are claimable; parked standbys resume from their saved state.
     pub fn select_idle_compatible(&self, want: &StandbyCompat) -> Result<Option<StandbyHandle>> {
         Ok(self.list()?.into_iter().find(|h| {
-            h.state == StandbyState::Idle
+            h.state.is_claimable()
                 && h.is_compatible(want)
                 && (h.is_saved_state() || pid_alive(h.pid))
         }))
@@ -450,6 +451,18 @@ mod tests {
 
     /// A recent saved standby (pid=0) is kept idle; an expired idle one is demoted to
     /// Parked (not removed) on the first reap pass.
+    #[test]
+    fn select_claims_compatible_parked_saved_state_standby() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let want = vz_compat("aa", "img");
+        let parked = saved_handle("vzp", "aa", "img", StandbyState::Parked);
+        pool.record(&parked).unwrap();
+
+        let got = pool.select_idle_compatible(&want).unwrap();
+        assert_eq!(got.map(|h| h.id), Some("vzp".to_string()));
+    }
+
     #[test]
     fn reap_keeps_recent_saved_standby_and_demotes_expired_one() {
         let tmp = tempfile::tempdir().unwrap();
