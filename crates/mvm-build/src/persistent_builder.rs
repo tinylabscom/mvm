@@ -646,9 +646,9 @@ pub struct SessionRecord {
     /// Last known successful host-side activity against the session.
     ///
     /// Optional for backward compatibility with session records written before
-    /// Plan 205's invocation-driven keeper. Missing means "unknown", and the
-    /// keeper treats it as active at the current observation time rather than
-    /// tearing down an upgraded user's existing builder immediately.
+    /// the invocation-driven keeper. Missing means "unknown", and the keeper
+    /// treats it as active at the current observation time rather than tearing
+    /// down an upgraded user's existing builder immediately.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_unix_secs: Option<u64>,
 }
