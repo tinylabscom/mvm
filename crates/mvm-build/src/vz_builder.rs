@@ -24,7 +24,9 @@
 //! So the Vz path can rely on `Child::wait()` plus a wall-clock
 //! timeout — no console-log polling needed.
 
-use std::io::Write;
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{RecvTimeoutError, channel};
@@ -1407,6 +1409,36 @@ fn vz_persistent_guest_vsock_ports(expose_guest_agent: bool) -> Vec<u32> {
 }
 
 const BUILDER_SUPERVISOR_CONFIG_FILE: &str = "supervisor-config.json";
+const BUILDER_SNAPSHOT_FILE: &str = "state.vzsave";
+const VZ_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Result of parking a persistent Vz builder. The snapshot and matching
+/// machine-id sidecar are the two files required to restore the guest's memory
+/// and identity on the next build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParkedVzBuilderSnapshot {
+    pub snapshot_path: PathBuf,
+    pub machine_id_path: PathBuf,
+}
+
+/// Result of restoring a parked persistent Vz builder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoredVzBuilder {
+    pub supervisor_pid: u32,
+    pub control_socket_path: PathBuf,
+}
+
+pub fn builder_supervisor_config_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(BUILDER_SUPERVISOR_CONFIG_FILE)
+}
+
+pub fn builder_snapshot_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(BUILDER_SNAPSHOT_FILE)
+}
+
+pub fn builder_snapshot_machine_id_path(snapshot_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.machine-id", snapshot_path.display()))
+}
 
 /// Write the builder's `SupervisorConfig` to `<state_dir>/supervisor-config.json`
 /// so a later snapshot-restore can reload it and flip `startup_mode` to `Restore`.
@@ -1414,7 +1446,7 @@ fn persist_builder_supervisor_config(
     state_dir: &Path,
     cfg: &crate::vz::SupervisorConfig,
 ) -> Result<PathBuf, BuilderVmError> {
-    let path = state_dir.join(BUILDER_SUPERVISOR_CONFIG_FILE);
+    let path = builder_supervisor_config_path(state_dir);
     let json = serde_json::to_vec_pretty(cfg).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!("serialising builder SupervisorConfig: {e}"))
     })?;
@@ -1425,6 +1457,241 @@ fn persist_builder_supervisor_config(
         ))
     })?;
     Ok(path)
+}
+
+fn read_builder_supervisor_config(
+    state_dir: &Path,
+) -> Result<crate::vz::SupervisorConfig, BuilderVmError> {
+    let path = builder_supervisor_config_path(state_dir);
+    let body = std::fs::read(&path).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "reading builder SupervisorConfig {}: {e}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_slice(&body).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "parsing builder SupervisorConfig {}: {e}",
+            path.display()
+        ))
+    })
+}
+
+/// Save the live persistent Vz builder to `<state_dir>/state.vzsave`, then stop
+/// the supervisor so the resident builder becomes a parked saved-state instead
+/// of a live VM. The control socket is host-only and already bound mode 0700 by
+/// `mvm-vz-supervisor`; this client sends only the fixed `SAVE <absolute-path>`
+/// verb.
+pub fn park_persistent_vz_builder(
+    state_dir: &Path,
+) -> Result<ParkedVzBuilderSnapshot, BuilderVmError> {
+    let snapshot_path = builder_snapshot_path(state_dir);
+    save_persistent_vz_builder_snapshot(state_dir, &snapshot_path)?;
+    stop_persistent_vz_by_pid_file(state_dir);
+    Ok(ParkedVzBuilderSnapshot {
+        machine_id_path: builder_snapshot_machine_id_path(&snapshot_path),
+        snapshot_path,
+    })
+}
+
+fn save_persistent_vz_builder_snapshot(
+    state_dir: &Path,
+    snapshot_path: &Path,
+) -> Result<(), BuilderVmError> {
+    if !snapshot_path.is_absolute() {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "Vz builder snapshot path must be absolute: {}",
+            snapshot_path.display()
+        )));
+    }
+    if !persistent_vz_supervisor_alive(state_dir) {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "persistent Vz builder supervisor is not alive under {}",
+            state_dir.display()
+        )));
+    }
+
+    let cfg = read_builder_supervisor_config(state_dir)?;
+    let socket_path = cfg
+        .control_socket_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_dir.join("control.sock"));
+    remove_stale_builder_snapshot(snapshot_path)?;
+    let command = format!("SAVE {}", snapshot_path.display());
+    send_builder_vz_control_command(&socket_path, &command)?;
+    let machine_id_path = builder_snapshot_machine_id_path(snapshot_path);
+    if !snapshot_path.is_file() {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "Vz builder SAVE reported success but snapshot {} was not created",
+            snapshot_path.display()
+        )));
+    }
+    if !machine_id_path.is_file() {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "Vz builder SAVE reported success but machine-id sidecar {} was not created",
+            machine_id_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn remove_stale_builder_snapshot(snapshot_path: &Path) -> Result<(), BuilderVmError> {
+    for path in [
+        snapshot_path.to_path_buf(),
+        builder_snapshot_machine_id_path(snapshot_path),
+    ] {
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!(
+                    "removing stale Vz builder snapshot file {}: {e}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Restore a parked persistent Vz builder by reloading its saved supervisor
+/// config, switching the startup mode to `Restore`, respawning gvproxy, and
+/// launching a fresh `mvm-vz-supervisor`.
+pub fn restore_persistent_vz_builder_from_snapshot(
+    state_dir: &Path,
+) -> Result<RestoredVzBuilder, BuilderVmError> {
+    let snapshot_path = builder_snapshot_path(state_dir);
+    if !snapshot_path.is_file() {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "persistent Vz builder snapshot {} does not exist",
+            snapshot_path.display()
+        )));
+    }
+    if persistent_vz_supervisor_alive(state_dir) {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "persistent Vz builder supervisor is already alive under {}",
+            state_dir.display()
+        )));
+    }
+
+    let supervisor_path = resolve_vz_supervisor_path()?;
+    let mut cfg = read_builder_supervisor_config(state_dir)?;
+    let gvproxy = host_gvproxy::spawn_detached(state_dir).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "spawn gvproxy for restored Vz persistent builder VM: {e}"
+        ))
+    })?;
+    let gvproxy_guard = BuilderGvproxyGuard {
+        state_dir: state_dir.to_path_buf(),
+    };
+
+    let machine_id_path = builder_snapshot_machine_id_path(&snapshot_path);
+    prepare_restored_builder_supervisor_config(
+        &mut cfg,
+        state_dir,
+        &snapshot_path,
+        &machine_id_path,
+        &gvproxy,
+    );
+    persist_builder_supervisor_config(state_dir, &cfg)?;
+
+    let child = spawn_vz_supervisor_in_background(&supervisor_path, &cfg)?;
+    let supervisor_pid = child.id();
+    drop(child);
+    gvproxy_guard.defuse();
+    Ok(RestoredVzBuilder {
+        supervisor_pid,
+        control_socket_path: PathBuf::from(
+            cfg.control_socket_path
+                .expect("restored config sets control socket"),
+        ),
+    })
+}
+
+fn prepare_restored_builder_supervisor_config(
+    cfg: &mut crate::vz::SupervisorConfig,
+    state_dir: &Path,
+    snapshot_path: &Path,
+    machine_id_path: &Path,
+    gvproxy: &host_gvproxy::HostGvproxyInfo,
+) {
+    if let Some(crate::vz::NetworkConfig::Gvproxy {
+        ref mut socket_path,
+        ref mut mac,
+        ..
+    }) = cfg.network
+    {
+        *socket_path = gvproxy.socket_path.to_string_lossy().into_owned();
+        *mac = host_gvproxy::derive_mac(&cfg.name);
+    }
+    cfg.startup_mode = crate::vz::StartupMode::Restore {
+        snapshot_path: snapshot_path.to_string_lossy().into_owned(),
+        machine_id_path: Some(machine_id_path.to_string_lossy().into_owned()),
+    };
+    cfg.control_socket_path = Some(
+        state_dir
+            .join("control.sock")
+            .to_string_lossy()
+            .into_owned(),
+    );
+}
+
+#[cfg(unix)]
+fn send_builder_vz_control_command(
+    socket_path: &Path,
+    command: &str,
+) -> Result<String, BuilderVmError> {
+    if command.contains('\n') {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "Vz control command must not contain a newline: {command:?}"
+        )));
+    }
+    let mut stream = UnixStream::connect(socket_path).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "connect Vz builder control socket {}: {e}",
+            socket_path.display()
+        ))
+    })?;
+    stream.set_read_timeout(Some(VZ_CONTROL_TIMEOUT)).ok();
+    stream.set_write_timeout(Some(VZ_CONTROL_TIMEOUT)).ok();
+    stream.write_all(command.as_bytes()).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("write Vz control command {command:?}: {e}"))
+    })?;
+    stream
+        .write_all(b"\n")
+        .map_err(|e| BuilderVmError::ExtractionFailed(format!("write Vz control newline: {e}")))?;
+
+    let mut response = Vec::with_capacity(64);
+    let mut buf = [0u8; 1];
+    loop {
+        let n = stream.read(&mut buf).map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("read Vz control response: {e}"))
+        })?;
+        if n == 0 || buf[0] == b'\n' {
+            break;
+        }
+        response.push(buf[0]);
+    }
+    let line = String::from_utf8(response).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("Vz control response was not UTF-8: {e}"))
+    })?;
+    if let Some(rest) = line.strip_prefix("ERR") {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "Vz builder supervisor refused {command:?}: {}",
+            rest.trim_start()
+        )));
+    }
+    let payload = line.strip_prefix("OK").map_or(line.as_str(), |rest| rest);
+    Ok(payload.trim().to_string())
+}
+
+#[cfg(not(unix))]
+fn send_builder_vz_control_command(
+    _socket_path: &Path,
+    _command: &str,
+) -> Result<String, BuilderVmError> {
+    Err(BuilderVmError::ExtractionFailed(
+        "Vz builder control sockets require Unix-domain sockets".to_string(),
+    ))
 }
 
 /// Spawn `mvm-vz-supervisor` in the background with the
@@ -1661,6 +1928,8 @@ fn pid_alive(pid: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixListener;
 
     fn rootfs_image() -> BuilderVmImage {
         BuilderVmImage::Rootfs {
@@ -1687,6 +1956,243 @@ mod tests {
             memory_mib: 8192,
             vsock_ports: vec![5252, 5253],
             vm_state_dir: PathBuf::from("/tmp/mvm-test/builder-vz"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn fake_control_socket(
+        socket_path: PathBuf,
+        response: &'static str,
+    ) -> std::thread::JoinHandle<String> {
+        let listener = UnixListener::bind(&socket_path).expect("bind fake control socket");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept fake control client");
+            let mut command = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                let n = stream.read(&mut byte).expect("read fake control command");
+                if n == 0 || byte[0] == b'\n' {
+                    break;
+                }
+                command.push(byte[0]);
+            }
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .expect("write fake control response");
+            String::from_utf8(command).expect("command is utf8")
+        })
+    }
+
+    #[cfg(unix)]
+    fn fake_save_control_socket(
+        socket_path: PathBuf,
+        snapshot_path: PathBuf,
+    ) -> std::thread::JoinHandle<String> {
+        let listener = UnixListener::bind(&socket_path).expect("bind fake save control socket");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept fake save client");
+            let mut command = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                let n = stream.read(&mut byte).expect("read fake save command");
+                if n == 0 || byte[0] == b'\n' {
+                    break;
+                }
+                command.push(byte[0]);
+            }
+            std::fs::write(&snapshot_path, b"snapshot").expect("write fake snapshot");
+            std::fs::write(
+                builder_snapshot_machine_id_path(&snapshot_path),
+                b"machine-id",
+            )
+            .expect("write fake machine id");
+            stream.write_all(b"OK\n").expect("write fake save ok");
+            String::from_utf8(command).expect("command is utf8")
+        })
+    }
+
+    #[test]
+    fn builder_snapshot_paths_live_under_state_dir() {
+        let state_dir = Path::new("/abs/cache/vms/mvm-persistent-builder-vz-dev");
+        let snapshot = builder_snapshot_path(state_dir);
+        assert_eq!(snapshot, state_dir.join("state.vzsave"));
+        assert_eq!(
+            builder_snapshot_machine_id_path(&snapshot),
+            PathBuf::from("/abs/cache/vms/mvm-persistent-builder-vz-dev/state.vzsave.machine-id")
+        );
+        assert_eq!(
+            builder_supervisor_config_path(state_dir),
+            state_dir.join("supervisor-config.json")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builder_vz_control_client_strips_ok_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = dir.path().join("control.sock");
+        let handle = fake_control_socket(socket_path.clone(), "OK saved");
+        let response = send_builder_vz_control_command(&socket_path, "STATUS").expect("ok");
+        assert_eq!(response, "saved");
+        assert_eq!(handle.join().expect("join fake supervisor"), "STATUS");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builder_vz_control_client_rejects_newline_injection() {
+        let err =
+            send_builder_vz_control_command(Path::new("/missing.sock"), "SAVE /tmp/a\nSTATUS")
+                .expect_err("newline rejected before connect");
+        assert!(
+            err.to_string().contains("must not contain a newline"),
+            "error explains newline rejection: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builder_vz_control_client_propagates_err_response() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = dir.path().join("control.sock");
+        let handle = fake_control_socket(socket_path.clone(), "ERR no snapshot support");
+        let err = send_builder_vz_control_command(&socket_path, "SAVE /tmp/snap")
+            .expect_err("err response propagated");
+        assert!(
+            err.to_string().contains("no snapshot support"),
+            "error includes supervisor response: {err}"
+        );
+        assert_eq!(
+            handle.join().expect("join fake supervisor"),
+            "SAVE /tmp/snap"
+        );
+    }
+
+    #[test]
+    fn save_persistent_vz_builder_snapshot_requires_absolute_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = save_persistent_vz_builder_snapshot(dir.path(), Path::new("relative.vzsave"))
+            .expect_err("relative path rejected");
+        assert!(
+            err.to_string().contains("absolute"),
+            "error explains absolute-path requirement: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_persistent_vz_builder_snapshot_sends_save_and_replaces_stale_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_dir = dir.path();
+        let socket_path = state_dir.join("control.sock");
+        let snapshot_path = builder_snapshot_path(state_dir);
+        std::fs::write(&snapshot_path, b"stale").expect("write stale snapshot");
+        std::fs::write(
+            builder_snapshot_machine_id_path(&snapshot_path),
+            b"stale-mid",
+        )
+        .expect("write stale machine-id");
+        std::fs::write(
+            state_dir.join(PERSISTENT_VZ_PID_FILE),
+            std::process::id().to_string(),
+        )
+        .expect("write live pid");
+
+        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+            vm_name: "mvm-persistent-builder-vz-dev",
+            vm_state_dir: state_dir,
+            image: &rootfs_image(),
+            workspace_root: Path::new("/tmp/work"),
+            job_dir: Path::new("/tmp/job"),
+            nix_store_img: Path::new("/tmp/nix-store.img"),
+            vcpus: 2,
+            memory_mib: 2048,
+            expose_guest_agent: false,
+            gvproxy: None,
+        })
+        .expect("config");
+        let mut cfg = cfg;
+        cfg.control_socket_path = Some(socket_path.to_string_lossy().into_owned());
+        persist_builder_supervisor_config(state_dir, &cfg).expect("persist config");
+
+        let handle = fake_save_control_socket(socket_path, snapshot_path.clone());
+        save_persistent_vz_builder_snapshot(state_dir, &snapshot_path).expect("save snapshot");
+        assert_eq!(
+            handle.join().expect("join fake supervisor"),
+            format!("SAVE {}", snapshot_path.display())
+        );
+        assert_eq!(
+            std::fs::read(&snapshot_path).expect("read snapshot"),
+            b"snapshot"
+        );
+        assert_eq!(
+            std::fs::read(builder_snapshot_machine_id_path(&snapshot_path))
+                .expect("read machine-id"),
+            b"machine-id"
+        );
+    }
+
+    #[test]
+    fn prepare_restored_builder_supervisor_config_sets_restore_mode_and_fresh_gvproxy() {
+        let state_dir = Path::new("/abs/state");
+        let snapshot_path = state_dir.join("state.vzsave");
+        let machine_id_path = builder_snapshot_machine_id_path(&snapshot_path);
+        let gvproxy = host_gvproxy::HostGvproxyInfo {
+            socket_path: state_dir.join("fresh-gvproxy.sock"),
+            pid: 42,
+        };
+        let mut cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+            vm_name: "mvm-persistent-builder-vz-dev",
+            vm_state_dir: state_dir,
+            image: &rootfs_image(),
+            workspace_root: Path::new("/tmp/work"),
+            job_dir: Path::new("/tmp/job"),
+            nix_store_img: Path::new("/tmp/nix-store.img"),
+            vcpus: 2,
+            memory_mib: 2048,
+            expose_guest_agent: false,
+            gvproxy: Some(&host_gvproxy::HostGvproxyInfo {
+                socket_path: state_dir.join("old-gvproxy.sock"),
+                pid: 41,
+            }),
+        })
+        .expect("config");
+
+        prepare_restored_builder_supervisor_config(
+            &mut cfg,
+            state_dir,
+            &snapshot_path,
+            &machine_id_path,
+            &gvproxy,
+        );
+
+        assert_eq!(
+            cfg.control_socket_path.as_deref(),
+            Some("/abs/state/control.sock")
+        );
+        match cfg.startup_mode {
+            crate::vz::StartupMode::Restore {
+                snapshot_path,
+                machine_id_path,
+            } => {
+                assert_eq!(snapshot_path, "/abs/state/state.vzsave");
+                assert_eq!(
+                    machine_id_path.as_deref(),
+                    Some("/abs/state/state.vzsave.machine-id")
+                );
+            }
+            crate::vz::StartupMode::Boot => panic!("restore mode expected"),
+        }
+        match cfg.network {
+            Some(crate::vz::NetworkConfig::Gvproxy {
+                socket_path, mac, ..
+            }) => {
+                assert_eq!(socket_path, "/abs/state/fresh-gvproxy.sock");
+                assert_eq!(
+                    mac,
+                    host_gvproxy::derive_mac("mvm-persistent-builder-vz-dev")
+                );
+            }
+            None => panic!("gvproxy network expected"),
         }
     }
 

@@ -97,6 +97,35 @@ pub(in crate::commands) fn is_vz_dev_running() -> bool {
     }
 }
 
+#[cfg(feature = "builder-vm")]
+fn dev_vz_snapshot_exists() -> bool {
+    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
+    mvm_build::vz_builder::builder_snapshot_path(&state_dir).is_file()
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn dev_vz_snapshot_exists() -> bool {
+    false
+}
+
+#[cfg(feature = "builder-vm")]
+fn wait_for_dev_vm_ready(console_log: &std::path::Path) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if std::time::Instant::now() > deadline {
+            anyhow::bail!(
+                "Dev VM did not become ready within 60 seconds.\n\
+                 Check the console log: {}",
+                console_log.display()
+            );
+        }
+        if dev_vm_guest_agent_connect().is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
 /// Boot the dev VM via the Vz supervisor, optionally opening an
 /// interactive console.
 #[cfg(feature = "builder-vm")]
@@ -117,6 +146,25 @@ pub(super) fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result
     // fresh start binds a clean state dir.
     let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
     mvm_build::vz_builder::stop_persistent_vz_by_pid_file(&state_dir);
+    let console_log = state_dir.join("console.log");
+    if dev_vz_snapshot_exists() {
+        match mvm_build::vz_builder::restore_persistent_vz_builder_from_snapshot(&state_dir) {
+            Ok(_) => {
+                wait_for_dev_vm_ready(&console_log)?;
+                ui::success("Dev VM restored from parked snapshot.");
+                if open_shell {
+                    ui::info("");
+                    let _ = console_interactive(DEV_VM_NAME);
+                }
+                return Ok("restored");
+            }
+            Err(e) => {
+                ui::warn(&format!(
+                    "parked dev VM restore failed; falling back to cold boot: {e}"
+                ));
+            }
+        }
+    }
 
     // Ensure dev image exists (build if needed — runs in this process).
     let (kernel, rootfs) = ensure_dev_image()?;
@@ -157,22 +205,7 @@ pub(super) fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result
     // optional explicit kill, which we don't call).
     drop(handle);
 
-    // Wait for the guest agent (≤60s), then point at the console log on
-    // timeout.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        if std::time::Instant::now() > deadline {
-            anyhow::bail!(
-                "Dev VM did not become ready within 60 seconds.\n\
-                 Check the console log: {}",
-                console_log.display()
-            );
-        }
-        if dev_vm_guest_agent_connect().is_ok() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
+    wait_for_dev_vm_ready(&console_log)?;
 
     ui::success("Dev VM ready.");
     ui::info("  Shell:      mvmctl dev shell");
@@ -192,6 +225,34 @@ pub(super) fn cmd_dev_vz(_cpus: u32, _memory_gib: u32, _open_shell: bool) -> Res
         "the dev VM is built locally via the builder VM, but this mvmctl was \
          compiled without the `builder-vm` feature."
     )
+}
+
+pub(in crate::commands) fn cmd_dev_vz_park(json: bool) -> Result<bool> {
+    #[cfg(feature = "builder-vm")]
+    {
+        let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
+        if !mvm_build::vz_builder::persistent_vz_supervisor_alive(&state_dir) {
+            if !json {
+                ui::info("Dev VM is not running.");
+            }
+            return Ok(false);
+        }
+        let parked = mvm_build::vz_builder::park_persistent_vz_builder(&state_dir)
+            .map_err(|e| anyhow::anyhow!("Failed to park dev VM: {e}"))?;
+        let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
+        if !json {
+            ui::success("Dev VM parked.");
+            ui::info(&format!("  Snapshot: {}", parked.snapshot_path.display()));
+        }
+        Ok(true)
+    }
+    #[cfg(not(feature = "builder-vm"))]
+    {
+        if !json {
+            ui::info("Dev VM is not running.");
+        }
+        Ok(false)
+    }
 }
 
 /// Host-side path of the dev VM's guest-agent vsock socket. The console
@@ -248,7 +309,13 @@ pub(in crate::commands) fn cmd_dev_vz_down(json: bool) -> Result<bool> {
 /// Show dev VM status.
 pub(super) fn cmd_dev_vz_status(json: bool) -> Result<()> {
     let running = is_vz_dev_running();
-    let state = if running { "running" } else { "stopped" };
+    let state = if running {
+        "running"
+    } else if cfg!(feature = "builder-vm") && dev_vz_snapshot_exists() {
+        "parked"
+    } else {
+        "stopped"
+    };
     let kernel = if running { probe_dev_vm_kernel() } else { None };
 
     if json {
@@ -636,6 +703,16 @@ pub(super) fn build_dev_down_json(
             "not-running"
         },
         reset,
+    }
+}
+
+pub(super) fn build_dev_park_json(backend: &'static str, parked: bool) -> DevLifecycleJson {
+    DevLifecycleJson {
+        schema_version: 1,
+        backend,
+        action: "park",
+        outcome: if parked { "parked" } else { "not-running" },
+        reset: false,
     }
 }
 
@@ -4968,6 +5045,22 @@ mod dev_status_image_tests {
 
         let already = build_dev_up_json("libkrun", "already-running");
         assert_eq!(already.outcome, "already-running");
+    }
+
+    #[test]
+    fn dev_park_json_reports_parked_and_not_running() {
+        let parked = build_dev_park_json("vz", true);
+        assert_eq!(parked.schema_version, 1);
+        assert_eq!(parked.backend, "vz");
+        assert_eq!(parked.action, "park");
+        assert_eq!(parked.outcome, "parked");
+        let json = crate::json_out::to_json_string(&parked).expect("serialize");
+        assert!(json.contains("\"action\": \"park\""));
+        assert!(json.contains("\"outcome\": \"parked\""));
+        assert!(!json.contains("\"reset\""));
+
+        let missing = build_dev_park_json("vz", false);
+        assert_eq!(missing.outcome, "not-running");
     }
 }
 

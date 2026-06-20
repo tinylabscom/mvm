@@ -3170,8 +3170,11 @@ and the residency model and consumes the in-flight pieces rather than rebuilding
   saved-state (vz) standbys, libkrun reaps to cold; claim resumes via the existing saved-state
   path; `pool status` parked count. Freshness = existing `StandbyCompat` (corrected; not the
   builder fingerprint). Builder-residency decisions now carry `BuilderResidencyAction` plus
-  builder snapshot freshness checks (#1121). FC leg (Plan 175) and live macOS-26 resume timing
-  deferred.
+  builder snapshot freshness checks (#1121). Follow-up slice: the explicit Vz dev-builder
+  park/restore path is wired (`mvmctl dev park` saves `state.vzsave`, next `dev up` restores
+  before cold-boot fallback, `dev status` reports `parked`, `doctor` reports parked
+  snapshot-present/no-snapshot state); idle-trigger automation, FC leg
+  (Plan 175), and live macOS-26 resume timing remain deferred.
 - **E — Cold acquisition**  ✅ #1102 — `mvmctl bootstrap` pre-fetches the builder VM image
   (instant first run); source-checkout stays release-artifact-free.
 - **F — Docs and posture**  ✅ #1103 — "what runs where" + residency in `reference/architecture.md`;
@@ -3189,8 +3192,9 @@ and the residency model and consumes the in-flight pieces rather than rebuilding
   authority, or audit writer exists below the host→builder vsock line.
 - Claim-11 volumes still fail closed on a resumed builder; no ADR-002 numbered claim
   regresses; `xtask check-claim-catalog` stays green.
-- Remaining Plan 205 closeout is live-gated: macOS-26 warm→parked demotion/resume timing
-  and the live-coupled OCI `run --image` residency path.
+- Remaining Plan 205 closeout is live-gated/policy-gated: idle-driven warm→parked demotion
+  for the builder, macOS-26 parked-restore timing proof via `mvm-builderd`, and the
+  live-coupled OCI `run --image` residency path.
 
 ### Non-goals (explicit — see Plan 205 §Non-goals)
 
