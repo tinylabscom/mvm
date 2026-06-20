@@ -88,6 +88,14 @@ plan 25 sequences the work into six independently-shippable workstreams.
       and `crates/mvm-build/src`, then run the narrow helper build only when a
       helper is missing or stale. Release-installed sidecars and explicit
       `MVM_VZ_*_PATH` overrides keep their existing behavior.
+- [x] Completed
+      [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
+      WS-3 linux-native richer `dev status --json`: Linux-native hosts now
+      keep the existing top-level `ready` / `not-ready` / `no-kvm` state and
+      add a typed `linux_native` object with safe `kvm`, `firecracker`, and
+      `base_assets` readiness labels. The JSON tests pin that no host paths,
+      artifact filenames, or digests leak, and the CLI reference documents the
+      schema-versioned status form.
 - [x] Advanced
       [`plans/118-supervisor-standby-pool-and-live-bench.md`](plans/118-supervisor-standby-pool-and-live-bench.md)
       live libkrun follow-up: x86_64 libkrun starts now carry an explicit

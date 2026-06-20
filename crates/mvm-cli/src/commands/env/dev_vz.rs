@@ -495,6 +495,20 @@ pub(super) struct DevStatusJson {
     pub dev_image: Option<DevImageCacheJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub builder_cache: Option<BuilderVmCacheJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linux_native: Option<LinuxNativeDevStatusJson>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(super) struct LinuxNativeDevStatusJson {
+    pub kvm: LinuxNativeComponentJson,
+    pub firecracker: LinuxNativeComponentJson,
+    pub base_assets: LinuxNativeComponentJson,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(super) struct LinuxNativeComponentJson {
+    pub state: &'static str,
 }
 
 /// Build the status report for a VM-backed dev backend (vz / libkrun):
@@ -517,6 +531,7 @@ pub(super) fn build_dev_status_json(
         builder_cache: Some(builder_vm_cache_json(
             &resolve_builder_vm_cache_status_summary(),
         )),
+        linux_native: None,
     }
 }
 
@@ -534,6 +549,49 @@ pub(super) fn build_dev_status_json_vmless(
         guest_kernel: None,
         dev_image: None,
         builder_cache: None,
+        linux_native: None,
+    }
+}
+
+pub(super) fn build_dev_status_json_linux_native(
+    has_kvm: bool,
+    firecracker_installed: bool,
+    base_assets_present: bool,
+) -> DevStatusJson {
+    let state = if !has_kvm {
+        "no-kvm"
+    } else if firecracker_installed && base_assets_present {
+        "ready"
+    } else {
+        "not-ready"
+    };
+    DevStatusJson {
+        schema_version: 1,
+        backend: "linux-native",
+        vm_name: None,
+        state,
+        guest_kernel: None,
+        dev_image: None,
+        builder_cache: None,
+        linux_native: Some(LinuxNativeDevStatusJson {
+            kvm: LinuxNativeComponentJson {
+                state: if has_kvm { "present" } else { "missing" },
+            },
+            firecracker: LinuxNativeComponentJson {
+                state: if firecracker_installed {
+                    "present"
+                } else {
+                    "missing"
+                },
+            },
+            base_assets: LinuxNativeComponentJson {
+                state: if base_assets_present {
+                    "present"
+                } else {
+                    "missing"
+                },
+            },
+        }),
     }
 }
 
@@ -4719,6 +4777,7 @@ mod dev_status_image_tests {
         assert_eq!(report.guest_kernel.as_deref(), Some("6.1.0-mvm"));
         assert!(report.dev_image.is_some());
         assert!(report.builder_cache.is_some());
+        assert!(report.linux_native.is_none());
 
         let json = crate::json_out::to_json_string(&report).expect("serialize");
         assert!(json.contains("\"backend\": \"vz\""));
@@ -4752,11 +4811,53 @@ mod dev_status_image_tests {
         assert!(report.vm_name.is_none());
         assert!(report.dev_image.is_none());
         assert!(report.builder_cache.is_none());
+        assert!(report.linux_native.is_none());
         let json = crate::json_out::to_json_string(&report).expect("serialize");
         assert!(json.contains("\"backend\": \"linux-native\""));
         assert!(!json.contains("\"vm_name\""));
         assert!(!json.contains("\"dev_image\""));
         assert!(!json.contains("\"builder_cache\""));
+    }
+
+    #[test]
+    fn dev_status_json_linux_native_reports_typed_safe_detail() {
+        let report = build_dev_status_json_linux_native(true, false, true);
+        assert_eq!(report.backend, "linux-native");
+        assert_eq!(report.state, "not-ready");
+        assert!(report.vm_name.is_none());
+        assert!(report.dev_image.is_none());
+        assert!(report.builder_cache.is_none());
+        let detail = report.linux_native.as_ref().expect("linux detail");
+        assert_eq!(detail.kvm.state, "present");
+        assert_eq!(detail.firecracker.state, "missing");
+        assert_eq!(detail.base_assets.state, "present");
+
+        let json = crate::json_out::to_json_string(&report).expect("serialize");
+        assert!(json.contains("\"linux_native\""));
+        assert!(json.contains("\"firecracker\""));
+        assert!(json.contains("\"base_assets\""));
+        assert!(!json.contains("/dev/kvm"));
+        assert!(!json.contains("/Users"));
+        assert!(!json.contains("/private/tmp"));
+        assert!(!json.contains("rootfs.ext4"));
+        assert!(!json.contains("vmlinux"));
+        assert!(!json.contains("sha256"));
+    }
+
+    #[test]
+    fn dev_status_json_linux_native_state_tracks_readiness() {
+        assert_eq!(
+            build_dev_status_json_linux_native(false, true, true).state,
+            "no-kvm"
+        );
+        assert_eq!(
+            build_dev_status_json_linux_native(true, true, false).state,
+            "not-ready"
+        );
+        assert_eq!(
+            build_dev_status_json_linux_native(true, true, true).state,
+            "ready"
+        );
     }
 
     #[test]
