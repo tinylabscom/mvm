@@ -77,14 +77,12 @@ pub const EPOCH_FILENAME: &str = ".epoch";
 /// create it — callers that need to write into it use
 /// `prepare_instance_snapshot_dir` instead.
 pub fn instance_dir(vm_name: &str) -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_data_dir())
-        .join("instances")
-        .join(vm_name)
+    mvm_core::config::instance_dir(vm_name)
 }
 
 /// Returns `~/.mvm/instances/<vm-name>/snapshot/`.
 pub fn snapshot_dir(vm_name: &str) -> PathBuf {
-    instance_dir(vm_name).join("snapshot")
+    mvm_core::config::instance_snapshot_dir(vm_name)
 }
 
 /// Create `<instance>/snapshot/` with mode 0700 if it doesn't
