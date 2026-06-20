@@ -225,6 +225,10 @@ pub struct PostRestoreOutcome {
     /// Free-form detail from the agent's ack (e.g. "post-restore signal
     /// sent to init"), surfaced to the operator.
     pub detail: Option<String>,
+    /// `true` iff the guest reseeded its CSPRNG because the delivered
+    /// generation token changed (a fresh clone of the snapshot). `false` for a
+    /// plain wake or a no-rotation (zero-token) restore.
+    pub reseeded: bool,
 }
 
 /// Sends the `PostRestore` signal to a resumed guest so it finishes coming
@@ -271,7 +275,12 @@ pub fn signal_post_restore<S: PostRestoreSignal + ?Sized>(
 /// here (needs a live guest agent); the orchestration in
 /// [`signal_post_restore`] is what the tests cover, mirroring the
 /// `FirecrackerIO` / `CannedIO` split on [`SnapshotIO`].
-pub struct VsockPostRestoreSignal;
+pub struct VsockPostRestoreSignal {
+    /// Host-minted generation token delivered to the guest on this resume so
+    /// it rotates its VMGenID. Random per resume; an all-zero token requests
+    /// no rotation (template restore).
+    pub token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+}
 
 impl PostRestoreSignal for VsockPostRestoreSignal {
     fn post_restore(&self, vm_name: &str) -> Result<PostRestoreOutcome> {
@@ -284,10 +293,18 @@ impl PostRestoreSignal for VsockPostRestoreSignal {
         // `call_unary` enforces PostRestore's response contract — the agent
         // `Error` / off-contract cases surface as a typed `RpcError`, so the
         // only `Ok` variant here is the contracted `PostRestoreAck`.
-        match call_unary(&mut stream, &GuestRequest::PostRestore)? {
-            GuestResponse::PostRestoreAck { success, detail } => Ok(PostRestoreOutcome {
+        match call_unary(
+            &mut stream,
+            &GuestRequest::PostRestore { token: self.token },
+        )? {
+            GuestResponse::PostRestoreAck {
+                success,
+                detail,
+                reseeded,
+            } => Ok(PostRestoreOutcome {
                 acknowledged: success,
                 detail,
+                reseeded,
             }),
             other => bail!("unexpected response to PostRestore: {other:?}"),
         }
@@ -1015,9 +1032,11 @@ mod tests {
         let signal = MockSignal(Ok(PostRestoreOutcome {
             acknowledged: true,
             detail: Some("post-restore signal sent to init".into()),
+            reseeded: true,
         }));
         let outcome = signal_post_restore("vm-1", &signal).unwrap();
         assert!(outcome.acknowledged);
+        assert!(outcome.reseeded, "a fresh-clone resume rotates the CSPRNG");
     }
 
     #[test]
@@ -1027,6 +1046,7 @@ mod tests {
         let signal = MockSignal(Ok(PostRestoreOutcome {
             acknowledged: false,
             detail: Some("kill failed: no such process".into()),
+            reseeded: false,
         }));
         let err = signal_post_restore("vm-1", &signal).unwrap_err();
         let msg = err.to_string();

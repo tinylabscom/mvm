@@ -1067,11 +1067,48 @@
           "additionalProperties": false
         },
         {
-          "description": "Signal post-restore: remount drives and restart services.",
-          "type": "string",
-          "enum": [
+          "description": "Signal post-restore: rotate the VMGenID, then remount drives and restart services. `token` is the host-minted generation token for this resume; the guest feeds it to its `GenIdReseeder` so two clones of one snapshot reseed their CSPRNG to distinct state. An all-zero token (the `serde` default, used by no-rotation callers like template restore) means \"no rotation\" — the remount/restart still runs.",
+          "type": "object",
+          "required": [
             "PostRestore"
-          ]
+          ],
+          "properties": {
+            "PostRestore": {
+              "type": "object",
+              "properties": {
+                "token": {
+                  "default": [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0.0
+                  },
+                  "maxItems": 16,
+                  "minItems": 16
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
         },
         {
           "description": "Request filesystem diff (changes since boot, from overlay or snapshot).",
@@ -2136,6 +2173,11 @@
                     "string",
                     "null"
                   ]
+                },
+                "reseeded": {
+                  "description": "`true` iff the delivered generation token changed and the guest reseeded its CSPRNG (a fresh clone). `false` for an unchanged/zero token (a plain wake or no-rotation restore). Defaults to `false` on the wire for forward-compat with a pre-rotation ack.",
+                  "default": false,
+                  "type": "boolean"
                 },
                 "success": {
                   "type": "boolean"

@@ -201,12 +201,20 @@ pub(in crate::commands) fn run_resume(
     // restart services (it maps PostRestore → SIGUSR1 → PID 1). The `mock`
     // hypervisor has no guest agent, so skip it there.
     if args.hypervisor != "mock" {
+        // Mint a fresh generation token for this resume so the guest rotates
+        // its VMGenID and reseeds its CSPRNG — two clones of one snapshot must
+        // not draw identical randomness. The token bytes are random; the
+        // content hash is metadata only.
+        let token = mvm_core::crypto::vmgenid::fresh_generation_token(&args.name).token;
         crate::commands::shared::emit_vsock_rpc_audit(
             &args.name,
-            &mvm_guest::vsock::GuestRequest::PostRestore,
+            &mvm_guest::vsock::GuestRequest::PostRestore { token },
         );
-        signal_post_restore(&args.name, &VsockPostRestoreSignal)
+        let outcome = signal_post_restore(&args.name, &VsockPostRestoreSignal { token })
             .with_context(|| format!("post-restore signal for {:?}", args.name))?;
+        if outcome.reseeded {
+            crate::ui::info(&format!("{}: VMGenID rotated (CSPRNG reseeded)", args.name));
+        }
     }
 
     println!(

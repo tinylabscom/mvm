@@ -212,8 +212,16 @@ pub enum GuestRequest {
         #[serde(default)]
         env: Vec<(String, String)>,
     },
-    /// Signal post-restore: remount drives and restart services.
-    PostRestore,
+    /// Signal post-restore: rotate the VMGenID, then remount drives and
+    /// restart services. `token` is the host-minted generation token for this
+    /// resume; the guest feeds it to its `GenIdReseeder` so two clones of one
+    /// snapshot reseed their CSPRNG to distinct state. An all-zero token (the
+    /// `serde` default, used by no-rotation callers like template restore)
+    /// means "no rotation" — the remount/restart still runs.
+    PostRestore {
+        #[serde(default)]
+        token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+    },
     /// Request filesystem diff (changes since boot, from overlay or snapshot).
     FsDiff,
     /// Start a vsock→TCP port forwarder for the given guest port.
@@ -520,7 +528,7 @@ impl GuestRequest {
             Self::ProbeStatus => "probe-status",
             Self::Exec { .. } => "exec",
             Self::RunEntrypoint { .. } => "run-entrypoint",
-            Self::PostRestore => "post-restore",
+            Self::PostRestore { .. } => "post-restore",
             Self::FsDiff => "fs-diff",
             Self::StartPortForward { .. } => "start-port-forward",
             Self::StartUnixSocketForward { .. } => "start-unix-socket-forward",
@@ -730,7 +738,7 @@ impl GuestRequest {
             GuestRequest::ProbeStatus => Verb::ProbeStatus,
             GuestRequest::Exec { .. } => Verb::Exec,
             GuestRequest::RunEntrypoint { .. } => Verb::RunEntrypoint,
-            GuestRequest::PostRestore => Verb::PostRestore,
+            GuestRequest::PostRestore { .. } => Verb::PostRestore,
             GuestRequest::FsDiff => Verb::FsDiff,
             GuestRequest::StartPortForward { .. } => Verb::StartPortForward,
             GuestRequest::StartUnixSocketForward { .. } => Verb::StartUnixSocketForward,
@@ -787,7 +795,7 @@ impl GuestRequest {
             | GuestRequest::CheckpointIntegrations { .. }
             | GuestRequest::ProbeStatus
             | GuestRequest::RunEntrypoint { .. }
-            | GuestRequest::PostRestore
+            | GuestRequest::PostRestore { .. }
             | GuestRequest::EntrypointStatus
             | GuestRequest::ReadinessStatus
             | GuestRequest::MountVolume { .. }
@@ -923,6 +931,12 @@ pub enum GuestResponse {
     PostRestoreAck {
         success: bool,
         detail: Option<String>,
+        /// `true` iff the delivered generation token changed and the guest
+        /// reseeded its CSPRNG (a fresh clone). `false` for an unchanged/zero
+        /// token (a plain wake or no-rotation restore). Defaults to `false`
+        /// on the wire for forward-compat with a pre-rotation ack.
+        #[serde(default)]
+        reseeded: bool,
     },
     /// Filesystem diff result.
     FsDiffResult { changes: Vec<FsChange> },
@@ -2798,11 +2812,16 @@ pub fn query_probe_status_at(vsock_uds_path: &str) -> Result<Vec<crate::probes::
 
 /// Signal post-restore to the guest agent at a specific UDS path.
 ///
-/// After snapshot restore, tells the guest to remount config/secrets drives
-/// and restart services. Returns Ok(true) if the guest acknowledged success.
-pub fn post_restore_at(vsock_uds_path: &str) -> Result<bool> {
+/// After snapshot restore, tells the guest to rotate its VMGenID with the
+/// host-minted `token` (so two clones of one snapshot diverge), then remount
+/// config/secrets drives and restart services. An all-zero `token` is a
+/// no-rotation restore. Returns Ok(true) if the guest acknowledged success.
+pub fn post_restore_at(
+    vsock_uds_path: &str,
+    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+) -> Result<bool> {
     let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
-    let resp = send_request(&mut stream, &GuestRequest::PostRestore)?;
+    let resp = send_request(&mut stream, &GuestRequest::PostRestore { token })?;
 
     match resp {
         GuestResponse::PostRestoreAck { success, .. } => Ok(success),
@@ -3079,7 +3098,9 @@ mod tests {
                 stdin: Some("hello".to_string()),
                 timeout_secs: Some(10),
             },
-            GuestRequest::PostRestore,
+            GuestRequest::PostRestore {
+                token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+            },
             GuestRequest::FsDiff,
             GuestRequest::StartPortForward { guest_port: 8080 },
             GuestRequest::StartUnixSocketForward {
@@ -3189,6 +3210,57 @@ mod tests {
     }
 
     #[test]
+    fn post_restore_token_roundtrips_and_defaults_to_zero() {
+        use mvm_core::crypto::vmgenid::GENID_BYTES;
+
+        // A non-zero generation token survives the JSON round-trip intact.
+        let req = GuestRequest::PostRestore {
+            token: [9u8; GENID_BYTES],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        match serde_json::from_str::<GuestRequest>(&json).unwrap() {
+            GuestRequest::PostRestore { token } => assert_eq!(token, [9u8; GENID_BYTES]),
+            other => panic!("expected PostRestore, got {other:?}"),
+        }
+
+        // An omitted token (no-rotation caller / template restore) defaults to
+        // the all-zero "no rotation" token rather than failing to parse.
+        match serde_json::from_str::<GuestRequest>(r#"{"PostRestore":{}}"#).unwrap() {
+            GuestRequest::PostRestore { token } => assert_eq!(token, [0u8; GENID_BYTES]),
+            other => panic!("expected PostRestore, got {other:?}"),
+        }
+
+        // `deny_unknown_fields` is load-bearing: an unexpected field fails closed.
+        assert!(
+            serde_json::from_str::<GuestRequest>(r#"{"PostRestore":{"bogus":1}}"#).is_err(),
+            "unknown field must be rejected"
+        );
+    }
+
+    #[test]
+    fn post_restore_ack_carries_reseeded_flag() {
+        let ack = GuestResponse::PostRestoreAck {
+            success: true,
+            detail: None,
+            reseeded: true,
+        };
+        let json = serde_json::to_string(&ack).unwrap();
+        match serde_json::from_str::<GuestResponse>(&json).unwrap() {
+            GuestResponse::PostRestoreAck { reseeded, .. } => assert!(reseeded),
+            other => panic!("expected PostRestoreAck, got {other:?}"),
+        }
+        // A pre-rotation ack without the field defaults `reseeded` to false.
+        match serde_json::from_str::<GuestResponse>(
+            r#"{"PostRestoreAck":{"success":true,"detail":null}}"#,
+        )
+        .unwrap()
+        {
+            GuestResponse::PostRestoreAck { reseeded, .. } => assert!(!reseeded),
+            other => panic!("expected PostRestoreAck, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_guest_response_roundtrip() {
         use crate::integrations::{IntegrationStateReport, IntegrationStatus};
 
@@ -3266,6 +3338,7 @@ mod tests {
             GuestResponse::PostRestoreAck {
                 success: true,
                 detail: Some("post-restore signal sent to init".to_string()),
+                reseeded: false,
             },
             GuestResponse::FsDiffResult {
                 changes: vec![
@@ -5164,7 +5237,9 @@ mod tests {
                 timeout_secs: 1,
                 env: vec![],
             },
-            GuestRequest::PostRestore,
+            GuestRequest::PostRestore {
+                token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+            },
             GuestRequest::FsDiff,
             GuestRequest::StartPortForward { guest_port: 1 },
             GuestRequest::StartUnixSocketForward {
@@ -5366,7 +5441,9 @@ mod tests {
                 drain_timeout_secs: 5,
             },
             GuestRequest::Wake,
-            GuestRequest::PostRestore,
+            GuestRequest::PostRestore {
+                token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+            },
             GuestRequest::UpdateIdleTimeout { secs: 600 },
             GuestRequest::MountVolume {
                 volume_name: "v".into(),
@@ -5648,7 +5725,12 @@ mod tests {
                 },
                 "run-entrypoint",
             ),
-            (GuestRequest::PostRestore, "post-restore"),
+            (
+                GuestRequest::PostRestore {
+                    token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                },
+                "post-restore",
+            ),
             (GuestRequest::FsDiff, "fs-diff"),
             (
                 GuestRequest::StartPortForward { guest_port: 0 },

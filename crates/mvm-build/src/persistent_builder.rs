@@ -1157,6 +1157,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn dispatch_socket_path_uses_builder_dispatch_port_constant() {
@@ -1332,17 +1333,9 @@ mod tests {
             serde_json::to_vec(&record).unwrap(),
         )
         .unwrap();
-        let old = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", scratch.path());
-        }
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", scratch.path().join(".mvm"));
         let touched = touch_active_session(55).expect("touch active session");
-        unsafe {
-            match old {
-                Some(h) => std::env::set_var("HOME", h),
-                None => std::env::remove_var("HOME"),
-            }
-        }
         assert!(touched);
         let body = std::fs::read(run_dir.join("persistent-builder.json")).unwrap();
         let back: SessionRecord = serde_json::from_slice(&body).unwrap();
@@ -1351,23 +1344,13 @@ mod tests {
 
     #[test]
     fn read_active_session_returns_none_when_record_missing() {
-        // Set HOME to a tempdir that has no .mvm/run/persistent-
-        // builder.json — the read should silently return None
-        // rather than error.
+        // Point MVM_DATA_DIR at a tempdir with no run/persistent-
+        // builder.json; the read should silently return None rather
+        // than error.
         let scratch = tempfile::tempdir().expect("tempdir");
-        // SAFETY: tests run in single-process; clobbering HOME for
-        // a few lines is fine. Reset after.
-        let old = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", scratch.path());
-        }
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", scratch.path().join(".mvm"));
         let result = read_active_session();
-        unsafe {
-            match old {
-                Some(h) => std::env::set_var("HOME", h),
-                None => std::env::remove_var("HOME"),
-            }
-        }
         assert!(result.is_none());
     }
 
@@ -1395,17 +1378,9 @@ mod tests {
             serde_json::to_vec(&record).unwrap(),
         )
         .unwrap();
-        let old = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", scratch.path());
-        }
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", scratch.path().join(".mvm"));
         let result = read_active_session();
-        unsafe {
-            match old {
-                Some(h) => std::env::set_var("HOME", h),
-                None => std::env::remove_var("HOME"),
-            }
-        }
         assert!(
             result.is_none(),
             "dead PID {DEFINITELY_DEAD_PID} must be classified as not-alive"

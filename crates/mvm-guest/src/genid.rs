@@ -34,7 +34,7 @@ pub struct GenIdReseeder {
 
 impl GenIdReseeder {
     /// Seed with the generation token present at first boot/resume.
-    pub fn new(initial: [u8; GENID_BYTES]) -> Self {
+    pub const fn new(initial: [u8; GENID_BYTES]) -> Self {
         Self {
             state: GenIdState::new(initial),
         }
@@ -55,6 +55,18 @@ impl GenIdReseeder {
             tracing::warn!("genid reseed: stirring /dev/urandom failed: {e}");
         }
         GenIdAction::Reseeded
+    }
+
+    /// Dispatch a token delivered on the `PostRestore` resume RPC. An all-zero
+    /// token means "no rotation requested" — the resume carried no fresh
+    /// generation (e.g. a template restore that just remounts drives), so the
+    /// change-detector is left untouched and a later real token still rotates.
+    /// Any non-zero token runs the normal change-detect-and-reseed path.
+    pub fn on_post_restore_token(&mut self, token: [u8; GENID_BYTES]) -> GenIdAction {
+        if token == [0u8; GENID_BYTES] {
+            return GenIdAction::Unchanged;
+        }
+        self.on_genid(token)
     }
 }
 
@@ -84,5 +96,48 @@ mod tests {
         assert_eq!(r.on_genid([2u8; GENID_BYTES]), GenIdAction::Reseeded);
         // Same token again is a no-op (normal wake, not a fresh clone).
         assert_eq!(r.on_genid([2u8; GENID_BYTES]), GenIdAction::Unchanged);
+    }
+
+    #[test]
+    fn post_restore_zero_token_is_no_rotation() {
+        // Baseline-zero seed mirrors the agent's static reseeder before any
+        // real token has been delivered.
+        let mut r = GenIdReseeder::new([0u8; GENID_BYTES]);
+        // A no-rotation resume (zero token) must not advance the detector...
+        assert_eq!(
+            r.on_post_restore_token([0u8; GENID_BYTES]),
+            GenIdAction::Unchanged
+        );
+        // ...so a later real token still counts as a fresh clone and rotates.
+        assert_eq!(
+            r.on_post_restore_token([7u8; GENID_BYTES]),
+            GenIdAction::Reseeded
+        );
+        // Re-sending the same token (idempotent PostRestore) is a no-op.
+        assert_eq!(
+            r.on_post_restore_token([7u8; GENID_BYTES]),
+            GenIdAction::Unchanged
+        );
+    }
+
+    #[test]
+    fn two_clones_of_one_snapshot_rotate_to_distinct_state() {
+        // Both clones restore from the same snapshot-captured reseeder state.
+        let snapshot_state = GenIdReseeder::new([3u8; GENID_BYTES]);
+        let mut clone_a = GenIdReseeder {
+            state: snapshot_state.state.clone(),
+        };
+        let mut clone_b = GenIdReseeder {
+            state: snapshot_state.state,
+        };
+        // The host delivers a distinct fresh token to each clone; both rotate.
+        assert_eq!(
+            clone_a.on_post_restore_token([10u8; GENID_BYTES]),
+            GenIdAction::Reseeded
+        );
+        assert_eq!(
+            clone_b.on_post_restore_token([20u8; GENID_BYTES]),
+            GenIdAction::Reseeded
+        );
     }
 }

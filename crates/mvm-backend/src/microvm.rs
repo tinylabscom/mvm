@@ -1089,7 +1089,12 @@ pub fn restore_from_template_snapshot(
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
         if agent_ready {
-            match mvm_guest::vsock::post_restore_at(&vsock_path) {
+            // Mint a fresh generation token so this resume rotates the guest
+            // CSPRNG — two clones of one snapshot must not draw identical
+            // randomness. The token bytes are random; the content hash is
+            // metadata only.
+            let token = mvm_core::crypto::vmgenid::fresh_generation_token(&vsock_path).token;
+            match mvm_guest::vsock::post_restore_at(&vsock_path, token) {
                 Ok(true) => ui::info("Post-restore complete."),
                 Ok(false) => ui::warn("Post-restore signal returned failure."),
                 Err(e) => ui::warn(&format!(
