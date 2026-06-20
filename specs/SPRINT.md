@@ -3078,7 +3078,7 @@ until explicitly directed.
 - Any production isolation claim for Tier 0 — it is single-principal dev preview,
   by design.
 
-## Sprint 63 — Resident builder control plane + residency model (proposed)  [`plans/205-resident-builder-control-plane.md`](plans/205-resident-builder-control-plane.md) | [`adrs/090-resident-daemon-trust-gradient-and-residency.md`](adrs/090-resident-daemon-trust-gradient-and-residency.md)
+## Sprint 63 — Resident builder control plane + residency model (🟢 substantially complete — A/B/D/F merged, E via #1102, C via Plan 204)  [`plans/205-resident-builder-control-plane.md`](plans/205-resident-builder-control-plane.md) | [`adrs/090-resident-daemon-trust-gradient-and-residency.md`](adrs/090-resident-daemon-trust-gradient-and-residency.md)
 
 ### Why this sprint
 
@@ -3110,18 +3110,24 @@ and the residency model and consumes the in-flight pieces rather than rebuilding
 
 ### Workstream breakdown (see Plan 205)
 
-- **A — Trust-gradient invariant**  🔴 proposed — codify + structural tests (no key /
-  admission / prod do_exec / console below the host line; host daemon stays per-tenant).
-- **B — Residency policy over the standby pool**  🔴 proposed — `min`+idle, warm↔parked
-  transitions, per-host default + override, doctor reporting.
-- **C — Resident builder daemon**  🔴 proposed — `mvm-builderd` long-lived across
-  invocations, session reuse with hot store (Plan 196), readiness/crash-recovery.
-- **D — Snapshot park/resume**  🔴 proposed — Vz snapshot (Plan 159) into parked state,
-  FC leg via Plan 175, freshness keyed to the builder fingerprint (Plan 195).
-- **E — Cold acquisition**  🔴 proposed — first-boot snapshot bake, source-checkout stays
-  release-artifact-free, doctor never-built/parked/warm.
-- **F — Docs and posture**  🔴 proposed — "what runs where" table, residency default +
-  tradeoff, threat-model delta.
+- **A — Trust-gradient invariant**  ✅ #1090 (+ builder tier #1110) — `check-prod-agent-no-authority`
+  + `per_tenant_isolation` + the `trust-gradient.md` ledger and `xtask check-trust-gradient`;
+  `check-builderd-no-authority` (#1110) extended it to the builder tier once Plan 204 landed
+  `mvm-builderd`. `check-trust-gradient: clean (3 rows)` — all three tiers machine-checked.
+- **B — Residency policy over the standby pool**  ✅ #1094 — `mvm-core::residency`
+  (`MVM_RESIDENCY` warm⇄parked, per-host default AS=warm/CI=parked), `effective_warm_pool_size`
+  wired into `up`, `mvmctl doctor` residency line. Idle→parked demotion delivered by D.
+- **C — Resident builder daemon**  ✅ delivered by Plan 204 (#1091) — `mvm-builderd` is the
+  resident builder-VM control daemon (typed vsock, no shell). Session-reuse/crash-recovery
+  lifecycle is Plan 204's domain.
+- **D — Snapshot park/resume**  ✅ #1099 — `StandbyState::Parked`; reaper demotes idle
+  saved-state (vz) standbys, libkrun reaps to cold; claim resumes via the existing saved-state
+  path; `pool status` parked count. Freshness = existing `StandbyCompat` (corrected; not the
+  builder fingerprint). FC leg (Plan 175) and live macOS-26 resume timing deferred.
+- **E — Cold acquisition**  ✅ #1102 — `mvmctl bootstrap` pre-fetches the builder VM image
+  (instant first run); source-checkout stays release-artifact-free.
+- **F — Docs and posture**  ✅ #1103 — "what runs where" + residency in `reference/architecture.md`;
+  threat-model delta in ADR-090.
 
 ### Sprint 63 success criteria
 
