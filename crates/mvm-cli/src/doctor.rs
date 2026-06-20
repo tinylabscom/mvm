@@ -448,10 +448,15 @@ fn builderd_daemon_summary(vms_root: &std::path::Path) -> String {
         if !dir.is_dir() {
             continue;
         }
-        let sock = mvm_build::builderd::builderd_control_socket_path(&dir);
-        if !sock.exists() {
+        // A builder VM may be libkrun (`<dir>/vsock-<port>.sock`) or Vz
+        // (`<dir>/vsock/vsock-<port>.sock`); probe whichever socket the
+        // backend actually created.
+        let Some(sock) = mvm_build::builderd::builderd_control_socket_candidates(&dir)
+            .into_iter()
+            .find(|p| p.exists())
+        else {
             continue;
-        }
+        };
         let name = entry.file_name().to_string_lossy().into_owned();
         let readiness =
             mvm_build::builderd::probe_builderd_readiness(&sock, BUILDERD_PROBE_TIMEOUT);
@@ -4035,6 +4040,30 @@ mod tests {
 
         let s = builderd_daemon_summary(root.path());
         assert!(s.contains("bv: ready"), "got {s:?}");
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn builderd_daemon_summary_finds_a_vz_shaped_socket() {
+        use std::os::unix::net::UnixListener;
+        // Regression for the live Vz boot: the Vz supervisor nests the
+        // control socket under `<vm_state_dir>/vsock/`. The scan must find
+        // it there, not only at the libkrun `<vm_state_dir>/vsock-*.sock`.
+        let root = tempfile::Builder::new()
+            .prefix("mvmbd")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let vm_dir = root.path().join("bvz");
+        let sock = mvm_build::builderd::builderd_vz_control_socket_path(&vm_dir);
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&sock).expect("bind");
+        let handle = std::thread::spawn(move || {
+            let (mut conn, _addr) = listener.accept().expect("accept");
+            mvm_build::builderd::serve_connection(&mut conn).expect("serve");
+        });
+
+        let s = builderd_daemon_summary(root.path());
+        assert!(s.contains("bvz: ready"), "got {s:?}");
         handle.join().expect("server thread");
     }
 

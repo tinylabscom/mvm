@@ -488,16 +488,47 @@ pub fn dispatch_with_executor(
 // Host-side client (readiness probe)
 // ============================================================================
 
-/// The per-port vsock socket the resident daemon's control channel is
-/// reachable at, for a builder VM rooted at `vm_state_dir`. Mirrors
-/// `persistent_builder::dispatch_socket_path` — the same
-/// `<vm_state_dir>/vsock-<port>.sock` convention, on the dedicated
-/// builder-control port. Single source of truth shared by the host
-/// client here and the daemon's listener config once boot wiring lands.
+/// The **libkrun**-shape control socket for a builder VM rooted at
+/// `vm_state_dir`: `<vm_state_dir>/vsock-<port>.sock`. libkrun binds one
+/// socket per forwarded port directly in the state dir (matching
+/// `persistent_builder::dispatch_socket_path`).
+///
+/// Vz nests its per-port sockets one level deeper, under a `vsock/`
+/// subdir — use [`builderd_vz_control_socket_path`] there, or
+/// [`builderd_control_socket_candidates`] when the backend is unknown
+/// (e.g. scanning the builder-VM `vms/` root). Mixing the two shapes is
+/// the libkrun-vs-Vz socket-path bug class that has bitten the broker
+/// path before.
 pub fn builderd_control_socket_path(vm_state_dir: &Path) -> PathBuf {
-    vm_state_dir.join(mvm_core::config::vsock_socket_filename(
-        mvm_guest::builder_agent::BUILDERD_CONTROL_PORT,
-    ))
+    vm_state_dir.join(builderd_control_socket_filename())
+}
+
+/// The **Vz**-shape control socket for a builder VM rooted at
+/// `vm_state_dir`: `<vm_state_dir>/vsock/vsock-<port>.sock`. The Vz
+/// supervisor nests per-port sockets under a `vsock/` subdir (see
+/// `mvm_core::config::vm_vz_vsock_dir`).
+pub fn builderd_vz_control_socket_path(vm_state_dir: &Path) -> PathBuf {
+    vm_state_dir
+        .join("vsock")
+        .join(builderd_control_socket_filename())
+}
+
+/// Both candidate control-socket paths (libkrun shape, then Vz shape)
+/// for a builder VM rooted at `vm_state_dir`. Use when the backend isn't
+/// known up front — e.g. `mvmctl doctor` scanning the builder-VM `vms/`
+/// root, where a dir may be a libkrun or a Vz builder VM. Probe whichever
+/// exists.
+pub fn builderd_control_socket_candidates(vm_state_dir: &Path) -> [PathBuf; 2] {
+    [
+        builderd_control_socket_path(vm_state_dir),
+        builderd_vz_control_socket_path(vm_state_dir),
+    ]
+}
+
+/// `vsock-<BUILDERD_CONTROL_PORT>.sock` — the per-port socket filename
+/// both backends use; they differ only in which directory it lives in.
+fn builderd_control_socket_filename() -> String {
+    mvm_core::config::vsock_socket_filename(mvm_guest::builder_agent::BUILDERD_CONTROL_PORT)
 }
 
 /// Outcome of a host-side readiness probe against a builder daemon's
@@ -1187,13 +1218,26 @@ mod tests {
 
     #[test]
     fn control_socket_path_uses_builderd_port() {
-        let p = builderd_control_socket_path(Path::new("/var/lib/mvm/vm-foo"));
+        let port = mvm_guest::builder_agent::BUILDERD_CONTROL_PORT;
+        let dir = Path::new("/var/lib/mvm/vm-foo");
+        // libkrun: directly in the state dir.
         assert_eq!(
-            p,
-            Path::new(&format!(
-                "/var/lib/mvm/vm-foo/vsock-{}.sock",
-                mvm_guest::builder_agent::BUILDERD_CONTROL_PORT
-            ))
+            builderd_control_socket_path(dir),
+            Path::new(&format!("/var/lib/mvm/vm-foo/vsock-{port}.sock"))
+        );
+        // Vz: one subdir deeper, under `vsock/` (the bug the live Vz boot
+        // surfaced — doctor/client must not assume the libkrun shape).
+        assert_eq!(
+            builderd_vz_control_socket_path(dir),
+            Path::new(&format!("/var/lib/mvm/vm-foo/vsock/vsock-{port}.sock"))
+        );
+        // Candidates: libkrun first, then Vz.
+        assert_eq!(
+            builderd_control_socket_candidates(dir),
+            [
+                builderd_control_socket_path(dir),
+                builderd_vz_control_socket_path(dir),
+            ]
         );
     }
 
