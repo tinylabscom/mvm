@@ -66,6 +66,18 @@ pub fn timed_step(label: &str, elapsed: std::time::Duration) {
     info(&format_timed(label, elapsed));
 }
 
+/// Format a liveness heartbeat for a long, silent blocking step: `<activity>
+/// still running — <secs>s elapsed …`. The Stage 0 builder-image build runs
+/// `nix` inside the guest with no host-visible output until it completes, so a
+/// periodic line is the only way to distinguish "working" from "hung". Pure
+/// (testable); the ticker routes it through [`info`] so it shows by default.
+pub fn format_heartbeat(activity: &str, elapsed: std::time::Duration) -> String {
+    format!(
+        "{activity} still running — {}s elapsed (the in-guest nix build is silent until it finishes; this is normal, not a hang)",
+        elapsed.as_secs()
+    )
+}
+
 /// Print a numbered step: [mvm] Step n/total: message
 pub fn step(n: u32, total: u32, msg: &str) {
     let formatted = format!(
@@ -179,5 +191,15 @@ mod tests {
             format_timed("nix build", std::time::Duration::from_millis(12_345)),
             "nix build … 12.3s"
         );
+    }
+
+    #[test]
+    fn format_heartbeat_names_activity_whole_seconds_and_reassures() {
+        let line = format_heartbeat("Builder VM image build", std::time::Duration::from_secs(40));
+        assert!(line.starts_with("Builder VM image build still running — 40s elapsed"));
+        // Reassurance text is the whole point — it must say silence is expected.
+        assert!(line.contains("not a hang"));
+        // Whole seconds, no fractional noise.
+        assert!(!line.contains("40.0"));
     }
 }

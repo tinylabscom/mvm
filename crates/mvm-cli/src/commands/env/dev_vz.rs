@@ -1775,6 +1775,11 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
             // removed; `nix/images/builder/flake.nix` is deleted.
             #[cfg(feature = "builder-vm")]
             {
+                // The Stage 0 build runs `nix` inside the guest with no
+                // host-visible output for minutes; a liveness heartbeat keeps it
+                // from reading as a hang. Dropped (thread stopped) when the build
+                // returns.
+                let _heartbeat = BuildHeartbeat::start("Builder VM image build");
                 bootstrap_builder_vm_image_via_root_dir_stage0(
                     &flake_dir,
                     &out_dir,
@@ -1803,6 +1808,71 @@ fn builder_vm_host_arch() -> &'static str {
         "aarch64"
     } else {
         "x86_64"
+    }
+}
+
+/// Cadence of [`BuildHeartbeat`] liveness lines. ~20s keeps a multi-minute
+/// Stage 0 build under ~20 lines while never leaving the user wondering for long.
+#[cfg(feature = "builder-vm")]
+const BUILD_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// RAII liveness ticker for a long, silent blocking step. While alive, a thread
+/// emits a periodic [`ui::format_heartbeat`] line so the operation can't be
+/// mistaken for a hang — the Stage 0 builder-image build runs `nix` inside the
+/// guest with no host-visible output until it completes. Stops + joins on drop,
+/// so the build's own return is the natural end of the heartbeat.
+#[cfg(feature = "builder-vm")]
+struct BuildHeartbeat {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(feature = "builder-vm")]
+impl BuildHeartbeat {
+    fn start(activity: &'static str) -> Self {
+        Self::start_with(activity, BUILD_HEARTBEAT_INTERVAL, ui::info)
+    }
+
+    /// Injectable core: `interval` and `emit` are parameters so a test can drive
+    /// a tight cadence into a counter instead of stdout.
+    fn start_with(
+        activity: &'static str,
+        interval: std::time::Duration,
+        emit: impl Fn(&str) + Send + 'static,
+    ) -> Self {
+        use std::sync::atomic::Ordering;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = std::sync::Arc::clone(&stop);
+        // Poll finely so `drop` is responsive; emit only once per `interval`.
+        let poll = interval.min(std::time::Duration::from_millis(250));
+        let handle = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let mut next = interval;
+            while !thread_stop.load(Ordering::Relaxed) {
+                std::thread::sleep(poll);
+                if thread_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if start.elapsed() >= next {
+                    emit(&ui::format_heartbeat(activity, start.elapsed()));
+                    next += interval;
+                }
+            }
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+#[cfg(feature = "builder-vm")]
+impl Drop for BuildHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
     }
 }
 
@@ -5288,6 +5358,37 @@ mod builder_vm_bootstrap_tests {
     //! `find_builder_vm_flake` + `bootstrap_builder_vm_image`.
     use super::*;
     use std::io::Write;
+
+    #[test]
+    #[cfg(feature = "builder-vm")]
+    fn build_heartbeat_emits_while_alive_and_stops_on_drop() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let sink = Arc::clone(&count);
+        // Tight 10ms cadence into a counter (not stdout) so the test is fast and
+        // deterministic-ish; a generous window then asserts it ticked.
+        let hb = BuildHeartbeat::start_with(
+            "Test build",
+            std::time::Duration::from_millis(10),
+            move |_line| {
+                sink.fetch_add(1, Ordering::Relaxed);
+            },
+        );
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let while_alive = count.load(Ordering::Relaxed);
+        assert!(while_alive >= 1, "heartbeat should tick while alive");
+
+        drop(hb); // joins the thread — no further emits after this returns
+        let after_drop = count.load(Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            after_drop,
+            "no heartbeat ticks after drop joins the thread"
+        );
+    }
 
     #[test]
     fn find_builder_vm_flake_resolves_to_in_repo_path() {
