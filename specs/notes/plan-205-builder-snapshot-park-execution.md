@@ -1,6 +1,7 @@
 # Plan 205 — Builder snapshot-park (S2.1 unblock) — Execution Plan
 
 **Issue:** #1119. **Unblocks:** builder-residency Step 2 "instant parked builder".
+**Status:** Slice 1 complete; Slice 2 explicit Vz dev-builder park/restore implemented.
 
 ## Feasibility (confirmed by exploration)
 
@@ -10,8 +11,8 @@ The persistent Vz **builder** VM is spawned by the *same* `mvm-vz-supervisor` bi
 
 ## Slices
 
-- **Slice 1 (this plan, mergeable):** make the persistent vz builder snapshot-capable — enable the control socket + persist the `SupervisorConfig`. Additive; no build-behavior change.
-- **Slice 2 (live, follow-on):** the park/resume primitive (`mvm-build` control-socket client → `SAVE`; RESTORE = read persisted config, flip `startup_mode` to `Restore`, re-spawn) + `SessionRecord.snapshot_path` + idle guard + dispatch-time resume + live macOS-26 validation.
+- **Slice 1 (complete):** make the persistent vz builder snapshot-capable — enable the control socket + persist the `SupervisorConfig`. Additive; no build-behavior change.
+- **Slice 2 (implemented for the Vz dev-builder lifecycle):** the park/resume primitive (`mvm-build` control-socket client → `SAVE`; RESTORE = read persisted config, flip `startup_mode` to `Restore`, re-spawn) plus explicit `mvmctl dev park`; the next `mvmctl dev up` restores before cold-boot fallback. The originally sketched `persistent-builder` session-record path remains a separate lifecycle seam because the current hidden `persistent-builder` command is libkrun-only, while the live Vz resident builder is the `dev` session.
 - **Slice 3 (follow-on):** auto-park keeper — `SessionRecord.last_activity` + `decide_builder_residency_action` (already shipped, #1121) at the dispatch chokepoint.
 
 ---
@@ -30,7 +31,7 @@ The persistent Vz **builder** VM is spawned by the *same* `mvm-vz-supervisor` bi
 
 ### Task 1: enable the control socket on the persistent vz builder
 
-- [ ] **Step 1: failing test** — add a unit test to `vz_builder.rs`'s `#[cfg(test)]` module (beside `build_vz_persistent_supervisor_config_assembles_expected_shape` ~2172) asserting the persistent config now carries a control socket:
+- [x] **Step 1: failing test** — add a unit test to `vz_builder.rs`'s `#[cfg(test)]` module (beside `build_vz_persistent_supervisor_config_assembles_expected_shape` ~2172) asserting the persistent config now carries a control socket:
 
 ```rust
     #[test]
@@ -47,22 +48,22 @@ The persistent Vz **builder** VM is spawned by the *same* `mvm-vz-supervisor` bi
 Run: `cargo test -p mvm-build persistent_config_enables_control_socket_for_snapshot_park`
 Expected: FAIL — `control_socket_path` is `None`.
 
-- [ ] **Step 2: implement** — at `vz_builder.rs:1365`, replace `control_socket_path: None,` with the per-VM control socket under the state dir (same `<state_dir>/control.sock` shape the workload supervisor uses). Use the `state_dir` already in scope in `build_vz_persistent_supervisor_config` (it's the value assigned to `vm_state_dir`). If a `control.sock` path helper doesn't already exist in `mvm-build`, inline `state_dir.join("control.sock")` (matching `mvm_backend::vz_control::control_socket_path`'s shape). Add a one-line comment that the socket enables idle snapshot-park (no spec refs).
+- [x] **Step 2: implement** — at `vz_builder.rs:1365`, replace `control_socket_path: None,` with the per-VM control socket under the state dir (same `<state_dir>/control.sock` shape the workload supervisor uses). Use the `state_dir` already in scope in `build_vz_persistent_supervisor_config` (it's the value assigned to `vm_state_dir`). If a `control.sock` path helper doesn't already exist in `mvm-build`, inline `state_dir.join("control.sock")` (matching `mvm_backend::vz_control::control_socket_path`'s shape). Add a one-line comment that the socket enables idle snapshot-park (no spec refs).
 
 Run: `cargo test -p mvm-build persistent_config_enables_control_socket_for_snapshot_park`
 Expected: PASS.
 
-- [ ] **Step 3:** `cargo fmt --all`; `cargo clippy -p mvm-build --all-targets -- -D warnings`; `cargo nextest run -p mvm-build -E 'test(build_vz_persistent)'` (the existing config tests stay green). Commit: `feat(plan-205): enable control socket on the persistent vz builder (snapshot-park S2.1 slice 1)`.
+- [x] **Step 3:** `cargo fmt --all`; `cargo clippy -p mvm-build --all-targets -- -D warnings`; `cargo nextest run -p mvm-build -E 'test(build_vz_persistent)'` (the existing config tests stay green). Commit: `feat(plan-205): enable control socket on the persistent vz builder (snapshot-park S2.1 slice 1)`.
 
 ### Task 2: persist the builder's SupervisorConfig to disk
 
 The workload persists its config to `<state_dir>/supervisor-config.json` (`mvm-backend/src/vz.rs:145` `supervisor_config_path` + `:309` `persist_supervisor_config`) so `snapshot_restore` can read it back and flip `startup_mode`. The persistent vz builder currently only pipes the config to the supervisor's stdin (`spawn_vz_supervisor_in_background`, ~1404) and never writes it. RESTORE needs it on disk.
 
-- [ ] **Step 1: failing test** — assert the start path writes the config file. Find the persistent-builder start function (the one that calls `spawn_vz_supervisor_in_background` after `build_vz_persistent_supervisor_config`, ~line 1167). Add a test (or extend an existing start test) that after building+persisting, `<state_dir>/supervisor-config.json` exists and round-trips to a `vz::SupervisorConfig` with `control_socket_path: Some(_)`. If the start path is too live to unit-test directly, instead unit-test a small extracted helper `persist_builder_supervisor_config(state_dir, &cfg) -> Result<PathBuf>` that does the write, and assert the round-trip.
+- [x] **Step 1: failing test** — assert the start path writes the config file. Find the persistent-builder start function (the one that calls `spawn_vz_supervisor_in_background` after `build_vz_persistent_supervisor_config`, ~line 1167). Add a test (or extend an existing start test) that after building+persisting, `<state_dir>/supervisor-config.json` exists and round-trips to a `vz::SupervisorConfig` with `control_socket_path: Some(_)`. If the start path is too live to unit-test directly, instead unit-test a small extracted helper `persist_builder_supervisor_config(state_dir, &cfg) -> Result<PathBuf>` that does the write, and assert the round-trip.
 
 Run it → FAIL (helper/behavior absent).
 
-- [ ] **Step 2: implement** — add a `mvm-build`-local helper:
+- [x] **Step 2: implement** — add a `mvm-build`-local helper:
 ```rust
 const BUILDER_SUPERVISOR_CONFIG_FILE: &str = "supervisor-config.json";
 
@@ -79,7 +80,7 @@ Call it in the persistent-builder start path right after `build_vz_persistent_su
 
 Run the test → PASS.
 
-- [ ] **Step 3:** fmt; clippy `-p mvm-build`; `cargo nextest run -p mvm-build -E 'test(persist_builder) or test(build_vz_persistent)'`. Commit: `feat(plan-205): persist the persistent vz builder SupervisorConfig for snapshot-restore (S2.1 slice 1)`.
+- [x] **Step 3:** fmt; clippy `-p mvm-build`; `cargo nextest run -p mvm-build -E 'test(persist_builder) or test(build_vz_persistent)'`. Commit: `feat(plan-205): persist the persistent vz builder SupervisorConfig for snapshot-restore (S2.1 slice 1)`.
 
 ## Slice-1 acceptance
 - The persistent vz builder config carries `control_socket_path: Some(<state_dir>/control.sock)`.
@@ -87,11 +88,10 @@ Run the test → PASS.
 - No change to one-shot builders; existing `mvm-build` tests green.
 - Live (manual, not gated): a started persistent vz builder now has a bound `control.sock` and a `supervisor-config.json` on disk — the two prerequisites Slice 2's SAVE/RESTORE needs.
 
-## Slice 2 outline (next plan) — the park/resume primitive
-- `mvm-build` control-socket client (`UnixStream` → `SAVE <abs>\n` → read `OK`/`ERR`), mirroring `mvm_backend::vz_control::send_command` (~vz_control.rs:39) but local to `mvm-build`.
-- `builder_snapshot_save(state_dir, snapshot_path)`: refuse unless the builder is idle (no in-flight dispatch — gate on the dispatch lock / a quiesce probe), then send `SAVE`. Writes `<snapshot>` + `<snapshot>.machine-id`.
-- `builder_snapshot_restore(state_dir, snapshot_path)`: read the persisted `supervisor-config.json`, set `startup_mode = StartupMode::Restore { snapshot_path, machine_id_path }`, re-spawn a fresh gvproxy + the supervisor (reuse `spawn_vz_supervisor_in_background`).
-- `SessionRecord.snapshot_path: Option<PathBuf>` (+ `#[serde(default)]`); set on park, cleared on resume.
-- Dispatch chokepoint (`pipeline/dev_build.rs:595`): if the active session has a `snapshot_path`, RESTORE instead of cold-boot.
-- A `mvmctl persistent-builder park` verb (explicit) for the first live proof; the keeper (Slice 3) calls the same primitive on idle.
-- **Live macOS-26 validation:** start persistent builder → `park` (SAVE, idle) → `supervisor-config.json` + snapshot + `.machine-id` on disk, builder stopped → next build RESTOREs (no cold boot) → build succeeds; `/nix-store` intact.
+## Slice 2 implemented — explicit Vz dev-builder park/resume primitive
+- [x] `mvm-build` control-socket client (`UnixStream` → `SAVE <abs>\n` → read `OK`/`ERR`), mirroring `mvm_backend::vz_control::send_command` (~vz_control.rs:39) but local to `mvm-build`.
+- [x] `park_persistent_vz_builder(state_dir)`: send `SAVE`, verify `<snapshot>` + `<snapshot>.machine-id`, then stop the supervisor. The explicit `dev park` path only runs while the builder is live; idle/build-triggered quiesce remains Slice 3.
+- [x] `restore_persistent_vz_builder_from_snapshot(state_dir)`: read the persisted `supervisor-config.json`, set `startup_mode = StartupMode::Restore { snapshot_path, machine_id_path }`, re-spawn a fresh gvproxy + the supervisor (reuse `spawn_vz_supervisor_in_background`).
+- [x] A `mvmctl dev park` verb (explicit) for the first live proof; non-Vz backends fail explicitly. `mvmctl dev up` restores an existing Vz dev-builder snapshot before cold-boot fallback; `dev status` reports `parked`.
+- [ ] `SessionRecord.snapshot_path: Option<PathBuf>` and dispatch-chokepoint resume remain open for any future non-dev hidden `persistent-builder` Vz session. The current hidden `persistent-builder` command is libkrun-only, so the live Vz resident builder path is the stable `dev` session.
+- [ ] **Live macOS-26 validation:** start persistent builder → `dev park` (SAVE) → `supervisor-config.json` + snapshot + `.machine-id` on disk, builder stopped → next `dev up` RESTOREs (no cold boot) → `mvm-builderd` serves a build; `/nix-store` intact.

@@ -75,6 +75,14 @@ the live macOS-26 demotion/resume timing proof and the live-coupled OCI
 `run --image` residency path; resident-daemon lifecycle and FC live-memory
 details remain in their owning Plan 204/175 lanes.
 
+Follow-up slice in progress: the persistent Vz dev builder now has an explicit
+snapshot-park path (`mvmctl dev park`) and `dev up` restores an existing
+`state.vzsave` before falling back to cold boot. The primitive lives in
+`mvm-build` and reuses the Plan 159 Vz `SAVE`/`Restore` supervisor contract:
+host-only control socket, `<snapshot>.machine-id` sidecar, and persisted
+`SupervisorConfig` replay. This is CI-tested without booting a VM; live macOS
+timing proof remains the acceptance gate.
+
 ## Design
 
 ### Trust gradient (ADR-090 §1)
@@ -137,6 +145,12 @@ typed allowlisted protocol, so residency shrinks rather than widens the attack s
 
 - [x] Wire Plan 159 (Vz) snapshot into the pool's parked state; resume uses the existing
       saved-state path (#1099). Live under-budget timing proof remains open.
+- [x] Wire explicit Vz dev-builder snapshot park/restore: `mvm-build::vz_builder`
+      saves `~/.cache/mvm/builder-vm/vms/mvm-persistent-builder-vz-dev/state.vzsave`,
+      persists/replays the supervisor config in `Restore` mode, `mvmctl dev park`
+      snapshots + stops the VM, and the next `mvmctl dev up` restores before
+      cold-boot fallback. Unit/CLI tests cover command framing, stale-snapshot
+      replacement, restore config rewriting, parser, and JSON output.
 - [~] Wire the Firecracker leg via Plan 175 when available; until then `min = 0` on FC
       falls back to fast boot, not a stub. FC/libkrun currently reap to cold.
 - [x] Key builder snapshot freshness/invalidation to builder residency inputs (#1121).
