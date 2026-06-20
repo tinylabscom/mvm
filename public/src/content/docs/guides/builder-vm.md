@@ -147,6 +147,36 @@ The exact transport is backend-specific. Implementations may use mounted job dir
 3. the host receives a kernel/rootfs artifact set;
 4. runtime commands boot those artifacts.
 
+## Resident builder control plane
+
+The builder VM does not expose a shell or a free-form command channel. Build
+work is driven by a small resident service, `mvm-builderd`, baked into the
+builder rootfs at `/sbin/mvm-builderd` and started at boot. The host `mvmctl`
+connects to it over vsock and sends **typed, allowlisted requests** — there is
+no "run this command in the builder" primitive.
+
+The request set is fixed and enumerated: a version handshake, a capability
+probe, a flake check, a guest-image build, a host-tool build, a source
+prefetch, a store-path query, and a job cancel. Each one streams structured
+progress and log chunks back and ends in a typed terminal result — an artifact
+or store path, a completion, or a categorized failure — never an interactive
+session. Unknown request fields are rejected, and any operation the daemon does
+not implement fails closed rather than falling back to a shell.
+
+This keeps the boundary clean in both directions:
+
+- **One host surface.** Users only ever run `mvmctl`. The daemon is internal;
+  its transport, port, and socket paths are implementation detail.
+- **Guest images stay tool-free.** The host/builder toolchain (`mvmctl`,
+  `mvm-builderd`, Nix) is never baked into a runtime guest image — only the
+  builder rootfs carries `mvm-builderd`, and a build-time check enforces it.
+- **Host Nix stays optional.** Nix evaluation and builds happen inside the
+  builder VM behind these requests, regardless of whether the host has Nix.
+
+`mvmctl doctor` reports a "builder daemon" line: it scans the builder-VM state
+directories and probes each daemon's control socket, so readiness (or its
+absence) is observable without starting a build.
+
 ## Nix on the Host
 
 Host-side Nix is not required for normal mvm use.

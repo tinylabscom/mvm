@@ -33,6 +33,29 @@ mvmctl uninstall
 mvmctl bootstrap
 ```
 
+### Builds hang or fail with the builder daemon not ready
+
+Builds are driven by a resident `mvm-builderd` service inside the builder VM
+(see [Builder VM → Resident builder control plane](/guides/builder-vm/)). If
+builds hang at startup or fail before any build output, check the daemon's
+readiness:
+
+```bash
+mvmctl doctor
+# look for the "builder daemon" line — it scans the builder-VM state
+# directories and probes each daemon's control socket.
+```
+
+- **Daemon absent / socket not answering**: the builder VM may not be up. Run
+  `mvmctl dev up`, then re-check `mvmctl doctor`.
+- **Still not ready after `dev up`**: recycle the builder VM with `mvmctl dev
+  down && mvmctl dev up`; if it persists, `mvmctl dev rebuild`.
+
+A build job can be cancelled from the host; the daemon stops the in-flight
+operation and returns a cancellation result rather than leaving a wedged build.
+You do not interact with `mvm-builderd` directly — everything goes through
+`mvmctl`.
+
 ### Stage 0 builder panics with `BadActivate` on a fresh, isolated cache
 
 ```
