@@ -181,6 +181,18 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             for line in &info.detail_lines {
                 println!("{line}");
             }
+            // Discoverability pointer for the builder-store recovery path. Shown
+            // only when a builder store exists (a fresh host has nothing to
+            // repair). This is a static hint, not a corruption probe — store
+            // damage only surfaces when the guest mounts the image, so `info`
+            // can't cheaply detect it from the host; the failure path and
+            // `doctor` carry the live diagnosis.
+            if std::path::Path::new(&cache_dir).join("builder-vm").is_dir() {
+                println!(
+                    "If `dev up`/`build` fails with a dangling-store or mount error, \
+                     run `mvmctl cache repair`."
+                );
+            }
             Ok(())
         }
         CacheAction::Repair {
