@@ -3152,7 +3152,7 @@ until explicitly directed.
 - Any production isolation claim for Tier 0 — it is single-principal dev preview,
   by design.
 
-## Sprint 63 — Resident builder control plane + residency model (🟢 substantially complete — A/B/D/F merged, E via #1102, C via Plan 204)  [`plans/205-resident-builder-control-plane.md`](plans/205-resident-builder-control-plane.md) | [`adrs/090-resident-daemon-trust-gradient-and-residency.md`](adrs/090-resident-daemon-trust-gradient-and-residency.md)
+## Sprint 63 — Resident builder control plane + residency model (✅ complete — Vz live gate passed 2026-06-20)  [`plans/205-resident-builder-control-plane.md`](plans/205-resident-builder-control-plane.md) | [`adrs/090-resident-daemon-trust-gradient-and-residency.md`](adrs/090-resident-daemon-trust-gradient-and-residency.md)
 
 ### Why this sprint
 
@@ -3211,8 +3211,11 @@ and the residency model and consumes the in-flight pieces rather than rebuilding
   activity and enforces the invocation-driven keeper on `dev status`/`dev up`: warm parks
   after the idle threshold, parked parks a live builder, and cold tears down before cold
   boot. The libkrun persistent-builder keeper degrades idle `Park` to teardown because
-  that path has no snapshot primitive; FC leg (Plan 175), live macOS-26 resume timing,
-  and live-coupled OCI residency remain deferred.
+  that path has no snapshot primitive. The Vz/macOS closeout runner passed in
+  `/tmp/mvm-plan205-live-proof9`: warm reuse 130 ms, parked restore P50 643 ms,
+  P95 1163 ms, zero command failures, final state `parked`, and OCI
+  `run --image docker.io/library/alpine:3.20 -- /bin/true` exit 0. FC live-memory
+  remains delegated to Plan 175.
 - **E — Cold acquisition**  ✅ #1102 — `mvmctl bootstrap` pre-fetches the builder VM image
   (instant first run); source-checkout stays release-artifact-free.
 - **F — Docs and posture**  ✅ #1103 — "what runs where" + residency in `reference/architecture.md`;
@@ -3230,9 +3233,10 @@ and the residency model and consumes the in-flight pieces rather than rebuilding
   authority, or audit writer exists below the host→builder vsock line.
 - Claim-11 volumes still fail closed on a resumed builder; no ADR-002 numbered claim
   regresses; `xtask check-claim-catalog` stays green.
-- Remaining Plan 205 closeout is live-gated/policy-gated: macOS-26 parked-restore timing
-  proof via `mvm-builderd`, warm no-boot proof, and the live-coupled OCI `run --image`
-  residency path.
+- Plan 205 closeout is live-gated/policy-gated and now passed on the target
+  macOS-26 Apple Silicon host. The capture runner is
+  `scripts/capture-plan-205-live-gates.sh`; evidence is
+  `/tmp/mvm-plan205-live-proof9`.
 
 ### Non-goals (explicit — see Plan 205 §Non-goals)
 

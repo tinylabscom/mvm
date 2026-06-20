@@ -190,6 +190,7 @@ fn materialize_ext4_in_builder_vm(
     use crate::builder_backend_select::BuilderBackendChoice;
     use crate::libkrun_builder::{BuilderExtraDisk, BuilderShellJob, LibkrunBuilderVm};
     use crate::qemu_builder::QemuBuilderVm;
+    use crate::vz_builder::VzBuilderVm;
 
     let artifact_out = input
         .output
@@ -216,13 +217,7 @@ fn materialize_ext4_in_builder_vm(
             QemuBuilderVm::new().run_shell_script(&shell_job)?;
         }
         BuilderBackendChoice::Vz => {
-            return Err(crate::builder_vm::BuilderVmError::VmmUnavailable {
-                requested: "vz-oci-ext4-materializer".to_string(),
-                reason: "OCI rootfs.ext4 materialization does not yet implement the Vz builder \
-                         shell-job path; use --builder libkrun or --builder qemu."
-                    .to_string(),
-            }
-            .into());
+            VzBuilderVm::new().run_shell_script(&shell_job)?;
         }
     }
     Ok(())
@@ -386,7 +381,7 @@ mod tests {
 
     #[cfg(feature = "builder-vm")]
     #[test]
-    fn materializer_refuses_explicit_vz_until_shell_jobs_exist() {
+    fn materializer_honors_explicit_vz_backend() {
         let mut env = TestEnv::new();
         env.set(MVM_BUILDER_BACKEND_ENV, "vz");
 
