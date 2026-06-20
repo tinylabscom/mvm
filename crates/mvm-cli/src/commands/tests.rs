@@ -3243,6 +3243,17 @@ fn test_dev_up_json_flag_parses() {
 }
 
 #[test]
+fn test_dev_up_base_flag_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "up", "--base", "dev-base@rev-a"]).unwrap();
+    match cli.command {
+        Commands::Dev(dev::Args {
+            action: Some(DevAction::Up { base, .. }),
+        }) => assert_eq!(base.as_deref(), Some("dev-base@rev-a")),
+        _ => panic!("Expected Dev Up command"),
+    }
+}
+
+#[test]
 fn test_dev_up_json_conflicts_with_shell() {
     // `--json` is non-interactive by definition; `--shell` must be rejected.
     let res = Cli::try_parse_from(["mvmctl", "dev", "up", "--json", "--shell"]);

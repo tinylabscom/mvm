@@ -79,6 +79,7 @@ verification under `trust`. Domains that already own their own subcommands
 | `mvmctl dev up --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
 | `mvmctl dev up --shell` (or `-s`) | Force opening an interactive shell after starting (the default behavior) |
 | `mvmctl dev up --no-shell` | Start the dev VM without attaching an interactive shell |
+| `mvmctl dev up --base <template[@revision]\|slot[@revision]\|bundle-sha>` | On the Vz backend, boot the dev VM from a built template/manifest-slot revision or installed bundle instead of the default dev image. Unknown or unbuilt bases fail before launch; changing the base of an already-running dev VM requires `mvmctl dev down` first. |
 | `mvmctl dev down` | Stop the dev VM |
 | `mvmctl dev down --reset` | Also delete the cached dev image so the next `dev up` rebuilds from local source |
 | `mvmctl dev park` | Vz only: snapshot and stop the running dev VM so the next `dev up` restores from the parked state |

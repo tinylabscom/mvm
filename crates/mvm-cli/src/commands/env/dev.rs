@@ -202,6 +202,11 @@ pub(in crate::commands) enum DevAction {
         /// or /mnt (system mounts stay read-only).
         #[arg(long, short = 'v', value_parser = clap_volume_spec)]
         volume: Vec<String>,
+        /// Boot the Vz dev VM from a built template, slot, or installed
+        /// bundle instead of the default dev image. Use `name@revision` to
+        /// pin an exact template/slot revision.
+        #[arg(long, value_name = "BASE")]
+        base: Option<String>,
         /// Emit a machine-readable JSON result after boot instead of text.
         /// Implies non-interactive (`--no-shell`); chrome goes to stderr.
         #[arg(long, conflicts_with = "shell")]
@@ -540,6 +545,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         shell: true,
         no_shell: false,
         volume: Vec::new(),
+        base: None,
         json: false,
     });
 
@@ -557,6 +563,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             shell,
             no_shell,
             volume,
+            base,
             json,
         } => {
             // `--json` emits a machine-readable result on stdout, so route
@@ -588,6 +595,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 );
             }
             let dev_volumes = resolve_dev_volumes(&volume)?;
+            let dev_base = base.as_deref().map(dev_vz::DevBaseRef::parse).transpose()?;
 
             // Reap helpers (gvproxy/supervisor) leaked by a prior killed
             // run before booting a fresh builder VM. Kill-only, quiet,
@@ -596,13 +604,19 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
 
             let outcome = match backend {
                 DevBackend::Libkrun => {
+                    if dev_base.is_some() {
+                        anyhow::bail!("`mvmctl dev up --base` is only supported by the Vz backend");
+                    }
                     cmd_dev_libkrun(effective_cpus, effective_mem, open_shell, &dev_volumes)
                 }
                 DevBackend::Vz => {
                     warn_dev_volumes_unsupported(&dev_volumes, "Vz");
-                    dev_vz::cmd_dev_vz(effective_cpus, effective_mem, open_shell)
+                    dev_vz::cmd_dev_vz(effective_cpus, effective_mem, open_shell, dev_base.as_ref())
                 }
                 DevBackend::LinuxKvm => {
+                    if dev_base.is_some() {
+                        anyhow::bail!("`mvmctl dev up --base` is only supported by the Vz backend");
+                    }
                     warn_dev_volumes_unsupported(&dev_volumes, "native Linux/KVM");
                     linux_native::cmd_dev_linux_native(open_shell)
                 }
@@ -744,7 +758,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 }
                 DevBackend::Vz => {
                     warn_dev_volumes_unsupported(&dev_volumes, "Vz");
-                    dev_vz::cmd_dev_vz(effective_cpus, effective_mem, shell).map(|_| ())
+                    dev_vz::cmd_dev_vz(effective_cpus, effective_mem, shell, None).map(|_| ())
                 }
                 DevBackend::LinuxKvm => {
                     warn_dev_volumes_unsupported(&dev_volumes, "native Linux/KVM");
