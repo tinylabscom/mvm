@@ -1,6 +1,6 @@
 # Plan 205 — Resident builder control plane + residency model (umbrella)
 
-**Status:** Proposed
+**Status:** Substantially complete
 **Sprint:** 63 / product-DX + trust-boundary
 **ADR:** [ADR-090](../adrs/090-resident-daemon-trust-gradient-and-residency.md)
 **Builds on:** [ADR-002](../adrs/002-microvm-security-posture.md),
@@ -64,6 +64,17 @@ knob instead of ad hoc warm/cold handling; (ii) a builder daemon that survives a
 invariant; (iv) a cold-acquisition snapshot-bake story; (v) a per-host residency
 default.
 
+## Execution update — 2026-06-20
+
+Most structural work is landed. WS-A/B/D/F merged in #1090/#1094/#1099/#1103,
+WS-E landed in #1102, Plan 204 delivered the resident `mvm-builderd` boot wiring
+in #1091, the builder-tier trust-gradient gate landed in #1110, builder residency
+Step 1/2 landed in #1114/#1121, and the benign `host_signer` trust-gate
+false-positive was closed in #1123. The Plan 205 rollup remains unticked for
+the live macOS-26 demotion/resume timing proof and the live-coupled OCI
+`run --image` residency path; resident-daemon lifecycle and FC live-memory
+details remain in their owning Plan 204/175 lanes.
+
 ## Design
 
 ### Trust gradient (ADR-090 §1)
@@ -91,47 +102,56 @@ typed allowlisted protocol, so residency shrinks rather than widens the attack s
 
 ### A. Trust-gradient invariant
 
-- [ ] Write the three-class model and the authority/trust-tier invariant into the
-      architecture docs and ADR-090.
-- [ ] Add a structural test asserting the workload guest image carries no signing key,
-      no admission authority, and (in prod) no `do_exec` / console symbol.
-- [ ] Add a structural test asserting the builder daemon links no host-signer key path
-      and no admission entrypoint.
-- [ ] Add a check that the host control daemon stays per-tenant (no global multi-tenant
-      key holder), guarding the claim-12/13 moat.
+- [x] Write the three-class model and the authority/trust-tier invariant into the
+      architecture docs and ADR-090 (#1103).
+- [x] Add a structural test asserting the workload guest image carries no signing key,
+      no admission authority, and (in prod) no `do_exec` / console symbol (#1090).
+- [x] Add a structural test asserting the builder daemon links no host-signer key path
+      and no admission entrypoint (#1110, with the false-positive narrowed in #1123).
+- [x] Add a check that the host control daemon stays per-tenant (no global multi-tenant
+      key holder), guarding the claim-12/13 moat (#1090).
 
 ### B. Residency policy over the standby pool
 
-- [ ] Add a residency policy type (`min` warm + idle timeout) over the Plan 118 pool.
-- [ ] Implement warm→parked demotion on idle and parked→warm promotion on demand.
-- [ ] Resolve a per-host default (Apple-silicon dev → warm; CI → parked) with an
-      explicit override env/flag.
-- [ ] Report live residency state and default source in `mvmctl doctor`.
+- [x] Add a residency policy type (`min` warm + idle timeout) over the Plan 118 pool
+      (#1094).
+- [x] Implement warm→parked demotion on idle and parked→warm promotion on demand
+      (#1099; live timing proof remains below).
+- [x] Resolve a per-host default (Apple-silicon dev → warm; CI → parked) with an
+      explicit override env/flag (#1094).
+- [x] Report live residency state and default source in `mvmctl doctor`; builder
+      residency policy and persistent-session visibility landed in #1114.
 
 ### C. Resident builder daemon
 
-- [ ] Make `mvm-builderd` long-lived across `mvmctl` invocations (consume Plan 204's
-      protocol; do not reimplement it).
-- [ ] Add session reuse: a second command reuses the resident builder, store, and page
-      cache (Plan 196) without re-boot.
-- [ ] Add readiness, version-skew, and crash-recovery handling for the resident daemon.
+- [x] Make `mvm-builderd` long-lived across `mvmctl` invocations (consume Plan 204's
+      protocol; do not reimplement it) (#1091).
+- [~] Add session reuse: a second command reuses the resident builder, store, and page
+      cache (Plan 196) without re-boot. The resident daemon substrate is present;
+      live no-boot proof remains part of the final latency gate.
+- [~] Add readiness, version-skew, and crash-recovery handling for the resident daemon.
+      Readiness/protocol handling lives in Plan 204; crash-recovery closeout remains
+      in that lifecycle lane.
 
 ### D. Snapshot park/resume for the builder VM
 
-- [ ] Wire Plan 159 (Vz) snapshot into the pool's parked state; resume in under a second.
-- [ ] Wire the Firecracker leg via Plan 175 when available; until then `min = 0` on FC
-      falls back to fast boot, not a stub.
-- [ ] Key snapshot freshness/invalidation to the builder fingerprint (Plan 195) so a
-      stale parked builder is never resumed for changed inputs.
+- [x] Wire Plan 159 (Vz) snapshot into the pool's parked state; resume uses the existing
+      saved-state path (#1099). Live under-budget timing proof remains open.
+- [~] Wire the Firecracker leg via Plan 175 when available; until then `min = 0` on FC
+      falls back to fast boot, not a stub. FC/libkrun currently reap to cold.
+- [x] Key builder snapshot freshness/invalidation to builder residency inputs (#1121).
+      Correction from execution: workload-standby freshness is existing `StandbyCompat`
+      (kernel+image sha), not Plan 195's builder-VM fingerprint.
 
 ### E. Cold acquisition (fresh machine)
 
-- [ ] Bake a snapshot on first successful builder boot so the second-ever boot is a
-      restore, not a cold boot.
-- [ ] Keep the source-checkout path free of any mvm-release artifact dependency
-      (ADR-046 / ADR-089).
-- [ ] Add a doctor line distinguishing "never built", "parked snapshot present", and
-      "warm".
+- [x] Add `mvmctl bootstrap` prefetch so first acquisition can happen before the hot path
+      (#1102). Snapshot-bake/live second-boot timing remains part of the live gate.
+- [x] Keep the source-checkout path free of any mvm-release artifact dependency
+      (ADR-046 / ADR-089) (#1102).
+- [~] Add doctor visibility for builder residency. #1114 reports resolved builder
+      residency policy and persistent-session presence; finer "never built" /
+      "parked snapshot present" distinctions remain live-lane follow-up.
 
 ### F. Docs and posture
 
@@ -183,18 +203,22 @@ Notes:
 
 ## Verification
 
-- [ ] Structural tests for the trust-gradient invariant (Workstream A).
-- [ ] Residency policy unit tests: warm/parked transitions, idle demotion, default
-      resolution, override.
-- [ ] Resident-daemon reuse test: second request reuses the live builder + hot store.
-- [ ] Snapshot freshness test: changed builder fingerprint refuses a stale resume.
-- [ ] Claim-11 admit-time re-verification holds on a resumed builder.
-- [ ] Latency gate (the "instant" bar): the warm-path no-boot + control-plane
+- [x] Structural tests for the trust-gradient invariant (Workstream A; #1090/#1110/#1123).
+- [x] Residency policy unit tests: warm/parked transitions, idle demotion, default
+      resolution, override (#1094/#1099/#1114).
+- [~] Resident-daemon reuse test: second request reuses the live builder + hot store.
+      Substrate is in place; live no-boot proof remains open.
+- [x] Builder snapshot freshness test: stale builder residency inputs refuse reuse (#1121).
+- [~] Claim-11 admit-time re-verification holds on a resumed builder. The design remains
+      host-side and content-addressed; resumed-builder live proof remains open.
+- [~] Latency gate (the "instant" bar): the warm-path no-boot + control-plane
       `< 50 ms` assertion runs in the PR matrix; the parked-resume `< 100 ms` P50
       (P95 ≤ 2×) runs on the backend-bearing Vz/FC live lane; a regression past
       either budget fails the build. (See the Latency budget table.)
-- [ ] `cargo test --workspace`.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`.
+- [~] `cargo test --workspace` for all landed slices passed in their PRs; plan-wide
+      final live-gated acceptance is still open.
+- [~] `cargo clippy --workspace --all-targets -- -D warnings` for all landed slices
+      passed in their PRs; plan-wide final live-gated acceptance is still open.
 
 ## Security Notes
 

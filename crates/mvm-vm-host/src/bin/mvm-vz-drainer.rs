@@ -109,8 +109,13 @@ fn main() -> ExitCode {
     // Stderr-only tracing keeps stdout clean for any future protocol
     // (the parent reads stdin only; we are not expected to print to
     // stdout). Same posture as `mvm-libkrun-supervisor`.
+    // Default to quiet (errors only); honor RUST_LOG when set.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error")),
+        )
         .init();
 
     match run() {

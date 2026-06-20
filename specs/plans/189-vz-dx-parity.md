@@ -141,6 +141,18 @@ WS-2 / Plan 140 — add `--json` there, don't fork).
       tests pin every new flag; CLI reference corrected from stale top-level
       `mvmctl checkpoint` examples to the grouped `mvmctl vm checkpoint` /
       `mvmctl vm snapshot` surface.
+- [x] structured-stdout hardening — entry convergence and dev-VM hints now run
+      after the dispatcher has routed `[mvm]` chrome to stderr for
+      structured-stdout commands (`ls --json`, `dev * --json`, `run --json`,
+      `up --up-json`, and grouped Vz save/restore/snapshot JSON). Regression:
+      `mvmctl ls --all --json` can no longer print the non-interactive
+      `dev shell` hint on stdout before the JSON array.
+- [x] Vz `dev shell` data-channel reachability — the persistent Vz dev VM now
+      exposes a bounded console data-port range (`20001..20128`) in addition
+      to the guest-agent port, matching `ConsoleOpen`'s
+      `CONSOLE_PORT_BASE + session_id` contract. The Vz `dev shell` path keeps
+      the actual attach error context instead of rewriting every console
+      failure as "owned by another process."
 - [ ] linux-native richer `--json` — today it collapses to a single `state`
       (`ready`/`not-ready`/`no-kvm`); surface the kvm/firecracker/assets detail
       as a typed shape if a Linux consumer needs it.

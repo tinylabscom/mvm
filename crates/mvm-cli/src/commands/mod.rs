@@ -56,9 +56,11 @@ pub(in crate::commands) struct Cli {
     #[arg(long, global = true, value_parser = ["compile", "download", "auto"])]
     pub kernel_source: Option<String>,
 
-    /// Show verbose `[mvm]` progress messages. Implied when `RUST_LOG` is set.
-    #[arg(long, global = true, alias = "debug")]
-    pub verbose: bool,
+    /// Increase log verbosity: -v (info), -vv (debug), -vvv (trace).
+    /// Default is quiet (errors only). `RUST_LOG=<filter>` overrides.
+    /// Place before the subcommand, e.g. `mvmctl -vv run -- …`.
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
+    pub verbose: u8,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -191,8 +193,18 @@ pub fn run() -> Result<()> {
     }
 
     // Verbose `[mvm]` chatter: explicit flag, or any RUST_LOG set.
-    let verbose = cli.verbose || std::env::var_os("RUST_LOG").is_some();
+    let verbose = cli.verbose > 0 || std::env::var_os("RUST_LOG").is_some();
     mvm::ui::set_verbose(verbose);
+
+    // Propagate the chosen verbosity to spawned child processes (drainer,
+    // supervisor, …) which read RUST_LOG. Only when the user asked for more
+    // than the quiet default and hasn't set RUST_LOG themselves.
+    // SAFETY: set at startup before any worker threads are spawned.
+    if cli.verbose > 0 && std::env::var_os("RUST_LOG").is_none() {
+        unsafe {
+            std::env::set_var("RUST_LOG", logging::filter_for_verbosity(cli.verbose));
+        }
+    }
 
     // Initialize logging.
     //
@@ -217,7 +229,7 @@ pub fn run() -> Result<()> {
     // default stdout subscriber and let `mvm_mcp` install its stderr-only one.
     let is_mcp = matches!(&cli.command, Commands::Ops(a) if a.action.is_mcp());
     if !is_mcp {
-        logging::init(log_format);
+        logging::init(log_format, cli.verbose);
     }
 
     // The internal QEMU vsock bridge is a detached, long-running helper
@@ -229,6 +241,13 @@ pub fn run() -> Result<()> {
     }
     if let Commands::SshAgentProxy(a) = &cli.command {
         return ssh_agent_proxy::run(a);
+    }
+
+    // Commands that promise a machine-readable stdout payload must reserve
+    // stdout before any pre-dispatch side effects (notably reconcile-on-entry
+    // and dev-VM hints) can emit friendly `[mvm]` chrome.
+    if cli.command.emits_machine_readable_stdout() {
+        mvm::ui::set_chrome_to_stderr(true);
     }
 
     // Install Ctrl-C / SIGTERM handler for graceful shutdown.
