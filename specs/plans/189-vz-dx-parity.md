@@ -18,6 +18,8 @@
 > **Status: 🟡 in progress.** Spun out of [Plan 177](./177-backend-consolidation.md)
 > §"deferred follow-ups". WS-3 lifecycle/checkpoint verbs landed:
 > `dev status/down/up --json` and `vm checkpoint`/`vm snapshot` JSON coverage.
+> Linux-native `dev status --json` now carries typed readiness detail for
+> KVM, Firecracker, and base assets without leaking host paths or digests.
 > WS-1 first-class `vm save` / `vm restore` aliases landed; live acceptance
 > remains hardware-gated.
 >
@@ -159,12 +161,15 @@ WS-2 / Plan 140 — add `--json` there, don't fork).
       `ExecutionPlan.auth` schema-v6 plans can no longer be paired with a
       stale schema-v5 `mvm-vz-drainer` that fails closed after the VM start
       sequence has already begun.
-- [ ] linux-native richer `--json` — today it collapses to a single `state`
-      (`ready`/`not-ready`/`no-kvm`); surface the kvm/firecracker/assets detail
-      as a typed shape if a Linux consumer needs it.
-- [ ] acceptance: every vz lifecycle verb has a documented `--json` form with
-      a stable schema + test. Checkpoint/snapshot JSON and docs are covered;
-      linux-native richer detail remains open.
+- [x] linux-native richer `--json` — the shared `dev status --json` schema now
+      adds a Linux-only `linux_native` object with typed `kvm`,
+      `firecracker`, and `base_assets` readiness labels while preserving the
+      top-level `ready`/`not-ready`/`no-kvm` state. Tests pin the privacy floor:
+      no host paths, artifact filenames, or digests appear in JSON output.
+- [x] acceptance: every vz lifecycle verb has a documented `--json` form with
+      a stable schema + test. Checkpoint/snapshot JSON and docs are covered,
+      and linux-native status now has typed readiness detail instead of a
+      single collapsed state.
 
 ## WS-4: Base pinning
 
@@ -184,7 +189,7 @@ starts from a known closure (the DX the reference SDK offers via image refs).
 ## Self-review / success criteria
 - [ ] `save`/`restore` are first-class verbs, honestly gated by backend tier.
 - [ ] Cached fast-boot is the default; cache decisions are observable.
-- [ ] Every vz lifecycle verb has a stable `--json` form.
+- [x] Every vz lifecycle verb has a stable `--json` form.
 - [ ] Base pinning reuses the existing artifact/template machinery (no parallel
       registry).
 - [ ] No security-claim regressions; no duplication of Plan 159/140/148
