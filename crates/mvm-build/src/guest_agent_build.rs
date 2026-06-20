@@ -7,7 +7,7 @@
 //! them in. This module mirrors the existing host cross-compile pattern
 //! (`crates/mvm-cli/build.rs` cross-compiles the host-vm bins with
 //! `cargo-zigbuild` to a static musl target) and caches the result under
-//! `~/.cache/mvm/guest-agent/<version>/<arch>/`.
+//! `~/.cache/mvm/guest-agent/<version>/<arch>/dev-shell/`.
 //!
 //! `cargo-zigbuild` is the single portable cross path: the agent pulls
 //! `ring` (C), so a static musl build needs a musl C cross-compiler, and
@@ -43,12 +43,21 @@ pub struct GuestAgentLayout {
     pub netinit: PathBuf,
 }
 
+/// Cache segment keying the agent build variant. The `run --image` path needs
+/// the dev-shell (exec-capable) agent, and this module always builds with it
+/// (see [`GuestAgentBuildSpec`]); keying the cache by the variant means a stale,
+/// same-version agent built *without* dev-shell (the old, segment-less layout)
+/// is never reused for an exec-capable request — the cause of the
+/// "guest agent built without dev-shell feature" exec failure on a cache hit.
+const AGENT_VARIANT: &str = "dev-shell";
+
 impl GuestAgentLayout {
     pub fn under(cache_root: &Path, version: &str, arch: GuestArch) -> Self {
         let dir = cache_root
             .join("guest-agent")
             .join(version)
-            .join(arch.to_string());
+            .join(arch.to_string())
+            .join(AGENT_VARIANT);
         Self {
             agent: dir.join("mvm-guest-agent"),
             netinit: dir.join("mvm-guest-netinit"),
@@ -265,16 +274,21 @@ mod tests {
     }
 
     #[test]
-    fn layout_is_versioned_and_arched() {
+    fn layout_is_versioned_arched_and_variant_keyed() {
         let l = GuestAgentLayout::under(Path::new("/c"), "0.16.1", GuestArch::Aarch64);
-        assert_eq!(l.dir, PathBuf::from("/c/guest-agent/0.16.1/aarch64"));
+        // The `dev-shell` segment keys the variant so a stale same-version agent
+        // built without dev-shell is never reused for the exec-capable request.
+        assert_eq!(
+            l.dir,
+            PathBuf::from("/c/guest-agent/0.16.1/aarch64/dev-shell")
+        );
         assert_eq!(
             l.agent,
-            PathBuf::from("/c/guest-agent/0.16.1/aarch64/mvm-guest-agent")
+            PathBuf::from("/c/guest-agent/0.16.1/aarch64/dev-shell/mvm-guest-agent")
         );
         assert_eq!(
             l.netinit,
-            PathBuf::from("/c/guest-agent/0.16.1/aarch64/mvm-guest-netinit")
+            PathBuf::from("/c/guest-agent/0.16.1/aarch64/dev-shell/mvm-guest-netinit")
         );
     }
 
