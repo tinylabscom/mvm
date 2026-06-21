@@ -89,6 +89,7 @@ export type {
 // admission/audit/policy stay in the CLI path.
 export { Machine, MachineError } from "./_machine.js";
 export type {
+  MachineCheckArtifactOptions,
   MachineCreateOptions,
   MachineResult,
   MachineRunOptions,

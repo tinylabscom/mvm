@@ -42,9 +42,10 @@
 //! ```
 //!
 //! Machine lifecycle wrappers are available through [`MachineRun`],
-//! [`MachineCreate`], and [`Machine`]. They shell to `mvmctl machine ...` so
-//! OCI pull, admission, artifact verification, networking, receipts, audit, and
-//! persistent machine state remain owned by the CLI path.
+//! [`MachineCreate`], [`MachineCheckArtifact`], and [`Machine`]. They shell to
+//! `mvmctl machine ...` so OCI pull, admission, artifact verification,
+//! networking, receipts, audit, and persistent machine state remain owned by
+//! the CLI path.
 
 mod builder;
 mod ctor;
@@ -103,9 +104,9 @@ pub use ctor::source::{local_path, nix_derivation, oci_image};
 pub use emit::{emit, emit_json};
 pub use error::{BuildError, EmitError};
 pub use machine::{
-    MVM_CLI_BIN_ENV, Machine, MachineClient, MachineCreate, MachineCreateBuilder, MachineError,
-    MachineExecBuilder, MachineResult, MachineRun, MachineRunBuilder, MachineShellBuilder,
-    MachineStartBuilder, MachineStopBuilder,
+    MVM_CLI_BIN_ENV, Machine, MachineCheckArtifact, MachineCheckArtifactBuilder, MachineClient,
+    MachineCreate, MachineCreateBuilder, MachineError, MachineExecBuilder, MachineResult,
+    MachineRun, MachineRunBuilder, MachineShellBuilder, MachineStartBuilder, MachineStopBuilder,
 };
 
 // Runtime record-mode lowering. The CLI's

@@ -222,7 +222,7 @@ case "$subcommand" in
         fi
         exit "${MVM_FAKE_MVM_EXIT:-0}"
         ;;
-      create|start|exec|shell|stop|ls|inspect|rm)
+      create|start|exec|shell|stop|check-artifact|ls|inspect|rm)
         if [ -n "${MVM_FAKE_MVM_MACHINE_OUT:-}" ]; then
           printf '%s' "$MVM_FAKE_MVM_MACHINE_OUT"
         fi

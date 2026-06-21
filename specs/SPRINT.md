@@ -259,8 +259,16 @@ plan 25 sequences the work into six independently-shippable workstreams.
       command hashing, effective policy, and receipt-input parity stay
       CLI-owned without invoking Nix or booting a VM. Python/TypeScript
       `Machine.create --manifest` fixtures now also reach the CLI strict
-      manifest unknown-key gate. Remaining C2 proof: artifact-verification
-      non-bypass and live admission/non-bypass proof.
+      manifest unknown-key gate. Later artifact-verification parity is covered
+      by the next sprint entry; remaining C2 proof is live admission/non-bypass
+      coverage.
+- [x] Advanced [`plans/200-machine-ux-dx-layer.md`](plans/200-machine-ux-dx-layer.md)
+      C2 SDK artifact-verification parity. Python `Machine.check_artifact`,
+      TypeScript `Machine.checkArtifact`, and Rust `MachineCheckArtifact` now
+      shell to `mvmctl machine check-artifact` instead of implementing a private
+      `.mvm` verifier. A shared checked-in argv fixture plus fake-CLI tests prove
+      the wrappers stay on the CLI-owned verify-before-admission path. Remaining
+      C2 proof: live admission/non-bypass coverage.
 - [x] Advanced Stage 0 bootstrap performance on the Plan 200 auth-proof branch.
       Host-side Stage 0 root materialization now reuses the marker-bound
       extracted root and prefers verified native `tar -xJf --strip-components 1`

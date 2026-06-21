@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as mvm from "../src/index.js";
-import { machineCreateArgv, machineRunArgv } from "../src/_machine.js";
+import { machineCheckArtifactArgv, machineCreateArgv, machineRunArgv } from "../src/_machine.js";
 
 let tmpDir: string;
 
@@ -121,6 +121,35 @@ describe("Machine.run", () => {
 
   it("rejects an empty command", () => {
     expect(() => mvm.Machine.run({ image: "alpine", command: [] })).toThrow(/command/);
+  });
+});
+
+describe("Machine.checkArtifact", () => {
+  it("emits the shared check-artifact argv fixture", () => {
+    expect(machineCheckArtifactArgv({
+      path: "/tmp/app.mvm",
+      key: "/tmp/app.pub",
+      json: true,
+    })).toEqual(readArgvFixture("check-artifact"));
+  });
+
+  it("shells check-artifact through mvmctl machine", () => {
+    const script = writeFixtureMvmctl(0, "{\"runnable_here\":true}\n");
+    process.env.MVM_CLI_BIN = script;
+
+    const result = mvm.Machine.checkArtifact({
+      path: "/tmp/app.mvm",
+      key: "/tmp/app.pub",
+      json: true,
+    });
+
+    expect(result.exitCode).toBe(0);
+    const text = readFixtureLog().join("\n");
+    expect(text).toContain("machine:check-artifact /tmp/app.mvm --key /tmp/app.pub --json");
+  });
+
+  it("rejects an empty path", () => {
+    expect(() => mvm.Machine.checkArtifact({ path: "" })).toThrow(/path/);
   });
 });
 

@@ -33,6 +33,15 @@ The language SDKs should converge on:
 
 Methods not implemented in a language SDK should stay documented as planned, not implied by examples.
 
+## Machine wrappers
+
+Python, TypeScript, and Rust also expose thin host-side wrappers for the
+beginner `mvmctl machine ...` surface. These wrappers shell through the CLI so
+OCI pull, admission, artifact verification, receipts, audit, networking, and
+persistent machine state stay owned by `mvmctl`; use `Machine.check_artifact`,
+`Machine.checkArtifact`, or Rust `MachineCheckArtifact` for the read-only
+`machine check-artifact` preview.
+
 ## Related references
 
 - [Sandbox types](/sdk/sandbox-types/)
