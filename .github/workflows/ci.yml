@@ -116,6 +116,9 @@ jobs:
       - name: mvmctl default closure within budget
         run: cargo run -p xtask -- check-closure-budget
 
+      - name: no new duplicate-major dependencies
+        run: cargo run -p xtask -- check-duplicate-majors
+
       - name: mvm-guest agent closure is runtime-free
         run: cargo run -p xtask -- check-guest-agent-runtime-free
 
