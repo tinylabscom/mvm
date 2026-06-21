@@ -272,8 +272,7 @@ pub fn seed_resolv_conf(cmdline: &str) -> Result<(), String> {
             return Ok(());
         }
     }
-    std::fs::write("/etc/resolv.conf", seed)
-        .map_err(|e| format!("write /etc/resolv.conf: {e}"))?;
+    std::fs::write("/etc/resolv.conf", seed).map_err(|e| format!("write /etc/resolv.conf: {e}"))?;
     Ok(())
 }
 
