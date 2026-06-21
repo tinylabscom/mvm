@@ -2394,19 +2394,58 @@ const BUILD_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_
 struct BuildHeartbeat {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+    // `Some` on a TTY: an animated spinner whose message is refreshed with the
+    // elapsed time. `None` when piped/redirected — there the text path emits a
+    // periodic line instead (a spinner draws nothing off a terminal).
+    spinner: Option<indicatif::ProgressBar>,
 }
 
 #[cfg(feature = "builder-vm")]
 impl BuildHeartbeat {
     fn start(activity: &'static str) -> Self {
-        // `notice`, not `info`: the heartbeat is always-on liveness — the only
-        // feedback during a multi-minute silent build — so it must survive the
-        // default quiet mode where `info` chatter is suppressed.
-        Self::start_with(activity, BUILD_HEARTBEAT_INTERVAL, ui::notice)
+        // On a TTY the animated spinner is the liveness signal and reads far
+        // better than a wall of repeating text lines. Off a TTY (pipe, CI, log
+        // capture) a spinner renders nothing, so fall back to the periodic text
+        // line — routed through `notice`, not `info`, so it survives the default
+        // quiet mode where `info` chatter is suppressed.
+        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            Self::start_spinner(activity)
+        } else {
+            Self::start_with(activity, BUILD_HEARTBEAT_INTERVAL, ui::notice)
+        }
     }
 
-    /// Injectable core: `interval` and `emit` are parameters so a test can drive
-    /// a tight cadence into a counter instead of stdout.
+    /// TTY path: an `indicatif` spinner refreshed with elapsed time. The spinner
+    /// self-animates via its steady tick; this thread only updates the message.
+    fn start_spinner(activity: &'static str) -> Self {
+        use std::sync::atomic::Ordering;
+        let pb = ui::spinner(&ui::format_build_progress(
+            activity,
+            std::time::Duration::ZERO,
+        ));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = std::sync::Arc::clone(&stop);
+        let pb_thread = pb.clone();
+        let handle = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while !thread_stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                if thread_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                pb_thread.set_message(ui::format_build_progress(activity, start.elapsed()));
+            }
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+            spinner: Some(pb),
+        }
+    }
+
+    /// Injectable text core: `interval` and `emit` are parameters so a test can
+    /// drive a tight cadence into a counter instead of stdout. Also the non-TTY
+    /// runtime path.
     fn start_with(
         activity: &'static str,
         interval: std::time::Duration,
@@ -2434,6 +2473,7 @@ impl BuildHeartbeat {
         Self {
             stop,
             handle: Some(handle),
+            spinner: None,
         }
     }
 }
@@ -2444,6 +2484,10 @@ impl Drop for BuildHeartbeat {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
+        }
+        // Clear the spinner line so the build's own next output starts clean.
+        if let Some(pb) = self.spinner.take() {
+            pb.finish_and_clear();
         }
     }
 }
