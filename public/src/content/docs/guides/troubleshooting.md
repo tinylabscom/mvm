@@ -198,6 +198,26 @@ error: timed out waiting for ...
 
 **Fix**: Check that the dev VM has internet access and that your service binds to the correct port. Use `mvmctl logs <name>` to inspect guest output.
 
+## Machine Run Issues
+
+### `machine run --image X -- /bin/sh` exits immediately with no shell
+
+This is **by design**, not a crash. A plain `machine run` is the one-shot
+*transient* runner: it streams the command's output back to the host but never
+forwards host stdin or allocates a terminal, so an interactive shell sees EOF on
+stdin and exits `0` right away.
+
+To get an interactive shell, add `-it` (dev-only):
+
+```bash
+mvmctl machine run -it --image <dev-image> -- /bin/sh   # drops into a shell
+```
+
+`-it` is refused for a sealed/production image (claim 15: no interactive access
+to a sealed microVM) and when stdin is not a terminal — both fail fast with a
+clear message rather than hanging. To keep the machine after the shell exits,
+add `--name <N>` or `-d`.
+
 ## Network Issues
 
 ### MicroVM has no internet

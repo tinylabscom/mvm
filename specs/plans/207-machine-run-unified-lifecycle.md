@@ -129,14 +129,20 @@ stream — leave unchanged), `console::run` (PTY attach to reuse), and
       `interactive_refuses_a_sealed_machine_via_the_claim15_gate`. (Live PTY
       round-trip is Task 5.)
 
-## Task 4: Docs + claim integrity
+## Task 4: Docs + claim integrity — DONE
 
-- [ ] Update `public/src/content/docs/reference/cli-commands.md` for the new
-      `machine run` flags and the three modes; add a troubleshooting note that a
-      bare `run -- /bin/sh` is non-interactive by design and `-it` (dev) gives a
-      shell.
-- [ ] Confirm `xtask check-claim-catalog` stays green — this plan introduces no
-      new claim; `-it` is an application of claim 15. No catalog edits expected.
+- [x] `public/src/content/docs/reference/cli-commands.md`: documented the three
+      `machine run` lifecycles (transient / persistent / interactive), the
+      `--name`/`-d`/`-t`/`-i` flags, the independence of persistence vs
+      interactivity, the `--volume` rename + bind-share-only-on-transient note,
+      and added behavior-matrix example rows.
+- [x] `public/src/content/docs/guides/troubleshooting.md`: added a "Machine Run
+      Issues" note explaining that a bare `run -- /bin/sh` is non-interactive by
+      design and `-it` (dev-only) gives a shell. Remaining `--add-dir` doc
+      references belong to the lower-level `mvmctl up`/`run` and are unchanged.
+- [x] `xtask check-claim-catalog` clean (16 claims, 39 witnesses) — no new claim;
+      `-it` is an application of claim 15, no catalog edits. `xtask
+      check-spec-numbers` clean (207/091 unique).
 
 ## Task 5: Verification (dev-host bootable)
 
