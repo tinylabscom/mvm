@@ -30,4 +30,8 @@ pub mod jailer;
 /// [`keyholder::SecretResolver`] trait + the single-host
 /// [`keyholder::LocalResolver`].
 pub mod keyholder;
+/// Child-side parent-death watchdog: each subprocess-moat bin exits the
+/// instant its supervisor dies, closing the macOS / abnormal-death gap the
+/// spawn-side `PR_SET_PDEATHSIG` attach leaves open.
+pub mod parent_death;
 pub mod supervisor;

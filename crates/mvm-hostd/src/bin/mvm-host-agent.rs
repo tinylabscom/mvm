@@ -387,6 +387,15 @@ fn registration_journal_path(cfg: &HostAgentConfig) -> Result<PathBuf> {
 }
 
 fn main() -> Result<()> {
+    // NB: deliberately NOT armed with the parent-death watchdog the sibling
+    // moat bins use. The worker is designed to outlive a wrapper restart — the
+    // wrapper can be killed and re-spawned while the worker keeps serving the
+    // broker socket, reconnecting via the pid file rather than re-parenting.
+    // The worker cannot tell "wrapper restarting" from "everything gone" by
+    // getppid alone, so a getppid-based self-reap would kill it mid-restart
+    // (it breaks wrapper_restart_restores_journaled_registration_and_chain).
+    // Cleanup of leaked host-agent trees is the age-based reaper's job instead.
+
     tracing_subscriber::fmt()
         .with_target(true)
         .with_level(true)
