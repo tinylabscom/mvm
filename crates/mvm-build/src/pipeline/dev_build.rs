@@ -610,6 +610,22 @@ fn dev_build_via_builder_vm_uncached(
             socket = %record.dispatch_socket_path.display(),
             "routing build through persistent supervisor"
         );
+        // Opt-in typed route (`MVM_BUILDERD_TYPED` + a reachable mvm-builderd):
+        // build `/work#<attr>` through the resident daemon and read the
+        // daemon-exported artifacts off the `/job` share. Not opted in / no
+        // daemon → `None` → legacy shell-job dispatch below; a daemon build
+        // failure or transport error → warn → legacy fallback (the opt-in path
+        // never turns a build the legacy path would pass into a failure).
+        match try_typed_persistent_build(env, &record, profile) {
+            Some(Ok(result)) => return Ok(result),
+            Some(Err(e)) => {
+                tracing::warn!(
+                    error = %e,
+                    "typed builder dispatch failed; falling back to legacy shell-job dispatch"
+                );
+            }
+            None => {}
+        }
         let persistent = crate::persistent_builder::PersistentBuilderVm::new(record.clone());
         match dev_build_with_builder_vm(env, flake_ref, profile, mode, &persistent) {
             Ok(result) => return Ok(result),
@@ -774,6 +790,120 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
 
     env.log_success(&format!(
         "Builder VM build complete; artifacts at {build_dir}"
+    ));
+
+    Ok(DevBuildResult {
+        build_dir,
+        vmlinux_path,
+        initrd_path,
+        rootfs_path,
+        revision_hash,
+        cached: false,
+        runner_dir,
+        artifact_sizes,
+    })
+}
+
+/// Attempt a guest-image build through the resident `mvm-builderd` typed
+/// control plane instead of the legacy shell-job dispatch.
+///
+/// Returns `None` when the typed route is not taken (caller not opted in via
+/// `MVM_BUILDERD_TYPED`, or no reachable daemon) so the caller falls back to the
+/// legacy persistent dispatch; `Some(Ok(_))` once the daemon built the image and
+/// exported its artifacts to the `/job` share, which we read into the dev build
+/// dir; `Some(Err(_))` on a daemon-reported build failure or a transport/IO
+/// error (the caller logs and falls back).
+///
+/// Builds `/work#<attr>` — the same target, and the same no-`--override-input`,
+/// that the legacy persistent dispatch uses (`run_flake_dispatch` ignores the
+/// source-checkout staging too) — so the two paths are behaviourally equivalent.
+#[cfg(feature = "builder-vm")]
+fn try_typed_persistent_build(
+    env: &dyn ShellEnvironment,
+    record: &crate::persistent_builder::SessionRecord,
+    profile: Option<&str>,
+) -> Option<Result<DevBuildResult>> {
+    use crate::builder_route::{BuildDispatch, BuildVerdict, try_typed_build};
+    use crate::builder_vm::host_system_linux;
+    use crate::libkrun_builder::GUEST_WORK_DIR;
+
+    let system = host_system_linux();
+    let attr_path = match profile {
+        Some(p) if p != "default" => format!("packages.{system}.tenant-{p}"),
+        _ => format!("packages.{system}.default"),
+    };
+
+    // A fresh per-build subdir under the session's `/job` share for the daemon
+    // to export into: host `<job_dir>/<id>/out` is guest `/job/<id>/out`.
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let host_out = crate::persistent_builder::artifact_dir_for(&record.job_dir, &job_id);
+    if let Err(e) = std::fs::create_dir_all(&host_out) {
+        return Some(Err(anyhow::anyhow!(
+            "creating typed build output dir {}: {e}",
+            host_out.display()
+        )));
+    }
+    let guest_out = format!(
+        "/job/{job_id}/{out}",
+        out = crate::persistent_builder::ARTIFACT_SUBDIR
+    );
+
+    let vms_root = crate::builder_vm::builder_vm_cache_dir().join("vms");
+    match try_typed_build(&vms_root, GUEST_WORK_DIR, &attr_path, Some(&guest_out)) {
+        BuildDispatch::Fellback => None,
+        BuildDispatch::Took(Ok(BuildVerdict::Built { store_path, .. })) => {
+            Some(finalize_typed_persistent_build(env, &host_out, &store_path))
+        }
+        BuildDispatch::Took(Ok(BuildVerdict::Failed { message })) => Some(Err(anyhow::anyhow!(
+            "typed builder build failed: {message}"
+        ))),
+        BuildDispatch::Took(Err(e)) => {
+            Some(Err(anyhow::anyhow!("typed builder dispatch error: {e}")))
+        }
+    }
+}
+
+/// Read a typed build's exported artifacts off the `/job` share into the dev
+/// build cache dir and assemble the [`DevBuildResult`]. `store_path` is the
+/// daemon-reported `/nix/store/...` out-path, from which the cache revision hash
+/// is derived (matching the legacy persistent path's sidecar-derived hash).
+#[cfg(feature = "builder-vm")]
+fn finalize_typed_persistent_build(
+    env: &dyn ShellEnvironment,
+    host_out: &std::path::Path,
+    store_path: &str,
+) -> Result<DevBuildResult> {
+    let revision_hash = crate::persistent_builder::extract_nix_store_hash(store_path.trim())
+        .ok_or_else(|| anyhow::anyhow!("malformed store path from typed build: {store_path:?}"))?
+        .to_string();
+
+    let final_dir = dev_build_dir(&revision_hash);
+    if std::path::Path::new(&final_dir).exists() {
+        env.log_info(&format!(
+            "Cache hit on rev {revision_hash}; discarding typed build export."
+        ));
+    } else {
+        std::fs::create_dir_all(&final_dir)
+            .with_context(|| format!("creating final build dir {final_dir}"))?;
+        let host_out_str = host_out
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("non-utf8 output dir {}", host_out.display()))?;
+        copy_staged_artifacts(host_out_str, &final_dir)?;
+    }
+    // Best-effort: drop the per-build export subdir under the `/job` share.
+    if let Some(job_sub) = host_out.parent() {
+        let _ = std::fs::remove_dir_all(job_sub);
+    }
+
+    let build_dir = final_dir;
+    let vmlinux_path = format!("{build_dir}/vmlinux");
+    let rootfs_path = format!("{build_dir}/rootfs.ext4");
+    let initrd_path = detect_initrd(env, &build_dir);
+    let runner_dir = detect_runner(env, &build_dir);
+    let artifact_sizes = measure_artifact_sizes(env, &build_dir, initrd_path.is_some());
+
+    env.log_success(&format!(
+        "Builder VM build complete (typed); artifacts at {build_dir}"
     ));
 
     Ok(DevBuildResult {
@@ -1340,6 +1470,47 @@ mod tests {
         fn log_success(&self, msg: &str) {
             self.logs.lock().unwrap().push(format!("SUCCESS: {}", msg));
         }
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn finalize_typed_build_derives_hash_and_copies_exported_artifacts() {
+        let temp = tempfile::tempdir().expect("create temp MVM_DATA_DIR");
+        let mut process_env = mvm_core::util::test_env::TestEnv::new();
+        process_env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
+
+        // Stand in for the daemon's export onto the `/job` share:
+        // `<job_dir>/<id>/out/{vmlinux,rootfs.ext4}`.
+        let host_out = temp.path().join("job").join("build-1").join("out");
+        std::fs::create_dir_all(&host_out).unwrap();
+        std::fs::write(host_out.join("vmlinux"), b"kernel").unwrap();
+        std::fs::write(host_out.join("rootfs.ext4"), b"rootfs").unwrap();
+
+        let env = TestEnv::new();
+        let store_path = "/nix/store/abc123hash-mvm-guest-image";
+        let result = finalize_typed_persistent_build(&env, &host_out, store_path).unwrap();
+
+        // Revision hash is the store-path leading hash; artifacts land in the
+        // dev build cache dir keyed by it.
+        assert_eq!(result.revision_hash, "abc123hash");
+        assert_eq!(result.build_dir, dev_build_dir("abc123hash"));
+        assert_eq!(std::fs::read(&result.vmlinux_path).unwrap(), b"kernel");
+        assert_eq!(std::fs::read(&result.rootfs_path).unwrap(), b"rootfs");
+        assert!(!result.cached);
+        // The per-build `/job` export subdir is cleaned up.
+        assert!(!host_out.exists());
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn finalize_typed_build_rejects_a_malformed_store_path() {
+        let temp = tempfile::tempdir().expect("create temp MVM_DATA_DIR");
+        let mut process_env = mvm_core::util::test_env::TestEnv::new();
+        process_env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
+        let host_out = temp.path().join("job").join("build-2").join("out");
+        std::fs::create_dir_all(&host_out).unwrap();
+        let env = TestEnv::new();
+        assert!(finalize_typed_persistent_build(&env, &host_out, "not-a-store-path").is_err());
     }
 
     #[cfg(feature = "builder-vm")]

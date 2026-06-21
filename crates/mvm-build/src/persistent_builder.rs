@@ -932,12 +932,13 @@ fn shell_single_quote(s: &str) -> String {
 }
 
 /// Extract the leading hash from a Nix store path. Mirror of the
-/// single-shot helper in `libkrun_builder.rs` (kept local rather
-/// than re-exported to keep this module self-contained). Only used
-/// by `PersistentBuilderVm`, so gated on the `builder-vm` feature
-/// to keep no-feature builds free of dead-code warnings.
+/// single-shot helper in `libkrun_builder.rs`. Shared with the typed
+/// builder-dispatch path in `pipeline::dev_build`, which derives a
+/// build's revision hash from the daemon-reported store out-path.
+/// Gated on the `builder-vm` feature to keep no-feature builds free of
+/// dead-code warnings.
 #[cfg(any(test, feature = "builder-vm"))]
-fn extract_nix_store_hash(store_path: &str) -> Option<&str> {
+pub(crate) fn extract_nix_store_hash(store_path: &str) -> Option<&str> {
     let name = store_path.strip_prefix("/nix/store/")?;
     let (hash, _rest) = name.split_once('-')?;
     if hash.is_empty() { None } else { Some(hash) }

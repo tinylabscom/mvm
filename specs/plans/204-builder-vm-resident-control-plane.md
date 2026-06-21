@@ -313,13 +313,22 @@ arm lands with the daemon's image baking (boot-gated).
       `artifact_path` = that host-readable dir while `store_path` stays the
       out-path. `run_build`/`try_typed_build` thread `output_dir` and return the
       `artifact_dir`. Unit-tested: dir/file out-path export, missing-rootfs
-      error, and the full `dispatch_nix_build` export path (479 mvm-build tests).
-      **Remaining to make builds the default:** wire `dev_build` to set up
-      `<session.job_dir>/<op>/out`, call `try_typed_build` with the `/job/<op>/out`
-      guest path, read the exported artifacts into the dev build dir, fall back to
-      legacy on `Fellback`; then a builder-image rebake to deploy the daemon
-      change and a live typed guest-image build proof; then flip `resolve_route`'s
-      default for builds.
+      error, and the full `dispatch_nix_build` export path.
+      **dev_build wiring landed (opt-in):** `dev_build_via_builder_vm_uncached`
+      now tries `try_typed_persistent_build` before the legacy persistent
+      dispatch — it mints a `/job/<id>/out` export dir, calls `try_typed_build`
+      for `/work#<attr>` (the same target and same no-`--override-input` the
+      legacy `run_flake_dispatch` uses, so the paths are behaviourally
+      equivalent), then `finalize_typed_persistent_build` derives the revision
+      hash from the daemon-reported store path and reads the exported artifacts
+      into the dev build cache dir. `Fellback` (not opted in / no daemon) and any
+      daemon/transport error fall through to the legacy dispatch, so the opt-in
+      path never turns a passing build into a failure. Unit-tested:
+      `finalize_typed_build_*` (hash derivation + artifact copy + cleanup;
+      malformed-store-path rejection).
+      **Remaining to make builds the default:** a builder-image rebake to deploy
+      the daemon export change, a live typed guest-image build proof on KVM, then
+      flip `resolve_route`'s default for builds.
 - [ ] Gate raw shell execution behind an explicit debug/development flag.
       Blocked on the line above — raw shell stays the default until a typed op replaces it; the gate flips once the typed path is the default.
 - [x] Add a lint or structural test that prevents new normal-path shell jobs.
