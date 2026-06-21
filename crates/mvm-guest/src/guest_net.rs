@@ -251,7 +251,7 @@ pub fn bring_iface_up(iface: &str) -> Result<(), String> {
 pub fn seed_resolv_conf(cmdline: &str) -> Result<(), String> {
     let seed = resolver_seed(cmdline);
     std::fs::create_dir_all("/run/mvm").map_err(|e| format!("mkdir /run/mvm: {e}"))?;
-    std::fs::write("/run/mvm/resolv.conf", &seed)
+    std::fs::write("/run/mvm/resolv.conf", seed)
         .map_err(|e| format!("seed /run/mvm/resolv.conf: {e}"))?;
     // Prefer a bind-mount so the image's own /etc/resolv.conf stays pristine.
     // A minimal OCI rootfs may have no bind target or no /bin/busybox, so on
