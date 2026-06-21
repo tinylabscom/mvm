@@ -63,6 +63,11 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("exit_group", libc::SYS_exit_group),
     ("rt_sigprocmask", libc::SYS_rt_sigprocmask),
     ("rt_sigaction", libc::SYS_rt_sigaction),
+    // The Rust runtime installs an alternate signal stack (stack-overflow
+    // guard) during thread setup; without this the bridge takes SIGSYS on its
+    // own `sigaltstack` as soon as the packet thread spins up. Found via live
+    // FC strace — the allowlist had never been exercised on the real sidecar.
+    ("sigaltstack", libc::SYS_sigaltstack),
     ("mmap", libc::SYS_mmap),
     ("munmap", libc::SYS_munmap),
     ("mprotect", libc::SYS_mprotect),
@@ -151,6 +156,11 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("exit_group", libc::SYS_exit_group),
     ("rt_sigprocmask", libc::SYS_rt_sigprocmask),
     ("rt_sigaction", libc::SYS_rt_sigaction),
+    // The Rust runtime installs an alternate signal stack (stack-overflow
+    // guard) during thread setup; without this the bridge takes SIGSYS on its
+    // own `sigaltstack` as soon as the packet thread spins up. Found via live
+    // FC strace — the allowlist had never been exercised on the real sidecar.
+    ("sigaltstack", libc::SYS_sigaltstack),
     ("mmap", libc::SYS_mmap),
     ("munmap", libc::SYS_munmap),
     ("mprotect", libc::SYS_mprotect),
