@@ -82,6 +82,8 @@ use mvm_hostd::supervisor::network::{
     ObserverAllowlist, Pipeline, ProviderCapabilities, resolve_observer_chain_from_policy_source,
 };
 #[cfg(target_os = "linux")]
+use mvm_hostd::supervisor::transcript_capture::TranscriptObserver;
+#[cfg(target_os = "linux")]
 use mvm_vm_host::firecracker_bridge::parse::{BridgeConfigJson, verify_passt_hash};
 #[cfg(target_os = "linux")]
 use std::io::Read;
@@ -202,7 +204,7 @@ fn run() -> Result<()> {
     };
     let observer_names = resolve_observer_chain_from_policy_source(&plan, bundle.as_ref())
         .map_err(|e| anyhow!("resolve observer chain from admitted policy source: {e}"))?;
-    let observers = if observer_names.is_empty() {
+    let mut observers = if observer_names.is_empty() {
         Vec::new()
     } else {
         let allowlist = ObserverAllowlist::load_from_host_config().map_err(|e| {
@@ -219,6 +221,17 @@ fn run() -> Result<()> {
         }
         pipe.build_observers()
     };
+
+    // A host-initiated forensic capture is not a tenant-policy
+    // observer (it carries a per-capture key, so it's not in the no-arg
+    // allowlist). When the producer armed one for this VM, add it directly. The
+    // capture dir lives under `audit_dir`, already read/write inside the
+    // Landlock ruleset; the host KEK under `keys_dir` is read-only there.
+    if let Some(capture_dir) = &cfg.transcript_capture_dir {
+        let obs = TranscriptObserver::activate(capture_dir, &cfg.keys_dir)
+            .with_context(|| format!("activate transcript capture at {}", capture_dir.display()))?;
+        observers.push(Arc::new(obs) as Arc<dyn mvm_hostd::supervisor::network::Observer>);
+    }
 
     tracing::info!(
         vm = %cfg.vm_name,

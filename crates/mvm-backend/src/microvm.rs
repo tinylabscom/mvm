@@ -3000,6 +3000,20 @@ fn spawn_fc_bridge(vm_name: &str, abs_dir: &str) -> Result<AttachedBridgeGuard> 
     let gateway_raw = gateway_socket.as_raw_fd();
     let supervisor_raw = supervisor_socket.as_raw_fd();
 
+    // Attach a forensic transcript capture if one was armed for this
+    // VM (`mvmctl trust audit transcript arm`). `MVM_TRANSCRIPT_CAPTURE_DIR`
+    // overrides the auto-detect for explicit control (validation/tests).
+    let transcript_capture_dir = match std::env::var_os("MVM_TRANSCRIPT_CAPTURE_DIR") {
+        Some(p) if !p.is_empty() => Some(std::path::PathBuf::from(p)),
+        _ => mvm_core::transcript::find_armed_capture(
+            &mvm_core::config::mvm_transcripts_dir(),
+            vm_name,
+        ),
+    };
+    if let Some(dir) = &transcript_capture_dir {
+        tracing::info!(vm = %vm_name, capture = %dir.display(), "attaching forensic transcript capture");
+    }
+
     let bridge_cfg = serde_json::json!({
         "vm_name": vm_name,
         "audit_dir": audit_dir,
@@ -3012,6 +3026,7 @@ fn spawn_fc_bridge(vm_name: &str, abs_dir: &str) -> Result<AttachedBridgeGuard> 
         "supervisor_fd_raw": supervisor_raw,
         "plan_json": plan_json,
         "bundle_json": bundle_json,
+        "transcript_capture_dir": transcript_capture_dir,
     });
 
     tracing::info!(

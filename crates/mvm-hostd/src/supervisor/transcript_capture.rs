@@ -1,4 +1,4 @@
-//! Forensic transcript byte-capture tap (Plan 203) on the gateway bridge.
+//! Forensic transcript byte-capture tap on the gateway bridge.
 //!
 //! [`TranscriptObserver`] is a host-initiated, opt-in [`Observer`] that copies
 //! every forwarded frame's raw bytes into an AEAD-encrypted transcript for a

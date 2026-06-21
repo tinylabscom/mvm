@@ -88,6 +88,13 @@ pub struct BridgeConfigJson {
     /// to label flow-event audit entries with the bundle digest).
     #[serde(default)]
     pub bundle_json: Option<String>,
+
+    /// Optional armed forensic-transcript capture directory,
+    /// under `audit_dir/transcripts/<tenant>/<id>/`. When set, the bridge
+    /// adds a `TranscriptObserver` that captures every forwarded frame into
+    /// the AEAD-encrypted transcript there. `None` (the default) = no capture.
+    #[serde(default)]
+    pub transcript_capture_dir: Option<PathBuf>,
 }
 
 /// On-disk format of `~/.mvm/passt-hashes.toml`. Operator-managed —

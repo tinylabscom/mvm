@@ -333,6 +333,47 @@ pub fn export(
     Ok(out)
 }
 
+/// Find a freshly-armed capture (zero chunks) bound to `vm_name` under the
+/// transcripts root, newest first. The VM launch path calls this to auto-attach
+/// the live capture observer to the VM's bridge. A capture that already has
+/// chunks is in-progress/consumed and is never re-selected — one capture = one
+/// VM run.
+pub fn find_armed_capture(transcripts_dir: &Path, vm_name: &str) -> Option<PathBuf> {
+    let mut best: Option<(u64, PathBuf)> = None;
+    for tenant in immediate_subdirs(transcripts_dir) {
+        let tenant_dir = transcripts_dir.join(&tenant);
+        for capture in immediate_subdirs(&tenant_dir) {
+            let dir = tenant_dir.join(&capture);
+            let Ok(raw) = std::fs::read_to_string(dir.join("manifest.json")) else {
+                continue;
+            };
+            let Ok(m) = serde_json::from_str::<TranscriptManifest>(&raw) else {
+                continue;
+            };
+            if m.binding.vm_name == vm_name
+                && m.chunks.is_empty()
+                && best
+                    .as_ref()
+                    .is_none_or(|(ts, _)| m.created_unix_secs >= *ts)
+            {
+                best = Some((m.created_unix_secs, dir));
+            }
+        }
+    }
+    best.map(|(_, d)| d)
+}
+
+/// Immediate subdirectory names of `dir` (empty when `dir` is absent).
+fn immediate_subdirs(dir: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect()
+}
+
 /// Load the host transcript key-encryption key from `keys_dir`, creating it
 /// (mode 0600) on first use. Every per-capture data key is wrapped under this
 /// KEK so payloads stay unreadable without host access.
@@ -634,6 +675,44 @@ mod tests {
             export(&manifest, dir.path(), &recovered).unwrap(),
             b"forensic payload"
         );
+    }
+
+    #[test]
+    fn find_armed_capture_picks_a_zero_chunk_capture_for_the_vm() {
+        let root = tempfile::tempdir().unwrap();
+        let transcripts = root.path();
+
+        // An armed (zero-chunk) capture for vm "alpha".
+        let armed = transcripts.join("t1").join("cap-armed");
+        std::fs::create_dir_all(&armed).unwrap();
+        let mut m = manifest(vec![]);
+        m.binding.vm_name = "alpha".to_string();
+        std::fs::write(
+            armed.join("manifest.json"),
+            serde_json::to_string(&m).unwrap(),
+        )
+        .unwrap();
+
+        // A consumed capture (has a chunk) for the same vm — must be skipped.
+        let used = transcripts.join("t1").join("cap-used");
+        std::fs::create_dir_all(&used).unwrap();
+        let mut mu = manifest(vec![ChunkRecord {
+            seq: 0,
+            file: "0.chunk".to_string(),
+            sha256_hex: "ab".to_string(),
+            size_bytes: 1,
+            direction: Direction::Egress,
+        }]);
+        mu.binding.vm_name = "alpha".to_string();
+        std::fs::write(
+            used.join("manifest.json"),
+            serde_json::to_string(&mu).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(find_armed_capture(transcripts, "alpha"), Some(armed));
+        assert_eq!(find_armed_capture(transcripts, "beta"), None);
+        assert_eq!(find_armed_capture(&transcripts.join("nope"), "alpha"), None);
     }
 
     #[test]
