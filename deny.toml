@@ -42,19 +42,29 @@ ignore = [
     # `number_prefix` is a pure-functional formatter used by indicatif.
     # Unmaintained but functionally complete; no security surface.
     { id = "RUSTSEC-2025-0119", reason = "transitive via indicatif; pure formatter, no IO, audited 2026-04-30" },
-    # `rsa v0.9.x` Marvin Attack timing side-channel. Pulled in via
-    # `sigstore → openidconnect → rsa` (plan 36 PR-A.2 introduces
-    # `sigstore` for cosign-keyless verification of the dev image
-    # manifest). The advisory has no safe upgrade today; the
-    # RustCrypto team is working on a constant-time fix. Mvmctl's
-    # use of `rsa` is purely verification-side: we only consume
-    # signatures from the project's release pipeline against
-    # operator-controlled local input (downloaded artifact bytes).
-    # The Marvin Attack requires an attacker to observe timing of
-    # decryption operations against attacker-influenced ciphertexts,
-    # which is not the threat shape mvmctl exposes. Re-evaluate when
-    # `rsa v0.10` ships with the constant-time fix.
-    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin Attack; transitive via sigstore→openidconnect; mvmctl is verification-only side, no decryption operations exposed; audited 2026-05-01" },
+    # `rsa v0.9.x` Marvin Attack timing side-channel. Reaches the
+    # shipped `mvmctl` (release builds enable `manifest-verify`) via
+    # `openidconnect → sigstore`, where sigstore backs cosign-keyless
+    # verification of the dev image manifest.
+    #
+    # Why this is not exploitable here: the Marvin Attack is a timing
+    # side-channel on RSA *private-key* operations (PKCS#1 v1.5
+    # decryption / signing) by which an attacker recovers the private
+    # key. mvm holds no RSA private key and performs no RSA decryption
+    # — its only sigstore use is bundle signature *verification* with
+    # public keys (`mvm-core/src/crypto/image_verify.rs`), and cosign
+    # bundles are ECDSA P-256, so the rsa path is not exercised at
+    # runtime. The advisory's threat shape does not exist in mvm.
+    #
+    # Why we cannot drop it: in sigstore 0.13 `rsa` is a non-optional
+    # dependency, so no feature trim removes it. Bumping to sigstore
+    # 0.14 drops sigstore's *direct* rsa edge but leaves it reachable
+    # via `openidconnect` (the `verify → fulcio → oauth` feature chain
+    # hard-pulls the OIDC client, which still depends on rsa 0.9). The
+    # only real fix is upstream: a constant-time `rsa` (0.10, still
+    # pre-release) adopted by openidconnect. Tracking follow-up in
+    # specs/plans/36. Re-evaluate when openidconnect ships on rsa 0.10.
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin Attack; reaches release mvmctl via openidconnect→sigstore (manifest-verify); verification-only, no RSA private-key/decrypt ops, cosign bundles are ECDSA P-256; non-optional in sigstore 0.13 and 0.14 only relocates the edge to openidconnect; fix is upstream rsa 0.10; audited 2026-06-21" },
     # `proc-macro-error v1` is unmaintained — replaced upstream by
     # `proc-macro-error2`. Transitive via
     # `sigstore → json-syntax → locspan-derive`. This is a

@@ -454,3 +454,18 @@ deliberate design decision, not a code rollback.
 - **Lockfile inventory**: confirm `nix/dev/flake.lock` exists alongside
   `nix/flake.nix::flake.lock` and `nix/images/builder/flake.lock`. Add
   any others surfaced by `find nix -name flake.lock`.
+
+## Deferred follow-ups
+
+- [ ] **Drop the `rsa` Marvin-Attack advisory (RUSTSEC-2023-0071).**
+  `manifest-verify` pulls `sigstore`, which transitively pulls
+  `rsa 0.9` and trips RUSTSEC-2023-0071 (accepted in `deny.toml` —
+  verification-only, no RSA private-key ops, cosign bundles are ECDSA
+  P-256). `rsa` is non-optional in sigstore 0.13; sigstore 0.14 drops
+  its direct edge but `rsa` still arrives via
+  `verify → fulcio → oauth → openidconnect → rsa`. The real fix is a
+  constant-time `rsa` 0.10 (still pre-release) adopted by
+  `openidconnect`. Re-evaluate — and remove the ignore — once
+  `openidconnect` ships on `rsa` 0.10. A sigstore 0.14 bump is a
+  separate modernization (clears RUSTSEC-2024-0370, pulls a new crypto
+  stack needing ADR-002 re-vetting); it does not by itself remove `rsa`.
