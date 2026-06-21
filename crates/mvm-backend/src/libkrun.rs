@@ -29,7 +29,7 @@ use mvm_core::kernel_format::KernelFormat;
 use mvm_core::vm_backend::{
     BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, SnapshotCapability,
     StandbyClaim, StandbyError, StandbyHandle, StandbySpec, StandbyState, StartMode, VmBackend,
-    VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartError,
+    VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartError, WarmStartOutcome,
 };
 use mvm_storage::snapshot::SnapshotUpper;
 
@@ -725,7 +725,7 @@ impl VmBackend for LibkrunBackend {
         &self,
         config: &VmStartConfig,
         requested: SnapshotCapability,
-    ) -> std::result::Result<VmId, WarmStartError> {
+    ) -> std::result::Result<WarmStartOutcome, WarmStartError> {
         // libkrun has no memory snapshot; a live-memory (or save/restore)
         // request fails closed with a recovery action rather than silently
         // cold-booting.
@@ -760,8 +760,15 @@ impl VmBackend for LibkrunBackend {
 
         let mut warm = config.clone();
         warm.rootfs_path = warm_rootfs.to_string_lossy().into_owned();
-        self.start(&warm)
-            .map_err(|e| WarmStartError::Failed(e.to_string()))
+        // Disk-only reboot carries no VMGenID rotation (no live memory to
+        // reseed) — report `NotApplicable` rather than a misleading "rotated".
+        let id = self
+            .start(&warm)
+            .map_err(|e| WarmStartError::Failed(e.to_string()))?;
+        Ok(WarmStartOutcome {
+            id,
+            reseed: mvm_core::vm_backend::ReseedStatus::NotApplicable,
+        })
     }
 
     fn supports_standby_pool(&self) -> bool {
