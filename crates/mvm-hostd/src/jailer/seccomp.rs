@@ -63,6 +63,11 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("exit_group", libc::SYS_exit_group),
     ("rt_sigprocmask", libc::SYS_rt_sigprocmask),
     ("rt_sigaction", libc::SYS_rt_sigaction),
+    // The Rust runtime installs an alternate signal stack (stack-overflow
+    // guard) during thread setup; without this the bridge takes SIGSYS on its
+    // own `sigaltstack` as soon as the packet thread spins up. Found via live
+    // FC strace — the allowlist had never been exercised on the real sidecar.
+    ("sigaltstack", libc::SYS_sigaltstack),
     ("mmap", libc::SYS_mmap),
     ("munmap", libc::SYS_munmap),
     ("mprotect", libc::SYS_mprotect),
@@ -119,6 +124,19 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     // tokio's runtime queries CPU affinity when it spawns workers after
     // confinement (worker count / NUMA placement).
     ("sched_getaffinity", libc::SYS_sched_getaffinity),
+    // Completed via live FC strace: the Rust/tokio runtime (thread TLS, stack
+    // limits, allocator realloc) + the transcript-capture sink + the
+    // gateway-audit socket make these after confinement; without them the
+    // bridge takes SIGSYS and the watchdog tears down the VM.
+    ("access", libc::SYS_access),
+    ("arch_prctl", libc::SYS_arch_prctl),
+    ("chmod", libc::SYS_chmod),
+    ("ioctl", libc::SYS_ioctl),
+    ("listen", libc::SYS_listen),
+    ("mremap", libc::SYS_mremap),
+    ("newfstatat", libc::SYS_newfstatat),
+    ("prlimit64", libc::SYS_prlimit64),
+    ("unlink", libc::SYS_unlink),
 ];
 
 #[cfg(target_arch = "aarch64")]
@@ -151,6 +169,11 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("exit_group", libc::SYS_exit_group),
     ("rt_sigprocmask", libc::SYS_rt_sigprocmask),
     ("rt_sigaction", libc::SYS_rt_sigaction),
+    // The Rust runtime installs an alternate signal stack (stack-overflow
+    // guard) during thread setup; without this the bridge takes SIGSYS on its
+    // own `sigaltstack` as soon as the packet thread spins up. Found via live
+    // FC strace — the allowlist had never been exercised on the real sidecar.
+    ("sigaltstack", libc::SYS_sigaltstack),
     ("mmap", libc::SYS_mmap),
     ("munmap", libc::SYS_munmap),
     ("mprotect", libc::SYS_mprotect),
@@ -202,6 +225,16 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     // tokio's runtime queries CPU affinity when it spawns workers after
     // confinement (worker count / NUMA placement).
     ("sched_getaffinity", libc::SYS_sched_getaffinity),
+    // Completed via live FC strace (x86_64). aarch64 has no arch_prctl, and
+    // access/chmod/unlink fold into the *at variants glibc actually issues.
+    ("faccessat", libc::SYS_faccessat),
+    ("fchmodat", libc::SYS_fchmodat),
+    ("ioctl", libc::SYS_ioctl),
+    ("listen", libc::SYS_listen),
+    ("mremap", libc::SYS_mremap),
+    ("newfstatat", libc::SYS_newfstatat),
+    ("prlimit64", libc::SYS_prlimit64),
+    ("unlinkat", libc::SYS_unlinkat),
 ];
 
 /// Resolve a syscall by name to its `libc::SYS_*` number on the current

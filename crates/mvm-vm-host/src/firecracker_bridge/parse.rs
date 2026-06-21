@@ -18,6 +18,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -88,6 +89,26 @@ pub struct BridgeConfigJson {
     /// to label flow-event audit entries with the bundle digest).
     #[serde(default)]
     pub bundle_json: Option<String>,
+}
+
+/// Decode the bridge's `plan_json` into the inner [`ExecutionPlan`].
+///
+/// `VmStartConfig.plan_json` (what `stash_plan_for_bridge` persists to
+/// `<state_dir>/plan.json`) is the `SignedExecutionPlan` envelope, so the inner
+/// plan lives in its payload — the same shape `mvm-libkrun-supervisor` consumes.
+/// The producer already verified the envelope at admit time and the bridge
+/// shares the host TCB, so it does not re-verify here. Falls back to a bare
+/// `ExecutionPlan` (the inner form the lifecycle `write_plan` path persists to
+/// the same file), so the bridge is robust to whichever writer last touched
+/// `plan.json`.
+pub fn decode_plan_json(plan_json: &str) -> Result<ExecutionPlan> {
+    if let Ok(signed) = serde_json::from_str::<SignedExecutionPlan>(plan_json) {
+        return serde_json::from_slice::<ExecutionPlan>(&signed.0.payload)
+            .context("decode SignedExecutionPlan payload into ExecutionPlan");
+    }
+    serde_json::from_str::<ExecutionPlan>(plan_json).context(
+        "decode plan_json: neither a SignedExecutionPlan envelope nor a bare ExecutionPlan",
+    )
 }
 
 /// On-disk format of `~/.mvm/passt-hashes.toml`. Operator-managed —
@@ -195,6 +216,44 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    // ── decode_plan_json ────────────────────────────────────────────
+    // The producer stashes the SignedExecutionPlan envelope as plan_json; the
+    // bridge must extract the inner ExecutionPlan (regression for the FC bridge
+    // crashing on `unknown field 'payload'`).
+
+    #[test]
+    fn decode_plan_json_extracts_inner_from_signed_envelope() {
+        use ed25519_dalek::SigningKey;
+        use mvm_core::plan::sign_plan;
+        use mvm_core::plan::signing::test_support::sample_plan;
+
+        let plan = sample_plan();
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let signed = sign_plan(&plan, &sk, "test-signer");
+        // This is exactly what stash_plan_for_bridge persists.
+        let envelope_json = serde_json::to_string(&signed).unwrap();
+        assert!(
+            envelope_json.contains("\"payload\""),
+            "fixture must be the envelope shape that used to crash the bridge"
+        );
+        let decoded = decode_plan_json(&envelope_json).unwrap();
+        assert_eq!(decoded.plan_id, plan.plan_id);
+    }
+
+    #[test]
+    fn decode_plan_json_falls_back_to_bare_inner_plan() {
+        use mvm_core::plan::signing::test_support::sample_plan;
+        let plan = sample_plan();
+        let inner_json = serde_json::to_string(&plan).unwrap();
+        let decoded = decode_plan_json(&inner_json).unwrap();
+        assert_eq!(decoded.plan_id, plan.plan_id);
+    }
+
+    #[test]
+    fn decode_plan_json_rejects_neither_shape() {
+        assert!(decode_plan_json(r#"{"not_a_plan":true}"#).is_err());
+    }
 
     /// Build a tiny passt-like binary fixture under a tempdir and a
     /// matching `passt-hashes.toml`. Returns both paths.
