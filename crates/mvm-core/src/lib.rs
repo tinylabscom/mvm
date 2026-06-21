@@ -36,6 +36,7 @@ pub mod residency;
 /// The guest↔host substitution-endpoint wire contract, shared so the
 /// in-guest client and the host server serialize identical bytes.
 pub mod substitution_wire;
+pub mod transcript;
 pub mod util;
 
 // ----------------------------------------------------------------------------
