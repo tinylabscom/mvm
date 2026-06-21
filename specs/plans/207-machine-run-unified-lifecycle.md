@@ -43,19 +43,32 @@ stream — leave unchanged), `console::run` (PTY attach to reuse), and
 
 ---
 
-## Task 1: Flags + dispatch scaffolding (transient stays unchanged)
+## Task 1: Flags + dispatch scaffolding (transient stays unchanged) — DONE
 
-- [ ] Add to `MachineRunArgs`: `--name <N>`, `-d`/`--detach`, `-t`/`--tty` (with
+- [x] Add to `MachineRunArgs`: `--name <N>`, `-d`/`--detach`, `-t`/`--tty` (with
       `-i` as an accepted alias so `-it` bundles parse). Keep all existing
       transient flags intact.
-- [ ] Compute `persistent = name.is_some() || detach` and `interactive = tty`
-      once; do **not** consult `tty` for persistence.
-- [ ] Branch `run()`: `interactive` → interactive path (Task 3); else
-      `persistent` → persistent path (Task 2); else → `run_secure(into_run_args())`
-      unchanged.
-- [ ] Tests: CLI parse coverage for every matrix row incl. `-it` bundling and the
-      `-i` alias; a dispatch unit test asserting the no-flag case still selects
-      `run_secure` (transient path unchanged).
+- [x] **Free `-d` for `--detach`.** `machine run`'s host-dir share flag was
+      `-d`/`--add-dir`, which collided with the locked `-d`=detach decision.
+      Renamed it to **`--volume`** (long-only — `-v` is the global verbosity
+      counter), matching the Docker `-v`/`--volume` mental model. Scoped to the
+      `machine run` surface: the rename rippled to the three `machine` SDK
+      builders (`mvm-sdk` `MachineRunBuilder::volume/volumes`, Python
+      `_machine.py volumes=`, TS `_machine.ts volumes`) and the shared
+      `sdks/machine-fixtures/run-admission.argv`. The lower-level
+      `mvmctl run`/`exec --add-dir` is a different command and is left unchanged.
+- [x] `argv` is no longer clap-`required` (persistent/interactive boot without a
+      command); a plain transient run with no argv is refused at dispatch with a
+      clear message.
+- [x] Compute `persistent = name.is_some() || detach` and
+      `interactive = tty || -i` once via `MachineRunArgs::{persistent,interactive}`;
+      `tty` is **not** consulted for persistence. `resolve_mode()` maps the two
+      axes to `MachineRunMode::{Transient,Persistent,InteractiveTransient,InteractivePersistent}`.
+- [x] Branch `run()` → `run_dispatch`: `Transient` → `run_secure(into_run_args())`
+      unchanged; `Persistent`/`Interactive*` → stubs (`bail!`) filled by Tasks 2/3.
+- [x] Tests: `resolve_mode_covers_the_behavior_matrix` (every matrix row incl.
+      `-it` bundling + `-i` alias), `transient_run_without_argv_is_rejected_at_dispatch`,
+      and the flag-parse coverage. All mvm-cli + mvm-sdk suites green.
 
 ## Task 2: Persistent path (`--name` / `-d`, no `-t`)
 

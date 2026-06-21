@@ -108,8 +108,10 @@ pub(in crate::commands) struct MachineRunArgs {
     pub profile: RunProfile,
     /// Share a host directory into the guest: `HOST_PATH:/GUEST_PATH[:MODE]`.
     /// MODE defaults to `ro`; `rw` needs `--profile dev` or `permissive`.
-    #[arg(short = 'd', long)]
-    pub add_dir: Vec<String>,
+    /// (No short flag: `-v` is the global verbosity counter and `-d` is
+    /// `--detach`.)
+    #[arg(long = "volume")]
+    pub volume: Vec<String>,
     /// Explicit environment variable to inject (KEY=VALUE). Repeatable.
     #[arg(short, long)]
     pub env: Vec<String>,
@@ -125,8 +127,31 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Validate and explain the effective run plan without booting a VM.
     #[arg(long)]
     pub dry_run: bool,
-    /// Argv to run inside the guest (use `--` to separate).
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+    /// Persist the machine under this name: it survives the command and is
+    /// reconnectable via `machine shell/exec/stop`. Implies persistence.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+    /// Boot a persistent machine and return immediately. Auto-names the machine
+    /// when `--name` is absent (the chosen name is printed). Implies persistence.
+    #[arg(short = 'd', long)]
+    pub detach: bool,
+    /// Attach an interactive PTY shell (dev-only; refused for `--prod`/sealed
+    /// images). Does not affect persistence: `-t` alone is a transient
+    /// interactive machine, gone when the shell exits.
+    #[arg(short = 't', long)]
+    pub tty: bool,
+    /// Accepted as an alias for `-t` so the conventional `-it` bundle parses.
+    #[arg(short = 'i', long = "interactive")]
+    pub interactive: bool,
+    /// Force-recreate a persistent machine whose on-disk spec exists with a
+    /// different config (stop + overwrite + restart). Without it, a config
+    /// mismatch is an error.
+    #[arg(long)]
+    pub force: bool,
+    /// Argv to run inside the guest (use `--` to separate). Optional for
+    /// persistent (`-d`/`--name`) and interactive (`-t`) modes; required for a
+    /// plain transient run.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub argv: Vec<String>,
 }
 
@@ -144,7 +169,7 @@ impl MachineRunArgs {
             cpus: self.cpus,
             memory: self.memory,
             profile: self.profile,
-            add_dir: self.add_dir,
+            add_dir: self.volume,
             env: self.env,
             timeout: self.timeout,
             receipt: self.receipt,
@@ -158,6 +183,56 @@ impl MachineRunArgs {
             ack_divergence: Vec::new(),
         }
     }
+
+    /// `-t`/`--tty` or its `-i` alias requests an interactive PTY shell.
+    fn interactive(&self) -> bool {
+        self.tty || self.interactive
+    }
+
+    /// `--name` or `-d`/`--detach` makes the machine survive the command.
+    /// `--tty` is deliberately NOT consulted here — persistence and
+    /// interactivity are independent axes.
+    fn persistent(&self) -> bool {
+        self.name.is_some() || self.detach
+    }
+
+    /// Resolve the lifecycle mode purely from the flags. The only validation is
+    /// that a plain transient run carries a command; persistent and interactive
+    /// modes default to "just boot" / "default shell" respectively.
+    fn resolve_mode(&self) -> Result<MachineRunMode> {
+        let mode = match (self.interactive(), self.persistent()) {
+            (true, true) => MachineRunMode::InteractivePersistent,
+            (true, false) => MachineRunMode::InteractiveTransient,
+            (false, true) => MachineRunMode::Persistent,
+            (false, false) => {
+                if self.argv.is_empty() {
+                    bail!(
+                        "machine run needs a command: pass `-- <cmd>`, \
+                         or `-d`/`--name <N>` to boot a persistent machine, \
+                         or `-t` for an interactive shell"
+                    );
+                }
+                MachineRunMode::Transient
+            }
+        };
+        Ok(mode)
+    }
+}
+
+/// The lifecycle `machine run` resolves to, computed purely from the parsed
+/// flags. Persistence (`--name`/`-d`) and interactivity (`-t`/`-i`) are
+/// independent axes, so the interactive variants record whether the machine
+/// also persists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MachineRunMode {
+    /// Default one-shot: boot, run argv, tear down. Unchanged `run_secure`.
+    Transient,
+    /// Persistent (named or detached), non-interactive.
+    Persistent,
+    /// Interactive PTY shell on a throwaway machine (gone on shell exit).
+    InteractiveTransient,
+    /// Interactive PTY shell on a persistent machine (left up on exit).
+    InteractivePersistent,
 }
 
 /// Declarative persistent machine spec. Runtime state lives elsewhere.
@@ -1413,9 +1488,22 @@ fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) -> Result<()>
     )
 }
 
+/// Dispatch `machine run` to one of the three flag-selected lifecycles. The
+/// transient default routes into the unchanged `run_secure`; persistence and
+/// interactivity compose the existing machine verbs.
+fn run_dispatch(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+    match args.resolve_mode()? {
+        MachineRunMode::Transient => run_secure(cli, args.into_run_args(), cfg),
+        MachineRunMode::Persistent => bail!("persistent `machine run` is not yet implemented"),
+        MachineRunMode::InteractiveTransient | MachineRunMode::InteractivePersistent => {
+            bail!("interactive `machine run` is not yet implemented")
+        }
+    }
+}
+
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     match args.action {
-        MachineAction::Run(run_args) => run_secure(cli, run_args.into_run_args(), cfg),
+        MachineAction::Run(run_args) => run_dispatch(cli, run_args, cfg),
         MachineAction::Create(create_args) => create_machine(create_args),
         MachineAction::Ls(list_args) => list_machines(list_args),
         MachineAction::Inspect(inspect_args) => inspect_machine(inspect_args),
@@ -1612,9 +1700,16 @@ mod tests {
     }
 
     #[test]
-    fn run_requires_argv() {
-        let err = parse_run(&["run", "--image", "alpine"]).expect_err("argv is required");
-        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    fn transient_run_without_argv_is_rejected_at_dispatch() {
+        // Argv is no longer clap-required (persistent/interactive modes boot
+        // without a command), so a bare transient run parses and is refused at
+        // mode resolution with a clear message — not a hang, not a silent exit.
+        let args = parse_run(&["run", "--image", "alpine"]).expect("parse");
+        let err = args.resolve_mode().expect_err("transient run needs a command");
+        assert!(
+            err.to_string().contains("command"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1625,8 +1720,13 @@ mod tests {
         assert_eq!(args.profile, RunProfile::Standard);
         assert!(!args.json);
         assert!(!args.dry_run);
-        assert!(args.add_dir.is_empty());
+        assert!(args.volume.is_empty());
         assert!(args.env.is_empty());
+        assert!(args.name.is_none());
+        assert!(!args.detach);
+        assert!(!args.tty);
+        assert!(!args.interactive);
+        assert!(!args.force);
     }
 
     #[test]
@@ -1641,7 +1741,7 @@ mod tests {
             "1G",
             "--profile",
             "dev",
-            "-d",
+            "--volume",
             "/host:/work:rw",
             "-e",
             "FOO=bar",
@@ -1657,12 +1757,110 @@ mod tests {
         assert_eq!(args.cpus, 4);
         assert_eq!(args.memory, "1G");
         assert_eq!(args.profile, RunProfile::Dev);
-        assert_eq!(args.add_dir, vec!["/host:/work:rw"]);
+        assert_eq!(args.volume, vec!["/host:/work:rw"]);
         assert_eq!(args.env, vec!["FOO=bar"]);
         assert_eq!(args.timeout, Some(30));
         assert!(args.json);
         assert!(args.dry_run);
         assert_eq!(args.argv, vec!["uname", "-a"]);
+    }
+
+    #[test]
+    fn volume_flag_carries_dir_share_and_d_is_no_longer_a_share() {
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "alpine",
+            "--volume",
+            "/host:/work:rw",
+            "--",
+            "true",
+        ])
+        .expect("parse");
+        assert_eq!(args.volume, vec!["/host:/work:rw"]);
+        // `-d` now means --detach, so it must NOT consume the following value as
+        // a dir share.
+        let detached = parse_run(&["run", "--image", "alpine", "-d"]).expect("parse");
+        assert!(detached.detach);
+        assert!(detached.volume.is_empty());
+    }
+
+    #[test]
+    fn detach_short_and_long_imply_persistence() {
+        for argv in [
+            &["run", "--image", "alpine", "-d"][..],
+            &["run", "--image", "alpine", "--detach"][..],
+        ] {
+            let args = parse_run(argv).expect("parse");
+            assert!(args.detach, "argv {argv:?}");
+            assert!(args.persistent(), "argv {argv:?}");
+            assert!(!args.interactive());
+        }
+    }
+
+    #[test]
+    fn name_implies_persistence_without_detach() {
+        let args = parse_run(&["run", "--image", "alpine", "--name", "web", "--", "true"])
+            .expect("parse");
+        assert_eq!(args.name.as_deref(), Some("web"));
+        assert!(args.persistent());
+        assert!(!args.detach);
+        assert!(!args.interactive());
+    }
+
+    #[test]
+    fn tty_long_short_alias_and_it_bundle_request_interactivity() {
+        for argv in [
+            &["run", "--image", "alpine", "--tty"][..],
+            &["run", "--image", "alpine", "-t"][..],
+            &["run", "--image", "alpine", "-i"][..],
+            &["run", "--image", "alpine", "-it"][..],
+        ] {
+            let args = parse_run(argv).expect("parse");
+            assert!(args.interactive(), "argv {argv:?}");
+            // Interactivity alone never implies persistence.
+            assert!(!args.persistent(), "argv {argv:?}");
+        }
+    }
+
+    #[test]
+    fn resolve_mode_covers_the_behavior_matrix() {
+        let cases: &[(&[&str], MachineRunMode)] = &[
+            (
+                &["run", "--image", "X", "--", "cmd"],
+                MachineRunMode::Transient,
+            ),
+            (
+                &["run", "-it", "--image", "X", "--", "/bin/sh"],
+                MachineRunMode::InteractiveTransient,
+            ),
+            (
+                &["run", "--name", "web", "--image", "X", "--", "cmd"],
+                MachineRunMode::Persistent,
+            ),
+            (
+                &["run", "-it", "--name", "web", "--image", "X", "--", "/bin/sh"],
+                MachineRunMode::InteractivePersistent,
+            ),
+            (&["run", "-d", "--image", "X"], MachineRunMode::Persistent),
+            (
+                &["run", "-d", "--name", "web", "--image", "X"],
+                MachineRunMode::Persistent,
+            ),
+            (
+                &["run", "-t", "--image", "X"],
+                MachineRunMode::InteractiveTransient,
+            ),
+            (
+                &["run", "--name", "web", "--image", "X"],
+                MachineRunMode::Persistent,
+            ),
+        ];
+        for (argv, expected) in cases {
+            let args = parse_run(argv).expect("parse");
+            let mode = args.resolve_mode().expect("resolve");
+            assert_eq!(mode, *expected, "argv {argv:?}");
+        }
     }
 
     #[test]
@@ -1760,7 +1958,7 @@ mod tests {
             .cpus(4)
             .memory("1G")
             .profile("dev")
-            .add_dir("/tmp/mvm-sdk-src:/workspace:ro")
+            .volume("/tmp/mvm-sdk-src:/workspace:ro")
             .env("TOKEN=secret")
             .env("MODE=test")
             .timeout(30)
