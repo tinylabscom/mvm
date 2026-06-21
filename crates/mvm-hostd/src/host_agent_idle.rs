@@ -29,10 +29,12 @@ pub const IDLE_SHUTDOWN_EXIT_CODE: i32 = 42;
 /// - `Some(unparseable / negative)` → `Some(300s)` — safe fallback to default.
 pub fn parse_idle_timeout(raw: Option<&str>) -> Option<Duration> {
     const DEFAULT: Duration = Duration::from_secs(300);
-    match raw {
+    // Trim once up front so the disable sentinel and the integer parse agree on
+    // a whitespace-padded value (e.g. `" 0 "` must still disable).
+    match raw.map(str::trim) {
         None => Some(DEFAULT),
         Some("0") => None,
-        Some(s) => match s.trim().parse::<i64>() {
+        Some(s) => match s.parse::<i64>() {
             Ok(n) if n > 0 => Some(Duration::from_secs(n as u64)),
             _ => Some(DEFAULT),
         },
@@ -114,6 +116,12 @@ mod tests {
     #[test]
     fn parse_zero_disables() {
         assert_eq!(parse_idle_timeout(Some("0")), None);
+    }
+
+    #[test]
+    fn parse_whitespace_padded_zero_disables() {
+        assert_eq!(parse_idle_timeout(Some(" 0 ")), None);
+        assert_eq!(parse_idle_timeout(Some("\t0\n")), None);
     }
 
     #[test]
