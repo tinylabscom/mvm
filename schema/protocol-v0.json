@@ -456,6 +456,52 @@
         }
       ]
     },
+    "ExecOutcomeWire": {
+      "description": "One command's buffered outcome from an [`GuestRequest::ExecBatch`]. Agent- measured: `duration_ms` is the in-guest wall-clock and `peak_rss_kib` the `getrusage` high-water mark when the guest can report it.",
+      "type": "object",
+      "required": [
+        "duration_ms",
+        "status",
+        "stderr",
+        "stdout"
+      ],
+      "properties": {
+        "duration_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "peak_rss_kib": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "status": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "stderr": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        },
+        "stdout": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "FsChange": {
       "description": "A single filesystem change detected since boot.",
       "type": "object",
@@ -1005,6 +1051,49 @@
                     "string",
                     "null"
                   ]
+                },
+                "timeout_secs": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Tier-2 batched exec (dev-shell only): stage files, then run a sequence of argv commands in-guest in a single round-trip, returning one buffered outcome per command. The chain stops at the first non-zero exit. This is the one-round-trip counterpart to the host driving `FsWrite` + `Exec` frames itself; `peak_rss_kib` is agent-measured here. Answered by a single `ExecBatchResult` frame.",
+          "type": "object",
+          "required": [
+            "ExecBatch"
+          ],
+          "properties": {
+            "ExecBatch": {
+              "type": "object",
+              "required": [
+                "commands",
+                "stages"
+              ],
+              "properties": {
+                "commands": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "stages": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/StageFile"
+                  }
                 },
                 "timeout_secs": {
                   "type": [
@@ -2185,6 +2274,31 @@
           "additionalProperties": false
         },
         {
+          "description": "Buffered outcomes of an `ExecBatch` call (dev-shell only), one per command in request order (truncated at the first non-zero exit).",
+          "type": "object",
+          "required": [
+            "ExecBatchResult"
+          ],
+          "properties": {
+            "ExecBatchResult": {
+              "type": "object",
+              "required": [
+                "outcomes"
+              ],
+              "properties": {
+                "outcomes": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/ExecOutcomeWire"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "description": "Post-restore acknowledgement.",
           "type": "object",
           "required": [
@@ -3227,6 +3341,34 @@
           ]
         }
       ]
+    },
+    "StageFile": {
+      "description": "A file to stage into the guest before an [`GuestRequest::ExecBatch`] runs.",
+      "type": "object",
+      "required": [
+        "content",
+        "mode",
+        "path"
+      ],
+      "properties": {
+        "content": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        },
+        "mode": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     },
     "VolumeMountErrorKind": {
       "description": "Class of error returned in `VolumeMountResult::Error`. Closed enum so the host can branch on `kind` without parsing message text. (Renamed from `ShareErrorKind`.)",
