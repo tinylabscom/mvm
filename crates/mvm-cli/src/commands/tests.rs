@@ -2223,20 +2223,23 @@ fn test_catalog_info_parses() {
     }
 }
 
-// --- Console CLI tests ---
+// --- Console CLI tests (now under `machine console`) ---
 
 #[test]
 fn test_console_help() {
-    let cli = Cli::try_parse_from(["mvmctl", "console", "myvm"]);
+    let cli = Cli::try_parse_from(["mvmctl", "machine", "console", "myvm"]);
     assert!(cli.is_ok());
 }
 
 #[test]
 fn test_console_with_command() {
-    let cli = Cli::try_parse_from(["mvmctl", "console", "myvm", "--command", "ls"]);
+    let cli = Cli::try_parse_from(["mvmctl", "machine", "console", "myvm", "--command", "ls"]);
     assert!(cli.is_ok());
-    match cli.unwrap().command {
-        Commands::Console(console::Args {
+    let Commands::Machine(mg) = cli.unwrap().command else {
+        panic!("expected machine group")
+    };
+    match mg.action {
+        machine::MachineAction::Console(console::Args {
             name,
             command,
             force,
@@ -2247,7 +2250,7 @@ fn test_console_with_command() {
             assert!(!force, "default --force is off");
             assert!(env.is_empty());
         }
-        _ => panic!("Expected Console command"),
+        _ => panic!("Expected machine console action"),
     }
 }
 
@@ -3648,7 +3651,7 @@ fn state_touching_commands_trigger_entry_convergence() {
     // Lifecycle mutate/read commands run the cheap converge pass.
     assert!(touches(&["mvmctl", "up"]));
     assert!(touches(&["mvmctl", "machine", "stop", "--all"]));
-    assert!(touches(&["mvmctl", "console", "myvm"]));
+    assert!(touches(&["mvmctl", "machine", "console", "myvm"]));
     assert!(touches(&["mvmctl", "vm", "pause", "myvm"]));
     assert!(touches(&["mvmctl", "vm", "save", "myvm"]));
     assert!(touches(&["mvmctl", "vm", "restore", "ckpt-myvm"]));
@@ -3825,5 +3828,85 @@ fn machine_help_lists_run_first() {
     assert!(
         inspect < check,
         "`inspect` (line {inspect}) must appear before `check-artifact` (line {check}) in machine --help"
+    );
+}
+
+// ---- Task 6: logs/console folded into machine ----
+
+#[test]
+fn machine_logs_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "machine", "logs", "myvm"]).unwrap();
+    let Commands::Machine(mg) = cli.command else {
+        panic!("expected machine group")
+    };
+    match mg.action {
+        machine::MachineAction::Logs(args) => {
+            assert_eq!(args.name, "myvm");
+        }
+        _ => panic!("expected machine logs action"),
+    }
+}
+
+#[test]
+fn machine_console_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "machine", "console", "myvm"]).unwrap();
+    let Commands::Machine(mg) = cli.command else {
+        panic!("expected machine group")
+    };
+    match mg.action {
+        machine::MachineAction::Console(args) => {
+            assert_eq!(args.name, "myvm");
+        }
+        _ => panic!("expected machine console action"),
+    }
+}
+
+#[test]
+fn logs_removed() {
+    let err = Cli::try_parse_from(["mvmctl", "logs", "myvm"])
+        .expect_err("logs must not parse after removal");
+    assert_eq!(
+        err.kind(),
+        clap::error::ErrorKind::InvalidSubcommand,
+        "expected InvalidSubcommand, got: {err:?}"
+    );
+}
+
+#[test]
+fn console_removed() {
+    let err = Cli::try_parse_from(["mvmctl", "console", "myvm"])
+        .expect_err("console must not parse after removal");
+    assert_eq!(
+        err.kind(),
+        clap::error::ErrorKind::InvalidSubcommand,
+        "expected InvalidSubcommand, got: {err:?}"
+    );
+}
+
+#[test]
+fn machine_console_refused_on_sealed_image() {
+    use mvm::vm::runtime_meta::{StartModeKind, VmRuntimeMeta, write as write_meta};
+
+    let _guard = mvm::vm::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    env.set("HOME", tmp.path());
+    env.set("MVM_DATA_DIR", tmp.path().join(".mvm"));
+
+    let name = "sealed-machine-console";
+    write_meta(
+        name,
+        &VmRuntimeMeta {
+            mode: StartModeKind::Detached,
+            accessible: false,
+        },
+    )
+    .expect("write");
+    let err = console::enforce_accessible_gate(name, false).expect_err("must refuse");
+    assert!(
+        err.to_string().contains("sealed image"),
+        "claim-15 gate must fire through machine console path: {err}"
     );
 }

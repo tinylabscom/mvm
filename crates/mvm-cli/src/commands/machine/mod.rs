@@ -86,10 +86,16 @@ pub(in crate::commands) enum MachineAction {
     /// Run a command inside an already-started named machine
     #[command(display_order = 10)]
     Exec(MachineExecArgs),
+    /// Show console logs from a running VM
+    #[command(display_order = 11)]
+    Logs(super::vm::logs::Args),
+    /// Interactive PTY console to a running VM (dev images only; claim-15 gated)
+    #[command(display_order = 12)]
+    Console(super::vm::console::Args),
     /// Verify a portable `.mvm` artifact and preview how `machine run` would
     /// admit it (arch, profile, seccomp, egress, volumes). Read-only: no
     /// extraction, no boot.
-    #[command(name = "check-artifact", display_order = 11)]
+    #[command(name = "check-artifact", display_order = 13)]
     CheckArtifact(portable::CheckArtifactArgs),
 }
 
@@ -1438,6 +1444,8 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Exec(exec_args) => exec_machine(cli, exec_args, cfg),
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
+        MachineAction::Logs(log_args) => super::vm::logs::run(cli, log_args, cfg),
+        MachineAction::Console(console_args) => super::vm::console::run(cli, console_args, cfg),
         MachineAction::CheckArtifact(a) => portable::run_check_artifact(a),
     }
 }

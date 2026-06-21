@@ -84,8 +84,6 @@ pub(in crate::commands) enum Commands {
     /// System diagnostics and dependency checks
     #[command(display_order = 5)]
     Doctor(env::doctor::Args),
-    /// Show console logs from a running microVM
-    Logs(vm::logs::Args),
     /// List running VMs
     Ls(vm::ps::Args),
     /// Build and run a VM
@@ -100,8 +98,6 @@ pub(in crate::commands) enum Commands {
     Invoke(vm::invoke::Args),
     /// Operate on a running VM (pause, snapshot, checkpoint, cp, fs, …)
     Vm(vm::group::Args),
-    /// Interactive console (PTY-over-vsock) to a running VM
-    Console(vm::console::Args),
     /// Prepare the environment + pre-fetch the builder VM image
     ///
     /// Runs host-tooling setup and pre-acquires the builder VM image so the
@@ -316,7 +312,6 @@ pub fn run() -> Result<()> {
         Commands::Env(a) => env::group::run(&cli, a, &cfg),
         Commands::Bootstrap(a) => bootstrap::run(&cli, a, &cfg),
         Commands::Dev(a) => env::dev::run(&cli, a, &cfg),
-        Commands::Logs(a) => vm::logs::run(&cli, a, &cfg),
         Commands::Ls(a) => vm::ps::run(&cli, a, &cfg),
         Commands::Doctor(a) => env::doctor::run(&cli, a, &cfg),
         Commands::Build(a) => build::group::run(&cli, a, &cfg),
@@ -329,7 +324,6 @@ pub fn run() -> Result<()> {
         Commands::Ops(a) => ops::group::run(&cli, a, &cfg),
         Commands::Network(a) => ops::network::run(&cli, a, &cfg),
         Commands::Catalog(a) => catalog::run(&cli, a, &cfg),
-        Commands::Console(a) => vm::console::run(&cli, a, &cfg),
         Commands::Cache(a) => ops::cache::run(&cli, a, &cfg),
         Commands::Pool(a) => pool::run(&cli, a, &cfg),
         Commands::Reconcile(a) => ops::reconcile::run(&cli, a, &cfg),

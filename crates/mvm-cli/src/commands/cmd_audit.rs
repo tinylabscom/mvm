@@ -176,7 +176,7 @@ impl Commands {
         matches!(
             self,
             // Lifecycle mutate/read on the local single-host path.
-            Commands::Up(_) | Commands::Run(_) | Commands::Console(_) | Commands::Dev(_)
+            Commands::Up(_) | Commands::Run(_) | Commands::Dev(_)
         )
     }
 
@@ -192,7 +192,6 @@ impl Commands {
             Commands::Env(a) => a.action.verb_name(),
             Commands::Bootstrap(_) => "bootstrap",
             Commands::Dev(_) => "dev",
-            Commands::Logs(_) => "logs",
             Commands::Ls(_) => "ls",
             Commands::Doctor(_) => "doctor",
             Commands::Manifest(_) => "manifest",
@@ -207,7 +206,6 @@ impl Commands {
             Commands::Ops(a) => a.action.verb_name(),
             Commands::Network(_) => "network",
             Commands::Catalog(_) => "catalog",
-            Commands::Console(_) => "console",
             Commands::Cache(_) => "cache",
             Commands::Pool(_) => "pool",
             Commands::Reconcile(_) => "reconcile",
