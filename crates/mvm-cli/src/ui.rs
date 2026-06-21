@@ -77,6 +77,14 @@ pub fn format_heartbeat(activity: &str, elapsed: std::time::Duration) -> String 
     )
 }
 
+/// Spinner message for a long, silent blocking step: `<activity> — <secs>s
+/// elapsed`. Used on a TTY where the animated spinner already conveys liveness,
+/// so the message stays terse (no need for the [`format_heartbeat`] "not a
+/// hang" reassurance the non-TTY text line carries). Pure (testable).
+pub fn format_build_progress(activity: &str, elapsed: std::time::Duration) -> String {
+    format!("{activity} — {}s elapsed", elapsed.as_secs())
+}
+
 // ---------------------------------------------------------------------------
 // Banner / status / prompts / spinners (always printed; delegate)
 // ---------------------------------------------------------------------------
@@ -135,5 +143,18 @@ mod tests {
         assert!(line.contains("not a hang"));
         // Whole seconds, no fractional noise.
         assert!(!line.contains("40.0"));
+    }
+
+    #[test]
+    fn format_build_progress_is_terse_with_whole_seconds() {
+        assert_eq!(
+            format_build_progress("Builder VM image build", std::time::Duration::from_secs(23)),
+            "Builder VM image build — 23s elapsed"
+        );
+        // The spinner conveys liveness, so the verbose "not a hang" reassurance
+        // is intentionally absent here.
+        let line = format_build_progress("x", std::time::Duration::from_millis(7_900));
+        assert_eq!(line, "x — 7s elapsed");
+        assert!(!line.contains("hang"));
     }
 }
