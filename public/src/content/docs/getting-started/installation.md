@@ -108,10 +108,11 @@ mvmctl automatically detects your platform at startup and selects the best VM ba
 | Platform | Backend | What happens |
 |----------|---------|-------------|
 | **Linux with `/dev/kvm`** | Firecracker | Runs directly on KVM. Smallest attack surface, fastest cold boot. |
-| **macOS 26+ Apple Silicon** | Apple Container | Native Virtualization.framework. No Docker Desktop required. |
-| **macOS Apple Silicon** | libkrun | Direct Hypervisor.framework backend. |
-| **Linux without `/dev/kvm`** | Docker | Tier 3 fallback when no microVM backend is available. |
-| **Docker available** | Docker | Tier 3 container fallback. Used only if no hypervisor backend works. |
+| **macOS 26+ Apple Silicon** | Vz | Apple Virtualization.framework, bundled with the OS. No extra library install. |
+| **macOS 13–25 Apple Silicon** | libkrun | In-process VMM via the Homebrew `slp/krun` trio. |
+
+There is no Docker or container backend on the runtime path. A `qemu`
+(microvm.nix) backend exists for local dev/test only and is never auto-selected.
 
 You don't need Nix on the host. On first build, mvm bootstraps or reuses a Linux builder VM, runs Nix evaluation and `nix build` inside it, and extracts the rootfs back. You run `mvmctl build` from the host; you do not need to enter a dev shell first. See [Builder VM](/guides/builder-vm/) for the full model.
 
@@ -123,17 +124,17 @@ After installation, run the setup wizard:
 mvmctl init
 ```
 
-This walks through platform detection, dependency installation (Firecracker on Linux, direct libkrun on macOS), default network setup, and XDG directory creation. Use `--non-interactive` for scripted environments.
+This walks through platform detection, dependency installation (Firecracker on Linux; the `slp/krun` Homebrew trio for libkrun on macOS 13–25, nothing extra for Apple Virtualization.framework on macOS 26+), default network setup, and XDG directory creation. Use `--non-interactive` for scripted environments.
 
 Running `mvmctl dev` or `mvmctl bootstrap` also handles setup automatically -- they detect your platform, select the backend, and stage the builder microVM image on first use.
 
 You can force a specific backend with `--hypervisor`:
 
 ```bash
-mvmctl up --flake . --hypervisor libkrun
-mvmctl up --flake . --hypervisor firecracker
-mvmctl up --flake . --hypervisor docker
-mvmctl up --flake . --hypervisor qemu    # microvm.nix
+mvmctl up --flake . --hypervisor firecracker  # Linux KVM
+mvmctl up --flake . --hypervisor vz           # macOS 26+ Apple Silicon
+mvmctl up --flake . --hypervisor libkrun      # macOS 13–25 Apple Silicon
+mvmctl up --flake . --hypervisor qemu         # microvm.nix — dev/test only
 ```
 
 Use `mvmctl doctor` to check which backends are available on your system.
