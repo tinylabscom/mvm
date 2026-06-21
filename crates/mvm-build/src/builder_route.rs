@@ -190,16 +190,16 @@ const BUILD_OP_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Verdict of a typed guest-image build run through the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildVerdict {
-    /// `nix build` produced an out-path. `store_path` is the `/nix/store/...`
-    /// result **inside the builder VM**. Exporting its artifacts (kernel +
-    /// rootfs) to a host-readable location is the caller's remaining step: the
-    /// legacy path copies them into the `/out` virtio-fs share the host reads,
-    /// and the typed path's output-export reconciliation is not wired yet. So
-    /// this verdict reports *that* a build succeeded and where in the store, not
-    /// host-readable artifacts.
+    /// `nix build` produced an out-path.
     Built {
-        /// The `/nix/store/...` out-path inside the builder VM.
+        /// The `/nix/store/...` out-path inside the builder VM (provenance).
         store_path: String,
+        /// The directory the built image's host-facing artifacts (`vmlinux`,
+        /// `rootfs.ext4`) were exported into. When the caller passed an
+        /// `output_dir` under the `/job` share, this is that host-readable
+        /// path; when it didn't, the daemon exported nothing and this equals
+        /// `store_path` (a builder-VM-internal path the host cannot read).
+        artifact_dir: String,
     },
     /// `nix build` failed; carries the daemon's failure message (a stderr tail).
     Failed {
@@ -224,6 +224,7 @@ pub fn run_build(
     socket_path: &Path,
     flake_ref: &str,
     attr_path: &str,
+    output_dir: Option<&str>,
     timeout: Duration,
 ) -> Result<BuildVerdict, BuilderdClientError> {
     let mut client = BuilderdClient::connect(socket_path, timeout)?;
@@ -232,14 +233,18 @@ pub fn run_build(
         flake_ref: flake_ref.to_string(),
         attr_path: attr_path.to_string(),
         fingerprint: None,
+        output_dir: output_dir.map(str::to_string),
     };
     let mut discard = |_event: OperationEvent| {};
     match client.run_operation(&request, &mut discard)? {
+        // On export the daemon sets `artifact_path` to the requested output dir
+        // (host-readable); with no export it equals the store path.
         OperationOutcome::Artifact {
             store_path,
             artifact_path,
         } => Ok(BuildVerdict::Built {
-            store_path: store_path.unwrap_or(artifact_path),
+            store_path: store_path.unwrap_or_else(|| artifact_path.clone()),
+            artifact_dir: artifact_path,
         }),
         OperationOutcome::Failed { message, .. } => Ok(BuildVerdict::Failed { message }),
         other => Err(BuilderdClientError::Protocol {
@@ -252,7 +257,12 @@ pub fn run_build(
 /// in (`MVM_BUILDERD_TYPED`) **and** a ready builder daemon is reachable under
 /// `vms_root`; otherwise fall back (emitting the compat diagnostic) to the
 /// caller's legacy in-VM build path.
-pub fn try_typed_build(vms_root: &Path, flake_ref: &str, attr_path: &str) -> BuildDispatch {
+pub fn try_typed_build(
+    vms_root: &Path,
+    flake_ref: &str,
+    attr_path: &str,
+    output_dir: Option<&str>,
+) -> BuildDispatch {
     let opt_in = typed_opt_in(|k| std::env::var(k).ok());
     let socket = resolve_running_builder_socket(vms_root);
     let reachable = socket.as_deref().is_some_and(|s| {
@@ -264,7 +274,13 @@ pub fn try_typed_build(vms_root: &Path, flake_ref: &str, attr_path: &str) -> Bui
     match resolve_route(reachable, opt_in) {
         BuilderRoute::Typed => {
             let socket = socket.expect("reachable implies a resolved socket");
-            BuildDispatch::Took(run_build(&socket, flake_ref, attr_path, BUILD_OP_TIMEOUT))
+            BuildDispatch::Took(run_build(
+                &socket,
+                flake_ref,
+                attr_path,
+                output_dir,
+                BUILD_OP_TIMEOUT,
+            ))
         }
         BuilderRoute::LegacyShell => {
             tracing::debug!(
@@ -386,8 +402,24 @@ mod io_tests {
         let sock = tmp.path().join("vsock-21473.sock");
         // The daemon's nix build prints the out-path on stdout.
         let h = serve_one_full(sock.clone(), 0, "/nix/store/aaaa-img\n".to_string());
-        match run_build(&sock, "path:.", "packages.default", Duration::from_secs(5)).unwrap() {
-            BuildVerdict::Built { store_path } => assert_eq!(store_path, "/nix/store/aaaa-img"),
+        // No output_dir → the daemon exports nothing (FakeExec runs no real
+        // copy), so artifact_dir == store_path.
+        match run_build(
+            &sock,
+            "path:.",
+            "packages.default",
+            None,
+            Duration::from_secs(5),
+        )
+        .unwrap()
+        {
+            BuildVerdict::Built {
+                store_path,
+                artifact_dir,
+            } => {
+                assert_eq!(store_path, "/nix/store/aaaa-img");
+                assert_eq!(artifact_dir, "/nix/store/aaaa-img");
+            }
             other => panic!("expected Built, got {other:?}"),
         }
         h.join().unwrap();
@@ -398,7 +430,7 @@ mod io_tests {
         let tmp = tempfile::tempdir().unwrap();
         let sock = tmp.path().join("vsock-21473.sock");
         let h = serve_one(sock.clone(), 1);
-        match run_build(&sock, "path:.", "x", Duration::from_secs(5)).unwrap() {
+        match run_build(&sock, "path:.", "x", None, Duration::from_secs(5)).unwrap() {
             BuildVerdict::Failed { message } => assert!(message.contains("boom"), "{message}"),
             other => panic!("expected Failed, got {other:?}"),
         }
@@ -409,7 +441,7 @@ mod io_tests {
     fn run_build_on_missing_socket_is_not_ready() {
         let tmp = tempfile::tempdir().unwrap();
         let sock = tmp.path().join("absent.sock");
-        let err = run_build(&sock, "path:.", "x", Duration::from_secs(1)).unwrap_err();
+        let err = run_build(&sock, "path:.", "x", None, Duration::from_secs(1)).unwrap_err();
         assert!(matches!(err, BuilderdClientError::NotReady { .. }));
     }
 

@@ -138,6 +138,14 @@ pub enum BuilderRequest {
         /// this image so the daemon can short-circuit to a warm store
         /// path. `None` disables the short-circuit.
         fingerprint: Option<String>,
+        /// Optional in-guest directory the daemon copies the built
+        /// image's host-facing artifacts (`vmlinux`, `rootfs.ext4`)
+        /// into, so the host can read them off a shared mount. The host
+        /// passes a path under the `/job` virtio-fs share (e.g.
+        /// `/job/<op>/out`); the daemon never invents it. `None` ⇒ the
+        /// daemon returns only the in-store out-path (no export).
+        #[serde(default)]
+        output_dir: Option<String>,
     },
 
     /// Build a source-built host tool package (e.g. the embedded
@@ -427,6 +435,7 @@ mod tests {
             flake_ref: "git+file:///work?dir=.".to_string(),
             attr_path: "packages.aarch64-linux.default".to_string(),
             fingerprint: Some("blake3:abcd".to_string()),
+            output_dir: None,
         });
         // None branch of the optional fingerprint.
         roundtrip(&BuilderRequest::BuildGuestImage {
@@ -434,6 +443,7 @@ mod tests {
             flake_ref: "path:.".to_string(),
             attr_path: "packages.x86_64-linux.worker".to_string(),
             fingerprint: None,
+            output_dir: None,
         });
     }
 
@@ -580,6 +590,7 @@ mod tests {
                     flake_ref: "x".to_string(),
                     attr_path: "y".to_string(),
                     fingerprint: None,
+                    output_dir: None,
                 })
                 .unwrap(),
                 "build_guest_image",
