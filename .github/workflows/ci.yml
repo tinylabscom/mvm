@@ -116,6 +116,9 @@ jobs:
       - name: mvmctl default closure within budget
         run: cargo run -p xtask -- check-closure-budget
 
+      - name: no new duplicate-major dependencies
+        run: cargo run -p xtask -- check-duplicate-majors
+
       - name: mvm-guest agent closure is runtime-free
         run: cargo run -p xtask -- check-guest-agent-runtime-free
 
@@ -124,6 +127,9 @@ jobs:
 
       - name: workload guest images bake no host/builder tools
         run: cargo run -p xtask -- check-guest-images-no-builder-tools
+
+      - name: no new builder shell-job dispatch sites
+        run: cargo run -p xtask -- check-builder-shell-job-sites
 
       - name: runtime-overlay version pinned to workspace
         run: cargo run -p xtask -- check-runtime-overlay-version
