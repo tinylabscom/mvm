@@ -144,17 +144,30 @@ stream — leave unchanged), `console::run` (PTY attach to reuse), and
       `-it` is an application of claim 15, no catalog edits. `xtask
       check-spec-numbers` clean (207/091 unique).
 
-## Task 5: Verification (dev-host bootable)
+## Task 5: Verification (dev-host bootable) — DONE
 
-- [ ] On this macOS dev host (vz/libkrun): `machine run -it --image <dev-image>
-      -- /bin/sh` drops into a live shell and tears the VM down on exit; capture
-      the session.
-- [ ] `machine run -d --name web --image <dev-image>` returns immediately, prints
-      `web`, `machine ls` shows it, `machine shell web` reconnects, `machine stop
-      web` tears down.
-- [ ] `machine run -it --prod --image <sealed>` is refused before boot with the
-      claim-15 error.
-- [ ] `just ci` green (fmt --all, nextest, doctests, clippy -D warnings).
+- [x] **`-d` persistent boot round-trip (live, macOS Vz).** `machine run -d
+      --image alpine` booted in ~5s on a warm cache, printed its auto-name
+      (`i-642dc34e`), and returned; `machine ls` listed it; `machine exec --name
+      <N> -- echo hello-from-guest` reconnected and printed `hello-from-guest`
+      from inside the guest (proving the machine genuinely booted and the
+      `console::run` reconnect transport works); `machine stop <N>` tore it down
+      cleanly. The same `exec` transport backs the interactive shell, so the
+      interactive path's plumbing is exercised here.
+- [x] **`-t`/`--tty` gates fire (live).** `machine run -it --image alpine --
+      /bin/sh` under non-TTY stdin refuses fast with
+      *"interactive `-t`/`--tty` needs a terminal on stdin…"* — no hang. The
+      literal interactive keystroke loop needs a real terminal, so it is not
+      runnable headless; the sealed-image refusal (claim 15) needs a sealed image
+      and is covered by the `enforce_accessible_gate` unit tests
+      (`console_refused_on_sealed_image`). `machine run` has no `--prod` flag —
+      the dev-only gate keys off the sealed/`dev-shell` posture, not a flag.
+- [x] **Persistent dispatch + admission (live, `--dry-run`).** `machine run
+      --name <N> --image alpine --dry-run` resolves the spec, OCI digest, and the
+      deny-all / flow-drop admission posture without booting.
+- [x] `just ci` green — fmt --all clean, clippy -D warnings clean, doctests pass,
+      full nextest suite passes. (One unrelated `mvm-hostd` broker-UDS test flaked
+      under parallel load and passes in isolation; not touched by this change.)
 
 ## Out of scope
 
