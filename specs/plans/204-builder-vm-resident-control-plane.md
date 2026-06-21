@@ -1,6 +1,6 @@
 # Plan 204 — Builder VM resident control plane
 
-**Status:** In progress — WS-A protocol wire types + version negotiation landed; daemon skeleton, image wiring, and host client remain
+**Status:** In progress — WS-A (protocol, daemon core, doctor readiness, boot wiring; daemon boot + reachability live-validated on macOS-26 Vz), WS-B (host client), WS-C (FlakeCheck + build-op handler cores), and WS-E (docs) landed. Open: WS-D (route builds through `BuilderdClient`; nothing consumes it yet), the WS-C no-host-Nix test, and the typed-operation over-the-wire proof.
 **Sprint:** 56 / product-DX follow-up
 **ADR:** [ADR-089](../adrs/089-builder-vm-resident-control-plane.md)
 **Depends on:** Plan 199, Plan 200, ADR-046, ADR-057, ADR-071
@@ -158,7 +158,7 @@ arm lands with the daemon's image baking (boot-gated).
 - [~] Add builder-VM image wiring so the daemon starts on boot (also lands
       the `mvm-builderd` bin entrypoint + AF_VSOCK listener over
       `serve_connection_with_executor`).
-      **Code landed; one live boot-validation step pending on-box.**
+      **Code landed; daemon boot + reachability live-validated on-box.**
       `crates/mvm-build/src/bin/mvm-builderd.rs` `#[path]`-includes the
       daemon modules (not `use mvm_build`, so it cross-compiles to static
       `aarch64-unknown-linux-musl` like every builder bin) and runs a
@@ -171,9 +171,12 @@ arm lands with the daemon's image baking (boot-gated).
       persistent libkrun + Vz builder launchers register vsock port 21473
       so the host reaches it at `<vm_state_dir>/vsock-21473.sock` — the
       exact path `doctor` and `BuilderdClient` already use. All of this is
-      CI-compiled (incl. the musl zigbuild via embedding); the remaining
-      step is a live `mvmctl dev up` → `doctor: builder daemon ready` →
-      typed `FlakeCheck` on the builder box. The lifecycle owner (routing
+      CI-compiled (incl. the musl zigbuild via embedding). Live proof
+      2026-06-20 (macOS-26 Vz): `dev up` → `outcome: started`, then
+      `mvmctl doctor` → `builder daemon: OK (mvm-persistent-builder-vz-dev:
+      ready (protocol v1))` — a real `Handshake` over vsock 21473 negotiated
+      protocol v1. The remaining step is a typed `FlakeCheck` over the wire,
+      which needs the WS-D host driver. The lifecycle owner (routing
       real `mvmctl` builds through the client instead of the legacy
       channel) is WS-D, still open.
 - [x] Add `mvmctl doctor` visibility for builder daemon readiness.
@@ -268,10 +271,13 @@ arm lands with the daemon's image baking (boot-gated).
 
 ### E. UX and docs
 
-- [~] Update installation docs: host `mvmctl` is required, host Nix is optional.
-      Host-Nix-optional is now documented in `guides/builder-vm.md`; the
-      `getting-started/installation.md` edit is deferred (a parallel Plan 200
-      docs session owns that file) to avoid a collision.
+- [x] Update installation docs: host `mvmctl` is required, host Nix is optional.
+      Host-Nix-optional is documented in `guides/builder-vm.md`, and
+      `getting-started/installation.md` now carries a resident-builder-daemon
+      note: builds run through `mvm-builderd` over typed vsock (not a builder
+      shell), `mvmctl` is the only command users invoke, and `mvmctl doctor`'s
+      "builder daemon" line is the readiness surface — cross-linked to the
+      builder-vm control-plane section.
 - [x] Update architecture docs with host control plane vs builder execution
       plane. `guides/builder-vm.md` → "Resident builder control plane" section:
       `mvm-builderd` resident daemon, typed allowlisted vsock requests, no
@@ -282,8 +288,8 @@ arm lands with the daemon's image baking (boot-gated).
       host-driven cancellation).
 - [x] Document that guest images do not contain `mvmctl` or `mvm-builderd`.
       Covered in the builder-vm.md section ("Guest images stay tool-free").
-- [ ] Add a concise "what runs where" table for users and contributors.
-      (`guides/builder-vm.md` already carries a "What Runs Where" table.)
+- [x] Add a concise "what runs where" table for users and contributors.
+      `guides/builder-vm.md` carries a "What Runs Where" table.
 
 ## Acceptance
 

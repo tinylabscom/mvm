@@ -30,6 +30,13 @@ For flake-backed builds, `mvmctl` starts or reuses the project builder VM and
 runs Linux Nix work inside that VM. The host CLI stays the user-facing entry
 point.
 
+Inside that builder VM, Nix work is driven by a resident service,
+`mvm-builderd`, over typed vsock requests — not a builder shell. You never run
+or install it; `mvmctl` is the only command you invoke. `mvmctl doctor` reports
+a "builder daemon" line so its readiness is observable. See
+[Builder VM](/guides/builder-vm/#resident-builder-control-plane) for the host
+control plane vs. builder execution plane split.
+
 Portable artifacts are also intended to be host-Nix-free. A signed `.mvmpkg`
 bundle can be verified and launched without rebuilding from source; source
 checkouts and Nix flakes remain contributor/build inputs, not runtime
