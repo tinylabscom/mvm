@@ -186,6 +186,17 @@ pub enum GuestRequest {
         stdin: Option<String>,
         timeout_secs: Option<u64>,
     },
+    /// Tier-2 batched exec (dev-shell only): stage files, then run a sequence of
+    /// argv commands in-guest in a single round-trip, returning one buffered
+    /// outcome per command. The chain stops at the first non-zero exit. This is
+    /// the one-round-trip counterpart to the host driving `FsWrite` + `Exec`
+    /// frames itself; `peak_rss_kib` is agent-measured here. Answered by a
+    /// single `ExecBatchResult` frame.
+    ExecBatch {
+        stages: Vec<StageFile>,
+        commands: Vec<Vec<String>>,
+        timeout_secs: Option<u64>,
+    },
     /// Run the image's baked entrypoint program with the given stdin
     /// piped in and stdout/stderr captured.
     ///
@@ -533,6 +544,7 @@ impl GuestRequest {
             Self::ProbeStatus => "probe-status",
             Self::PrimedStatus => "primed-status",
             Self::Exec { .. } => "exec",
+            Self::ExecBatch { .. } => "exec-batch",
             Self::RunEntrypoint { .. } => "run-entrypoint",
             Self::PostRestore { .. } => "post-restore",
             Self::FsDiff => "fs-diff",
@@ -744,6 +756,7 @@ impl GuestRequest {
             GuestRequest::ProbeStatus => Verb::ProbeStatus,
             GuestRequest::PrimedStatus => Verb::PrimedStatus,
             GuestRequest::Exec { .. } => Verb::Exec,
+            GuestRequest::ExecBatch { .. } => Verb::ExecBatch,
             GuestRequest::RunEntrypoint { .. } => Verb::RunEntrypoint,
             GuestRequest::PostRestore { .. } => Verb::PostRestore,
             GuestRequest::FsDiff => Verb::FsDiff,
@@ -816,6 +829,7 @@ impl GuestRequest {
             // mounted-volume contents, so the entire filesystem
             // RPC surface is DevOnly in v1.
             GuestRequest::Exec { .. }
+            | GuestRequest::ExecBatch { .. }
             | GuestRequest::FsDiff
             | GuestRequest::StartPortForward { .. }
             | GuestRequest::StartUnixSocketForward { .. }
@@ -938,6 +952,9 @@ pub enum GuestResponse {
     /// One event in the streaming response of an `Exec` call (dev-shell
     /// only). Terminated by `ExecEvent::Exit`.
     ExecEvent(ExecEvent),
+    /// Buffered outcomes of an `ExecBatch` call (dev-shell only), one per
+    /// command in request order (truncated at the first non-zero exit).
+    ExecBatchResult { outcomes: Vec<ExecOutcomeWire> },
     /// Post-restore acknowledgement.
     PostRestoreAck {
         success: bool,
@@ -1052,7 +1069,8 @@ name_enum! {
     /// lockstep with the wire enum (exhaustive match).
     pub enum Verb {
         ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, IntegrationStatus,
-        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, RunEntrypoint, PostRestore,
+        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, ExecBatch, RunEntrypoint,
+        PostRestore,
         FsDiff, StartPortForward, StartUnixSocketForward, ConsoleOpen,
         ConsoleClose, ConsoleResize, EntrypointStatus, ReadinessStatus, FsRead,
         FsWrite, FsList, FsStat, FsMkdir, FsRemove, FsMove, ProcStart,
@@ -1069,6 +1087,7 @@ name_enum! {
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
         Pong, Error, UnsupportedInProfile, IntegrationStatusReport,
         CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, ExecEvent,
+        ExecBatchResult,
         PostRestoreAck, FsDiffResult, PortForwardStarted,
         UnixSocketForwardStarted, ConsoleOpened, ConsoleExited, ConsoleResized,
         EntrypointStatusReport,
@@ -1137,6 +1156,7 @@ impl Verb {
             Verb::ProbeStatus => unary(&[R::ProbeStatusReport]),
             Verb::PrimedStatus => unary(&[R::PrimedStatusReport]),
             Verb::Exec => stream(&[R::ExecEvent]),
+            Verb::ExecBatch => unary(&[R::ExecBatchResult]),
             Verb::RunEntrypoint => stream(&[R::EntrypointEvent]),
             Verb::PostRestore => unary(&[R::PostRestoreAck]),
             Verb::FsDiff => unary(&[R::FsDiffResult]),
@@ -1189,6 +1209,7 @@ impl GuestResponse {
             GuestResponse::PrimedStatusReport { .. } => ResponseVariant::PrimedStatusReport,
             GuestResponse::EntrypointEvent(_) => ResponseVariant::EntrypointEvent,
             GuestResponse::ExecEvent(_) => ResponseVariant::ExecEvent,
+            GuestResponse::ExecBatchResult { .. } => ResponseVariant::ExecBatchResult,
             GuestResponse::PostRestoreAck { .. } => ResponseVariant::PostRestoreAck,
             GuestResponse::FsDiffResult { .. } => ResponseVariant::FsDiffResult,
             GuestResponse::PortForwardStarted { .. } => ResponseVariant::PortForwardStarted,
@@ -1834,6 +1855,30 @@ impl EntrypointEvent {
             EntrypointEvent::Exit { .. } | EntrypointEvent::Error { .. }
         )
     }
+}
+
+/// A file to stage into the guest before an [`GuestRequest::ExecBatch`] runs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StageFile {
+    pub path: String,
+    pub content: Vec<u8>,
+    pub mode: u32,
+}
+
+/// One command's buffered outcome from an [`GuestRequest::ExecBatch`]. Agent-
+/// measured: `duration_ms` is the in-guest wall-clock and `peak_rss_kib` the
+/// `getrusage` high-water mark when the guest can report it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ExecOutcomeWire {
+    pub status: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub duration_ms: u64,
+    pub peak_rss_kib: Option<u64>,
 }
 
 /// One event in the response stream of an `Exec` call (dev-shell only).
@@ -6008,6 +6053,69 @@ mod tests {
         let back: GuestResponse = serde_json::from_slice(&j).unwrap();
         assert!(
             matches!(back, GuestResponse::ExecEvent(ExecEvent::Stdout { ref chunk }) if chunk == b"hi")
+        );
+    }
+
+    #[test]
+    fn exec_batch_request_roundtrips_and_classifies() {
+        let req = GuestRequest::ExecBatch {
+            stages: vec![StageFile {
+                path: "/tmp/m.rs".to_string(),
+                content: b"fn main(){}".to_vec(),
+                mode: 0o644,
+            }],
+            commands: vec![vec!["rustc".to_string(), "/tmp/m.rs".to_string()]],
+            timeout_secs: Some(30),
+        };
+        let back: GuestRequest =
+            serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            GuestRequest::ExecBatch { ref stages, ref commands, timeout_secs: Some(30) }
+                if stages.len() == 1 && commands == &[vec!["rustc".to_string(), "/tmp/m.rs".to_string()]]
+        ));
+        // Verb, name, dev-only class, and the unary ExecBatchResult contract.
+        assert_eq!(req.verb(), Verb::ExecBatch);
+        assert_eq!(req.kind_name(), "exec-batch");
+        assert_eq!(req.class(), RequestClass::DevOnly);
+        let contract = req.response_contract();
+        assert_eq!(contract.kind, ResponseKind::Unary);
+        assert_eq!(contract.responses, &[ResponseVariant::ExecBatchResult]);
+    }
+
+    #[test]
+    fn exec_batch_result_roundtrips_and_maps_to_variant() {
+        let r = GuestResponse::ExecBatchResult {
+            outcomes: vec![ExecOutcomeWire {
+                status: 0,
+                stdout: b"ok".to_vec(),
+                stderr: Vec::new(),
+                duration_ms: 12,
+                peak_rss_kib: Some(2048),
+            }],
+        };
+        let back: GuestResponse = serde_json::from_slice(&serde_json::to_vec(&r).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            GuestResponse::ExecBatchResult { ref outcomes }
+                if outcomes.len() == 1 && outcomes[0].duration_ms == 12
+                    && outcomes[0].peak_rss_kib == Some(2048)
+        ));
+        assert_eq!(r.variant(), ResponseVariant::ExecBatchResult);
+    }
+
+    #[test]
+    fn exec_batch_wire_types_deny_unknown_fields() {
+        // StageFile + ExecOutcomeWire fail closed on a smuggled extra field.
+        assert!(
+            serde_json::from_str::<StageFile>(r#"{"path":"/a","content":[],"mode":420,"x":1}"#)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ExecOutcomeWire>(
+                r#"{"status":0,"stdout":[],"stderr":[],"duration_ms":0,"peak_rss_kib":null,"x":1}"#
+            )
+            .is_err()
         );
     }
 
