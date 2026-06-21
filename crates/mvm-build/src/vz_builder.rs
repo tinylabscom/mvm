@@ -1000,6 +1000,12 @@ impl BuilderVm for VzBuilderVm {
         //     timeout and surfaces the elapsed budget in the error.
         let timeout = builder_vm_timeout()?;
 
+        // Stream the in-guest `nix --print-build-logs` output to the terminal as
+        // the build runs (under `-v`/`RUST_LOG`); no-op otherwise. Dropped after
+        // the wait + finalize below, with a final drain.
+        let _job_log =
+            crate::builder_vm_runtime::JobLogStreamer::start(job_dir.join("nix-stderr.log"));
+
         // 13. Hand off to the seam. The backend spawns the
         //     `mvm-vz-supervisor`, pipes the JSON config to stdin,
         //     and blocks until the supervisor exits.
