@@ -98,26 +98,36 @@ stream — leave unchanged), `console::run` (PTY attach to reuse), and
 
 ### deferred follow-ups
 
-- [ ] `--volume` host-directory shares on a persistent machine. The persistent
-      `MachineSpec` has no field for an ephemeral host bind-share, so
-      `run_persistent` refuses `--volume` with `--name`/`-d`
-      (`reject_volume_with_persistence`). Persisting a bind-share across restarts
-      needs its own design (host-path drift / re-materialization semantics); no
-      behavior-matrix row depends on it.
+- [ ] `--volume` host-directory shares on a managed boot (persistent **or**
+      interactive). The `MachineSpec` boot path carries no bind-share field, so
+      `reject_volume_for_managed_boot` refuses `--volume` with `-d`/`--name`/`-t`;
+      it rides the plain transient `run_secure` path only. Persisting/re-materializing
+      a bind-share for these lifecycles needs its own design (host-path drift); no
+      behavior-matrix row depends on it. Interactive (`-t`) bind-shares are the
+      most likely first extension (Docker `run -it -v $PWD:/app` parity).
 
-## Task 3: Interactive path (`-t`/`--tty`, dev-only)
+## Task 3: Interactive path (`-t`/`--tty`, dev-only) — DONE
 
-- [ ] Route to `console::run` (the PTY path `machine shell` uses) against the
-      just-booted VM. For the **transient** case (no name/detach) boot a throwaway
-      VM, attach, and **tear it down on shell exit**; for the persistent case
-      boot/reuse the named machine and **leave it up** on exit.
-- [ ] Dev-only gate: refuse `--tty` under `--prod`, a sealed (dm-verity) image, or
-      a non-`dev-shell` agent — **before boot** — via `enforce_accessible_gate`
-      (claim 15). Clear error.
-- [ ] Refuse `--tty` when host stdin is not a TTY, with a clear message (no hang).
-- [ ] Tests: `--tty` refused for `--prod`/sealed via the gate; non-TTY stdin
-      refused; transient-interactive selects teardown-on-exit, persistent-interactive
-      leaves the machine up. (Live PTY round-trip is Task 5.)
+- [x] `run_interactive` boots (or reconnects to) the machine via the **shared**
+      `persist_and_boot_machine` (same managed path as the persistent lifecycle —
+      `run_persistent` was refactored onto it), then attaches a PTY via
+      `console::run` (`command: None` ⇒ shell). Transient (no name/`-d`) →
+      **tear down on exit** (`stop_running_machine` + drop the throwaway spec);
+      persistent → **left up**. The decision is `should_teardown_after_interactive`
+      = `!persistent`.
+- [x] Dev-only gate: `enforce_accessible_gate` (claim 15, now
+      `pub(in crate::commands)`) is called **before boot** for an existing
+      machine; a fresh boot is re-checked by `console::run` post-boot. The
+      recreate `--force` is deliberately **not** threaded into the gate, so it
+      cannot bypass claim 15. (`machine run` has no `--prod` flag — it is
+      dev-tier; the sealed-image/non-`dev-shell`-agent triggers are the relevant
+      ones.)
+- [x] `require_tty(stdin_is_tty)` refuses a non-TTY stdin up front with a clear
+      message — no hang. Call site reads `std::io::stdin().is_terminal()`.
+- [x] Tests: `interactive_requires_a_host_tty`,
+      `interactive_tears_down_only_the_transient_machine`,
+      `interactive_refuses_a_sealed_machine_via_the_claim15_gate`. (Live PTY
+      round-trip is Task 5.)
 
 ## Task 4: Docs + claim integrity
 
