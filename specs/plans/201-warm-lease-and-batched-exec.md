@@ -166,17 +166,22 @@ the same builder surface without linking the dev-only handler. The new
   zero-exit outcome per command. Tests: 3 vsock (request roundtrip + verb/
   class/contract, result roundtrip + variant, `deny_unknown_fields`) + 1
   host-side batch round-trip against the mock.
-- [~] **WS-E — facade + example.** Re-export DONE — `mvm` now re-exports
+- [x] **WS-E — facade + example.** Re-export DONE — `mvm` now re-exports
   `WarmLease`/`AcquireSpec`/`ExecBuilder`/`ExecOutcome` at the crate root
   (`crates/mvm/src/lib.rs`), reachable via the `mvmctl::runtime` facade.
-  Remaining: the `crates/mvm-cli/examples/verification_loop.rs` end-to-end
-  example.
+  **Example DONE** — `crates/mvm-cli/examples/verification_loop.rs` shows the
+  canonical flow (acquire → `exec().stage_file().argv().chain().output()` →
+  `release`/Drop) with no explicit pool/transport/stop/replenish in the caller
+  body; runs on the mock backend (the guest-exec step degrades cleanly without a
+  live agent) and is gated by `cargo build --example`.
 
 ## Success criteria
 
-- [ ] A caller acquires a warm VM, runs a staged compile-and-run batch, and
+- [x] A caller acquires a warm VM, runs a staged compile-and-run batch, and
   drops the handle — with no explicit pool, transport, stop, or replenish
-  calls in caller code.
+  calls in caller code. **Demonstrated** by `verification_loop.rs` (caller-body
+  shape) + the WS-A/B lease/exec unit tests; a real-VM run of the example is
+  live-gated.
 - [ ] Release never reuses a dirty VM; a dropped lease leaves the pool at
   target idle count for its compat key.
 - [ ] The argv exec surface is absent from a production agent build
