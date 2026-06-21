@@ -257,9 +257,15 @@
       # Added on top of `builderPackages` when `interactive = true`.
       # Provides a useful shell environment for contributors debugging
       # inside the builder VM via `mvmctl dev shell`.
+      #
+      # The Rust toolchain (`cargo` + `rustc`) is deliberately NOT baked in:
+      # it is ~1 GB of closure and `mvm` itself builds on the host, while Rust
+      # guest workloads build through nix (`buildRustPackage`) — so interactive
+      # `cargo`/`rustc` here only served ad-hoc poking. The builder VM has `nix`
+      # and (in the dev shell) open egress, so a contributor who wants it runs
+      # `nix shell nixpkgs#rustc nixpkgs#cargo` on demand; it then persists in
+      # the `/nix-store` image. Halving the dev rootfs is worth the one-time pull.
       devPackages = pkgs: with pkgs; [
-        cargo
-        rustc
         nano
       ];
 
