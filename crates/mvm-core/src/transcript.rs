@@ -277,18 +277,35 @@ impl TranscriptWriter {
         Ok(())
     }
 
-    /// Finalize the manifest for the chunks written so far.
-    pub fn seal(self) -> TranscriptManifest {
+    /// The capture directory chunks + manifest are written under.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Number of chunks captured so far.
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// Snapshot the manifest for the chunks written so far **without consuming**
+    /// the writer. A live capture persists this after each push so `list` /
+    /// `export` observe current state before the writer is finally `seal()`ed.
+    pub fn snapshot_manifest(&self) -> TranscriptManifest {
         TranscriptManifest {
             format_version: TRANSCRIPT_MANIFEST_FORMAT_VERSION,
-            capture_id: self.capture_id,
-            binding: self.binding,
+            capture_id: self.capture_id.clone(),
+            binding: self.binding.clone(),
             bounds: self.bounds,
             created_unix_secs: self.created_unix_secs,
-            wrapped_data_key_b64: self.wrapped_data_key_b64,
-            recipient: self.recipient,
-            chunks: self.chunks,
+            wrapped_data_key_b64: self.wrapped_data_key_b64.clone(),
+            recipient: self.recipient.clone(),
+            chunks: self.chunks.clone(),
         }
+    }
+
+    /// Finalize the manifest for the chunks written so far.
+    pub fn seal(self) -> TranscriptManifest {
+        self.snapshot_manifest()
     }
 }
 
