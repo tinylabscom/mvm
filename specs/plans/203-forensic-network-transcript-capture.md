@@ -179,7 +179,12 @@ This is a forensic tool, not a monitoring feature.
    `TranscriptWriter`; `push`/`seal` fill + finalize it. The
    `gateway_bridge::bridge_copy_bidirectional` tap opens the sink once per VM
    (`None` = no capture armed = zero cost), pushes each forwarded egress/ingress
-   frame, and seals + emits `TranscriptSealed` on teardown. Tested through the
+   frame, and seals + emits `TranscriptSealed` on teardown. **Denied egress is
+   captured too**: the `PacketDecision::Kill` arms push the original frame via
+   `push_dropped` (recorded with `ChunkRecord.dropped = true`), so the transcript
+   shows attempted-but-blocked egress — not only policy-allowed traffic. Without
+   this a deny-all workload captured zero chunks and attempted exfil to a denied
+   host was invisible. Tested through the
    **real** bridge relay (4 tests, `UnixStream` pairs): a forwarded frame is
    captured, sealed, and `transcript::export` decrypts it back byte-for-byte; all
    43 gateway_bridge tests stay green. The transcript lifecycle audit kinds landed

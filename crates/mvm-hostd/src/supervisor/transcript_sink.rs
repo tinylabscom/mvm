@@ -90,6 +90,17 @@ impl TranscriptCaptureSink {
         self.writer.push(direction, bytes)
     }
 
+    /// Record a frame egress policy **denied** (dropped, not forwarded). Flagged
+    /// `dropped` in the manifest so the transcript captures attempted-but-blocked
+    /// egress — the forensically interesting case.
+    pub fn push_dropped(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+    ) -> Result<(), TranscriptError> {
+        self.writer.push_dropped(direction, bytes)
+    }
+
     /// Finalize: re-seal `manifest.json` with the captured chunks so the
     /// operator CLI lists/exports them. Returns the sealed manifest so the
     /// caller can emit the `TranscriptSealed` audit entry with the counts.
