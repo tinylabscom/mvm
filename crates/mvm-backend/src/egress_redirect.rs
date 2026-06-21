@@ -24,6 +24,17 @@ pub fn terminator_port_for(slot_index: u8) -> u16 {
     TERMINATOR_PORT_BASE + slot_index as u16
 }
 
+/// Derive a stable host-loopback terminator port for backends that do not use
+/// the Firecracker slot allocator. Kept in a disjoint range from slot ports.
+pub fn terminator_port_for_vm_name(vm_name: &str) -> u16 {
+    const NAME_PORT_BASE: u16 = TERMINATOR_PORT_BASE + 1024;
+    const NAME_PORT_SPAN: u16 = 20_000;
+    let hash = vm_name.bytes().fold(0x811c_9dc5_u32, |acc, b| {
+        (acc ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    });
+    NAME_PORT_BASE + (hash % u32::from(NAME_PORT_SPAN)) as u16
+}
+
 /// RAII handle for a per-VM nft redirect table. `Drop` tears it down so an
 /// early return in the caller never strands a half-built table.
 pub struct EgressRedirect {
@@ -232,5 +243,12 @@ mod tests {
         assert_eq!(terminator_port_for(1), TERMINATOR_PORT_BASE + 1);
         assert_eq!(terminator_port_for(7), TERMINATOR_PORT_BASE + 7);
         assert_eq!(terminator_port_for(255), TERMINATOR_PORT_BASE + 255);
+    }
+
+    #[test]
+    fn vm_name_terminator_port_is_stable_and_disjoint_from_slot_range() {
+        let port = terminator_port_for_vm_name("workload-a");
+        assert_eq!(port, terminator_port_for_vm_name("workload-a"));
+        assert!(port >= TERMINATOR_PORT_BASE + 1024);
     }
 }

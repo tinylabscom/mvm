@@ -95,6 +95,25 @@ pub fn build_egress_tls_delivery(bound_hosts: &[&str], ca_dir: &Path) -> Result<
     })
 }
 
+/// Read the per-VM egress intermediate (`cert_pem` + `key_pem`) persisted under
+/// `<state_dir>/egress-intermediate.json`. Returns `None` when absent.
+pub fn read_egress_intermediate(state_dir: &Path) -> Result<Option<(String, String)>> {
+    let path = state_dir.join("egress-intermediate.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow!("read {}: {e}", path.display())),
+    };
+    let v: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| anyhow!("parse {}: {e}", path.display()))?;
+    let cert = v["cert_pem"].as_str();
+    let key = v["key_pem"].as_str();
+    match (cert, key) {
+        (Some(c), Some(k)) => Ok(Some((c.to_string(), k.to_string()))),
+        _ => Err(anyhow!("{} missing cert_pem/key_pem", path.display())),
+    }
+}
+
 /// PID of the per-VM `mvm-substitution-endpoint` moat, and the JSON
 /// file holding the `(guest var, placeholder)` env pairs it minted (the invoke
 /// path reads this to inject `HTTP_PROXY` + placeholder vars). Spawned only when

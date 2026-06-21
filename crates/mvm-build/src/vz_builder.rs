@@ -359,6 +359,7 @@ fn build_vz_supervisor_config(
         audit_dir: None,
         gateway_audit_socket: None,
         signing_key_path: None,
+        transparent_terminator_port: None,
     })
 }
 
@@ -1578,6 +1579,7 @@ fn build_vz_persistent_supervisor_config(
         audit_dir: None,
         gateway_audit_socket: None,
         signing_key_path: None,
+        transparent_terminator_port: None,
     })
 }
 

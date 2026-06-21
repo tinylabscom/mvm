@@ -52,22 +52,24 @@ use crate::substitution_spawn::EndpointGuard;
 /// Spawn the per-VM substitution endpoint when the admitted plan carries egress
 /// secrets, returning an armed [`EndpointGuard`]; a secret-free plan (or no
 /// `plan.json`) yields a defused no-op guard. The libkrun guest reaches the
-/// endpoint by dialing `connect_host_vsock(SUBSTITUTION_PORT)`; libkrun proxies
-/// that to the per-VM UDS the endpoint binds, so the transport is `Uds`. No
-/// transparent terminator on this path (`terminator_listen: None`), hence no
-/// per-VM TLS intermediate.
+/// proxy-aware endpoint by dialing `connect_host_vsock(SUBSTITUTION_PORT)`.
+/// The native gateway forwards intercepted `:80/:443` flows to the host
+/// loopback terminator on `terminator_port`.
 fn spawn_libkrun_egress_endpoint_if_needed(
     vm_name: &str,
     state_dir: &Path,
+    terminator_port: u16,
 ) -> Result<EndpointGuard> {
     use crate::substitution_spawn::{
         EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
     };
+    use std::net::SocketAddr;
     let Some((secrets, redaction, tenant)) =
         crate::egress_shared::decode_plan_secrets_from_state(state_dir)?
     else {
         return Ok(EndpointGuard::defused());
     };
+    let tls_intermediate = crate::substitution_spawn::read_egress_intermediate(state_dir)?;
     spawn_substitution_endpoint(SubstitutionSpawnParams {
         vm_name,
         state_dir,
@@ -80,8 +82,8 @@ fn spawn_libkrun_egress_endpoint_if_needed(
                 mvm_guest::vsock::SUBSTITUTION_PORT,
             ),
         },
-        terminator_listen: None,
-        tls_intermediate: None,
+        terminator_listen: Some(SocketAddr::from(([127, 0, 0, 1], terminator_port))),
+        tls_intermediate,
     })?;
     Ok(EndpointGuard::new(vm_name))
 }
@@ -247,6 +249,10 @@ fn standby_attach_config(
         plan,
         bundle,
         network_policy,
+        transparent_terminator_port: claim
+            .start_config
+            .as_ref()
+            .map(|config| crate::egress_redirect::terminator_port_for_vm_name(&config.name)),
     })
 }
 
@@ -401,6 +407,9 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         // explicit while a future change can introduce policy-driven
         // selection.
         bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
+        transparent_terminator_port: Some(crate::egress_redirect::terminator_port_for_vm_name(
+            &config.name,
+        )),
     })
 }
 
@@ -472,6 +481,12 @@ impl VmBackend for LibkrunBackend {
 
         let vcpus = u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
         let cfg = build_supervisor_config(config, &state_dir)?;
+        let mut endpoint_guard = spawn_libkrun_egress_endpoint_if_needed(
+            &config.name,
+            &state_dir,
+            cfg.transparent_terminator_port
+                .expect("libkrun transparent terminator port is set"),
+        )?;
         let pid_file = cfg.pid_file();
         // Remove any stale PID file from a previous crashed supervisor
         // so the wait-loop below can detect the new one unambiguously.
@@ -564,14 +579,6 @@ impl VmBackend for LibkrunBackend {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-
-        // The supervisor is up and its vsock listeners are bound. Spawn the
-        // egress substitution endpoint if the admitted plan carries secrets so
-        // the guest's egress can resolve placeholders host-side (the guest never
-        // holds the real secret). Armed via the guard until the VM is fully up;
-        // a spawn failure rolls the launch back (fail closed). When the plan has
-        // no secrets this is a defused no-op.
-        let mut endpoint_guard = spawn_libkrun_egress_endpoint_if_needed(&config.name, &state_dir)?;
 
         // Spawn the per-VM host-services broker (+ its audit-signer) for an
         // admitted workload so the guest can reach `host.audit.v1` over
@@ -1532,7 +1539,7 @@ mod tests {
     fn libkrun_substitution_not_spawned_when_no_secrets() {
         let tmp = tempfile::tempdir().unwrap();
         // Empty state dir: no plan.json at all.
-        let guard = spawn_libkrun_egress_endpoint_if_needed("no-secrets-vm", tmp.path())
+        let guard = spawn_libkrun_egress_endpoint_if_needed("no-secrets-vm", tmp.path(), 18080)
             .expect("no-secrets path must succeed");
         assert!(
             guard.vm_name.is_none(),

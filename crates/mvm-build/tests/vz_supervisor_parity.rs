@@ -122,6 +122,7 @@ fn build_boot_config(name: &str, kernel: &str, rootfs: &str, state_dir: &Path) -
         audit_dir: None,
         gateway_audit_socket: None,
         signing_key_path: None,
+        transparent_terminator_port: None,
     }
 }
 

@@ -18,7 +18,7 @@ use mvm_core::policy::projection::CanonicalEgress;
 use mvm_core::policy::resolver::EmergencyDeny;
 use mvm_core::policy::{EffectivePolicy, PolicyBundle, canonicalize_l4, resolve};
 
-use super::rvproxy_config::{RvproxyConfigParams, render_rvproxy_config};
+use super::rvproxy_config::{RvproxyConfigParams, RvproxyTransparentConfig, render_rvproxy_config};
 
 /// Upstream resolvers the native gateway forwards allowed lookups to. gvproxy
 /// reads the host's resolv.conf implicitly; rvproxy needs them named in
@@ -71,6 +71,7 @@ pub fn write_native_gateway_config(
     tenant: &TenantId,
     vm_id: &str,
     scratch_dir: &Path,
+    transparent: Option<RvproxyTransparentConfig>,
     now: DateTime<Utc>,
 ) -> std::io::Result<PathBuf> {
     let (egress, dns_allow) = match bundle {
@@ -88,6 +89,7 @@ pub fn write_native_gateway_config(
         egress: &egress,
         dns_allow: &dns_allow,
         upstream_resolvers: &DEFAULT_UPSTREAM_RESOLVERS,
+        transparent,
     })
     .map_err(std::io::Error::other)?;
     let config_path = scratch_dir.join("rvproxy.toml");
@@ -131,6 +133,7 @@ mod tests {
             &tenant,
             "vm-1",
             tmp.path(),
+            None,
             DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
         )
         .expect("write native config");
@@ -164,6 +167,7 @@ mod tests {
             &tenant,
             "vm-dev",
             tmp.path(),
+            None,
             DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
         )
         .expect("write native config");
@@ -184,5 +188,27 @@ mod tests {
 
         assert_eq!(egress, CanonicalEgress::Unrestricted);
         assert!(dns_allow.is_empty());
+    }
+
+    #[test]
+    fn writes_transparent_config_when_endpoint_is_available() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tenant = TenantId("dev".to_string());
+        let path = write_native_gateway_config(
+            None,
+            &tenant,
+            "vm-dev",
+            tmp.path(),
+            Some(RvproxyTransparentConfig {
+                terminator_host: Ipv4Addr::new(127, 0, 0, 1),
+                terminator_port: 18081,
+            }),
+            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+        )
+        .expect("write native config");
+        let toml = std::fs::read_to_string(&path).unwrap();
+        assert!(toml.contains("[transparent]"));
+        assert!(toml.contains("terminator_host = \"127.0.0.1\""));
+        assert!(toml.contains("terminator_port = 18081"));
     }
 }

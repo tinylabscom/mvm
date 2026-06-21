@@ -407,12 +407,19 @@ fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible
         native_flow_audit_path = Some(scratch.join("flow-audit.jsonl"));
         // Fail closed: a native gateway we can't configure must not silently
         // fall back to gvproxy-compat, which carries no policy.
+        let transparent = cfg.transparent_terminator_port.map(|terminator_port| {
+            mvm_hostd::supervisor::network::rvproxy_config::RvproxyTransparentConfig {
+                terminator_host: std::net::Ipv4Addr::new(127, 0, 0, 1),
+                terminator_port,
+            }
+        });
         let config_path =
             mvm_hostd::supervisor::network::rvproxy_launch::write_native_gateway_config(
                 bundle.as_ref(),
                 &plan.tenant,
                 &vm_name,
                 &scratch,
+                transparent,
                 chrono::Utc::now(),
             )
             .context("render native rvproxy gateway config")?;

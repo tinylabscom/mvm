@@ -1279,6 +1279,7 @@ mod tests {
             audit_dir: None,
             gateway_audit_socket: None,
             signing_key_path: None,
+            transparent_terminator_port: None,
         };
         let json = cfg.to_json().unwrap();
         std::fs::write(state_dir.join("supervisor-config.json"), json).unwrap();

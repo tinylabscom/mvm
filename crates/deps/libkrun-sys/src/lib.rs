@@ -1429,6 +1429,11 @@ pub struct SupervisorConfig {
     /// future restart variants they don't understand.
     #[serde(default)]
     pub bridge_restart_policy: BridgeRestartPolicy,
+    /// Host loopback port where the per-VM transparent egress terminator listens.
+    /// When set, native gateway config generation may intercept guest `:80` and
+    /// `:443` flows and forward them here.
+    #[serde(default)]
+    pub transparent_terminator_port: Option<u16>,
 }
 
 impl SupervisorConfig {
@@ -1583,6 +1588,10 @@ pub struct SupervisorAttachConfig {
     /// callers; the merge fails closed to deny-all in that case.
     #[serde(default)]
     pub network_policy: Option<serde_json::Value>,
+    /// Host loopback port where the claimed workload's transparent egress
+    /// terminator listens, when the native gateway will intercept `:80/:443`.
+    #[serde(default)]
+    pub transparent_terminator_port: Option<u16>,
 }
 
 /// Failure modes of [`SupervisorConfig::from_base_and_attach`]. The plan
@@ -1650,6 +1659,7 @@ impl SupervisorConfig {
             // control UDS — a malicious host is out of the threat model.
             network_policy: attach.network_policy,
             bridge_restart_policy: base.bridge_restart_policy,
+            transparent_terminator_port: attach.transparent_terminator_port,
         })
     }
 }
@@ -1686,6 +1696,7 @@ mod base_attach_tests {
             plan: serde_json::json!({"envelope": "stub"}),
             bundle: None,
             network_policy: None,
+            transparent_terminator_port: None,
         }
     }
 
@@ -2190,6 +2201,7 @@ mod tests {
             bundle: None,
             network_policy: None,
             bridge_restart_policy: BridgeRestartPolicy::HardFail,
+            transparent_terminator_port: None,
         }
     }
 
@@ -2312,6 +2324,7 @@ mod tests {
             bundle: None,
             network_policy: None,
             bridge_restart_policy: BridgeRestartPolicy::HardFail,
+            transparent_terminator_port: None,
         };
         let json = serde_json::to_string(&cfg_pre_w6a).unwrap();
         let parsed: SupervisorConfig =
@@ -2495,6 +2508,15 @@ mod tests {
         let parsed: SupervisorConfig = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(parsed.bridge_restart_policy, cfg.bridge_restart_policy);
         assert_eq!(parsed.bridge_restart_policy, BridgeRestartPolicy::HardFail);
+    }
+
+    #[test]
+    fn supervisor_config_round_trips_transparent_terminator_port() {
+        let mut cfg = well_formed_supervisor_config();
+        cfg.transparent_terminator_port = Some(19123);
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let parsed: SupervisorConfig = serde_json::from_str(&json).expect("roundtrip");
+        assert_eq!(parsed.transparent_terminator_port, Some(19123));
     }
 
     // ---------------------------------------------------------------
