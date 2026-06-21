@@ -115,6 +115,11 @@ impl WarmLease {
         vsock_transport::for_vm(&self.id.0)
     }
 
+    /// Stage files + run a command (or chain) in the leased VM over one stream.
+    pub fn exec(&self) -> super::exec_builder::ExecBuilder<'_> {
+        super::exec_builder::ExecBuilder::new(self)
+    }
+
     /// Stop the VM (and replenish for a claimed lease), surfacing errors that
     /// `Drop` would swallow.
     pub fn release(mut self) -> Result<()> {
