@@ -150,9 +150,22 @@ the same builder surface without linking the dev-only handler. The new
   stderr, duration, peak_rss_kib }` — `duration` is host-measured (Tier 1);
   `peak_rss_kib` is `None` on Tier 1 (agent-measured `getrusage` arrives with
   the Tier-2 `ExecBatch` path in WS-D).
-- [ ] **WS-D — `GuestRequest::ExecBatch` Tier 2.** New frame + in-guest
-  sequential runner, `dev-shell`-gated. Extend the `GuestRequest` fuzz
-  target. `#[serde(deny_unknown_fields)]` on the new stage types.
+- [x] **WS-D — `GuestRequest::ExecBatch` Tier 2.** Landed. New `ExecBatch
+  { stages, commands, timeout_secs }` request + `ExecBatchResult { outcomes }`
+  response carrying agent-measured `ExecOutcomeWire { status, stdout, stderr,
+  duration_ms, peak_rss_kib }` (`deny_unknown_fields` on `StageFile` +
+  `ExecOutcomeWire`). One round-trip, unary contract. The in-guest runner
+  (`do_exec_batch` in `mvm-guest-agent`) stages files then runs each argv
+  buffered via `exec_stream::stream_exec`, stops at the first non-zero exit, and
+  fills `peak_rss_kib` from `getrusage(RUSAGE_CHILDREN)` — `dev-shell`-gated, so
+  the prod agent ships the not-feature `Error` arm (verified: prod no-default
+  build + `check-prod-agent-no-exec`/`-console` still green). The
+  `fuzz_guest_request` target is `serde_json::from_slice::<GuestRequest>`, so it
+  covers `ExecBatch` automatically. Host `ExecBuilder::batch()` sends it and
+  maps `ExecBatchResult` → `Vec<ExecOutcome>`; `mock_guest_agent` answers one
+  zero-exit outcome per command. Tests: 3 vsock (request roundtrip + verb/
+  class/contract, result roundtrip + variant, `deny_unknown_fields`) + 1
+  host-side batch round-trip against the mock.
 - [~] **WS-E — facade + example.** Re-export DONE — `mvm` now re-exports
   `WarmLease`/`AcquireSpec`/`ExecBuilder`/`ExecOutcome` at the crate root
   (`crates/mvm/src/lib.rs`), reachable via the `mvmctl::runtime` facade.

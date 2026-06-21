@@ -10,10 +10,10 @@
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use mvm_guest::vsock::{
-    EntrypointEvent, ExecEvent, GUEST_AGENT_PORT, GuestRequest, GuestResponse, call_streaming,
-    call_unary,
+    EntrypointEvent, ExecEvent, GUEST_AGENT_PORT, GuestRequest, GuestResponse, StageFile,
+    call_streaming, call_unary,
 };
 
 use super::lease::WarmLease;
@@ -126,6 +126,15 @@ impl<'a> ExecBuilder<'a> {
         run_entrypoint(&mut stream, stdin, self.timeout)
     }
 
+    /// Tier-2: run the whole staged batch (files + every command) in **one
+    /// round-trip** via `ExecBatch`, returning one outcome per command run
+    /// (truncated at the first non-zero exit). `peak_rss_kib` is agent-measured
+    /// on this path. Requires a `dev-shell` guest agent.
+    pub fn batch(self) -> Result<Vec<ExecOutcome>> {
+        let mut stream = self.connect()?;
+        run_batch(&mut stream, &self.stages, &self.commands, self.timeout)
+    }
+
     fn connect(&self) -> Result<UnixStream> {
         self.lease
             .transport()?
@@ -149,6 +158,46 @@ fn stage_files(stream: &mut UnixStream, stages: &[StagedFile]) -> Result<()> {
         .with_context(|| format!("staging {}", s.path))?;
     }
     Ok(())
+}
+
+/// Tier-2 batch: send one `ExecBatch` (staged files + every command) and map
+/// the buffered wire outcomes back to [`ExecOutcome`]s.
+fn run_batch(
+    stream: &mut UnixStream,
+    stages: &[StagedFile],
+    commands: &[Vec<String>],
+    timeout: Option<Duration>,
+) -> Result<Vec<ExecOutcome>> {
+    let wire_stages = stages
+        .iter()
+        .map(|s| StageFile {
+            path: s.path.clone(),
+            content: s.content.clone(),
+            mode: s.mode,
+        })
+        .collect();
+    let resp = call_unary(
+        stream,
+        &GuestRequest::ExecBatch {
+            stages: wire_stages,
+            commands: commands.to_vec(),
+            timeout_secs: timeout.map(|d| d.as_secs()),
+        },
+    )
+    .context("running exec batch")?;
+    match resp {
+        GuestResponse::ExecBatchResult { outcomes } => Ok(outcomes
+            .into_iter()
+            .map(|o| ExecOutcome {
+                status: o.status,
+                stdout: o.stdout,
+                stderr: o.stderr,
+                duration: Duration::from_millis(o.duration_ms),
+                peak_rss_kib: o.peak_rss_kib,
+            })
+            .collect()),
+        other => bail!("unexpected response to ExecBatch: {:?}", other.variant()),
+    }
 }
 
 /// Single-quote each argv element so spaces/metacharacters don't re-split when
@@ -277,6 +326,24 @@ mod tests {
         let out =
             run_entrypoint(&mut stream, b"input".to_vec(), Some(Duration::from_secs(5))).unwrap();
         assert_eq!(out.status, 0);
+    }
+
+    #[test]
+    fn batch_stages_and_runs_commands_in_one_round_trip() {
+        let (_d, _a, mut stream) = agent_stream();
+        let stages = [StagedFile {
+            path: "/tmp/m.rs".to_string(),
+            content: b"fn main(){}".to_vec(),
+            mode: 0o644,
+        }];
+        let commands = [
+            vec!["rustc".to_string(), "/tmp/m.rs".to_string()],
+            vec!["/tmp/m".to_string()],
+        ];
+        let outcomes = run_batch(&mut stream, &stages, &commands, None).unwrap();
+        // The mock returns one zero-exit outcome per command.
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes.iter().all(|o| o.status == 0));
     }
 
     #[test]

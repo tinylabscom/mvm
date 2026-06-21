@@ -982,6 +982,81 @@ fn do_exec_streaming(
     GuestResponse::ExecEvent(terminal)
 }
 
+/// Write one staged file to disk (creating parents, applying mode) before an
+/// `ExecBatch` runs its commands. (dev-shell only)
+#[cfg(feature = "dev-shell")]
+fn stage_file_to_disk(s: &mvm_guest::vsock::StageFile) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(parent) = std::path::Path::new(&s.path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&s.path, &s.content)?;
+    std::fs::set_permissions(&s.path, std::fs::Permissions::from_mode(s.mode))
+}
+
+/// `getrusage(RUSAGE_CHILDREN).ru_maxrss` (KiB on Linux): the high-water RSS
+/// across reaped children — a cumulative peak proxy for the batch. `None` when
+/// the call fails or reports nothing. (dev-shell only)
+#[cfg(feature = "dev-shell")]
+fn read_peak_rss_kib() -> Option<u64> {
+    // SAFETY: getrusage only writes the provided rusage struct.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) };
+    (rc == 0 && usage.ru_maxrss > 0).then_some(usage.ru_maxrss as u64)
+}
+
+/// `ExecBatch` arm (dev-shell only): stage every file, then run each argv
+/// command buffered (stop at the first non-zero exit), returning one
+/// `ExecOutcomeWire` per command run. One round-trip, no streaming.
+#[cfg(feature = "dev-shell")]
+fn do_exec_batch(
+    stages: &[mvm_guest::vsock::StageFile],
+    commands: &[Vec<String>],
+    timeout_secs: Option<u64>,
+) -> GuestResponse {
+    use mvm_guest::vsock::{ExecEvent, ExecOutcomeWire};
+    for s in stages {
+        if let Err(e) = stage_file_to_disk(s) {
+            return GuestResponse::Error {
+                message: format!("exec-batch staging {} failed: {e}", s.path),
+            };
+        }
+    }
+    let mut outcomes = Vec::new();
+    for argv in commands {
+        let command = argv
+            .iter()
+            .map(|a| shell_quote_for_sh(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let start = std::time::Instant::now();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let terminal =
+            mvm_guest::exec_stream::stream_exec(&command, None, timeout_secs, |ev| match ev {
+                ExecEvent::Stdout { chunk } => stdout.extend_from_slice(&chunk),
+                ExecEvent::Stderr { chunk } => stderr.extend_from_slice(&chunk),
+                _ => {}
+            });
+        let status = match terminal {
+            ExecEvent::Exit { code } => code,
+            ExecEvent::TimedOut => 124,
+            _ => -1,
+        };
+        outcomes.push(ExecOutcomeWire {
+            status,
+            stdout,
+            stderr,
+            duration_ms: start.elapsed().as_millis() as u64,
+            peak_rss_kib: read_peak_rss_kib(),
+        });
+        if status != 0 {
+            break;
+        }
+    }
+    GuestResponse::ExecBatchResult { outcomes }
+}
+
 /// Read the wrapper's language from `/etc/mvm/wrapper.json`. Returns
 /// `None` if the file is missing, unparseable, or the field is
 /// absent — caller treats that as "language unknown, refuse the
@@ -2165,6 +2240,26 @@ fn handle_client(
         #[cfg(not(feature = "dev-shell"))]
         GuestRequest::Exec { .. } => GuestResponse::Error {
             message: "exec not available: guest agent built without dev-shell feature".to_string(),
+        },
+
+        #[cfg(feature = "dev-shell")]
+        GuestRequest::ExecBatch {
+            stages,
+            commands,
+            timeout_secs,
+        } => {
+            eprintln!(
+                "[audit] exec-batch request: {} stages, {} commands",
+                stages.len(),
+                commands.len()
+            );
+            do_exec_batch(&stages, &commands, timeout_secs)
+        }
+
+        #[cfg(not(feature = "dev-shell"))]
+        GuestRequest::ExecBatch { .. } => GuestResponse::Error {
+            message: "exec-batch not available: guest agent built without dev-shell feature"
+                .to_string(),
         },
 
         #[cfg(feature = "dev-shell")]
