@@ -202,10 +202,28 @@ This is a forensic tool, not a monitoring feature.
    lockstep (`AUDIT_SUB`/`TRANSCRIPT_SUB` tables + `KNOWN_TOKENS`). Captures live
    under `mvm_transcripts_dir()` = `<audit>/transcripts/<tenant>/<id>/`. 6 CLI
    tests (arm/list/disarm/export round-trip via a synthetic-sink capture,
-   tamper-refusal, unknown-capture). The live byte-capture sink + bridge tap
-   landed in slice 2. **Plan 203 is implementation-complete on-host; the only
-   gated remainder is the end-to-end byte-fanning proof through a real booted
-   VM** (the bridge relay itself is exercised on-host with `UnixStream` pairs).
+   tamper-refusal, unknown-capture).
+   **[capture sink + bridge tap landed]** `supervisor::transcript_capture::
+   TranscriptObserver` is an opt-in `Observer` on the Plan-141 packet pipeline:
+   `on_packet` copies each forwarded frame's `raw_frame` into the AEAD
+   transcript and always returns `Verdict::Forward` (capture never alters,
+   delays, or drops traffic). To honor the cheap-`on_packet` contract, the hot
+   path only does a bounded `try_send` (dropping + counting frames if a slow
+   disk falls behind); a std-thread worker owns the `TranscriptWriter`,
+   encrypts + appends off the hot path, and flushes the manifest on a cadence +
+   a final flush on drop (the capture-seal point at VM teardown). It is wired
+   via `BridgeConfigJson.transcript_capture_dir` (serde-default; the claim-5
+   fuzz surface is unchanged) — the `mvm-firecracker-bridge` bin activates it
+   when set (the capture dir is under the already-Landlock-writable `audit_dir`,
+   so no sandbox change is needed; the host KEK under `keys_dir` is read-only
+   there), and `microvm.rs` auto-attaches an armed capture for the VM via
+   `transcript::find_armed_capture` (override: `MVM_TRANSCRIPT_CAPTURE_DIR`).
+   `mvm-core` gained `TranscriptWriter::{snapshot_manifest, dir, chunk_count}`
+   (live-manifest persistence) + `find_armed_capture`. Verified on the live
+   Linux/KVM box: the `cfg(linux)` bin compiles with the tap and the observer +
+   transcript tests pass on-target. **Remaining:** the live FC-workload
+   end-to-end (arm → real egress → chunks land → export decrypts) — a
+   live-validation task, not new code.
 4. Add focused tests for:
    - arming and disarming a capture
    - manifest hash verification ✅ (`verify_chunks` tests, slice 1)
