@@ -64,11 +64,33 @@ boots. This is an open egress-enforcement gap on the transient `machine run`
 path (related to the in-flight `fix/plan-200-up-egress-enforcement` work), not
 a measurement artifact. The no-network path above is unaffected.
 
+## Linux KVM / Firecracker lane (live-captured)
+
+Captured on a Linux KVM host (x86_64, Firecracker v1.14.1, `/dev/kvm`),
+debug `mvmctl` off `origin/main`, isolated `MVM_CACHE_DIR`/`MVM_DATA_DIR`,
+`MVM_BUILDER_BACKEND=qemu` (the builder VM runs under QEMU on this host;
+the *workload* boots on Firecracker). `machine run --image
+docker.io/library/alpine:3.20 -- /bin/true`, cold isolated cache, exit 0:
+
+```
+phase-timing: resolve=0.0ms drives=3.1ms admit=490.7ms
+              backend_start=1259.7ms vsock_wait=975.3ms command=56.7ms
+              teardown=1243.0ms total=4028.5ms dispatch_window=2235.0ms
+```
+
+The OCI materialization + builder Stage-0 bootstrap happen *before* this
+window (resolve/drives ≈ 0), so these are the workload-run spans, directly
+comparable to the Vz numbers above. Firecracker `backend_start` ~1.26 s is
+notably faster than Vz's ~2.25 s create+boot; the hot-path cost is split
+between `backend_start` and the ~0.98 s guest boot (`vsock_wait`).
+`dispatch_window` = 2235 ms → this binary predates the `dispatch_bar`
+token, but the value clears the 200 ms warm bar only when `backend_start`
+collapses on a standby claim; cold, it is correctly over.
+
 ## Open / not covered here
 
 - Release-build numbers (these are debug upper bounds).
 - The `--net`/`--allow-host` smoke, blocked on the egress-policy-bundle gap above.
-- The Linux KVM / builder-VM lane (`machine run` on Firecracker) — needs a KVM host.
 - A committed cached-hot-start benchmark *harness* — the live loop that
   claims a warm standby and measures the hot-path dispatch window across
   N iterations. (Still open; needs a warm standby, so it overlaps the
