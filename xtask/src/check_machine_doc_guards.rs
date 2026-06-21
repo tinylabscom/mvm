@@ -1,9 +1,8 @@
 //! `xtask check-machine-doc-guards`
 //!
-//! Plan 200 docs hygiene lint. The beginner machine docs must include
-//! explicit use-case and limitation pages, and they must not imply that
-//! host Nix, GPU, ICMP, or unsupported architectures are available by
-//! default.
+//! Beginner machine docs hygiene lint. The docs must include explicit use-case
+//! and limitation pages, and they must not imply that host Nix, GPU, ICMP, or
+//! unsupported architectures are available by default.
 
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
