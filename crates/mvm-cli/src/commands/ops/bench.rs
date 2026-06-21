@@ -71,8 +71,7 @@ pub(in crate::commands) struct MicrovmLaunchArgs {
     /// Warm standby pool target to request for each measured launch.
     ///
     /// Currently supported for Linux Firecracker launch probes; use
-    /// `0` for a cold baseline and `1` for the Plan 118 warm-claim
-    /// delta proof.
+    /// `0` for a cold baseline and `1` for a warm-claim delta proof.
     #[arg(long, default_value_t = 0)]
     pub warm_pool_size: u32,
     /// Write the JSON report here. Default:
