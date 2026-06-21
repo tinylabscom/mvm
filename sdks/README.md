@@ -18,14 +18,14 @@ host automation surfaces: they route through `mvmctl machine ...` instead of
 reimplementing OCI pull, admission, artifact verification, networking, receipts,
 audit, or persistent machine state.
 
-- Python: `mvm.Machine.run/create/start/exec/shell/stop`
-- TypeScript: `Machine.run/create/start/exec/shell/stop`
-- Rust: `mvm_sdk::{MachineRun, MachineCreate, Machine}` builders
+- Python: `mvm.Machine.run/create/check_artifact/start/exec/shell/stop`
+- TypeScript: `Machine.run/create/checkArtifact/start/exec/shell/stop`
+- Rust: `mvm_sdk::{MachineRun, MachineCreate, MachineCheckArtifact, Machine}` builders
 
 The Rust API is builder-oriented for embedders:
 
 ```rust
-use mvm_sdk::{Machine, MachineRun};
+use mvm_sdk::{Machine, MachineCheckArtifact, MachineRun};
 
 let result = MachineRun::builder()
     .image("alpine")
@@ -35,8 +35,16 @@ let result = MachineRun::builder()
 
 let vm = Machine::named("devbox")?;
 vm.exec(["echo", "hello"]).run()?;
+
+let artifact = MachineCheckArtifact::builder("app.mvm")
+    .json(true)
+    .run()?;
 # Ok::<(), mvm_sdk::MachineError>(())
 ```
+
+`check_artifact` / `checkArtifact` / `MachineCheckArtifact` is read-only and
+still shells through `mvmctl machine check-artifact`; SDKs do not verify `.mvm`
+artifacts privately or bypass CLI admission preview logic.
 
 ## Single source of truth
 

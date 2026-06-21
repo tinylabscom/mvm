@@ -366,6 +366,67 @@ impl MachineCreate {
     }
 }
 
+/// Entry point for portable artifact verification builders.
+pub struct MachineCheckArtifact;
+
+impl MachineCheckArtifact {
+    /// Start building a `mvmctl machine check-artifact <path>` invocation.
+    pub fn builder(path: impl Into<String>) -> MachineCheckArtifactBuilder {
+        MachineCheckArtifactBuilder::new(path.into())
+    }
+}
+
+/// Builder for `mvmctl machine check-artifact`.
+#[derive(Debug, Clone)]
+pub struct MachineCheckArtifactBuilder {
+    path: String,
+    key: Option<String>,
+    json: bool,
+}
+
+impl MachineCheckArtifactBuilder {
+    fn new(path: String) -> Self {
+        Self {
+            path,
+            key: None,
+            json: false,
+        }
+    }
+
+    /// Set the verifying-key file path.
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+
+    /// Request JSON output from the CLI.
+    pub fn json(mut self, enabled: bool) -> Self {
+        self.json = enabled;
+        self
+    }
+
+    /// Return the `machine` subcommand argv, excluding the `mvmctl` program.
+    pub fn machine_args(&self) -> Result<Vec<String>, MachineError> {
+        let path = require_non_empty(self.path.clone(), "path")?;
+        let mut args = vec!["check-artifact".to_string(), path];
+        append_optional(&mut args, "--key", self.key.as_deref())?;
+        if self.json {
+            args.push("--json".to_string());
+        }
+        Ok(args)
+    }
+
+    /// Execute this builder with the default [`MachineClient`].
+    pub fn run(&self) -> Result<MachineResult, MachineError> {
+        self.run_with(&MachineClient::default())
+    }
+
+    /// Execute this builder with `client`.
+    pub fn run_with(&self, client: &MachineClient) -> Result<MachineResult, MachineError> {
+        client.run_machine(self.machine_args()?)
+    }
+}
+
 /// Builder for `mvmctl machine create`.
 #[derive(Debug, Clone)]
 pub struct MachineCreateBuilder {

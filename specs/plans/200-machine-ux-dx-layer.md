@@ -1068,8 +1068,10 @@ Required behavior:
       preflight/receipt summary path for default-deny and allow-host receipts;
       the richer shared fixture now covers CPU/memory/profile, sorted env-key
       redaction, host-path hashing for volume shares, timeout propagation,
-      command hashing, effective policy, and receipt-input parity. Remaining:
-      artifact verification and live admission proof.
+      command hashing, effective policy, and receipt-input parity. Python,
+      TypeScript, and Rust now expose `machine check-artifact` wrappers through
+      shared argv fixtures that shell to the CLI-owned verification/admission
+      preview path. Remaining: live admission proof.
 - [~] Add SDK negative tests proving wrappers cannot bypass artifact
       verification, network default-deny, unknown-key rejection, or
       `image`/`flake` conflict rejection. Python, TypeScript, and Rust now
@@ -1077,8 +1079,9 @@ Required behavior:
       Rust SDK `MachineCreate --manifest` argv now reaches the CLI manifest
       parser and proves strict unknown-key rejection is still owned by the CLI;
       Python/TypeScript shared create-manifest fixtures now reach that same CLI
-      strict-manifest unknown-key gate. Artifact-verification and live
-      non-bypass proof remain.
+      strict-manifest unknown-key gate. SDK artifact-verification wrappers now
+      route through CLI `machine check-artifact` instead of implementing a
+      private verifier. Live non-bypass proof remains.
 
 ### D. Agent-safe auth and volumes
 
@@ -1435,8 +1438,10 @@ follow-ups:
       source-selector conflict rejection, and receipt/audit summaries. Rust
       SDK -> CLI parser/preflight coverage now proves dry-run receipt posture
       parity for default-deny and `--allow-host`, plus CLI strict-manifest
-      unknown-key rejection; full admission-input, artifact-verification,
-      audit-summary, and Python/TS parity remain.
+      unknown-key rejection; Python/TypeScript shared fixtures now prove
+      admission-input and receipt-summary parity; SDK `check-artifact` wrappers
+      prove artifact-verification stays CLI-owned. Live non-bypass proof
+      remains.
 - [ ] Docs/source guards for no-host-Nix default and explicit limitations:
       network protocol scope, volumes, SSH-agent prerequisites, macOS
       signing/entitlements, GPU status, and backend/architecture support.

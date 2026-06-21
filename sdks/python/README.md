@@ -98,8 +98,8 @@ calls on the prod path.
 
 `mv.Machine` mirrors the beginner `mvmctl machine ...` command group for host
 automation. These wrappers deliberately shell to `mvmctl machine ...`; OCI pull,
-admission, receipts, audit, networking, and persistent machine state stay owned
-by the CLI instead of being reimplemented in Python.
+admission, artifact verification, receipts, audit, networking, and persistent
+machine state stay owned by the CLI instead of being reimplemented in Python.
 
 ```python
 import mvm as mv
@@ -111,6 +111,9 @@ result = mv.Machine.run(
     allow_hosts=["example.com:443"],
 )
 print(result.stdout)
+
+artifact = mv.Machine.check_artifact(path="app.mvm", json=True)
+print(artifact.stdout)
 
 vm = mv.Machine.create(name="devbox", manifest="mvm.toml", profile="dev")
 vm.start()

@@ -44,6 +44,12 @@ export interface MachineCreateOptions {
   json?: boolean;
 }
 
+export interface MachineCheckArtifactOptions {
+  path: string;
+  key?: string;
+  json?: boolean;
+}
+
 export interface MachineStartOptions {
   receipt?: string;
   json?: boolean;
@@ -166,6 +172,13 @@ export function machineCreateArgv(options: MachineCreateOptions): string[] {
   return argv;
 }
 
+export function machineCheckArtifactArgv(options: MachineCheckArtifactOptions): string[] {
+  const argv = ["check-artifact", requireString(options.path, "path")];
+  if (options.key !== undefined) argv.push("--key", requireString(options.key, "key"));
+  if (options.json) argv.push("--json");
+  return argv;
+}
+
 export class Machine {
   readonly name: string;
 
@@ -180,6 +193,10 @@ export class Machine {
   static create(options: MachineCreateOptions): Machine {
     runMachine(machineCreateArgv(options));
     return new Machine(options.name);
+  }
+
+  static checkArtifact(options: MachineCheckArtifactOptions): MachineResult {
+    return runMachine(machineCheckArtifactArgv(options));
   }
 
   start(options: MachineStartOptions = {}): MachineResult {

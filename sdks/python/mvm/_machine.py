@@ -196,6 +196,20 @@ def _machine_create_argv(
     return argv
 
 
+def _machine_check_artifact_argv(
+    *,
+    path: str,
+    key: str | None = None,
+    json: bool = False,
+) -> list[str]:
+    argv = ["check-artifact", _require_non_empty_str(path, "path")]
+    if key is not None:
+        argv.extend(["--key", _require_non_empty_str(key, "key")])
+    if json:
+        argv.append("--json")
+    return argv
+
+
 class Machine:
     """Persistent machine handle plus ephemeral ``machine run`` helpers."""
 
@@ -268,6 +282,15 @@ class Machine:
             )
         )
         return Machine(name)
+
+    @staticmethod
+    def check_artifact(
+        *,
+        path: str,
+        key: str | None = None,
+        json: bool = False,
+    ) -> MachineResult:
+        return _run_machine(_machine_check_artifact_argv(path=path, key=key, json=json))
 
     def start(
         self,

@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 import mvm
-from mvm._machine import _machine_create_argv, _machine_run_argv
+from mvm._machine import (
+    _machine_check_artifact_argv,
+    _machine_create_argv,
+    _machine_run_argv,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -87,6 +91,14 @@ def test_machine_create_manifest_argv_matches_cli_unknown_key_fixture() -> None:
     ) == _fixture("create-manifest")
 
 
+def test_machine_check_artifact_argv_matches_cli_fixture() -> None:
+    assert _machine_check_artifact_argv(
+        path="/tmp/app.mvm",
+        key="/tmp/app.pub",
+        json=True,
+    ) == _fixture("check-artifact")
+
+
 def test_machine_run_shells_to_cli_machine_run(tmp_path: Path) -> None:
     record = tmp_path / "calls.log"
     os.environ["MVM_CLI_BIN"] = str(_fake_mvm())
@@ -113,6 +125,26 @@ def test_machine_run_shells_to_cli_machine_run(tmp_path: Path) -> None:
     assert "--net" in text
     assert "--allow-host example.com:443" in text
     assert "-- uname -a" in text
+
+
+def test_machine_check_artifact_shells_to_cli(tmp_path: Path) -> None:
+    record = tmp_path / "calls.log"
+    os.environ["MVM_CLI_BIN"] = str(_fake_mvm())
+    os.environ["MVM_FAKE_MVM_RECORD"] = str(record)
+    os.environ["MVM_FAKE_MVM_MACHINE_OUT"] = '{"runnable_here":true}\n'
+
+    result = mvm.Machine.check_artifact(
+        path="/tmp/app.mvm",
+        key="/tmp/app.pub",
+        json=True,
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == '{"runnable_here":true}\n'
+    text = "\n".join(_records(record))
+    assert "subcommand=machine" in text
+    assert "verb=check-artifact" in text
+    assert "args=/tmp/app.mvm --key /tmp/app.pub --json" in text
 
 
 def test_machine_persistent_lifecycle_shells_to_cli(tmp_path: Path) -> None:
@@ -150,6 +182,11 @@ def test_machine_create_rejects_image_and_manifest() -> None:
 def test_machine_run_requires_command() -> None:
     with pytest.raises(ValueError, match="command"):
         mvm.Machine.run(image="alpine", command=[])
+
+
+def test_machine_check_artifact_requires_path() -> None:
+    with pytest.raises(ValueError, match="path"):
+        mvm.Machine.check_artifact(path="")
 
 
 def test_machine_cli_failure_is_structured(tmp_path: Path) -> None:

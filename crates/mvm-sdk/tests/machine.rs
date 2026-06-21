@@ -4,7 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use mvm_sdk::{Machine, MachineClient, MachineCreate, MachineError, MachineRun};
+use mvm_sdk::{
+    Machine, MachineCheckArtifact, MachineClient, MachineCreate, MachineError, MachineRun,
+};
 use tempfile::TempDir;
 
 struct FakeCli {
@@ -149,6 +151,49 @@ fn machine_create_shells_through_mvmctl_machine() {
 }
 
 #[test]
+fn machine_check_artifact_builder_emits_machine_cli_argv() {
+    let args = MachineCheckArtifact::builder("/tmp/app.mvm")
+        .key("/tmp/app.pub")
+        .json(true)
+        .machine_args()
+        .expect("machine check-artifact argv");
+
+    assert_eq!(
+        args,
+        [
+            "check-artifact",
+            "/tmp/app.mvm",
+            "--key",
+            "/tmp/app.pub",
+            "--json",
+        ]
+    );
+}
+
+#[test]
+fn machine_check_artifact_shells_through_mvmctl_machine() {
+    let fake = FakeCli::success();
+    let result = MachineCheckArtifact::builder("/tmp/app.mvm")
+        .key("/tmp/app.pub")
+        .json(true)
+        .run_with(&fake.client())
+        .expect("check artifact");
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(
+        fake.argv(),
+        [
+            "machine",
+            "check-artifact",
+            "/tmp/app.mvm",
+            "--key",
+            "/tmp/app.pub",
+            "--json",
+        ]
+    );
+}
+
+#[test]
 fn persistent_machine_lifecycle_builders_reuse_machine_cli() {
     let fake = FakeCli::success();
     let client = fake.client();
@@ -223,6 +268,15 @@ fn machine_builders_reject_invalid_inputs_before_invoking_cli() {
 
     let empty_name = Machine::named("").expect_err("empty name rejected");
     assert!(empty_name.to_string().contains("name must be non-empty"));
+
+    let empty_artifact = MachineCheckArtifact::builder("")
+        .machine_args()
+        .expect_err("empty artifact path rejected");
+    assert!(
+        empty_artifact
+            .to_string()
+            .contains("path must be non-empty")
+    );
 }
 
 #[test]

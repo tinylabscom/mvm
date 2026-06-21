@@ -87,8 +87,9 @@ The IR types (`Workload`, `App`, `Resources`, …) are re-exported, so
 
 `Machine` mirrors the beginner `mvmctl machine ...` command group for host
 automation. These wrappers deliberately shell to `mvmctl machine ...`; OCI pull,
-admission, receipts, audit, networking, and persistent machine state stay owned
-by the CLI instead of being reimplemented in TypeScript.
+admission, artifact verification, receipts, audit, networking, and persistent
+machine state stay owned by the CLI instead of being reimplemented in
+TypeScript.
 
 ```ts
 import { Machine } from "@runmvm/mvm";
@@ -100,6 +101,9 @@ const result = Machine.run({
   allowHosts: ["example.com:443"],
 });
 console.log(result.stdout);
+
+const artifact = Machine.checkArtifact({ path: "app.mvm", json: true });
+console.log(artifact.stdout);
 
 const vm = Machine.create({ name: "devbox", manifest: "mvm.toml", profile: "dev" });
 vm.start();
