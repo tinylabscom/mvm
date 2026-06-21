@@ -51,6 +51,11 @@ fn read_stdin_blocking() -> Result<Vec<u8>> {
 }
 
 fn main() -> Result<()> {
+    // Spawn-contract step 5: exit when the supervisor dies. This is the
+    // "defensive double-attach in this binary" the contract above promises —
+    // the child-side half that also covers macOS and abnormal parent death.
+    mvm_hostd::parent_death::exit_when_orphaned();
+
     // The supervisor spawns with stdout/stderr captured for the audit
     // log; structured logging is the only useful trace.
     tracing_subscriber::fmt()

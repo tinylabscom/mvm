@@ -320,6 +320,13 @@ setup-libkrun:
 clean:
     cargo clean
 
+# Reap leaked host-side helper subprocesses (broker/host-agent/signer/etc.)
+# older than N minutes (default 30). Backstop for the in-binary parent-death
+# watchdog; clears orphans from past test runs across worktrees. DRY_RUN=1 to
+# preview, e.g. `DRY_RUN=1 just reap-helpers` or `just reap-helpers 5`.
+reap-helpers MINUTES="30":
+    ./scripts/reap-helper-orphans.sh {{MINUTES}}
+
 # Security audit (cargo-audit — RUSTSEC advisories against Cargo.lock)
 audit:
     cargo audit

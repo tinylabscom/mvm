@@ -44,6 +44,11 @@ fn read_stdin_blocking() -> Result<Vec<u8>> {
 }
 
 fn main() -> Result<()> {
+    // This process holds the workload's secrets in the clear; a backend that
+    // died must not leave it serving as an orphan. Exit the instant the parent
+    // is gone (macOS / SIGKILL gap the spawn-side attach misses).
+    mvm_hostd::parent_death::exit_when_orphaned();
+
     tracing_subscriber::fmt()
         .with_target(true)
         .with_level(true)

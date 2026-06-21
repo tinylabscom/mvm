@@ -38,6 +38,11 @@ fn read_stdin_blocking() -> Result<Vec<u8>> {
 }
 
 fn main() -> Result<()> {
+    // Step 6 of the spawn contract above: exit when the supervisor dies. The
+    // child-side watchdog covers macOS and abnormal (SIGKILL/panic) deaths the
+    // spawn-side PR_SET_PDEATHSIG attach cannot.
+    mvm_hostd::parent_death::exit_when_orphaned();
+
     tracing_subscriber::fmt()
         .with_target(true)
         .with_level(true)

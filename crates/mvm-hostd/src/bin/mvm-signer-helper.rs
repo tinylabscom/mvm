@@ -26,6 +26,10 @@ fn read_stdin_blocking() -> Result<Vec<u8>> {
 }
 
 fn main() -> Result<()> {
+    // A signer-helper whose host-agent parent is gone holds key material no one
+    // can reach — exit rather than leak as an orphan.
+    mvm_hostd::parent_death::exit_when_orphaned();
+
     tracing_subscriber::fmt()
         .with_target(true)
         .with_level(true)
