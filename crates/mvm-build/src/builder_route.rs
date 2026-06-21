@@ -19,9 +19,30 @@
 //! flipping its default is a one-line change here rather than a scatter of
 //! call-site edits.
 
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use crate::builderd::{
+    BuilderdReadiness, builderd_control_socket_candidates, probe_builderd_readiness,
+};
+use crate::builderd_client::{
+    BuilderdClient, BuilderdClientError, OperationEvent, OperationOutcome,
+};
+use crate::builderd_protocol::{BuilderRequest, OperationId};
+
 /// Opt-in env flag letting a host build path prefer the typed `mvm-builderd`
 /// route when the daemon is reachable. Off by default during the migration.
 pub const BUILDERD_TYPED_OPT_IN_ENV: &str = "MVM_BUILDERD_TYPED";
+
+/// Readiness-probe timeout when deciding whether to route typed: the daemon
+/// answers a handshake immediately or it isn't there.
+const READINESS_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Per-read timeout for a typed flake-check operation. `connect` arms this as
+/// the socket read timeout for the whole exchange, and the daemon runs
+/// `nix flake check` synchronously before the terminal reply, so it must
+/// comfortably exceed a real flake evaluation.
+const FLAKE_CHECK_OP_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Which channel a host-side builder dispatch takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +86,99 @@ pub fn legacy_shell_diagnostic(job_label: &str) -> String {
     )
 }
 
+/// Verdict of a typed flake check run through the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlakeCheckVerdict {
+    /// `nix flake check` passed.
+    Valid,
+    /// `nix flake check` failed; carries the daemon's failure message.
+    Invalid {
+        /// The daemon's failure detail (a stderr tail), for the user.
+        message: String,
+    },
+}
+
+/// Outcome of attempting a typed flake check.
+pub enum FlakeCheckDispatch {
+    /// The typed route was taken; carries the daemon result (or a transport
+    /// error once we had committed to the typed path).
+    Took(Result<FlakeCheckVerdict, BuilderdClientError>),
+    /// Not routed typed (caller not opted in, or no ready daemon) — the
+    /// caller should use its legacy in-VM path.
+    Fellback,
+}
+
+/// Find the control socket of a running builder VM under `vms_root`, if any.
+/// Returns the first (sorted) builder directory with a present control socket;
+/// readiness is the caller's call.
+pub fn resolve_running_builder_socket(vms_root: &Path) -> Option<PathBuf> {
+    let mut sockets: Vec<PathBuf> = std::fs::read_dir(vms_root)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|d| d.is_dir())
+        .filter_map(|d| {
+            builderd_control_socket_candidates(&d)
+                .into_iter()
+                .find(|p| p.exists())
+        })
+        .collect();
+    sockets.sort();
+    sockets.into_iter().next()
+}
+
+/// Run a typed `FlakeCheck` against the daemon at `socket_path`: connect, send
+/// the op, and map its terminal outcome onto a [`FlakeCheckVerdict`].
+pub fn run_flake_check(
+    socket_path: &Path,
+    flake_path: &str,
+    timeout: Duration,
+) -> Result<FlakeCheckVerdict, BuilderdClientError> {
+    let mut client = BuilderdClient::connect(socket_path, timeout)?;
+    let request = BuilderRequest::FlakeCheck {
+        op: OperationId::new(),
+        flake_path: flake_path.to_string(),
+    };
+    let mut discard = |_event: OperationEvent| {};
+    match client.run_operation(&request, &mut discard)? {
+        OperationOutcome::Completed => Ok(FlakeCheckVerdict::Valid),
+        OperationOutcome::Failed { message, .. } => Ok(FlakeCheckVerdict::Invalid { message }),
+        other => Err(BuilderdClientError::Protocol {
+            detail: format!("unexpected flake-check outcome: {other:?}"),
+        }),
+    }
+}
+
+/// Route a flake check: take the typed daemon path when the caller opted in
+/// (`MVM_BUILDERD_TYPED`) **and** a ready builder daemon is reachable under
+/// `vms_root`; otherwise fall back (emitting the compat diagnostic). Flake
+/// check has no host-side legacy equivalent that honours the no-host-nix
+/// invariant, so the caller's fallback is its existing in-VM shell path.
+pub fn try_typed_flake_check(vms_root: &Path, flake_path: &str) -> FlakeCheckDispatch {
+    let opt_in = typed_opt_in(|k| std::env::var(k).ok());
+    let socket = resolve_running_builder_socket(vms_root);
+    let reachable = socket.as_deref().is_some_and(|s| {
+        matches!(
+            probe_builderd_readiness(s, READINESS_PROBE_TIMEOUT),
+            BuilderdReadiness::Ready { .. }
+        )
+    });
+    match resolve_route(reachable, opt_in) {
+        BuilderRoute::Typed => {
+            let socket = socket.expect("reachable implies a resolved socket");
+            FlakeCheckDispatch::Took(run_flake_check(&socket, flake_path, FLAKE_CHECK_OP_TIMEOUT))
+        }
+        BuilderRoute::LegacyShell => {
+            tracing::debug!(
+                target: "mvm::builder",
+                "{}",
+                legacy_shell_diagnostic("flake-check")
+            );
+            FlakeCheckDispatch::Fellback
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +215,85 @@ mod tests {
         assert!(msg.contains("job-7f3a"));
         assert!(msg.contains("legacy shell-job channel"));
         assert!(msg.contains("mvm-builderd"));
+    }
+}
+
+#[cfg(test)]
+mod io_tests {
+    use super::*;
+    use crate::builderd::{
+        OpExecResult, OpExecutor, builderd_control_socket_path, serve_connection_with_executor,
+    };
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+
+    /// Daemon-side stand-in: every op subprocess exits with a fixed code.
+    struct FakeExec {
+        exit: i32,
+    }
+    impl OpExecutor for FakeExec {
+        fn run(&self, _argv: &[String]) -> std::io::Result<OpExecResult> {
+            Ok(OpExecResult {
+                exit_code: self.exit,
+                stdout: String::new(),
+                stderr_tail: "flake eval boom".to_string(),
+            })
+        }
+    }
+
+    /// Serve exactly one connection (handshake + one op) with a fake executor.
+    fn serve_one(socket: PathBuf, exit: i32) -> thread::JoinHandle<()> {
+        let listener = UnixListener::bind(&socket).unwrap();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = serve_connection_with_executor(&mut stream, &FakeExec { exit });
+            }
+        })
+    }
+
+    #[test]
+    fn typed_flake_check_clean_exit_is_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("vsock-21473.sock");
+        let h = serve_one(sock.clone(), 0);
+        let verdict = run_flake_check(&sock, "/flake", Duration::from_secs(5)).unwrap();
+        assert_eq!(verdict, FlakeCheckVerdict::Valid);
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn typed_flake_check_nonzero_exit_is_invalid_with_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("vsock-21473.sock");
+        let h = serve_one(sock.clone(), 1);
+        match run_flake_check(&sock, "/flake", Duration::from_secs(5)).unwrap() {
+            FlakeCheckVerdict::Invalid { message } => assert!(message.contains("boom")),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn run_flake_check_on_missing_socket_is_not_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("absent.sock");
+        let err = run_flake_check(&sock, "/flake", Duration::from_secs(1)).unwrap_err();
+        assert!(matches!(err, BuilderdClientError::NotReady { .. }));
+    }
+
+    #[test]
+    fn resolve_socket_finds_a_present_control_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vms = tmp.path();
+        // Short dir name keeps the bound socket path under macOS's SUN_LEN.
+        let vmdir = vms.join("b");
+        std::fs::create_dir_all(&vmdir).unwrap();
+        // No socket yet.
+        assert!(resolve_running_builder_socket(vms).is_none());
+        // Bind the libkrun-style control socket directly under the vm dir
+        // (a real candidate; the Vz candidate nests one dir deeper).
+        let sock = builderd_control_socket_path(&vmdir);
+        let _listener = UnixListener::bind(&sock).unwrap();
+        assert_eq!(resolve_running_builder_socket(vms), Some(sock));
     }
 }
