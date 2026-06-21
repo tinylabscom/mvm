@@ -172,11 +172,18 @@ This is a forensic tool, not a monitoring feature.
    `verify_chunks` then `aead::open` per chunk, failing closed on a wrong key
    (`TranscriptError::Decrypt`) or tamper (`HashMismatch`). 4 new tests
    (round-trip, tamper-refuse, wrong-key-refuse, budget-refuse-without-writing);
-   `check-core-runtime-free` stays green (no tokio pulled). **Remaining for the
-   slice:** the hostd capture sink + the boundary tap that fans bridge bytes
-   into the writer, and the transcript lifecycle audit kinds (arm/seal/export/
-   refusal) — these touch the claim-gated audit taxonomy + the live bridge, so
-   they land with the emitter that drives them.
+   `check-core-runtime-free` stays green (no tokio pulled). **[hostd sink + tap
+   landed]** `mvm_hostd::supervisor::transcript_sink::TranscriptCaptureSink`:
+   `open_for_vm(transcripts, keys, tenant, vm)` finds an armed (empty-chunk)
+   manifest for the VM, unwraps the data key under the host KEK, and opens a
+   `TranscriptWriter`; `push`/`seal` fill + finalize it. The
+   `gateway_bridge::bridge_copy_bidirectional` tap opens the sink once per VM
+   (`None` = no capture armed = zero cost), pushes each forwarded egress/ingress
+   frame, and seals + emits `TranscriptSealed` on teardown. Tested through the
+   **real** bridge relay (4 tests, `UnixStream` pairs): a forwarded frame is
+   captured, sealed, and `transcript::export` decrypts it back byte-for-byte; all
+   43 gateway_bridge tests stay green. The transcript lifecycle audit kinds landed
+   with the CLI (slice 3).
 3. **[key-wrapping landed]** Per-capture key wrapping is done:
    `aead::Key::{wrap_under, unwrap_under, persist, load}` (bytes stay
    encapsulated — no accessor) + `mvm_core::transcript::{load_or_init_kek,
@@ -195,9 +202,10 @@ This is a forensic tool, not a monitoring feature.
    lockstep (`AUDIT_SUB`/`TRANSCRIPT_SUB` tables + `KNOWN_TOKENS`). Captures live
    under `mvm_transcripts_dir()` = `<audit>/transcripts/<tenant>/<id>/`. 6 CLI
    tests (arm/list/disarm/export round-trip via a synthetic-sink capture,
-   tamper-refusal, unknown-capture). **Only remaining for Plan 203:** the live
-   byte-capture sink + bridge tap (`gateway_bridge::bridge_copy_bidirectional`)
-   that fans real boundary bytes into the writer — live-only-testable.
+   tamper-refusal, unknown-capture). The live byte-capture sink + bridge tap
+   landed in slice 2. **Plan 203 is implementation-complete on-host; the only
+   gated remainder is the end-to-end byte-fanning proof through a real booted
+   VM** (the bridge relay itself is exercised on-host with `UnixStream` pairs).
 4. Add focused tests for:
    - arming and disarming a capture
    - manifest hash verification ✅ (`verify_chunks` tests, slice 1)
