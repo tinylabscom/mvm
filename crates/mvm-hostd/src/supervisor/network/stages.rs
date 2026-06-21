@@ -609,6 +609,19 @@ impl ScanStage for L4PolicyScan {
             FlowDirection::Egress => {}
             _ => return ScanOutcome::Pass,
         }
+        // DNS (UDP/53) is governed by the DNS layer ([`DnsSinkholeScan`]), not
+        // the L4 host allow-list. A curated allow-list (e.g. the dev preset)
+        // pins TCP/443 to specific hosts; the guest must still reach the gateway
+        // resolver on UDP/53 to resolve those very hostnames, and the resolver
+        // is not — and must not be — an entry in that allow-list. Drop DNS here
+        // and no hostname ever resolves. Defer it: mandatory-deny still gates
+        // the dest IP, and `DnsSinkholeScan` sink-holes any non-allow-listed
+        // query. Symmetric with `DnsSinkholeScan`, which inspects only UDP/53
+        // and passes everything else. (Deny-all is still blocked upstream: its
+        // egress flow never opens at the coarse `FlowPolicy` gate.)
+        if pkt.five_tuple.proto == L4Proto::Udp && pkt.five_tuple.dst_port == 53 {
+            return ScanOutcome::Pass;
+        }
         let proto = match pkt.five_tuple.proto {
             L4Proto::Tcp => CanonProto::Tcp,
             L4Proto::Udp => CanonProto::Udp,
@@ -651,10 +664,17 @@ pub fn build_egress_scan(
         Arc::new(PlaceholderLeakScan),
         Arc::new(SshBannerProtocolDenyScan),
     ];
+    // A restrictive L4 policy (`Rules`) now defers DNS (UDP/53) to the DNS
+    // layer, so the DNS layer must be present to govern it — otherwise an
+    // IP-only allow-list (`Rules`, empty `dns_allow`) would leave DNS
+    // resolution wide open. An empty allow-list sink-holes every query
+    // (drop-all), matching the IP-only policy's intent. `Unrestricted`/no-policy
+    // egress keeps DNS open (sink-hole only when an explicit allow-list is set).
+    let restrictive_l4 = matches!(l4, Some(CanonicalEgress::Rules(_)));
     if let Some(eg) = l4 {
         stages.push(Arc::new(L4PolicyScan::new(eg)));
     }
-    if !dns_allow.is_empty() {
+    if restrictive_l4 || !dns_allow.is_empty() {
         stages.push(Arc::new(DnsSinkholeScan::new(dns_allow)));
     }
     Arc::new(ScanChain::new(stages))
@@ -1354,6 +1374,67 @@ mod tests {
         // remain, so a DNS lookup passes (not sink-holed).
         let scan = build_egress_scan(None, vec![]);
         assert_eq!(scan.name(), "scan-chain");
+        assert_eq!(
+            scan.scan(&egress_ctx(), &dns_packet(&dns_query("anything.test"))),
+            ScanOutcome::Pass
+        );
+    }
+
+    #[test]
+    fn l4_policy_defers_dns_udp53_to_the_dns_layer() {
+        // A restrictive L4 policy must NOT drop DNS (UDP/53): the DNS layer is
+        // its authority, and the guest must reach the resolver on UDP/53 to
+        // resolve the very hostnames the L4 allow-list pins. A curated allow-list
+        // never lists the resolver, so an L4 drop here breaks all name lookup.
+        let scan = L4PolicyScan::new(CanonicalEgress::Rules(vec![]));
+        assert_eq!(
+            scan.scan(&egress_ctx(), &dns_packet(&dns_query("github.com"))),
+            ScanOutcome::Pass,
+            "DNS must be deferred to the DNS layer, not dropped by l4-policy"
+        );
+        // A non-DNS egress packet under the same empty rule set still drops.
+        assert_eq!(
+            scan.scan(&egress_ctx(), &tcp_packet("1.1.1.1".parse().unwrap(), 443)),
+            ScanOutcome::Drop { by: "l4-policy" }
+        );
+    }
+
+    #[test]
+    fn build_egress_scan_rules_governs_dns_even_with_empty_allow_list() {
+        // Part 2: a restrictive L4 (`Rules`) always installs the DNS governor, so
+        // deferring DNS in l4-policy can't leave it open. Empty allow-list ⇒
+        // sink-hole every lookup (deny-all DNS to match the IP-only policy).
+        let scan = build_egress_scan(Some(CanonicalEgress::Rules(vec![])), vec![]);
+        assert_eq!(
+            scan.scan(&egress_ctx(), &dns_packet(&dns_query("anything.test"))),
+            ScanOutcome::Drop { by: "dns-sinkhole" }
+        );
+    }
+
+    #[test]
+    fn build_egress_scan_rules_resolves_allowed_host_and_sinkholes_others() {
+        // The dev-preset shape: a restrictive L4 + a DNS allow-list. A query for
+        // an allow-listed host passes (l4-policy deferred it, the sink-hole allows
+        // it); a denied host is sink-holed. This is the curated-allow-list fix.
+        let scan = build_egress_scan(
+            Some(CanonicalEgress::Rules(vec![])),
+            vec!["github.com".to_string()],
+        );
+        assert_eq!(
+            scan.scan(&egress_ctx(), &dns_packet(&dns_query("github.com"))),
+            ScanOutcome::Pass
+        );
+        assert_eq!(
+            scan.scan(&egress_ctx(), &dns_packet(&dns_query("example.com"))),
+            ScanOutcome::Drop { by: "dns-sinkhole" }
+        );
+    }
+
+    #[test]
+    fn build_egress_scan_unrestricted_leaves_dns_open() {
+        // Open egress: no DNS governor unless an explicit allow-list is set, and
+        // Unrestricted L4 passes the query. DNS stays open, as it should.
+        let scan = build_egress_scan(Some(CanonicalEgress::Unrestricted), vec![]);
         assert_eq!(
             scan.scan(&egress_ctx(), &dns_packet(&dns_query("anything.test"))),
             ScanOutcome::Pass
