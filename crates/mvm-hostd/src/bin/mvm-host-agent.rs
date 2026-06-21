@@ -316,6 +316,10 @@ async fn run_worker_once(cfg: HostAgentConfig) -> Result<()> {
         registrations = restored,
         "mvm-host-agent registration journal restored"
     );
+    tokio::spawn(mvm_hostd::host_agent_idle::run_idle_watcher(
+        daemon.clone(),
+        mvm_hostd::host_agent_idle::idle_timeout(),
+    ));
     HostAgentDaemon::run_shared(daemon, &cfg.control_socket).await?;
 
     Ok(())
@@ -343,6 +347,12 @@ async fn supervise_worker(cfg: HostAgentConfig, raw_cfg: Vec<u8>) -> Result<()> 
             Ok(()) => {
                 startup_failures = 0;
                 match worker.wait().await {
+                    Ok(status) if mvm_hostd::host_agent_idle::is_idle_shutdown(status.code()) => {
+                        reap_stale_worker_group(&worker_pid_path);
+                        let _ = std::fs::remove_file(&worker_pid_path);
+                        tracing::info!(tenant_id = %cfg.tenant_id, "mvm-host-agent idle; daemon exiting");
+                        return Ok(());
+                    }
                     Ok(status) => tracing::warn!(
                         tenant_id = %cfg.tenant_id,
                         status = %status,
@@ -394,7 +404,10 @@ fn main() -> Result<()> {
     // The worker cannot tell "wrapper restarting" from "everything gone" by
     // getppid alone, so a getppid-based self-reap would kill it mid-restart
     // (it breaks wrapper_restart_restores_journaled_registration_and_chain).
-    // Cleanup of leaked host-agent trees is the age-based reaper's job instead.
+    // Instead the worker self-terminates via the idle watcher (host_agent_idle)
+    // once it has had no VM registrations for the configured idle timeout; the
+    // age-based reaper remains the long-tail backstop for any trees that escape
+    // that window.
 
     tracing_subscriber::fmt()
         .with_target(true)

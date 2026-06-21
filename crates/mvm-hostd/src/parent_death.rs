@@ -4,8 +4,10 @@
 //! substitution-endpoint) are each spawned by a supervisor and are useless the
 //! instant that supervisor is gone. (`mvm-host-agent` deliberately opts out:
 //! its worker is built to outlive a wrapper restart, so a getppid-based
-//! self-reap would kill it mid-restart — the age-based reaper cleans up its
-//! leaked trees instead.) The
+//! self-reap would kill it mid-restart; instead the worker self-terminates via
+//! the idle-registration watcher once it has had no VM registrations for the
+//! configured timeout, with the age-based reaper as the long-tail backstop.)
+//! The
 //! supervisor attaches a parent-death signal on Linux at spawn time
 //! (`PR_SET_PDEATHSIG`, see `supervisor::services::spawn`), but two gaps let a
 //! helper leak as an orphan re-parented to init/launchd:
