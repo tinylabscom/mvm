@@ -85,7 +85,7 @@ describe("Machine.run", () => {
       cpus: 4,
       memory: "1G",
       profile: "dev",
-      addDirs: ["/tmp/mvm-sdk-src:/workspace:ro"],
+      volumes: ["/tmp/mvm-sdk-src:/workspace:ro"],
       env: ["TOKEN=secret", "MODE=test"],
       timeout: 30,
       receipt: "/tmp/mvm-sdk-machine.receipt.json",

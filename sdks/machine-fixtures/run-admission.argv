@@ -9,7 +9,7 @@ api.example.com
 1G
 --profile
 dev
---add-dir
+--volume
 /tmp/mvm-sdk-src:/workspace:ro
 --env
 TOKEN=secret

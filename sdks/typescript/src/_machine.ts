@@ -22,7 +22,7 @@ export interface MachineRunOptions {
   cpus?: number;
   memory?: string;
   profile?: string;
-  addDirs?: string[];
+  volumes?: string[];
   env?: string[];
   timeout?: number;
   receipt?: string;
@@ -139,7 +139,7 @@ export function machineRunArgv(options: MachineRunOptions): string[] {
   if (options.cpus !== undefined) argv.push("--cpus", String(options.cpus));
   if (options.memory !== undefined) argv.push("--memory", requireString(options.memory, "memory"));
   if (options.profile !== undefined) argv.push("--profile", requireString(options.profile, "profile"));
-  appendRepeated(argv, "--add-dir", options.addDirs);
+  appendRepeated(argv, "--volume", options.volumes);
   appendRepeated(argv, "--env", options.env);
   if (options.timeout !== undefined) argv.push("--timeout", String(options.timeout));
   if (options.receipt !== undefined) argv.push("--receipt", requireString(options.receipt, "receipt"));
