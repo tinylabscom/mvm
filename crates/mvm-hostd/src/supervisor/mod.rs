@@ -88,6 +88,9 @@ pub mod substitution_proxy;
 /// recovery after nft REDIRECT, plus the future forward/substitute
 /// legs (orig_dst is the only piece here now).
 pub mod terminator;
+/// Live forensic transcript capture sink — fills an armed capture's manifest
+/// with encrypted byte chunks as they cross the host bridge.
+pub mod transcript_sink;
 // Supervisor-side UDS proxy clients for the three broker subprocesses
 // (mvm-broker, mvm-host-signer, mvm-audit-signer). Stateless client
 // libraries that open a fresh UDS connection per call.
