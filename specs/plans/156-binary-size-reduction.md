@@ -27,9 +27,9 @@
 
 ### Task A1: one measurement method, written down
 
-- [ ] **Step 1:** Define the canonical commands. File size = `ls -l target/release/mvmctl` (bytes, the headline) + `size target/release/mvmctl` (section breakdown). Crate attribution = `cargo bloat --release --bin mvmctl --crates`; function-level = `cargo bloat --release --bin mvmctl -n 50`. Embedded musl pair = `ls -l target/aarch64-unknown-linux-musl/release/{mvm-host-vm-init,mvm-egress-proxy}` (they are baked into `mvmctl` as data; `cargo bloat` won't attribute them). Build with the *current* profile (`opt-level=3`, `lto=true`, `codegen-units=1`, `strip=true`) and record that the baseline is taken under it.
+- [x] **Step 1:** Define the canonical commands. File size = `ls -l target/release/mvmctl` (bytes, the headline) + `size target/release/mvmctl` (section breakdown). Crate attribution = `cargo bloat --release --bin mvmctl --crates`; function-level = `cargo bloat --release --bin mvmctl -n 50`. Embedded musl pair = `ls -l target/aarch64-unknown-linux-musl/release/{mvm-host-vm-init,mvm-egress-proxy}` (they are baked into `mvmctl` as data; `cargo bloat` won't attribute them). Build with the *current* profile (`opt-level=3`, `lto=true`, `codegen-units=1`, `strip=true`) and record that the baseline is taken under it. **DONE** — method recorded in `binary-size-baseline.md`.
 - [ ] **Step 2:** Add a baseline row per secondary binary: `cargo bloat --release --bin <name> --crates` for `mvm-libkrun-supervisor`, `mvm-broker`, `mvm-host-signer`, `mvm-audit-signer`, `mvm-vz-drainer`, `mvm-firecracker-bridge`.
-- [ ] **Step 3:** Commit `docs/investigations/binary-size-baseline.md` with the method + the numbers (sibling to 126's `dep-baseline.md`; 127's dashboard reads both). Every later task appends its delta.
+- [x] **Step 3:** Commit `docs/investigations/binary-size-baseline.md` with the method + the numbers (sibling to 126's `dep-baseline.md`; 127's dashboard reads both). Every later task appends its delta. **DONE** — first row recorded: **macOS arm64 = 25,324,512 B (24.15 MiB)** under the release profile, 2026-06-21. Per-target Linux rows need Linux release builds (release lane).
 
 ## Phase B — release-profile tuning (evidence-driven)
 
@@ -61,8 +61,8 @@ Driven by `cargo bloat --crates` — coordinates with 126 (126 removes whole dep
 
 ### Task D1: the size gate
 
-- [ ] **Step 1:** After A–C, record the final `mvmctl` size and set a budget = that size + a small headroom (e.g. +5%), written in `binary-size-baseline.md`. Add `xtask check-binary-size`: build `mvmctl` in release, `ls -l` the artifact, fail if it exceeds the committed budget. Failing test — bumping the budget down below current size trips the gate.
-- [ ] **Step 2:** Wire the gate into `ci.yml` (with 128), sibling to `check-forbidden-deps`. The headline reduction in `binary-size-baseline.md` is `(B1 + C1 + C2)` on top of 126's whole-crate cuts. Commit.
+- [x] **Step 1:** ~~After A–C,~~ record the `mvmctl` size and set a budget = size + ~5% headroom, written in `binary-size-baseline.md`. Add `xtask check-binary-size`: ~~build~~ measure the release artifact (`MVM_BINARY_SIZE_PATH` or `target/release/mvmctl` — the build is the CI/release lane's job, not the gate's), fail if it exceeds the committed budget. **DONE** — `xtask/src/check_binary_size.rs` mirrors `check-closure-budget`: `BINARY_SIZE_BUDGET_BYTES = 26_600_000` (baseline 24.15 MiB + 5%), bail-over with a ratchet hint under budget; pure `evaluate` + `human` + absent-binary-error unit-tested; verified green against the real built binary (24.15 MiB, 1.22 MiB headroom). Set ahead of A–C so it gates regressions now; the tuning tasks ratchet the const down. (`MVM_BINARY_SIZE_PATH` is the per-target hook for the release lane.)
+- [ ] **Step 2:** Wire the gate into a CI lane that has a release `mvmctl` (the release workflow per-target, via `MVM_BINARY_SIZE_PATH`) — not the Lint job, which builds no release artifact. Needs per-target budgets (Linux baselines, A3 follow-up). The headline reduction in `binary-size-baseline.md` is `(B1 + C1 + C2)` on top of 126's whole-crate cuts.
 
 ## Acceptance
 

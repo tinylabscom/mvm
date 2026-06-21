@@ -10,6 +10,7 @@ use std::path::Path;
 mod build_dev_image;
 mod check_adr_coverage;
 mod check_audit_positional;
+mod check_binary_size;
 mod check_claim_catalog;
 mod check_closure_budget;
 mod check_core_runtime_free;
@@ -80,6 +81,10 @@ fn main() -> Result<()> {
         Some("check-closure-budget") => {
             let workspace = workspace_root();
             check_closure_budget::run(&workspace)
+        }
+        Some("check-binary-size") => {
+            let workspace = workspace_root();
+            check_binary_size::run(&workspace)
         }
         Some("check-guest-agent-runtime-free") => {
             let workspace = workspace_root();

@@ -1028,7 +1028,14 @@ PLAN 200 — Machine UX/DX layer  🟢 in progress — `machine run` shipped (#9
   [ ] Implement product-level portable artifact pack/verify/inspect/run/transfer/cleanup docs
       and tamper, wrong-key, wrong-architecture, traversal, unknown-version, and missing-verity
       tests.
-  [ ] Add default-closure, duplicate-major, forbidden-heavy-dep, and binary-size CI budgets.
+  [x] Add default-closure, duplicate-major, forbidden-heavy-dep, and binary-size CI budgets.
+      default-closure (`xtask check-closure-budget`), forbidden-heavy-dep (`check-forbidden-deps`),
+      and duplicate-major (cargo-deny `multiple-versions=deny`, Plan 126 D2) are CI-wired.
+      **binary-size** = `xtask check-binary-size` (Plan 156 D1): measures the release `mvmctl`
+      against `BINARY_SIZE_BUDGET_BYTES` (baseline 24.15 MiB macOS arm64 + 5% = 25.37 MiB),
+      pure logic unit-tested + verified vs the real binary; `binary-size-baseline.md` records the
+      measured baseline. Its CI lane (release workflow, `MVM_BINARY_SIZE_PATH` per-target) + Linux
+      per-target baselines are the D1-Step2 follow-up (the Lint job builds no release artifact).
   WS-B post-merge deferred-list closeout (post-#1003):
   [x] Emit plan.launched/plan.failed on the transient-run path — #1013 (AdmissionContext
       stashed in a cell + reuse up::emit_launched_if/emit_failed_if).
