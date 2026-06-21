@@ -70,23 +70,40 @@ stream — leave unchanged), `console::run` (PTY attach to reuse), and
       `-it` bundling + `-i` alias), `transient_run_without_argv_is_rejected_at_dispatch`,
       and the flag-parse coverage. All mvm-cli + mvm-sdk suites green.
 
-## Task 2: Persistent path (`--name` / `-d`, no `-t`)
+## Task 2: Persistent path (`--name` / `-d`, no `-t`) — DONE
 
-- [ ] `run_persistent`: resolve name — given `--name`, use it; given bare `-d`,
-      auto-generate via the existing transient `vm_name` generator / `mvm-core`
-      ID helper (no second scheme). Surface the resolved name on stdout + `--json`.
-- [ ] Create-or-reuse the `MachineSpec` (same struct `create` writes): absent →
-      write; present + config matches → reuse; present + config differs → **error**
-      with a clear message, unless `--force` → stop + overwrite + restart.
-- [ ] Start if not already running — reuse `start_machine` and the liveness check
-      `start`/`stop` already use against `machine_state_dir` (never double-boot).
-- [ ] Post-start behavior: argv + no `-d` → `exec` it, stream, leave machine up;
-      argv + `-d` → `exec` detached, return; no argv + `-d` → boot, print name,
-      return; no argv + no `-d` → boot and print a hint pointing at
-      `machine shell <name>`.
-- [ ] Tests: same-config reuse vs different-config error vs `--force` reconcile;
-      auto-name surfaced + reconnect by it through `machine shell`/`exec`/`stop`;
-      no-double-boot when already running.
+- [x] `run_persistent`: resolve name via `resolve_machine_run_name` — `--name`
+      used verbatim; bare `-d` auto-names via `auto_machine_name()` =
+      `mvm_core::naming::generate_instance_id()` (one scheme, valid VM name). The
+      name is surfaced on stdout (`start_machine` line + a bare-name last line for
+      `-d`) and in `--json`.
+- [x] Create-or-reuse via `resolve_persistent_spec` + `reconcile_machine_spec`:
+      absent → `Create` (write); same launch config → `Reuse`; different config →
+      **error** (`machine 'N' exists with a different config; pass --force …`)
+      unless `--force` → `Recreate` (stop running + overwrite). `--image`-less
+      invocations are a pure reconnect to the on-disk spec.
+- [x] `machine_config_matches` compares only boot-affecting fields, ignoring
+      runtime metadata (resolved digest / timestamps) so a restart never trips a
+      false collision.
+- [x] Start only if not already running — `machine_is_running` (backend
+      `status` = `kill(pid,0)`-cheap) guards a double-boot; otherwise reuse
+      `start_machine`.
+- [x] Post-start (`run_persistent_post_start`): argv → `wait_for_guest_agent` +
+      `console::run` exec (streamed, machine left up); no argv + `-d` → print the
+      name; no argv + no `-d` → print a `machine shell <name>` hint.
+- [x] Tests: reconcile create/reuse/error/force; config-match ignores metadata;
+      run-spec field mapping; auto-name validity; `--image`-less reconnect +
+      missing-machine error. (Live reconnect through `shell`/`exec`/`stop` is
+      Task 5.)
+
+### deferred follow-ups
+
+- [ ] `--volume` host-directory shares on a persistent machine. The persistent
+      `MachineSpec` has no field for an ephemeral host bind-share, so
+      `run_persistent` refuses `--volume` with `--name`/`-d`
+      (`reject_volume_with_persistence`). Persisting a bind-share across restarts
+      needs its own design (host-path drift / re-materialization semantics); no
+      behavior-matrix row depends on it.
 
 ## Task 3: Interactive path (`-t`/`--tty`, dev-only)
 
