@@ -249,24 +249,30 @@ pub fn bring_iface_up(iface: &str) -> Result<(), String> {
 /// can write DNS config through the mount.
 #[cfg(target_os = "linux")]
 pub fn seed_resolv_conf(cmdline: &str) -> Result<(), String> {
+    let seed = resolver_seed(cmdline);
     std::fs::create_dir_all("/run/mvm").map_err(|e| format!("mkdir /run/mvm: {e}"))?;
-    std::fs::write("/run/mvm/resolv.conf", resolver_seed(cmdline))
+    std::fs::write("/run/mvm/resolv.conf", seed)
         .map_err(|e| format!("seed /run/mvm/resolv.conf: {e}"))?;
-    let st = std::process::Command::new("/bin/busybox")
-        .args([
-            "mount",
-            "--bind",
-            "/run/mvm/resolv.conf",
-            "/etc/resolv.conf",
-        ])
-        .status()
-        .map_err(|e| format!("spawn mount --bind resolv.conf: {e}"))?;
-    if !st.success() {
-        return Err(format!(
-            "bind-mount resolv.conf exit {}",
-            st.code().unwrap_or(-1)
-        ));
+    // Prefer a bind-mount so the image's own /etc/resolv.conf stays pristine.
+    // A minimal OCI rootfs may have no bind target or no /bin/busybox, so on
+    // any failure fall back to writing /etc/resolv.conf directly — DNS is what
+    // matters, not the mechanism.
+    if std::path::Path::new("/etc/resolv.conf").exists() {
+        let bound = std::process::Command::new("/bin/busybox")
+            .args([
+                "mount",
+                "--bind",
+                "/run/mvm/resolv.conf",
+                "/etc/resolv.conf",
+            ])
+            .status()
+            .map(|st| st.success())
+            .unwrap_or(false);
+        if bound {
+            return Ok(());
+        }
     }
+    std::fs::write("/etc/resolv.conf", seed).map_err(|e| format!("write /etc/resolv.conf: {e}"))?;
     Ok(())
 }
 
@@ -294,25 +300,32 @@ pub fn configure_guest_network(
 
     // `/bin/udhcpc` — busybox applet symlink. `-n` exit if lease fails, `-q`
     // quit after obtaining a lease. The `-s` script applies the lease (IP +
-    // route + DNS) when present.
+    // route + DNS) when present. An arbitrary OCI rootfs (e.g. a minimal
+    // alpine) need not ship udhcpc at this path; a spawn failure is treated as
+    // "no lease" so the static fallback still runs, rather than hard-failing
+    // the guest with no address. `configure_static` uses ioctls directly, so it
+    // needs no in-guest networking tools.
     let script = "/etc/udhcpc/default.script";
     let mut cmd = std::process::Command::new("/bin/udhcpc");
     cmd.args(["-i", iface, "-n", "-q"]);
     if std::path::Path::new(script).is_file() {
         cmd.args(["-s", script]);
     }
-    let status = cmd
-        .status()
-        .map_err(|e| format!("spawn /bin/udhcpc: {e}"))?;
+    let udhcpc_success = match cmd.status() {
+        Ok(status) => status.success(),
+        Err(e) => {
+            eprintln!("guest-net: /bin/udhcpc unavailable ({e}); treating as no lease");
+            false
+        }
+    };
 
-    if dhcp_fallback_applies(cmdline, status.success()) {
+    if dhcp_fallback_applies(cmdline, udhcpc_success) {
         eprintln!(
-            "guest-net: udhcpc exit {} — falling back to static gvproxy addressing ({fallback_ip})",
-            status.code().unwrap_or(-1)
+            "guest-net: no DHCP lease — falling back to static gvproxy addressing ({fallback_ip})"
         );
         configure_static(iface, fallback_ip, "255.255.255.0", "192.168.127.1")?;
-    } else if !status.success() {
-        return Err(format!("udhcpc exit {}", status.code().unwrap_or(-1)));
+    } else if !udhcpc_success {
+        return Err("udhcpc obtained no lease and no static fallback applies".to_string());
     }
     Ok(())
 }
