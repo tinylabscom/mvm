@@ -300,19 +300,26 @@ arm lands with the daemon's image baking (boot-gated).
       Typed operation adapters now exist in `builder_route` for **both** ops:
       `run_flake_check`/`try_typed_flake_check` (wired into `mvmctl build
       validate`) and `run_build`/`try_typed_build` (`BuildGuestImage` →
-      `BuildVerdict::{Built{store_path}, Failed}`; 4 unit tests over
-      `serve_connection`). Remaining for the **build** path before it can be the
-      default: **output-export reconciliation.** The legacy build copies the nix
-      out-path's artifacts (`vmlinux`, `rootfs.ext4`) into the host-mounted
-      `/out` virtio-fs share that `dev_build` reads (see
-      `builder_vm_runtime::render_flake_cmd_sh`); builderd's `BuildGuestImage`
-      only returns the `/nix/store/…` out-path **inside** the builder VM, so the
-      host cannot read the artifacts. Wiring the build through builderd therefore
-      needs the daemon to copy the out-path artifacts to a caller-specified
-      output dir (a `BuildGuestImage` output-dir field + the host setting up the
-      share the daemon writes and the host reads), then `dev_build` consuming
-      that, then flipping `resolve_route`'s default for builds — plus a builder
-      image rebake to deploy the daemon change and a live typed-build proof.
+      `BuildVerdict::{Built{store_path, artifact_dir}, Failed}`).
+      **Output-export reconciliation landed (the hard part):** `BuildGuestImage`
+      gained an optional `output_dir` field; the daemon's `dispatch_nix_build`
+      now calls `export_image_artifacts`, which copies the nix out-path's
+      host-facing artifacts (`vmlinux`, `rootfs.ext4`) into that dir — the typed
+      equivalent of the legacy `render_flake_cmd_sh` `cp -L "$NIX_OUT/…" /out/…`
+      block (file out-path ⇒ it *is* the rootfs; dir out-path ⇒ kernel under
+      `vmlinux`/`Image`/`bzImage` + `rootfs.ext4`). The host passes a path under
+      the existing `/job` virtio-fs share (host `<session.job_dir>/<op>/out` ↔
+      guest `/job/<op>/out`), so no new share is needed; the daemon reports
+      `artifact_path` = that host-readable dir while `store_path` stays the
+      out-path. `run_build`/`try_typed_build` thread `output_dir` and return the
+      `artifact_dir`. Unit-tested: dir/file out-path export, missing-rootfs
+      error, and the full `dispatch_nix_build` export path (479 mvm-build tests).
+      **Remaining to make builds the default:** wire `dev_build` to set up
+      `<session.job_dir>/<op>/out`, call `try_typed_build` with the `/job/<op>/out`
+      guest path, read the exported artifacts into the dev build dir, fall back to
+      legacy on `Fellback`; then a builder-image rebake to deploy the daemon
+      change and a live typed guest-image build proof; then flip `resolve_route`'s
+      default for builds.
 - [ ] Gate raw shell execution behind an explicit debug/development flag.
       Blocked on the line above — raw shell stays the default until a typed op replaces it; the gate flips once the typed path is the default.
 - [x] Add a lint or structural test that prevents new normal-path shell jobs.

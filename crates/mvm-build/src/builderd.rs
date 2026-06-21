@@ -374,17 +374,87 @@ pub fn dispatch_nix_build(
     op: OperationId,
     flake_ref: &str,
     attr_path: &str,
+    output_dir: Option<&str>,
     executor: &dyn OpExecutor,
 ) -> BuilderResponse {
-    match executor.run(&nix_build_argv(flake_ref, attr_path)) {
+    let outcome = match executor.run(&nix_build_argv(flake_ref, attr_path)) {
         Ok(result) => nix_build_outcome(op, &result),
-        Err(e) => BuilderResponse::Failed {
-            op,
-            category: FailureCategory::Internal,
-            message: format!("failed to run nix build: {e}"),
-            retryable: true,
+        Err(e) => {
+            return BuilderResponse::Failed {
+                op,
+                category: FailureCategory::Internal,
+                message: format!("failed to run nix build: {e}"),
+                retryable: true,
+            };
+        }
+    };
+    // When the host asked for an export dir (a path under the `/job` share),
+    // copy the image's host-facing artifacts (kernel + rootfs) out of the nix
+    // store so the host can read them — the typed equivalent of the legacy
+    // cmd.sh `cp -L "$NIX_OUT/..." /out/...` block. The reported `artifact_path`
+    // then points at the host-readable dir; `store_path` stays the in-store
+    // path for provenance.
+    match (&outcome, output_dir) {
+        (
+            BuilderResponse::ArtifactReady {
+                store_path: Some(store_path),
+                ..
+            },
+            Some(out),
+        ) => match export_image_artifacts(Path::new(store_path), Path::new(out)) {
+            Ok(()) => BuilderResponse::ArtifactReady {
+                op,
+                artifact_path: out.to_string(),
+                store_path: Some(store_path.clone()),
+            },
+            Err(e) => BuilderResponse::Failed {
+                op,
+                category: FailureCategory::NixBuild,
+                message: format!("exporting image artifacts to {out}: {e}"),
+                retryable: false,
+            },
         },
+        _ => outcome,
     }
+}
+
+/// Copy a built guest image's host-facing artifacts out of the nix store into
+/// `output_dir` (a directory on a host-shared mount), so the host can read
+/// `vmlinux` + `rootfs.ext4` without reaching into the builder's store. Mirrors
+/// the legacy `render_flake_cmd_sh` copy block: an out-path that is itself a
+/// file is the rootfs; an out-path that is a directory carries the kernel under
+/// `vmlinux`/`Image`/`bzImage` plus `rootfs.ext4`.
+fn export_image_artifacts(nix_out: &Path, output_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(output_dir)
+        .map_err(|e| format!("create {}: {e}", output_dir.display()))?;
+    let meta =
+        std::fs::metadata(nix_out).map_err(|e| format!("stat {}: {e}", nix_out.display()))?;
+    if meta.is_file() {
+        copy_artifact(nix_out, &output_dir.join("rootfs.ext4"))?;
+        return Ok(());
+    }
+    if let Some(kernel) = ["vmlinux", "Image", "bzImage"]
+        .iter()
+        .map(|n| nix_out.join(n))
+        .find(|p| p.is_file())
+    {
+        copy_artifact(&kernel, &output_dir.join("vmlinux"))?;
+    }
+    let rootfs = nix_out.join("rootfs.ext4");
+    if rootfs.is_file() {
+        copy_artifact(&rootfs, &output_dir.join("rootfs.ext4"))?;
+    } else {
+        return Err(format!("no rootfs.ext4 in {}", nix_out.display()));
+    }
+    Ok(())
+}
+
+/// Copy one artifact, dereferencing symlinks (nix store paths are read-only
+/// symlink farms), with a path-named error.
+fn copy_artifact(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::copy(src, dst)
+        .map(|_| ())
+        .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))
 }
 
 /// The `nix flake prefetch --json` argv for a
@@ -499,13 +569,15 @@ pub fn dispatch_with_executor(
             // The cache short-circuit on `fingerprint` is a later
             // addition; this handler always builds.
             fingerprint: _,
-        }
-        | BuilderRequest::BuildHostTool {
+            output_dir,
+        } => dispatch_nix_build(*op, flake_ref, attr_path, output_dir.as_deref(), executor),
+        BuilderRequest::BuildHostTool {
             op,
             flake_ref,
             attr_path,
             fingerprint: _,
-        } => dispatch_nix_build(*op, flake_ref, attr_path, executor),
+            // Host tools have no image-artifact export (no kernel/rootfs).
+        } => dispatch_nix_build(*op, flake_ref, attr_path, None, executor),
         BuilderRequest::PrefetchSource { op, source_ref } => {
             dispatch_prefetch_source(*op, source_ref, executor)
         }
@@ -756,6 +828,7 @@ mod tests {
                 flake_ref: "path:.".to_string(),
                 attr_path: "packages.aarch64-linux.default".to_string(),
                 fingerprint: None,
+                output_dir: None,
             },
             BuilderRequest::BuildHostTool {
                 op: op(),
@@ -1044,6 +1117,7 @@ mod tests {
                     flake_ref: "path:.".to_string(),
                     attr_path: "packages.aarch64-linux.default".to_string(),
                     fingerprint: None,
+                    output_dir: None,
                 },
                 &exec,
             ),
@@ -1079,7 +1153,7 @@ mod tests {
     #[test]
     fn nix_build_clean_exit_reports_artifact_from_last_out_path() {
         let exec = FakeExecutor::full(0, "/nix/store/bbbb-old\n/nix/store/cccc-img\n", "");
-        match dispatch_nix_build(op(), "path:.", "x", &exec) {
+        match dispatch_nix_build(op(), "path:.", "x", None, &exec) {
             BuilderResponse::ArtifactReady {
                 artifact_path,
                 store_path,
@@ -1093,10 +1167,74 @@ mod tests {
     }
 
     #[test]
+    fn export_copies_kernel_and_rootfs_from_a_dir_out_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nix_out = tmp.path().join("store-img");
+        std::fs::create_dir_all(&nix_out).unwrap();
+        std::fs::write(nix_out.join("vmlinux"), b"kernel").unwrap();
+        std::fs::write(nix_out.join("rootfs.ext4"), b"rootfs").unwrap();
+        let out = tmp.path().join("job-out");
+        export_image_artifacts(&nix_out, &out).unwrap();
+        assert_eq!(std::fs::read(out.join("vmlinux")).unwrap(), b"kernel");
+        assert_eq!(std::fs::read(out.join("rootfs.ext4")).unwrap(), b"rootfs");
+    }
+
+    #[test]
+    fn export_treats_a_file_out_path_as_the_rootfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nix_out = tmp.path().join("just-rootfs.ext4");
+        std::fs::write(&nix_out, b"rootfs-bytes").unwrap();
+        let out = tmp.path().join("job-out");
+        export_image_artifacts(&nix_out, &out).unwrap();
+        assert_eq!(
+            std::fs::read(out.join("rootfs.ext4")).unwrap(),
+            b"rootfs-bytes"
+        );
+        assert!(!out.join("vmlinux").exists());
+    }
+
+    #[test]
+    fn export_errors_when_dir_out_path_has_no_rootfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nix_out = tmp.path().join("store-img");
+        std::fs::create_dir_all(&nix_out).unwrap();
+        std::fs::write(nix_out.join("vmlinux"), b"kernel").unwrap();
+        let out = tmp.path().join("job-out");
+        assert!(export_image_artifacts(&nix_out, &out).is_err());
+    }
+
+    #[test]
+    fn dispatch_nix_build_with_output_dir_exports_and_reports_the_dir() {
+        // The executor prints the out-path; point it at a real dir with
+        // artifacts so the export step copies them and `artifact_path` becomes
+        // the host-readable output dir while `store_path` stays the out-path.
+        let tmp = tempfile::tempdir().unwrap();
+        let nix_out = tmp.path().join("store-img");
+        std::fs::create_dir_all(&nix_out).unwrap();
+        std::fs::write(nix_out.join("vmlinux"), b"k").unwrap();
+        std::fs::write(nix_out.join("rootfs.ext4"), b"r").unwrap();
+        let out = tmp.path().join("job-out");
+        let exec = FakeExecutor::full(0, &format!("{}\n", nix_out.display()), "");
+        match dispatch_nix_build(op(), "path:.", "x", Some(out.to_str().unwrap()), &exec) {
+            BuilderResponse::ArtifactReady {
+                artifact_path,
+                store_path,
+                ..
+            } => {
+                assert_eq!(artifact_path, out.to_str().unwrap());
+                assert_eq!(store_path, Some(nix_out.to_string_lossy().into_owned()));
+                assert!(out.join("rootfs.ext4").is_file());
+                assert!(out.join("vmlinux").is_file());
+            }
+            other => panic!("expected ArtifactReady, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn nix_build_clean_exit_without_out_path_is_nix_build_failure() {
         let exec = FakeExecutor::full(0, "   \n", "");
         assert!(matches!(
-            dispatch_nix_build(op(), "path:.", "x", &exec),
+            dispatch_nix_build(op(), "path:.", "x", None, &exec),
             BuilderResponse::Failed {
                 category: FailureCategory::NixBuild,
                 ..
@@ -1107,7 +1245,7 @@ mod tests {
     #[test]
     fn nix_build_nonzero_exit_is_nix_build_failure() {
         let exec = FakeExecutor::full(1, "", "error: builder failed");
-        match dispatch_nix_build(op(), "path:.", "x", &exec) {
+        match dispatch_nix_build(op(), "path:.", "x", None, &exec) {
             BuilderResponse::Failed {
                 category, message, ..
             } => {
@@ -1120,7 +1258,7 @@ mod tests {
 
     #[test]
     fn nix_build_executor_error_is_internal_and_retryable() {
-        match dispatch_nix_build(op(), "path:.", "x", &FakeExecutor::erroring()) {
+        match dispatch_nix_build(op(), "path:.", "x", None, &FakeExecutor::erroring()) {
             BuilderResponse::Failed {
                 category,
                 retryable,
@@ -1273,6 +1411,7 @@ mod tests {
                 flake_ref: "path:.".to_string(),
                 attr_path: "packages.aarch64-linux.default".to_string(),
                 fingerprint: None,
+                output_dir: None,
             },
         )
         .expect("write");

@@ -373,6 +373,7 @@ mod tests {
                 flake_ref: "path:.".to_string(),
                 attr_path: "packages.aarch64-linux.default".to_string(),
                 fingerprint: None,
+                output_dir: None,
             },
         )
         .expect("operation");
