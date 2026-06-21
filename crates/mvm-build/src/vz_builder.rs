@@ -1750,6 +1750,21 @@ fn remove_stale_builder_snapshot(snapshot_path: &Path) -> Result<(), BuilderVmEr
     Ok(())
 }
 
+/// First disk image path in `disks` that no longer exists on the host, if any.
+///
+/// A parked snapshot pins absolute disk paths in its `supervisor-config.json`.
+/// If one was purged out from under it — e.g. an `MVM_DATA_DIR` rootfs under a
+/// cleaned `/tmp` — the restore would otherwise fail deep inside the spawned
+/// supervisor at disk-attach (a hard `image not found` error). Checking up front
+/// lets the caller discard the stale snapshot and cold-boot instead. Pure, so it
+/// is unit-tested without a VM.
+fn first_missing_disk(disks: &[crate::vz::DiskConfig]) -> Option<&str> {
+    disks
+        .iter()
+        .find(|d| !Path::new(&d.path).is_file())
+        .map(|d| d.path.as_str())
+}
+
 /// Restore a parked persistent Vz builder by reloading its saved supervisor
 /// config, switching the startup mode to `Restore`, respawning gvproxy, and
 /// launching a fresh `mvm-vz-supervisor`.
@@ -1772,6 +1787,15 @@ pub fn restore_persistent_vz_builder_from_snapshot(
 
     let supervisor_path = resolve_vz_supervisor_path()?;
     let mut cfg = read_builder_supervisor_config(state_dir)?;
+    // Fail fast (before spawning gvproxy/supervisor) if a referenced disk was
+    // purged: returning an error here routes through the caller's snapshot-discard
+    // + cold-boot fallback instead of dying at disk-attach inside the supervisor.
+    if let Some(missing) = first_missing_disk(&cfg.disks) {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "persistent Vz builder snapshot references a disk image that no longer \
+             exists ({missing}); discarding the stale snapshot and cold-booting"
+        )));
+    }
     let gvproxy = host_gvproxy::spawn_detached(state_dir).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "spawn gvproxy for restored Vz persistent builder VM: {e}"
@@ -3409,5 +3433,31 @@ mod tests {
             "control_socket_path must survive the round-trip"
         );
         assert_eq!(reloaded.name, vm_name);
+    }
+
+    #[test]
+    fn first_missing_disk_flags_a_purged_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let present = dir.path().join("rootfs.ext4");
+        std::fs::write(&present, b"x").expect("write present disk");
+        let missing = dir.path().join("nix-store.img"); // never created
+
+        let disk = |id: &str, p: &std::path::Path| crate::vz::DiskConfig {
+            id: id.to_string(),
+            path: p.to_string_lossy().into_owned(),
+            read_only: false,
+        };
+
+        // All present → nothing flagged.
+        assert_eq!(first_missing_disk(&[disk("rootfs", &present)]), None);
+
+        // A purged disk is reported (by its path), even when others exist.
+        assert_eq!(
+            first_missing_disk(&[disk("rootfs", &present), disk("nix-store", &missing)]),
+            Some(missing.to_string_lossy().as_ref())
+        );
+
+        // Empty disk list never panics.
+        assert_eq!(first_missing_disk(&[]), None);
     }
 }
