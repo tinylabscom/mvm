@@ -1,6 +1,6 @@
 # Plan 204 — Builder VM resident control plane
 
-**Status:** In progress — WS-A (protocol, daemon core, doctor readiness, boot wiring; daemon boot + reachability live-validated on macOS-26 Vz), WS-B (host client), WS-C (FlakeCheck + build-op handler cores), and WS-E (docs) landed. Open: WS-D (route builds through `BuilderdClient`; nothing consumes it yet), the WS-C no-host-Nix test, and the typed-operation over-the-wire proof.
+**Status:** In progress — WS-A (protocol, daemon core, doctor readiness, boot wiring; daemon boot + reachability live-validated on macOS-26 Vz), WS-B (host client), WS-C (FlakeCheck + build-op handler cores), and WS-E (docs) landed. Open: WS-D (route builds through `BuilderdClient`; nothing consumes it yet) and the WS-C no-host-Nix test. The typed-operation over-the-wire **transport** is now live-proven (a real `FlakeCheck` round-tripped a typed terminal over vsock-21473 on macOS-26 Vz, which also caught + fixed a missing-experimental-features daemon bug); the remaining proof is a clean `Completed`, gated on the fix reaching a rebuilt image plus WS-D source-staging.
 **Sprint:** 56 / product-DX follow-up
 **ADR:** [ADR-089](../adrs/089-builder-vm-resident-control-plane.md)
 **Depends on:** Plan 199, Plan 200, ADR-046, ADR-057, ADR-071
@@ -236,8 +236,26 @@ arm lands with the daemon's image baking (boot-gated).
       `dispatch_flake_check` / `dispatch_with_executor`, and
       `serve_connection_with_executor` so the daemon serve loop runs it.
       Fully unit-tested (argv shape, every classification arm, routing,
-      over-the-wire serve). The actual `nix` execution inside the builder
-      VM is exercised when the daemon bin + boot wiring land on-box.
+      over-the-wire serve). **Over-the-wire transport live-proven
+      2026-06-20 (macOS-26 Vz):** the `builderd-flakecheck` diagnostic
+      example (`crates/mvm-build/examples/`, the first `BuilderdClient`
+      consumer) connected the host client to the live
+      `vsock-21473.sock`, negotiated protocol v1, sent a real
+      `FlakeCheck`, and got a typed `Failed{NixEval}` terminal back — so
+      request → in-VM `nix` exec → classification → typed terminal all
+      round-trip end-to-end, no hang. The live run also surfaced a real
+      daemon bug the fake-executor unit tests could not: the builder
+      image's `nix.conf` does not enable the `nix-command`/`flakes`
+      experimental features, so every daemon `nix` invocation failed
+      `error: experimental Nix feature 'nix-command' is disabled`. Fixed
+      by having the daemon pass `--extra-experimental-features
+      "nix-command flakes"` explicitly on all four Nix argvs
+      (`flake_check_argv`/`nix_build_argv`/`prefetch_source_argv`/`query_store_path_argv`
+      via a shared `nix_argv` helper) rather than depending on the
+      image's global config. The remaining over-the-wire proof is a
+      **clean `Completed`**: it needs this fix carried into a rebuilt
+      builder image *and* a valid flake staged into a builder-VM-visible
+      path, which is the WS-D host-driver/source-staging work.
 - [~] Implement `BuildGuestImage`.
       Host-testable core: `nix_build_argv` (`nix build <ref>#<attr> --no-link
       --print-out-paths`), `nix_build_outcome` (clean exit + out-path →
@@ -311,7 +329,12 @@ Plan 204 is done when:
 - [x] Builder daemon health/probe tests.
 - [x] Host client timeout/cancellation tests.
 - [~] Builder-VM integration test for typed `FlakeCheck` — logic tested via
-      injectable executor; the live in-VM `nix` run is boot-gated.
+      injectable executor; the live in-VM `nix` run is boot-gated. The
+      `builderd-flakecheck` example drove a real `FlakeCheck` over the live
+      vsock-21473 socket on macOS-26 Vz (2026-06-20), proving the transport
+      + in-VM exec + typed terminal round-trip and catching the missing
+      experimental-features bug. A clean `Completed` still needs the fix in
+      a rebuilt image + a staged flake (WS-D).
 - [ ] Builder-VM integration test for typed guest image build.
 - [x] Structural tests for no `mvmctl` / no `mvm-builderd` in guest images
       (`xtask check-guest-images-no-builder-tools`, CI-wired).

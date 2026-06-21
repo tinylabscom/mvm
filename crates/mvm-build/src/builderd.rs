@@ -211,19 +211,32 @@ fn tail_lines(text: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
+/// Experimental Nix features every daemon `nix` invocation requires
+/// (`nix-command` for the new CLI, `flakes` for flake refs). The daemon
+/// passes them explicitly rather than relying on the builder image's
+/// `nix.conf`, so its commands are correct regardless of the image's
+/// global Nix configuration.
+const NIX_EXPERIMENTAL_FEATURES: &str = "nix-command flakes";
+
+/// The leading `nix --extra-experimental-features …` tokens shared by
+/// every daemon Nix invocation, followed by `args`.
+fn nix_argv(args: &[&str]) -> Vec<String> {
+    let mut argv = vec![
+        "nix".to_string(),
+        "--extra-experimental-features".to_string(),
+        NIX_EXPERIMENTAL_FEATURES.to_string(),
+    ];
+    argv.extend(args.iter().map(|a| a.to_string()));
+    argv
+}
+
 /// The `nix flake check` argv the daemon runs for a
 /// [`BuilderRequest::FlakeCheck`]. Pure so the command shape is
 /// unit-tested without executing Nix. `--no-build` keeps it an
-/// evaluation check (fast, no derivation realisation); the builder VM
-/// already has the `nix-command flakes` features enabled.
+/// evaluation check (fast, no derivation realisation).
 pub fn flake_check_argv(flake_path: &str) -> Vec<String> {
-    vec![
-        "nix".to_string(),
-        "flake".to_string(),
-        "check".to_string(),
-        "--no-build".to_string(),
-        format!("path:{flake_path}"),
-    ]
+    let target = format!("path:{flake_path}");
+    nix_argv(&["flake", "check", "--no-build", &target])
 }
 
 /// Map a flake-check process result to its terminal response: a clean
@@ -271,13 +284,8 @@ pub fn dispatch_flake_check(
 /// path(s) to stdout so the daemon can report provenance. Pure for
 /// testing.
 pub fn nix_build_argv(flake_ref: &str, attr_path: &str) -> Vec<String> {
-    vec![
-        "nix".to_string(),
-        "build".to_string(),
-        format!("{flake_ref}#{attr_path}"),
-        "--no-link".to_string(),
-        "--print-out-paths".to_string(),
-    ]
+    let target = format!("{flake_ref}#{attr_path}");
+    nix_argv(&["build", &target, "--no-link", "--print-out-paths"])
 }
 
 /// The last non-empty line of `stdout` — the store path
@@ -349,13 +357,7 @@ pub fn dispatch_nix_build(
 /// [`BuilderRequest::PrefetchSource`]. `--json` makes the resolved
 /// `storePath` machine-readable on stdout.
 pub fn prefetch_source_argv(source_ref: &str) -> Vec<String> {
-    vec![
-        "nix".to_string(),
-        "flake".to_string(),
-        "prefetch".to_string(),
-        source_ref.to_string(),
-        "--json".to_string(),
-    ]
+    nix_argv(&["flake", "prefetch", source_ref, "--json"])
 }
 
 /// Extract `storePath` from `nix flake prefetch --json` stdout.
@@ -417,11 +419,7 @@ pub fn dispatch_prefetch_source(
 /// The `nix path-info` argv for a [`BuilderRequest::QueryStorePath`]. It
 /// exits zero iff the path is a valid, present store path.
 pub fn query_store_path_argv(store_path: &str) -> Vec<String> {
-    vec![
-        "nix".to_string(),
-        "path-info".to_string(),
-        store_path.to_string(),
-    ]
+    nix_argv(&["path-info", store_path])
 }
 
 /// Run a [`BuilderRequest::QueryStorePath`] through `executor`. The
@@ -871,11 +869,27 @@ mod tests {
     }
 
     #[test]
+    fn nix_argv_prepends_experimental_features() {
+        assert_eq!(
+            nix_argv(&["path-info", "/nix/store/x"]),
+            vec![
+                "nix".to_string(),
+                "--extra-experimental-features".to_string(),
+                "nix-command flakes".to_string(),
+                "path-info".to_string(),
+                "/nix/store/x".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn flake_check_argv_is_a_no_build_eval_check() {
         assert_eq!(
             flake_check_argv("/work/nix"),
             vec![
                 "nix".to_string(),
+                "--extra-experimental-features".to_string(),
+                "nix-command flakes".to_string(),
                 "flake".to_string(),
                 "check".to_string(),
                 "--no-build".to_string(),
@@ -978,6 +992,8 @@ mod tests {
             nix_build_argv("path:.", "packages.aarch64-linux.default"),
             vec![
                 "nix".to_string(),
+                "--extra-experimental-features".to_string(),
+                "nix-command flakes".to_string(),
                 "build".to_string(),
                 "path:.#packages.aarch64-linux.default".to_string(),
                 "--no-link".to_string(),
@@ -1066,6 +1082,8 @@ mod tests {
             prefetch_source_argv("github:nixos/nixpkgs"),
             vec![
                 "nix".to_string(),
+                "--extra-experimental-features".to_string(),
+                "nix-command flakes".to_string(),
                 "flake".to_string(),
                 "prefetch".to_string(),
                 "github:nixos/nixpkgs".to_string(),
@@ -1128,6 +1146,8 @@ mod tests {
             query_store_path_argv("/nix/store/ffff-foo"),
             vec![
                 "nix".to_string(),
+                "--extra-experimental-features".to_string(),
+                "nix-command flakes".to_string(),
                 "path-info".to_string(),
                 "/nix/store/ffff-foo".to_string(),
             ]
