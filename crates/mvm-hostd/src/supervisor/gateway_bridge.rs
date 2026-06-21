@@ -1019,6 +1019,21 @@ async fn bridge_copy_bidirectional(
     let substitution = wiring.substitution;
     let scan = wiring.scan;
 
+    // Forensic transcript capture (opt-in). If an operator armed a capture for
+    // this VM, fan the forwarded frames into its sink; `None` (the common case)
+    // costs nothing. The two directions share the sink behind an async mutex.
+    let capture = crate::supervisor::transcript_sink::TranscriptCaptureSink::open_for_vm(
+        &mvm_core::config::mvm_transcripts_dir(),
+        &mvm_core::config::mvm_keys_dir(),
+        &tenant,
+        &vm_name,
+    )
+    .ok()
+    .flatten()
+    .map(|s| std::sync::Arc::new(tokio::sync::Mutex::new(Some(s))));
+    let cap_e = capture.clone();
+    let cap_i = capture.clone();
+
     // Egress: guest → internet. Read framed from b, observe, write to a.
     let egress = async {
         loop {
@@ -1079,6 +1094,11 @@ async fn bridge_copy_bidirectional(
                 &latency,
             ) {
                 PacketDecision::Forward { frame: out, .. } => {
+                    if let Some(cap) = &cap_e
+                        && let Some(sink) = cap.lock().await.as_mut()
+                    {
+                        let _ = sink.push(mvm_core::transcript::Direction::Egress, &out);
+                    }
                     write_one_frame(&mut a_wr, &out).await?;
                 }
                 PacketDecision::Kill {
@@ -1166,6 +1186,11 @@ async fn bridge_copy_bidirectional(
                 &latency,
             ) {
                 PacketDecision::Forward { frame: out, .. } => {
+                    if let Some(cap) = &cap_i
+                        && let Some(sink) = cap.lock().await.as_mut()
+                    {
+                        let _ = sink.push(mvm_core::transcript::Direction::Ingress, &out);
+                    }
                     write_one_frame(&mut b_wr, &out).await?;
                 }
                 PacketDecision::Kill {
@@ -1194,6 +1219,25 @@ async fn bridge_copy_bidirectional(
     };
 
     let result = tokio::try_join!(egress, ingress);
+
+    // Seal an armed transcript capture on teardown so the operator CLI can
+    // list/export it, and record the seal in the local audit log.
+    if let Some(cap) = capture
+        && let Some(sink) = cap.lock().await.take()
+    {
+        match sink.seal() {
+            Ok(manifest) => mvm_core::audit_emit!(
+                TranscriptSealed,
+                vm: &vm_name,
+                "tenant={tenant} vm={vm_name} capture={} chunks={}",
+                manifest.capture_id,
+                manifest.chunks.len()
+            ),
+            Err(e) => {
+                tracing::warn!(vm = %vm_name, error = %e, "transcript capture seal failed")
+            }
+        }
+    }
 
     // Emit close events for any direction that opened. EOF on a
     // direction = Eof reason; I/O error = BridgeError.
@@ -2412,6 +2456,96 @@ mod tests {
         assert!(matches!(c1.kind, FlowEventKind::Closed { .. }));
         assert!(matches!(c2.kind, FlowEventKind::Closed { .. }));
         let _ = bridge_task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn armed_capture_records_forwarded_frames_and_export_round_trips() {
+        use std::os::unix::net::UnixStream as StdUs;
+
+        // Isolate the transcript store under a temp MVM_DATA_DIR.
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+
+        // Arm a capture for tenant "t" / vm "vm-test", the way the operator CLI
+        // does: a sealed-but-empty manifest with the data key wrapped under KEK.
+        let cap_dir = mvm_core::config::mvm_transcripts_dir()
+            .join("t")
+            .join("cap-test");
+        std::fs::create_dir_all(&cap_dir).unwrap();
+        let kek =
+            mvm_core::transcript::load_or_init_kek(&mvm_core::config::mvm_keys_dir()).unwrap();
+        let data_key = mvm_core::crypto::aead::Key::random();
+        let cfg = mvm_core::transcript::TranscriptWriterConfig {
+            capture_id: "cap-test".into(),
+            binding: mvm_core::transcript::CaptureBinding {
+                tenant_id: "t".into(),
+                vm_name: "vm-test".into(),
+                session_id: None,
+            },
+            bounds: mvm_core::transcript::CaptureBounds {
+                max_duration_secs: 60,
+                max_bytes: 1 << 20,
+                max_chunks: 64,
+            },
+            created_unix_secs: 1_700_000_000,
+            recipient: "transcript-kek".into(),
+            wrapped_data_key_b64: mvm_core::transcript::wrap_data_key(&kek, &data_key),
+        };
+        let armed = mvm_core::transcript::TranscriptWriter::new(&cap_dir, data_key, cfg).seal();
+        std::fs::write(
+            cap_dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&armed).unwrap(),
+        )
+        .unwrap();
+
+        // Drive the bridge for that VM.
+        let (gateway_a, gateway_b) = StdUs::pair().unwrap();
+        let (guest_a, guest_b) = StdUs::pair().unwrap();
+        for s in [&gateway_a, &gateway_b, &guest_a, &guest_b] {
+            s.set_nonblocking(true).unwrap();
+        }
+        let supervisor_gateway = tokio::net::UnixStream::from_std(gateway_a).unwrap();
+        let supervisor_guest = tokio::net::UnixStream::from_std(guest_a).unwrap();
+        let mut passt = tokio::net::UnixStream::from_std(gateway_b).unwrap();
+        let mut libkrun = tokio::net::UnixStream::from_std(guest_b).unwrap();
+
+        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let bridge_task = tokio::spawn(bridge_copy_bidirectional(
+            supervisor_gateway,
+            supervisor_guest,
+            "vm-test".to_string(),
+            "t".to_string(),
+            unrestricted_flow_policy(),
+            tx,
+            wiring_with(vec![]),
+        ));
+
+        // guest → passt = egress; the forwarded frame must be captured.
+        let frame = tcp_egress_frame(b"capture-me");
+        write_one_frame(&mut libkrun, &frame).await.unwrap();
+        let got = read_one_frame(&mut passt).await.unwrap().unwrap();
+        assert_eq!(got, frame);
+
+        // Teardown seals the manifest.
+        drop(passt);
+        drop(libkrun);
+        let _ = bridge_task.await;
+
+        // The sealed manifest carries the forwarded frame; operator export
+        // verifies + decrypts it back byte-for-byte.
+        let raw = std::fs::read(cap_dir.join("manifest.json")).unwrap();
+        let manifest: mvm_core::transcript::TranscriptManifest =
+            serde_json::from_slice(&raw).unwrap();
+        assert_eq!(
+            manifest.chunks.len(),
+            1,
+            "the forwarded egress frame was captured + sealed"
+        );
+        let data_key =
+            mvm_core::transcript::unwrap_data_key(&kek, &manifest.wrapped_data_key_b64).unwrap();
+        let out = mvm_core::transcript::export(&manifest, &cap_dir, &data_key).unwrap();
+        assert_eq!(out, frame, "export round-trips the captured frame bytes");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
