@@ -1,6 +1,6 @@
 # Plan 204 — Builder VM resident control plane
 
-**Status:** In progress — WS-A (protocol, daemon core, doctor readiness, boot wiring; daemon boot + reachability live-validated on macOS-26 Vz), WS-B (host client), WS-C (FlakeCheck + build-op handler cores), and WS-E (docs) landed. Open: WS-D (route builds through `BuilderdClient`; nothing consumes it yet) and the WS-C no-host-Nix test. The typed-operation over-the-wire **transport** is now live-proven (a real `FlakeCheck` round-tripped a typed terminal over vsock-21473 on macOS-26 Vz, which also caught + fixed a missing-experimental-features daemon bug); the remaining proof is a clean `Completed`, gated on the fix reaching a rebuilt image plus WS-D source-staging.
+**Status:** In progress — WS-A (protocol, daemon core, doctor readiness, boot wiring; daemon boot + reachability live-validated on macOS-26 Vz), WS-B (host client), WS-C (FlakeCheck + build-op handler cores + the no-host-Nix test, landed as `xtask check-no-host-nix`, CI-wired), and WS-E (docs) landed. Open: WS-D (route builds through `BuilderdClient`; nothing consumes it yet). The typed-operation over-the-wire **transport** is now live-proven (a real `FlakeCheck` round-tripped a typed terminal over vsock-21473 on macOS-26 Vz, which also caught + fixed a missing-experimental-features daemon bug); the remaining proof is a clean `Completed`, gated on the fix reaching a rebuilt image plus WS-D source-staging.
 **Sprint:** 56 / product-DX follow-up
 **ADR:** [ADR-089](../adrs/089-builder-vm-resident-control-plane.md)
 **Depends on:** Plan 199, Plan 200, ADR-046, ADR-057, ADR-071
@@ -277,7 +277,17 @@ arm lands with the daemon's image baking (boot-gated).
       `query_store_path_argv` (`nix path-info`) + `dispatch_query_store_path`
       (always `StorePathReady`, `already_present = exit==0`; spawn error →
       `Internal`). All host-tested. Live `nix` exec is boot-gated.
-- [ ] Add tests proving normal `mvmctl` flows do not require host Nix.
+- [x] Add tests proving normal `mvmctl` flows do not require host Nix.
+      `xtask check-no-host-nix` (`xtask/src/check_no_host_nix.rs`) flags any
+      literal `Command::new("nix")`/`nix-build`/… in `crates/*/src/**/*.rs`,
+      proving no normal-path code shells out to a host nix binary — every nix
+      invocation routes through the builder VM (`ShellEnvironment::shell_exec*`,
+      in-guest) or the in-guest `mvm-builderd` daemon. The single host probe
+      (`platform::has_host_nix`, zero normal-path callers) carries an explicit
+      `// allow(host-nix): <reason>` marker; any new unannotated host-nix
+      Command fails the gate. Wired into the CI Lint lane (ci.yml + ci-full.yml);
+      3 unit tests (flag/allow-marker/clean). The daemon's nix execs are dynamic
+      `Command::new(&argv[0])` and run in-guest, so they never match.
 
 ### D. Compatibility shrink
 

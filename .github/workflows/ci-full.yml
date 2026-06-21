@@ -127,6 +127,9 @@ jobs:
       - name: No positional audit::emit / event-chain calls
         run: cargo run -p xtask -- check-audit-positional
 
+      - name: No host-nix invocation (builds route through the builder VM)
+        run: cargo run -p xtask -- check-no-host-nix
+
       - name: No forbidden dependency families
         run: cargo run -p xtask -- check-forbidden-deps
 
