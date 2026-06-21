@@ -162,16 +162,33 @@ This is a forensic tool, not a monitoring feature.
    `deny_unknown_fields`; 9 unit tests). The **lifecycle audit kinds are
    deferred to slice 2** (where they are actually emitted), to avoid touching
    the claim-gated audit taxonomy before there is an emitter.
-2. Add the capture sink and the boundary tap (+ the transcript lifecycle audit
-   kinds: arm/seal/export/refusal).
-3. Add the CLI arm/export commands (the verifier from slice 1 backs `export`'s
-   pre-decrypt check) + at-rest payload encryption (wrap the per-capture key).
+2. **[capture+encryption+export core landed]** The bounded, AEAD-encrypting
+   capture writer + verify-and-decrypt export landed as
+   `mvm_core::transcript::{TranscriptWriter, TranscriptWriterConfig, export}`:
+   `push(direction, plaintext)` budget-checks *before* writing, encrypts each
+   chunk at rest with the per-capture data key (`crypto::aead::seal`, reused),
+   and records it by the sha256 of its **ciphertext** so `verify_chunks`
+   re-hashes what is on disk; `seal()` finalizes the manifest; `export()` runs
+   `verify_chunks` then `aead::open` per chunk, failing closed on a wrong key
+   (`TranscriptError::Decrypt`) or tamper (`HashMismatch`). 4 new tests
+   (round-trip, tamper-refuse, wrong-key-refuse, budget-refuse-without-writing);
+   `check-core-runtime-free` stays green (no tokio pulled). **Remaining for the
+   slice:** the hostd capture sink + the boundary tap that fans bridge bytes
+   into the writer, and the transcript lifecycle audit kinds (arm/seal/export/
+   refusal) — these touch the claim-gated audit taxonomy + the live bridge, so
+   they land with the emitter that drives them.
+3. Add the CLI arm/export commands — `export` reuses
+   `mvm_core::transcript::export` (verify + decrypt). The per-capture key
+   *wrapping* (raw key → `wrapped_data_key_b64` for `recipient`, e.g. the host
+   keypair) is the remaining host-side step; the writer already records the
+   wrapped form verbatim and decrypts from the raw key.
 4. Add focused tests for:
    - arming and disarming a capture
    - manifest hash verification ✅ (`verify_chunks` tests, slice 1)
-   - export refusal on tampering ✅ (tamper test, slice 1; export wiring in 3)
-   - bounded capture overflow ✅ (`CaptureBudget` tests, slice 1)
-   - round-trip export of a captured session
+   - export refusal on tampering ✅ (slice 1 verifier + slice 2 `export` wiring)
+   - bounded capture overflow ✅ (`CaptureBudget` tests, slice 1; writer
+     `push` budget test, slice 2)
+   - round-trip export of a captured session ✅ (slice 2 `export` round-trip)
 
 ## Out of scope
 

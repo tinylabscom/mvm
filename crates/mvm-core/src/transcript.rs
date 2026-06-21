@@ -8,9 +8,11 @@
 //! are never written to the normal audit chain, and capture is opt-in and
 //! bounded.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::crypto::aead;
 
 /// Current sealed-transcript manifest format. Unknown versions fail closed.
 pub const TRANSCRIPT_MANIFEST_FORMAT_VERSION: u32 = 1;
@@ -95,6 +97,8 @@ pub enum TranscriptError {
     UnsafeChunkName(String),
     #[error("io error verifying {file}: {msg}")]
     Io { file: String, msg: String },
+    #[error("chunk {seq} ({file}) failed to decrypt (wrong key or tampered ciphertext)")]
+    Decrypt { seq: u64, file: String },
 }
 
 /// Accumulates a live capture and fails closed the moment a bound is hit.
@@ -187,6 +191,121 @@ pub fn verify_chunks(manifest: &TranscriptManifest, dir: &Path) -> Result<(), Tr
         }
     }
     Ok(())
+}
+
+/// Bounded, AEAD-encrypting transcript writer. Each pushed payload is checked
+/// against the [`CaptureBudget`] *before* it is written, encrypted at rest with
+/// the per-capture data key, and recorded in the manifest by the sha256 of its
+/// **ciphertext** (so [`verify_chunks`] re-hashes what is on disk). The raw
+/// data key is the caller's to wrap for `recipient`; the writer only records
+/// the already-wrapped form.
+pub struct TranscriptWriter {
+    dir: PathBuf,
+    key: aead::Key,
+    budget: CaptureBudget,
+    chunks: Vec<ChunkRecord>,
+    capture_id: String,
+    binding: CaptureBinding,
+    bounds: CaptureBounds,
+    created_unix_secs: u64,
+    wrapped_data_key_b64: String,
+    recipient: String,
+}
+
+/// Construction parameters for a [`TranscriptWriter`] (grouped to keep the
+/// constructor narrow). `wrapped_data_key_b64` is the per-capture key wrapped
+/// for `recipient`; the writer records it verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptWriterConfig {
+    pub capture_id: String,
+    pub binding: CaptureBinding,
+    pub bounds: CaptureBounds,
+    pub created_unix_secs: u64,
+    pub recipient: String,
+    pub wrapped_data_key_b64: String,
+}
+
+impl TranscriptWriter {
+    /// `dir` must already exist. `key` encrypts chunks at rest.
+    pub fn new(dir: impl Into<PathBuf>, key: aead::Key, config: TranscriptWriterConfig) -> Self {
+        Self {
+            dir: dir.into(),
+            key,
+            budget: CaptureBudget::new(config.bounds),
+            chunks: Vec::new(),
+            capture_id: config.capture_id,
+            binding: config.binding,
+            bounds: config.bounds,
+            created_unix_secs: config.created_unix_secs,
+            wrapped_data_key_b64: config.wrapped_data_key_b64,
+            recipient: config.recipient,
+        }
+    }
+
+    /// Encrypt and append one payload chunk, or fail closed on a bound. The
+    /// budget is checked on the *plaintext* size before any ciphertext lands.
+    pub fn push(&mut self, direction: Direction, plaintext: &[u8]) -> Result<(), TranscriptError> {
+        self.budget.try_add(plaintext.len() as u64)?;
+        let seq = self.chunks.len() as u64;
+        let file = format!("{seq}.chunk");
+        let ciphertext = aead::seal(&self.key, plaintext);
+        let path = self.dir.join(&file);
+        std::fs::write(&path, &ciphertext).map_err(|e| TranscriptError::Io {
+            file: file.clone(),
+            msg: e.to_string(),
+        })?;
+        let sha256_hex =
+            crate::crypto::image_verify::sha256_file(&path).map_err(|e| TranscriptError::Io {
+                file: file.clone(),
+                msg: e.to_string(),
+            })?;
+        self.chunks.push(ChunkRecord {
+            seq,
+            file,
+            sha256_hex,
+            size_bytes: ciphertext.len() as u64,
+            direction,
+        });
+        Ok(())
+    }
+
+    /// Finalize the manifest for the chunks written so far.
+    pub fn seal(self) -> TranscriptManifest {
+        TranscriptManifest {
+            format_version: TRANSCRIPT_MANIFEST_FORMAT_VERSION,
+            capture_id: self.capture_id,
+            binding: self.binding,
+            bounds: self.bounds,
+            created_unix_secs: self.created_unix_secs,
+            wrapped_data_key_b64: self.wrapped_data_key_b64,
+            recipient: self.recipient,
+            chunks: self.chunks,
+        }
+    }
+}
+
+/// Verify a sealed transcript and decrypt its chunks back to the original
+/// plaintext stream. Integrity is checked first ([`verify_chunks`]); a wrong
+/// key or tampered ciphertext fails closed on decrypt.
+pub fn export(
+    manifest: &TranscriptManifest,
+    dir: &Path,
+    key: &aead::Key,
+) -> Result<Vec<u8>, TranscriptError> {
+    verify_chunks(manifest, dir)?;
+    let mut out = Vec::new();
+    for c in &manifest.chunks {
+        let ciphertext = std::fs::read(dir.join(&c.file)).map_err(|e| TranscriptError::Io {
+            file: c.file.clone(),
+            msg: e.to_string(),
+        })?;
+        let plaintext = aead::open(key, &ciphertext).map_err(|_| TranscriptError::Decrypt {
+            seq: c.seq,
+            file: c.file.clone(),
+        })?;
+        out.extend_from_slice(&plaintext);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -333,5 +452,89 @@ mod tests {
             verify_chunks(&m, dir.path()).unwrap_err(),
             TranscriptError::UnknownFormatVersion { got: 999, .. }
         ));
+    }
+
+    fn writer_config() -> TranscriptWriterConfig {
+        TranscriptWriterConfig {
+            capture_id: "cap-1".to_string(),
+            binding: CaptureBinding {
+                tenant_id: "t".to_string(),
+                vm_name: "vm".to_string(),
+                session_id: None,
+            },
+            bounds: bounds(),
+            created_unix_secs: 1,
+            recipient: "host-key-1".to_string(),
+            wrapped_data_key_b64: "wrapped".to_string(),
+        }
+    }
+
+    // `aead::Key` is deliberately not `Clone`; build identical keys from bytes
+    // so a test can both encrypt and later decrypt.
+    fn fixed_key(b: u8) -> aead::Key {
+        aead::Key::from_bytes([b; 32])
+    }
+
+    #[test]
+    fn capture_then_export_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config());
+        w.push(Direction::Egress, b"GET / HTTP/1.1\r\n").unwrap();
+        w.push(Direction::Ingress, b"HTTP/1.1 200 OK\r\n").unwrap();
+        let manifest = w.seal();
+        assert_eq!(manifest.chunks.len(), 2);
+        // Ciphertext on disk verifies, and decrypts back to the concatenation.
+        verify_chunks(&manifest, dir.path()).unwrap();
+        let out = export(&manifest, dir.path(), &fixed_key(7)).unwrap();
+        assert_eq!(out, b"GET / HTTP/1.1\r\nHTTP/1.1 200 OK\r\n");
+    }
+
+    #[test]
+    fn export_fails_closed_on_a_tampered_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config());
+        w.push(Direction::Egress, b"secret").unwrap();
+        let manifest = w.seal();
+        // Flip a byte in place (same length) so the hash check — not the size
+        // check — is what refuses.
+        let mut ct = std::fs::read(dir.path().join("0.chunk")).unwrap();
+        ct[0] ^= 0xff;
+        std::fs::write(dir.path().join("0.chunk"), &ct).unwrap();
+        let err = export(&manifest, dir.path(), &fixed_key(7)).unwrap_err();
+        assert!(matches!(err, TranscriptError::HashMismatch { .. }));
+    }
+
+    #[test]
+    fn export_fails_closed_on_the_wrong_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config());
+        w.push(Direction::Egress, b"secret").unwrap();
+        let manifest = w.seal();
+        // Integrity passes (ciphertext untouched) but the wrong key can't decrypt.
+        assert!(matches!(
+            export(&manifest, dir.path(), &fixed_key(9)).unwrap_err(),
+            TranscriptError::Decrypt { .. }
+        ));
+    }
+
+    #[test]
+    fn push_fails_closed_on_budget_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = aead::Key::random();
+        let mut cfg = writer_config();
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: 60,
+            max_bytes: 4,
+            max_chunks: 10,
+        };
+        let mut w = TranscriptWriter::new(dir.path(), key, cfg);
+        assert!(matches!(
+            w.push(Direction::Egress, b"too-long").unwrap_err(),
+            TranscriptError::BoundExceeded(_)
+        ));
+        assert!(
+            !dir.path().join("0.chunk").exists(),
+            "no ciphertext lands when the budget refuses the chunk"
+        );
     }
 }
