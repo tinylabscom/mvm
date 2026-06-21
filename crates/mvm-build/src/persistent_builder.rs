@@ -310,6 +310,24 @@ impl PersistentBuilderSupervisor {
             job_dir_relpath,
         };
 
+        // The generic shell-job channel has no typed mvm-builderd equivalent
+        // yet, so this dispatch always resolves to the legacy route. Emit the
+        // structured diagnostic so the remaining shell surface stays visible
+        // and shrinkable; per-operation typed routing (BuildGuestImage /
+        // FlakeCheck via BuilderdClient) lands in the callers behind the
+        // opt-in flag, flipping this resolution one operation at a time.
+        let route = crate::builder_route::resolve_route(
+            false,
+            crate::builder_route::typed_opt_in(|k| std::env::var(k).ok()),
+        );
+        if route == crate::builder_route::BuilderRoute::LegacyShell {
+            tracing::debug!(
+                target: "mvm::builder",
+                "{}",
+                crate::builder_route::legacy_shell_diagnostic(&job_id.to_string())
+            );
+        }
+
         // Emit `dispatched` before the round begins. Reasons:
         //
         // 1. If the dispatch round itself errors, the host still

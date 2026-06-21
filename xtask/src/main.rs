@@ -24,6 +24,7 @@ mod check_guest_images_no_builder_tools;
 mod check_machine_doc_guards;
 mod check_mvm_host_binaries_sync;
 mod check_no_display_on_secret_types;
+mod check_no_host_nix;
 mod check_no_overclaim;
 mod check_no_spec_refs_in_comments;
 mod check_runtime_overlay_version;
@@ -63,6 +64,10 @@ fn main() -> Result<()> {
         Some("check-audit-positional") => {
             let workspace = workspace_root();
             check_audit_positional::run(&workspace)
+        }
+        Some("check-no-host-nix") => {
+            let workspace = workspace_root();
+            check_no_host_nix::run(&workspace)
         }
         Some("check-doc-claims") => {
             let workspace = workspace_root();
