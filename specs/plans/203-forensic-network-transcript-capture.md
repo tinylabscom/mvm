@@ -154,14 +154,23 @@ This is a forensic tool, not a monitoring feature.
 
 ## Implementation slices
 
-1. Add the transcript manifest and lifecycle audit kinds.
-2. Add the capture sink and the boundary tap.
-3. Add the CLI arm/export commands and the transcript verifier.
+1. **[partly landed]** Add the transcript manifest and lifecycle audit kinds.
+   The manifest format + tamper verifier + bounded-capture budget landed as
+   `mvm_core::transcript` (`TranscriptManifest`/`ChunkRecord`/`CaptureBinding`/
+   `CaptureBounds`, `CaptureBudget::try_add` fail-closed bounds, `verify_chunks`
+   re-hashing + unsafe-name/size/missing/tamper/version refusals; serde
+   `deny_unknown_fields`; 9 unit tests). The **lifecycle audit kinds are
+   deferred to slice 2** (where they are actually emitted), to avoid touching
+   the claim-gated audit taxonomy before there is an emitter.
+2. Add the capture sink and the boundary tap (+ the transcript lifecycle audit
+   kinds: arm/seal/export/refusal).
+3. Add the CLI arm/export commands (the verifier from slice 1 backs `export`'s
+   pre-decrypt check) + at-rest payload encryption (wrap the per-capture key).
 4. Add focused tests for:
    - arming and disarming a capture
-   - manifest hash verification
-   - export refusal on tampering
-   - bounded capture overflow
+   - manifest hash verification ✅ (`verify_chunks` tests, slice 1)
+   - export refusal on tampering ✅ (tamper test, slice 1; export wiring in 3)
+   - bounded capture overflow ✅ (`CaptureBudget` tests, slice 1)
    - round-trip export of a captured session
 
 ## Out of scope
