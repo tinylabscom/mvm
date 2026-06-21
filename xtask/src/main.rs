@@ -18,6 +18,7 @@ mod check_forbidden_deps;
 mod check_guest_agent_in_all_images;
 mod check_guest_agent_runtime_free;
 mod check_guest_images_no_builder_tools;
+mod check_machine_doc_guards;
 mod check_mvm_host_binaries_sync;
 mod check_no_display_on_secret_types;
 mod check_no_overclaim;
@@ -63,6 +64,10 @@ fn main() -> Result<()> {
         Some("check-doc-claims") => {
             let workspace = workspace_root();
             check_doc_claims::run(&workspace)
+        }
+        Some("check-machine-doc-guards") => {
+            let workspace = workspace_root();
+            check_machine_doc_guards::run(&workspace)
         }
         Some("check-forbidden-deps") => {
             let workspace = workspace_root();
@@ -130,7 +135,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-trust-gradient, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-trust-gradient, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {
@@ -150,6 +155,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-doc-claims                        Plan 74 W0 lint: reject gated marketing phrases in public docs"
+            );
+            eprintln!(
+                "  check-machine-doc-guards                Plan 200 lint: require machine use-case/limitations docs and reject beginner overclaims"
             );
             eprintln!(
                 "  check-forbidden-deps                    Reject sea-*/mysql in Cargo.lock + sigstore/opendal/pgp in mvmctl's default closure"

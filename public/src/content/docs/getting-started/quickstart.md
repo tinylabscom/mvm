@@ -28,6 +28,10 @@ Use this when you want "run this command in a fresh microVM." Use the flake,
 manifest, and dev-shell flows below when you are building a custom image or a
 repeatable project environment.
 
+For a scenario-led map of when to use each machine workflow, read
+[Machine use cases](/guides/machine-use-cases/). Before depending on a backend
+capability, read [Machine limitations](/guides/machine-limitations/).
+
 For a named machine that survives across starts:
 
 ```bash
@@ -189,6 +193,8 @@ mvmctl cache info       # Cache directory disk usage
 
 - [Your First MicroVM](/getting-started/first-microvm/) -- write a Nix flake and boot it
 - [Sandboxed Exec](/guides/exec/) -- run a single command in a fresh microVM
+- [Machine use cases](/guides/machine-use-cases/) -- choose the right machine workflow
+- [Machine limitations](/guides/machine-limitations/) -- explicit backend and feature limits
 - [CLI Commands](/reference/cli-commands/) -- full command reference
 - [Manifests](/guides/manifests/) -- reusable base images via `mvm.toml`
 - [Troubleshooting](/guides/troubleshooting/) -- common issues
