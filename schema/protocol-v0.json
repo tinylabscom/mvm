@@ -978,6 +978,13 @@
           ]
         },
         {
+          "description": "Query whether the workload has signalled \"primed\" (caches/JITs/model load done). The workload asserts it by creating the primed marker (`PRIMED_MARKER_PATH`); the agent reports its presence. Used by the host's warm-snapshot barrier to seal a deterministic, fully-warmed base.",
+          "type": "string",
+          "enum": [
+            "PrimedStatus"
+          ]
+        },
+        {
           "description": "Run a command inside the guest (dev-only, requires dev-shell feature + SecurityPolicy).",
           "type": "object",
           "required": [
@@ -2122,6 +2129,28 @@
                   "items": {
                     "$ref": "#/definitions/ProbeResult"
                   }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Whether the workload has signalled \"primed\" (the primed marker is present). Answers `PrimedStatus`.",
+          "type": "object",
+          "required": [
+            "PrimedStatusReport"
+          ],
+          "properties": {
+            "PrimedStatusReport": {
+              "type": "object",
+              "required": [
+                "primed"
+              ],
+              "properties": {
+                "primed": {
+                  "type": "boolean"
                 }
               },
               "additionalProperties": false

@@ -175,6 +175,11 @@ pub enum GuestRequest {
     CheckpointIntegrations { integrations: Vec<String> },
     /// Query status of all loaded probes.
     ProbeStatus,
+    /// Query whether the workload has signalled "primed" (caches/JITs/model
+    /// load done). The workload asserts it by creating the primed marker
+    /// (`PRIMED_MARKER_PATH`); the agent reports its presence. Used by the
+    /// host's warm-snapshot barrier to seal a deterministic, fully-warmed base.
+    PrimedStatus,
     /// Run a command inside the guest (dev-only, requires dev-shell feature + SecurityPolicy).
     Exec {
         command: String,
@@ -526,6 +531,7 @@ impl GuestRequest {
             Self::IntegrationStatus => "integration-status",
             Self::CheckpointIntegrations { .. } => "checkpoint-integrations",
             Self::ProbeStatus => "probe-status",
+            Self::PrimedStatus => "primed-status",
             Self::Exec { .. } => "exec",
             Self::RunEntrypoint { .. } => "run-entrypoint",
             Self::PostRestore { .. } => "post-restore",
@@ -736,6 +742,7 @@ impl GuestRequest {
             GuestRequest::IntegrationStatus => Verb::IntegrationStatus,
             GuestRequest::CheckpointIntegrations { .. } => Verb::CheckpointIntegrations,
             GuestRequest::ProbeStatus => Verb::ProbeStatus,
+            GuestRequest::PrimedStatus => Verb::PrimedStatus,
             GuestRequest::Exec { .. } => Verb::Exec,
             GuestRequest::RunEntrypoint { .. } => Verb::RunEntrypoint,
             GuestRequest::PostRestore { .. } => Verb::PostRestore,
@@ -794,6 +801,7 @@ impl GuestRequest {
             | GuestRequest::IntegrationStatus
             | GuestRequest::CheckpointIntegrations { .. }
             | GuestRequest::ProbeStatus
+            | GuestRequest::PrimedStatus
             | GuestRequest::RunEntrypoint { .. }
             | GuestRequest::PostRestore { .. }
             | GuestRequest::EntrypointStatus
@@ -917,6 +925,9 @@ pub enum GuestResponse {
     ProbeStatusReport {
         probes: Vec<crate::probes::ProbeResult>,
     },
+    /// Whether the workload has signalled "primed" (the primed marker is
+    /// present). Answers `PrimedStatus`.
+    PrimedStatusReport { primed: bool },
     /// One event in the response stream of a `RunEntrypoint` call.
     ///
     /// The agent emits a sequence of these in response to a single
@@ -1041,7 +1052,7 @@ name_enum! {
     /// lockstep with the wire enum (exhaustive match).
     pub enum Verb {
         ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, IntegrationStatus,
-        CheckpointIntegrations, ProbeStatus, Exec, RunEntrypoint, PostRestore,
+        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, RunEntrypoint, PostRestore,
         FsDiff, StartPortForward, StartUnixSocketForward, ConsoleOpen,
         ConsoleClose, ConsoleResize, EntrypointStatus, ReadinessStatus, FsRead,
         FsWrite, FsList, FsStat, FsMkdir, FsRemove, FsMove, ProcStart,
@@ -1057,7 +1068,7 @@ name_enum! {
     pub enum ResponseVariant {
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
         Pong, Error, UnsupportedInProfile, IntegrationStatusReport,
-        CheckpointResult, ProbeStatusReport, EntrypointEvent, ExecEvent,
+        CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, ExecEvent,
         PostRestoreAck, FsDiffResult, PortForwardStarted,
         UnixSocketForwardStarted, ConsoleOpened, ConsoleExited, ConsoleResized,
         EntrypointStatusReport,
@@ -1124,6 +1135,7 @@ impl Verb {
             Verb::IntegrationStatus => unary(&[R::IntegrationStatusReport]),
             Verb::CheckpointIntegrations => unary(&[R::CheckpointResult]),
             Verb::ProbeStatus => unary(&[R::ProbeStatusReport]),
+            Verb::PrimedStatus => unary(&[R::PrimedStatusReport]),
             Verb::Exec => stream(&[R::ExecEvent]),
             Verb::RunEntrypoint => stream(&[R::EntrypointEvent]),
             Verb::PostRestore => unary(&[R::PostRestoreAck]),
@@ -1174,6 +1186,7 @@ impl GuestResponse {
             }
             GuestResponse::CheckpointResult { .. } => ResponseVariant::CheckpointResult,
             GuestResponse::ProbeStatusReport { .. } => ResponseVariant::ProbeStatusReport,
+            GuestResponse::PrimedStatusReport { .. } => ResponseVariant::PrimedStatusReport,
             GuestResponse::EntrypointEvent(_) => ResponseVariant::EntrypointEvent,
             GuestResponse::ExecEvent(_) => ResponseVariant::ExecEvent,
             GuestResponse::PostRestoreAck { .. } => ResponseVariant::PostRestoreAck,
@@ -2810,26 +2823,81 @@ pub fn query_probe_status_at(vsock_uds_path: &str) -> Result<Vec<crate::probes::
     }
 }
 
-/// Signal post-restore to the guest agent at a specific UDS path.
+/// Outcome of a `PostRestore` signal: whether the guest acknowledged the
+/// signal and whether it actually rotated its VMGenID from the host token.
 ///
-/// After snapshot restore, tells the guest to rotate its VMGenID with the
-/// host-minted `token` (so two clones of one snapshot diverge), then remount
-/// config/secrets drives and restart services. An all-zero `token` is a
-/// no-rotation restore. Returns Ok(true) if the guest acknowledged success.
-pub fn post_restore_at(
-    vsock_uds_path: &str,
-    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
-) -> Result<bool> {
-    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
-    let resp = send_request(&mut stream, &GuestRequest::PostRestore { token })?;
+/// `reseeded` is the load-bearing field for the warm-start verb's honesty —
+/// `acknowledged` only says the guest answered, `reseeded` says it rotated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PostRestoreReply {
+    /// The guest acknowledged the post-restore signal with success.
+    pub acknowledged: bool,
+    /// The guest rotated its VMGenID from the delivered token.
+    pub reseeded: bool,
+}
 
+/// Interpret a guest's response to `PostRestore` into the host-facing reply.
+/// Pure so the success/reseeded mapping is unit-tested without a live agent.
+fn interpret_post_restore(resp: GuestResponse) -> Result<PostRestoreReply> {
     match resp {
-        GuestResponse::PostRestoreAck { success, .. } => Ok(success),
+        GuestResponse::PostRestoreAck {
+            success, reseeded, ..
+        } => Ok(PostRestoreReply {
+            acknowledged: success,
+            reseeded,
+        }),
         GuestResponse::Error { message } => {
             bail!("Guest post-restore error: {}", message);
         }
         _ => bail!("Unexpected response to PostRestore"),
     }
+}
+
+/// Signal post-restore to the guest agent at a specific UDS path.
+///
+/// After snapshot restore, tells the guest to rotate its VMGenID with the
+/// host-minted `token` (so two clones of one snapshot diverge), then remount
+/// config/secrets drives and restart services. An all-zero `token` is a
+/// no-rotation restore. Returns the guest's [`PostRestoreReply`] so the caller
+/// can surface whether the guest actually reseeded.
+pub fn post_restore_at(
+    vsock_uds_path: &str,
+    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+) -> Result<PostRestoreReply> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::PostRestore { token })?;
+    interpret_post_restore(resp)
+}
+
+/// Filesystem marker a workload creates to signal it has finished warming
+/// (caches/JITs/model load done). The guest agent reports its presence on a
+/// `PrimedStatus` query; the host's warm-snapshot barrier waits for it before
+/// sealing. A tmpfs path the workload can write with no extra privilege.
+pub const PRIMED_MARKER_PATH: &str = "/run/mvm/primed";
+
+/// Whether the workload has signalled "primed": the marker exists. Pure so the
+/// agent-side check is unit-testable without a live guest.
+pub fn workload_is_primed_at(marker: &std::path::Path) -> bool {
+    marker.exists()
+}
+
+/// Interpret a guest's response to `PrimedStatus`. Pure so the mapping is
+/// unit-tested without a live agent.
+pub fn interpret_primed_status(resp: GuestResponse) -> Result<bool> {
+    match resp {
+        GuestResponse::PrimedStatusReport { primed } => Ok(primed),
+        GuestResponse::Error { message } => bail!("Guest primed-status error: {}", message),
+        _ => bail!("Unexpected response to PrimedStatus"),
+    }
+}
+
+/// Query whether the workload has signalled "primed" via the guest agent at a
+/// specific UDS path. One-shot; the host barrier polls this until primed or it
+/// times out.
+pub fn query_primed_at(vsock_uds_path: &str) -> Result<bool> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::PrimedStatus)?;
+    interpret_primed_status(resp)
 }
 
 /// Query filesystem diff from the guest agent at a specific UDS path.
@@ -3258,6 +3326,91 @@ mod tests {
             GuestResponse::PostRestoreAck { reseeded, .. } => assert!(!reseeded),
             other => panic!("expected PostRestoreAck, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn primed_status_wire_roundtrips_and_rejects_unknown_fields() {
+        // Request roundtrip.
+        let json = serde_json::to_string(&GuestRequest::PrimedStatus).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<GuestRequest>(&json).unwrap(),
+            GuestRequest::PrimedStatus
+        ));
+        // Response roundtrip.
+        let report = GuestResponse::PrimedStatusReport { primed: true };
+        let json = serde_json::to_string(&report).unwrap();
+        match serde_json::from_str::<GuestResponse>(&json).unwrap() {
+            GuestResponse::PrimedStatusReport { primed } => assert!(primed),
+            other => panic!("expected PrimedStatusReport, got {other:?}"),
+        }
+        // The verb maps to the contracted unary response.
+        assert!(matches!(
+            GuestRequest::PrimedStatus.verb().response_contract().kind,
+            ResponseKind::Unary
+        ));
+    }
+
+    #[test]
+    fn workload_is_primed_reflects_marker_presence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("primed");
+        assert!(
+            !workload_is_primed_at(&marker),
+            "absent marker → not primed"
+        );
+        std::fs::write(&marker, b"").unwrap();
+        assert!(workload_is_primed_at(&marker), "present marker → primed");
+    }
+
+    #[test]
+    fn interpret_primed_status_maps_report_and_errors() {
+        assert!(
+            interpret_primed_status(GuestResponse::PrimedStatusReport { primed: true }).unwrap()
+        );
+        assert!(
+            !interpret_primed_status(GuestResponse::PrimedStatusReport { primed: false }).unwrap()
+        );
+        assert!(
+            interpret_primed_status(GuestResponse::Error {
+                message: "x".into()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn interpret_post_restore_maps_ack_reseeded_and_errors() {
+        // Positive ack with rotation.
+        let r = interpret_post_restore(GuestResponse::PostRestoreAck {
+            success: true,
+            detail: None,
+            reseeded: true,
+        })
+        .unwrap();
+        assert!(r.acknowledged && r.reseeded);
+        // Acknowledged but the guest did not rotate (e.g. a zero/no-op token).
+        let r = interpret_post_restore(GuestResponse::PostRestoreAck {
+            success: true,
+            detail: None,
+            reseeded: false,
+        })
+        .unwrap();
+        assert!(r.acknowledged && !r.reseeded);
+        // A guest-reported failure ack is surfaced as acknowledged=false.
+        let r = interpret_post_restore(GuestResponse::PostRestoreAck {
+            success: false,
+            detail: Some("kill failed".into()),
+            reseeded: false,
+        })
+        .unwrap();
+        assert!(!r.acknowledged && !r.reseeded);
+        // A transport-level error / off-contract response is an Err.
+        assert!(
+            interpret_post_restore(GuestResponse::Error {
+                message: "boom".into()
+            })
+            .is_err()
+        );
     }
 
     #[test]

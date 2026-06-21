@@ -258,6 +258,71 @@ pub fn await_primed_barrier<S: PrimedSignalSource + ?Sized>(
     }
 }
 
+/// Poll `probe` until it reports primed or `timeout` elapses, sleeping
+/// `interval` between polls. Pure (the only impurity is the clock + sleep) so
+/// the "stop at first primed, else fail closed on the deadline" policy is
+/// unit-tested with a fake probe (the "mock guest").
+fn wait_for_primed_polling<F: FnMut() -> bool>(
+    timeout: std::time::Duration,
+    interval: std::time::Duration,
+    mut probe: F,
+) -> PrimedOutcome {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if probe() {
+            return PrimedOutcome::Primed;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return PrimedOutcome::TimedOut;
+        }
+        std::thread::sleep(interval.min(deadline - now));
+    }
+}
+
+/// Production [`PrimedSignalSource`] — polls the guest agent's `PrimedStatus`
+/// RPC over the backend-agnostic vsock transport until the workload signals
+/// primed (it created `PRIMED_MARKER_PATH`) or the barrier times out. Mirrors
+/// [`VsockPostRestoreSignal`]: the per-poll vsock I/O ([`probe_once`]) is the
+/// thin shell (not unit-tested — needs a live guest), while the poll *policy*
+/// ([`wait_for_primed_polling`]) is unit-tested. No new guest privilege and no
+/// host-delivered signal — the guest agent answers a read.
+///
+/// [`probe_once`]: Self::probe_once
+pub struct VsockPrimedSignalSource {
+    /// VM whose guest agent is polled for the primed signal.
+    pub vm_name: String,
+    /// Delay between primed-status polls.
+    pub poll_interval: std::time::Duration,
+}
+
+impl VsockPrimedSignalSource {
+    /// One primed-status probe. Any transport/agent error is treated as "not
+    /// primed yet" (best-effort) so a transient blip doesn't abort the
+    /// barrier; the deadline in [`wait_for_primed_polling`] bounds the wait.
+    fn probe_once(&self) -> bool {
+        use mvm_guest::vsock::{
+            GUEST_AGENT_PORT, GuestRequest, call_unary, interpret_primed_status,
+        };
+        let Ok(transport) = crate::vsock_transport::for_vm(&self.vm_name) else {
+            return false;
+        };
+        let Ok(mut stream) = transport.connect(GUEST_AGENT_PORT) else {
+            return false;
+        };
+        match call_unary(&mut stream, &GuestRequest::PrimedStatus) {
+            Ok(resp) => interpret_primed_status(resp).unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+}
+
+impl PrimedSignalSource for VsockPrimedSignalSource {
+    fn wait_for_primed(&self, timeout: std::time::Duration) -> PrimedOutcome {
+        wait_for_primed_polling(timeout, self.poll_interval, || self.probe_once())
+    }
+}
+
 /// Outcome of signaling `PostRestore` to a resumed guest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostRestoreOutcome {
@@ -1146,5 +1211,30 @@ mod tests {
             err.to_string().contains("half-warmed"),
             "fail-closed message names the hazard: {err}"
         );
+    }
+
+    #[test]
+    fn poll_returns_primed_as_soon_as_the_probe_succeeds() {
+        use std::cell::Cell;
+        use std::time::Duration;
+        // Probe succeeds on the 3rd poll → Primed, and we stop polling there.
+        let calls = Cell::new(0u32);
+        let outcome =
+            wait_for_primed_polling(Duration::from_secs(5), Duration::from_millis(1), || {
+                calls.set(calls.get() + 1);
+                calls.get() >= 3
+            });
+        assert_eq!(outcome, PrimedOutcome::Primed);
+        assert_eq!(calls.get(), 3, "stops polling at the first success");
+    }
+
+    #[test]
+    fn poll_times_out_when_the_probe_never_succeeds() {
+        use std::time::Duration;
+        let outcome =
+            wait_for_primed_polling(Duration::from_millis(15), Duration::from_millis(1), || {
+                false
+            });
+        assert_eq!(outcome, PrimedOutcome::TimedOut);
     }
 }

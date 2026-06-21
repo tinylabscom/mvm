@@ -34,6 +34,7 @@ export type GuestRequest =
       };
     }
   | "ProbeStatus"
+  | "PrimedStatus"
   | {
       Exec: {
         command: string;
@@ -348,6 +349,11 @@ export type GuestResponse =
   | {
       ProbeStatusReport: {
         probes: ProbeResult[];
+      };
+    }
+  | {
+      PrimedStatusReport: {
+        primed: boolean;
       };
     }
   | {

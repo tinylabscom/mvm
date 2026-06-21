@@ -2110,6 +2110,12 @@ fn handle_client(
             probes: build_probe_reports(probe_state),
         },
 
+        GuestRequest::PrimedStatus => GuestResponse::PrimedStatusReport {
+            primed: mvm_guest::vsock::workload_is_primed_at(std::path::Path::new(
+                mvm_guest::vsock::PRIMED_MARKER_PATH,
+            )),
+        },
+
         GuestRequest::PostRestore { token } => {
             // First, rotate the VMGenID: feed the host-minted token to the
             // process-resident reseeder. Its state is captured in the snapshot,

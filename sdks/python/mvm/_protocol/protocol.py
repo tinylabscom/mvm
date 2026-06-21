@@ -366,6 +366,10 @@ class GuestRequest8(Enum):
     ProbeStatus = 'ProbeStatus'
 
 
+class GuestRequest9(Enum):
+    PrimedStatus = 'PrimedStatus'
+
+
 @dataclass
 class Exec:
     command: str
@@ -374,7 +378,7 @@ class Exec:
 
 
 @dataclass
-class GuestRequest9:
+class GuestRequest10:
     Exec: Exec
 
 
@@ -386,7 +390,7 @@ class RunEntrypoint:
 
 
 @dataclass
-class GuestRequest10:
+class GuestRequest11:
     RunEntrypoint: RunEntrypoint
 
 
@@ -401,11 +405,11 @@ class PostRestore:
 
 
 @dataclass
-class GuestRequest11:
+class GuestRequest12:
     PostRestore: PostRestore
 
 
-class GuestRequest12(Enum):
+class GuestRequest13(Enum):
     FsDiff = 'FsDiff'
 
 
@@ -415,7 +419,7 @@ class StartPortForward:
 
 
 @dataclass
-class GuestRequest13:
+class GuestRequest14:
     StartPortForward: StartPortForward
 
 
@@ -427,7 +431,7 @@ class StartUnixSocketForward:
 
 
 @dataclass
-class GuestRequest14:
+class GuestRequest15:
     StartUnixSocketForward: StartUnixSocketForward
 
 
@@ -439,7 +443,7 @@ class ConsoleOpen:
 
 
 @dataclass
-class GuestRequest15:
+class GuestRequest16:
     ConsoleOpen: ConsoleOpen
 
 
@@ -449,7 +453,7 @@ class ConsoleClose:
 
 
 @dataclass
-class GuestRequest16:
+class GuestRequest17:
     ConsoleClose: ConsoleClose
 
 
@@ -461,15 +465,15 @@ class ConsoleResize:
 
 
 @dataclass
-class GuestRequest17:
+class GuestRequest18:
     ConsoleResize: ConsoleResize
 
 
-class GuestRequest18(Enum):
+class GuestRequest19(Enum):
     EntrypointStatus = 'EntrypointStatus'
 
 
-class GuestRequest19(Enum):
+class GuestRequest20(Enum):
     ReadinessStatus = 'ReadinessStatus'
 
 
@@ -482,7 +486,7 @@ class FsRead:
 
 
 @dataclass
-class GuestRequest20:
+class GuestRequest21:
     FsRead: FsRead
 
 
@@ -496,7 +500,7 @@ class FsWrite:
 
 
 @dataclass
-class GuestRequest21:
+class GuestRequest22:
     FsWrite: FsWrite
 
 
@@ -507,7 +511,7 @@ class FsList:
 
 
 @dataclass
-class GuestRequest22:
+class GuestRequest23:
     FsList: FsList
 
 
@@ -518,7 +522,7 @@ class FsStat1:
 
 
 @dataclass
-class GuestRequest23:
+class GuestRequest24:
     FsStat: FsStat1
 
 
@@ -530,7 +534,7 @@ class FsMkdir:
 
 
 @dataclass
-class GuestRequest24:
+class GuestRequest25:
     FsMkdir: FsMkdir
 
 
@@ -542,7 +546,7 @@ class FsRemove:
 
 
 @dataclass
-class GuestRequest25:
+class GuestRequest26:
     FsRemove: FsRemove
 
 
@@ -554,7 +558,7 @@ class FsMove:
 
 
 @dataclass
-class GuestRequest26:
+class GuestRequest27:
     FsMove: FsMove
 
 
@@ -568,11 +572,11 @@ class ProcStart:
 
 
 @dataclass
-class GuestRequest27:
+class GuestRequest28:
     ProcStart: ProcStart
 
 
-class GuestRequest28(Enum):
+class GuestRequest29(Enum):
     ProcList = 'ProcList'
 
 
@@ -583,7 +587,7 @@ class ProcSignal:
 
 
 @dataclass
-class GuestRequest29:
+class GuestRequest30:
     ProcSignal: ProcSignal
 
 
@@ -594,7 +598,7 @@ class ProcSendInput:
 
 
 @dataclass
-class GuestRequest30:
+class GuestRequest31:
     ProcSendInput: ProcSendInput
 
 
@@ -605,7 +609,7 @@ class ProcWait:
 
 
 @dataclass
-class GuestRequest31:
+class GuestRequest32:
     ProcWait: ProcWait
 
 
@@ -615,7 +619,7 @@ class ProcKill:
 
 
 @dataclass
-class GuestRequest32:
+class GuestRequest33:
     ProcKill: ProcKill
 
 
@@ -627,7 +631,7 @@ class MountVolume:
 
 
 @dataclass
-class GuestRequest33:
+class GuestRequest34:
     MountVolume: MountVolume
 
 
@@ -638,7 +642,7 @@ class UnmountVolume:
 
 
 @dataclass
-class GuestRequest34:
+class GuestRequest35:
     UnmountVolume: UnmountVolume
 
 
@@ -648,7 +652,7 @@ class UpdateIdleTimeout:
 
 
 @dataclass
-class GuestRequest35:
+class GuestRequest36:
     UpdateIdleTimeout: UpdateIdleTimeout
 
 
@@ -659,7 +663,7 @@ class RunCode:
 
 
 @dataclass
-class GuestRequest36:
+class GuestRequest37:
     RunCode: RunCode
 
 
@@ -700,6 +704,7 @@ GuestRequest = Union[
     GuestRequest34,
     GuestRequest35,
     GuestRequest36,
+    GuestRequest37,
 ]
 
 
@@ -786,7 +791,17 @@ class GuestResponse10:
 
 
 @dataclass
-class GuestResponse13:
+class PrimedStatusReport:
+    primed: bool
+
+
+@dataclass
+class GuestResponse12:
+    PrimedStatusReport: PrimedStatusReport
+
+
+@dataclass
+class GuestResponse14:
     ExecEvent: ExecEvent
 
 
@@ -798,7 +813,7 @@ class PostRestoreAck:
 
 
 @dataclass
-class GuestResponse14:
+class GuestResponse15:
     PostRestoreAck: PostRestoreAck
 
 
@@ -809,7 +824,7 @@ class PortForwardStarted:
 
 
 @dataclass
-class GuestResponse16:
+class GuestResponse17:
     PortForwardStarted: PortForwardStarted
 
 
@@ -820,7 +835,7 @@ class UnixSocketForwardStarted:
 
 
 @dataclass
-class GuestResponse17:
+class GuestResponse18:
     UnixSocketForwardStarted: UnixSocketForwardStarted
 
 
@@ -831,7 +846,7 @@ class ConsoleOpened:
 
 
 @dataclass
-class GuestResponse18:
+class GuestResponse19:
     ConsoleOpened: ConsoleOpened
 
 
@@ -842,7 +857,7 @@ class ConsoleExited:
 
 
 @dataclass
-class GuestResponse19:
+class GuestResponse20:
     ConsoleExited: ConsoleExited
 
 
@@ -852,7 +867,7 @@ class ConsoleResized:
 
 
 @dataclass
-class GuestResponse20:
+class GuestResponse21:
     ConsoleResized: ConsoleResized
 
 
@@ -864,7 +879,7 @@ class EntrypointStatusReport:
 
 
 @dataclass
-class GuestResponse21:
+class GuestResponse22:
     EntrypointStatusReport: EntrypointStatusReport
 
 
@@ -875,7 +890,7 @@ class UpdateIdleTimeoutAck:
 
 
 @dataclass
-class GuestResponse27:
+class GuestResponse28:
     UpdateIdleTimeoutAck: UpdateIdleTimeoutAck
 
 
@@ -1305,7 +1320,7 @@ class GuestResponse11:
 
 
 @dataclass
-class GuestResponse12:
+class GuestResponse13:
     EntrypointEvent: EntrypointEvent
 
 
@@ -1315,27 +1330,27 @@ class FsDiffResult:
 
 
 @dataclass
-class GuestResponse15:
+class GuestResponse16:
     FsDiffResult: FsDiffResult
 
 
 @dataclass
-class GuestResponse22:
+class GuestResponse23:
     ReadinessStatusReport: ReadinessReport
 
 
 @dataclass
-class GuestResponse23:
+class GuestResponse24:
     FsResult: FsResult
 
 
 @dataclass
-class GuestResponse25:
+class GuestResponse26:
     ProcWaitEvent: ProcWaitEvent
 
 
 @dataclass
-class GuestResponse26:
+class GuestResponse27:
     VolumeMountResult: VolumeMountResult
 
 
@@ -1382,7 +1397,7 @@ class GuestResponse9:
 
 
 @dataclass
-class GuestResponse24:
+class GuestResponse25:
     ProcResult: ProcResult
 
 
@@ -1414,6 +1429,7 @@ GuestResponse = Union[
     GuestResponse25,
     GuestResponse26,
     GuestResponse27,
+    GuestResponse28,
 ]
 
 

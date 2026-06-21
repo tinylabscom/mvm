@@ -1151,8 +1151,8 @@ pub fn restore_from_template_snapshot(
             // metadata only.
             let token = mvm_core::crypto::vmgenid::fresh_generation_token(&vsock_path).token;
             match mvm_guest::vsock::post_restore_at(&vsock_path, token) {
-                Ok(true) => ui::info("Post-restore complete."),
-                Ok(false) => ui::warn("Post-restore signal returned failure."),
+                Ok(r) if r.acknowledged => ui::info("Post-restore complete."),
+                Ok(_) => ui::warn("Post-restore signal returned failure."),
                 Err(e) => ui::warn(&format!(
                     "Post-restore failed: {}. Services may need manual restart.",
                     e
@@ -1181,6 +1181,35 @@ pub fn restore_from_template_snapshot(
     Ok(())
 }
 
+/// Poll interval while waiting for the restored guest agent to re-accept on
+/// the recreated vsock after a warm resume.
+const WARM_AGENT_READY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How many [`WARM_AGENT_READY_POLL_INTERVAL`] ticks to wait for the restored
+/// agent before giving up on token delivery. The restored agent has been
+/// observed re-accepting ~30–35s after a ~0.5s VMM resume; a 30s window
+/// (60 × 500ms) raced that tail and the token silently no-op'd. Widened to 60s
+/// so the token reliably lands while the latency root-cause is chased
+/// separately.
+const WARM_AGENT_READY_POLL_ATTEMPTS: u32 = 120;
+
+/// Classify the warm-start reseed outcome from the agent-ready result and the
+/// guest's post-restore reply. Pure so the tri-state honesty logic is
+/// unit-tested without a live guest. Rotation is judged on the guest's
+/// `reseeded` flag, not the remount/restart ack — the guest reseeds before it
+/// remounts, so a failed remount still leaves a rotated VMGenID.
+fn classify_reseed(
+    agent_ready: bool,
+    reply: Option<mvm_guest::vsock::PostRestoreReply>,
+) -> mvm_core::vm_backend::ReseedStatus {
+    use mvm_core::vm_backend::ReseedStatus;
+    match (agent_ready, reply) {
+        (false, _) | (_, None) => ReseedStatus::Undelivered,
+        (true, Some(r)) if r.reseeded => ReseedStatus::Rotated,
+        (true, Some(_)) => ReseedStatus::NotRotated,
+    }
+}
+
 /// Warm-restore an instance from its sealed snapshot into its already-running
 /// (paused) Firecracker, then deliver the VMGenID token so the guest reseeds.
 ///
@@ -1195,7 +1224,7 @@ pub fn restore_from_template_snapshot(
 pub fn warm_restore_instance(
     name: &str,
     token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
-) -> Result<()> {
+) -> Result<mvm_core::vm_backend::ReseedStatus> {
     // Defense in depth, *before* any work: every path below is derived from
     // `name` and several are interpolated into shell commands
     // (`start_vm_firecracker`, the kill). The CLI validates the name, but this
@@ -1261,27 +1290,32 @@ pub fn warm_restore_instance(
     // (mirrors `restore_from_template_snapshot`'s post-restore policy).
     let vsock = firecracker_vsock_uds_path(&vm_dir);
     let mut agent_ready = false;
-    for _ in 0..60 {
+    for _ in 0..WARM_AGENT_READY_POLL_ATTEMPTS {
         if mvm_guest::vsock::ping_at(&vsock).unwrap_or(false) {
             agent_ready = true;
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(WARM_AGENT_READY_POLL_INTERVAL);
     }
     if !agent_ready {
         warn!(
             "warm-start of '{name}': guest agent not reachable to deliver VMGenID token; the VM is resumed but did not reseed — re-run resume to retry"
         );
-        return Ok(());
+        return Ok(classify_reseed(false, None));
     }
-    match mvm_guest::vsock::post_restore_at(&vsock, token) {
-        Ok(true) => {}
-        Ok(false) => {
-            warn!("warm-start of '{name}': guest did not acknowledge post-restore (VM is resumed)")
+    let reply = match mvm_guest::vsock::post_restore_at(&vsock, token) {
+        Ok(r) => {
+            if !r.reseeded {
+                warn!("warm-start of '{name}': guest did not reseed VMGenID (VM is resumed)");
+            }
+            Some(r)
         }
-        Err(e) => warn!("warm-start of '{name}': post-restore signal failed: {e} (VM is resumed)"),
-    }
-    Ok(())
+        Err(e) => {
+            warn!("warm-start of '{name}': post-restore signal failed: {e} (VM is resumed)");
+            None
+        }
+    };
+    Ok(classify_reseed(agent_ready, reply))
 }
 
 /// Pause the vCPUs of a running Firecracker VM.
@@ -3215,6 +3249,51 @@ mod tests {
                 "rejection names the cause for {bad:?}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn classify_reseed_is_honest_about_rotation() {
+        use mvm_core::vm_backend::ReseedStatus;
+        use mvm_guest::vsock::PostRestoreReply;
+
+        // Agent never came back → token undelivered, reseed unknown.
+        assert_eq!(classify_reseed(false, None), ReseedStatus::Undelivered);
+        // Agent ready but the signal RPC errored (reply None) → undelivered.
+        assert_eq!(classify_reseed(true, None), ReseedStatus::Undelivered);
+        // Reachable + guest rotated → Rotated, regardless of the remount ack.
+        assert_eq!(
+            classify_reseed(
+                true,
+                Some(PostRestoreReply {
+                    acknowledged: false,
+                    reseeded: true
+                })
+            ),
+            ReseedStatus::Rotated
+        );
+        // Reachable + acknowledged but did not rotate → NotRotated.
+        assert_eq!(
+            classify_reseed(
+                true,
+                Some(PostRestoreReply {
+                    acknowledged: true,
+                    reseeded: false
+                })
+            ),
+            ReseedStatus::NotRotated
+        );
+    }
+
+    #[test]
+    fn warm_agent_ready_budget_covers_observed_post_restore_latency() {
+        // The restored guest agent has been observed re-accepting ~30–35s after
+        // a ~0.5s VMM resume; a 30s window raced it and the token silently
+        // no-op'd. The widened window must cover that tail.
+        let window = WARM_AGENT_READY_POLL_INTERVAL * WARM_AGENT_READY_POLL_ATTEMPTS;
+        assert!(
+            window >= std::time::Duration::from_secs(45),
+            "warm agent-ready window {window:?} must cover the observed ~35s latency with margin"
+        );
     }
 
     #[test]

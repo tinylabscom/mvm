@@ -19,8 +19,8 @@ use clap::Args as ClapArgs;
 use std::path::PathBuf;
 
 use mvm::vm::instance_snapshot::{
-    CannedIO, FirecrackerIO, SnapshotIO, VsockPostRestoreSignal, pause_and_seal,
-    signal_post_restore, verify_and_resume,
+    CannedIO, FirecrackerIO, SnapshotIO, VsockPostRestoreSignal, VsockPrimedSignalSource,
+    await_primed_barrier, pause_and_seal, signal_post_restore, verify_and_resume,
 };
 use mvm_backend::backend::AnyBackend;
 use mvm_core::config::vm_state_dir;
@@ -43,6 +43,15 @@ pub(in crate::commands) struct PauseArgs {
     /// exercise `WorkloadSleep` without a real Firecracker socket.
     #[arg(long, default_value = "firecracker")]
     pub hypervisor: String,
+    /// Before sealing, wait for the workload to signal "primed" (it created
+    /// `/run/mvm/primed`) so the warm base is deterministic and fully-warmed.
+    /// Fails closed: if the workload does not signal within `--primed-timeout`,
+    /// the pause refuses rather than sealing a half-warmed snapshot.
+    #[arg(long)]
+    pub primed_barrier: bool,
+    /// Seconds to wait for the primed signal when `--primed-barrier` is set.
+    #[arg(long, default_value_t = 120)]
+    pub primed_timeout: u64,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -98,8 +107,32 @@ fn snapshot_io_for(hypervisor: &str, vm_name: &str) -> Result<Box<dyn SnapshotIO
     Ok(Box::new(FirecrackerIO::new(socket)))
 }
 
+/// The primed-barrier timeout to enforce before sealing, or `None` when the
+/// barrier is not requested (or not applicable to a hermetic mock VM, which has
+/// no live guest agent to answer). Pure so the opt-in gating is unit-tested
+/// without a VM.
+fn primed_barrier_timeout(args: &PauseArgs) -> Option<std::time::Duration> {
+    if args.primed_barrier && args.hypervisor != "mock" {
+        Some(std::time::Duration::from_secs(args.primed_timeout))
+    } else {
+        None
+    }
+}
+
 pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConfig) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
+
+    // Opt-in warm-base barrier: wait for the workload to signal "primed" before
+    // sealing. Fails closed — the `?` propagates a timeout so no half-warmed
+    // snapshot is sealed.
+    if let Some(timeout) = primed_barrier_timeout(&args) {
+        let source = VsockPrimedSignalSource {
+            vm_name: args.name.clone(),
+            poll_interval: std::time::Duration::from_millis(500),
+        };
+        await_primed_barrier(&source, timeout)
+            .with_context(|| format!("primed barrier for VM {:?}", args.name))?;
+    }
     if is_vz_vm(&args.name) {
         AnyBackend::Vz(mvm_backend::vz::VzBackend)
             .pause(&VmId::from(args.name.as_str()))
@@ -155,6 +188,16 @@ pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConf
 /// renders a `WarmStartError` cleanly: an over-request on a disk-only backend
 /// (libkrun) surfaces the typed recovery hint and exits nonzero rather than
 /// silently cold-booting.
+/// Build the `vm resume --warm` success line, reflecting the *actual* reseed
+/// outcome rather than asserting a rotation unconditionally. Pure so the
+/// honesty of the message is unit-tested without a live VM.
+fn warm_start_success_line(name: &str, reseed: mvm_core::vm_backend::ReseedStatus) -> String {
+    format!(
+        "{name}: warm-started (live-memory resume, {})",
+        reseed.resume_summary()
+    )
+}
+
 fn run_warm_start(name: &str, hypervisor: &str) -> Result<()> {
     use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
 
@@ -164,14 +207,14 @@ fn run_warm_start(name: &str, hypervisor: &str) -> Result<()> {
         ..Default::default()
     };
     match backend.warm_start(&config, SnapshotCapability::LiveMemory) {
-        Ok(_) => {
+        Ok(outcome) => {
             let registry_path = mvm::vm::name_registry::registry_path();
             if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
                 let _ = registry.set_paused(name, false);
                 let _ = registry.touch_last_active(name, mvm_core::time::utc_now());
                 let _ = registry.save(&registry_path);
             }
-            println!("{name}: warm-started (live-memory resume, VMGenID rotated)");
+            println!("{}", warm_start_success_line(name, outcome.reseed));
             mvm_core::audit_emit!(WorkloadWake, vm: name, "warm_start backend={hypervisor}");
             Ok(())
         }
@@ -402,6 +445,51 @@ fn snap_rm(name: &str, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primed_barrier_timeout_is_opt_in_and_skips_mock() {
+        let base = PauseArgs {
+            name: "vm".into(),
+            hypervisor: "firecracker".into(),
+            primed_barrier: false,
+            primed_timeout: 120,
+        };
+        // Default off → no barrier.
+        assert!(primed_barrier_timeout(&base).is_none());
+        // Opt-in on a real backend → barrier with the requested timeout.
+        let on = PauseArgs {
+            primed_barrier: true,
+            primed_timeout: 30,
+            ..base.clone()
+        };
+        assert_eq!(
+            primed_barrier_timeout(&on),
+            Some(std::time::Duration::from_secs(30))
+        );
+        // The hermetic mock VM has no live guest agent — never gate it.
+        let mock = PauseArgs {
+            hypervisor: "mock".into(),
+            ..on
+        };
+        assert!(primed_barrier_timeout(&mock).is_none());
+    }
+
+    #[test]
+    fn warm_start_success_line_reflects_actual_reseed_state() {
+        use mvm_core::vm_backend::ReseedStatus;
+        // A confirmed rotation says so; an unconfirmed one must NOT claim it.
+        let rotated = warm_start_success_line("vm1", ReseedStatus::Rotated);
+        assert!(rotated.contains("vm1") && rotated.contains("rotated"));
+        let undelivered = warm_start_success_line("vm1", ReseedStatus::Undelivered);
+        assert!(
+            !undelivered.contains("VMGenID rotated"),
+            "must not claim a rotation that did not happen: {undelivered}"
+        );
+        assert!(undelivered.to_lowercase().contains("not delivered"));
+        // The disk-only / no-rotation backend reads honestly too.
+        let na = warm_start_success_line("vm1", ReseedStatus::NotApplicable);
+        assert!(!na.contains("VMGenID rotated"), "{na}");
+    }
 
     #[test]
     fn is_vz_vm_true_for_vz_marker() {

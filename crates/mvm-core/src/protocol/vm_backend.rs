@@ -550,6 +550,56 @@ impl fmt::Display for WarmStartError {
 
 impl std::error::Error for WarmStartError {}
 
+/// Whether a live-memory warm-start rotated the guest's VMGenID.
+///
+/// A snapshot restore must reseed the guest CSPRNG so two clones of one
+/// snapshot diverge. The host mints a fresh token per resume and delivers it
+/// over vsock; this records the *honest* outcome of that delivery so the
+/// resume verb never claims a rotation that did not happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReseedStatus {
+    /// Confirmed: the guest acknowledged the post-restore signal and rotated
+    /// its VMGenID from the host token.
+    Rotated,
+    /// The guest was reachable and answered, but did not rotate — a negative
+    /// `reseeded` acknowledgement or a non-success ack.
+    NotRotated,
+    /// The token was never confirmed delivered: the guest agent was not
+    /// reachable within the post-resume wait window, or the signal RPC
+    /// errored. The VM is resumed but its reseed state is unknown.
+    Undelivered,
+    /// This backend's warm-start carries no VMGenID rotation (libkrun
+    /// disk-only reboot, the trait default).
+    NotApplicable,
+}
+
+impl ReseedStatus {
+    /// Human-facing clause for the resume verb's success line — honest about
+    /// whether the guest actually rotated its VMGenID.
+    pub fn resume_summary(self) -> &'static str {
+        match self {
+            ReseedStatus::Rotated => "VMGenID rotated",
+            ReseedStatus::NotRotated => "VMGenID NOT rotated (guest did not reseed)",
+            ReseedStatus::Undelivered => {
+                "VMGenID token not delivered (guest agent unreachable) — re-run resume to retry"
+            }
+            ReseedStatus::NotApplicable => "no VMGenID rotation for this backend",
+        }
+    }
+}
+
+/// A successful warm-start: the booted VM plus the honest reseed outcome.
+///
+/// Returned by [`VmBackend::warm_start`] so a caller can surface whether the
+/// guest actually rotated its VMGenID rather than asserting it unconditionally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmStartOutcome {
+    /// The warm-started VM.
+    pub id: VmId,
+    /// Whether the guest rotated its VMGenID on this resume.
+    pub reseed: ReseedStatus,
+}
+
 // ---------------------------------------------------------------------------
 // Supervisor standby pool
 // ---------------------------------------------------------------------------
@@ -928,7 +978,7 @@ pub trait VmBackend: Send + Sync {
         &self,
         _config: &VmStartConfig,
         requested: SnapshotCapability,
-    ) -> std::result::Result<VmId, WarmStartError> {
+    ) -> std::result::Result<WarmStartOutcome, WarmStartError> {
         let available = self.snapshot_capability();
         if !available.satisfies(requested) {
             return Err(WarmStartError::Unsupported {
@@ -1533,6 +1583,48 @@ mod tests {
         assert!(msg.contains("mvmctl up"), "{msg}");
         // It's a real std error so callers can `?`/box it.
         let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn reseed_status_resume_summary_is_honest_and_distinct() {
+        // The resume verb prints this clause; each state must read differently
+        // so the message reflects whether the guest actually reseeded.
+        assert!(
+            ReseedStatus::Rotated.resume_summary().contains("rotated"),
+            "{}",
+            ReseedStatus::Rotated.resume_summary()
+        );
+        assert!(
+            ReseedStatus::NotRotated
+                .resume_summary()
+                .to_lowercase()
+                .contains("not"),
+            "{}",
+            ReseedStatus::NotRotated.resume_summary()
+        );
+        let undel = ReseedStatus::Undelivered.resume_summary().to_lowercase();
+        assert!(
+            undel.contains("not delivered") || undel.contains("unreachable"),
+            "{undel}"
+        );
+        let all = [
+            ReseedStatus::Rotated.resume_summary(),
+            ReseedStatus::NotRotated.resume_summary(),
+            ReseedStatus::Undelivered.resume_summary(),
+            ReseedStatus::NotApplicable.resume_summary(),
+        ];
+        let uniq: std::collections::HashSet<_> = all.iter().collect();
+        assert_eq!(uniq.len(), 4, "each reseed state must read differently");
+    }
+
+    #[test]
+    fn warm_start_outcome_carries_id_and_reseed() {
+        let o = WarmStartOutcome {
+            id: VmId("vm".into()),
+            reseed: ReseedStatus::Rotated,
+        };
+        assert_eq!(o.id.0, "vm");
+        assert_eq!(o.reseed, ReseedStatus::Rotated);
     }
 
     #[test]
