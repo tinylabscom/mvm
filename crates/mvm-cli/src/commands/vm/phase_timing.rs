@@ -68,19 +68,39 @@ impl RunPhaseMarks {
     }
 }
 
+/// Target ceiling for [`RunPhaseTimings::dispatch_window_ms`], in
+/// milliseconds. This is the *warm/cached* hot-start bar: when the run
+/// claims an already-booted standby, `backend_start_ms` collapses toward
+/// zero and the whole admitted-to-agent-reachable window should clear
+/// 200 ms. A cold run (full VMM create + guest boot) is expected to
+/// exceed it — the bar is a regression signal for the hot path, not a
+/// claim that every run is sub-200 ms.
+pub const DISPATCH_BAR_MS: f64 = 200.0;
+
 impl RunPhaseTimings {
-    /// Admitted-plan to command-dispatch: the window the `<200 ms` dispatch
-    /// latency bar is set against (backend boot + boot-to-agent wait).
+    /// Admitted-plan to command-dispatch: the window the [`DISPATCH_BAR_MS`]
+    /// hot-start latency bar is set against (backend boot + boot-to-agent
+    /// wait).
     pub fn dispatch_window_ms(&self) -> f64 {
         self.backend_start_ms + self.vsock_wait_ms
     }
 
+    /// Whether this run's dispatch window cleared the warm-start
+    /// [`DISPATCH_BAR_MS`] bar. The boundary is inclusive: a window exactly
+    /// at the bar passes.
+    pub fn within_dispatch_bar(&self) -> bool {
+        self.dispatch_window_ms() <= DISPATCH_BAR_MS
+    }
+
     /// A single stable, greppable line for logs and the benchmark harness.
+    /// The trailing `dispatch_bar=ok|over` token reports this run against
+    /// the warm-start [`DISPATCH_BAR_MS`] ceiling so a regression is visible
+    /// in the line itself, not just inferable from the raw window.
     pub fn render(&self) -> String {
         format!(
             "[mvm] phase-timing: resolve={:.1}ms drives={:.1}ms admit={:.1}ms \
              backend_start={:.1}ms vsock_wait={:.1}ms command={:.1}ms \
-             teardown={:.1}ms total={:.1}ms dispatch_window={:.1}ms",
+             teardown={:.1}ms total={:.1}ms dispatch_window={:.1}ms dispatch_bar={}",
             self.resolve_ms,
             self.drives_ms,
             self.admit_ms,
@@ -90,6 +110,11 @@ impl RunPhaseTimings {
             self.teardown_ms,
             self.total_ms,
             self.dispatch_window_ms(),
+            if self.within_dispatch_bar() {
+                "ok"
+            } else {
+                "over"
+            },
         )
     }
 }
@@ -191,8 +216,57 @@ mod tests {
         };
         assert_eq!(
             t.render(),
-            "[mvm] phase-timing: resolve=5.0ms drives=7.0ms admit=8.0ms backend_start=100.0ms vsock_wait=30.0ms command=10.0ms teardown=15.0ms total=175.0ms dispatch_window=130.0ms"
+            "[mvm] phase-timing: resolve=5.0ms drives=7.0ms admit=8.0ms backend_start=100.0ms vsock_wait=30.0ms command=10.0ms teardown=15.0ms total=175.0ms dispatch_window=130.0ms dispatch_bar=ok"
         );
+    }
+
+    /// Build timings with a chosen dispatch window (`backend_start +
+    /// vsock_wait`); the other phases are irrelevant to the bar.
+    fn timings_with_dispatch_window(backend_start_ms: f64, vsock_wait_ms: f64) -> RunPhaseTimings {
+        RunPhaseTimings {
+            resolve_ms: 0.0,
+            drives_ms: 0.0,
+            admit_ms: 0.0,
+            backend_start_ms,
+            vsock_wait_ms,
+            command_ms: 0.0,
+            teardown_ms: 0.0,
+            total_ms: backend_start_ms + vsock_wait_ms,
+        }
+    }
+
+    #[test]
+    fn dispatch_bar_is_inclusive_at_the_ceiling() {
+        // Exactly at the bar passes; one tick over fails. A warm standby
+        // claim (near-zero backend_start) clears it; a cold boot does not.
+        let at_bar = timings_with_dispatch_window(DISPATCH_BAR_MS - 30.0, 30.0);
+        approx(at_bar.dispatch_window_ms(), DISPATCH_BAR_MS);
+        assert!(at_bar.within_dispatch_bar(), "window == bar must pass");
+
+        let over = timings_with_dispatch_window(DISPATCH_BAR_MS, 0.1);
+        assert!(!over.within_dispatch_bar(), "window > bar must fail");
+
+        let warm = timings_with_dispatch_window(0.5, 130.0);
+        assert!(warm.within_dispatch_bar(), "warm 130ms window clears 200ms");
+
+        let cold = timings_with_dispatch_window(2250.0, 30.0);
+        assert!(
+            !cold.within_dispatch_bar(),
+            "cold 2.28s window exceeds 200ms"
+        );
+    }
+
+    #[test]
+    fn render_reports_over_bar_for_a_cold_window() {
+        let cold = timings_with_dispatch_window(2250.0, 30.0);
+        assert!(cold.render().ends_with("dispatch_bar=over"));
+    }
+
+    #[test]
+    fn dispatch_bar_constant_is_pinned() {
+        // Pin the published latency target so a change is a deliberate edit
+        // with a matching docs/rollup update, not an accidental drift.
+        approx(DISPATCH_BAR_MS, 200.0);
     }
 
     #[test]

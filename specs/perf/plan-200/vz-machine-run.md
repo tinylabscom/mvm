@@ -69,7 +69,19 @@ a measurement artifact. The no-network path above is unaffected.
 - Release-build numbers (these are debug upper bounds).
 - The `--net`/`--allow-host` smoke, blocked on the egress-policy-bundle gap above.
 - The Linux KVM / builder-VM lane (`machine run` on Firecracker) — needs a KVM host.
-- A committed cached-hot-start benchmark harness + a `<200 ms` dispatch bar
-  assertion (the dominant `backend_start` is the work item before any such claim).
+- A committed cached-hot-start benchmark *harness* — the live loop that
+  claims a warm standby and measures the hot-path dispatch window across
+  N iterations. (Still open; needs a warm standby, so it overlaps the
+  warm-pool work.)
+
+The `<200 ms` dispatch bar itself is now a first-class, surfaced
+construct (`RunPhaseTimings::DISPATCH_BAR_MS` / `within_dispatch_bar()`):
+`MVM_PHASE_TIMING=1` runs now end their line with `dispatch_bar=ok|over`,
+comparing `dispatch_window` (`backend_start + vsock_wait`) against the
+200 ms warm-start ceiling, so a regression is visible in the line rather
+than eyeballed. On the cold Vz numbers above (`backend_start` ~2.25 s)
+the verdict is correctly `over` — the bar is a *warm/cached* hot-start
+target (where `backend_start` collapses toward zero on a standby claim),
+not a claim that cold runs clear it.
 
 No latency claim should be made beyond what is measured here.
