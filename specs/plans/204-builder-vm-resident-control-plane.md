@@ -326,9 +326,33 @@ arm lands with the daemon's image baking (boot-gated).
       path never turns a passing build into a failure. Unit-tested:
       `finalize_typed_build_*` (hash derivation + artifact copy + cleanup;
       malformed-store-path rejection).
-      **Remaining to make builds the default:** a builder-image rebake to deploy
-      the daemon export change, a live typed guest-image build proof on KVM, then
-      flip `resolve_route`'s default for builds.
+      **Daemon nix-env fix landed:** a live typed `BuildGuestImage` against a
+      freshly-rebaked vz builder (macOS-26) caught that the typed path could not
+      build at all — the daemon spawned `nix` with no environment, so `HOME` was
+      unset (`//.cache`) and `nix` died "creating directory '//.cache/nix':
+      Read-only file system" on the read-only rootfs. The legacy shell build
+      script exports `HOME=/tmp` + `XDG_CACHE_HOME=/nix-store/.cache` +
+      `XDG_STATE_HOME=/tmp/.local/state` and `mkdir -p`s them; the typed daemon
+      was never given that contract. `builderd::CommandExecutor` now applies the
+      same writable `HOME`/XDG env to its `nix` runs and creates the cache/state
+      dirs first (`daemon_command_env`, unit-tested). A `builderd-buildimage`
+      diagnostic (sibling of `builderd-flakecheck`) drives one typed
+      `BuildGuestImage` over the live socket and prints the store path — the
+      harness that surfaced the gap. Without this the typed build path was
+      non-functional, so it could not have been artifact-equal.
+      **Remaining to make builds the default (deferred — needs a quiet box):**
+      1. Live override-free artifact-equality proof: with the rebaked daemon, run
+         `builderd-buildimage` for a clean target (one without a `git+file:///work`
+         input — a git *worktree*'s `.git` is a pointer file the builder VM can't
+         resolve; use `nixpkgs#hello` or a non-worktree checkout) and assert its
+         reported `store_path` equals a plain in-VM `nix build … --print-out-paths`
+         of the same target. Both dispatch paths run byte-identical `nix build`
+         argv, so equality is expected; this confirms no residual daemon-env drift.
+      2. Then flip the **build** default in `resolve_route` (build-specific, must
+         not also flip `FlakeCheck`): `try_typed_build` takes Typed when the daemon
+         is reachable, with a debug **opt-out** to force legacy.
+      3. That opt-out is the raw-shell debug gate below; once it lands, drop the
+         newly-routed file from the `check-builder-shell-job-sites` allowlist.
 - [ ] Gate raw shell execution behind an explicit debug/development flag.
       Blocked on the line above — raw shell stays the default until a typed op replaces it; the gate flips once the typed path is the default.
 - [x] Add a lint or structural test that prevents new normal-path shell jobs.

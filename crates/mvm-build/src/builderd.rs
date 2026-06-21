@@ -189,12 +189,47 @@ pub trait OpExecutor {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CommandExecutor;
 
+/// Writable `HOME`/XDG locations the daemon's `nix` needs inside the builder
+/// VM. The rootfs is mounted read-only, so without these `nix` dies creating
+/// its cache under `//.cache`. Mirrors the env the in-VM shell build script
+/// exports: the cache sits on the persistent `/nix-store` overlay so eval and
+/// tarball caches survive across builds, while state stays on `/tmp` tmpfs.
+const BUILDERD_NIX_ENV: [(&str, &str); 3] = [
+    ("HOME", "/tmp"),
+    ("XDG_CACHE_HOME", "/nix-store/.cache"),
+    ("XDG_STATE_HOME", "/tmp/.local/state"),
+];
+
+/// Persistent cache/state dirs the daemon creates before a `nix` run so the
+/// first build can write them (the shell build script `mkdir -p`s the same).
+const BUILDERD_NIX_DIRS: [&str; 2] = ["/nix-store/.cache", "/tmp/.local/state"];
+
+/// The env a daemon command needs: the writable `HOME`/XDG contract for `nix`
+/// (the only program the daemon spawns), nothing for anything else. Pure so the
+/// contract is unit-tested without executing Nix.
+fn daemon_command_env(program: &str) -> &'static [(&'static str, &'static str)] {
+    if program == "nix" {
+        &BUILDERD_NIX_ENV
+    } else {
+        &[]
+    }
+}
+
 impl OpExecutor for CommandExecutor {
     fn run(&self, argv: &[String]) -> std::io::Result<OpExecResult> {
         let (program, rest) = argv
             .split_first()
             .ok_or_else(|| std::io::Error::other("empty argv"))?;
-        let output = std::process::Command::new(program).args(rest).output()?;
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(rest);
+        let env = daemon_command_env(program);
+        if !env.is_empty() {
+            for dir in BUILDERD_NIX_DIRS {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            cmd.envs(env.iter().copied());
+        }
+        let output = cmd.output()?;
         Ok(OpExecResult {
             exit_code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -763,6 +798,29 @@ mod tests {
 
     fn op() -> OperationId {
         OperationId(Uuid::nil())
+    }
+
+    // ---- command env ---------------------------------------------------
+
+    #[test]
+    fn daemon_command_env_gives_nix_writable_home_and_xdg() {
+        // The read-only rootfs has no writable `HOME`; without these the
+        // daemon's `nix` dies creating `//.cache/nix`. The cache must sit on
+        // the persistent `/nix-store` overlay, mirroring the shell build script.
+        assert_eq!(
+            daemon_command_env("nix"),
+            &[
+                ("HOME", "/tmp"),
+                ("XDG_CACHE_HOME", "/nix-store/.cache"),
+                ("XDG_STATE_HOME", "/tmp/.local/state"),
+            ]
+        );
+    }
+
+    #[test]
+    fn daemon_command_env_is_empty_for_non_nix_programs() {
+        assert!(daemon_command_env("ls").is_empty());
+        assert!(daemon_command_env("/sbin/mvm-builderd").is_empty());
     }
 
     // ---- dispatch ------------------------------------------------------
