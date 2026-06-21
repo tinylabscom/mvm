@@ -14,5 +14,6 @@ pub(super) mod metrics;
 pub(super) mod network;
 pub(super) mod reconcile;
 pub(super) mod secret;
+pub(super) mod transcript;
 
 pub(super) use super::{Cli, shared};
