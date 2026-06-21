@@ -1151,8 +1151,14 @@ Required behavior:
 
 - [ ] Decide whether `.mvm`, `.mvmpkg`, or one consolidated public artifact is
       the beginner-facing portable unit.
-- [ ] Implement verify-then-extract for the selected artifact format if the
-      existing primitive does not already expose it.
+- [x] Implement verify-then-extract for the selected artifact format if the
+      existing primitive does not already expose it. The selected beginner-facing
+      unit is the existing signed `.mvm` archive; `mvm_build::packed_artifact`
+      verifies signature, hashes, format version, sealed-prod verity sidecars,
+      size caps, and traversal-safe regular files before extraction. `mvmctl
+      machine check-artifact` now reuses a single verified-admission gate:
+      admission preview is derived only after artifact verification and host-arch
+      acceptance pass.
 - [ ] Implement `mvmctl machine pack ... -o <artifact>` using source-built or
       image-backed inputs.
 - [ ] Implement `mvmctl machine run <artifact> -- <cmd>` through the standard
@@ -1164,8 +1170,11 @@ Required behavior:
 - [ ] Add docs/source tests that portable artifact examples do not imply host
       Nix is required and do state host architecture/backend compatibility
       requirements.
-- [ ] Add tamper, wrong-key, traversal, unknown-version, missing-verity, and
-      arch-mismatch tests.
+- [~] Add tamper, wrong-key, traversal, unknown-version, missing-verity, and
+      arch-mismatch tests. The lower-level packed-artifact verifier already
+      covers traversal, unknown-version, and missing-verity refusal; Plan 200 now
+      adds machine-level non-bypass coverage for wrong-key, tampered payload, and
+      host-arch mismatch before any admission preview is returned.
 
 ### G. Default binary closure and dependency weight
 

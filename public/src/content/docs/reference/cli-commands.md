@@ -382,6 +382,9 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine exec --name <name> -- <cmd>...` | Run a command in an already-started named machine |
 | `mvmctl machine shell --name <name>` | Attach an interactive shell/console to an already-started named machine |
 | `mvmctl machine stop --name <name>` | Stop an already-started named machine |
+| `mvmctl machine check-artifact <artifact.mvm>` | Verify a portable artifact and preview its admission posture without extracting or booting |
+| `mvmctl machine check-artifact <artifact.mvm> --key <pubkey>` | Verify with an explicit raw Ed25519 public key |
+| `mvmctl machine check-artifact <artifact.mvm> --json` | Print the verified artifact/admission preview as JSON |
 
 `machine create` accepts either `--image <ref>` or an image-backed manifest, not
 both. When `--image` is omitted, it searches the current directory for
@@ -408,8 +411,12 @@ and redacted volume policy without resolving or booting the image; the signed
 machine-start receipt carries the same policy summary plus the resolved digest
 and start timestamp after a real boot. `exec` / `shell` / `stop` reuse the
 existing console/down paths for the running VM. `machine pack` for portable
-signed artifacts is still follow-up work. Use `mvmctl up` for the manifest/flake
-path that already exposes named networks and policy bundles.
+signed artifacts and live `machine run <artifact.mvm>` are still follow-up work.
+`machine check-artifact` is the current read-only portable-artifact gate: it
+verifies the signed manifest, file hashes, format version, sealed-prod verity
+requirements, host architecture, and fail-closed admission posture before
+printing a preview. Use `mvmctl up` for the manifest/flake path that already
+exposes named networks and policy bundles.
 
 ## Sandbox State
 
