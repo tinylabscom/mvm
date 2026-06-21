@@ -1172,21 +1172,20 @@ fn resume_emits_workload_wake_audit_entry() {
 }
 
 #[test]
-fn down_no_args_emits_vm_stop_audit_entry() {
-    // `mvmctl down` (no args, empty registry) calls `backend.stop_all`,
+fn machine_stop_all_emits_vm_stop_audit_entry() {
+    // `mvmctl machine stop --all` (empty registry) calls `backend.stop_all`,
     // which Firecracker satisfies as a no-op when no VMs are running.
-    // The verb emits `vm_stop` with `detail=stop_all_ok` regardless
-    // — Plan 37 §6: every state-changing CLI verb emits one record
-    // per attempt, even no-ops.
+    // The verb emits `vm_stop` with `detail=stop_all_ok` regardless —
+    // every state-changing CLI verb emits one record per attempt, even no-ops.
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["down"])
+        .args(["machine", "stop", "--all"])
         .output()
         .expect("spawn mvmctl");
     assert!(
         output.status.success(),
-        "mvmctl down failed: stderr={}",
+        "mvmctl machine stop --all failed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -1203,19 +1202,19 @@ fn down_no_args_emits_vm_stop_audit_entry() {
 }
 
 #[test]
-fn down_with_name_emits_vm_stop_for_that_name() {
-    // `mvmctl down <vm>` against a fresh sandbox: Firecracker's
+fn machine_stop_with_name_emits_vm_stop_for_that_name() {
+    // `mvmctl machine stop <vm>` against a fresh sandbox: Firecracker's
     // `stop_vm` is tolerant of missing VMs (returns Ok), the verb
     // emits `vm_stop` with `vm_name=<vm>` and `detail=ok`.
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["down", "ghost-vm"])
+        .args(["machine", "stop", "ghost-vm"])
         .output()
         .expect("spawn mvmctl");
     assert!(
         output.status.success(),
-        "mvmctl down ghost-vm failed: stderr={}",
+        "mvmctl machine stop ghost-vm failed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -2076,7 +2075,7 @@ fn secret_rm_emits_delete_action_in_secret_audit_log() {
 
 #[test]
 fn build_emits_template_build_audit_entry_against_stub_outdir() {
-    // Plan 68: `mvmctl build --flake <stub-flake> --profile minimal`
+    // `mvmctl machine build --flake <stub-flake> --profile minimal`
     // reaches `mvm_build::dev_build::dev_build`, which normally
     // shells out to `nix build`. With `MVM_BUILD_STUB_OUTDIR` set,
     // dev_build returns a synthetic `DevBuildResult` pointing at
@@ -2107,18 +2106,18 @@ fn build_emits_template_build_audit_entry_against_stub_outdir() {
         .mvmctl()
         .env("MVM_BUILD_STUB_OUTDIR", &stub_out)
         .args([
+            "machine",
             "build",
-            "image",
             "--flake",
             flake_dir.to_str().expect("utf-8 flake path"),
             "--profile",
             "minimal",
         ])
         .output()
-        .expect("spawn mvmctl build");
+        .expect("spawn mvmctl machine build");
     assert!(
         output.status.success(),
-        "mvmctl build failed: stdout={} stderr={}",
+        "mvmctl machine build failed: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

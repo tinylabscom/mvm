@@ -134,10 +134,8 @@ const VM_SUB: &[(&str, AuditPosture)] = &[
 // may trigger are emitted by the shared bootstrap, same as `dev`.
 const KERNEL_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
 
-// Plan 178 (D1) — build-time verbs grouped under `build <sub>`. `build image`
-// is the former top-level `build`. Postures unchanged.
+// Plan 178 (D1) — build-time verbs grouped under `build <sub>`.
 const BUILD_SUB: &[(&str, AuditPosture)] = &[
-    ("image", AuditPosture::Emits("TemplateBuild")),
     ("compile", AuditPosture::ReadOnly),
     ("validate", AuditPosture::ReadOnly),
     ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
@@ -206,6 +204,7 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
 // surfaces after first resolving the named machine.
 const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("run", AuditPosture::InteractiveOrControl),
+    ("build", AuditPosture::Emits("TemplateBuild")),
     ("create", AuditPosture::Emits("ConfigChange")),
     ("ls", AuditPosture::ReadOnly),
     ("inspect", AuditPosture::ReadOnly),
@@ -217,6 +216,8 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     // Plan 200 — verify a portable `.mvm` + preview its admission. Read-only:
     // no extraction, no boot, no audit-chain emission.
     ("check-artifact", AuditPosture::ReadOnly),
+    ("logs", AuditPosture::ReadOnly),
+    ("console", AuditPosture::InteractiveOrControl),
 ];
 
 const VOLUME_SUB: &[(&str, AuditPosture)] = &[
@@ -393,9 +394,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
         "up",
         AuditPosture::Emits("plan.admitted+plan.launched+VmStart"),
     ),
-    ("logs", AuditPosture::ReadOnly),
     ("ls", AuditPosture::ReadOnly),
-    ("console", AuditPosture::InteractiveOrControl),
     ("run", AuditPosture::InteractiveOrControl),
     ("invoke", AuditPosture::Emits("plan.admitted+plan.launched")),
     // Plan 178 — single-VM operational verbs grouped under `vm <sub>`.
