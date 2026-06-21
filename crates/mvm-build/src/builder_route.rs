@@ -6,6 +6,9 @@
 //! dispatched by `persistent_builder`) is being migrated onto that typed client
 //! one operation at a time.
 //!
+//! Typed operations live here as `run_*` (one connection, one op) + `try_typed_*`
+//! (route-decide then dispatch): `flake_check` and `build` (guest image).
+//!
 //! This module is the decision seam for that migration. A host build path asks
 //! [`resolve_route`] whether a given dispatch should use the typed `mvm-builderd`
 //! route or fall back to the legacy shell-job channel, and emits
@@ -179,6 +182,101 @@ pub fn try_typed_flake_check(vms_root: &Path, flake_path: &str) -> FlakeCheckDis
     }
 }
 
+/// Per-read timeout for a typed guest-image build. A `nix build` of a guest
+/// image is far heavier than an eval check (cold-cache realisation), so this is
+/// generous — it bounds a hung daemon, not a slow-but-progressing build.
+const BUILD_OP_TIMEOUT: Duration = Duration::from_secs(3600);
+
+/// Verdict of a typed guest-image build run through the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildVerdict {
+    /// `nix build` produced an out-path. `store_path` is the `/nix/store/...`
+    /// result **inside the builder VM**. Exporting its artifacts (kernel +
+    /// rootfs) to a host-readable location is the caller's remaining step: the
+    /// legacy path copies them into the `/out` virtio-fs share the host reads,
+    /// and the typed path's output-export reconciliation is not wired yet. So
+    /// this verdict reports *that* a build succeeded and where in the store, not
+    /// host-readable artifacts.
+    Built {
+        /// The `/nix/store/...` out-path inside the builder VM.
+        store_path: String,
+    },
+    /// `nix build` failed; carries the daemon's failure message (a stderr tail).
+    Failed {
+        /// The daemon's failure detail, for the user.
+        message: String,
+    },
+}
+
+/// Outcome of attempting a typed guest-image build.
+pub enum BuildDispatch {
+    /// The typed route was taken; carries the daemon result (or a transport
+    /// error once committed to the typed path).
+    Took(Result<BuildVerdict, BuilderdClientError>),
+    /// Not routed typed (caller not opted in, or no ready daemon) — the caller
+    /// should use its legacy in-VM build path.
+    Fellback,
+}
+
+/// Run a typed `BuildGuestImage` against the daemon at `socket_path`: connect,
+/// send the op, and map its terminal outcome onto a [`BuildVerdict`].
+pub fn run_build(
+    socket_path: &Path,
+    flake_ref: &str,
+    attr_path: &str,
+    timeout: Duration,
+) -> Result<BuildVerdict, BuilderdClientError> {
+    let mut client = BuilderdClient::connect(socket_path, timeout)?;
+    let request = BuilderRequest::BuildGuestImage {
+        op: OperationId::new(),
+        flake_ref: flake_ref.to_string(),
+        attr_path: attr_path.to_string(),
+        fingerprint: None,
+    };
+    let mut discard = |_event: OperationEvent| {};
+    match client.run_operation(&request, &mut discard)? {
+        OperationOutcome::Artifact {
+            store_path,
+            artifact_path,
+        } => Ok(BuildVerdict::Built {
+            store_path: store_path.unwrap_or(artifact_path),
+        }),
+        OperationOutcome::Failed { message, .. } => Ok(BuildVerdict::Failed { message }),
+        other => Err(BuilderdClientError::Protocol {
+            detail: format!("unexpected build outcome: {other:?}"),
+        }),
+    }
+}
+
+/// Route a guest-image build: take the typed daemon path when the caller opted
+/// in (`MVM_BUILDERD_TYPED`) **and** a ready builder daemon is reachable under
+/// `vms_root`; otherwise fall back (emitting the compat diagnostic) to the
+/// caller's legacy in-VM build path.
+pub fn try_typed_build(vms_root: &Path, flake_ref: &str, attr_path: &str) -> BuildDispatch {
+    let opt_in = typed_opt_in(|k| std::env::var(k).ok());
+    let socket = resolve_running_builder_socket(vms_root);
+    let reachable = socket.as_deref().is_some_and(|s| {
+        matches!(
+            probe_builderd_readiness(s, READINESS_PROBE_TIMEOUT),
+            BuilderdReadiness::Ready { .. }
+        )
+    });
+    match resolve_route(reachable, opt_in) {
+        BuilderRoute::Typed => {
+            let socket = socket.expect("reachable implies a resolved socket");
+            BuildDispatch::Took(run_build(&socket, flake_ref, attr_path, BUILD_OP_TIMEOUT))
+        }
+        BuilderRoute::LegacyShell => {
+            tracing::debug!(
+                target: "mvm::builder",
+                "{}",
+                legacy_shell_diagnostic("build-guest-image")
+            );
+            BuildDispatch::Fellback
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,28 +325,37 @@ mod io_tests {
     use std::os::unix::net::UnixListener;
     use std::thread;
 
-    /// Daemon-side stand-in: every op subprocess exits with a fixed code.
+    /// Daemon-side stand-in: every op subprocess exits with a fixed code and
+    /// emits a fixed stdout (build ops read their out-path from stdout).
     struct FakeExec {
         exit: i32,
+        stdout: String,
     }
     impl OpExecutor for FakeExec {
         fn run(&self, _argv: &[String]) -> std::io::Result<OpExecResult> {
             Ok(OpExecResult {
                 exit_code: self.exit,
-                stdout: String::new(),
+                stdout: self.stdout.clone(),
                 stderr_tail: "flake eval boom".to_string(),
             })
         }
     }
 
-    /// Serve exactly one connection (handshake + one op) with a fake executor.
-    fn serve_one(socket: PathBuf, exit: i32) -> thread::JoinHandle<()> {
+    /// Serve exactly one connection (handshake + one op) with a fake executor
+    /// that emits `stdout`.
+    fn serve_one_full(socket: PathBuf, exit: i32, stdout: String) -> thread::JoinHandle<()> {
         let listener = UnixListener::bind(&socket).unwrap();
         thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
-                let _ = serve_connection_with_executor(&mut stream, &FakeExec { exit });
+                let _ = serve_connection_with_executor(&mut stream, &FakeExec { exit, stdout });
             }
         })
+    }
+
+    /// Serve one connection with empty stdout (sufficient for flake check, whose
+    /// verdict is exit-code-driven).
+    fn serve_one(socket: PathBuf, exit: i32) -> thread::JoinHandle<()> {
+        serve_one_full(socket, exit, String::new())
     }
 
     #[test]
@@ -271,6 +378,39 @@ mod io_tests {
             other => panic!("expected Invalid, got {other:?}"),
         }
         h.join().unwrap();
+    }
+
+    #[test]
+    fn typed_build_clean_exit_with_out_path_is_built() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("vsock-21473.sock");
+        // The daemon's nix build prints the out-path on stdout.
+        let h = serve_one_full(sock.clone(), 0, "/nix/store/aaaa-img\n".to_string());
+        match run_build(&sock, "path:.", "packages.default", Duration::from_secs(5)).unwrap() {
+            BuildVerdict::Built { store_path } => assert_eq!(store_path, "/nix/store/aaaa-img"),
+            other => panic!("expected Built, got {other:?}"),
+        }
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn typed_build_nonzero_exit_is_failed_with_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("vsock-21473.sock");
+        let h = serve_one(sock.clone(), 1);
+        match run_build(&sock, "path:.", "x", Duration::from_secs(5)).unwrap() {
+            BuildVerdict::Failed { message } => assert!(message.contains("boom"), "{message}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn run_build_on_missing_socket_is_not_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("absent.sock");
+        let err = run_build(&sock, "path:.", "x", Duration::from_secs(1)).unwrap_err();
+        assert!(matches!(err, BuilderdClientError::NotReady { .. }));
     }
 
     #[test]
