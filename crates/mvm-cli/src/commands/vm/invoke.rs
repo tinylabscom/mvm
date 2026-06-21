@@ -125,7 +125,7 @@ pub(in crate::commands) struct Args {
     /// workload's substitution endpoint + its boot-minted placeholders
     /// are reused, so a secret-declaring `up` workload's
     /// entrypoint runs with live egress substitution. The VM is left running
-    /// (no teardown) — reap it with `mvmctl down <NAME>`.
+    /// (no teardown) — reap it with `mvmctl machine stop <NAME>`.
     #[arg(long, conflicts_with_all = ["keep_alive", "fresh", "reset", "no_vm"])]
     pub attach: bool,
 

@@ -94,8 +94,6 @@ pub(in crate::commands) enum Commands {
     /// `nix/images/default-tenant/` image is used (built via Nix on first use,
     /// cached at `~/.cache/mvm/default-microvm/`).
     Up(vm::up::Args),
-    /// Stop microVMs (from mvm.toml, by name, or all)
-    Down(vm::down::Args),
     /// Run a command in a transient microVM (absorbed the former `exec`)
     Run(vm::exec::RunArgs),
     /// Call a VM's baked entrypoint
@@ -327,7 +325,6 @@ pub fn run() -> Result<()> {
         Commands::Machine(a) => machine::run(&cli, a, &cfg),
         Commands::Storage(a) => storage::run(&cli, a, &cfg),
         Commands::Up(a) => vm::up::run(&cli, a, &cfg),
-        Commands::Down(a) => vm::down::run(&cli, a, &cfg),
         Commands::ShellInit(a) => env::shell_init::run(&cli, a, &cfg),
         Commands::Ops(a) => ops::group::run(&cli, a, &cfg),
         Commands::Network(a) => ops::network::run(&cli, a, &cfg),

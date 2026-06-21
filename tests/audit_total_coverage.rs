@@ -213,7 +213,7 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("start", AuditPosture::InteractiveOrControl),
     ("exec", AuditPosture::InteractiveOrControl),
     ("shell", AuditPosture::InteractiveOrControl),
-    ("stop", AuditPosture::InteractiveOrControl),
+    ("stop", AuditPosture::Emits("VmStop")),
     // Plan 200 — verify a portable `.mvm` + preview its admission. Read-only:
     // no extraction, no boot, no audit-chain emission.
     ("check-artifact", AuditPosture::ReadOnly),
@@ -393,7 +393,6 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
         "up",
         AuditPosture::Emits("plan.admitted+plan.launched+VmStart"),
     ),
-    ("down", AuditPosture::Emits("VmStop")),
     ("logs", AuditPosture::ReadOnly),
     ("ls", AuditPosture::ReadOnly),
     ("console", AuditPosture::InteractiveOrControl),

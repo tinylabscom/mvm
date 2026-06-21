@@ -61,7 +61,7 @@ fn next_steps_lines(dir: &std::path::Path, name: &str) -> Vec<String> {
         "  mvmctl up --flake .                 # build + boot the VM".to_string(),
         String::new(),
         "Cleanup when you're done:".to_string(),
-        "  mvmctl down                         # stop running VMs".to_string(),
+        "  mvmctl machine stop --all           # stop running VMs".to_string(),
         format!("  rm -rf {dir_display}                       # remove the scaffold"),
     ]
 }
@@ -1357,7 +1357,7 @@ mod tests {
         // scaffold) must appear — the scaffold owes the user the full
         // loop, not just the build/boot half.
         assert!(
-            lines.iter().any(|l| l.contains("mvmctl down")),
+            lines.iter().any(|l| l.contains("mvmctl machine stop")),
             "scaffold must include a VM-stop cleanup hint; got: {lines:?}"
         );
         assert!(

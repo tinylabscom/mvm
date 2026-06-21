@@ -68,7 +68,7 @@ pub(in crate::commands) enum MachineAction {
     /// Boot a persistent named machine without running a one-shot command
     #[command(display_order = 4)]
     Start(MachineStartArgs),
-    /// Stop an already-started named machine
+    /// Stop a running VM by name, or all running VMs with --all
     #[command(display_order = 5)]
     Stop(MachineStopArgs),
     /// Remove one persistent named machine spec
@@ -306,10 +306,17 @@ pub(in crate::commands) struct MachineShellArgs {
 }
 
 #[derive(ClapArgs, Debug, Clone)]
+#[command(group(
+    clap::ArgGroup::new("target")
+        .required(true)
+        .args(["name", "all"])
+))]
 pub(in crate::commands) struct MachineStopArgs {
-    /// Persistent machine name.
-    #[arg(long)]
-    pub name: String,
+    /// VM name to stop.
+    pub name: Option<String>,
+    /// Stop all running VMs.
+    #[arg(long, conflicts_with = "name")]
+    pub all: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1413,15 +1420,10 @@ fn shell_machine(cli: &Cli, args: MachineShellArgs, cfg: &MvmConfig) -> Result<(
 }
 
 fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) -> Result<()> {
-    ensure_machine_spec_exists(&args.name)?;
-    reap_proxy(&args.name);
-    down::run(
-        cli,
-        down::Args {
-            name: Some(args.name),
-        },
-        cfg,
-    )
+    if let Some(ref name) = args.name {
+        reap_proxy(name);
+    }
+    down::run(cli, down::Args { name: args.name }, cfg)
 }
 
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
@@ -1965,8 +1967,11 @@ mod tests {
             }
             other => panic!("expected shell action, got {other:?}"),
         }
-        match parse(&["stop", "--name", "web"]).expect("parse") {
-            MachineAction::Stop(args) => assert_eq!(args.name, "web"),
+        match parse(&["stop", "web"]).expect("parse") {
+            MachineAction::Stop(args) => {
+                assert_eq!(args.name.as_deref(), Some("web"));
+                assert!(!args.all);
+            }
             other => panic!("expected stop action, got {other:?}"),
         }
     }
@@ -2712,5 +2717,35 @@ ssh_agent = true
             },
             other => panic!("expected Commands::Machine, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn machine_stop_named_and_all_parse() {
+        match parse(&["stop", "web"]).expect("parse named") {
+            MachineAction::Stop(args) => {
+                assert_eq!(args.name.as_deref(), Some("web"));
+                assert!(!args.all);
+            }
+            other => panic!("expected stop action, got {other:?}"),
+        }
+        match parse(&["stop", "--all"]).expect("parse --all") {
+            MachineAction::Stop(args) => {
+                assert!(args.name.is_none());
+                assert!(args.all);
+            }
+            other => panic!("expected stop action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn machine_stop_requires_target() {
+        let err = parse(&["stop"]).expect_err("no name and no --all must be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn machine_stop_name_and_all_conflict() {
+        let err = parse(&["stop", "web", "--all"]).expect_err("name + --all must be a parse error");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

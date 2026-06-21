@@ -72,8 +72,8 @@ pub(super) fn cmd_dev_linux_native_down(json: bool) -> Result<bool> {
     if !json {
         ui::info(
             "Nothing to stop on Linux+KVM — the host is the dev environment. \
-             (mvmctl-managed microVMs are still running; use `mvmctl down <name>` \
-             to stop those individually or `mvmctl down --all`.)",
+             (mvmctl-managed microVMs are still running; use `mvmctl machine stop <name>` \
+             to stop those individually or `mvmctl machine stop --all`.)",
         );
     }
     // No managed dev VM on a native-KVM host; nothing was running.

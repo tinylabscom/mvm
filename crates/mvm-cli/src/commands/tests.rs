@@ -19,7 +19,7 @@ use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
 use super::trust;
 use super::vm::{
-    checkpoint, console, cp, down, exec, forward, group, pause, sandbox, session, up, volume,
+    checkpoint, console, cp, exec, forward, group, pause, sandbox, session, up, volume,
 };
 
 use audit::AuditAction;
@@ -997,32 +997,54 @@ fn test_env_vars_to_drive_file_empty() {
 
 // ---- VM subcommand tests ----
 
-// ---- Up/Down command tests ----
+// ---- machine stop tests ----
 
-// The `mvmctl down -f <fleet-config>` flag was removed along with
-// fleet.rs — multi-VM orchestration is mvmd's job. `down::Args` now
-// has only `name`.
+// `mvmctl down` was removed; `machine stop` is the sole stop path.
+// It requires exactly one of: a positional VM name, or `--all`.
 
 #[test]
-fn test_down_parses_no_args() {
-    let cli = Cli::try_parse_from(["mvmctl", "down"]).unwrap();
-    match cli.command {
-        Commands::Down(down::Args { name }) => {
-            assert!(name.is_none());
+fn machine_stop_named_and_all_parse() {
+    let cli = Cli::try_parse_from(["mvmctl", "machine", "stop", "web"]).unwrap();
+    let Commands::Machine(mg) = cli.command else {
+        panic!("expected machine group")
+    };
+    match mg.action {
+        machine::MachineAction::Stop(args) => {
+            assert_eq!(args.name.as_deref(), Some("web"));
+            assert!(!args.all);
         }
-        _ => panic!("Expected Down command"),
+        _ => panic!("expected stop action"),
+    }
+
+    let cli = Cli::try_parse_from(["mvmctl", "machine", "stop", "--all"]).unwrap();
+    let Commands::Machine(mg) = cli.command else {
+        panic!("expected machine group")
+    };
+    match mg.action {
+        machine::MachineAction::Stop(args) => {
+            assert!(args.name.is_none());
+            assert!(args.all);
+        }
+        _ => panic!("expected stop action"),
     }
 }
 
 #[test]
-fn test_down_parses_with_name() {
-    let cli = Cli::try_parse_from(["mvmctl", "down", "gw"]).unwrap();
-    match cli.command {
-        Commands::Down(down::Args { name }) => {
-            assert_eq!(name.as_deref(), Some("gw"));
-        }
-        _ => panic!("Expected Down command"),
-    }
+fn machine_stop_requires_target() {
+    let err = Cli::try_parse_from(["mvmctl", "machine", "stop"])
+        .expect_err("no name and no --all must be rejected");
+    assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+}
+
+#[test]
+fn down_removed() {
+    let err = Cli::try_parse_from(["mvmctl", "down", "web"])
+        .expect_err("down must not parse after removal");
+    assert_eq!(
+        err.kind(),
+        clap::error::ErrorKind::InvalidSubcommand,
+        "expected InvalidSubcommand, got: {err:?}"
+    );
 }
 
 // ---- read_dir_to_drive_files tests ----
@@ -3625,7 +3647,7 @@ fn emits_machine_readable_stdout(argv: &[&str]) -> bool {
 fn state_touching_commands_trigger_entry_convergence() {
     // Lifecycle mutate/read commands run the cheap converge pass.
     assert!(touches(&["mvmctl", "up"]));
-    assert!(touches(&["mvmctl", "down"]));
+    assert!(touches(&["mvmctl", "machine", "stop", "--all"]));
     assert!(touches(&["mvmctl", "console", "myvm"]));
     assert!(touches(&["mvmctl", "vm", "pause", "myvm"]));
     assert!(touches(&["mvmctl", "vm", "save", "myvm"]));

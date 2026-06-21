@@ -169,14 +169,14 @@ impl Commands {
         if let Commands::Ls(a) = self {
             return a.touches_vm_state();
         }
+        // `machine <sub>` — start/stop/run all touch running-VM lifecycle state.
+        if matches!(self, Commands::Machine(_)) {
+            return true;
+        }
         matches!(
             self,
             // Lifecycle mutate/read on the local single-host path.
-            Commands::Up(_)
-                | Commands::Down(_)
-                | Commands::Run(_)
-                | Commands::Console(_)
-                | Commands::Dev(_)
+            Commands::Up(_) | Commands::Run(_) | Commands::Console(_) | Commands::Dev(_)
         )
     }
 
@@ -202,7 +202,6 @@ impl Commands {
             // `build <sub>` delegates to the per-op verb (image/compile/validate/kernel).
             Commands::Build(a) => a.action.verb_name(),
             Commands::Up(_) => "up",
-            Commands::Down(_) => "down",
             Commands::ShellInit(_) => "shell-init",
             // `ops <sub>` delegates to the per-op verb (metrics/bench/config/mcp).
             Commands::Ops(a) => a.action.verb_name(),
