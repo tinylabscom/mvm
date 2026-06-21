@@ -40,6 +40,14 @@ The host-side barrier policy (`await_primed_barrier`, fail-closed) already lande
 - [ ] **Step 2:** Gate the warm-snapshot path (`mvmctl vm pause` with an opt-in `--primed-barrier`/timeout, or the warm-pool seal trigger) on `await_primed_barrier` before `pause_and_seal`. Fail closed on timeout (no half-warmed snapshot).
 - [ ] **Step 3 (live-KVM gated):** A workload that signals primed after warmup → host seals at that point → `vm resume --warm` starts past cold-start; a workload that never signals → the seal times out and refuses.
 
+## Task 3: warm-start token-delivery polish (small, from the Plan 175 live capture)
+
+The merged warm path restores correctly, but the VMGenID token delivery is best-effort and **raced the 30 s agent-ready window in every Plan 175 live run** — the restored guest agent reliably re-accepts ~30–35 s post-restore, just outside the window, so the reseed silently no-ops with a warn.
+
+- [ ] **Step 1 — investigate the ~30 s post-restore agent-ready latency.** Why does the restored agent take ~30 s to accept a host vsock connection (CONNECT 5252 → OK) when the VMM resumed in ~0.5 s? (Snapshot-captured listener state? clock/timer catch-up? service re-init?) Fix the root cause if cheap; otherwise widen `warm_restore_instance`'s agent-ready wait to cover the observed latency so the token reliably lands.
+- [ ] **Step 2 — make the verb honest.** `run_warm_start` prints "VMGenID rotated" unconditionally; surface the actual `PostRestoreAck.reseeded` (thread it back through `post_restore_at` → `warm_restore_instance`) so the message reflects whether the guest actually reseeded.
+- [ ] **Step 3 (live-KVM gated):** capture a live `vm resume --warm` where `reseeded == true` and two clones of one snapshot draw divergent `/dev/urandom` (the Plan 175 T1-Step3 claim, needs a dev/exec image).
+
 ## Out of scope
 
 - The merged Plan 175 core (full-`mem.bin` warm-start, VMGenID delivery, barrier protocol). Don't rebuild.
