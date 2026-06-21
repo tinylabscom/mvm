@@ -5,9 +5,9 @@
 (`create`/`start`/`ls`/`inspect`/`rm`), and running-VM wrappers
 (`exec`/`shell`/`stop`) shipped; full `mvm.toml` machine runtime mapping,
 Python/TypeScript/Rust SDK machine wrappers, and dev-tier persistent-machine
-ssh-agent forwarding shipped; deeper SDK/CLI parity,
-scenario docs, portable artifacts, perf/smoke coverage, and
-duplicate-major/binary-size budgets remain
+ssh-agent forwarding shipped; deeper SDK/CLI parity and scenario-led machine
+docs/source guards shipped; live admission/non-bypass proof, portable artifacts,
+perf/smoke coverage, and duplicate-major/binary-size budgets remain
 **Owner:** mvm
 **Date:** 2026-06-15
 
@@ -809,15 +809,20 @@ Required behavior:
       machine run`; until then, keep binary install + `mvmctl run --image ...`
       as the documented current path and keep optional Nix clearly marked as
       optional.
-- [ ] Add a scenario-led "use this for" guide before architecture internals:
+- [x] Add a scenario-led "use this for" guide before architecture internals:
       untrusted-code sandboxing, image-backed one-shot run, local image archive,
       persistent dev machine, SSH-agent forwarding, portable artifact, and
-      `mvm.toml`.
-- [ ] Add a machine limitations page covering network protocol scope, volume
+      `mvm.toml`. Landed as `public/src/content/docs/guides/machine-use-cases.md`
+      and linked from quickstart/happy-path docs.
+- [x] Add a machine limitations page covering network protocol scope, volume
       shapes, SSH-agent prerequisites, macOS signing/entitlement requirements,
-      GPU status, and host/guest architecture support.
-- [ ] Add docs/source guards that prevent beginner docs from implying host Nix,
+      GPU status, and host/guest architecture support. Landed as
+      `public/src/content/docs/guides/machine-limitations.md`.
+- [x] Add docs/source guards that prevent beginner docs from implying host Nix,
       GPU, ICMP, or unsupported architectures are available by default.
+      `xtask check-machine-doc-guards` requires the machine use-case and
+      limitations pages, verifies the limitation categories, and runs in the CI
+      Lint job.
 - [ ] Keep old verbs documented as advanced/underlying surfaces, not removed.
 
 ### B. Ephemeral image runner parity
@@ -1442,9 +1447,12 @@ follow-ups:
       admission-input and receipt-summary parity; SDK `check-artifact` wrappers
       prove artifact-verification stays CLI-owned. Live non-bypass proof
       remains.
-- [ ] Docs/source guards for no-host-Nix default and explicit limitations:
+- [x] Docs/source guards for no-host-Nix default and explicit limitations:
       network protocol scope, volumes, SSH-agent prerequisites, macOS
       signing/entitlements, GPU status, and backend/architecture support.
+      Covered by `guides/machine-use-cases.md`,
+      `guides/machine-limitations.md`, quickstart/happy-path links, and
+      `xtask check-machine-doc-guards` in CI.
 - [ ] Portable artifact workflow tests/docs: pack, verify, inspect, run,
       transfer guidance, cleanup, tamper, wrong-key, wrong-arch, traversal,
       unknown-version, and missing-verity rejection.
