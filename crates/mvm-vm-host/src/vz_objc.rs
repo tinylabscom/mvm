@@ -1793,7 +1793,8 @@ fn spawn_payload_tap(
         BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
     };
     use mvm_hostd::supervisor::network::{
-        ObserverAllowlist, Pipeline, ProviderCapabilities, resolve_observer_chain_from_plan,
+        ObserverAllowlist, Pipeline, ProviderCapabilities,
+        resolve_observer_chain_from_policy_source,
     };
 
     let plan_value = config
@@ -1846,8 +1847,12 @@ fn spawn_payload_tap(
         flow_events: true,
         payload_tap: true,
     };
-    let observer_names =
-        resolve_observer_chain_from_plan(&plan).map_err(|e| anyhow!("resolve observers: {e}"))?;
+    // Resolve observers from the admitted policy *source*: a CLI-generated
+    // egress bundle lives only in `config.bundle` (threaded as `bundle_json`),
+    // never under `~/.mvm/policies`, so the plan-ref-only resolver would fail
+    // closed on it. Mirrors the vz drainer + libkrun supervisor.
+    let observer_names = resolve_observer_chain_from_policy_source(&plan, bundle.as_ref())
+        .map_err(|e| anyhow!("resolve observers: {e}"))?;
     let observers = if observer_names.is_empty() {
         Vec::new()
     } else {
