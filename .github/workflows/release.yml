@@ -109,6 +109,20 @@ jobs:
           print('smoke test passed')
           "
 
+      - name: Binary size within budget (measured targets only)
+        # Per-target byte budget for the release `mvmctl`. Only targets with a
+        # measured baseline are gated; add a branch here once a new target is
+        # measured. aarch64-apple-darwin baseline 25,341,040 bytes (2026-06-20),
+        # budget 29,360,128 (28 MiB) for headroom.
+        if: matrix.target == 'aarch64-apple-darwin'
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          cargo run --package xtask -- check-binary-size \
+            --path "target/${TARGET}/release/mvmctl" \
+            --budget-bytes 29360128
+
       - name: Generate man pages
         shell: bash
         # gen-man lives behind xtask's off-by-default `man` feature (it pulls

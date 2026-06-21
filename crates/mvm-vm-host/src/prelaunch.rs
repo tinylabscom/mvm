@@ -138,6 +138,7 @@ mod tests {
             plan: plan_envelope,
             bundle: None,
             network_policy: None,
+            transparent_terminator_port: None,
         };
         serde_json::to_vec(&attach).unwrap()
     }

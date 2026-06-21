@@ -112,6 +112,11 @@ pub struct SupervisorConfig {
     /// Host Ed25519 signing key (mode 0600) the chain signer re-reads per start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_key_path: Option<String>,
+    /// Reserved transparent-terminator destination for the Vz supervisor.
+    /// This keeps the config schema aligned with the libkrun path while the
+    /// Vz runtime still uses the existing gvproxy bridge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparent_terminator_port: Option<u16>,
 }
 
 /// How the supervisor brings the VM up.
@@ -460,6 +465,7 @@ mod tests {
             audit_dir: None,
             gateway_audit_socket: None,
             signing_key_path: None,
+            transparent_terminator_port: None,
         }
     }
 
@@ -496,6 +502,27 @@ mod tests {
         let json = serde_json::to_string(&value).unwrap();
         let back: SupervisorConfig = serde_json::from_str(&json).expect("decode without field");
         assert!(back.vsock.host_listen_ports.is_empty());
+    }
+
+    #[test]
+    fn transparent_terminator_port_roundtrips_when_set() {
+        let mut cfg = minimal_config();
+        cfg.transparent_terminator_port = Some(19123);
+        let json = cfg.to_json().expect("serialize");
+        let back: SupervisorConfig = serde_json::from_str(&json).expect("roundtrip parses");
+        assert_eq!(back.transparent_terminator_port, Some(19123));
+    }
+
+    #[test]
+    fn transparent_terminator_port_defaults_none_when_absent() {
+        let mut value = serde_json::to_value(minimal_config()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("transparent_terminator_port");
+        let json = serde_json::to_string(&value).unwrap();
+        let back: SupervisorConfig = serde_json::from_str(&json).expect("decode without field");
+        assert_eq!(back.transparent_terminator_port, None);
     }
 
     #[test]

@@ -10,9 +10,9 @@ This guide walks through writing a Nix flake that builds a microVM image, then b
 mvmctl auto-selects the best backend for your platform:
 
 ```
-Linux (KVM):    mvmctl up  -->  Firecracker microVM (direct)
-macOS:          mvmctl up  -->  libkrun microVM (Hypervisor.framework)
-Docker:        mvmctl up  -->  Docker container (Tier 3 fallback)
+Linux (KVM):       mvmctl up  -->  Firecracker microVM (direct)
+macOS 26+ (AS):    mvmctl up  -->  Vz microVM (Apple Virtualization.framework)
+macOS 13-25 (AS):  mvmctl up  -->  libkrun microVM
 ```
 
 | Layer | Access command | Has your project files? |
@@ -24,7 +24,7 @@ Docker:        mvmctl up  -->  Docker container (Tier 3 fallback)
 MicroVMs are **headless workloads** with no SSH access -- they communicate via vsock only.
 
 :::note
-On Linux with `/dev/kvm`, the dev-VM layer is skipped entirely -- Firecracker runs directly. On macOS, libkrun runs microVMs via Hypervisor.framework. If none of the microVM backends work, Docker serves as a Tier 3 fallback.
+On Linux with `/dev/kvm`, the dev-VM layer is skipped entirely -- Firecracker runs directly. On macOS Apple Silicon, microVMs run on Apple Virtualization.framework (macOS 26+) or libkrun (macOS 13–25). There is no Docker or container runtime path.
 :::
 
 ## Scaffold a project

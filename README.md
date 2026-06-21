@@ -44,6 +44,18 @@ Override with `--hypervisor`:
 All backends consume the same Nix-built ext4 rootfs produced by
 `mkGuest`. The runtime differs; the image doesn't.
 
+## Transparent Egress
+
+On the native libkrun path, mvm can now render rvproxy's transparent
+interception config and forward guest TCP `:80` / `:443` to a host-side
+terminator. That keeps secret substitution in the host path instead of
+requiring the guest to opt into an explicit proxy. The guest still uses the
+proxy-aware channel for placeholder substitution; transparent interception is
+an additional native gateway contract, not a guest-facing API.
+
+Vz is not wired to this contract yet. The backend remains guarded until its
+launch path emits the same native rvproxy config.
+
 ## Install
 
 ```bash

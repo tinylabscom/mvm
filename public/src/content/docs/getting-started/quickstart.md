@@ -54,18 +54,19 @@ This single command detects your platform and handles everything. **Builds run i
 2. Bootstraps the builder microVM on first build (one-time fetch); `nix build` runs inside it
 3. Drops you into a dev shell
 
-**On macOS (Apple Silicon or Intel):**
-1. Selects libkrun (libkrun on Hypervisor.framework)
+**On macOS 26+ Apple Silicon:**
+1. Selects Apple Virtualization.framework (the `vz` backend, bundled with the OS)
+2. Boots the builder microVM there; `nix build` runs inside it
+3. Drops you into a dev shell
+
+**On macOS 13–25 Apple Silicon:**
+1. Selects libkrun (the in-process VMM from the `slp/krun` Homebrew trio)
 2. Same builder microVM, hosted on libkrun
 3. Drops you into a dev shell
 
-**On Linux without KVM:**
-1. Falls back to libkrun in software-emulation mode (slower; meant for CI / sandboxed CI runners)
-2. Same builder-microVM flow
-
-**Docker fallback (any platform):**
-1. If no hypervisor backend works, falls back to Docker
-2. Runs your workload in a container with pause/resume support; security collapses to Tier 3
+mvm targets Apple Silicon on macOS and `/dev/kvm` on Linux. There is no Docker
+or container runtime path; a host without a supported microVM backend surfaces a
+backend-unavailable error rather than silently degrading.
 
 Inside the dev shell your project directory is bind-mounted at `/work`. Exit with `exit` or `Ctrl+D` -- background services keep running.
 

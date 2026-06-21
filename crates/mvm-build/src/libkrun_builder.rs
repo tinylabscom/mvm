@@ -526,6 +526,7 @@ impl LibkrunBuilderVm {
             // override). Step 3 flips builder/dev to trusted_build_egress when
             // they move onto the bridge.
             network_policy: None,
+            transparent_terminator_port: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -638,6 +639,7 @@ impl LibkrunBuilderVm {
             // override). Step 3 flips builder/dev to trusted_build_egress when
             // they move onto the bridge.
             network_policy: None,
+            transparent_terminator_port: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -957,6 +959,7 @@ impl BuilderVm for LibkrunBuilderVm {
             // override). Step 3 flips builder/dev to trusted_build_egress when
             // they move onto the bridge.
             network_policy: None,
+            transparent_terminator_port: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -1141,6 +1144,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             // override). Step 3 flips builder/dev to trusted_build_egress when
             // they move onto the bridge.
             network_policy: None,
+            transparent_terminator_port: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -2280,6 +2284,7 @@ impl LibkrunPersistentHostVm {
             // override). Step 3 flips builder/dev to trusted_build_egress when
             // they move onto the bridge.
             network_policy: None,
+            transparent_terminator_port: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
