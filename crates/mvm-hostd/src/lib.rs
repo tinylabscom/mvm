@@ -24,6 +24,8 @@ pub mod broker;
 /// from `mvm_core::framing` so `mvm-core`'s default build pulls no
 /// async runtime.
 pub mod framing;
+/// Idle-registration self-termination logic for the `mvm-host-agent` worker.
+pub mod host_agent_idle;
 pub mod host_signer;
 pub mod jailer;
 /// Secret keyholder — the `SecretRef` → credential boundary: the
