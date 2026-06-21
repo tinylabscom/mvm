@@ -128,6 +128,9 @@ jobs:
       - name: workload guest images bake no host/builder tools
         run: cargo run -p xtask -- check-guest-images-no-builder-tools
 
+      - name: no new builder shell-job dispatch sites
+        run: cargo run -p xtask -- check-builder-shell-job-sites
+
       - name: runtime-overlay version pinned to workspace
         run: cargo run -p xtask -- check-runtime-overlay-version
 

@@ -267,7 +267,56 @@ arm lands with the daemon's image baking (boot-gated).
 - [ ] Emit a diagnostic when the adapter is used.
 - [ ] Replace the remaining normal-path shell jobs with typed operations.
 - [ ] Gate raw shell execution behind an explicit debug/development flag.
-- [ ] Add a lint or structural test that prevents new normal-path shell jobs.
+- [x] Add a lint or structural test that prevents new normal-path shell jobs.
+      `xtask check-builder-shell-job-sites` (CI Lint lane) freezes the set of
+      `*/src/` files that construct a legacy `HostVmRequest::{Run,Build}` shell
+      job to a 4-entry allowlist; a construction in any new file fails the
+      gate, and the gate flags an allowlist entry that no longer matches so it
+      can be dropped as routing lands. File-level allowlist (like
+      `check-guest-images-no-builder-tools`); `bin/` (the in-guest
+      `mvm-host-vm-init` parser) and `tests/` are excluded.
+
+#### WS-D routing plan (recon 2026-06-20)
+
+The remaining four items are the actual routing. The host-side dispatch surface
+is exactly two prod sites today:
+
+- `crates/mvm-build/src/persistent_builder.rs` `submit()` — `dev_build`'s
+  `HostVmRequest::Run` over the persistent-builder dispatch socket
+  (`mvm_guest::vsock::write_frame`).
+- `crates/mvm-build/src/pipeline/vsock_builder.rs` — `pool_build`'s older
+  `HostVmRequest::Build` over the legacy builder-agent port.
+
+`builderd_client::BuilderdClient` has no consumers yet; its typed ops cover the
+need (`BuildGuestImage`/`BuildHostTool` for the flake build, `FlakeCheck`,
+`PrefetchSource`, `QueryStorePath`). Phased rollout:
+
+1. **Socket resolution.** Add a helper that returns the running builder's
+   `builderd` control socket for a build dispatch (libkrun
+   `<vm_state_dir>/vsock-21473.sock` vs Vz `<vm_state_dir>/vsock/…`, via the
+   existing `builderd_control_socket_candidates`). The persistent-builder
+   `SessionRecord` does not record it today — derive it from the session's
+   `vm_state_dir` + backend rather than adding a field.
+2. **Single adapter module.** Introduce `builder_dispatch_adapter` that, given a
+   resolved socket, runs a build through `BuilderdClient::run_operation` and
+   maps `OperationOutcome::{Artifact,Failed,…}` onto the existing artifact shape;
+   on `NotReady`/missing socket it logs one diagnostic and falls back to the
+   legacy shell-job channel. Unit-test it against the in-process
+   `serve_connection` daemon (as `builderd_client` tests already do).
+3. **Opt-in flip, then default.** Wire the two dispatch sites through the
+   adapter behind `MVM_BUILDERD_DISPATCH=1` (default off → zero behaviour
+   change, mergeable without a live boot), then flip the default after a live
+   per-backend boot proves a typed `BuildGuestImage` produces the same artifact
+   (libkrun + Vz on macOS; Firecracker on a KVM host).
+4. **Gate raw shell + diagnostic.** Once routing is the default, gate the legacy
+   channel behind an explicit debug flag and keep the adapter's
+   fallback-diagnostic; drop each routed file from the
+   `check-builder-shell-job-sites` allowlist as it stops constructing a shell
+   job.
+
+Riskiest parts: the daemon-unavailable fallback must be exact, cancellation
+must map `request_cancel` onto the legacy signal path, and step 3's default flip
+needs live per-backend artifact-equality proof before it lands.
 
 ### E. UX and docs
 

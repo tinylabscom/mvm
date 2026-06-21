@@ -11,6 +11,7 @@ mod build_dev_image;
 mod check_adr_coverage;
 mod check_audit_positional;
 mod check_binary_size;
+mod check_builder_shell_job_sites;
 mod check_claim_catalog;
 mod check_closure_budget;
 mod check_core_runtime_free;
@@ -79,6 +80,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_core_runtime_free::run(&workspace)
         }
+        Some("check-builder-shell-job-sites") => {
+            let workspace = workspace_root();
+            check_builder_shell_job_sites::run(&workspace)
+        }
         Some("check-closure-budget") => {
             let workspace = workspace_root();
             check_closure_budget::run(&workspace)
@@ -142,7 +147,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-trust-gradient, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-trust-gradient, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {
@@ -171,6 +176,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-core-runtime-free                 Plan 126 B5: assert mvm-core's default build pulls no tokio"
+            );
+            eprintln!(
+                "  check-builder-shell-job-sites           Plan 204 WS-D: freeze the set of files that construct a legacy builder shell-job request"
             );
             eprintln!(
                 "  check-closure-budget                    Plan 200: assert mvmctl's default linux closure stays within the crate budget"
