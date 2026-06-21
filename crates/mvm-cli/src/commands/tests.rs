@@ -14,6 +14,7 @@ use super::catalog;
 use super::env::group as env_group;
 use super::env::{cleanup, dev, init, uninstall};
 use super::image;
+use super::machine;
 use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
 use super::trust;
@@ -374,54 +375,90 @@ fn volume_mount_managed_omits_host() {
 fn test_build_flake_with_profile() {
     let cli = Cli::try_parse_from([
         "mvmctl",
+        "machine",
         "build",
-        "image",
         "--flake",
         ".",
         "--profile",
         "gateway",
     ])
     .unwrap();
-    let Commands::Build(bg) = cli.command else {
-        panic!("expected build group")
+    let Commands::Machine(mg) = cli.command else {
+        panic!("expected machine group")
     };
-    match bg.action {
-        build_group::BuildCmd::Image(build::Args { flake, profile, .. }) => {
+    match mg.action {
+        machine::MachineAction::Build(build::Args { flake, profile, .. }) => {
             assert_eq!(flake.as_deref(), Some("."));
             assert_eq!(profile.as_deref(), Some("gateway"));
         }
-        _ => panic!("Expected Build command"),
+        _ => panic!("Expected machine build command"),
     }
 }
 
 #[test]
 fn test_build_flake_defaults_to_no_profile() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "image", "--flake", "."]).unwrap();
-    let Commands::Build(bg) = cli.command else {
-        panic!("expected build group")
+    let cli = Cli::try_parse_from(["mvmctl", "machine", "build", "--flake", "."]).unwrap();
+    let Commands::Machine(mg) = cli.command else {
+        panic!("expected machine group")
     };
-    match bg.action {
-        build_group::BuildCmd::Image(build::Args { flake, profile, .. }) => {
+    match mg.action {
+        machine::MachineAction::Build(build::Args { flake, profile, .. }) => {
             assert_eq!(flake.as_deref(), Some("."));
             assert!(profile.is_none(), "profile should be None when omitted");
         }
-        _ => panic!("Expected Build command"),
+        _ => panic!("Expected machine build command"),
     }
 }
 
 #[test]
 fn test_build_mvmfile_mode_still_works() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "image", "myimage"]).unwrap();
-    let Commands::Build(bg) = cli.command else {
-        panic!("expected build group")
+    let cli = Cli::try_parse_from(["mvmctl", "machine", "build", "myimage"]).unwrap();
+    let Commands::Machine(mg) = cli.command else {
+        panic!("expected machine group")
     };
-    match bg.action {
-        build_group::BuildCmd::Image(build::Args { path, flake, .. }) => {
+    match mg.action {
+        machine::MachineAction::Build(build::Args { path, flake, .. }) => {
             assert_eq!(path, "myimage");
             assert!(flake.is_none(), "Mvmfile mode should have no --flake");
         }
-        _ => panic!("Expected Build command"),
+        _ => panic!("Expected machine build command"),
     }
+}
+
+#[test]
+fn machine_build_parses_image_and_flake() {
+    // `machine build --flake .` parses.
+    let cli_flake =
+        Cli::try_parse_from(["mvmctl", "machine", "build", "--flake", "."]).expect("flake parse");
+    let Commands::Machine(mg) = cli_flake.command else {
+        panic!("expected machine group")
+    };
+    assert!(
+        matches!(mg.action, machine::MachineAction::Build(build::Args { ref flake, .. }) if flake.as_deref() == Some(".")),
+        "expected machine build with --flake ."
+    );
+
+    // `machine build myimage` (mvmfile/manifest path) also parses.
+    let cli_path =
+        Cli::try_parse_from(["mvmctl", "machine", "build", "myimage"]).expect("path parse");
+    let Commands::Machine(mg2) = cli_path.command else {
+        panic!("expected machine group")
+    };
+    assert!(
+        matches!(mg2.action, machine::MachineAction::Build(build::Args { ref path, .. }) if path == "myimage"),
+        "expected machine build with positional path"
+    );
+}
+
+#[test]
+fn build_image_subcommand_removed() {
+    let err = Cli::try_parse_from(["mvmctl", "build", "image", "--flake", "."])
+        .expect_err("build image must not parse after removal");
+    assert_eq!(
+        err.kind(),
+        clap::error::ErrorKind::InvalidSubcommand,
+        "expected InvalidSubcommand, got: {err:?}"
+    );
 }
 
 #[test]

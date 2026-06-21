@@ -36,6 +36,7 @@ use mvm_core::vm_backend::VmId;
 use mvm_core::{config, naming};
 
 use super::Cli;
+use super::build::build;
 use super::vm::exec::{RunArgs, RunProfile, run_secure};
 #[cfg(test)]
 use super::vm::host_signer::PUBLIC_FILENAME;
@@ -58,34 +59,37 @@ pub(in crate::commands) enum MachineAction {
     /// Boot an OCI image, run a command, then tear the VM down
     #[command(display_order = 1)]
     Run(MachineRunArgs),
-    /// Create or update a persistent named machine spec without booting it
+    /// Build a microVM image from a manifest or Nix flake
     #[command(display_order = 2)]
+    Build(build::Args),
+    /// Create or update a persistent named machine spec without booting it
+    #[command(display_order = 3)]
     Create(MachineCreateArgs),
     /// Boot a persistent named machine without running a one-shot command
-    #[command(display_order = 3)]
+    #[command(display_order = 4)]
     Start(MachineStartArgs),
     /// Stop an already-started named machine
-    #[command(display_order = 4)]
+    #[command(display_order = 5)]
     Stop(MachineStopArgs),
     /// Remove one persistent named machine spec
-    #[command(name = "rm", display_order = 5)]
+    #[command(name = "rm", display_order = 6)]
     Rm(MachineRemoveArgs),
     /// List persistent named machine specs
-    #[command(name = "ls", display_order = 6)]
+    #[command(name = "ls", display_order = 7)]
     Ls(MachineListArgs),
     /// Show one persistent named machine spec
-    #[command(display_order = 7)]
+    #[command(display_order = 8)]
     Inspect(MachineInspectArgs),
     /// Attach an interactive shell/console to an already-started named machine
-    #[command(display_order = 8)]
+    #[command(display_order = 9)]
     Shell(MachineShellArgs),
     /// Run a command inside an already-started named machine
-    #[command(display_order = 9)]
+    #[command(display_order = 10)]
     Exec(MachineExecArgs),
     /// Verify a portable `.mvm` artifact and preview how `machine run` would
     /// admit it (arch, profile, seccomp, egress, volumes). Read-only: no
     /// extraction, no boot.
-    #[command(name = "check-artifact", display_order = 10)]
+    #[command(name = "check-artifact", display_order = 11)]
     CheckArtifact(portable::CheckArtifactArgs),
 }
 
@@ -1423,6 +1427,7 @@ fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) -> Result<()>
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     match args.action {
         MachineAction::Run(run_args) => run_secure(cli, run_args.into_run_args(), cfg),
+        MachineAction::Build(build_args) => build::run(cli, build_args, cfg),
         MachineAction::Create(create_args) => create_machine(create_args),
         MachineAction::Ls(list_args) => list_machines(list_args),
         MachineAction::Inspect(inspect_args) => inspect_machine(inspect_args),
