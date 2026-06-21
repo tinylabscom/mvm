@@ -4445,11 +4445,35 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
     if let Some(built) = try_build_workload_kernel_locally()? {
         return Ok(built);
     }
-    if let Some(parent) = std::path::Path::new(&dest).parent() {
+    download_workload_kernel(arch, &dest)?;
+    Ok(dest)
+}
+
+/// End-user download of the published, hash-verified `vmlinux-<arch>-workload`
+/// (~10 MB, no Nix) for this mvmctl's release tag. Mirrors
+/// `download_default_microvm_image`'s verify-then-cache flow via the same
+/// non-gated artifact helpers, so the OCI `--image` path resolves a kernel even
+/// when mvmctl is built without the `builder-vm` feature.
+fn download_workload_kernel(arch: &str, dest: &str) -> Result<()> {
+    if let Some(parent) = std::path::Path::new(dest).parent() {
         std::fs::create_dir_all(parent)?;
     }
-    crate::update::download_kernel(arch, "workload", std::path::Path::new(&dest))?;
-    Ok(dest)
+    let version = env!("CARGO_PKG_VERSION");
+    let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/v{version}");
+    let asset = format!("vmlinux-{arch}-workload");
+    let checksums_url = format!("{base_url}/kernel-{arch}-checksums-sha256.txt");
+
+    ui::info(&format!(
+        "Downloading workload kernel {asset} (v{version})..."
+    ));
+    let expected = fetch_expected_hashes(&checksums_url, &[asset.as_str()])?;
+    let asset_url = format!("{base_url}/{asset}");
+    download_file(&asset_url, dest).with_context(|| format!("Failed to download {asset_url}"))?;
+    verify_artifact_hash(dest, &asset, expected.get(&asset))?;
+    ui::success(&format!(
+        "Workload kernel {asset} downloaded, hash-verified, and cached."
+    ));
+    Ok(())
 }
 
 /// First existing workload-kernel `vmlinux` on disk among the dedicated kernel

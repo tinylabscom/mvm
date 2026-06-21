@@ -622,8 +622,8 @@ fn build_exec_request(
             // the kernel — the published `vmlinux-<arch>-workload` download for
             // an end-user mvmctl (no Nix), or a local `workload-kernel` build on
             // a source checkout — rather than building/downloading a whole
-            // default image whose rootfs we'd discard. Per Plan 200, the OCI
-            // path avoids Nix (end users) and a ~220 MB unused-rootfs fetch.
+            // default image whose rootfs we'd discard. This keeps the OCI path
+            // free of Nix (end users) and of a ~220 MB unused-rootfs fetch.
             let kernel_path = ensure_workload_kernel()?;
             crate::exec::ImageSource::Prebuilt {
                 kernel_path,
