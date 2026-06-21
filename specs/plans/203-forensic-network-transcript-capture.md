@@ -183,10 +183,21 @@ This is a forensic tool, not a monitoring feature.
    wrap_data_key, unwrap_data_key}` manage a host KEK at
    `<keys_dir>/transcript-kek.bin` (0600, created on first use) and produce/
    consume the manifest's `wrapped_data_key_b64`. 5 tests incl. an end-to-end
-   wrap→capture→unwrap→export round-trip. **Remaining:** the `mvmctl audit
-   transcript arm/disarm/list/export` CLI itself (export = `unwrap_data_key`
-   then `transcript::export`), which is also where the 4 lifecycle audit kinds
-   are emitted (their `Emits` rows + `KNOWN_TOKENS`/`AUDIT_POSTURE` land with it).
+   wrap→capture→unwrap→export round-trip.
+   **[CLI + lifecycle audit kinds landed]** `mvmctl trust audit transcript
+   {arm,disarm,list,export}` (`crates/mvm-cli/src/commands/ops/transcript.rs`):
+   `arm` provisions a capture dir + manifest (per-capture key wrapped under the
+   host KEK), `list` enumerates, `disarm` seals, `export` =
+   `unwrap_data_key` → `transcript::export` (verify + decrypt) to a file/stdout,
+   failing closed on tamper/wrong-key. The 4 lifecycle kinds
+   (`TranscriptArmed`/`Sealed`/`Exported`/`Refused`) were added to
+   `LocalAuditKind` and are emitted per step; `audit_total_coverage` updated in
+   lockstep (`AUDIT_SUB`/`TRANSCRIPT_SUB` tables + `KNOWN_TOKENS`). Captures live
+   under `mvm_transcripts_dir()` = `<audit>/transcripts/<tenant>/<id>/`. 6 CLI
+   tests (arm/list/disarm/export round-trip via a synthetic-sink capture,
+   tamper-refusal, unknown-capture). **Only remaining for Plan 203:** the live
+   byte-capture sink + bridge tap (`gateway_bridge::bridge_copy_bidirectional`)
+   that fans real boundary bytes into the writer — live-only-testable.
 4. Add focused tests for:
    - arming and disarming a capture
    - manifest hash verification ✅ (`verify_chunks` tests, slice 1)

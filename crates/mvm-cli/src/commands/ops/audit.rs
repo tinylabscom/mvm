@@ -113,6 +113,12 @@ pub(in crate::commands) enum AuditAction {
         #[arg(long)]
         json: bool,
     },
+    /// Opt-in forensic network transcript capture: arm / disarm / list /
+    /// export. Off by default; separate from the metadata-only flow audit.
+    Transcript {
+        #[command(subcommand)]
+        action: super::transcript::TranscriptAction,
+    },
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
@@ -136,6 +142,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             json,
         } => audit_show(&tenant, &plan_id, json),
         AuditAction::Posture { json } => super::audit_posture::run(json),
+        AuditAction::Transcript { action } => super::transcript::run(action),
         AuditAction::VerifyCert {
             cert,
             pubkey,

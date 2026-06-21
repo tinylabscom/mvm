@@ -457,6 +457,21 @@ pub enum LocalAuditKind {
     /// `key=value`, matching the Stage 0 kinds):
     ///   `url=<url> sha256=<64hex> bytes=<n> outcome=<fetched|cache_revalidated>`
     VendorBlobFetched,
+
+    // Forensic transcript capture lifecycle (opt-in, host-boundary). Detail is
+    // a space-separated `key=value` list; raw payload bytes never appear here.
+    /// A forensic transcript capture was armed for a tenant/VM/session.
+    ///   `tenant=<t> vm=<v> capture=<id> max_bytes=<n> max_chunks=<n>`
+    TranscriptArmed,
+    /// A capture was sealed (disarmed) — no further bytes will be recorded.
+    ///   `tenant=<t> vm=<v> capture=<id> chunks=<n>`
+    TranscriptSealed,
+    /// A sealed transcript was verified and exported (decrypted).
+    ///   `tenant=<t> vm=<v> capture=<id> bytes=<n>`
+    TranscriptExported,
+    /// A transcript operation refused fail-closed (tamper, wrong key, bound).
+    ///   `tenant=<t> vm=<v> capture=<id> reason=<msg>`
+    TranscriptRefused,
 }
 
 /// A single local audit log entry.

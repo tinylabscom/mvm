@@ -508,6 +508,13 @@ pub fn mvm_audit_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_data_dir()).join("audit")
 }
 
+/// Forensic transcript captures: `<mvm_data_dir>/audit/transcripts/`. Each
+/// capture is `<tenant>/<vm>/<capture-id>/` holding `manifest.json` + encrypted
+/// chunk files. Kept under `audit/` since it is opt-in forensic evidence.
+pub fn mvm_transcripts_dir() -> std::path::PathBuf {
+    mvm_audit_dir().join("transcripts")
+}
+
 /// Filename suffix for a per-VM workload audit chain.
 pub const WORKLOAD_AUDIT_SUFFIX: &str = ".workload.jsonl";
 

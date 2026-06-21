@@ -328,6 +328,29 @@ const BUNDLE_SUB: &[(&str, AuditPosture)] = &[
 // `LocalAuditKind::{TrustAdd, TrustRemove}` via
 // `mvm_core::audit::emit`. Sprint 52 W2 phase-3 close-out
 // promoted these from `InteractiveOrControl` to `Emits(...)`.
+// `trust audit transcript <sub>` — opt-in forensic capture lifecycle. arm /
+// disarm / export emit chain-visible lifecycle kinds; list is read-only. (The
+// failure-path `TranscriptRefused` is emitted by `export` on refusal, not a
+// separate leaf.)
+const TRANSCRIPT_SUB: &[(&str, AuditPosture)] = &[
+    ("arm", AuditPosture::Emits("TranscriptArmed")),
+    ("disarm", AuditPosture::Emits("TranscriptSealed")),
+    ("list", AuditPosture::ReadOnly),
+    ("export", AuditPosture::Emits("TranscriptExported")),
+];
+
+// `trust audit <sub>` — the chain inspection/verification verbs are read-only;
+// `transcript` is the one emitting subgroup (promoted to DelegatesToSub so its
+// emitting leaves are classified).
+const AUDIT_SUB: &[(&str, AuditPosture)] = &[
+    ("tail", AuditPosture::ReadOnly),
+    ("verify", AuditPosture::ReadOnly),
+    ("show", AuditPosture::ReadOnly),
+    ("posture", AuditPosture::ReadOnly),
+    ("verify-cert", AuditPosture::ReadOnly),
+    ("transcript", AuditPosture::DelegatesToSub(TRANSCRIPT_SUB)),
+];
+
 const TRUST_SUB: &[(&str, AuditPosture)] = &[
     ("add", AuditPosture::Emits("TrustAdd")),
     ("list", AuditPosture::ReadOnly),
@@ -335,7 +358,7 @@ const TRUST_SUB: &[(&str, AuditPosture)] = &[
     // Plan 178 — provenance verbs folded into `trust <sub>`.
     ("attest", AuditPosture::DelegatesToSub(ATTEST_SUB)),
     ("receipt", AuditPosture::ReadOnly),
-    ("audit", AuditPosture::ReadOnly),
+    ("audit", AuditPosture::DelegatesToSub(AUDIT_SUB)),
 ];
 
 // Plan 73 Followup C — sealed deps-volume cache. `deps inspect` is
@@ -597,6 +620,9 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "BundleInstall",
         "ImageExportOci",
         "ImageFetch",
+        "TranscriptArmed",
+        "TranscriptExported",
+        "TranscriptSealed",
         "TrustAdd",
         "TrustRemove",
         "VmStart",
