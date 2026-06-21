@@ -295,8 +295,24 @@ arm lands with the daemon's image baking (boot-gated).
       `mvm_build::builder_route` is the host-side decision seam: `resolve_route(daemon_reachable, typed_opt_in) -> BuilderRoute::{Typed, LegacyShell}` (pure; typed only when the daemon is reachable **and** the caller opted in), `typed_opt_in(env_getter)` reading `MVM_BUILDERD_TYPED`, and `legacy_shell_diagnostic(job_label)`. The `persistent_builder::submit` dev_build dispatch boundary now resolves the route on every dispatch (3 unit tests; 17 persistent_builder tests stay green).
 - [x] Emit a diagnostic when the adapter is used.
       Every legacy shell-job dispatch emits a structured `tracing` diagnostic (`target: "mvm::builder"`) naming the job, so the remaining shell surface stays visible and shrinkable — the runtime counterpart to the static `check-builder-shell-job-sites` allowlist.
-- [ ] Replace the remaining normal-path shell jobs with typed operations.
-      The opt-in seam is in place (`MVM_BUILDERD_TYPED` + `resolve_route`); the next step is to give `dev_build`/`pool_build` a typed `BuildGuestImage`/`FlakeCheck` path over `BuilderdClient` and flip `resolve_route`'s default per operation once proven over the wire (needs a live builder-VM boot).
+- [~] Replace the remaining normal-path shell jobs with typed operations.
+      The opt-in seam is in place (`MVM_BUILDERD_TYPED` + `resolve_route`).
+      Typed operation adapters now exist in `builder_route` for **both** ops:
+      `run_flake_check`/`try_typed_flake_check` (wired into `mvmctl build
+      validate`) and `run_build`/`try_typed_build` (`BuildGuestImage` →
+      `BuildVerdict::{Built{store_path}, Failed}`; 4 unit tests over
+      `serve_connection`). Remaining for the **build** path before it can be the
+      default: **output-export reconciliation.** The legacy build copies the nix
+      out-path's artifacts (`vmlinux`, `rootfs.ext4`) into the host-mounted
+      `/out` virtio-fs share that `dev_build` reads (see
+      `builder_vm_runtime::render_flake_cmd_sh`); builderd's `BuildGuestImage`
+      only returns the `/nix/store/…` out-path **inside** the builder VM, so the
+      host cannot read the artifacts. Wiring the build through builderd therefore
+      needs the daemon to copy the out-path artifacts to a caller-specified
+      output dir (a `BuildGuestImage` output-dir field + the host setting up the
+      share the daemon writes and the host reads), then `dev_build` consuming
+      that, then flipping `resolve_route`'s default for builds — plus a builder
+      image rebake to deploy the daemon change and a live typed-build proof.
 - [ ] Gate raw shell execution behind an explicit debug/development flag.
       Blocked on the line above — raw shell stays the default until a typed op replaces it; the gate flips once the typed path is the default.
 - [x] Add a lint or structural test that prevents new normal-path shell jobs.
