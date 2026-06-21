@@ -809,15 +809,28 @@ Required behavior:
       machine run`; until then, keep binary install + `mvmctl run --image ...`
       as the documented current path and keep optional Nix clearly marked as
       optional.
-- [ ] Add a scenario-led "use this for" guide before architecture internals:
+- [x] Add a scenario-led "use this for" guide before architecture internals:
       untrusted-code sandboxing, image-backed one-shot run, local image archive,
       persistent dev machine, SSH-agent forwarding, portable artifact, and
-      `mvm.toml`.
-- [ ] Add a machine limitations page covering network protocol scope, volume
+      `mvm.toml`. **DONE:** `getting-started/machine-scenarios.md` (sidebar
+      "Machine: Use This For") covers each task-led scenario with verified
+      commands and links into the reference + limitations. Local-image-archive
+      is intentionally omitted — `machine run --image` takes an OCI *reference*
+      (pulled/cached), not a local archive path, so documenting it would be
+      aspirational; portable artifacts are documented as preview.
+- [x] Add a machine limitations page covering network protocol scope, volume
       shapes, SSH-agent prerequisites, macOS signing/entitlement requirements,
-      GPU status, and host/guest architecture support.
-- [ ] Add docs/source guards that prevent beginner docs from implying host Nix,
+      GPU status, and host/guest architecture support. **DONE:**
+      `guides/machine-limitations.md` (sidebar "Machine Limitations & Scope") —
+      no-host-Nix, deny-all egress + no-ICMP + no-SSH, `--add-dir` volume shapes,
+      dev-tier SSH-agent socket-only prerequisites, macOS Vz/libkrun signing,
+      no-GPU, and host=guest architecture (no cross-arch emulation).
+- [x] Add docs/source guards that prevent beginner docs from implying host Nix,
       GPU, ICMP, or unsupported architectures are available by default.
+      **DONE:** `crates/mvm-cli/tests/machine_docs_guard.rs` — positive-presence
+      that the limitations page keeps covering every boundary topic, that the
+      scenario guide links the limitations + states the no-network default, and
+      a narrow affirmative-claim guard (collision-safe against negating prose).
 - [ ] Keep old verbs documented as advanced/underlying surfaces, not removed.
 
 ### B. Ephemeral image runner parity

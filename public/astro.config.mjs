@@ -51,6 +51,7 @@ export default defineConfig({
           items: [
             { label: "Installation", slug: "getting-started/installation" },
             { label: "First-Use Happy Paths", slug: "getting-started/happy-paths" },
+            { label: "Machine: Use This For", slug: "getting-started/machine-scenarios" },
             { label: "Quick Start", slug: "getting-started/quickstart" },
             { label: "Python quickstart", slug: "getting-started/python-quickstart" },
             { label: "Node.js quickstart", slug: "getting-started/nodejs-quickstart" },
@@ -139,6 +140,7 @@ export default defineConfig({
             { label: "Audit and Receipts", slug: "guides/audit-and-receipts" },
             { label: "Observability and Results", slug: "guides/observability-and-results" },
             { label: "Manifests", slug: "guides/manifests" },
+            { label: "Machine Limitations & Scope", slug: "guides/machine-limitations" },
             { label: "Networking", slug: "guides/networking" },
             { label: "Network Egress Policy", slug: "guides/network-egress-policy" },
             { label: "AI Agent Integration", slug: "guides/ai-agent-integration" },
