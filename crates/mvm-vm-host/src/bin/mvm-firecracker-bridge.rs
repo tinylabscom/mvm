@@ -82,7 +82,9 @@ use mvm_hostd::supervisor::network::{
     ObserverAllowlist, Pipeline, ProviderCapabilities, resolve_observer_chain_from_policy_source,
 };
 #[cfg(target_os = "linux")]
-use mvm_vm_host::firecracker_bridge::parse::{BridgeConfigJson, verify_passt_hash};
+use mvm_vm_host::firecracker_bridge::parse::{
+    BridgeConfigJson, decode_plan_json, verify_passt_hash,
+};
 #[cfg(target_os = "linux")]
 use std::io::Read;
 #[cfg(target_os = "linux")]
@@ -158,12 +160,14 @@ fn run() -> Result<()> {
 
     // ── Step 4: parse trusted plan + bundle ─────────────────────────
     //
-    // Trust model (see module doc): the producer (`FirecrackerBackend`)
-    // has already verified the signed envelope
-    // via `mvm-cli::admit_for_run`; we parse the inner ExecutionPlan
-    // body directly.
-    let plan: ExecutionPlan = serde_json::from_str(&cfg.plan_json)
-        .context("decode BridgeConfigJson.plan_json into ExecutionPlan")?;
+    // Trust model (see module doc): the producer (`FirecrackerBackend`) has
+    // already verified the signed envelope via `mvm-cli::admit_for_run`.
+    // `plan_json` is the `SignedExecutionPlan` envelope (the
+    // `VmStartConfig.plan_json` shape), so `decode_plan_json` extracts the inner
+    // `ExecutionPlan` from its payload — mirroring `mvm-libkrun-supervisor` —
+    // without re-verifying (the bridge shares the host TCB).
+    let plan: ExecutionPlan =
+        decode_plan_json(&cfg.plan_json).context("decode BridgeConfigJson.plan_json")?;
     let bundle: Option<PolicyBundle> = match &cfg.bundle_json {
         Some(s) => Some(
             serde_json::from_str(s)
