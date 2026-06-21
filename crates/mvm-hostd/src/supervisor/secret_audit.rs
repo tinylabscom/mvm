@@ -101,6 +101,22 @@ mod tests {
         )
     }
 
+    // The signed `entry` payloads only — the claim-13 surface. The opaque
+    // base64 `signature`/`prev_hash` fields carry arbitrary bytes that can spell
+    // any substring (the signature covers a wall-clock timestamp, so it varies
+    // per run); scanning them for value leaks is nondeterministic and wrong.
+    fn entry_payloads(chain: &str) -> String {
+        chain
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                v["entry"].to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[tokio::test]
     async fn substituted_event_is_metadata_only_and_chain_verifies() {
         let dir = tempdir().unwrap();
@@ -116,10 +132,11 @@ mod tests {
         assert!(chain.contains("openai"));
         assert!(chain.contains("api.openai.com"));
         assert!(chain.contains("bearer"));
-        // claim 13: the value never appears in the chain.
+        // claim 13: the value never appears in the signed entry.
+        let payloads = entry_payloads(&chain);
         assert!(
-            !chain.contains("sk-live"),
-            "audit chain must not carry the secret value: {chain}"
+            !payloads.contains("sk-live"),
+            "audit chain must not carry the secret value: {payloads}"
         );
 
         assert_eq!(verify_audit_chain(&file, &vk).unwrap(), 1);
@@ -157,9 +174,10 @@ mod tests {
         assert!(chain.contains("api.openai.com"));
         assert!(chain.contains("openai-key,email"));
         // claim 13: the masked bytes / value never appear — only category names.
+        let payloads = entry_payloads(&chain);
         assert!(
-            !chain.contains("sk-") && !chain.contains("XXX"),
-            "audit chain must carry no matched bytes: {chain}"
+            !payloads.contains("sk-") && !payloads.contains("XXX"),
+            "audit chain must carry no matched bytes: {payloads}"
         );
         assert_eq!(verify_audit_chain(&file, &vk).unwrap(), 1);
     }
