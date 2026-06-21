@@ -210,8 +210,8 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 clap_mangen = "0.2"
 colored = "3"
-indicatif = "0.17"
-inquire = "0.7"
+indicatif = "0.18"
+inquire = "0.9"
 
 # HTTP client (for CLI upgrade)
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
@@ -221,7 +221,6 @@ reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], def
 # `ring` backend (matches reqwest's rustls-tls + rcgen), no aws-lc-rs/cmake.
 # Direct dep of mvm-hostd only; the upstream re-origination leg reuses reqwest.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-rustls-pemfile = "2"
 
 # Name generation
 names = { version = "0.14", default-features = false }
@@ -246,8 +245,8 @@ seccompiler = "0.5"
 landlock = "0.4"
 
 # File watching (dev-watch feature only)
-notify = "7"
-notify-debouncer-mini = "0.5"
+notify = "8"
+notify-debouncer-mini = "0.7"
 
 # IP/CIDR matching for the L4 egress proxy's allow-list rules.
 # Plan 60 Phase 3 Slice B. `serde` feature serialises `IpNet` as
@@ -430,7 +429,7 @@ mvm-oci.workspace = true
 clap.workspace = true
 # Plan 69: local mock HTTP server for the `mvmctl update` live test.
 # Avoids reaching the real GitHub release API in CI / on dev machines.
-httpmock = "0.7"
+httpmock = "0.8"
 # Plan 60 Phase 7a — `tests/tenant_destroy_e2e.rs` exercises the
 # operator→auditor pipeline end-to-end. `mvm` (path dep above)
 # pulls these transitively at runtime; the integration test

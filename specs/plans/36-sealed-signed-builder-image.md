@@ -457,15 +457,18 @@ deliberate design decision, not a code rollback.
 
 ## Deferred follow-ups
 
-- [ ] **Drop the `rsa` Marvin-Attack advisory (RUSTSEC-2023-0071).**
-  `manifest-verify` pulls `sigstore`, which transitively pulls
-  `rsa 0.9` and trips RUSTSEC-2023-0071 (accepted in `deny.toml` —
-  verification-only, no RSA private-key ops, cosign bundles are ECDSA
-  P-256). `rsa` is non-optional in sigstore 0.13; sigstore 0.14 drops
-  its direct edge but `rsa` still arrives via
-  `verify → fulcio → oauth → openidconnect → rsa`. The real fix is a
-  constant-time `rsa` 0.10 (still pre-release) adopted by
-  `openidconnect`. Re-evaluate — and remove the ignore — once
-  `openidconnect` ships on `rsa` 0.10. A sigstore 0.14 bump is a
-  separate modernization (clears RUSTSEC-2024-0370, pulls a new crypto
-  stack needing ADR-002 re-vetting); it does not by itself remove `rsa`.
+- [x] **Drop the `rsa` Marvin-Attack advisory (RUSTSEC-2023-0071).** Done:
+  `manifest-verify` migrated off the monolithic `sigstore` crate onto the
+  modular `sigstore-verify` + `sigstore-trust-root` + `sigstore-types`
+  stack (`crypto::image_verify`). That stack verifies cosign bundles
+  offline against an embedded Sigstore trust root and carries no `rsa`, no
+  `openidconnect`, and no `proc-macro-error v1` — eliminating both
+  RUSTSEC-2023-0071 and RUSTSEC-2024-0370 outright rather than accepting
+  them. Verification is synchronous (no async TUF fetch), so the feature
+  no longer pulls tokio.
+- [ ] **Watch `jiff` for the optional `defmt` chain.** `sigstore-types`
+  pulls `jiff`; jiff ≥ 0.2.29 adds an optional `defmt` dependency whose
+  macro crate trips RUSTSEC-2026-0173 (`proc-macro-error2`) as a lockfile
+  entry even though the feature is never enabled. The lock pins
+  `jiff = 0.2.28` to avoid it. When upstream `defmt-macros` drops
+  `proc-macro-error2`, lift the pin.

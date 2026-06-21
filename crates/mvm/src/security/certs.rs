@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+use rustls::pki_types::pem::PemObject;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -162,9 +163,8 @@ pub fn load_server_config() -> Result<quinn::ServerConfig> {
     let key_pem = read_pem_file(&paths.node_key)?;
 
     // Parse CA for client verification
-    let mut ca_reader = std::io::BufReader::new(ca_pem.as_bytes());
     let ca_certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut ca_reader)
+        rustls::pki_types::CertificateDer::pem_slice_iter(ca_pem.as_bytes())
             .filter_map(|r| r.ok())
             .collect();
 
@@ -174,16 +174,14 @@ pub fn load_server_config() -> Result<quinn::ServerConfig> {
     }
 
     // Parse node certificate chain
-    let mut cert_reader = std::io::BufReader::new(cert_pem.as_bytes());
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_reader)
+        rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem.as_bytes())
             .filter_map(|r| r.ok())
             .collect();
 
     // Parse node private key
-    let mut key_reader = std::io::BufReader::new(key_pem.as_bytes());
-    let key = rustls_pemfile::private_key(&mut key_reader)?
-        .ok_or_else(|| anyhow::anyhow!("No private key found in {}", paths.node_key))?;
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
+        .map_err(|e| anyhow::anyhow!("No private key found in {}: {e}", paths.node_key))?;
 
     // Build mTLS server config: verify clients against our CA
     let client_verifier =
@@ -209,9 +207,8 @@ pub fn load_client_config() -> Result<quinn::ClientConfig> {
     let key_pem = read_pem_file(&paths.node_key)?;
 
     // Parse CA for server verification
-    let mut ca_reader = std::io::BufReader::new(ca_pem.as_bytes());
     let ca_certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut ca_reader)
+        rustls::pki_types::CertificateDer::pem_slice_iter(ca_pem.as_bytes())
             .filter_map(|r| r.ok())
             .collect();
 
@@ -221,16 +218,14 @@ pub fn load_client_config() -> Result<quinn::ClientConfig> {
     }
 
     // Parse client certificate chain
-    let mut cert_reader = std::io::BufReader::new(cert_pem.as_bytes());
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_reader)
+        rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem.as_bytes())
             .filter_map(|r| r.ok())
             .collect();
 
     // Parse client private key
-    let mut key_reader = std::io::BufReader::new(key_pem.as_bytes());
-    let key = rustls_pemfile::private_key(&mut key_reader)?
-        .ok_or_else(|| anyhow::anyhow!("No private key found in {}", paths.node_key))?;
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
+        .map_err(|e| anyhow::anyhow!("No private key found in {}: {e}", paths.node_key))?;
 
     let tls_config = rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
