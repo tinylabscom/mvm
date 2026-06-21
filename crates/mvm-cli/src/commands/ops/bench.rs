@@ -755,6 +755,7 @@ pub fn read_process_footprint_bytes(_pid: u32) -> Result<u64> {
 /// Persist a guest-monotonic boot timing cross-check beside the bench reports.
 /// The host-clock report remains the regression metric; this sidecar audits the
 /// guest's own phase timing without mixing clock domains.
+#[cfg(any(feature = "libkrun-live", target_os = "macos"))]
 pub(in crate::commands::ops) fn write_boot_timing_sidecar(
     vm_name: &str,
     boot_millis: &mvm_guest::vsock::BootTimingReport,
