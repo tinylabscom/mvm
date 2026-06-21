@@ -15,6 +15,10 @@ pub mod vsock_transport;
 
 pub mod vm;
 
+// Embedded-library surface for the warm-lease ergonomics.
+pub use vm::exec_builder::{ExecBuilder, ExecOutcome};
+pub use vm::lease::{AcquireSpec, WarmLease};
+
 // Substrate re-exports — see crate doc comment.
 pub use mvm_backend::base::{config, linux_env, shell, ui};
 

@@ -39,6 +39,11 @@ cache when the resolved image and policy inputs still match. Production image
 runs should use digest-pinned refs and the existing OCI policy verification
 path.
 
+For the higher-level `mvmctl machine` workflow map, see
+[Machine use cases](/guides/machine-use-cases/). For explicit network, volume,
+SSH-agent, macOS, GPU, and architecture limits, see
+[Machine limitations](/guides/machine-limitations/).
+
 **Failure recovery:**
 
 - `image verification failed` → use a digest-pinned image and configure the OCI
@@ -186,3 +191,7 @@ running after you exit; `mvmctl dev down` stops them.
   surface in detail.
 - [Sandboxed Exec](/guides/exec/) — one-shot transient microVMs
   for `docker run --rm`-style use.
+- [Machine use cases](/guides/machine-use-cases/) — scenario-led
+  `mvmctl machine` workflows.
+- [Machine limitations](/guides/machine-limitations/) — explicit
+  backend and feature limits for machine UX.

@@ -21,6 +21,8 @@ policy decision, or troubleshooting path.
 | Guide | Use it when |
 | --- | --- |
 | [Builder VM](/guides/builder-vm/) | You need Linux builds from a secure builder boundary. |
+| [Machine use cases](/guides/machine-use-cases/) | You want to choose the right `mvmctl machine` workflow before reading internals. |
+| [Machine limitations](/guides/machine-limitations/) | You need the explicit limits for machine networking, volumes, SSH-agent forwarding, macOS, GPU, and architecture support. |
 | [Building MicroVM Images](/guides/building-microvm-images/) | You need to turn a flake and manifest into a bootable image. |
 | [Nix and OCI](/guides/nix-and-oci/) | You need the Nix-first model plus OCI compatibility rules. |
 | [Policy Profiles](/guides/policy-profiles/) | You need repeatable security defaults for sandbox classes. |

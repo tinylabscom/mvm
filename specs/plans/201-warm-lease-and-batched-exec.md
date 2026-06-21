@@ -138,19 +138,39 @@ the same builder surface without linking the dev-only handler. The new
   Tests (mock backend, no live boot, 4): claim → release stops + replenishes;
   cold-boot fallback on an empty pool does **not** replenish; drop of a claimed
   lease stops + replenishes; `release()` surfaces a stop error `Drop` swallows.
-- [ ] **WS-B — `ExecBuilder` Tier 1.** Connection-reuse pipelining over
-  `VsockTransport`. Tests against `mvm-backend`'s `mock_guest_agent`:
-  staged files land before the command runs; one stream serves the batch.
-- [ ] **WS-C — `ExecOutcome` enrichment.** Add `duration` + `peak_rss_kib`;
-  populate host-side (Tier 1) and agent-side (`getrusage`, Tier 2). Serde
-  roundtrip + default-value tests.
-- [ ] **WS-D — `GuestRequest::ExecBatch` Tier 2.** New frame + in-guest
-  sequential runner, `dev-shell`-gated. Extend the `GuestRequest` fuzz
-  target. `#[serde(deny_unknown_fields)]` on the new stage types.
-- [ ] **WS-E — facade + example.** Re-export `WarmLease` / `ExecBuilder`;
-  add `crates/mvm-cli/examples/verification_loop.rs` proving
-  `WarmLease` + batched exec end-to-end (the embedded-library tier we do
-  not currently demonstrate).
+- [x] **WS-B — `ExecBuilder` Tier 1.** Landed at `crates/mvm/src/vm/exec_builder.rs`:
+  `WarmLease::exec()` → `ExecBuilder` (`stage_file`/`argv`/`chain`/`timeout`/
+  `output()`/`run_entrypoint()`). Connection-reuse — one stream pipelines the
+  `FsWrite` staging frames (`call_unary`) then the `Exec`/`RunEntrypoint`
+  frame(s) (`call_streaming`), reusing the `mvm-guest` host plumbing (no upward
+  dep on the CLI exec driver). Argv is shell-quoted. Tests against
+  `mock_guest_agent` (gained `Exec`/`RunEntrypoint` single-terminal handlers):
+  stage→exec on one stream, multi-file stage, run_entrypoint, shell-join quoting.
+- [x] **WS-C — `ExecOutcome` enrichment.** `ExecOutcome { status, stdout,
+  stderr, duration, peak_rss_kib }` — `duration` is host-measured (Tier 1);
+  `peak_rss_kib` is `None` on Tier 1 (agent-measured `getrusage` arrives with
+  the Tier-2 `ExecBatch` path in WS-D).
+- [x] **WS-D — `GuestRequest::ExecBatch` Tier 2.** Landed. New `ExecBatch
+  { stages, commands, timeout_secs }` request + `ExecBatchResult { outcomes }`
+  response carrying agent-measured `ExecOutcomeWire { status, stdout, stderr,
+  duration_ms, peak_rss_kib }` (`deny_unknown_fields` on `StageFile` +
+  `ExecOutcomeWire`). One round-trip, unary contract. The in-guest runner
+  (`do_exec_batch` in `mvm-guest-agent`) stages files then runs each argv
+  buffered via `exec_stream::stream_exec`, stops at the first non-zero exit, and
+  fills `peak_rss_kib` from `getrusage(RUSAGE_CHILDREN)` — `dev-shell`-gated, so
+  the prod agent ships the not-feature `Error` arm (verified: prod no-default
+  build + `check-prod-agent-no-exec`/`-console` still green). The
+  `fuzz_guest_request` target is `serde_json::from_slice::<GuestRequest>`, so it
+  covers `ExecBatch` automatically. Host `ExecBuilder::batch()` sends it and
+  maps `ExecBatchResult` → `Vec<ExecOutcome>`; `mock_guest_agent` answers one
+  zero-exit outcome per command. Tests: 3 vsock (request roundtrip + verb/
+  class/contract, result roundtrip + variant, `deny_unknown_fields`) + 1
+  host-side batch round-trip against the mock.
+- [~] **WS-E — facade + example.** Re-export DONE — `mvm` now re-exports
+  `WarmLease`/`AcquireSpec`/`ExecBuilder`/`ExecOutcome` at the crate root
+  (`crates/mvm/src/lib.rs`), reachable via the `mvmctl::runtime` facade.
+  Remaining: the `crates/mvm-cli/examples/verification_loop.rs` end-to-end
+  example.
 
 ## Success criteria
 

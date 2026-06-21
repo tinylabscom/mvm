@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use mvm_core::vm_backend::{
     BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, StandbyClaim,
     StandbyError, StandbyHandle, StandbySpec, StandbyState, StartMode, VmBackend, VmCapabilities,
-    VmId, VmInfo, VmStartConfig, VmStatus,
+    VmId, VmInfo, VmStartConfig, VmStatus, WarmStartOutcome,
 };
 
 // Every backend variant + the FC support modules live in this crate.
@@ -219,7 +219,7 @@ impl VmBackend for FirecrackerBackend {
         &self,
         config: &VmStartConfig,
         requested: SnapshotCapability,
-    ) -> std::result::Result<VmId, mvm_core::vm_backend::WarmStartError> {
+    ) -> std::result::Result<WarmStartOutcome, mvm_core::vm_backend::WarmStartError> {
         use mvm_core::vm_backend::WarmStartError;
         // Fail closed on an over-request rather than silently degrading — the
         // same gate the trait default applies (C4).
@@ -236,11 +236,16 @@ impl VmBackend for FirecrackerBackend {
             });
         }
         // Mint a fresh generation token so two clones of one snapshot reseed to
-        // distinct CSPRNG state, then load + resume + deliver it.
+        // distinct CSPRNG state, then load + resume + deliver it. The returned
+        // `ReseedStatus` is surfaced verbatim so the verb is honest about
+        // whether the guest actually rotated.
         let token = mvm_core::crypto::vmgenid::fresh_generation_token(&config.name).token;
-        microvm::warm_restore_instance(&config.name, token)
+        let reseed = microvm::warm_restore_instance(&config.name, token)
             .map_err(|e| WarmStartError::Failed(format!("{e:#}")))?;
-        Ok(VmId(config.name.clone()))
+        Ok(WarmStartOutcome {
+            id: VmId(config.name.clone()),
+            reseed,
+        })
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
@@ -657,7 +662,7 @@ impl AnyBackend {
         &self,
         config: &VmStartConfig,
         requested: SnapshotCapability,
-    ) -> std::result::Result<VmId, mvm_core::vm_backend::WarmStartError> {
+    ) -> std::result::Result<WarmStartOutcome, mvm_core::vm_backend::WarmStartError> {
         self.inner().warm_start(config, requested)
     }
 

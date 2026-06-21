@@ -8,9 +8,17 @@
 //! are never written to the normal audit chain, and capture is opt-in and
 //! bounded.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
+
+use crate::crypto::aead;
+
+/// Filename of the host transcript key-encryption key, under the keys dir.
+pub const TRANSCRIPT_KEK_FILENAME: &str = "transcript-kek.bin";
 
 /// Current sealed-transcript manifest format. Unknown versions fail closed.
 pub const TRANSCRIPT_MANIFEST_FORMAT_VERSION: u32 = 1;
@@ -95,6 +103,10 @@ pub enum TranscriptError {
     UnsafeChunkName(String),
     #[error("io error verifying {file}: {msg}")]
     Io { file: String, msg: String },
+    #[error("chunk {seq} ({file}) failed to decrypt (wrong key or tampered ciphertext)")]
+    Decrypt { seq: u64, file: String },
+    #[error("wrapped transcript key is malformed or cannot be unwrapped")]
+    WrappedKeyInvalid,
 }
 
 /// Accumulates a live capture and fails closed the moment a bound is hit.
@@ -187,6 +199,150 @@ pub fn verify_chunks(manifest: &TranscriptManifest, dir: &Path) -> Result<(), Tr
         }
     }
     Ok(())
+}
+
+/// Bounded, AEAD-encrypting transcript writer. Each pushed payload is checked
+/// against the [`CaptureBudget`] *before* it is written, encrypted at rest with
+/// the per-capture data key, and recorded in the manifest by the sha256 of its
+/// **ciphertext** (so [`verify_chunks`] re-hashes what is on disk). The raw
+/// data key is the caller's to wrap for `recipient`; the writer only records
+/// the already-wrapped form.
+pub struct TranscriptWriter {
+    dir: PathBuf,
+    key: aead::Key,
+    budget: CaptureBudget,
+    chunks: Vec<ChunkRecord>,
+    capture_id: String,
+    binding: CaptureBinding,
+    bounds: CaptureBounds,
+    created_unix_secs: u64,
+    wrapped_data_key_b64: String,
+    recipient: String,
+}
+
+/// Construction parameters for a [`TranscriptWriter`] (grouped to keep the
+/// constructor narrow). `wrapped_data_key_b64` is the per-capture key wrapped
+/// for `recipient`; the writer records it verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptWriterConfig {
+    pub capture_id: String,
+    pub binding: CaptureBinding,
+    pub bounds: CaptureBounds,
+    pub created_unix_secs: u64,
+    pub recipient: String,
+    pub wrapped_data_key_b64: String,
+}
+
+impl TranscriptWriter {
+    /// `dir` must already exist. `key` encrypts chunks at rest.
+    pub fn new(dir: impl Into<PathBuf>, key: aead::Key, config: TranscriptWriterConfig) -> Self {
+        Self {
+            dir: dir.into(),
+            key,
+            budget: CaptureBudget::new(config.bounds),
+            chunks: Vec::new(),
+            capture_id: config.capture_id,
+            binding: config.binding,
+            bounds: config.bounds,
+            created_unix_secs: config.created_unix_secs,
+            wrapped_data_key_b64: config.wrapped_data_key_b64,
+            recipient: config.recipient,
+        }
+    }
+
+    /// Encrypt and append one payload chunk, or fail closed on a bound. The
+    /// budget is checked on the *plaintext* size before any ciphertext lands.
+    pub fn push(&mut self, direction: Direction, plaintext: &[u8]) -> Result<(), TranscriptError> {
+        self.budget.try_add(plaintext.len() as u64)?;
+        let seq = self.chunks.len() as u64;
+        let file = format!("{seq}.chunk");
+        let ciphertext = aead::seal(&self.key, plaintext);
+        let path = self.dir.join(&file);
+        std::fs::write(&path, &ciphertext).map_err(|e| TranscriptError::Io {
+            file: file.clone(),
+            msg: e.to_string(),
+        })?;
+        let sha256_hex =
+            crate::crypto::image_verify::sha256_file(&path).map_err(|e| TranscriptError::Io {
+                file: file.clone(),
+                msg: e.to_string(),
+            })?;
+        self.chunks.push(ChunkRecord {
+            seq,
+            file,
+            sha256_hex,
+            size_bytes: ciphertext.len() as u64,
+            direction,
+        });
+        Ok(())
+    }
+
+    /// Finalize the manifest for the chunks written so far.
+    pub fn seal(self) -> TranscriptManifest {
+        TranscriptManifest {
+            format_version: TRANSCRIPT_MANIFEST_FORMAT_VERSION,
+            capture_id: self.capture_id,
+            binding: self.binding,
+            bounds: self.bounds,
+            created_unix_secs: self.created_unix_secs,
+            wrapped_data_key_b64: self.wrapped_data_key_b64,
+            recipient: self.recipient,
+            chunks: self.chunks,
+        }
+    }
+}
+
+/// Verify a sealed transcript and decrypt its chunks back to the original
+/// plaintext stream. Integrity is checked first ([`verify_chunks`]); a wrong
+/// key or tampered ciphertext fails closed on decrypt.
+pub fn export(
+    manifest: &TranscriptManifest,
+    dir: &Path,
+    key: &aead::Key,
+) -> Result<Vec<u8>, TranscriptError> {
+    verify_chunks(manifest, dir)?;
+    let mut out = Vec::new();
+    for c in &manifest.chunks {
+        let ciphertext = std::fs::read(dir.join(&c.file)).map_err(|e| TranscriptError::Io {
+            file: c.file.clone(),
+            msg: e.to_string(),
+        })?;
+        let plaintext = aead::open(key, &ciphertext).map_err(|_| TranscriptError::Decrypt {
+            seq: c.seq,
+            file: c.file.clone(),
+        })?;
+        out.extend_from_slice(&plaintext);
+    }
+    Ok(out)
+}
+
+/// Load the host transcript key-encryption key from `keys_dir`, creating it
+/// (mode 0600) on first use. Every per-capture data key is wrapped under this
+/// KEK so payloads stay unreadable without host access.
+pub fn load_or_init_kek(keys_dir: &Path) -> std::io::Result<aead::Key> {
+    let path = keys_dir.join(TRANSCRIPT_KEK_FILENAME);
+    if path.exists() {
+        return aead::Key::load(&path);
+    }
+    std::fs::create_dir_all(keys_dir)?;
+    let kek = aead::Key::random();
+    kek.persist(&path, 0o600)?;
+    Ok(kek)
+}
+
+/// Wrap a per-capture data key under the host KEK, base64 for the manifest's
+/// `wrapped_data_key_b64`.
+pub fn wrap_data_key(kek: &aead::Key, data_key: &aead::Key) -> String {
+    B64.encode(data_key.wrap_under(kek))
+}
+
+/// Recover a per-capture data key from the manifest's `wrapped_data_key_b64`.
+/// Fails closed on bad base64, a wrong KEK, or a tampered wrap.
+pub fn unwrap_data_key(kek: &aead::Key, wrapped_b64: &str) -> Result<aead::Key, TranscriptError> {
+    let framed = B64
+        .decode(wrapped_b64)
+        .map_err(|_| TranscriptError::WrappedKeyInvalid)?;
+    aead::Key::unwrap_under(kek, &framed).map_err(|_| TranscriptError::WrappedKeyInvalid)
 }
 
 #[cfg(test)]
@@ -333,5 +489,154 @@ mod tests {
             verify_chunks(&m, dir.path()).unwrap_err(),
             TranscriptError::UnknownFormatVersion { got: 999, .. }
         ));
+    }
+
+    fn writer_config() -> TranscriptWriterConfig {
+        TranscriptWriterConfig {
+            capture_id: "cap-1".to_string(),
+            binding: CaptureBinding {
+                tenant_id: "t".to_string(),
+                vm_name: "vm".to_string(),
+                session_id: None,
+            },
+            bounds: bounds(),
+            created_unix_secs: 1,
+            recipient: "host-key-1".to_string(),
+            wrapped_data_key_b64: "wrapped".to_string(),
+        }
+    }
+
+    // `aead::Key` is deliberately not `Clone`; build identical keys from bytes
+    // so a test can both encrypt and later decrypt.
+    fn fixed_key(b: u8) -> aead::Key {
+        aead::Key::from_bytes([b; 32])
+    }
+
+    #[test]
+    fn capture_then_export_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config());
+        w.push(Direction::Egress, b"GET / HTTP/1.1\r\n").unwrap();
+        w.push(Direction::Ingress, b"HTTP/1.1 200 OK\r\n").unwrap();
+        let manifest = w.seal();
+        assert_eq!(manifest.chunks.len(), 2);
+        // Ciphertext on disk verifies, and decrypts back to the concatenation.
+        verify_chunks(&manifest, dir.path()).unwrap();
+        let out = export(&manifest, dir.path(), &fixed_key(7)).unwrap();
+        assert_eq!(out, b"GET / HTTP/1.1\r\nHTTP/1.1 200 OK\r\n");
+    }
+
+    #[test]
+    fn export_fails_closed_on_a_tampered_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config());
+        w.push(Direction::Egress, b"secret").unwrap();
+        let manifest = w.seal();
+        // Flip a byte in place (same length) so the hash check — not the size
+        // check — is what refuses.
+        let mut ct = std::fs::read(dir.path().join("0.chunk")).unwrap();
+        ct[0] ^= 0xff;
+        std::fs::write(dir.path().join("0.chunk"), &ct).unwrap();
+        let err = export(&manifest, dir.path(), &fixed_key(7)).unwrap_err();
+        assert!(matches!(err, TranscriptError::HashMismatch { .. }));
+    }
+
+    #[test]
+    fn export_fails_closed_on_the_wrong_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config());
+        w.push(Direction::Egress, b"secret").unwrap();
+        let manifest = w.seal();
+        // Integrity passes (ciphertext untouched) but the wrong key can't decrypt.
+        assert!(matches!(
+            export(&manifest, dir.path(), &fixed_key(9)).unwrap_err(),
+            TranscriptError::Decrypt { .. }
+        ));
+    }
+
+    #[test]
+    fn kek_is_created_once_then_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        let k1 = load_or_init_kek(&keys).unwrap();
+        let path = keys.join(TRANSCRIPT_KEK_FILENAME);
+        assert!(path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "KEK file must be private");
+        }
+        // Reload returns a KEK that round-trips the same wrapped data key.
+        let k2 = load_or_init_kek(&keys).unwrap();
+        let data = aead::Key::from_bytes([5u8; 32]);
+        let wrapped = wrap_data_key(&k1, &data);
+        assert!(
+            unwrap_data_key(&k2, &wrapped).is_ok(),
+            "persisted KEK reused"
+        );
+    }
+
+    #[test]
+    fn wrap_unwrap_data_key_round_trips_and_rejects_garbage() {
+        let kek = aead::Key::from_bytes([1u8; 32]);
+        let data = aead::Key::from_bytes([2u8; 32]);
+        let wrapped = wrap_data_key(&kek, &data);
+        // Recovered key decrypts what the original sealed.
+        let recovered = unwrap_data_key(&kek, &wrapped).unwrap();
+        let blob = aead::seal(&data, b"payload");
+        assert_eq!(aead::open(&recovered, &blob).unwrap(), b"payload");
+        // Wrong KEK + non-base64 both fail closed.
+        let wrong = aead::Key::from_bytes([3u8; 32]);
+        assert!(matches!(
+            unwrap_data_key(&wrong, &wrapped),
+            Err(TranscriptError::WrappedKeyInvalid)
+        ));
+        assert!(matches!(
+            unwrap_data_key(&kek, "not base64!!"),
+            Err(TranscriptError::WrappedKeyInvalid)
+        ));
+    }
+
+    #[test]
+    fn wrapped_key_capture_and_export_round_trips_end_to_end() {
+        // The full at-rest path: KEK wraps the data key in the manifest, the
+        // capture encrypts under the data key, and export unwraps then decrypts.
+        let dir = tempfile::tempdir().unwrap();
+        let kek = load_or_init_kek(&dir.path().join("keys")).unwrap();
+        let data = aead::Key::from_bytes([8u8; 32]);
+        let mut cfg = writer_config();
+        cfg.wrapped_data_key_b64 = wrap_data_key(&kek, &data);
+        let mut w = TranscriptWriter::new(dir.path(), aead::Key::from_bytes([8u8; 32]), cfg);
+        w.push(Direction::Egress, b"forensic payload").unwrap();
+        let manifest = w.seal();
+        // Operator-side: unwrap the data key from the manifest using the KEK,
+        // then export.
+        let recovered = unwrap_data_key(&kek, &manifest.wrapped_data_key_b64).unwrap();
+        assert_eq!(
+            export(&manifest, dir.path(), &recovered).unwrap(),
+            b"forensic payload"
+        );
+    }
+
+    #[test]
+    fn push_fails_closed_on_budget_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = aead::Key::random();
+        let mut cfg = writer_config();
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: 60,
+            max_bytes: 4,
+            max_chunks: 10,
+        };
+        let mut w = TranscriptWriter::new(dir.path(), key, cfg);
+        assert!(matches!(
+            w.push(Direction::Egress, b"too-long").unwrap_err(),
+            TranscriptError::BoundExceeded(_)
+        ));
+        assert!(
+            !dir.path().join("0.chunk").exists(),
+            "no ciphertext lands when the budget refuses the chunk"
+        );
     }
 }

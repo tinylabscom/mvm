@@ -33,11 +33,22 @@ struct HostAgentFixture {
 
 impl HostAgentFixture {
     async fn start() -> Self {
+        Self::start_inner(None).await
+    }
+
+    async fn start_with_idle_timeout(secs: u64) -> Self {
+        Self::start_inner(Some(secs)).await
+    }
+
+    async fn start_inner(idle_timeout_secs: Option<u64>) -> Self {
         let mut env = TestEnv::new();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         env.set("MVM_DATA_DIR", data_dir.path());
         env.set("MVM_HOST_AGENT_PATH", HOST_AGENT_BIN);
         env.set("MVM_SIGNER_HELPER_PATH", SIGNER_HELPER_BIN);
+        if let Some(secs) = idle_timeout_secs {
+            env.set("MVM_HOST_AGENT_IDLE_TIMEOUT", secs.to_string());
+        }
 
         let keys_dir = config::mvm_keys_dir();
         let signer = host_keypair::load_or_init_at(&keys_dir).expect("host signer");
@@ -112,6 +123,10 @@ impl HostAgentFixture {
     fn chain_entries(&self) -> usize {
         verify_workload_chain(&self.workload_chain, &self.verifying_key).expect("chain verifies")
     }
+
+    fn deregister(&self) {
+        deregister_vm(&self.control_socket, &self.key_bytes, &self.vm_name).expect("deregister vm");
+    }
 }
 
 impl Drop for HostAgentFixture {
@@ -139,6 +154,28 @@ fn kill_process_group(pid: libc::pid_t) {
     unsafe {
         libc::kill(-pid, libc::SIGKILL);
     }
+}
+
+fn pid_alive(pid: libc::pid_t) -> bool {
+    // Reap zombie children before probing: if the process is a zombie, waitpid
+    // removes it from the table so a subsequent kill(pid, 0) returns ESRCH.
+    // SAFETY: WNOHANG never blocks; we discard the status.
+    unsafe {
+        libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG);
+    }
+    // SAFETY: kill(pid, 0) probes process existence without delivering a signal.
+    // Returns 0 if alive (including zombies not yet reaped), -1/ESRCH if gone.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+async fn wait_until_pid_dead(pid: libc::pid_t, deadline: Instant) {
+    while Instant::now() < deadline {
+        if !pid_alive(pid) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("pid {pid} was still alive at deadline");
 }
 
 async fn write_frame(stream: &mut UnixStream, value: &impl serde::Serialize) -> Result<()> {
@@ -273,4 +310,33 @@ async fn daemon_crash_mid_flight_loses_at_most_one_call_and_preserves_chain() {
         &fixture.vm_name,
     )
     .expect("deregister vm");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_daemon_self_terminates_when_last_vm_deregisters() {
+    // 1s idle timeout — the daemon should exit well within our 6s deadline.
+    let fixture = HostAgentFixture::start_with_idle_timeout(1).await;
+
+    // Sanity check: the tree is alive before we pull the registration.
+    let daemon_pid = fixture.daemon_pid().expect("daemon pid");
+    let worker_pid = fixture.worker_pid().expect("worker pid");
+    assert!(
+        pid_alive(daemon_pid),
+        "daemon must be alive before deregister"
+    );
+    assert!(
+        pid_alive(worker_pid),
+        "worker must be alive before deregister"
+    );
+
+    // Deregister the only VM → registration count drops to 0.
+    fixture.deregister();
+
+    // Poll until both the worker and the wrapper (daemon) are gone.
+    // The idle watcher polls every 500ms and the timeout is 1s, so the worker
+    // exits after ~1.5s at most. The wrapper observes the idle exit code and
+    // returns Ok() without restarting. 6s is ample headroom.
+    let deadline = Instant::now() + Duration::from_secs(6);
+    wait_until_pid_dead(worker_pid, deadline).await;
+    wait_until_pid_dead(daemon_pid, deadline).await;
 }

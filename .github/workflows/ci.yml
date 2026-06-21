@@ -89,6 +89,9 @@ jobs:
       - name: Gated doc claims
         run: cargo run -p xtask -- check-doc-claims
 
+      - name: Machine docs guards
+        run: cargo run -p xtask -- check-machine-doc-guards
+
       - name: No overclaiming
         run: cargo run -p xtask -- check-no-overclaim
 

@@ -132,6 +132,8 @@ export default defineConfig({
             { label: "Builder VM", slug: "guides/builder-vm" },
             { label: "Custom kernels", slug: "guides/kernels" },
             { label: "Sandboxed Exec", slug: "guides/exec" },
+            { label: "Machine use cases", slug: "guides/machine-use-cases" },
+            { label: "Machine limitations", slug: "guides/machine-limitations" },
             { label: "Policy Profiles", slug: "guides/policy-profiles" },
             { label: "Config & Secrets", slug: "guides/config-secrets" },
             { label: "Secrets and Credentials", slug: "guides/secrets-and-credentials" },

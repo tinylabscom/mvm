@@ -46,8 +46,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use mvm_guest::vsock::{
-    FsErrorKind, FsResult, GuestRequest, GuestResponse, ProcResult, ProcWaitEvent,
-    protocol_hello_response,
+    EntrypointEvent, ExecEvent, ExecOutcomeWire, FsErrorKind, FsResult, GuestRequest,
+    GuestResponse, ProcResult, ProcWaitEvent, protocol_hello_response,
 };
 
 /// Maximum frame size accepted by the mock agent — matches the
@@ -322,6 +322,29 @@ fn dispatch(req: GuestRequest, next_token: &AtomicU64) -> GuestResponse {
             bytes_written: content.len() as u64,
         }),
         GuestRequest::FsMkdir { .. } => GuestResponse::FsResult(FsResult::Mkdir),
+
+        // ── Exec / entrypoint (single terminal frame) ───────────────
+        // The mock answers the streaming Exec / RunEntrypoint verbs with one
+        // terminal Exit frame so `call_streaming` completes after a single
+        // read. Enough to exercise the host-side ExecBuilder pipelining; it
+        // does not emit stdout/stderr chunks.
+        GuestRequest::Exec { .. } => GuestResponse::ExecEvent(ExecEvent::Exit { code: 0 }),
+        GuestRequest::RunEntrypoint { .. } => {
+            GuestResponse::EntrypointEvent(EntrypointEvent::Exit { code: 0 })
+        }
+        // One zero-exit outcome per command; stages are ignored.
+        GuestRequest::ExecBatch { commands, .. } => GuestResponse::ExecBatchResult {
+            outcomes: commands
+                .iter()
+                .map(|_| ExecOutcomeWire {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    duration_ms: 0,
+                    peak_rss_kib: None,
+                })
+                .collect(),
+        },
         GuestRequest::FsRemove { .. } => {
             // Real agent reports actual entry count; the mock has no
             // tree to walk, so always report a single entry removed.

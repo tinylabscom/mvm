@@ -34,10 +34,18 @@ export type GuestRequest =
       };
     }
   | "ProbeStatus"
+  | "PrimedStatus"
   | {
       Exec: {
         command: string;
         stdin?: string | null;
+        timeout_secs?: number | null;
+      };
+    }
+  | {
+      ExecBatch: {
+        commands: string[][];
+        stages: StageFile[];
         timeout_secs?: number | null;
       };
     }
@@ -351,10 +359,20 @@ export type GuestResponse =
       };
     }
   | {
+      PrimedStatusReport: {
+        primed: boolean;
+      };
+    }
+  | {
       EntrypointEvent: EntrypointEvent;
     }
   | {
       ExecEvent: ExecEvent;
+    }
+  | {
+      ExecBatchResult: {
+        outcomes: ExecOutcomeWire[];
+      };
     }
   | {
       PostRestoreAck: {
@@ -748,6 +766,14 @@ export interface Protocol {
   response: GuestResponse;
 }
 /**
+ * A file to stage into the guest before an [`GuestRequest::ExecBatch`] runs.
+ */
+export interface StageFile {
+  content: number[];
+  mode: number;
+  path: string;
+}
+/**
  * Full state report for a single integration (returned by guest agent).
  */
 export interface IntegrationStateReport {
@@ -809,6 +835,16 @@ export interface ProbeResult {
   output?: {
     [k: string]: unknown;
   };
+}
+/**
+ * One command's buffered outcome from an [`GuestRequest::ExecBatch`]. Agent- measured: `duration_ms` is the in-guest wall-clock and `peak_rss_kib` the `getrusage` high-water mark when the guest can report it.
+ */
+export interface ExecOutcomeWire {
+  duration_ms: number;
+  peak_rss_kib?: number | null;
+  status: number;
+  stderr: number[];
+  stdout: number[];
 }
 /**
  * A single filesystem change detected since boot.

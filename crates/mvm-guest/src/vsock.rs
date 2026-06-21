@@ -175,10 +175,26 @@ pub enum GuestRequest {
     CheckpointIntegrations { integrations: Vec<String> },
     /// Query status of all loaded probes.
     ProbeStatus,
+    /// Query whether the workload has signalled "primed" (caches/JITs/model
+    /// load done). The workload asserts it by creating the primed marker
+    /// (`PRIMED_MARKER_PATH`); the agent reports its presence. Used by the
+    /// host's warm-snapshot barrier to seal a deterministic, fully-warmed base.
+    PrimedStatus,
     /// Run a command inside the guest (dev-only, requires dev-shell feature + SecurityPolicy).
     Exec {
         command: String,
         stdin: Option<String>,
+        timeout_secs: Option<u64>,
+    },
+    /// Tier-2 batched exec (dev-shell only): stage files, then run a sequence of
+    /// argv commands in-guest in a single round-trip, returning one buffered
+    /// outcome per command. The chain stops at the first non-zero exit. This is
+    /// the one-round-trip counterpart to the host driving `FsWrite` + `Exec`
+    /// frames itself; `peak_rss_kib` is agent-measured here. Answered by a
+    /// single `ExecBatchResult` frame.
+    ExecBatch {
+        stages: Vec<StageFile>,
+        commands: Vec<Vec<String>>,
         timeout_secs: Option<u64>,
     },
     /// Run the image's baked entrypoint program with the given stdin
@@ -526,7 +542,9 @@ impl GuestRequest {
             Self::IntegrationStatus => "integration-status",
             Self::CheckpointIntegrations { .. } => "checkpoint-integrations",
             Self::ProbeStatus => "probe-status",
+            Self::PrimedStatus => "primed-status",
             Self::Exec { .. } => "exec",
+            Self::ExecBatch { .. } => "exec-batch",
             Self::RunEntrypoint { .. } => "run-entrypoint",
             Self::PostRestore { .. } => "post-restore",
             Self::FsDiff => "fs-diff",
@@ -736,7 +754,9 @@ impl GuestRequest {
             GuestRequest::IntegrationStatus => Verb::IntegrationStatus,
             GuestRequest::CheckpointIntegrations { .. } => Verb::CheckpointIntegrations,
             GuestRequest::ProbeStatus => Verb::ProbeStatus,
+            GuestRequest::PrimedStatus => Verb::PrimedStatus,
             GuestRequest::Exec { .. } => Verb::Exec,
+            GuestRequest::ExecBatch { .. } => Verb::ExecBatch,
             GuestRequest::RunEntrypoint { .. } => Verb::RunEntrypoint,
             GuestRequest::PostRestore { .. } => Verb::PostRestore,
             GuestRequest::FsDiff => Verb::FsDiff,
@@ -794,6 +814,7 @@ impl GuestRequest {
             | GuestRequest::IntegrationStatus
             | GuestRequest::CheckpointIntegrations { .. }
             | GuestRequest::ProbeStatus
+            | GuestRequest::PrimedStatus
             | GuestRequest::RunEntrypoint { .. }
             | GuestRequest::PostRestore { .. }
             | GuestRequest::EntrypointStatus
@@ -808,6 +829,7 @@ impl GuestRequest {
             // mounted-volume contents, so the entire filesystem
             // RPC surface is DevOnly in v1.
             GuestRequest::Exec { .. }
+            | GuestRequest::ExecBatch { .. }
             | GuestRequest::FsDiff
             | GuestRequest::StartPortForward { .. }
             | GuestRequest::StartUnixSocketForward { .. }
@@ -917,6 +939,9 @@ pub enum GuestResponse {
     ProbeStatusReport {
         probes: Vec<crate::probes::ProbeResult>,
     },
+    /// Whether the workload has signalled "primed" (the primed marker is
+    /// present). Answers `PrimedStatus`.
+    PrimedStatusReport { primed: bool },
     /// One event in the response stream of a `RunEntrypoint` call.
     ///
     /// The agent emits a sequence of these in response to a single
@@ -927,6 +952,9 @@ pub enum GuestResponse {
     /// One event in the streaming response of an `Exec` call (dev-shell
     /// only). Terminated by `ExecEvent::Exit`.
     ExecEvent(ExecEvent),
+    /// Buffered outcomes of an `ExecBatch` call (dev-shell only), one per
+    /// command in request order (truncated at the first non-zero exit).
+    ExecBatchResult { outcomes: Vec<ExecOutcomeWire> },
     /// Post-restore acknowledgement.
     PostRestoreAck {
         success: bool,
@@ -1041,7 +1069,8 @@ name_enum! {
     /// lockstep with the wire enum (exhaustive match).
     pub enum Verb {
         ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, IntegrationStatus,
-        CheckpointIntegrations, ProbeStatus, Exec, RunEntrypoint, PostRestore,
+        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, ExecBatch, RunEntrypoint,
+        PostRestore,
         FsDiff, StartPortForward, StartUnixSocketForward, ConsoleOpen,
         ConsoleClose, ConsoleResize, EntrypointStatus, ReadinessStatus, FsRead,
         FsWrite, FsList, FsStat, FsMkdir, FsRemove, FsMove, ProcStart,
@@ -1057,7 +1086,8 @@ name_enum! {
     pub enum ResponseVariant {
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
         Pong, Error, UnsupportedInProfile, IntegrationStatusReport,
-        CheckpointResult, ProbeStatusReport, EntrypointEvent, ExecEvent,
+        CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, ExecEvent,
+        ExecBatchResult,
         PostRestoreAck, FsDiffResult, PortForwardStarted,
         UnixSocketForwardStarted, ConsoleOpened, ConsoleExited, ConsoleResized,
         EntrypointStatusReport,
@@ -1124,7 +1154,9 @@ impl Verb {
             Verb::IntegrationStatus => unary(&[R::IntegrationStatusReport]),
             Verb::CheckpointIntegrations => unary(&[R::CheckpointResult]),
             Verb::ProbeStatus => unary(&[R::ProbeStatusReport]),
+            Verb::PrimedStatus => unary(&[R::PrimedStatusReport]),
             Verb::Exec => stream(&[R::ExecEvent]),
+            Verb::ExecBatch => unary(&[R::ExecBatchResult]),
             Verb::RunEntrypoint => stream(&[R::EntrypointEvent]),
             Verb::PostRestore => unary(&[R::PostRestoreAck]),
             Verb::FsDiff => unary(&[R::FsDiffResult]),
@@ -1174,8 +1206,10 @@ impl GuestResponse {
             }
             GuestResponse::CheckpointResult { .. } => ResponseVariant::CheckpointResult,
             GuestResponse::ProbeStatusReport { .. } => ResponseVariant::ProbeStatusReport,
+            GuestResponse::PrimedStatusReport { .. } => ResponseVariant::PrimedStatusReport,
             GuestResponse::EntrypointEvent(_) => ResponseVariant::EntrypointEvent,
             GuestResponse::ExecEvent(_) => ResponseVariant::ExecEvent,
+            GuestResponse::ExecBatchResult { .. } => ResponseVariant::ExecBatchResult,
             GuestResponse::PostRestoreAck { .. } => ResponseVariant::PostRestoreAck,
             GuestResponse::FsDiffResult { .. } => ResponseVariant::FsDiffResult,
             GuestResponse::PortForwardStarted { .. } => ResponseVariant::PortForwardStarted,
@@ -1821,6 +1855,30 @@ impl EntrypointEvent {
             EntrypointEvent::Exit { .. } | EntrypointEvent::Error { .. }
         )
     }
+}
+
+/// A file to stage into the guest before an [`GuestRequest::ExecBatch`] runs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StageFile {
+    pub path: String,
+    pub content: Vec<u8>,
+    pub mode: u32,
+}
+
+/// One command's buffered outcome from an [`GuestRequest::ExecBatch`]. Agent-
+/// measured: `duration_ms` is the in-guest wall-clock and `peak_rss_kib` the
+/// `getrusage` high-water mark when the guest can report it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ExecOutcomeWire {
+    pub status: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub duration_ms: u64,
+    pub peak_rss_kib: Option<u64>,
 }
 
 /// One event in the response stream of an `Exec` call (dev-shell only).
@@ -2810,26 +2868,81 @@ pub fn query_probe_status_at(vsock_uds_path: &str) -> Result<Vec<crate::probes::
     }
 }
 
-/// Signal post-restore to the guest agent at a specific UDS path.
+/// Outcome of a `PostRestore` signal: whether the guest acknowledged the
+/// signal and whether it actually rotated its VMGenID from the host token.
 ///
-/// After snapshot restore, tells the guest to rotate its VMGenID with the
-/// host-minted `token` (so two clones of one snapshot diverge), then remount
-/// config/secrets drives and restart services. An all-zero `token` is a
-/// no-rotation restore. Returns Ok(true) if the guest acknowledged success.
-pub fn post_restore_at(
-    vsock_uds_path: &str,
-    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
-) -> Result<bool> {
-    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
-    let resp = send_request(&mut stream, &GuestRequest::PostRestore { token })?;
+/// `reseeded` is the load-bearing field for the warm-start verb's honesty —
+/// `acknowledged` only says the guest answered, `reseeded` says it rotated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PostRestoreReply {
+    /// The guest acknowledged the post-restore signal with success.
+    pub acknowledged: bool,
+    /// The guest rotated its VMGenID from the delivered token.
+    pub reseeded: bool,
+}
 
+/// Interpret a guest's response to `PostRestore` into the host-facing reply.
+/// Pure so the success/reseeded mapping is unit-tested without a live agent.
+fn interpret_post_restore(resp: GuestResponse) -> Result<PostRestoreReply> {
     match resp {
-        GuestResponse::PostRestoreAck { success, .. } => Ok(success),
+        GuestResponse::PostRestoreAck {
+            success, reseeded, ..
+        } => Ok(PostRestoreReply {
+            acknowledged: success,
+            reseeded,
+        }),
         GuestResponse::Error { message } => {
             bail!("Guest post-restore error: {}", message);
         }
         _ => bail!("Unexpected response to PostRestore"),
     }
+}
+
+/// Signal post-restore to the guest agent at a specific UDS path.
+///
+/// After snapshot restore, tells the guest to rotate its VMGenID with the
+/// host-minted `token` (so two clones of one snapshot diverge), then remount
+/// config/secrets drives and restart services. An all-zero `token` is a
+/// no-rotation restore. Returns the guest's [`PostRestoreReply`] so the caller
+/// can surface whether the guest actually reseeded.
+pub fn post_restore_at(
+    vsock_uds_path: &str,
+    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+) -> Result<PostRestoreReply> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::PostRestore { token })?;
+    interpret_post_restore(resp)
+}
+
+/// Filesystem marker a workload creates to signal it has finished warming
+/// (caches/JITs/model load done). The guest agent reports its presence on a
+/// `PrimedStatus` query; the host's warm-snapshot barrier waits for it before
+/// sealing. A tmpfs path the workload can write with no extra privilege.
+pub const PRIMED_MARKER_PATH: &str = "/run/mvm/primed";
+
+/// Whether the workload has signalled "primed": the marker exists. Pure so the
+/// agent-side check is unit-testable without a live guest.
+pub fn workload_is_primed_at(marker: &std::path::Path) -> bool {
+    marker.exists()
+}
+
+/// Interpret a guest's response to `PrimedStatus`. Pure so the mapping is
+/// unit-tested without a live agent.
+pub fn interpret_primed_status(resp: GuestResponse) -> Result<bool> {
+    match resp {
+        GuestResponse::PrimedStatusReport { primed } => Ok(primed),
+        GuestResponse::Error { message } => bail!("Guest primed-status error: {}", message),
+        _ => bail!("Unexpected response to PrimedStatus"),
+    }
+}
+
+/// Query whether the workload has signalled "primed" via the guest agent at a
+/// specific UDS path. One-shot; the host barrier polls this until primed or it
+/// times out.
+pub fn query_primed_at(vsock_uds_path: &str) -> Result<bool> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::PrimedStatus)?;
+    interpret_primed_status(resp)
 }
 
 /// Query filesystem diff from the guest agent at a specific UDS path.
@@ -3258,6 +3371,91 @@ mod tests {
             GuestResponse::PostRestoreAck { reseeded, .. } => assert!(!reseeded),
             other => panic!("expected PostRestoreAck, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn primed_status_wire_roundtrips_and_rejects_unknown_fields() {
+        // Request roundtrip.
+        let json = serde_json::to_string(&GuestRequest::PrimedStatus).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<GuestRequest>(&json).unwrap(),
+            GuestRequest::PrimedStatus
+        ));
+        // Response roundtrip.
+        let report = GuestResponse::PrimedStatusReport { primed: true };
+        let json = serde_json::to_string(&report).unwrap();
+        match serde_json::from_str::<GuestResponse>(&json).unwrap() {
+            GuestResponse::PrimedStatusReport { primed } => assert!(primed),
+            other => panic!("expected PrimedStatusReport, got {other:?}"),
+        }
+        // The verb maps to the contracted unary response.
+        assert!(matches!(
+            GuestRequest::PrimedStatus.verb().response_contract().kind,
+            ResponseKind::Unary
+        ));
+    }
+
+    #[test]
+    fn workload_is_primed_reflects_marker_presence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("primed");
+        assert!(
+            !workload_is_primed_at(&marker),
+            "absent marker → not primed"
+        );
+        std::fs::write(&marker, b"").unwrap();
+        assert!(workload_is_primed_at(&marker), "present marker → primed");
+    }
+
+    #[test]
+    fn interpret_primed_status_maps_report_and_errors() {
+        assert!(
+            interpret_primed_status(GuestResponse::PrimedStatusReport { primed: true }).unwrap()
+        );
+        assert!(
+            !interpret_primed_status(GuestResponse::PrimedStatusReport { primed: false }).unwrap()
+        );
+        assert!(
+            interpret_primed_status(GuestResponse::Error {
+                message: "x".into()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn interpret_post_restore_maps_ack_reseeded_and_errors() {
+        // Positive ack with rotation.
+        let r = interpret_post_restore(GuestResponse::PostRestoreAck {
+            success: true,
+            detail: None,
+            reseeded: true,
+        })
+        .unwrap();
+        assert!(r.acknowledged && r.reseeded);
+        // Acknowledged but the guest did not rotate (e.g. a zero/no-op token).
+        let r = interpret_post_restore(GuestResponse::PostRestoreAck {
+            success: true,
+            detail: None,
+            reseeded: false,
+        })
+        .unwrap();
+        assert!(r.acknowledged && !r.reseeded);
+        // A guest-reported failure ack is surfaced as acknowledged=false.
+        let r = interpret_post_restore(GuestResponse::PostRestoreAck {
+            success: false,
+            detail: Some("kill failed".into()),
+            reseeded: false,
+        })
+        .unwrap();
+        assert!(!r.acknowledged && !r.reseeded);
+        // A transport-level error / off-contract response is an Err.
+        assert!(
+            interpret_post_restore(GuestResponse::Error {
+                message: "boom".into()
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -5855,6 +6053,69 @@ mod tests {
         let back: GuestResponse = serde_json::from_slice(&j).unwrap();
         assert!(
             matches!(back, GuestResponse::ExecEvent(ExecEvent::Stdout { ref chunk }) if chunk == b"hi")
+        );
+    }
+
+    #[test]
+    fn exec_batch_request_roundtrips_and_classifies() {
+        let req = GuestRequest::ExecBatch {
+            stages: vec![StageFile {
+                path: "/tmp/m.rs".to_string(),
+                content: b"fn main(){}".to_vec(),
+                mode: 0o644,
+            }],
+            commands: vec![vec!["rustc".to_string(), "/tmp/m.rs".to_string()]],
+            timeout_secs: Some(30),
+        };
+        let back: GuestRequest =
+            serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            GuestRequest::ExecBatch { ref stages, ref commands, timeout_secs: Some(30) }
+                if stages.len() == 1 && commands == &[vec!["rustc".to_string(), "/tmp/m.rs".to_string()]]
+        ));
+        // Verb, name, dev-only class, and the unary ExecBatchResult contract.
+        assert_eq!(req.verb(), Verb::ExecBatch);
+        assert_eq!(req.kind_name(), "exec-batch");
+        assert_eq!(req.class(), RequestClass::DevOnly);
+        let contract = req.response_contract();
+        assert_eq!(contract.kind, ResponseKind::Unary);
+        assert_eq!(contract.responses, &[ResponseVariant::ExecBatchResult]);
+    }
+
+    #[test]
+    fn exec_batch_result_roundtrips_and_maps_to_variant() {
+        let r = GuestResponse::ExecBatchResult {
+            outcomes: vec![ExecOutcomeWire {
+                status: 0,
+                stdout: b"ok".to_vec(),
+                stderr: Vec::new(),
+                duration_ms: 12,
+                peak_rss_kib: Some(2048),
+            }],
+        };
+        let back: GuestResponse = serde_json::from_slice(&serde_json::to_vec(&r).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            GuestResponse::ExecBatchResult { ref outcomes }
+                if outcomes.len() == 1 && outcomes[0].duration_ms == 12
+                    && outcomes[0].peak_rss_kib == Some(2048)
+        ));
+        assert_eq!(r.variant(), ResponseVariant::ExecBatchResult);
+    }
+
+    #[test]
+    fn exec_batch_wire_types_deny_unknown_fields() {
+        // StageFile + ExecOutcomeWire fail closed on a smuggled extra field.
+        assert!(
+            serde_json::from_str::<StageFile>(r#"{"path":"/a","content":[],"mode":420,"x":1}"#)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ExecOutcomeWire>(
+                r#"{"status":0,"stdout":[],"stderr":[],"duration_ms":0,"peak_rss_kib":null,"x":1}"#
+            )
+            .is_err()
         );
     }
 

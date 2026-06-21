@@ -269,6 +269,16 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `.mvm` verifier. A shared checked-in argv fixture plus fake-CLI tests prove
       the wrappers stay on the CLI-owned verify-before-admission path. Remaining
       C2 proof: live admission/non-bypass coverage.
+- [x] Advanced [`plans/200-machine-ux-dx-layer.md`](plans/200-machine-ux-dx-layer.md)
+      docs/source-guard closeout. Added scenario-led machine docs
+      (`guides/machine-use-cases.md`) and explicit limitations docs
+      (`guides/machine-limitations.md`) covering no-host-Nix normal usage,
+      network protocol scope, volumes, SSH-agent prerequisites, macOS
+      signing/entitlements, GPU status, and host/guest architecture support.
+      Quickstart and happy-path docs now link to those pages, the sidebar exposes
+      both pages, and `xtask check-machine-doc-guards` is CI-wired to keep
+      beginner docs from implying host Nix, GPU, ICMP, or unsupported
+      architectures are default-supported.
 - [x] Advanced Stage 0 bootstrap performance on the Plan 200 auth-proof branch.
       Host-side Stage 0 root materialization now reuses the marker-bound
       extracted root and prefers verified native `tar -xJf --strip-components 1`
