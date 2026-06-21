@@ -158,7 +158,7 @@ fn pool_seed_config_path(pool_root: &Path, standby_id: &str) -> PathBuf {
 /// PID file before killing the child and bailing. Matches the libkrun
 /// path's budget.
 const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
-const POST_PID_STABILITY_TIMEOUT: Duration = Duration::from_millis(250);
+const POST_PID_STABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long [`VzBackend::stop`] waits after `SIGTERM` before escalating
 /// to `SIGKILL`. Vz's graceful-stop callback runs on the supervisor's

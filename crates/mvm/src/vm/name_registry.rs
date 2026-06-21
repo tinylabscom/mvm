@@ -162,6 +162,20 @@ impl VmNameRegistry {
         }
     }
 
+    /// Fill or replace the concrete runtime directory for an existing
+    /// reservation. `mvmctl up` reserves a name before it has materialized the
+    /// backend state dir; reconcile must see the real dir before launch can be
+    /// reported as successful.
+    pub fn set_vm_dir(&mut self, name: &str, vm_dir: impl Into<String>) -> Result<bool> {
+        match self.vms.get_mut(name) {
+            Some(reg) => {
+                reg.vm_dir = vm_dir.into();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     /// Record observed guest activity. Returns
     /// `Ok(true)` if updated, `Ok(false)` if the name is unknown.
     /// Callers pass the timestamp explicitly so fixtures stay
@@ -395,6 +409,25 @@ mod tests {
     fn test_deregister_nonexistent() {
         let mut reg = VmNameRegistry::default();
         assert!(reg.deregister("nonexistent").is_none());
+    }
+
+    #[test]
+    fn set_vm_dir_fills_existing_reservation() {
+        let mut reg = VmNameRegistry::default();
+        reg.register_with_metadata(RegisterParams::minimal("myvm", "", "default"))
+            .unwrap();
+
+        assert!(reg.set_vm_dir("myvm", "/tmp/mvm/vms/myvm").unwrap());
+
+        let got = reg.lookup("myvm").unwrap();
+        assert_eq!(got.vm_dir, "/tmp/mvm/vms/myvm");
+        assert_eq!(got.network, "default");
+    }
+
+    #[test]
+    fn set_vm_dir_reports_missing_name() {
+        let mut reg = VmNameRegistry::default();
+        assert!(!reg.set_vm_dir("missing", "/tmp/mvm/vms/missing").unwrap());
     }
 
     #[test]
