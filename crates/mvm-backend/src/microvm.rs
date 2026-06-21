@@ -1140,6 +1140,14 @@ pub fn warm_restore_instance(
     name: &str,
     token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
 ) -> Result<()> {
+    // Defense in depth, *before* any work: every path below is derived from
+    // `name` and several are interpolated into shell commands
+    // (`start_vm_firecracker`, the kill). The CLI validates the name, but this
+    // is a `pub fn` — re-validate at the boundary so no caller can smuggle
+    // shell/JSON metacharacters in. The validator allows only `[a-z0-9-]`,
+    // which is shell- and JSON-safe.
+    mvm_core::naming::validate_vm_name(name)
+        .with_context(|| format!("warm-start refused invalid VM name {name:?}"))?;
     require_linux_env()?;
 
     let vm_dir = resolve_running_vm_dir(name)?;
@@ -1177,15 +1185,18 @@ pub fn warm_restore_instance(
     start_vm_firecracker(&vm_dir, &socket)
         .with_context(|| format!("starting fresh Firecracker for warm-start of '{name}'"))?;
 
-    // Load + resume into the fresh VMM in a single call (resume_vm).
-    let q_socket = shell_quote(&socket);
-    run_in_vm(&format!(
-        r#"sudo curl -fsS -X PUT --unix-socket {q_socket} \
-            -H 'Content-Type: application/json' \
-            -d '{{"snapshot_path":"{vmstate}","mem_backend":{{"backend_type":"File","backend_path":"{mem}"}},"resume_vm":true}}' \
-            'http://localhost/snapshot/load'"#,
-    ))
-    .with_context(|| format!("PUT /snapshot/load for warm-start of '{name}'"))?;
+    // Load + resume into the fresh VMM in a single call (resume_vm). Build the
+    // body with `serde_json` (paths are JSON-escaped) and send it through
+    // `api_put_socket`, which writes the body to a temp file and curls it via
+    // `--data @<file>` — so the paths never traverse a shell, no injection.
+    let body = serde_json::json!({
+        "snapshot_path": vmstate,
+        "mem_backend": { "backend_type": "File", "backend_path": mem },
+        "resume_vm": true,
+    })
+    .to_string();
+    api_put_socket(&socket, "/snapshot/load", &body)
+        .with_context(|| format!("PUT /snapshot/load for warm-start of '{name}'"))?;
 
     // The VM is restored and resumed at this point. Delivering the VMGenID
     // token (so the guest reseeds) is best-effort — the agent re-accepts on
@@ -3113,6 +3124,28 @@ fn detach_and_spawn_bridge_watchdog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warm_restore_refuses_names_with_shell_metacharacters() {
+        // The name feeds shell-interpolated paths; warm_restore_instance must
+        // reject anything outside the safe `[a-z0-9-]` charset *before* any
+        // VMM work, on every platform (validation precedes require_linux_env).
+        for bad in [
+            "foo; rm -rf /",
+            "a'b",
+            "x$(id)",
+            "../escape",
+            "name with space",
+            "UPPER",
+        ] {
+            let err = warm_restore_instance(bad, [0u8; mvm_core::crypto::vmgenid::GENID_BYTES])
+                .expect_err("must refuse an unsafe VM name");
+            assert!(
+                err.to_string().contains("invalid VM name"),
+                "rejection names the cause for {bad:?}: {err}"
+            );
+        }
+    }
 
     #[test]
     fn drive_file_default() {
