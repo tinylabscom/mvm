@@ -127,11 +127,17 @@ the same builder surface without linking the dev-only handler. The new
 
 ## Workstreams
 
-- [ ] **WS-A — `WarmLease` + acquire/release/Drop.** `AcquireSpec`,
-  `ReleasePolicy`, background replenish-to-target. Tests (mock backend, no
-  live boot): claim → use → drop stops and replenishes; cold-boot fallback
-  on an empty pool; double-claim guard via `mark_claimed`; `release()`
-  surfaces a stop error that `Drop` would swallow.
+- [x] **WS-A — `WarmLease` + acquire/release/Drop.** Landed at
+  `crates/mvm/src/vm/lease.rs`: `AcquireSpec`, `WarmLease` (`acquire` =
+  `select_idle_compatible` → `mark_claimed` → `claim_standby` → `remove` on a
+  hit, cold-boot fallback on a miss; `id()` / `transport()` /
+  `release()` / `Drop`). Replenish is an **injected `ReplenishFn`** so `mvm`
+  doesn't depend upward on the CLI's `pool warm` machinery; release/Drop of a
+  claimed lease stops + replenishes, a cold-boot lease only stops. `MockBackend`
+  gained opt-in standby support (`with_standby`) + a `with_failing_stop` knob.
+  Tests (mock backend, no live boot, 4): claim → release stops + replenishes;
+  cold-boot fallback on an empty pool does **not** replenish; drop of a claimed
+  lease stops + replenishes; `release()` surfaces a stop error `Drop` swallows.
 - [ ] **WS-B — `ExecBuilder` Tier 1.** Connection-reuse pipelining over
   `VsockTransport`. Tests against `mvm-backend`'s `mock_guest_agent`:
   staged files land before the command runs; one stream serves the batch.

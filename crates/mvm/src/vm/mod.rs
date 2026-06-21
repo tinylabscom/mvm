@@ -12,6 +12,7 @@
 
 pub mod egress_proxy;
 pub mod instance_snapshot;
+pub mod lease;
 pub mod name_registry;
 pub mod overlay;
 pub mod reconcile;
