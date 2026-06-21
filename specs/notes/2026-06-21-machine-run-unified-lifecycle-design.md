@@ -1,6 +1,8 @@
 # `machine run` — unified transient / persistent / interactive lifecycle
 
-**Status:** design, approved 2026-06-21. Implementation plan to follow in `specs/plans/`.
+**Status:** design, approved 2026-06-21. Decision recorded in
+[ADR-091](../adrs/091-unified-machine-run-lifecycle.md); implementation tracked in
+[Plan 207](../plans/207-machine-run-unified-lifecycle.md).
 
 ## Problem
 
