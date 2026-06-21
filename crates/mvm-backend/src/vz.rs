@@ -3928,6 +3928,7 @@ mod tests {
             image_sha256: Some("cccc".into()),
         };
         let claim = mvm_core::vm_backend::StandbyClaim {
+            start_config: None,
             rootfs_path: "/fake/rootfs.ext4".into(),
             plan_json: "{}".into(),
             tenant_id: "t1".into(),
@@ -4025,6 +4026,7 @@ mod tests {
             image_sha256: Some("img-sha".into()),
         };
         let claim = mvm_core::vm_backend::StandbyClaim {
+            start_config: None,
             rootfs_path: "/fake/rootfs.ext4".into(),
             plan_json: "{}".into(),
             tenant_id: "t1".into(),

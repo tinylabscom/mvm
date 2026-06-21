@@ -1058,6 +1058,7 @@ mod tests {
 
     fn sample_standby_claim() -> StandbyClaim {
         StandbyClaim {
+            start_config: None,
             rootfs_path: "/vol/rootfs.ext4".into(),
             tenant_id: "tenant-a".into(),
             audit_dir: "/audit".into(),

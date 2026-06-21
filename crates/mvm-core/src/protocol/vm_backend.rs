@@ -674,6 +674,12 @@ impl StandbyState {
 /// signed plan + rootfs + audit substrate). Backend-agnostic.
 #[derive(Debug, Clone)]
 pub struct StandbyClaim {
+    /// Full launch config for backends whose "claim" step must still configure
+    /// machine-local boot devices before starting vCPUs. Firecracker uses this
+    /// to configure a prestarted daemon with the same kernel/initrd/rootfs,
+    /// overlays, policy, ports, and drive files a cold boot would use. Existing
+    /// supervisor-style backends consume the explicit claim fields below.
+    pub start_config: Option<VmStartConfig>,
     /// Workload rootfs ext4.
     pub rootfs_path: String,
     pub tenant_id: String,
@@ -1257,6 +1263,7 @@ mod tests {
 
     fn sample_standby_claim() -> StandbyClaim {
         StandbyClaim {
+            start_config: None,
             rootfs_path: "/vol/rootfs.ext4".into(),
             tenant_id: "tenant-a".into(),
             audit_dir: "/audit".into(),

@@ -82,11 +82,16 @@ impl SupervisorStandbyPool {
     /// TTL controls expiry, not a process liveness check. Both `Idle` and `Parked`
     /// standbys are claimable; parked standbys resume from their saved state.
     pub fn select_idle_compatible(&self, want: &StandbyCompat) -> Result<Option<StandbyHandle>> {
-        Ok(self.list()?.into_iter().find(|h| {
-            h.state.is_claimable()
-                && h.is_compatible(want)
-                && (h.is_saved_state() || pid_alive(h.pid))
-        }))
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|h| h.state.is_claimable() && h.is_compatible(want) && Self::is_live_or_saved(h)))
+    }
+
+    /// True when the recorded standby still has a resource that can be claimed or displayed
+    /// as live. Saved-state standbys have no process; the snapshot payload is the resource.
+    pub fn is_live_or_saved(h: &StandbyHandle) -> bool {
+        h.is_saved_state() || pid_alive(h.pid)
     }
 
     /// Count of live idle standbys compatible with `want` — drives replenish-to-target.
@@ -95,9 +100,7 @@ impl SupervisorStandbyPool {
             .list()?
             .into_iter()
             .filter(|h| {
-                h.state == StandbyState::Idle
-                    && h.is_compatible(want)
-                    && (h.is_saved_state() || pid_alive(h.pid))
+                h.state == StandbyState::Idle && h.is_compatible(want) && Self::is_live_or_saved(h)
             })
             .count())
     }
@@ -326,6 +329,19 @@ mod tests {
         pool.record(&handle("b", "aa", StandbyState::Claimed))
             .unwrap();
         assert_eq!(pool.idle_count_compatible(&compat("aa")).unwrap(), 1);
+    }
+
+    #[test]
+    fn is_live_or_saved_distinguishes_dead_processes_from_saved_state() {
+        let live = handle("live", "aa", StandbyState::Idle);
+        assert!(SupervisorStandbyPool::is_live_or_saved(&live));
+
+        let mut dead = handle("dead", "aa", StandbyState::Idle);
+        dead.pid = 999_999;
+        assert!(!SupervisorStandbyPool::is_live_or_saved(&dead));
+
+        let saved = saved_handle("saved", "aa", "img", StandbyState::Idle);
+        assert!(SupervisorStandbyPool::is_live_or_saved(&saved));
     }
 
     // ── saved-state standby tests (Vz) ───────────────────────────────────────────

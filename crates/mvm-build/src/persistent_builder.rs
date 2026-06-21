@@ -1318,7 +1318,8 @@ mod tests {
     #[test]
     fn touch_active_session_updates_live_record_timestamp() {
         let scratch = tempfile::tempdir().expect("tempdir");
-        let run_dir = scratch.path().join(".mvm").join("run");
+        let data_dir = scratch.path().join(".mvm");
+        let run_dir = data_dir.join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
         let record = SessionRecord {
             session_id: "x".to_string(),
@@ -1334,7 +1335,7 @@ mod tests {
         )
         .unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", scratch.path().join(".mvm"));
+        env.set("MVM_DATA_DIR", &data_dir);
         let touched = touch_active_session(55).expect("touch active session");
         assert!(touched);
         let body = std::fs::read(run_dir.join("persistent-builder.json")).unwrap();

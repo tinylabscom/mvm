@@ -33,7 +33,7 @@ pub(super) mod set_ttl;
 pub(super) mod tenant_resolution;
 pub(super) mod up;
 pub(super) mod volume;
-pub(super) mod wait;
+pub(in crate::commands) mod wait;
 
 pub(super) use super::{Cli, shared};
 

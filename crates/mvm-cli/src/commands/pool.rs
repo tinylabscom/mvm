@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use super::Cli;
 use super::env::dev_vz::ensure_default_microvm_image;
 use super::vm::host_signer;
+use super::vm::plan_admission::stash_plan_for_bridge;
 
 /// Lowercase-hex sha256 of a kernel image — part of the base-compat key.
 pub fn kernel_sha256_hex(kernel: &Path) -> Result<String> {
@@ -302,9 +303,11 @@ fn compat_for_launch(
 ///
 /// Eligibility (all required): `warm_pool_size > 0`, the launch is auto-named (no explicit
 /// `--name` — a claimed VM is named by its standby-id), no extra volumes (the attach
-/// threads only the rootfs), the backend supports the pool, and the **admitted plan +
-/// tenant** are threaded into the config — which only the gateway-bridge path
-/// (`MVM_GATEWAY_BRIDGE=1`) does, and which a claimed standby's `run_with_bridge` requires.
+/// threads only the rootfs), the backend supports the pool, and the admitted tenant is
+/// threaded into the config. libkrun/Vz additionally require the signed plan JSON because
+/// their claimed standby enters the gateway-bridge supervisor path; Firecracker can claim
+/// with only the resolved launch config because the default path enforces networking
+/// directly via TAP/nftables and only needs plan JSON when its optional bridge is enabled.
 pub fn try_warm_claim(
     backend: &AnyBackend,
     cfg: &VmStartConfig,
@@ -318,8 +321,13 @@ pub fn try_warm_claim(
     {
         return Ok(None);
     }
-    let (Some(plan_json), Some(tenant)) = (cfg.plan_json.clone(), cfg.tenant_id.clone()) else {
-        // No admitted plan threaded in → not the bridge path → cold-boot.
+    let Some(tenant) = cfg.tenant_id.clone() else {
+        // No admitted tenant threaded in → not an admitted workload → cold-boot.
+        return Ok(None);
+    };
+    let Some(plan_json) = warm_claim_plan_json(backend.as_vm_backend(), cfg) else {
+        // libkrun/Vz claims need a signed envelope for their gateway-bridge
+        // supervisor attach path; without it, cold-boot.
         return Ok(None);
     };
     // Reuse the rootfs sha claim-8 admission already computed (same bytes) so
@@ -327,12 +335,25 @@ pub fn try_warm_claim(
     let want = compat_for_launch(backend.as_vm_backend(), cfg, admitted_image_sha256)?;
     let rootfs = cfg.rootfs_path.clone();
     let bundle_json = cfg.bundle_json.clone();
+    let claim_start_config = cfg.clone();
     let pool = SupervisorStandbyPool::open()?;
     let decision = claim_or_cold(&pool, backend.as_vm_backend(), &want, |handle| {
         // The audit substrate (`gateway-<vm>.sock`) is name-keyed; the claimed VM runs
         // under the standby-id, so compute it for `handle.id`.
         let sub = mvm_backend::audit_substrate::compute_audit_substrate(&handle.id, Some(&tenant))?;
+        let mut start_config = claim_start_config.clone();
+        start_config.name = handle.id.clone();
+        start_config.rootfs_path = rootfs.clone();
+        start_config.tenant_id = Some(tenant.clone());
+        start_config.plan_json = Some(plan_json.clone());
+        start_config.bundle_json = bundle_json.clone();
+        start_config.network_policy = cfg.network_policy.clone();
+        if backend.name() == "firecracker" && !plan_json.is_empty() {
+            stash_plan_for_bridge(&start_config)
+                .with_context(|| format!("stash admitted plan for claimed VM '{}'", handle.id))?;
+        }
         Ok(StandbyClaim {
+            start_config: Some(start_config),
             rootfs_path: rootfs.clone(),
             tenant_id: tenant.clone(),
             audit_dir: sub.audit_dir.context("audit substrate missing audit_dir")?,
@@ -349,6 +370,14 @@ pub fn try_warm_claim(
         LaunchDecision::Claimed(id) => Some(id),
         LaunchDecision::ColdBoot => None,
     })
+}
+
+fn warm_claim_plan_json(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Option<String> {
+    match cfg.plan_json.clone() {
+        Some(plan) => Some(plan),
+        None if backend.name() == "firecracker" => Some(String::new()),
+        None => None,
+    }
 }
 
 /// Top the pool back up toward `cfg.warm_pool_size` after a launch (the no-daemon
@@ -647,6 +676,39 @@ mod tests {
         }
     }
 
+    fn saved_idle_handle(id: &str, kernel: &str, image: &str) -> StandbyHandle {
+        StandbyHandle {
+            id: id.into(),
+            control_socket: format!("/p/{id}/control.sock").into(),
+            pid: 0,
+            kernel_sha256: kernel.into(),
+            vcpus: 2,
+            mem_mib: 1024,
+            binding_nonce: "cd".repeat(32),
+            spawned_unix_secs: 1,
+            state: StandbyState::Idle,
+            image_sha256: Some(image.into()),
+        }
+    }
+
+    #[test]
+    fn build_pool_status_reports_dead_standbys_separately() {
+        let live = idle_handle("live", "aa");
+        let mut dead = idle_handle("dead", "aa");
+        dead.pid = 999_999_999;
+        let saved = saved_idle_handle("saved", "aa", "img");
+
+        let report = build_pool_status(&[live, dead, saved]);
+
+        assert_eq!(report.idle, 2, "live process + saved-state are idle");
+        assert_eq!(report.claimed, 0);
+        assert_eq!(report.parked, 0);
+        assert_eq!(report.dead, 1);
+        assert_eq!(report.standbys[0].state, "idle");
+        assert_eq!(report.standbys[1].state, "dead");
+        assert_eq!(report.standbys[2].state, "idle");
+    }
+
     fn compat(kernel: &str) -> StandbyCompat {
         StandbyCompat {
             kernel_sha256: kernel.into(),
@@ -658,6 +720,7 @@ mod tests {
 
     fn sample_claim() -> StandbyClaim {
         StandbyClaim {
+            start_config: None,
             rootfs_path: "/vol/rootfs.ext4".into(),
             tenant_id: "tenant-a".into(),
             audit_dir: "/audit".into(),
@@ -766,6 +829,26 @@ mod tests {
         let mut c = eligible_cfg();
         c.plan_json = None; // not the gateway-bridge/admitted path → cold-boot
         assert_eq!(try_warm_claim(&b, &c, false, None).unwrap(), None);
+    }
+
+    #[test]
+    fn warm_claim_plan_json_is_optional_for_firecracker_only() {
+        let mut cfg = eligible_cfg();
+        cfg.plan_json = None;
+        let fc = AnyBackend::from_hypervisor("firecracker");
+        let libkrun = AnyBackend::from_hypervisor("libkrun");
+
+        assert_eq!(
+            warm_claim_plan_json(fc.as_vm_backend(), &cfg),
+            Some(String::new())
+        );
+        assert_eq!(warm_claim_plan_json(libkrun.as_vm_backend(), &cfg), None);
+
+        cfg.plan_json = Some("{\"signed\":\"plan\"}".into());
+        assert_eq!(
+            warm_claim_plan_json(libkrun.as_vm_backend(), &cfg),
+            Some("{\"signed\":\"plan\"}".into())
+        );
     }
 
     // A VmBackend stub whose `spawn_standby` always fails — used to exercise
@@ -1184,6 +1267,7 @@ struct PoolStatus {
     idle: usize,
     claimed: usize,
     parked: usize,
+    dead: usize,
     standbys: Vec<PoolStatusEntry>,
 }
 
@@ -1199,29 +1283,40 @@ struct PoolStatusEntry {
     image_sha256: Option<String>,
 }
 
-fn run_status(pool: &SupervisorStandbyPool, json: bool) -> Result<()> {
-    let standbys = pool.list()?;
+fn build_pool_status(standbys: &[StandbyHandle]) -> PoolStatus {
     let idle = standbys
         .iter()
-        .filter(|h| h.state == StandbyState::Idle)
+        .filter(|h| h.state == StandbyState::Idle && SupervisorStandbyPool::is_live_or_saved(h))
         .count();
     let parked = standbys
         .iter()
-        .filter(|h| h.state == StandbyState::Parked)
+        .filter(|h| h.state == StandbyState::Parked && SupervisorStandbyPool::is_live_or_saved(h))
         .count();
-    let claimed = standbys.len() - idle - parked;
-    let report = PoolStatus {
+    let claimed = standbys
+        .iter()
+        .filter(|h| h.state == StandbyState::Claimed && SupervisorStandbyPool::is_live_or_saved(h))
+        .count();
+    let dead = standbys
+        .iter()
+        .filter(|h| !SupervisorStandbyPool::is_live_or_saved(h))
+        .count();
+    PoolStatus {
         idle,
         claimed,
         parked,
+        dead,
         standbys: standbys
             .iter()
             .map(|h| PoolStatusEntry {
                 id: h.id.clone(),
-                state: match h.state {
-                    StandbyState::Idle => "idle",
-                    StandbyState::Claimed => "claimed",
-                    StandbyState::Parked => "parked",
+                state: if SupervisorStandbyPool::is_live_or_saved(h) {
+                    match h.state {
+                        StandbyState::Idle => "idle",
+                        StandbyState::Claimed => "claimed",
+                        StandbyState::Parked => "parked",
+                    }
+                } else {
+                    "dead"
                 },
                 pid: h.pid,
                 kernel_sha256: h.kernel_sha256.clone(),
@@ -1230,12 +1325,20 @@ fn run_status(pool: &SupervisorStandbyPool, json: bool) -> Result<()> {
                 image_sha256: h.image_sha256.clone(),
             })
             .collect(),
-    };
+    }
+}
+
+fn run_status(pool: &SupervisorStandbyPool, json: bool) -> Result<()> {
+    let standbys = pool.list()?;
+    let report = build_pool_status(&standbys);
     if json {
         crate::json_out::emit_json(&report)?;
         return Ok(());
     }
-    println!("Supervisor standby pool: {idle} idle, {claimed} claimed, {parked} parked");
+    println!(
+        "Supervisor standby pool: {} idle, {} claimed, {} parked, {} dead",
+        report.idle, report.claimed, report.parked, report.dead
+    );
     for e in &report.standbys {
         let image_tag = e
             .image_sha256

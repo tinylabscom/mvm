@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "host": {
+    "os": "linux",
+    "arch": "x86_64",
+    "hypervisor": "firecracker",
+    "libkrun_version": null,
+    "kernel_sha256": "f78cd547954abef8730a60ca3b8df92458d8484653c559f1121526519219c306",
+    "cmdline": "console=ttyS0 reboot=k panic=1 net.ifnames=0 ip=<per-slot>",
+    "readiness_boundary": "firecracker-pid"
+  },
+  "concurrency": 2,
+  "start_to_pid_ms": {
+    "min": 1248.33392,
+    "p50": 1261.3441755,
+    "p90": 1271.7523799,
+    "p99": 1274.09422589,
+    "max": 1274.354431,
+    "mean": 1261.3441755,
+    "stddev": 13.010255499999971
+  },
+  "pid_to_connect_ms": {
+    "min": 0.0,
+    "p50": 0.0,
+    "p90": 0.0,
+    "p99": 0.0,
+    "max": 0.0,
+    "mean": 0.0,
+    "stddev": 0.0
+  },
+  "handshake_ms": {
+    "min": 0.0,
+    "p50": 0.0,
+    "p90": 0.0,
+    "p99": 0.0,
+    "max": 0.0,
+    "mean": 0.0,
+    "stddev": 0.0
+  },
+  "total_ready_ms": {
+    "min": 1248.33392,
+    "p50": 1261.3441755,
+    "p90": 1271.7523799,
+    "p99": 1274.09422589,
+    "max": 1274.354431,
+    "mean": 1261.3441755,
+    "stddev": 13.010255499999971
+  },
+  "total_ready_tail_ms": {
+    "p50": 1261.3441755,
+    "p95": 1273.05340545,
+    "p99": 1274.09422589
+  },
+  "raw": [
+    {
+      "start_to_pid_ms": 1274.354431,
+      "pid_to_connect_ms": 0.0,
+      "handshake_ms": 0.0,
+      "total_ready_ms": 1274.354431
+    },
+    {
+      "start_to_pid_ms": 1248.33392,
+      "pid_to_connect_ms": 0.0,
+      "handshake_ms": 0.0,
+      "total_ready_ms": 1248.33392
+    }
+  ]
+}

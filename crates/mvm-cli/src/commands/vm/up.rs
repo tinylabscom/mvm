@@ -1354,9 +1354,8 @@ pub(in crate::commands) struct Args {
     pub metrics_port: u16,
     /// Keep this many prelaunched supervisor standbys warm so the next
     /// auto-named `up` claims one instead of cold-booting. Omit to use the
-    /// residency-policy default (`MVM_RESIDENCY`); pass `0` to disable. Only
-    /// the libkrun backend has a standby pool today; a claim uses the
-    /// gateway-bridge path.
+    /// residency-policy default (`MVM_RESIDENCY`); pass `0` to disable.
+    /// Supported by Firecracker, libkrun, and platform-gated Vz.
     #[arg(long)]
     pub warm_pool_size: Option<u32>,
     /// Reload ~/.mvm/config.toml automatically when it changes
@@ -1718,7 +1717,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     // `--redact HOST[=audit]`. Empty → all-off (curated-only baseline).
     let redaction = super::redaction_flags::parse_redaction_flags(&args.redact)?;
 
-    cmd_run(RunParams {
+    let launched_vm_id = cmd_run(RunParams {
         flake_ref: args.flake.as_deref(),
         template_name: resolved_template_arg.as_deref(),
         name: args.name.as_deref(),
@@ -1763,9 +1762,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     // through to subsequent `proc start` / `fs write` / `down`
     // shells. The friendly chrome already went to stderr above.
     if up_json_resolved {
-        let vm_id = user_supplied_name
-            .or_else(|| std::env::var("MVM_REEXEC_NAME").ok())
-            .unwrap_or_default();
+        let vm_id = user_supplied_name.unwrap_or(launched_vm_id);
         let build_mode_str = match template_name_for_envelope.as_deref() {
             Some(t) => template_build_mode_for_envelope(t).unwrap_or("prod"),
             None => match build_mode {
@@ -2004,7 +2001,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     Ok(())
 }
 
-pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
+pub(super) fn cmd_run(params: RunParams<'_>) -> Result<String> {
     let RunParams {
         flake_ref,
         template_name,
@@ -2295,7 +2292,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // long-lived CLI process would be redundant). Same shape as
         // the main path's detach branch.
         if detach {
-            return Ok(());
+            return Ok(vm_name.clone());
         }
 
         ui::info(&format!("VM '{}' running. Press Ctrl+C to stop.", vm_name));
@@ -2328,8 +2325,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 next_health_poll = std::time::Instant::now() + DEGRADED_POLL_INTERVAL;
             }
         }
-        let _ = backend.stop(&mvm_core::vm_backend::VmId(vm_name));
-        return Ok(());
+        let _ = backend.stop(&mvm_core::vm_backend::VmId(vm_name.clone()));
+        return Ok(vm_name.clone());
     }
 
     // Resolve artifact paths from either a pre-built template or a flake build.
@@ -2835,7 +2832,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // (scripting contract) and return without the agent-wait below.
     if detach && effective_hypervisor == "vz" {
         println!("{vm_name_owned}");
-        return Ok(());
+        return Ok(vm_name_owned);
     }
 
     // libkrun / firecracker / vz all launch a detached supervisor daemon,
@@ -2886,7 +2883,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // image upstream. The VM keeps running after the shell exits;
     // `mvmctl down <name>` stops it.
     if console {
-        return super::console::console_interactive(&vm_name_owned);
+        super::console::console_interactive(&vm_name_owned)?;
+        return Ok(vm_name_owned);
     }
 
     // Block until the workload powers off and propagate its
@@ -2906,7 +2904,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         if code != 0 {
             std::process::exit(code);
         }
-        return Ok(());
+        return Ok(vm_name_owned);
     }
 
     if forward {
@@ -2921,11 +2919,11 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     if watch {
         let Some(flake) = flake_ref else {
             // Template mode — watch not supported.
-            return Ok(());
+            return Ok(vm_name_owned);
         };
         if flake.contains(':') {
             ui::warn("--watch requires a local flake; running a single boot instead.");
-            return Ok(());
+            return Ok(vm_name_owned);
         }
         let flake_dir = resolve_flake_ref(flake)?;
         loop {
@@ -3114,7 +3112,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(vm_name_owned)
 }
 
 /// Attach the verity-sealed runtime overlay by

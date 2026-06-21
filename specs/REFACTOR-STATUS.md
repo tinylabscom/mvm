@@ -20,6 +20,10 @@
 
 **Additional 2026-06-20 — Plan 175 Task 1 (VMGenID delivery) host/unit landed:** the `PostRestore` resume RPC now carries the host-minted generation token end to end so a snapshot restore actually rotates the guest CSPRNG. `GuestRequest::PostRestore` became a struct variant `{ token: [u8; GENID_BYTES] }` (`#[serde(default)]` → all-zero = "no rotation" for template-restore callers), `PostRestoreAck` gained `reseeded: bool`, and the guest agent feeds the token to a process-resident `GenIdReseeder` (snapshot-captured, baseline-zero seed) via a new zero-aware `on_post_restore_token` dispatch wrapper; `GenIdState::new`/`GenIdReseeder::new` are now `const fn`. Both host senders mint a fresh token per resume (`VsockPostRestoreSignal`, `post_restore_at`); `mvmctl resume` surfaces "VMGenID rotated". Unit-proven (zero-token no-op, fresh-token rotate, idempotent re-send, two-clone divergence, wire round-trip + `deny_unknown_fields` + serde defaults); fmt+clippy clean. Step 3 (live snapshot→restore `/dev/urandom`-divergence assertion) stays gated — it rides Task 4's FC restore driver. T2 (UFFD/NBD/hugepages substrate), T3 (SIGUSR1 primed barrier), and T4 (`FirecrackerBackend::warm_start` + verb + `agent_ping` e2e) remain.
 
+**Additional 2026-06-20 — Plan 118 Firecracker standby pool live:** the non-vz Firecracker standby box is implemented and live-validated. Firecracker now reserves the normal slot at warm-spawn time, prestarts the daemon, records the live standby in `SupervisorStandbyPool`, and claim reuses that slot to configure the admitted launch shape before issuing `InstanceStart`. The `StandbyClaim` in-memory contract carries the original `VmStartConfig` for backends that must configure boot devices at claim time; libkrun/Vz keep consuming the explicit attach fields. `try_warm_claim` remains fail-open but now permits Firecracker claims without bridge-only `plan_json` while preserving libkrun/Vz's signed-plan requirement. `--up-json` now reports the claimed standby id. Remote proof on `rvproxy-firecracker` (2026-06-20): `pool warm 1` produced one live idle standby; `up --detach --warm-pool-size 1 --hypervisor firecracker --up-json` consumed `standby-6a263a7a4233599a`; replenish restored one fresh idle standby.
+
+**Additional 2026-06-20 — Plan 118 Firecracker baselines + mvmd sizing:** committed Firecracker live bench artifacts under `specs/perf/plan-118/`. The reports are `HostDescriptor`-namespaced with `readiness_boundary=firecracker-pid`: single launch P50 `total_ready_ms=1899.851577`, concurrency-2 P95 `total_ready_ms=1273.05340545`, and density count-2 PSS `138852352` bytes total / `69426176` bytes per instance. Follow-up gated runs passed against those baselines: serial launch `-16.27%`, concurrency P95 `-23.13%`, density per-instance PSS `+0.35%`. Warm-pool launch through the bench harness produced P50 `total_ready_ms=803.596724` versus the gated cold P50 `1590.731061` (`49.48%` faster). The bench harness now asserts Firecracker VM cleanup after RAII teardown, remote cleanup proof found no named `mvm-bench-fc*` / `mvm-density-fc*` processes remaining after report capture, and `admit_probe_plan_generates_distinct_nonces_per_boot` covers per-boot nonce distinctness. Guest-agent-ready probes now persist `ReadinessReport.boot_millis` sidecars under `bench/boot-timing-<vm>.json` for BootTiming cross-checks; Firecracker remains fingerprinted as PID-boundary until its proof image exposes guest-agent ping. The Vz bench lane is implemented for serial launch, concurrent launch, and density through the same admitted-plan probe flow with macOS `phys_footprint` sampling and no-leak teardown assertions; live Vz artifacts remain host-gated. The companion mvmd worktree `feat/plan-118-sizing` now reconciles `desired_counts.warm` into fleet-level warm Firecracker instances; this is the real mvmd hook today because mvmd launches Firecracker directly rather than through mvm `VmStartConfig.warm_pool_size`. Final closeout evidence is green: `cargo test --workspace --no-fail-fast`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo fmt --all -- --check`.
+
 **Additional 2026-06-19 — Stage 0 bootstrap performance follow-up:** the active branch also addresses the observed `[mvm] Materializing Stage 0 root dir` cold-path latency without overclaiming beyond the measured path. Host-side Stage 0 root materialization now reuses a marker-bound extracted root and prefers native `tar -xJf --strip-components 1` after SHA-256 verification, falling back to the prior pure-Rust extractor if the host tar path is unavailable. Firecracker-host measurement on branch `156391a4` with isolated cache/data dirs: cold builder-image cache miss reached `Fetching Stage 0 bootstrap assets … 0.7s` and `Materializing Stage 0 root dir … 1.7s`; immediate warm rerun reached `Fetching … 0.1s` and `Materializing … 0.1s`. The same host confirmed the current Nix seed contains no `mkfs.ext4`/`mke2fs`, so the branch now adds a host-side libkrun preformat path: when host `mkfs.ext4` is available, `nix-store-stage0-<arch>.img` is populated from the verified RootDir `/nix` before boot and marked with a `.stage0-seed` sidecar; Stage 0 PID 1 can adopt that prepopulated store and write its in-filesystem marker. Bounded libkrun proof on the Firecracker host reached and logged the host prepopulate step (`blocks_4k=16777200`, sparse image plus sidecar written) before the 180s timeout; it did not yet capture an in-guest `stage0-init` adoption line, so full libkrun boot/adoption timing remains gated.
 
 **Additional 2026-06-19 — Plan 193 native-gateway cleanup:** the first cutover cleanup after Plan 199/195 removes the dead mvm-side open-policy slot before splice deletion. `BridgeConfig.policy` and the production `AllowAll` `FlowPolicy` are gone; the four supervisor-bin construction sites no longer pass an ignored policy; tests that need an intentional open gate now use `PlanFlowPolicy::from_network_policy(NetworkPolicy::unrestricted())`. This aligns the code with the already-landed Plan 200 WS-B status and reduces the chance of reintroducing an always-open fallback while Plan 193 deletes the splice. Plan 193 status is corrected: rvproxy R2 is shipped, WS-1.5 scaffold/native enforcement witnesses are in place, and remaining code work is splice/Plan-141 hook deletion plus transparent terminator support; the parity gate is now required as of the 2026-06-20 update below.
@@ -134,7 +138,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 178** — CLI surface consolidation (~56→~28) · ✅ (dir-purity deferred)
 - [x] **PLAN 129** — Secrets / SigV4 substitution · ✅ **COMPLETE** — both tiers (declared substitution incl. SigV4/HMAC bind-checked + undeclared detection), terminator-path + vsock, claim-12/13 leak-gate (claim 16), endpoint self-confines (Landlock+seccomp jailer); QEMU clean-room e2e GREEN; FC bringup fixes landed (#804); live-FC e2e spun out (builder-VM box infra, not plan logic)
 - [x] **PLAN 152** — Rust-native VZ supervisor · ✅ native objc2, Swift deleted; WS-C fork primitive satisfied (snapshot/restore + fork stack), WS-D nested-KVM out-of-scope for vz parity
-- [ ] **PLAN 118** — Supervisor standby pool · 🟡 **vz + libkrun DONE; PR-10c live-gated CLI wired** (saved-standby warm pool live-validated + self-replenish #840 + overshoot flock closed; density/concurrent-launch schemas, platform footprint accessors, `bench microvm-density`, and `bench microvm-launch --concurrency` landed; **default-path Vz warm-claim fixed #1112 / #1101** — the standby kernel is now paired to its rootfs variant, dev↔dev / prod↔prod, so the dev claim's compat key matches and `up --dev` / transient `run` consume the standby instead of silently cold-booting; the earlier "live-validated" only ever exercised the explicit-path claim). Open boxes: the **non-vz** FC standby pool, committed baselines, live no-leak/nonce-distinctness proof, and Vz/FC density lanes.
+- [x] **PLAN 118** — Supervisor standby pool · ✅ **DONE** (saved-standby warm pool live-validated + self-replenish #840 + overshoot flock closed; density/concurrent-launch schemas, platform footprint accessors, `bench microvm-density`, and `bench microvm-launch --concurrency` landed; **default-path Vz warm-claim fixed #1112 / #1101**; **Firecracker standby pool live-validated 2026-06-20** with warm-spawn → claim → replenish and `--up-json` returning the claimed standby id; Firecracker launch/concurrency/density proof JSON and gated reruns live under `specs/perf/plan-118/`; guest-agent-ready probes write BootTiming sidecars; Vz serial/concurrency/density bench lane is implemented and compiled; mvmd `desired_counts.warm` sizing lives in companion branch `feat/plan-118-sizing`; final aggregate `cargo test --workspace --no-fail-fast`, workspace clippy, and fmt gates are green).
 - [x] **PLAN 159** — vz-inspired macOS VZ DX · ✅ **DONE** — VZ/macOS scope shipped (warm pool, checkpoint/fork/diff, two-copy + instant memory fork, live Vz validation); non-VZ residuals closed by scope decision: verb/install/product polish rehomed to Plan 181 / Plan 200, signed delta-image distribution descoped until a future artifact/distribution plan owns it
 - [x] **PLAN 123** — Network / storage / warm-start · ✅ **DONE** — Phase A/B done; C1/C4 done; C3 (Vz save/restore) MET via 159 WS-2; the lone residual, C2 (FC live-memory), is carved to **Plan 175** (live-KVM-gated), not a 123 box
 - [x] **PLAN 124** — Lean guest agent · ✅ **core complete** — full D1.2 RPC thread landed (stubs + check-stubs gate + 2a contract + 2b client + 2c adoption); D1.3 SDK veneer → Plan 125; Phase E signed config-on-device DESCOPED (baked + verity-sealed, no vsock round-trip); the residual KVM-live-verity / libkrun-Vz overlay-attach / no_std items are explicit **own-efforts**, rehomed out of 124 scope
@@ -388,7 +392,7 @@ PLAN 159 — vz-inspired macOS VZ DX               ✅ DONE
   [x] instant memory fork: vm_full fork of a RUNNING parent → second live VM in
       0.91s incl. claim-8 admission (same-identity clone model; recorded-sha admission; gvproxy-only invariant) (#833)
 
-PLAN 118 — Supervisor standby pool              🟡 libkrun + Vz done; FC follow-up open
+PLAN 118 — Supervisor standby pool              🟡 pool done; FC baselines gated; Vz lane implemented
   [x] 1a primitive + 1b-i trait seam/registry/libkrun + 1b-ii reaper/doctor/`mvmctl pool`
       /bench-fix + 1b-iii up auto-claim (try_warm_claim/replenish/--warm-pool-size,
       fail-open) + bundled-kernel compat key — libkrun mkGuest warm claim FIRES
@@ -423,20 +427,33 @@ PLAN 118 — Supervisor standby pool              🟡 libkrun + Vz done; FC fol
       bytes — verified), so the compat match is unchanged; libkrun stays
       image-agnostic. Chosen over coupling to the WS-2 fingerprint (would weaken
       claim-8 byte-identity + tie pool.rs to dev_vz.rs). Live: claim still fires.
-  [ ] Firecracker standby pool (the mvmd-facing deliverable) — gated on FC standby
-      follow-up; not blocking current libkrun/Vz use
-  [ ] Part C / PR-10c — density + concurrent-launch distribution bench (🟡 in progress,
+  [x] Plan 118 closeout cleanup: `pool status` now reports dead non-saved
+      standbys separately instead of showing them as idle, while Vz saved-state
+      standbys remain live without a pid; the libkrun supervisor audit-substrate
+      signing-key prefix check already routes through `mvm_core::config::mvm_keys_dir()`
+      so `MVM_DATA_DIR` isolation is honored.
+  [x] Firecracker standby pool (the mvmd-facing deliverable) — live-validated on
+      `rvproxy-firecracker` 2026-06-20: warm-spawn reserved the normal slot,
+      claim configured the admitted launch shape, `InstanceStart` booted from
+      the standby, `--up-json` returned the claimed standby id, and replenish
+      restored target capacity.
+  [x] Part C / PR-10c — density + concurrent-launch distribution bench (code/proof slice,
       added 2026-06-16). Extends Part A's probe to two new metrics: per-instance host
       footprint (`bench microvm-density`, platform-split PSS/phys_footprint accessor)
       and launch P50/P95/P99 under concurrency (`bench microvm-launch --concurrency N`).
       libkrun live-gated CLI wiring, platform accessors, concurrency orchestration,
-      and cap tests are landed. libkrun → Vz → FC baselines remain staged. Read-only;
+      and cap tests are landed. Firecracker baselines are committed under
+      `specs/perf/plan-118/` with `readiness_boundary=firecracker-pid`, the serial /
+      concurrency / density baseline gates pass, and warm-pool launch is 49.48% faster
+      than the gated cold run. Vz serial/concurrency/density harness lanes are
+      implemented through the same admitted-plan flow with BootTiming sidecars and
+      no-leak teardown assertions; live Vz artifacts remain host-gated. Read-only;
       every boot still goes through claim-8 admission (no bypass), no new
-      key/daemon/socket, `libkrun-live`-gated → zero new attack surface. Closes the
+      key/daemon/socket, backend-gated → zero new attack surface. Closes the
       no-published-numbers gap surfaced by external prior art
       (`specs/notes/external-agent-sandbox-runtime-prior-art.md`); proves the warm pool's
-      payoff. Inherits Part A's blocker (needs a freshly-built default-microvm image for
-      committed baselines); live no-leak/nonce-distinctness proof plus Vz/FC lanes remain.
+      payoff for Firecracker. Inherits Part A's libkrun blocker only for a
+      guest-agent-ready libkrun baseline image.
 
 PLAN 183 — Builder-VM egress posture + net boot ✅ DONE (follow-ups tracked in plan)
   Last updated: 2026-06-15 (ALL deferred items now CLOSED: DHCP belt-and-suspenders
