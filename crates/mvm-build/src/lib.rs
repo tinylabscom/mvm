@@ -16,6 +16,10 @@ pub mod builderd;
 /// handshake, run one typed operation per connection, stream
 /// progress/log events, and surface a typed terminal outcome.
 pub mod builderd_client;
+/// Host-side routing of build/eval work through the resident `mvm-builderd`
+/// daemon (the typed replacement for the shell-in-the-VM channel). Currently
+/// routes `mvmctl validate` (flake check), opt-in behind `MVM_BUILDERD_DISPATCH`.
+pub mod builderd_dispatch;
 /// Typed allowlisted control-plane protocol for the resident
 /// `mvm-builderd` builder-VM service (the long-term replacement for the
 /// controlled-shell-job channel in `builder_protocol`).

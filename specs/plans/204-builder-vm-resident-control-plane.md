@@ -281,9 +281,30 @@ arm lands with the daemon's image baking (boot-gated).
 
 ### D. Compatibility shrink
 
-- [ ] Route current shell-job builder calls through a single adapter module.
+- [~] Route current shell-job builder calls through a single adapter module.
+      Host-side adapter landed: `mvm_build::builderd_dispatch`
+      (`resolve_ready_builder_socket` scans the builder-VM state root and
+      returns the first daemon that answers a handshake; pure
+      `classify_flake_check_outcome` verdict mapper; `flake_check_via_builderd`
+      thin `BuilderdClient::run_operation` wrapper). First production consumer:
+      `mvmctl build validate` routes a flake check through the daemon as a typed
+      `FlakeCheck` behind `MVM_BUILDERD_DISPATCH=1`, else the legacy shell path.
+      Daemon-side fix shipped with it: `flake_check_argv` no longer `path:`-wraps
+      a scheme-qualified ref (`github:`/`path:`/`git+…`) — the prior
+      unconditional wrap produced `path:github:…`. **Scope:** only a *remote*
+      ref is routed today (the builder VM does not mount the host work tree, so
+      a local-path flake is not reachable inside it; routing one would report a
+      valid flake as invalid). Live-proven over the wire on macOS-26 Vz: a
+      routed check reaches the daemon, which runs `nix flake check` and returns a
+      typed terminal the adapter maps to the verb's output. A clean *valid*
+      remote-ref result additionally needs a builder image rebuilt from this
+      revision (to deploy the `flake_check_argv` fix into the resident daemon).
 - [ ] Emit a diagnostic when the adapter is used.
-- [ ] Replace the remaining normal-path shell jobs with typed operations.
+- [ ] Replace the remaining normal-path shell jobs with typed operations
+      (the build ops `BuildGuestImage`/`BuildHostTool`, plus local-flake/job
+      staging into the builder; the build path delivers artifacts via a shared
+      `/out` mount while builderd returns a store path, so this needs
+      output-model reconciliation).
 - [ ] Gate raw shell execution behind an explicit debug/development flag.
 - [x] Add a lint or structural test that prevents new normal-path shell jobs.
       `xtask check-builder-shell-job-sites` (CI Lint lane) freezes the set of
