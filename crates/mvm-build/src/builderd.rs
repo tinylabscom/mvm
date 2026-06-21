@@ -235,8 +235,42 @@ fn nix_argv(args: &[&str]) -> Vec<String> {
 /// unit-tested without executing Nix. `--no-build` keeps it an
 /// evaluation check (fast, no derivation realisation).
 pub fn flake_check_argv(flake_path: &str) -> Vec<String> {
-    let target = format!("path:{flake_path}");
+    let target = flake_ref_target(flake_path);
     nix_argv(&["flake", "check", "--no-build", &target])
+}
+
+/// Turn a caller-supplied flake reference into a nix-ready target. A
+/// scheme-qualified ref (`github:…`, `path:…`, `git+https:…` — anything nix
+/// already understands as a flake URL) passes through unchanged; a bare
+/// filesystem path is wrapped in `path:` so nix treats it as a path flake.
+/// Wrapping a scheme ref (the prior unconditional `path:{flake}`) produced
+/// `path:github:…`, which nix reads as a non-existent path.
+fn flake_ref_target(flake: &str) -> String {
+    if has_uri_scheme(flake) {
+        flake.to_string()
+    } else {
+        format!("path:{flake}")
+    }
+}
+
+/// True if `s` begins with a URI scheme (`alpha (alnum|+|-|.)* ':'`), the way
+/// nix flake refs are scheme-qualified. A bare path (`/work/nix`, `.`, `./x`)
+/// has none.
+fn has_uri_scheme(s: &str) -> bool {
+    let mut chars = s.char_indices();
+    match chars.next() {
+        Some((_, c)) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    for (i, c) in chars {
+        if c == ':' {
+            return i > 0;
+        }
+        if !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) {
+            return false;
+        }
+    }
+    false
 }
 
 /// Map a flake-check process result to its terminal response: a clean
@@ -896,6 +930,46 @@ mod tests {
                 "path:/work/nix".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn flake_check_argv_passes_scheme_refs_through_unwrapped() {
+        // A scheme-qualified flake ref must NOT be `path:`-wrapped (that yields
+        // `path:github:…`, a non-existent path).
+        assert_eq!(
+            flake_check_argv("github:numtide/flake-utils")
+                .last()
+                .unwrap(),
+            "github:numtide/flake-utils"
+        );
+        assert_eq!(
+            flake_check_argv("git+https://example.com/r")
+                .last()
+                .unwrap(),
+            "git+https://example.com/r"
+        );
+        // An explicit `path:` ref is already qualified — no double wrap.
+        assert_eq!(
+            flake_check_argv("path:/work/nix").last().unwrap(),
+            "path:/work/nix"
+        );
+        // Bare paths still get wrapped.
+        assert_eq!(flake_check_argv(".").last().unwrap(), "path:.");
+        assert_eq!(
+            flake_check_argv("/abs/dir").last().unwrap(),
+            "path:/abs/dir"
+        );
+    }
+
+    #[test]
+    fn has_uri_scheme_distinguishes_refs_from_paths() {
+        assert!(has_uri_scheme("github:x/y"));
+        assert!(has_uri_scheme("path:/a"));
+        assert!(has_uri_scheme("git+https://h/r"));
+        assert!(!has_uri_scheme("/work/nix"));
+        assert!(!has_uri_scheme("."));
+        assert!(!has_uri_scheme("./rel"));
+        assert!(!has_uri_scheme(":leadingcolon"));
     }
 
     #[test]
