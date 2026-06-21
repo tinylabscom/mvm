@@ -1670,7 +1670,10 @@ fn resolve_persistent_spec(
 fn machine_is_running(name: &str) -> bool {
     let backend =
         AnyBackend::from_hypervisor(&super::shared::resolve_effective_hypervisor("firecracker"));
-    matches!(backend.status(&VmId(name.to_string())), Ok(VmStatus::Running))
+    matches!(
+        backend.status(&VmId(name.to_string())),
+        Ok(VmStatus::Running)
+    )
 }
 
 /// Stop a running machine before recreating it under a new config.
@@ -2069,7 +2072,9 @@ mod tests {
         // without a command), so a bare transient run parses and is refused at
         // mode resolution with a clear message — not a hang, not a silent exit.
         let args = parse_run(&["run", "--image", "alpine"]).expect("parse");
-        let err = args.resolve_mode().expect_err("transient run needs a command");
+        let err = args
+            .resolve_mode()
+            .expect_err("transient run needs a command");
         assert!(
             err.to_string().contains("command"),
             "unexpected error: {err}"
@@ -2164,8 +2169,8 @@ mod tests {
 
     #[test]
     fn name_implies_persistence_without_detach() {
-        let args = parse_run(&["run", "--image", "alpine", "--name", "web", "--", "true"])
-            .expect("parse");
+        let args =
+            parse_run(&["run", "--image", "alpine", "--name", "web", "--", "true"]).expect("parse");
         assert_eq!(args.name.as_deref(), Some("web"));
         assert!(args.persistent());
         assert!(!args.detach);
@@ -2203,7 +2208,9 @@ mod tests {
                 MachineRunMode::Persistent,
             ),
             (
-                &["run", "-it", "--name", "web", "--image", "X", "--", "/bin/sh"],
+                &[
+                    "run", "-it", "--name", "web", "--image", "X", "--", "/bin/sh",
+                ],
                 MachineRunMode::InteractivePersistent,
             ),
             (&["run", "-d", "--image", "X"], MachineRunMode::Persistent),
@@ -2342,13 +2349,7 @@ mod tests {
     #[test]
     fn volume_host_share_is_refused_with_persistence() {
         let with_share = parse_run(&[
-            "run",
-            "--image",
-            "x",
-            "--name",
-            "web",
-            "--volume",
-            "/h:/g:ro",
+            "run", "--image", "x", "--name", "web", "--volume", "/h:/g:ro",
         ])
         .expect("parse");
         let err = reject_volume_for_managed_boot(&with_share)
