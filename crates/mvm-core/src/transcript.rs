@@ -12,7 +12,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
+
 use crate::crypto::aead;
+
+/// Filename of the host transcript key-encryption key, under the keys dir.
+pub const TRANSCRIPT_KEK_FILENAME: &str = "transcript-kek.bin";
 
 /// Current sealed-transcript manifest format. Unknown versions fail closed.
 pub const TRANSCRIPT_MANIFEST_FORMAT_VERSION: u32 = 1;
@@ -99,6 +105,8 @@ pub enum TranscriptError {
     Io { file: String, msg: String },
     #[error("chunk {seq} ({file}) failed to decrypt (wrong key or tampered ciphertext)")]
     Decrypt { seq: u64, file: String },
+    #[error("wrapped transcript key is malformed or cannot be unwrapped")]
+    WrappedKeyInvalid,
 }
 
 /// Accumulates a live capture and fails closed the moment a bound is hit.
@@ -308,6 +316,35 @@ pub fn export(
     Ok(out)
 }
 
+/// Load the host transcript key-encryption key from `keys_dir`, creating it
+/// (mode 0600) on first use. Every per-capture data key is wrapped under this
+/// KEK so payloads stay unreadable without host access.
+pub fn load_or_init_kek(keys_dir: &Path) -> std::io::Result<aead::Key> {
+    let path = keys_dir.join(TRANSCRIPT_KEK_FILENAME);
+    if path.exists() {
+        return aead::Key::load(&path);
+    }
+    std::fs::create_dir_all(keys_dir)?;
+    let kek = aead::Key::random();
+    kek.persist(&path, 0o600)?;
+    Ok(kek)
+}
+
+/// Wrap a per-capture data key under the host KEK, base64 for the manifest's
+/// `wrapped_data_key_b64`.
+pub fn wrap_data_key(kek: &aead::Key, data_key: &aead::Key) -> String {
+    B64.encode(data_key.wrap_under(kek))
+}
+
+/// Recover a per-capture data key from the manifest's `wrapped_data_key_b64`.
+/// Fails closed on bad base64, a wrong KEK, or a tampered wrap.
+pub fn unwrap_data_key(kek: &aead::Key, wrapped_b64: &str) -> Result<aead::Key, TranscriptError> {
+    let framed = B64
+        .decode(wrapped_b64)
+        .map_err(|_| TranscriptError::WrappedKeyInvalid)?;
+    aead::Key::unwrap_under(kek, &framed).map_err(|_| TranscriptError::WrappedKeyInvalid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,6 +552,71 @@ mod tests {
             export(&manifest, dir.path(), &fixed_key(9)).unwrap_err(),
             TranscriptError::Decrypt { .. }
         ));
+    }
+
+    #[test]
+    fn kek_is_created_once_then_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        let k1 = load_or_init_kek(&keys).unwrap();
+        let path = keys.join(TRANSCRIPT_KEK_FILENAME);
+        assert!(path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "KEK file must be private");
+        }
+        // Reload returns a KEK that round-trips the same wrapped data key.
+        let k2 = load_or_init_kek(&keys).unwrap();
+        let data = aead::Key::from_bytes([5u8; 32]);
+        let wrapped = wrap_data_key(&k1, &data);
+        assert!(
+            unwrap_data_key(&k2, &wrapped).is_ok(),
+            "persisted KEK reused"
+        );
+    }
+
+    #[test]
+    fn wrap_unwrap_data_key_round_trips_and_rejects_garbage() {
+        let kek = aead::Key::from_bytes([1u8; 32]);
+        let data = aead::Key::from_bytes([2u8; 32]);
+        let wrapped = wrap_data_key(&kek, &data);
+        // Recovered key decrypts what the original sealed.
+        let recovered = unwrap_data_key(&kek, &wrapped).unwrap();
+        let blob = aead::seal(&data, b"payload");
+        assert_eq!(aead::open(&recovered, &blob).unwrap(), b"payload");
+        // Wrong KEK + non-base64 both fail closed.
+        let wrong = aead::Key::from_bytes([3u8; 32]);
+        assert!(matches!(
+            unwrap_data_key(&wrong, &wrapped),
+            Err(TranscriptError::WrappedKeyInvalid)
+        ));
+        assert!(matches!(
+            unwrap_data_key(&kek, "not base64!!"),
+            Err(TranscriptError::WrappedKeyInvalid)
+        ));
+    }
+
+    #[test]
+    fn wrapped_key_capture_and_export_round_trips_end_to_end() {
+        // The full at-rest path: KEK wraps the data key in the manifest, the
+        // capture encrypts under the data key, and export unwraps then decrypts.
+        let dir = tempfile::tempdir().unwrap();
+        let kek = load_or_init_kek(&dir.path().join("keys")).unwrap();
+        let data = aead::Key::from_bytes([8u8; 32]);
+        let mut cfg = writer_config();
+        cfg.wrapped_data_key_b64 = wrap_data_key(&kek, &data);
+        let mut w = TranscriptWriter::new(dir.path(), aead::Key::from_bytes([8u8; 32]), cfg);
+        w.push(Direction::Egress, b"forensic payload").unwrap();
+        let manifest = w.seal();
+        // Operator-side: unwrap the data key from the manifest using the KEK,
+        // then export.
+        let recovered = unwrap_data_key(&kek, &manifest.wrapped_data_key_b64).unwrap();
+        assert_eq!(
+            export(&manifest, dir.path(), &recovered).unwrap(),
+            b"forensic payload"
+        );
     }
 
     #[test]
