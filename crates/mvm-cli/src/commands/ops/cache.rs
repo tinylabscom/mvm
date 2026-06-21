@@ -233,12 +233,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 return Ok(());
             }
             if !repair.existed {
-                ui::info(&format!(
+                ui::notice(&format!(
                     "Builder store {} is already absent — nothing to repair.",
                     repair.path
                 ));
             } else if dry_run {
-                ui::info(&format!(
+                ui::notice(&format!(
                     "Would clear builder store {} ({}). Re-run without --dry-run to repair.",
                     repair.path,
                     human_bytes(repair.bytes_freed)
@@ -250,7 +250,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     repair.bytes_freed,
                     repair.path
                 );
-                ui::success(&format!(
+                ui::notice(&format!(
                     "Cleared builder store {} ({} freed). The next `mvmctl dev up` rebuilds it.",
                     repair.path,
                     human_bytes(repair.bytes_freed)
@@ -278,14 +278,14 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                         if o.killed == 0 && o.removed_dirs == 0 {
                             ui::info("No orphaned VM helpers.");
                         } else if dry_run {
-                            ui::info(&format!(
+                            ui::notice(&format!(
                                 "(dry-run) Would reap {} orphaned helper PID(s) and {} cache dir(s) ({}).",
                                 o.killed,
                                 o.removed_dirs,
                                 human_bytes(o.freed_bytes)
                             ));
                         } else {
-                            ui::success(&format!(
+                            ui::notice(&format!(
                                 "Reaped {} orphaned helper PID(s) and {} cache dir(s), freed {}.",
                                 o.killed,
                                 o.removed_dirs,
@@ -504,15 +504,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             }
 
             if removed == 0 {
-                ui::info("Nothing to prune.");
+                ui::notice("Nothing to prune.");
             } else if dry_run {
-                ui::info(&format!(
+                ui::notice(&format!(
                     "Would remove {} items, freeing {}",
                     removed,
                     human_bytes(freed)
                 ));
             } else {
-                ui::success(&format!(
+                ui::notice(&format!(
                     "Pruned {} items, freed {}",
                     removed,
                     human_bytes(freed)
