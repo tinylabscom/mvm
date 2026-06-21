@@ -43,6 +43,8 @@ use crate::supervisor::tools::http_hardening::{
 
 /// 16 MiB cap on a single routed request/response frame.
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(not(target_os = "linux"))]
+const RVPROXY_ORIGINAL_DST_MAGIC: &[u8; 8] = b"RVPXOD01";
 
 /// A request the guest routed to the substitution endpoint. Header values may
 /// carry an opaque placeholder where a credential goes.
@@ -53,6 +55,31 @@ pub struct ProxyRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+fn recover_terminator_original_destination(
+    stream: &mut std::net::TcpStream,
+) -> anyhow::Result<std::net::SocketAddr> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(crate::supervisor::terminator::orig_dst::original_dst(
+            stream,
+        )?)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use std::io::Read;
+
+        let mut header = [0_u8; 14];
+        stream.read_exact(&mut header)?;
+        anyhow::ensure!(
+            &header[..8] == RVPROXY_ORIGINAL_DST_MAGIC,
+            "invalid rvproxy original-destination preamble"
+        );
+        let ip = std::net::Ipv4Addr::new(header[8], header[9], header[10], header[11]);
+        let port = u16::from_be_bytes([header[12], header[13]]);
+        Ok(std::net::SocketAddr::from((ip, port)))
+    }
 }
 
 /// A request with every placeholder substituted to its real credential, ready
@@ -734,25 +761,24 @@ impl SubstitutionService {
         }
     }
 
-    /// Accept loop for the transparent egress **terminator**: the host nft
-    /// `nat` chain REDIRECTs a guest's outbound TCP here, we
-    /// recover the original destination via `SO_ORIGINAL_DST`, substitute any
-    /// secret placeholder in the request (claim-12 bind-checked), and splice
-    /// the request to the real destination — returning its response verbatim.
+    /// Accept loop for the transparent egress **terminator**: guest outbound TCP
+    /// is redirected here, we recover the original destination, substitute any
+    /// secret placeholder in the request (claim-12 bind-checked), and splice the
+    /// request to the real destination — returning its response verbatim.
     ///
-    /// Linux-only: `SO_ORIGINAL_DST` is an `SOL_IP` getsockopt. The substitution
-    /// core (`terminator::handler::handle_request`) and the splice
+    /// Linux recovers the destination via `SO_ORIGINAL_DST`; rvproxy-native
+    /// connections carry a compact preamble before the first guest byte. The
+    /// substitution core (`terminator::handler::handle_request`) and splice
     /// (`terminator::listener::forward_http_raw`) are sync + blocking, so each
-    /// connection's syscalls (orig-dst, request read, forward, write-back) run
-    /// on `spawn_blocking` threads, off the reactor. A failure on one connection
-    /// is logged and the socket dropped — never fatal to the loop.
+    /// connection's syscalls run on `spawn_blocking` threads, off the reactor.
+    /// A failure on one connection is logged and the socket dropped — never
+    /// fatal to the loop.
     ///
     /// `timeout` is the configured per-connection I/O deadline (the endpoint's
     /// `forward_timeout_secs`), applied to BOTH the untrusted guest-facing socket
     /// (read+write) and the upstream forward leg. Without it a guest that sends a
     /// partial header or stops reading mid-write-back would park a blocking-pool
     /// thread forever — a bounded pool means a hostile guest could exhaust it.
-    #[cfg(target_os = "linux")]
     pub async fn serve_terminator(
         self: Arc<Self>,
         listener: tokio::net::TcpListener,
@@ -781,7 +807,6 @@ impl SubstitutionService {
     /// fail-closed is enforced inside `handle_request` (it refuses an unbound
     /// destination / unknown placeholder before the forward runs); on refusal
     /// we log and close WITHOUT forwarding.
-    #[cfg(target_os = "linux")]
     async fn handle_terminator_connection(
         &self,
         stream: tokio::net::TcpStream,
@@ -800,10 +825,9 @@ impl SubstitutionService {
         std_stream.set_read_timeout(Some(timeout))?;
         std_stream.set_write_timeout(Some(timeout))?;
 
-        // Recover the original destination first (cheap getsockopt) so we can
-        // branch http(:80) vs https(:443) before reading.
         let (std_stream, orig_dst) = tokio::task::spawn_blocking(move || {
-            let orig_dst = terminator::orig_dst::original_dst(&std_stream)?;
+            let mut std_stream = std_stream;
+            let orig_dst = recover_terminator_original_destination(&mut std_stream)?;
             anyhow::Ok((std_stream, orig_dst))
         })
         .await??;
@@ -907,7 +931,6 @@ impl SubstitutionService {
     /// re-originate over the hardened reqwest forwarder) or **splice** an unbound
     /// host straight through without decrypting. Fail-closed: a bound host whose
     /// substitution refuses closes the socket without forwarding (claim 12).
-    #[cfg(target_os = "linux")]
     async fn handle_https_terminator(
         &self,
         std_stream: std::net::TcpStream,

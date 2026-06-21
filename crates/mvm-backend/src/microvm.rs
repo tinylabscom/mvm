@@ -2812,7 +2812,7 @@ fn spawn_egress_endpoint(config: &FlakeRunConfig) -> Result<EndpointGuard> {
     // `mvmctl up` staged the per-VM name-constrained intermediate (cert+key) in
     // the sidecar. Hand the KEY to the endpoint so the `https` terminator can
     // mint per-SNI leaves; it never reaches the guest. Absent ⇒ `http`-only.
-    let tls_intermediate = read_egress_intermediate(&state_dir)?;
+    let tls_intermediate = crate::substitution_spawn::read_egress_intermediate(&state_dir)?;
     spawn_substitution_endpoint(crate::substitution_spawn::SubstitutionSpawnParams {
         vm_name: name,
         state_dir: &state_dir,
@@ -2872,32 +2872,6 @@ fn secret_env_cmdline_token(vm_name: &str) -> Option<String> {
     let bytes = std::fs::read(&path).ok()?;
     let pairs: Vec<(String, String)> = serde_json::from_slice(&bytes).ok()?;
     mvm_core::vm_backend::encode_secret_env_cmdline(&pairs)
-}
-
-/// Read the per-VM egress intermediate (`cert_pem` + `key_pem`)
-/// `mvmctl up` persisted at `<state_dir>/egress-intermediate.json` (host-only,
-/// mode 0600). Returns `None` when absent (no https leg) — a missing file is the
-/// no-secret path, not an error. The key is host-side material only;
-/// it is handed to the terminator endpoint and never written to a guest drive.
-#[cfg(target_os = "linux")]
-fn read_egress_intermediate(state_dir: &std::path::Path) -> Result<Option<(String, String)>> {
-    let path = state_dir.join("egress-intermediate.json");
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", path.display())),
-    };
-    let v: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
-    let cert = v["cert_pem"].as_str();
-    let key = v["key_pem"].as_str();
-    match (cert, key) {
-        (Some(c), Some(k)) => Ok(Some((c.to_string(), k.to_string()))),
-        _ => Err(anyhow::anyhow!(
-            "{} missing cert_pem/key_pem",
-            path.display()
-        )),
-    }
 }
 
 /// Spawn the `mvm-firecracker-bridge` sibling. Creates a UNIX

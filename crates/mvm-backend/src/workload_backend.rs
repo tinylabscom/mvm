@@ -18,10 +18,12 @@ pub enum EgressSubstitutionTransport {
     /// terminator via an nft PREROUTING REDIRECT; the funnel computes the
     /// per-slot terminator address and installs the redirect post-boot.
     NftTerminator,
-    /// macOS (libkrun / vz): the guest dials the substitution port over
-    /// vsock, bridged to a host unix socket; the endpoint listens on that
-    /// `Uds`. No transparent :80/:443 terminator yet (that is gated on the
-    /// rvproxy gateway — a separate follow-up).
+    /// macOS rvproxy-native path: the guest still has a proxy-aware vsock/UDS
+    /// channel, and ordinary `:80/:443` TCP is intercepted by the native gateway
+    /// and forwarded to the same host terminator.
+    RvproxyTransparentTerminator,
+    /// Proxy-aware channel only: the guest dials the substitution port over
+    /// vsock, bridged to a host unix socket; no transparent `:80/:443` leg.
     VsockUdsChannel,
     /// This backend does not run egress substitution (the mock test double).
     None,
@@ -36,7 +38,10 @@ impl EgressSubstitutionTransport {
     /// Whether this transport can transparently intercept ordinary guest
     /// `:80`/`:443` egress and deliver it to the host terminator.
     pub fn supports_transparent_terminator(self) -> bool {
-        matches!(self, Self::NftTerminator)
+        matches!(
+            self,
+            Self::NftTerminator | Self::RvproxyTransparentTerminator
+        )
     }
 }
 
@@ -54,7 +59,7 @@ impl WorkloadBackend for FirecrackerBackend {
 }
 impl WorkloadBackend for LibkrunBackend {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
-        EgressSubstitutionTransport::VsockUdsChannel
+        EgressSubstitutionTransport::RvproxyTransparentTerminator
     }
 }
 impl WorkloadBackend for VzBackend {
@@ -128,11 +133,14 @@ mod tests {
     }
 
     #[test]
-    fn libkrun_declares_vsock_uds_channel() {
+    fn libkrun_declares_rvproxy_transparent_terminator() {
         let transport = LibkrunBackend.egress_substitution_transport();
-        assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
+        assert_eq!(
+            transport,
+            EgressSubstitutionTransport::RvproxyTransparentTerminator
+        );
         assert!(transport.supports_proxy_aware_substitution());
-        assert!(!transport.supports_transparent_terminator());
+        assert!(transport.supports_transparent_terminator());
     }
 
     #[test]
@@ -182,10 +190,15 @@ mod tests {
     }
 
     #[test]
+    fn transparent_egress_terminator_requirement_accepts_libkrun() {
+        require_transparent_egress_terminator(&LibkrunBackend)
+            .expect("libkrun declares the rvproxy terminator leg");
+    }
+
+    #[test]
     fn transparent_egress_terminator_requirement_refuses_proxy_only_backends() {
         let mock = MockBackend::new();
         for backend in [
-            &LibkrunBackend as &dyn WorkloadBackend,
             &VzBackend as &dyn WorkloadBackend,
             &mock as &dyn WorkloadBackend,
         ] {

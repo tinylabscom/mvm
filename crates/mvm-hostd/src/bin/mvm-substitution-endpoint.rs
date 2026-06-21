@@ -188,26 +188,16 @@ fn bind_transport(transport: &EndpointTransport) -> Result<Bound> {
 
 /// Bind the transparent egress terminator's TCP listener, if configured. Bound
 /// here (outside the runtime, set non-blocking) so it's reachable before the
-/// ready handshake — the nft redirect target must be live before the guest
-/// boots. Linux-only: the terminator recovers the original destination via
-/// `SO_ORIGINAL_DST`, an `SOL_IP` getsockopt with no portable equivalent.
+/// ready handshake.
 fn bind_terminator(addr: Option<std::net::SocketAddr>) -> Result<Option<std::net::TcpListener>> {
     let Some(addr) = addr else {
         return Ok(None);
     };
-    #[cfg(target_os = "linux")]
-    {
-        let listener = std::net::TcpListener::bind(addr)
-            .with_context(|| format!("terminator TCP bind on {addr} failed"))?;
-        listener.set_nonblocking(true)?;
-        info!(terminator_addr = %addr, "egress terminator bound");
-        Ok(Some(listener))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = addr;
-        anyhow::bail!("egress terminator (terminator_listen) is linux-only");
-    }
+    let listener = std::net::TcpListener::bind(addr)
+        .with_context(|| format!("terminator TCP bind on {addr} failed"))?;
+    listener.set_nonblocking(true)?;
+    info!(terminator_addr = %addr, "egress terminator bound");
+    Ok(Some(listener))
 }
 
 /// Run the primary substitution accept loop, plus the terminator accept loop
@@ -221,8 +211,7 @@ async fn serve(
     forward_timeout: std::time::Duration,
 ) -> Result<()> {
     // Spawn the terminator loop first so it's accepting while the primary loop
-    // owns the task. On non-Linux `terminator` is always None (bind bails).
-    #[cfg(target_os = "linux")]
+    // owns the task.
     let terminator_task = match terminator {
         Some(std_listener) => {
             let listener = tokio::net::TcpListener::from_std(std_listener)
@@ -233,8 +222,6 @@ async fn serve(
         }
         None => None,
     };
-    #[cfg(not(target_os = "linux"))]
-    let _ = (terminator, forward_timeout);
 
     match bound {
         Bound::Uds(std_listener) => {
@@ -246,7 +233,6 @@ async fn serve(
         Bound::Vsock(listener) => service.serve_vsock(listener).await,
     }
 
-    #[cfg(target_os = "linux")]
     if let Some(task) = terminator_task {
         task.abort();
     }

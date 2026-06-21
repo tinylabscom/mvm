@@ -4108,6 +4108,7 @@ mod tests {
                 egress,
                 dns_allow: &[],
                 upstream_resolvers: &resolvers,
+                transparent: None,
             },
         )
         .expect("render native config");

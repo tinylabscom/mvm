@@ -2080,6 +2080,7 @@ fn build_supervisor_config(
         signing_key_path: substrate
             .signing_key_path
             .map(|p| p.to_string_lossy().into_owned()),
+        transparent_terminator_port: None,
     })
 }
 
@@ -3491,6 +3492,7 @@ mod tests {
             audit_dir: None,
             gateway_audit_socket: None,
             signing_key_path: None,
+            transparent_terminator_port: None,
         };
         let json = cfg.to_json().unwrap();
         std::fs::write(state_dir.join(SUPERVISOR_CONFIG_FILE_NAME), json.as_bytes()).unwrap();
@@ -3575,6 +3577,7 @@ mod tests {
             audit_dir: Some("/parent/audit".into()),
             gateway_audit_socket: Some("/parent/audit/gateway-parentvm.sock".into()),
             signing_key_path: Some("/parent/keys/host-signer.ed25519".into()),
+            transparent_terminator_port: None,
         }
     }
 
@@ -3772,6 +3775,7 @@ mod tests {
             audit_dir: None,
             gateway_audit_socket: None,
             signing_key_path: None,
+            transparent_terminator_port: None,
         };
         let json = cfg.to_json().unwrap();
         std::fs::write(state_dir.join(SUPERVISOR_CONFIG_FILE_NAME), json).unwrap();

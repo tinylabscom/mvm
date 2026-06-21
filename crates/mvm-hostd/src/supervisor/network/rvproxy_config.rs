@@ -44,6 +44,15 @@ pub struct RvproxyConfigParams<'a> {
     pub dns_allow: &'a [String],
     /// Upstream DNS resolvers the gateway forwards allowed lookups to.
     pub upstream_resolvers: &'a [Ipv4Addr],
+    /// Transparent guest TCP interception for host-side egress termination.
+    pub transparent: Option<RvproxyTransparentConfig>,
+}
+
+/// Transparent interception target for rvproxy's `[transparent]` section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RvproxyTransparentConfig {
+    pub terminator_host: Ipv4Addr,
+    pub terminator_port: u16,
 }
 
 /// Render the complete rvproxy config TOML for `params`.
@@ -76,6 +85,12 @@ pub fn render_rvproxy_config(params: &RvproxyConfigParams<'_>) -> Result<String,
         audit: AuditSection {
             dataplane_audit_jsonl_path: params.flow_audit_path.display().to_string(),
         },
+        transparent: params.transparent.map(|transparent| TransparentSection {
+            enabled: true,
+            intercept_ports: vec![80, 443],
+            terminator_host: transparent.terminator_host.to_string(),
+            terminator_port: transparent.terminator_port,
+        }),
         // `policy` is the last field so its `[[policy.l4_allowlist]]`
         // array-of-tables is the final thing in the document (TOML requires an
         // array-of-tables to follow every scalar/inline value at its level).
@@ -94,6 +109,8 @@ struct RvproxyConfigDoc {
     api: ApiSection,
     dns: DnsSection,
     audit: AuditSection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transparent: Option<TransparentSection>,
     policy: RvproxyPolicy,
 }
 
@@ -136,6 +153,14 @@ struct AuditSection {
     dataplane_audit_jsonl_path: String,
 }
 
+#[derive(Serialize)]
+struct TransparentSection {
+    enabled: bool,
+    intercept_ports: Vec<u16>,
+    terminator_host: String,
+    terminator_port: u16,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +181,7 @@ mod tests {
             egress,
             dns_allow,
             upstream_resolvers: resolvers,
+            transparent: None,
         }
     }
 
@@ -209,6 +235,26 @@ mod tests {
         assert!(toml.contains("[[policy.l4_allowlist]]"));
         assert!(toml.contains("protocol = \"tcp\""));
         assert!(toml.contains("port_lo = 443"));
+    }
+
+    #[test]
+    fn renders_transparent_interception_when_configured() {
+        let egress = CanonicalEgress::Unrestricted;
+        let resolvers = [Ipv4Addr::new(1, 1, 1, 1)];
+        let sk = sockets();
+        let mut p = params(&egress, &[], &resolvers, &sk);
+        p.transparent = Some(RvproxyTransparentConfig {
+            terminator_host: Ipv4Addr::new(127, 0, 0, 1),
+            terminator_port: 18080,
+        });
+
+        let toml = render_rvproxy_config(&p).unwrap();
+
+        assert!(toml.contains("[transparent]"));
+        assert!(toml.contains("enabled = true"));
+        assert!(toml.contains("intercept_ports = [80, 443]"));
+        assert!(toml.contains("terminator_host = \"127.0.0.1\""));
+        assert!(toml.contains("terminator_port = 18080"));
     }
 
     #[test]

@@ -17,11 +17,12 @@ are landed. The macOS/libkrun default selection now chooses native when
 `MVM_GATEWAY_BIN` is configured, while explicit `MVM_NETWORKING=gvproxy` and the
 no-candidate fallback remain available. The parity workflow now has a stable
 required-check shim, and `rvproxy gateway parity` is now required by `main`
-branch protection on PR and merge-group SHAs. Remaining cutover work is blocked
-on rvproxy exposing a typed transparent `:80`/`:443` interception
-config/contract; mvm must not mark libkrun/Vz as transparent-terminator-capable
-until that schema exists. After rvproxy lands it, mvm wires the config and only
-then deletes the splice/Plan-141 hooks.
+branch protection on PR and merge-group SHAs. The rvproxy transparent
+interception contract landed upstream; this branch wires the mvm libkrun native
+gateway config to a host loopback terminator and marks libkrun transparent-
+terminator-capable. Vz remains guarded until its launch path emits and uses the
+same native rvproxy config. Splice/Plan-141 hook deletion still waits on the
+live allow/deny matrix plus the remaining Vz/native cutover proof.
 
 > **Priority update 2026-06-15:** Plan 200 consumes this plan as security/network
 > substrate. `mvmctl machine --net` and `allow-host` must use the current
@@ -314,14 +315,15 @@ own internal default).
         libkrun/Vz/mock while accepting Firecracker's nft terminator leg. This
         does not implement macOS interception; it makes that rvproxy capability
         an explicit splice-deletion prerequisite instead of an implied comment.
-  - [x] **2d task 2h — transparent terminator blocker classified.**
-        The local rvproxy schema has no typed transparent `:80`/`:443`
-        interception section or host-terminator destination yet (`RvproxyConfig`
-        exposes network/backend/transport/api/dns/policy/audit/transforms;
-        `GatewayConfig` exposes policy/flow fields only). mvm therefore keeps
-        libkrun/Vz at `VsockUdsChannel` and cannot honestly satisfy
-        `supports_transparent_terminator()` for them until rvproxy lands the
-        contract.
+  - [x] **2d task 2h — transparent terminator contract unblocked.**
+        rvproxy now exposes typed transparent `:80`/`:443` interception to a
+        host terminator destination, and forwards the original destination to
+        the terminator. mvm consumes that contract for libkrun native launches:
+        `render_rvproxy_config` emits `[transparent]`, the libkrun supervisor
+        passes the per-VM loopback terminator port, and the substitution
+        endpoint accepts rvproxy's original-destination preamble. Vz is not
+        marked capable yet because its current launch path does not emit the
+        native rvproxy config.
   - [x] **2d task 2g — required-check shim for parity gate.**
         `.github/workflows/rvproxy-parity.yml` now emits a stable
         `rvproxy gateway parity` check on every PR. It detects gateway-contract
@@ -331,13 +333,14 @@ own internal default).
         safe to add to branch protection without hanging unrelated PRs. The
         `rvproxy gateway parity` context is now required by `main` branch
         protection on PR and merge-group SHAs.
-  - [ ] **2d — remaining: transparent terminator wiring + splice deletion.**
-        First land the rvproxy transparent-interception schema/implementation,
-        then wire mvm's native rvproxy config to the host terminator and update
-        libkrun/Vz capability tests. Delete the splice + Plan-141 `on_packet`
-        hooks only after the native audit feed is the sole path and the
-        transparent terminator/parity-required gates are in place. Design + the
-        R2 contract are in "## WS-2 design" below.
+  - [ ] **2d — remaining: Vz terminator wiring + splice deletion.**
+        Libkrun native rvproxy launches now wire transparent interception to the
+        host terminator and pass the capability gate. Vz still needs equivalent
+        native rvproxy config emission before its capability can be flipped.
+        Delete the splice + Plan-141 `on_packet` hooks only after the native
+        audit feed is the sole path and the transparent terminator/parity-
+        required gates are in place. Design + the R2 contract are in "## WS-2
+        design" below.
 - [ ] **WS-3 — backend cutover.** Replace the gvproxy spawn
       (`mvm-build/host_gvproxy.rs`, `libkrun-sys/gvproxy.rs`) + passt with
       `rvproxy run --config` per the integration contract; drop the Homebrew
