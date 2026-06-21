@@ -823,7 +823,12 @@ Required behavior:
       `xtask check-machine-doc-guards` requires the machine use-case and
       limitations pages, verifies the limitation categories, and runs in the CI
       Lint job.
-- [ ] Keep old verbs documented as advanced/underlying surfaces, not removed.
+- [x] Keep old verbs documented as advanced/underlying surfaces, not removed.
+      **DONE:** `reference/cli-commands.md` now frames the tiers explicitly — a
+      "Beginner vs. advanced surfaces" note positions `mvmctl machine` as the
+      beginner front door and the grouped lower-level verbs (`up`/`run`/`vm *`/
+      `build *`/`console`/…) as fully-supported advanced/underlying surfaces over
+      the same signed/audited path, explicitly **not deprecated**.
 
 ### B. Ephemeral image runner parity
 

@@ -30,6 +30,18 @@ verification under `trust`. Domains that already own their own subcommands
 | `trust <sub>` | `add`/`list`/`remove` (publishers), `attest`, `receipt`, `audit` |
 | Already-grouped top-level | `image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact` |
 
+**Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
+(further down) is the beginner-facing front door — one small command group for
+the common "run something in a microVM" cases, and the path the
+[getting-started docs](/getting-started/machine-scenarios/) lead with. Every
+verb in the grouping above is an **advanced / underlying surface**: `machine`
+is a thin UX layer over the *same* signed, audited, OCI-provenance execution
+path these verbs use, so the lower-level commands (`up`, `run`, `invoke`,
+`vm *`, `build *`, `console`, …) stay fully supported for power users and
+scripts. They are **not deprecated and not going away** — reach for them when
+you need finer control than `machine` exposes (custom flakes, snapshots,
+templates, the guest-RPC surface, fleet-shaped workflows).
+
 | Command | Description |
 |---------|-------------|
 | `mvmctl up --flake <ref>` | Build and run a VM from a Nix flake |
