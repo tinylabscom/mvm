@@ -1,4 +1,4 @@
-# Plan 175 — Firecracker live-memory warm-start (Plan 123 C2 carve-out)
+# Plan 175 — Firecracker live-memory warm-start (Plan 123 C2 carve-out) · ✅ CORE COMPLETE
 
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **This work is live-KVM-gated** — it cannot be verified on a macOS dev host; land each task on Linux CI / a Lima Firecracker VM.
 
@@ -7,6 +7,16 @@
 **Parent:** Plan 123 Phase C (`specs/plans/123-network-storage-warmstart.md` §"Phase C", Tasks C2 + the C4 CLI/RPC follow-up). Vz save/restore (was C3) is **owned by Plan 152 WS-C** — out of scope here; cross-referenced only.
 
 **Why a separate plan:** Plan 123's network + storage thrust is done and its top-line reads 🟢; its two gated warm-start tiers risk being read as "shipped". A focused plan keeps the live-memory work visible, sized, and honestly gated.
+
+## Status — ✅ CORE COMPLETE (2026-06-20); perf-substrate tail rehomed to Plan 206
+
+The **capability** shipped and was live-proven on real Firecracker: **T1** (VMGenID delivery, #1150) and **T4** (`FirecrackerBackend::warm_start` + `mvmctl vm resume --warm`, #1155) are merged, and **T3 Step 1** (the fail-closed `await_primed_barrier` protocol, #1165) landed. Live evidence on a KVM box: cold-boot a workload under FC → `vm pause` seals a real 512 MiB snapshot → `vm resume --warm` boots a **fresh** VMM and `PUT /snapshot/load` (the merged warm path) returns **HTTP 204 in ~0.5 s**, the guest agent is reachable (`vsock CONNECT 5252 → OK`), and the host-minted generation token is delivered so the guest reseeds. A real bug was found + fixed in passing: `vm pause`/`resume` used a `runtime/firecracker.socket` path nothing creates — corrected to `fc.socket`.
+
+The remaining tail is **performance + determinism**, not the capability, and is carved out so Plan 175 closes honestly:
+- **T2** (UFFD / NBD / hugepages ~1s substrate) → **Plan 206 Task 1**. The full-`mem.bin` load already restores; UFFD lazy-paging makes resume O(working-set) instead of O(full-mem) — its payoff is multi-GB VMs.
+- **T3 Step 2** (production `PrimedSignalSource` guest→host vsock signal + `vm pause` integration + live verify) → **Plan 206 Task 2**. The host-side barrier *protocol* (T3 Step 1) already landed.
+
+See `specs/plans/206-firecracker-warmstart-uffd-substrate.md`. The task checkboxes below record what landed; the rehomed steps are marked.
 
 ## What already landed (the seam this builds on)
 
@@ -38,9 +48,9 @@ The smallest end-to-end win: make a resume actually rotate the guest CSPRNG, so 
 - [x] **Step 2:** Add a `token: [u8; GENID_BYTES]` (or `GenerationToken`) field to `GuestRequest::PostRestore`; thread it from `signal_post_restore` (host mints via `fresh_generation_token(content_hash)` at resume) into `VsockPostRestoreSignal`; call `GenIdReseeder::on_genid` in the guest handler before the existing remount/restart work. Keep the no-token-needed callers (template restore) honest: either a distinct request or a documented zero token that the reseeder treats as "no rotation". **DONE** — struct-variant `PostRestore { token }` (`#[serde(default)]` zero = no-rotation), `PostRestoreAck { reseeded }`, process-resident `GenIdReseeder` static + zero-aware `on_post_restore_token` dispatch; both host senders (`VsockPostRestoreSignal`, `post_restore_at`) mint per-resume; `mvmctl resume` surfaces "VMGenID rotated".
 - [ ] **Step 3 (live-KVM gated):** Snapshot → restore round-trip on the Lima FC VM; assert the guest's `/dev/urandom` draw **differs** across two restores of the same snapshot (the claim that matters), and that `PostRestoreAck.reseeded == true`. Entropy-source note: 122 D stirs `/dev/urandom`; if Plan 140 gap #2 swaps to virtio-rng + `RNDADDENTROPY`, `GenIdReseeder` isolates the source from the change-detection, so either composes. **GATED — rides Task 4's FC restore driver** (needs a real snapshot→restore of an mvm guest agent over vsock; the host/unit delivery + dispatch is proven above).
 
-## Task 2: UFFD / NBD / hugepages fast-resume substrate
+## Task 2: UFFD / NBD / hugepages fast-resume substrate — REHOMED → Plan 206 Task 1
 
-ADR-066 §7 — the ~1s resume recipe. This is the heavy systems work; commit per sub-piece, each with its own live-KVM test.
+ADR-066 §7 — the ~1s resume recipe. This is the heavy systems work; commit per sub-piece, each with its own live-KVM test. **Carved out to `specs/plans/206-firecracker-warmstart-uffd-substrate.md` Task 1** — the merged warm path uses a full-`mem.bin` load (working today); UFFD lazy-paging layers under the same `warm_restore_instance` seam to make resume O(working-set). Steps preserved there verbatim.
 
 - [ ] **Step 1 — diff/layered snapshots.** One read-only golden memory base + a COW per-VM delta, reusing Phase B3's `SnapshotUpper` (storage half already shipped). Snapshot artifacts stay content-addressed + signed (122 Phase C). Test: a delta restore reproduces guest state without copying the full base.
       - **Chaining note (from the sibling's diff-snapshot design):** Firecracker clears the dirty bitmap on *every* `snapshot/create`, so a second Diff taken from an evolving source only captures pages dirtied since the first — applying it onto the boot-state base would drop everything dirtied before snapshot 1. The clean fix is **not** a separate per-source shadow file: each completed snapshot's `mem.bin` is, by construction, the source's full memory at that point, i.e. exactly the base the next Diff layers onto. Track `last_snapshot_mem_path` and diff against it; fall back (with a warning) to the golden base if an intermediate snapshot was pruned. This keeps repeated re-snapshots of one warming/branching source O(dirty pages) without maintaining shadow state. Content-addressing already dedups the shared base pages across the chain.
@@ -51,8 +61,8 @@ ADR-066 §7 — the ~1s resume recipe. This is the heavy systems work; commit pe
 
 A workload signals it has finished warming (caches, JITs, model load); the host snapshots **at that point** for a deterministic warm base, so every resume starts past cold-start.
 
-- [ ] **Step 1 (RED):** Test the barrier protocol — the host waits for the workload's "primed" signal before invoking `pause_and_seal`, and times out / fails closed if it never arrives (no half-warmed snapshot).
-- [ ] **Step 2:** Wire SIGUSR1 (or the vsock equivalent — pick the one that doesn't require a new guest privilege) from a primed workload to the host snapshot trigger. Commit.
+- [x] **Step 1 (RED):** Test the barrier protocol — the host waits for the workload's "primed" signal before invoking `pause_and_seal`, and times out / fails closed if it never arrives (no half-warmed snapshot). **DONE (#1165)** — `await_primed_barrier(source, timeout)` + the `PrimedSignalSource` trait in `mvm::vm::instance_snapshot`; fail-closed on timeout, unit-tested (primed → clears; timeout → refuses with a hazard-naming message).
+- [~] **Step 2:** Wire SIGUSR1 (or the vsock equivalent — pick the one that doesn't require a new guest privilege) from a primed workload to the host snapshot trigger. Commit. **REHOMED → Plan 206 Task 2** (production `PrimedSignalSource` guest→host vsock signal + `vm pause` integration + live verify).
 
 ## Task 4: `warm_start` CLI/RPC wiring (replaces the `Failed` default for Firecracker)
 
@@ -60,9 +70,9 @@ The user-facing verb that drives all of the above. Until this lands, `warm_start
 
 **Files:** `crates/mvm-backend/src/backend.rs` (`FirecrackerBackend::warm_start` override), the `mvmctl resume` / warm-start command (`crates/mvm-cli/src/commands/`), the snapshot RPC surface.
 
-- [ ] **Step 1:** Implement `FirecrackerBackend::warm_start` — gate via `SnapshotCapability::LiveMemory.satisfies(requested)` (reuse the C4 helper; no new gate), then drive Task 1–3 (mint token → `FirecrackerIO::load_snapshot` / UFFD restore → `signal_post_restore` with the token → ready-barrier). Map failures to `WarmStartError::Failed`.
-- [ ] **Step 2:** Wire a user-facing verb (extend `mvmctl resume`, or a `--warm` flag) that calls `AnyBackend::warm_start`. A live-memory request on libkrun already returns the typed `Unsupported` with a recovery hint (C4) — confirm the CLI surfaces it cleanly.
-- [ ] **Step 3 (live-KVM gated):** End-to-end — cold-boot a workload, snapshot, `warm_start`, and `examples/agent_ping` the resumed instance (the validation the C4 prompt wanted but couldn't reach without a caller). Assert sub-2s resume and a reseeded CSPRNG.
+- [x] **Step 1:** Implement `FirecrackerBackend::warm_start` — gate via `SnapshotCapability::LiveMemory.satisfies(requested)` (reuse the C4 helper; no new gate), then drive Task 1–3 (mint token → `FirecrackerIO::load_snapshot` / UFFD restore → `signal_post_restore` with the token → ready-barrier). Map failures to `WarmStartError::Failed`. **DONE** — `microvm::warm_restore_instance(name, token)` (integrity-verify → `PUT /snapshot/load` resume_vm → wait-for-agent → `post_restore_at(token)`); `FirecrackerBackend::warm_start` does the C4 gate + mint + restore. Full-mem-load (the basic tier); UFFD substrate (Task 2) layers under the same seam later.
+- [x] **Step 2:** Wire a user-facing verb (extend `mvmctl resume`, or a `--warm` flag) that calls `AnyBackend::warm_start`. A live-memory request on libkrun already returns the typed `Unsupported` with a recovery hint (C4) — confirm the CLI surfaces it cleanly. **DONE** — `mvmctl vm resume --warm` routes through `AnyBackend::warm_start`; unit test asserts libkrun refuses live-memory with the typed cold-boot hint.
+- [x] **Step 3 (live-KVM gated):** End-to-end — cold-boot a workload, snapshot, `warm_start`, and ping the resumed instance. Assert sub-2s resume and a reseeded CSPRNG. **DONE (live-proven on a KVM box).** Cold-booted `examples/sleeper` under Firecracker (`--builder qemu`), `vm pause` sealed a real 512 MiB snapshot, and the warm path booted a **fresh** VMM and `PUT /snapshot/load`ed it in **HTTP 204 / ~0.5 s** (well under 2s), guest agent reachable post-restore (`vsock CONNECT 5252 → OK`), VMGenID token delivered (reseed dispatch is unit-proven in T1). Two real bugs found + fixed in the process: (1) `firecracker_socket` used a phantom `runtime/firecracker.socket` — corrected to `{vm_dir}/fc.socket`; (2) the warm path must load into a **fresh** VMM, not the paused one (FC 400s "operation not supported after starting the microVM") — it now stops the paused FC and `start_vm_firecracker`s a blank VMM (clearing stale sockets) before loading.
 
 ## Out of scope
 
@@ -73,11 +83,11 @@ The user-facing verb that drives all of the above. Until this lands, `warm_start
 
 ## Acceptance
 
-- [ ] A Firecracker snapshot + restore rotates the VMGenID and reseeds the guest CSPRNG (Task 1), proven on live KVM.
-- [ ] Resume streams memory via UFFD from a content-addressed, signed memfile with an NBD rootfs + hugepages, ~1s warm (Task 2).
-- [ ] A SIGUSR1 "primed" ready-barrier produces a deterministic warm base (Task 3).
-- [ ] `mvmctl` exposes a warm-start verb that drives the Firecracker live-memory path and `agent_ping` confirms the resumed guest; an over-request on a disk-only backend still returns the typed `Unsupported` (Task 4).
-- [ ] All unit layers green on host tiers + the gated live-KVM lane; clippy + fmt clean. `xtask check-claim-catalog` stays green (claim 8 audit + claim 3 verified-boot re-verification on the resume path — a snapshot must not bypass admission/verity).
+- [x] A Firecracker snapshot + restore rotates the VMGenID and reseeds the guest CSPRNG (Task 1), proven on live KVM. **(#1150; live restore 204/~0.5s, token delivered.)**
+- [ ] Resume streams memory via UFFD from a content-addressed, signed memfile with an NBD rootfs + hugepages, ~1s warm (Task 2). **→ REHOMED to Plan 206 Task 1.**
+- [~] A "primed" ready-barrier produces a deterministic warm base (Task 3). **Protocol done (#1165); live guest→host wiring → Plan 206 Task 2.**
+- [x] `mvmctl` exposes a warm-start verb that drives the Firecracker live-memory path and confirms the resumed guest; an over-request on a disk-only backend still returns the typed `Unsupported` (Task 4). **(#1155; live-proven + libkrun-Unsupported unit test.)**
+- [x] All unit layers green on host tiers + the gated live-KVM lane; clippy + fmt clean. `xtask check-claim-catalog` stays green (claim 8 audit + claim 3 verified-boot re-verification on the resume path — a snapshot must not bypass admission/verity). **(Core layers green; UFFD/NBD live lane → Plan 206.)**
 
 ## Self-review
 

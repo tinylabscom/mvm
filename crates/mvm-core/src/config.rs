@@ -337,6 +337,22 @@ pub fn vm_state_dir(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+/// Per-instance state root: `<mvm_data_dir>/instances/<name>/`. Distinct from
+/// `vms/` (the VMM runtime dir) — this holds instance-snapshot artifacts that
+/// must outlive a VMM restart. Shared by the mvm-layer pause/resume
+/// orchestration and the backend warm-start path so both agree on one path.
+pub fn instance_dir(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir())
+        .join("instances")
+        .join(name)
+}
+
+/// Sealed instance-snapshot directory: `<mvm_data_dir>/instances/<name>/snapshot/`.
+/// Holds `vmstate.bin` + `mem.bin` + the integrity sidecar a warm-start loads.
+pub fn instance_snapshot_dir(name: &str) -> std::path::PathBuf {
+    instance_dir(name).join("snapshot")
+}
+
 // ============================================================================
 // Persistent `mvmctl machine` specs
 // ============================================================================

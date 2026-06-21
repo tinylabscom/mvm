@@ -1125,6 +1125,109 @@ pub fn restore_from_template_snapshot(
     Ok(())
 }
 
+/// Warm-restore an instance from its sealed snapshot into its already-running
+/// (paused) Firecracker, then deliver the VMGenID token so the guest reseeds.
+///
+/// Precondition: a sealed snapshot from `pause` exists for `name`. Verifies the
+/// snapshot's integrity sidecar *before* touching the VMM (a tampered snapshot
+/// is refused), stops any paused Firecracker, boots a fresh blank VMM, loads
+/// `vmstate.bin` + `mem.bin` into it via `PUT /snapshot/load` with `resume_vm`,
+/// waits for the guest agent, and signals post-restore carrying `token` so the
+/// guest rotates its VMGenID (distinct clones diverge). The host-side
+/// counterpart of `mvmctl vm resume`, reachable from the backend layer for
+/// `FirecrackerBackend::warm_start`.
+pub fn warm_restore_instance(
+    name: &str,
+    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+) -> Result<()> {
+    // Defense in depth, *before* any work: every path below is derived from
+    // `name` and several are interpolated into shell commands
+    // (`start_vm_firecracker`, the kill). The CLI validates the name, but this
+    // is a `pub fn` — re-validate at the boundary so no caller can smuggle
+    // shell/JSON metacharacters in. The validator allows only `[a-z0-9-]`,
+    // which is shell- and JSON-safe.
+    mvm_core::naming::validate_vm_name(name)
+        .with_context(|| format!("warm-start refused invalid VM name {name:?}"))?;
+    require_linux_env()?;
+
+    let vm_dir = resolve_running_vm_dir(name)?;
+    // The control socket + pid file every other FC op in this module uses
+    // (`start_vm_firecracker`, `resume_vm`, balloon, …) — `{dir}/fc.socket`,
+    // not a `runtime/` variant.
+    let socket = format!("{vm_dir}/fc.socket");
+    let pid_file = format!("{vm_dir}/fc.pid");
+
+    let snapshot_dir = mvm_core::config::instance_snapshot_dir(name);
+    let snapshot_dir = snapshot_dir.to_string_lossy().into_owned();
+    if !std::path::Path::new(&format!("{snapshot_dir}/vmstate.bin")).exists() {
+        anyhow::bail!(
+            "no sealed snapshot at {snapshot_dir} for VM '{name}' — `mvmctl vm pause {name}` \
+             first, or `mvmctl up` for a cold boot"
+        );
+    }
+    // Refuse a tampered snapshot before any VMM interaction.
+    crate::base::snapshot_integrity::verify_snapshot_artifacts(&snapshot_dir)?;
+
+    let vmstate = format!("{snapshot_dir}/vmstate.bin");
+    let mem = format!("{snapshot_dir}/mem.bin");
+
+    // Firecracker refuses `/snapshot/load` on a VMM that already started a
+    // microVM ("operation not supported after starting the microVM"), so stop
+    // the paused FC and bring up a fresh blank VMM to load the sealed snapshot
+    // into. `start_vm_firecracker` clears the stale `fc.socket` + `runtime/v.sock`
+    // first — otherwise the restored vsock device fails to bind (AddrInUse).
+    if firecracker::is_vm_running(&pid_file)? {
+        let q_pid = shell_quote(&pid_file);
+        let _ = run_in_vm(&format!(
+            "sudo kill -9 \"$(cat {q_pid})\" 2>/dev/null; sleep 1"
+        ));
+    }
+    start_vm_firecracker(&vm_dir, &socket)
+        .with_context(|| format!("starting fresh Firecracker for warm-start of '{name}'"))?;
+
+    // Load + resume into the fresh VMM in a single call (resume_vm). Build the
+    // body with `serde_json` (paths are JSON-escaped) and send it through
+    // `api_put_socket`, which writes the body to a temp file and curls it via
+    // `--data @<file>` — so the paths never traverse a shell, no injection.
+    let body = serde_json::json!({
+        "snapshot_path": vmstate,
+        "mem_backend": { "backend_type": "File", "backend_path": mem },
+        "resume_vm": true,
+    })
+    .to_string();
+    api_put_socket(&socket, "/snapshot/load", &body)
+        .with_context(|| format!("PUT /snapshot/load for warm-start of '{name}'"))?;
+
+    // The VM is restored and resumed at this point. Delivering the VMGenID
+    // token (so the guest reseeds) is best-effort — the agent re-accepts on
+    // the recreated vsock a beat after resume, and a missed signal is safe to
+    // re-send. A racy signal must not fail an otherwise-successful warm-start
+    // (mirrors `restore_from_template_snapshot`'s post-restore policy).
+    let vsock = firecracker_vsock_uds_path(&vm_dir);
+    let mut agent_ready = false;
+    for _ in 0..60 {
+        if mvm_guest::vsock::ping_at(&vsock).unwrap_or(false) {
+            agent_ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if !agent_ready {
+        warn!(
+            "warm-start of '{name}': guest agent not reachable to deliver VMGenID token; the VM is resumed but did not reseed — re-run resume to retry"
+        );
+        return Ok(());
+    }
+    match mvm_guest::vsock::post_restore_at(&vsock, token) {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!("warm-start of '{name}': guest did not acknowledge post-restore (VM is resumed)")
+        }
+        Err(e) => warn!("warm-start of '{name}': post-restore signal failed: {e} (VM is resumed)"),
+    }
+    Ok(())
+}
+
 /// Pause the vCPUs of a running Firecracker VM.
 ///
 /// Sends `PATCH /vm` with `{"state":"Paused"}` to the per-VM control
@@ -3021,6 +3124,28 @@ fn detach_and_spawn_bridge_watchdog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warm_restore_refuses_names_with_shell_metacharacters() {
+        // The name feeds shell-interpolated paths; warm_restore_instance must
+        // reject anything outside the safe `[a-z0-9-]` charset *before* any
+        // VMM work, on every platform (validation precedes require_linux_env).
+        for bad in [
+            "foo; rm -rf /",
+            "a'b",
+            "x$(id)",
+            "../escape",
+            "name with space",
+            "UPPER",
+        ] {
+            let err = warm_restore_instance(bad, [0u8; mvm_core::crypto::vmgenid::GENID_BYTES])
+                .expect_err("must refuse an unsafe VM name");
+            assert!(
+                err.to_string().contains("invalid VM name"),
+                "rejection names the cause for {bad:?}: {err}"
+            );
+        }
+    }
 
     #[test]
     fn drive_file_default() {

@@ -77,14 +77,12 @@ pub const EPOCH_FILENAME: &str = ".epoch";
 /// create it — callers that need to write into it use
 /// `prepare_instance_snapshot_dir` instead.
 pub fn instance_dir(vm_name: &str) -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_data_dir())
-        .join("instances")
-        .join(vm_name)
+    mvm_core::config::instance_dir(vm_name)
 }
 
 /// Returns `~/.mvm/instances/<vm-name>/snapshot/`.
 pub fn snapshot_dir(vm_name: &str) -> PathBuf {
-    instance_dir(vm_name).join("snapshot")
+    mvm_core::config::instance_snapshot_dir(vm_name)
 }
 
 /// Create `<instance>/snapshot/` with mode 0700 if it doesn't
@@ -214,6 +212,51 @@ pub fn verify_and_resume<IO: SnapshotIO + ?Sized>(
 // ============================================================================
 // Post-restore signal — the host-side sender
 // ============================================================================
+
+// ============================================================================
+// "Primed" ready-barrier — gate a warm snapshot on the workload finishing warmup
+// ============================================================================
+
+/// Outcome of waiting for a workload's "primed" ready signal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrimedOutcome {
+    /// The workload signalled it has finished warming (caches, JITs, model load).
+    Primed,
+    /// The wait window elapsed with no signal.
+    TimedOut,
+}
+
+/// Source of a workload's "primed" ready signal. The production impl waits for
+/// the guest to notify the host (over vsock — no new guest privilege, unlike a
+/// host-delivered SIGUSR1); tests inject a deterministic source. Kept a trait
+/// so the barrier *policy* is unit-testable without a live guest (mirrors
+/// [`PostRestoreSignal`]).
+pub trait PrimedSignalSource {
+    /// Block up to `timeout` for the workload to signal it has finished
+    /// warming. Returns whether the signal arrived.
+    fn wait_for_primed(&self, timeout: std::time::Duration) -> PrimedOutcome;
+}
+
+/// Wait for the workload's "primed" ready barrier before sealing a warm
+/// snapshot, so the snapshot captures a *deterministic, fully-warmed* base and
+/// every resume starts past cold-start.
+///
+/// Fails closed: a workload that never signals primed must NOT produce a
+/// half-warmed snapshot — that would defeat the barrier's purpose — so a
+/// timeout is an error, never a "snapshot anyway". The caller runs this before
+/// [`pause_and_seal`].
+pub fn await_primed_barrier<S: PrimedSignalSource + ?Sized>(
+    source: &S,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    match source.wait_for_primed(timeout) {
+        PrimedOutcome::Primed => Ok(()),
+        PrimedOutcome::TimedOut => bail!(
+            "workload did not signal 'primed' within {timeout:?} — refusing to seal a \
+             half-warmed snapshot; give the workload longer to warm or check its readiness hook"
+        ),
+    }
+}
 
 /// Outcome of signaling `PostRestore` to a resumed guest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1070,5 +1113,38 @@ mod tests {
             "context: {chained}"
         );
         assert!(chained.contains("connection refused"), "cause: {chained}");
+    }
+
+    /// Canned [`PrimedSignalSource`] so the barrier policy is testable without
+    /// a live guest (mirrors `MockSignal`).
+    struct MockPrimed(PrimedOutcome);
+    impl PrimedSignalSource for MockPrimed {
+        fn wait_for_primed(&self, _timeout: std::time::Duration) -> PrimedOutcome {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn primed_barrier_passes_when_workload_signals() {
+        await_primed_barrier(
+            &MockPrimed(PrimedOutcome::Primed),
+            std::time::Duration::from_secs(5),
+        )
+        .expect("a primed workload clears the barrier");
+    }
+
+    #[test]
+    fn primed_barrier_fails_closed_on_timeout() {
+        // The whole point of the barrier is a deterministic warm base, so a
+        // workload that never signals must NOT yield a half-warmed snapshot.
+        let err = await_primed_barrier(
+            &MockPrimed(PrimedOutcome::TimedOut),
+            std::time::Duration::from_millis(10),
+        )
+        .expect_err("a timed-out barrier must fail closed");
+        assert!(
+            err.to_string().contains("half-warmed"),
+            "fail-closed message names the hazard: {err}"
+        );
     }
 }

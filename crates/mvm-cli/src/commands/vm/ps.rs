@@ -27,7 +27,7 @@ pub(in crate::commands) struct Args {
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     use anyhow::Context;
-    use mvm_core::vm_backend::VmInfo;
+    use mvm_core::vm_backend::{VmInfo, VmStatus};
 
     // Parse the tag filter early so an invalid `--tag` errors out before
     // we go talk to backends. Validation is shared with `mvmctl up`,
@@ -43,10 +43,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     // Aggregate across every backend (QEMU, libkrun, Firecracker, Apple
     // Container, Docker) so a VM started under any VMM is listed — not just
     // the platform default. Single source of truth in `AnyBackend::list_all`.
-    let mut all_vms: Vec<VmInfo> = AnyBackend::list_all();
-
-    let _ = args.all;
-
     // Cross-reference the backend listing with the persistent name
     // registry so tags / TTLs / auto-resume can flow through `mvmctl
     // ls` without changing the `VmInfo` shape every backend produces.
@@ -54,6 +50,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     // and only the backend listing is shown.
     let registry_path = mvm::vm::name_registry::registry_path();
     let registry = mvm::vm::name_registry::VmNameRegistry::load(&registry_path).unwrap_or_default();
+
+    let mut all_vms: Vec<VmInfo> = AnyBackend::list_all();
+    merge_registry_only_stopped_rows(&mut all_vms, &registry, args.all);
+    if !args.all {
+        all_vms.retain(|vm| !matches!(vm.status, VmStatus::Stopped));
+    }
 
     let now = chrono::Utc::now();
     let is_expired = |reg: &mvm::vm::name_registry::VmRegistration| -> bool {
@@ -186,4 +188,105 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 
     Ok(())
+}
+
+fn merge_registry_only_stopped_rows(
+    all_vms: &mut Vec<mvm_core::vm_backend::VmInfo>,
+    registry: &mvm::vm::name_registry::VmNameRegistry,
+    include_stopped: bool,
+) {
+    if !include_stopped {
+        return;
+    }
+
+    let listed: std::collections::BTreeSet<String> =
+        all_vms.iter().map(|vm| vm.name.clone()).collect();
+    for (name, reg) in &registry.vms {
+        if listed.contains(name.as_str()) {
+            continue;
+        }
+        all_vms.push(mvm_core::vm_backend::VmInfo {
+            id: mvm_core::vm_backend::VmId(name.clone()),
+            name: name.clone(),
+            status: mvm_core::vm_backend::VmStatus::Stopped,
+            guest_ip: reg.guest_ip.clone(),
+            cpus: 0,
+            memory_mib: 0,
+            profile: None,
+            revision: None,
+            flake_ref: None,
+            ports: Vec::new(),
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registered(name: &str) -> mvm::vm::name_registry::VmNameRegistry {
+        let mut registry = mvm::vm::name_registry::VmNameRegistry::default();
+        registry
+            .register_with_metadata(mvm::vm::name_registry::RegisterParams::minimal(
+                name,
+                "/tmp/mvm-test-vm",
+                "default",
+            ))
+            .unwrap();
+        registry
+    }
+
+    fn running_vm(name: &str) -> mvm_core::vm_backend::VmInfo {
+        mvm_core::vm_backend::VmInfo {
+            id: mvm_core::vm_backend::VmId(name.to_string()),
+            name: name.to_string(),
+            status: mvm_core::vm_backend::VmStatus::Running,
+            guest_ip: None,
+            cpus: 1,
+            memory_mib: 256,
+            profile: None,
+            revision: None,
+            flake_ref: None,
+            ports: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn registry_only_rows_appear_when_all_requested() {
+        let registry = registered("detached-vz");
+        let mut rows = Vec::new();
+
+        merge_registry_only_stopped_rows(&mut rows, &registry, true);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "detached-vz");
+        assert!(matches!(
+            rows[0].status,
+            mvm_core::vm_backend::VmStatus::Stopped
+        ));
+    }
+
+    #[test]
+    fn registry_only_rows_are_hidden_without_all() {
+        let registry = registered("detached-vz");
+        let mut rows = Vec::new();
+
+        merge_registry_only_stopped_rows(&mut rows, &registry, false);
+
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn registry_merge_does_not_duplicate_backend_rows() {
+        let registry = registered("running-vz");
+        let mut rows = vec![running_vm("running-vz")];
+
+        merge_registry_only_stopped_rows(&mut rows, &registry, true);
+
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            rows[0].status,
+            mvm_core::vm_backend::VmStatus::Running
+        ));
+    }
 }

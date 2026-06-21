@@ -678,6 +678,18 @@ impl VmConn {
     /// `pause → save` order. If the guest is already
     /// paused (a caller pre-paused), we save in place and leave it paused.
     async fn save(&self, path: &str) -> Result<()> {
+        self.save_with_resume_policy(path, true).await
+    }
+
+    /// Parking variant of [`save`](Self::save): pause and save the guest but
+    /// intentionally do not resume it before the host tears the supervisor
+    /// down. Resuming between SAVE and supervisor stop can make the restored
+    /// guest observe the pending shutdown path immediately after restore.
+    async fn save_for_park(&self, path: &str) -> Result<()> {
+        self.save_with_resume_policy(path, false).await
+    }
+
+    async fn save_with_resume_policy(&self, path: &str, resume_after_success: bool) -> Result<()> {
         // VZ refuses to overwrite an existing save file.
         let _ = std::fs::remove_file(path);
 
@@ -688,10 +700,11 @@ impl VmConn {
                 .map_err(|e| anyhow!("pause before save: {e}"))?;
         }
         let saved = self.save_machine_state(path).await;
-        // Resume even if the save failed, so a failure never strands the guest
-        // suspended. A resume failure is logged, not fatal — the snapshot (if it
-        // succeeded) is still the deliverable.
-        if resume_after && let Err(e) = self.resume().await {
+        let should_resume = resume_after && (resume_after_success || saved.is_err());
+        // Resume normal SAVE requests and failed park saves so a failure never
+        // strands the guest suspended. A resume failure is logged, not fatal —
+        // the snapshot (if it succeeded) is still the deliverable.
+        if should_resume && let Err(e) = self.resume().await {
             tracing::warn!(error = %e, "resume after save failed; guest left paused");
         }
         saved?;
@@ -1357,6 +1370,13 @@ async fn dispatch_control(conn: &VmConn, command: &str) -> String {
                 "ERR SAVE requires a path argument".to_string()
             } else {
                 ok_reply(conn.save(arg).await)
+            }
+        }
+        "SAVE_PARK" => {
+            if arg.is_empty() {
+                "ERR SAVE_PARK requires a path argument".to_string()
+            } else {
+                ok_reply(conn.save_for_park(arg).await)
             }
         }
         "RESTORE" => "ERR RESTORE is a supervisor startup mode, not a control-socket command — \
