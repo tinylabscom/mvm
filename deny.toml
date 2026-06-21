@@ -25,78 +25,15 @@ feature-depth = 1
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-# Each ignore is a deliberate, audited acceptance of a transitive
-# unmaintained-or-similar advisory we cannot fix without ripping out
-# a load-bearing dep. Re-evaluate at each Cargo.lock major bump.
-ignore = [
-    # `fxhash` is unmaintained but pinned as a transitive dep via
-    # `notify` / file-watching infrastructure. Replacement (rustc-hash
-    # or ahash) requires upstream changes. Audited 2026-04-30: the
-    # crate is ~200 LoC and contains no networking, no IO, no unsafe
-    # beyond basic pointer arithmetic.
-    { id = "RUSTSEC-2025-0057", reason = "transitive via notify; ~200 LoC, no IO, audited 2026-04-30" },
-    # `instant` is the wasm-time abstraction. Pulled in transitively
-    # via a parking_lot 0.11 chain. Replaced upstream by `web-time` in
-    # newer parking_lot. Track via a Cargo.lock bump.
-    { id = "RUSTSEC-2024-0384", reason = "transitive via old parking_lot chain; will resolve on upstream bump" },
-    # `number_prefix` is a pure-functional formatter used by indicatif.
-    # Unmaintained but functionally complete; no security surface.
-    { id = "RUSTSEC-2025-0119", reason = "transitive via indicatif; pure formatter, no IO, audited 2026-04-30" },
-    # `rsa v0.9.x` Marvin Attack timing side-channel. Pulled in via
-    # `sigstore → openidconnect → rsa` (plan 36 PR-A.2 introduces
-    # `sigstore` for cosign-keyless verification of the dev image
-    # manifest). The advisory has no safe upgrade today; the
-    # RustCrypto team is working on a constant-time fix. Mvmctl's
-    # use of `rsa` is purely verification-side: we only consume
-    # signatures from the project's release pipeline against
-    # operator-controlled local input (downloaded artifact bytes).
-    # The Marvin Attack requires an attacker to observe timing of
-    # decryption operations against attacker-influenced ciphertexts,
-    # which is not the threat shape mvmctl exposes. Re-evaluate when
-    # `rsa v0.10` ships with the constant-time fix.
-    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin Attack; transitive via sigstore→openidconnect; mvmctl is verification-only side, no decryption operations exposed; audited 2026-05-01" },
-    # `proc-macro-error v1` is unmaintained — replaced upstream by
-    # `proc-macro-error2`. Transitive via
-    # `sigstore → json-syntax → locspan-derive`. This is a
-    # build-time proc-macro dep only; it produces no runtime code in
-    # the shipped binary. Will resolve when sigstore (or its
-    # json-syntax dep) bumps to proc-macro-error2.
-    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error v1 unmaintained; build-time-only via sigstore→json-syntax; no runtime surface; audited 2026-05-01" },
-    # `time v0.3.x` stack-exhaustion DoS via crafted parsed input.
-    # Path: sigstore → openidconnect → serde_with → time. mvmctl uses
-    # the time crate transitively only inside the cosign verification
-    # path, where the input is the manifest signature material from
-    # the project's release pipeline — not attacker-influenced bytes
-    # capable of triggering the stack exhaustion. The advisory's DoS
-    # only matters when parsing externally-supplied time strings;
-    # we don't expose that surface. Re-evaluate when time v0.4
-    # ships with the bound.
-    { id = "RUSTSEC-2026-0009", reason = "time stack-exhaustion DoS; transitive via sigstore→openidconnect→serde_with; no untrusted-time-string parsing surface in mvmctl; audited 2026-05-01" },
-    # `async-std` discontinued. DEV-DEPENDENCY ONLY: pulled via httpmock
-    # (test HTTP mock) → async-object-pool → async-std. Absent from every
-    # shipped artifact (mvmctl, guest agents, supervisors); no production
-    # surface. Follow-up: migrate httpmock → wiremock to drop it entirely.
-    { id = "RUSTSEC-2025-0052", reason = "async-std discontinued; DEV-ONLY via httpmock test mock; absent from all shipped artifacts; audited 2026-06-03" },
-    # `paste` unmaintained. Build-time proc-macro only — produces no
-    # runtime code in the shipped binary, same class as proc-macro-error
-    # above. No runtime/IO surface.
-    { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; build-time proc-macro, no runtime surface; audited 2026-06-03" },
-    # `proc-macro-error2` — the maintained fork of `proc-macro-error`
-    # (RUSTSEC-2024-0370) is now itself unmaintained. Transitive via
-    # `oci-client → oci-spec → getset` (a derive-macro crate). Build-time
-    # proc-macro only: produces no runtime code in any shipped artifact,
-    # same class as the proc-macro-error v1 / paste entries above. Will
-    # resolve when oci-spec's getset dep drops it.
-    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; build-time-only via oci-client→oci-spec→getset; no runtime surface; audited 2026-06-12" },
-    # `rustls-pemfile` unmaintained — its PEM parsing was folded into
-    # `rustls-pki-types` upstream. Direct dep of mvm-hostd, used only to
-    # parse CA/cert/key PEM the host itself mints for the Plan 129 TLS
-    # termination path (operator-controlled material, never
-    # attacker-influenced bytes). Unmaintained, not vulnerable; the
-    # crate is a small, functionally-complete parser. Follow-up: migrate
-    # to `rustls_pki_types::pem` to drop it (tracked in plan 126).
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; parses host-minted CA/cert PEM only, no untrusted input; migrate to rustls-pki-types; audited 2026-06-12" },
-]
+# No advisories are ignored. The transitive unmaintained/vulnerable deps
+# this list used to suppress (rsa, async-std, fxhash, instant,
+# number_prefix, proc-macro-error/2, rustls-pemfile, paste) were all
+# eliminated outright — by migrating `sigstore` → the modular
+# `sigstore-verify` stack, bumping inquire/indicatif/notify/httpmock/getset,
+# pinning `jiff < 0.2.29` (its optional `defmt` feature pulls
+# proc-macro-error2), and moving PEM parsing onto `rustls-pki-types`. Keep
+# this list empty: a new advisory must be fixed, not suppressed.
+ignore = []
 
 # ── Licenses ──────────────────────────────────────────────────────
 [licenses]

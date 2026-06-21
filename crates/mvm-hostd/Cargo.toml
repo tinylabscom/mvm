@@ -91,7 +91,6 @@ url = "2"
 reqwest = { workspace = true }
 # Server-side TLS termination for bound-host https egress.
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 zeroize.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
