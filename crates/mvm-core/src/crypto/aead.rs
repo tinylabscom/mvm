@@ -65,6 +65,41 @@ impl Key {
         bytes.copy_from_slice(&generic);
         Key(bytes)
     }
+
+    /// Wrap this key's bytes under a key-encryption key, returning the AEAD
+    /// frame. The raw bytes never leave the type — the inverse is
+    /// [`Key::unwrap_under`]. Used to store a data key encrypted at rest.
+    pub fn wrap_under(&self, kek: &Key) -> Vec<u8> {
+        seal(kek, &self.0)
+    }
+
+    /// Recover a key wrapped by [`Key::wrap_under`]. Fails closed on a wrong
+    /// KEK or tampered frame (via [`open`]) or a wrong unwrapped length.
+    pub fn unwrap_under(kek: &Key, framed: &[u8]) -> Result<Key, AeadError> {
+        Key::from_slice(&open(kek, framed)?)
+    }
+
+    /// Write this key's raw bytes to `path` with octal `mode` (0o600 for a
+    /// host KEK). Bytes are written straight from the type — no accessor
+    /// exposes them — and the file is truncated to exactly the key length.
+    pub fn persist(&self, path: &std::path::Path, mode: u32) -> std::io::Result<()> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(mode)
+            .open(path)?;
+        f.write_all(&self.0)
+    }
+
+    /// Load a key persisted by [`Key::persist`]; a wrong-length file is an
+    /// `InvalidData` error.
+    pub fn load(path: &std::path::Path) -> std::io::Result<Key> {
+        let bytes = std::fs::read(path)?;
+        Key::from_slice(&bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
 }
 
 impl Drop for Key {
@@ -124,6 +159,23 @@ mod tests {
         assert_eq!(open(&k, &ct).unwrap(), b"snapshot bytes");
         ct[20] ^= 1; // flip one ciphertext byte
         assert!(matches!(open(&k, &ct), Err(AeadError::Auth)));
+    }
+
+    #[test]
+    fn key_wrap_unwrap_roundtrips_and_rejects_wrong_kek() {
+        let kek = Key::from_bytes([7u8; KEY_SIZE]);
+        let data = Key::from_bytes([42u8; KEY_SIZE]);
+        let framed = data.wrap_under(&kek);
+        // Same KEK recovers an identical key (proven by an equal re-wrap is not
+        // possible — random nonce — so prove via a seal/open round-trip).
+        let recovered = Key::unwrap_under(&Key::from_bytes([7u8; KEY_SIZE]), &framed).unwrap();
+        let blob = seal(&recovered, b"hi");
+        assert_eq!(open(&data, &blob).unwrap(), b"hi");
+        // Wrong KEK fails closed.
+        assert!(matches!(
+            Key::unwrap_under(&Key::from_bytes([9u8; KEY_SIZE]), &framed),
+            Err(AeadError::Auth)
+        ));
     }
 
     #[test]

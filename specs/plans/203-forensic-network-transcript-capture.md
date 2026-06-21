@@ -177,11 +177,16 @@ This is a forensic tool, not a monitoring feature.
    into the writer, and the transcript lifecycle audit kinds (arm/seal/export/
    refusal) — these touch the claim-gated audit taxonomy + the live bridge, so
    they land with the emitter that drives them.
-3. Add the CLI arm/export commands — `export` reuses
-   `mvm_core::transcript::export` (verify + decrypt). The per-capture key
-   *wrapping* (raw key → `wrapped_data_key_b64` for `recipient`, e.g. the host
-   keypair) is the remaining host-side step; the writer already records the
-   wrapped form verbatim and decrypts from the raw key.
+3. **[key-wrapping landed]** Per-capture key wrapping is done:
+   `aead::Key::{wrap_under, unwrap_under, persist, load}` (bytes stay
+   encapsulated — no accessor) + `mvm_core::transcript::{load_or_init_kek,
+   wrap_data_key, unwrap_data_key}` manage a host KEK at
+   `<keys_dir>/transcript-kek.bin` (0600, created on first use) and produce/
+   consume the manifest's `wrapped_data_key_b64`. 5 tests incl. an end-to-end
+   wrap→capture→unwrap→export round-trip. **Remaining:** the `mvmctl audit
+   transcript arm/disarm/list/export` CLI itself (export = `unwrap_data_key`
+   then `transcript::export`), which is also where the 4 lifecycle audit kinds
+   are emitted (their `Emits` rows + `KNOWN_TOKENS`/`AUDIT_POSTURE` land with it).
 4. Add focused tests for:
    - arming and disarming a capture
    - manifest hash verification ✅ (`verify_chunks` tests, slice 1)
