@@ -69,32 +69,25 @@ pub(in crate::commands) struct Cli {
 #[derive(Subcommand, Debug, Clone)]
 #[allow(clippy::large_enum_variant)] // Up variant has many CLI fields; boxing breaks Clap derive
 pub(in crate::commands) enum Commands {
-    /// Environment / install lifecycle (bootstrap, update, sign, …)
-    Env(env::group::Args),
-    /// Prepare the environment + pre-fetch the builder VM image
-    ///
-    /// Runs host-tooling setup and pre-acquires the builder VM image so the
-    /// first `dev up` is fast. Run automatically by install.sh unless
-    /// `MVM_SKIP_BUILDER_PREFETCH=1`.
-    Bootstrap(bootstrap::Args),
+    /// Beginner microVM workflows (run an OCI image and more)
+    #[command(display_order = 1)]
+    Machine(machine::Args),
     /// Manage the local dev VM
+    #[command(display_order = 2)]
     Dev(env::dev::Args),
+    /// Build-time commands (image, compile, validate, kernel)
+    #[command(display_order = 3)]
+    Build(build::group::Args),
+    /// Scaffold a new project
+    #[command(display_order = 4)]
+    Init(env::init::Args),
+    /// System diagnostics and dependency checks
+    #[command(display_order = 5)]
+    Doctor(env::doctor::Args),
     /// Show console logs from a running microVM
     Logs(vm::logs::Args),
     /// List running VMs
     Ls(vm::ps::Args),
-    /// System diagnostics and dependency checks
-    Doctor(env::doctor::Args),
-    /// Manage built manifest slots
-    Manifest(manifest::Args),
-    /// Inspect cached OCI images
-    Image(image::Args),
-    /// Beginner microVM workflows (run an OCI image and more)
-    Machine(machine::Args),
-    /// Inspect the dm-thin storage pool
-    Storage(storage::Args),
-    /// Build-time commands (image, compile, validate, kernel)
-    Build(build::group::Args),
     /// Build and run a VM
     ///
     /// If neither `--flake` nor `--manifest` is supplied, the bundled
@@ -103,41 +96,67 @@ pub(in crate::commands) enum Commands {
     Up(vm::up::Args),
     /// Stop microVMs (from mvm.toml, by name, or all)
     Down(vm::down::Args),
-    /// Print shell configuration (completions + dev aliases) to stdout
-    #[command(hide = true)]
-    ShellInit(env::shell_init::Args),
-    /// Operational / observability commands (metrics, bench, config, mcp)
-    Ops(ops::group::Args),
-    /// Manage named dev networks
-    Network(ops::network::Args),
-    /// Browse the bundled image catalog
-    Catalog(catalog::Args),
-    /// Interactive console (PTY-over-vsock) to a running VM
-    Console(vm::console::Args),
-    /// Manage the XDG cache directory (~/.cache/mvm)
-    Cache(ops::cache::Args),
-    /// Manage the supervisor warm pool (pre-spawned standbys for fast `up`)
-    Pool(pool::Args),
-    /// Converge the VM name registry with on-disk runtime state
-    #[command(hide = true)]
-    Reconcile(ops::reconcile::Args),
-    /// Scaffold a new project
-    Init(env::init::Args),
     /// Run a command in a transient microVM (absorbed the former `exec`)
     Run(vm::exec::RunArgs),
     /// Call a VM's baked entrypoint
     Invoke(vm::invoke::Args),
     /// Operate on a running VM (pause, snapshot, checkpoint, cp, fs, …)
     Vm(vm::group::Args),
+    /// Interactive console (PTY-over-vsock) to a running VM
+    Console(vm::console::Args),
+    /// Prepare the environment + pre-fetch the builder VM image
+    ///
+    /// Runs host-tooling setup and pre-acquires the builder VM image so the
+    /// first `dev up` is fast. Run automatically by install.sh unless
+    /// `MVM_SKIP_BUILDER_PREFETCH=1`.
+    Bootstrap(bootstrap::Args),
+    /// Environment / install lifecycle (bootstrap, update, sign, …)
+    #[command(hide = true)]
+    Env(env::group::Args),
+    /// Manage built manifest slots
+    #[command(hide = true)]
+    Manifest(manifest::Args),
+    /// Inspect cached OCI images
+    #[command(hide = true)]
+    Image(image::Args),
+    /// Inspect the dm-thin storage pool
+    #[command(hide = true)]
+    Storage(storage::Args),
+    /// Print shell configuration (completions + dev aliases) to stdout
+    #[command(hide = true)]
+    ShellInit(env::shell_init::Args),
+    /// Operational / observability commands (metrics, bench, config, mcp)
+    #[command(hide = true)]
+    Ops(ops::group::Args),
+    /// Manage named dev networks
+    #[command(hide = true)]
+    Network(ops::network::Args),
+    /// Browse the bundled image catalog
+    #[command(hide = true)]
+    Catalog(catalog::Args),
+    /// Manage the XDG cache directory (~/.cache/mvm)
+    #[command(hide = true)]
+    Cache(ops::cache::Args),
+    /// Manage the supervisor warm pool (pre-spawned standbys for fast `up`)
+    #[command(hide = true)]
+    Pool(pool::Args),
+    /// Converge the VM name registry with on-disk runtime state
+    #[command(hide = true)]
+    Reconcile(ops::reconcile::Args),
     /// Manage local secret namespaces
+    #[command(hide = true)]
     Secret(ops::secret::Args),
     /// Seal or verify portable VM bundles
+    #[command(hide = true)]
     Bundle(bundle::Args),
     /// Manage trusted bundle publishers
+    #[command(hide = true)]
     Trust(trust::Args),
     /// Inspect cached application dependencies
+    #[command(hide = true)]
     Deps(deps::Args),
     /// Pack or verify signed `.mvm` artifacts
+    #[command(hide = true)]
     Artifact(vm::artifact::Args),
     /// Manage the persistent builder VM
     #[cfg(feature = "builder-vm")]

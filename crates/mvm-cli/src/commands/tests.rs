@@ -3660,3 +3660,67 @@ fn state_touching_json_commands_reserve_stdout_before_entry_convergence() {
     assert!(!emits_machine_readable_stdout(&["mvmctl", "dev", "status"]));
     assert!(!emits_machine_readable_stdout(&["mvmctl", "up"]));
 }
+
+// --- Top-level help surface tests ---
+
+#[test]
+fn top_level_help_hides_infra() {
+    let help = cli_command().render_help().to_string();
+    // Daily-driver commands must appear.
+    assert!(
+        help.contains("machine"),
+        "machine must appear in top-level help"
+    );
+    assert!(help.contains("dev"), "dev must appear in top-level help");
+    assert!(
+        help.contains("build"),
+        "build must appear in top-level help"
+    );
+    assert!(help.contains("init"), "init must appear in top-level help");
+    assert!(
+        help.contains("doctor"),
+        "doctor must appear in top-level help"
+    );
+    // Infrastructure commands must NOT appear in the default help.
+    for hidden in &[
+        "pool", "cache", "storage", "manifest", "catalog", "image", "bundle", "trust", "deps",
+        "artifact", "secret", "network", "ops", "env",
+    ] {
+        // Commands are listed one per line; a hidden command's name should
+        // not appear as a standalone word at the start of a help line.
+        let visible_as_subcommand = help.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with(hidden)
+                && trimmed[hidden.len()..].starts_with(|c: char| c.is_whitespace() || c == '\0')
+        });
+        assert!(
+            !visible_as_subcommand,
+            "infra command `{hidden}` must be hidden from top-level help but was found"
+        );
+    }
+}
+
+#[test]
+fn infra_commands_still_invoke() {
+    // Hidden commands must still parse — `hide` only affects help visibility.
+    assert!(
+        Cli::try_parse_from(["mvmctl", "pool", "status"]).is_ok(),
+        "pool must still parse when hidden"
+    );
+    assert!(
+        Cli::try_parse_from(["mvmctl", "cache", "info"]).is_ok(),
+        "cache must still parse when hidden"
+    );
+    assert!(
+        Cli::try_parse_from(["mvmctl", "network", "list"]).is_ok(),
+        "network must still parse when hidden"
+    );
+    assert!(
+        Cli::try_parse_from(["mvmctl", "catalog", "list"]).is_ok(),
+        "catalog must still parse when hidden"
+    );
+    assert!(
+        Cli::try_parse_from(["mvmctl", "ops", "metrics"]).is_ok(),
+        "ops must still parse when hidden"
+    );
+}
