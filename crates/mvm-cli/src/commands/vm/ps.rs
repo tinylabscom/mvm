@@ -25,6 +25,14 @@ pub(in crate::commands) struct Args {
     pub show_expired: bool,
 }
 
+impl Args {
+    pub(in crate::commands) fn touches_vm_state(&self) -> bool {
+        // `ls --all` is the historical listing surface. It must render
+        // registry-only stopped rows before any convergence pass can sweep them.
+        !self.all
+    }
+}
+
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     use anyhow::Context;
     use mvm_core::vm_backend::{VmInfo, VmStatus};

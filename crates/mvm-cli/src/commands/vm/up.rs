@@ -1251,6 +1251,22 @@ fn reserve_launch_vm_name(
     )
 }
 
+fn complete_launch_vm_registration(
+    registry_path: &std::path::Path,
+    vm_name: &str,
+    vm_state_dir: &std::path::Path,
+) -> Result<()> {
+    let _lock = mvm::vm::name_registry::acquire_registry_lock(registry_path)?;
+    let mut registry = mvm::vm::name_registry::VmNameRegistry::load(registry_path)?;
+    if !registry.set_vm_dir(vm_name, vm_state_dir.to_string_lossy())? {
+        anyhow::bail!(
+            "VM name {:?} was not reserved before launch; refusing to boot without registry state",
+            vm_name
+        );
+    }
+    registry.save(registry_path)
+}
+
 /// Resolve the `source_root` for an app's lockfile path. For
 /// `Source::LocalPath { path, .. }` the source root is the directory
 /// the path resolves against — relative paths root at the IR file's
@@ -2191,6 +2207,11 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             sandbox_ttl,
             auto_resume,
         )?;
+        complete_launch_vm_registration(
+            &registry_path,
+            &vm_name,
+            &mvm_core::config::vm_state_dir(&vm_name),
+        )?;
         if let Err(e) = backend.start(&start_config) {
             emit_failed_if(&admission, "backend-start", &e);
             return Err(e);
@@ -2654,6 +2675,11 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             sandbox_ttl,
             auto_resume,
         )?;
+        complete_launch_vm_registration(
+            &registry_path,
+            &vm_name_owned,
+            &mvm_core::config::vm_state_dir(&vm_name_owned),
+        )?;
         if let Err(e) =
             microvm::restore_from_template_snapshot(tmpl, &run_config, &snap_dir, snap_info)
         {
@@ -2782,6 +2808,11 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                     &sandbox_tags,
                     sandbox_ttl,
                     auto_resume,
+                )?;
+                complete_launch_vm_registration(
+                    &registry_path,
+                    &vm_name_owned,
+                    &mvm_core::config::vm_state_dir(&vm_name_owned),
                 )?;
                 if let Err(e) = backend.start(&start_config) {
                     emit_failed_if(&admission_main, "backend-start", &e);
@@ -3265,6 +3296,41 @@ mod vm_name_reservation_tests {
         let registry = mvm::vm::name_registry::VmNameRegistry::load(&path).unwrap();
         assert_eq!(registry.len(), 1);
         assert_eq!(registry.lookup("vm-a").unwrap().network, "default");
+    }
+
+    #[test]
+    fn complete_registration_fills_runtime_dir_and_preserves_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vm-names.json");
+        let state_dir = tmp.path().join("vms").join("vm-a");
+        let mut reservation = reservation("vm-a", "isolated");
+        reservation
+            .tags
+            .insert("role".to_string(), "sleeper".to_string());
+        reservation.expires_at = Some("2026-06-21T00:00:00Z".to_string());
+        reservation.auto_resume = false;
+
+        reserve_vm_name(&path, reservation).unwrap();
+        complete_launch_vm_registration(&path, "vm-a", &state_dir).unwrap();
+
+        let registry = mvm::vm::name_registry::VmNameRegistry::load(&path).unwrap();
+        let got = registry.lookup("vm-a").unwrap();
+        assert_eq!(got.vm_dir, state_dir.to_string_lossy());
+        assert_eq!(got.network, "isolated");
+        assert_eq!(got.tags.get("role").map(String::as_str), Some("sleeper"));
+        assert_eq!(got.expires_at.as_deref(), Some("2026-06-21T00:00:00Z"));
+        assert!(!got.auto_resume);
+    }
+
+    #[test]
+    fn complete_registration_refuses_unreserved_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vm-names.json");
+        let state_dir = tmp.path().join("vms").join("missing");
+
+        let err = complete_launch_vm_registration(&path, "missing", &state_dir).unwrap_err();
+
+        assert!(err.to_string().contains("was not reserved"));
     }
 }
 

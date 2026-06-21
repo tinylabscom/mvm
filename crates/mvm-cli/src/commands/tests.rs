@@ -3603,6 +3603,9 @@ fn read_only_and_vm_agnostic_commands_skip_entry_convergence() {
     assert!(!touches(&["mvmctl", "catalog", "list"]));
     assert!(!touches(&["mvmctl", "trust", "audit", "tail"]));
     assert!(!touches(&["mvmctl", "cache", "info"]));
+    // `ls --all` must preserve registry-only stopped rows for rendering.
+    assert!(!touches(&["mvmctl", "ls", "--all"]));
+    assert!(!touches(&["mvmctl", "ls", "--all", "--json"]));
     // `reconcile` is the convergence verb itself — must not double-run on entry.
     assert!(!touches(&["mvmctl", "reconcile"]));
     assert!(!touches(&["mvmctl", "reconcile", "--dry-run"]));

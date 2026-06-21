@@ -166,6 +166,9 @@ impl Commands {
         if let Commands::Vm(a) = self {
             return a.action.touches_vm_state();
         }
+        if let Commands::Ls(a) = self {
+            return a.touches_vm_state();
+        }
         matches!(
             self,
             // Lifecycle mutate/read on the local single-host path.
@@ -174,9 +177,6 @@ impl Commands {
                 | Commands::Run(_)
                 | Commands::Console(_)
                 | Commands::Dev(_)
-                // `ls` is the local "status" surface — converging first
-                // means stale dead records never show up in the listing.
-                | Commands::Ls(_)
         )
     }
 
