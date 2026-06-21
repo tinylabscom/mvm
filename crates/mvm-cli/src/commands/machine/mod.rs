@@ -56,29 +56,36 @@ pub(in crate::commands) struct Args {
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum MachineAction {
     /// Boot an OCI image, run a command, then tear the VM down
+    #[command(display_order = 1)]
     Run(MachineRunArgs),
     /// Create or update a persistent named machine spec without booting it
+    #[command(display_order = 2)]
     Create(MachineCreateArgs),
+    /// Boot a persistent named machine without running a one-shot command
+    #[command(display_order = 3)]
+    Start(MachineStartArgs),
+    /// Stop an already-started named machine
+    #[command(display_order = 4)]
+    Stop(MachineStopArgs),
+    /// Remove one persistent named machine spec
+    #[command(name = "rm", display_order = 5)]
+    Rm(MachineRemoveArgs),
     /// List persistent named machine specs
-    #[command(name = "ls")]
+    #[command(name = "ls", display_order = 6)]
     Ls(MachineListArgs),
     /// Show one persistent named machine spec
+    #[command(display_order = 7)]
     Inspect(MachineInspectArgs),
-    /// Remove one persistent named machine spec
-    #[command(name = "rm")]
-    Rm(MachineRemoveArgs),
-    /// Boot a persistent named machine without running a one-shot command
-    Start(MachineStartArgs),
-    /// Run a command inside an already-started named machine
-    Exec(MachineExecArgs),
     /// Attach an interactive shell/console to an already-started named machine
+    #[command(display_order = 8)]
     Shell(MachineShellArgs),
-    /// Stop an already-started named machine
-    Stop(MachineStopArgs),
+    /// Run a command inside an already-started named machine
+    #[command(display_order = 9)]
+    Exec(MachineExecArgs),
     /// Verify a portable `.mvm` artifact and preview how `machine run` would
     /// admit it (arch, profile, seccomp, egress, volumes). Read-only: no
     /// extraction, no boot.
-    #[command(name = "check-artifact")]
+    #[command(name = "check-artifact", display_order = 10)]
     CheckArtifact(portable::CheckArtifactArgs),
 }
 

@@ -3724,3 +3724,47 @@ fn infra_commands_still_invoke() {
         "ops must still parse when hidden"
     );
 }
+
+#[test]
+fn machine_help_lists_run_first() {
+    let mut machine_cmd = cli_command()
+        .find_subcommand_mut("machine")
+        .expect("machine subcommand must exist")
+        .clone();
+    let help = machine_cmd.render_help().to_string();
+
+    // Verify the key ordering: run < start < stop < inspect < check-artifact
+    let pos = |name: &str| -> usize {
+        help.lines()
+            .position(|line| {
+                let t = line.trim_start();
+                t.starts_with(name) && t[name.len()..].starts_with(|c: char| c.is_whitespace())
+            })
+            .unwrap_or_else(|| {
+                panic!("`{name}` must appear as a line in machine --help;\nhelp:\n{help}")
+            })
+    };
+
+    let run = pos("run");
+    let start = pos("start");
+    let stop = pos("stop");
+    let inspect = pos("inspect");
+    let check = pos("check-artifact");
+
+    assert!(
+        run < start,
+        "`run` (line {run}) must appear before `start` (line {start}) in machine --help"
+    );
+    assert!(
+        start < stop,
+        "`start` (line {start}) must appear before `stop` (line {stop}) in machine --help"
+    );
+    assert!(
+        stop < inspect,
+        "`stop` (line {stop}) must appear before `inspect` (line {inspect}) in machine --help"
+    );
+    assert!(
+        inspect < check,
+        "`inspect` (line {inspect}) must appear before `check-artifact` (line {check}) in machine --help"
+    );
+}
