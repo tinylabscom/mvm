@@ -27,8 +27,8 @@ use std::sync::Mutex;
 use anyhow::{Result, bail};
 use mvm_core::vm_backend::{
     BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, SnapshotCapability,
-    StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmNetworkInfo, VmStartConfig,
-    VmStatus,
+    StandbyClaim, StandbyError, StandbyHandle, StartMode, VmBackend, VmCapabilities, VmExitStatus,
+    VmId, VmInfo, VmNetworkInfo, VmStartConfig, VmStatus,
 };
 
 use crate::mock_guest_agent::MockGuestAgent;
@@ -59,12 +59,31 @@ struct MockVm {
 pub struct MockBackend {
     state: std::sync::Arc<Mutex<HashMap<String, MockVm>>>,
     agents: std::sync::Arc<Mutex<HashMap<String, MockGuestAgent>>>,
+    /// Opt-in: report `supports_standby_pool()` and honor `claim_standby`.
+    /// Off by default so existing tests keep the fail-closed `Unsupported`.
+    supports_standby: bool,
+    /// Test knob: make `stop` fail, to exercise error-surfacing paths
+    /// (e.g. `WarmLease::release` vs the swallowing `Drop`).
+    fail_stop: bool,
 }
 
 impl MockBackend {
     /// Construct a fresh empty mock backend.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Test builder: opt this mock into the standby-pool surface so
+    /// `claim_standby` boots (records) the standby instead of failing closed.
+    pub fn with_standby(mut self) -> Self {
+        self.supports_standby = true;
+        self
+    }
+
+    /// Test builder: make every `stop` return an error.
+    pub fn with_failing_stop(mut self) -> Self {
+        self.fail_stop = true;
+        self
     }
 
     /// Test helper: count VMs currently recorded.
@@ -162,7 +181,45 @@ impl VmBackend for MockBackend {
         bail!("mock: wait is not supported (mock VMs do not exit)")
     }
 
+    fn supports_standby_pool(&self) -> bool {
+        self.supports_standby
+    }
+
+    fn claim_standby(
+        &self,
+        handle: &StandbyHandle,
+        _claim: &StandbyClaim,
+    ) -> std::result::Result<VmId, StandbyError> {
+        if !self.supports_standby {
+            return Err(StandbyError::Unsupported {
+                backend: "mock".to_string(),
+            });
+        }
+        // A claimed standby becomes a running VM; record it under the
+        // standby id so `count()` / `stop` behave like a normal boot.
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| StandbyError::ClaimFailed("mock state mutex poisoned".to_string()))?;
+        state.insert(
+            handle.id.clone(),
+            MockVm {
+                name: handle.id.clone(),
+                cpus: u32::from(handle.vcpus),
+                memory_mib: handle.mem_mib,
+                profile: None,
+                flake_ref: None,
+                revision: None,
+                paused: false,
+            },
+        );
+        Ok(VmId(handle.id.clone()))
+    }
+
     fn stop(&self, id: &VmId) -> Result<()> {
+        if self.fail_stop {
+            bail!("mock: forced stop failure (test knob) for '{}'", id.0);
+        }
         let mut state = self
             .state
             .lock()
