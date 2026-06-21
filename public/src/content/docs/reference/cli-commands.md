@@ -423,6 +423,49 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine check-artifact <artifact.mvm> --key <pubkey>` | Verify with an explicit raw Ed25519 public key |
 | `mvmctl machine check-artifact <artifact.mvm> --json` | Print the verified artifact/admission preview as JSON |
 
+### `machine run` lifecycles in practice
+
+A transient run is the default and needs no flags — it boots, runs the command,
+and tears the VM down:
+
+```bash
+mvmctl machine run --image alpine -- echo hi      # prints "hi", VM gone
+```
+
+A bare `machine run --image alpine -- /bin/sh` is **non-interactive**: it streams
+the command's output but forwards no stdin, so an interactive shell sees EOF and
+exits at once. For a live shell, add `-it` (dev-only — see below):
+
+```bash
+mvmctl machine run -it --image <dev-image> -- /bin/sh   # live shell, VM gone on exit
+```
+
+Naming or detaching is the *only* thing that keeps a machine alive past the
+command — that is the whole difference between a transient and a persistent run:
+
+```bash
+mvmctl machine run -d --image alpine          # boots, prints e.g. "blue-fox-3f2a", returns
+mvmctl machine shell --name blue-fox-3f2a     # reconnect (dev PTY)
+mvmctl machine exec  --name blue-fox-3f2a -- ps   # one-shot command in the running machine
+mvmctl machine stop  --name blue-fox-3f2a     # tear it down when done
+```
+
+`--name <N>` does the same with a name you choose; `machine run --name <N>` with
+no `--image` reconnects to an existing machine.
+
+**Collision.** If `--name <N>` already exists with a *different* boot config
+(image, CPU, memory, profile, …), `machine run` refuses rather than silently
+reusing or clobbering it (`machine 'N' exists with a different config; pass
+--force …`). `--force` stops, overwrites, and recreates it; a matching config
+reuses the machine as-is.
+
+**Interactive is dev-only.** `-t`/`--tty` attaches a PTY shell and is refused for
+a sealed/production image (claim 15 — no interactive access to a sealed microVM)
+and when stdin is not a terminal, both failing fast rather than hanging. It never
+affects persistence: `-it` alone is transient, `-it` with `--name`/`-d` keeps the
+machine. The design rationale and full behavior matrix are recorded in ADR-091
+(`specs/adrs/091-unified-machine-run-lifecycle.md`).
+
 `machine create` accepts either `--image <ref>` or an image-backed manifest, not
 both. When `--image` is omitted, it searches the current directory for
 `mvm.toml` / `Mvmfile.toml`; `--manifest <path>` selects a file explicitly. The

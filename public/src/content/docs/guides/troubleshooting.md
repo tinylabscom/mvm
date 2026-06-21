@@ -218,6 +218,28 @@ to a sealed microVM) and when stdin is not a terminal — both fail fast with a
 clear message rather than hanging. To keep the machine after the shell exits,
 add `--name <N>` or `-d`.
 
+### `machine run --name X` fails: "machine 'X' exists with a different config"
+
+You're reusing a name whose persisted spec was created with a different boot
+config (image, CPU, memory, profile, …). `machine run` refuses to silently reuse
+or clobber it.
+
+**Fix**: drop the conflicting flags to reconnect to the existing machine
+(`mvmctl machine run --name X`), pick a different name, or pass `--force` to stop,
+overwrite, and recreate it under the new config.
+
+### I detached a machine with `-d` — how do I get back in?
+
+`machine run -d` prints the machine's name (auto-generated unless you passed
+`--name`). Reconnect with that name:
+
+```bash
+mvmctl machine ls                 # list persisted machines
+mvmctl machine shell --name <N>   # interactive shell (dev)
+mvmctl machine exec  --name <N> -- <cmd>   # one-shot command
+mvmctl machine stop  --name <N>   # tear it down
+```
+
 ## Network Issues
 
 ### MicroVM has no internet
