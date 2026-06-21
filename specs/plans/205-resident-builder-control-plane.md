@@ -15,7 +15,8 @@ Make builder bring-up disappear from the steady state without moving any authori
 into a guest. Concretely:
 
 - the per-session builder boot (the top latency pain) is gone — the builder is already
-  warm, or resumes from a snapshot in under a second;
+  warm (no boot at all), or resumes from a snapshot no slower than a cold boot of the
+  same closure while costing zero idle RAM;
 - cold acquisition on a fresh machine is a one-time event whose second boot is a
   restore, with no release-pipeline dependency for source checkouts;
 - the three long-lived daemons (host control, builder, workload agent) sit on an
@@ -119,7 +120,7 @@ cross the host→builder vsock line — is codified and tested (Workstream A).
 ### Residency slider (ADR-090 §2)
 
 `min` warm builders + idle timeout select a point between always-resident (`min ≥ 1`)
-and parked-and-resumed (`min = 0`, snapshot on disk, sub-second resume). One mechanism
+and parked-and-resumed (`min = 0`, snapshot on disk, resume ≈ cold boot, zero idle RAM). One mechanism
 over the Plan 118 pool. Per-host default, user-overridable. `mvmctl doctor` reports the
 live residency state (warm / parked / cold) and the resolved default's source.
 
@@ -220,8 +221,8 @@ typed allowlisted protocol, so residency shrinks rather than widens the attack s
 Plan 205 is done when:
 
 - a second `mvmctl` command in a session triggers no builder boot (warm) or a
-  sub-second resume (parked) — held to the **latency budget** below, CI-gated,
-  not asserted;
+  parked resume no slower than a cold boot of the same closure — held to the
+  **latency budget** below, CI-gated, not asserted;
 - the residency posture is a single policy with a per-host default and an override;
 - the trust-gradient invariant has passing structural tests, and no signing key,
   admission authority, or audit writer exists below the host→builder vsock line;
@@ -236,7 +237,7 @@ these budgets; a regression fails the build.
 | Path | Budget (P50) | How it is gated |
 |---|---|---|
 | Warm (`min ≥ 1`), Nth command in a session | **no builder boot occurs**; end-to-end reuse stays under **250 ms** in the Vz live gate | deterministic in the PR matrix for the no-boot branch, plus `scripts/capture-plan-205-live-gates.sh` on macOS/Vz |
-| Parked (`min = 0`), resume-on-demand | end-to-end `mvmctl dev up --json` restore P50 under **800 ms**, P95 ≤ 2× P50 | backend-bearing live lane: Vz/macOS now gated by `scripts/capture-plan-205-live-gates.sh`; FC/KVM remains Plan 175 |
+| Parked (`min = 0`), resume-on-demand | a full guest-memory restore that is **no slower than a cold boot of the same closure**; the shipped Vz closeout gate is stricter: end-to-end `mvmctl dev up --json` restore P50 under **800 ms**, P95 ≤ 2× P50. Parked trades resume latency for zero idle RAM, not an instant path. | backend-bearing live lane: Vz/macOS now gated by `scripts/capture-plan-205-live-gates.sh`; FC/KVM remains Plan 175 |
 | Cold acquisition, second-ever boot | a **restore**, not a cold boot — within the parked end-to-end budget | first boot bakes a snapshot (WS-E); the second boot is measured within the parked-resume budget |
 
 Notes:
@@ -247,10 +248,11 @@ Notes:
   `bench microvm-launch` and the macOS live lanes), not the default PR matrix.
   The closeout evidence is `/tmp/mvm-plan205-live-proof9`.
 - A P95 ceiling of 2× the P50 budget guards tail latency.
-- The earlier 100 ms target remains the raw backend/saved-state aspiration. The
-  shipping gate is the end-to-end `mvmctl` path because it includes supervisor
-  restore, gvproxy readiness, and CLI/status handling; tighten it as those layers
-  are reduced, never silently.
+- The earlier 100 ms target is not the full-memory-restore shipping gate. It
+  scopes to the warm no-boot control path and raw resume signaling; the shipping
+  gate is the end-to-end `mvmctl` path because it includes supervisor restore,
+  gvproxy readiness, and CLI/status handling. Tighten it as those layers are
+  reduced, never silently.
 - The first-ever **image-download** cost is explicitly *out* of this budget: it
   is paid once at install/prefetch time (ADR-089 `mvmctl bootstrap` prefetch /
   the install script), never on the per-command hot path. The budget measures
@@ -276,7 +278,8 @@ Notes:
 - [x] Latency gate (the "instant" bar): the warm-path no-boot invariant runs in
       the PR matrix, and the Vz/macOS live runner passed with warm reuse 130 ms,
       parked restore P50 643 ms, P95 1163 ms, and zero command failures. The
-      runner is committed at `scripts/capture-plan-205-live-gates.sh`.
+      parked bar is no slower than cold boot, not a sub-100 ms full-memory
+      restore. The runner is committed at `scripts/capture-plan-205-live-gates.sh`.
 - [x] `cargo test --workspace` coverage for landed slices passed in their PRs;
       final closeout adds focused tests for the Vz control client, Vz shell-job
       validation, snapshot park command framing, shell VM name bounds, and Vz OCI
@@ -284,6 +287,23 @@ Notes:
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` passed for landed
       slices in their PRs; final closeout re-runs focused clippy/check gates for
       touched crates.
+
+### Deferred follow-ups
+
+- [x] Reconcile the parked-resume latency budget with the team's own ~2.3 s live
+      measurement (was `< 100 ms`, physically impossible for a 512 MiB memory
+      restore). The parked bar is now "≤ a cold boot of the same closure"; the
+      `< 50 ms` / sub-100 ms figures scope to the warm control round-trip and the
+      control-plane resume signal, never the memory restore. ADR-090 §2 updated to
+      match (the diagram + prose no longer claim a sub-second memory resume).
+- [ ] Build `bench residency-resume`: instrument resume-ms on the parked→warm
+      promotion and assert `resume-ms ≤ cold-boot-ms` for the same closure on the
+      backend-bearing Vz/FC live lane (mirrors Plan 118 `bench microvm-launch`).
+      Blocked on the instrumentation below.
+- [ ] Add a force-demotion hook so the live bench can park on demand (today
+      demotion is TTL-gated at ~20 min idle with no force knob), and extend
+      `MVM_RESIDENCY` (or a sibling override) with an idle/force-park override so
+      the parked path is reachable without waiting out the timeout.
 
 ## Security Notes
 

@@ -163,7 +163,8 @@ mvmctl exec --manifest my-tpl -- /bin/true         # registered template
 ```
 
 When you reuse a registered template that has a captured snapshot, exec
-restores from the snapshot instead of cold-booting -- typically sub-second.
+restores the captured state instead of re-provisioning from scratch, so
+repeat runs skip the first-run setup cost.
 See the [Sandboxed Exec](/guides/exec/) guide for details.
 
 ## 9. Named Networks
