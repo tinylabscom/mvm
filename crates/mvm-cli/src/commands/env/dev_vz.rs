@@ -4703,6 +4703,85 @@ pub(crate) fn ensure_default_microvm_image(
     }
 }
 
+/// Resolve **only** the workload microVM kernel, returning its path. The OCI
+/// `--image` run path needs just a kernel — the materialized OCI rootfs (with
+/// its injected agent) is the workload — so this avoids building/downloading a
+/// whole default image. It's the same `workload-kernel` the default microVM
+/// boots on. An end-user mvmctl downloads the published, hash-verified
+/// `vmlinux-<arch>-workload` (~10 MB, no Nix); a source checkout builds just the
+/// `workload-kernel` flake target locally (no rootfs/verity). Cache-hit-fast.
+pub(crate) fn ensure_workload_kernel() -> Result<String> {
+    let arch = builder_vm_host_arch();
+    let cache = mvm_core::config::mvm_cache_dir();
+    if let Some(cached) = find_cached_workload_kernel(&cache, arch) {
+        return Ok(cached);
+    }
+    let dest = format!("{cache}/builder-vm/{arch}/kernels/workload/vmlinux");
+    if let Some(built) = try_build_workload_kernel_locally()? {
+        return Ok(built);
+    }
+    download_workload_kernel(arch, &dest)?;
+    Ok(dest)
+}
+
+/// End-user download of the published, hash-verified `vmlinux-<arch>-workload`
+/// (~10 MB, no Nix) for this mvmctl's release tag. Mirrors
+/// `download_default_microvm_image`'s verify-then-cache flow via the same
+/// non-gated artifact helpers, so the OCI `--image` path resolves a kernel even
+/// when mvmctl is built without the `builder-vm` feature.
+fn download_workload_kernel(arch: &str, dest: &str) -> Result<()> {
+    if let Some(parent) = std::path::Path::new(dest).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/v{version}");
+    let asset = format!("vmlinux-{arch}-workload");
+    let checksums_url = format!("{base_url}/kernel-{arch}-checksums-sha256.txt");
+
+    ui::info(&format!(
+        "Downloading workload kernel {asset} (v{version})..."
+    ));
+    let expected = fetch_expected_hashes(&checksums_url, &[asset.as_str()])?;
+    let asset_url = format!("{base_url}/{asset}");
+    download_file(&asset_url, dest).with_context(|| format!("Failed to download {asset_url}"))?;
+    verify_artifact_hash(dest, &asset, expected.get(&asset))?;
+    ui::success(&format!(
+        "Workload kernel {asset} downloaded, hash-verified, and cached."
+    ));
+    Ok(())
+}
+
+/// First existing workload-kernel `vmlinux` on disk among the dedicated kernel
+/// cache and the default-microvm images — all the identical `mkWorkloadKernel`
+/// derivation, so any one is a valid workload kernel. `None` ⇒ build/download.
+/// Path-injectable (no global state) so it's hermetically testable.
+fn find_cached_workload_kernel(cache_dir: &str, arch: &str) -> Option<String> {
+    [
+        format!("{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux"),
+        format!("{cache_dir}/default-microvm/prod/vmlinux"),
+        format!("{cache_dir}/default-microvm/dev/vmlinux"),
+    ]
+    .into_iter()
+    .find(|p| std::path::Path::new(p).is_file())
+}
+
+/// Source-checkout local build of just the workload kernel. `Some` when the
+/// in-repo `builder-vm` flake resolves; `None` (→ caller downloads) otherwise.
+#[cfg(feature = "builder-vm")]
+fn try_build_workload_kernel_locally() -> Result<Option<String>> {
+    if find_builder_vm_flake().is_err() {
+        return Ok(None);
+    }
+    ui::info("Building the workload microVM kernel locally (source checkout)...");
+    let path = build_kernel_via_stage0(KernelVariant::Workload, false)?;
+    Ok(Some(path.display().to_string()))
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn try_build_workload_kernel_locally() -> Result<Option<String>> {
+    Ok(None)
+}
+
 /// Prod-mode default image. On a source checkout (the in-repo `builder-vm` flake
 /// resolves and this mvmctl carries the `builder-vm` feature) it builds the
 /// verity-sealed `default` variant locally via the builder VM, honoring the
@@ -6067,6 +6146,40 @@ mod builder_vm_bootstrap_tests {
     //! `find_builder_vm_flake` + `bootstrap_builder_vm_image`.
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn find_cached_workload_kernel_prefers_dedicated_then_default_images() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().to_str().unwrap();
+        let arch = "x86_64";
+        // Nothing on disk → None (caller will build/download).
+        assert_eq!(find_cached_workload_kernel(cache, arch), None);
+
+        let mk = |rel: &str| {
+            let p = tmp.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"vmlinux").unwrap();
+            p.to_str().unwrap().to_string()
+        };
+        // The dev default image's kernel is a valid reuse source.
+        let dev = mk("default-microvm/dev/vmlinux");
+        assert_eq!(
+            find_cached_workload_kernel(cache, arch).as_deref(),
+            Some(dev.as_str())
+        );
+        // Prod wins over dev (checked first).
+        let prod = mk("default-microvm/prod/vmlinux");
+        assert_eq!(
+            find_cached_workload_kernel(cache, arch).as_deref(),
+            Some(prod.as_str())
+        );
+        // The dedicated kernel cache wins over everything.
+        let dedicated = mk(&format!("builder-vm/{arch}/kernels/workload/vmlinux"));
+        assert_eq!(
+            find_cached_workload_kernel(cache, arch).as_deref(),
+            Some(dedicated.as_str())
+        );
+    }
 
     #[test]
     #[cfg(feature = "builder-vm")]
