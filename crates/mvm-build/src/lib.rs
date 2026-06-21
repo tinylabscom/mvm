@@ -4,6 +4,7 @@ pub mod artifacts;
 pub mod backend;
 /// Vsock dispatch wire types for the persistent builder VM.
 pub mod builder_protocol;
+pub mod builder_route;
 pub mod builder_vm;
 /// Hypervisor-agnostic builder-VM orchestration helper that wraps a
 /// `VmBackendForBuilder` implementation (libkrun and Vz).

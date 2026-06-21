@@ -1,6 +1,6 @@
 # Plan 204 — Builder VM resident control plane
 
-**Status:** In progress — WS-A (protocol, daemon core, doctor readiness, boot wiring; daemon boot + reachability live-validated on macOS-26 Vz), WS-B (host client), WS-C (FlakeCheck + build-op handler cores + the no-host-Nix test, landed as `xtask check-no-host-nix`, CI-wired), and WS-E (docs) landed. Open: WS-D (route builds through `BuilderdClient`; nothing consumes it yet). The typed-operation over-the-wire **transport** is now live-proven (a real `FlakeCheck` round-tripped a typed terminal over vsock-21473 on macOS-26 Vz, which also caught + fixed a missing-experimental-features daemon bug); the remaining proof is a clean `Completed`, gated on the fix reaching a rebuilt image plus WS-D source-staging.
+**Status:** In progress — WS-A (protocol, daemon core, doctor readiness, boot wiring; daemon boot + reachability live-validated on macOS-26 Vz), WS-B (host client), WS-C (FlakeCheck + build-op handler cores + the no-host-Nix test, landed as `xtask check-no-host-nix`, CI-wired), and WS-E (docs) landed. Open: WS-D's typed routing — the decision seam + compat diagnostic landed (`mvm_build::builder_route` + the `check-builder-shell-job-sites` lint), but the `BuilderdClient`-running half (typed `BuildGuestImage`/`FlakeCheck` from `dev_build`/`pool_build` + the raw-shell debug gate) remains. The typed-operation over-the-wire **transport** is now live-proven (a real `FlakeCheck` round-tripped a typed terminal over vsock-21473 on macOS-26 Vz, which also caught + fixed a missing-experimental-features daemon bug); the remaining proof is a clean `Completed`, gated on the fix reaching a rebuilt image plus WS-D source-staging.
 **Sprint:** 56 / product-DX follow-up
 **ADR:** [ADR-089](../adrs/089-builder-vm-resident-control-plane.md)
 **Depends on:** Plan 199, Plan 200, ADR-046, ADR-057, ADR-071
@@ -291,10 +291,14 @@ arm lands with the daemon's image baking (boot-gated).
 
 ### D. Compatibility shrink
 
-- [ ] Route current shell-job builder calls through a single adapter module.
-- [ ] Emit a diagnostic when the adapter is used.
+- [x] Route current shell-job builder calls through a single adapter module.
+      `mvm_build::builder_route` is the host-side decision seam: `resolve_route(daemon_reachable, typed_opt_in) -> BuilderRoute::{Typed, LegacyShell}` (pure; typed only when the daemon is reachable **and** the caller opted in), `typed_opt_in(env_getter)` reading `MVM_BUILDERD_TYPED`, and `legacy_shell_diagnostic(job_label)`. The `persistent_builder::submit` dev_build dispatch boundary now resolves the route on every dispatch (3 unit tests; 17 persistent_builder tests stay green).
+- [x] Emit a diagnostic when the adapter is used.
+      Every legacy shell-job dispatch emits a structured `tracing` diagnostic (`target: "mvm::builder"`) naming the job, so the remaining shell surface stays visible and shrinkable — the runtime counterpart to the static `check-builder-shell-job-sites` allowlist.
 - [ ] Replace the remaining normal-path shell jobs with typed operations.
+      The opt-in seam is in place (`MVM_BUILDERD_TYPED` + `resolve_route`); the next step is to give `dev_build`/`pool_build` a typed `BuildGuestImage`/`FlakeCheck` path over `BuilderdClient` and flip `resolve_route`'s default per operation once proven over the wire (needs a live builder-VM boot).
 - [ ] Gate raw shell execution behind an explicit debug/development flag.
+      Blocked on the line above — raw shell stays the default until a typed op replaces it; the gate flips once the typed path is the default.
 - [x] Add a lint or structural test that prevents new normal-path shell jobs.
       `xtask check-builder-shell-job-sites` (CI Lint lane) freezes the set of
       `*/src/` files that construct a legacy `HostVmRequest::{Run,Build}` shell
@@ -325,9 +329,12 @@ need (`BuildGuestImage`/`BuildHostTool` for the flake build, `FlakeCheck`,
    existing `builderd_control_socket_candidates`). The persistent-builder
    `SessionRecord` does not record it today — derive it from the session's
    `vm_state_dir` + backend rather than adding a field.
-2. **Single adapter module.** Introduce `builder_dispatch_adapter` that, given a
-   resolved socket, runs a build through `BuilderdClient::run_operation` and
-   maps `OperationOutcome::{Artifact,Failed,…}` onto the existing artifact shape;
+2. **Single adapter module.** The decision + diagnostic half landed as
+   `mvm_build::builder_route` (`resolve_route` + `MVM_BUILDERD_TYPED` opt-in +
+   `legacy_shell_diagnostic`, wired into `persistent_builder::submit`). The
+   remaining half: given a resolved socket, run a build through
+   `BuilderdClient::run_operation` and
+   map `OperationOutcome::{Artifact,Failed,…}` onto the existing artifact shape;
    on `NotReady`/missing socket it logs one diagnostic and falls back to the
    legacy shell-job channel. Unit-test it against the in-process
    `serve_connection` daemon (as `builderd_client` tests already do).
