@@ -616,7 +616,7 @@ fn dev_build_via_builder_vm_uncached(
         // daemon → `None` → legacy shell-job dispatch below; a daemon build
         // failure or transport error → warn → legacy fallback (the opt-in path
         // never turns a build the legacy path would pass into a failure).
-        match try_typed_persistent_build(env, &record, profile) {
+        match try_typed_persistent_build(env, &record, flake_ref, profile) {
             Some(Ok(result)) => return Ok(result),
             Some(Err(e)) => {
                 tracing::warn!(
@@ -696,6 +696,16 @@ fn local_mvm_workspace(user_flake: &std::path::Path) -> Option<std::path::PathBu
     flake_nix
         .contains("github:tinylabscom/mvm")
         .then_some(workspace)
+}
+
+/// Whether the legacy persistent dispatch would rewrite the workload's `mvm`
+/// input to the in-repo checkout for this flake (`--override-input mvm
+/// path:/work/nix`). The typed `BuildGuestImage` op carries no override field,
+/// so such a build is not artifact-equal across the two paths and must stay on
+/// legacy until the wire can express the override.
+#[cfg(feature = "builder-vm")]
+fn typed_route_blocked_by_local_override(flake_ref: &str) -> bool {
+    local_mvm_workspace(&resolve_user_flake(flake_ref)).is_some()
 }
 
 #[cfg(feature = "builder-vm")]
@@ -814,18 +824,29 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
 /// dir; `Some(Err(_))` on a daemon-reported build failure or a transport/IO
 /// error (the caller logs and falls back).
 ///
-/// Builds `/work#<attr>` — the same target, and the same no-`--override-input`,
-/// that the legacy persistent dispatch uses (`run_flake_dispatch` ignores the
-/// source-checkout staging too) — so the two paths are behaviourally equivalent.
+/// Builds `/work#<attr>` — the same target the legacy persistent dispatch uses.
+/// Scoped to override-free builds: when the legacy path would rewrite the
+/// workload's `mvm` input to the local checkout for a source-checkout flake
+/// (`--override-input mvm path:/work/nix`), the typed `BuildGuestImage` op
+/// carries no such override and so would not be artifact-equal — those builds
+/// stay on the legacy path (returns `None`). Otherwise the two paths build the
+/// same flake the same way.
 #[cfg(feature = "builder-vm")]
 fn try_typed_persistent_build(
     env: &dyn ShellEnvironment,
     record: &crate::persistent_builder::SessionRecord,
+    flake_ref: &str,
     profile: Option<&str>,
 ) -> Option<Result<DevBuildResult>> {
     use crate::builder_route::{BuildDispatch, BuildVerdict, try_typed_build};
     use crate::builder_vm::host_system_linux;
     use crate::libkrun_builder::GUEST_WORK_DIR;
+
+    // A source-checkout flake gets `--override-input mvm path:/work/nix` on the
+    // legacy path; the typed op can't express that, so keep it on legacy.
+    if typed_route_blocked_by_local_override(flake_ref) {
+        return None;
+    }
 
     let system = host_system_linux();
     let attr_path = match profile {
@@ -1511,6 +1532,39 @@ mod tests {
         std::fs::create_dir_all(&host_out).unwrap();
         let env = TestEnv::new();
         assert!(finalize_typed_persistent_build(&env, &host_out, "not-a-store-path").is_err());
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn typed_route_blocked_for_source_checkout_github_pinned_flake() {
+        // A user flake that pins `mvm` to GitHub: in a source checkout the
+        // legacy path rewrites it to `path:/work/nix`, so the typed route — which
+        // can't express that override — must defer to legacy.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("flake.nix"),
+            "{ inputs.mvm.url = \"github:tinylabscom/mvm\"; }",
+        )
+        .unwrap();
+        assert!(typed_route_blocked_by_local_override(
+            temp.path().to_str().unwrap()
+        ));
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn typed_route_allowed_for_override_free_flake() {
+        // A user flake that does not pin `mvm` to GitHub gets no override on the
+        // legacy path, so the typed route is artifact-equal and may run.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("flake.nix"),
+            "{ description = \"a standalone workload flake\"; }",
+        )
+        .unwrap();
+        assert!(!typed_route_blocked_by_local_override(
+            temp.path().to_str().unwrap()
+        ));
     }
 
     #[cfg(feature = "builder-vm")]
