@@ -337,7 +337,9 @@ own internal default).
         libkrun/Vz capability tests. Delete the splice + Plan-141 `on_packet`
         hooks only after the native audit feed is the sole path and the
         transparent terminator/parity-required gates are in place. Design + the
-        R2 contract are in "## WS-2 design" below.
+        R2 contract are in "## WS-2 design" below; the concrete post-R4
+        acceptance steps are "## WS-2 design" §"Transparent-terminator hookup
+        ladder".
 - [ ] **WS-3 — backend cutover.** Replace the gvproxy spawn
       (`mvm-build/host_gvproxy.rs`, `libkrun-sys/gvproxy.rs`) + passt with
       `rvproxy run --config` per the integration contract; drop the Homebrew
@@ -455,14 +457,69 @@ the splice is deleted. The splice (`gateway_bridge` + the Plan 141 per-backend
 3. Only when the native path is green on every witness do we delete the splice
    and the per-backend `on_packet` hooks (Plan 141).
 
+### Transparent-terminator hookup ladder (post-R4 acceptance)
+
+Once rvproxy lands R4 (transparent `:80`/`:443` interception → host terminator,
+its `specs/plans/014` §R4), the integration is proven by climbing this ladder.
+Each rung is cheaper-and-earlier than the next; **the splice is not deleted until
+the top rung is green**, and a failure at any rung blocks the one above it. Each
+rung is its own PR.
+
+- [ ] **1 — pin the R4-bearing rvproxy.** Move the `rvproxy-parity` candidate
+      pin (the binary `MVM_GATEWAY_BIN` / the parity workflow build) to the
+      rvproxy commit/tag that contains R4. Until this moves, mvm cannot claim the
+      capability; everything below tests against this pin.
+- [ ] **2 — schema agreement (CI, cheapest signal).** `render_rvproxy_config`
+      (`supervisor::network::rvproxy_*`) emits the `[transparent]` section; the
+      parity gate feeds the emitted TOML to the **real** rvproxy binary's
+      `RvproxyConfig::validate()` off-tree. A field-name/shape mismatch between
+      mvm's emitter and rvproxy's R4 schema fails here — the same mechanism that
+      caught the `upstream_resolvers` rename. This is the single best "are they
+      hooked up" check and it is already automated.
+- [ ] **2a — original-dst contract fixture (shared, checked-in).** rvproxy and
+      mvm's terminator must agree byte-for-byte on how each redirected
+      connection carries its original destination (the `SO_ORIGINAL_DST`
+      analogue — R4 req #2; length-prefixed preamble vs PROXY-protocol-v2).
+      Pin it with a shared fixture both an rvproxy test and an mvm test decode to
+      the same `{host, port, sni}` (the Plan 200 SDK/CLI-parity fixture pattern).
+      This is the one genuinely hard cross-repo contract; drift on either side
+      turns both repos' tests red. Folds into rung 2.
+- [ ] **3 — capability guard flips (type-level tripwire).** Set
+      `supports_transparent_terminator()` true for libkrun/Vz and update
+      `require_transparent_egress_terminator(&dyn WorkloadBackend)` to accept
+      them. Flipped before rungs 2/4 pass, this unit test is a tripwire: mvm
+      asserting a capability rvproxy can't back is now a red test.
+- [ ] **4 — native-path enforcement parity (CI, binary-discriminating).** Extend
+      `scripts/rvproxy-gateway-parity.sh`'s native-enforcement step (it already
+      plays a VMM directly against rvproxy's vfkit socket, no full VM): a guest
+      TCP SYN to `:443` → rvproxy redirects to the terminator dst **and** conveys
+      the original dst; a policy-denied flow is dropped *before* redirect;
+      terminator-down → flow denied (not leaked). gvproxy can do none of these, so
+      it discriminates the binary — proving the candidate implements R4, not just
+      parses its config.
+- [ ] **5 — live egress proof + repeatable artifact.** A live libkrun boot with a
+      workload egressing to `:443`: assert the host terminator received the flow
+      with the original dst, substitution happened, the claim-13 placeholder
+      never left the host, and the chain-signed audit recorded it (this is the
+      2b line-218 egress matrix on the transparent path). Capture it as a
+      repo-managed conformance artifact (mirror rvproxy's
+      `scripts/capture-mvm-libkrun-conformance.sh` / mvm's
+      `docs/mvm-gateway-conformance.md`) so it is gated, not one-off.
+- [ ] **6 — claim-witness parity, then delete the splice.** The claim-10/12/13
+      witnesses run against the **native** rvproxy transparent path and assert
+      **verdict-identical** results to the splice. Only when that is green do we
+      delete the splice + Plan-141 `on_packet` hooks (WS-2 "2d") and default to
+      native. The splice stays as belt-and-suspenders the entire climb.
+
 ### Dependency
 
 rvproxy R2 shipped, and mvm has consumed the subprocess-facing pieces needed for
 native config emission plus flow-audit JSONL refeed. Remaining dependency work
 is the cutover contract: keep the stable `rvproxy gateway parity` check required,
 land the rvproxy transparent-terminator schema/implementation for
-macOS/Vz/libkrun, wire mvm once that schema exists, and only then delete the
-splice and default to the native path.
+macOS/Vz/libkrun (rvproxy `specs/plans/014` §R4), wire mvm once that schema
+exists per the hookup ladder above, and only then delete the splice and default
+to the native path.
 
 ## Cross-repo dependency
 rvproxy `specs/plans/014-mvm-adoption-requirements.md` (mvm-authored requirements)
