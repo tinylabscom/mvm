@@ -11,6 +11,7 @@
 // proxy, vminitd client, and the host-side rootfs snapshot helper.
 
 pub mod egress_proxy;
+pub mod exec_builder;
 pub mod instance_snapshot;
 pub mod lease;
 pub mod name_registry;
