@@ -245,6 +245,92 @@ fn nsurl_from_path(path: &str) -> Retained<NSURL> {
     NSURL::initFileURLWithPath(NSURL::alloc(), &s)
 }
 
+/// Backoff (ms) to wait before the next disk-attach retry, or `None` to give up.
+///
+/// `attempt` is the count of failures so far (0 = first failure). Only
+/// `NSPOSIXErrorDomain` errors retry — those are the transient host-side file
+/// conditions (e.g. `ENOTSUP`/45 on a freshly-made APFS CoW clone or a briefly
+/// contended backing file). Any other domain (a malformed image, an unsupported
+/// format) is permanent and gives up at once. Pure, so the policy is unit-tested
+/// without the Virtualization framework.
+fn disk_attach_backoff_ms(error_domain: &str, attempt: u32) -> Option<u64> {
+    const BACKOFF_MS: [u64; 3] = [50, 150, 400];
+    if error_domain != "NSPOSIXErrorDomain" {
+        return None;
+    }
+    BACKOFF_MS.get(attempt as usize).copied()
+}
+
+/// Give-up message after the disk-attach retries are exhausted.
+///
+/// VZ reports a *missing* disk image as `NSPOSIXErrorDomain` `ENOTSUP`/45
+/// ("Operation not supported") — useless for diagnosis and the cause of every
+/// such failure seen in practice (a purged `MVM_DATA_DIR` under `/tmp`, a stale
+/// snapshot pointing at a deleted rootfs, an un-built image). So when the path
+/// is gone we say so plainly; otherwise we surface the raw VZ error. Pure, so
+/// it is unit-tested without the framework.
+fn disk_attach_giveup_message(disk_id: &str, path: &str, exists: bool, raw_error: &str) -> String {
+    if exists {
+        format!("disk {disk_id:?}: {raw_error}")
+    } else {
+        format!(
+            "disk {disk_id:?}: image not found at {path} \
+             (Apple Virtualization reports a missing disk image as \
+             \"Operation not supported\")"
+        )
+    }
+}
+
+/// Attach a disk image, retrying transient `NSPOSIXErrorDomain` failures.
+///
+/// `VZDiskImageStorageDeviceAttachment` is a host-side file open. It returns a
+/// `NSPOSIXErrorDomain` error in two cases that look identical from the outside
+/// (both `ENOTSUP`/45): a *missing* backing file, and a transient condition on a
+/// freshly-made APFS CoW clone or a briefly contended file. A short bounded
+/// retry (see [`disk_attach_backoff_ms`]) self-heals the transient case — and
+/// covers the window where a per-instance clone is created a beat after the
+/// supervisor starts. When the budget is spent, [`disk_attach_giveup_message`]
+/// turns a still-missing path into a clear "image not found" instead of the
+/// opaque framework error. Each retry is logged so a deterministic failure
+/// stays visible rather than silently masked.
+fn attach_disk_image(
+    path: &str,
+    read_only: bool,
+    disk_id: &str,
+) -> Result<Retained<VZDiskImageStorageDeviceAttachment>> {
+    let url = nsurl_from_path(path);
+    let mut attempt: u32 = 0;
+    loop {
+        // SAFETY: initWithURL_readOnly_error validates the disk image path.
+        let error = match unsafe {
+            VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_error(
+                VZDiskImageStorageDeviceAttachment::alloc(),
+                &url,
+                read_only,
+            )
+        } {
+            Ok(attachment) => return Ok(attachment),
+            Err(error) => error,
+        };
+        let domain = error.domain().to_string();
+        let Some(backoff) = disk_attach_backoff_ms(&domain, attempt) else {
+            let exists = std::path::Path::new(path).exists();
+            return Err(anyhow!(
+                "{}",
+                disk_attach_giveup_message(disk_id, path, exists, &ns_error_to_string(&error))
+            ));
+        };
+        attempt += 1;
+        tracing::warn!(
+            disk = disk_id,
+            attempt,
+            code = error.code(),
+            "vz disk attach failed ({domain}); retrying in {backoff}ms"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(backoff));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // vsock byte stream (guest connection fd → AsyncFd)
 // ---------------------------------------------------------------------------
@@ -1503,16 +1589,7 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
     if !config.disks.is_empty() {
         let mut devices = Vec::with_capacity(config.disks.len());
         for disk in &config.disks {
-            let url = nsurl_from_path(&disk.path);
-            // SAFETY: initWithURL_readOnly_error validates the disk image path.
-            let attachment = unsafe {
-                VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_error(
-                    VZDiskImageStorageDeviceAttachment::alloc(),
-                    &url,
-                    disk.read_only,
-                )
-            }
-            .map_err(|e| anyhow!("disk {:?}: {}", disk.id, ns_error_to_string(&e)))?;
+            let attachment = attach_disk_image(&disk.path, disk.read_only, &disk.id)?;
             // SAFETY: initWithAttachment wraps the attachment in a virtio-block device.
             let device = unsafe {
                 VZVirtioBlockDeviceConfiguration::initWithAttachment(
@@ -2174,5 +2251,58 @@ mod tests {
         // SAFETY: `listener_fd` was opened by `socket` above and is closed exactly
         // once here (the client fd is an `OwnedFd` that closes on drop).
         unsafe { libc::close(listener_fd) };
+    }
+
+    #[test]
+    fn disk_attach_retries_posix_errors_with_growing_backoff() {
+        // The observed transient (ENOTSUP on a fresh APFS clone) is POSIX-domain.
+        assert_eq!(disk_attach_backoff_ms("NSPOSIXErrorDomain", 0), Some(50));
+        assert_eq!(disk_attach_backoff_ms("NSPOSIXErrorDomain", 1), Some(150));
+        assert_eq!(disk_attach_backoff_ms("NSPOSIXErrorDomain", 2), Some(400));
+    }
+
+    #[test]
+    fn disk_attach_gives_up_after_budget_exhausted() {
+        // Three backoffs → three retries, then give up (a deterministic failure
+        // must surface, not loop forever).
+        assert_eq!(disk_attach_backoff_ms("NSPOSIXErrorDomain", 3), None);
+        assert_eq!(disk_attach_backoff_ms("NSPOSIXErrorDomain", 99), None);
+    }
+
+    #[test]
+    fn disk_attach_does_not_retry_non_posix_domains() {
+        // A malformed/unsupported image is permanent — fail fast, don't burn the
+        // budget waiting on something that can't self-heal.
+        assert_eq!(disk_attach_backoff_ms("VZErrorDomain", 0), None);
+        assert_eq!(disk_attach_backoff_ms("NSCocoaErrorDomain", 0), None);
+    }
+
+    #[test]
+    fn disk_attach_giveup_translates_missing_file() {
+        // The real-world cause: VZ's ENOTSUP/45 for an absent path. The message
+        // must name the path and not parrot "Operation not supported".
+        let msg = disk_attach_giveup_message(
+            "rootfs",
+            "/tmp/gone/rootfs.ext4",
+            false,
+            "The operation couldn’t be completed. Operation not supported (NSPOSIXErrorDomain:45)",
+        );
+        assert!(
+            msg.contains("image not found at /tmp/gone/rootfs.ext4"),
+            "{msg}"
+        );
+        assert!(msg.contains("rootfs"), "{msg}");
+    }
+
+    #[test]
+    fn disk_attach_giveup_keeps_raw_error_when_file_present() {
+        // A present-but-unattachable file is a genuine VZ error — surface it.
+        let msg = disk_attach_giveup_message(
+            "nix-store",
+            "/cache/nix.img",
+            true,
+            "boom (VZErrorDomain:7)",
+        );
+        assert_eq!(msg, "disk \"nix-store\": boom (VZErrorDomain:7)");
     }
 }
