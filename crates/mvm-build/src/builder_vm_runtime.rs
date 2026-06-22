@@ -1149,11 +1149,10 @@ pub fn acquire_nix_store_image_lock_named(
 /// exact error from two call sites; lifting it removes the drift risk
 /// if one site changes wording but not the other.
 pub fn supervisor_exit_error(exit_code: i32, vm_state_dir: &Path) -> BuilderVmError {
-    BuilderVmError::NixBuildFailed(format!(
-        "supervisor exited with non-zero status ({exit_code}); \
-         guest stderr at {}",
-        vm_state_dir.display()
-    ))
+    BuilderVmError::SupervisorExited {
+        exit_code,
+        vm_state_dir: vm_state_dir.display().to_string(),
+    }
 }
 
 /// Format the [`BuilderVmError`] returned when the guest's cmd.sh
@@ -1885,10 +1884,22 @@ mod tests {
     #[test]
     fn supervisor_exit_error_names_exit_code_and_state_dir() {
         let err = supervisor_exit_error(42, Path::new("/tmp/vmstate/foo"));
-        let msg = match err {
-            BuilderVmError::NixBuildFailed(s) => s,
+        // Distinct `SupervisorExited` variant (VMM-level failure) so the
+        // builder dispatch can fall back without masking a real build error.
+        let (exit_code, vm_state_dir) = match err {
+            BuilderVmError::SupervisorExited {
+                exit_code,
+                vm_state_dir,
+            } => (exit_code, vm_state_dir),
             other => panic!("wrong variant: {other:?}"),
         };
+        assert_eq!(exit_code, 42);
+        assert_eq!(vm_state_dir, "/tmp/vmstate/foo");
+        // The Display string keeps the operator-facing wording.
+        let msg = format!(
+            "{}",
+            supervisor_exit_error(42, Path::new("/tmp/vmstate/foo"))
+        );
         assert!(msg.contains("non-zero status (42)"), "got: {msg}");
         assert!(msg.contains("/tmp/vmstate/foo"), "got: {msg}");
         assert!(msg.contains("guest stderr at"), "got: {msg}");

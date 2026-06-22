@@ -209,17 +209,23 @@ fn materialize_ext4_in_builder_vm(
         }],
     };
 
-    match ext4_materializer_choice() {
-        BuilderBackendChoice::Libkrun => {
-            LibkrunBuilderVm::default().run_shell_script(&shell_job)?;
+    // Auto-fallback: an auto-detected libkrun materializer that fails at
+    // VM creation on Linux (libkrun rc -22 / `KVM_SET_USER_MEMORY_REGION`)
+    // transparently retries on the qemu builder, which works there. An
+    // explicit `MVM_BUILDER_BACKEND` opts out.
+    let selected = ext4_materializer_choice();
+    let explicit = crate::builder_backend_select::resolve_env_override().is_some();
+    crate::builder_backend_select::run_with_builder_fallback(selected, explicit, |choice| {
+        match choice {
+            BuilderBackendChoice::Libkrun => LibkrunBuilderVm::default()
+                .run_shell_script(&shell_job)
+                .map(|_| ()),
+            BuilderBackendChoice::Qemu => QemuBuilderVm::new()
+                .run_shell_script(&shell_job)
+                .map(|_| ()),
+            BuilderBackendChoice::Vz => VzBuilderVm::new().run_shell_script(&shell_job).map(|_| ()),
         }
-        BuilderBackendChoice::Qemu => {
-            QemuBuilderVm::new().run_shell_script(&shell_job)?;
-        }
-        BuilderBackendChoice::Vz => {
-            VzBuilderVm::new().run_shell_script(&shell_job)?;
-        }
-    }
+    })?;
     Ok(())
 }
 
