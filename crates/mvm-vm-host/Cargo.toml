@@ -38,6 +38,15 @@ path = "src/bin/mvm-vz-drainer.rs"
 name = "mvm-firecracker-bridge"
 path = "src/bin/mvm-firecracker-bridge.rs"
 
+# Shared per-VM bridge sidecar — folds the mvm-firecracker-bridge (Passt) and
+# mvm-vz-drainer (VzIngest) sidecars into one. Cross-platform (not a
+# whole-binary cfg gate): the Passt arm is Linux-only and confined, the
+# VzIngest arm is macOS; per-arm cfg gating lives inside. The old per-backend
+# bins stay until their callers are moved over.
+[[bin]]
+name = "mvm-bridge"
+path = "src/bin/mvm-bridge.rs"
+
 # Rust-native Vz supervisor — the objc2 reimplementation of the (removed)
 # Swift supervisor. macOS-only at runtime; the bin self-gates
 # to a stub main() on other targets so non-macOS workspace builds stay green.
