@@ -1264,10 +1264,23 @@ impl BuilderVmImage {
 /// pre-populated with the variant's kernel cmdline (where applicable).
 /// `RootDir` images carry no cmdline — libkrun handles `set_root`
 /// mode without one.
-/// Page size KVM's `KVM_SET_USER_MEMORY_REGION` aligns to (4 KiB on x86_64 /
-/// aarch64 Linux, where the bug below manifests; larger guest pages are still
-/// multiples of it).
-const KVM_REGION_ALIGN: u64 = 4096;
+/// The alignment KVM's `KVM_SET_USER_MEMORY_REGION` enforces: the **host** page
+/// size. 4 KiB on x86_64 and 4K-page aarch64, but 16 KiB / 64 KiB aarch64 hosts
+/// exist (RHEL/CentOS 64K-page kernels), where a kernel aligned only to 4 KiB
+/// still trips `EINVAL`. Query `sysconf(_SC_PAGESIZE)` so the padding is correct
+/// on every host instead of assuming 4 KiB; fall back to 4 KiB only if the query
+/// is unavailable.
+fn host_page_size() -> u64 {
+    #[cfg(unix)]
+    {
+        // SAFETY: `sysconf` is a side-effect-free query with no preconditions.
+        let v = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if v > 0 {
+            return v as u64;
+        }
+    }
+    4096
+}
 
 /// Round `n` up to the next multiple of `align`.
 fn align_up(n: u64, align: u64) -> u64 {
@@ -1286,6 +1299,10 @@ fn align_up(n: u64, align: u64) -> u64 {
 /// `vmlinux.page-aligned`) created next to it and reused across builds. Trailing
 /// zeros are safe — libkrun loads the kernel from its own headers; the padded
 /// tail is unused guest RAM.
+///
+/// Scope: only the external-`vmlinux` (`Rootfs`) path runs this. `RootDir` /
+/// Stage 0 boots use libkrun's bundled libkrunfw kernel via `set_kernel`, which
+/// libkrun maps itself — they never reach here and need no padding.
 fn page_aligned_kernel(kernel_path: &Path) -> Result<PathBuf, BuilderVmError> {
     if !cfg!(target_os = "linux") {
         return Ok(kernel_path.to_path_buf());
@@ -1298,10 +1315,11 @@ fn page_aligned_kernel(kernel_path: &Path) -> Result<PathBuf, BuilderVmError> {
             ))
         })?
         .len();
-    if size.is_multiple_of(KVM_REGION_ALIGN) {
+    let align = host_page_size();
+    if size.is_multiple_of(align) {
         return Ok(kernel_path.to_path_buf());
     }
-    let aligned_size = align_up(size, KVM_REGION_ALIGN);
+    let aligned_size = align_up(size, align);
     let aligned_path = kernel_path.with_extension("page-aligned");
     if !aligned_copy_is_current(&aligned_path, aligned_size, kernel_path) {
         write_zero_padded_copy(kernel_path, &aligned_path, aligned_size)?;
@@ -1323,15 +1341,18 @@ fn aligned_copy_is_current(aligned_path: &Path, aligned_size: u64, source: &Path
 }
 
 /// Copy `source` to `dest` and zero-extend it to `padded_size` (`set_len`
-/// zero-fills the tail). Written to a temp sibling then renamed so a concurrent
-/// reader never sees a half-written kernel.
+/// zero-fills the tail). Written to a process-unique temp sibling then renamed
+/// onto `dest`, so a concurrent reader never sees a half-written kernel and two
+/// builders sharing a cache dir don't interleave each other's copy/extend on a
+/// shared `.tmp` path — each writes its own `.tmp.<pid>` and the final rename is
+/// atomic (last-writer-wins; both produce byte-identical padded copies).
 fn write_zero_padded_copy(
     source: &Path,
     dest: &Path,
     padded_size: u64,
 ) -> Result<(), BuilderVmError> {
     let mut tmp = dest.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".tmp.{}", std::process::id()));
     let tmp = PathBuf::from(tmp);
     std::fs::copy(source, &tmp).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
@@ -2562,8 +2583,23 @@ mod tests {
         assert_eq!(padded.len(), 8192, "padded to the page boundary");
         assert_eq!(&padded[..5000], &body[..], "original bytes preserved");
         assert!(padded[5000..].iter().all(|&b| b == 0), "tail zero-filled");
-        // The temp sibling is renamed away, not left behind.
-        assert!(!dir.path().join("vmlinux.page-aligned.tmp").exists());
+        // The process-unique temp sibling is renamed away, not left behind.
+        let leftover_tmp = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains(".page-aligned.tmp")
+            });
+        assert!(!leftover_tmp, "no .tmp.<pid> sibling left behind");
+    }
+
+    #[test]
+    fn host_page_size_is_a_sane_page() {
+        let p = host_page_size();
+        assert!(p >= 4096, "page size {p} unexpectedly small");
+        assert!(p.is_power_of_two(), "page size {p} not a power of two");
     }
 
     #[cfg(unix)]
@@ -2602,7 +2638,9 @@ mod tests {
     fn page_aligned_kernel_passes_through_when_already_aligned() {
         let dir = TempDir::new().unwrap();
         let k = dir.path().join("vmlinux");
-        std::fs::write(&k, vec![0u8; 8192]).unwrap(); // multiple of 4096
+        // A whole number of host pages is aligned by construction on any host.
+        let aligned_len = (host_page_size() * 2) as usize;
+        std::fs::write(&k, vec![0u8; aligned_len]).unwrap();
         // Already aligned → original path, no sibling created.
         assert_eq!(page_aligned_kernel(&k).unwrap(), k);
         assert!(!dir.path().join("vmlinux.page-aligned").exists());
@@ -2615,10 +2653,13 @@ mod tests {
     fn page_aligned_kernel_pads_unaligned_on_linux() {
         let dir = TempDir::new().unwrap();
         let k = dir.path().join("vmlinux");
-        std::fs::write(&k, vec![7u8; 5000]).unwrap(); // not a multiple of 4096
+        // 5000 is not a whole number of pages on any real page size (4K/16K/64K).
+        let raw = 5000u64;
+        std::fs::write(&k, vec![7u8; raw as usize]).unwrap();
         let aligned = page_aligned_kernel(&k).unwrap();
         assert_eq!(aligned, dir.path().join("vmlinux.page-aligned"));
-        assert_eq!(std::fs::metadata(&aligned).unwrap().len(), 8192);
+        let expected = align_up(raw, host_page_size());
+        assert_eq!(std::fs::metadata(&aligned).unwrap().len(), expected);
     }
 
     fn ok_mounts(scratch: &TempDir) -> BuilderMounts {

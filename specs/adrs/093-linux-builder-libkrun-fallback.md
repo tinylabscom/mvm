@@ -128,11 +128,20 @@ ioctl(KVM_SET_USER_MEMORY_REGION, {slot=1, guest_phys_addr=0x80000000,
 `8963072 % 4096 = 1024` — **not page-aligned**. Linux KVM requires
 `KVM_SET_USER_MEMORY_REGION` sizes to be a multiple of the host page size; mvm
 passed the kernel to libkrun (`krun_set_kernel`), which maps it verbatim, so an
-unaligned `vmlinux` fails VM creation regardless of guest RAM (the earlier
-"2 GiB boots past it" reading was a coincidence of layout). macOS HVF imposes no
-such requirement — which is why the identical (also-unaligned) aarch64 builder
+unaligned `vmlinux` fails VM creation regardless of guest RAM. macOS HVF imposes
+no such requirement — which is why the identical (also-unaligned) aarch64 builder
 kernel boots under libkrun on macOS. So this **is** an mvm-addressable bug, not
 purely a libkrun/kernel defect.
+
+On the **"2 GiB boots past it" anomaly**: the rejected region is slot 1, the
+*kernel*, whose size is the `vmlinux` file size — independent of how much guest
+RAM is configured. So a smaller-RAM run must hit `EINVAL` at this *same* ioctl;
+guest-RAM size cannot explain the difference. The earlier "2 GiB boots" reading
+was never reproduced under `strace` and is **not** explained by this root cause —
+most plausibly that run used a different, already-aligned kernel build (or never
+reached slot 1 for an unrelated reason). We record it as an unexplained prior
+observation rather than attribute a mechanism we can't substantiate; the
+strace-confirmed alignment defect above is the real, reproduced cause.
 
 **Fix:** `mvm_build::libkrun_builder::page_aligned_kernel` zero-pads the builder
 kernel up to a page boundary (a cached `vmlinux.page-aligned` sibling) before
