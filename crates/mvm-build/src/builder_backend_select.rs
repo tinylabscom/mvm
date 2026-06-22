@@ -185,7 +185,19 @@ pub fn resolve_builder_backend_with_override(
 /// `verbose` streams the libkrun console; the QEMU path always logs to
 /// `console.log`.
 pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
-    match resolve_choice() {
+    resolve_stage0_backend_for_choice(resolve_choice(), verbose)
+}
+
+/// Stage 0 driver for an explicit `choice` — used by the auto-fallback loop to
+/// construct the next backend to try. QEMU when chosen; libkrun for everything
+/// else (Vz Stage 0 is a gap, and the "Stage 0 is libkrun even on Vz-default
+/// hosts" invariant holds — and the Linux fallback order only ever yields
+/// libkrun→qemu, never Vz).
+pub fn resolve_stage0_backend_for_choice(
+    choice: BuilderBackendChoice,
+    verbose: bool,
+) -> Box<dyn BuilderVm> {
+    match choice {
         BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
         _ => Box::new(LibkrunBuilderVm::default().with_verbose(verbose)),
     }

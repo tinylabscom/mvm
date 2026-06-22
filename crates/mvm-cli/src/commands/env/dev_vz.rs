@@ -2817,7 +2817,7 @@ fn run_stage0_rootfs_with_external_kernel(
     source_fingerprint: &str,
     verbose: bool,
 ) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
-    use mvm_build::builder_backend_select::resolve_stage0_backend;
+    use mvm_build::builder_backend_select as bbs;
 
     // Build only the rootfs (`stage0-rootfs`, no kernel in $out).
     std::fs::write(
@@ -2831,21 +2831,25 @@ fn run_stage0_rootfs_with_external_kernel(
         )
     })?;
 
-    let backend = resolve_stage0_backend(verbose);
-    backend
-        .run_stage0(
+    // Auto-fallback to qemu when an auto-detected libkrun fails to create its
+    // Stage 0 VM on Linux (rc -22); explicit `--builder` opts out.
+    let selected = bbs::resolve_choice();
+    let explicit = bbs::resolve_env_override().is_some();
+    bbs::run_with_builder_fallback(selected, explicit, |choice| {
+        bbs::resolve_stage0_backend_for_choice(choice, verbose).run_stage0(
             guest_root_dir,
             "/init",
             workspace_root,
             staging_dir,
             host_bin_dir,
         )
-        .map_err(|e| {
-            (
-                Stage0FailureStage::Build,
-                anyhow::anyhow!("Stage 0 rootfs build: {e}"),
-            )
-        })?;
+    })
+    .map_err(|e| {
+        (
+            Stage0FailureStage::Build,
+            anyhow::anyhow!("Stage 0 rootfs build: {e}"),
+        )
+    })?;
 
     // Pair the externally-acquired kernel as the image's vmlinux. The
     // published builder kernel is the same flake derivation `default`
@@ -2980,7 +2984,7 @@ pub(crate) fn build_kernel_via_stage0(
     ));
 
     {
-        use mvm_build::builder_backend_select::resolve_stage0_backend;
+        use mvm_build::builder_backend_select as bbs;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -3009,14 +3013,19 @@ pub(crate) fn build_kernel_via_stage0(
             }))
         };
 
-        let backend = resolve_stage0_backend(verbose);
-        let result = backend.run_stage0(
-            &root_dir,
-            "/init",
-            &workspace_root,
-            &staging_dir,
-            &host_bin_dir,
-        );
+        // Auto-fallback to qemu when an auto-detected libkrun fails to create
+        // its Stage 0 VM on Linux (rc -22); explicit `--builder` opts out.
+        let selected = bbs::resolve_choice();
+        let explicit = bbs::resolve_env_override().is_some();
+        let result = bbs::run_with_builder_fallback(selected, explicit, |choice| {
+            bbs::resolve_stage0_backend_for_choice(choice, verbose).run_stage0(
+                &root_dir,
+                "/init",
+                &workspace_root,
+                &staging_dir,
+                &host_bin_dir,
+            )
+        });
 
         stop.store(true, Ordering::Relaxed);
         if let Some(handle) = heartbeat {
@@ -3058,31 +3067,36 @@ fn run_stage0_root_dir(
     source_fingerprint: &str,
     verbose: bool,
 ) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
-    use mvm_build::builder_backend_select::resolve_stage0_backend;
+    use mvm_build::builder_backend_select as bbs;
 
-    // Dispatch Stage 0 through the `BuilderVm` trait.
-    // `resolve_stage0_backend` uses QEMU when explicitly chosen
-    // (`MVM_BUILDER_BACKEND=qemu`) and **libkrun otherwise** — including the
-    // Vz auto-detect default on macOS-26+, since Vz Stage 0 is still a gap.
+    // Dispatch Stage 0 through the `BuilderVm` trait. QEMU when explicitly
+    // chosen (`MVM_BUILDER_BACKEND=qemu`) and **libkrun otherwise** — including
+    // the Vz auto-detect default on macOS-26+, since Vz Stage 0 is still a gap.
     // That preserves the "Stage 0 is libkrun even on Vz-default hosts"
-    // invariant while adding QEMU as the second implemented backend.
-    // `verbose` makes the backend forward the in-guest nix `--print-build-logs`
-    // output (already streamed to the guest console) live to the host stderr.
-    let backend = resolve_stage0_backend(verbose);
-    backend
-        .run_stage0(
+    // invariant. `verbose` forwards the in-guest nix `--print-build-logs`
+    // output to host stderr.
+    //
+    // Auto-fallback: an auto-detected libkrun that fails to create its Stage 0
+    // VM on Linux (rc -22 / `KVM_SET_USER_MEMORY_REGION`) transparently retries
+    // on qemu; a genuine build error surfaces unchanged. Explicit
+    // `--builder`/`MVM_BUILDER_BACKEND` opts out.
+    let selected = bbs::resolve_choice();
+    let explicit = bbs::resolve_env_override().is_some();
+    bbs::run_with_builder_fallback(selected, explicit, |choice| {
+        bbs::resolve_stage0_backend_for_choice(choice, verbose).run_stage0(
             guest_root_dir,
             entry_path,
             workspace_root,
             staging_dir,
             host_bin_dir,
         )
-        .map_err(|e| {
-            (
-                Stage0FailureStage::Build,
-                anyhow::anyhow!("Stage 0 root-dir build: {e}"),
-            )
-        })?;
+    })
+    .map_err(|e| {
+        (
+            Stage0FailureStage::Build,
+            anyhow::anyhow!("Stage 0 root-dir build: {e}"),
+        )
+    })?;
 
     // Refuse to promote a rootfs the steady-state VM can't boot: walk the
     // freshly-built ext4 and confirm the `init=` target is present.
