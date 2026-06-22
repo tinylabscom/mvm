@@ -86,8 +86,6 @@ pub(in crate::commands) enum Commands {
     Doctor(env::doctor::Args),
     /// List running VMs
     Ls(vm::ps::Args),
-    /// Call a VM's baked entrypoint
-    Invoke(vm::invoke::Args),
     /// Prepare the environment + pre-fetch the builder VM image
     ///
     /// Runs host-tooling setup and pre-acquires the builder VM image so the
@@ -317,7 +315,6 @@ pub fn run() -> Result<()> {
         Commands::Pool(a) => pool::run(&cli, a, &cfg),
         Commands::Reconcile(a) => ops::reconcile::run(&cli, a, &cfg),
         Commands::Init(a) => env::init::run(&cli, a, &cfg),
-        Commands::Invoke(a) => vm::invoke::run(&cli, a, &cfg),
         Commands::Secret(a) => ops::secret::run(&cli, a, &cfg),
         Commands::Bundle(a) => bundle::run(&cli, a, &cfg),
         Commands::Trust(a) => trust::run(&cli, a, &cfg),

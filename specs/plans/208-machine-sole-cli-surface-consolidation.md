@@ -223,28 +223,36 @@ two more axes so all three compose freely:
 ### Staging (each sub-step green)
 
 Land in two commits inside Task 4 if the whole is large:
-1. **Source axis** — add `--flake`/`--manifest` to `machine run` composing with
-   lifecycle; retire `up` + `run`. (`--entrypoint` not yet.)
-2. **Action axis** — add `--entrypoint` (+ invoke flags); retire `invoke`.
+1. [x] **Source axis** — add `--flake`/`--manifest` to `machine run` composing
+   with lifecycle; retire `up` + `run`. (`--entrypoint` not yet.)
+2. [x] **Action axis** — add `--entrypoint` (+ `--stdin`/`--fresh`/`--reset`/
+   `--from-workload-ir`/`--attach`); retire `invoke`. The runner
+   (`vm::invoke::run_entrypoint` + `EntrypointCall`) is reused, not forked; the
+   `--no-vm` host-side dev shortcut and the `--session`/`--fn`/`--keep-alive`
+   SDK-transport flags were dropped from the surface (`-d`/`--name` ⇒ warm
+   session; SDK wrappers move to the new surface in Task 8). `--image
+   --entrypoint` is rejected (OCI images run their own command via the argv
+   action).
 
 ### Tests (TDD)
 
-- [ ] `machine_run_source_flags_parse`: `--image`/`--manifest`/`--flake` each
-  parse; any two together → clap `ArgumentConflict`.
-- [ ] `machine_run_flake_builds_then_runs`: `machine run --flake . -d` resolves
-  the source to the build step and then the Persistent lifecycle (assert the
-  resolved source enum + `MachineRunMode::Persistent`, no separate up path).
-- [ ] `machine_run_entrypoint_conflicts_with_argv`: `--entrypoint -- cmd` →
-  conflict; `--entrypoint` alone selects the entrypoint action.
-- [ ] `up_removed`/`run_removed`/`invoke_removed`: each → `InvalidSubcommand`.
-- [ ] Behaviour parity: a `--flake` build-and-run yields the same artifact as
-  old `up`; an `--entrypoint` call matches old `invoke` (reuse their existing
-  handler tests against the new entry points).
-- [ ] Audit: run the workspace audit suite (`nextest --workspace -E
-  'test(/audit/)'`) — removing `up`/`run`/`invoke` will need
-  `audit_total_coverage` + `audit_emissions_live` updated (stale top-level
-  entries; their postures move under `machine`'s `--entrypoint`/source paths as
-  appropriate). Keep `machine`'s `cmd.machine.*` verb behaviour.
+- [x] `machine_run_source_flags_parse[_and_conflict]`: `--image`/`--manifest`/
+  `--flake` each parse; any two together → clap `ArgumentConflict`.
+- [x] `machine_run_flake_[builds_then_runs]resolves_to_persistent_lifecycle`:
+  `machine run --flake . -d` resolves the source to the build step and then the
+  Persistent lifecycle (no separate up path).
+- [x] `machine_run_entrypoint_conflicts_with_argv`: `--entrypoint -- cmd` →
+  conflict; `--entrypoint` alone selects the entrypoint action. Plus
+  `machine_run_entrypoint_flag_parses`, `_flags_require_entrypoint`,
+  `_from_workload_ir_parses`, `_attach_parses_and_requires_name`,
+  `_conflicts_with_interactive`.
+- [x] `up_removed`/`run_removed`/`invoke_removed`: each → `InvalidSubcommand`.
+- [x] Behaviour parity: `--entrypoint` reuses the old `invoke` runner
+  (`run_entrypoint` + its `exit_code`/`stdin`/`substitution_env` unit tests,
+  retained); the `invoke` clap-parse tests moved onto `MachineRunArgs`.
+- [x] Audit: `audit_total_coverage` top-level `invoke` row removed (posture now
+  lives under `machine run --entrypoint`); `audit_emissions_live` unchanged.
+  Suite green.
 - [ ] `just ci`; commit(s) per the staging above.
 
 **Done when:** `up`/`run`/`invoke` no longer parse; `machine run` covers OCI /

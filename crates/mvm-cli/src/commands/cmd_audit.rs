@@ -216,7 +216,6 @@ impl Commands {
             Commands::Pool(_) => "pool",
             Commands::Reconcile(_) => "reconcile",
             Commands::Init(_) => "init",
-            Commands::Invoke(_) => "invoke",
             Commands::Secret(_) => "secret",
             Commands::Bundle(_) => "bundle",
             // `trust <sub>` delegates: attest/receipt/audit keep their own

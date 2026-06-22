@@ -56,6 +56,9 @@ pub(in crate::commands) struct Args {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+// Run carries the full machine-run CLI surface (source + lifecycle + action
+// axes); boxing it breaks the Clap `Subcommand` derive, same as `Commands`.
+#[allow(clippy::large_enum_variant)]
 pub(in crate::commands) enum MachineAction {
     /// Boot an OCI image, run a command, then tear the VM down
     #[command(display_order = 1)]
@@ -214,6 +217,42 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Skip plan-admission signing (hidden; for testing only).
     #[arg(long, hide = true)]
     pub no_supervisor: bool,
+    // ── Action axis: --entrypoint dispatches the image's baked entrypoint ──
+    /// Call the image's baked `/etc/mvm/entrypoint` instead of running argv —
+    /// the production-safe call surface (no shell, no argv override): dispatches
+    /// the `RunEntrypoint` vsock verb. Source must be `--manifest`/`--flake`
+    /// (OCI `--image` runs its own command via the default argv action).
+    /// Conflicts with a trailing `-- <argv>` and with the interactive shell.
+    #[arg(long, conflicts_with_all = ["argv", "tty", "interactive"])]
+    pub entrypoint: bool,
+    /// Entrypoint stdin payload: a file path, or `-` for mvmctl's own stdin.
+    /// Omit for the no-argument call. Requires `--entrypoint`.
+    #[arg(long, value_name = "PATH", requires = "entrypoint")]
+    pub stdin: Option<String>,
+    /// Boot a fresh transient VM for the entrypoint call (the current default;
+    /// wired so a future warm-session default can be opted out of). Requires
+    /// `--entrypoint`.
+    #[arg(long, requires = "entrypoint", conflicts_with = "reset")]
+    pub fresh: bool,
+    /// Restore the session VM from its post-boot snapshot before the entrypoint
+    /// call. Wired but no-op in this build. Requires `--entrypoint`.
+    #[arg(long, requires = "entrypoint")]
+    pub reset: bool,
+    /// Workload IR (`workload.json`) declaring `.secrets` for the entrypoint
+    /// call: the ephemeral VM is admitted so the host spawns the substitution
+    /// endpoint and egress gets the real credential (the guest holds only the
+    /// opaque placeholder). Requires `--entrypoint`.
+    #[arg(long, value_name = "PATH", requires = "entrypoint")]
+    pub from_workload_ir: Option<PathBuf>,
+    /// Dispatch the entrypoint into an already-running named machine (booted by
+    /// `machine run --name <NAME>`) instead of a transient VM, reusing its
+    /// substitution endpoint. Requires `--entrypoint` + `--name`.
+    #[arg(
+        long,
+        requires_all = ["entrypoint", "name"],
+        conflicts_with_all = ["image", "manifest", "flake", "fresh", "reset", "detach"]
+    )]
+    pub attach: bool,
     /// Argv to run inside the guest (use `--` to separate). Optional for
     /// persistent (`-d`/`--name`) and interactive (`-t`) modes; required for a
     /// plain transient run.
@@ -2141,6 +2180,54 @@ fn run_persistent_post_start(
     Ok(())
 }
 
+/// The entrypoint action: dispatch the image's baked `/etc/mvm/entrypoint` (the
+/// production-safe call surface) instead of argv. Reuses the shared
+/// `vm::invoke::run_entrypoint` runner — no boot/send logic is duplicated here.
+/// The source (`--manifest`, the built `--flake` slot, or the running machine
+/// name under `--attach`) and the lifecycle (`-d`/`--name` ⇒ warm session;
+/// default ⇒ transient boot + teardown) are mapped from the parsed flags.
+/// `--image` is rejected: OCI images carry their own process model and run via
+/// the default argv action, not a baked entrypoint.
+fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<String>) -> Result<()> {
+    if args.image.is_some() {
+        bail!(
+            "machine run --entrypoint dispatches a manifest/flake image's baked \
+             /etc/mvm/entrypoint; an OCI --image runs its own command via the \
+             default argv action — drop --entrypoint"
+        );
+    }
+    let source = if args.attach {
+        // `--attach` reinterprets the target as an already-running machine name.
+        resolve_machine_run_name(&args)?
+    } else if let Some(slot) = resolved_flake_slot {
+        slot
+    } else if let Some(manifest) = args.manifest.clone() {
+        manifest
+    } else {
+        bail!(
+            "machine run --entrypoint needs `--manifest <path>` or `--flake <path>` \
+             (or `--attach --name <NAME>` to dispatch into a running machine)"
+        );
+    };
+    let (memory_mib, _) = validate_machine_memory(&args.memory, None)?;
+    super::vm::invoke::run_entrypoint(super::vm::invoke::EntrypointCall {
+        source,
+        stdin: args.stdin.clone(),
+        timeout: args.timeout.unwrap_or(30),
+        cpus: args.cpus,
+        memory_mib,
+        from_workload_ir: args.from_workload_ir.clone(),
+        reset: args.reset,
+        // Persistence axis (`-d`/`--name`) ⇒ keep the substrate VM warm after
+        // the call (the warm-session lifecycle). Default ⇒ transient teardown.
+        keep_alive: args.persistent(),
+        keep_alive_dev: false,
+        session: None,
+        r#fn: None,
+        attach: args.attach,
+    })
+}
+
 /// Dispatch `machine run` to one of the three flag-selected lifecycles. The
 /// transient default routes into the unchanged `run_secure`; persistence and
 /// interactivity compose the existing machine verbs.
@@ -2158,6 +2245,14 @@ fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<
     } else {
         None
     };
+
+    // Action axis: `--entrypoint` dispatches the image's baked entrypoint
+    // (production-safe call surface) instead of argv. It has its own lifecycle
+    // (transient / warm-session / attach-into-running) reused from the shared
+    // runner, so it short-circuits before the argv lifecycle dispatch below.
+    if args.entrypoint {
+        return run_entrypoint_action(args, resolved_flake_slot);
+    }
 
     match args.resolve_mode()? {
         MachineRunMode::Transient => {

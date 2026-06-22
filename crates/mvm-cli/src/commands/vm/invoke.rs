@@ -1,229 +1,114 @@
-//! `mvmctl invoke` — boot a microVM and call its baked entrypoint.
+//! The baked-entrypoint call action — boot a microVM and dispatch its
+//! `/etc/mvm/entrypoint` over vsock. Reached via `machine run --entrypoint`.
 //!
-//! Distinct from `mvmctl exec` (dev-only, arbitrary shell). `invoke`
-//! is the production-safe call surface — it dispatches the
-//! `RunEntrypoint` vsock verb, which the guest agent serves only by
-//! spawning the program named in `/etc/mvm/entrypoint`. There is no
-//! shell and no argv override. The only env injected is the
-//! substitution env — `HTTP_PROXY` + the opaque secret placeholders —
-//! and only when the VM's admitted plan carried secrets; never a raw
-//! secret value (those stay in the host substitution endpoint).
+//! Distinct from `mvmctl machine exec` (dev-only, arbitrary shell). This is
+//! the production-safe call surface — it dispatches the `RunEntrypoint` vsock
+//! verb, which the guest agent serves only by spawning the program named in
+//! `/etc/mvm/entrypoint`. There is no shell and no argv override. The only env
+//! injected is the substitution env — `HTTP_PROXY` + the opaque secret
+//! placeholders — and only when the VM's admitted plan carried secrets; never
+//! a raw secret value (those stay in the host substitution endpoint).
 //!
-//! v1 behaviour:
-//!   - boots a transient microVM from a registered template,
+//! Behaviour:
+//!   - boots a transient microVM from a registered template / manifest slot
+//!     (or, with `attach`, dispatches into an already-running named machine),
 //!   - waits for the guest agent,
 //!   - reads stdin from a file (`-` = mvmctl's own stdin, default empty),
 //!   - sends `GuestRequest::RunEntrypoint`,
 //!   - streams `EntrypointEvent::Stdout` / `Stderr` events back to
 //!     mvmctl's own stdout / stderr as they arrive,
-//!   - tears the VM down,
+//!   - tears the VM down (unless `keep_alive`),
 //!   - exits with the wrapper's exit code (or non-zero on error).
 //!
-//! `--fresh` and `--reset` are accepted but informational in v1 — the
-//! current behaviour matches `--fresh` (no warm session reuse). When
-//! the session-pool plan lands, the default flips to "reuse warm VM"
-//! and `--fresh` becomes the opt-out for callers who need a clean
-//! VM per call.
+//! `fresh` and `reset` are accepted but informational — the current behaviour
+//! matches `fresh` (no warm session reuse). When the session-pool plan lands,
+//! the default flips to "reuse warm VM" and `fresh` becomes the opt-out.
 
 use std::io::{Read, Write};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::Args as ClapArgs;
 
-use mvm_core::user_config::MvmConfig;
-
-use super::Cli;
 use crate::ui;
 
-#[derive(ClapArgs, Debug, Clone)]
-pub(in crate::commands) struct Args {
-    /// Template (or pre-built manifest) to boot. Resolves the same way
-    /// as `mvmctl exec --manifest <ARG>` (registered name, manifest
-    /// path, or manifest directory). Required for v1; warm-session
-    /// reuse and arbitrary VM-name targeting come with the
-    /// session-pool plan.
-    #[arg(value_name = "MANIFEST")]
-    pub manifest: String,
-
-    /// Path to stdin payload, or `-` for mvmctl's own stdin. Default:
-    /// no stdin (the wrapper sees an empty pipe).
-    #[arg(long, value_name = "PATH")]
+/// One baked-entrypoint call, decoupled from clap so the `machine run`
+/// lifecycle dispatcher can drive it directly. `machine run --entrypoint`
+/// builds this from `MachineRunArgs` (source → `source`, `-d`/`--name` →
+/// `keep_alive`, `--attach` → `attach`); there is no separate `invoke` verb.
+pub(in crate::commands) struct EntrypointCall {
+    /// Template name / pre-built manifest slot to boot, resolved the same way
+    /// as `machine exec --manifest`. With `attach`, this is the running VM's
+    /// name instead.
+    pub source: String,
+    /// Path to stdin payload, or `-` for mvmctl's own stdin. `None` ⇒ the
+    /// no-argument call payload.
     pub stdin: Option<String>,
-
-    /// Wall-clock timeout for the call, in seconds. Default 30.
-    #[arg(long, default_value = "30")]
+    /// Wall-clock timeout for the call, in seconds.
     pub timeout: u64,
-
-    /// vCPU count for the booted VM. Default 2.
-    #[arg(long, default_value = "2")]
+    /// vCPU count for the booted VM.
     pub cpus: u32,
-
-    /// Memory for the booted VM (MiB). Default 512.
-    #[arg(long, default_value = "512")]
+    /// Memory for the booted VM (MiB).
     pub memory_mib: u32,
-
-    /// Path to the workload's IR (`workload.json`) declaring its
-    /// `.secrets`. When set, the ephemeral VM is booted through plan admission
-    /// so the host spawns the substitution endpoint and the workload's egress
-    /// gets the real credential — while the guest only ever holds the opaque
-    /// `mvm-secret-<hex>` placeholder. Omit for a plain (no-secret) invoke.
-    #[arg(long)]
-    pub from_workload_ir: Option<std::path::PathBuf>,
-
-    /// Boot a fresh transient VM, run the call, tear down (the v1
-    /// default — wired explicitly so future versions can flip the
-    /// default to warm-session reuse without breaking scripts).
-    #[arg(long, conflicts_with = "reset")]
-    pub fresh: bool,
-
-    /// Restore the session VM from its post-boot snapshot before the
-    /// next call. Wired but no-op in v1; lands with the session-pool
-    /// plan.
-    #[arg(long)]
+    /// Workload IR (`workload.json`) declaring `.secrets`. When set, the
+    /// ephemeral VM is admitted so the host spawns the substitution endpoint;
+    /// the guest only ever holds the opaque `mvm-secret-<hex>` placeholder.
+    pub from_workload_ir: Option<PathBuf>,
+    /// Restore the session VM from its post-boot snapshot before the call.
+    /// Wired but no-op in this build (session-pool plan).
     pub reset: bool,
-
-    /// Keep the substrate VM alive after the call finishes, leaving
-    /// a persistent session that subsequent `mvmctl session attach
-    /// <id>` calls can dispatch into. The session id is printed on
-    /// stderr (`Session kept alive: <id>`) for easy capture. Without
-    /// this flag, the VM is torn down immediately after the call —
-    /// the default behaviour.
-    #[arg(long)]
+    /// Keep the substrate VM alive after the call (warm session). The session
+    /// id is printed on stderr. Mapped from `machine run`'s persistence axis.
     pub keep_alive: bool,
-
-    /// Mark the kept-alive session as `mode=dev` so subsequent
-    /// `mvmctl session exec` / `run-code` calls are allowed. Has no
-    /// effect without `--keep-alive`. Refused on prod-only
-    /// substrates by the wrapper itself if dev capabilities aren't
-    /// compiled in.
-    #[arg(long, requires = "keep_alive")]
+    /// Mark the kept-alive session `mode=dev` so subsequent `session exec` /
+    /// `run-code` are allowed. No effect without `keep_alive`.
     pub keep_alive_dev: bool,
-
-    /// Attach this call to an existing warm session id. The Python /
-    /// TypeScript SDKs pass this when a user wraps `f.remote(...)` in
-    /// an `mv.session(...)` context manager, so multiple back-to-back
-    /// calls reuse the same warm VM. The flag is accepted so the SDK's
-    /// argv doesn't get rejected at parse time, but routing into an
-    /// existing session isn't wired yet by the session-pool path. A
-    /// non-empty value prints a warning and the call falls back to the
-    /// transient-VM path.
-    #[arg(long, value_name = "ID")]
+    /// Attach this call to an existing warm session id (SDK `mv.session(...)`).
+    /// Accepted but no-op in this build; a non-empty value warns and falls
+    /// back to the transient path.
     pub session: Option<String>,
-
-    /// Dispatch into a specific function within a multi-function app.
-    /// Single-function apps ignore the selector because their primary
-    /// entrypoint is the only one. The flag is accepted so the SDK's argv
-    /// (`--fn <name>` from `WorkloadRef.attr(...)`) doesn't get
-    /// rejected; actual routing lands when per-function dispatch is wired
-    /// on the agent side.
-    #[arg(long, value_name = "NAME")]
+    /// Dispatch into a specific function within a multi-function app. Accepted
+    /// so SDK argv survives; routing lands with per-function dispatch.
     pub r#fn: Option<String>,
-
-    /// Dispatch into an **already-running** workload (e.g. one booted by
-    /// `mvmctl up --name <NAME>`) instead of booting a transient VM. The
-    /// positional `MANIFEST` is reinterpreted as the running VM's name. The
-    /// workload's substitution endpoint + its boot-minted placeholders
-    /// are reused, so a secret-declaring `up` workload's
-    /// entrypoint runs with live egress substitution. The VM is left running
-    /// (no teardown) — reap it with `mvmctl machine stop <NAME>`.
-    #[arg(long, conflicts_with_all = ["keep_alive", "fresh", "reset", "no_vm"])]
+    /// Dispatch into an **already-running** machine (booted by
+    /// `machine run --name <NAME>`) instead of booting a transient VM. `source`
+    /// is the running VM's name. Its substitution endpoint + boot-minted
+    /// placeholders are reused; the VM is left running (no teardown).
     pub attach: bool,
-
-    /// **Dev shortcut** — bypass VM boot and run the workload's
-    /// wrapper directly on the host. Exercises the full wire contract
-    /// (encode → wrapper → user function → encode → decode) without
-    /// any Nix or virtualization. The
-    /// `--language` / `--module` / `--function` / `--format` /
-    /// `--source-path` flags below carry the per-call info the SDK
-    /// would normally bake into `/etc/mvm/wrapper.json` at image
-    /// build time; the positional manifest argument is accepted but
-    /// ignored.
-    ///
-    /// **Not for production.** None of the in-VM hardening
-    /// (seccomp tier, namespace isolation, RLIMIT_CORE) applies. Use
-    /// for SDK iteration, CI smoke, and dev loops on machines
-    /// without Linux/KVM/Lima.
-    #[arg(long)]
-    pub no_vm: bool,
-
-    /// Wrapper language for `--no-vm`. Maps directly to the IR
-    /// `Entrypoint::Function.language` field. Required when
-    /// `--no-vm` is set; ignored otherwise.
-    #[arg(long, value_name = "LANG", requires = "no_vm")]
-    pub language: Option<String>,
-
-    /// Module identifier for `--no-vm`. For Python: dotted path
-    /// (`pkg.mod`). For Node: module path (`./src/mod.mjs`).
-    /// Required when `--no-vm` is set.
-    #[arg(long, value_name = "MODULE", requires = "no_vm")]
-    pub module: Option<String>,
-
-    /// Function identifier within the module for `--no-vm`.
-    /// Required when `--no-vm` is set.
-    #[arg(long, value_name = "FUNCTION", requires = "no_vm")]
-    pub function: Option<String>,
-
-    /// Wire-format for stdin args + stdout return under `--no-vm`.
-    /// One of `json` or `msgpack`. Default `json`.
-    #[arg(long, value_name = "FMT", default_value = "json", requires = "no_vm")]
-    pub format: String,
-
-    /// Absolute path to the user's source tree for `--no-vm`. The
-    /// wrapper imports `<module>` relative to this path. Required
-    /// when `--no-vm` is set.
-    #[arg(long, value_name = "PATH", requires = "no_vm")]
-    pub source_path: Option<String>,
 }
 
-pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    if args.no_vm {
-        // Dev shortcut — bypass VM boot and run the wrapper directly
-        // on the host. See
-        // `invoke_no_vm.rs` for the full contract. `eprintln!`
-        // instead of `ui::warn` because the latter writes to stdout
-        // (a pre-existing inconsistency vs `ui::error`); stdout under
-        // --no-vm is reserved for the wrapper's encoded return value
-        // that the SDK decodes.
-        eprintln!(
-            "[mvm] --no-vm: bypassing VM boot, running wrapper on the host. \
-             Not for production. None of the in-VM hardening applies."
-        );
-        let stdin_bytes = read_stdin_payload(args.stdin.as_deref())?;
-        let exit_code = super::invoke_no_vm::run(&args, stdin_bytes)?;
-        std::process::exit(exit_code);
-    }
-    if args.attach {
+pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
+    if call.attach {
         // Dispatch into an already-running workload by
-        // name (booted by `mvmctl up --name <NAME>`), reusing its substitution
+        // name (booted by `machine run --name <NAME>`), reusing its substitution
         // endpoint + boot-minted placeholders. `dispatch` injects the workload's
         // substitution env (HTTP_PROXY + placeholders) via `substitution_env`,
         // so a secret-declaring entrypoint runs with live egress substitution.
         // No transient boot, no teardown — the VM is the user's to reap.
-        let stdin_bytes = read_stdin_payload(args.stdin.as_deref())?;
+        let stdin_bytes = read_stdin_payload(call.stdin.as_deref())?;
         ui::info(&format!(
-            "invoke: dispatching into running workload '{}'",
-            args.manifest
+            "entrypoint: dispatching into running workload '{}'",
+            call.source
         ));
-        let exit_code = dispatch(&args.manifest, stdin_bytes, args.timeout, None)?;
+        let exit_code = dispatch(&call.source, stdin_bytes, call.timeout, None)?;
         if exit_code != 0 {
             std::process::exit(exit_code);
         }
         return Ok(());
     }
-    if args.reset {
+    if call.reset {
         ui::warn(
             "--reset is wired but no-op in this build (session-pool plan); \
              treating as default behaviour",
         );
     }
-    if let Some(id) = &args.session {
+    if let Some(id) = &call.session {
         ui::warn(&format!(
             "--session {id} is accepted but no-op in this build \
              (session-pool plan, plan 60 Phase 5c); falling back to a \
              transient VM for this call"
         ));
     }
-    if let Some(name) = &args.r#fn {
+    if let Some(name) = &call.r#fn {
         ui::warn(&format!(
             "--fn {name} is accepted but no-op in this build \
              (multi-function dispatch lands with ADR-0014 Phase 2); \
@@ -231,23 +116,24 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         ));
     }
 
-    // v1: invoke targets a *template*. Resolve through the same shared
-    // helper as `mvmctl exec --manifest`. Slot-hash and registered-name
-    // both resolve to a string the lifecycle helpers consume.
-    let template_id = match super::shared::resolve_manifest_arg(&args.manifest)? {
+    // The entrypoint action targets a *template* / manifest slot. Resolve
+    // through the same shared helper as `machine exec --manifest`. Slot-hash
+    // and registered-name both resolve to a string the lifecycle helpers
+    // consume.
+    let template_id = match super::shared::resolve_manifest_arg(&call.source)? {
         super::shared::ManifestArgRef::Name(n) => n,
         super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
     };
 
-    let stdin_bytes = read_stdin_payload(args.stdin.as_deref())?;
+    let stdin_bytes = read_stdin_payload(call.stdin.as_deref())?;
 
-    let lifecycle_label = if args.keep_alive {
+    let lifecycle_label = if call.keep_alive {
         "warm session"
     } else {
         "transient VM"
     };
     ui::info(&format!(
-        "invoke: booting {lifecycle_label} for template '{template_id}'"
+        "entrypoint: booting {lifecycle_label} for template '{template_id}'"
     ));
     // If the workload declares secrets (its IR was passed via
     // `--from-workload-ir`), admit the lowered plan so the ephemeral VM spawns
@@ -255,7 +141,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     // `boot_session_vm` (the rootfs + vm_name it needs are generated there). No
     // IR / no secrets ⇒ `None`, the unchanged plain-invoke path.
     let admit_closure: Option<Box<crate::exec::SessionAdmit>> =
-        super::up::load_workload_ir(args.from_workload_ir.as_deref())?
+        super::up::load_workload_ir(call.from_workload_ir.as_deref())?
             .map(|w| super::managed_secrets::lower_workload_secrets(&w))
             .filter(|lowered| !lowered.secrets.is_empty())
             .map(|lowered| {
@@ -264,8 +150,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 let backend_name = mvm_backend::backend::AnyBackend::auto_select()
                     .name()
                     .to_string();
-                let cpus = args.cpus;
-                let mem = args.memory_mib as u64;
+                let cpus = call.cpus;
+                let mem = call.memory_mib as u64;
                 Box::new(
                     move |rootfs: &std::path::Path,
                           vm_name: &str|
@@ -320,11 +206,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let vm = crate::exec::boot_session_vm(
         &template_id,
         "invoke",
-        args.cpus,
-        args.memory_mib,
+        call.cpus,
+        call.memory_mib,
         admit_closure.as_deref(),
     )
-    .context("Booting VM for invoke")?;
+    .context("Booting VM for the entrypoint call")?;
 
     // Register a session record so `mvmctl session ls`
     // sees the call (whether transient or warm). With `--keep-alive`
@@ -332,7 +218,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     // its `mode` so subsequent `session exec` / `run-code` are
     // permitted. Errors registering are logged but don't block the
     // call.
-    let mode = if args.keep_alive_dev {
+    let mode = if call.keep_alive_dev {
         mvm_core::session::SessionMode::Dev
     } else {
         mvm_core::session::SessionMode::Prod
@@ -352,7 +238,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     // Run the call. Pass the session id so a transport drop coincident
     // with `mvmctl session kill` is attributed as `SessionKilled`
     // rather than a generic I/O error.
-    let dispatch_result = dispatch(&vm.vm_name, stdin_bytes, args.timeout, session_id.as_ref());
+    let dispatch_result = dispatch(&vm.vm_name, stdin_bytes, call.timeout, session_id.as_ref());
 
     // Tear down lifecycle:
     //   - default: kill the VM and drop the session record (matches
@@ -360,7 +246,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     //   - `--keep-alive`: leave the VM running and bump the session
     //     record's invoke counter; the user reuses via `mvmctl session
     //     attach` and reaps via `mvmctl session kill` when done.
-    if args.keep_alive {
+    if call.keep_alive {
         if let Some(id) = session_id.as_ref() {
             if let Err(e) = mvm_core::session::update_session(id, |r| {
                 r.invoke_count = r.invoke_count.saturating_add(1);
@@ -633,49 +519,6 @@ fn exit_code_for(event: &mvm_guest::vsock::EntrypointEvent) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn attach_flag_parses_and_conflicts_with_boot_flags() {
-        use clap::Parser;
-        #[derive(Parser)]
-        struct Wrap {
-            #[command(flatten)]
-            args: Args,
-        }
-        // `invoke <name> --attach` parses and sets the flag.
-        let w = Wrap::try_parse_from(["x", "myvm", "--attach"]).unwrap();
-        assert!(w.args.attach);
-        assert_eq!(w.args.manifest, "myvm");
-        // --attach is incompatible with the transient-boot flags (it dispatches
-        // into an already-running workload, never boots a VM).
-        for flag in ["--keep-alive", "--fresh", "--reset", "--no-vm"] {
-            assert!(
-                Wrap::try_parse_from(["x", "myvm", "--attach", flag]).is_err(),
-                "--attach must conflict with {flag}"
-            );
-        }
-    }
-
-    #[test]
-    fn from_workload_ir_flag_parses() {
-        use clap::Parser;
-        #[derive(Parser)]
-        struct Wrap {
-            #[command(flatten)]
-            args: Args,
-        }
-        // The IR path that routes an ephemeral invoke through
-        // admission so the substitution endpoint spawns.
-        let w =
-            Wrap::try_parse_from(["x", "tmpl", "--from-workload-ir", "/w/workload.json"]).unwrap();
-        assert_eq!(
-            w.args.from_workload_ir.as_deref(),
-            Some(std::path::Path::new("/w/workload.json"))
-        );
-        // Absent ⇒ None (the plain no-secret invoke path).
-        let plain = Wrap::try_parse_from(["x", "tmpl"]).unwrap();
-        assert!(plain.args.from_workload_ir.is_none());
-    }
 
     #[test]
     fn test_exit_code_normal_exit_zero() {

@@ -13,7 +13,6 @@ pub(super) mod fs;
 pub(super) mod group;
 pub(super) mod host_signer;
 pub(super) mod invoke;
-pub(super) mod invoke_no_vm;
 pub(super) mod logs;
 pub(super) mod managed_secrets;
 pub(super) mod pause;

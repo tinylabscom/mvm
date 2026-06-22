@@ -18,9 +18,7 @@ use super::machine;
 use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
 use super::trust;
-use super::vm::{
-    checkpoint, console, cp, exec, forward, group, pause, sandbox, session, volume,
-};
+use super::vm::{checkpoint, console, cp, exec, forward, group, pause, sandbox, session, volume};
 
 use audit::AuditAction;
 use cache::CacheAction;
@@ -524,6 +522,19 @@ fn run_removed() {
 }
 
 #[test]
+fn invoke_removed() {
+    let result = Cli::try_parse_from(["mvmctl", "invoke", "tmpl"]);
+    assert!(
+        result.is_err(),
+        "`invoke` was retired; `machine run --manifest tmpl --entrypoint` is the replacement"
+    );
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand,
+    );
+}
+
+#[test]
 fn test_up_manifest_flag() {
     let cli = Cli::try_parse_from([
         "mvmctl",
@@ -679,6 +690,140 @@ fn machine_run_flake_resolves_to_persistent_lifecycle() {
             );
         }
         _ => panic!("expected machine run command"),
+    }
+}
+
+/// Helper: parse a `machine run …` argv and return the `MachineRunArgs`.
+fn parse_machine_run(argv: &[&str]) -> Result<machine::MachineRunArgs, clap::Error> {
+    let mut full = vec!["mvmctl", "machine", "run"];
+    full.extend_from_slice(argv);
+    match Cli::try_parse_from(full)?.command {
+        Commands::Machine(machine::Args {
+            action: machine::MachineAction::Run(args),
+        }) => Ok(args),
+        other => panic!("expected machine run, got {other:?}"),
+    }
+}
+
+#[test]
+fn machine_run_entrypoint_flag_parses() {
+    // `--manifest m --entrypoint` selects the entrypoint action; the source +
+    // entrypoint flags round-trip.
+    let args = parse_machine_run(&[
+        "--manifest",
+        "tmpl",
+        "--entrypoint",
+        "--stdin",
+        "/w/in.json",
+    ])
+    .unwrap();
+    assert!(args.entrypoint);
+    assert_eq!(args.manifest.as_deref(), Some("tmpl"));
+    assert_eq!(args.stdin.as_deref(), Some("/w/in.json"));
+    assert!(args.argv.is_empty());
+    // Bare `--entrypoint` (no stdin) is the no-argument call.
+    let bare = parse_machine_run(&["--manifest", "tmpl", "--entrypoint"]).unwrap();
+    assert!(bare.entrypoint && bare.stdin.is_none());
+}
+
+#[test]
+fn machine_run_entrypoint_conflicts_with_argv() {
+    // The entrypoint action calls the baked entrypoint; a trailing argv would
+    // be ambiguous, so clap rejects the combination.
+    let err =
+        parse_machine_run(&["--manifest", "tmpl", "--entrypoint", "--", "echo", "hi"]).unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    // `--entrypoint` alone (no argv) is fine.
+    parse_machine_run(&["--manifest", "tmpl", "--entrypoint"]).unwrap();
+}
+
+#[test]
+fn machine_run_entrypoint_flags_require_entrypoint() {
+    // `--stdin`/`--from-workload-ir`/`--attach` only make sense for the
+    // entrypoint action — clap refuses them without `--entrypoint`.
+    for flag in [
+        &["--manifest", "tmpl", "--stdin", "/w/in.json"][..],
+        &[
+            "--manifest",
+            "tmpl",
+            "--from-workload-ir",
+            "/w/workload.json",
+        ][..],
+        &["--name", "n", "--attach"][..],
+    ] {
+        let err = parse_machine_run(flag).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "{flag:?} must require --entrypoint"
+        );
+    }
+}
+
+#[test]
+fn machine_run_entrypoint_from_workload_ir_parses() {
+    // The secrets path: `--from-workload-ir` routes the entrypoint call through
+    // plan admission so the substitution endpoint spawns. (Migrated from the
+    // retired `invoke` parse test.)
+    let args = parse_machine_run(&[
+        "--manifest",
+        "tmpl",
+        "--entrypoint",
+        "--from-workload-ir",
+        "/w/workload.json",
+    ])
+    .unwrap();
+    assert_eq!(
+        args.from_workload_ir.as_deref(),
+        Some(std::path::Path::new("/w/workload.json"))
+    );
+}
+
+#[test]
+fn machine_run_entrypoint_attach_parses_and_requires_name() {
+    // `--attach` dispatches into a running machine named by `--name`; it
+    // reinterprets the target and so conflicts with a fresh source + boot flags.
+    // (Migrated from the retired `invoke --attach` parse test.)
+    let args = parse_machine_run(&["--name", "myvm", "--entrypoint", "--attach"]).unwrap();
+    assert!(args.attach && args.entrypoint);
+    assert_eq!(args.name.as_deref(), Some("myvm"));
+    // --attach needs --name (the running machine to target).
+    let err = parse_machine_run(&["--entrypoint", "--attach"]).unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    // --attach is incompatible with a fresh source + transient-boot flags.
+    for flag in [
+        &[
+            "--name",
+            "n",
+            "--entrypoint",
+            "--attach",
+            "--image",
+            "alpine",
+        ][..],
+        &["--name", "n", "--entrypoint", "--attach", "--manifest", "m"][..],
+        &["--name", "n", "--entrypoint", "--attach", "--fresh"][..],
+        &["--name", "n", "--entrypoint", "--attach", "--reset"][..],
+        &["--name", "n", "--entrypoint", "--attach", "-d"][..],
+    ] {
+        let err = parse_machine_run(flag).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "{flag:?} must conflict with --attach"
+        );
+    }
+}
+
+#[test]
+fn machine_run_entrypoint_conflicts_with_interactive() {
+    // An entrypoint call is not an interactive shell.
+    for flag in ["-t", "-i"] {
+        let err = parse_machine_run(&["--manifest", "tmpl", "--entrypoint", flag]).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "--entrypoint must conflict with {flag}"
+        );
     }
 }
 
@@ -1074,10 +1219,10 @@ fn test_parse_port_spec_invalid() {
 // -------------------------------------------------------------------------
 // Top-level verb tests. `ps`, `start`, `flake`, `image`, `setup`,
 // `completions`, and `security` were dropped — `ls`/`validate`/
-// `catalog`/`doctor` cover the cleaned surface. `up` and `run` were
-// consolidated into `machine run` (Plan 208); the removal tests
-// `up_removed` and `run_removed` pin that both verbs are now
-// unrecognized.
+// `catalog`/`doctor` cover the cleaned surface. `up`, `run`, and `invoke`
+// were consolidated into `machine run` (argv lifecycle + `--entrypoint`
+// action); the removal tests `up_removed`/`run_removed`/`invoke_removed`
+// pin that all three verbs are now unrecognized.
 // -------------------------------------------------------------------------
 
 #[test]
