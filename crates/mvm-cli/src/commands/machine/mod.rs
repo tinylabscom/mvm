@@ -1782,6 +1782,21 @@ fn stop_running_machine(name: &str) {
     }
 }
 
+/// Fast teardown for a throwaway interactive-transient machine. The guest shell
+/// has already exited, so there is nothing to flush: SIGKILL the
+/// supervisor/drainer/gvproxy up front (`stop_transient`) instead of burning the
+/// graceful ACPI grace `stop()` waits out — on Vz that grace runs ~6s across the
+/// supervisor, gvproxy, and drainer, which reads as a hang after Ctrl+D. Mirrors
+/// the `mvmctl run` transient teardown.
+fn stop_transient_machine(name: &str) {
+    reap_proxy(name);
+    let backend =
+        AnyBackend::from_hypervisor(&super::shared::resolve_effective_hypervisor("firecracker"));
+    if let Err(err) = backend.stop_transient(&VmId(name.to_string())) {
+        tracing::warn!(error = %err, machine = name, "fast-stopping transient machine failed");
+    }
+}
+
 /// The persistent lifecycle: `machine run --name <N>` / `-d`. Composes the
 /// existing create + start (+ exec) verbs — no new lifecycle code — so the
 /// signed-`ExecutionPlan` admission and default-deny egress are identical to
@@ -1907,7 +1922,10 @@ fn run_interactive(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<(
     );
 
     if teardown {
-        stop_running_machine(&name);
+        // Fast SIGKILL teardown — the shell already exited, so skip the graceful
+        // ACPI grace that otherwise sits silent for seconds after Ctrl+D.
+        println!("Stopping transient machine {name}.");
+        stop_transient_machine(&name);
         // Best-effort: drop the throwaway spec we created for this session.
         let _ = remove_machine_spec(&name, true);
     }
