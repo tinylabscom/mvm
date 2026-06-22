@@ -469,25 +469,20 @@
       # lets the expensive compile run (and be cached / published)
       # without realizing a full rootfs.
       #
-      # `workload-kernel` is the shared base alone (no builder infra). No
-      # runtime consumes it yet — workload microVMs currently boot a
-      # host-provided kernel — so it's published as an artifact ahead of
-      # the runtime wiring, which is when its home moves out of this
-      # builder-vm flake.
-      # The workload kernel's one delta over the shared base: dm-verity
-      # (Claim 3 — verified boot of the workload rootfs). The builder
-      # force-drops these (it boots `ro`, no roothash); workloads keep
-      # them. Shared between the kernel + its configfile output.
-      workloadKernelEnables = [ "MD" "BLK_DEV_DM" "DM_VERITY" ];
+      # `workload-kernel` is the shared base + the dm-verity delta
+      # (`nix/images/kernel/workload.nix`). No runtime consumes it yet —
+      # workload microVMs currently boot a host-provided kernel — so it's
+      # published as an artifact ahead of the runtime wiring, which is
+      # when its home moves out of this builder-vm flake.
       mkBuilderKernel = system:
         let pkgs = import nixpkgs { inherit system; };
         in import ../kernel/builder.nix { inherit pkgs; base = kernelBaseFor pkgs; };
       mkWorkloadKernel = system:
         let pkgs = import nixpkgs { inherit system; };
-        in (kernelBaseFor pkgs).mkKernel { extraEnables = workloadKernelEnables; };
+        in import ../kernel/workload.nix { inherit pkgs; base = kernelBaseFor pkgs; };
       mkWorkloadKernelConfigfile = system:
         let pkgs = import nixpkgs { inherit system; };
-        in (kernelBaseFor pkgs).mkConfigfile { extraEnables = workloadKernelEnables; };
+        in (import ../kernel/workload.nix { inherit pkgs; base = kernelBaseFor pkgs; }).passthru.configfile;
     in
     {
       packages = forAllSystems (system: {
