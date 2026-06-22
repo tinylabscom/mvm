@@ -1,0 +1,113 @@
+# ADR-093 — Linux builder: auto-fallback over libkrun, default unchanged
+
+**Status:** Proposed
+**Date:** 2026-06-22
+**Relates to:** [ADR-002](002-microvm-security-posture.md) §"Per-backend tier
+matrix", [Plan 98 — builder backend selection](../plans/98-vz-builder-vm.md),
+[Plan 166 — QEMU dev builder backend](../plans/166-qemu-dev-builder-backend.md)
+
+## Context
+
+The builder VM — the Linux guest that runs `nix build` for `mvmctl build` /
+`up` / `dev` / `machine run --image` — picks a host VMM. Plan-98 auto-detect:
+macOS 26+ Apple Silicon → Vz; **everywhere else → libkrun**.
+
+On a bare-metal Linux box (Intel i7-7700, kernel 6.1, 62 GiB RAM, libkrun
+1.18.0) the libkrun builder **cannot create its VM**: libkrun's
+`KVM_SET_USER_MEMORY_REGION` ioctl returns `EINVAL` (`rc -22`) for any guest
+memory region spanning above ~4 GiB (the region above the PCI hole). Surfaced
+via `MVM_KRUN_LOG=trace` as `Internal(Vm(SetUserMemoryRegion(Error(22))))`, and
+confirmed by experiment: a 16 GiB and an 8 GiB builder VM both fail at memory
+setup; a 2 GiB VM boots past it but is far too small for a `nix build` (which
+peaks at 5–6 GiB). The builder fundamentally needs >4 GiB, so this is **not
+tunable** — and it is a libkrun/kernel defect, not an mvm bug; mvm cannot make
+that ioctl succeed.
+
+The QEMU/microvm_nix builder (Plan 166) works on the same box — proven live: an
+alpine microVM materialized via qemu and booted through Firecracker on
+`/dev/kvm`.
+
+Two tensions:
+
+- The "Key Design Decisions" prose in `CLAUDE.md` says builds run "Firecracker
+  on Linux KVM," but the dispatch (`resolve_stage0_backend` /
+  `resolve_builder_backend`) only implements **libkrun / vz / qemu** —
+  firecracker-as-*builder* is not wired. The real Linux default is libkrun.
+- The qemu builder is documented "`mvm`-only dev/test, never `mvmd`" — so it is
+  available to the *local* dev/build path but must not become the fleet
+  builder.
+
+Before this work, a Linux user on an affected host hit an opaque
+`materialize OCI rootfs failed: rc -22` with no hint that `--builder qemu`
+(which works) is the escape.
+
+## Decision
+
+1. **Keep the Plan-98 auto-detect default unchanged** — Linux still defaults to
+   libkrun. We do **not** flip the Linux default to qemu.
+2. **Add a transparent VMM-level auto-fallback.** When an *auto-detected* (not
+   explicitly forced) builder fails to **create its VM** — a VMM-level failure,
+   distinguished from a genuine build error by the new
+   `BuilderVmError::SupervisorExited` variant — the dispatch retries the next
+   backend. On Linux that order is libkrun → qemu; on macOS it preserves the
+   pre-existing auto-Vz → libkrun behaviour. A genuine `nix build` failure
+   surfaces unchanged with no retry, and an explicit `--builder` /
+   `MVM_BUILDER_BACKEND` opts out entirely.
+
+One pure policy drives every builder entry point — OCI materialize, the
+`dev_build` flake path (`up --flake` / `build image` / `template build`),
+Stage 0 bootstrap, and the dev-image / default-microvm CLI loops —
+(`builder_attempt_order` + `run_with_builder_fallback{,_anyhow}` +
+`resolve_stage0_backend_for_choice`), so the CLI loops and the `mvm-build`
+build paths cannot drift. Implemented in PRs #1237 + #1239 and live-proven:
+`machine run --image alpine` with no `--builder` falls back libkrun → qemu and
+boots.
+
+## Alternatives considered
+
+### Flip the Linux default to qemu — rejected (for now)
+
+- The evidence is a **single host**. The defect is tied to a specific
+  libkrun/kernel/hardware combination and is not proven universal; libkrun may
+  create its VM fine on many Linux boxes. Flipping the default would penalize
+  every healthy Linux host — qemu/microvm_nix boots slower and adds a heavier
+  dependency (`qemu-system-*`) where libkrun needs none.
+- The fallback cost on an *affected* host is bounded: libkrun fails fast at VM
+  creation (~seconds, no boot), then qemu runs. That is far cheaper than
+  slowing the healthy majority.
+- If future data shows libkrun-on-Linux is broadly broken rather than
+  host-specific, revisit — flipping is then a one-line change to
+  `auto_detect_default_for` / `builder_attempt_order`.
+
+### Wire firecracker-as-builder now — deferred
+
+`CLAUDE.md` names Firecracker as the intended Linux builder, but it is a fourth
+`BuilderVm` implementation (its own `run_build` / `run_stage0` /
+`run_shell_script`) — a separate, larger project. The qemu fallback unblocks
+Linux users today; firecracker-as-builder remains the longer-term direction and
+is tracked as a follow-up. Until it lands, the `CLAUDE.md` "Firecracker on Linux
+KVM" builder line is corrected to describe the real default (libkrun + qemu
+fallback).
+
+## Consequences
+
+- Linux `build` / `up` / `machine run --image` / `dev up` work out of the box
+  even where libkrun cannot create its VM — no `--builder` knowledge required.
+- A genuine build error still surfaces immediately (the fallback fires only on a
+  VMM-level failure), and explicit `--builder` is honoured.
+- The qemu builder is reached only by the **local** dev/build path, not mvmd's
+  `pool_build` — staying inside its "`mvm`-only dev/test" boundary
+  (ADR-002 §"Per-backend tier matrix").
+- On an affected host every build pays a one-time ~5s libkrun-failure before
+  qemu takes over. A per-host "libkrun builder unhealthy" cache to skip the
+  doomed attempt is possible but out of scope.
+
+## Follow-ups
+
+- Determine whether the libkrun >4 GiB `KVM_SET_USER_MEMORY_REGION` EINVAL is
+  universal-on-Linux or host-specific; feed the result back into this default
+  decision.
+- Implement firecracker-as-builder (the long-stated Linux intent) or keep the
+  doc aligned with the libkrun + qemu-fallback reality.
+- Optional: persist a per-host "libkrun-builder-unavailable" marker so affected
+  hosts skip the failing libkrun attempt on subsequent builds.
