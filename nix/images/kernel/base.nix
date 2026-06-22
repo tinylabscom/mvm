@@ -200,6 +200,26 @@ let
 
       make olddefconfig
 
+      # Guard: every requested enable must survive olddefconfig. When a
+      # symbol's Kconfig `depends on` isn't met — e.g. a shrink disabled a
+      # hidden dependency of a still-needed driver — olddefconfig silently
+      # drops it and the build still succeeds, yielding a kernel missing the
+      # driver with zero signal. That is the #1 silent-failure mode of
+      # kernel shrinking. Assert each requested enable is `=y` in the final
+      # config and fail loud, naming the casualties, so a dropped dependency
+      # is caught here instead of at a guest's failed mount/boot.
+      missing=""
+      for s in $enableList; do
+        if ! grep -q "^CONFIG_$s=y\$" .config; then
+          missing="$missing $s"
+        fi
+      done
+      if [ -n "$missing" ]; then
+        echo "ERROR: requested kernel enables were dropped by olddefconfig:$missing" >&2
+        echo "Each dropped symbol has an unmet Kconfig dependency, or a disable removed a symbol it needs. Investigate — do not suppress." >&2
+        exit 1
+      fi
+
       cp .config $out
     '';
 
