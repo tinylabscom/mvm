@@ -24,6 +24,14 @@ pub(super) fn lower_workload_secrets(workload: &Workload) -> LoweredPlanSecrets 
     }
 }
 
+pub(super) fn lower_app_secrets(app: &App) -> LoweredPlanSecrets {
+    let secrets = lower_app_secret_bindings(app);
+    LoweredPlanSecrets {
+        secret_release: secret_release_for_bindings(&secrets),
+        secrets,
+    }
+}
+
 fn lower_app_secret_bindings(app: &App) -> Vec<SecretBinding> {
     let mut secrets = Vec::new();
     lower_env_map(&app.env, &mut secrets);
@@ -123,29 +131,23 @@ mod tests {
         let mut ep_env = BTreeMap::new();
         ep_env.insert("EP_KEY".into(), secret_env_ref("ep-key", "EP_KEY"));
 
-        let secrets = lower_app_secret_bindings(&app_with_envs(app_env, ep_env));
+        let lowered = lower_app_secrets(&app_with_envs(app_env, ep_env));
+        assert_eq!(lowered.secret_release, SecretReleasePolicy::PlanBound);
+        assert_eq!(lowered.secrets.len(), 2);
+        assert_eq!(lowered.secrets[0].name, "APP_KEY");
         assert_eq!(
-            secret_release_for_bindings(&secrets),
-            SecretReleasePolicy::PlanBound
-        );
-        assert_eq!(secrets.len(), 2);
-        assert_eq!(secrets[0].name, "APP_KEY");
-        assert_eq!(
-            secrets[0].source,
+            lowered.secrets[0].source,
             SecretSource::Keystore {
                 address: "app-key".into()
             }
         );
-        assert_eq!(secrets[1].name, "EP_KEY");
+        assert_eq!(lowered.secrets[1].name, "EP_KEY");
     }
 
     #[test]
     fn empty_secret_set_keeps_release_none() {
-        let secrets = lower_app_secret_bindings(&app_with_envs(BTreeMap::new(), BTreeMap::new()));
-        assert_eq!(
-            secret_release_for_bindings(&secrets),
-            SecretReleasePolicy::None
-        );
-        assert!(secrets.is_empty());
+        let lowered = lower_app_secrets(&app_with_envs(BTreeMap::new(), BTreeMap::new()));
+        assert_eq!(lowered.secret_release, SecretReleasePolicy::None);
+        assert!(lowered.secrets.is_empty());
     }
 }

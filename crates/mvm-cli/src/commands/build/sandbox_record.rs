@@ -22,7 +22,8 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use mvm_sdk::ir::Workload;
 use mvm_sdk::runtime::{
-    Divergence, RuntimeRecording, compile_recording_with_findings, verify_recording_digest,
+    Divergence, RuntimeRecording, compile_recording_with_findings, recording_sha256_hex,
+    verify_recording_digest,
 };
 
 /// Hard cap on recording bytes read from disk — guards the JSON parser
@@ -31,11 +32,12 @@ use mvm_sdk::runtime::{
 const MAX_RECORDING_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A recording loaded from disk: the lowered workload, the divergence
-/// findings the admission path gates on, and any raw-secret findings from
-/// the host-side scan.
+/// findings the admission path gates on, the content digest captured
+/// at read time, and any raw-secret findings from the host-side scan.
 pub(in crate::commands) struct LoadedRecording {
     pub workload: Workload,
     pub findings: Vec<Divergence>,
+    pub digest_hex: String,
     pub secret_findings: Vec<crate::commands::build::trace_secret_scan::SecretFinding>,
 }
 
@@ -164,6 +166,7 @@ pub(in crate::commands) fn load_recording(
     }
     let bytes = std::fs::read(path)
         .with_context(|| format!("reading runtime recording from {}", path.display()))?;
+    let digest_hex = recording_sha256_hex(&bytes);
     if let Some(expected) = expected_sha256 {
         verify_recording_digest(&bytes, expected)
             .map_err(|e| anyhow::anyhow!("{e}"))
@@ -181,6 +184,7 @@ pub(in crate::commands) fn load_recording(
     Ok(LoadedRecording {
         workload,
         findings,
+        digest_hex,
         secret_findings,
     })
 }

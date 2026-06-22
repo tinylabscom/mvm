@@ -509,15 +509,23 @@ fn up_removed() {
 }
 
 #[test]
-fn run_removed() {
-    let result = Cli::try_parse_from(["mvmctl", "run", "--", "/bin/true"]);
+fn run_kept_hidden_as_sdk_transport() {
+    // The user-facing transient-run role folded into `machine run`, but `run`
+    // survives hidden as the SDK Sandbox launcher (`run --mode live/plan`) the
+    // Python/TS SDKs shell to — so it must still parse.
+    let cli = Cli::try_parse_from(["mvmctl", "run", "--mode", "live", "script.py"]).unwrap();
+    assert!(matches!(cli.command, Commands::Run(_)));
+    // …but it is hidden from top-level help.
+    let help = {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        cmd.write_long_help(&mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    };
     assert!(
-        result.is_err(),
-        "`run` was retired; `machine run -- /bin/true` is the replacement"
-    );
-    assert_eq!(
-        result.unwrap_err().kind(),
-        clap::error::ErrorKind::InvalidSubcommand,
+        !help.contains("\n  run "),
+        "`run` must be hidden from top-level help"
     );
 }
 
@@ -1219,10 +1227,10 @@ fn test_parse_port_spec_invalid() {
 // -------------------------------------------------------------------------
 // Top-level verb tests. `ps`, `start`, `flake`, `image`, `setup`,
 // `completions`, and `security` were dropped — `ls`/`validate`/
-// `catalog`/`doctor` cover the cleaned surface. `up`, `run`, and `invoke`
-// were consolidated into `machine run` (argv lifecycle + `--entrypoint`
-// action); the removal tests `up_removed`/`run_removed`/`invoke_removed`
-// pin that all three verbs are now unrecognized.
+// `catalog`/`doctor` cover the cleaned surface. `up` and `invoke` were
+// consolidated into `machine run` (argv lifecycle + `--entrypoint` action);
+// `up_removed`/`invoke_removed` pin they no longer parse. `run` survives
+// hidden as the SDK Sandbox transport (`run_kept_hidden_as_sdk_transport`).
 // -------------------------------------------------------------------------
 
 #[test]
@@ -2499,22 +2507,29 @@ fn run_image_flag_parses() {
 
 #[test]
 fn run_image_prod_flag_parses_as_image_policy() {
-    // `--prod` is not on `machine run`; it was a `mvmctl run`-only flag.
-    // Pin that `run` is retired.
-    let result = Cli::try_parse_from([
+    // `run` is kept hidden for the SDK transport; `--prod` is its OCI digest-pin
+    // flag (not on `machine run`).
+    let pinned = "docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let cli = Cli::try_parse_from([
         "mvmctl",
         "run",
         "--image",
-        "alpine:latest",
+        pinned,
         "--prod",
         "--",
         "/bin/true",
-    ]);
-    assert!(result.is_err(), "`run` was retired");
-    assert_eq!(
-        result.unwrap_err().kind(),
-        clap::error::ErrorKind::InvalidSubcommand
-    );
+    ])
+    .expect("parse");
+    match cli.command {
+        Commands::Run(exec::RunArgs {
+            image, prod, mode, ..
+        }) => {
+            assert_eq!(image.as_deref(), Some(pinned));
+            assert!(prod);
+            assert!(mode.is_none());
+        }
+        _ => panic!("Expected Run command"),
+    }
 }
 
 #[test]
@@ -2886,19 +2901,22 @@ fn cp_guest_to_host_defaults_parse() {
 
 #[test]
 fn run_transient_with_launch_plan_no_argv() {
-    // `--launch-plan` was a `mvmctl run`-only flag; `run` is retired.
-    let result = Cli::try_parse_from(["mvmctl", "run", "--launch-plan", "./plan.json"]);
-    assert!(result.is_err(), "`run` was retired");
-    assert_eq!(
-        result.unwrap_err().kind(),
-        clap::error::ErrorKind::InvalidSubcommand
-    );
+    let cli =
+        Cli::try_parse_from(["mvmctl", "run", "--launch-plan", "./plan.json"]).expect("parse");
+    match cli.command {
+        Commands::Run(exec::RunArgs {
+            launch_plan, argv, ..
+        }) => {
+            assert_eq!(launch_plan.as_deref(), Some("./plan.json"));
+            assert!(argv.is_empty());
+        }
+        _ => panic!("Expected Run command"),
+    }
 }
 
 #[test]
 fn run_transient_launch_plan_conflicts_with_argv() {
-    // `run` is retired; pin the removal.
-    let result = Cli::try_parse_from([
+    let cli = Cli::try_parse_from([
         "mvmctl",
         "run",
         "--launch-plan",
@@ -2907,10 +2925,9 @@ fn run_transient_launch_plan_conflicts_with_argv() {
         "echo",
         "hi",
     ]);
-    assert!(result.is_err(), "`run` was retired");
-    assert_eq!(
-        result.unwrap_err().kind(),
-        clap::error::ErrorKind::InvalidSubcommand
+    assert!(
+        cli.is_err(),
+        "--launch-plan and trailing argv must be mutually exclusive"
     );
 }
 
@@ -2993,13 +3010,9 @@ fn run_transient_with_add_dir_and_env() {
 
 #[test]
 fn run_transient_requires_argv() {
-    // `run` is retired; bare `mvmctl run` is unrecognized.
-    let result = Cli::try_parse_from(["mvmctl", "run"]);
-    assert!(result.is_err(), "`run` was retired");
-    assert_eq!(
-        result.unwrap_err().kind(),
-        clap::error::ErrorKind::InvalidSubcommand
-    );
+    // Without trailing argv, Clap should reject because `argv` is required.
+    let cli = Cli::try_parse_from(["mvmctl", "run"]);
+    assert!(cli.is_err());
 }
 
 // --- Init CLI tests (pure project-scaffold; DIR is required) ---
@@ -3806,12 +3819,12 @@ fn state_touching_json_commands_reserve_stdout_before_entry_convergence() {
     assert!(emits_machine_readable_stdout(&[
         "mvmctl", "dev", "cache", "inspect", "--json"
     ]));
-    // `mvmctl run` and `mvmctl up` are retired; the machine-readable
-    // channel on `machine run --json` routes through MachineAction which
-    // does not set emits_machine_readable_stdout (the VmCmd delegation
-    // path handles that for advanced ops; the run/start verbs use
-    // streaming output). Omit the retired verbs here — the removal tests
-    // (`run_removed`, `up_removed`) pin that they are unrecognized.
+    // `mvmctl up` is retired; `run` survives hidden as the SDK transport and
+    // keeps its `--json` reservation. The user-facing machine-readable channel
+    // is `machine run --json`.
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "run", "--json", "--", "true"
+    ]));
     assert!(emits_machine_readable_stdout(&[
         "mvmctl", "machine", "save", "myvm", "--json"
     ]));

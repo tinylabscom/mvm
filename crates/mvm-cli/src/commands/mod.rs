@@ -86,6 +86,12 @@ pub(in crate::commands) enum Commands {
     Doctor(env::doctor::Args),
     /// List running VMs
     Ls(vm::ps::Args),
+    /// SDK transport surface (`run --mode live/plan`). Hidden: the user-facing
+    /// transient-run role folded into `machine run`; `run` survives only as the
+    /// SDK Sandbox launcher the Python/TS SDKs shell to, so it stays hidden
+    /// rather than break that transport.
+    #[command(hide = true)]
+    Run(vm::exec::RunArgs),
     /// Prepare the environment + pre-fetch the builder VM image
     ///
     /// Runs host-tooling setup and pre-acquires the builder VM image so the
@@ -301,6 +307,7 @@ pub fn run() -> Result<()> {
         Commands::Bootstrap(a) => bootstrap::run(&cli, a, &cfg),
         Commands::Dev(a) => env::dev::run(&cli, a, &cfg),
         Commands::Ls(a) => vm::ps::run(&cli, a, &cfg),
+        Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),
         Commands::Doctor(a) => env::doctor::run(&cli, a, &cfg),
         Commands::Build(a) => build::group::run(&cli, a, &cfg),
         Commands::Manifest(a) => manifest::run(&cli, a, &cfg),

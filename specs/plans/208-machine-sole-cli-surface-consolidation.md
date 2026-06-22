@@ -224,7 +224,7 @@ two more axes so all three compose freely:
 
 Land in two commits inside Task 4 if the whole is large:
 1. [x] **Source axis** — add `--flake`/`--manifest` to `machine run` composing
-   with lifecycle; retire `up` + `run`. (`--entrypoint` not yet.)
+   with lifecycle; retire `up`. (`--entrypoint` not yet.)
 2. [x] **Action axis** — add `--entrypoint` (+ `--stdin`/`--fresh`/`--reset`/
    `--from-workload-ir`/`--attach`); retire `invoke`. The runner
    (`vm::invoke::run_entrypoint` + `EntrypointCall`) is reused, not forked; the
@@ -233,6 +233,13 @@ Land in two commits inside Task 4 if the whole is large:
    session; SDK wrappers move to the new surface in Task 8). `--image
    --entrypoint` is rejected (OCI images run their own command via the argv
    action).
+
+   **`run` is kept, not removed.** Its user-facing transient-argv role folds
+   into `machine run`, but `run` survives as a `#[command(hide = true)]` verb
+   because the `run --mode live/plan` path is the SDK Sandbox launcher the
+   Python/TS SDKs shell to (#1266 migrated the SDK's *inner* verbs to `machine`
+   while keeping that launcher). Removing it (the earlier plan) would break the
+   SDK transport, so Task 4 demotes `run` to hidden rather than retiring it.
 
 ### Tests (TDD)
 
@@ -246,7 +253,9 @@ Land in two commits inside Task 4 if the whole is large:
   `machine_run_entrypoint_flag_parses`, `_flags_require_entrypoint`,
   `_from_workload_ir_parses`, `_attach_parses_and_requires_name`,
   `_conflicts_with_interactive`.
-- [x] `up_removed`/`run_removed`/`invoke_removed`: each → `InvalidSubcommand`.
+- [x] `up_removed`/`invoke_removed`: each → `InvalidSubcommand`.
+  `run_kept_hidden_as_sdk_transport`: `run --mode live` still parses but is
+  hidden from top-level help.
 - [x] Behaviour parity: `--entrypoint` reuses the old `invoke` runner
   (`run_entrypoint` + its `exit_code`/`stdin`/`substitution_env` unit tests,
   retained); the `invoke` clap-parse tests moved onto `MachineRunArgs`.

@@ -287,6 +287,12 @@ impl MachineRunArgs {
             dry_run: self.dry_run,
             launch_plan: None,
             prod: false,
+            // SDK-transport surface (`--mode`/`--dev`/`--ack-divergence`) stays
+            // off — `machine run` is the beginner contract; that transport lives
+            // on the hidden `run` verb the SDKs shell to.
+            mode: None,
+            dev: false,
+            ack_divergence: Vec::new(),
             argv: self.argv,
         }
     }

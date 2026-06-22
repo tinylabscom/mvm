@@ -142,18 +142,63 @@ pub(in crate::commands) struct RunArgs {
     /// Path to an mvmforge launch document. Mutually exclusive with trailing argv.
     #[arg(long, value_name = "PATH", conflicts_with = "argv")]
     pub launch_plan: Option<String>,
-    /// Require an OCI image digest pin before any network fetch (claim-14
-    /// prod posture for `--image`). Carried on the run path; constructed by
-    /// the caller rather than parsed, now that `machine run` is the only entry.
+    /// SDK transport mode for `mvmctl run`.
+    ///
+    /// - `--mode plan`: synthesize an ExecutionPlan per Sandbox call
+    ///   and route through `mvm_hostd::supervisor::admit_for_run`; no
+    ///   microVM ever boots.
+    /// - `--mode live`: spawn the user's script with `MVM_SDK_MODE=live`
+    ///   so the SDK shells each `Sandbox` operation to existing
+    ///   `mvmctl up` / `proc start` / `fs write` / `down` against a
+    ///   real microVM.
+    /// - `--mode record` redirects users to `mvmctl compile` (where
+    ///   record is the default mode).
+    ///
+    /// When unset, the verb behaves as a transient-sandbox runner
+    /// over the trailing argv.
+    #[arg(long = "mode", value_enum)]
+    pub mode: Option<RunMode>,
+    /// Friendly alias for `--mode live`.
+    #[arg(long = "dev", conflicts_with_all = ["prod", "mode"])]
+    pub dev: bool,
+    /// Friendly alias for `--mode record`. `mvmctl run --prod`
+    /// redirects users to `mvmctl compile`, where record is the
+    /// default.
+    #[arg(long = "prod", conflicts_with_all = ["dev", "mode"])]
     pub prod: bool,
     /// Argv to run inside the guest (use `--` to separate). Required unless
-    /// `--launch-plan` is supplied.
+    /// `--launch-plan` is supplied. Under `--mode plan`, the first
+    /// argv element is a `.py`/`.ts`/`.js` script path.
     #[arg(
         trailing_var_arg = true,
         allow_hyphen_values = true,
-        required_unless_present = "launch_plan"
+        required_unless_present_any = ["launch_plan", "mode", "dev", "prod"]
     )]
     pub argv: Vec<String>,
+    /// Acknowledge a divergence class on the plan-mode admission
+    /// path (repeatable). Unacknowledged divergence refuses
+    /// admission: what you previewed is not what would ship.
+    #[arg(long = "ack-divergence", value_name = "KIND")]
+    pub ack_divergence: Vec<String>,
+}
+
+/// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
+/// `mvmctl compile` but specialises the rejection messages to point
+/// users at the right verb when they pick the wrong default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(in crate::commands) enum RunMode {
+    /// Live transport — Sandbox calls shell out to existing mvmctl
+    /// up / proc start / fs write / down against a real microVM.
+    Live,
+    /// Plan transport — synthesise one ExecutionPlan per Sandbox
+    /// operation and route through `mvm_hostd::supervisor::admit_for_run`.
+    /// No microVM boots. Useful for dry-running admission gates.
+    Plan,
+    /// Record transport — capture Sandbox operations into a
+    /// recording and lower to a Workload. `mvmctl run --mode
+    /// record` redirects users to `mvmctl compile`, whose default
+    /// mode is record.
+    Record,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -210,6 +255,14 @@ pub(in crate::commands) fn run_receipt(
 }
 
 pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig) -> Result<()> {
+    // When an SDK transport mode is requested, peel off the
+    // SDK-shaped surface before the sandbox-runner validation kicks
+    // in. `--dev` (alias for live) is refused in v1; `--prod` (alias
+    // for record) redirects to `mvmctl compile`; `--mode plan` routes
+    // through the plan-mode admission dry-run.
+    if let Some(mode) = resolve_run_mode(&args)? {
+        return super::run_plan::dispatch_sdk_mode(mode, &args);
+    }
     validate_run_profile(&args)?;
     if args.dry_run {
         let summary = RunPreflightSummary::from_args(&args)?;
@@ -366,6 +419,57 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             backend: &receipt_backend,
         },
     )
+}
+
+/// Resolve the `mvmctl run` transport mode from the explicit
+/// `--mode` flag, the friendly `--dev` / `--prod` aliases, and the
+/// `MVM_SDK_MODE` env-var override. Returns `Ok(None)` when no SDK
+/// mode was requested — in that case the verb falls back to the
+/// transient-sandbox runner over the trailing argv.
+///
+/// Env-var precedence matches `mvmctl compile`: `MVM_SDK_MODE`
+/// supersedes any flag-only override so a wrapper script can pin a
+/// mode without the user retyping `--mode`.
+pub(in crate::commands) fn resolve_run_mode(args: &RunArgs) -> Result<Option<RunMode>> {
+    if let Ok(env_mode) = std::env::var("MVM_SDK_MODE") {
+        return Ok(Some(parse_env_run_mode(&env_mode)?));
+    }
+    if args.dev {
+        return Ok(Some(RunMode::Live));
+    }
+    if args.prod {
+        if args.image.is_some() {
+            return Ok(None);
+        }
+        anyhow::bail!(
+            "`mvmctl run --prod` (alias for --mode record) redirects to `mvmctl compile`, where \
+             record is the default mode. Re-run as `mvmctl compile <script>` (the trailing argv \
+             on `mvmctl run` is for the live sandbox runner, not for SDK record-mode)."
+        );
+    }
+    match args.mode {
+        None => Ok(None),
+        Some(RunMode::Live) => Ok(Some(RunMode::Live)),
+        Some(RunMode::Record) => anyhow::bail!(
+            "`mvmctl run --mode record` is unsupported — `mvmctl compile` is the record-mode verb \
+             (record is the default; pass the script as the positional entry)."
+        ),
+        Some(RunMode::Plan) => Ok(Some(RunMode::Plan)),
+    }
+}
+
+fn parse_env_run_mode(raw: &str) -> Result<RunMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "live" => Ok(RunMode::Live),
+        "plan" => Ok(RunMode::Plan),
+        "record" => anyhow::bail!(
+            "MVM_SDK_MODE=record on `mvmctl run` is unsupported — `mvmctl compile` is the \
+             record-mode verb (record is its default)."
+        ),
+        other => anyhow::bail!(
+            "MVM_SDK_MODE={other:?} is not recognized; expected one of: live, plan, record"
+        ),
+    }
 }
 
 fn validate_run_profile(args: &RunArgs) -> Result<()> {
@@ -1233,9 +1337,77 @@ mod tests {
             json: false,
             dry_run: false,
             launch_plan: None,
+            mode: None,
+            dev: false,
             prod: false,
             argv: vec!["/bin/true".to_string()],
+            ack_divergence: Vec::new(),
         }
+    }
+
+    #[test]
+    fn resolve_run_mode_returns_none_when_no_mode_flag() {
+        let args = run_args(RunProfile::Standard);
+        let mode = resolve_run_mode(&args).expect("no flag resolves to None");
+        assert!(mode.is_none());
+    }
+
+    #[test]
+    fn resolve_run_mode_returns_plan_when_mode_plan() {
+        let mut args = run_args(RunProfile::Standard);
+        args.mode = Some(RunMode::Plan);
+        let mode = resolve_run_mode(&args).expect("plan resolves").unwrap();
+        assert_eq!(mode, RunMode::Plan);
+    }
+
+    #[test]
+    fn resolve_run_mode_returns_live_for_dev_alias() {
+        let mut args = run_args(RunProfile::Standard);
+        args.dev = true;
+        let mode = resolve_run_mode(&args)
+            .expect("--dev resolves to Some(Live) post-H-live")
+            .expect("must be Some(Live)");
+        assert_eq!(mode, RunMode::Live);
+    }
+
+    #[test]
+    fn resolve_run_mode_bails_redirect_for_prod_alias() {
+        let mut args = run_args(RunProfile::Standard);
+        args.prod = true;
+        let err = resolve_run_mode(&args).expect_err("--prod must bail");
+        let msg = err.to_string();
+        assert!(msg.contains("mvmctl compile"));
+    }
+
+    #[test]
+    fn resolve_run_mode_leaves_image_prod_for_oci_policy() {
+        let mut args = run_args(RunProfile::Standard);
+        args.image = Some(
+            "docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+        );
+        args.prod = true;
+        let mode = resolve_run_mode(&args).expect("image prod is not SDK mode");
+        assert!(mode.is_none());
+    }
+
+    #[test]
+    fn resolve_run_mode_returns_live_for_mode_live() {
+        let mut args = run_args(RunProfile::Standard);
+        args.mode = Some(RunMode::Live);
+        let mode = resolve_run_mode(&args)
+            .expect("--mode live resolves to Some(Live) post-H-live")
+            .expect("must be Some(Live)");
+        assert_eq!(mode, RunMode::Live);
+    }
+
+    #[test]
+    fn resolve_run_mode_bails_redirect_for_mode_record() {
+        let mut args = run_args(RunProfile::Standard);
+        args.mode = Some(RunMode::Record);
+        let err = resolve_run_mode(&args).expect_err("--mode record must bail");
+        let msg = err.to_string();
+        assert!(msg.contains("mvmctl compile"));
     }
 
     #[test]

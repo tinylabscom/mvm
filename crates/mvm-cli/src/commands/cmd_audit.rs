@@ -147,6 +147,7 @@ impl Commands {
                 _ => false,
             },
             Commands::Ls(a) => a.json,
+            Commands::Run(a) => a.json,
             Commands::Machine(a) => match &a.action {
                 // Folded advanced ops delegate to their own check.
                 machine::MachineAction::Vm(cmd) => cmd.emits_machine_readable_stdout(),
@@ -181,7 +182,7 @@ impl Commands {
         matches!(
             self,
             // Lifecycle mutate/read on the local single-host path.
-            Commands::Dev(_)
+            Commands::Run(_) | Commands::Dev(_)
         )
     }
 
@@ -198,6 +199,7 @@ impl Commands {
             Commands::Bootstrap(_) => "bootstrap",
             Commands::Dev(_) => "dev",
             Commands::Ls(_) => "ls",
+            Commands::Run(_) => "run",
             Commands::Doctor(_) => "doctor",
             Commands::Manifest(_) => "manifest",
             Commands::Image(_) => "image",
