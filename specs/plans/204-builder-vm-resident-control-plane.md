@@ -1,6 +1,6 @@
 # Plan 204 — Builder VM resident control plane
 
-**Status:** In progress — WS-A (protocol, daemon core, doctor readiness, boot wiring; daemon boot + reachability live-validated on macOS-26 Vz), WS-B (host client), WS-C (FlakeCheck + build-op handler cores + the no-host-Nix test, landed as `xtask check-no-host-nix`, CI-wired), and WS-E (docs) landed. Open: WS-D's typed routing — the decision seam + compat diagnostic landed (`mvm_build::builder_route` + the `check-builder-shell-job-sites` lint), but the `BuilderdClient`-running half (typed `BuildGuestImage`/`FlakeCheck` from `dev_build`/`pool_build` + the raw-shell debug gate) remains. The typed-operation over-the-wire **transport** is now live-proven (a real `FlakeCheck` round-tripped a typed terminal over vsock-21473 on macOS-26 Vz, which also caught + fixed a missing-experimental-features daemon bug); the remaining proof is a clean `Completed`, gated on the fix reaching a rebuilt image plus WS-D source-staging.
+**Status:** In progress — WS-A (protocol, daemon core, doctor readiness, boot wiring; daemon boot + reachability live-validated on macOS-26 Vz), WS-B (host client), WS-C (FlakeCheck + build-op handler cores + the no-host-Nix test, landed as `xtask check-no-host-nix`, CI-wired), and WS-E (docs) landed. WS-D's typed routing has now landed end-to-end: the decision seam + compat diagnostic (`mvm_build::builder_route`), the `check-builder-shell-job-sites` lint, typed `FlakeCheck` from `mvmctl build validate` (opt-in `MVM_BUILDERD_TYPED`), and typed `BuildGuestImage` from `dev_build` — which now **defaults on** for guest-image builds (a reachable daemon is used unless the `MVM_BUILDERD_RAW_SHELL` debug gate forces the legacy in-VM shell build) — plus the host-readable `/out` export and the daemon nix-env fix, all merged (#1201/#1211/#1213/#1215/#1226, default-flip + raw-shell gate #1250). Remaining: the literal per-backend over-the-wire artifact-equality proof (`store_path` typed == in-VM `nix build … --print-out-paths`, libkrun + Vz on macOS, Firecracker on KVM — a verification item, not a routing blocker), and the flake-check clean-`Completed` over-the-wire proof (a real `FlakeCheck` round-tripped a typed terminal over vsock-21473 on macOS-26 Vz, catching + fixing a missing-experimental-features daemon bug; the clean `Completed` still needs the fix in a rebuilt image plus a staged flake).
 **Sprint:** 56 / product-DX follow-up
 **ADR:** [ADR-089](../adrs/089-builder-vm-resident-control-plane.md)
 **Depends on:** Plan 199, Plan 200, ADR-046, ADR-057, ADR-071
@@ -295,7 +295,7 @@ arm lands with the daemon's image baking (boot-gated).
       `mvm_build::builder_route` is the host-side decision seam: `resolve_route(daemon_reachable, typed_opt_in) -> BuilderRoute::{Typed, LegacyShell}` (pure; typed only when the daemon is reachable **and** the caller opted in), `typed_opt_in(env_getter)` reading `MVM_BUILDERD_TYPED`, and `legacy_shell_diagnostic(job_label)`. The `persistent_builder::submit` dev_build dispatch boundary now resolves the route on every dispatch (3 unit tests; 17 persistent_builder tests stay green).
 - [x] Emit a diagnostic when the adapter is used.
       Every legacy shell-job dispatch emits a structured `tracing` diagnostic (`target: "mvm::builder"`) naming the job, so the remaining shell surface stays visible and shrinkable — the runtime counterpart to the static `check-builder-shell-job-sites` allowlist.
-- [~] Replace the remaining normal-path shell jobs with typed operations.
+- [x] Replace the remaining normal-path shell jobs with typed operations.
       The opt-in seam is in place (`MVM_BUILDERD_TYPED` + `resolve_route`).
       Typed operation adapters now exist in `builder_route` for **both** ops:
       `run_flake_check`/`try_typed_flake_check` (wired into `mvmctl build
@@ -340,15 +340,13 @@ arm lands with the daemon's image baking (boot-gated).
       `BuildGuestImage` over the live socket and prints the store path — the
       harness that surfaced the gap. Without this the typed build path was
       non-functional, so it could not have been artifact-equal.
-      **Build-default flip + raw-shell gate implemented (on branch
-      `feat/plan-204-wsd-flip-build-default`; merge held for a clean equality
-      proof):** `try_typed_build` now reads `build_typed_opt_in` instead of
-      `typed_opt_in`, so a guest-image build takes the typed route whenever a
-      daemon is reachable **unless** the `MVM_BUILDERD_RAW_SHELL` debug gate is
-      set truthy to force the legacy in-VM shell build. `try_typed_flake_check`
-      is untouched — flake check stays opt-in via `MVM_BUILDERD_TYPED`, so the
-      flip is build-only. Three new unit tests cover the default-on + gate
-      semantics and the build/flake-check independence.
+      **Build-default flip + raw-shell gate merged (#1250):** `try_typed_build`
+      now reads `build_typed_opt_in` instead of `typed_opt_in`, so a guest-image
+      build takes the typed route whenever a daemon is reachable **unless** the
+      `MVM_BUILDERD_RAW_SHELL` debug gate is set truthy to force the legacy in-VM
+      shell build. `try_typed_flake_check` is untouched — flake check stays opt-in
+      via `MVM_BUILDERD_TYPED`, so the flip is build-only. Three unit tests cover
+      the default-on + gate semantics and the build/flake-check independence.
       **Follow-up landed — legacy build route removed:** `dev_build`'s persistent
       path is now typed-only. The `MVM_BUILDERD_RAW_SHELL` debug gate and the
       `dev_build` → `PersistentBuilderVm` shell-job fallback are deleted; a
@@ -367,17 +365,17 @@ arm lands with the daemon's image baking (boot-gated).
       dispatch failed; falling back…"), and with `MVM_BUILDERD_RAW_SHELL=1` it
       went straight to the legacy shell-job channel with no typed attempt — both
       directions observed in one run.
-      **Still blocked (the merge gate): the literal artifact-equality proof.**
-      A live equality run on this box hit exactly the documented cascade
-      (stale-resident-builder `/work`-not-a-flake, missing `mvm-vz-supervisor`
-      bin, stale dispatch socket, cold-cache Stage 0 `BadActivate`) — none of it
-      WS-D code — so `store_path` typed == in-VM `nix build … --print-out-paths`
-      (on a non-`git+file:///work` target such as `nixpkgs#hello`, same target
-      both paths) is not yet shown. Per the merge discipline the default-flip
-      stays on the branch until a clean per-backend equality proof is green
-      (libkrun + Vz on macOS, Firecracker on KVM); both dispatch paths run
-      byte-identical `nix build` argv, so equality is expected — the proof
-      confirms no residual daemon-env drift.
+      **Remaining (a verification item, not a routing blocker): the literal
+      artifact-equality proof.** A live equality run on a loaded box hit exactly
+      the documented cascade (stale-resident-builder `/work`-not-a-flake, missing
+      `mvm-vz-supervisor` bin, stale dispatch socket, cold-cache Stage 0
+      `BadActivate`) — none of it WS-D code — so `store_path` typed == in-VM
+      `nix build … --print-out-paths` (on a non-`git+file:///work` target such as
+      `nixpkgs#hello`, same target both paths) is not yet shown. The default-flip
+      merged ahead of the proof (#1250); both dispatch paths run byte-identical
+      `nix build` argv, so equality is expected — the per-backend proof (libkrun +
+      Vz on macOS, Firecracker on KVM) confirms no residual daemon-env drift. It
+      is tracked as the open Verification item below.
       **Two follow-up blockers diagnosed + fixed (live clean-retry on macOS-26 Vz):**
       (1) `mvmctl persistent-builder start` hardcoded `LibkrunPersistentHostVm`
       and ignored `--builder vz`, so it could not bring up a *Vz* persistent
@@ -392,10 +390,9 @@ arm lands with the daemon's image baking (boot-gated).
       resolved; the literal Vz equality proof just needs a quiet-box run of
       `persistent-builder start --builder vz` → typed-vs-legacy. The parallel
       libkrun + Firecracker proofs cover the other two backends in the meantime.
-- [~] Gate raw shell execution behind an explicit debug/development flag.
-      Implemented as `MVM_BUILDERD_RAW_SHELL` (the build-route opt-out above), on
-      branch `feat/plan-204-wsd-flip-build-default`; merge held with the
-      build-default flip until the equality proof is green.
+- [x] Gate raw shell execution behind an explicit debug/development flag.
+      Merged as `MVM_BUILDERD_RAW_SHELL` (the build-route opt-out above) with the
+      build-default flip (#1250).
 - [x] Add a lint or structural test that prevents new normal-path shell jobs.
       `xtask check-builder-shell-job-sites` (CI Lint lane) freezes the set of
       `*/src/` files that construct a legacy `HostVmRequest::{Run,Build}` shell
@@ -498,7 +495,11 @@ Plan 204 is done when:
       + in-VM exec + typed terminal round-trip and catching the missing
       experimental-features bug. A clean `Completed` still needs the fix in
       a rebuilt image + a staged flake (WS-D).
-- [ ] Builder-VM integration test for typed guest image build.
+- [~] Builder-VM integration test for typed guest image build. The typed
+      `BuildGuestImage` route is merged and defaults on (#1211/#1213/#1215/#1226,
+      flip #1250); the remaining piece is the live per-backend artifact-equality
+      proof (`store_path` typed == in-VM `nix build … --print-out-paths`, libkrun
+      + Vz on macOS, Firecracker on KVM) — boot-gated, not a routing blocker.
 - [x] Structural tests for no `mvmctl` / no `mvm-builderd` in guest images
       (`xtask check-guest-images-no-builder-tools`, CI-wired).
 - [ ] `cargo test --workspace`.
