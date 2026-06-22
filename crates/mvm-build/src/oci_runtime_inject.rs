@@ -58,8 +58,10 @@ const NETINIT_DEST: &str = "usr/local/bin/mvm-guest-netinit";
 /// 1. Mount `/proc`, `/sys`, `/dev` (+ `devpts`, `tmpfs` for `/run`,
 ///    `/tmp`) — the agent and any exec'd command need them.
 /// 2. Create the `/mvm/runtime` overlay mount point.
-/// 3. Run the guest-side network defense (netinit), overlay copy first.
-/// 4. Fork the agent (overlay copy first, baked fallback) and idle.
+/// 3. Mount each `machine run --volume` host share (`mvm.uvols=` cmdline)
+///    as virtio-fs at its guest path, before the workload comes up.
+/// 4. Run the guest-side network defense (netinit), overlay copy first.
+/// 5. Fork the agent (overlay copy first, baked fallback) and idle.
 ///
 /// The agent is forked, not `exec`'d: PID 1 must stay alive to keep the
 /// VM up while the agent serves vsock RPC. An input-less idle loop
@@ -82,6 +84,37 @@ mkdir -p /dev/pts /dev/shm /run /tmp /mvm/runtime 2>/dev/null || true
 mount -t devpts none /dev/pts 2>/dev/null || true
 mount -t tmpfs  none /run     2>/dev/null || true
 mount -t tmpfs  none /tmp     2>/dev/null || true
+
+# User volumes (machine run --volume). The host encoded
+# mvm.uvols=<tag>:<hex(guest_path)>:<ro|rw>:<fs|blk>;... onto the kernel
+# cmdline (mvm_core::vm_backend::encode_user_volumes_cmdline); mount each
+# virtio-fs share at its guest path. virtio-fs is built into the workload
+# kernel, so no module load is needed. Best-effort: a bad mount logs and
+# continues rather than wedging PID 1. Disk (blk) volumes are attached as
+# block devices for the workload to mount itself. Mirrors the mkGuest init.
+MVM_UVOLS=$(sed -n 's/.*\bmvm\.uvols=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null)
+if [ -n "$MVM_UVOLS" ]; then
+  echo "$MVM_UVOLS" | tr ';' '\n' | while IFS=: read -r utag uhex umode ukind; do
+    [ -n "$utag" ] || continue
+    [ -n "$uhex" ] || continue
+    upath=$(printf '%b' "$(echo "$uhex" | sed 's/../\\x&/g')")
+    [ -n "$upath" ] || continue
+    if [ "$ukind" = blk ]; then
+      echo "mvm-oci-init: user disk volume for '$upath' attached (guest auto-mount of disks not wired)"
+      continue
+    fi
+    mkdir -p "$upath" 2>/dev/null || true
+    if [ "$umode" = ro ]; then
+      mount -t virtiofs -o ro "$utag" "$upath" \
+        && echo "mvm-oci-init: mounted user volume $utag at $upath (ro)" \
+        || echo "mvm-oci-init: user volume $utag -> $upath failed (mountpoint must exist on the ro rootfs)"
+    else
+      mount -t virtiofs "$utag" "$upath" \
+        && echo "mvm-oci-init: mounted user volume $utag at $upath (rw)" \
+        || echo "mvm-oci-init: user volume $utag -> $upath failed (mountpoint must exist on the ro rootfs)"
+    fi
+  done
+fi
 
 # Guest-side network defense — prefer the overlay-resident netinit.
 MVM_NETINIT=
@@ -234,6 +267,34 @@ mod tests {
         assert!(
             netinit_at < agent_fork_at,
             "netinit must run before the agent fork"
+        );
+    }
+
+    #[test]
+    fn init_script_mounts_user_volumes_before_the_agent() {
+        let s = oci_init_script();
+        // Reads the host-encoded cmdline token and mounts each share as virtio-fs.
+        assert!(
+            s.contains("mvm.uvols="),
+            "init must parse the uvols cmdline"
+        );
+        assert!(
+            s.contains("mount -t virtiofs -o ro"),
+            "ro shares mount as virtio-fs"
+        );
+        assert!(
+            s.contains("mount -t virtiofs \"$utag\""),
+            "rw shares mount as virtio-fs"
+        );
+        assert!(s.contains("mkdir -p \"$upath\""), "mountpoint is created");
+        // Disk volumes are left for the workload, not auto-mounted here.
+        assert!(s.contains("guest auto-mount of disks not wired"));
+        // Shares mount before the workload agent comes up so the workload sees them.
+        let uvols_at = s.find("mvm.uvols=").expect("uvols parse");
+        let agent_fork_at = s.find("\"$MVM_AGENT\" &").expect("agent fork");
+        assert!(
+            uvols_at < agent_fork_at,
+            "user volumes must mount before the agent fork"
         );
     }
 
