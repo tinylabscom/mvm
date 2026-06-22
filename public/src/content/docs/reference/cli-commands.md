@@ -400,7 +400,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine run --name <name> --image <ref>` | Boot a persistent named machine, return; reconnect via `machine shell <name>` |
 | `mvmctl machine run --name <name> --image <ref> -- <cmd>` | Boot a persistent named machine, run `<cmd>` (streamed), leave it up |
 | `mvmctl machine run --name <name>` | Reconnect to an existing machine by name (no `--image` needed) |
-| `mvmctl machine run --name <name> --image <ref> --force` | Recreate the named machine when the on-disk config differs |
+| `mvmctl machine run --name <name> --image <ref2>` | A changed config auto-recreates the machine (stop + reboot), announced on stderr |
 | `mvmctl machine run -it --image <ref>` | **Interactive** dev shell on a transient machine (gone on exit) |
 | `mvmctl machine run -it --name <name> --image <ref>` | Interactive dev shell on a persistent machine (left up on exit) |
 | `mvmctl machine create --name <name> --image <ref>` | Persist a named OCI-backed machine spec without booting it |
@@ -456,11 +456,14 @@ mvmctl machine stop  --name blue-fox-3f2a     # tear it down when done
 `--name <N>` does the same with a name you choose; `machine run --name <N>` with
 no `--image` reconnects to an existing machine.
 
-**Collision.** If `--name <N>` already exists with a *different* boot config
-(image, CPU, memory, profile, …), `machine run` refuses rather than silently
-reusing or clobbering it (`machine 'N' exists with a different config; pass
---force …`). `--force` stops, overwrites, and recreates it; a matching config
-reuses the machine as-is.
+**Config change auto-recreates.** A matching config reconnects to the existing
+machine. A *different* config (image, CPU, memory, profile, volumes, …)
+**recreates** it — `machine run` stops the old instance, overwrites the spec, and
+reboots, converging like `compose up` (the machine is cattle; durable data
+belongs in `--volume` host shares, which survive the recreate). The recreate is
+announced on stderr (`machine 'N': config changed (…) — stopping the old instance
+and recreating it`) so an unintended clobber, e.g. a typo'd `--image`, is visible.
+To keep two configs side by side, give them different `--name`s.
 
 **Interactive is dev-only.** `-t`/`--tty` attaches a PTY shell and is refused for
 a sealed/production image (claim 15 — no interactive access to a sealed microVM)
