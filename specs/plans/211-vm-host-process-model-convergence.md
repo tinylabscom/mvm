@@ -1,4 +1,4 @@
-# Plan 211 — Per-VM host-process model convergence (one shared `mvm-bridge`, thin libkrun launcher)
+# Plan 211 — Fold the external-VMM bridge sidecars into one `mvm-bridge` (libkrun stays merged)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:executing-plans to
 > implement this plan task-by-task, and superpowers:test-driven-development for
@@ -7,49 +7,56 @@
 > `spawn_bridge_thread` enforcement behavior** — this is a topology refactor, not a
 > policy change; claim-10/12/13 witnesses must stay byte-for-byte green throughout.
 
-**Goal:** Converge every workload backend on the split *VMM-process + thin shared
-bridge sidecar* model (ADR-094). Fold `mvm-firecracker-bridge` + `mvm-vz-drainer`
-into one `mvm-bridge` binary, and strip the bridge out of
-`mvm-libkrun-supervisor` so it is a thin krun launcher whose backend spawns the
-shared sidecar — exactly as Firecracker/vz already do.
+**Goal:** Fold the two external-VMM bridge sidecars (`mvm-firecracker-bridge`,
+`mvm-vz-drainer`) into one shared `mvm-bridge` binary, and point the Firecracker
++ vz backends at it (ADR-094). **`mvm-libkrun-supervisor` keeps its merged
+in-process bridge** — Task 3 (splitting it) was descoped on an intrinsic libkrun
+constraint (see below). Net: 4 per-VM host bins → 3.
 
 **Design:** ADR-094 (`specs/adrs/094-vm-host-process-model-convergence.md`). Read
 it first — it is the contract. Locked rules:
 
-- The split model is the only common denominator (FC/vz VMMs cannot be
-  in-process). Converge *toward* it; never try to merge FC/vz like libkrun.
+- The split model is the natural fit for the **external-VMM** backends (FC, vz);
+  they already use it. Do **not** try to make FC/vz merged, and do **not** try
+  to split libkrun (it creates the bridge fds internally + `_exit()`s on guest
+  shutdown — see ADR-094 "Why libkrun stays merged").
 - One `mvm-bridge` binary; one `BridgeConfigJson` with an **endpoint-kind
-  discriminant**; **uniform** `mvm-jailer-lite` confinement for every endpoint
-  (closes the current vz-drainer gap); passt-hash verify only on the passt
+  discriminant**; `mvm-jailer-lite` confinement through one cfg-gated codepath
+  where the OS supports it (Linux `Passt`); passt-hash verify only on the passt
   endpoint, before confinement.
 - `spawn_bridge_thread`, `BridgeConfig`, `BridgeEndpoints`, and the admission /
-  signed-plan path are **unchanged**. This plan moves *who spawns what*, not
-  *what the bridge enforces*.
-- Teardown is the explicit `AttachedBridgeGuard` fail-closed kill, uniformly —
-  no reliance on libkrun `exit()` to reap a thread.
+  signed-plan path are **unchanged**. This plan moves *who spawns what* (FC + vz
+  spawn the shared bin instead of per-backend bins), not *what the bridge
+  enforces*.
+- FC + vz teardown stays the explicit `AttachedBridgeGuard` /
+  `AttachedDrainerGuard` fail-closed kill they already use.
 
 **Key anchors (verify before editing):**
 
-- `crates/mvm-vm-host/src/bin/mvm-libkrun-supervisor.rs` — `run_with_bridge`
-  (≈L332–566, the bridge half to remove), `run_legacy` (L320), main dispatch
-  (L97–216), the `krun_start_enter` launch to keep.
-- `crates/mvm-vm-host/src/bin/mvm-firecracker-bridge.rs` — sidecar shape:
-  stdin read → `verify_passt_hash` → `confine_self` → `BridgeEndpoints::Passt`
-  → `spawn_bridge_thread`.
-- `crates/mvm-vm-host/src/bin/mvm-vz-drainer.rs` — sidecar shape with
-  `BridgeEndpoints::VzIngest`; **no** jailer-lite today.
-- `crates/mvm-vm-host/src/lib.rs` + `firecracker_bridge::parse`
-  (`BridgeConfigJson`, `decode_plan_json`, `verify_passt_hash`,
-  `PasstHashesFile`) — the parser surface the fuzz lane drives.
+- `crates/mvm-vm-host/src/bin/mvm-libkrun-supervisor.rs` — **unchanged** (Task 3
+  descoped): keeps `run_with_bridge` (the merged in-process bridge) +
+  `run_legacy`. Listed only so reviewers know it is deliberately left alone.
+- `crates/mvm-vm-host/src/bin/mvm-bridge.rs` — the shared sidecar (Task 2). FC +
+  vz will spawn this instead of the per-backend bins.
+- `crates/mvm-vm-host/src/bin/mvm-firecracker-bridge.rs` — to delete; its shape
+  (stdin → `verify_passt_hash` → `confine_self` → `BridgeEndpoints::Passt`) is
+  already reproduced in `mvm-bridge`.
+- `crates/mvm-vm-host/src/bin/mvm-vz-drainer.rs` — to delete; its `VzIngest`
+  shape is reproduced in `mvm-bridge`.
+- `crates/mvm-vm-host/src/bridge::parse` (`BridgeConfigJson`, endpoint
+  discriminant) + `firecracker_bridge::parse` (`decode_plan_json`,
+  `verify_passt_hash`, `PasstHashesFile`) — the unified contract + reused
+  helpers; the fuzz lane drives the parser.
 - `mvm_hostd::supervisor::gateway_bridge` (`BridgeConfig`, `BridgeEndpoints`,
   `spawn_bridge_thread`) and `mvm_hostd::jailer` (`ConfinementSpec`,
   `confine_self`) — the shared core, unchanged.
 - `crates/mvm-backend/src/microvm.rs` — `spawn_fc_bridge`, the RAII
   `AttachedBridgeGuard`, `MVM_FC_BRIDGE_PATH` resolution, socketpair
-  fd-inheritance (the pattern libkrun adopts).
-- `crates/mvm-backend/src/vz.rs` — `AttachedDrainerGuard` (vz sidecar spawn).
-- `crates/mvm-backend/src/libkrun.rs` — `start` (currently spawns the
-  merged supervisor), `resolve_supervisor_path`.
+  fd-inheritance — **repoint at `mvm-bridge` with the unified config**.
+- `crates/mvm-backend/src/vz.rs` — `AttachedDrainerGuard` (vz sidecar spawn) —
+  **repoint at `mvm-bridge` with the `VzIngest` config**.
+- `crates/mvm-backend/src/libkrun.rs` — `start` / `resolve_supervisor_path`
+  **unchanged** (libkrun keeps the merged supervisor).
 - `crates/mvm-vm-host/Cargo.toml` — `[[bin]]` declarations to edit.
 - `crates/mvm-cli/build.rs` / packaging / `.github/workflows/architecture.yml`
   + the bridge fuzz lane — reference updates.
@@ -113,25 +120,23 @@ packaging fix (tracked separately, though this plan reduces its surface).
       + clippy green. (Live confinement + relay + Passt fd reconstruction are
       exercised on-host in Task 6 / the Linux-gated leg.)
 
-## Task 3: Thin `mvm-libkrun-supervisor` + backend-spawned sidecar (the crux)
+## Task 3: ~~Thin `mvm-libkrun-supervisor` + backend-spawned sidecar~~ — DESCOPED
 
-- [ ] Strip the bridge half out of `run_with_bridge`: the supervisor parses the
-      `SupervisorConfig`, builds the `KrunContext`, and calls
-      `krun_start_enter` — nothing else. Collapse `run_legacy` + `run_with_bridge`
-      into one launch path. Delete the `BridgeFds → BridgeEndpoints` factory
-      closure and the concurrent bridge-thread spawn.
-- [ ] In `mvm-backend::libkrun::start`, create the gateway socketpair, give one
-      end to the krun net device (the fd the supervisor previously wired
-      in-process), and spawn `mvm-bridge` with the other end via fd-inheritance —
-      reusing/generalizing `spawn_fc_bridge`'s RAII `AttachedBridgeGuard` and the
-      `MVM_*_BRIDGE_PATH` → adjacent-to-exe → PATH resolver. Guard reaps the
-      sidecar on early return / panic / VM teardown.
-- [ ] Generalize the bridge-path resolver + guard so libkrun, FC, and vz share
-      one helper (one env override name, e.g. `MVM_BRIDGE_PATH`, plus the
-      legacy `MVM_FC_BRIDGE_PATH`/supervisor-path fallbacks for compat).
-- [ ] Tests: unit-test the socketpair setup + guard teardown (kill-on-drop);
-      assert the thin supervisor no longer references `spawn_bridge_thread`; an
-      `xtask`/grep gate that the libkrun supervisor links no bridge symbol.
+> **Abandoned on an intrinsic libkrun constraint** (see ADR-094 "Why libkrun
+> stays merged"). libkrun creates the bridge fds *inside* the supervisor
+> (`run_supervisor_with_bridge` → `configure_with_gateway_for_bridge`) and
+> `_exit()`s on guest shutdown, so the backend cannot feed it fds (as it does
+> for the external `firecracker`/vz VMMs) and a destructor-based sidecar reaper
+> never runs. Splitting would need a C-library restructure + per-platform
+> `PR_SET_PDEATHSIG`/`kqueue NOTE_EXIT` reaping for no benefit the merged model
+> doesn't already provide (running libkrun out-of-process to absorb `_exit()` is
+> exactly what the per-VM supervisor already is). Confirmed against the
+> `msb_krun` binding, which documents the same `_exit()` behavior.
+>
+> **`mvm-libkrun-supervisor` keeps its merged in-process bridge unchanged.** The
+> "4 bins → 3" reduction is achieved entirely by Task 4 (folding the two
+> external-VMM sidecars). The libkrun in-process bridge keeps calling the shared
+> `spawn_bridge_thread`, so the enforcement logic stays one implementation.
 
 ## Task 4: Move FC + vz onto `mvm-bridge`; delete the old sidecars
 
@@ -163,29 +168,30 @@ packaging fix (tracked separately, though this plan reduces its surface).
       must not weaken an existing one. No catalog edits expected.
 - [ ] `just ci` green (fmt --all, nextest, doctests, clippy -D warnings).
 
-## Task 6: Verification (dev-host bootable; FC live-KVM gated)
+## Task 6: Verification (FC = live-KVM gated; vz = macOS-26 gated)
 
-- [ ] On this macOS dev host (libkrun + vz): `machine run --image alpine --
-      echo hi` boots through the thin libkrun supervisor + spawned `mvm-bridge`
-      sidecar; `ps` shows the two-process topology (launcher + bridge); the
-      sidecar is reaped on teardown (no orphan — also addresses the
-      orphaned-supervisor leak observed during diagnosis). Capture the session.
-- [ ] `machine run --net --image alpine` still resolves + connects allow-listed
-      hosts and sink-holes the rest (claim-10 egress unchanged) on libkrun/vz.
-- [ ] Firecracker path (live-KVM-gated; unverifiable on a macOS dev host):
-      FC VM boots with `mvm-bridge` as its sidecar; default-deny + allow-list
-      egress regression holds. Mark this acceptance line gated until run on a
-      KVM host.
+- [ ] libkrun path **unchanged** (Task 3 descoped): `machine run --image alpine
+      -- echo hi` on a libkrun host still boots through the merged supervisor.
+      This is a regression check, not new behavior.
+- [ ] vz path (macOS-26 Apple Silicon gated): `machine run --image alpine` boots
+      with `mvm-bridge` (VzIngest) as the drainer instead of `mvm-vz-drainer`;
+      `--net` still resolves + connects allow-listed hosts and sink-holes the
+      rest (claim-10 egress unchanged); the sidecar is reaped on teardown.
+- [ ] Firecracker path (live-KVM gated; unverifiable on a macOS dev host): FC VM
+      boots with `mvm-bridge` (Passt) as its sidecar instead of
+      `mvm-firecracker-bridge`; default-deny + allow-list egress regression
+      holds. Gated until run on a KVM host.
 
 ---
 
 ## Risks / notes
 
-- **fd-passing is the highest-risk step** (Task 3). De-risk by mirroring
-  `spawn_fc_bridge`'s socketpair + inherited-fd encoding exactly; the FC path is
-  the working reference.
 - **No behavior drift in `spawn_bridge_thread`.** If a claim-10/12/13 witness
   moves at all, stop — the refactor changed enforcement, which is out of scope.
-- **Sequencing:** Tasks 1→2 are additive (old bins still present), so they can
-  land and bake before Task 3/4 flip callers and delete the old bins. Keep the
-  old bins until Task 4's grep gate is green to allow a clean revert.
+- **The Passt/VzIngest configs `mvm-bridge` receives must match byte-for-byte
+  what the old bins received** (same fds, paths, audit substrate, network
+  policy). The only intended change is the binary name + the unified wrapper
+  shape. Diff the produced JSON against the old producers.
+- **Sequencing:** Tasks 1→2 are additive (old bins still present). Task 4 flips
+  the FC + vz callers to `mvm-bridge` and deletes the two old bins; keep them
+  until the grep gate is green to allow a clean revert. libkrun is never touched.
