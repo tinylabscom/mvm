@@ -23,13 +23,13 @@ language SDK tests prove them.
 | Create live sandbox | `mvmctl run --mode live ./script.py` | `mvmctl run --mode live ./script.ts` | `mvmctl up` |
 | Start command | `sandbox.commands.start([...])` | `sandbox.commands.start([...])` | `mvmctl proc start` or `mvmctl exec` |
 | Capture command result | Target `commands.run(...)` | Target `commands.run(...)` | CLI command result and receipt paths |
-| Write file | `sandbox.files.write(path, data)` | `sandbox.files.write(path, data)` | `mvmctl fs write` |
-| Read/list/remove file | Target helpers | Target helpers | `mvmctl fs read`, `mvmctl fs ls`, `mvmctl fs rm` |
-| Logs | Target helper | Target helper | `mvmctl logs` |
+| Write file | `sandbox.files.write(path, data)` | `sandbox.files.write(path, data)` | `mvmctl machine fs write` |
+| Read/list/remove file | Target helpers | Target helpers | `mvmctl machine fs read`, `mvmctl machine fs ls`, `mvmctl machine fs rm` |
+| Logs | Target helper | Target helper | `mvmctl machine logs` |
 | Ports | Target helper | Target helper | port-forwarding CLI commands |
 | Pause/resume | Target helper | Target helper | `mvmctl pause`, `mvmctl resume` |
 | Checkpoint create/restore | Target helper | Target helper | `mvmctl checkpoint create --class vm-full`, `mvmctl checkpoint restore` |
-| Stop cleanup | context manager or `kill()` | `using`/`Symbol.dispose` or `kill()` | `mvmctl down` |
+| Stop cleanup | context manager or `kill()` | `using`/`Symbol.dispose` or `kill()` | `mvmctl machine stop` |
 
 ## Current paths
 
@@ -242,7 +242,7 @@ mvmctl pause agent-sandbox
 mvmctl resume agent-sandbox
 mvmctl checkpoint create agent-sandbox --class vm-full
 mvmctl checkpoint restore agent-sandbox --name after-index
-mvmctl down agent-sandbox
+mvmctl machine stop agent-sandbox
 ```
 
 Snapshots and cold state can contain memory, files, process state, and

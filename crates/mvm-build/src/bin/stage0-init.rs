@@ -595,7 +595,57 @@ mod linux {
         if store_path.is_empty() {
             return Err("nix build emitted no /nix/store path".into());
         }
-        copy_artifacts(Path::new(&store_path), &mode)
+        copy_artifacts(Path::new(&store_path), &mode)?;
+
+        // Best-effort: also emit the resolved `.config` so the host can report
+        // the `=y` symbol count without a CI round-trip. The configfile is a
+        // cached build dep of the kernel just built, so this realises instantly.
+        // A failure here never fails the kernel build — the kernel is the
+        // artifact that matters.
+        if mode == "kernel"
+            && let Some(config_attr) = conf.get("MVM_STAGE0_CONFIG_ATTR")
+        {
+            if let Err(e) = emit_resolved_config(&nix, &arch, config_attr) {
+                eprintln!("stage0-init: skipping kernel-config emit: {e}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Realise the resolved-`.config` flake attr and copy it to
+    /// `/out/mvm-kernel.config`. Cheap — it's a cached dependency of the
+    /// kernel just built.
+    fn emit_resolved_config(nix: &Path, arch: &str, config_attr: &str) -> Result<(), String> {
+        let flake_ref =
+            format!("path:/work/nix/images/builder-vm#packages.{arch}-linux.{config_attr}");
+        let mut cmd = Command::new(nix);
+        cmd.args([
+            "build",
+            &flake_ref,
+            "--extra-experimental-features",
+            "nix-command flakes",
+            "--option",
+            "build-users-group",
+            "",
+            "--max-jobs",
+            "1",
+            "--no-link",
+            "--no-write-lock-file",
+            "--impure",
+            "--print-out-paths",
+        ]);
+        let out = cmd.output().map_err(|e| format!("nix build config: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "nix build config exit {}",
+                out.status.code().unwrap_or(-1)
+            ));
+        }
+        let store_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if store_path.is_empty() {
+            return Err("config build emitted no /nix/store path".into());
+        }
+        copy_deref(Path::new(&store_path), Path::new("/out/mvm-kernel.config"))
     }
 
     /// Spawn `cmd`, streaming its stderr line-by-line to `live` (flushed per

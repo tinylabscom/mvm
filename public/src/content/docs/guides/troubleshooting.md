@@ -87,8 +87,8 @@ in-guest seed-store fallback that aggravates first-boot geometry on a cold cache
 The Firecracker process may have crashed. Check the logs:
 
 ```bash
-mvmctl logs <name>
-mvmctl logs <name> --hypervisor   # Firecracker logs
+mvmctl machine logs <name>
+mvmctl machine logs <name> --hypervisor   # Firecracker logs
 ```
 
 ### "Failed to create TAP device"
@@ -196,7 +196,7 @@ error: timed out waiting for ...
 
 **Cause**: Network connectivity issue or a service failed to start within the expected time.
 
-**Fix**: Check that the dev VM has internet access and that your service binds to the correct port. Use `mvmctl logs <name>` to inspect guest output.
+**Fix**: Check that the dev VM has internet access and that your service binds to the correct port. Use `mvmctl machine logs <name>` to inspect guest output.
 
 ## Machine Run Issues
 

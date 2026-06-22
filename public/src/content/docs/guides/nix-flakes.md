@@ -146,8 +146,8 @@ healthChecks.my-app = {
 Query health status from the host:
 
 ```bash
-mvmctl logs <name>       # view guest console (includes health check results)
-mvmctl logs <name> -f    # follow in real time
+mvmctl machine logs <name>       # view guest console (includes health check results)
+mvmctl machine logs <name> -f    # follow in real time
 ```
 
 ## Users

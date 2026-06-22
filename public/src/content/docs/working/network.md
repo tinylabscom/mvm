@@ -40,7 +40,7 @@ Use readiness and logs while developing services:
 ```sh
 mvmctl wait api-dev --for all
 mvmctl boot-report api-dev
-mvmctl logs api-dev -f
+mvmctl machine logs api-dev -f
 ```
 
 ## Host control channel
@@ -48,8 +48,8 @@ mvmctl logs api-dev -f
 Host control does not require SSH. Guest communication uses the mvm control plane and guest protocol where supported. For debugging, prefer:
 
 ```sh
-mvmctl console api-dev
-mvmctl logs api-dev
+mvmctl machine console api-dev
+mvmctl machine logs api-dev
 mvmctl exec api-dev -- sh -lc 'id && pwd'
 ```
 

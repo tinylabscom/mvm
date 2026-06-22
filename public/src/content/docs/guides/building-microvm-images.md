@@ -115,7 +115,7 @@ Independent of the sealed/accessible distinction, mvm exposes two **runtime life
 | Mode | What it means | When to use |
 |---|---|---|
 | `attached` | VM lifecycle bound to the calling process — Ctrl-C / process exit sends SIGTERM to the VM. | `mvmctl run` interactive, `mvmctl dev` shell sessions, test harnesses that want deterministic teardown. |
-| `detached` | VM survives caller exit — only `mvmctl down` (or `VmBackend::stop`) terminates it. | `mvmctl up` (background), production agents, CI fixtures that boot once and run multiple phases. |
+| `detached` | VM survives caller exit — only `mvmctl machine stop` (or `VmBackend::stop`) terminates it. | `mvmctl up` (background), production agents, CI fixtures that boot once and run multiple phases. |
 
 The default is `detached`. Override:
 
@@ -133,13 +133,13 @@ The lifecycle mode is **orthogonal** to the sealed/accessible distinction:
 | accessible + attached | Dev-mode debug session: `entrypoint.shell`, Ctrl-C ends the session. |
 | accessible + detached | Long-running dev container: shell available, survives reconnect. |
 | sealed + attached | Test harness running an entrypoint to completion, exit captured. |
-| sealed + detached | Production: `entrypoint.command`, runs forever until `mvmctl down`. |
+| sealed + detached | Production: `entrypoint.command`, runs forever until `mvmctl machine stop`. |
 
 The trait surface lives at `mvm_core::vm_backend::{StartMode, VmBackend::start_with_mode, VmBackend::wait, VmBackend::detach}`. The libkrun backend records `StartMode` intent at `~/.mvm/vms/<name>/mode.json`; `mvmctl status` surfaces it.
 
 ## Sealed vs accessible — the same flake works for both
 
-The mvm builder transparently determines whether the resulting image is **sealed** (production — no console attach) or **accessible** (dev — `mvmctl console <vm>` opens an interactive PTY over vsock). The decision is encoded in `passthru.mvm.{accessible, sealed, entrypointKind}` on the resulting derivation, and `mvmctl` reads that metadata to gate the `console` subcommand.
+The mvm builder transparently determines whether the resulting image is **sealed** (production — no console attach) or **accessible** (dev — `mvmctl machine console <vm>` opens an interactive PTY over vsock). The decision is encoded in `passthru.mvm.{accessible, sealed, entrypointKind}` on the resulting derivation, and `mvmctl` reads that metadata to gate the `console` subcommand.
 
 The default inference:
 

@@ -55,7 +55,7 @@ if [ "$verb" = "machine" ]; then
   shift || true
 fi
 case "$verb" in
-  up)
+  up | run)
     if [ -t 0 ]; then :; else cat > ${JSON.stringify(path.join(stdinDir, "up-stdin.bin"))} || true; fi
     if [ "${upExit}" -eq 0 ]; then
       echo '${envelopeJson}'
@@ -189,7 +189,7 @@ describe("Sandbox.create (live mode)", () => {
 
     const calls = readFixtureLog();
     expect(calls.length).toBe(1);
-    expect(calls[0]).toMatch(/^up --up-json --name /);
+    expect(calls[0]).toMatch(/^machine run -d --up-json --name /);
     expect(calls[0]).toContain("--manifest python-3.12");
     expect(calls[0]).toContain("--ttl");
   });

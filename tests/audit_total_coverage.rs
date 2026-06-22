@@ -386,14 +386,11 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("doctor", AuditPosture::ReadOnly),
     ("shell-init", AuditPosture::InteractiveOrControl),
     ("init", AuditPosture::InteractiveOrControl),
-    // VM lifecycle.
-    (
-        "up",
-        AuditPosture::Emits("plan.admitted+plan.launched+VmStart"),
-    ),
+    // VM lifecycle. `up` and `invoke` are retired (folded into `machine run`'s
+    // argv lifecycle + `--entrypoint` action). `run` survives hidden as the SDK
+    // Sandbox transport (`run --mode live/plan`); its posture is unchanged.
     ("ls", AuditPosture::ReadOnly),
     ("run", AuditPosture::InteractiveOrControl),
-    ("invoke", AuditPosture::Emits("plan.admitted+plan.launched")),
     // Build / artifact / registry. Plan 178 (D1) — image/compile/validate/
     // kernel grouped under `build <sub>`.
     ("build", AuditPosture::DelegatesToSub(BUILD_SUB)),

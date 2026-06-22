@@ -91,9 +91,8 @@ mvmctl up --dev --flake .
 mvmctl ls
 
 # Stop one VM, or all
-mvmctl down app1
-mvmctl down
-
+mvmctl machine stop app1
+mvmctl machine stop --all
 # Force a specific backend
 mvmctl up --flake . --hypervisor cloud-hypervisor
 
@@ -102,7 +101,7 @@ mvmctl invoke <vm> --stdin '{"name": "world"}'
 ```
 
 `mvmctl up <flake>` produces a **sealed** image by default —
-`mvmctl console <vm>` will refuse on it unless you pass `--force`.
+`mvmctl machine console <vm>` will refuse on it unless you pass `--force`.
 Pass `--dev` to `up` for the accessible posture. This is the
 runtime enforcement of security claim 4 (CLAUDE.md "Security model").
 
@@ -210,12 +209,12 @@ See `nix/lib/default.nix` for the full `mkGuest` API and
 | `mvmctl up -d` | Detached background mode |
 | `mvmctl up -p HOST:GUEST` | Port mapping (repeatable) |
 | `mvmctl up --hypervisor <backend>` | Force backend selection |
-| `mvmctl down [name]` | Stop a VM by name, or all if omitted |
+| `mvmctl machine stop [name]` | Stop a VM by name, or all if omitted |
 | `mvmctl ls` / `mvmctl ls -a` | List running / all VMs |
-| `mvmctl logs <name>` | Console logs (`-f` to follow) |
+| `mvmctl machine logs <name>` | Console logs (`-f` to follow) |
 | `mvmctl invoke <vm>` | Function-entrypoint call (production-safe) |
 | `mvmctl exec <vm>` | One-shot exec (dev-only — sealed images refuse) |
-| `mvmctl console <vm>` | Attach console (refuses on sealed VMs; `--force` overrides) |
+| `mvmctl machine console <vm>` | Attach console (refuses on sealed VMs; `--force` overrides) |
 | `mvmctl forward <name> -p PORT` | Forward a guest port to localhost |
 
 ### Building

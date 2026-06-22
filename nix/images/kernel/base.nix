@@ -48,12 +48,14 @@ let
   # only what we directly require.
   baseEnables = [
     # virtio bus + transport (sans virtio-fs — that's builder-only;
-    # a sealed workload mounts no host shares).
-    "VIRTIO" "VIRTIO_MENU" "VIRTIO_PCI" "VIRTIO_MMIO"
+    # a sealed workload mounts no host shares). Shrink batch 3: PCI dropped —
+    # libkrun/Firecracker present virtio over the MMIO transport, so the whole
+    # PCI subsystem + its host-controller drivers are dead weight. virtio-pci
+    # goes with it; virtio-mmio carries every device.
+    "VIRTIO" "VIRTIO_MENU" "VIRTIO_MMIO"
     "VIRTIO_BLK" "VIRTIO_NET" "VIRTIO_CONSOLE"
     "VSOCKETS" "VIRTIO_VSOCKETS" "VIRTIO_BALLOON"
     "HW_RANDOM" "HW_RANDOM_VIRTIO"
-    "PCI" "PCI_MSI"
 
     # filesystems. OVERLAY_FS stays in base: the guest agent lands on
     # an overlay. FUSE_FS is builder-only (it backs virtio-fs).
@@ -145,6 +147,56 @@ let
     "MMC" "MMC_BLOCK"      # no SD/eMMC behind virtio
     "REGULATOR" "POWER_SUPPLY" "THERMAL"  # SoC power plumbing defconfig drags in
     "NEW_LEDS" "LEDS_CLASS"
+
+    # Shrink batch 1 — leaf driver subsystems defconfig pulls in that a
+    # headless virtio microVM never touches (console is hvc0 + vsock; no
+    # firmware blobs, no input devices, no host sensors/watchdog). None are
+    # transitive deps of the keep-set (virtio/vsock/ext4/overlay/dm-verity).
+    "FW_LOADER"            # request_firmware infra — no driver here loads blobs
+    "FIREWIRE"             # IEEE-1394 host stack
+    "INPUT" "SERIO"        # input core + PS/2 serial-IO; no virtio-input/keyboard
+    "HWMON"                # hardware monitoring sensors
+    "WATCHDOG"             # watchdog timers
+
+    # Shrink batch 2 — self-contained subsystems + SoC bus/pin/PMIC drivers
+    # defconfig drags in. The SoC `ARCH_*` clusters are already off; these are
+    # the orthogonal driver menus that survive that. None are on the virtio
+    # microVM boot path (no GPIO/I2C/pinctrl/PMIC hardware; FDT boot, not EFI;
+    # not a ChromeOS board). Netfilter is NOT cut here — the builder kernel
+    # needs it for its egress lockdown; the workload kernel drops it on its
+    # own (workload.nix extraDisables), since base is shared by both.
+    "CHROME_PLATFORMS"     # ChromeOS embedded-controller drivers
+    "EFI"                  # arm64 boots from the FDT, never the EFI stub/runtime
+    "I2C"                  # no I2C buses behind virtio
+    "GPIOLIB"              # no GPIO controllers
+    "PINCTRL"              # SoC pin-mux
+    "MFD_CORE"             # multi-function (PMIC) device core
+
+    # Shrink batch 3 — the whole PCI subsystem + host-controller drivers.
+    # Force-dropped (defconfig defaults it on) since virtio rides MMIO here.
+    "PCI"
+
+    # Shrink batch 4 — more whole subsystems a sealed virtio microVM never
+    # uses. Each cascades its family (drivers + helpers) via olddefconfig.
+    "NFS_FS"               # no network filesystems mounted
+    "PHYLIB" "MDIO_DEVICE" # ethernet PHY mgmt — virtio-net has no PHY
+    "VFIO"                 # device passthrough (and PCI is gone)
+    "IPMI_HANDLER"         # no BMC / out-of-band mgmt
+    "CPU_FREQ" "CPU_IDLE"  # no DVFS/idle-governor in a guest
+    "SPI"                  # no SPI buses behind virtio (drops SPI flash/RTC/…)
+    "NVMEM"                # no on-board NVMEM providers
+    "PWM"                  # no PWM controllers
+
+    # Shrink batch 5 — subsystems the proven-minimal libkrun guest also drops.
+    # Console stays: 8250 + AMBA PL011 + virtio-console are kept; only the SoC
+    # vendor UARTs go. IOMMU is safe to drop — virtio rides MMIO with direct
+    # DMA, no translation unit.
+    "CORESIGHT"            # ARM hardware trace/debug — never wired in a guest
+    "VIRTUALIZATION"       # a guest doesn't host nested VMs (drops KVM)
+    "REMOTEPROC"           # no remote-processor/RPMSG coprocessors
+    "IOMMU_SUPPORT"        # virtio-mmio uses direct DMA; no SMMU present
+    "SERIAL_XILINX_PS_UART" "SERIAL_FSL_LPUART" "SERIAL_FSL_LINFLEXUART"
+    "SERIAL_MCTRL_GPIO" "SERIAL_DEV_BUS"  # SoC/serdev UARTs — console is PL011
   ] ++ pkgs.lib.optionals (kernelArch == "arm64") [
     # arm64 boots from the FDT libkrun / Firecracker hand us; ACPI is
     # never consulted, so drop the ACPICA interpreter and the whole

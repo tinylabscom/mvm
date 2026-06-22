@@ -282,10 +282,10 @@ After the grace period expires, normal health reporting resumes.
 
 ```bash
 # Check guest console output
-mvmctl logs my-vm
+mvmctl machine logs my-vm
 
 # Follow logs in real time
-mvmctl logs my-vm -f
+mvmctl machine logs my-vm -f
 
 # List VMs and their status
 mvmctl ls

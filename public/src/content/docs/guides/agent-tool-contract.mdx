@@ -66,10 +66,10 @@ the CLI while preserving the same contract the SDK target should expose.
 ```sh
 mvmctl build ./agent-tool
 mvmctl up ./agent-tool --name agent-tool-call
-mvmctl fs write agent-tool-call /work/main.py < /tmp/request-main.py
+mvmctl machine fs write agent-tool-call /work/main.py < /tmp/request-main.py
 mvmctl exec agent-tool-call --timeout 20 -- python /work/main.py
-mvmctl logs agent-tool-call
-mvmctl down agent-tool-call
+mvmctl machine logs agent-tool-call
+mvmctl machine stop agent-tool-call
 ```
 
 For one-off command execution, prefer a single bounded run when the workflow

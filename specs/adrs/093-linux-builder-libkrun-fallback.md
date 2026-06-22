@@ -111,3 +111,46 @@ fallback).
   doc aligned with the libkrun + qemu-fallback reality.
 - Optional: persist a per-host "libkrun-builder-unavailable" marker so affected
   hosts skip the failing libkrun attempt on subsequent builds.
+
+## Update (2026-06-22): root cause corrected — unaligned kernel, fixed in mvm
+
+The "`KVM_SET_USER_MEMORY_REGION` EINVAL for any region above ~4 GiB" diagnosis
+above was **incomplete**. `strace -f` of the failing supervisor on the same box
+showed the rejected ioctl is the **kernel** region, not a RAM region above the
+PCI hole:
+
+```
+ioctl(KVM_SET_USER_MEMORY_REGION, {slot=1, guest_phys_addr=0x80000000,
+      memory_size=8963072, ...}) = -1 EINVAL
+```
+
+`memory_size=8963072` is exactly the builder `vmlinux` file size, and
+`8963072 % 4096 = 1024` — **not page-aligned**. Linux KVM requires
+`KVM_SET_USER_MEMORY_REGION` sizes to be a multiple of the host page size; mvm
+passed the kernel to libkrun (`krun_set_kernel`), which maps it verbatim, so an
+unaligned `vmlinux` fails VM creation regardless of guest RAM. macOS HVF imposes
+no such requirement — which is why the identical (also-unaligned) aarch64 builder
+kernel boots under libkrun on macOS. So this **is** an mvm-addressable bug, not
+purely a libkrun/kernel defect.
+
+On the **"2 GiB boots past it" anomaly**: the rejected region is slot 1, the
+*kernel*, whose size is the `vmlinux` file size — independent of how much guest
+RAM is configured. So a smaller-RAM run must hit `EINVAL` at this *same* ioctl;
+guest-RAM size cannot explain the difference. The earlier "2 GiB boots" reading
+was never reproduced under `strace` and is **not** explained by this root cause —
+most plausibly that run used a different, already-aligned kernel build (or never
+reached slot 1 for an unrelated reason). We record it as an unexplained prior
+observation rather than attribute a mechanism we can't substantiate; the
+strace-confirmed alignment defect above is the real, reproduced cause.
+
+**Fix:** `mvm_build::libkrun_builder::page_aligned_kernel` zero-pads the builder
+kernel up to a page boundary (a cached `vmlinux.page-aligned` sibling) before
+`krun_set_kernel`. Confirmed on the box: with the unaligned kernel on disk, the
+code auto-creates the aligned sibling, every `KVM_SET_USER_MEMORY_REGION`
+succeeds, and `KVM_RUN` runs the vCPUs (the EINVAL is gone).
+
+This does **not** retire the qemu fallback: it still covers other VM-creation
+failures, and at least one affected host shows a *separate* later issue (the
+guest userspace does not reach `cmd.sh` under libkrun — empty console, no nix
+output), tracked separately. The fallback stays; this fix removes the
+unaligned-kernel EINVAL as one of its triggers.

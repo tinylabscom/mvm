@@ -61,7 +61,7 @@ MicroVMs have **no SSH access** by design. Communication is exclusively via vsoc
 - SSH daemon attack surface
 - Network-based authentication bypasses
 
-For debugging dev builds, use `mvmctl logs <name>` to view guest console output, or `mvmctl logs <name> -f` to follow in real time.
+For debugging dev builds, use `mvmctl machine logs <name>` to view guest console output, or `mvmctl machine logs <name> -f` to follow in real time.
 
 ## Network Policies
 

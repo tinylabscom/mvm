@@ -494,6 +494,22 @@ else
     rm -f /out/mvm-meta.json
 fi
 
+# Pin the builder VM's own materialize toolchain under fixed GC roots so the
+# cap GC below can't reap it. The OCI rootfs materialize job runs
+# /sbin/mkfs.ext4 (and `mount`) inside this VM but registers no root of its
+# own, and a workload build's $NIX_OUT closure never carries e2fsprogs — so
+# without these roots a cap GC after a workload build leaves /sbin/mkfs.ext4
+# a dangling symlink and every later image run dies with "mkfs.ext4: not
+# found". Best-effort; skips a tool already missing (recovery rebuilds it).
+for tool in /sbin/mkfs.ext4 mount; do
+  tool_path=$(command -v "$tool" 2>/dev/null) || continue
+  tool_store=$(readlink -f "$tool_path" 2>/dev/null) || continue
+  [ -n "$tool_store" ] || continue
+  tool_root="/nix/var/nix/gcroots/mvm-builder-tools-$(basename "$tool")"
+  nix-store --add-root "$tool_root" --indirect -r "$tool_store" >/dev/null 2>&1 \
+    || ln -sfn "$tool_store" "$tool_root" 2>/dev/null || true
+done
+
 # Bound the persistent /nix store: GC stale closures once it grows
 # past the cap. `--delete-older-than 14d` keeps the just-built closure
 # (recent) so rebuilds stay warm; only old-revision garbage is freed.
@@ -2021,6 +2037,37 @@ mod tests {
         assert!(
             warm_idx < gc_idx,
             "warm gcroot must be registered before the GC tail"
+        );
+    }
+
+    #[test]
+    fn render_flake_cmd_sh_pins_builder_toolchain_before_gc() {
+        let body = render_flake_cmd_sh(".", "default", false);
+        // The OCI rootfs materialize job runs /sbin/mkfs.ext4 inside the
+        // builder VM but registers no GC root, and a workload build's
+        // $NIX_OUT closure never carries e2fsprogs. Without a dedicated root
+        // the cap GC reaps the builder's own toolchain, leaving
+        // /sbin/mkfs.ext4 a dangling symlink and breaking every later image
+        // run. Pin the materialize toolchain under fixed roots, before the GC.
+        let pin_idx = body
+            .find("/nix/var/nix/gcroots/mvm-builder-tools-")
+            .expect("builder-toolchain gcroot present");
+        assert!(
+            body.contains("tool_root=\"/nix/var/nix/gcroots/mvm-builder-tools-"),
+            "toolchain pin must build the gcroot path in:\n{body}"
+        );
+        assert!(
+            body.contains("nix-store --add-root \"$tool_root\" --indirect -r \"$tool_store\""),
+            "toolchain pin must register an indirect --add-root in:\n{body}"
+        );
+        assert!(
+            body.contains("/sbin/mkfs.ext4"),
+            "toolchain pin must cover mkfs.ext4 in:\n{body}"
+        );
+        let gc_idx = body.find("nix-collect-garbage").expect("gc present");
+        assert!(
+            pin_idx < gc_idx,
+            "builder-toolchain gcroot must be registered before the GC tail"
         );
     }
 

@@ -41,18 +41,17 @@
 //!   degrade to warnings when the dev VM isn't reachable, but
 //!   Step 2 — the build-cache prune — runs on host fs and the
 //!   audit emit always fires)
-//! - `mvmctl up --hypervisor mock --detach --no-supervisor` (with
+//! - `mvmctl machine run --hypervisor mock -d --no-supervisor` (with
 //!   `MVM_DIRECT_BOOT=1` + stub kernel/rootfs files) → `VmStart`
-//!   (end-to-end exercise of the launchd-spawned direct-boot path
-//!   against the in-memory `MockBackend`. The mock makes the
-//!   backend dispatch hermetic; `MVM_DIRECT_BOOT` skips the
-//!   build + template lookup. Together they let `mvmctl up` run
-//!   to completion on a CI runner with no KVM / Nix / Apple
-//!   Container / Docker / libkrun)
-//! - `mvmctl machine set-ttl <vm> <duration>` (after `up --hypervisor mock`)
-//!   → `VmTtlSet` (chains off the up-via-mock fixture; the verb
-//!   operates on the persistent name registry that `up` populates)
-//! - `mvmctl machine pause <vm> --hypervisor mock` (after `up`) →
+//!   (end-to-end exercise of the direct-boot path against the
+//!   in-memory `MockBackend`. The mock makes the backend dispatch
+//!   hermetic; `MVM_DIRECT_BOOT` skips the build + template lookup.
+//!   Together they let `machine run` complete on a CI runner with
+//!   no KVM / Nix / Apple Container / Docker / libkrun)
+//! - `mvmctl machine set-ttl <vm> <duration>` (after `machine run --hypervisor mock`)
+//!   → `VmTtlSet` (chains off the machine-run-via-mock fixture; the verb
+//!   operates on the persistent name registry that `machine run` populates)
+//! - `mvmctl machine pause <vm> --hypervisor mock` (after `machine run`) →
 //!   `WorkloadSleep` (Plan 65: pause routes through the SnapshotIO
 //!   trait; `--hypervisor mock` swaps in `CannedIO` so the seal
 //!   step writes deterministic 12-byte vmstate + 8-byte mem stubs
@@ -931,16 +930,15 @@ fn cleanup_emits_slot_prune_audit_entry_even_with_no_builds() {
 
 /// Bring up an `--hypervisor mock` VM in the sandbox via the
 /// `MVM_DIRECT_BOOT` direct-boot path. Returns when the VM is
-/// registered in the name registry (which `up` does before
-/// dispatching to the backend). Used as a fixture by tests of
+/// registered in the name registry. Used as a fixture by tests of
 /// state-changing verbs that operate on a registered VM
-/// (`set-ttl`, future `pause`/`resume`/etc. work).
+/// (`set-ttl`, `pause`/`resume`/etc.).
 ///
 /// Pass-through env: `MVM_DIRECT_BOOT=1` + stub kernel/rootfs
 /// files skip the build + template-lookup pre-flight that needs
 /// real Nix; `--hypervisor mock` routes backend dispatch to
-/// [`mvm_backend::MockBackend`]; `--detach` short-circuits the
-/// Ctrl+C loop; `--no-supervisor` skips plan-64 admission.
+/// [`mvm_backend::MockBackend`]; `-d` detaches; `--no-supervisor`
+/// skips plan-64 admission.
 fn bring_up_mock_vm(sandbox: &AuditSandbox, name: &str) {
     let stub_dir = sandbox.home_path().join("stub");
     std::fs::create_dir_all(&stub_dir).expect("mkdir stub");
@@ -958,16 +956,17 @@ fn bring_up_mock_vm(sandbox: &AuditSandbox, name: &str) {
         .env("MVM_KERNEL_PATH", &kernel)
         .env("MVM_ROOTFS_PATH", &rootfs)
         .args([
-            "up",
+            "machine",
+            "run",
             "--hypervisor",
             "mock",
             "--name",
             name,
             "--no-supervisor",
-            "--detach",
+            "-d",
         ])
         .output()
-        .expect("spawn mvmctl up");
+        .expect("spawn mvmctl machine run");
     assert!(
         output.status.success(),
         "fixture: bring_up_mock_vm({name}) failed: stderr={}",
@@ -1006,8 +1005,8 @@ fn start_mock_vm_agent(sandbox: &AuditSandbox, name: &str) -> MockVmAgentFixture
 }
 
 #[test]
-fn up_with_mock_backend_emits_vm_start_audit_entry() {
-    // End-to-end test of `mvmctl up` against the in-memory
+fn machine_run_with_mock_backend_emits_vm_start_audit_entry() {
+    // End-to-end test of `mvmctl machine run` against the in-memory
     // `MockBackend`. Pre-MockBackend this row needed a real
     // Firecracker / Apple Container / Docker / libkrun to
     // exercise — none of which are hermetic on a CI runner. The

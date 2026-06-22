@@ -31,7 +31,7 @@ mvmctl run --dry-run --json -- python task.py
 ```sh
 mvmctl up ./my-app --name agent-sandbox
 mvmctl exec agent-sandbox -- python /work/task.py
-mvmctl logs agent-sandbox -f
+mvmctl machine logs agent-sandbox -f
 ```
 
 Use this path when the VM has state, files, services, or snapshots that should survive across commands.

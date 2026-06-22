@@ -5,7 +5,7 @@
 //!
 //! - A fixture `mvmctl` shell script (the "fake mvmctl") that
 //!   records each invocation's argv and emits the
-//!   `mvmctl up --up-json` envelope the SDK expects.
+//!   `mvmctl machine run --up-json` envelope the SDK expects.
 //! - A real `mvmctl run --mode live <script>` invocation that
 //!   spawns the user script with `MVM_SDK_MODE=live` +
 //!   `MVM_CLI_BIN=<fixture>`.
@@ -17,9 +17,9 @@
 //! 1. `mvmctl run --mode live` spawns the user script with the
 //!    right env vars (the fixture verifies `MVM_CLI_BIN` was set
 //!    by writing the binary path into its own log).
-//! 2. The SDK shells `mvmctl up --up-json` and parses the envelope.
-//! 3. The SDK shells `mvmctl proc start` against the dev VM.
-//! 4. The SDK shells `mvmctl down` on `Sandbox.__exit__`.
+//! 2. The SDK shells `mvmctl machine run --up-json` and parses the envelope.
+//! 3. The SDK shells `mvmctl machine proc start` against the dev VM.
+//! 4. The SDK shells `mvmctl machine stop` on `Sandbox.__exit__`.
 //! 5. Against a prod-template envelope, the SDK raises
 //!    `SandboxDevOnly` *before* any `proc start` shell — security
 //!    claim 4 enforcement.
@@ -64,7 +64,7 @@ fn python_on_path() -> Option<PathBuf> {
 }
 
 /// Write a fixture `mvmctl` shell script that records its argv to a
-/// log file and emits the requested envelope on `up --up-json`.
+/// log file and emits the requested envelope on `machine run --up-json`.
 fn write_fixture_mvmctl(dir: &std::path::Path, build_mode: &str) -> PathBuf {
     let log = dir.join("fixture-calls.log");
     let stdin_dir = dir.join("fixture-stdin");
@@ -84,7 +84,7 @@ if [ "$verb" = "machine" ]; then
   shift || true
 fi
 case "$verb" in
-  up)
+  run)
     echo '{envelope}'
     exit 0
     ;;
@@ -142,7 +142,7 @@ fn read_fixture_log(dir: &std::path::Path) -> Vec<String> {
 /// before reaching the SDK.
 ///
 /// In practice the verb sets `MVM_CLI_BIN=<current_exe>`. To
-/// avoid a real `mvmctl up` going out and trying to boot a VM,
+/// avoid a real `mvmctl machine run` going out and trying to boot a VM,
 /// the test overrides `MVM_CLI_BIN` directly via `Command::env`
 /// after the verb sets it — that's not possible because the verb
 /// is the spawner. So instead the test inlines the env override
@@ -187,14 +187,14 @@ fn sdk_live_dev_template_shells_to_proc_start() {
     );
 
     let calls = read_fixture_log(tmp.path());
-    // 1: up --up-json, 2: proc start, 3: fs write, 4: down
+    // 1: machine run --up-json, 2: machine proc start, 3: machine fs write, 4: machine stop
     assert!(
         calls.len() >= 4,
-        "expected >= 4 mvmctl shells (up, machine proc start, machine fs write, machine stop); got {calls:?}"
+        "expected >= 4 mvmctl shells (machine run, machine proc start, machine fs write, machine stop); got {calls:?}"
     );
     assert!(
-        calls[0].starts_with("up --up-json"),
-        "first shell must be `up --up-json`, got {:?}",
+        calls[0].starts_with("machine run -d --up-json"),
+        "first shell must be `machine run -d --up-json`, got {:?}",
         calls[0]
     );
     assert!(
@@ -256,8 +256,10 @@ fn sdk_live_prod_template_raises_sandbox_dev_only_before_proc_start() {
         "SDK must NOT have shelled to `mvmctl proc start` against a prod template (security claim 4 client-side enforcement); but the fixture saw: {calls:?}"
     );
     assert!(
-        calls.iter().any(|c| c.starts_with("up --up-json")),
-        "the `up` shell must still have fired; got {calls:?}"
+        calls
+            .iter()
+            .any(|c| c.starts_with("machine run -d --up-json")),
+        "the `machine run` boot shell must still have fired; got {calls:?}"
     );
 }
 

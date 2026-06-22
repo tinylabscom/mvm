@@ -5838,6 +5838,7 @@ dependencies = [
  "clap",
  "clap_mangen",
  "mvm-cli",
+ "mvm-core",
  "regex",
  "serde",
  "serde_json",

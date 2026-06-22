@@ -74,7 +74,7 @@ Use these while SDK error and metric helpers mature:
 ```sh
 mvmctl run --receipt /tmp/receipt.json -- python task.py
 mvmctl boot-report devbox --json
-mvmctl logs devbox
+mvmctl machine logs devbox
 mvmctl audit tail -n 20
 mvmctl audit verify --tenant local
 mvmctl doctor --json

@@ -90,7 +90,7 @@ mvmctl run
 
 **`nix build` fails with "a 'x86_64-linux' with features … is required"** — that is a direct host-side Nix command failing because macOS cannot build Linux derivations by itself. Use `mvmctl build --flake .` so the Linux build runs inside the builder VM. If you intentionally want direct `nix build` on macOS, configure [`nix-darwin`'s `linux-builder`](https://nix.dev/manual/nix/stable/installation/installing-binary).
 
-**`mvmctl run` boots but `mvmctl console` fails to attach** — the `console` subcommand is only enabled for *accessible* images. If your `entrypoint.command = [ ... ]`, the build is *sealed* and console attach is rejected. Switch to `entrypoint.shell = "/bin/sh"` or pass `dev = true` in your `mkGuest` call. See [Building MicroVM Images](/guides/building-microvm-images).
+**`mvmctl run` boots but `mvmctl machine console` fails to attach** — the `console` subcommand is only enabled for *accessible* images. If your `entrypoint.command = [ ... ]`, the build is *sealed* and console attach is rejected. Switch to `entrypoint.shell = "/bin/sh"` or pass `dev = true` in your `mkGuest` call. See [Building MicroVM Images](/guides/building-microvm-images).
 
 **"libkrun shared library not found"** — install libkrun, then rerun the command. On Apple Silicon with Homebrew:
 
