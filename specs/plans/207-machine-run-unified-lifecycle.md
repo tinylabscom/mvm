@@ -199,6 +199,20 @@ agent + `enforce_accessible_gate` still bar a sealed prod guest, leaving the
 listeners inert there. Live-proven on macOS Vz: a managed alpine boot binds
 `vsock-20001.sock`…`vsock-20128.sock` and the guest agent answers.
 
+## Post-regression: slow transient teardown after the interactive shell exits
+
+Second issue found in the same session: after Ctrl+D (or `exit`), `machine run
+-t` (transient) sat silent for ~6s before returning, so the shell *looked* hung
+and users reached for Ctrl+C. The console relay itself tears down in ~0.05s; the
+delay was `run_interactive` calling the **graceful** `stop_running_machine`
+(`backend.stop`), which on Vz burns ~6s of ACPI grace across the supervisor,
+gvproxy, and drainer. The throwaway guest's work is already done, so the grace
+buys nothing. Fixed by routing the transient-interactive teardown through the
+existing fast `backend.stop_transient` (the same path `mvmctl run` uses —
+SIGKILL up front, no grace) via a new `stop_transient_machine` helper, plus a
+one-line "Stopping transient machine …" notice for immediate feedback.
+Measured on macOS Vz: teardown after Ctrl+D dropped 6.44s → 0.06s.
+
 ## Out of scope
 
 - Idle auto-stop / TTL reaping of persistent machines (warm-pool/reaper work is
