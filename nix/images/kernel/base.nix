@@ -48,12 +48,14 @@ let
   # only what we directly require.
   baseEnables = [
     # virtio bus + transport (sans virtio-fs — that's builder-only;
-    # a sealed workload mounts no host shares).
-    "VIRTIO" "VIRTIO_MENU" "VIRTIO_PCI" "VIRTIO_MMIO"
+    # a sealed workload mounts no host shares). Shrink batch 3: PCI dropped —
+    # libkrun/Firecracker present virtio over the MMIO transport, so the whole
+    # PCI subsystem + its host-controller drivers are dead weight. virtio-pci
+    # goes with it; virtio-mmio carries every device.
+    "VIRTIO" "VIRTIO_MENU" "VIRTIO_MMIO"
     "VIRTIO_BLK" "VIRTIO_NET" "VIRTIO_CONSOLE"
     "VSOCKETS" "VIRTIO_VSOCKETS" "VIRTIO_BALLOON"
     "HW_RANDOM" "HW_RANDOM_VIRTIO"
-    "PCI" "PCI_MSI"
 
     # filesystems. OVERLAY_FS stays in base: the guest agent lands on
     # an overlay. FUSE_FS is builder-only (it backs virtio-fs).
@@ -168,6 +170,21 @@ let
     "GPIOLIB"              # no GPIO controllers
     "PINCTRL"              # SoC pin-mux
     "MFD_CORE"             # multi-function (PMIC) device core
+
+    # Shrink batch 3 — the whole PCI subsystem + host-controller drivers.
+    # Force-dropped (defconfig defaults it on) since virtio rides MMIO here.
+    "PCI"
+
+    # Shrink batch 4 — more whole subsystems a sealed virtio microVM never
+    # uses. Each cascades its family (drivers + helpers) via olddefconfig.
+    "NFS_FS"               # no network filesystems mounted
+    "PHYLIB" "MDIO_DEVICE" # ethernet PHY mgmt — virtio-net has no PHY
+    "VFIO"                 # device passthrough (and PCI is gone)
+    "IPMI_HANDLER"         # no BMC / out-of-band mgmt
+    "CPU_FREQ" "CPU_IDLE"  # no DVFS/idle-governor in a guest
+    "SPI"                  # no SPI buses behind virtio (drops SPI flash/RTC/…)
+    "NVMEM"                # no on-board NVMEM providers
+    "PWM"                  # no PWM controllers
   ] ++ pkgs.lib.optionals (kernelArch == "arm64") [
     # arm64 boots from the FDT libkrun / Firecracker hand us; ACPI is
     # never consulted, so drop the ACPICA interpreter and the whole
