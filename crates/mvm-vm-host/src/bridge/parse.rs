@@ -322,4 +322,77 @@ mod tests {
             .expect("policy present");
         assert_eq!(decoded, policy);
     }
+
+    // ── Producer byte-equivalence (golden) ──────────────────────────────
+    //
+    // The FC + vz backends build this config as raw JSON (they cannot depend on
+    // the leaf bin crate). These two tests mirror those producer `json!` blocks
+    // EXACTLY so a key/nesting drift between producer and consumer is caught in
+    // CI without a live VM — the main guard for the Firecracker leg, whose
+    // producer (`mvm-backend::microvm::spawn_fc_bridge`) is Linux-only and not
+    // compiled on a macOS dev host. Keep these in sync with the producers; the
+    // live runs (Hetzner KVM for FC, macOS-26 for vz) are the end-to-end proof.
+
+    #[test]
+    fn fc_producer_passt_config_deserializes() {
+        // Mirror of `mvm-backend::microvm::spawn_fc_bridge`'s bridge_cfg.
+        let np = serde_json::to_string(&NetworkPolicy::unrestricted()).unwrap();
+        let json = serde_json::json!({
+            "vm_name": "fc-vm",
+            "audit_dir": "/h/.mvm/audit",
+            "audit_socket": "/h/.mvm/audit/gateway-fc-vm.sock",
+            "keys_dir": "/h/.mvm/keys",
+            "signing_key_path": "/h/.mvm/keys/host-signer.ed25519",
+            "plan_json": "{}",
+            "bundle_json": serde_json::Value::Null,
+            "network_policy_json": np,
+            "endpoint": {
+                "passt": {
+                    "passt_path": "/usr/bin/passt",
+                    "passt_hashes_path": "/h/.mvm/passt-hashes.toml",
+                    "gateway_fd_raw": 7,
+                    "supervisor_fd_raw": 8,
+                }
+            },
+        });
+        let cfg: BridgeConfigJson =
+            serde_json::from_value(json).expect("FC producer JSON must deserialize");
+        assert!(cfg.bundle_json.is_none(), "null bundle_json → None");
+        // FC defers egress to nftables → unrestricted.
+        assert_eq!(
+            decode_network_policy(&cfg).unwrap(),
+            Some(NetworkPolicy::unrestricted())
+        );
+        match cfg.endpoint {
+            BridgeEndpointKind::Passt {
+                gateway_fd_raw,
+                supervisor_fd_raw,
+                ..
+            } => {
+                assert_eq!(gateway_fd_raw, 7);
+                assert_eq!(supervisor_fd_raw, 8);
+            }
+            other => panic!("expected Passt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vz_producer_vz_ingest_config_deserializes() {
+        // Mirror of `mvm-backend::vz::spawn_vz_drainer`'s drainer_cfg.
+        let json = serde_json::json!({
+            "vm_name": "vz-vm",
+            "audit_dir": "/h/.mvm/audit",
+            "audit_socket": "/h/.mvm/audit/gateway-vz-vm.sock",
+            "keys_dir": "/h/.mvm/keys",
+            "signing_key_path": "/h/.mvm/keys/host-signer.ed25519",
+            "plan_json": "{}",
+            "bundle_json": serde_json::Value::Null,
+            "endpoint": { "vz_ingest": { "events_socket_path": "/h/.mvm/vms/vz-vm/events.sock" } },
+        });
+        let cfg: BridgeConfigJson =
+            serde_json::from_value(json).expect("vz producer JSON must deserialize");
+        // vz omits network_policy_json → None (no-bundle arm fails closed).
+        assert!(decode_network_policy(&cfg).unwrap().is_none());
+        assert!(matches!(cfg.endpoint, BridgeEndpointKind::VzIngest { .. }));
+    }
 }

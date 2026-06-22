@@ -1,6 +1,6 @@
 [package]
 name = "mvm-vm-host"
-description = "Per-VM supervisor host processes for mvm — one process per guest VM. Cfg-gated [[bin]]s: mvm-libkrun-supervisor (libkrun; gated by the libkrun-sys feature), mvm-vz-drainer (Vz), mvm-firecracker-bridge (Firecracker; Linux-gated in source). Consolidated from the three former per-VM crates (plan 121 D2). The shared lib carries the firecracker-bridge config/passt-hash parsers (fuzzed)."
+description = "Per-VM supervisor host processes for mvm — one process per guest VM. [[bin]]s: mvm-libkrun-supervisor (libkrun; gated by the libkrun-sys feature; merged in-process bridge), mvm-vz-supervisor (Vz VMM), and the shared mvm-bridge sidecar (external-VMM gateway/audit bridge for Firecracker + vz; replaces the former mvm-firecracker-bridge / mvm-vz-drainer). The shared lib carries the unified bridge config + passt-hash parsers (fuzzed)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -28,21 +28,10 @@ name = "mvm-libkrun-supervisor"
 path = "src/bin/mvm-libkrun-supervisor.rs"
 required-features = ["libkrun-sys"]
 
-[[bin]]
-name = "mvm-vz-drainer"
-path = "src/bin/mvm-vz-drainer.rs"
-
-# Linux-only at runtime; src/bin self-gates with cfg(target_os="linux")
-# to a stub main() elsewhere so non-Linux workspace builds stay green.
-[[bin]]
-name = "mvm-firecracker-bridge"
-path = "src/bin/mvm-firecracker-bridge.rs"
-
-# Shared per-VM bridge sidecar — folds the mvm-firecracker-bridge (Passt) and
-# mvm-vz-drainer (VzIngest) sidecars into one. Cross-platform (not a
-# whole-binary cfg gate): the Passt arm is Linux-only and confined, the
-# VzIngest arm is macOS; per-arm cfg gating lives inside. The old per-backend
-# bins stay until their callers are moved over.
+# Shared per-VM bridge sidecar — the single sidecar for both external-VMM
+# backends (replaces the former mvm-firecracker-bridge / mvm-vz-drainer).
+# Cross-platform (not a whole-binary cfg gate): the Passt arm is Linux-only and
+# confined, the VzIngest arm is macOS; per-arm cfg gating lives inside.
 [[bin]]
 name = "mvm-bridge"
 path = "src/bin/mvm-bridge.rs"
