@@ -1,7 +1,7 @@
 //! Per-host builder-VM health cache.
 //!
 //! On a host where libkrun can't create its builder VM — e.g. the
-//! `KVM_SET_USER_MEMORY_REGION` EINVAL defect on some Linux kernels (ADR-093) —
+//! `KVM_SET_USER_MEMORY_REGION` EINVAL defect on some Linux kernels —
 //! the auto-fallback would otherwise pay a doomed libkrun attempt on *every*
 //! build before switching to qemu. This records a short-lived marker so
 //! subsequent builds skip straight to the qemu builder. The marker self-heals
