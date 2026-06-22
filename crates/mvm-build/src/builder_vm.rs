@@ -432,6 +432,20 @@ pub enum BuilderVmError {
     #[error("nix build failed inside builder sandbox: {0}")]
     NixBuildFailed(String),
 
+    /// The builder-VM supervisor exited non-zero — the VM/VMM itself could not
+    /// run the build (e.g. libkrun failing `KVM_SET_USER_MEMORY_REGION` on a
+    /// host that can't map the guest's high-memory region). Distinct from
+    /// [`NixBuildFailed`](Self::NixBuildFailed) — where the build *ran* and
+    /// failed — so the builder dispatch can transparently fall back to another
+    /// backend on a VMM-level failure without masking a genuine build error.
+    #[error("supervisor exited with non-zero status ({exit_code}); guest stderr at {vm_state_dir}")]
+    SupervisorExited {
+        /// The supervisor process's non-zero exit code.
+        exit_code: i32,
+        /// Host path to the per-VM state dir holding the guest console/stderr.
+        vm_state_dir: String,
+    },
+
     /// The persistent builder Nix store has a dangling/GC'd path — every build
     /// re-evals to the same missing path and fails identically, so `dev up`
     /// appears to "loop". Distinguished from a generic build failure so

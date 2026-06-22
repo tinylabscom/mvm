@@ -192,6 +192,97 @@ pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// Auto-fallback between builder backends on a VMM-level failure
+// ──────────────────────────────────────────────────────────────────
+
+/// Is `e` a VMM-level failure — the builder VM/supervisor couldn't run the
+/// build at all — rather than a genuine build error a different backend would
+/// hit identically? Only these justify an auto-fallback: a real
+/// `NixBuildFailed` (the build ran and failed) or a `DegradedBuilderStore`
+/// (shared Nix store) must surface unchanged.
+pub fn is_builder_vm_level_failure(e: &BuilderVmError) -> bool {
+    matches!(
+        e,
+        BuilderVmError::SupervisorExited { .. } | BuilderVmError::LibkrunUnavailable(_)
+    )
+}
+
+/// Is the live host Linux-with-KVM? The qemu fallback is a Linux concern —
+/// libkrun-on-KVM is the path that fails at VM creation
+/// (`KVM_SET_USER_MEMORY_REGION` EINVAL on some kernels/libkrun versions) where
+/// the qemu/microvm_nix builder works.
+fn is_linux_native_host() -> bool {
+    matches!(current(), Platform::LinuxNative)
+}
+
+/// Backends to try, in order, for a builder job. Pure (the `is_linux_native`
+/// input is injected) so the policy is unit-testable without spoofing the host.
+///
+/// - An **explicit** choice (CLI flag / `MVM_BUILDER_BACKEND`) is honoured with
+///   no fallback — the operator asked for that backend specifically.
+/// - Auto-detected **Vz** falls back to **libkrun** (the long-standing macOS
+///   behaviour: Vz probe passes but the backend trips a runtime issue).
+/// - Auto-detected **libkrun on Linux** falls back to **qemu** — libkrun-on-KVM
+///   can fail at VM creation on hosts the qemu/microvm_nix builder handles fine.
+pub fn builder_attempt_order(
+    selected: BuilderBackendChoice,
+    explicit: bool,
+    is_linux_native: bool,
+) -> Vec<BuilderBackendChoice> {
+    if explicit {
+        return vec![selected];
+    }
+    match selected {
+        BuilderBackendChoice::Vz => vec![BuilderBackendChoice::Vz, BuilderBackendChoice::Libkrun],
+        BuilderBackendChoice::Libkrun if is_linux_native => {
+            vec![BuilderBackendChoice::Libkrun, BuilderBackendChoice::Qemu]
+        }
+        _ => vec![selected],
+    }
+}
+
+/// Run `attempt` over [`builder_attempt_order`], retrying the next backend when
+/// an earlier one fails with a [VMM-level error](is_builder_vm_level_failure).
+/// A genuine build error (or the last backend's error) surfaces unchanged.
+///
+/// Centralizes the "libkrun broke at VM creation; try qemu" policy so every
+/// builder-invocation site — `run_build`, `run_shell_script` materialization,
+/// etc. — shares one decision. `selected` is the resolved choice; `explicit`
+/// is whether it was forced (CLI flag / env), which disables the fallback.
+pub fn run_with_builder_fallback<T>(
+    selected: BuilderBackendChoice,
+    explicit: bool,
+    mut attempt: impl FnMut(BuilderBackendChoice) -> Result<T, BuilderVmError>,
+) -> Result<T, BuilderVmError> {
+    let order = builder_attempt_order(selected, explicit, is_linux_native_host());
+    let last_idx = order.len() - 1;
+    let mut last_err: Option<BuilderVmError> = None;
+    for (idx, choice) in order.iter().copied().enumerate() {
+        match attempt(choice) {
+            Ok(value) => return Ok(value),
+            // Not the last backend, and a VMM-level failure → try the next.
+            Err(e) if idx < last_idx && is_builder_vm_level_failure(&e) => {
+                tracing::warn!(
+                    error = %e,
+                    from = choice.name(),
+                    to = order[idx + 1].name(),
+                    "the {} builder VM could not run the build (VMM-level failure); \
+                     falling back to the {} builder \
+                     (re-run with `--builder {}` to disable the fallback)",
+                    choice.name(),
+                    order[idx + 1].name(),
+                    choice.name(),
+                );
+                last_err = Some(e);
+            }
+            // Last backend, or a genuine build error → surface it unchanged.
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.expect("builder_attempt_order is never empty"))
+}
+
+// ──────────────────────────────────────────────────────────────────
 // `MVM_LINUX_BUILDER_VM` readiness gate
 // ──────────────────────────────────────────────────────────────────
 
@@ -442,6 +533,117 @@ mod tests {
             let _backend =
                 resolve_builder_backend_with_override(Some(BuilderBackendChoice::Libkrun));
         });
+    }
+
+    // ── Auto-fallback policy (pure) ──────────────────────────────
+
+    #[test]
+    fn vmm_level_failures_trigger_fallback_build_errors_do_not() {
+        // Supervisor died / VMM unavailable → try another backend.
+        assert!(is_builder_vm_level_failure(
+            &BuilderVmError::SupervisorExited {
+                exit_code: 1,
+                vm_state_dir: "/x".into(),
+            }
+        ));
+        assert!(is_builder_vm_level_failure(
+            &BuilderVmError::LibkrunUnavailable("no lib".into())
+        ));
+        // A real build error (the build ran and failed) must surface unchanged.
+        assert!(!is_builder_vm_level_failure(
+            &BuilderVmError::NixBuildFailed("guest cmd.sh exited 1".into())
+        ));
+        assert!(!is_builder_vm_level_failure(
+            &BuilderVmError::DegradedBuilderStore {
+                cache_dir: "/c".into(),
+                log_path: "/l".into(),
+                detail: "dangling".into(),
+            }
+        ));
+    }
+
+    #[test]
+    fn attempt_order_linux_libkrun_falls_back_to_qemu_only_when_auto() {
+        use BuilderBackendChoice::*;
+        // Auto-detected libkrun on Linux → libkrun, then qemu.
+        assert_eq!(
+            builder_attempt_order(Libkrun, false, true),
+            vec![Libkrun, Qemu]
+        );
+        // Explicit libkrun → no fallback (operator asked for libkrun).
+        assert_eq!(builder_attempt_order(Libkrun, true, true), vec![Libkrun]);
+        // libkrun off-Linux (e.g. macOS 13-25) → no qemu fallback.
+        assert_eq!(builder_attempt_order(Libkrun, false, false), vec![Libkrun]);
+    }
+
+    #[test]
+    fn attempt_order_preserves_vz_to_libkrun_and_explicit_qemu() {
+        use BuilderBackendChoice::*;
+        // Existing macOS behaviour unchanged.
+        assert_eq!(builder_attempt_order(Vz, false, false), vec![Vz, Libkrun]);
+        assert_eq!(builder_attempt_order(Vz, true, false), vec![Vz]);
+        // Explicit qemu is a single attempt.
+        assert_eq!(builder_attempt_order(Qemu, false, true), vec![Qemu]);
+    }
+
+    #[test]
+    fn run_with_fallback_retries_qemu_on_supervisor_exit_then_succeeds() {
+        use std::cell::RefCell;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // Force the Linux auto path: selected=libkrun, not explicit. The host
+        // running the test may not be Linux, so drive the order decision
+        // through `builder_attempt_order` directly in a sibling test; here we
+        // assert the loop's retry behaviour with an injected two-element order
+        // via a libkrun failure followed by a qemu success — exercised only
+        // when the live host yields a 2-element order. To stay host-agnostic,
+        // assert the *single-attempt* contract instead: a VMM failure with no
+        // fallback available surfaces unchanged.
+        let on_linux = is_linux_native_host();
+        let calls = RefCell::new(Vec::new());
+        let qemu_ok = AtomicBool::new(false);
+        let result = run_with_builder_fallback(BuilderBackendChoice::Libkrun, false, |c| {
+            calls.borrow_mut().push(c);
+            match c {
+                BuilderBackendChoice::Qemu => {
+                    qemu_ok.store(true, Ordering::SeqCst);
+                    Ok(())
+                }
+                _ => Err(BuilderVmError::SupervisorExited {
+                    exit_code: 1,
+                    vm_state_dir: "/x".into(),
+                }),
+            }
+        });
+        if on_linux {
+            // libkrun fails (VMM-level) → qemu retried → Ok.
+            assert!(result.is_ok());
+            assert_eq!(
+                *calls.borrow(),
+                vec![BuilderBackendChoice::Libkrun, BuilderBackendChoice::Qemu]
+            );
+        } else {
+            // No fallback off-Linux → the libkrun failure surfaces.
+            assert!(matches!(
+                result,
+                Err(BuilderVmError::SupervisorExited { .. })
+            ));
+            assert_eq!(*calls.borrow(), vec![BuilderBackendChoice::Libkrun]);
+        }
+    }
+
+    #[test]
+    fn run_with_fallback_surfaces_real_build_errors_without_retry() {
+        use std::cell::RefCell;
+        let calls = RefCell::new(0u32);
+        // A genuine build error must NOT trigger a fallback, even on Linux.
+        let result: Result<(), _> =
+            run_with_builder_fallback(BuilderBackendChoice::Libkrun, false, |_c| {
+                *calls.borrow_mut() += 1;
+                Err(BuilderVmError::NixBuildFailed("flake is broken".into()))
+            });
+        assert!(matches!(result, Err(BuilderVmError::NixBuildFailed(_))));
+        // Exactly one attempt — no qemu retry for a real build failure.
+        assert_eq!(*calls.borrow(), 1);
     }
 
     // ── MVM_LINUX_BUILDER_VM env predicate ──────────

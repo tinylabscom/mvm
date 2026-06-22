@@ -453,6 +453,13 @@ fn clone_builder_err(e: &BuilderVmError) -> BuilderVmError {
             log_path: log_path.clone(),
             detail: detail.clone(),
         },
+        BuilderVmError::SupervisorExited {
+            exit_code,
+            vm_state_dir,
+        } => BuilderVmError::SupervisorExited {
+            exit_code: *exit_code,
+            vm_state_dir: vm_state_dir.clone(),
+        },
     }
 }
 
