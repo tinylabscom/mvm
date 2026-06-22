@@ -98,13 +98,17 @@ stream — leave unchanged), `console::run` (PTY attach to reuse), and
 
 ### deferred follow-ups
 
-- [ ] `--volume` host-directory shares on a managed boot (persistent **or**
-      interactive). The `MachineSpec` boot path carries no bind-share field, so
-      `reject_volume_for_managed_boot` refuses `--volume` with `-d`/`--name`/`-t`;
-      it rides the plain transient `run_secure` path only. Persisting/re-materializing
-      a bind-share for these lifecycles needs its own design (host-path drift); no
-      behavior-matrix row depends on it. Interactive (`-t`) bind-shares are the
-      most likely first extension (Docker `run -it -v $PWD:/app` parity).
+- [x] `--volume` host-directory shares on a managed boot (persistent **or**
+      interactive) — **DONE**. `MachineSpec.volumes` already existed and the
+      `machine start` boot path already validates + mounts it
+      (`build_machine_volume_cfg` → `vm_volume_from_spec_validated`), so
+      `machine_run_spec` now threads `--volume` into the spec via
+      `machine_run_volume_specs`: each share is validated through the shared
+      protected-dir/guest-mount choke point and its host path is **canonicalized
+      to absolute** so a reconnect from a different cwd re-mounts the same share
+      (the "host-path drift" concern). `:rw` is gated on a dev-capable profile.
+      `reject_volume_for_managed_boot` removed. Docker `run -it -v $PWD:/app`
+      parity now works.
 
 ## Task 3: Interactive path (`-t`/`--tty`, dev-only) — DONE
 
