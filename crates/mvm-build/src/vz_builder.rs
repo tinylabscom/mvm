@@ -468,7 +468,6 @@ pub const VZ_BUILDER_DEFAULT_MEMORY_MIB: u32 = crate::libkrun_builder::DEFAULT_M
 /// [`crate::libkrun_builder::DEFAULT_NIX_STORE_MIB`] so swapping backends
 /// doesn't change the on-disk cache footprint.
 pub const VZ_BUILDER_DEFAULT_NIX_STORE_MIB: u32 = crate::libkrun_builder::DEFAULT_NIX_STORE_MIB;
-const VZ_DEV_CONSOLE_DATA_PORT_COUNT: u32 = 128;
 
 /// Vz parallel of [`crate::libkrun_builder::LibkrunBuilderVm`]. Implements
 /// [`BuilderVm::run_build`] against the [`VzBuilderBackend`] seam,
@@ -1645,10 +1644,7 @@ fn vz_persistent_guest_vsock_ports(expose_guest_agent: bool) -> Vec<u32> {
     // repeated `mvmctl dev shell` attaches can reach the data channel.
     if expose_guest_agent {
         ports.push(mvm_guest::vsock::GUEST_AGENT_PORT);
-        ports.extend(
-            (1..=VZ_DEV_CONSOLE_DATA_PORT_COUNT)
-                .map(|offset| mvm_guest::vsock::CONSOLE_PORT_BASE + offset),
-        );
+        ports.extend(mvm_guest::vsock::dev_console_data_ports());
     }
     ports
 }
@@ -3431,10 +3427,10 @@ mod tests {
             "Vz dev shell must expose the first PTY data port"
         );
         assert!(
-            with_agent
-                .vsock
-                .ports
-                .contains(&(mvm_guest::vsock::CONSOLE_PORT_BASE + VZ_DEV_CONSOLE_DATA_PORT_COUNT)),
+            with_agent.vsock.ports.contains(
+                &(mvm_guest::vsock::CONSOLE_PORT_BASE
+                    + mvm_guest::vsock::DEV_CONSOLE_DATA_PORT_COUNT)
+            ),
             "Vz dev shell must expose the configured PTY data range"
         );
     }

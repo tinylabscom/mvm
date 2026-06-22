@@ -403,6 +403,7 @@ mod tests {
             bundle_json: None,
             warm_pool_size: 0,
             network_policy: Default::default(),
+            dev_console: false,
         }
     }
 
