@@ -486,7 +486,7 @@ export class LiveTransport {
 
   /** Encode `env` into `-e KEY=VALUE` flags for `mvmctl machine proc start`,
    *  rejecting non-literal (secret) values — live mode forwards only
-   *  literals; secrets are injected host-side via `--secret` on `up`. */
+   *  literals; secrets are injected host-side via `--secret` on `machine run`. */
   private encodeEnvFlags(
     env: Record<string, EnvValue | string> | undefined,
     shellForErr: string[],
@@ -770,7 +770,7 @@ export function parseUpEnvelope(
     parsed = JSON.parse(line);
   } catch (err) {
     throw new SandboxLiveError(
-      `\`mvmctl up --up-json\` stdout is not valid JSON: ${String(err)}`,
+      `\`mvmctl machine run --up-json\` stdout is not valid JSON: ${String(err)}`,
       { argv, stderr: line },
     );
   }
@@ -783,7 +783,7 @@ export function parseUpEnvelope(
   const obj = parsed as Record<string, unknown>;
   if (obj.schema_version !== LiveTransport.SCHEMA_VERSION) {
     throw new SandboxLiveError(
-      `\`mvmctl up --up-json\` envelope schema_version=${JSON.stringify(obj.schema_version)}; ` +
+      `\`mvmctl machine run --up-json\` envelope schema_version=${JSON.stringify(obj.schema_version)}; ` +
         `SDK supports ${LiveTransport.SCHEMA_VERSION}`,
       { argv },
     );
@@ -796,7 +796,7 @@ export function parseUpEnvelope(
   }
   if (obj.build_mode !== "dev" && obj.build_mode !== "prod") {
     throw new SandboxLiveError(
-      `\`mvmctl up --up-json\` envelope build_mode=${JSON.stringify(obj.build_mode)}; ` +
+      `\`mvmctl machine run --up-json\` envelope build_mode=${JSON.stringify(obj.build_mode)}; ` +
         "expected 'dev' or 'prod'.",
       { argv },
     );

@@ -829,7 +829,7 @@ class _LiveTransport:
         self._forwards.append(proc)
 
     def kill(self) -> None:
-        """Shell ``mvmctl down <vm>``. Idempotent — repeated kills
+        """Shell ``mvmctl machine stop <vm>``. Idempotent — repeated kills
         from the context manager + an explicit `sb.kill()` are
         coalesced so we don't trip on a double-down."""
         if self._killed:
@@ -858,7 +858,7 @@ class _LiveTransport:
             # failure here usually means the VM was already torn
             # down by the orchestrator's TTL reaper.
             sys.stderr.write(
-                f"mvm-sdk live: `mvmctl down {self.vm_id}` exited "
+                f"mvm-sdk live: `mvmctl machine stop {self.vm_id}` exited "
                 f"with {result.returncode}: {result.stderr}\n"
             )
 
@@ -1208,7 +1208,7 @@ class Sandbox:
         drops these; the microVM TTL is the orchestrator's job, but
         the bookkeeping is preserved through the recording so
         tooling can introspect intent). In live mode, shells
-        ``mvmctl down <vm>``."""
+        ``mvmctl machine stop <vm>``."""
         if self._live is not None:
             self._live.kill()
             _clear_live()
@@ -1227,7 +1227,7 @@ class Sandbox:
 
     async def __aexit__(self, *_exc: Any) -> None:
         # Same teardown as `__exit__`, off the event loop so a slow
-        # `mvmctl down` doesn't block the caller's loop.
+        # `mvmctl machine stop` doesn't block the caller's loop.
         await asyncio.to_thread(self.kill)
 
 
