@@ -160,6 +160,13 @@ fn pool_seed_config_path(pool_root: &Path, standby_id: &str) -> PathBuf {
 const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POST_PID_STABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The line the in-guest agent writes to the captured console once its
+/// vsock listener is up. Its presence proves the VM booted and the guest
+/// is serving — used both as the seed-pool readiness signal and as the
+/// early-exit for the post-PID stability wait so a healthy boot need not
+/// burn the full [`POST_PID_STABILITY_TIMEOUT`].
+const GUEST_AGENT_READY_LINE: &str = "mvm-guest-agent: listening";
+
 /// How long [`VzBackend::stop`] waits after `SIGTERM` before escalating
 /// to `SIGKILL`. Vz's graceful-stop callback runs on the supervisor's
 /// dispatch queue, so the 2 s window is comfortable.
@@ -1537,7 +1544,6 @@ fn wait_for_seed_agent(vm_name: &str) -> Result<()> {
 
     const SEED_AGENT_TIMEOUT: Duration = Duration::from_secs(60);
     const POLL_INTERVAL: Duration = Duration::from_millis(500);
-    const AGENT_READY_LINE: &str = "mvm-guest-agent: listening";
 
     let agent_sock =
         mvm_core::config::vm_vz_vsock_port_socket(vm_name, mvm_guest::vsock::GUEST_AGENT_PORT);
@@ -1563,22 +1569,29 @@ fn wait_for_seed_agent(vm_name: &str) -> Result<()> {
     // The socket exists once the supervisor binds; the guest process may still
     // be initialising its vsock listener.
     loop {
-        let agent_ready = std::fs::read_to_string(&console_log)
-            .map(|log| log.contains(AGENT_READY_LINE))
-            .unwrap_or(false);
-        if agent_ready {
+        if console_signals_agent_ready(&console_log) {
             return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(anyhow!(
                 "guest agent did not write '{}' to {} within {:?}",
-                AGENT_READY_LINE,
+                GUEST_AGENT_READY_LINE,
                 console_log.display(),
                 SEED_AGENT_TIMEOUT,
             ));
         }
         std::thread::sleep(POLL_INTERVAL);
     }
+}
+
+/// True once the in-guest agent has written its [`GUEST_AGENT_READY_LINE`]
+/// to the captured console — proof the VM booted and the guest is serving.
+/// A missing/unreadable console reads as "not ready yet". Pure (filesystem
+/// read only); unit-tested.
+fn console_signals_agent_ready(console_log: &Path) -> bool {
+    std::fs::read_to_string(console_log)
+        .map(|log| log.contains(GUEST_AGENT_READY_LINE))
+        .unwrap_or(false)
 }
 
 /// Claim a Vz saved-standby: verify the pool content integrity, clone
@@ -2617,6 +2630,17 @@ fn wait_for_supervisor_stability(
                 stale_supervisor_hint(supervisor_path),
                 console_log.display()
             );
+        }
+        // Fast-exit: once the guest agent is listening, the supervisor has
+        // already survived the dangerous early-crash window (a VZ config /
+        // runtime validation error kills it in the first few hundred ms — well
+        // before the guest boots and the agent binds). Returning here turns a
+        // fixed `timeout` wait into `min(time-to-agent-ready, timeout)`, which
+        // removes ~1s+ of dead time from every healthy boot. An image whose
+        // guest never writes the ready line simply falls through to the
+        // deadline below — behaviour unchanged for non-agent rootfs.
+        if console_signals_agent_ready(console_log) {
+            return Ok(());
         }
         if Instant::now() >= deadline {
             return Ok(());
@@ -4067,6 +4091,30 @@ mod tests {
     /// expected path via the production helper and asserts that writing a file
     /// there causes the function to succeed (without a real VM) — pinning the
     /// naming against the helper so they cannot drift independently.
+    #[test]
+    fn console_signals_agent_ready_detects_the_ready_line() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let cl = tmp.path().join("console.log");
+
+        // Missing console reads as "not ready yet".
+        assert!(!console_signals_agent_ready(&cl));
+
+        // Boot noise without the ready line is still "not ready".
+        std::fs::write(&cl, "[ 0.7 ] Run /init\nguest-net: no DHCP lease\n").unwrap();
+        assert!(!console_signals_agent_ready(&cl));
+
+        // The agent's listening line flips it ready — this is what lets the
+        // stability wait exit early instead of burning the full timeout.
+        std::fs::write(
+            &cl,
+            "[ 0.7 ] Run /init\nmvm-guest-agent: listening on vsock port 5252\n",
+        )
+        .unwrap();
+        assert!(console_signals_agent_ready(&cl));
+        // Pinned to the same literal the guest writes.
+        assert!(GUEST_AGENT_READY_LINE.starts_with("mvm-guest-agent: listening"));
+    }
+
     #[test]
     fn wait_for_seed_agent_matches_vm_vz_vsock_port_socket() {
         use mvm_core::config::vm_vz_vsock_port_socket;
