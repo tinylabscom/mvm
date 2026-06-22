@@ -13,7 +13,7 @@
 # host shares, overlays a persistent `/nix` store, runs the nix-build
 # sandbox (user namespaces + cgroups), and installs an iptables egress
 # lockdown — none of which a workload guest needs. Those land in the
-# builder's `extraEnables` (see `nix/images/builder-vm/kernel/default.nix`).
+# builder's `extraEnables` (see `nix/images/kernel/builder.nix`).
 #
 # Why slim / all-built-in: a stock `pkgs.linuxPackages.kernel` ships
 # the features we need as `=m`, forcing every consumer to ship a

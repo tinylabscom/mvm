@@ -119,14 +119,20 @@
         mvmSrc = workspace;
       };
 
-      # Shared kernel-config base. Kept inside this flake's source tree
-      # (`./kernel/base.nix`) and imported relatively: importing it
-      # through the `workspace` path forces realisation of that filtered
-      # store path, which `nix flake check --no-build` (the "Nix flake
-      # check (Linux eval)" lane) refuses — so the builder/workload
-      # kernel + their configfile outputs must not route base through it.
+      # Shared kernel-config base. Imported from `nix/images/kernel/base.nix`
+      # relatively (not through `workspace`): importing through `workspace`
+      # forces realisation of that filtered store path, which
+      # `nix flake check --no-build` (the "Nix flake check (Linux eval)"
+      # lane) refuses — so the builder/workload kernel + their configfile
+      # outputs must not route base through it.
+      # Import the shared kernel via `workspaceRoot` (the same mechanism
+      # this flake uses for `nix/lib`), NOT a bare `../kernel` relative
+      # path. Under the `path:` URL fetch the libkrun builder VM uses, a
+      # relative `..` resolves against the flake's *store copy* and
+      # escapes it; `workspaceRoot` points at the live workspace
+      # (`MVM_WORKSPACE_PATH`), so the sibling dir resolves.
       kernelBaseFor = pkgs:
-        import ./kernel/base.nix { inherit pkgs; };
+        import (workspaceRoot + "/nix/images/kernel/base.nix") { inherit pkgs; };
 
       # veritysetup sidecar bytes must not drift when nixpkgs revs. The
       # OCI-pull path runs `veritysetup format`
@@ -331,12 +337,12 @@
         { system, interactive ? false }:
         let
           pkgs = import nixpkgs { inherit system; };
-          # Slim custom kernel — see `./kernel/default.nix` (shared
-          # base `./kernel/base.nix` + builder-only delta).
+          # Slim custom kernel — see `nix/images/kernel/builder.nix` (shared
+          # base `nix/images/kernel/base.nix` + builder-only delta).
           # `linuxManualConfig` over `make defconfig` carved down by the
           # base disables. `CONFIG_MODULES=n` so the kernel has only what
           # `mvm-host-vm-init` uses built-in — no driver modules tree.
-          kernelPkg = import ./kernel { inherit pkgs; base = kernelBaseFor pkgs; };
+          kernelPkg = import (workspaceRoot + "/nix/images/kernel/builder.nix") { inherit pkgs; base = kernelBaseFor pkgs; };
           rootfs = mkBuilderVmRootfs { inherit system interactive; };
           kernelFile =
             if pkgs.stdenv.hostPlatform.isAarch64 then "Image" else "bzImage";
@@ -461,7 +467,7 @@
       # `disables` edits to confirm SoC platform clusters are gone.
       mkKernelConfigfile = system:
         let pkgs = import nixpkgs { inherit system; };
-        in (import ./kernel { inherit pkgs; base = kernelBaseFor pkgs; }).passthru.configfile;
+        in (import (workspaceRoot + "/nix/images/kernel/builder.nix") { inherit pkgs; base = kernelBaseFor pkgs; }).passthru.configfile;
 
       # Standalone kernel artifacts — targets for `mvmctl kernel build`
       # and the kernel-build GHA. The builder image's `default` output
@@ -469,25 +475,20 @@
       # lets the expensive compile run (and be cached / published)
       # without realizing a full rootfs.
       #
-      # `workload-kernel` is the shared base alone (no builder infra). No
-      # runtime consumes it yet — workload microVMs currently boot a
-      # host-provided kernel — so it's published as an artifact ahead of
-      # the runtime wiring, which is when its home moves out of this
-      # builder-vm flake.
-      # The workload kernel's one delta over the shared base: dm-verity
-      # (Claim 3 — verified boot of the workload rootfs). The builder
-      # force-drops these (it boots `ro`, no roothash); workloads keep
-      # them. Shared between the kernel + its configfile output.
-      workloadKernelEnables = [ "MD" "BLK_DEV_DM" "DM_VERITY" ];
+      # `workload-kernel` is the shared base + the dm-verity delta
+      # (`nix/images/kernel/workload.nix`). No runtime consumes it yet —
+      # workload microVMs currently boot a host-provided kernel — so it's
+      # published as an artifact ahead of the runtime wiring, which is
+      # when its home moves out of this builder-vm flake.
       mkBuilderKernel = system:
         let pkgs = import nixpkgs { inherit system; };
-        in import ./kernel { inherit pkgs; base = kernelBaseFor pkgs; };
+        in import (workspaceRoot + "/nix/images/kernel/builder.nix") { inherit pkgs; base = kernelBaseFor pkgs; };
       mkWorkloadKernel = system:
         let pkgs = import nixpkgs { inherit system; };
-        in (kernelBaseFor pkgs).mkKernel { extraEnables = workloadKernelEnables; };
+        in import (workspaceRoot + "/nix/images/kernel/workload.nix") { inherit pkgs; base = kernelBaseFor pkgs; };
       mkWorkloadKernelConfigfile = system:
         let pkgs = import nixpkgs { inherit system; };
-        in (kernelBaseFor pkgs).mkConfigfile { extraEnables = workloadKernelEnables; };
+        in (import (workspaceRoot + "/nix/images/kernel/workload.nix") { inherit pkgs; base = kernelBaseFor pkgs; }).passthru.configfile;
     in
     {
       packages = forAllSystems (system: {

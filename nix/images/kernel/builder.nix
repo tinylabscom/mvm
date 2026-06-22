@@ -1,14 +1,14 @@
 # Builder-VM kernel — slim custom Linux 6.12.
 #
-# = the shared base (`./base.nix`) + the builder-only infrastructure a
-# workload guest never needs. Source of truth for the base config lives
-# in `base.nix`; this file owns only the delta.
+# = the shared base (`nix/images/kernel/base.nix`) + the builder-only
+# infrastructure a workload guest never needs. Source of truth for the
+# base config lives in `base.nix`; this file owns only the delta.
 #
 # The flake passes `base` in (it builds the workload kernel from the same
-# `./base.nix`). base.nix is kept inside this flake's source tree rather
-# than under `nix/lib/`: importing it through the `workspace` path forces
-# realisation of that store path, which `nix flake check --no-build`
-# refuses.
+# `nix/images/kernel/base.nix`). base.nix is imported relatively by the
+# builder-vm flake rather than through `workspace`: importing through
+# `workspace` forces realisation of that filtered store path, which
+# `nix flake check --no-build` refuses.
 #
 # Builder-only features (why each is here, not in base):
 #   - VIRTIO_FS / FUSE_FS  — the builder mounts four virtio-fs host

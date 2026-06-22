@@ -3,13 +3,13 @@
 A slim custom Linux 6.12 kernel tailored for the libkrun builder
 VM. Built via `pkgs.linuxManualConfig` from a `.config` generated
 by `make defconfig` + the `enables` / `disables` lists in
-[`default.nix`](./default.nix) + `make olddefconfig`. (Plan 92
+[`builder.nix`](./builder.nix) + `make olddefconfig`. (Plan 92
 landed `tinyconfig` first; `e663abf4` switched to `defconfig`
 because tinyconfig stripped arch_timer / GIC / OF — see the
-comment in `default.nix`.)
+comment in `builder.nix`.)
 
 Nothing is vendored under this directory. The source of truth is
-the `enables` / `disables` lists in `default.nix`.
+the `enables` / `disables` lists in `builder.nix`.
 
 ## Why a slim, all-built-in kernel
 
