@@ -60,19 +60,24 @@ packaging fix (tracked separately, though this plan reduces its surface).
 
 ---
 
-## Task 1: Unified `BridgeConfigJson` + endpoint-kind discriminant (contract first)
+## Task 1: Unified `BridgeConfigJson` + endpoint-kind discriminant (contract first) — ✅ DONE
 
-- [ ] In `mvm_vm_host::firecracker_bridge::parse` (or a renamed
-      `mvm_vm_host::bridge::parse`), define a single `BridgeConfigJson` that
-      carries an `endpoint: BridgeEndpointKind` enum (`Passt { gateway_fd_raw,
-      supervisor_fd_raw, passt_path, passt_hashes_path, keys_dir }`,
-      `VzIngest { … }`, `LibkrunGvproxy { … }`). `#[serde(deny_unknown_fields)]`
-      on the outer struct and every variant.
-- [ ] Keep `decode_plan_json` / `verify_passt_hash` as-is; re-export so the
-      existing `firecracker-bridge-fuzz` target compiles against the unified type.
-- [ ] Tests: serde roundtrip for each variant; `deny_unknown_fields` rejection;
-      a tampered/unknown endpoint kind is refused; `decode_plan_json` rejects a
-      malformed plan. (TDD: write these red first.)
+- [x] New module `mvm_vm_host::bridge::parse` defines a single `BridgeConfigJson`
+      carrying an `endpoint: BridgeEndpointKind` enum (`Passt { passt_path,
+      passt_hashes_path, gateway_fd_raw, supervisor_fd_raw }`, `VzIngest {
+      events_socket_path }`, `LibkrunGvproxy { gvproxy_socket_path,
+      supervisor_listen_path }`); `keys_dir` is a common field (threaded for
+      every kind now, including vz). `#[serde(deny_unknown_fields)]` on the outer
+      struct + the enum. **Externally tagged** (not internally), because
+      `deny_unknown_fields` is not honoured on internally-tagged enums — fail-closed
+      parsing is the security contract. Additive: old bins/configs untouched.
+- [x] `decode_plan_json` / `verify_passt_hash` / `PasstHashesFile` re-exported
+      verbatim from `firecracker_bridge::parse`; the fuzz target keeps compiling
+      against the same code.
+- [x] 10 tests: per-variant roundtrip (serialize→deserialize identity),
+      `deny_unknown_fields` at top level + within a variant, unknown/missing
+      endpoint kind refused, `bundle_json` default+carry, re-export resolves.
+      `cargo test -p mvm-vm-host` + fmt + clippy green.
 
 ## Task 2: `mvm-bridge` binary — fold the two sidecars into one
 
