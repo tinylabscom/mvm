@@ -8,7 +8,7 @@
 
 **Tech Stack:** Nix (`linuxManualConfig`, flakes), Rust (`mvm-backend`, `mvm-build`, `crates/deps/libkrun-sys`, `xtask`), GitHub Actions, SHA-256 hash verification.
 
-**Spec:** [ADR-094](../adrs/094-slim-microvm-kernel.md). This plan implements its §Sequencing 1–5; §6 follow-ups (detection watcher, mvmd rollout) are out of scope and tracked under "Deferred follow-ups" below.
+**Spec:** [ADR-095](../adrs/095-slim-microvm-kernel.md). This plan implements its §Sequencing 1–5; §6 follow-ups (detection watcher, mvmd rollout) are out of scope and tracked under "Deferred follow-ups" below.
 
 ## Global Constraints
 
