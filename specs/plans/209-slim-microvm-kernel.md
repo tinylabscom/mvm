@@ -579,3 +579,28 @@ git commit -am "docs(plan-209): unified slim-kernel docs + status rollup"
 - [ ] **mvmd fleet rollout** — drain-and-roll across running microVMs lives in the mvmd repo. mvm exposes the single-VM primitive (Task 11); mvmd consumes it. Not in this repo.
 - [ ] **Option 2 fallback wiring** — only if Gate 0 (Task 3) says DOES-NOT-BOOT: slim `nix/packages/libkrunfw.nix`'s bundled config for macOS. Tracked here, built only on that branch.
 </content>
+
+## Gate 0 findings (2026-06-21)
+
+**Regression caught — and fixed — before the unified path could mislead us.**
+
+- **Setup:** libkrun 1.18.0 + libkrunfw 5.3.0 + gvproxy 0.8.8 on macOS 26.5.1 (arm64); binaries signed with the Hypervisor entitlement (`mvmctl env sign`); isolated `MVM_CACHE_DIR`/`MVM_DATA_DIR`; no host nix / no linux-builder (all builds via the libkrun builder VM, per the project invariant).
+- **First result: BROKE at Stage 0 eval.** `mvmctl build kernel build --which workload --source compile` failed:
+  `error: path '/nix/store/kernel/workload.nix' does not exist` (impure Stage 0) / `access to absolute path … forbidden` (pure host repro).
+- **Root cause:** Tasks 1–2 imported the promoted kernel via `import ../kernel/X.nix`. That resolves fine when the repo is a **`git+file`** flake (whole tree copied to the store — which is why `nix flake check` and the `.drv`-hash proofs passed), but the libkrun builder VM fetches `builder-vm` as a **`path:`** flake — nix copies only that subtree, so `..` escapes the store copy. The two byte-identical-`.drv` proofs were in the wrong resolution mode to see it; CI's flake-check lane (also `git+file`) would not have caught it either. **Gate 0 was the only thing that would.**
+- **Fix (commit 07dd9c12):** route the kernel imports through `workspaceRoot` (`MVM_WORKSPACE_PATH`) — the exact mechanism `builder-vm/flake.nix` already uses for `nix/lib`. Verified via fast host repro (no Stage 0 / no linux-builder needed): `nix eval --impure` against `path:…#workload-kernel.drvPath` and `#builder-kernel.drvPath` both resolve; `git+file` mode produces the identical `.drv`; `flake check --no-build` stays green.
+- **Process consequence:** the byte-identical-`.drv` verification used for Tasks 1–2 is insufficient on its own for the kernel-promotion class of change — it must be paired with a `path:`-mode eval (`nix eval --impure -L path:…/builder-vm#…-kernel.drvPath` with `MVM_WORKSPACE_PATH` set). Added to the task checklist below.
+- **Decision: PROCEED with the unified path** — the `set_kernel` FFI is already wired and the slim kernel now resolves under the builder VM. Live boot-to-agent confirmation continues (real Stage 0 compile in progress).
+
+### Added verification step (applies to any kernel-flake-structure change)
+- [ ] `nix eval --impure path:$PWD/nix/images/builder-vm#packages.<arch>-linux.workload-kernel.drvPath` with `MVM_WORKSPACE_PATH=$PWD` must resolve (catches `path:`-flake escapes that `git+file`/`flake check` miss).
+
+### Gate 0 result: PASS (live on macOS 26.5.1 / libkrun, 2026-06-21)
+
+End-to-end on this host, all via the libkrun builder VM (no host nix / no linux-builder):
+- `mvmctl build kernel build --which workload --source compile` → slim workload **vmlinux compiled inside the builder VM** (20.2 MiB) after the flake fix.
+- `mvmctl dev up --no-shell --builder libkrun` → **full builder image built** (rootfs.ext4 780 MB + kernel) via Stage 0.
+- `mvmctl up --flake examples/sleeper --hypervisor libkrun -d` → **workload booted under libkrun** (`backend=libkrun`, `mvm-libkrun-supervisor` pid alive).
+- `mvmctl vm wait` → exit 0; `mvmctl vm boot-report` → **control plane ready, vsock bound, first accept 44s** = guest agent reachable over vsock.
+
+**Decision: PROCEED with the unified path.** libkrun boots a workload to a live vsock agent on the promoted+fixed kernel tree. (Note: `--builder` selects the *builder* backend; `--hypervisor` selects the *workload runtime* — on macOS 26 the workload defaults to Vz, so libkrun workload boot needs explicit `--hypervisor libkrun`. Both Vz and libkrun workload boots reached the agent.)
