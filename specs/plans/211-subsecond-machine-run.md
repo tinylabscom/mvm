@@ -1,6 +1,11 @@
 # Plan 211 — Sub-second `machine run`
 
-**Status: IN PROGRESS** (Phase 1)
+**Status: IN PROGRESS** — Phase 1a DONE, Phase 1b-i CODE DONE (claim wired +
+unit-tested; eligibility live-proven `warm_pool_size=1`). End-to-end "claim
+fires" live proof **blocked** by a pre-existing OCI-materialize regression
+(`/sbin/mkfs.ext4: not found` in the builder VM — breaks every `machine run
+--image` boot in this env; my diff touches no builder/nix code). Live proof is
+pending a working materialize (or a non-OCI cached image + a pool warmed for it).
 
 ## Goal
 
