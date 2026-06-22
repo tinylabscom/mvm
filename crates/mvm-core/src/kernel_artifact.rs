@@ -42,4 +42,22 @@ mod tests {
         let j = serde_json::to_string(&id).unwrap();
         assert_eq!(serde_json::from_str::<KernelArtifactId>(&j).unwrap(), id);
     }
+
+    #[test]
+    fn artifact_id_rejects_unknown_fields() {
+        // `deny_unknown_fields` is fail-closed: a manifest with an extra key
+        // must error, not silently drop it.
+        let j = r#"{"kernel_version":"6.12.91","config_hash":"a","artifact_hash":"b","rogue":"x"}"#;
+        assert!(serde_json::from_str::<KernelArtifactId>(j).is_err());
+    }
+
+    #[test]
+    fn artifact_hash_is_lowercase_hex() {
+        let h = compute_artifact_hash(b"vmlinux-bytes");
+        assert!(
+            h.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "artifact hash must be lowercase hex, got {h}"
+        );
+    }
 }

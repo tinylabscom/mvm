@@ -21,6 +21,7 @@ mod check_forbidden_deps;
 mod check_guest_agent_in_all_images;
 mod check_guest_agent_runtime_free;
 mod check_guest_images_no_builder_tools;
+mod check_kernel_config_budget;
 mod check_machine_doc_guards;
 mod check_mvm_host_binaries_sync;
 mod check_no_display_on_secret_types;
@@ -138,6 +139,7 @@ fn main() -> Result<()> {
             check_runtime_overlay_version::run(&workspace)
         }
         Some("check-binary-size") => check_binary_size::run(&args[2..]),
+        Some("check-kernel-config-budget") => check_kernel_config_budget::run(&args[2..]),
         Some("perf") => perf::run(&args[2..]),
         Some("build-dev-image") => {
             let workspace = workspace_root();
@@ -152,7 +154,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-trust-gradient, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-trust-gradient, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {

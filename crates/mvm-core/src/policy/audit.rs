@@ -205,6 +205,12 @@ pub enum LocalAuditKind {
     /// `mvmctl vm set-ttl` — changes the TTL deadline on a running
     /// VM. The reaper picks up the new deadline on its next tick.
     VmTtlSet,
+    /// `mvmctl vm rekernel` — relaunches a VM on a chosen/updated
+    /// workload kernel (a stop + re-boot). Recorded as its own kind so
+    /// a kernel swap is distinguishable in the audit trail from an
+    /// ordinary restart; the underlying down/up legs still emit their
+    /// own VmStop / plan.* + VmStart entries.
+    VmRekernel,
     /// `mvmctl vm volume add` / `volume remove` — mounts or unmounts
     /// a virtio-fs volume into a running guest. (Renamed from the
     /// prior `VmShareAdd` / `VmShareRemove`; no compat shim, no

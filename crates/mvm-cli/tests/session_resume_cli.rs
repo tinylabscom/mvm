@@ -14,7 +14,7 @@ fn mvmctl(args: &[&str]) -> std::process::Output {
 
 #[test]
 fn session_attach_help_lists_continue_and_resume() {
-    let out = mvmctl(&["vm", "session", "attach", "--help"]);
+    let out = mvmctl(&["machine", "session", "attach", "--help"]);
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
@@ -27,7 +27,7 @@ fn session_attach_help_lists_continue_and_resume() {
 
 #[test]
 fn session_start_help_lists_ephemeral() {
-    let out = mvmctl(&["vm", "session", "start", "--help"]);
+    let out = mvmctl(&["machine", "session", "start", "--help"]);
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),

@@ -47,9 +47,25 @@ pub const SOCKET_FILE_NAME: &str = "gvproxy.sock";
 /// `EINVAL`; gvproxy surfaces it as `vfkit listen error: ... bind: invalid
 /// argument` and exits before its listener socket appears.
 #[cfg(target_os = "macos")]
-const SUN_PATH_MAX: usize = 104;
+pub(crate) const SUN_PATH_MAX: usize = 104;
 #[cfg(not(target_os = "macos"))]
-const SUN_PATH_MAX: usize = 108;
+pub(crate) const SUN_PATH_MAX: usize = 108;
+
+/// Short, deterministic, filesystem-safe hex token derived from `input`
+/// (first `bytes` bytes of its SHA-256). Used to keep `AF_UNIX` socket paths
+/// short: as a relocated-socket filename here, and as the Vz persistent
+/// builder's session id (so its `<state_dir>/vsock/*` paths stay under
+/// [`SUN_PATH_MAX`]). Collision-resistant across a host's per-VM dirs.
+pub(crate) fn short_token(input: &str, bytes: usize) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let digest = hasher.finalize();
+    digest
+        .iter()
+        .take(bytes)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
 
 /// Resolve the host-gvproxy listener socket path for a VM rooted at
 /// `scratch_dir`.
@@ -76,12 +92,9 @@ fn gvproxy_socket_path_in(scratch_dir: &Path, cache_root: &Path) -> PathBuf {
     if natural.as_os_str().len() < SUN_PATH_MAX {
         return natural;
     }
-    let mut hasher = Sha256::new();
-    hasher.update(scratch_dir.to_string_lossy().as_bytes());
-    let digest = hasher.finalize();
     // 12 hex chars (48 bits) keyed on the full scratch dir — collision-resistant
     // across a host's per-VM dirs, and short enough to stay well under the limit.
-    let token: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    let token = short_token(&scratch_dir.to_string_lossy(), 6);
     cache_root.join("gv").join(format!("{token}.sock"))
 }
 
@@ -440,6 +453,16 @@ mod tests {
             gvproxy_socket_path_in(&a, cache),
             gvproxy_socket_path_in(&b, cache)
         );
+    }
+
+    #[test]
+    fn short_token_is_deterministic_fixed_length_and_distinct() {
+        let a = short_token("scratch-a", 4);
+        assert_eq!(a.len(), 8, "4 bytes → 8 hex chars");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(a, short_token("scratch-a", 4)); // deterministic
+        assert_ne!(a, short_token("scratch-b", 4)); // distinct inputs differ
+        assert_eq!(short_token("x", 6).len(), 12); // 6 bytes → 12 hex
     }
 
     #[test]

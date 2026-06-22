@@ -1,8 +1,7 @@
 //! `mvmctl build <sub>` — build-time commands.
 //!
-//! The image build plus `compile`/`validate`/`kernel` collapse under
-//! one `build` namespace. `build image` is the former top-level
-//! `build`. Leaf modules are unchanged.
+//! `compile`/`validate`/`kernel` are the remaining build-time verbs.
+//! Image builds moved to `machine build`. Leaf modules are unchanged.
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
@@ -10,7 +9,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
-use super::{build, compile, kernel, validate};
+use super::{compile, kernel, validate};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -20,8 +19,6 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum BuildCmd {
-    /// Build a microVM image from a Mvmfile.toml config or Nix flake
-    Image(build::Args),
     /// Compile Workload IR into build artifacts
     Compile(compile::Args),
     /// Validate a Nix flake before building (runs `nix flake check`)
@@ -34,7 +31,6 @@ impl BuildCmd {
     /// Audit verb name (matches the clap subcommand name).
     pub(in crate::commands) fn verb_name(&self) -> &'static str {
         match self {
-            BuildCmd::Image(_) => "image",
             BuildCmd::Compile(_) => "compile",
             BuildCmd::Validate(_) => "validate",
             BuildCmd::Kernel(_) => "kernel",
@@ -44,7 +40,6 @@ impl BuildCmd {
 
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     match args.action {
-        BuildCmd::Image(a) => build::run(cli, a, cfg),
         BuildCmd::Compile(a) => compile::run(cli, a, cfg),
         BuildCmd::Validate(a) => validate::run(cli, a, cfg),
         BuildCmd::Kernel(a) => kernel::run(cli, a, cfg),

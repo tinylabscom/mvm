@@ -1081,6 +1081,34 @@ fn vz_shell_vm_name(job_id: &str) -> String {
     format!("vzsh-{job_id}")
 }
 
+/// Short, unique, filesystem-safe session id for a minted Vz persistent builder.
+/// Hashing `unique_job_id()` (unique per call) to 8 hex chars keeps the derived
+/// `mvm-persistent-builder-vz-<id>/vsock/vsock-<port>.sock` under the AF_UNIX
+/// sun_path limit on normal cache paths — the old `unique_job_id` (~19 chars)
+/// overran it. The always-short `dev` session is why `mvmctl dev up` never hit this.
+fn short_vz_persistent_session_id() -> String {
+    host_gvproxy::short_token(&unique_job_id(), 4)
+}
+
+/// Fail closed if a Vz persistent builder's builderd control socket
+/// (`<state_dir>/vsock/vsock-<port>.sock`) would exceed the AF_UNIX sun_path
+/// limit. The Vz supervisor only *warns* and skips an over-long bind, leaving
+/// the daemon unreachable and the typed `mvm-builderd` route silently falling
+/// back to legacy — so catch it here with an actionable error instead.
+fn ensure_vz_control_socket_fits(vm_state_dir: &Path) -> Result<(), BuilderVmError> {
+    let ctrl = crate::builderd::builderd_vz_control_socket_path(vm_state_dir);
+    if ctrl.as_os_str().len() >= host_gvproxy::SUN_PATH_MAX {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "Vz builder control socket path {} is {} bytes, at/over the {}-byte AF_UNIX \
+             sun_path limit; use a shorter MVM_CACHE_DIR",
+            ctrl.display(),
+            ctrl.as_os_str().len(),
+            host_gvproxy::SUN_PATH_MAX,
+        )));
+    }
+    Ok(())
+}
+
 /// Resolve the absolute path to the `mvm-vz-supervisor` binary.
 ///
 /// Mirrors `mvm_backend::vz::resolve_supervisor_path` (which is
@@ -1334,7 +1362,18 @@ impl VzPersistentBuilderVm {
             u64::from(self.nix_store_mib),
         )?;
 
-        let session_id = self.session_id.clone().unwrap_or_else(unique_job_id);
+        // A minted session id must be SHORT: it lands in the
+        // `mvm-persistent-builder-vz-{session}` state-dir name, and the Vz
+        // supervisor's sockets nest one level deeper under `<state_dir>/vsock/`.
+        // The old `unique_job_id` (~19 chars) pushed `vsock/vsock-<port>.sock`
+        // past the AF_UNIX sun_path limit (the supervisor warns + skips the
+        // bind, so builderd is unreachable and the typed route silently falls
+        // back to legacy). A short hashed id keeps those paths short, matching
+        // the always-short `dev` session that has always worked.
+        let session_id = self
+            .session_id
+            .clone()
+            .unwrap_or_else(short_vz_persistent_session_id);
         let job_dir = builder_vm_cache_dir().join("jobs").join(&session_id);
         stage_persistent_vz_job_dir(&job_dir)?;
 
@@ -1350,6 +1389,11 @@ impl VzPersistentBuilderVm {
                 vm_state_dir.display()
             ))
         })?;
+        // Defense in depth: even a short id can't save a pathologically long
+        // MVM_CACHE_DIR/$HOME. If the builderd control socket still wouldn't fit
+        // sun_path, fail loud here rather than booting a builder whose control
+        // socket can't bind (which surfaces only as a silent typed→legacy fallback).
+        ensure_vz_control_socket_fits(&vm_state_dir)?;
 
         // Spawn host-side gvproxy so the long-lived dev VM has egress
         // (a cold `nix build` from `dev shell` fetches nixpkgs). The
@@ -2202,6 +2246,27 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn short_vz_persistent_session_id_is_short_hex() {
+        let id = short_vz_persistent_session_id();
+        assert_eq!(id.len(), 8, "8 hex chars keeps the state-dir name short");
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+    }
+
+    #[test]
+    fn vz_control_socket_guard_accepts_short_rejects_overlong() {
+        // Normal cache + short (hashed) session id → control socket fits.
+        let ok = Path::new("/Users/u/.cache/mvm/builder-vm/vms/mvm-persistent-builder-vz-deadbeef");
+        assert!(ensure_vz_control_socket_fits(ok).is_ok());
+        // Pathologically long cache/$HOME → control socket over sun_path → loud error.
+        let long = PathBuf::from(format!(
+            "/Users/{}/.cache/mvm/builder-vm/vms/mvm-persistent-builder-vz-deadbeef",
+            "x".repeat(60)
+        ));
+        let err = ensure_vz_control_socket_fits(&long).unwrap_err();
+        assert!(format!("{err}").contains("sun_path"), "{err}");
+    }
 
     fn rootfs_image() -> BuilderVmImage {
         BuilderVmImage::Rootfs {

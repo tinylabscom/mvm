@@ -13,7 +13,8 @@ use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 use super::{
-    checkpoint, cp, diff, forward, fs, pause, proc, sandbox, session, set_ttl, volume, wait,
+    checkpoint, cp, diff, forward, fs, pause, proc, rekernel, sandbox, session, set_ttl, volume,
+    wait,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -25,41 +26,58 @@ pub(in crate::commands) struct Args {
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum VmCmd {
     /// Pause and seal a running VM
+    #[command(hide = true)]
     Pause(pause::PauseArgs),
     /// Verify and resume a sealed snapshot
+    #[command(hide = true)]
     Resume(pause::ResumeArgs),
     /// Manage sealed instance snapshots (`ls`, `rm`)
+    #[command(hide = true)]
     Snapshot(pause::SnapshotArgs),
     /// Save a running Vz VM's memory + disk state
+    #[command(hide = true)]
     Save(checkpoint::SaveArgs),
     /// Restore a Vz VM from a saved memory checkpoint
+    #[command(hide = true)]
     Restore(checkpoint::RestoreArgs),
     /// Capture, list, remove, or fork rootfs checkpoints
+    #[command(hide = true)]
     Checkpoint(checkpoint::CheckpointArgs),
     /// Copy one file between the host and a running VM
+    #[command(hide = true)]
     Cp(cp::Args),
     /// Run filesystem RPC against a VM
+    #[command(hide = true)]
     Fs(fs::Args),
     /// Run process-control RPC against a VM
+    #[command(hide = true)]
     Proc(proc::Args),
     /// Show filesystem changes in a running VM
+    #[command(hide = true)]
     Diff(diff::Args),
     /// Wait for guest readiness
+    #[command(hide = true)]
     Wait(wait::WaitArgs),
     /// Print guest readiness and boot timings
-    #[command(name = "boot-report")]
+    #[command(name = "boot-report", hide = true)]
     BootReport(wait::BootReportArgs),
     /// Set or clear a sandbox TTL
-    #[command(name = "set-ttl")]
+    #[command(name = "set-ttl", hide = true)]
     SetTtl(set_ttl::Args),
     /// Forward a port from a running microVM to localhost
+    #[command(hide = true)]
     Forward(forward::Args),
     /// Inspect and clean sandbox lifecycle state
+    #[command(hide = true)]
     Sandbox(sandbox::Args),
     /// Manage long-running VM sessions
+    #[command(hide = true)]
     Session(session::Args),
     /// Manage virtio-fs volume mounts
+    #[command(hide = true)]
     Volume(volume::Args),
+    /// Relaunch a VM on a chosen/updated workload kernel
+    Rekernel(rekernel::Args),
 }
 
 impl VmCmd {
@@ -91,10 +109,10 @@ impl VmCmd {
         )
     }
 
-    /// Audit verb name for this VM op. Preserves the per-op audit taxonomy
-    /// (`cmd.pause.*`, `cmd.cp.*`, …) unchanged across the `vm` grouping —
-    /// the CLI path moved to `vm <sub>` but the audit verbs did not, so
-    /// the claims 8/12/13 event names are stable.
+    /// The `<verb>` slot in `cmd.<verb>.*` audit events for this op. Keeps the
+    /// per-op audit taxonomy (`cmd.pause.*`, `cmd.set-ttl.*`, …) stable now
+    /// that these ops are reached through `machine` instead of `vm`. Values
+    /// MUST match the clap subcommand names.
     pub(in crate::commands) fn verb_name(&self) -> &'static str {
         match self {
             VmCmd::Pause(_) => "pause",
@@ -114,6 +132,7 @@ impl VmCmd {
             VmCmd::Sandbox(_) => "sandbox",
             VmCmd::Session(_) => "session",
             VmCmd::Volume(_) => "volume",
+            VmCmd::Rekernel(_) => "rekernel",
         }
     }
 }
@@ -137,5 +156,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         VmCmd::Sandbox(a) => sandbox::run(cli, a, cfg),
         VmCmd::Session(a) => session::run(cli, a, cfg),
         VmCmd::Volume(a) => volume::run(cli, a, cfg),
+        VmCmd::Rekernel(a) => rekernel::run(cli, a, cfg),
     }
 }

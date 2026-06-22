@@ -105,39 +105,14 @@ const OPS_SUB: &[(&str, AuditPosture)] = &[
     ("mcp", AuditPosture::InteractiveOrControl),
 ];
 
-// Plan 178 — the single-VM operational verbs grouped under `vm <sub>`. The
-// audit postures are unchanged from when these were top-level (the CLI path
-// moved, the audit taxonomy did not).
-const VM_SUB: &[(&str, AuditPosture)] = &[
-    ("pause", AuditPosture::Emits("VmStop")),
-    ("resume", AuditPosture::Emits("VmStart")),
-    ("snapshot", AuditPosture::DelegatesToSub(SNAPSHOT_SUB)),
-    ("save", AuditPosture::Emits("CheckpointCreated")),
-    ("restore", AuditPosture::Emits("CheckpointRestored")),
-    ("checkpoint", AuditPosture::DelegatesToSub(CHECKPOINT_SUB)),
-    ("cp", AuditPosture::Emits("VmFileCopy")),
-    ("fs", AuditPosture::Emits("VmFsMutate")),
-    ("proc", AuditPosture::DelegatesToSub(PROC_SUB)),
-    ("diff", AuditPosture::ReadOnly),
-    ("wait", AuditPosture::ReadOnly),
-    ("boot-report", AuditPosture::ReadOnly),
-    ("set-ttl", AuditPosture::Emits("VmTtlSet")),
-    ("forward", AuditPosture::ReadOnly),
-    ("sandbox", AuditPosture::DelegatesToSub(SANDBOX_SUB)),
-    ("session", AuditPosture::DelegatesToSub(SESSION_SUB)),
-    ("volume", AuditPosture::DelegatesToSub(VOLUME_SUB)),
-];
-
 // `kernel build` compiles/downloads a microVM kernel into the local
 // cache. Like `compile`, it produces build outputs but doesn't touch the
 // security audit chain — the Stage-0 supply-chain events the compile arm
 // may trigger are emitted by the shared bootstrap, same as `dev`.
 const KERNEL_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
 
-// Plan 178 (D1) — build-time verbs grouped under `build <sub>`. `build image`
-// is the former top-level `build`. Postures unchanged.
+// Plan 178 (D1) — build-time verbs grouped under `build <sub>`.
 const BUILD_SUB: &[(&str, AuditPosture)] = &[
-    ("image", AuditPosture::Emits("TemplateBuild")),
     ("compile", AuditPosture::ReadOnly),
     ("validate", AuditPosture::ReadOnly),
     ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
@@ -206,6 +181,7 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
 // surfaces after first resolving the named machine.
 const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("run", AuditPosture::InteractiveOrControl),
+    ("build", AuditPosture::Emits("TemplateBuild")),
     ("create", AuditPosture::Emits("ConfigChange")),
     ("ls", AuditPosture::ReadOnly),
     ("inspect", AuditPosture::ReadOnly),
@@ -213,10 +189,32 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("start", AuditPosture::InteractiveOrControl),
     ("exec", AuditPosture::InteractiveOrControl),
     ("shell", AuditPosture::InteractiveOrControl),
-    ("stop", AuditPosture::InteractiveOrControl),
+    ("stop", AuditPosture::Emits("VmStop")),
     // Plan 200 — verify a portable `.mvm` + preview its admission. Read-only:
     // no extraction, no boot, no audit-chain emission.
     ("check-artifact", AuditPosture::ReadOnly),
+    ("logs", AuditPosture::ReadOnly),
+    ("console", AuditPosture::InteractiveOrControl),
+    // Advanced single-VM verbs folded under `machine` (hidden from default help).
+    // The audit postures are unchanged from when these lived under `vm <sub>`.
+    ("pause", AuditPosture::Emits("VmStop")),
+    ("resume", AuditPosture::Emits("VmStart")),
+    ("snapshot", AuditPosture::DelegatesToSub(SNAPSHOT_SUB)),
+    ("save", AuditPosture::Emits("CheckpointCreated")),
+    ("restore", AuditPosture::Emits("CheckpointRestored")),
+    ("checkpoint", AuditPosture::DelegatesToSub(CHECKPOINT_SUB)),
+    ("cp", AuditPosture::Emits("VmFileCopy")),
+    ("fs", AuditPosture::Emits("VmFsMutate")),
+    ("proc", AuditPosture::DelegatesToSub(PROC_SUB)),
+    ("diff", AuditPosture::ReadOnly),
+    ("wait", AuditPosture::ReadOnly),
+    ("boot-report", AuditPosture::ReadOnly),
+    ("set-ttl", AuditPosture::Emits("VmTtlSet")),
+    ("rekernel", AuditPosture::Emits("VmRekernel")),
+    ("forward", AuditPosture::ReadOnly),
+    ("sandbox", AuditPosture::DelegatesToSub(SANDBOX_SUB)),
+    ("session", AuditPosture::DelegatesToSub(SESSION_SUB)),
+    ("volume", AuditPosture::DelegatesToSub(VOLUME_SUB)),
 ];
 
 const VOLUME_SUB: &[(&str, AuditPosture)] = &[
@@ -393,14 +391,9 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
         "up",
         AuditPosture::Emits("plan.admitted+plan.launched+VmStart"),
     ),
-    ("down", AuditPosture::Emits("VmStop")),
-    ("logs", AuditPosture::ReadOnly),
     ("ls", AuditPosture::ReadOnly),
-    ("console", AuditPosture::InteractiveOrControl),
     ("run", AuditPosture::InteractiveOrControl),
     ("invoke", AuditPosture::Emits("plan.admitted+plan.launched")),
-    // Plan 178 — single-VM operational verbs grouped under `vm <sub>`.
-    ("vm", AuditPosture::DelegatesToSub(VM_SUB)),
     // Build / artifact / registry. Plan 178 (D1) — image/compile/validate/
     // kernel grouped under `build <sub>`.
     ("build", AuditPosture::DelegatesToSub(BUILD_SUB)),
@@ -625,6 +618,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "TranscriptSealed",
         "TrustAdd",
         "TrustRemove",
+        "VmRekernel",
         "VmStart",
         "VmStop",
         "VmTtlSet",

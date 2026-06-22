@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use mvm_core::kernel_artifact::KernelArtifactId;
 use thiserror::Error;
@@ -47,6 +47,52 @@ pub fn verify_fetched_kernel(path: &Path, id: &KernelArtifactId) -> Result<(), K
         });
     }
     Ok(())
+}
+
+/// How a kernel pin resolves to a concrete `vmlinux` for a given backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KernelResolution {
+    /// A cached kernel is already present at this path. Installed builds
+    /// should still [`verify_fetched_kernel`] it against the pin before boot.
+    Cached(PathBuf),
+    /// Source checkout with no cached kernel — build it to this path
+    /// (`mvmctl build kernel build`). A source checkout is NEVER fetched: the
+    /// local-build invariant forbids depending on a published artifact.
+    NeedsBuild(PathBuf),
+    /// Installed binary with no cached kernel — fetch the published prebuilt
+    /// to this path, then [`verify_fetched_kernel`] it against the pin.
+    NeedsFetch(PathBuf),
+}
+
+/// Per-arch, per-variant kernel cache path — the location
+/// `mvmctl build kernel build` writes and the boot path reads.
+pub fn cached_kernel_path(cache_dir: &Path, arch: &str, variant: &str) -> PathBuf {
+    cache_dir
+        .join("builder-vm")
+        .join(arch)
+        .join("kernels")
+        .join(variant)
+        .join("vmlinux")
+}
+
+/// Decide how to obtain the `vmlinux` for a kernel pin without performing any
+/// I/O beyond a cache-presence check. Pure policy so the build-local /
+/// fetch-verify decision is unit-testable and the local-build invariant is
+/// enforced in one place: a source checkout never resolves to `NeedsFetch`.
+pub fn resolve_kernel(
+    cache_dir: &Path,
+    arch: &str,
+    variant: &str,
+    source_checkout: bool,
+) -> KernelResolution {
+    let path = cached_kernel_path(cache_dir, arch, variant);
+    if path.exists() {
+        KernelResolution::Cached(path)
+    } else if source_checkout {
+        KernelResolution::NeedsBuild(path)
+    } else {
+        KernelResolution::NeedsFetch(path)
+    }
 }
 
 #[cfg(test)]
@@ -118,6 +164,40 @@ mod tests {
         let result = verify_fetched_kernel(f.path(), &id);
         drop(env);
         assert!(result.is_ok(), "skip env must bypass hash check");
+    }
+
+    #[test]
+    fn resolve_cached_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = cached_kernel_path(dir.path(), "aarch64", "workload");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"vmlinux").unwrap();
+        assert_eq!(
+            resolve_kernel(dir.path(), "aarch64", "workload", true),
+            KernelResolution::Cached(p.clone())
+        );
+        // Installed build with a cached kernel also resolves Cached.
+        assert_eq!(
+            resolve_kernel(dir.path(), "aarch64", "workload", false),
+            KernelResolution::Cached(p)
+        );
+    }
+
+    #[test]
+    fn source_checkout_needs_build_never_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = resolve_kernel(dir.path(), "x86_64", "workload", true);
+        assert!(
+            matches!(r, KernelResolution::NeedsBuild(_)),
+            "source checkout must build locally, never fetch — got {r:?}"
+        );
+    }
+
+    #[test]
+    fn installed_needs_fetch_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = resolve_kernel(dir.path(), "x86_64", "builder", false);
+        assert!(matches!(r, KernelResolution::NeedsFetch(_)));
     }
 
     #[test]
