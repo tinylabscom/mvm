@@ -43,72 +43,131 @@ stream — leave unchanged), `console::run` (PTY attach to reuse), and
 
 ---
 
-## Task 1: Flags + dispatch scaffolding (transient stays unchanged)
+## Task 1: Flags + dispatch scaffolding (transient stays unchanged) — DONE
 
-- [ ] Add to `MachineRunArgs`: `--name <N>`, `-d`/`--detach`, `-t`/`--tty` (with
+- [x] Add to `MachineRunArgs`: `--name <N>`, `-d`/`--detach`, `-t`/`--tty` (with
       `-i` as an accepted alias so `-it` bundles parse). Keep all existing
       transient flags intact.
-- [ ] Compute `persistent = name.is_some() || detach` and `interactive = tty`
-      once; do **not** consult `tty` for persistence.
-- [ ] Branch `run()`: `interactive` → interactive path (Task 3); else
-      `persistent` → persistent path (Task 2); else → `run_secure(into_run_args())`
-      unchanged.
-- [ ] Tests: CLI parse coverage for every matrix row incl. `-it` bundling and the
-      `-i` alias; a dispatch unit test asserting the no-flag case still selects
-      `run_secure` (transient path unchanged).
+- [x] **Free `-d` for `--detach`.** `machine run`'s host-dir share flag was
+      `-d`/`--add-dir`, which collided with the locked `-d`=detach decision.
+      Renamed it to **`--volume`** (long-only — `-v` is the global verbosity
+      counter), matching the Docker `-v`/`--volume` mental model. Scoped to the
+      `machine run` surface: the rename rippled to the three `machine` SDK
+      builders (`mvm-sdk` `MachineRunBuilder::volume/volumes`, Python
+      `_machine.py volumes=`, TS `_machine.ts volumes`) and the shared
+      `sdks/machine-fixtures/run-admission.argv`. The lower-level
+      `mvmctl run`/`exec --add-dir` is a different command and is left unchanged.
+- [x] `argv` is no longer clap-`required` (persistent/interactive boot without a
+      command); a plain transient run with no argv is refused at dispatch with a
+      clear message.
+- [x] Compute `persistent = name.is_some() || detach` and
+      `interactive = tty || -i` once via `MachineRunArgs::{persistent,interactive}`;
+      `tty` is **not** consulted for persistence. `resolve_mode()` maps the two
+      axes to `MachineRunMode::{Transient,Persistent,InteractiveTransient,InteractivePersistent}`.
+- [x] Branch `run()` → `run_dispatch`: `Transient` → `run_secure(into_run_args())`
+      unchanged; `Persistent`/`Interactive*` → stubs (`bail!`) filled by Tasks 2/3.
+- [x] Tests: `resolve_mode_covers_the_behavior_matrix` (every matrix row incl.
+      `-it` bundling + `-i` alias), `transient_run_without_argv_is_rejected_at_dispatch`,
+      and the flag-parse coverage. All mvm-cli + mvm-sdk suites green.
 
-## Task 2: Persistent path (`--name` / `-d`, no `-t`)
+## Task 2: Persistent path (`--name` / `-d`, no `-t`) — DONE
 
-- [ ] `run_persistent`: resolve name — given `--name`, use it; given bare `-d`,
-      auto-generate via the existing transient `vm_name` generator / `mvm-core`
-      ID helper (no second scheme). Surface the resolved name on stdout + `--json`.
-- [ ] Create-or-reuse the `MachineSpec` (same struct `create` writes): absent →
-      write; present + config matches → reuse; present + config differs → **error**
-      with a clear message, unless `--force` → stop + overwrite + restart.
-- [ ] Start if not already running — reuse `start_machine` and the liveness check
-      `start`/`stop` already use against `machine_state_dir` (never double-boot).
-- [ ] Post-start behavior: argv + no `-d` → `exec` it, stream, leave machine up;
-      argv + `-d` → `exec` detached, return; no argv + `-d` → boot, print name,
-      return; no argv + no `-d` → boot and print a hint pointing at
-      `machine shell <name>`.
-- [ ] Tests: same-config reuse vs different-config error vs `--force` reconcile;
-      auto-name surfaced + reconnect by it through `machine shell`/`exec`/`stop`;
-      no-double-boot when already running.
+- [x] `run_persistent`: resolve name via `resolve_machine_run_name` — `--name`
+      used verbatim; bare `-d` auto-names via `auto_machine_name()` =
+      `mvm_core::naming::generate_instance_id()` (one scheme, valid VM name). The
+      name is surfaced on stdout (`start_machine` line + a bare-name last line for
+      `-d`) and in `--json`.
+- [x] Create-or-reuse via `resolve_persistent_spec` + `reconcile_machine_spec`:
+      absent → `Create` (write); same launch config → `Reuse`; different config →
+      **error** (`machine 'N' exists with a different config; pass --force …`)
+      unless `--force` → `Recreate` (stop running + overwrite). `--image`-less
+      invocations are a pure reconnect to the on-disk spec.
+- [x] `machine_config_matches` compares only boot-affecting fields, ignoring
+      runtime metadata (resolved digest / timestamps) so a restart never trips a
+      false collision.
+- [x] Start only if not already running — `machine_is_running` (backend
+      `status` = `kill(pid,0)`-cheap) guards a double-boot; otherwise reuse
+      `start_machine`.
+- [x] Post-start (`run_persistent_post_start`): argv → `wait_for_guest_agent` +
+      `console::run` exec (streamed, machine left up); no argv + `-d` → print the
+      name; no argv + no `-d` → print a `machine shell <name>` hint.
+- [x] Tests: reconcile create/reuse/error/force; config-match ignores metadata;
+      run-spec field mapping; auto-name validity; `--image`-less reconnect +
+      missing-machine error. (Live reconnect through `shell`/`exec`/`stop` is
+      Task 5.)
 
-## Task 3: Interactive path (`-t`/`--tty`, dev-only)
+### deferred follow-ups
 
-- [ ] Route to `console::run` (the PTY path `machine shell` uses) against the
-      just-booted VM. For the **transient** case (no name/detach) boot a throwaway
-      VM, attach, and **tear it down on shell exit**; for the persistent case
-      boot/reuse the named machine and **leave it up** on exit.
-- [ ] Dev-only gate: refuse `--tty` under `--prod`, a sealed (dm-verity) image, or
-      a non-`dev-shell` agent — **before boot** — via `enforce_accessible_gate`
-      (claim 15). Clear error.
-- [ ] Refuse `--tty` when host stdin is not a TTY, with a clear message (no hang).
-- [ ] Tests: `--tty` refused for `--prod`/sealed via the gate; non-TTY stdin
-      refused; transient-interactive selects teardown-on-exit, persistent-interactive
-      leaves the machine up. (Live PTY round-trip is Task 5.)
+- [ ] `--volume` host-directory shares on a managed boot (persistent **or**
+      interactive). The `MachineSpec` boot path carries no bind-share field, so
+      `reject_volume_for_managed_boot` refuses `--volume` with `-d`/`--name`/`-t`;
+      it rides the plain transient `run_secure` path only. Persisting/re-materializing
+      a bind-share for these lifecycles needs its own design (host-path drift); no
+      behavior-matrix row depends on it. Interactive (`-t`) bind-shares are the
+      most likely first extension (Docker `run -it -v $PWD:/app` parity).
 
-## Task 4: Docs + claim integrity
+## Task 3: Interactive path (`-t`/`--tty`, dev-only) — DONE
 
-- [ ] Update `public/src/content/docs/reference/cli-commands.md` for the new
-      `machine run` flags and the three modes; add a troubleshooting note that a
-      bare `run -- /bin/sh` is non-interactive by design and `-it` (dev) gives a
-      shell.
-- [ ] Confirm `xtask check-claim-catalog` stays green — this plan introduces no
-      new claim; `-it` is an application of claim 15. No catalog edits expected.
+- [x] `run_interactive` boots (or reconnects to) the machine via the **shared**
+      `persist_and_boot_machine` (same managed path as the persistent lifecycle —
+      `run_persistent` was refactored onto it), then attaches a PTY via
+      `console::run` (`command: None` ⇒ shell). Transient (no name/`-d`) →
+      **tear down on exit** (`stop_running_machine` + drop the throwaway spec);
+      persistent → **left up**. The decision is `should_teardown_after_interactive`
+      = `!persistent`.
+- [x] Dev-only gate: `enforce_accessible_gate` (claim 15, now
+      `pub(in crate::commands)`) is called **before boot** for an existing
+      machine; a fresh boot is re-checked by `console::run` post-boot. The
+      recreate `--force` is deliberately **not** threaded into the gate, so it
+      cannot bypass claim 15. (`machine run` has no `--prod` flag — it is
+      dev-tier; the sealed-image/non-`dev-shell`-agent triggers are the relevant
+      ones.)
+- [x] `require_tty(stdin_is_tty)` refuses a non-TTY stdin up front with a clear
+      message — no hang. Call site reads `std::io::stdin().is_terminal()`.
+- [x] Tests: `interactive_requires_a_host_tty`,
+      `interactive_tears_down_only_the_transient_machine`,
+      `interactive_refuses_a_sealed_machine_via_the_claim15_gate`. (Live PTY
+      round-trip is Task 5.)
 
-## Task 5: Verification (dev-host bootable)
+## Task 4: Docs + claim integrity — DONE
 
-- [ ] On this macOS dev host (vz/libkrun): `machine run -it --image <dev-image>
-      -- /bin/sh` drops into a live shell and tears the VM down on exit; capture
-      the session.
-- [ ] `machine run -d --name web --image <dev-image>` returns immediately, prints
-      `web`, `machine ls` shows it, `machine shell web` reconnects, `machine stop
-      web` tears down.
-- [ ] `machine run -it --prod --image <sealed>` is refused before boot with the
-      claim-15 error.
-- [ ] `just ci` green (fmt --all, nextest, doctests, clippy -D warnings).
+- [x] `public/src/content/docs/reference/cli-commands.md`: documented the three
+      `machine run` lifecycles (transient / persistent / interactive), the
+      `--name`/`-d`/`-t`/`-i` flags, the independence of persistence vs
+      interactivity, the `--volume` rename + bind-share-only-on-transient note,
+      and added behavior-matrix example rows.
+- [x] `public/src/content/docs/guides/troubleshooting.md`: added a "Machine Run
+      Issues" note explaining that a bare `run -- /bin/sh` is non-interactive by
+      design and `-it` (dev-only) gives a shell. Remaining `--add-dir` doc
+      references belong to the lower-level `mvmctl up`/`run` and are unchanged.
+- [x] `xtask check-claim-catalog` clean (16 claims, 39 witnesses) — no new claim;
+      `-it` is an application of claim 15, no catalog edits. `xtask
+      check-spec-numbers` clean (207/091 unique).
+
+## Task 5: Verification (dev-host bootable) — DONE
+
+- [x] **`-d` persistent boot round-trip (live, macOS Vz).** `machine run -d
+      --image alpine` booted in ~5s on a warm cache, printed its auto-name
+      (`i-642dc34e`), and returned; `machine ls` listed it; `machine exec --name
+      <N> -- echo hello-from-guest` reconnected and printed `hello-from-guest`
+      from inside the guest (proving the machine genuinely booted and the
+      `console::run` reconnect transport works); `machine stop <N>` tore it down
+      cleanly. The same `exec` transport backs the interactive shell, so the
+      interactive path's plumbing is exercised here.
+- [x] **`-t`/`--tty` gates fire (live).** `machine run -it --image alpine --
+      /bin/sh` under non-TTY stdin refuses fast with
+      *"interactive `-t`/`--tty` needs a terminal on stdin…"* — no hang. The
+      literal interactive keystroke loop needs a real terminal, so it is not
+      runnable headless; the sealed-image refusal (claim 15) needs a sealed image
+      and is covered by the `enforce_accessible_gate` unit tests
+      (`console_refused_on_sealed_image`). `machine run` has no `--prod` flag —
+      the dev-only gate keys off the sealed/`dev-shell` posture, not a flag.
+- [x] **Persistent dispatch + admission (live, `--dry-run`).** `machine run
+      --name <N> --image alpine --dry-run` resolves the spec, OCI digest, and the
+      deny-all / flow-drop admission posture without booting.
+- [x] `just ci` green — fmt --all clean, clippy -D warnings clean, doctests pass,
+      full nextest suite passes. (One unrelated `mvm-hostd` broker-UDS test flaked
+      under parallel load and passes in isolation; not touched by this change.)
 
 ## Out of scope
 

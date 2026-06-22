@@ -189,7 +189,7 @@ pub struct MachineRunBuilder {
     cpus: Option<u16>,
     memory: Option<String>,
     profile: Option<String>,
-    add_dirs: Vec<String>,
+    volumes: Vec<String>,
     env: Vec<String>,
     timeout: Option<u64>,
     receipt: Option<String>,
@@ -254,19 +254,19 @@ impl MachineRunBuilder {
         self
     }
 
-    /// Add one host directory share.
-    pub fn add_dir(mut self, dir: impl Into<String>) -> Self {
-        self.add_dirs.push(dir.into());
+    /// Add one host directory share (`HOST:/GUEST[:MODE]`).
+    pub fn volume(mut self, volume: impl Into<String>) -> Self {
+        self.volumes.push(volume.into());
         self
     }
 
     /// Add multiple host directory shares.
-    pub fn add_dirs<I, S>(mut self, dirs: I) -> Self
+    pub fn volumes<I, S>(mut self, volumes: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.add_dirs.extend(collect_strings(dirs));
+        self.volumes.extend(collect_strings(volumes));
         self
     }
 
@@ -315,7 +315,7 @@ impl MachineRunBuilder {
         let image = require_option(&self.image, "image")?;
         require_non_empty_slice(&self.command, "command")?;
         validate_strings(&self.allow_hosts, "--allow-host")?;
-        validate_strings(&self.add_dirs, "--add-dir")?;
+        validate_strings(&self.volumes, "--volume")?;
         validate_strings(&self.env, "--env")?;
 
         let mut args = vec!["run".to_string(), "--image".to_string(), image.to_string()];
@@ -328,7 +328,7 @@ impl MachineRunBuilder {
         }
         append_optional(&mut args, "--memory", self.memory.as_deref())?;
         append_optional(&mut args, "--profile", self.profile.as_deref())?;
-        append_repeated(&mut args, "--add-dir", &self.add_dirs);
+        append_repeated(&mut args, "--volume", &self.volumes);
         append_repeated(&mut args, "--env", &self.env);
         if let Some(timeout) = self.timeout {
             args.extend(["--timeout".to_string(), timeout.to_string()]);

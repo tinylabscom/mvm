@@ -72,7 +72,7 @@ def test_machine_run_admission_argv_matches_cli_parity_fixture() -> None:
         cpus=4,
         memory="1G",
         profile="dev",
-        add_dirs=["/tmp/mvm-sdk-src:/workspace:ro"],
+        volumes=["/tmp/mvm-sdk-src:/workspace:ro"],
         env=["TOKEN=secret", "MODE=test"],
         timeout=30,
         receipt="/tmp/mvm-sdk-machine.receipt.json",

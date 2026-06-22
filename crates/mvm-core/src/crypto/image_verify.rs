@@ -202,37 +202,64 @@ pub fn verify_manifest(
     expected_identity: &str,
     expected_issuer: &str,
 ) -> VerifyResult<SignedManifest> {
-    use sigstore::bundle::Bundle;
-    use sigstore::bundle::verify::{blocking::Verifier, policy::Identity};
+    verify_cosign_bundle(
+        manifest_bytes,
+        cosign_bundle,
+        expected_identity,
+        expected_issuer,
+    )?;
+    parse_manifest(manifest_bytes)
+}
 
-    let bundle: Bundle =
-        serde_json::from_slice(cosign_bundle).map_err(|e| VerifyError::SignatureInvalid {
-            reason: format!("cosign bundle parse failed: {e}"),
+/// Verify a cosign bundle over `artifact` against the exact SAN identity and
+/// OIDC issuer, returning `Ok(())` only when the signature, certificate chain,
+/// and transparency-log inclusion proof all check out.
+///
+/// Verification is offline: the Sigstore trust root (Fulcio CA + Rekor and
+/// CT-log public keys) is embedded in `sigstore-trust-root`, and the bundle
+/// carries its own inline inclusion proof and signed entry timestamp, so no
+/// network or async runtime is involved. The trust root refreshes by bumping
+/// the crate. Identity/issuer mismatches fail closed inside `verify`.
+#[cfg(feature = "manifest-verify")]
+fn verify_cosign_bundle(
+    artifact: &[u8],
+    cosign_bundle: &[u8],
+    expected_identity: &str,
+    expected_issuer: &str,
+) -> VerifyResult<()> {
+    use sigstore_trust_root::{SIGSTORE_PRODUCTION_TRUSTED_ROOT, TrustedRoot};
+    use sigstore_types::Bundle;
+    use sigstore_verify::{VerificationPolicy, verify};
+
+    let bundle_json =
+        std::str::from_utf8(cosign_bundle).map_err(|e| VerifyError::SignatureInvalid {
+            reason: format!("cosign bundle is not valid UTF-8: {e}"),
         })?;
-
-    // `Verifier::production()` fetches Sigstore's public-good TUF root
-    // on first construction. The fetch is blocking and one-shot per
-    // process; subsequent calls reuse the in-memory trust state. A
-    // network-down host on first run will surface as SignatureInvalid
-    // with a clear "trust root init failed" reason.
-    let verifier = Verifier::production().map_err(|e| VerifyError::SignatureInvalid {
-        reason: format!("sigstore trust root init failed: {e}"),
+    let bundle = Bundle::from_json(bundle_json).map_err(|e| VerifyError::SignatureInvalid {
+        reason: format!("cosign bundle parse failed: {e}"),
     })?;
 
-    let policy = Identity::new(expected_identity, expected_issuer);
+    let trusted_root = TrustedRoot::from_json(SIGSTORE_PRODUCTION_TRUSTED_ROOT).map_err(|e| {
+        VerifyError::SignatureInvalid {
+            reason: format!("sigstore trust root init failed: {e}"),
+        }
+    })?;
 
-    // `offline = false` lets the verifier consult Rekor for the
-    // transparency log entry. The "offline-bundle" path
-    // (`offline = true`) is reachable when the bundle already includes
-    // the inclusion proof inline — wire that into mvmd's reconciliation
-    // loop, where re-querying Rekor on every pool verify is too expensive.
-    verifier
-        .verify(manifest_bytes, bundle, &policy, false)
-        .map_err(|e| VerifyError::SignatureInvalid {
-            reason: format!("manifest signature verification failed: {e}"),
-        })?;
+    let policy = VerificationPolicy::default()
+        .require_identity(expected_identity)
+        .require_issuer(expected_issuer);
 
-    parse_manifest(manifest_bytes)
+    let result = verify(artifact, &bundle, &policy, &trusted_root).map_err(|e| {
+        VerifyError::SignatureInvalid {
+            reason: format!("signature verification failed: {e}"),
+        }
+    })?;
+    if !result.success {
+        return Err(VerifyError::SignatureInvalid {
+            reason: "sigstore verification returned an unsuccessful result".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Verify a cosign-signed JSON payload (any shape), returning the
@@ -252,23 +279,12 @@ pub fn verify_signed_payload(
     expected_identity: &str,
     expected_issuer: &str,
 ) -> VerifyResult<()> {
-    use sigstore::bundle::Bundle;
-    use sigstore::bundle::verify::{blocking::Verifier, policy::Identity};
-
-    let bundle: Bundle =
-        serde_json::from_slice(cosign_bundle).map_err(|e| VerifyError::SignatureInvalid {
-            reason: format!("cosign bundle parse failed: {e}"),
-        })?;
-    let verifier = Verifier::production().map_err(|e| VerifyError::SignatureInvalid {
-        reason: format!("sigstore trust root init failed: {e}"),
-    })?;
-    let policy = Identity::new(expected_identity, expected_issuer);
-    verifier
-        .verify(payload_bytes, bundle, &policy, false)
-        .map_err(|e| VerifyError::SignatureInvalid {
-            reason: format!("payload signature verification failed: {e}"),
-        })?;
-    Ok(())
+    verify_cosign_bundle(
+        payload_bytes,
+        cosign_bundle,
+        expected_identity,
+        expected_issuer,
+    )
 }
 
 #[cfg(not(feature = "manifest-verify"))]

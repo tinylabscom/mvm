@@ -55,10 +55,13 @@ keyring.workspace = true
 secrecy.workspace = true
 zeroize.workspace = true
 rand.workspace = true
-# Opt-in cosign-keyless image verification (off by default). Pulls the
-# large sigstore OIDC/TUF/Rekor graph only under `manifest-verify`, so
-# the default mvm-core build stays async/runtime-free.
-sigstore = { version = "0.13", default-features = false, features = ["bundle", "sigstore-trust-root", "rustls-tls"], optional = true }
+# Opt-in cosign-keyless image verification (off by default). The modular
+# sigstore-verify stack checks bundles offline against an embedded trust root
+# — no rsa, no OIDC client, no async TUF fetch — so the default mvm-core build
+# stays runtime-free and `manifest-verify` pulls no tokio.
+sigstore-verify = { version = "0.9", default-features = false, optional = true }
+sigstore-trust-root = { version = "0.9", default-features = false, optional = true }
+sigstore-types = { version = "0.9", optional = true }
 # Only under the `schema` feature (protocol-schema codegen);
 # 0.8 matches the version mvm-sdk already pins, so no new lockfile entry.
 schemars = { version = "0.8", optional = true }
@@ -89,21 +92,14 @@ test-support = []
 # async surface in mvm-core besides `manifest-verify`; gated so the
 # default closure carries no tokio. Pulls tokio's `io-util`.
 hostd-transport = ["dep:tokio", "tokio/io-util"]
-# Cosign-keyless manifest verification via sigstore (folded from
-# mvm-security). sigstore uses a blocking verifier backed
-# by a tokio runtime; enable the tokio features it needs (independent of
-# `hostd-transport` — `manifest-verify` alone must build).
+# Cosign-keyless manifest verification via the modular sigstore-verify stack.
+# Verification is synchronous and offline (embedded trust root + the bundle's
+# inline transparency-log inclusion proof), so this feature pulls no tokio and
+# the runtime-free invariant holds with or without it.
 manifest-verify = [
-    "dep:sigstore",
-    "dep:tokio",
-    "tokio/io-util",
-    "tokio/rt",
-    "tokio/rt-multi-thread",
-    "tokio/macros",
-    "tokio/net",
-    "tokio/time",
-    "tokio/fs",
-    "tokio/sync",
+    "dep:sigstore-verify",
+    "dep:sigstore-trust-root",
+    "dep:sigstore-types",
 ]
 # Hardware attestation provider stubs — each enables
 # the corresponding `crypto::attestation::provider` impl.
