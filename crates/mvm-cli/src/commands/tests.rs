@@ -19,7 +19,7 @@ use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
 use super::trust;
 use super::vm::{
-    checkpoint, console, cp, exec, forward, group, pause, sandbox, session, up, volume,
+    checkpoint, console, cp, exec, forward, group, pause, sandbox, session, volume,
 };
 
 use audit::AuditAction;
@@ -28,12 +28,10 @@ use catalog::CatalogAction;
 use config::ConfigAction;
 use dev::{DevAction, DevCacheAction};
 use image::ImageAction;
-use up::RunParams;
 
 use super::shared::{
-    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
-    env_vars_to_drive_file, parse_port_spec, parse_port_specs, parse_volume_spec,
-    ports_to_drive_file, read_dir_to_drive_files, resolve_flake_ref, resolve_network_policy,
+    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec, parse_port_spec,
+    parse_volume_spec, resolve_flake_ref,
 };
 
 #[test]
@@ -876,64 +874,6 @@ fn test_run_forward_default_false() {
     );
 }
 
-#[test]
-fn test_parse_port_specs_multiple() {
-    let specs = vec!["3333:3000".to_string(), "8080".to_string()];
-    let result = parse_port_specs(&specs).unwrap();
-    assert_eq!(result.len(), 2);
-    assert_eq!(result[0].host, 3333);
-    assert_eq!(result[0].guest, 3000);
-    assert_eq!(result[1].host, 8080);
-    assert_eq!(result[1].guest, 8080);
-}
-
-#[test]
-fn test_parse_port_specs_empty() {
-    let specs: Vec<String> = vec![];
-    let result = parse_port_specs(&specs).unwrap();
-    assert!(result.is_empty());
-}
-
-#[test]
-fn test_ports_to_drive_file() {
-    use mvm::config::PortMapping;
-    let ports = vec![
-        PortMapping {
-            host: 3333,
-            guest: 3000,
-        },
-        PortMapping {
-            host: 3334,
-            guest: 3002,
-        },
-    ];
-    let f = ports_to_drive_file(&ports).unwrap();
-    assert_eq!(f.name, "mvm-ports.env");
-    assert!(f.content.contains("MVM_PORT_MAP=\"3333:3000,3334:3002\""));
-    assert_eq!(f.mode, 0o444);
-}
-
-#[test]
-fn test_ports_to_drive_file_empty() {
-    assert!(ports_to_drive_file(&[]).is_none());
-}
-
-#[test]
-fn test_env_vars_to_drive_file() {
-    let vars = vec!["NODE_ENV=production".to_string(), "DEBUG=true".to_string()];
-    let f = env_vars_to_drive_file(&vars).unwrap();
-    assert_eq!(f.name, "mvm-env.env");
-    assert!(f.content.contains("export NODE_ENV=production"));
-    assert!(f.content.contains("export DEBUG=true"));
-    assert_eq!(f.mode, 0o444);
-}
-
-#[test]
-fn test_env_vars_to_drive_file_empty() {
-    let vars: Vec<String> = vec![];
-    assert!(env_vars_to_drive_file(&vars).is_none());
-}
-
 // ---- VM subcommand tests ----
 
 // ---- machine stop tests ----
@@ -984,51 +924,6 @@ fn down_removed() {
         clap::error::ErrorKind::InvalidSubcommand,
         "expected InvalidSubcommand, got: {err:?}"
     );
-}
-
-// ---- read_dir_to_drive_files tests ----
-
-#[test]
-fn test_read_dir_to_drive_files_reads_files() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
-    std::fs::write(dir.path().join("b.env"), "KEY=val").unwrap();
-
-    let files = read_dir_to_drive_files(dir.path().to_str().unwrap(), 0o444).unwrap();
-    assert_eq!(files.len(), 2);
-
-    let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
-    assert!(names.contains(&"a.txt"));
-    assert!(names.contains(&"b.env"));
-
-    for f in &files {
-        assert_eq!(f.mode, 0o444);
-    }
-}
-
-#[test]
-fn test_read_dir_to_drive_files_skips_directories() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("file.txt"), "content").unwrap();
-    std::fs::create_dir(dir.path().join("subdir")).unwrap();
-
-    let files = read_dir_to_drive_files(dir.path().to_str().unwrap(), 0o400).unwrap();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].name, "file.txt");
-    assert_eq!(files[0].mode, 0o400);
-}
-
-#[test]
-fn test_read_dir_to_drive_files_empty_dir() {
-    let dir = tempfile::tempdir().unwrap();
-    let files = read_dir_to_drive_files(dir.path().to_str().unwrap(), 0o444).unwrap();
-    assert!(files.is_empty());
-}
-
-#[test]
-fn test_read_dir_to_drive_files_nonexistent_dir() {
-    let result = read_dir_to_drive_files("/nonexistent/path/abc123", 0o444);
-    assert!(result.is_err());
 }
 
 // ---- Forward command tests ----
@@ -1771,57 +1666,6 @@ fn test_run_cli_flag_overrides_config_memory() {
     let cli_memory: Option<u32> = Some(512);
     let effective = cli_memory.or(Some(cfg.default_memory_mib));
     assert_eq!(effective, Some(512));
-}
-
-#[test]
-fn test_resolve_network_policy_default_is_deny_all() {
-    // Claim 10: the safe default is deny-all. Workloads that need
-    // network access opt in explicitly.
-    let policy = resolve_network_policy(None, &[]).unwrap();
-    assert!(!policy.is_unrestricted());
-    let rules = policy
-        .resolve_rules()
-        .expect("default resolves to a concrete rule set");
-    assert!(rules.is_empty(), "deny-all should yield no allow rules");
-}
-
-#[test]
-fn test_resolve_network_policy_preset() {
-    let policy = resolve_network_policy(Some("dev"), &[]).unwrap();
-    assert!(!policy.is_unrestricted());
-    let rules = policy.resolve_rules().unwrap();
-    assert!(rules.iter().any(|r| r.host == "github.com"));
-}
-
-#[test]
-fn test_resolve_network_policy_allow_list() {
-    let allow = vec![
-        "github.com:443".to_string(),
-        "api.openai.com:443".to_string(),
-    ];
-    let policy = resolve_network_policy(None, &allow).unwrap();
-    let rules = policy.resolve_rules().unwrap();
-    assert_eq!(rules.len(), 2);
-}
-
-#[test]
-fn test_resolve_network_policy_mutual_exclusion() {
-    let allow = vec!["github.com:443".to_string()];
-    let result = resolve_network_policy(Some("dev"), &allow);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_resolve_network_policy_invalid_preset() {
-    let result = resolve_network_policy(Some("bogus"), &[]);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_resolve_network_policy_invalid_allow_entry() {
-    let allow = vec!["not-a-host-port".to_string()];
-    let result = resolve_network_policy(None, &allow);
-    assert!(result.is_err());
 }
 
 #[test]
@@ -3455,12 +3299,6 @@ fn test_dev_status_json_flag_parses() {
 fn test_is_vz_dev_running_returns_bool() {
     // Just verify it doesn't panic — actual result depends on platform
     let _ = super::env::dev_vz::is_vz_dev_running();
-}
-
-// ---- RunParams compile-check (referenced for type-export verification) ----
-#[allow(dead_code)]
-fn _runparams_has_lifetime() {
-    fn _take(_p: RunParams<'_>) {}
 }
 
 // ---- admission flags (up retired; pin removal) ----

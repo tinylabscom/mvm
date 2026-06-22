@@ -147,33 +147,6 @@ pub fn resolve_flake_ref(flake_ref: &str) -> Result<String> {
     Ok(canonical.to_string_lossy().to_string())
 }
 
-/// Resolve CLI network flags into a `NetworkPolicy`.
-/// `--network-preset` and `--network-allow` are mutually exclusive.
-pub fn resolve_network_policy(
-    preset: Option<&str>,
-    allow: &[String],
-) -> Result<mvm_core::network_policy::NetworkPolicy> {
-    use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
-
-    match (preset, allow.is_empty()) {
-        (Some(_), false) => {
-            anyhow::bail!("--network-preset and --network-allow are mutually exclusive")
-        }
-        (Some(name), true) => {
-            let p: NetworkPreset = name.parse()?;
-            Ok(NetworkPolicy::preset(p))
-        }
-        (None, false) => {
-            let rules: Vec<HostPort> = allow
-                .iter()
-                .map(|s| s.parse())
-                .collect::<Result<Vec<_>>>()?;
-            Ok(NetworkPolicy::allow_list(rules))
-        }
-        (None, true) => Ok(NetworkPolicy::default()),
-    }
-}
-
 /// Resolve the transient-run egress flags (`--net` / `--allow-host`) into a
 /// single `NetworkPolicy`, identical for every backend.
 ///
