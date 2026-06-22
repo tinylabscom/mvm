@@ -1,15 +1,17 @@
 //! mvm-vm-host — per-VM supervisor host processes.
 //!
-//! One process per guest VM. The three roles ship as cfg-gated
-//! `[[bin]]`s (see Cargo.toml): `mvm-libkrun-supervisor`,
-//! `mvm-vz-drainer`, `mvm-firecracker-bridge`. They are leaf binaries
-//! — nothing depends on them as a library; `mvm-backend`'s spawner
+//! One process per guest VM. The roles ship as `[[bin]]`s (see Cargo.toml):
+//! `mvm-libkrun-supervisor` (libkrun VMM + merged in-process bridge;
+//! libkrun-sys-gated), `mvm-vz-supervisor` (Vz VMM), and the shared `mvm-bridge`
+//! sidecar — the single external-VMM gateway/audit bridge for Firecracker + vz
+//! (replaces the former `mvm-firecracker-bridge` / `mvm-vz-drainer`). They are
+//! leaf binaries — nothing depends on them as a library; `mvm-backend`'s spawner
 //! resolves them by binary name on the launch path.
 //!
-//! This shared lib carries only the firecracker-bridge config +
-//! passt-hash parsers (`firecracker_bridge::parse`), which both the
-//! `mvm-firecracker-bridge` bin and the fuzz harnesses consume.
-//! Folded in from the former `mvm-firecracker-bridge` crate.
+//! This shared lib carries the bridge config + passt-hash parsers: the unified
+//! contract in `bridge::parse` (what `mvm-bridge` reads) plus the original
+//! `firecracker_bridge::parse` helpers it re-exports (still fuzzed). Folded in
+//! from the former per-VM bin crates.
 
 /// Unified per-VM bridge-sidecar stdin contract. The shared `mvm-bridge`
 /// sidecar parses [`bridge::parse::BridgeConfigJson`] and dispatches on its

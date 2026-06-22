@@ -1,0 +1,1 @@
+BIOS (Basic Input/Output System) and UEFI (Unified Extensible Firmware Interface) are the foundational software on your computer's motherboard that start up your system before the operating system (like Windows or macOS) load
