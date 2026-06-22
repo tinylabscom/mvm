@@ -1213,7 +1213,7 @@ fn reserve_vm_name(
     let mut registry = mvm::vm::name_registry::VmNameRegistry::load(registry_path)?;
     if registry.lookup(reservation.name).is_some() {
         anyhow::bail!(
-            "VM name {:?} is already reserved; stop the existing VM with `mvmctl down {}` or choose a different name",
+            "VM name {:?} is already reserved; stop the existing VM with `mvmctl machine stop {}` or choose a different name",
             reservation.name,
             reservation.name
         );
@@ -2881,7 +2881,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<String> {
     // `mvmctl console`. Only the dev agent serves it (a sealed prod image
     // ships none — claim 15), which is why `--console` forced the dev
     // image upstream. The VM keeps running after the shell exits;
-    // `mvmctl down <name>` stops it.
+    // `mvmctl machine stop <name>` stops it.
     if console {
         super::console::console_interactive(&vm_name_owned)?;
         return Ok(vm_name_owned);

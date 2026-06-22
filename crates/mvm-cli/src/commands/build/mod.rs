@@ -3,7 +3,7 @@
 //! validation is the `validate` subcommand.
 
 #[allow(clippy::module_inception)]
-pub(super) mod build;
+pub(in crate::commands) mod build;
 pub(super) mod compile;
 pub(super) mod group;
 pub(super) mod kernel;

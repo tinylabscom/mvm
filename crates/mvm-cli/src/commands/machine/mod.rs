@@ -36,7 +36,9 @@ use mvm_core::vm_backend::{VmId, VmStatus};
 use mvm_core::{config, naming};
 
 use super::Cli;
+use super::build::build;
 use super::vm::exec::{RunArgs, RunProfile, run_secure};
+use super::vm::group::VmCmd;
 #[cfg(test)]
 use super::vm::host_signer::PUBLIC_FILENAME;
 use super::vm::host_signer::{host_signer_id, load_or_init};
@@ -56,30 +58,74 @@ pub(in crate::commands) struct Args {
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum MachineAction {
     /// Boot an OCI image, run a command, then tear the VM down
+    #[command(display_order = 1)]
     Run(MachineRunArgs),
+    /// Build a microVM image from a manifest or Nix flake
+    #[command(display_order = 2)]
+    Build(build::Args),
     /// Create or update a persistent named machine spec without booting it
+    #[command(display_order = 3)]
     Create(MachineCreateArgs),
+    /// Boot a persistent named machine without running a one-shot command
+    #[command(display_order = 4)]
+    Start(MachineStartArgs),
+    /// Stop a running VM by name, or all running VMs with --all
+    #[command(display_order = 5)]
+    Stop(MachineStopArgs),
+    /// Remove one persistent named machine spec
+    #[command(name = "rm", display_order = 6)]
+    Rm(MachineRemoveArgs),
     /// List persistent named machine specs
-    #[command(name = "ls")]
+    #[command(name = "ls", display_order = 7)]
     Ls(MachineListArgs),
     /// Show one persistent named machine spec
+    #[command(display_order = 8)]
     Inspect(MachineInspectArgs),
-    /// Remove one persistent named machine spec
-    #[command(name = "rm")]
-    Rm(MachineRemoveArgs),
-    /// Boot a persistent named machine without running a one-shot command
-    Start(MachineStartArgs),
-    /// Run a command inside an already-started named machine
-    Exec(MachineExecArgs),
     /// Attach an interactive shell/console to an already-started named machine
+    #[command(display_order = 9)]
     Shell(MachineShellArgs),
-    /// Stop an already-started named machine
-    Stop(MachineStopArgs),
+    /// Run a command inside an already-started named machine
+    #[command(display_order = 10)]
+    Exec(MachineExecArgs),
+    /// Show console logs from a running VM
+    #[command(display_order = 11)]
+    Logs(super::vm::logs::Args),
+    /// Interactive PTY console to a running VM (dev images only; claim-15 gated)
+    #[command(display_order = 12)]
+    Console(super::vm::console::Args),
     /// Verify a portable `.mvm` artifact and preview how `machine run` would
     /// admit it (arch, profile, seccomp, egress, volumes). Read-only: no
     /// extraction, no boot.
-    #[command(name = "check-artifact")]
+    #[command(name = "check-artifact", display_order = 13)]
     CheckArtifact(portable::CheckArtifactArgs),
+    /// Advanced single-VM operations (pause, snapshot, cp, fs, …). Hidden; use `machine <verb>` directly.
+    #[command(flatten)]
+    Vm(VmCmd),
+}
+
+impl MachineAction {
+    /// The `<verb>` slot in `cmd.<verb>.*` audit events. The folded advanced
+    /// ops keep their own per-op verbs (`cmd.pause.*`, `cmd.set-ttl.*`, …) so
+    /// the audit taxonomy is unchanged by the move from `vm` to `machine`; the
+    /// native lifecycle verbs report as `machine`, as they always have.
+    pub(in crate::commands) fn verb_name(&self) -> &'static str {
+        match self {
+            MachineAction::Vm(cmd) => cmd.verb_name(),
+            MachineAction::Run(_)
+            | MachineAction::Build(_)
+            | MachineAction::Create(_)
+            | MachineAction::Start(_)
+            | MachineAction::Stop(_)
+            | MachineAction::Rm(_)
+            | MachineAction::Ls(_)
+            | MachineAction::Inspect(_)
+            | MachineAction::Shell(_)
+            | MachineAction::Exec(_)
+            | MachineAction::Logs(_)
+            | MachineAction::Console(_)
+            | MachineAction::CheckArtifact(_) => "machine",
+        }
+    }
 }
 
 /// Ephemeral image-backed run. Mirrors the relevant subset of `mvmctl run`'s
@@ -522,10 +568,17 @@ pub(in crate::commands) struct MachineShellArgs {
 }
 
 #[derive(ClapArgs, Debug, Clone)]
+#[command(group(
+    clap::ArgGroup::new("target")
+        .required(true)
+        .args(["name", "all"])
+))]
 pub(in crate::commands) struct MachineStopArgs {
-    /// Persistent machine name.
-    #[arg(long)]
-    pub name: String,
+    /// VM name to stop.
+    pub name: Option<String>,
+    /// Stop all running VMs.
+    #[arg(long, conflicts_with = "name")]
+    pub all: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1629,15 +1682,10 @@ fn shell_machine(cli: &Cli, args: MachineShellArgs, cfg: &MvmConfig) -> Result<(
 }
 
 fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) -> Result<()> {
-    ensure_machine_spec_exists(&args.name)?;
-    reap_proxy(&args.name);
-    down::run(
-        cli,
-        down::Args {
-            name: Some(args.name),
-        },
-        cfg,
-    )
+    if let Some(ref name) = args.name {
+        reap_proxy(name);
+    }
+    down::run(cli, down::Args { name: args.name }, cfg)
 }
 
 /// Resolve the spec a persistent run should boot, reconciling the desired
@@ -1867,6 +1915,7 @@ fn run_dispatch(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> 
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     match args.action {
         MachineAction::Run(run_args) => run_dispatch(cli, run_args, cfg),
+        MachineAction::Build(build_args) => build::run(cli, build_args, cfg),
         MachineAction::Create(create_args) => create_machine(create_args),
         MachineAction::Ls(list_args) => list_machines(list_args),
         MachineAction::Inspect(inspect_args) => inspect_machine(inspect_args),
@@ -1875,7 +1924,12 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Exec(exec_args) => exec_machine(cli, exec_args, cfg),
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
+        MachineAction::Logs(log_args) => super::vm::logs::run(cli, log_args, cfg),
+        MachineAction::Console(console_args) => super::vm::console::run(cli, console_args, cfg),
         MachineAction::CheckArtifact(a) => portable::run_check_artifact(a),
+        MachineAction::Vm(cmd) => {
+            super::vm::group::run(cli, super::vm::group::Args { action: cmd }, cfg)
+        }
     }
 }
 
@@ -1883,7 +1937,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
 mod tests {
     use super::*;
     use crate::commands::{Cli, Commands};
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use mvm_core::util::test_env::TestEnv;
 
     /// Minimal standalone parser so `MachineAction` can be exercised without
@@ -2712,8 +2766,11 @@ mod tests {
             }
             other => panic!("expected shell action, got {other:?}"),
         }
-        match parse(&["stop", "--name", "web"]).expect("parse") {
-            MachineAction::Stop(args) => assert_eq!(args.name, "web"),
+        match parse(&["stop", "web"]).expect("parse") {
+            MachineAction::Stop(args) => {
+                assert_eq!(args.name.as_deref(), Some("web"));
+                assert!(!args.all);
+            }
             other => panic!("expected stop action, got {other:?}"),
         }
     }
@@ -3459,5 +3516,149 @@ ssh_agent = true
             },
             other => panic!("expected Commands::Machine, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn machine_stop_named_and_all_parse() {
+        match parse(&["stop", "web"]).expect("parse named") {
+            MachineAction::Stop(args) => {
+                assert_eq!(args.name.as_deref(), Some("web"));
+                assert!(!args.all);
+            }
+            other => panic!("expected stop action, got {other:?}"),
+        }
+        match parse(&["stop", "--all"]).expect("parse --all") {
+            MachineAction::Stop(args) => {
+                assert!(args.name.is_none());
+                assert!(args.all);
+            }
+            other => panic!("expected stop action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn machine_stop_requires_target() {
+        let err = parse(&["stop"]).expect_err("no name and no --all must be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn machine_stop_name_and_all_conflict() {
+        let err = parse(&["stop", "web", "--all"]).expect_err("name + --all must be a parse error");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn machine_advanced_verbs_parse() {
+        use super::super::vm::group::VmCmd;
+
+        // pause
+        let r = parse(&["pause", "myvm", "--hypervisor", "mock"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Pause(_)))),
+            "pause: {r:?}"
+        );
+
+        // snapshot (subcommand with sub-subcommand)
+        let r = parse(&["snapshot", "ls"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Snapshot(_)))),
+            "snapshot ls: {r:?}"
+        );
+
+        // cp
+        let r = parse(&["cp", "myvm", "host.txt:/guest.txt"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Cp(_)))),
+            "cp: {r:?}"
+        );
+
+        // fs
+        let r = parse(&["fs", "ls", "myvm", "/"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Fs(_)))),
+            "fs: {r:?}"
+        );
+
+        // proc
+        let r = parse(&["proc", "ls", "myvm"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Proc(_)))),
+            "proc: {r:?}"
+        );
+
+        // session
+        let r = parse(&["session", "ls"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Session(_)))),
+            "session: {r:?}"
+        );
+
+        // volume
+        let r = parse(&["volume", "ls", "myvm"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Volume(_)))),
+            "volume: {r:?}"
+        );
+
+        // sandbox
+        let r = parse(&["sandbox", "gc"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Sandbox(_)))),
+            "sandbox: {r:?}"
+        );
+    }
+
+    #[test]
+    fn machine_vm_op_uses_per_op_audit_verb() {
+        // Folded advanced ops keep their own `cmd.<verb>.*` audit verb (no
+        // regression from the vm→machine move); the dash-renamed `set-ttl`
+        // is the edge case that proves the clap name, not the enum variant.
+        let action = parse(&["pause", "myvm", "--hypervisor", "mock"]).unwrap();
+        assert_eq!(action.verb_name(), "pause");
+        let action = parse(&["snapshot", "ls"]).unwrap();
+        assert_eq!(action.verb_name(), "snapshot");
+        let action = parse(&["set-ttl", "myvm", "5m"]).unwrap();
+        assert_eq!(action.verb_name(), "set-ttl");
+    }
+
+    #[test]
+    fn machine_native_verb_audit_stays_machine() {
+        // Native lifecycle verbs report `machine`, as they always have.
+        assert_eq!(parse(&["stop", "web"]).unwrap().verb_name(), "machine");
+        assert_eq!(parse(&["ls"]).unwrap().verb_name(), "machine");
+    }
+
+    #[test]
+    fn vm_noun_removed() {
+        use clap::error::ErrorKind;
+        // After Task 7, `mvmctl vm <verb>` must not parse.
+        let err = Cli::try_parse_from(["mvmctl", "vm", "pause", "myvm"])
+            .expect_err("vm noun must be removed");
+        assert_eq!(
+            err.kind(),
+            ErrorKind::InvalidSubcommand,
+            "expected InvalidSubcommand, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn machine_help_hides_advanced() {
+        // `machine --help` must NOT list `snapshot`, but `machine snapshot <name>` must parse.
+        let help = {
+            let mut cmd = Cli::command();
+            let machine_sub = cmd.find_subcommand_mut("machine").unwrap();
+            format!("{}", machine_sub.render_help())
+        };
+        assert!(
+            !help.contains("snapshot"),
+            "`snapshot` must be hidden from `machine --help` output. Help text:\n{help}"
+        );
+        // But it still parses.
+        let r = parse(&["snapshot", "ls"]);
+        assert!(
+            r.is_ok(),
+            "`machine snapshot ls` must parse even when hidden from help: {r:?}"
+        );
     }
 }

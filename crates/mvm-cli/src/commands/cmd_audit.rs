@@ -34,6 +34,7 @@ use mvm_core::plan::TenantId;
 use mvm_hostd::supervisor::{EventCategory, FileAuditSigner, Recorder};
 
 use super::Commands;
+use super::machine;
 use super::vm::audit_chain::default_audit_dir;
 use super::vm::host_signer;
 
@@ -148,7 +149,13 @@ impl Commands {
             Commands::Ls(a) => a.json,
             Commands::Up(a) => a.up_json,
             Commands::Run(a) => a.json,
-            Commands::Vm(a) => a.action.emits_machine_readable_stdout(),
+            Commands::Machine(a) => {
+                if let machine::MachineAction::Vm(ref cmd) = a.action {
+                    cmd.emits_machine_readable_stdout()
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
@@ -159,24 +166,23 @@ impl Commands {
     /// of caches, build/compile, config, …) skip it. `reconcile` itself
     /// is excluded — it *is* the convergence pass, run with its own opts.
     pub(super) fn touches_vm_state(&self) -> bool {
-        // `vm <sub>` only converges for running-VM lifecycle ops
-        // (pause/resume/snapshot/save/restore); registry-record and guest-RPC
-        // subs (set-ttl, cp, fs, …) opt out so convergence doesn't sweep a
-        // registered VM whose process isn't live before the op reads its record.
-        if let Commands::Vm(a) = self {
-            return a.action.touches_vm_state();
-        }
         if let Commands::Ls(a) = self {
             return a.touches_vm_state();
+        }
+        // `machine <sub>` — start/stop/run all touch running-VM lifecycle state.
+        // For the advanced VmCmd variants folded under `machine`, delegate to
+        // VmCmd's own touches_vm_state (pause/resume/snapshot/save/restore
+        // converge; registry-record and guest-RPC ops opt out).
+        if let Commands::Machine(a) = self {
+            if let machine::MachineAction::Vm(ref cmd) = a.action {
+                return cmd.touches_vm_state();
+            }
+            return true;
         }
         matches!(
             self,
             // Lifecycle mutate/read on the local single-host path.
-            Commands::Up(_)
-                | Commands::Down(_)
-                | Commands::Run(_)
-                | Commands::Console(_)
-                | Commands::Dev(_)
+            Commands::Up(_) | Commands::Run(_) | Commands::Dev(_)
         )
     }
 
@@ -192,33 +198,28 @@ impl Commands {
             Commands::Env(a) => a.action.verb_name(),
             Commands::Bootstrap(_) => "bootstrap",
             Commands::Dev(_) => "dev",
-            Commands::Logs(_) => "logs",
             Commands::Ls(_) => "ls",
             Commands::Doctor(_) => "doctor",
             Commands::Manifest(_) => "manifest",
             Commands::Image(_) => "image",
-            Commands::Machine(_) => "machine",
+            // `machine <sub>`: folded advanced ops (pause/snapshot/set-ttl/…)
+            // keep their per-op verb; native lifecycle verbs report `machine`.
+            Commands::Machine(a) => a.action.verb_name(),
             Commands::Storage(_) => "storage",
             // `build <sub>` delegates to the per-op verb (image/compile/validate/kernel).
             Commands::Build(a) => a.action.verb_name(),
             Commands::Up(_) => "up",
-            Commands::Down(_) => "down",
             Commands::ShellInit(_) => "shell-init",
             // `ops <sub>` delegates to the per-op verb (metrics/bench/config/mcp).
             Commands::Ops(a) => a.action.verb_name(),
             Commands::Network(_) => "network",
             Commands::Catalog(_) => "catalog",
-            Commands::Console(_) => "console",
             Commands::Cache(_) => "cache",
             Commands::Pool(_) => "pool",
             Commands::Reconcile(_) => "reconcile",
             Commands::Init(_) => "init",
             Commands::Run(_) => "run",
             Commands::Invoke(_) => "invoke",
-            // `vm <sub>` delegates to the per-op verb so the audit taxonomy
-            // (cmd.pause.*, cmd.cp.*, cmd.checkpoint.*, …) is unchanged by
-            // the grouping.
-            Commands::Vm(a) => a.action.verb_name(),
             Commands::Secret(_) => "secret",
             Commands::Bundle(_) => "bundle",
             // `trust <sub>` delegates: attest/receipt/audit keep their own

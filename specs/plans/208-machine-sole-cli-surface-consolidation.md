@@ -159,34 +159,98 @@ subcommand from the `build` group (`build compile/validate/kernel` stay).
 **Done when:** `machine build` builds; `build image` no longer parses; the build
 pipeline code is unchanged (only its entry point moved).
 
-## Task 4: Fold `up`/`run`/`invoke` → `machine run` (Lifecycle)
+## Task 4: Fold `up`/`run`/`invoke` → `machine run` (orthogonal model)
 
-ADR-091/Plan 207 already gave `machine run` `--name`/`-d`/`-it`. This task adds
-the two source/entry flags and retires the three transient/persistent runners.
+This is the crux task and the largest. It was written before Plan 207 reshaped
+`machine run`; this is the refined design.
 
-- `machine run --flake <path>` (and manifest discovery) routes to **`vm::up::run`**
-  (the Nix build-and-run path); `--image` keeps routing to `run_secure`.
-- `machine run --entrypoint [args…]` routes to **`vm::invoke::run`** (baked
-  entrypoint).
-- Remove `Commands::Up`, `Commands::Run`, `Commands::Invoke` (mod.rs:103/127/129)
-  and their dispatch arms.
+### Why the old "delegate" sketch is wrong
 
-- [ ] Write failing test `machine_run_flake_routes_to_build_and_run`: parse
-  `machine run --flake . --name web`, assert it resolves to the up/build path
-  (assert on the dispatch selector enum the handler branches on).
-- [ ] Write failing test `machine_run_entrypoint_routes_to_invoke`: parse
-  `machine run --entrypoint -- arg1`, assert invoke path selected.
-- [ ] Write failing tests `up_removed`/`run_removed`/`invoke_removed`: each old
-  name → `InvalidSubcommand`.
-- [ ] Run all; FAIL. Add `--flake`/`--entrypoint` to `MachineRunArgs`
-  (exclusive with `--image`), branch dispatch to `vm::up::run`/`vm::invoke::run`,
-  delete the three `Commands` variants + arms.
-- [ ] Run; PASS. Confirm the existing `up`/`invoke`/`run` handler unit tests
-  still pass unchanged (they test the moved functions).
-- [ ] `just ci`; commit `feat(cli): fold up/run/invoke into machine run`.
+The original sketch ("`--flake` routes to `vm::up::run`, `--entrypoint` routes
+to `vm::invoke::run`") is the **(b) delegate** approach, and it is rejected:
+`vm::up::run` carries its own persistent + attach lifecycle, so
+`machine run --flake .` would behave persistently while `machine run --image X`
+is transient — `-d`/`-t` would be silently ignored on the flake path. That is
+the exact "two behaviors under one name" the consolidation exists to remove.
 
-**Done when:** all three old verbs are gone; `machine run` covers OCI, Nix-flake,
-transient, persistent, and entrypoint via flags; handler bodies unchanged.
+### The model: three orthogonal axes
+
+`machine run` already separates lifecycle (Plan 207's `run_dispatch`:
+Transient / Persistent via `--name`/`-d` / Interactive via `-t`). Task 4 adds
+two more axes so all three compose freely:
+
+- **Source** (exactly one; none ⇒ bundled default image):
+  - `--image <ref>` → OCI pull + materialize (existing `run_secure`
+    `ImageSource::Prebuilt`).
+  - `--manifest <path>` → pre-built manifest/template (existing `run_secure`
+    `ImageSource::Template`).
+  - `--flake <path>` → **NEW**: Nix build in the builder VM, then feed the
+    built manifest into the same run path. Reuse the existing build step
+    (`build::run` / the `vm::up` build helper) — do NOT duplicate nix-build
+    logic, and do NOT route to `vm::up::run` wholesale (that would drag up's
+    lifecycle in). Build → resolved manifest → `run_dispatch`.
+- **Action** (default = argv command):
+  - trailing `-- <argv>` → run the command (today's `run_secure`).
+  - `--entrypoint` → call the image's baked entrypoint instead of argv (today's
+    `vm::invoke::run`), carrying invoke's `--input`/`--stdin`/`--fresh`/`--reset`.
+    Conflicts with trailing argv (clap).
+- **Lifecycle** (unchanged, Plan 207): Transient | `--name`/`-d` | `-t`/`-i`.
+  Works for every source × action combination.
+
+### Old → new mapping (behaviour parity)
+
+- `up --flake . [--name N]` → `machine run --flake . -d` (or `--name N`) — build
+  + persistent. (up's bare attach/`--wait` ⇒ default persistent-attached
+  behaviour; preserve via the existing persistent path.)
+- `run -- cmd` → `machine run -- cmd` (already works).
+- `invoke <manifest> --input k=v` → `machine run --manifest <manifest>
+  --entrypoint --input k=v`.
+
+### Implementation
+
+- Add `--flake`, `--manifest`, `--entrypoint` (+ `--input`/`--stdin`/`--fresh`/
+  `--reset`) to `MachineRunArgs`. clap: a `required = false` source group making
+  `--image`/`--manifest`/`--flake` mutually exclusive; `--entrypoint`
+  `conflicts_with = "argv"`.
+- Resolve **source → bootable manifest/image BEFORE `run_dispatch`**: `--flake`
+  ⇒ build (reuse build helper) ⇒ manifest; thread `--manifest`/built-manifest
+  into `RunArgs` (which already accepts `--manifest`); `--image` unchanged.
+- Resolve **action**: default argv via `run_secure`; `--entrypoint` reuses
+  invoke's entrypoint-send within the selected lifecycle (extract invoke's
+  entrypoint-send so persistent/interactive can reuse it — don't fork it).
+- Delete `Commands::Up`, `Commands::Run`, `Commands::Invoke` + dispatch arms.
+
+### Staging (each sub-step green)
+
+Land in two commits inside Task 4 if the whole is large:
+1. **Source axis** — add `--flake`/`--manifest` to `machine run` composing with
+   lifecycle; retire `up` + `run`. (`--entrypoint` not yet.)
+2. **Action axis** — add `--entrypoint` (+ invoke flags); retire `invoke`.
+
+### Tests (TDD)
+
+- [ ] `machine_run_source_flags_parse`: `--image`/`--manifest`/`--flake` each
+  parse; any two together → clap `ArgumentConflict`.
+- [ ] `machine_run_flake_builds_then_runs`: `machine run --flake . -d` resolves
+  the source to the build step and then the Persistent lifecycle (assert the
+  resolved source enum + `MachineRunMode::Persistent`, no separate up path).
+- [ ] `machine_run_entrypoint_conflicts_with_argv`: `--entrypoint -- cmd` →
+  conflict; `--entrypoint` alone selects the entrypoint action.
+- [ ] `up_removed`/`run_removed`/`invoke_removed`: each → `InvalidSubcommand`.
+- [ ] Behaviour parity: a `--flake` build-and-run yields the same artifact as
+  old `up`; an `--entrypoint` call matches old `invoke` (reuse their existing
+  handler tests against the new entry points).
+- [ ] Audit: run the workspace audit suite (`nextest --workspace -E
+  'test(/audit/)'`) — removing `up`/`run`/`invoke` will need
+  `audit_total_coverage` + `audit_emissions_live` updated (stale top-level
+  entries; their postures move under `machine`'s `--entrypoint`/source paths as
+  appropriate). Keep `machine`'s `cmd.machine.*` verb behaviour.
+- [ ] `just ci`; commit(s) per the staging above.
+
+**Done when:** `up`/`run`/`invoke` no longer parse; `machine run` covers OCI /
+manifest / Nix-flake sources × argv / entrypoint actions × transient /
+persistent / interactive lifecycle, with no hidden mode divergence; the build
+and entrypoint-send logic is reused, not duplicated.
 
 ## Task 5: Fold `down` → `machine stop`
 
