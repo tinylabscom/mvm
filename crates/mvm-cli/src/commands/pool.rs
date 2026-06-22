@@ -18,16 +18,12 @@ use mvm_backend::backend::AnyBackend;
 use mvm_backend::catalog::BackendKind;
 use mvm_backend::standby_pool::SupervisorStandbyPool;
 use mvm_core::user_config::MvmConfig;
-use mvm_core::vm_backend::{
-    StandbyClaim, StandbyCompat, StandbyHandle, StandbySpec, StandbyState, VmBackend, VmId,
-    VmStartConfig,
-};
+use mvm_core::vm_backend::{StandbyCompat, StandbyHandle, StandbySpec, StandbyState, VmBackend};
 use sha2::{Digest, Sha256};
 
 use super::Cli;
 use super::env::dev_vz::ensure_default_microvm_image;
 use super::vm::host_signer;
-use super::vm::plan_admission::stash_plan_for_bridge;
 
 /// Lowercase-hex sha256 of a kernel image — part of the base-compat key.
 pub fn kernel_sha256_hex(kernel: &Path) -> Result<String> {
@@ -59,23 +55,6 @@ pub fn kernel_identity(backend: &dyn VmBackend, kernel_path: Option<&str>) -> Re
     }
     let kernel = kernel_path.context("launch config has no kernel path for the compat key")?;
     kernel_sha256_hex(Path::new(kernel))
-}
-
-/// The compat-key image identity. `None` for libkrun (image-agnostic standbys). For Vz
-/// the sha256 of the source rootfs image ties a saved-standby to the exact image it was
-/// captured from — only launches with the same image may claim it.
-pub fn image_identity(backend: &dyn VmBackend, rootfs_path: &str) -> Result<Option<String>> {
-    if backend.name() == "libkrun" {
-        return Ok(None);
-    }
-    if backend.name() == "vz" {
-        let sha = kernel_sha256_hex(Path::new(rootfs_path))
-            .with_context(|| format!("hashing rootfs for image identity: {rootfs_path}"))?;
-        return Ok(Some(sha));
-    }
-    // Other backends (firecracker, qemu, …) have no pool today; return None so
-    // compat_for_launch compiles without gating those paths.
-    Ok(None)
 }
 
 /// Inputs to [`build_standby_spec`] (grouped to avoid a long positional signature).
@@ -125,63 +104,6 @@ pub fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
         image_sha256: p.image_sha256.map(str::to_string),
         id,
     })
-}
-
-/// Outcome of the warm-pool claim attempt on a launch.
-#[derive(Debug, PartialEq, Eq)]
-pub enum LaunchDecision {
-    /// A standby was claimed and is booting under this VmId.
-    Claimed(VmId),
-    /// No compatible warm standby (or the claim failed) — caller must cold-boot.
-    ColdBoot,
-}
-
-/// Try to claim an idle standby compatible with `want`; **fail open to cold boot**. On a
-/// claim error the standby is removed (it's spent/broken), never left idle, so the next
-/// launch doesn't keep retrying a dead standby.
-///
-/// `make_claim` builds the [`StandbyClaim`] **for the selected standby's id** — the audit
-/// substrate (`gateway-<vm>.sock`) is name-keyed, and a claimed VM runs under its
-/// standby-id, so the caller must compute those paths against `handle.id`. A `make_claim`
-/// error also fails open to cold boot (and reaps the reserved standby).
-pub fn claim_or_cold<F>(
-    pool: &SupervisorStandbyPool,
-    backend: &dyn VmBackend,
-    want: &StandbyCompat,
-    make_claim: F,
-) -> Result<LaunchDecision>
-where
-    F: FnOnce(&StandbyHandle) -> Result<StandbyClaim>,
-{
-    if !backend.supports_standby_pool() {
-        return Ok(LaunchDecision::ColdBoot);
-    }
-    let Some(handle) = pool.select_idle_compatible(want)? else {
-        return Ok(LaunchDecision::ColdBoot);
-    };
-    // Reserve it so a concurrent launch won't double-claim.
-    pool.mark_claimed(&handle.id)?;
-    let claim = match make_claim(&handle) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(standby = %handle.id, error = %e, "build claim failed; cold-booting");
-            let _ = pool.remove(&handle.id);
-            return Ok(LaunchDecision::ColdBoot);
-        }
-    };
-    match backend.claim_standby(&handle, &claim) {
-        Ok(vm_id) => {
-            // The standby has become the VM; drop its pool entry (the control UDS is
-            // one-shot). The VM now lives under its vms/<id> state dir.
-            let _ = pool.remove(&handle.id);
-            Ok(LaunchDecision::Claimed(vm_id))
-        }
-        Err(e) => {
-            tracing::warn!(standby = %handle.id, error = %e, "standby claim failed; cold-booting");
-            let _ = pool.remove(&handle.id); // spent/broken — never leave it idle
-            Ok(LaunchDecision::ColdBoot)
-        }
-    }
 }
 
 /// Parameters for [`warm_to_target`] — grouped to keep the signature small.
@@ -271,184 +193,6 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     Ok(WarmResult { spawned, failed })
 }
 
-/// The base-compat key a launch needs (kernel identity + fixed vcpus/mem + image sha for
-/// Vz). The kernel component is [`kernel_identity`] — for libkrun the bundled-kernel
-/// constant, so it's computable pre-boot even without an on-disk kernel.
-/// Build the compat key for a launch. `image_sha256_override` lets the caller
-/// hand in a rootfs sha already computed elsewhere (claim-8 admission hashes
-/// the rootfs to mint `ExecutionPlan.image.sha256` — the exact same bytes), so
-/// the image-bound backends skip a redundant full-rootfs hash on the launch hot
-/// path. It is the identical value `image_identity` would produce; `None` falls
-/// back to hashing. libkrun is image-agnostic and ignores the override.
-fn compat_for_launch(
-    backend: &dyn VmBackend,
-    cfg: &VmStartConfig,
-    image_sha256_override: Option<&str>,
-) -> Result<StandbyCompat> {
-    let image_sha256 = match image_sha256_override {
-        Some(sha) if backend.name() == "vz" => Some(sha.to_string()),
-        _ => image_identity(backend, cfg.rootfs_path.as_str())?,
-    };
-    Ok(StandbyCompat {
-        kernel_sha256: kernel_identity(backend, cfg.kernel_path.as_deref())?,
-        vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
-        mem_mib: cfg.memory_mib,
-        image_sha256,
-    })
-}
-
-/// Attempt a warm-pool claim for this launch. Returns the claimed `VmId` (the standby-id
-/// the VM now runs under) or `None` to cold-boot. **Fail-open**: anything not default-
-/// shaped, not bridge-admitted, or any error → `None` (the caller cold-boots as normal).
-///
-/// Eligibility (all required): `warm_pool_size > 0`, the launch is auto-named (no explicit
-/// `--name` — a claimed VM is named by its standby-id), no extra volumes (the attach
-/// threads only the rootfs), the backend supports the pool, and the admitted tenant is
-/// threaded into the config. libkrun/Vz additionally require the signed plan JSON because
-/// their claimed standby enters the gateway-bridge supervisor path; Firecracker can claim
-/// with only the resolved launch config because the default path enforces networking
-/// directly via TAP/nftables and only needs plan JSON when its optional bridge is enabled.
-pub fn try_warm_claim(
-    backend: &AnyBackend,
-    cfg: &VmStartConfig,
-    user_named: bool,
-    admitted_image_sha256: Option<&str>,
-) -> Result<Option<VmId>> {
-    if cfg.warm_pool_size == 0
-        || user_named
-        || !cfg.volumes.is_empty()
-        || !backend.supports_standby_pool()
-    {
-        return Ok(None);
-    }
-    let Some(tenant) = cfg.tenant_id.clone() else {
-        // No admitted tenant threaded in → not an admitted workload → cold-boot.
-        return Ok(None);
-    };
-    let Some(plan_json) = warm_claim_plan_json(backend.as_vm_backend(), cfg) else {
-        // libkrun/Vz claims need a signed envelope for their gateway-bridge
-        // supervisor attach path; without it, cold-boot.
-        return Ok(None);
-    };
-    // Reuse the rootfs sha claim-8 admission already computed (same bytes) so
-    // the claim decision doesn't re-hash the whole rootfs on the launch path.
-    let want = compat_for_launch(backend.as_vm_backend(), cfg, admitted_image_sha256)?;
-    let rootfs = cfg.rootfs_path.clone();
-    let bundle_json = cfg.bundle_json.clone();
-    let claim_start_config = cfg.clone();
-    let pool = SupervisorStandbyPool::open()?;
-    let decision = claim_or_cold(&pool, backend.as_vm_backend(), &want, |handle| {
-        // The audit substrate (`gateway-<vm>.sock`) is name-keyed; the claimed VM runs
-        // under the standby-id, so compute it for `handle.id`.
-        let sub = mvm_backend::audit_substrate::compute_audit_substrate(&handle.id, Some(&tenant))?;
-        let mut start_config = claim_start_config.clone();
-        start_config.name = handle.id.clone();
-        start_config.rootfs_path = rootfs.clone();
-        start_config.tenant_id = Some(tenant.clone());
-        start_config.plan_json = Some(plan_json.clone());
-        start_config.bundle_json = bundle_json.clone();
-        start_config.network_policy = cfg.network_policy.clone();
-        if backend.name() == "firecracker" && !plan_json.is_empty() {
-            stash_plan_for_bridge(&start_config)
-                .with_context(|| format!("stash admitted plan for claimed VM '{}'", handle.id))?;
-        }
-        Ok(StandbyClaim {
-            start_config: Some(start_config),
-            rootfs_path: rootfs.clone(),
-            tenant_id: tenant.clone(),
-            audit_dir: sub.audit_dir.context("audit substrate missing audit_dir")?,
-            gateway_audit_socket: sub
-                .gateway_audit_socket
-                .context("audit substrate missing gateway_audit_socket")?,
-            gateway_events_socket: sub.gateway_events_socket,
-            plan_json: plan_json.clone(),
-            bundle_json: bundle_json.clone(),
-            network_policy: cfg.network_policy.clone(),
-        })
-    })?;
-    Ok(match decision {
-        LaunchDecision::Claimed(id) => Some(id),
-        LaunchDecision::ColdBoot => None,
-    })
-}
-
-fn warm_claim_plan_json(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Option<String> {
-    match cfg.plan_json.clone() {
-        Some(plan) => Some(plan),
-        None if backend.name() == "firecracker" => Some(String::new()),
-        None => None,
-    }
-}
-
-/// Top the pool back up toward `cfg.warm_pool_size` after a launch (the no-daemon
-/// replenish-on-use maintainer). Best-effort — failures are logged, never propagated.
-///
-/// For libkrun standbys this path fires automatically after each claimed launch.
-/// For Vz saved-standbys the replenish path requires a boot + capture cycle that is
-/// expensive and may require the builder VM to resolve the kernel. Automatic replenish
-/// is skipped for Vz (pool warm is manual); `supports_standby_pool()` stays true so
-/// `try_warm_claim` still fires.
-pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Result<u32> {
-    if cfg.warm_pool_size == 0 || !backend.supports_standby_pool() {
-        return Ok(0);
-    }
-    // Vz replenish boots a seed VM + captures its memory (~seconds) — far too
-    // slow to run inline on the post-launch path. Hand the whole job to a
-    // DETACHED `mvmctl pool warm` subprocess so `up` returns immediately. The
-    // child does the idle-count check + rootfs hash itself (off the hot path,
-    // so `up` doesn't re-hash a multi-hundred-MB rootfs `try_warm_claim`
-    // already hashed) and re-warms only the deficit toward `target` — a spawn
-    // against an already-full pool is a cheap no-op, not an over-warm. Two
-    // races against the same image can still transiently overshoot target by
-    // one per concurrent launch; the surplus ages out via the standby TTL.
-    if backend.kind() == BackendKind::Vz {
-        spawn_detached_rewarm(&cfg.rootfs_path, cfg.warm_pool_size)?;
-        return Ok(0);
-    }
-    let Some(kernel) = cfg.kernel_path.as_ref() else {
-        return Ok(0);
-    };
-    let signer = host_signer::load_or_init()?;
-    let pool = SupervisorStandbyPool::open()?;
-    let result = warm_to_target(
-        &pool,
-        &WarmParams {
-            backend: backend.as_vm_backend(),
-            kernel: Path::new(kernel),
-            vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
-            mem_mib: cfg.memory_mib,
-            signer_id: &host_signer::host_signer_id(),
-            signing_key_path: &signer.secret_path,
-            target: cfg.warm_pool_size,
-            image: None, // libkrun only: image-agnostic standbys
-        },
-    )?;
-    Ok(result.spawned)
-}
-
-/// Hand a Vz pool re-warm to a detached `mvmctl pool warm` subprocess so it
-/// outlives the `up` that triggered it. The child inherits our environment
-/// (MVM_DATA_DIR / cache / supervisor path), runs with no stdio, and is moved
-/// into its own process group so a Ctrl-C on `up` doesn't take it down.
-/// `pool warm` is idempotent toward the target, so a spurious spawn is a cheap
-/// no-op rather than an over-warm.
-fn spawn_detached_rewarm(rootfs_path: &str, target: u32) -> Result<()> {
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-
-    let exe =
-        std::env::current_exe().context("resolve mvmctl path for background pool replenish")?;
-    Command::new(exe)
-        .args(["pool", "warm", &target.to_string(), "--rootfs", rootfs_path])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .context("spawn detached pool warm for background replenish")?;
-    Ok(())
-}
-
 fn hex_lower(bytes: &[u8]) -> String {
     use std::fmt::Write;
     bytes
@@ -464,10 +208,9 @@ mod tests {
     use super::*;
 
     use mvm_core::vm_backend::{
-        StandbyError, StandbyHandle, StandbyState, StartMode, VmCapabilities, VmInfo,
+        StandbyError, StandbyHandle, StandbyState, StartMode, VmCapabilities, VmId, VmInfo,
         VmStartConfig, VmStatus,
     };
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn sha256_hex_of(bytes: &[u8]) -> String {
         hex_lower(&Sha256::digest(bytes))
@@ -593,74 +336,6 @@ mod tests {
         assert!(kernel_identity(fc.as_vm_backend(), None).is_err());
     }
 
-    // A minimal VmBackend stub that opts into the standby pool and records calls, so the
-    // claim/cold decision is testable without a VM.
-    struct StubBackend {
-        claim_ok: bool,
-        claimed: AtomicBool,
-    }
-    impl StubBackend {
-        fn new(claim_ok: bool) -> Self {
-            Self {
-                claim_ok,
-                claimed: AtomicBool::new(false),
-            }
-        }
-    }
-    impl VmBackend for StubBackend {
-        fn name(&self) -> &str {
-            "stub"
-        }
-        fn capabilities(&self) -> VmCapabilities {
-            VmCapabilities::default()
-        }
-        fn supports_standby_pool(&self) -> bool {
-            true
-        }
-        fn claim_standby(
-            &self,
-            handle: &StandbyHandle,
-            _claim: &StandbyClaim,
-        ) -> std::result::Result<VmId, StandbyError> {
-            self.claimed.store(true, Ordering::SeqCst);
-            if self.claim_ok {
-                Ok(VmId(handle.id.clone()))
-            } else {
-                Err(StandbyError::ClaimFailed("stub refused".into()))
-            }
-        }
-        fn start_with_mode(&self, _: &VmStartConfig, _: StartMode) -> anyhow::Result<VmId> {
-            unreachable!("cold start is the caller's job, not claim_or_cold")
-        }
-        fn stop(&self, _: &VmId) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn stop_all(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn pause(&self, _: &VmId) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn resume(&self, _: &VmId) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn status(&self, _: &VmId) -> anyhow::Result<VmStatus> {
-            Ok(VmStatus::Stopped)
-        }
-        fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
-            Ok(vec![])
-        }
-        fn logs(&self, _: &VmId, _: u32, _: bool) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn is_available(&self) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-        fn install(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
     fn idle_handle(id: &str, kernel: &str) -> StandbyHandle {
         StandbyHandle {
             id: id.into(),
@@ -707,148 +382,6 @@ mod tests {
         assert_eq!(report.standbys[0].state, "idle");
         assert_eq!(report.standbys[1].state, "dead");
         assert_eq!(report.standbys[2].state, "idle");
-    }
-
-    fn compat(kernel: &str) -> StandbyCompat {
-        StandbyCompat {
-            kernel_sha256: kernel.into(),
-            vcpus: 2,
-            mem_mib: 1024,
-            image_sha256: None,
-        }
-    }
-
-    fn sample_claim() -> StandbyClaim {
-        StandbyClaim {
-            start_config: None,
-            rootfs_path: "/vol/rootfs.ext4".into(),
-            tenant_id: "tenant-a".into(),
-            audit_dir: "/audit".into(),
-            gateway_audit_socket: "/audit/g.sock".into(),
-            gateway_events_socket: None,
-            plan_json: "{}".into(),
-            bundle_json: None,
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-        }
-    }
-
-    #[test]
-    fn claim_or_cold_claims_when_compatible_idle_standby_exists() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pool = SupervisorStandbyPool::at(tmp.path());
-        pool.record(&idle_handle("s1", "aa")).unwrap();
-        let backend = StubBackend::new(true);
-        let decision =
-            claim_or_cold(&pool, &backend, &compat("aa"), |_h| Ok(sample_claim())).unwrap();
-        assert_eq!(decision, LaunchDecision::Claimed(VmId("s1".into())));
-        assert!(backend.claimed.load(Ordering::SeqCst));
-        assert!(
-            pool.load("s1").is_err(),
-            "a claimed standby's pool entry is removed"
-        );
-    }
-
-    #[test]
-    fn claim_or_cold_cold_boots_when_no_standby() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pool = SupervisorStandbyPool::at(tmp.path());
-        let backend = StubBackend::new(true);
-        let decision =
-            claim_or_cold(&pool, &backend, &compat("aa"), |_h| Ok(sample_claim())).unwrap();
-        assert_eq!(decision, LaunchDecision::ColdBoot);
-        assert!(!backend.claimed.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn claim_or_cold_cold_boots_and_removes_standby_when_claim_errors() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pool = SupervisorStandbyPool::at(tmp.path());
-        pool.record(&idle_handle("s1", "aa")).unwrap();
-        let backend = StubBackend::new(false);
-        let decision =
-            claim_or_cold(&pool, &backend, &compat("aa"), |_h| Ok(sample_claim())).unwrap();
-        assert_eq!(decision, LaunchDecision::ColdBoot);
-        assert!(
-            pool.load("s1").is_err(),
-            "a failed standby is removed, not left idle"
-        );
-    }
-
-    // try_warm_claim eligibility gates — each must cold-boot (return None) before touching
-    // the pool. A real libkrun AnyBackend (supports the pool, no I/O at construction) so the
-    // tested gate is the deciding one.
-    fn eligible_cfg() -> VmStartConfig {
-        VmStartConfig {
-            warm_pool_size: 2,
-            kernel_path: Some("/k/vmlinux".into()),
-            rootfs_path: "/vol/rootfs.ext4".into(),
-            cpus: 2,
-            memory_mib: 1024,
-            tenant_id: Some("tenant-a".into()),
-            plan_json: Some("{}".into()),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn try_warm_claim_cold_when_pool_size_zero() {
-        let b = AnyBackend::from_hypervisor("libkrun");
-        let mut c = eligible_cfg();
-        c.warm_pool_size = 0;
-        assert_eq!(try_warm_claim(&b, &c, false, None).unwrap(), None);
-    }
-
-    #[test]
-    fn try_warm_claim_cold_when_user_named() {
-        let b = AnyBackend::from_hypervisor("libkrun");
-        assert_eq!(
-            try_warm_claim(&b, &eligible_cfg(), true, None).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn try_warm_claim_cold_with_extra_volumes() {
-        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
-        let b = AnyBackend::from_hypervisor("libkrun");
-        let mut c = eligible_cfg();
-        c.volumes = vec![VmVolume {
-            host: "/h".into(),
-            guest: "/g".into(),
-            size: String::new(),
-            read_only: false,
-            kind: VmVolumeKind::DirShare,
-            encrypted: false,
-        }];
-        assert_eq!(try_warm_claim(&b, &c, false, None).unwrap(), None);
-    }
-
-    #[test]
-    fn try_warm_claim_cold_without_admitted_plan() {
-        let b = AnyBackend::from_hypervisor("libkrun");
-        let mut c = eligible_cfg();
-        c.plan_json = None; // not the gateway-bridge/admitted path → cold-boot
-        assert_eq!(try_warm_claim(&b, &c, false, None).unwrap(), None);
-    }
-
-    #[test]
-    fn warm_claim_plan_json_is_optional_for_firecracker_only() {
-        let mut cfg = eligible_cfg();
-        cfg.plan_json = None;
-        let fc = AnyBackend::from_hypervisor("firecracker");
-        let libkrun = AnyBackend::from_hypervisor("libkrun");
-
-        assert_eq!(
-            warm_claim_plan_json(fc.as_vm_backend(), &cfg),
-            Some(String::new())
-        );
-        assert_eq!(warm_claim_plan_json(libkrun.as_vm_backend(), &cfg), None);
-
-        cfg.plan_json = Some("{\"signed\":\"plan\"}".into());
-        assert_eq!(
-            warm_claim_plan_json(libkrun.as_vm_backend(), &cfg),
-            Some("{\"signed\":\"plan\"}".into())
-        );
     }
 
     // A VmBackend stub whose `spawn_standby` always fails — used to exercise

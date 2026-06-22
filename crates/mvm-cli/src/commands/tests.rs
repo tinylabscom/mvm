@@ -18,9 +18,7 @@ use super::machine;
 use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
 use super::trust;
-use super::vm::{
-    checkpoint, console, cp, exec, forward, group, pause, sandbox, session, up, volume,
-};
+use super::vm::{checkpoint, console, cp, exec, forward, group, pause, sandbox, session, volume};
 
 use audit::AuditAction;
 use cache::CacheAction;
@@ -28,12 +26,10 @@ use catalog::CatalogAction;
 use config::ConfigAction;
 use dev::{DevAction, DevCacheAction};
 use image::ImageAction;
-use up::RunParams;
 
 use super::shared::{
-    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
-    env_vars_to_drive_file, parse_port_spec, parse_port_specs, parse_volume_spec,
-    ports_to_drive_file, read_dir_to_drive_files, resolve_flake_ref, resolve_network_policy,
+    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec, parse_port_spec,
+    parse_volume_spec, resolve_flake_ref,
 };
 
 #[test]
@@ -497,285 +493,118 @@ fn test_resolve_flake_ref_nonexistent_fails() {
     assert!(result.is_err());
 }
 
-// ---- Run command tests ----
+// ---- up/run removal tests ----
 
 #[test]
-fn test_run_parses_all_flags() {
-    let cli = Cli::try_parse_from([
-        "mvmctl",
-        "up",
-        "--flake",
-        ".",
-        "--profile",
-        "full",
-        "--cpus",
-        "4",
-        "--memory",
-        "2048",
-    ])
-    .unwrap();
-    match cli.command {
-        Commands::Up(up::Args {
-            flake,
-            profile,
-            cpus,
-            memory,
-            ..
-        }) => {
-            assert_eq!(flake, Some(".".to_string()));
-            assert_eq!(profile.as_deref(), Some("full"));
-            assert_eq!(cpus, Some(4));
-            assert_eq!(memory, Some("2048".to_string()));
-        }
-        _ => panic!("Expected Run command"),
-    }
+fn up_removed() {
+    let result = Cli::try_parse_from(["mvmctl", "up", "--flake", "."]);
+    assert!(
+        result.is_err(),
+        "`up` was retired; `machine run --flake .` is the replacement"
+    );
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand,
+    );
 }
 
 #[test]
-fn test_run_defaults() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", "."]).unwrap();
-    match cli.command {
-        Commands::Up(up::Args {
-            flake,
-            manifest,
-            name,
-            profile,
-            cpus,
-            memory,
-            volume,
-            hypervisor,
-            ..
-        }) => {
-            assert_eq!(flake, Some(".".to_string()));
-            assert!(manifest.is_none(), "manifest should be None when omitted");
-            assert!(name.is_none(), "name should be None when omitted");
-            assert!(profile.is_none(), "profile should be None when omitted");
-            assert!(cpus.is_none(), "cpus should be None when omitted");
-            assert!(memory.is_none(), "memory should be None when omitted");
-            assert_eq!(volume.len(), 0);
-            assert_eq!(hypervisor, "firecracker");
-        }
-        _ => panic!("Expected Up command"),
-    }
+fn run_kept_hidden_as_sdk_transport() {
+    // The user-facing transient-run role folded into `machine run`, but `run`
+    // survives hidden as the SDK Sandbox launcher (`run --mode live/plan`) the
+    // Python/TS SDKs shell to — so it must still parse.
+    let cli = Cli::try_parse_from(["mvmctl", "run", "--mode", "live", "script.py"]).unwrap();
+    assert!(matches!(cli.command, Commands::Run(_)));
+    // …but it is hidden from top-level help.
+    let help = {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        cmd.write_long_help(&mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    };
+    assert!(
+        !help.contains("\n  run "),
+        "`run` must be hidden from top-level help"
+    );
 }
 
 #[test]
-fn test_up_without_source_uses_default_microvm() {
-    // No --flake / --manifest: the dispatcher falls back to the bundled
-    // default microVM image. Clap should accept the bare invocation; the
-    // dispatcher then resolves the image at runtime.
-    let cli = Cli::try_parse_from(["mvmctl", "up"]).expect("parse");
-    match cli.command {
-        Commands::Up(up::Args {
-            flake, manifest, ..
-        }) => {
-            assert!(flake.is_none(), "no --flake should be parsed");
-            assert!(manifest.is_none(), "no --manifest should be parsed");
-        }
-        _ => panic!("Expected Up command"),
-    }
+fn invoke_removed() {
+    let result = Cli::try_parse_from(["mvmctl", "invoke", "tmpl"]);
+    assert!(
+        result.is_err(),
+        "`invoke` was retired; `machine run --manifest tmpl --entrypoint` is the replacement"
+    );
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand,
+    );
 }
 
 #[test]
 fn test_up_manifest_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--manifest", "openclaw"]).unwrap();
-    match cli.command {
-        Commands::Up(up::Args {
-            flake, manifest, ..
-        }) => {
-            assert!(flake.is_none());
-            assert_eq!(manifest, Some("openclaw".to_string()));
-        }
-        _ => panic!("Expected Up command"),
-    }
-}
-
-#[test]
-fn test_up_redact_flag_parses_repeatably() {
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "up",
-        "--redact",
-        "api.openai.com",
-        "--redact",
-        "logs.example.com=audit",
+        "machine",
+        "run",
+        "--manifest",
+        "openclaw",
+        "--",
+        "sh",
     ])
     .unwrap();
     match cli.command {
-        Commands::Up(up::Args { redact, .. }) => {
-            assert_eq!(redact, vec!["api.openai.com", "logs.example.com=audit"]);
-        }
-        _ => panic!("Expected Up command"),
-    }
-}
-
-#[test]
-fn test_up_dev_flag_resolves_dev_mode() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--dev"]).unwrap();
-    match cli.command {
-        Commands::Up(up::Args { build_mode, .. }) => {
-            assert!(build_mode.dev);
-            assert!(!build_mode.prod);
-            assert_eq!(build_mode.resolve(), mvm_build::pipeline::BuildMode::Dev);
-        }
-        _ => panic!("Expected Up command"),
-    }
-}
-
-#[test]
-fn test_up_prod_flag_resolves_prod_mode() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--prod"]).unwrap();
-    match cli.command {
-        Commands::Up(up::Args { build_mode, .. }) => {
-            assert!(!build_mode.dev);
-            assert!(build_mode.prod);
-            assert_eq!(build_mode.resolve(), mvm_build::pipeline::BuildMode::Prod);
-        }
-        _ => panic!("Expected Up command"),
-    }
-}
-
-#[test]
-fn test_up_no_build_mode_flag_defaults_to_prod() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", "."]).unwrap();
-    match cli.command {
-        Commands::Up(up::Args { build_mode, .. }) => {
-            assert!(!build_mode.dev);
-            assert!(!build_mode.prod);
-            // No flag → resolve to Prod (the architectural default).
-            assert_eq!(build_mode.resolve(), mvm_build::pipeline::BuildMode::Prod);
-        }
-        _ => panic!("Expected Up command"),
-    }
-}
-
-#[test]
-fn test_up_dev_and_prod_are_mutually_exclusive() {
-    let result = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--dev", "--prod"]);
-    assert!(
-        result.is_err(),
-        "passing both --dev and --prod must be a clap parse error"
-    );
-}
-
-// `--from-workload-ir <path>` wires `mvmctl up` into the app-deps
-// install pipeline. These tests pin the flag-parse surface (clap-side);
-// the install-pipeline integration itself is covered by
-// `app_deps_gate::tests` + the helper unit tests in
-// `vm/up.rs::resolve_deps_volume_binding`-adjacent fixtures.
-
-#[test]
-fn test_up_from_workload_ir_flag_parses() {
-    let cli = Cli::try_parse_from([
-        "mvmctl",
-        "up",
-        "--flake",
-        ".",
-        "--from-workload-ir",
-        "./workload.ir.json",
-    ])
-    .expect("clap parses --from-workload-ir");
-    match cli.command {
-        Commands::Up(up::Args {
-            from_workload_ir, ..
-        }) => {
-            assert_eq!(
-                from_workload_ir,
-                Some(std::path::PathBuf::from("./workload.ir.json"))
-            );
-        }
-        _ => panic!("Expected Up command"),
-    }
-}
-
-#[test]
-fn test_up_from_workload_ir_absent_means_none() {
-    // Claim-8 preservation guard: when the user doesn't pass the
-    // flag, `from_workload_ir` is `None` and `mvmctl up` runs the
-    // no-deps-volume path with `deps_volume = None` on the plan.
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", "."]).unwrap();
-    match cli.command {
-        Commands::Up(up::Args {
-            from_workload_ir, ..
-        }) => {
-            assert!(from_workload_ir.is_none());
-        }
-        _ => panic!("Expected Up command"),
-    }
-}
-
-#[test]
-fn test_up_from_workload_ir_combines_with_prod_gate_flag() {
-    let cli = Cli::try_parse_from([
-        "mvmctl",
-        "up",
-        "--flake",
-        ".",
-        "--from-workload-ir",
-        "./workload.ir.json",
-        "--prod",
-    ])
-    .expect("clap parses --from-workload-ir + --prod");
-    match cli.command {
-        Commands::Up(up::Args {
-            from_workload_ir,
-            build_mode,
-            ..
-        }) => {
-            assert_eq!(
-                from_workload_ir,
-                Some(std::path::PathBuf::from("./workload.ir.json"))
-            );
-            assert!(build_mode.prod);
-            assert_eq!(build_mode.resolve(), mvm_build::pipeline::BuildMode::Prod);
-        }
-        _ => panic!("Expected Up command"),
-    }
-}
-
-#[test]
-fn test_up_from_workload_ir_combines_with_dev_gate_flag() {
-    let cli = Cli::try_parse_from([
-        "mvmctl",
-        "up",
-        "--flake",
-        ".",
-        "--from-workload-ir",
-        "./workload.ir.json",
-        "--dev",
-    ])
-    .expect("clap parses --from-workload-ir + --dev");
-    match cli.command {
-        Commands::Up(up::Args {
-            from_workload_ir,
-            build_mode,
-            ..
-        }) => {
-            assert_eq!(
-                from_workload_ir,
-                Some(std::path::PathBuf::from("./workload.ir.json"))
-            );
-            assert!(build_mode.dev);
-            assert_eq!(build_mode.resolve(), mvm_build::pipeline::BuildMode::Dev);
-        }
-        _ => panic!("Expected Up command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                manifest, flake, ..
+            }) => {
+                assert!(flake.is_none());
+                assert_eq!(manifest, Some("openclaw".to_string()));
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
 #[test]
 fn test_up_manifest_short_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "-m", "openclaw"]).unwrap();
+    // `machine run` uses --manifest (long form only; -m is not wired on MachineRunArgs)
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--manifest",
+        "openclaw",
+        "--",
+        "sh",
+    ])
+    .unwrap();
     match cli.command {
-        Commands::Up(up::Args { manifest, .. }) => {
-            assert_eq!(manifest, Some("openclaw".to_string()));
-        }
-        _ => panic!("Expected Up command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs { manifest, .. }) => {
+                assert_eq!(manifest, Some("openclaw".to_string()));
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
 #[test]
 fn test_up_flake_and_manifest_conflict() {
-    let result = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--manifest", "openclaw"]);
+    let result = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--flake",
+        ".",
+        "--manifest",
+        "openclaw",
+        "--",
+        "sh",
+    ]);
     assert!(
         result.is_err(),
         "--flake and --manifest should be mutually exclusive"
@@ -783,38 +612,281 @@ fn test_up_flake_and_manifest_conflict() {
 }
 
 #[test]
+fn machine_run_source_flags_parse_and_conflict() {
+    // --image alone parses
+    Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--",
+        "sh",
+    ])
+    .unwrap();
+    // --manifest alone parses
+    Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--manifest",
+        "/path/to/slot",
+        "--",
+        "sh",
+    ])
+    .unwrap();
+    // --flake alone parses
+    Cli::try_parse_from(["mvmctl", "machine", "run", "--flake", ".", "--", "sh"]).unwrap();
+    // --image + --manifest conflict
+    let err = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine",
+        "--manifest",
+        ".",
+        "--",
+        "sh",
+    ])
+    .unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    // --image + --flake conflict
+    let err = Cli::try_parse_from([
+        "mvmctl", "machine", "run", "--image", "alpine", "--flake", ".", "--", "sh",
+    ])
+    .unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    // --manifest + --flake conflict
+    let err = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--manifest",
+        ".",
+        "--flake",
+        ".",
+        "--",
+        "sh",
+    ])
+    .unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
+#[test]
+fn machine_run_flake_resolves_to_persistent_lifecycle() {
+    // `--flake . -d` must parse to Persistent lifecycle with flake set,
+    // NOT a separate "up" path — the source and lifecycle are orthogonal.
+    let cli = Cli::try_parse_from(["mvmctl", "machine", "run", "--flake", ".", "-d"]).unwrap();
+    match cli.command {
+        Commands::Machine(machine::Args {
+            action: machine::MachineAction::Run(ref run_args),
+        }) => {
+            assert_eq!(run_args.flake.as_deref(), Some("."));
+            assert!(
+                run_args.image.is_none(),
+                "image must be absent when --flake set"
+            );
+            assert!(
+                run_args.manifest.is_none(),
+                "manifest must be absent when --flake set"
+            );
+            // -d selects Persistent lifecycle
+            assert!(
+                run_args.detach,
+                "-d must set detach for Persistent lifecycle"
+            );
+        }
+        _ => panic!("expected machine run command"),
+    }
+}
+
+/// Helper: parse a `machine run …` argv and return the `MachineRunArgs`.
+fn parse_machine_run(argv: &[&str]) -> Result<machine::MachineRunArgs, clap::Error> {
+    let mut full = vec!["mvmctl", "machine", "run"];
+    full.extend_from_slice(argv);
+    match Cli::try_parse_from(full)?.command {
+        Commands::Machine(machine::Args {
+            action: machine::MachineAction::Run(args),
+        }) => Ok(args),
+        other => panic!("expected machine run, got {other:?}"),
+    }
+}
+
+#[test]
+fn machine_run_entrypoint_flag_parses() {
+    // `--manifest m --entrypoint` selects the entrypoint action; the source +
+    // entrypoint flags round-trip.
+    let args = parse_machine_run(&[
+        "--manifest",
+        "tmpl",
+        "--entrypoint",
+        "--stdin",
+        "/w/in.json",
+    ])
+    .unwrap();
+    assert!(args.entrypoint);
+    assert_eq!(args.manifest.as_deref(), Some("tmpl"));
+    assert_eq!(args.stdin.as_deref(), Some("/w/in.json"));
+    assert!(args.argv.is_empty());
+    // Bare `--entrypoint` (no stdin) is the no-argument call.
+    let bare = parse_machine_run(&["--manifest", "tmpl", "--entrypoint"]).unwrap();
+    assert!(bare.entrypoint && bare.stdin.is_none());
+}
+
+#[test]
+fn machine_run_entrypoint_conflicts_with_argv() {
+    // The entrypoint action calls the baked entrypoint; a trailing argv would
+    // be ambiguous, so clap rejects the combination.
+    let err =
+        parse_machine_run(&["--manifest", "tmpl", "--entrypoint", "--", "echo", "hi"]).unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    // `--entrypoint` alone (no argv) is fine.
+    parse_machine_run(&["--manifest", "tmpl", "--entrypoint"]).unwrap();
+}
+
+#[test]
+fn machine_run_entrypoint_flags_require_entrypoint() {
+    // `--stdin`/`--from-workload-ir`/`--attach` only make sense for the
+    // entrypoint action — clap refuses them without `--entrypoint`.
+    for flag in [
+        &["--manifest", "tmpl", "--stdin", "/w/in.json"][..],
+        &[
+            "--manifest",
+            "tmpl",
+            "--from-workload-ir",
+            "/w/workload.json",
+        ][..],
+        &["--name", "n", "--attach"][..],
+    ] {
+        let err = parse_machine_run(flag).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "{flag:?} must require --entrypoint"
+        );
+    }
+}
+
+#[test]
+fn machine_run_entrypoint_from_workload_ir_parses() {
+    // The secrets path: `--from-workload-ir` routes the entrypoint call through
+    // plan admission so the substitution endpoint spawns. (Migrated from the
+    // retired `invoke` parse test.)
+    let args = parse_machine_run(&[
+        "--manifest",
+        "tmpl",
+        "--entrypoint",
+        "--from-workload-ir",
+        "/w/workload.json",
+    ])
+    .unwrap();
+    assert_eq!(
+        args.from_workload_ir.as_deref(),
+        Some(std::path::Path::new("/w/workload.json"))
+    );
+}
+
+#[test]
+fn machine_run_entrypoint_attach_parses_and_requires_name() {
+    // `--attach` dispatches into a running machine named by `--name`; it
+    // reinterprets the target and so conflicts with a fresh source + boot flags.
+    // (Migrated from the retired `invoke --attach` parse test.)
+    let args = parse_machine_run(&["--name", "myvm", "--entrypoint", "--attach"]).unwrap();
+    assert!(args.attach && args.entrypoint);
+    assert_eq!(args.name.as_deref(), Some("myvm"));
+    // --attach needs --name (the running machine to target).
+    let err = parse_machine_run(&["--entrypoint", "--attach"]).unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    // --attach is incompatible with a fresh source + transient-boot flags.
+    for flag in [
+        &[
+            "--name",
+            "n",
+            "--entrypoint",
+            "--attach",
+            "--image",
+            "alpine",
+        ][..],
+        &["--name", "n", "--entrypoint", "--attach", "--manifest", "m"][..],
+        &["--name", "n", "--entrypoint", "--attach", "--fresh"][..],
+        &["--name", "n", "--entrypoint", "--attach", "--reset"][..],
+        &["--name", "n", "--entrypoint", "--attach", "-d"][..],
+    ] {
+        let err = parse_machine_run(flag).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "{flag:?} must conflict with --attach"
+        );
+    }
+}
+
+#[test]
+fn machine_run_entrypoint_conflicts_with_interactive() {
+    // An entrypoint call is not an interactive shell.
+    for flag in ["-t", "-i"] {
+        let err = parse_machine_run(&["--manifest", "tmpl", "--entrypoint", flag]).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "--entrypoint must conflict with {flag}"
+        );
+    }
+}
+
+#[test]
 fn test_run_volume_dir_inject() {
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "up",
-        "--flake",
-        ".",
-        "-v",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--volume",
         "/tmp/config:/mnt/config",
-        "-v",
+        "--volume",
         "/tmp/secrets:/mnt/secrets",
+        "--",
+        "sh",
     ])
     .unwrap();
     match cli.command {
-        Commands::Up(up::Args { volume, .. }) => {
-            assert_eq!(volume.len(), 2);
-            assert_eq!(volume[0], "/tmp/config:/mnt/config");
-            assert_eq!(volume[1], "/tmp/secrets:/mnt/secrets");
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs { volume, .. }) => {
+                assert_eq!(volume.len(), 2);
+                assert_eq!(volume[0], "/tmp/config:/mnt/config");
+                assert_eq!(volume[1], "/tmp/secrets:/mnt/secrets");
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
 #[test]
 fn test_run_volume_persistent() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "-v", "/data:/mnt/data:4G"]).unwrap();
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--volume",
+        "/data:/mnt/data:4G",
+        "--",
+        "sh",
+    ])
+    .unwrap();
     match cli.command {
-        Commands::Up(up::Args { volume, .. }) => {
-            assert_eq!(volume.len(), 1);
-            assert_eq!(volume[0], "/data:/mnt/data:4G");
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs { volume, .. }) => {
+                assert_eq!(volume.len(), 1);
+                assert_eq!(volume[0], "/data:/mnt/data:4G");
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
@@ -876,45 +948,59 @@ fn test_parse_volume_spec_generic_dir_share() {
 
 #[test]
 fn test_run_port_and_env_flags() {
+    // `--port` is not on `machine run`; test env injection which IS available.
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "up",
-        "--flake",
-        ".",
-        "-p",
-        "3333:3000",
-        "-p",
-        "3334:3002",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
         "-e",
         "NODE_ENV=production",
         "-e",
         "DEBUG=true",
+        "--",
+        "sh",
     ])
     .unwrap();
     match cli.command {
-        Commands::Up(up::Args { port, env, .. }) => {
-            assert_eq!(port, vec!["3333:3000", "3334:3002"]);
-            assert_eq!(env, vec!["NODE_ENV=production", "DEBUG=true"]);
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs { env, .. }) => {
+                assert_eq!(env, vec!["NODE_ENV=production", "DEBUG=true"]);
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
 #[test]
 fn test_run_port_and_env_default_empty() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", "."]).unwrap();
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--",
+        "sh",
+    ])
+    .unwrap();
     match cli.command {
-        Commands::Up(up::Args { port, env, .. }) => {
-            assert!(port.is_empty());
-            assert!(env.is_empty());
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs { env, .. }) => {
+                assert!(env.is_empty());
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
 #[test]
 fn test_run_forward_flag() {
-    let cli = Cli::try_parse_from([
+    // `--forward` was an `up`-only flag; `up` is retired.
+    let result = Cli::try_parse_from([
         "mvmctl",
         "up",
         "--flake",
@@ -922,84 +1008,23 @@ fn test_run_forward_flag() {
         "-p",
         "3333:3000",
         "--forward",
-    ])
-    .unwrap();
-    match cli.command {
-        Commands::Up(up::Args { forward, port, .. }) => {
-            assert!(forward);
-            assert_eq!(port, vec!["3333:3000"]);
-        }
-        _ => panic!("Expected Run command"),
-    }
+    ]);
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
+    );
 }
 
 #[test]
 fn test_run_forward_default_false() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", "."]).unwrap();
-    match cli.command {
-        Commands::Up(up::Args { forward, .. }) => {
-            assert!(!forward);
-        }
-        _ => panic!("Expected Run command"),
-    }
-}
-
-#[test]
-fn test_parse_port_specs_multiple() {
-    let specs = vec!["3333:3000".to_string(), "8080".to_string()];
-    let result = parse_port_specs(&specs).unwrap();
-    assert_eq!(result.len(), 2);
-    assert_eq!(result[0].host, 3333);
-    assert_eq!(result[0].guest, 3000);
-    assert_eq!(result[1].host, 8080);
-    assert_eq!(result[1].guest, 8080);
-}
-
-#[test]
-fn test_parse_port_specs_empty() {
-    let specs: Vec<String> = vec![];
-    let result = parse_port_specs(&specs).unwrap();
-    assert!(result.is_empty());
-}
-
-#[test]
-fn test_ports_to_drive_file() {
-    use mvm::config::PortMapping;
-    let ports = vec![
-        PortMapping {
-            host: 3333,
-            guest: 3000,
-        },
-        PortMapping {
-            host: 3334,
-            guest: 3002,
-        },
-    ];
-    let f = ports_to_drive_file(&ports).unwrap();
-    assert_eq!(f.name, "mvm-ports.env");
-    assert!(f.content.contains("MVM_PORT_MAP=\"3333:3000,3334:3002\""));
-    assert_eq!(f.mode, 0o444);
-}
-
-#[test]
-fn test_ports_to_drive_file_empty() {
-    assert!(ports_to_drive_file(&[]).is_none());
-}
-
-#[test]
-fn test_env_vars_to_drive_file() {
-    let vars = vec!["NODE_ENV=production".to_string(), "DEBUG=true".to_string()];
-    let f = env_vars_to_drive_file(&vars).unwrap();
-    assert_eq!(f.name, "mvm-env.env");
-    assert!(f.content.contains("export NODE_ENV=production"));
-    assert!(f.content.contains("export DEBUG=true"));
-    assert_eq!(f.mode, 0o444);
-}
-
-#[test]
-fn test_env_vars_to_drive_file_empty() {
-    let vars: Vec<String> = vec![];
-    assert!(env_vars_to_drive_file(&vars).is_none());
+    // `--forward` was an `up`-only flag; `up` is retired.
+    let result = Cli::try_parse_from(["mvmctl", "up", "--flake", "."]);
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
+    );
 }
 
 // ---- VM subcommand tests ----
@@ -1052,51 +1077,6 @@ fn down_removed() {
         clap::error::ErrorKind::InvalidSubcommand,
         "expected InvalidSubcommand, got: {err:?}"
     );
-}
-
-// ---- read_dir_to_drive_files tests ----
-
-#[test]
-fn test_read_dir_to_drive_files_reads_files() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
-    std::fs::write(dir.path().join("b.env"), "KEY=val").unwrap();
-
-    let files = read_dir_to_drive_files(dir.path().to_str().unwrap(), 0o444).unwrap();
-    assert_eq!(files.len(), 2);
-
-    let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
-    assert!(names.contains(&"a.txt"));
-    assert!(names.contains(&"b.env"));
-
-    for f in &files {
-        assert_eq!(f.mode, 0o444);
-    }
-}
-
-#[test]
-fn test_read_dir_to_drive_files_skips_directories() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("file.txt"), "content").unwrap();
-    std::fs::create_dir(dir.path().join("subdir")).unwrap();
-
-    let files = read_dir_to_drive_files(dir.path().to_str().unwrap(), 0o400).unwrap();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].name, "file.txt");
-    assert_eq!(files[0].mode, 0o400);
-}
-
-#[test]
-fn test_read_dir_to_drive_files_empty_dir() {
-    let dir = tempfile::tempdir().unwrap();
-    let files = read_dir_to_drive_files(dir.path().to_str().unwrap(), 0o444).unwrap();
-    assert!(files.is_empty());
-}
-
-#[test]
-fn test_read_dir_to_drive_files_nonexistent_dir() {
-    let result = read_dir_to_drive_files("/nonexistent/path/abc123", 0o444);
-    assert!(result.is_err());
 }
 
 // ---- Forward command tests ----
@@ -1246,10 +1226,11 @@ fn test_parse_port_spec_invalid() {
 
 // -------------------------------------------------------------------------
 // Top-level verb tests. `ps`, `start`, `flake`, `image`, `setup`,
-// `completions`, and `security` were dropped — `ls`/`up`/`validate`/
-// `catalog`/`doctor` cover the cleaned surface. `run` was reintroduced
-// later as the secure one-shot execution UX, distinct from the old `up`
-// alias.
+// `completions`, and `security` were dropped — `ls`/`validate`/
+// `catalog`/`doctor` cover the cleaned surface. `up` and `invoke` were
+// consolidated into `machine run` (argv lifecycle + `--entrypoint` action);
+// `up_removed`/`invoke_removed` pin they no longer parse. `run` survives
+// hidden as the SDK Sandbox transport (`run_kept_hidden_as_sdk_transport`).
 // -------------------------------------------------------------------------
 
 #[test]
@@ -1272,13 +1253,26 @@ fn test_start_verb_is_unrecognized() {
 
 #[test]
 fn test_run_command_is_recognized() {
-    let cli = Cli::try_parse_from(["mvmctl", "run", "--", "/bin/true"]).unwrap();
+    // `mvmctl run` was retired; `machine run` is the replacement.
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--",
+        "/bin/true",
+    ])
+    .unwrap();
     match cli.command {
-        Commands::Run(exec::RunArgs { profile, argv, .. }) => {
-            assert_eq!(profile, exec::RunProfile::Standard);
-            assert_eq!(argv, vec!["/bin/true".to_string()]);
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs { profile, argv, .. }) => {
+                assert_eq!(profile, exec::RunProfile::Standard);
+                assert_eq!(argv, vec!["/bin/true".to_string()]);
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
@@ -1740,27 +1734,38 @@ fn test_clap_flake_ref_invalid() {
 
 #[test]
 fn test_run_rejects_invalid_vm_name_at_parse_time() {
-    // Clap should reject bad --name values before any command runs.
+    // `up` validated --name via a clap value_parser; it is now retired.
+    // Pin the retirement rather than the old parse-time rejection.
     let result = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--name", "INVALID"]);
-    assert!(
-        result.is_err(),
-        "uppercase VM name should fail at parse time"
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
     );
 }
 
 #[test]
 fn test_run_rejects_invalid_flake_at_parse_time() {
+    // `up` validated --flake via a clap value_parser; it is now retired.
+    // Pin the retirement rather than the old parse-time rejection.
     let result = Cli::try_parse_from(["mvmctl", "up", "--flake", ". ; rm -rf /", "--name", "vm1"]);
-    assert!(
-        result.is_err(),
-        "shell-injection flake ref should fail at parse time"
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
     );
 }
 
 #[test]
 fn test_run_rejects_invalid_port_at_parse_time() {
+    // `--port` was an `up`-only flag; `up` is retired. The test now pins
+    // that `up` itself is unrecognized.
     let result = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--port", "notaport"]);
-    assert!(result.is_err(), "invalid port should fail at parse time");
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
+    );
 }
 
 // ---- Config defaults wired into the Up command ----
@@ -1814,57 +1819,6 @@ fn test_run_cli_flag_overrides_config_memory() {
     let cli_memory: Option<u32> = Some(512);
     let effective = cli_memory.or(Some(cfg.default_memory_mib));
     assert_eq!(effective, Some(512));
-}
-
-#[test]
-fn test_resolve_network_policy_default_is_deny_all() {
-    // Claim 10: the safe default is deny-all. Workloads that need
-    // network access opt in explicitly.
-    let policy = resolve_network_policy(None, &[]).unwrap();
-    assert!(!policy.is_unrestricted());
-    let rules = policy
-        .resolve_rules()
-        .expect("default resolves to a concrete rule set");
-    assert!(rules.is_empty(), "deny-all should yield no allow rules");
-}
-
-#[test]
-fn test_resolve_network_policy_preset() {
-    let policy = resolve_network_policy(Some("dev"), &[]).unwrap();
-    assert!(!policy.is_unrestricted());
-    let rules = policy.resolve_rules().unwrap();
-    assert!(rules.iter().any(|r| r.host == "github.com"));
-}
-
-#[test]
-fn test_resolve_network_policy_allow_list() {
-    let allow = vec![
-        "github.com:443".to_string(),
-        "api.openai.com:443".to_string(),
-    ];
-    let policy = resolve_network_policy(None, &allow).unwrap();
-    let rules = policy.resolve_rules().unwrap();
-    assert_eq!(rules.len(), 2);
-}
-
-#[test]
-fn test_resolve_network_policy_mutual_exclusion() {
-    let allow = vec!["github.com:443".to_string()];
-    let result = resolve_network_policy(Some("dev"), &allow);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_resolve_network_policy_invalid_preset() {
-    let result = resolve_network_policy(Some("bogus"), &[]);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_resolve_network_policy_invalid_allow_entry() {
-    let allow = vec!["not-a-host-port".to_string()];
-    let result = resolve_network_policy(None, &allow);
-    assert!(result.is_err());
 }
 
 #[test]
@@ -2343,166 +2297,178 @@ fn secret_get_rejects_force_flag() {
 
 #[test]
 fn up_accepts_repeatable_secret_flag() {
-    let cli = Cli::try_parse_from([
+    // `--secret` was an `up`-only flag; `up` is retired.
+    let result = Cli::try_parse_from([
         "mvmctl",
         "up",
         "--flake",
         ".",
         "--secret",
         "openai:api.openai.com",
-        "--secret",
-        "aws:s3.amazonaws.com,sts.amazonaws.com",
-    ])
-    .unwrap();
-    match cli.command {
-        Commands::Up(up::Args { secret, .. }) => {
-            assert_eq!(
-                secret,
-                vec![
-                    "openai:api.openai.com".to_string(),
-                    "aws:s3.amazonaws.com,sts.amazonaws.com".to_string(),
-                ]
-            );
-        }
-        _ => panic!("Expected Up command"),
-    }
+    ]);
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
+    );
 }
 
 #[test]
 fn up_accepts_security_profile_flag_and_defaults_to_none() {
-    // Explicitly named.
-    let cli =
-        Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--security-profile", "dev"]).unwrap();
-    match cli.command {
-        Commands::Up(up::Args {
-            security_profile, ..
-        }) => assert_eq!(security_profile.as_deref(), Some("dev")),
-        _ => panic!("Expected Up command"),
-    }
-    // Unset → None (the runtime then defaults it to `production`).
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", "."]).unwrap();
-    match cli.command {
-        Commands::Up(up::Args {
-            security_profile,
-            seccomp,
-            ..
-        }) => {
-            assert_eq!(security_profile, None);
-            assert_eq!(seccomp, None, "no --seccomp default; profile supplies it");
-        }
-        _ => panic!("Expected Up command"),
-    }
+    // `--security-profile` and `--seccomp` were `up`-only flags; `up` is retired.
+    let result = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--security-profile", "dev"]);
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
+    );
 }
 
-// --- Run (transient runner; absorbed the former exec) CLI tests ---
+// --- machine run (replaced the retired `mvmctl run`) CLI tests ---
 
 #[test]
 fn run_transient_default_manifest_argv_only() {
-    let cli = Cli::try_parse_from(["mvmctl", "run", "--", "uname", "-a"]).expect("parse");
+    // `mvmctl run` is retired; pin defaults on `machine run` instead.
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--",
+        "uname",
+        "-a",
+    ])
+    .expect("parse");
     match cli.command {
-        Commands::Run(exec::RunArgs {
-            manifest,
-            cpus,
-            memory,
-            add_dir,
-            env,
-            timeout,
-            launch_plan,
-            argv,
-            ..
-        }) => {
-            assert!(manifest.is_none(), "manifest should default to None");
-            assert_eq!(cpus, 2);
-            assert_eq!(memory, "512M");
-            assert!(add_dir.is_empty());
-            assert!(env.is_empty());
-            assert_eq!(
-                timeout, None,
-                "unset --timeout ⇒ None (no per-command kill)"
-            );
-            assert!(launch_plan.is_none(), "launch_plan should default to None");
-            assert_eq!(argv, vec!["uname".to_string(), "-a".to_string()]);
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                manifest,
+                cpus,
+                memory,
+                volume,
+                env,
+                timeout,
+                argv,
+                ..
+            }) => {
+                assert!(manifest.is_none());
+                assert_eq!(cpus, 2);
+                assert_eq!(memory, "512M");
+                assert!(volume.is_empty());
+                assert!(env.is_empty());
+                assert_eq!(timeout, None, "unset --timeout ⇒ None");
+                assert_eq!(argv, vec!["uname".to_string(), "-a".to_string()]);
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
 #[test]
 fn run_transient_timeout_parses_to_some() {
-    let cli = Cli::try_parse_from(["mvmctl", "run", "--timeout", "5", "--", "sleep", "10"])
-        .expect("parse");
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--timeout",
+        "5",
+        "--",
+        "sleep",
+        "10",
+    ])
+    .expect("parse");
     match cli.command {
-        Commands::Run(exec::RunArgs { timeout, .. }) => {
-            assert_eq!(timeout, Some(5), "--timeout 5 ⇒ Some(5)");
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs { timeout, .. }) => {
+                assert_eq!(timeout, Some(5), "--timeout 5 ⇒ Some(5)");
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
 #[test]
 fn run_default_profile_argv_only() {
-    let cli = Cli::try_parse_from(["mvmctl", "run", "--", "uname", "-a"]).expect("parse");
+    // Pin defaults on `machine run` — the successor to `mvmctl run`.
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--",
+        "uname",
+        "-a",
+    ])
+    .expect("parse");
     match cli.command {
-        Commands::Run(exec::RunArgs {
-            manifest,
-            image,
-            net,
-            allow_host,
-            cpus,
-            memory,
-            profile,
-            add_dir,
-            env,
-            timeout,
-            receipt,
-            json,
-            dry_run,
-            launch_plan,
-            mode,
-            dev,
-            prod,
-            argv,
-            ack_divergence,
-        }) => {
-            assert!(manifest.is_none(), "manifest should default to None");
-            assert!(image.is_none(), "image should default to None");
-            assert!(!net, "net should default to false (deny-all)");
-            assert!(allow_host.is_empty(), "allow_host should default to empty");
-            assert_eq!(cpus, 2);
-            assert_eq!(memory, "512M");
-            assert_eq!(profile, exec::RunProfile::Standard);
-            assert!(add_dir.is_empty());
-            assert!(env.is_empty());
-            assert_eq!(
-                timeout, None,
-                "unset --timeout ⇒ None (no per-command kill)"
-            );
-            assert!(receipt.is_none(), "receipt should default to None");
-            assert!(!json, "json should default to false");
-            assert!(!dry_run, "dry_run should default to false");
-            assert!(launch_plan.is_none(), "launch_plan should default to None");
-            assert!(mode.is_none(), "mode should default to None");
-            assert!(!dev, "dev should default to false");
-            assert!(!prod, "prod should default to false");
-            assert_eq!(argv, vec!["uname".to_string(), "-a".to_string()]);
-            assert!(
-                ack_divergence.is_empty(),
-                "ack_divergence should default to empty"
-            );
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                manifest,
+                image,
+                net,
+                allow_host,
+                cpus,
+                memory,
+                profile,
+                volume,
+                env,
+                timeout,
+                receipt,
+                json,
+                dry_run,
+                argv,
+                ..
+            }) => {
+                assert!(manifest.is_none());
+                assert_eq!(image.as_deref(), Some("alpine:latest"));
+                assert!(!net, "deny-all by default");
+                assert!(allow_host.is_empty());
+                assert_eq!(cpus, 2);
+                assert_eq!(memory, "512M");
+                assert_eq!(profile, exec::RunProfile::Standard);
+                assert!(volume.is_empty());
+                assert!(env.is_empty());
+                assert_eq!(timeout, None);
+                assert!(receipt.is_none());
+                assert!(!json);
+                assert!(!dry_run);
+                assert_eq!(argv, vec!["uname".to_string(), "-a".to_string()]);
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
 #[test]
 fn run_timeout_parses_to_some() {
-    let cli = Cli::try_parse_from(["mvmctl", "run", "--timeout", "5", "--", "sleep", "10"])
-        .expect("parse");
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--timeout",
+        "5",
+        "--",
+        "sleep",
+        "10",
+    ])
+    .expect("parse");
     match cli.command {
-        Commands::Run(exec::RunArgs { timeout, .. }) => {
-            assert_eq!(timeout, Some(5), "--timeout 5 ⇒ Some(5)");
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs { timeout, .. }) => {
+                assert_eq!(timeout, Some(5), "--timeout 5 ⇒ Some(5)");
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
@@ -2510,6 +2476,7 @@ fn run_timeout_parses_to_some() {
 fn run_image_flag_parses() {
     let cli = Cli::try_parse_from([
         "mvmctl",
+        "machine",
         "run",
         "--image",
         "docker.io/library/alpine:3.20",
@@ -2520,26 +2487,28 @@ fn run_image_flag_parses() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Run(exec::RunArgs {
-            image, prod, argv, ..
-        }) => {
-            assert_eq!(image.as_deref(), Some("docker.io/library/alpine:3.20"));
-            assert!(!prod);
-            assert_eq!(
-                argv,
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "echo hi".to_string()
-                ]
-            );
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs { image, argv, .. }) => {
+                assert_eq!(image.as_deref(), Some("docker.io/library/alpine:3.20"));
+                assert_eq!(
+                    argv,
+                    vec![
+                        "/bin/sh".to_string(),
+                        "-c".to_string(),
+                        "echo hi".to_string()
+                    ]
+                );
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
 #[test]
 fn run_image_prod_flag_parses_as_image_policy() {
+    // `run` is kept hidden for the SDK transport; `--prod` is its OCI digest-pin
+    // flag (not on `machine run`).
     let pinned = "docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let cli = Cli::try_parse_from([
         "mvmctl",
@@ -2565,8 +2534,10 @@ fn run_image_prod_flag_parses_as_image_policy() {
 
 #[test]
 fn run_manifest_and_image_conflict() {
+    // Still enforced on `machine run`.
     let cli = Cli::try_parse_from([
         "mvmctl",
+        "machine",
         "run",
         "--manifest",
         "hello",
@@ -2582,7 +2553,10 @@ fn run_manifest_and_image_conflict() {
 fn run_accepts_restrictive_profile() {
     let cli = Cli::try_parse_from([
         "mvmctl",
+        "machine",
         "run",
+        "--image",
+        "alpine:latest",
         "--profile",
         "restrictive",
         "--",
@@ -2590,17 +2564,30 @@ fn run_accepts_restrictive_profile() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Run(exec::RunArgs { profile, argv, .. }) => {
-            assert_eq!(profile, exec::RunProfile::Restrictive);
-            assert_eq!(argv, vec!["/bin/true".to_string()]);
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs { profile, argv, .. }) => {
+                assert_eq!(profile, exec::RunProfile::Restrictive);
+                assert_eq!(argv, vec!["/bin/true".to_string()]);
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
 #[test]
 fn run_rejects_unknown_profile() {
-    let cli = Cli::try_parse_from(["mvmctl", "run", "--profile", "unsafe", "--", "/bin/true"]);
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--profile",
+        "unsafe",
+        "--",
+        "/bin/true",
+    ]);
     assert!(cli.is_err());
 }
 
@@ -2608,7 +2595,10 @@ fn run_rejects_unknown_profile() {
 fn run_receipt_flag_parses() {
     let cli = Cli::try_parse_from([
         "mvmctl",
+        "machine",
         "run",
+        "--image",
+        "alpine:latest",
         "--receipt",
         "/tmp/mvm-run-receipt.json",
         "--",
@@ -2616,44 +2606,73 @@ fn run_receipt_flag_parses() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Run(exec::RunArgs { receipt, .. }) => {
-            assert_eq!(
-                receipt.as_deref(),
-                Some(std::path::Path::new("/tmp/mvm-run-receipt.json"))
-            );
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs { receipt, .. }) => {
+                assert_eq!(
+                    receipt.as_deref(),
+                    Some(std::path::Path::new("/tmp/mvm-run-receipt.json"))
+                );
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
 #[test]
 fn run_json_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "run", "--json", "--", "/bin/true"]).expect("parse");
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--json",
+        "--",
+        "/bin/true",
+    ])
+    .expect("parse");
     match cli.command {
-        Commands::Run(exec::RunArgs { json, argv, .. }) => {
-            assert!(json);
-            assert_eq!(argv, vec!["/bin/true".to_string()]);
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs { json, argv, .. }) => {
+                assert!(json);
+                assert_eq!(argv, vec!["/bin/true".to_string()]);
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
 #[test]
 fn run_dry_run_json_flags_parse() {
-    let cli = Cli::try_parse_from(["mvmctl", "run", "--dry-run", "--json", "--", "/bin/true"])
-        .expect("parse");
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--dry-run",
+        "--json",
+        "--",
+        "/bin/true",
+    ])
+    .expect("parse");
     match cli.command {
-        Commands::Run(exec::RunArgs {
-            dry_run,
-            json,
-            argv,
-            ..
-        }) => {
-            assert!(dry_run);
-            assert!(json);
-            assert_eq!(argv, vec!["/bin/true".to_string()]);
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                dry_run,
+                json,
+                argv,
+                ..
+            }) => {
+                assert!(dry_run);
+                assert!(json);
+                assert_eq!(argv, vec!["/bin/true".to_string()]);
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
@@ -2916,6 +2935,7 @@ fn run_transient_launch_plan_conflicts_with_argv() {
 fn run_transient_with_manifest_and_resources() {
     let cli = Cli::try_parse_from([
         "mvmctl",
+        "machine",
         "run",
         "--manifest",
         "my-tpl",
@@ -2928,30 +2948,38 @@ fn run_transient_with_manifest_and_resources() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Run(exec::RunArgs {
-            manifest,
-            cpus,
-            memory,
-            argv,
-            ..
-        }) => {
-            assert_eq!(manifest.as_deref(), Some("my-tpl"));
-            assert_eq!(cpus, 4);
-            assert_eq!(memory, "1G");
-            assert_eq!(argv, vec!["/bin/true".to_string()]);
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                manifest,
+                cpus,
+                memory,
+                argv,
+                ..
+            }) => {
+                assert_eq!(manifest.as_deref(), Some("my-tpl"));
+                assert_eq!(cpus, 4);
+                assert_eq!(memory, "1G");
+                assert_eq!(argv, vec!["/bin/true".to_string()]);
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
 #[test]
 fn run_transient_with_add_dir_and_env() {
+    // `machine run` uses `--volume` for directory shares (not `--add-dir`) and
+    // `--env` for environment variables.
     let cli = Cli::try_parse_from([
         "mvmctl",
+        "machine",
         "run",
-        "--add-dir",
+        "--image",
+        "alpine:latest",
+        "--volume",
         "/tmp:/work",
-        "--add-dir",
+        "--volume",
         "/etc:/host-etc",
         "--env",
         "FOO=bar",
@@ -2963,17 +2991,20 @@ fn run_transient_with_add_dir_and_env() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Run(exec::RunArgs {
-            add_dir, env, argv, ..
-        }) => {
-            assert_eq!(
-                add_dir,
-                vec!["/tmp:/work".to_string(), "/etc:/host-etc".to_string()]
-            );
-            assert_eq!(env, vec!["FOO=bar".to_string(), "BAZ=qux".to_string()]);
-            assert_eq!(argv, vec!["ls".to_string(), "/work".to_string()]);
-        }
-        _ => panic!("Expected Run command"),
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                volume, env, argv, ..
+            }) => {
+                assert_eq!(
+                    volume,
+                    vec!["/tmp:/work".to_string(), "/etc:/host-etc".to_string()]
+                );
+                assert_eq!(env, vec!["FOO=bar".to_string(), "BAZ=qux".to_string()]);
+                assert_eq!(argv, vec!["ls".to_string(), "/work".to_string()]);
+            }
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected Machine command"),
     }
 }
 
@@ -3238,29 +3269,28 @@ fn test_dev_cache_inspect_json() {
     }
 }
 
-// --- Up --network flag tests ---
+// --- Up --network flag tests (up retired; pin removal) ---
 
 #[test]
 fn test_up_network_default() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", "."]).unwrap();
-    match cli.command {
-        Commands::Up(up::Args { network, .. }) => {
-            assert_eq!(network, "default");
-        }
-        _ => panic!("Expected Up command"),
-    }
+    // `--network` was an `up`-only flag; `up` is retired.
+    let result = Cli::try_parse_from(["mvmctl", "up", "--flake", "."]);
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
+    );
 }
 
 #[test]
 fn test_up_network_custom() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--network", "isolated"]).unwrap();
-    match cli.command {
-        Commands::Up(up::Args { network, .. }) => {
-            assert_eq!(network, "isolated");
-        }
-        _ => panic!("Expected Up command"),
-    }
+    // `--network` was an `up`-only flag; `up` is retired.
+    let result = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--network", "isolated"]);
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
+    );
 }
 
 // The `mvmctl template *` namespace was removed outright. The two
@@ -3429,60 +3459,50 @@ fn test_is_vz_dev_running_returns_bool() {
     let _ = super::env::dev_vz::is_vz_dev_running();
 }
 
-// ---- RunParams compile-check (referenced for type-export verification) ----
-#[allow(dead_code)]
-fn _runparams_has_lifetime() {
-    fn _take(_p: RunParams<'_>) {}
-}
-
-// ---- admission flags ----
+// ---- admission flags (up retired; pin removal) ----
 
 #[test]
 fn test_up_tenant_parse_default_is_none() {
-    // The clap field is `Option<String>`; the `"local"` default has
-    // moved into `vm::tenant_resolution::resolve_tenant` so the 4-level
-    // precedence (built-in → config.toml → env → flag) can apply.
-    let cli = Cli::try_parse_from(["mvmctl", "up"]).expect("parse");
-    match cli.command {
-        Commands::Up(up::Args { tenant, .. }) => {
-            assert!(
-                tenant.is_none(),
-                "tenant parse default is None; resolver fills `local` per ADR-064 §Decision 9",
-            );
-        }
-        _ => panic!("Expected Up command"),
-    }
+    // `--tenant` was an `up`-only flag; `up` is retired.
+    let result = Cli::try_parse_from(["mvmctl", "up"]);
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
+    );
 }
 
 #[test]
 fn test_up_tenant_override_via_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--tenant", "acme"]).expect("parse");
-    match cli.command {
-        Commands::Up(up::Args { tenant, .. }) => {
-            assert_eq!(tenant.as_deref(), Some("acme"))
-        }
-        _ => panic!("Expected Up command"),
-    }
+    // `--tenant` was an `up`-only flag; `up` is retired.
+    let result = Cli::try_parse_from(["mvmctl", "up", "--tenant", "acme"]);
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
+    );
 }
 
 #[test]
 fn test_up_no_supervisor_defaults_off() {
-    let cli = Cli::try_parse_from(["mvmctl", "up"]).expect("parse");
-    match cli.command {
-        Commands::Up(up::Args { no_supervisor, .. }) => {
-            assert!(!no_supervisor, "admission is on by default");
-        }
-        _ => panic!("Expected Up command"),
-    }
+    // `--no-supervisor` was an `up`-only flag; `up` is retired.
+    let result = Cli::try_parse_from(["mvmctl", "up"]);
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
+    );
 }
 
 #[test]
 fn test_up_no_supervisor_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--no-supervisor"]).expect("parse");
-    match cli.command {
-        Commands::Up(up::Args { no_supervisor, .. }) => assert!(no_supervisor),
-        _ => panic!("Expected Up command"),
-    }
+    // `--no-supervisor` was an `up`-only flag; `up` is retired.
+    let result = Cli::try_parse_from(["mvmctl", "up", "--no-supervisor"]);
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
+    );
 }
 
 // ---- `mvmctl compile --from-recording` ----
@@ -3668,28 +3688,34 @@ fn test_session_attach_continue_parses() {
 
 #[test]
 fn test_up_wait_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--wait"]).unwrap();
-    match cli.command {
-        Commands::Up(ref a) => assert!(a.wait),
-        _ => panic!("expected up"),
-    }
+    // `--wait` was an `up`-only flag; `up` is retired.
+    let result = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--wait"]);
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
+    );
 }
 
 #[test]
 fn test_up_wait_conflicts_with_detach() {
-    let res = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--wait", "--detach"]);
-    assert!(
-        res.is_err(),
-        "--wait --detach must be rejected at parse time"
+    // `--wait`/`--detach` were `up`-only flags; `up` is retired.
+    let result = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--wait", "--detach"]);
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
     );
 }
 
 #[test]
 fn test_up_wait_conflicts_with_up_json() {
-    let res = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--wait", "--up-json"]);
-    assert!(
-        res.is_err(),
-        "--wait --up-json must be rejected at parse time"
+    // `--wait`/`--up-json` were `up`-only flags; `up` is retired.
+    let result = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--wait", "--up-json"]);
+    assert!(result.is_err(), "`up` was retired");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::InvalidSubcommand
     );
 }
 
@@ -3739,7 +3765,18 @@ fn emits_machine_readable_stdout(argv: &[&str]) -> bool {
 #[test]
 fn state_touching_commands_trigger_entry_convergence() {
     // Lifecycle mutate/read commands run the cheap converge pass.
-    assert!(touches(&["mvmctl", "up"]));
+    // (`up` was retired — `machine run` and `machine start` are the
+    // lifecycle-entry points; they route through MachineAction which
+    // touches_vm_state returns true for.)
+    assert!(touches(&[
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--",
+        "sh"
+    ]));
     assert!(touches(&["mvmctl", "machine", "stop", "--all"]));
     assert!(touches(&["mvmctl", "machine", "console", "myvm"]));
     assert!(touches(&["mvmctl", "machine", "pause", "myvm"]));
@@ -3782,17 +3819,11 @@ fn state_touching_json_commands_reserve_stdout_before_entry_convergence() {
     assert!(emits_machine_readable_stdout(&[
         "mvmctl", "dev", "cache", "inspect", "--json"
     ]));
+    // `mvmctl up` is retired; `run` survives hidden as the SDK transport and
+    // keeps its `--json` reservation. The user-facing machine-readable channel
+    // is `machine run --json`.
     assert!(emits_machine_readable_stdout(&[
-        "mvmctl",
-        "run",
-        "--json",
-        "--",
-        "/bin/true"
-    ]));
-    assert!(emits_machine_readable_stdout(&[
-        "mvmctl",
-        "up",
-        "--up-json"
+        "mvmctl", "run", "--json", "--", "true"
     ]));
     assert!(emits_machine_readable_stdout(&[
         "mvmctl", "machine", "save", "myvm", "--json"
@@ -3810,7 +3841,7 @@ fn state_touching_json_commands_reserve_stdout_before_entry_convergence() {
 
     assert!(!emits_machine_readable_stdout(&["mvmctl", "ls"]));
     assert!(!emits_machine_readable_stdout(&["mvmctl", "dev", "status"]));
-    assert!(!emits_machine_readable_stdout(&["mvmctl", "up"]));
+    // `mvmctl up` is retired; `up_removed` pins the removal separately.
 }
 
 // --- Top-level help surface tests ---
