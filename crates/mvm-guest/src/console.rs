@@ -86,6 +86,12 @@ const TIOCSWINSZ: u64 = 0x5414;
 #[cfg(not(target_os = "linux"))]
 const TIOCSWINSZ: u64 = 0x80087467;
 
+/// ioctl request to set the controlling terminal.
+#[cfg(target_os = "linux")]
+const TIOCSCTTY: u64 = 0x540E;
+#[cfg(not(target_os = "linux"))]
+const TIOCSCTTY: u64 = 0x2000_7461;
+
 #[repr(C)]
 struct SockAddrVm {
     svm_family: u16,
@@ -189,6 +195,7 @@ pub fn open_session(
         unsafe {
             close(master_fd);
             setsid();
+            set_controlling_tty(slave_fd);
             // Redirect stdin/stdout/stderr to the PTY slave.
             dup2(slave_fd, 0);
             dup2(slave_fd, 1);
@@ -239,6 +246,23 @@ pub fn resize_active_session(cols: u16, rows: u16) -> bool {
     }
     resize_pty(fd, cols, rows);
     true
+}
+
+/// Make `slave_fd` the controlling terminal of the calling session, so an
+/// interactive shell can do job control (Ctrl-Z/fg/bg, Ctrl-C process-group
+/// signaling). `setsid()` alone leaves the new session leader with no
+/// controlling tty.
+///
+/// # Safety
+/// Must run in the forked child after `setsid()`: `slave_fd` must be a valid
+/// open PTY slave and the caller a fresh session leader with no controlling
+/// terminal yet. Async-signal-safe (a single `ioctl`).
+unsafe fn set_controlling_tty(slave_fd: i32) {
+    // SAFETY: TIOCSCTTY takes an int arg; 0 = do not steal the tty from an
+    // existing session. `slave_fd` is a live PTY slave fd.
+    unsafe {
+        ioctl(slave_fd, TIOCSCTTY, 0i32);
+    }
 }
 
 /// Resize the PTY window.
@@ -623,5 +647,65 @@ mod tests {
         // tests the initial value only in isolation)
         CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
         assert!(!is_active());
+    }
+
+    // Portable: openpty + TIOCSCTTY + /dev/tty controlling-terminal semantics
+    // work on both Linux (the guest) and macOS (dev hosts), so this runs on
+    // both — the `TIOCSCTTY` const already carries per-OS values.
+    #[test]
+    fn child_acquires_controlling_tty() {
+        let ws = Winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let mut master_fd: i32 = -1;
+        let mut slave_fd: i32 = -1;
+        // SAFETY: out-params are live i32s; name/termp NULL = defaults.
+        let rc = unsafe {
+            openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &ws,
+            )
+        };
+        assert_eq!(rc, 0, "openpty failed");
+
+        // SAFETY: fork has no preconditions; returns 0 in child.
+        let pid = unsafe { fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            // Child: become a session leader, claim the slave as our
+            // controlling terminal, then prove it by opening /dev/tty
+            // (only a process WITH a controlling tty can). Async-signal-safe
+            // calls only: setsid/ioctl/open/_exit.
+            // SAFETY: slave_fd is a valid PTY slave; we are post-fork.
+            unsafe {
+                setsid();
+                set_controlling_tty(slave_fd);
+                let fd = libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR);
+                libc::_exit(if fd >= 0 { 0 } else { 1 });
+            }
+        }
+
+        // SAFETY: slave_fd valid; the child holds its own copy.
+        unsafe {
+            close(slave_fd);
+        }
+        let mut status: i32 = 0;
+        // SAFETY: pid is the just-forked child; status is a live i32.
+        unsafe {
+            waitpid(pid, &mut status, 0);
+            close(master_fd);
+        }
+        assert!(libc::WIFEXITED(status), "child did not exit normally");
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "child could not open /dev/tty — no controlling terminal acquired"
+        );
     }
 }
