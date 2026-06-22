@@ -590,6 +590,10 @@ pub(in crate::commands) struct MachineStartArgs {
     /// Validate and explain the effective start without booting a VM.
     #[arg(long)]
     pub dry_run: bool,
+    /// Suppress the human `started machine <name>` banner — set internally
+    /// when an interactive shell attach follows. Not a CLI flag.
+    #[arg(skip)]
+    pub quiet: bool,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -1542,7 +1546,7 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
     if args.json {
         let summary = MachineStartJsonSummary::from_parts(receipt_input, outcome, args.receipt);
         println!("{}", serde_json::to_string_pretty(&summary)?);
-    } else {
+    } else if !args.quiet {
         println!("started machine {}", spec.name);
     }
     Ok(())
@@ -1826,6 +1830,7 @@ fn run_persistent(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<()
             receipt: args.receipt.clone(),
             json: args.json,
             dry_run: false,
+            quiet: false,
         },
     )?;
     if !booted && !args.json {
@@ -1905,6 +1910,7 @@ fn run_interactive(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<(
             receipt: None,
             json: false,
             dry_run: false,
+            quiet: true,
         },
     )?;
 
@@ -2868,6 +2874,20 @@ mod tests {
             }
             other => panic!("expected rm action, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn start_quiet_is_internal_only_and_defaults_off() {
+        // `quiet` is not a user-facing flag — the standalone `machine start`
+        // and the detached path must keep printing the boot banner.
+        match parse(&["start", "--name", "web"]).expect("parse") {
+            MachineAction::Start(args) => assert!(!args.quiet),
+            other => panic!("expected start action, got {other:?}"),
+        }
+        assert!(
+            parse(&["start", "--name", "web", "--quiet"]).is_err(),
+            "--quiet must not be exposed as a CLI flag"
+        );
     }
 
     #[test]
