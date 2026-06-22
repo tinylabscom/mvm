@@ -8,6 +8,7 @@ pub mod checkpoint;
 pub mod config;
 pub mod dev_network;
 pub mod exit_capture;
+pub mod kernel_advisory;
 pub mod kernel_artifact;
 pub mod kernel_format;
 pub mod metering;
