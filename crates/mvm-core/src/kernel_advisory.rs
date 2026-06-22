@@ -53,6 +53,14 @@ pub enum Staleness {
 }
 
 /// The watcher's verdict across all pins.
+///
+/// This is a **stable JSON wire contract** — the fleet orchestrator (mvmd)
+/// polls it to decide whether to remediate. The consumer flow: poll the
+/// advisory (from the watch workflow's artifact or by running the xtask); if
+/// `action_recommended`, bump the pin(s), rebuild the kernel, then
+/// `mvmctl vm rekernel` each fleet member (the single-VM remediation
+/// primitive). `deny_unknown_fields` + the schema-stability test keep this
+/// shape from drifting under consumers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KernelAdvisory {
@@ -228,5 +236,31 @@ mod tests {
         let a = assess(&[pin("6.12.87")], &upstream(&[("6.12", "6.12.95")]));
         let j = serde_json::to_string(&a).unwrap();
         assert_eq!(serde_json::from_str::<KernelAdvisory>(&j).unwrap(), a);
+    }
+
+    /// Schema-stability guard: the JSON shape is the contract mvmd polls.
+    /// Renaming a field here breaks this test — a deliberate tripwire so a
+    /// contract change is a conscious decision, not an accident.
+    #[test]
+    fn advisory_json_schema_is_stable() {
+        let a = assess(&[pin("6.12.87")], &upstream(&[("6.12", "6.12.95")]));
+        let v = serde_json::to_value(&a).unwrap();
+
+        assert!(v.get("pins").unwrap().is_array());
+        assert!(v.get("action_recommended").unwrap().is_boolean());
+
+        // `worst` is a tagged Staleness: `{ "status": "behind", current, latest, patch_gap }`.
+        let worst = v.get("worst").unwrap();
+        assert_eq!(worst.get("status").unwrap(), "behind");
+        assert!(worst.get("current").unwrap().is_string());
+        assert!(worst.get("latest").unwrap().is_string());
+        assert!(worst.get("patch_gap").unwrap().is_number());
+
+        // Each pin entry is `[KernelPin, Staleness]`.
+        let entry = &v.get("pins").unwrap().as_array().unwrap()[0];
+        let pin = &entry.as_array().unwrap()[0];
+        assert!(pin.get("name").unwrap().is_string());
+        assert!(pin.get("version").unwrap().is_string());
+        assert!(entry.as_array().unwrap()[1].get("status").is_some());
     }
 }
