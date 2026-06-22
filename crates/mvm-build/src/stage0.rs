@@ -65,9 +65,9 @@ pub struct BootstrapAsset {
 /// Nix release we seed from. Bump in lockstep with the SHA-256 pins below.
 ///
 /// 2.31.1 was the outlier that computed a divergent flake-input narHash vs the
-/// committed flake.locks (ADR-096), breaking every fresh builder-VM build since
-/// the Plan 160 nix-seed cutover. 2.34.7 computes the lock-matching narHash
-/// (verified against the same nixpkgs rev the locks pin).
+/// committed flake.locks, breaking every fresh builder-VM build since the
+/// nix-seed Stage 0 cutover. 2.34.7 computes the lock-matching narHash (verified
+/// against the same nixpkgs rev the locks pin).
 pub const NIX_SEED_VERSION: &str = "2.34.7";
 
 /// Official Nix release tarball for aarch64-linux guests (~23 MiB). When
