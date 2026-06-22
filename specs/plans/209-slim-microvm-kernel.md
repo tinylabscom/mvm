@@ -604,3 +604,12 @@ End-to-end on this host, all via the libkrun builder VM (no host nix / no linux-
 - `mvmctl vm wait` → exit 0; `mvmctl vm boot-report` → **control plane ready, vsock bound, first accept 44s** = guest agent reachable over vsock.
 
 **Decision: PROCEED with the unified path.** libkrun boots a workload to a live vsock agent on the promoted+fixed kernel tree. (Note: `--builder` selects the *builder* backend; `--hypervisor` selects the *workload runtime* — on macOS 26 the workload defaults to Vz, so libkrun workload boot needs explicit `--hypervisor libkrun`. Both Vz and libkrun workload boots reached the agent.)
+
+### Task 11 live validation (2026-06-21)
+
+`vm rekernel` proven end-to-end on macOS-26/libkrun: `up --hypervisor libkrun --name rk`
+boots + agent ready; `vm rekernel rk --flake examples/sleeper --kernel-pin 6.12.87
+--hypervisor libkrun` downs `rk` and relaunches it on the pin-resolved workload kernel
+(`resolve_pinned_kernel` → cached workload `vmlinux`); `REKERNEL_EXIT=0`, VM restarts under
+libkrun, guest agent answers over vsock (`vm wait` → 0, control-plane ready, first accept
+914 ms). `up --kernel-pin`'s `None` path is byte-unchanged, so existing boots are unaffected.
