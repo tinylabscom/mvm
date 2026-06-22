@@ -1,4 +1,4 @@
-# ADR-093 — Converge per-VM host processes on the split VMM + shared bridge sidecar model
+# ADR-094 — Converge per-VM host processes on the split VMM + shared bridge sidecar model
 
 **Status:** Proposed
 **Amends:** [ADR-002](002-microvm-security-posture.md) (per-backend tier matrix — the per-VM host-process topology becomes uniform across workload backends) and [ADR-083](083-workload-backend-type-bar.md) (the shared egress/audit funnel gains a single, shared transport process instead of three near-identical ones).

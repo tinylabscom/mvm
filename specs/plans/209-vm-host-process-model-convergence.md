@@ -8,12 +8,12 @@
 > policy change; claim-10/12/13 witnesses must stay byte-for-byte green throughout.
 
 **Goal:** Converge every workload backend on the split *VMM-process + thin shared
-bridge sidecar* model (ADR-093). Fold `mvm-firecracker-bridge` + `mvm-vz-drainer`
+bridge sidecar* model (ADR-094). Fold `mvm-firecracker-bridge` + `mvm-vz-drainer`
 into one `mvm-bridge` binary, and strip the bridge out of
 `mvm-libkrun-supervisor` so it is a thin krun launcher whose backend spawns the
 shared sidecar — exactly as Firecracker/vz already do.
 
-**Design:** ADR-093 (`specs/adrs/093-vm-host-process-model-convergence.md`). Read
+**Design:** ADR-094 (`specs/adrs/094-vm-host-process-model-convergence.md`). Read
 it first — it is the contract. Locked rules:
 
 - The split model is the only common denominator (FC/vz VMMs cannot be
