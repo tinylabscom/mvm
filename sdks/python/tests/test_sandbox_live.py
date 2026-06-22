@@ -2,7 +2,7 @@
 
 Each test stands up a fixture `mvmctl` shell script that records its
 argv to a sidecar file and emits whatever stdout the live transport
-needs (e.g. the `mvmctl up --up-json` envelope). The SDK shells to
+needs (e.g. the `mvmctl machine run --up-json` envelope). The SDK shells to
 the fixture via `MVM_CLI_BIN`; no real microVM boots.
 
 What we assert:
@@ -61,7 +61,7 @@ def _write_fixture_mvmctl(
     """Write a shell script that pretends to be `mvmctl`. It
     records each invocation's argv + stdin to sidecar files so
     tests can assert wire shape, and emits the requested
-    envelope on `mvmctl up --up-json`.
+    envelope on `mvmctl machine run --up-json`.
     """
     log = tmp_path / "fixture-calls.log"
     stdin_dir = tmp_path / "fixture-stdin"
