@@ -2278,6 +2278,14 @@ fn find_builder_vm_flake() -> Result<String> {
     anyhow::bail!("Builder VM flake not found. Expected at nix/images/builder-vm/flake.nix.")
 }
 
+/// Returns `true` when the running `mvmctl` is a source-checkout build
+/// (the in-repo builder-VM flake is present). The local-build invariant
+/// applies when this is true: source checkouts must build kernels
+/// locally and never fetch pre-built artifacts.
+pub(in crate::commands) fn find_builder_vm_flake_is_source_checkout() -> bool {
+    find_builder_vm_flake().is_ok()
+}
+
 /// Ensure `~/.cache/mvm/builder-vm/<arch>/` contains `vmlinux` +
 /// `rootfs.ext4` before launching the libkrun builder.
 ///
