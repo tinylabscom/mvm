@@ -41,6 +41,50 @@ pub const PID_FILE_NAME: &str = "host-gvproxy.pid";
 /// listener (when claim-10 bridge mode is on).
 pub const SOCKET_FILE_NAME: &str = "gvproxy.sock";
 
+/// Size of an `AF_UNIX` `sun_path` buffer, *including* the NUL terminator:
+/// 104 on Darwin, 108 on Linux. A path of `L` bytes needs `L + 1` (path + NUL)
+/// to fit, so it binds iff `L < SUN_PATH_MAX`. `bind()` of a longer path fails
+/// `EINVAL`; gvproxy surfaces it as `vfkit listen error: ... bind: invalid
+/// argument` and exits before its listener socket appears.
+#[cfg(target_os = "macos")]
+const SUN_PATH_MAX: usize = 104;
+#[cfg(not(target_os = "macos"))]
+const SUN_PATH_MAX: usize = 108;
+
+/// Resolve the host-gvproxy listener socket path for a VM rooted at
+/// `scratch_dir`.
+///
+/// Normally `<scratch_dir>/gvproxy.sock`. But the per-VM state-dir name can be
+/// long (e.g. `mvm-persistent-builder-vz-<session>`), and under a long
+/// `MVM_CACHE_DIR`/`MVM_DATA_DIR` or a long `$HOME` the natural path can exceed
+/// the `AF_UNIX` `sun_path` limit — gvproxy then fails to `bind()` and exits
+/// before listening. When the natural path wouldn't fit, relocate the socket to
+/// a short, deterministic path under `<cache>/gv/` (the mvm cache root is 0700
+/// and isolation-respecting). Only the bind-limited socket moves; the PID file
+/// and logs stay in `scratch_dir`. `spawn_detached` and `stop_by_pid_file` both
+/// call this so they always agree on the path.
+fn gvproxy_socket_path(scratch_dir: &Path) -> PathBuf {
+    gvproxy_socket_path_in(scratch_dir, Path::new(&mvm_core::config::mvm_cache_dir()))
+}
+
+/// Pure core of [`gvproxy_socket_path`] with the relocation root injected, so
+/// the natural-vs-relocated decision is unit-testable without touching the
+/// process environment.
+fn gvproxy_socket_path_in(scratch_dir: &Path, cache_root: &Path) -> PathBuf {
+    let natural = scratch_dir.join(SOCKET_FILE_NAME);
+    // Fits iff path bytes < buffer size (one byte reserved for the NUL).
+    if natural.as_os_str().len() < SUN_PATH_MAX {
+        return natural;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(scratch_dir.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    // 12 hex chars (48 bits) keyed on the full scratch dir — collision-resistant
+    // across a host's per-VM dirs, and short enough to stay well under the limit.
+    let token: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    cache_root.join("gv").join(format!("{token}.sock"))
+}
+
 /// How long we wait for gvproxy's listen-vfkit socket to appear
 /// before declaring the spawn failed.
 const SOCKET_READY_TIMEOUT: Duration = Duration::from_secs(3);
@@ -83,7 +127,24 @@ pub fn spawn_detached(scratch_dir: &Path) -> Result<HostGvproxyInfo> {
     std::fs::create_dir_all(scratch_dir)
         .map_err(|e| anyhow!("create scratch dir {}: {e}", scratch_dir.display()))?;
 
-    let socket_path = scratch_dir.join(SOCKET_FILE_NAME);
+    let socket_path = gvproxy_socket_path(scratch_dir);
+    // The relocated path lives under <cache>/gv/, which may not exist yet.
+    // (For the natural path the parent is `scratch_dir`, just created above.)
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow!("create gvproxy socket dir {}: {e}", parent.display()))?;
+    }
+    // Defense in depth: if even the (possibly relocated) socket path can't fit
+    // sun_path, fail with an actionable error instead of gvproxy's cryptic
+    // bind-failure-then-exit.
+    if socket_path.as_os_str().len() >= SUN_PATH_MAX {
+        bail!(
+            "gvproxy socket path {} is {} bytes, at/over the {SUN_PATH_MAX}-byte AF_UNIX \
+             sun_path buffer (path + NUL); use a shorter MVM_CACHE_DIR",
+            socket_path.display(),
+            socket_path.as_os_str().len(),
+        );
+    }
     let pid_path = scratch_dir.join(PID_FILE_NAME);
     let log_path = scratch_dir.join("host-gvproxy.log");
 
@@ -213,7 +274,7 @@ pub fn kill_by_pid_file(scratch_dir: &Path) -> Result<()> {
 /// SIGKILLed. Removes the PID + socket files on every terminal path.
 fn stop_by_pid_file_with_grace(scratch_dir: &Path, grace: Option<Duration>) -> Result<()> {
     let pid_path = scratch_dir.join(PID_FILE_NAME);
-    let socket_path = scratch_dir.join(SOCKET_FILE_NAME);
+    let socket_path = gvproxy_socket_path(scratch_dir);
 
     let pid: i32 = match std::fs::read_to_string(&pid_path) {
         Ok(s) => match s.trim().parse() {
@@ -325,6 +386,60 @@ mod tests {
         let a = derive_mac("vm-alpha");
         let b = derive_mac("vm-beta");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn socket_path_keeps_natural_path_when_it_fits() {
+        let scratch = Path::new("/Users/u/.cache/mvm/builder-vm/vms/mvm-builder-vz-123");
+        let cache = Path::new("/Users/u/.cache/mvm");
+        let got = gvproxy_socket_path_in(scratch, cache);
+        // Fits → unchanged behaviour: socket sits in the scratch dir.
+        assert_eq!(got, scratch.join(SOCKET_FILE_NAME));
+        assert!(got.as_os_str().len() < SUN_PATH_MAX);
+    }
+
+    #[test]
+    fn socket_path_relocates_when_natural_path_exceeds_sun_path() {
+        // A long cache root + the long persistent state-dir name pushes the
+        // natural socket path over the AF_UNIX limit (the proof4 failure mode).
+        let cache = Path::new("/Users/somebody/some-long-isolated-cache-dir/mvm");
+        let scratch = cache
+            .join("builder-vm/vms")
+            .join("mvm-persistent-builder-vz-1782091841495-85253");
+        let natural = scratch.join(SOCKET_FILE_NAME);
+        assert!(
+            natural.as_os_str().len() >= SUN_PATH_MAX,
+            "fixture must exceed the limit: {} bytes",
+            natural.as_os_str().len()
+        );
+        let got = gvproxy_socket_path_in(&scratch, cache);
+        // Relocated: not the natural path, lives under <cache>/gv/, ends .sock,
+        // and now fits the limit so gvproxy can bind it.
+        assert_ne!(got, natural);
+        assert_eq!(got.parent().unwrap(), cache.join("gv"));
+        assert_eq!(got.extension().and_then(|e| e.to_str()), Some("sock"));
+        assert!(
+            got.as_os_str().len() < SUN_PATH_MAX,
+            "relocated path must fit: {} bytes",
+            got.as_os_str().len()
+        );
+    }
+
+    #[test]
+    fn socket_path_is_deterministic_and_collision_free() {
+        let cache = Path::new("/Users/somebody/some-long-isolated-cache-dir/mvm");
+        let a = cache.join("builder-vm/vms/mvm-persistent-builder-vz-1111111111111-11111");
+        let b = cache.join("builder-vm/vms/mvm-persistent-builder-vz-2222222222222-22222");
+        // Same input → same path (so spawn_detached and stop_by_pid_file agree).
+        assert_eq!(
+            gvproxy_socket_path_in(&a, cache),
+            gvproxy_socket_path_in(&a, cache)
+        );
+        // Different VMs → different relocated sockets (no collision).
+        assert_ne!(
+            gvproxy_socket_path_in(&a, cache),
+            gvproxy_socket_path_in(&b, cache)
+        );
     }
 
     #[test]
