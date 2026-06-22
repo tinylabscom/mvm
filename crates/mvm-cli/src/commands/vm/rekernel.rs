@@ -60,6 +60,15 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         }
     }
 
+    // Capture the kernel-swap detail before these fields move into `up::Args`.
+    let vm_name = args.name.clone();
+    let rekernel_detail = format!(
+        "hypervisor={} kernel_pin={} flake={}",
+        args.hypervisor,
+        args.kernel_pin.as_deref().unwrap_or("-"),
+        args.flake.as_deref().unwrap_or("-"),
+    );
+
     // Reboot on the (potentially new) kernel. All parameters not exposed on
     // the `rekernel` surface take their `up` defaults so the semantics are
     // exactly those of a plain `mvmctl up --name <name> [flags...]`.
@@ -108,5 +117,11 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
             redact: vec![],
         },
         cfg,
-    )
+    )?;
+
+    // Record the kernel swap as a distinct audit entry. The down/up legs
+    // above already emitted their own VmStop / plan.* + VmStart entries;
+    // this makes the kernel change itself forensically visible.
+    mvm_core::audit_emit!(VmRekernel, vm: &vm_name, "{rekernel_detail}");
+    Ok(())
 }
