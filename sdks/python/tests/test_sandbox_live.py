@@ -76,6 +76,10 @@ set -u
 verb=${{1:-}}
 shift || true
 echo "$verb $*" >> {log!s}
+if [ "$verb" = "machine" ]; then
+  verb=${{1:-}}
+  shift || true
+fi
 case "$verb" in
   up)
     # Record stdin for completeness (mvmctl up has none).
@@ -113,7 +117,7 @@ case "$verb" in
     sleep {forward_sleep}
     exit 0
     ;;
-  down)
+  stop)
     exit {down_exit}
     ;;
   *)
@@ -242,7 +246,7 @@ def test_commands_start_dev_template_shells_to_proc_start(
     calls = _read_fixture_log(tmp_path)
     # 1: up, 2: proc start
     assert len(calls) == 2
-    assert calls[1].startswith("proc start sb-dev-vm")
+    assert calls[1].startswith("machine proc start sb-dev-vm")
     assert "-e MODE=test" in calls[1]
     assert "-- python run.py" in calls[1]
 
@@ -273,7 +277,7 @@ def test_commands_start_prod_template_raises_sandbox_dev_only(
     # The SDK must NOT have shelled to `mvmctl proc start`.
     calls = _read_fixture_log(tmp_path)
     assert len(calls) == 1, f"unexpected vsock traffic: {calls}"
-    assert not any(c.startswith("proc") for c in calls)
+    assert not any(c.startswith("machine proc") for c in calls)
 
 
 # ── files.write ──────────────────────────────────────────────────────
@@ -295,7 +299,7 @@ def test_files_write_shells_with_stdin_bytes(tmp_path: Path) -> None:
     sb.files.write("/app/config.json", b'{"x":1}')
 
     calls = _read_fixture_log(tmp_path)
-    assert any(c.startswith("fs write sb-fs-vm /app/config.json") for c in calls)
+    assert any(c.startswith("machine fs write sb-fs-vm /app/config.json") for c in calls)
     stdin_path = tmp_path / "fixture-stdin" / "fs-write-stdin.bin"
     assert stdin_path.read_bytes() == b'{"x":1}'
 
@@ -319,7 +323,7 @@ def test_kill_shells_to_mvmctl_down(tmp_path: Path) -> None:
     sb.kill()
 
     calls = _read_fixture_log(tmp_path)
-    assert any(c == "down sb-kill-vm" for c in calls)
+    assert any(c == "machine stop sb-kill-vm" for c in calls)
 
 
 def test_context_manager_kills_on_exit(tmp_path: Path) -> None:
@@ -338,7 +342,7 @@ def test_context_manager_kills_on_exit(tmp_path: Path) -> None:
         sb.files.write("/app/data.txt", "hi")
 
     calls = _read_fixture_log(tmp_path)
-    down_calls = [c for c in calls if c.startswith("down ")]
+    down_calls = [c for c in calls if c.startswith("machine stop ")]
     assert len(down_calls) == 1
 
 
@@ -379,7 +383,7 @@ def test_copy_in_shells_to_mvmctl_cp(tmp_path: Path) -> None:
 
     calls = _read_fixture_log(tmp_path)
     assert any(
-        c.startswith(f"cp {host_file} sb-cp-vm:/app/local.txt") for c in calls
+        c.startswith(f"machine cp {host_file} sb-cp-vm:/app/local.txt") for c in calls
     ), calls
 
 
@@ -397,7 +401,7 @@ def test_copy_out_shells_to_mvmctl_cp(tmp_path: Path) -> None:
 
     calls = _read_fixture_log(tmp_path)
     assert any(
-        c.startswith(f"cp sb-cp-vm:/app/out.txt {dest}") for c in calls
+        c.startswith(f"machine cp sb-cp-vm:/app/out.txt {dest}") for c in calls
     ), calls
 
 
@@ -445,7 +449,7 @@ def test_forward_shells_to_mvmctl_forward(tmp_path: Path) -> None:
     sb._live._forwards[0].wait(timeout=5)
     calls = _read_fixture_log(tmp_path)
     assert any(
-        c.startswith("forward sb-fwd-vm --port 8080:80") for c in calls
+        c.startswith("machine forward sb-fwd-vm --port 8080:80") for c in calls
     ), calls
 
 
@@ -497,8 +501,8 @@ def test_aexec_runs_and_returns_result(tmp_path: Path) -> None:
 
     asyncio.run(body())
     calls = _read_fixture_log(tmp_path)
-    assert any(c.startswith("proc start sb-aex-vm") for c in calls), calls
-    assert any(c.startswith("proc wait sb-aex-vm pid-token-abc123") for c in calls), calls
+    assert any(c.startswith("machine proc start sb-aex-vm") for c in calls), calls
+    assert any(c.startswith("machine proc wait sb-aex-vm pid-token-abc123") for c in calls), calls
 
 
 def test_async_context_manager_kills_on_exit(tmp_path: Path) -> None:
@@ -517,7 +521,7 @@ def test_async_context_manager_kills_on_exit(tmp_path: Path) -> None:
 
     asyncio.run(body())
     calls = _read_fixture_log(tmp_path)
-    assert sum(1 for c in calls if c.startswith("down ")) == 1, calls
+    assert sum(1 for c in calls if c.startswith("machine stop ")) == 1, calls
 
 
 def test_aexec_dev_only_on_prod_template(tmp_path: Path) -> None:
@@ -612,8 +616,8 @@ def test_code_sandbox_run_returns_stdout(tmp_path: Path) -> None:
         assert cs.run("print(2 + 2)") == "4"
 
     calls = _read_fixture_log(tmp_path)
-    assert any(c.startswith("proc start sb-cs-vm") and "-- python -c" in c for c in calls), calls
-    assert any(c.startswith("proc wait sb-cs-vm") for c in calls), calls
+    assert any(c.startswith("machine proc start sb-cs-vm") and "-- python -c" in c for c in calls), calls
+    assert any(c.startswith("machine proc wait sb-cs-vm") for c in calls), calls
 
 
 def test_code_sandbox_run_raises_on_nonzero(tmp_path: Path) -> None:
@@ -660,7 +664,7 @@ def test_code_sandbox_run_script_copies_then_execs(tmp_path: Path) -> None:
         assert cs.run_script(str(host_script)) == "ok"
 
     calls = _read_fixture_log(tmp_path)
-    assert any(c.startswith("cp ") and "sb-cs-vm:/tmp/job.py" in c for c in calls), calls
+    assert any(c.startswith("machine cp ") and "sb-cs-vm:/tmp/job.py" in c for c in calls), calls
     assert any("-- python /tmp/job.py" in c for c in calls), calls
 
 
@@ -696,7 +700,7 @@ def test_browser_sandbox_forwards_cdp_and_endpoint(tmp_path: Path) -> None:
         assert bs.endpoint() == "http://localhost:9222"
         bs.sandbox._live._forwards[0].wait(timeout=5)
         calls = _read_fixture_log(tmp_path)
-        assert any(c.startswith("forward sb-br-vm --port 9222:9222") for c in calls), calls
+        assert any(c.startswith("machine forward sb-br-vm --port 9222:9222") for c in calls), calls
     finally:
         bs.kill()
 
@@ -714,7 +718,7 @@ def test_browser_sandbox_custom_host_port(tmp_path: Path) -> None:
         assert bs.endpoint() == "http://localhost:18222"
         bs.sandbox._live._forwards[0].wait(timeout=5)
         calls = _read_fixture_log(tmp_path)
-        assert any(c.startswith("forward sb-br-vm --port 18222:9222") for c in calls), calls
+        assert any(c.startswith("machine forward sb-br-vm --port 18222:9222") for c in calls), calls
     finally:
         bs.kill()
 
