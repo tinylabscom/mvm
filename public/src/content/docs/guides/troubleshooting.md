@@ -218,15 +218,22 @@ to a sealed microVM) and when stdin is not a terminal — both fail fast with a
 clear message rather than hanging. To keep the machine after the shell exits,
 add `--name <N>` or `-d`.
 
-### `machine run --name X` fails: "machine 'X' exists with a different config"
+### `machine run --name X` recreated my machine
 
-You're reusing a name whose persisted spec was created with a different boot
-config (image, CPU, memory, profile, …). `machine run` refuses to silently reuse
-or clobber it.
+`machine run --name X` with a config that differs from the persisted spec
+(image, CPU, memory, profile, volumes, …) **auto-recreates** the machine: it
+stops the old instance, overwrites the spec, and reboots, printing
+`machine 'X': config changed (…) — stopping the old instance and recreating it`
+on stderr. This is intended — a machine is defined by its config, so a config
+change converges to a fresh machine.
 
-**Fix**: drop the conflicting flags to reconnect to the existing machine
-(`mvmctl machine run --name X`), pick a different name, or pass `--force` to stop,
-overwrite, and recreate it under the new config.
+**If that wasn't what you wanted** (e.g. a typo'd `--image`): the machine's own
+rootfs is ephemeral, so just re-run with the right config. Durable data should
+live in a `--volume` host share, which lives on the host and survives the
+recreate. To keep two configs side by side, give them different `--name`s.
+
+**To reconnect without changing anything**, run `mvmctl machine run --name X`
+with no other config flags — a matching config reuses the running machine.
 
 ### I detached a machine with `-d` — how do I get back in?
 

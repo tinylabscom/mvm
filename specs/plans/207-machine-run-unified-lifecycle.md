@@ -17,8 +17,10 @@ Read both first — they are the contract. The locked rules:
   in `--prod`/sealed via `enforce_accessible_gate` (claim 15). `--tty` never
   affects persistence; `-it` alone = transient interactive (gone on shell exit).
 - Default (no flags) = transient `run_secure`, byte-for-byte unchanged.
-- Collision (named spec exists, different config) = **error** unless `--force`
-  (stop + overwrite + restart).
+- Config change (named spec exists, different config) = **auto-recreate** (stop +
+  overwrite + restart), announced loudly on stderr. No `--force`; matching config
+  reconnects. (Supersedes the original error-unless-`--force` decision — durable
+  data lives in `--volume` host shares that survive the recreate.)
 
 **Key anchors (verify before editing):**
 `crates/mvm-cli/src/commands/machine/mod.rs` (`MachineRunArgs`, `run()` dispatch,
@@ -38,8 +40,8 @@ stream — leave unchanged), `console::run` (PTY attach to reuse), and
 | `run -it --name web --image X -- /bin/sh` | yes | web | yes | on shell exit | up |
 | `run -d --image X` | yes | auto, printed | no | after boot | up |
 | `run -d --name web --image X` | yes | web | no | after boot | up |
-| `run --name web` (exists, diff config) | — | — | — | error | unchanged |
-| `run --force --name web ...` (diff config) | yes | web | per flags | per flags | recreated |
+| `run --name web` (exists, same config) | yes | web | per flags | per flags | reused |
+| `run --name web --image X2` (exists, diff config) | yes | web | per flags | per flags | auto-recreated (loud) |
 
 ---
 
@@ -77,11 +79,12 @@ stream — leave unchanged), `console::run` (PTY attach to reuse), and
       `mvm_core::naming::generate_instance_id()` (one scheme, valid VM name). The
       name is surfaced on stdout (`start_machine` line + a bare-name last line for
       `-d`) and in `--json`.
-- [x] Create-or-reuse via `resolve_persistent_spec` + `reconcile_machine_spec`:
+- [x] Create-or-reconcile via `resolve_persistent_spec` + `reconcile_machine_spec`:
       absent → `Create` (write); same launch config → `Reuse`; different config →
-      **error** (`machine 'N' exists with a different config; pass --force …`)
-      unless `--force` → `Recreate` (stop running + overwrite). `--image`-less
-      invocations are a pure reconnect to the on-disk spec.
+      `Recreate { changed }` — **auto-recreate** (stop running + overwrite +
+      reboot), with a loud `eprintln!` naming the changed fields
+      (`machine_config_diff`). No `--force` flag. `--image`-less invocations are a
+      pure reconnect to the on-disk spec.
 - [x] `machine_config_matches` compares only boot-affecting fields, ignoring
       runtime metadata (resolved digest / timestamps) so a restart never trips a
       false collision.
@@ -91,7 +94,8 @@ stream — leave unchanged), `console::run` (PTY attach to reuse), and
 - [x] Post-start (`run_persistent_post_start`): argv → `wait_for_guest_agent` +
       `console::run` exec (streamed, machine left up); no argv + `-d` → print the
       name; no argv + no `-d` → print a `machine shell <name>` hint.
-- [x] Tests: reconcile create/reuse/error/force; config-match ignores metadata;
+- [x] Tests: reconcile create/reuse/auto-recreate (+ changed-field summary);
+      config-match ignores metadata;
       run-spec field mapping; auto-name validity; `--image`-less reconnect +
       missing-machine error. (Live reconnect through `shell`/`exec`/`stop` is
       Task 5.)
@@ -121,11 +125,10 @@ stream — leave unchanged), `console::run` (PTY attach to reuse), and
       = `!persistent`.
 - [x] Dev-only gate: `enforce_accessible_gate` (claim 15, now
       `pub(in crate::commands)`) is called **before boot** for an existing
-      machine; a fresh boot is re-checked by `console::run` post-boot. The
-      recreate `--force` is deliberately **not** threaded into the gate, so it
-      cannot bypass claim 15. (`machine run` has no `--prod` flag — it is
-      dev-tier; the sealed-image/non-`dev-shell`-agent triggers are the relevant
-      ones.)
+      machine; a fresh boot is re-checked by `console::run` post-boot. An
+      auto-recreate (config change) still goes through the gate, so it cannot
+      bypass claim 15. (`machine run` has no `--prod` flag — it is dev-tier; the
+      sealed-image/non-`dev-shell`-agent triggers are the relevant ones.)
 - [x] `require_tty(stdin_is_tty)` refuses a non-TTY stdin up front with a clear
       message — no hang. Call site reads `std::io::stdin().is_terminal()`.
 - [x] Tests: `interactive_requires_a_host_tty`,
