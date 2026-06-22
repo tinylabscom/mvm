@@ -67,6 +67,80 @@ packaging fix (tracked separately, though this plan reduces its surface).
 
 ---
 
+## Implementation status & resume context (as of 2026-06-21)
+
+**Branches / PRs**
+
+- **PR #1252** = branch `feat/plan-209-task1-unified-bridge-config` — carries the
+  specs + **Task 1 + Task 2**. CI was red on `check-no-spec-refs-in-comments`
+  (plan/ADR citations in source comments) → fixed (commit `15cd64e3`), pushed,
+  `MERGEABLE`. **Note:** this PR still has the *original* ADR-094 ("split all
+  backends / thin libkrun launcher"). The descope amendment lives on the Task 4
+  branch below, so #1252 would merge ADR v1 and the Task 4 PR supersedes it with
+  v2 — unless we cherry-pick the descope doc-commit into #1252 first (open
+  decision — see below).
+- **Task 4 work** = branch `feat/plan-209-task4-fold-sidecars` (stacked on
+  #1252). Currently contains only the **descope amendment** (ADR-094 + this plan
+  + REFACTOR-STATUS rewritten; commit `a66b86da`). No Task 4 code yet.
+
+**Done**
+
+- Task 1 (unified `bridge::parse` contract) + Task 2 (`mvm-bridge` binary). 43
+  tests; fmt/clippy/spec-ref gates green.
+- Task 3 **descoped** (libkrun stays merged) — see ADR-094 "Why libkrun stays
+  merged". `msb_krun` checked and rejected (same `_exit()` behavior).
+
+**Not done — remaining Task 4 work (mechanical but wide; both spawn sites read
+and understood):**
+
+- **vz leg** — `mvm-backend::vz::spawn_vz_drainer` (`crates/mvm-backend/src/vz.rs`
+  ~L2317–2375). Reshape `drainer_cfg` JSON → unified `BridgeConfigJson`: **add
+  `keys_dir`** (= `data_dir.join("keys")`; the old drainer omitted it),
+  `endpoint: {vz_ingest: {events_socket_path}}`, omit `network_policy_json` (old
+  drainer hardcoded `network_policy: None`). Resolve `mvm-bridge` (env
+  `MVM_BRIDGE_PATH`) instead of `mvm-vz-drainer`. *Compiles on macOS; live test
+  needs macOS 26 (now available after this upgrade).*
+- **FC leg** — `mvm-backend::microvm::spawn_fc_bridge`
+  (`crates/mvm-backend/src/microvm.rs` ~L2933–3015, `#[cfg(target_os="linux")]`).
+  Reshape `bridge_cfg` JSON: move `passt_path` + `passt_hashes_path` into
+  `endpoint: {passt: {passt_path, passt_hashes_path, gateway_fd_raw,
+  supervisor_fd_raw}}`; **add `network_policy_json` = serialized
+  `NetworkPolicy::unrestricted()`** (the old `mvm-firecracker-bridge` hardcoded
+  this internally so the passt bridge defers to the nftables moat — must now be
+  producer-supplied). Resolve `mvm-bridge`. ***Linux-only: NOT compiled on a
+  macOS host — only CI verifies it.*** Leave the socketpair + `pre_exec` dup2 +
+  `AttachedBridgeGuard` exactly as-is.
+- **Byte-equivalence safety net** (cross-platform, runs on macOS): a test that
+  builds the exact JSON each producer now emits (Passt + VzIngest) and asserts it
+  deserializes into the unified `BridgeConfigJson` with the right endpoint +
+  fields. This is the main guard for the FC leg we can't compile here.
+- **Delete the two old bins** + their `[[bin]]` entries
+  (`crates/mvm-vm-host/src/bin/mvm-firecracker-bridge.rs`, `mvm-vz-drainer.rs`,
+  `crates/mvm-vm-host/Cargo.toml`). **Deletion fallout to handle in the same
+  change** (found via grep): `crates/mvm-cli/src/commands/vm/up.rs` (references a
+  bin name), `crates/mvm-vm-host/fuzz/` targets + `.github/workflows/security.yml`
+  bridge-fuzz lane (L387), and jailer doc/comments (`mvm-hostd/src/jailer/*`).
+  Keep `firecracker_bridge::parse` (the `decode_plan_json`/`verify_passt_hash`/
+  `PasstHashesFile` helpers + the now-bin-less `BridgeConfigJson`, which stays
+  `pub` so no dead-code warning) — the unified `bridge::parse` re-exports from it.
+- Consider splitting Task 4 into **4a** (wire FC+vz + byte-equiv tests, *keep*
+  old bins) and **4b** (delete bins + fuzz/CI/up.rs cleanup) so the risky
+  deletion is isolated + revertible.
+
+**Then:** Task 5 (fuzz/CI/docs/architecture.yml/doctor) and Task 6 (verification —
+vz now live-testable on macOS 26; FC still KVM-gated).
+
+**Open decisions for the user**
+
+1. **#1252 ADR coordination:** merge #1252 as-is (ADR v1, superseded by Task 4
+   PR) **or** cherry-pick the descope doc-commit (`a66b86da`) into #1252 so it
+   merges correct in one shot?
+2. **FC verification basis:** OK to land the FC egress-path change CI-checked +
+   live-KVM-gated only (no KVM host available to us)?
+3. Task 4 as one PR or split 4a/4b?
+
+---
+
 ## Task 1: Unified `BridgeConfigJson` + endpoint-kind discriminant (contract first) — ✅ DONE
 
 - [x] New module `mvm_vm_host::bridge::parse` defines a single `BridgeConfigJson`
