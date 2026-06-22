@@ -145,6 +145,29 @@ let
     "MMC" "MMC_BLOCK"      # no SD/eMMC behind virtio
     "REGULATOR" "POWER_SUPPLY" "THERMAL"  # SoC power plumbing defconfig drags in
     "NEW_LEDS" "LEDS_CLASS"
+
+    # Shrink batch 1 — leaf driver subsystems defconfig pulls in that a
+    # headless virtio microVM never touches (console is hvc0 + vsock; no
+    # firmware blobs, no input devices, no host sensors/watchdog). None are
+    # transitive deps of the keep-set (virtio/vsock/ext4/overlay/dm-verity).
+    "FW_LOADER"            # request_firmware infra — no driver here loads blobs
+    "FIREWIRE"             # IEEE-1394 host stack
+    "INPUT" "SERIO"        # input core + PS/2 serial-IO; no virtio-input/keyboard
+    "HWMON"                # hardware monitoring sensors
+    "WATCHDOG"             # watchdog timers
+
+    # Shrink batch 2 — self-contained subsystems + SoC bus/pin/PMIC drivers
+    # defconfig drags in. The SoC `ARCH_*` clusters are already off; these are
+    # the orthogonal driver menus that survive that. None are on the virtio
+    # microVM boot path (no GPIO/I2C/pinctrl/PMIC hardware; FDT boot, not EFI;
+    # egress is host-enforced, not in-guest netfilter; not a ChromeOS board).
+    "CHROME_PLATFORMS"     # ChromeOS embedded-controller drivers
+    "EFI"                  # arm64 boots from the FDT, never the EFI stub/runtime
+    "NETFILTER"            # workload egress is host-enforced + blackhole routes
+    "I2C"                  # no I2C buses behind virtio
+    "GPIOLIB"              # no GPIO controllers
+    "PINCTRL"              # SoC pin-mux
+    "MFD_CORE"             # multi-function (PMIC) device core
   ] ++ pkgs.lib.optionals (kernelArch == "arm64") [
     # arm64 boots from the FDT libkrun / Firecracker hand us; ACPI is
     # never consulted, so drop the ACPICA interpreter and the whole
