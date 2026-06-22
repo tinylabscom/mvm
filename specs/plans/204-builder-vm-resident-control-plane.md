@@ -348,12 +348,20 @@ arm lands with the daemon's image baking (boot-gated).
       set truthy to force the legacy in-VM shell build. `try_typed_flake_check`
       is untouched — flake check stays opt-in via `MVM_BUILDERD_TYPED`, so the
       flip is build-only. Three new unit tests cover the default-on + gate
-      semantics and the build/flake-check independence. The
-      `check-builder-shell-job-sites` allowlist stays at 4 entries (no drop): the
-      legacy `HostVmRequest::Run` construction in `persistent_builder.rs` is
-      retained as the daemon-unreachable + raw-shell-debug fallback, so that file
-      still *constructs* a shell job and legitimately stays allowlisted — the
-      drop only applies if the fallback is later removed entirely.
+      semantics and the build/flake-check independence.
+      **Follow-up landed — legacy build route removed:** `dev_build`'s persistent
+      path is now typed-only. The `MVM_BUILDERD_RAW_SHELL` debug gate and the
+      `dev_build` → `PersistentBuilderVm` shell-job fallback are deleted; a
+      reachable `mvm-builderd` builds guest images and an unreachable daemon /
+      daemon error falls through to the single-shot builder, not the legacy
+      in-VM shell build (which can no longer run a flake build anyway — it
+      dispatches `cmd.sh` under `setpriv --reuid=<builder-uid>`, and nix aborts
+      "cannot determine user's home directory" with no `/etc/passwd` entry; the
+      typed daemon and single-shot path run nix as uid 0). The
+      `check-builder-shell-job-sites` allowlist stays at 4 for now: the
+      now-orphaned `PersistentBuilderVm` / `submit()` machinery in
+      `persistent_builder.rs` still *constructs* `HostVmRequest::Run` and is
+      removed in a dead-code-teardown follow-up that drops the entry to 3.
       **Routing behaviour live-confirmed on macOS-26 Vz:** with the gate unset
       the build attempted the typed route by default (`dev_build`: "typed builder
       dispatch failed; falling back…"), and with `MVM_BUILDERD_RAW_SHELL=1` it
