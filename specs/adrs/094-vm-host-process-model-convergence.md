@@ -36,11 +36,18 @@ The cost of the divergence:
   `spawn_bridge_thread` hand-off. They differ only in the `BridgeEndpoints`
   variant (`Passt` vs `VzIngest`) and confinement. Two binaries, two stdin
   parsers, two fuzz surfaces, for one contract.
-- **A latent security inconsistency.** `mvm-firecracker-bridge` applies
-  `mvm-jailer-lite` confinement (`confine_self`, seccomp + Landlock) and
-  verifies the pinned passt hash; `mvm-vz-drainer` does **not** apply
-  jailer-lite. The same enforcement leaf is hardened on one backend and not
-  the other purely because the code is duplicated rather than shared.
+- **Confinement is wired per-binary, not per-platform.** `mvm-firecracker-bridge`
+  applies `mvm-jailer-lite` confinement (`confine_self`, seccomp + Landlock) and
+  verifies the pinned passt hash; `mvm-vz-drainer` applies neither. That
+  asymmetry is *mostly* a platform fact, not a pure duplication bug:
+  `confine_self` is **Linux-only** — on macOS it is a stub that returns
+  `SeccompUnavailable` (there is no Landlock/seccomp to apply), and the vz
+  drainer only ever runs on macOS. So the consolidation does **not** newly
+  confine the macOS paths (it cannot). What it *does* fix is that confinement
+  becomes a single cfg-gated codepath applied uniformly to every endpoint the
+  OS *can* confine (the Linux `Passt` path), instead of being open-coded in one
+  bin and absent from the other — removing the duplication and the risk that a
+  future Linux endpoint silently ships unconfined.
 - **The libkrun supervisor carries the trickiest code in the tree** — the
   `BridgeFds → BridgeEndpoints` factory closure and the
   concurrent-thread-reaped-by-VMM-`exit()` dance — which exists *only* because
@@ -61,11 +68,13 @@ sidecar binary**. Two moves:
 
 1. **Fold `mvm-firecracker-bridge` + `mvm-vz-drainer` into a single
    `mvm-bridge` binary.** It takes a unified `BridgeConfigJson` carrying an
-   **endpoint-kind discriminant**, applies **uniform** `mvm-jailer-lite`
-   confinement (closing the vz-drainer gap), verifies the passt hash on the
-   passt endpoint only, builds the matching `BridgeEndpoints` variant, and
-   calls the unchanged `spawn_bridge_thread`. The stdin contract — already
-   identical in practice — is written and fuzzed once.
+   **endpoint-kind discriminant**, applies `mvm-jailer-lite` confinement
+   through **one cfg-gated codepath** wherever the OS supports it (the Linux
+   `Passt` endpoint; macOS `VzIngest`/`LibkrunGvproxy` run unconfined because
+   macOS has no Landlock/seccomp — unchanged from today), verifies the passt
+   hash on the passt endpoint only, builds the matching `BridgeEndpoints`
+   variant, and calls the unchanged `spawn_bridge_thread`. The stdin contract —
+   already identical in practice — is written and fuzzed once.
 
 2. **Strip the bridge out of `mvm-libkrun-supervisor`.** The supervisor
    becomes a **thin krun launcher** (parse config → build `KrunContext` →
@@ -80,7 +89,7 @@ The resulting per-VM topology is uniform across every workload backend:
 ```text
 [ thin VMM launcher ]   +   [ shared mvm-bridge sidecar ]
   krun-launch / firecracker / vz        one binary, one stdin contract,
-                                        one confinement path
+                                        one (cfg-gated) confinement path
 ```
 
 Binaries go from four (`mvm-libkrun-supervisor`, `mvm-vz-supervisor`,
@@ -93,10 +102,13 @@ Binaries go from four (`mvm-libkrun-supervisor`, `mvm-vz-supervisor`,
   bridge sidecar is a single binary with a single stdin parser; the
   `firecracker-bridge-fuzz` and the supervisor-config fuzz surfaces converge.
   Claim 10/12/13 enforcement is exercised through one code path, not three.
-- **The vz confinement gap closes by construction.** Uniform jailer-lite on
-  the one sidecar means no backend can silently ship the bridge unconfined —
-  the same "make a hole impossible, not merely documented" discipline ADR-083
-  established for the workload path.
+- **Confinement becomes one cfg-gated codepath, not per-bin open-coding.**
+  Wherever the OS supports it (the Linux `Passt` endpoint) the single sidecar
+  applies `confine_self` uniformly, so a future Linux endpoint can't silently
+  ship unconfined. This does **not** newly confine the macOS paths (vz /
+  libkrun-on-macOS) — macOS has no Landlock/seccomp, so `confine_self` is a
+  hard-erroring stub there and those paths run unconfined exactly as today; the
+  win is removing the duplication, not adding a macOS sandbox.
 - **The trickiest concurrency code is deleted.** No more factory closure, no
   more thread-reaped-by-`exit()`; teardown is the explicit, uniform
   `AttachedBridgeGuard` fail-closed kill that FC/vz already use.

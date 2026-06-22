@@ -81,20 +81,34 @@ packaging fix (tracked separately, though this plan reduces its surface).
 
 ## Task 2: `mvm-bridge` binary — fold the two sidecars into one
 
+> Confinement is **Linux-only** (`confine_self` = Landlock+seccomp; the macOS
+> stub hard-errors). The unified binary is **cross-platform** (Linux `Passt`;
+> macOS `VzIngest`/`LibkrunGvproxy`), so confinement is cfg-gated per arm — not a
+> whole-binary Linux gate like the old `mvm-firecracker-bridge`. Network policy
+> is **not** derivable from endpoint kind (`Passt` serves both FC, which defers
+> to nftables → `unrestricted`, *and* libkrun-on-Linux, which enforces in the
+> bridge), so the producer supplies it via a `network_policy_json` config field.
+
+- [x] Extend `bridge::parse::BridgeConfigJson` with `network_policy_json:
+      Option<String>` (`#[serde(default)]`) — the producer's egress-policy
+      intent, decoded into `Option<NetworkPolicy>` for `BridgeConfig`. Keeps the
+      sidecar policy-agnostic.
 - [ ] Add `crates/mvm-vm-host/src/bin/mvm-bridge.rs`: read `BridgeConfigJson`
-      from stdin → (passt only) `verify_passt_hash` *before* confinement →
-      `confine_self` **for every endpoint kind** (closes the vz-drainer gap) →
-      decode plan/bundle/network_policy → build `BridgeConfig` → build the
-      `BridgeEndpoints` variant from the discriminant → `spawn_bridge_thread` →
-      `catch_unwind → exit(1)` fail-closed wrapper (preserve today's semantics).
-- [ ] Self-gate non-Linux to a stub `main()` (mirror the current
-      `mvm-firecracker-bridge` cfg pattern) so non-Linux workspace builds stay
-      green; vz endpoint path gated appropriately.
-- [ ] Declare `[[bin]] mvm-bridge` in `crates/mvm-vm-host/Cargo.toml`. Leave the
-      old two bins in place *for now* (deleted in Task 4 once callers move).
-- [ ] Tests: per-endpoint dispatch selects the right `BridgeEndpoints` variant;
-      confinement is applied on the vz path (regression for the gap); passt-hash
-      mismatch refuses before confinement.
+      from stdin → dispatch on endpoint kind. `Passt` (Linux): `verify_passt_hash`
+      *before* `confine_self` → reconstruct inherited fds → `BridgeEndpoints::Passt`;
+      rejected on non-Linux (requires Linux socketpair/passt). `VzIngest` /
+      `LibkrunGvproxy`: build the endpoint; `confine_self` only where supported
+      (gvproxy-on-Linux) — macOS runs unconfined (no LSM), unchanged from today.
+      Decode plan/bundle/network_policy → build `BridgeConfig` → `spawn_bridge_thread`
+      → `catch_unwind → exit(1)` fail-closed wrapper (preserve today's semantics).
+- [ ] Declare `[[bin]] mvm-bridge` in `crates/mvm-vm-host/Cargo.toml` (no
+      whole-binary cfg gate; per-arm gating inside). Leave the old two bins in
+      place *for now* (deleted in Task 4 once callers move).
+- [ ] Tests: per-endpoint dispatch selects the right `BridgeEndpoints` variant
+      (the pure config→endpoint mapping, testable without a live VM);
+      `network_policy_json` decodes; passt-hash mismatch refuses before
+      confinement; a `Passt` config on non-Linux is refused. (Live confinement +
+      relay are exercised on-host in Task 6 / the Linux-gated leg.)
 
 ## Task 3: Thin `mvm-libkrun-supervisor` + backend-spawned sidecar (the crux)
 
