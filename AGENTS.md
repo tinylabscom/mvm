@@ -181,6 +181,17 @@ Rules:
 
 **NEVER** use `.unwrap()` in production code. Always use `.expect("descriptive message")` instead, so that if a panic occurs, the error message explains what went wrong and where. `.unwrap()` is only acceptable in test code (`#[cfg(test)]` modules and `tests/` directories).
 
+## No Spec References in Code Comments
+
+**NEVER** cite a plan, ADR, PR, sprint, or workstream in a code comment. Process artifacts (`Plan 200`, `ADR-093`, `PR #1234`, `Sprint 52`, `W2.4`) belong in specs, commit messages, and PR descriptions — not in the source. The `check-no-spec-refs-in-comments` lint (`xtask/src/check_no_spec_refs_in_comments.rs`, a CI Lint-job gate) extracts comment text and fails the build on any such reference, so a citation that builds locally will still break the GitHub action.
+
+Keep the *reasoning* in the comment, drop the *citation*. Write the invariant or the "why" the comment is explaining, not the spec number that motivated it:
+
+- Bad: `// Plan 200 PR2: enforce uniform host:port L4 policy here`
+- Good: `// Enforce uniform host:port L4 policy — untrusted workloads never reach the network unless admitted`
+
+Spec numbers are still fine in string literals that are genuinely runtime data (error messages, audit-log fields) — the lint only scans comment text. When you need to record *why* a decision was made for future readers, put it in the commit message or the owning spec doc and link the code from there, not the other way around.
+
 ## Reuse First; Compose Small, Testable Units
 
 **Never reimplement functionality that already exists.** Before writing anything,
