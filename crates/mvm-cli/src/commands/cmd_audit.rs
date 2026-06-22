@@ -147,13 +147,14 @@ impl Commands {
                 _ => false,
             },
             Commands::Ls(a) => a.json,
-            Commands::Machine(a) => {
-                if let machine::MachineAction::Vm(ref cmd) = a.action {
-                    cmd.emits_machine_readable_stdout()
-                } else {
-                    false
-                }
-            }
+            Commands::Machine(a) => match &a.action {
+                // Folded advanced ops delegate to their own check.
+                machine::MachineAction::Vm(cmd) => cmd.emits_machine_readable_stdout(),
+                // `machine run --json` streams a structured MachineRunSummary;
+                // reserve stdout so reconcile chrome can't interleave.
+                machine::MachineAction::Run(r) => r.json,
+                _ => false,
+            },
             _ => false,
         }
     }

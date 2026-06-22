@@ -3962,6 +3962,17 @@ ssh_agent = true
     }
 
     #[test]
+    fn machine_run_json_reserves_stdout() {
+        // `machine run --json` streams structured JSON, so the stdout guard
+        // must fire (preserved from the retired `run --json`); without it, off.
+        let on = Cli::try_parse_from(["mvmctl", "machine", "run", "--image", "alpine", "--json"])
+            .unwrap();
+        assert!(on.command.emits_machine_readable_stdout());
+        let off = Cli::try_parse_from(["mvmctl", "machine", "run", "--image", "alpine"]).unwrap();
+        assert!(!off.command.emits_machine_readable_stdout());
+    }
+
+    #[test]
     fn vm_noun_removed() {
         use clap::error::ErrorKind;
         // After Task 7, `mvmctl vm <verb>` must not parse.
