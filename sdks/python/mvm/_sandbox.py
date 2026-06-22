@@ -17,8 +17,8 @@ Two modes are live:
   host's ``mvmctl compile`` / ``mvmctl run --mode plan`` verbs
   lower the recording via ``compile_recording``.
 - ``MVM_SDK_MODE=live`` (Plan 73 Followup H-live): every
-  ``Sandbox`` call shells to ``$MVM_CLI_BIN`` (``mvmctl up``,
-  ``mvmctl machine proc start``, ``mvmctl fs write``, ``mvmctl down``)
+  ``Sandbox`` call shells to ``$MVM_CLI_BIN`` (``mvmctl machine run``,
+  ``mvmctl machine proc start``, ``mvmctl fs write``, ``mvmctl machine stop``)
   against a real microVM. The shell is dispatched by
   :class:`_LiveTransport` below.
 
@@ -528,7 +528,7 @@ class _LiveTransport:
     Created by :meth:`Sandbox.create` when ``MVM_SDK_MODE=live``.
     Holds the resolved ``mvmctl`` binary path, the generated
     ``vm_id``, and the template's ``build_mode`` ("dev" / "prod")
-    parsed from ``mvmctl up --up-json``'s stdout envelope. The
+    parsed from ``mvmctl machine run --up-json``'s stdout envelope. The
     ``build_mode`` is what the SDK uses to enforce the W4.3
     dev-only ``proc start`` rule client-side."""
 
@@ -557,7 +557,7 @@ class _LiveTransport:
         workload_id: str,
         ttl_seconds: int,
     ) -> "_LiveTransport":
-        """Run ``mvmctl up --up-json --detach --name <id> --manifest
+        """Run ``mvmctl machine run -d --up-json --name <id> --manifest
         <template>`` and parse the JSON envelope. Raises
         :class:`SandboxLiveError` on any failure."""
         mvm_cli_bin = os.environ.get(MVM_CLI_BIN_ENV) or ""
@@ -565,7 +565,7 @@ class _LiveTransport:
             raise SandboxModeError(
                 "MVM_SDK_MODE=live requires MVM_CLI_BIN to point at a `mvmctl` binary."
             )
-        # Generate a short, validatable VM id. `mvmctl up` rejects
+        # Generate a short, validatable VM id. `mvmctl machine run` rejects
         # names that don't match its validator; alphanumerics with
         # a hyphen are safe.
         suffix = secrets.token_hex(4)
@@ -574,7 +574,9 @@ class _LiveTransport:
 
         argv = [
             mvm_cli_bin,
-            "up",
+            "machine",
+            "run",
+            "-d",
             "--up-json",
             "--name",
             vm_id,
@@ -598,7 +600,7 @@ class _LiveTransport:
 
         if result.returncode != 0:
             raise SandboxLiveError(
-                f"`mvmctl up` failed with exit code {result.returncode}",
+                f"`mvmctl machine run` failed with exit code {result.returncode}",
                 argv=argv,
                 exit_code=result.returncode,
                 stderr=result.stderr,
@@ -645,7 +647,7 @@ class _LiveTransport:
                     raise SandboxLiveError(
                         f"`commands.start` env {key!r} carries a non-literal value; "
                         f"live mode only forwards literal env vars (secrets must be "
-                        f"injected via the host keystore + `--secret` on `mvmctl up`).",
+                        f"injected via the host keystore + `--secret` on `mvmctl machine run`).",
                         argv=shell,
                     )
         shell += ["--", *argv]
@@ -687,7 +689,7 @@ class _LiveTransport:
                     raise SandboxLiveError(
                         f"`exec` env {key!r} carries a non-literal value; live mode "
                         f"only forwards literal env vars (secrets must be injected via "
-                        f"the host keystore + `--secret` on `mvmctl up`).",
+                        f"the host keystore + `--secret` on `mvmctl machine run`).",
                         argv=start_shell,
                     )
         if cwd is not None:
@@ -891,32 +893,32 @@ class _LiveTransport:
 
 
 def _parse_up_envelope(stdout: str, *, argv: list[str]) -> dict[str, str]:
-    """Parse ``mvmctl up --up-json`` stdout. The envelope is a single
+    """Parse ``mvmctl machine run --up-json`` stdout. The envelope is a single
     JSON line; trailing newlines tolerated. Raises
     :class:`SandboxLiveError` if the envelope is malformed."""
     line = stdout.strip()
     if not line:
         raise SandboxLiveError(
-            "`mvmctl up --up-json` produced empty stdout — expected a JSON envelope.",
+            "`mvmctl machine run --up-json` produced empty stdout — expected a JSON envelope.",
             argv=argv,
         )
     try:
         parsed = json.loads(line)
     except json.JSONDecodeError as exc:
         raise SandboxLiveError(
-            f"`mvmctl up --up-json` stdout is not valid JSON: {exc.msg}",
+            f"`mvmctl machine run --up-json` stdout is not valid JSON: {exc.msg}",
             argv=argv,
             stderr=line,
         ) from exc
     if not isinstance(parsed, dict):
         raise SandboxLiveError(
-            f"`mvmctl up --up-json` envelope must be a JSON object; got {type(parsed).__name__}",
+            f"`mvmctl machine run --up-json` envelope must be a JSON object; got {type(parsed).__name__}",
             argv=argv,
         )
     schema = parsed.get("schema_version")
     if schema != _LiveTransport.SCHEMA_VERSION:
         raise SandboxLiveError(
-            f"`mvmctl up --up-json` envelope schema_version={schema!r}; "
+            f"`mvmctl machine run --up-json` envelope schema_version={schema!r}; "
             f"SDK supports {_LiveTransport.SCHEMA_VERSION}",
             argv=argv,
         )
@@ -924,12 +926,12 @@ def _parse_up_envelope(stdout: str, *, argv: list[str]) -> dict[str, str]:
     build_mode = parsed.get("build_mode")
     if not isinstance(vm_id, str) or not vm_id:
         raise SandboxLiveError(
-            "`mvmctl up --up-json` envelope is missing a non-empty `vm_id` field.",
+            "`mvmctl machine run --up-json` envelope is missing a non-empty `vm_id` field.",
             argv=argv,
         )
     if build_mode not in ("dev", "prod"):
         raise SandboxLiveError(
-            f"`mvmctl up --up-json` envelope build_mode={build_mode!r}; "
+            f"`mvmctl machine run --up-json` envelope build_mode={build_mode!r}; "
             f"expected 'dev' or 'prod'.",
             argv=argv,
         )
@@ -942,11 +944,11 @@ class Sandbox:
 
     Construct via :meth:`Sandbox.create`. Under ``MVM_SDK_MODE=record``
     the constructor sets up an in-process recording; under
-    ``MVM_SDK_MODE=live`` it shells ``mvmctl up`` to boot a real
+    ``MVM_SDK_MODE=live`` it shells ``mvmctl machine run`` to boot a real
     microVM and stashes the resulting handle on
     ``self._live``. Supports context-manager usage; ``__exit__``
     issues a ``kill`` (record-mode: appends a kill op; live-mode:
-    shells ``mvmctl down``)."""
+    shells ``mvmctl machine stop``)."""
 
     def __init__(
         self,
@@ -979,7 +981,7 @@ class Sandbox:
         ``runtime::resolve_base_image``); in record mode unknown
         templates fail at lower time, not here, because the wire
         shape preserves them verbatim. In live mode unknown
-        templates fail when ``mvmctl up --manifest <template>``
+        templates fail when ``mvmctl machine run --manifest <template>``
         rejects them — that failure surfaces as
         :class:`SandboxLiveError` here.
 

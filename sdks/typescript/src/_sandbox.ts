@@ -19,7 +19,7 @@
  *   the Rust lowering at `mvm_sdk::runtime::compile_recording`
  *   produces a Workload.
  * - `MVM_SDK_MODE=live` (Plan 73 Followup H-live): every
- *   `Sandbox` call shells to `$MVM_CLI_BIN` (`mvmctl up`,
+ *   `Sandbox` call shells to `$MVM_CLI_BIN` (`mvmctl machine run`,
  *   `mvmctl machine proc start`, `mvmctl machine fs write`, `mvmctl machine stop`)
  *   against a real microVM. The shell is dispatched by
  *   {@link LiveTransport} below.
@@ -376,7 +376,7 @@ function requireRecording(): RuntimeRecordingWire {
  *
  *  Created by `Sandbox.create(...)` when `MVM_SDK_MODE=live`. Holds
  *  the resolved `mvmctl` path, the generated `vmId`, and the
- *  template's `build_mode` parsed from the `mvmctl up --up-json`
+ *  template's `build_mode` parsed from the `mvmctl machine run --up-json`
  *  envelope. The `build_mode` is what the SDK uses to enforce the
  *  W4.3 dev-only `proc start` rule client-side. */
 export class LiveTransport {
@@ -408,7 +408,7 @@ export class LiveTransport {
         "MVM_SDK_MODE=live requires MVM_CLI_BIN to point at a `mvmctl` binary.",
       );
     }
-    // Generate a short, validatable VM id. `mvmctl up` rejects
+    // Generate a short, validatable VM id. `mvmctl machine run` rejects
     // names that don't match its validator; alphanumerics with a
     // hyphen are safe.
     const suffix = randomHex(4);
@@ -419,7 +419,9 @@ export class LiveTransport {
     const vmId = `sdk-${slug}-${suffix}`;
 
     const argv = [
-      "up",
+      "machine",
+      "run",
+      "-d",
       "--up-json",
       "--name",
       vmId,
@@ -449,7 +451,7 @@ export class LiveTransport {
     }
     if (result.status !== 0) {
       throw new SandboxLiveError(
-        `\`mvmctl up\` failed with exit code ${result.status}`,
+        `\`mvmctl machine run\` failed with exit code ${result.status}`,
         {
           argv: [mvmCliBin, ...argv],
           exitCode: result.status,
@@ -504,7 +506,7 @@ export class LiveTransport {
         throw new SandboxLiveError(
           `env ${JSON.stringify(key)} carries a non-literal value; live mode only ` +
             "forwards literal env vars (secrets must be injected via the host keystore " +
-            "+ `--secret` on `mvmctl up`).",
+            "+ `--secret` on `mvmctl machine run`).",
           { argv: shellForErr },
         );
       }
@@ -749,7 +751,7 @@ export class LiveTransport {
   }
 }
 
-/** Parse an `mvmctl up --up-json` stdout envelope. The envelope is
+/** Parse an `mvmctl machine run --up-json` stdout envelope. The envelope is
  *  a single JSON line; trailing newlines tolerated. Throws
  *  `SandboxLiveError` on any shape violation. Exported for tests. */
 export function parseUpEnvelope(
@@ -759,7 +761,7 @@ export function parseUpEnvelope(
   const line = stdout.trim();
   if (!line) {
     throw new SandboxLiveError(
-      "`mvmctl up --up-json` produced empty stdout — expected a JSON envelope.",
+      "`mvmctl machine run --up-json` produced empty stdout — expected a JSON envelope.",
       { argv },
     );
   }
@@ -774,7 +776,7 @@ export function parseUpEnvelope(
   }
   if (typeof parsed !== "object" || parsed === null) {
     throw new SandboxLiveError(
-      "`mvmctl up --up-json` envelope must be a JSON object.",
+      "`mvmctl machine run --up-json` envelope must be a JSON object.",
       { argv },
     );
   }
@@ -788,7 +790,7 @@ export function parseUpEnvelope(
   }
   if (typeof obj.vm_id !== "string" || obj.vm_id.length === 0) {
     throw new SandboxLiveError(
-      "`mvmctl up --up-json` envelope is missing a non-empty `vm_id` field.",
+      "`mvmctl machine run --up-json` envelope is missing a non-empty `vm_id` field.",
       { argv },
     );
   }
@@ -821,7 +823,7 @@ function isLiveActive(): boolean {
  *
  *  Construct via `Sandbox.create(...)`. Under `MVM_SDK_MODE=record`
  *  the constructor sets up an in-process recording; under
- *  `MVM_SDK_MODE=live` it shells `mvmctl up` to boot a real
+ *  `MVM_SDK_MODE=live` it shells `mvmctl machine run` to boot a real
  *  microVM and stashes the resulting handle on
  *  `this._live`. Use `[Symbol.dispose]` (TS 5.2+) for automatic
  *  cleanup, or call `sb.kill()` explicitly. */

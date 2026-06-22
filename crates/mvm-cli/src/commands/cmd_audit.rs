@@ -152,8 +152,9 @@ impl Commands {
                 // Folded advanced ops delegate to their own check.
                 machine::MachineAction::Vm(cmd) => cmd.emits_machine_readable_stdout(),
                 // `machine run --json` streams a structured MachineRunSummary;
+                // `machine run --up-json` emits the SDK boot envelope;
                 // reserve stdout so reconcile chrome can't interleave.
-                machine::MachineAction::Run(r) => r.json,
+                machine::MachineAction::Run(r) => r.json || r.up_json,
                 _ => false,
             },
             _ => false,

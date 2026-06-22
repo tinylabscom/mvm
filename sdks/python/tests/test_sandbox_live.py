@@ -81,8 +81,8 @@ if [ "$verb" = "machine" ]; then
   shift || true
 fi
 case "$verb" in
-  up)
-    # Record stdin for completeness (mvmctl up has none).
+  up | run)
+    # Record stdin for completeness (mvmctl machine run has none).
     if [ -t 0 ]; then :; else cat > {stdin_dir!s}/up-stdin.bin || true; fi
     if [ "{up_exit}" -eq 0 ]; then
       echo '{envelope_json}'
@@ -207,7 +207,7 @@ def test_sandbox_create_live_parses_envelope_and_records_vm(
 
     calls = _read_fixture_log(tmp_path)
     assert len(calls) == 1
-    assert calls[0].startswith("up --up-json --name ")
+    assert calls[0].startswith("machine run -d --up-json --name ")
     assert "--manifest python-3.12" in calls[0]
     assert "--ttl" in calls[0]
 

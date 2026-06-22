@@ -198,6 +198,17 @@ pub(in crate::commands) struct MachineRunArgs {
     /// when `--name` is absent (the chosen name is printed). Implies persistence.
     #[arg(short = 'd', long)]
     pub detach: bool,
+    /// Emit a one-line JSON envelope on stdout when the machine is up.
+    /// Routes all other output to stderr. Implies persistence + detach
+    /// semantics (boot and return). Envelope shape:
+    /// `{"schema_version":1,"vm_id":"<name>","build_mode":"dev"|"prod"}`.
+    /// Used by the SDK live-mode transport to learn the vm_id and build_mode.
+    #[arg(long = "up-json")]
+    pub up_json: bool,
+    /// Set a TTL on the persistent machine after boot: `30s`, `5m`, `2h`, `7d`
+    /// or a bare number of seconds. The reaper tears down expired machines.
+    #[arg(long, value_name = "DURATION")]
+    pub ttl: Option<String>,
     /// Attach an interactive PTY shell (dev-only; refused for `--prod`/sealed
     /// images). Does not affect persistence: `-t` alone is a transient
     /// interactive machine, gone when the shell exits.
@@ -302,11 +313,11 @@ impl MachineRunArgs {
         self.tty || self.interactive
     }
 
-    /// `--name` or `-d`/`--detach` makes the machine survive the command.
+    /// `--name` or `-d`/`--detach`/`--up-json` makes the machine survive the command.
     /// `--tty` is deliberately NOT consulted here — persistence and
     /// interactivity are independent axes.
     fn persistent(&self) -> bool {
-        self.name.is_some() || self.detach
+        self.name.is_some() || self.detach || self.up_json
     }
 
     /// Resolve the lifecycle mode purely from the flags. The only validation is
@@ -2055,8 +2066,13 @@ fn run_persistent(
             kernel_pin: args.kernel_pin.clone(),
         },
     )?;
-    if !booted && !args.json {
+    if !booted && !args.json && !args.up_json {
         println!("machine {name} already running");
+    }
+
+    // Apply TTL if requested (after a successful boot record exists).
+    if let Some(dur_str) = args.ttl.as_deref() {
+        apply_machine_ttl(&name, dur_str)?;
     }
 
     run_persistent_post_start(cli, cfg, &args, &name, &spec)
@@ -2191,6 +2207,17 @@ fn run_persistent_post_start(
             cfg,
         );
     }
+    if args.up_json {
+        // Emit the SDK boot envelope as the sole stdout line.
+        let build_mode_str = resolve_build_mode_for_envelope(args, name);
+        let envelope = serde_json::json!({
+            "schema_version": 1,
+            "vm_id": name,
+            "build_mode": build_mode_str,
+        });
+        println!("{envelope}");
+        return Ok(());
+    }
     if !args.json {
         if args.detach {
             // `-d`: the name is the handle. `start_machine` already printed it;
@@ -2201,6 +2228,64 @@ fn run_persistent_post_start(
         }
     }
     Ok(())
+}
+
+/// Set a TTL on a persistent machine by writing `expires_at` to the name registry.
+/// Reuses the same registry helpers as `machine vm set-ttl`.
+fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
+    let dur = mvm_core::crypto::policy::parse_ttl(dur_str)
+        .with_context(|| format!("Invalid --ttl value {dur_str:?}"))?;
+    let expires_at = mvm_core::util::time::utc_plus_duration(dur);
+    let registry_path = mvm::vm::name_registry::registry_path();
+    let mut registry =
+        mvm::vm::name_registry::VmNameRegistry::load(&registry_path).with_context(|| {
+            format!(
+                "Failed to load VM name registry at {}",
+                registry_path.display()
+            )
+        })?;
+    registry
+        .set_expires_at(name, Some(expires_at))
+        .with_context(|| format!("Failed to set TTL for machine {name:?}"))?;
+    registry.save(&registry_path).with_context(|| {
+        format!(
+            "Failed to save VM name registry at {}",
+            registry_path.display()
+        )
+    })
+}
+
+/// Resolve the `build_mode` string for the `--up-json` envelope.
+///
+/// For manifest-backed boots, reads the template revision's `build_mode`
+/// field so the SDK knows whether `do_exec` is available (claim 4 / claim 15).
+/// For image-backed boots the runtime meta's `accessible` flag carries the
+/// same signal post-boot. Falls back to `"prod"` when no signal is available
+/// (fail-closed: the SDK will refuse exec against a prod image, which is
+/// correct).
+fn resolve_build_mode_for_envelope(args: &MachineRunArgs, name: &str) -> &'static str {
+    // Manifest path: read the template revision's stored build_mode.
+    if let Some(manifest) = args.manifest.as_deref() {
+        let slot_name = manifest
+            .trim_end_matches('/')
+            .split('/')
+            .next_back()
+            .unwrap_or(manifest);
+        if let Ok(Some(revision)) =
+            mvm::vm::template::lifecycle::template_load_current_revision(slot_name)
+        {
+            return match revision.build_mode.as_deref() {
+                Some("dev") => "dev",
+                _ => "prod",
+            };
+        }
+    }
+    // Image / fallback path: consult the runtime meta written at boot time.
+    // Missing or unreadable meta defaults to "prod" (fail-closed).
+    match mvm::vm::runtime_meta::read(name) {
+        Ok(Some(meta)) if meta.accessible => "dev",
+        _ => "prod",
+    }
 }
 
 /// The entrypoint action: dispatch the image's baked `/etc/mvm/entrypoint` (the
@@ -2337,6 +2422,8 @@ pub(in crate::commands) fn boot_persistent_by_name(
             interactive: false,
             force: false,
             no_supervisor: false,
+            up_json: false,
+            ttl: None,
             entrypoint: false,
             stdin: None,
             fresh: false,
@@ -2714,6 +2801,11 @@ mod tests {
             ),
             (
                 &["run", "--name", "web", "--image", "X"],
+                MachineRunMode::Persistent,
+            ),
+            // `--up-json` implies Persistent (SDK boot-and-return path).
+            (
+                &["run", "--up-json", "--manifest", "tmpl"],
                 MachineRunMode::Persistent,
             ),
         ];

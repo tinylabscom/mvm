@@ -4031,3 +4031,72 @@ fn machine_console_refused_on_sealed_image() {
         "claim-15 gate must fire through machine console path: {err}"
     );
 }
+
+#[test]
+fn machine_run_up_json_and_ttl_parse() {
+    // `machine run --up-json --manifest x --ttl 60s` must parse without error
+    // and set the expected fields.
+    let args = parse_machine_run(&["--up-json", "--manifest", "x", "--ttl", "60s"]).unwrap();
+    assert!(args.up_json);
+    assert_eq!(args.ttl.as_deref(), Some("60s"));
+    assert_eq!(args.manifest.as_deref(), Some("x"));
+}
+
+#[test]
+fn machine_run_up_json_implies_persistent_mode() {
+    // `--up-json` implies persistence: `--manifest x --up-json` (no argv, no -d)
+    // must parse and route to the persistent lifecycle. We verify this via the
+    // parsed fields: up_json is set, and the parse doesn't error (a transient
+    // run with no argv would fail at dispatch, but persistent doesn't need argv).
+    let args = parse_machine_run(&["--up-json", "--manifest", "x"]).unwrap();
+    assert!(args.up_json, "up_json field must be set");
+    // The manifest source must survive parsing.
+    assert_eq!(args.manifest.as_deref(), Some("x"));
+    // No detach flag needed — up_json alone implies persistence.
+    assert!(!args.detach, "detach is not required when up_json is set");
+}
+
+#[test]
+fn machine_run_up_json_guards_stdout() {
+    // `machine run --up-json` must reserve stdout (emits_machine_readable_stdout).
+    let cli =
+        Cli::try_parse_from(["mvmctl", "machine", "run", "--up-json", "--manifest", "x"]).unwrap();
+    assert!(
+        cli.command.emits_machine_readable_stdout(),
+        "--up-json must guard stdout via emits_machine_readable_stdout"
+    );
+}
+
+#[test]
+fn sdk_live_mode_shelled_commands_keep_parsing() {
+    // Every command the SDKs shell to must parse against the real Cli.
+    // A future rename that breaks any of these will fail CI here first.
+    let sdk_commands: &[&[&str]] = &[
+        &[
+            "machine", "proc", "start", "vm", "-e", "K=V", "--", "echo", "hi",
+        ],
+        &["machine", "proc", "wait", "vm", "tok", "--timeout", "30"],
+        &["machine", "fs", "write", "vm", "/app/x"],
+        &["machine", "cp", "host.txt", "vm:/guest.txt"],
+        &["machine", "forward", "vm", "--port", "8080:80"],
+        &["machine", "stop", "vm"],
+        &[
+            "machine",
+            "run",
+            "-d",
+            "--up-json",
+            "--name",
+            "vm",
+            "--manifest",
+            "tmpl",
+            "--ttl",
+            "1800s",
+        ],
+    ];
+    for argv in sdk_commands {
+        let mut full = vec!["mvmctl"];
+        full.extend_from_slice(argv);
+        Cli::try_parse_from(full.clone())
+            .unwrap_or_else(|e| panic!("SDK command {:?} failed to parse: {e}", argv));
+    }
+}
