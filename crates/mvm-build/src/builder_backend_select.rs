@@ -28,6 +28,7 @@
 //! match the *runtime* default there. Older macOS and Linux contributors
 //! keep libkrun as the cross-platform path they were already using.
 
+use crate::builder_health;
 use crate::builder_vm::{BuilderVm, BuilderVmError};
 use crate::libkrun_builder::LibkrunBuilderVm;
 use crate::qemu_builder::QemuBuilderVm;
@@ -236,10 +237,17 @@ fn is_linux_native_host() -> bool {
 ///   behaviour: Vz probe passes but the backend trips a runtime issue).
 /// - Auto-detected **libkrun on Linux** falls back to **qemu** — libkrun-on-KVM
 ///   can fail at VM creation on hosts the qemu/microvm_nix builder handles fine.
+///   When `libkrun_unhealthy` (a fresh per-host marker from a prior failed
+///   attempt — see [`crate::builder_health`]) the doomed libkrun attempt is
+///   skipped entirely and qemu is tried first, so a reliably-broken host
+///   doesn't re-pay the failure on every build. The marker only reorders the
+///   Linux-libkrun auto path; explicit choices and the macOS Vz→libkrun path
+///   ignore it.
 pub fn builder_attempt_order(
     selected: BuilderBackendChoice,
     explicit: bool,
     is_linux_native: bool,
+    libkrun_unhealthy: bool,
 ) -> Vec<BuilderBackendChoice> {
     if explicit {
         return vec![selected];
@@ -247,7 +255,11 @@ pub fn builder_attempt_order(
     match selected {
         BuilderBackendChoice::Vz => vec![BuilderBackendChoice::Vz, BuilderBackendChoice::Libkrun],
         BuilderBackendChoice::Libkrun if is_linux_native => {
-            vec![BuilderBackendChoice::Libkrun, BuilderBackendChoice::Qemu]
+            if libkrun_unhealthy {
+                vec![BuilderBackendChoice::Qemu]
+            } else {
+                vec![BuilderBackendChoice::Libkrun, BuilderBackendChoice::Qemu]
+            }
         }
         _ => vec![selected],
     }
@@ -266,14 +278,23 @@ pub fn run_with_builder_fallback<T>(
     explicit: bool,
     mut attempt: impl FnMut(BuilderBackendChoice) -> Result<T, BuilderVmError>,
 ) -> Result<T, BuilderVmError> {
-    let order = builder_attempt_order(selected, explicit, is_linux_native_host());
+    let order = builder_attempt_order(
+        selected,
+        explicit,
+        is_linux_native_host(),
+        builder_health::libkrun_marked_unavailable(),
+    );
     let last_idx = order.len() - 1;
     let mut last_err: Option<BuilderVmError> = None;
     for (idx, choice) in order.iter().copied().enumerate() {
         match attempt(choice) {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                builder_health::note_attempt_outcome(choice, true);
+                return Ok(value);
+            }
             // Not the last backend, and a VMM-level failure → try the next.
             Err(e) if idx < last_idx && is_builder_vm_level_failure(&e) => {
+                builder_health::note_attempt_outcome(choice, false);
                 tracing::warn!(
                     error = %e,
                     from = choice.name(),
@@ -288,7 +309,14 @@ pub fn run_with_builder_fallback<T>(
                 last_err = Some(e);
             }
             // Last backend, or a genuine build error → surface it unchanged.
-            Err(e) => return Err(e),
+            // Still record a VMM-level libkrun failure so a doomed sole-backend
+            // libkrun isn't re-attempted next time; a build error is left alone.
+            Err(e) => {
+                if is_builder_vm_level_failure(&e) {
+                    builder_health::note_attempt_outcome(choice, false);
+                }
+                return Err(e);
+            }
         }
     }
     Err(last_err.expect("builder_attempt_order is never empty"))
@@ -314,13 +342,22 @@ pub fn run_with_builder_fallback_anyhow<T>(
     explicit: bool,
     mut attempt: impl FnMut(BuilderBackendChoice) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    let order = builder_attempt_order(selected, explicit, is_linux_native_host());
+    let order = builder_attempt_order(
+        selected,
+        explicit,
+        is_linux_native_host(),
+        builder_health::libkrun_marked_unavailable(),
+    );
     let last_idx = order.len() - 1;
     let mut last_err: Option<anyhow::Error> = None;
     for (idx, choice) in order.iter().copied().enumerate() {
         match attempt(choice) {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                builder_health::note_attempt_outcome(choice, true);
+                return Ok(value);
+            }
             Err(e) if idx < last_idx && anyhow_has_builder_vm_level_failure(&e) => {
+                builder_health::note_attempt_outcome(choice, false);
                 tracing::warn!(
                     error = %e,
                     from = choice.name(),
@@ -334,7 +371,12 @@ pub fn run_with_builder_fallback_anyhow<T>(
                 );
                 last_err = Some(e);
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                if anyhow_has_builder_vm_level_failure(&e) {
+                    builder_health::note_attempt_outcome(choice, false);
+                }
+                return Err(e);
+            }
         }
     }
     Err(last_err.expect("builder_attempt_order is never empty"))
@@ -623,25 +665,62 @@ mod tests {
     #[test]
     fn attempt_order_linux_libkrun_falls_back_to_qemu_only_when_auto() {
         use BuilderBackendChoice::*;
-        // Auto-detected libkrun on Linux → libkrun, then qemu.
+        // Auto-detected libkrun on Linux (healthy) → libkrun, then qemu.
         assert_eq!(
-            builder_attempt_order(Libkrun, false, true),
+            builder_attempt_order(Libkrun, false, true, false),
             vec![Libkrun, Qemu]
         );
         // Explicit libkrun → no fallback (operator asked for libkrun).
-        assert_eq!(builder_attempt_order(Libkrun, true, true), vec![Libkrun]);
+        assert_eq!(
+            builder_attempt_order(Libkrun, true, true, false),
+            vec![Libkrun]
+        );
         // libkrun off-Linux (e.g. macOS 13-25) → no qemu fallback.
-        assert_eq!(builder_attempt_order(Libkrun, false, false), vec![Libkrun]);
+        assert_eq!(
+            builder_attempt_order(Libkrun, false, false, false),
+            vec![Libkrun]
+        );
+    }
+
+    #[test]
+    fn attempt_order_skips_libkrun_when_marked_unhealthy_on_linux_auto() {
+        use BuilderBackendChoice::*;
+        // A fresh per-host "libkrun can't build here" marker → skip straight to
+        // qemu on the Linux auto path (no doomed libkrun attempt).
+        assert_eq!(
+            builder_attempt_order(Libkrun, false, true, true),
+            vec![Qemu]
+        );
+        // Explicit libkrun ignores the marker — the operator forced it, so we
+        // re-attempt (and a success would clear the marker).
+        assert_eq!(
+            builder_attempt_order(Libkrun, true, true, true),
+            vec![Libkrun]
+        );
+        // Off-Linux libkrun ignores the marker (there is no qemu fallback there
+        // to redirect to).
+        assert_eq!(
+            builder_attempt_order(Libkrun, false, false, true),
+            vec![Libkrun]
+        );
     }
 
     #[test]
     fn attempt_order_preserves_vz_to_libkrun_and_explicit_qemu() {
         use BuilderBackendChoice::*;
-        // Existing macOS behaviour unchanged.
-        assert_eq!(builder_attempt_order(Vz, false, false), vec![Vz, Libkrun]);
-        assert_eq!(builder_attempt_order(Vz, true, false), vec![Vz]);
+        // Existing macOS behaviour unchanged (and the libkrun marker never
+        // reorders the Vz→libkrun auto path).
+        assert_eq!(
+            builder_attempt_order(Vz, false, false, false),
+            vec![Vz, Libkrun]
+        );
+        assert_eq!(
+            builder_attempt_order(Vz, false, false, true),
+            vec![Vz, Libkrun]
+        );
+        assert_eq!(builder_attempt_order(Vz, true, false, false), vec![Vz]);
         // Explicit qemu is a single attempt.
-        assert_eq!(builder_attempt_order(Qemu, false, true), vec![Qemu]);
+        assert_eq!(builder_attempt_order(Qemu, false, true, false), vec![Qemu]);
     }
 
     #[test]
@@ -656,6 +735,11 @@ mod tests {
         // when the live host yields a 2-element order. To stay host-agnostic,
         // assert the *single-attempt* contract instead: a VMM failure with no
         // fallback available surfaces unchanged.
+        // Isolate the per-host builder-health marker the fallback now reads and
+        // writes (a libkrun VMM failure records it) so it can't leak across tests.
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
         let on_linux = is_linux_native_host();
         let calls = RefCell::new(Vec::new());
         let qemu_ok = AtomicBool::new(false);
@@ -692,6 +776,9 @@ mod tests {
     #[test]
     fn run_with_fallback_surfaces_real_build_errors_without_retry() {
         use std::cell::RefCell;
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
         let calls = RefCell::new(0u32);
         // A genuine build error must NOT trigger a fallback, even on Linux.
         let result: Result<(), _> =
@@ -727,6 +814,10 @@ mod tests {
     #[test]
     fn run_with_fallback_anyhow_retries_qemu_on_wrapped_supervisor_exit() {
         use std::cell::RefCell;
+        // Isolate the per-host builder-health marker (see the typed sibling test).
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
         let on_linux = is_linux_native_host();
         let calls = RefCell::new(Vec::new());
         let result = run_with_builder_fallback_anyhow(BuilderBackendChoice::Libkrun, false, |c| {
@@ -755,6 +846,9 @@ mod tests {
     #[test]
     fn run_with_fallback_anyhow_surfaces_real_build_error_without_retry() {
         use std::cell::RefCell;
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
         let calls = RefCell::new(0u32);
         let result: anyhow::Result<()> =
             run_with_builder_fallback_anyhow(BuilderBackendChoice::Libkrun, false, |_c| {

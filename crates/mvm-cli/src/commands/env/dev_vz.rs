@@ -4638,11 +4638,18 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
         let backend = resolve_builder_backend_with_override(Some(choice));
         match backend.run_build(&job, &mounts) {
             Ok(_) => {
+                mvm_build::builder_health::note_attempt_outcome(choice, true);
                 used_backend = choice;
                 last_error = None;
                 break;
             }
             Err(err) => {
+                // Record only a VMM-level libkrun failure in the per-host health
+                // cache so the next dev-image build skips the doomed attempt; a
+                // genuine build error must not poison the cache.
+                if mvm_build::builder_backend_select::is_builder_vm_level_failure(&err) {
+                    mvm_build::builder_health::note_attempt_outcome(choice, false);
+                }
                 if idx + 1 < attempt_order.len() {
                     ui::warn(&format!(
                         "Auto-selected {} builder failed ({}); retrying with {}.",
@@ -4702,7 +4709,9 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
 /// to the shared [`mvm_build::builder_backend_select::builder_attempt_order`]
 /// (one policy: auto Vz→libkrun, auto libkrun→qemu on Linux, explicit→single)
 /// so this CLI loop and the `mvm-build` build paths can't drift. The live
-/// platform supplies the `is_linux_native` input the shared (pure) policy takes.
+/// platform supplies `is_linux_native`, and the per-host builder-health cache
+/// supplies whether libkrun should be skipped (a prior failed attempt left a
+/// marker — see [`mvm_build::builder_health`]).
 #[cfg(feature = "builder-vm")]
 fn builder_backend_attempt_order(
     selected: mvm_build::builder_backend_select::BuilderBackendChoice,
@@ -4716,6 +4725,7 @@ fn builder_backend_attempt_order(
         selected,
         explicit_override,
         is_linux_native,
+        mvm_build::builder_health::libkrun_marked_unavailable(),
     )
 }
 
@@ -4766,7 +4776,12 @@ mod builder_backend_attempt_order_tests {
         );
         assert_eq!(
             builder_backend_attempt_order(BuilderBackendChoice::Libkrun, false),
-            builder_attempt_order(BuilderBackendChoice::Libkrun, false, is_linux)
+            builder_attempt_order(
+                BuilderBackendChoice::Libkrun,
+                false,
+                is_linux,
+                mvm_build::builder_health::libkrun_marked_unavailable(),
+            )
         );
     }
 }
@@ -5042,10 +5057,16 @@ fn build_default_microvm_via_libkrun(
         let backend = resolve_builder_backend_with_override(Some(choice));
         match backend.run_build(&job, &mounts) {
             Ok(_) => {
+                mvm_build::builder_health::note_attempt_outcome(choice, true);
                 last_error = None;
                 break;
             }
             Err(err) => {
+                // VMM-level libkrun failures feed the per-host health cache;
+                // genuine build errors do not (see the dev-image loop above).
+                if mvm_build::builder_backend_select::is_builder_vm_level_failure(&err) {
+                    mvm_build::builder_health::note_attempt_outcome(choice, false);
+                }
                 if idx + 1 < attempt_order.len() {
                     ui::warn(&format!(
                         "Auto-selected {} builder failed ({}); retrying with {}.",
