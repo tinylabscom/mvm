@@ -141,7 +141,7 @@ fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
     }
 
     if args.boot_check {
-        run_boot_check(&variants)?;
+        run_boot_check(&variants, &arch)?;
     }
     Ok(())
 }
@@ -200,7 +200,10 @@ fn emit_local_metrics(
 /// the agent answers. Re-execs `mvmctl` (the real `up` / `machine` paths)
 /// rather than reconstructing their argument plumbing here.
 #[cfg(feature = "builder-vm")]
-fn run_boot_check(variants: &[(crate::commands::env::dev_vz::KernelVariant, &str)]) -> Result<()> {
+fn run_boot_check(
+    variants: &[(crate::commands::env::dev_vz::KernelVariant, &str)],
+    arch: &str,
+) -> Result<()> {
     use crate::commands::env::dev_vz::KernelVariant;
     use crate::ui;
 
@@ -215,14 +218,40 @@ fn run_boot_check(variants: &[(crate::commands::env::dev_vz::KernelVariant, &str
             "--boot-check needs a source checkout (examples/sleeper not found in the cwd)"
         );
     }
+    // Precondition: `up` builds the sleeper image, which needs the full builder
+    // VM image (kernel just built into the cache isn't enough). Fail early with
+    // a fixable message rather than a deep `up` error 20 min into a build.
+    let builder_rootfs = mvm_build::builder_vm::builder_vm_cache_dir()
+        .join(arch)
+        .join("rootfs.ext4");
+    if !builder_rootfs.is_file() {
+        anyhow::bail!(
+            "--boot-check needs the builder VM image, which isn't in the cache yet \
+             ({}). Run `mvmctl dev up` once to populate it, then retry.",
+            builder_rootfs.display()
+        );
+    }
     let exe = std::env::current_exe().context("locating mvmctl for --boot-check")?;
     let name = "kernel-bootcheck";
     let _ = run_self(&exe, &["machine", "stop", name]); // clear any stale VM
 
-    ui::info("boot-check: booting a throwaway VM on the new workload kernel…");
+    // Force libkrun: it's available wherever `--source compile` ran (it drives
+    // Stage 0), so the check is deterministic and doesn't depend on the host's
+    // default workload backend (Vz on macOS 26) or its separate supervisor. The
+    // kernel is backend-agnostic, so a libkrun boot proves it boots.
+    ui::info("boot-check: booting a throwaway VM on the new workload kernel (libkrun)…");
     run_self(
         &exe,
-        &["up", "--flake", "examples/sleeper", "--name", name, "-d"],
+        &[
+            "up",
+            "--flake",
+            "examples/sleeper",
+            "--hypervisor",
+            "libkrun",
+            "--name",
+            name,
+            "-d",
+        ],
     )
     .context("boot-check: `up` failed to launch the VM")?;
 
