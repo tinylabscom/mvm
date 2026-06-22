@@ -105,6 +105,32 @@ impl VmCmd {
                 | VmCmd::Restore(_)
         )
     }
+
+    /// The `<verb>` slot in `cmd.<verb>.*` audit events for this op. Keeps the
+    /// per-op audit taxonomy (`cmd.pause.*`, `cmd.set-ttl.*`, …) stable now
+    /// that these ops are reached through `machine` instead of `vm`. Values
+    /// MUST match the clap subcommand names.
+    pub(in crate::commands) fn verb_name(&self) -> &'static str {
+        match self {
+            VmCmd::Pause(_) => "pause",
+            VmCmd::Resume(_) => "resume",
+            VmCmd::Snapshot(_) => "snapshot",
+            VmCmd::Save(_) => "save",
+            VmCmd::Restore(_) => "restore",
+            VmCmd::Checkpoint(_) => "checkpoint",
+            VmCmd::Cp(_) => "cp",
+            VmCmd::Fs(_) => "fs",
+            VmCmd::Proc(_) => "proc",
+            VmCmd::Diff(_) => "diff",
+            VmCmd::Wait(_) => "wait",
+            VmCmd::BootReport(_) => "boot-report",
+            VmCmd::SetTtl(_) => "set-ttl",
+            VmCmd::Forward(_) => "forward",
+            VmCmd::Sandbox(_) => "sandbox",
+            VmCmd::Session(_) => "session",
+            VmCmd::Volume(_) => "volume",
+        }
+    }
 }
 
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {

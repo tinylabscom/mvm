@@ -103,6 +103,31 @@ pub(in crate::commands) enum MachineAction {
     Vm(VmCmd),
 }
 
+impl MachineAction {
+    /// The `<verb>` slot in `cmd.<verb>.*` audit events. The folded advanced
+    /// ops keep their own per-op verbs (`cmd.pause.*`, `cmd.set-ttl.*`, …) so
+    /// the audit taxonomy is unchanged by the move from `vm` to `machine`; the
+    /// native lifecycle verbs report as `machine`, as they always have.
+    pub(in crate::commands) fn verb_name(&self) -> &'static str {
+        match self {
+            MachineAction::Vm(cmd) => cmd.verb_name(),
+            MachineAction::Run(_)
+            | MachineAction::Build(_)
+            | MachineAction::Create(_)
+            | MachineAction::Start(_)
+            | MachineAction::Stop(_)
+            | MachineAction::Rm(_)
+            | MachineAction::Ls(_)
+            | MachineAction::Inspect(_)
+            | MachineAction::Shell(_)
+            | MachineAction::Exec(_)
+            | MachineAction::Logs(_)
+            | MachineAction::Console(_)
+            | MachineAction::CheckArtifact(_) => "machine",
+        }
+    }
+}
+
 /// Ephemeral image-backed run. Mirrors the relevant subset of `mvmctl run`'s
 /// flags and translates into the same admitted execution path.
 #[derive(ClapArgs, Debug, Clone)]
@@ -3582,6 +3607,26 @@ ssh_agent = true
             matches!(r, Ok(MachineAction::Vm(VmCmd::Sandbox(_)))),
             "sandbox: {r:?}"
         );
+    }
+
+    #[test]
+    fn machine_vm_op_uses_per_op_audit_verb() {
+        // Folded advanced ops keep their own `cmd.<verb>.*` audit verb (no
+        // regression from the vm→machine move); the dash-renamed `set-ttl`
+        // is the edge case that proves the clap name, not the enum variant.
+        let action = parse(&["pause", "myvm", "--hypervisor", "mock"]).unwrap();
+        assert_eq!(action.verb_name(), "pause");
+        let action = parse(&["snapshot", "ls"]).unwrap();
+        assert_eq!(action.verb_name(), "snapshot");
+        let action = parse(&["set-ttl", "myvm", "5m"]).unwrap();
+        assert_eq!(action.verb_name(), "set-ttl");
+    }
+
+    #[test]
+    fn machine_native_verb_audit_stays_machine() {
+        // Native lifecycle verbs report `machine`, as they always have.
+        assert_eq!(parse(&["stop", "web"]).unwrap().verb_name(), "machine");
+        assert_eq!(parse(&["ls"]).unwrap().verb_name(), "machine");
     }
 
     #[test]
