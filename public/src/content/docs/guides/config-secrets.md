@@ -193,6 +193,6 @@ different configs and secrets at runtime.
 ### Monitoring the VM
 
 ```bash
-mvmctl logs my-vm        # view console output
-mvmctl logs my-vm -f     # follow in real time
+mvmctl machine logs my-vm        # view console output
+mvmctl machine logs my-vm -f     # follow in real time
 ```

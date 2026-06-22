@@ -41,7 +41,7 @@ A dev image is just an mkGuest call with `entrypoint.shell` set. Your project's 
           name = "my-app-dev";
 
           # entrypoint.shell auto-infers `dev = true` (accessible).
-          # `mvmctl console <vm>` attaches via vsock.
+          # `mvmctl machine console <vm>` attaches via vsock.
           entrypoint.shell = "/bin/bash";
 
           # Anything in nixpkgs.
@@ -75,7 +75,7 @@ Then:
 ```sh
 mvmctl dev up         # builds the .dev output, boots it, drops you into the shell
 mvmctl dev down       # stop the dev VM
-mvmctl console        # reattach to the running shell
+mvmctl machine console        # reattach to the running shell
 ```
 
 You **never edit anything inside the mvm repository** to customize your dev image. Your project owns its dev image; mvm is the library.
@@ -105,7 +105,7 @@ Each service runs as its own supervised process. The shell stays your foreground
 
 ### Forcing the dev path on a sealed entrypoint
 
-If you want a dev image whose primary entrypoint is a *program* (not a shell) but still want `mvmctl console` to attach for debugging:
+If you want a dev image whose primary entrypoint is a *program* (not a shell) but still want `mvmctl machine console` to attach for debugging:
 
 ```nix
 dev = mvm.lib.${system}.mkGuest {

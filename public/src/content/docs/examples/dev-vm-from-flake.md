@@ -23,10 +23,10 @@ runtime sizing.
 ```sh
 mvmctl build ./my-dev-vm
 mvmctl up ./my-dev-vm --name my-dev-vm
-mvmctl console my-dev-vm
+mvmctl machine console my-dev-vm
 ```
 
-Use `mvmctl exec` for scripted commands and `mvmctl console` for interactive
+Use `mvmctl exec` for scripted commands and `mvmctl machine console` for interactive
 debugging.
 
 ## Iterate
@@ -35,7 +35,7 @@ debugging.
 $EDITOR flake.nix
 nix flake update
 mvmctl build ./my-dev-vm
-mvmctl down my-dev-vm
+mvmctl machine stop my-dev-vm
 mvmctl up ./my-dev-vm --name my-dev-vm
 ```
 

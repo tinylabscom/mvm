@@ -85,9 +85,9 @@ The CLI sets `MVM_SDK_MODE=live` and `MVM_CLI_BIN` for the child process. The SD
 then uses the local CLI for operations such as:
 
 - `mvmctl up --up-json --detach --name <generated-id> --manifest <template>`
-- `mvmctl fs write <vm> <path>`
+- `mvmctl machine fs write <vm> <path>`
 - `mvmctl proc start <vm> -- <argv>`
-- `mvmctl down <vm>`
+- `mvmctl machine stop <vm>`
 
 Live mode creates a real microVM. It should be used only when the caller is ready
 for runtime side effects: boot, file writes, command execution, logs, audit
@@ -103,7 +103,7 @@ Live mode is intentionally narrower than the target SDK contract:
 | TTL | Defaults to 30 minutes unless the caller sets `ttl`. |
 | Commands | `commands.start(...)` starts a command; result capture is still a parity target. |
 | Files | `files.write(...)` stages bytes into the running VM. |
-| Cleanup | Python `with`, TypeScript `using`, or explicit `kill()` calls `mvmctl down`. |
+| Cleanup | Python `with`, TypeScript `using`, or explicit `kill()` calls `mvmctl machine stop`. |
 | Secrets | Live command env forwarding accepts literal values only. Secret refs must use host-managed injection paths. |
 
 `commands.start(...)` is a developer-oriented command surface. Production-style

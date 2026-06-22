@@ -20,7 +20,7 @@ mvmctl up ./agent-sandbox --name agent-sandbox
 ```sh
 mvmctl ls
 mvmctl boot-report agent-sandbox
-mvmctl logs agent-sandbox
+mvmctl machine logs agent-sandbox
 ```
 
 Use JSON output where commands support it when integrating with tooling.
@@ -29,7 +29,7 @@ Use JSON output where commands support it when integrating with tooling.
 
 ```sh
 mvmctl exec agent-sandbox -- python /work/task.py
-mvmctl fs ls agent-sandbox /work
+mvmctl machine fs ls agent-sandbox /work
 mvmctl forward agent-sandbox -p 8080:8080
 ```
 
@@ -54,7 +54,7 @@ Snapshots can contain memory, files, and runtime credentials. Apply retention an
 ## Stop and clean up
 
 ```sh
-mvmctl down agent-sandbox
+mvmctl machine stop agent-sandbox
 mvmctl cleanup
 ```
 

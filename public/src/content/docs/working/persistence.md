@@ -31,7 +31,7 @@ Cold mode is the product posture where a sandbox is snapshotted, compute is rele
 ## Cleanup
 
 ```sh
-mvmctl down agent-sandbox
+mvmctl machine stop agent-sandbox
 mvmctl sandbox gc
 mvmctl cleanup
 ```

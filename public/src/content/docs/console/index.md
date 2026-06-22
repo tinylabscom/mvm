@@ -25,8 +25,8 @@ for production workloads.
 
 ```sh
 mvmctl up ./my-app --name devbox
-mvmctl console devbox
-mvmctl console devbox --command "uname -a"
+mvmctl machine console devbox
+mvmctl machine console devbox --command "uname -a"
 ```
 
 Use `--command` for a one-shot shell command when you want console transport
@@ -36,11 +36,11 @@ but not an interactive session. Use `mvmctl exec` for normal automation.
 
 | Need | Prefer |
 | --- | --- |
-| Human debugging | `mvmctl console <name>` |
+| Human debugging | `mvmctl machine console <name>` |
 | Scripted command execution | `mvmctl exec <name> -- <cmd>` |
 | Process lifecycle control | `mvmctl proc start/list/wait/kill` |
-| File transfer | `mvmctl fs` or `mvmctl cp` |
-| Service logs | `mvmctl logs <name>` |
+| File transfer | `mvmctl machine fs` or `mvmctl cp` |
+| Service logs | `mvmctl machine logs <name>` |
 
 ## Related pages
 

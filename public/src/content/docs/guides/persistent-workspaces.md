@@ -12,7 +12,7 @@ explicit before the sandbox starts.
 
 | Need | Use | Security posture |
 | --- | --- | --- |
-| One input file or result file | `mvmctl cp` or `mvmctl fs` | Narrowest boundary; preferred for generated-code tasks. |
+| One input file or result file | `mvmctl cp` or `mvmctl machine fs` | Narrowest boundary; preferred for generated-code tasks. |
 | Read-only fixtures | `mvmctl run --add-dir ...:ro` | Host data is exposed but not writable by the guest. |
 | Local dev edits | `mvmctl run --profile dev --add-dir ...:rw` | Writable host share; use only for trusted dev workflows. |
 | Stateful app data | managed encrypted volume | Encrypted at rest when locked; plaintext exists while unlocked. |
@@ -144,7 +144,7 @@ mvmctl cp ./task.json coding-agent:/work/task.json
 mvmctl exec coding-agent --timeout 120 -- python /work/run_task.py
 mvmctl cp --max-bytes 16777216 coding-agent:/work/result.json ./result.json
 mvmctl volume unmount coding-agent /workspace
-mvmctl down coding-agent
+mvmctl machine stop coding-agent
 mvmctl volume lock coding-agent-work
 ```
 
@@ -152,7 +152,7 @@ mvmctl volume lock coding-agent-work
 
 Before marking a stateful sandbox done:
 
-- stop compute with `mvmctl down` when it no longer needs to run;
+- stop compute with `mvmctl machine stop` when it no longer needs to run;
 - lock every managed volume;
 - remove mounts that are no longer needed;
 - delete snapshots that no longer have a recovery purpose;
