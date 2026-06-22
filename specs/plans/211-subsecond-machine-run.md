@@ -36,9 +36,21 @@ So origin/main has the standby *primitives* but **no CLI claim orchestration**;
 `up.rs` now hardcodes `warm_pool_size: 0`. The glue is cleanly recoverable from
 `git show 04bab4f7^:crates/mvm-cli/src/commands/pool.rs`.
 
-⇒ Phase 1b must **reconstruct** `try_warm_claim`/`replenish_after_launch` from
-that parent and wire them into `run_captured` **in one commit** (recovering them
-unused would re-trip the no-dead-code gate #1258 added).
+⇒ Phase 1b must **reconstruct** the deleted cluster from that parent and wire it
+into `run_captured` **in one commit** (recovering it unused would re-trip the
+no-dead-code gate #1258 added).
+
+**Exact recovery surface** (all from `04bab4f7^:crates/mvm-cli/src/commands/pool.rs`):
+`try_warm_claim`, `replenish_after_launch`, `warm_claim_plan_json`,
+`compat_for_launch`, `claim_or_cold` + `enum LaunchDecision`. **Surviving deps to
+re-point at** (paths may have moved): `StandbyClaim`
+(`mvm_core::protocol::vm_backend`), `compute_audit_substrate`
+(`mvm_backend::libkrun` / `audit_substrate`), `stash_plan_for_bridge`
+(`mvm_backend::microvm`), `SupervisorStandbyPool`. The recovered code already
+threads the admitted plan + `network_policy` into the `StandbyClaim` and gates
+libkrun/Vz claims on a signed plan (gateway-bridge supervisor path) — so the
+claim-10 egress posture is preserved by construction; the live check is that the
+bridge is actually (re)bound on the claimed VM.
 
 ## The two gaps
 
