@@ -31,7 +31,7 @@ mvmctl exec --launch-plan ./launch.json
   up a long-running VM.
 - **Reach for `mvmctl up`** when you want a long-running VM you can
   re-enter, share state with, or expose ports from.
-- **Reach for `mvmctl console <vm> --command "..."`** when you already
+- **Reach for `mvmctl machine console <vm> --command "..."`** when you already
   have a VM running and want to run something inside it without a fresh
   boot.
 
@@ -235,7 +235,7 @@ highest):
 - **Ctrl-C**: a SIGINT handler triggers teardown so the Firecracker
   process and any tap interface don't get orphaned.
 - **Hard kill** (`kill -9` on `mvmctl exec` itself): teardown is
-  best-effort; you may need `mvmctl ls` and `mvmctl down <name>` to
+  best-effort; you may need `mvmctl ls` and `mvmctl machine stop <name>` to
   clean up. Each transient VM is named `exec-<pid>-<rand>` so they're
   easy to spot.
 

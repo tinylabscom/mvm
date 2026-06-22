@@ -11,8 +11,8 @@ description: Local sandbox management with mvmctl.
 mvmctl build ./my-app
 mvmctl up ./my-app --name agent-sandbox
 mvmctl exec agent-sandbox -- python /work/task.py
-mvmctl logs agent-sandbox -f
-mvmctl down agent-sandbox
+mvmctl machine logs agent-sandbox -f
+mvmctl machine stop agent-sandbox
 ```
 
 ## Management tasks

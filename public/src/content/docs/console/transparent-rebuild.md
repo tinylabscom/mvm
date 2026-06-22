@@ -17,9 +17,9 @@ workspace state remains available.
 ```sh
 $EDITOR flake.nix
 mvmctl build ./my-app
-mvmctl down devbox
+mvmctl machine stop devbox
 mvmctl up ./my-app --name devbox
-mvmctl console devbox
+mvmctl machine console devbox
 ```
 
 This keeps rebuild semantics obvious. The rootfs comes from the Nix flake; the

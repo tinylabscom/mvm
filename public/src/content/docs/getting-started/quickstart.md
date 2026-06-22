@@ -79,9 +79,9 @@ Release binaries download the builder image (~200MB) and dev microVM image on fi
 ```bash
 mvmctl ls         # List running VMs (aliases: ps, status)
 mvmctl dev shell  # Open a shell in the dev microVM
-mvmctl down       # Stop all running VMs
+mvmctl machine stop --all       # Stop all running VMs
 mvmctl doctor     # Check system dependencies and configuration
-mvmctl console vm # Interactive shell into a running VM (PTY-over-vsock)
+mvmctl machine console vm # Interactive shell into a running VM (PTY-over-vsock)
 ```
 
 ## 4. Build and Run
@@ -149,8 +149,8 @@ mvmctl up my-app                          # Boot the VM
 Access a running VM without SSH -- uses PTY-over-vsock:
 
 ```bash
-mvmctl console myvm                    # Interactive shell
-mvmctl console myvm --command "ls -la" # One-shot command
+mvmctl machine console myvm                    # Interactive shell
+mvmctl machine console myvm --command "ls -la" # One-shot command
 ```
 
 ## 8. Sandboxed One-Shot Commands
@@ -186,7 +186,7 @@ mvmctl network list
 
 ```bash
 mvmctl doctor           # Deps, available backends, and security posture (one report)
-mvmctl logs vm1         # View guest console logs
+mvmctl machine logs vm1         # View guest console logs
 mvmctl cache info       # Cache directory disk usage
 ```
 

@@ -107,7 +107,7 @@ mvmctl up --flake . --cpus 2 --memory 1024
 mvmctl ls
 
 # View guest console logs
-mvmctl logs hello
+mvmctl machine logs hello
 ```
 
 ## Run with Config and Secrets
@@ -129,7 +129,7 @@ Inside the guest, config files appear at `/mnt/config/` and secrets at `/mnt/sec
 ## Stop
 
 ```bash
-mvmctl down hello
+mvmctl machine stop hello
 ```
 
 ## Next Steps

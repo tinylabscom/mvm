@@ -28,7 +28,7 @@ keep a workflow documented as planned.
 | One-shot run | Shipped | Target | Target | `mvmctl run -- <cmd>` is current; SDK convenience helpers should preserve receipts and policy. |
 | Start command | Shipped | Partial | Partial | SDK exposes `commands.start(...)`; result capture is still a target. |
 | Command result capture | Shipped | Target | Target | CLI one-shot JSON/receipt paths exist; SDK `commands.run(...)` result shape is a target. |
-| File write | Shipped | Shipped | Shipped | SDK supports `files.write(...)`; live mode shells to `mvmctl fs write`. |
+| File write | Shipped | Shipped | Shipped | SDK supports `files.write(...)`; live mode shells to `mvmctl machine fs write`. |
 | File read/list/remove | Shipped | Target | Target | CLI filesystem verbs exist; SDK wrappers need shared tests. |
 | Logs | Shipped | Target | Target | SDK log helpers should keep payload redaction rules explicit. |
 | Port forwarding | Shipped | Target | Target | SDK helpers should require explicit host and guest port binding. |
@@ -47,7 +47,7 @@ keep a workflow documented as planned.
 | Local SDK smoke script | Python or TypeScript `Sandbox.create(...)` in record mode | Produces Workload IR without booting a VM. |
 | Live SDK experiment | `mvmctl run --mode live ./script.py` or `.ts` | Exercises current live transport and cleanup helpers. |
 | Deployable workload declaration | Static declaration workflow | Avoids importing user modules during compile. |
-| Persistent service | `mvmctl build`, `mvmctl up`, `mvmctl logs`, `mvmctl down` | CLI has the broadest lifecycle coverage today. |
+| Persistent service | `mvmctl build`, `mvmctl up`, `mvmctl machine logs`, `mvmctl machine stop` | CLI has the broadest lifecycle coverage today. |
 | Cold recovery test | `mvmctl pause/resume` or `mvmctl checkpoint create/restore` | Backend-specific state handling is visible. |
 
 ## SDK parity rules

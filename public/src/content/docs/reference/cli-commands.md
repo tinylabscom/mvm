@@ -63,19 +63,19 @@ templates, the guest-RPC surface, fleet-shaped workflows).
 | `mvmctl up --network-allow host:port` | Allow egress to specific host:port (repeatable, mutually exclusive with preset) |
 | `mvmctl up --seccomp <tier>` | Seccomp profile: `essential`, `minimal`, `standard` (default), `network`, `unrestricted`. The selected tier is enforced through the guest `seccomp.json` manifest and recorded in the signed admission profile for audit. |
 | `mvmctl up --network <name>` | Named dev network to attach VM to (default: "default") |
-| `mvmctl down [name]` | Stop VMs by name, or all if omitted |
+| `mvmctl machine stop [name]` | Stop VMs by name, or all if omitted |
 | `mvmctl ls` | List running VMs (aliases: `ps`, `status`) |
 | `mvmctl ls -a` | Show all VMs including stopped |
 | `mvmctl ls --json` | Output as JSON |
-| `mvmctl vm forward <name> -p PORT` | Forward a port from a running VM to localhost |
-| `mvmctl logs <name>` | View guest console logs (`-f` to follow, `-n` for line count) |
-| `mvmctl logs <name> --hypervisor` | View Firecracker hypervisor logs |
-| `mvmctl vm diff <name>` | Show filesystem changes in a running VM (created/modified/deleted since boot) |
-| `mvmctl vm diff <name> --json` | Output filesystem diff as JSON |
-| `mvmctl vm wait <name> --for <component>` | Block until a guest readiness component is `Ready`, `Disabled`, or `Failed`. Targets: `control-plane`, `entrypoint`, `warm-pool`, `integrations`, `probes`, `all` (default). Exit codes: `0` ready, `65` (`EX_DATAERR`) failed, `75` (`EX_TEMPFAIL`) timeout. Plan 76 Phase 2. |
-| `mvmctl vm wait <name> --timeout <secs> --interval-ms <ms>` | Tune the deadline and poll cadence. Defaults: 60s / 250ms. |
-| `mvmctl vm boot-report <name>` | Print a single readiness snapshot + per-phase boot timings. Plan 76 Phase 4. |
-| `mvmctl vm boot-report <name> --json` | Same payload as JSON. |
+| `mvmctl machine forward <name> -p PORT` | Forward a port from a running VM to localhost |
+| `mvmctl machine logs <name>` | View guest console logs (`-f` to follow, `-n` for line count) |
+| `mvmctl machine logs <name> --hypervisor` | View Firecracker hypervisor logs |
+| `mvmctl machine diff <name>` | Show filesystem changes in a running VM (created/modified/deleted since boot) |
+| `mvmctl machine diff <name> --json` | Output filesystem diff as JSON |
+| `mvmctl machine wait <name> --for <component>` | Block until a guest readiness component is `Ready`, `Disabled`, or `Failed`. Targets: `control-plane`, `entrypoint`, `warm-pool`, `integrations`, `probes`, `all` (default). Exit codes: `0` ready, `65` (`EX_DATAERR`) failed, `75` (`EX_TEMPFAIL`) timeout. Plan 76 Phase 2. |
+| `mvmctl machine wait <name> --timeout <secs> --interval-ms <ms>` | Tune the deadline and poll cadence. Defaults: 60s / 250ms. |
+| `mvmctl machine boot-report <name>` | Print a single readiness snapshot + per-phase boot timings. Plan 76 Phase 4. |
+| `mvmctl machine boot-report <name> --json` | Same payload as JSON. |
 
 ## Environment Management
 
@@ -300,8 +300,8 @@ never the token value.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl console <name>` | Interactive PTY shell into a running VM (vsock, no SSH) |
-| `mvmctl console <name> --command <cmd>` | Run a one-shot command in the VM |
+| `mvmctl machine console <name>` | Interactive PTY shell into a running VM (vsock, no SSH) |
+| `mvmctl machine console <name> --command <cmd>` | Run a one-shot command in the VM |
 
 ## One-shot Run (transient runner)
 
@@ -508,10 +508,10 @@ exposes named networks and policy bundles.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl vm sandbox gc` | Dry-run cleanup of stale sandbox name-registry entries for stopped or expired VMs |
-| `mvmctl vm sandbox gc --dry-run` | Explicit dry-run; reports candidates and does not mutate state |
-| `mvmctl vm sandbox gc --apply` | Remove stale stopped/expired registry entries and emit a `SandboxGc` audit entry |
-| `mvmctl vm sandbox gc --json` | Print a machine-readable GC summary with candidates, reasons, and removed count |
+| `mvmctl machine sandbox gc` | Dry-run cleanup of stale sandbox name-registry entries for stopped or expired VMs |
+| `mvmctl machine sandbox gc --dry-run` | Explicit dry-run; reports candidates and does not mutate state |
+| `mvmctl machine sandbox gc --apply` | Remove stale stopped/expired registry entries and emit a `SandboxGc` audit entry |
+| `mvmctl machine sandbox gc --json` | Print a machine-readable GC summary with candidates, reasons, and removed count |
 
 `sandbox gc` never tears down a live VM. Entries that still appear as starting,
 running, or paused in a backend listing are skipped; cleanup only removes stale
@@ -521,20 +521,20 @@ host registry records.
 
 ## Checkpoint
 
-`mvmctl vm save` / `mvmctl vm restore` are the first-class Vz machine-state verbs. They are thin aliases over the `vm-full` checkpoint path: save captures memory + disk through Vz `saveMachineStateToURL`, restore verifies the sealed checkpoint content and resumes the same VM identity. `mvmctl vm checkpoint` remains the advanced checkpoint store surface for list/remove/fork/diff and explicit class selection. `mvmctl vm snapshot ls` / `mvmctl vm snapshot rm` remain for Firecracker sealed snapshots.
+`mvmctl machine save` / `mvmctl machine restore` are the first-class Vz machine-state verbs. They are thin aliases over the `vm-full` checkpoint path: save captures memory + disk through Vz `saveMachineStateToURL`, restore verifies the sealed checkpoint content and resumes the same VM identity. `mvmctl machine checkpoint` remains the advanced checkpoint store surface for list/remove/fork/diff and explicit class selection. `mvmctl machine snapshot ls` / `mvmctl machine snapshot rm` remain for Firecracker sealed snapshots.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl vm save <name> [--tag <tag>] [--json]` | Save a running Vz VM as a `vm_full` checkpoint. Refuses when the active host/backend does not report the `save-restore` snapshot tier. |
-| `mvmctl vm restore <checkpoint> [--json]` | Restore a previously saved `vm_full` checkpoint into the original VM identity after content verification. Refuses when the active host/backend does not report the `save-restore` snapshot tier. |
-| `mvmctl vm checkpoint create <name> [--class fs-quick\|vm-full] [--tag <tag>] [--json]` | Capture a checkpoint. `--class vm-full` saves full machine state (memory + disk) via Vz's `saveMachineStateToURL`. Records content hash in the audit chain. |
-| `mvmctl vm checkpoint restore <checkpoint> [--json]` | Restore a previously created `vm_full` checkpoint into the original VM identity. Re-hashes content against the recorded metadata before loading. |
-| `mvmctl vm checkpoint fork <checkpoint> [--new-id <name>] [--boot] [--json]` | Restore a checkpoint into a new VM identity (new name, separate audit lineage). `vm_full` forks auto-boot; `fs_quick` forks boot only with `--boot`. |
-| `mvmctl vm checkpoint ls [--json]` | List checkpoints. |
-| `mvmctl vm checkpoint diff <a> <b> [--json]` | Compare two checkpoint metadata/content manifests. |
-| `mvmctl vm checkpoint rm <checkpoint> [--json]` | Delete a checkpoint and its blobs. |
-| `mvmctl vm snapshot ls [--json]` | List sealed Firecracker instance snapshots. |
-| `mvmctl vm snapshot rm <name> [--json]` | Delete a sealed Firecracker instance snapshot. |
+| `mvmctl machine save <name> [--tag <tag>] [--json]` | Save a running Vz VM as a `vm_full` checkpoint. Refuses when the active host/backend does not report the `save-restore` snapshot tier. |
+| `mvmctl machine restore <checkpoint> [--json]` | Restore a previously saved `vm_full` checkpoint into the original VM identity after content verification. Refuses when the active host/backend does not report the `save-restore` snapshot tier. |
+| `mvmctl machine checkpoint create <name> [--class fs-quick\|vm-full] [--tag <tag>] [--json]` | Capture a checkpoint. `--class vm-full` saves full machine state (memory + disk) via Vz's `saveMachineStateToURL`. Records content hash in the audit chain. |
+| `mvmctl machine checkpoint restore <checkpoint> [--json]` | Restore a previously created `vm_full` checkpoint into the original VM identity. Re-hashes content against the recorded metadata before loading. |
+| `mvmctl machine checkpoint fork <checkpoint> [--new-id <name>] [--boot] [--json]` | Restore a checkpoint into a new VM identity (new name, separate audit lineage). `vm_full` forks auto-boot; `fs_quick` forks boot only with `--boot`. |
+| `mvmctl machine checkpoint ls [--json]` | List checkpoints. |
+| `mvmctl machine checkpoint diff <a> <b> [--json]` | Compare two checkpoint metadata/content manifests. |
+| `mvmctl machine checkpoint rm <checkpoint> [--json]` | Delete a checkpoint and its blobs. |
+| `mvmctl machine snapshot ls [--json]` | List sealed Firecracker instance snapshots. |
+| `mvmctl machine snapshot rm <name> [--json]` | Delete a sealed Firecracker instance snapshot. |
 
 Checkpoint blobs are stored under the configured checkpoint store (`MVM_DATA_DIR` / `~/.mvm` via the core path helpers). The audit chain records `checkpoint.created`, `checkpoint.restored`, and `checkpoint.forked` entries with content hashes; restore and fork refuse tampered checkpoint content before booting.
 
@@ -542,12 +542,12 @@ Checkpoint blobs are stored under the configured checkpoint store (`MVM_DATA_DIR
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl vm cp <host-path> <vm>:/absolute/path` | Copy one regular file from the host into a running VM |
-| `mvmctl vm cp <vm>:/absolute/path <host-path>` | Copy one regular file from a running VM to the host |
-| `mvmctl vm cp --force <src> <dst>` | Overwrite an existing destination |
-| `mvmctl vm cp --create-parents <src> <dst>` | Create destination parent directories |
-| `mvmctl vm cp --max-bytes <n> <src> <dst>` | Refuse copies larger than the byte cap. Default: 16 MiB |
-| `mvmctl vm cp --json <src> <dst>` | Print a machine-readable copy summary without host paths or file contents |
+| `mvmctl machine cp <host-path> <vm>:/absolute/path` | Copy one regular file from the host into a running VM |
+| `mvmctl machine cp <vm>:/absolute/path <host-path>` | Copy one regular file from a running VM to the host |
+| `mvmctl machine cp --force <src> <dst>` | Overwrite an existing destination |
+| `mvmctl machine cp --create-parents <src> <dst>` | Create destination parent directories |
+| `mvmctl machine cp --max-bytes <n> <src> <dst>` | Refuse copies larger than the byte cap. Default: 16 MiB |
+| `mvmctl machine cp --json <src> <dst>` | Print a machine-readable copy summary without host paths or file contents |
 
 Exactly one endpoint must use `VM:/absolute/path` form. Guest paths are
 validated by the guest agent's filesystem policy before any read or write. Host
@@ -637,19 +637,19 @@ to cold boot with a warning rather than aborting the exec. See the
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl vm volume create <name>` | Create a locked mvm-managed encrypted local volume archive |
-| `mvmctl vm volume create <name> --root <absolute-dir>` | Create the mvm-managed encrypted volume under a specific root |
-| `mvmctl vm volume create <name> --host-backed` | Create the previous host-backed managed directory, requiring encrypted backing storage |
-| `mvmctl vm volume unlock <name>` | Decrypt a managed volume into its plaintext mount directory |
-| `mvmctl vm volume lock <name>` | Seal a managed volume back into its encrypted archive and remove plaintext |
-| `mvmctl vm volume catalog` | List managed local volumes |
-| `mvmctl vm volume catalog --json` | List managed local volumes as JSON |
-| `mvmctl vm volume mount <vm> --volume <name> --guest <absolute-path>` | Register an unlocked managed local virtio-fs volume mount for a VM. Read-only by default |
-| `mvmctl vm volume mount <vm> --volume <name> --host <absolute-dir> --guest <absolute-path>` | Register an ad-hoc encrypted host directory as a virtio-fs volume mount |
-| `mvmctl vm volume mount <vm> --volume <name> --host <absolute-dir> --guest <absolute-path> --rw` | Register the volume read-write |
-| `mvmctl vm volume ls <vm>` | List registered volume mounts |
-| `mvmctl vm volume ls <vm> --json` | List registered volume mounts as JSON |
-| `mvmctl vm volume unmount <vm> <guest-path>` | Remove a registered volume mount |
+| `mvmctl machine volume create <name>` | Create a locked mvm-managed encrypted local volume archive |
+| `mvmctl machine volume create <name> --root <absolute-dir>` | Create the mvm-managed encrypted volume under a specific root |
+| `mvmctl machine volume create <name> --host-backed` | Create the previous host-backed managed directory, requiring encrypted backing storage |
+| `mvmctl machine volume unlock <name>` | Decrypt a managed volume into its plaintext mount directory |
+| `mvmctl machine volume lock <name>` | Seal a managed volume back into its encrypted archive and remove plaintext |
+| `mvmctl machine volume catalog` | List managed local volumes |
+| `mvmctl machine volume catalog --json` | List managed local volumes as JSON |
+| `mvmctl machine volume mount <vm> --volume <name> --guest <absolute-path>` | Register an unlocked managed local virtio-fs volume mount for a VM. Read-only by default |
+| `mvmctl machine volume mount <vm> --volume <name> --host <absolute-dir> --guest <absolute-path>` | Register an ad-hoc encrypted host directory as a virtio-fs volume mount |
+| `mvmctl machine volume mount <vm> --volume <name> --host <absolute-dir> --guest <absolute-path> --rw` | Register the volume read-write |
+| `mvmctl machine volume ls <vm>` | List registered volume mounts |
+| `mvmctl machine volume ls <vm> --json` | List registered volume mounts as JSON |
+| `mvmctl machine volume unmount <vm> <guest-path>` | Remove a registered volume mount |
 
 Managed local volumes are encrypted by mvm at rest. `volume create` writes a
 locked AES-256-GCM encrypted archive plus wrapped per-volume data key metadata
