@@ -21,6 +21,7 @@
 //! the single-shot builder instead). The **flake-check** route is still opt-in
 //! via [`BUILDERD_TYPED_OPT_IN_ENV`] until it gets the same live proof.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -218,8 +219,24 @@ pub enum BuildDispatch {
     Fellback,
 }
 
+/// Render a streamed build event for the user's terminal. Log chunks pass
+/// through verbatim — they already carry nix's derivation-prefixed lines (e.g.
+/// `linux>   CC   kernel/fork.o`) — and progress becomes a concise
+/// percent-and-label line. Empty log chunks render to nothing. Pure so the
+/// formatting is unit-tested without touching a daemon or stderr.
+fn render_build_event(event: &OperationEvent) -> Option<String> {
+    match event {
+        OperationEvent::Log { text } => (!text.is_empty()).then(|| text.clone()),
+        OperationEvent::Progress { fraction, label } => {
+            let pct = (fraction.clamp(0.0, 1.0) * 100.0).round() as u32;
+            Some(format!("[build {pct:>3}%] {label}\n"))
+        }
+    }
+}
+
 /// Run a typed `BuildGuestImage` against the daemon at `socket_path`: connect,
-/// send the op, and map its terminal outcome onto a [`BuildVerdict`].
+/// send the op, stream its progress/log to stderr, and map its terminal outcome
+/// onto a [`BuildVerdict`].
 pub fn run_build(
     socket_path: &Path,
     flake_ref: &str,
@@ -235,8 +252,17 @@ pub fn run_build(
         fingerprint: None,
         output_dir: output_dir.map(str::to_string),
     };
-    let mut discard = |_event: OperationEvent| {};
-    match client.run_operation(&request, &mut discard)? {
+    // Stream the daemon's progress/log to stderr so the typed route is as
+    // visible as the legacy in-VM build — without it a cold guest-image build
+    // (e.g. a from-source kernel) shows nothing and reads as a hang.
+    let mut to_stderr = |event: OperationEvent| {
+        if let Some(rendered) = render_build_event(&event) {
+            let mut err = std::io::stderr();
+            let _ = err.write_all(rendered.as_bytes());
+            let _ = err.flush();
+        }
+    };
+    match client.run_operation(&request, &mut to_stderr)? {
         // On export the daemon sets `artifact_path` to the requested output dir
         // (host-readable); with no export it equals the store path.
         OperationOutcome::Artifact {
@@ -312,6 +338,59 @@ mod tests {
         assert!(!on(""));
         // Absent var → not opted in.
         assert!(!typed_opt_in(|_| None));
+    }
+
+    #[test]
+    fn render_build_event_passes_log_text_through_verbatim() {
+        // Log chunks already carry nix's derivation-prefixed lines; surface them
+        // unchanged so the typed route is as visible as the legacy in-VM build.
+        let ev = OperationEvent::Log {
+            text: "linux>   CC      kernel/fork.o\n".to_string(),
+        };
+        assert_eq!(
+            render_build_event(&ev).as_deref(),
+            Some("linux>   CC      kernel/fork.o\n")
+        );
+    }
+
+    #[test]
+    fn render_build_event_drops_empty_log_chunks() {
+        let ev = OperationEvent::Log {
+            text: String::new(),
+        };
+        assert_eq!(render_build_event(&ev), None);
+    }
+
+    #[test]
+    fn render_build_event_formats_progress_as_percent_and_label() {
+        let ev = OperationEvent::Progress {
+            fraction: 0.42,
+            label: "building workload kernel".to_string(),
+        };
+        assert_eq!(
+            render_build_event(&ev).as_deref(),
+            Some("[build  42%] building workload kernel\n")
+        );
+    }
+
+    #[test]
+    fn render_build_event_clamps_out_of_range_progress() {
+        let over = OperationEvent::Progress {
+            fraction: 1.9,
+            label: "done".to_string(),
+        };
+        assert_eq!(
+            render_build_event(&over).as_deref(),
+            Some("[build 100%] done\n")
+        );
+        let under = OperationEvent::Progress {
+            fraction: -0.5,
+            label: "starting".to_string(),
+        };
+        assert_eq!(
+            render_build_event(&under).as_deref(),
+            Some("[build   0%] starting\n")
+        );
     }
 
     #[test]
