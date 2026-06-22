@@ -578,7 +578,6 @@ git commit -am "docs(plan-209): unified slim-kernel docs + status rollup"
 - [ ] **Detection watcher** — sibling plan: flag when `linux_6_12.y` trails the latest LTS point release or is hit by a published Linux CVE (sibling to ADR-002 claim 7's `cargo audit`). Not in this plan.
 - [ ] **mvmd fleet rollout** — drain-and-roll across running microVMs lives in the mvmd repo. mvm exposes the single-VM primitive (Task 11); mvmd consumes it. Not in this repo.
 - [ ] **Option 2 fallback wiring** — only if Gate 0 (Task 3) says DOES-NOT-BOOT: slim `nix/packages/libkrunfw.nix`'s bundled config for macOS. Tracked here, built only on that branch.
-</content>
 
 ## Gate 0 findings (2026-06-21)
 
