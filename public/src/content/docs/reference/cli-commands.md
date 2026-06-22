@@ -373,10 +373,13 @@ flag:
   shell exits); combine with `--name`/`-d` to keep it up.
 
 Persistence and interactivity are independent: `--tty` never changes whether the
-machine survives. `--volume` host shares ride the transient path only; combining
-them with `-d`/`--name`/`-t` is currently refused. The `--volume` syntax is
-`HOST:/GUEST[:MODE]` (`MODE` defaults to `ro`; `rw` needs `--profile dev` or
-`permissive`).
+machine survives. `--volume` host shares work on every mode — transient,
+persistent, and interactive. The syntax is `HOST:/GUEST[:MODE]` (`MODE` defaults
+to `ro`; `rw` needs `--profile dev` or `permissive`). On a persistent (`-d`/
+`--name`) or interactive (`-t`) machine the host path is canonicalized to an
+absolute path and stored in the machine spec, so a later reconnect re-mounts the
+same share regardless of your working directory; the host directory must exist at
+boot.
 
 SSH sessions are banned in microVMs. `--allow-host <host:22>` is refused, and
 the runtime also denies TCP/22 even under broad egress. Dev-tier `ssh_agent`
