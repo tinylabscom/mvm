@@ -368,6 +368,24 @@ enum MachineRunMode {
     InteractivePersistent,
 }
 
+impl MachineRunMode {
+    /// Warm-pool size for this run mode (Plan 211 Phase 1). Transient and
+    /// interactive-transient runs are throwaway, auto-named cattle — eligible to
+    /// claim a pre-booted standby and to replenish the pool, so they take the
+    /// residency-policy size (`effective_warm_pool_size`). A user-named or `-d`
+    /// persistent machine is long-lived, not pool cattle, so it never claims
+    /// (size 0). `explicit` is a caller override (e.g. a future `--warm` flag),
+    /// applied only to the claim-eligible modes.
+    fn warm_pool_size(self, explicit: Option<u32>) -> u32 {
+        match self {
+            MachineRunMode::Transient | MachineRunMode::InteractiveTransient => {
+                mvm_core::residency::effective_warm_pool_size(explicit)
+            }
+            MachineRunMode::Persistent | MachineRunMode::InteractivePersistent => 0,
+        }
+    }
+}
+
 /// What the persistent path should do with the on-disk spec for the target name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SpecReconcile {
@@ -2277,7 +2295,16 @@ fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<
         return run_entrypoint_action(args, resolved_flake_slot);
     }
 
-    match args.resolve_mode()? {
+    let mode = args.resolve_mode()?;
+    // Plan 211 Phase 1: resolve warm-pool eligibility per mode. Threaded into the
+    // claim path next; logged here so the dark-landed decision is observable
+    // (transient/interactive-transient take the residency size, persistent → 0).
+    tracing::debug!(
+        ?mode,
+        warm_pool_size = mode.warm_pool_size(None),
+        "machine run warm-pool eligibility"
+    );
+    match mode {
         MachineRunMode::Transient => {
             // For flake runs, pass the slot hash as the manifest.
             if let Some(slot) = resolved_flake_slot {
@@ -2722,6 +2749,31 @@ mod tests {
             let mode = args.resolve_mode().expect("resolve");
             assert_eq!(mode, *expected, "argv {argv:?}");
         }
+    }
+
+    #[test]
+    fn warm_pool_size_is_claim_eligible_only_for_throwaway_runs() {
+        // Transient + interactive-transient are auto-named cattle → eligible:
+        // an explicit override is honoured verbatim (the residency-policy default
+        // for `None` is env-dependent, so the override path is the deterministic
+        // assertion).
+        assert_eq!(MachineRunMode::Transient.warm_pool_size(Some(3)), 3);
+        assert_eq!(
+            MachineRunMode::InteractiveTransient.warm_pool_size(Some(2)),
+            2
+        );
+        // A user-named / `-d` persistent machine is long-lived, never pooled —
+        // size 0 regardless of any override.
+        assert_eq!(MachineRunMode::Persistent.warm_pool_size(Some(5)), 0);
+        assert_eq!(MachineRunMode::Persistent.warm_pool_size(None), 0);
+        assert_eq!(
+            MachineRunMode::InteractivePersistent.warm_pool_size(Some(5)),
+            0
+        );
+        assert_eq!(
+            MachineRunMode::InteractivePersistent.warm_pool_size(None),
+            0
+        );
     }
 
     #[test]

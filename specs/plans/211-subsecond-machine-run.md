@@ -49,15 +49,21 @@ Target warm budget: **~300–500ms** to shell.
 ## Phases
 
 ### Phase 1 — Warm-claim eligibility for transient + interactive `machine run`  ← this PR
-- Replace the hardcoded `warm_pool_size: 0` on the transient/interactive
-  start configs with a **mode-aware, policy-driven** value: claim-eligible for
-  *transient* and *interactive-transient* (auto-named, throwaway), `0` for a
-  user-named/`-d` persistent machine (those are long-lived, not pool cattle).
-- Add the `try_warm_claim` attempt (mirroring `up.rs:2809`) to the
-  interactive-transient start path so `-it` can claim.
-- **Safe to land dark:** with an unpopulated pool, `try_warm_claim` returns
-  `None` → cold boot, unchanged. Behavior only changes once Phase 2 fills the pool.
-- TDD a pure `warm_pool_size_for(mode, explicit)` eligibility helper.
+
+**Phase 1a — eligibility decision core (DONE).** `MachineRunMode::warm_pool_size(explicit)`
+returns the residency-policy size (`effective_warm_pool_size`) for *transient* and
+*interactive-transient* (auto-named, throwaway), `0` for user-named/`-d` persistent
+machines. Resolved + logged in `run_dispatch` so the dark-landed decision is
+observable; unit-tested (`warm_pool_size_is_claim_eligible_only_for_throwaway_runs`).
+Zero behavior change — nothing claims yet.
+
+**Phase 1b — claim-call integration (NEXT).** Thread the resolved size into
+`run_secure` (transient) and `run_interactive` (interactive), and add the
+`try_warm_claim` + `replenish_after_launch` calls (mirroring `up.rs:2809`) at the
+boot seam. This bottoms out in the shared `crate::exec` runner / `start_machine`
+managed-start, so it lands as its own isolated commit (security-sensitive boot
+path). **Safe to land dark:** with an unpopulated pool, `try_warm_claim` → `None`
+→ cold boot, unchanged. Behavior only changes once Phase 2 fills the pool.
 
 ### Phase 2 — Populate + keep warm (Vz Option A: per-image)
 - Lazy `replenish_after_launch` for the just-run image so the **2nd+ run of a
