@@ -21,15 +21,24 @@ tail that the removed boot then exposes.
 
 Target warm budget: **~300–500ms** to shell.
 
-## What already exists (Plan 118, merged #1170)
+## What exists on origin/main — and what #1258 deleted
 
-- `try_warm_claim` + `replenish_after_launch` are wired into the `up`/`cmd_run`
-  flow (`crates/mvm-cli/src/commands/vm/up.rs:2809/2858`). A claimed standby is
-  pre-booted to agent-ready, so a claim skips the entire cold boot.
-- Per-backend `spawn_standby` (`vz`/`libkrun`/`firecracker`).
-- `StandbyCompat` keying = kernel + fixed resources + `image_sha256`.
-- Vz residency default is `always_warm()` (`mvm_core::residency`), so the
-  *policy* already wants a warm pool on the deployment tier.
+**Surviving primitives** (Plan 118, #757 / #1170): per-backend `spawn_standby` +
+`claim_standby` traits; `SupervisorStandbyPool::select_idle_compatible` /
+`mark_claimed`; `pool::warm_to_target` (replenish core); `StandbyCompat` keying
+(kernel + resources + `image_sha256`); Vz residency default `always_warm()`.
+
+**Deleted mid-development by #1258** (`04bab4f7`, "fold up/run into machine run"):
+the CLI auto-claim glue `pool::try_warm_claim` (63 LOC) + `replenish_after_launch`
+(37 LOC) + 4 unit tests. They were removed as **orphaned** — folding `up`/`run`
+into `machine run` left no caller, and #1258 also dropped the `dead_code` allow.
+So origin/main has the standby *primitives* but **no CLI claim orchestration**;
+`up.rs` now hardcodes `warm_pool_size: 0`. The glue is cleanly recoverable from
+`git show 04bab4f7^:crates/mvm-cli/src/commands/pool.rs`.
+
+⇒ Phase 1b must **reconstruct** `try_warm_claim`/`replenish_after_launch` from
+that parent and wire them into `run_captured` **in one commit** (recovering them
+unused would re-trip the no-dead-code gate #1258 added).
 
 ## The two gaps
 
@@ -76,11 +85,21 @@ a claim without reconciling the two — either (a) rebind the managed spec/regis
 + console-attach to the claimed standby-id, or (b) re-route interactive-transient
 off the managed path onto a claim-aware transient flow. **Decision: split 1b.**
 
-- **1b-i (transient `-- cmd`, tractable):** intercept in `run_secure` before
-  `crate::exec::run_captured`: thread `MachineRunMode::warm_pool_size` in, attempt
-  `try_warm_claim`; on hit, run the command against the claimed standby (reuse the
-  attach-into-running path) instead of a cold `run_captured`; replenish after.
-  Auto-named + throwaway, so it matches the `up.rs:2809` claim model directly.
+- **1b-i (transient `-- cmd`, tractable):** (1) **recover** `try_warm_claim` +
+  `replenish_after_launch` (+ their 4 tests) from `04bab4f7^:pool.rs`, adapt to
+  current types; (2) wire into `run_captured` (`exec.rs:638`) as a third boot
+  fast-path *sibling to snapshot-restore* — after admission (so `start_config`
+  carries the admitted `tenant_id`/`plan_json`), attempt the claim; on hit rebind
+  the mutable `vm_name` to the standby-id (so Ctrl-C handler + `run_in_guest` +
+  `stop_transient` target it) and skip cold boot; replenish after teardown.
+  Gate to `add_dirs.is_empty()` (matches the pool's "no extra volumes" rule).
+  **Egress review (claim 10):** the claim passes the *admitted* `start_config`
+  (plan + `network_policy`) to `claim_standby` exactly as the deleted up-path did,
+  so the standby re-verifies + applies this run's plan; confirm the gateway bridge
+  is (re)bound for the claimed VM before trusting it — this is the one
+  security-load-bearing check of 1b-i. **Not dark on Vz:** `always_warm` ⇒
+  nonzero size by default, so replenish populates and run-2 claims — verify live
+  (run twice, expect "Claimed a warm standby" + faster run-2, no VM leak).
 - **1b-ii (interactive `-it`):** the managed-name ↔ standby-id reconciliation
   above. Larger; its own commit, with the console-attach + teardown + registry
   rebind covered by tests before it goes near the boot path.
