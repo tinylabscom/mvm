@@ -16,11 +16,12 @@
 //! remaining shell surface stays visible and shrinkable (the
 //! `xtask check-builder-shell-job-sites` allowlist is the static counterpart).
 //!
-//! The phasing is "opt-in, then default": today the typed route is taken only
-//! when the daemon is reachable *and* the caller opted in via
-//! [`BUILDERD_TYPED_OPT_IN_ENV`]; once a typed operation is proven over the wire,
-//! flipping its default is a one-line change here rather than a scatter of
-//! call-site edits.
+//! The phasing is "opt-in, then default", per operation. The **build** route has
+//! flipped to default-on: a reachable daemon is used unless the raw-shell debug
+//! gate [`BUILDERD_RAW_SHELL_ENV`] forces the legacy in-VM shell build. The
+//! **flake-check** route is still opt-in via [`BUILDERD_TYPED_OPT_IN_ENV`] until
+//! it gets the same live proof. Each flip is a one-line change to the route's
+//! opt-in helper rather than a scatter of call-site edits.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -34,8 +35,17 @@ use crate::builderd_client::{
 use crate::builderd_protocol::{BuilderRequest, OperationId};
 
 /// Opt-in env flag letting a host build path prefer the typed `mvm-builderd`
-/// route when the daemon is reachable. Off by default during the migration.
+/// route when the daemon is reachable. Still gates the *flake-check* route
+/// (`try_typed_flake_check`); the *build* route now defaults on (see
+/// [`BUILDERD_RAW_SHELL_ENV`]).
 pub const BUILDERD_TYPED_OPT_IN_ENV: &str = "MVM_BUILDERD_TYPED";
+
+/// Opt-out env flag forcing a guest-image build down the legacy controlled
+/// shell-job channel even when the daemon is reachable — the raw-shell debug
+/// gate. The build route is typed by default once a daemon is reachable; set
+/// this (truthy: `1`/`true`/`yes`) to fall back to the in-VM shell build for
+/// debugging or to bypass a misbehaving daemon. Does not affect flake check.
+pub const BUILDERD_RAW_SHELL_ENV: &str = "MVM_BUILDERD_RAW_SHELL";
 
 /// Readiness-probe timeout when deciding whether to route typed: the daemon
 /// answers a handshake immediately or it isn't there.
@@ -73,6 +83,21 @@ pub fn resolve_route(daemon_reachable: bool, typed_opt_in: bool) -> BuilderRoute
 pub fn typed_opt_in(getter: impl Fn(&str) -> Option<String>) -> bool {
     matches!(
         getter(BUILDERD_TYPED_OPT_IN_ENV)
+            .as_deref()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+/// Whether a guest-image build should take the typed route when the daemon is
+/// reachable. Builds default on: a reachable daemon is used unless the raw-shell
+/// debug gate ([`BUILDERD_RAW_SHELL_ENV`]) is set truthy to force the legacy
+/// in-VM shell build. Injected getter for unit-testability. Distinct from
+/// [`typed_opt_in`], which keeps flake check opt-in.
+pub fn build_typed_opt_in(getter: impl Fn(&str) -> Option<String>) -> bool {
+    !matches!(
+        getter(BUILDERD_RAW_SHELL_ENV)
             .as_deref()
             .map(|v| v.trim().to_ascii_lowercase())
             .as_deref(),
@@ -253,17 +278,18 @@ pub fn run_build(
     }
 }
 
-/// Route a guest-image build: take the typed daemon path when the caller opted
-/// in (`MVM_BUILDERD_TYPED`) **and** a ready builder daemon is reachable under
-/// `vms_root`; otherwise fall back (emitting the compat diagnostic) to the
-/// caller's legacy in-VM build path.
+/// Route a guest-image build: take the typed daemon path whenever a ready
+/// builder daemon is reachable under `vms_root`, unless the raw-shell debug gate
+/// (`MVM_BUILDERD_RAW_SHELL`) forces legacy; otherwise fall back (emitting the
+/// compat diagnostic) to the caller's legacy in-VM build path. The build route
+/// is default-on — unlike flake check, which stays opt-in via `MVM_BUILDERD_TYPED`.
 pub fn try_typed_build(
     vms_root: &Path,
     flake_ref: &str,
     attr_path: &str,
     output_dir: Option<&str>,
 ) -> BuildDispatch {
-    let opt_in = typed_opt_in(|k| std::env::var(k).ok());
+    let opt_in = build_typed_opt_in(|k| std::env::var(k).ok());
     let socket = resolve_running_builder_socket(vms_root);
     let reachable = socket.as_deref().is_some_and(|s| {
         matches!(
@@ -321,6 +347,36 @@ mod tests {
         assert!(!on(""));
         // Absent var → not opted in.
         assert!(!typed_opt_in(|_| None));
+    }
+
+    #[test]
+    fn build_route_defaults_on_and_raw_shell_gate_forces_legacy() {
+        // Absent gate → build is typed-eligible (default on).
+        assert!(build_typed_opt_in(|_| None));
+        let gate = |v: &str| {
+            let v = v.to_string();
+            build_typed_opt_in(move |_| Some(v.clone()))
+        };
+        // Truthy gate → forced legacy (not typed-eligible).
+        assert!(!gate("1"));
+        assert!(!gate("true"));
+        assert!(!gate("YES"));
+        assert!(!gate("  true  "));
+        // Non-truthy gate values leave the build default-on.
+        assert!(gate("0"));
+        assert!(gate("false"));
+        assert!(gate(""));
+    }
+
+    #[test]
+    fn raw_shell_gate_is_independent_of_flake_check_opt_in() {
+        // The build gate reads MVM_BUILDERD_RAW_SHELL, not MVM_BUILDERD_TYPED, so
+        // flipping the flake-check opt-in never changes the build default.
+        let only_typed_set = |k: &str| (k == BUILDERD_TYPED_OPT_IN_ENV).then(|| "1".to_string());
+        assert!(build_typed_opt_in(only_typed_set)); // build still default-on
+        assert!(!typed_opt_in(
+            |k: &str| (k == BUILDERD_RAW_SHELL_ENV).then(|| "1".to_string())
+        ));
     }
 
     #[test]
