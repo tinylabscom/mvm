@@ -186,6 +186,17 @@ let
     "SPI"                  # no SPI buses behind virtio (drops SPI flash/RTC/…)
     "NVMEM"                # no on-board NVMEM providers
     "PWM"                  # no PWM controllers
+
+    # Shrink batch 5 — subsystems the proven-minimal libkrun guest also drops.
+    # Console stays: 8250 + AMBA PL011 + virtio-console are kept; only the SoC
+    # vendor UARTs go. IOMMU is safe to drop — virtio rides MMIO with direct
+    # DMA, no translation unit.
+    "CORESIGHT"            # ARM hardware trace/debug — never wired in a guest
+    "VIRTUALIZATION"       # a guest doesn't host nested VMs (drops KVM)
+    "REMOTEPROC"           # no remote-processor/RPMSG coprocessors
+    "IOMMU_SUPPORT"        # virtio-mmio uses direct DMA; no SMMU present
+    "SERIAL_XILINX_PS_UART" "SERIAL_FSL_LPUART" "SERIAL_FSL_LINFLEXUART"
+    "SERIAL_MCTRL_GPIO" "SERIAL_DEV_BUS"  # SoC/serdev UARTs — console is PL011
   ] ++ pkgs.lib.optionals (kernelArch == "arm64") [
     # arm64 boots from the FDT libkrun / Firecracker hand us; ACPI is
     # never consulted, so drop the ACPICA interpreter and the whole
