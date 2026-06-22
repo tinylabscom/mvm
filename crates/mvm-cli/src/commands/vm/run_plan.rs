@@ -528,6 +528,7 @@ mod tests {
     fn base_run_args() -> RunArgs {
         RunArgs {
             manifest: None,
+            warm_pool_size: 0,
             image: None,
             net: false,
             allow_host: Vec::new(),

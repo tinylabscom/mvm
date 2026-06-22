@@ -178,6 +178,12 @@ pub struct ExecRequest {
     /// `VmStartConfig.network_policy` so every backend enforces the same
     /// value.
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
+    /// Plan 211: warm-pool size for this transient run. `> 0` makes the run
+    /// eligible to claim a pre-booted standby (skipping cold boot) and to
+    /// replenish the pool after teardown; `0` always cold-boots. Resolved from
+    /// `MachineRunMode::warm_pool_size` — nonzero only for throwaway auto-named
+    /// transient/interactive-transient runs.
+    pub warm_pool_size: u32,
 }
 
 impl ExecRequest {
@@ -539,7 +545,7 @@ fn run_inner(
 
     // Build read-only ext4 images for each --add-dir, staged in a transient
     // VMS subdirectory so cleanup is straightforward.
-    let vm_name = transient_vm_name();
+    let mut vm_name = transient_vm_name();
     let staging_dir = format!("{}/{}/extras", mvm::config::VMS_DIR, vm_name);
     let mut volumes: Vec<mvm_backend::image::RuntimeVolume> = Vec::new();
     let mut add_dir_labels: Vec<String> = Vec::new();
@@ -616,6 +622,7 @@ fn run_inner(
         secret_files: Vec::new(),
         runner_dir: None,
         network_policy: req.network_policy.clone(),
+        warm_pool_size: req.warm_pool_size,
         ..Default::default()
     };
 
@@ -635,29 +642,53 @@ fn run_inner(
     }
     let t_admitted = timing.then(std::time::Instant::now);
 
-    let booted = if use_snapshot {
-        let tmpl = template_id
-            .as_deref()
-            .expect("snapshot_eligible only true for ImageSource::Template");
-        let snap = snap_info
-            .as_ref()
-            .expect("snapshot_eligible requires snap_info.is_some()");
-        ui::info(&format!(
-            "Restoring transient VM '{vm_name}' from template '{tmpl}' snapshot..."
-        ));
-        match restore_via_snapshot(&vm_name, tmpl, snap, &start_config) {
-            Ok(()) => true,
+    // Plan 211: try a warm-pool claim before snapshot/cold-boot. A claimed
+    // standby is pre-booted to agent-ready and runs under its own standby-id, so
+    // rebind `vm_name` for the Ctrl-C handler, run_in_guest, and teardown below.
+    // try_warm_claim gates internally (warm_pool_size > 0, admitted tenant +
+    // signed plan threaded into start_config, no extra volumes, backend supports
+    // the pool); any miss/error fails open to the snapshot/cold-boot paths.
+    let warm_claimed =
+        match crate::commands::pool::try_warm_claim(&backend, &start_config, false, None) {
+            Ok(Some(id)) => {
+                ui::info(&format!(
+                    "Claimed a warm standby ({}) — skipping cold boot.",
+                    id.0
+                ));
+                vm_name = id.0;
+                true
+            }
+            Ok(None) => false,
             Err(e) => {
-                // macOS / Lima QEMU returns os error 95 (EOPNOTSUPP) on vsock
-                // snapshots; cold boot still works there. Fall back rather
-                // than failing the whole exec.
-                ui::warn(&format!("Snapshot restore failed: {e}; cold-booting."));
+                tracing::warn!(error = %e, "warm-claim attempt errored; cold-booting");
                 false
             }
-        }
-    } else {
-        false
-    };
+        };
+
+    let booted = warm_claimed
+        || if use_snapshot {
+            let tmpl = template_id
+                .as_deref()
+                .expect("snapshot_eligible only true for ImageSource::Template");
+            let snap = snap_info
+                .as_ref()
+                .expect("snapshot_eligible requires snap_info.is_some()");
+            ui::info(&format!(
+                "Restoring transient VM '{vm_name}' from template '{tmpl}' snapshot..."
+            ));
+            match restore_via_snapshot(&vm_name, tmpl, snap, &start_config) {
+                Ok(()) => true,
+                Err(e) => {
+                    // macOS / Lima QEMU returns os error 95 (EOPNOTSUPP) on vsock
+                    // snapshots; cold boot still works there. Fall back rather
+                    // than failing the whole exec.
+                    ui::warn(&format!("Snapshot restore failed: {e}; cold-booting."));
+                    false
+                }
+            }
+        } else {
+            false
+        };
 
     if !booted {
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
@@ -689,6 +720,14 @@ fn run_inner(
     };
 
     let _ = backend.stop_transient(&VmId(vm_name.clone()));
+
+    // Plan 211: top the warm pool back toward target after the run (best-effort,
+    // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; on Vz it
+    // hands a detached `pool warm` subprocess the boot+capture so teardown isn't
+    // blocked. `start_config` still carries this run's rootfs + warm size.
+    if let Err(e) = crate::commands::pool::replenish_after_launch(&backend, &start_config) {
+        tracing::debug!(error = %e, "pool replenish skipped (best-effort)");
+    }
 
     // Writable --add-dir uses rsync-back. With the VM stopped the
     // ext4 image is no longer in use, so we mount it host-side and rsync
@@ -1067,6 +1106,7 @@ pub fn dispatch_in_session(
     // with no add_dirs (sessions don't take --add-dir). The wrapper
     // emits `set -e\n<env exports>\n<argv>\n`.
     let req = ExecRequest {
+        warm_pool_size: 0,
         image: ImageSource::Template(String::new()),
         cpus: 0,
         memory_mib: 0,
@@ -1263,6 +1303,7 @@ mod tests {
     #[test]
     fn target_command_inline_quotes_each_arg() {
         let req = ExecRequest {
+            warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,
@@ -1281,6 +1322,7 @@ mod tests {
     #[test]
     fn build_guest_wrapper_no_extras() {
         let req = ExecRequest {
+            warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,
@@ -1303,6 +1345,7 @@ mod tests {
     #[test]
     fn build_guest_wrapper_mounts_and_env() {
         let req = ExecRequest {
+            warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,
@@ -1329,6 +1372,7 @@ mod tests {
     #[test]
     fn build_guest_wrapper_writable_mount_drops_ro_flag() {
         let req = ExecRequest {
+            warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,
@@ -1559,6 +1603,7 @@ mod tests {
     #[test]
     fn target_command_launch_plan_quotes_argv() {
         let req = ExecRequest {
+            warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,
@@ -1584,6 +1629,7 @@ mod tests {
         env.insert("PORT".to_string(), "8080".to_string());
         env.insert("LOG".to_string(), "info".to_string());
         let req = ExecRequest {
+            warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,
@@ -1624,6 +1670,7 @@ mod tests {
     fn build_guest_wrapper_inline_target_unchanged() {
         // Sanity: inline target wrapper still does not emit cd or extra env blocks.
         let req = ExecRequest {
+            warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,

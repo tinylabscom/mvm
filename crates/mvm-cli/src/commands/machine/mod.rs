@@ -273,6 +273,9 @@ impl MachineRunArgs {
     fn into_run_args(self) -> RunArgs {
         RunArgs {
             manifest: self.manifest,
+            // Default off; `run_dispatch` sets it for the warm-claim-eligible
+            // transient mode (Plan 211).
+            warm_pool_size: 0,
             image: self.image,
             net: self.net,
             allow_host: self.allow_host,
@@ -2310,7 +2313,12 @@ fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<
             if let Some(slot) = resolved_flake_slot {
                 args.manifest = Some(slot);
             }
-            run_secure(cli, args.into_run_args(), cfg)
+            // Plan 211 Phase 1b-i: a throwaway transient run is warm-claim
+            // eligible — carry the residency-policy size so `run_inner` can claim
+            // a pre-booted standby and replenish the pool.
+            let mut run_args = args.into_run_args();
+            run_args.warm_pool_size = mode.warm_pool_size(None);
+            run_secure(cli, run_args, cfg)
         }
         MachineRunMode::Persistent => {
             run_persistent(cli, args, cfg, resolved_flake_slot.as_deref())

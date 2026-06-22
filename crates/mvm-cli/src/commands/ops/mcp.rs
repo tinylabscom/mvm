@@ -416,6 +416,8 @@ impl ExecDispatcher {
         let argv = bash_dash_c(&shell_escape(code));
         let req = crate::exec::ExecRequest {
             image: crate::exec::ImageSource::Template(env.to_string()),
+            // MCP sessions don't use the warm pool.
+            warm_pool_size: 0,
             cpus: DEFAULT_VM_CPUS,
             memory_mib: DEFAULT_VM_MEM_MIB,
             mem_initial_mib: None,
