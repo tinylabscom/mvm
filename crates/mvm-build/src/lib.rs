@@ -95,6 +95,7 @@ pub mod vz_builder;
 /// concrete driver the env-var resolved to.
 #[cfg(feature = "builder-vm")]
 pub mod builder_backend_select;
+pub mod builder_health;
 
 /// Host-side cross-compile + cache of the guest agent/netinit binaries
 /// baked into an OCI rootfs by [`oci_runtime_inject`].
