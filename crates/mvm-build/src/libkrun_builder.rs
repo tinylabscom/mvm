@@ -481,13 +481,18 @@ impl LibkrunBuilderVm {
         })?;
         let console_log = vm_state_dir.join("console.log");
         // The in-guest nix build streams its `--print-build-logs` to this
-        // console as it runs (stage0-init echoes each line live), so point the
-        // operator at it — the build is otherwise silent for minutes. `[mvm]`
-        // eprintln matches the existing Stage 0 hint channel (stage0.rs).
-        eprintln!(
-            "[mvm] Stage 0 build log streams to {} — `tail -f` it to watch progress",
-            console_log.display()
-        );
+        // console as it runs (stage0-init echoes each line live). In verbose
+        // mode the host forwards that console to stderr, so the build log is
+        // already on screen — pointing at the file would be redundant. In quiet
+        // mode the build is silent for minutes, so point the operator at the
+        // file. `[mvm]` eprintln matches the existing Stage 0 hint channel.
+        if !self.verbose {
+            eprintln!(
+                "[mvm] Stage 0 build log streams to {} — `tail -f` it to watch progress \
+                 (or re-run with `-v` to stream it here)",
+                console_log.display()
+            );
+        }
 
         let mut krun = krun_context_for_image(&vm_name, &image)?
             .with_resources(self.vcpus, self.memory_mib)
@@ -970,6 +975,12 @@ impl BuilderVm for LibkrunBuilderVm {
         // on supervisor failure) so the background thread always gets
         // a chance to log.
         let vsock_rx = spawn_vsock_response_listener(&vm_state_dir);
+        // Stream the in-guest `nix --print-build-logs` output to the terminal as
+        // the build runs (under `-v`/`RUST_LOG`); no-op otherwise. The console
+        // echo carries init/kernel lines; this carries the nix build log, which
+        // cmd.sh redirects to the host-readable `<job_dir>/nix-stderr.log`.
+        let _job_log =
+            crate::builder_vm_runtime::JobLogStreamer::start(job_dir.join("nix-stderr.log"));
         let exit_code =
             spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir, self.verbose)?;
         if exit_code != 0 {

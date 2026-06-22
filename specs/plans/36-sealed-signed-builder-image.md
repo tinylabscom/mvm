@@ -454,3 +454,21 @@ deliberate design decision, not a code rollback.
 - **Lockfile inventory**: confirm `nix/dev/flake.lock` exists alongside
   `nix/flake.nix::flake.lock` and `nix/images/builder/flake.lock`. Add
   any others surfaced by `find nix -name flake.lock`.
+
+## Deferred follow-ups
+
+- [x] **Drop the `rsa` Marvin-Attack advisory (RUSTSEC-2023-0071).** Done:
+  `manifest-verify` migrated off the monolithic `sigstore` crate onto the
+  modular `sigstore-verify` + `sigstore-trust-root` + `sigstore-types`
+  stack (`crypto::image_verify`). That stack verifies cosign bundles
+  offline against an embedded Sigstore trust root and carries no `rsa`, no
+  `openidconnect`, and no `proc-macro-error v1` — eliminating both
+  RUSTSEC-2023-0071 and RUSTSEC-2024-0370 outright rather than accepting
+  them. Verification is synchronous (no async TUF fetch), so the feature
+  no longer pulls tokio.
+- [ ] **Watch `jiff` for the optional `defmt` chain.** `sigstore-types`
+  pulls `jiff`; jiff ≥ 0.2.29 adds an optional `defmt` dependency whose
+  macro crate trips RUSTSEC-2026-0173 (`proc-macro-error2`) as a lockfile
+  entry even though the feature is never enabled. The lock pins
+  `jiff = 0.2.28` to avoid it. When upstream `defmt-macros` drops
+  `proc-macro-error2`, lift the pin.

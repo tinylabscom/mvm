@@ -1445,7 +1445,7 @@ fn update_emits_update_install_audit_entry_against_mocked_github() {
     let current_version = env!("CARGO_PKG_VERSION");
     let _api_mock = server.mock(|when, then| {
         when.method(httpmock::Method::GET)
-            .path_contains("/releases/latest");
+            .path_includes("/releases/latest");
         then.status(200)
             .header("content-type", "application/json")
             .body(format!(r#"{{"tag_name":"v{current_version}"}}"#));
@@ -1481,7 +1481,7 @@ fn update_check_does_not_emit_audit_entry() {
     let server = httpmock::MockServer::start();
     let _api_mock = server.mock(|when, then| {
         when.method(httpmock::Method::GET)
-            .path_contains("/releases/latest");
+            .path_includes("/releases/latest");
         then.status(200)
             .header("content-type", "application/json")
             .body(r#"{"tag_name":"v0.999.0"}"#);

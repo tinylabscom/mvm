@@ -1106,6 +1106,14 @@ async fn bridge_copy_bidirectional(
                     reason,
                     flow_key,
                 } => {
+                    // Forensic capture records the denied frame (the original,
+                    // un-forwarded bytes) flagged dropped, so an armed transcript
+                    // shows attempted-but-blocked egress, not only allowed traffic.
+                    if let Some(cap) = &cap_e
+                        && let Some(sink) = cap.lock().await.as_mut()
+                    {
+                        let _ = sink.push_dropped(mvm_core::transcript::Direction::Egress, &frame);
+                    }
                     if let Some(k) = flow_key {
                         killed_flows.lock().await.insert(k);
                     }
@@ -1198,6 +1206,12 @@ async fn bridge_copy_bidirectional(
                     reason,
                     flow_key,
                 } => {
+                    // Capture the denied ingress frame (flagged dropped) too.
+                    if let Some(cap) = &cap_i
+                        && let Some(sink) = cap.lock().await.as_mut()
+                    {
+                        let _ = sink.push_dropped(mvm_core::transcript::Direction::Ingress, &frame);
+                    }
                     if let Some(k) = flow_key {
                         killed_flows.lock().await.insert(k);
                     }

@@ -42,6 +42,12 @@ pub struct ChunkRecord {
     pub sha256_hex: String,
     pub size_bytes: u64,
     pub direction: Direction,
+    /// True when the frame was denied by egress policy (dropped, not forwarded)
+    /// rather than crossing the boundary — forensically the interesting case (an
+    /// attempt to reach a blocked endpoint). `#[serde(default)]` so manifests
+    /// written before this field parse as `false` (forwarded).
+    #[serde(default)]
+    pub dropped: bool,
 }
 
 /// Which admitted workload/session a transcript belongs to. Capture is never
@@ -253,6 +259,26 @@ impl TranscriptWriter {
     /// Encrypt and append one payload chunk, or fail closed on a bound. The
     /// budget is checked on the *plaintext* size before any ciphertext lands.
     pub fn push(&mut self, direction: Direction, plaintext: &[u8]) -> Result<(), TranscriptError> {
+        self.push_inner(direction, false, plaintext)
+    }
+
+    /// Append a frame that egress policy **denied** (dropped, not forwarded),
+    /// recorded with `dropped = true`. Same bounds + at-rest encryption as
+    /// [`push`]; lets the forensic transcript show attempted-but-blocked egress.
+    pub fn push_dropped(
+        &mut self,
+        direction: Direction,
+        plaintext: &[u8],
+    ) -> Result<(), TranscriptError> {
+        self.push_inner(direction, true, plaintext)
+    }
+
+    fn push_inner(
+        &mut self,
+        direction: Direction,
+        dropped: bool,
+        plaintext: &[u8],
+    ) -> Result<(), TranscriptError> {
         self.budget.try_add(plaintext.len() as u64)?;
         let seq = self.chunks.len() as u64;
         let file = format!("{seq}.chunk");
@@ -273,6 +299,7 @@ impl TranscriptWriter {
             sha256_hex,
             size_bytes: ciphertext.len() as u64,
             direction,
+            dropped,
         });
         Ok(())
     }
@@ -383,6 +410,7 @@ mod tests {
             sha256_hex: sha,
             size_bytes: body.len() as u64,
             direction: Direction::Egress,
+            dropped: false,
         }
     }
 
@@ -394,6 +422,7 @@ mod tests {
             sha256_hex: "ab".to_string(),
             size_bytes: 2,
             direction: Direction::Ingress,
+            dropped: false,
         }]);
         let json = serde_json::to_string(&m).unwrap();
         let back: TranscriptManifest = serde_json::from_str(&json).unwrap();
@@ -457,6 +486,7 @@ mod tests {
             sha256_hex: "00".to_string(),
             size_bytes: 1,
             direction: Direction::Egress,
+            dropped: false,
         };
         assert!(matches!(
             verify_chunks(&manifest(vec![c]), dir.path()).unwrap_err(),
@@ -473,6 +503,7 @@ mod tests {
             sha256_hex: "00".to_string(),
             size_bytes: 1,
             direction: Direction::Egress,
+            dropped: false,
         };
         assert!(matches!(
             verify_chunks(&manifest(vec![c]), dir.path()).unwrap_err(),
@@ -524,6 +555,24 @@ mod tests {
         verify_chunks(&manifest, dir.path()).unwrap();
         let out = export(&manifest, dir.path(), &fixed_key(7)).unwrap();
         assert_eq!(out, b"GET / HTTP/1.1\r\nHTTP/1.1 200 OK\r\n");
+    }
+
+    #[test]
+    fn push_dropped_marks_the_chunk_and_still_exports() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config());
+        w.push(Direction::Egress, b"allowed").unwrap();
+        w.push_dropped(Direction::Egress, b"denied").unwrap();
+        let manifest = w.seal();
+        assert_eq!(manifest.chunks.len(), 2);
+        assert!(!manifest.chunks[0].dropped, "forwarded frame not flagged");
+        assert!(manifest.chunks[1].dropped, "denied frame flagged dropped");
+        // Both are encrypted + verifiable + decrypt back in order.
+        verify_chunks(&manifest, dir.path()).unwrap();
+        assert_eq!(
+            export(&manifest, dir.path(), &fixed_key(7)).unwrap(),
+            b"alloweddenied"
+        );
     }
 
     #[test]

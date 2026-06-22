@@ -121,7 +121,7 @@ def _machine_run_argv(
     cpus: int | None = None,
     memory: str | None = None,
     profile: str | None = None,
-    add_dirs: Iterable[str] | None = None,
+    volumes: Iterable[str] | None = None,
     env: Iterable[str] | None = None,
     timeout: int | None = None,
     receipt: str | None = None,
@@ -142,7 +142,7 @@ def _machine_run_argv(
         argv.extend(["--memory", _require_non_empty_str(memory, "memory")])
     if profile is not None:
         argv.extend(["--profile", _require_non_empty_str(profile, "profile")])
-    _append_repeated(argv, "--add-dir", add_dirs)
+    _append_repeated(argv, "--volume", volumes)
     _append_repeated(argv, "--env", env)
     if timeout is not None:
         argv.extend(["--timeout", str(timeout)])
@@ -226,7 +226,7 @@ class Machine:
         cpus: int | None = None,
         memory: str | None = None,
         profile: str | None = None,
-        add_dirs: Iterable[str] | None = None,
+        volumes: Iterable[str] | None = None,
         env: Iterable[str] | None = None,
         timeout: int | None = None,
         receipt: str | None = None,
@@ -242,7 +242,7 @@ class Machine:
                 cpus=cpus,
                 memory=memory,
                 profile=profile,
-                add_dirs=add_dirs,
+                volumes=volumes,
                 env=env,
                 timeout=timeout,
                 receipt=receipt,

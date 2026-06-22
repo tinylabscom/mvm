@@ -2344,15 +2344,20 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
             // removed; `nix/images/builder/flake.nix` is deleted.
             #[cfg(feature = "builder-vm")]
             {
-                // The Stage 0 build runs `nix` inside the guest with no
-                // host-visible output for minutes; a liveness heartbeat keeps it
-                // from reading as a hang. Dropped (thread stopped) when the build
-                // returns.
-                let _heartbeat = BuildHeartbeat::start("Builder VM image build");
+                // `-v`/`RUST_LOG` streams the in-guest nix `--print-build-logs`
+                // output live to the terminal. In that mode the streamed lines
+                // are the progress signal, so the spinner/heartbeat stays off (it
+                // would fight the scrolling output). Quiet mode keeps the spinner:
+                // the Stage 0 build is otherwise silent for minutes and would read
+                // as a hang.
+                let verbose = mvm::ui::is_verbose();
+                let _heartbeat =
+                    (!verbose).then(|| BuildHeartbeat::start("Builder VM image build"));
                 bootstrap_builder_vm_image_via_root_dir_stage0(
                     &flake_dir,
                     &out_dir,
                     &source_fingerprint,
+                    verbose,
                 )
                 .context("building the source-checkout builder VM image via root-dir Stage 0")
             }
@@ -2567,6 +2572,7 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     builder_flake_dir: &str,
     out_dir: &str,
     source_fingerprint: &str,
+    verbose: bool,
 ) -> Result<()> {
     let _stage0_guard = acquire_stage0_lock(out_dir)?;
 
@@ -2681,6 +2687,7 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
             &host_bin_dir,
             kernel,
             source_fingerprint,
+            verbose,
         )
     } else {
         run_stage0_root_dir(
@@ -2690,6 +2697,7 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
             "/init",
             &host_bin_dir,
             source_fingerprint,
+            verbose,
         )
     };
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -2807,6 +2815,7 @@ fn run_stage0_rootfs_with_external_kernel(
     host_bin_dir: &std::path::Path,
     external_kernel: &std::path::Path,
     source_fingerprint: &str,
+    verbose: bool,
 ) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
     use mvm_build::builder_backend_select::resolve_stage0_backend;
 
@@ -2822,7 +2831,7 @@ fn run_stage0_rootfs_with_external_kernel(
         )
     })?;
 
-    let backend = resolve_stage0_backend(false);
+    let backend = resolve_stage0_backend(verbose);
     backend
         .run_stage0(
             guest_root_dir,
@@ -3047,6 +3056,7 @@ fn run_stage0_root_dir(
     entry_path: &str,
     host_bin_dir: &std::path::Path,
     source_fingerprint: &str,
+    verbose: bool,
 ) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
     use mvm_build::builder_backend_select::resolve_stage0_backend;
 
@@ -3056,7 +3066,9 @@ fn run_stage0_root_dir(
     // Vz auto-detect default on macOS-26+, since Vz Stage 0 is still a gap.
     // That preserves the "Stage 0 is libkrun even on Vz-default hosts"
     // invariant while adding QEMU as the second implemented backend.
-    let backend = resolve_stage0_backend(false);
+    // `verbose` makes the backend forward the in-guest nix `--print-build-logs`
+    // output (already streamed to the guest console) live to the host stderr.
+    let backend = resolve_stage0_backend(verbose);
     backend
         .run_stage0(
             guest_root_dir,

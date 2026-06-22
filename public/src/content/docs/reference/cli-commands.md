@@ -354,11 +354,29 @@ Booting machine commands use the same signed-`ExecutionPlan`, audited,
 OCI-provenance execution path as the lower-level commands; non-booting state
 commands persist declarative specs under `MVM_DATA_DIR`.
 
-The flagship verb is `machine run`: boot a fresh microVM from an OCI image, run a
-command, and tear the VM down. It routes into the same code path as
-`mvmctl run --image`, so it inherits **deny-all networking by default**, opt-in
-egress via `--net` / `--allow-host`, and the same `--profile`, `--add-dir`,
-`--receipt`, `--json`, and `--dry-run` semantics.
+The flagship verb is `machine run`, which selects one of three lifecycles by
+flag:
+
+- **Transient** (default): boot a fresh microVM from an OCI image, run the
+  command, tear the VM down. Routes into the same code path as
+  `mvmctl run --image`, inheriting **deny-all networking by default**, opt-in
+  egress via `--net` / `--allow-host`, and the same `--profile`, `--volume`,
+  `--receipt`, `--json`, and `--dry-run` semantics.
+- **Persistent** (`--name <N>` or `-d`/`--detach`): boot a machine that survives
+  the command and is reconnectable by name through `machine shell`/`exec`/`stop`.
+  `--name` gives it a name; bare `-d` auto-generates one and prints it. With a
+  command, the command is run (streamed) and the machine is left up; without one,
+  the machine just boots.
+- **Interactive** (`-t`/`--tty`, with `-i` accepted so `-it` parses): attach a
+  PTY shell. **Dev-only** — refused for a sealed image (claim 15) and when stdin
+  is not a terminal. `-t` alone is a transient interactive machine (gone when the
+  shell exits); combine with `--name`/`-d` to keep it up.
+
+Persistence and interactivity are independent: `--tty` never changes whether the
+machine survives. `--volume` host shares ride the transient path only; combining
+them with `-d`/`--name`/`-t` is currently refused. The `--volume` syntax is
+`HOST:/GUEST[:MODE]` (`MODE` defaults to `ro`; `rw` needs `--profile dev` or
+`permissive`).
 
 SSH sessions are banned in microVMs. `--allow-host <host:22>` is refused, and
 the runtime also denies TCP/22 even under broad egress. Dev-tier `ssh_agent`
@@ -370,11 +388,18 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine run --image <ref> -- <cmd>...` | Boot an OCI image, run `<cmd>` with no network, tear down |
 | `mvmctl machine run --net --image <ref> -- <cmd>...` | Boot with dev-tier outbound networking enabled |
 | `mvmctl machine run --image <ref> --allow-host <host[:port]> -- <cmd>...` | Boot with egress narrowed to the listed host/port entries |
-| `mvmctl machine run --image <ref> --profile dev --add-dir .:/work:rw -- <cmd>` | Same, with a writable host share under the dev profile |
+| `mvmctl machine run --image <ref> --profile dev --volume .:/work:rw -- <cmd>` | Same, with a writable host share under the dev profile |
 | `mvmctl machine run --image <ref> --cpus <n> --memory <size> -- <cmd>` | Resize the transient VM |
 | `mvmctl machine run --image <ref> --dry-run -- <cmd>` | Validate and explain the run plan without booting a VM |
 | `mvmctl machine run --image <ref> --json -- <cmd>` | Print a redacted JSON execution summary |
 | `mvmctl machine run --image <ref> --receipt <path> -- <cmd>` | Write a signed execution receipt |
+| `mvmctl machine run -d --image <ref>` | Boot a **persistent** machine, auto-name it (printed), return |
+| `mvmctl machine run --name <name> --image <ref>` | Boot a persistent named machine, return; reconnect via `machine shell <name>` |
+| `mvmctl machine run --name <name> --image <ref> -- <cmd>` | Boot a persistent named machine, run `<cmd>` (streamed), leave it up |
+| `mvmctl machine run --name <name>` | Reconnect to an existing machine by name (no `--image` needed) |
+| `mvmctl machine run --name <name> --image <ref> --force` | Recreate the named machine when the on-disk config differs |
+| `mvmctl machine run -it --image <ref>` | **Interactive** dev shell on a transient machine (gone on exit) |
+| `mvmctl machine run -it --name <name> --image <ref>` | Interactive dev shell on a persistent machine (left up on exit) |
 | `mvmctl machine create --name <name> --image <ref>` | Persist a named OCI-backed machine spec without booting it |
 | `mvmctl machine create --name <name> --manifest <path>` | Persist a named machine spec from an image-backed `mvm.toml` / `Mvmfile.toml` |
 | `mvmctl machine create --name <name> --image <ref> --net --allow-host <host[:port]>` | Persist a named spec with opt-in egress settings for future lifecycle starts |
@@ -397,6 +422,49 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine check-artifact <artifact.mvm>` | Verify a portable artifact and preview its admission posture without extracting or booting |
 | `mvmctl machine check-artifact <artifact.mvm> --key <pubkey>` | Verify with an explicit raw Ed25519 public key |
 | `mvmctl machine check-artifact <artifact.mvm> --json` | Print the verified artifact/admission preview as JSON |
+
+### `machine run` lifecycles in practice
+
+A transient run is the default and needs no flags — it boots, runs the command,
+and tears the VM down:
+
+```bash
+mvmctl machine run --image alpine -- echo hi      # prints "hi", VM gone
+```
+
+A bare `machine run --image alpine -- /bin/sh` is **non-interactive**: it streams
+the command's output but forwards no stdin, so an interactive shell sees EOF and
+exits at once. For a live shell, add `-it` (dev-only — see below):
+
+```bash
+mvmctl machine run -it --image <dev-image> -- /bin/sh   # live shell, VM gone on exit
+```
+
+Naming or detaching is the *only* thing that keeps a machine alive past the
+command — that is the whole difference between a transient and a persistent run:
+
+```bash
+mvmctl machine run -d --image alpine          # boots, prints e.g. "blue-fox-3f2a", returns
+mvmctl machine shell --name blue-fox-3f2a     # reconnect (dev PTY)
+mvmctl machine exec  --name blue-fox-3f2a -- ps   # one-shot command in the running machine
+mvmctl machine stop  --name blue-fox-3f2a     # tear it down when done
+```
+
+`--name <N>` does the same with a name you choose; `machine run --name <N>` with
+no `--image` reconnects to an existing machine.
+
+**Collision.** If `--name <N>` already exists with a *different* boot config
+(image, CPU, memory, profile, …), `machine run` refuses rather than silently
+reusing or clobbering it (`machine 'N' exists with a different config; pass
+--force …`). `--force` stops, overwrites, and recreates it; a matching config
+reuses the machine as-is.
+
+**Interactive is dev-only.** `-t`/`--tty` attaches a PTY shell and is refused for
+a sealed/production image (claim 15 — no interactive access to a sealed microVM)
+and when stdin is not a terminal, both failing fast rather than hanging. It never
+affects persistence: `-it` alone is transient, `-it` with `--name`/`-d` keeps the
+machine. The design rationale and full behavior matrix are recorded in ADR-091
+(`specs/adrs/091-unified-machine-run-lifecycle.md`).
 
 `machine create` accepts either `--image <ref>` or an image-backed manifest, not
 both. When `--image` is omitted, it searches the current directory for

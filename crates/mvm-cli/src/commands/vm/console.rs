@@ -83,6 +83,9 @@ pub(in crate::commands) struct Args {
 /// Refuse to attach if the VM's image was built sealed (dev = false /
 /// `passthru.mvm.accessible = false`). The state file is best-effort:
 /// missing or legacy files without the field are treated as accessible.
+///
+/// Reused by `machine run -t` (claim 15: no interactive access to a sealed
+/// production microVM).
 pub(in crate::commands) fn enforce_accessible_gate(name: &str, force: bool) -> Result<()> {
     if force {
         return Ok(());

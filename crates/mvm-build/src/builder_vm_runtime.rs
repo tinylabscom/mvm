@@ -607,6 +607,106 @@ pub fn read_last_bytes_of(path: &Path, max_bytes: u64) -> std::io::Result<String
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Forward bytes newly appended to `file` to `sink`; returns true if any were
+/// written. `read_to_end` resumes from the file's current offset, so repeated
+/// calls stream only the freshly-appended tail. Extracted so the tail behaviour
+/// is unit-testable without a thread or a VM. Write errors are swallowed — the
+/// echo must never fail a build.
+#[cfg(any(feature = "builder-vm", test))]
+fn drain_appended(file: &mut std::fs::File, sink: &mut impl std::io::Write) -> bool {
+    use std::io::Read;
+    let mut chunk = Vec::new();
+    if file.read_to_end(&mut chunk).is_ok() && !chunk.is_empty() {
+        let _ = sink.write_all(&chunk);
+        let _ = sink.flush();
+        return true;
+    }
+    false
+}
+
+/// Verbose iff `RUST_LOG` is set. `mvm-build` sits *below* `mvm-backend`, so it
+/// can't call `ui::is_verbose()`; the CLI defines verbose as `-v` OR a user-set
+/// `RUST_LOG` and exports `RUST_LOG` on `-v`, so `RUST_LOG`'s presence is the
+/// equivalent signal at this layer.
+#[cfg(feature = "builder-vm")]
+fn verbose_from_env() -> bool {
+    std::env::var_os("RUST_LOG").is_some()
+}
+
+/// Streams the in-builder-VM nix build log to the terminal as the build runs.
+///
+/// `mvmctl build image` / `template build` run `nix … --print-build-logs`
+/// inside the builder VM, redirecting stderr to `<job_dir>/nix-stderr.log` on
+/// the `/job` virtio-fs share — host-readable and appended live. Until now the
+/// host only read it *after* a failure; this tails it to stderr while the build
+/// runs, but only when verbose (`-v`/`RUST_LOG`). Quiet builds spawn no thread
+/// and pay nothing. Stops + drains on drop, so the closing lines aren't lost.
+#[cfg(feature = "builder-vm")]
+pub(crate) struct JobLogStreamer {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(feature = "builder-vm")]
+impl JobLogStreamer {
+    /// Start streaming `nix_stderr_log` to stderr if verbose; otherwise a no-op
+    /// guard (no thread).
+    pub(crate) fn start(nix_stderr_log: std::path::PathBuf) -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if !verbose_from_env() {
+            return Self { stop, handle: None };
+        }
+        let thread_stop = std::sync::Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            tail_forward(
+                &nix_stderr_log,
+                &thread_stop,
+                std::time::Duration::from_millis(200),
+            );
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+#[cfg(feature = "builder-vm")]
+impl Drop for JobLogStreamer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Tail loop: open `log_path` (retrying each poll until the in-guest build
+/// creates it on first write), forward freshly-appended bytes until `stop`,
+/// then one final drain to capture the tail written after the last poll.
+#[cfg(feature = "builder-vm")]
+fn tail_forward(
+    log_path: &std::path::Path,
+    stop: &std::sync::atomic::AtomicBool,
+    poll: std::time::Duration,
+) {
+    use std::sync::atomic::Ordering;
+    let mut file: Option<std::fs::File> = None;
+    let mut stderr = std::io::stderr();
+    while !stop.load(Ordering::SeqCst) {
+        if file.is_none() && log_path.exists() {
+            file = std::fs::File::open(log_path).ok();
+        }
+        if let Some(ref mut f) = file {
+            let _ = drain_appended(f, &mut stderr);
+        }
+        std::thread::sleep(poll);
+    }
+    if let Some(ref mut f) = file {
+        let _ = drain_appended(f, &mut stderr);
+    }
+}
+
 /// Finalize a flake build: read `<job_dir>/result`, validate the
 /// `rootfs.ext4` (and optional `vmlinux`) landed in `artifact_out`,
 /// return a [`BuilderArtifacts::Image`]. Hypervisor-agnostic — the
@@ -1112,6 +1212,40 @@ mod tests {
     use mvm_core::util::test_env::TestEnv;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
+
+    #[test]
+    fn drain_appended_forwards_only_freshly_written_bytes() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join("nix-stderr.log");
+        std::fs::write(&log, b"building '/nix/store/aaa.drv'...\n").unwrap();
+
+        let mut reader = std::fs::File::open(&log).unwrap();
+        let mut sink: Vec<u8> = Vec::new();
+
+        // First drain forwards the whole current contents.
+        assert!(drain_appended(&mut reader, &mut sink));
+        assert_eq!(sink, b"building '/nix/store/aaa.drv'...\n");
+
+        // Append more; the next drain resumes from the file offset and forwards
+        // only the new tail — not the bytes already streamed.
+        let mut appender = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        appender
+            .write_all(b"building '/nix/store/bbb.drv'...\n")
+            .unwrap();
+        assert!(drain_appended(&mut reader, &mut sink));
+        assert_eq!(
+            sink,
+            b"building '/nix/store/aaa.drv'...\nbuilding '/nix/store/bbb.drv'...\n"
+        );
+
+        // Nothing new → no write, no duplication.
+        assert!(!drain_appended(&mut reader, &mut sink));
+        assert_eq!(
+            sink,
+            b"building '/nix/store/aaa.drv'...\nbuilding '/nix/store/bbb.drv'...\n"
+        );
+    }
 
     /// Minimal backend that records every call. Same shape as the
     /// mock in `builder_vm::vm_backend_for_builder_tests`, but

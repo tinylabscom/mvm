@@ -32,7 +32,7 @@ use mvm_core::atomic_io::atomic_write;
 use mvm_core::manifest::{Manifest, ManifestMachineWorkflow, resolve_manifest_config_path};
 use mvm_core::user_config::MvmConfig;
 use mvm_core::util::parse_human_size;
-use mvm_core::vm_backend::VmId;
+use mvm_core::vm_backend::{VmId, VmStatus};
 use mvm_core::{config, naming};
 
 use super::Cli;
@@ -108,8 +108,10 @@ pub(in crate::commands) enum MachineAction {
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct MachineRunArgs {
     /// OCI image reference to boot (pulled or reused from the local cache).
+    /// Required for a fresh boot; optional when reconnecting to an existing
+    /// persistent machine by `--name`.
     #[arg(long, value_name = "REF")]
-    pub image: String,
+    pub image: Option<String>,
     /// Enable dev-tier outbound networking (broad egress + DNS). Off by
     /// default (deny-all). Narrow it with `--allow-host`.
     #[arg(long)]
@@ -129,8 +131,10 @@ pub(in crate::commands) struct MachineRunArgs {
     pub profile: RunProfile,
     /// Share a host directory into the guest: `HOST_PATH:/GUEST_PATH[:MODE]`.
     /// MODE defaults to `ro`; `rw` needs `--profile dev` or `permissive`.
-    #[arg(short = 'd', long)]
-    pub add_dir: Vec<String>,
+    /// (No short flag: `-v` is the global verbosity counter and `-d` is
+    /// `--detach`.)
+    #[arg(long = "volume")]
+    pub volume: Vec<String>,
     /// Explicit environment variable to inject (KEY=VALUE). Repeatable.
     #[arg(short, long)]
     pub env: Vec<String>,
@@ -146,8 +150,31 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Validate and explain the effective run plan without booting a VM.
     #[arg(long)]
     pub dry_run: bool,
-    /// Argv to run inside the guest (use `--` to separate).
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+    /// Persist the machine under this name: it survives the command and is
+    /// reconnectable via `machine shell/exec/stop`. Implies persistence.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+    /// Boot a persistent machine and return immediately. Auto-names the machine
+    /// when `--name` is absent (the chosen name is printed). Implies persistence.
+    #[arg(short = 'd', long)]
+    pub detach: bool,
+    /// Attach an interactive PTY shell (dev-only; refused for `--prod`/sealed
+    /// images). Does not affect persistence: `-t` alone is a transient
+    /// interactive machine, gone when the shell exits.
+    #[arg(short = 't', long)]
+    pub tty: bool,
+    /// Accepted as an alias for `-t` so the conventional `-it` bundle parses.
+    #[arg(short = 'i', long = "interactive")]
+    pub interactive: bool,
+    /// Force-recreate a persistent machine whose on-disk spec exists with a
+    /// different config (stop + overwrite + restart). Without it, a config
+    /// mismatch is an error.
+    #[arg(long)]
+    pub force: bool,
+    /// Argv to run inside the guest (use `--` to separate). Optional for
+    /// persistent (`-d`/`--name`) and interactive (`-t`) modes; required for a
+    /// plain transient run.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub argv: Vec<String>,
 }
 
@@ -159,13 +186,13 @@ impl MachineRunArgs {
     fn into_run_args(self) -> RunArgs {
         RunArgs {
             manifest: None,
-            image: Some(self.image),
+            image: self.image,
             net: self.net,
             allow_host: self.allow_host,
             cpus: self.cpus,
             memory: self.memory,
             profile: self.profile,
-            add_dir: self.add_dir,
+            add_dir: self.volume,
             env: self.env,
             timeout: self.timeout,
             receipt: self.receipt,
@@ -179,6 +206,206 @@ impl MachineRunArgs {
             ack_divergence: Vec::new(),
         }
     }
+
+    /// `-t`/`--tty` or its `-i` alias requests an interactive PTY shell.
+    fn interactive(&self) -> bool {
+        self.tty || self.interactive
+    }
+
+    /// `--name` or `-d`/`--detach` makes the machine survive the command.
+    /// `--tty` is deliberately NOT consulted here — persistence and
+    /// interactivity are independent axes.
+    fn persistent(&self) -> bool {
+        self.name.is_some() || self.detach
+    }
+
+    /// Resolve the lifecycle mode purely from the flags. The only validation is
+    /// that a plain transient run carries a command; persistent and interactive
+    /// modes default to "just boot" / "default shell" respectively.
+    fn resolve_mode(&self) -> Result<MachineRunMode> {
+        let mode = match (self.interactive(), self.persistent()) {
+            // Persistent modes may reconnect to an existing machine by name, so
+            // `--image` is optional here (validated against spec existence in the
+            // persistent path).
+            (true, true) => MachineRunMode::InteractivePersistent,
+            (false, true) => MachineRunMode::Persistent,
+            // Fresh-boot modes always materialize a new VM and need an image.
+            (true, false) => {
+                self.require_image_for_fresh_boot()?;
+                MachineRunMode::InteractiveTransient
+            }
+            (false, false) => {
+                self.require_image_for_fresh_boot()?;
+                if self.argv.is_empty() {
+                    bail!(
+                        "machine run needs a command: pass `-- <cmd>`, \
+                         or `-d`/`--name <N>` to boot a persistent machine, \
+                         or `-t` for an interactive shell"
+                    );
+                }
+                MachineRunMode::Transient
+            }
+        };
+        Ok(mode)
+    }
+
+    /// Fresh-boot modes (transient, interactive-transient) have no spec to fall
+    /// back on, so an image is mandatory.
+    fn require_image_for_fresh_boot(&self) -> Result<()> {
+        if self.image.is_none() {
+            bail!("machine run needs `--image <ref>` to boot a new machine");
+        }
+        Ok(())
+    }
+}
+
+/// The lifecycle `machine run` resolves to, computed purely from the parsed
+/// flags. Persistence (`--name`/`-d`) and interactivity (`-t`/`-i`) are
+/// independent axes, so the interactive variants record whether the machine
+/// also persists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MachineRunMode {
+    /// Default one-shot: boot, run argv, tear down. Unchanged `run_secure`.
+    Transient,
+    /// Persistent (named or detached), non-interactive.
+    Persistent,
+    /// Interactive PTY shell on a throwaway machine (gone on shell exit).
+    InteractiveTransient,
+    /// Interactive PTY shell on a persistent machine (left up on exit).
+    InteractivePersistent,
+}
+
+/// What the persistent path should do with the on-disk spec for the target name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpecReconcile {
+    /// No spec on disk — write `desired` and boot.
+    Create,
+    /// A spec with the same launch config already exists — keep it.
+    Reuse,
+    /// A spec with a different config exists and `--force` was given — stop,
+    /// overwrite, reboot.
+    Recreate,
+}
+
+/// An auto-generated machine name for `-d` without `--name`. Reuses the
+/// `mvm-core` instance-ID helper so there is one naming scheme, not two; the
+/// `i-<hex>` shape satisfies `validate_vm_name`.
+fn auto_machine_name() -> String {
+    naming::generate_instance_id()
+}
+
+/// Resolve the persistent machine's name: the explicit `--name`, or an
+/// auto-generated one for bare `-d`/`--detach`.
+fn resolve_machine_run_name(args: &MachineRunArgs) -> Result<String> {
+    match args.name.as_deref() {
+        Some(name) => {
+            validate_machine_name(name)?;
+            Ok(name.to_string())
+        }
+        None => Ok(auto_machine_name()),
+    }
+}
+
+/// Two specs share a launch config when every boot-affecting field matches.
+/// Runtime metadata (resolved digest, timestamps) is deliberately excluded —
+/// it changes on every start and must not trigger a collision.
+fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
+    a.image == b.image
+        && a.net == b.net
+        && a.allow_host == b.allow_host
+        && a.cpus == b.cpus
+        && a.memory == b.memory
+        && a.mem_initial == b.mem_initial
+        && a.profile == b.profile
+        && a.volumes == b.volumes
+        && a.init == b.init
+        && a.ssh_agent == b.ssh_agent
+}
+
+/// Decide how to reconcile a desired spec against what's on disk. A
+/// same-config spec is reused; a different-config spec is an error unless
+/// `--force` recreates it. Silently ignoring new flags or silently destroying
+/// state are both footguns and are rejected.
+fn reconcile_machine_spec(
+    existing: Option<&MachineSpec>,
+    desired: &MachineSpec,
+    force: bool,
+) -> Result<SpecReconcile> {
+    match existing {
+        None => Ok(SpecReconcile::Create),
+        Some(current) if machine_config_matches(current, desired) => Ok(SpecReconcile::Reuse),
+        Some(_) if force => Ok(SpecReconcile::Recreate),
+        Some(_) => bail!(
+            "machine {:?} exists with a different config; pass --force to recreate, \
+             or use a different name",
+            desired.name
+        ),
+    }
+}
+
+/// Host-directory shares (`--volume`) ride the transient `run_secure` path
+/// only. The persistent/interactive lifecycles boot through the `MachineSpec`,
+/// which carries no bind-share field, so refuse `--volume` there rather than
+/// silently dropping the share.
+fn reject_volume_for_managed_boot(args: &MachineRunArgs) -> Result<()> {
+    if !args.volume.is_empty() {
+        bail!(
+            "--volume host shares are not supported with -d/--name/-t yet; \
+             drop --volume, or use a plain transient run"
+        );
+    }
+    Ok(())
+}
+
+/// Interactive attach needs a real terminal: the console bridges raw-mode
+/// stdin. Refuse up front when stdin is not a TTY so the command fails with a
+/// clear message instead of hanging on an EOF'd stdin.
+fn require_tty(stdin_is_tty: bool) -> Result<()> {
+    if !stdin_is_tty {
+        bail!(
+            "interactive `-t`/`--tty` needs a terminal on stdin; \
+             run it from an interactive shell, or drop `-t` for a non-interactive run"
+        );
+    }
+    Ok(())
+}
+
+/// An interactive machine is torn down on shell exit only when it is transient
+/// (no `--name`/`-d`); a persistent one is left up.
+fn should_teardown_after_interactive(args: &MachineRunArgs) -> bool {
+    !args.persistent()
+}
+
+/// Build a persistent `MachineSpec` from the `run` flags. Mirrors the
+/// validation `machine create` applies (network policy, memory, profile) so the
+/// two entry points produce identical specs. The `run` surface intentionally
+/// omits disk volumes / init / ssh-agent — those stay manifest-driven.
+fn machine_run_spec(args: &MachineRunArgs, name: String) -> Result<MachineSpec> {
+    validate_machine_name(&name)?;
+    let image = args
+        .image
+        .clone()
+        .ok_or_else(|| anyhow!("machine run needs `--image <ref>` to create machine {name:?}"))?;
+    super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
+    let _ = validate_machine_memory(&args.memory, None)?;
+    let profile = run_profile_name(args.profile).to_string();
+    Ok(MachineSpec {
+        schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+        name,
+        image,
+        resolved_digest: None,
+        net: args.net,
+        allow_host: args.allow_host.clone(),
+        cpus: args.cpus,
+        memory: args.memory.clone(),
+        mem_initial: None,
+        profile,
+        volumes: Vec::new(),
+        init: Vec::new(),
+        ssh_agent: false,
+        created_at: Some(mvm_core::time::utc_now()),
+        last_started_at: None,
+    })
 }
 
 /// Declarative persistent machine spec. Runtime state lives elsewhere.
@@ -1436,9 +1663,233 @@ fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) -> Result<()>
     down::run(cli, down::Args { name: args.name }, cfg)
 }
 
+/// Resolve the spec a persistent run should boot, reconciling the desired
+/// config (when `--image` is given) against any on-disk spec. Does **no** IO
+/// beyond loading: persistence happens in the caller, keyed off the returned
+/// action. With no `--image` this is a pure reconnect to an existing machine.
+fn resolve_persistent_spec(
+    args: &MachineRunArgs,
+    name: &str,
+    existing: Option<MachineSpec>,
+) -> Result<(MachineSpec, SpecReconcile)> {
+    match args.image {
+        None => match existing {
+            Some(spec) => Ok((spec, SpecReconcile::Reuse)),
+            None => bail!("machine {name:?} does not exist; pass --image to create it"),
+        },
+        Some(_) => {
+            let desired = machine_run_spec(args, name.to_string())?;
+            let action = reconcile_machine_spec(existing.as_ref(), &desired, args.force)?;
+            let spec = match action {
+                SpecReconcile::Reuse => existing.expect("reuse implies an existing spec"),
+                SpecReconcile::Create | SpecReconcile::Recreate => desired,
+            };
+            Ok((spec, action))
+        }
+    }
+}
+
+/// `kill(pid,0)`-cheap liveness probe via the active backend.
+fn machine_is_running(name: &str) -> bool {
+    let backend =
+        AnyBackend::from_hypervisor(&super::shared::resolve_effective_hypervisor("firecracker"));
+    matches!(
+        backend.status(&VmId(name.to_string())),
+        Ok(VmStatus::Running)
+    )
+}
+
+/// Stop a running machine before recreating it under a new config.
+fn stop_running_machine(name: &str) {
+    reap_proxy(name);
+    let backend =
+        AnyBackend::from_hypervisor(&super::shared::resolve_effective_hypervisor("firecracker"));
+    if let Err(err) = backend.stop(&VmId(name.to_string())) {
+        tracing::warn!(error = %err, machine = name, "stopping machine before recreate failed");
+    }
+}
+
+/// The persistent lifecycle: `machine run --name <N>` / `-d`. Composes the
+/// existing create + start (+ exec) verbs — no new lifecycle code — so the
+/// signed-`ExecutionPlan` admission and default-deny egress are identical to
+/// `machine create` + `machine start`.
+fn run_persistent(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+    reject_volume_for_managed_boot(&args)?;
+    let name = resolve_machine_run_name(&args)?;
+    let existing = load_machine_spec(&name).ok();
+    let (spec, action) = resolve_persistent_spec(&args, &name, existing)?;
+
+    // Dry-run: explain the effective start without persisting or booting.
+    if args.dry_run {
+        let summary = machine_start_preflight_summary(&spec, args.receipt.as_deref())?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        } else {
+            print_machine_start_preflight_human(&summary);
+        }
+        return Ok(());
+    }
+
+    let booted = persist_and_boot_machine(
+        &name,
+        &spec,
+        action,
+        MachineStartArgs {
+            name: name.clone(),
+            receipt: args.receipt.clone(),
+            json: args.json,
+            dry_run: false,
+        },
+    )?;
+    if !booted && !args.json {
+        println!("machine {name} already running");
+    }
+
+    run_persistent_post_start(cli, cfg, &args, &name, &spec)
+}
+
+/// Persist the reconciled spec and boot the machine if it isn't already up.
+/// Shared by the persistent and interactive lifecycles. Returns whether a boot
+/// happened (`false` ⇒ the machine was already running).
+fn persist_and_boot_machine(
+    name: &str,
+    spec: &MachineSpec,
+    action: SpecReconcile,
+    start: MachineStartArgs,
+) -> Result<bool> {
+    match action {
+        SpecReconcile::Reuse => {}
+        SpecReconcile::Create => save_machine_spec(spec, false)?,
+        SpecReconcile::Recreate => {
+            stop_running_machine(name);
+            overwrite_machine_spec(spec)?;
+        }
+    }
+    if machine_is_running(name) {
+        Ok(false)
+    } else {
+        start_machine(start)?;
+        Ok(true)
+    }
+}
+
+/// The interactive lifecycle: `machine run -t`/`--tty`. Boots (or reconnects to)
+/// the machine via the same managed path as the persistent lifecycle, attaches
+/// a PTY shell through `console::run`, and tears the machine down on exit only
+/// when it is transient. Dev-only: claim 15's `enforce_accessible_gate` refuses
+/// a sealed machine before attach, and a non-TTY stdin is refused up front.
+fn run_interactive(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+    use std::io::IsTerminal as _;
+    require_tty(std::io::stdin().is_terminal())?;
+    reject_volume_for_managed_boot(&args)?;
+
+    let teardown = should_teardown_after_interactive(&args);
+    let name = resolve_machine_run_name(&args)?;
+    let existing = load_machine_spec(&name).ok();
+
+    // Claim 15, before boot: a previously-started machine carries runtime meta,
+    // so a sealed one is refused here; a fresh boot is re-checked by
+    // `console::run` post-boot. The recreate `--force` must not bypass this
+    // security gate, so it is not threaded in.
+    super::vm::console::enforce_accessible_gate(&name, false)?;
+
+    let (spec, action) = resolve_persistent_spec(&args, &name, existing)?;
+
+    if args.dry_run {
+        let summary = machine_start_preflight_summary(&spec, args.receipt.as_deref())?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        } else {
+            print_machine_start_preflight_human(&summary);
+        }
+        return Ok(());
+    }
+
+    persist_and_boot_machine(
+        &name,
+        &spec,
+        action,
+        MachineStartArgs {
+            name: name.clone(),
+            receipt: None,
+            json: false,
+            dry_run: false,
+        },
+    )?;
+
+    // Attach the interactive PTY (command: None ⇒ a shell). `force: false`
+    // keeps claim 15 strict on the post-boot re-check.
+    let attached = console::run(
+        cli,
+        console::Args {
+            name: name.clone(),
+            command: None,
+            force: false,
+            env: machine_console_env(spec.ssh_agent),
+        },
+        cfg,
+    );
+
+    if teardown {
+        stop_running_machine(&name);
+        // Best-effort: drop the throwaway spec we created for this session.
+        let _ = remove_machine_spec(&name, true);
+    }
+    attached
+}
+
+/// After the machine is up: run the command (streamed, machine left up), or —
+/// with no command — print the name (`-d`) or a reconnect hint.
+fn run_persistent_post_start(
+    cli: &Cli,
+    cfg: &MvmConfig,
+    args: &MachineRunArgs,
+    name: &str,
+    spec: &MachineSpec,
+) -> Result<()> {
+    if !args.argv.is_empty() {
+        if !super::shared::wait_for_guest_agent(name, 30) {
+            bail!("guest agent for {name:?} not reachable to run the command");
+        }
+        return console::run(
+            cli,
+            console::Args {
+                name: name.to_string(),
+                command: Some(machine_exec_command(&args.argv)),
+                force: false,
+                env: machine_console_env(spec.ssh_agent),
+            },
+            cfg,
+        );
+    }
+    if !args.json {
+        if args.detach {
+            // `-d`: the name is the handle. `start_machine` already printed it;
+            // echo it once more so it is the last line on stdout.
+            println!("{name}");
+        } else {
+            println!("machine {name} is up; attach with `machine shell {name}`");
+        }
+    }
+    Ok(())
+}
+
+/// Dispatch `machine run` to one of the three flag-selected lifecycles. The
+/// transient default routes into the unchanged `run_secure`; persistence and
+/// interactivity compose the existing machine verbs.
+fn run_dispatch(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+    match args.resolve_mode()? {
+        MachineRunMode::Transient => run_secure(cli, args.into_run_args(), cfg),
+        MachineRunMode::Persistent => run_persistent(cli, args, cfg),
+        MachineRunMode::InteractiveTransient | MachineRunMode::InteractivePersistent => {
+            run_interactive(cli, args, cfg)
+        }
+    }
+}
+
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     match args.action {
-        MachineAction::Run(run_args) => run_secure(cli, run_args.into_run_args(), cfg),
+        MachineAction::Run(run_args) => run_dispatch(cli, run_args, cfg),
         MachineAction::Build(build_args) => build::run(cli, build_args, cfg),
         MachineAction::Create(create_args) => create_machine(create_args),
         MachineAction::Ls(list_args) => list_machines(list_args),
@@ -1600,7 +2051,7 @@ mod tests {
     #[test]
     fn run_parses_image_and_trailing_argv() {
         let args = parse_run(&["run", "--image", "alpine", "--", "echo", "hello"]).expect("parse");
-        assert_eq!(args.image, "alpine");
+        assert_eq!(args.image.as_deref(), Some("alpine"));
         assert_eq!(args.argv, vec!["echo", "hello"]);
     }
 
@@ -1635,15 +2086,28 @@ mod tests {
     }
 
     #[test]
-    fn run_requires_image() {
-        let err = parse_run(&["run", "--", "echo", "hi"]).expect_err("image is required");
-        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    fn fresh_boot_without_image_is_rejected_at_dispatch() {
+        // `--image` is no longer clap-required (a persistent run can reconnect
+        // by name), so a fresh transient boot with no image parses and is
+        // refused at mode resolution with a clear message.
+        let args = parse_run(&["run", "--", "echo", "hi"]).expect("parse");
+        let err = args.resolve_mode().expect_err("fresh boot needs an image");
+        assert!(err.to_string().contains("image"), "unexpected error: {err}");
     }
 
     #[test]
-    fn run_requires_argv() {
-        let err = parse_run(&["run", "--image", "alpine"]).expect_err("argv is required");
-        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    fn transient_run_without_argv_is_rejected_at_dispatch() {
+        // Argv is no longer clap-required (persistent/interactive modes boot
+        // without a command), so a bare transient run parses and is refused at
+        // mode resolution with a clear message — not a hang, not a silent exit.
+        let args = parse_run(&["run", "--image", "alpine"]).expect("parse");
+        let err = args
+            .resolve_mode()
+            .expect_err("transient run needs a command");
+        assert!(
+            err.to_string().contains("command"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1654,8 +2118,13 @@ mod tests {
         assert_eq!(args.profile, RunProfile::Standard);
         assert!(!args.json);
         assert!(!args.dry_run);
-        assert!(args.add_dir.is_empty());
+        assert!(args.volume.is_empty());
         assert!(args.env.is_empty());
+        assert!(args.name.is_none());
+        assert!(!args.detach);
+        assert!(!args.tty);
+        assert!(!args.interactive);
+        assert!(!args.force);
     }
 
     #[test]
@@ -1670,7 +2139,7 @@ mod tests {
             "1G",
             "--profile",
             "dev",
-            "-d",
+            "--volume",
             "/host:/work:rw",
             "-e",
             "FOO=bar",
@@ -1686,12 +2155,302 @@ mod tests {
         assert_eq!(args.cpus, 4);
         assert_eq!(args.memory, "1G");
         assert_eq!(args.profile, RunProfile::Dev);
-        assert_eq!(args.add_dir, vec!["/host:/work:rw"]);
+        assert_eq!(args.volume, vec!["/host:/work:rw"]);
         assert_eq!(args.env, vec!["FOO=bar"]);
         assert_eq!(args.timeout, Some(30));
         assert!(args.json);
         assert!(args.dry_run);
         assert_eq!(args.argv, vec!["uname", "-a"]);
+    }
+
+    #[test]
+    fn volume_flag_carries_dir_share_and_d_is_no_longer_a_share() {
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "alpine",
+            "--volume",
+            "/host:/work:rw",
+            "--",
+            "true",
+        ])
+        .expect("parse");
+        assert_eq!(args.volume, vec!["/host:/work:rw"]);
+        // `-d` now means --detach, so it must NOT consume the following value as
+        // a dir share.
+        let detached = parse_run(&["run", "--image", "alpine", "-d"]).expect("parse");
+        assert!(detached.detach);
+        assert!(detached.volume.is_empty());
+    }
+
+    #[test]
+    fn detach_short_and_long_imply_persistence() {
+        for argv in [
+            &["run", "--image", "alpine", "-d"][..],
+            &["run", "--image", "alpine", "--detach"][..],
+        ] {
+            let args = parse_run(argv).expect("parse");
+            assert!(args.detach, "argv {argv:?}");
+            assert!(args.persistent(), "argv {argv:?}");
+            assert!(!args.interactive());
+        }
+    }
+
+    #[test]
+    fn name_implies_persistence_without_detach() {
+        let args =
+            parse_run(&["run", "--image", "alpine", "--name", "web", "--", "true"]).expect("parse");
+        assert_eq!(args.name.as_deref(), Some("web"));
+        assert!(args.persistent());
+        assert!(!args.detach);
+        assert!(!args.interactive());
+    }
+
+    #[test]
+    fn tty_long_short_alias_and_it_bundle_request_interactivity() {
+        for argv in [
+            &["run", "--image", "alpine", "--tty"][..],
+            &["run", "--image", "alpine", "-t"][..],
+            &["run", "--image", "alpine", "-i"][..],
+            &["run", "--image", "alpine", "-it"][..],
+        ] {
+            let args = parse_run(argv).expect("parse");
+            assert!(args.interactive(), "argv {argv:?}");
+            // Interactivity alone never implies persistence.
+            assert!(!args.persistent(), "argv {argv:?}");
+        }
+    }
+
+    #[test]
+    fn resolve_mode_covers_the_behavior_matrix() {
+        let cases: &[(&[&str], MachineRunMode)] = &[
+            (
+                &["run", "--image", "X", "--", "cmd"],
+                MachineRunMode::Transient,
+            ),
+            (
+                &["run", "-it", "--image", "X", "--", "/bin/sh"],
+                MachineRunMode::InteractiveTransient,
+            ),
+            (
+                &["run", "--name", "web", "--image", "X", "--", "cmd"],
+                MachineRunMode::Persistent,
+            ),
+            (
+                &[
+                    "run", "-it", "--name", "web", "--image", "X", "--", "/bin/sh",
+                ],
+                MachineRunMode::InteractivePersistent,
+            ),
+            (&["run", "-d", "--image", "X"], MachineRunMode::Persistent),
+            (
+                &["run", "-d", "--name", "web", "--image", "X"],
+                MachineRunMode::Persistent,
+            ),
+            (
+                &["run", "-t", "--image", "X"],
+                MachineRunMode::InteractiveTransient,
+            ),
+            (
+                &["run", "--name", "web", "--image", "X"],
+                MachineRunMode::Persistent,
+            ),
+        ];
+        for (argv, expected) in cases {
+            let args = parse_run(argv).expect("parse");
+            let mode = args.resolve_mode().expect("resolve");
+            assert_eq!(mode, *expected, "argv {argv:?}");
+        }
+    }
+
+    #[test]
+    fn auto_generated_machine_name_is_a_valid_vm_name() {
+        let name = auto_machine_name();
+        mvm_core::naming::validate_vm_name(&name)
+            .unwrap_or_else(|e| panic!("auto name {name:?} invalid: {e}"));
+    }
+
+    #[test]
+    fn detach_resolves_to_an_auto_name_and_named_uses_the_given_name() {
+        let named = parse_run(&["run", "--image", "x", "--name", "web"]).expect("parse");
+        assert_eq!(resolve_machine_run_name(&named).expect("name"), "web");
+
+        let detached = parse_run(&["run", "--image", "x", "-d"]).expect("parse");
+        let auto = resolve_machine_run_name(&detached).expect("name");
+        mvm_core::naming::validate_vm_name(&auto).expect("auto name valid");
+        assert_ne!(auto, "web");
+    }
+
+    fn spec_fixture(name: &str) -> MachineSpec {
+        MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: name.to_string(),
+            image: "alpine:latest".to_string(),
+            resolved_digest: None,
+            net: false,
+            allow_host: vec![],
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "standard".to_string(),
+            volumes: vec![],
+            init: vec![],
+            ssh_agent: false,
+            created_at: None,
+            last_started_at: None,
+        }
+    }
+
+    #[test]
+    fn config_match_ignores_runtime_metadata_but_not_launch_config() {
+        let mut a = spec_fixture("web");
+        let mut b = spec_fixture("web");
+        // Runtime metadata differs — still the same launch config.
+        a.resolved_digest = Some("sha256:aaa".to_string());
+        a.created_at = Some("t0".to_string());
+        b.last_started_at = Some("t1".to_string());
+        assert!(machine_config_matches(&a, &b));
+        // A launch-config field differs — no longer a match.
+        b.cpus = 4;
+        assert!(!machine_config_matches(&a, &b));
+    }
+
+    #[test]
+    fn reconcile_covers_create_reuse_error_and_force_recreate() {
+        let desired = spec_fixture("web");
+
+        assert_eq!(
+            reconcile_machine_spec(None, &desired, false).expect("create"),
+            SpecReconcile::Create
+        );
+
+        let same = spec_fixture("web");
+        assert_eq!(
+            reconcile_machine_spec(Some(&same), &desired, false).expect("reuse"),
+            SpecReconcile::Reuse
+        );
+
+        let mut different = spec_fixture("web");
+        different.image = "ubuntu:24.04".to_string();
+        let err = reconcile_machine_spec(Some(&different), &desired, false)
+            .expect_err("different config errors without --force");
+        assert!(err.to_string().contains("different config"), "msg: {err}");
+
+        assert_eq!(
+            reconcile_machine_spec(Some(&different), &desired, true).expect("recreate"),
+            SpecReconcile::Recreate
+        );
+    }
+
+    #[test]
+    fn run_spec_maps_run_args_into_a_machine_spec() {
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "alpine:3.20",
+            "--name",
+            "web",
+            "--cpus",
+            "4",
+            "--memory",
+            "1G",
+            "--profile",
+            "dev",
+            "--net",
+            "--allow-host",
+            "api.example.com:443",
+        ])
+        .expect("parse");
+        let spec = machine_run_spec(&args, "web".to_string()).expect("spec");
+        assert_eq!(spec.name, "web");
+        assert_eq!(spec.image, "alpine:3.20");
+        assert_eq!(spec.cpus, 4);
+        assert_eq!(spec.memory, "1G");
+        assert_eq!(spec.profile, "dev");
+        assert!(spec.net);
+        assert_eq!(spec.allow_host, vec!["api.example.com:443"]);
+        // Disk volumes / init / ssh-agent are not part of the `run` surface.
+        assert!(spec.volumes.is_empty());
+        assert!(spec.init.is_empty());
+        assert!(!spec.ssh_agent);
+    }
+
+    #[test]
+    fn volume_host_share_is_refused_with_persistence() {
+        let with_share = parse_run(&[
+            "run", "--image", "x", "--name", "web", "--volume", "/h:/g:ro",
+        ])
+        .expect("parse");
+        let err = reject_volume_for_managed_boot(&with_share)
+            .expect_err("host shares are not supported on persistent machines");
+        assert!(err.to_string().contains("--volume"), "msg: {err}");
+
+        let no_share =
+            parse_run(&["run", "--image", "x", "--name", "web", "--", "true"]).expect("parse");
+        reject_volume_for_managed_boot(&no_share).expect("no share is fine");
+    }
+
+    #[test]
+    fn persistent_spec_reconnects_without_image_and_errors_when_absent() {
+        // No `--image`: reconnect to the existing spec verbatim.
+        let reconnect = parse_run(&["run", "--name", "web"]).expect("parse");
+        let existing = spec_fixture("web");
+        let (spec, action) =
+            resolve_persistent_spec(&reconnect, "web", Some(existing.clone())).expect("reconnect");
+        assert_eq!(action, SpecReconcile::Reuse);
+        assert_eq!(spec, existing);
+
+        // No `--image` and no on-disk spec: a clear "does not exist" error.
+        let err = resolve_persistent_spec(&reconnect, "web", None)
+            .expect_err("reconnect to a missing machine errors");
+        assert!(err.to_string().contains("does not exist"), "msg: {err}");
+    }
+
+    #[test]
+    fn interactive_requires_a_host_tty() {
+        require_tty(true).expect("a host TTY is allowed");
+        let err = require_tty(false).expect_err("no TTY must be refused, not left to hang");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("tty") || msg.contains("terminal") || msg.contains("interactive"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn interactive_tears_down_only_the_transient_machine() {
+        let transient = parse_run(&["run", "-t", "--image", "x"]).expect("parse");
+        assert!(should_teardown_after_interactive(&transient));
+
+        let named = parse_run(&["run", "-it", "--name", "web", "--image", "x"]).expect("parse");
+        assert!(!should_teardown_after_interactive(&named));
+
+        let detached = parse_run(&["run", "-it", "-d", "--image", "x"]).expect("parse");
+        assert!(!should_teardown_after_interactive(&detached));
+    }
+
+    #[test]
+    fn interactive_refuses_a_sealed_machine_via_the_claim15_gate() {
+        let _guard = mvm::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        env.set("HOME", tmp.path());
+        env.set("MVM_DATA_DIR", tmp.path().join(".mvm"));
+        let name = "sealed-machine";
+        mvm::vm::runtime_meta::write(
+            name,
+            &mvm::vm::runtime_meta::VmRuntimeMeta {
+                mode: mvm::vm::runtime_meta::StartModeKind::Detached,
+                accessible: false,
+            },
+        )
+        .expect("write sealed runtime meta");
+        // The interactive path reuses console's claim-15 gate before attaching.
+        let err = super::super::vm::console::enforce_accessible_gate(name, false)
+            .expect_err("a sealed machine must be refused");
+        assert!(err.to_string().contains("sealed image"), "msg: {err}");
     }
 
     #[test]
@@ -1789,7 +2548,7 @@ mod tests {
             .cpus(4)
             .memory("1G")
             .profile("dev")
-            .add_dir("/tmp/mvm-sdk-src:/workspace:ro")
+            .volume("/tmp/mvm-sdk-src:/workspace:ro")
             .env("TOKEN=secret")
             .env("MODE=test")
             .timeout(30)
@@ -2658,7 +3417,7 @@ ssh_agent = true
         match cli.command {
             Commands::Machine(args) => match args.action {
                 MachineAction::Run(run) => {
-                    assert_eq!(run.image, "alpine");
+                    assert_eq!(run.image.as_deref(), Some("alpine"));
                     assert_eq!(run.argv, vec!["echo", "hi"]);
                 }
                 other => panic!("expected run action, got {other:?}"),

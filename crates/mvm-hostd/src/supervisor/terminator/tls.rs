@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use mvm_core::crypto::egress_ca::VmIntermediate;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use mvm_sdk::ir::AuthType;
@@ -328,8 +329,7 @@ fn copy_until_eof(mut r: TcpStream, mut w: TcpStream) {
 
 /// Parse a PEM bundle into DER certs (the leaf + intermediate chain).
 fn pem_certs(pem: &str) -> Result<Vec<CertificateDer<'static>>> {
-    let mut rd = std::io::Cursor::new(pem.as_bytes());
-    let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut rd).collect();
+    let certs: Result<Vec<_>, _> = CertificateDer::pem_slice_iter(pem.as_bytes()).collect();
     let certs = certs.context("read PEM certs")?;
     if certs.is_empty() {
         return Err(anyhow!("no certificate in PEM"));
@@ -339,10 +339,7 @@ fn pem_certs(pem: &str) -> Result<Vec<CertificateDer<'static>>> {
 
 /// Parse a PEM private key (PKCS#8 — rcgen emits PKCS#8) into a rustls key.
 fn pem_private_key(pem: &str) -> Result<PrivateKeyDer<'static>> {
-    let mut rd = std::io::Cursor::new(pem.as_bytes());
-    rustls_pemfile::private_key(&mut rd)
-        .context("read PEM private key")?
-        .ok_or_else(|| anyhow!("no private key in PEM"))
+    PrivateKeyDer::from_pem_slice(pem.as_bytes()).context("read PEM private key")
 }
 
 /// Extract the SNI `host_name` from a buffered TLS ClientHello record, or `None`

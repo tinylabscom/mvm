@@ -198,6 +198,48 @@ error: timed out waiting for ...
 
 **Fix**: Check that the dev VM has internet access and that your service binds to the correct port. Use `mvmctl logs <name>` to inspect guest output.
 
+## Machine Run Issues
+
+### `machine run --image X -- /bin/sh` exits immediately with no shell
+
+This is **by design**, not a crash. A plain `machine run` is the one-shot
+*transient* runner: it streams the command's output back to the host but never
+forwards host stdin or allocates a terminal, so an interactive shell sees EOF on
+stdin and exits `0` right away.
+
+To get an interactive shell, add `-it` (dev-only):
+
+```bash
+mvmctl machine run -it --image <dev-image> -- /bin/sh   # drops into a shell
+```
+
+`-it` is refused for a sealed/production image (claim 15: no interactive access
+to a sealed microVM) and when stdin is not a terminal — both fail fast with a
+clear message rather than hanging. To keep the machine after the shell exits,
+add `--name <N>` or `-d`.
+
+### `machine run --name X` fails: "machine 'X' exists with a different config"
+
+You're reusing a name whose persisted spec was created with a different boot
+config (image, CPU, memory, profile, …). `machine run` refuses to silently reuse
+or clobber it.
+
+**Fix**: drop the conflicting flags to reconnect to the existing machine
+(`mvmctl machine run --name X`), pick a different name, or pass `--force` to stop,
+overwrite, and recreate it under the new config.
+
+### I detached a machine with `-d` — how do I get back in?
+
+`machine run -d` prints the machine's name (auto-generated unless you passed
+`--name`). Reconnect with that name:
+
+```bash
+mvmctl machine ls                 # list persisted machines
+mvmctl machine shell --name <N>   # interactive shell (dev)
+mvmctl machine exec  --name <N> -- <cmd>   # one-shot command
+mvmctl machine stop  --name <N>   # tear it down
+```
+
 ## Network Issues
 
 ### MicroVM has no internet
