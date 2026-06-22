@@ -4698,19 +4698,25 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
     Ok((kernel, rootfs))
 }
 
+/// Backend attempt order for the dev-image / default-microvm builds. Delegates
+/// to the shared [`mvm_build::builder_backend_select::builder_attempt_order`]
+/// (one policy: auto Vz→libkrun, auto libkrun→qemu on Linux, explicit→single)
+/// so this CLI loop and the `mvm-build` build paths can't drift. The live
+/// platform supplies the `is_linux_native` input the shared (pure) policy takes.
 #[cfg(feature = "builder-vm")]
 fn builder_backend_attempt_order(
     selected: mvm_build::builder_backend_select::BuilderBackendChoice,
     explicit_override: bool,
 ) -> Vec<mvm_build::builder_backend_select::BuilderBackendChoice> {
-    use mvm_build::builder_backend_select::BuilderBackendChoice;
-
-    match (selected, explicit_override) {
-        (BuilderBackendChoice::Vz, false) => {
-            vec![BuilderBackendChoice::Vz, BuilderBackendChoice::Libkrun]
-        }
-        _ => vec![selected],
-    }
+    let is_linux_native = matches!(
+        mvm_core::platform::current(),
+        mvm_core::platform::Platform::LinuxNative
+    );
+    mvm_build::builder_backend_select::builder_attempt_order(
+        selected,
+        explicit_override,
+        is_linux_native,
+    )
 }
 
 #[cfg(all(test, feature = "builder-vm"))]
@@ -4735,14 +4741,32 @@ mod builder_backend_attempt_order_tests {
     }
 
     #[test]
-    fn libkrun_selection_stays_single_backend() {
-        assert_eq!(
-            builder_backend_attempt_order(BuilderBackendChoice::Libkrun, false),
-            vec![BuilderBackendChoice::Libkrun]
-        );
+    fn explicit_override_is_always_single_backend() {
+        // An explicit choice (CLI flag / env) never falls back, on any platform.
         assert_eq!(
             builder_backend_attempt_order(BuilderBackendChoice::Libkrun, true),
             vec![BuilderBackendChoice::Libkrun]
+        );
+        assert_eq!(
+            builder_backend_attempt_order(BuilderBackendChoice::Qemu, true),
+            vec![BuilderBackendChoice::Qemu]
+        );
+    }
+
+    #[test]
+    fn delegates_to_shared_policy_for_live_platform() {
+        // The wrapper only threads the live platform into the shared (pure)
+        // policy; the per-platform behaviour — including the Linux
+        // libkrun→qemu fallback — is exhaustively tested in mvm-build. Pin that
+        // the wrapper agrees with the shared policy on this host.
+        use mvm_build::builder_backend_select::builder_attempt_order;
+        let is_linux = matches!(
+            mvm_core::platform::current(),
+            mvm_core::platform::Platform::LinuxNative
+        );
+        assert_eq!(
+            builder_backend_attempt_order(BuilderBackendChoice::Libkrun, false),
+            builder_attempt_order(BuilderBackendChoice::Libkrun, false, is_linux)
         );
     }
 }
