@@ -2,10 +2,13 @@
 //!
 //! One `BridgeConfigJson` shape for every backend, carrying the common
 //! audit/plan substrate plus a [`BridgeEndpointKind`] discriminant that selects
-//! the transport. The `mvm-bridge` binary (Plan 209 Task 2) parses this once,
-//! applies uniform `mvm-jailer-lite` confinement for *every* kind (closing the
-//! gap where `mvm-vz-drainer` shipped unconfined), and builds the matching
-//! `mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints` variant.
+//! the transport. The `mvm-bridge` binary (Plan 209 Task 2) parses this once
+//! and builds the matching
+//! `mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints` variant, applying
+//! `mvm-jailer-lite` confinement through one cfg-gated codepath wherever the OS
+//! supports it (the Linux `Passt` endpoint). The macOS arms (`VzIngest`,
+//! libkrun-gvproxy on macOS) run unconfined — `confine_self` is Linux-only
+//! (Landlock+seccomp), unchanged from the vz drainer.
 //!
 //! ## Fail-closed parsing
 //!
@@ -24,6 +27,8 @@
 
 use std::path::PathBuf;
 
+use anyhow::{Context, Result};
+use mvm_core::network_policy::NetworkPolicy;
 use serde::{Deserialize, Serialize};
 
 // Reused verbatim — the unified sidecar decodes the plan and verifies the passt
@@ -51,8 +56,8 @@ pub struct BridgeConfigJson {
     pub audit_socket: PathBuf,
 
     /// `~/.mvm/keys/` — directory holding the host signer key. Scopes the
-    /// Landlock confinement spec. Threaded for **every** endpoint kind now
-    /// (the vz path previously omitted it because it shipped unconfined).
+    /// Linux Landlock confinement spec. A common field across every endpoint
+    /// kind, though only consumed by confinement on Linux (macOS has no LSM).
     pub keys_dir: PathBuf,
 
     /// `~/.mvm/keys/host-signer.ed25519` — mode 0600 file owned by the calling
@@ -69,6 +74,18 @@ pub struct BridgeConfigJson {
     /// label flow-event audit entries with the bundle digest).
     #[serde(default)]
     pub bundle_json: Option<String>,
+
+    /// Optional serialised bare `NetworkPolicy` — the producer's egress-policy
+    /// intent for the **no-bundle** path, decoded into the
+    /// `BridgeConfig.network_policy` field. Producer-supplied because endpoint
+    /// kind alone cannot determine it: the `Passt` kind serves both Firecracker
+    /// (which defers egress enforcement to its kernel nftables moat, so the
+    /// bridge gate must be `unrestricted` to avoid double-gating) *and*
+    /// libkrun-on-Linux (where the bridge IS the enforcer, so it carries the
+    /// real policy). `None` ⇒ the bridge's no-bundle arm fails closed to
+    /// deny-all.
+    #[serde(default)]
+    pub network_policy_json: Option<String>,
 
     /// Transport selector. Externally tagged so `deny_unknown_fields` holds.
     pub endpoint: BridgeEndpointKind,
@@ -110,6 +127,18 @@ pub enum BridgeEndpointKind {
         gvproxy_socket_path: PathBuf,
         supervisor_listen_path: PathBuf,
     },
+}
+
+/// Decode the optional `network_policy_json` field into a bare
+/// [`NetworkPolicy`]. `None` (field absent) yields `None`, which the bridge's
+/// no-bundle arm treats as fail-closed deny-all.
+pub fn decode_network_policy(cfg: &BridgeConfigJson) -> Result<Option<NetworkPolicy>> {
+    match &cfg.network_policy_json {
+        Some(s) => Ok(Some(
+            serde_json::from_str(s).context("decode network_policy_json into NetworkPolicy")?,
+        )),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -263,5 +292,34 @@ mod tests {
         // Smoke: the re-export path is wired (the FC fuzz target + the sidecar
         // both reach the same helper through this module).
         assert!(super::decode_plan_json(r#"{"not_a_plan":true}"#).is_err());
+    }
+
+    #[test]
+    fn network_policy_json_defaults_to_none_and_decodes_none() {
+        let json = with_endpoint(serde_json::json!({
+            "vz_ingest": { "events_socket_path": "/x.sock" }
+        }));
+        let cfg: BridgeConfigJson = serde_json::from_str(&json).unwrap();
+        assert!(cfg.network_policy_json.is_none());
+        assert!(decode_network_policy(&cfg).unwrap().is_none());
+    }
+
+    #[test]
+    fn network_policy_json_roundtrips_and_decodes() {
+        let policy = NetworkPolicy::unrestricted();
+        let policy_json = serde_json::to_string(&policy).unwrap();
+        let mut v = base_fields();
+        let obj = v.as_object_mut().unwrap();
+        obj.insert("network_policy_json".into(), serde_json::json!(policy_json));
+        obj.insert(
+            "endpoint".into(),
+            serde_json::json!({ "vz_ingest": { "events_socket_path": "/x.sock" } }),
+        );
+        let cfg: BridgeConfigJson =
+            serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
+        let decoded = decode_network_policy(&cfg)
+            .unwrap()
+            .expect("policy present");
+        assert_eq!(decoded, policy);
     }
 }
