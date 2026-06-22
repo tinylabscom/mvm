@@ -38,6 +38,7 @@ use mvm_core::{config, naming};
 use super::Cli;
 use super::build::build;
 use super::vm::exec::{RunArgs, RunProfile, run_secure};
+use super::vm::group::VmCmd;
 #[cfg(test)]
 use super::vm::host_signer::PUBLIC_FILENAME;
 use super::vm::host_signer::{host_signer_id, load_or_init};
@@ -97,6 +98,9 @@ pub(in crate::commands) enum MachineAction {
     /// extraction, no boot.
     #[command(name = "check-artifact", display_order = 13)]
     CheckArtifact(portable::CheckArtifactArgs),
+    /// Advanced single-VM operations (pause, snapshot, cp, fs, …). Hidden; use `machine <verb>` directly.
+    #[command(flatten)]
+    Vm(VmCmd),
 }
 
 /// Ephemeral image-backed run. Mirrors the relevant subset of `mvmctl run`'s
@@ -1447,6 +1451,9 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Logs(log_args) => super::vm::logs::run(cli, log_args, cfg),
         MachineAction::Console(console_args) => super::vm::console::run(cli, console_args, cfg),
         MachineAction::CheckArtifact(a) => portable::run_check_artifact(a),
+        MachineAction::Vm(cmd) => {
+            super::vm::group::run(cli, super::vm::group::Args { action: cmd }, cfg)
+        }
     }
 }
 
@@ -1454,7 +1461,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
 mod tests {
     use super::*;
     use crate::commands::{Cli, Commands};
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use mvm_core::util::test_env::TestEnv;
 
     /// Minimal standalone parser so `MachineAction` can be exercised without
@@ -2755,5 +2762,99 @@ ssh_agent = true
     fn machine_stop_name_and_all_conflict() {
         let err = parse(&["stop", "web", "--all"]).expect_err("name + --all must be a parse error");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn machine_advanced_verbs_parse() {
+        use super::super::vm::group::VmCmd;
+
+        // pause
+        let r = parse(&["pause", "myvm", "--hypervisor", "mock"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Pause(_)))),
+            "pause: {r:?}"
+        );
+
+        // snapshot (subcommand with sub-subcommand)
+        let r = parse(&["snapshot", "ls"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Snapshot(_)))),
+            "snapshot ls: {r:?}"
+        );
+
+        // cp
+        let r = parse(&["cp", "myvm", "host.txt:/guest.txt"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Cp(_)))),
+            "cp: {r:?}"
+        );
+
+        // fs
+        let r = parse(&["fs", "ls", "myvm", "/"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Fs(_)))),
+            "fs: {r:?}"
+        );
+
+        // proc
+        let r = parse(&["proc", "ls", "myvm"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Proc(_)))),
+            "proc: {r:?}"
+        );
+
+        // session
+        let r = parse(&["session", "ls"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Session(_)))),
+            "session: {r:?}"
+        );
+
+        // volume
+        let r = parse(&["volume", "ls", "myvm"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Volume(_)))),
+            "volume: {r:?}"
+        );
+
+        // sandbox
+        let r = parse(&["sandbox", "gc"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Sandbox(_)))),
+            "sandbox: {r:?}"
+        );
+    }
+
+    #[test]
+    fn vm_noun_removed() {
+        use clap::error::ErrorKind;
+        // After Task 7, `mvmctl vm <verb>` must not parse.
+        let err = Cli::try_parse_from(["mvmctl", "vm", "pause", "myvm"])
+            .expect_err("vm noun must be removed");
+        assert_eq!(
+            err.kind(),
+            ErrorKind::InvalidSubcommand,
+            "expected InvalidSubcommand, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn machine_help_hides_advanced() {
+        // `machine --help` must NOT list `snapshot`, but `machine snapshot <name>` must parse.
+        let help = {
+            let mut cmd = Cli::command();
+            let machine_sub = cmd.find_subcommand_mut("machine").unwrap();
+            format!("{}", machine_sub.render_help())
+        };
+        assert!(
+            !help.contains("snapshot"),
+            "`snapshot` must be hidden from `machine --help` output. Help text:\n{help}"
+        );
+        // But it still parses.
+        let r = parse(&["snapshot", "ls"]);
+        assert!(
+            r.is_ok(),
+            "`machine snapshot ls` must parse even when hidden from help: {r:?}"
+        );
     }
 }

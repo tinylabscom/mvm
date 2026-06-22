@@ -96,8 +96,6 @@ pub(in crate::commands) enum Commands {
     Run(vm::exec::RunArgs),
     /// Call a VM's baked entrypoint
     Invoke(vm::invoke::Args),
-    /// Operate on a running VM (pause, snapshot, checkpoint, cp, fs, …)
-    Vm(vm::group::Args),
     /// Prepare the environment + pre-fetch the builder VM image
     ///
     /// Runs host-tooling setup and pre-acquires the builder VM image so the
@@ -330,7 +328,6 @@ pub fn run() -> Result<()> {
         Commands::Init(a) => env::init::run(&cli, a, &cfg),
         Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),
         Commands::Invoke(a) => vm::invoke::run(&cli, a, &cfg),
-        Commands::Vm(a) => vm::group::run(&cli, a, &cfg),
         Commands::Secret(a) => ops::secret::run(&cli, a, &cfg),
         Commands::Bundle(a) => bundle::run(&cli, a, &cfg),
         Commands::Trust(a) => trust::run(&cli, a, &cfg),
