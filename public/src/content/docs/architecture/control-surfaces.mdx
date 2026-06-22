@@ -36,8 +36,8 @@ Use `mvmctl` for the full local lifecycle:
 mvmctl build ./agent
 mvmctl up ./agent --name agent-dev
 mvmctl exec agent-dev -- python /work/task.py
-mvmctl logs agent-dev
-mvmctl down agent-dev
+mvmctl machine logs agent-dev
+mvmctl machine stop agent-dev
 ```
 
 Prefer JSON where available:
@@ -151,8 +151,8 @@ policy profiles.
 Use console access for human debugging:
 
 ```sh
-mvmctl console agent-dev
-mvmctl console agent-dev --command "uname -a"
+mvmctl machine console agent-dev
+mvmctl machine console agent-dev --command "uname -a"
 ```
 
 Console access is broad authority inside the guest. Development images can

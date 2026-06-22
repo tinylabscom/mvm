@@ -36,7 +36,7 @@ Avoid caching:
 ## Cleanup
 
 ```sh
-mvmctl down
+mvmctl machine stop --all
 mvmctl manifest prune --orphans --dry-run
 mvmctl cache prune --orphan-builds
 ```

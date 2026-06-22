@@ -62,7 +62,7 @@ booted from it.
 ```bash
 mvmctl doctor --workflow cli-run                # preflight
 mvmctl up --flake . --cpus 2 --memory 1024      # build + boot
-mvmctl down                                     # tear down
+mvmctl machine stop --all                                     # tear down
 ```
 
 The first run downloads the builder VM image (or builds it from a
@@ -134,7 +134,7 @@ to launch.
 ```bash
 mvmctl doctor --workflow bundle-run             # preflight (no host rust needed)
 mvmctl up --bundle ./my-app.mvmpkg              # boot
-mvmctl down                                     # tear down
+mvmctl machine stop --all                                     # tear down
 ```
 
 `bundle-run` doctor scope explicitly drops `prerequisites` and

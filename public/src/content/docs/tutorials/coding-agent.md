@@ -46,7 +46,7 @@ mvmctl pause coding-agent
 mvmctl resume coding-agent
 ```
 
-Use `mvmctl down` and cleanup commands when the task is complete.
+Use `mvmctl machine stop` and cleanup commands when the task is complete.
 
 ## Security checklist
 

@@ -7,7 +7,7 @@ Start a development microVM, then attach:
 
 ```sh
 mvmctl up ./my-app --name devbox
-mvmctl console devbox
+mvmctl machine console devbox
 ```
 
 The console uses the project's guest-control path rather than requiring SSH
@@ -17,7 +17,7 @@ second always-on remote access service.
 ## One-shot command
 
 ```sh
-mvmctl console devbox --command "id && uname -a"
+mvmctl machine console devbox --command "id && uname -a"
 ```
 
 Use this for terminal-shaped checks. For normal automation, prefer:
@@ -36,7 +36,7 @@ Console behavior depends on the active backend and image mode:
 - Terminal resize, signal forwarding, and scrollback are backend-specific.
 - Console sessions end when the VM stops.
 
-When a backend cannot provide a console, use `mvmctl logs`, `mvmctl exec`, and
+When a backend cannot provide a console, use `mvmctl machine logs`, `mvmctl exec`, and
 guest readiness probes to debug the workload.
 
 ## Security checklist

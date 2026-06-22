@@ -266,7 +266,7 @@ just run -- doctor                  # dependency checks
 
 ### Console Access
 
-microVMs have no SSH. Interactive access is via `mvmctl console` which uses PTY-over-vsock:
+microVMs have no SSH. Interactive access is via `mvmctl machine console` which uses PTY-over-vsock:
 - Authenticated via the existing Ed25519 vsock protocol
 - Dev-mode only (`access.console` must be `true` in the guest security policy)
 - Single session per VM, 15-minute idle timeout

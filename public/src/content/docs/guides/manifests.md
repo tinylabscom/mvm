@@ -175,7 +175,7 @@ Snapshots (`--snapshot`) are Firecracker-only. On Apple Virtualization or Docker
 
 ## Listing / inspecting / removing
 
-Manifest registry operations live under `mvmctl manifest`. (The unprefixed `mvmctl ls` / `mvmctl info` / `mvmctl down` continue to operate on **running VMs** — those are unchanged.)
+Manifest registry operations live under `mvmctl manifest`. (The unprefixed `mvmctl ls` / `mvmctl info` / `mvmctl machine stop` continue to operate on **running VMs** — those are unchanged.)
 
 ```bash
 mvmctl manifest ls                            # list built slots (manifest path, name, last built)
@@ -192,7 +192,7 @@ mvmctl manifest rm /path/to/project --force   # idempotent
 mvmctl manifest rm --manifest-file            # also delete mvm.toml on disk (off by default)
 ```
 
-For running VMs (separate concern), continue to use `mvmctl ls` / `mvmctl down <vm>` / `mvmctl logs <vm>` etc.
+For running VMs (separate concern), continue to use `mvmctl ls` / `mvmctl machine stop <vm>` / `mvmctl machine logs <vm>` etc.
 
 ## Booting
 

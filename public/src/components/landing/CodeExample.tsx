@@ -10,8 +10,8 @@ mvmctl build --flake .
 # Boot a headless Firecracker VM
 mvmctl up --flake . --cpus 2 --memory 1024
 
-# Check health via vsock
-mvmctl vm ping`;
+# Confirm it's running
+mvmctl ls`;
 
 const nixFlake = `{
   inputs = {

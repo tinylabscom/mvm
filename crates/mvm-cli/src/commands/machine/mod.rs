@@ -421,8 +421,11 @@ fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
 /// "config changed, recreating" notice. Mirrors [`machine_config_matches`].
 fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> String {
     let mut changed = Vec::new();
-    if current.image != desired.image {
-        changed.push("image");
+    // `image` and `manifest` are mutually-exclusive sources; report either as a
+    // single "source" change. `machine_config_matches` already compares both, so
+    // without this a manifest-only swap recreates with an empty `changed` list.
+    if current.image != desired.image || current.manifest != desired.manifest {
+        changed.push("source");
     }
     if current.net != desired.net {
         changed.push("net");
@@ -2803,11 +2806,25 @@ mod tests {
         assert!(err.to_string().contains("different config"), "msg: {err}");
         match reconcile_machine_spec(Some(&different), &desired, true).expect("recreate") {
             SpecReconcile::Recreate { changed } => {
-                assert!(changed.contains("image"), "changed: {changed}");
+                assert!(changed.contains("source"), "changed: {changed}");
                 assert!(changed.contains("cpus"), "changed: {changed}");
             }
             other => panic!("expected Recreate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn config_diff_names_a_manifest_only_source_change() {
+        // A manifest-only swap (no image) must be named — `machine_config_matches`
+        // compares `manifest`, so without this the recreate notice would be empty.
+        let mut current = spec_fixture("web");
+        current.image = None;
+        current.manifest = Some("slot-aaaa".to_string());
+        let mut desired = spec_fixture("web");
+        desired.image = None;
+        desired.manifest = Some("slot-bbbb".to_string());
+        let changed = machine_config_diff(&current, &desired);
+        assert!(changed.contains("source"), "changed: {changed}");
     }
 
     #[test]

@@ -366,6 +366,9 @@ fuzz-authenticated-frame SECONDS="300":
 outdated:
     cargo outdated -R
 
+# Watch open PRs for a GitHub repo
+watch-prs repo="tinylabscom/mvm" interval="10":
+    watch -n {{interval}} "gh pr list --repo {{repo}} --state open --json number,title,mergeStateStatus,reviewDecision,isDraft --jq '.[] | \"#\(.number)  \(.mergeStateStatus // \"UNKNOWN\")  review=\(.reviewDecision // \"NONE\")  draft=\(.isDraft)  \(.title)\"'"
 
 # List all available recipes
 @_default:

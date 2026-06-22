@@ -40,7 +40,7 @@ mvmctl doctor
 
 ## Files and volumes
 
-Keep host mounts narrow. Use `mvmctl fs`, `mvmctl cp`, and declared volumes
+Keep host mounts narrow. Use `mvmctl machine fs`, `mvmctl cp`, and declared volumes
 instead of broad writable host shares when running untrusted code.
 
 Snapshots and cold-mode artifacts may contain guest memory, generated files,

@@ -58,7 +58,7 @@ For a long-running sandbox:
 mvmctl up ./service --name service-dev --metrics-port 9100
 mvmctl wait service-dev --for all
 mvmctl boot-report service-dev --json
-mvmctl logs service-dev -n 200
+mvmctl machine logs service-dev -n 200
 mvmctl metrics --json
 ```
 

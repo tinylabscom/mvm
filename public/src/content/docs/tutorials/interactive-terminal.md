@@ -15,8 +15,8 @@ Use the existing console and guest RPC surfaces:
 
 ```sh
 mvmctl up ./mvm.toml --name debug-vm
-mvmctl console debug-vm
-mvmctl logs debug-vm -f
+mvmctl machine console debug-vm
+mvmctl machine logs debug-vm -f
 ```
 
 ## Security notes

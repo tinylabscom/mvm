@@ -274,13 +274,13 @@ Your microVM is serving traffic from inside a Firecracker VM (or whichever backe
 mvmctl ls
 
 # View logs (including health check output)
-mvmctl logs hello -f
+mvmctl machine logs hello -f
 
 # Forward additional ports from a running VM
 mvmctl forward hello -p 9090:9090
 
 # Stop it
-mvmctl down hello
+mvmctl machine stop hello
 ```
 
 The first build downloads dependencies and takes a few minutes. Subsequent builds with the same `flake.lock` can be much faster because Nix reuses cached inputs and build outputs.
