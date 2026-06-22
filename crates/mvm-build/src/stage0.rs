@@ -63,23 +63,28 @@ pub struct BootstrapAsset {
 // ============================================================================
 
 /// Nix release we seed from. Bump in lockstep with the SHA-256 pins below.
-pub const NIX_SEED_VERSION: &str = "2.31.1";
+///
+/// 2.31.1 was the outlier that computed a divergent flake-input narHash vs the
+/// committed flake.locks (ADR-096), breaking every fresh builder-VM build since
+/// the Plan 160 nix-seed cutover. 2.34.7 computes the lock-matching narHash
+/// (verified against the same nixpkgs rev the locks pin).
+pub const NIX_SEED_VERSION: &str = "2.34.7";
 
 /// Official Nix release tarball for aarch64-linux guests (~23 MiB). When
 /// extracted, its `store/` IS a populated `/nix/store` carrying the `nix`
 /// binary + its runtime closure. `signature_url: None` — SHA-256 only.
 pub const NIX_SEED_AARCH64: BootstrapAsset = BootstrapAsset {
     cache_filename: "nix-seed-aarch64.tar.xz",
-    url: "https://releases.nixos.org/nix/nix-2.31.1/nix-2.31.1-aarch64-linux.tar.xz",
-    sha256_hex: "4ae8cb26dada33765f3068d185b36dcfe23efba2ba678048b70d36d8b1553850",
+    url: "https://releases.nixos.org/nix/nix-2.34.7/nix-2.34.7-aarch64-linux.tar.xz",
+    sha256_hex: "f1cee64ae7a02330c6421924c28f597c41813f2214ff108622087d8056378b08",
     mode: 0o644,
 };
 
 /// Official Nix release tarball for x86_64-linux guests (Linux KVM path).
 pub const NIX_SEED_X86_64: BootstrapAsset = BootstrapAsset {
     cache_filename: "nix-seed-x86_64.tar.xz",
-    url: "https://releases.nixos.org/nix/nix-2.31.1/nix-2.31.1-x86_64-linux.tar.xz",
-    sha256_hex: "75f18f5d567bb8c7b5d62155f8c852e62ffac0c81acda02f52b998281e3603ce",
+    url: "https://releases.nixos.org/nix/nix-2.34.7/nix-2.34.7-x86_64-linux.tar.xz",
+    sha256_hex: "eafe5042404e818505e28c5ca3d0885f3ec45c31f955489a25bb38258f87560e",
     mode: 0o644,
 };
 
