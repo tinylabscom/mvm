@@ -16,11 +16,13 @@ use std::path::Path;
 
 /// Max built-in (`=y`) symbols allowed in the workload kernel config.
 ///
-/// Provisional ceiling: the workload `.config` cannot be realised on a
-/// non-Linux host, so this starts loose and PRINTS the measured count. Ratchet
-/// it down to the value the first kernel-build CI run reports, then tighten on
-/// every shrink. Raising it must be justified in the PR that does.
-const KERNEL_Y_BUDGET: usize = 4096;
+/// Set to the aarch64 measurement — the higher of the two arches (x86_64 is
+/// ~1130; aarch64 carries more arch/platform built-ins). Tighten on every
+/// shrink; raising it must be justified in the PR that does. Tracks the
+/// audit-subtraction pass that took the baseline 1716 → 1327 (PCI / EFI / MFD /
+/// I2C / GPIO / NFS / VFIO / IPMI / cpufreq / SPI / CORESIGHT / KVM / IOMMU and
+/// other off-the-boot-path subsystems), each cut boot-validated under libkrun.
+const KERNEL_Y_BUDGET: usize = 1327;
 
 pub fn run(args: &[String]) -> Result<()> {
     let Some(path) = args.first() else {
