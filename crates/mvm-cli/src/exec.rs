@@ -178,7 +178,7 @@ pub struct ExecRequest {
     /// `VmStartConfig.network_policy` so every backend enforces the same
     /// value.
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
-    /// Plan 211: warm-pool size for this transient run. `> 0` makes the run
+    /// Warm-pool size for this transient run. `> 0` makes the run
     /// eligible to claim a pre-booted standby (skipping cold boot) and to
     /// replenish the pool after teardown; `0` always cold-boots. Resolved from
     /// `MachineRunMode::warm_pool_size` — nonzero only for throwaway auto-named
@@ -642,7 +642,7 @@ fn run_inner(
     }
     let t_admitted = timing.then(std::time::Instant::now);
 
-    // Plan 211: try a warm-pool claim before snapshot/cold-boot. A claimed
+    // Try a warm-pool claim before snapshot/cold-boot. A claimed
     // standby is pre-booted to agent-ready and runs under its own standby-id, so
     // rebind `vm_name` for the Ctrl-C handler, run_in_guest, and teardown below.
     // try_warm_claim gates internally (warm_pool_size > 0, admitted tenant +
@@ -721,7 +721,7 @@ fn run_inner(
 
     let _ = backend.stop_transient(&VmId(vm_name.clone()));
 
-    // Plan 211: top the warm pool back toward target after the run (best-effort,
+    // Top the warm pool back toward target after the run (best-effort,
     // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; on Vz it
     // hands a detached `pool warm` subprocess the boot+capture so teardown isn't
     // blocked. `start_config` still carries this run's rootfs + warm size.

@@ -33,7 +33,7 @@ pub(in crate::commands) struct Args {
     /// fresh transient microVM — never the long-running `mvmctl dev` VM.
     #[arg(short = 'm', long)]
     pub manifest: Option<String>,
-    /// Plan 211 (internal, not a CLI flag): warm-pool size for this run, carried
+    /// Internal (not a CLI flag): warm-pool size for this run, carried
     /// from `machine run` dispatch. `> 0` ⇒ eligible to claim a warm standby.
     #[arg(skip)]
     pub warm_pool_size: u32,
@@ -96,7 +96,7 @@ pub(in crate::commands) struct RunArgs {
     /// performs the existing verified OCI pull and rootfs materialization path.
     #[arg(long, value_name = "REF")]
     pub image: Option<String>,
-    /// Plan 211 (internal, not a CLI flag): warm-pool size for this run, set by
+    /// Internal (not a CLI flag): warm-pool size for this run, set by
     /// `machine run` dispatch from the resolved run mode. `> 0` ⇒ eligible to
     /// claim a pre-booted standby + replenish the pool.
     #[arg(skip)]

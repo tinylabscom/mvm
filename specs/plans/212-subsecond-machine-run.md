@@ -1,4 +1,4 @@
-# Plan 211 — Sub-second `machine run`
+# Plan 212 — Sub-second `machine run`
 
 **Status: IN PROGRESS** — Phase 1a DONE, Phase 1b-i CODE DONE (claim wired +
 unit-tested; eligibility live-proven `warm_pool_size=1`). End-to-end "claim

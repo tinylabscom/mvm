@@ -214,9 +214,9 @@ pub fn image_identity(backend: &dyn VmBackend, rootfs_path: &str) -> Result<Opti
     Ok(None)
 }
 
-// ── Plan 211 Phase 1b-i: warm-pool claim glue, recovered from 04bab4f7^ ──
-// (deleted by #1258 as orphaned when up/run folded into `machine run`; the
-// surviving standby primitives are unchanged). Wired into `crate::exec::run_inner`.
+// ── Warm-pool claim glue (recovered from history after up/run folded into
+// `machine run` orphaned it; the surviving standby primitives are unchanged).
+// Wired into `crate::exec::run_inner`.
 
 pub enum LaunchDecision {
     /// A standby was claimed and is booting under this VmId.
@@ -465,9 +465,9 @@ mod tests {
         hex_lower(&Sha256::digest(bytes))
     }
 
-    // ── Plan 211 Phase 1b-i: warm-claim eligibility-gate tests (recovered from
-    // 04bab4f7^). They assert `try_warm_claim` fails open to cold boot *before*
-    // touching the pool, so they need no real VM/backend.
+    // ── Warm-claim eligibility-gate tests. They assert `try_warm_claim` fails
+    // open to cold boot *before* touching the pool, so they need no real
+    // VM/backend.
     fn eligible_cfg() -> VmStartConfig {
         VmStartConfig {
             warm_pool_size: 2,
