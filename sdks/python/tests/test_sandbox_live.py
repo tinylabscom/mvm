@@ -2,7 +2,7 @@
 
 Each test stands up a fixture `mvmctl` shell script that records its
 argv to a sidecar file and emits whatever stdout the live transport
-needs (e.g. the `mvmctl up --up-json` envelope). The SDK shells to
+needs (e.g. the `mvmctl machine run --up-json` envelope). The SDK shells to
 the fixture via `MVM_CLI_BIN`; no real microVM boots.
 
 What we assert:
@@ -61,7 +61,7 @@ def _write_fixture_mvmctl(
     """Write a shell script that pretends to be `mvmctl`. It
     records each invocation's argv + stdin to sidecar files so
     tests can assert wire shape, and emits the requested
-    envelope on `mvmctl up --up-json`.
+    envelope on `mvmctl machine run --up-json`.
     """
     log = tmp_path / "fixture-calls.log"
     stdin_dir = tmp_path / "fixture-stdin"
@@ -81,8 +81,8 @@ if [ "$verb" = "machine" ]; then
   shift || true
 fi
 case "$verb" in
-  up)
-    # Record stdin for completeness (mvmctl up has none).
+  up | run)
+    # Record stdin for completeness (mvmctl machine run has none).
     if [ -t 0 ]; then :; else cat > {stdin_dir!s}/up-stdin.bin || true; fi
     if [ "{up_exit}" -eq 0 ]; then
       echo '{envelope_json}'
@@ -207,7 +207,7 @@ def test_sandbox_create_live_parses_envelope_and_records_vm(
 
     calls = _read_fixture_log(tmp_path)
     assert len(calls) == 1
-    assert calls[0].startswith("up --up-json --name ")
+    assert calls[0].startswith("machine run -d --up-json --name ")
     assert "--manifest python-3.12" in calls[0]
     assert "--ttl" in calls[0]
 
