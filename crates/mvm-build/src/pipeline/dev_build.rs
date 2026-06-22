@@ -643,8 +643,18 @@ fn dev_build_via_builder_vm_uncached(
     // hardcoding libkrun, so `mvmctl build` routes a steady-state build through
     // the chosen VMM (QEMU on `MVM_BUILDER_BACKEND=qemu`). Default stays libkrun
     // on Linux + macOS 13-25; macOS 26 auto-detects Vz.
-    let builder = crate::builder_backend_select::resolve_builder_backend();
-    dev_build_with_builder_vm(env, flake_ref, profile, mode, builder.as_ref())
+    //
+    // Auto-fallback: an auto-detected libkrun that fails to create its VM on
+    // Linux (libkrun rc -22 / `KVM_SET_USER_MEMORY_REGION`) transparently
+    // retries the build on the qemu builder; a genuine build error surfaces
+    // unchanged. An explicit `--builder`/`MVM_BUILDER_BACKEND` opts out.
+    use crate::builder_backend_select as bbs;
+    let selected = bbs::resolve_choice();
+    let explicit = bbs::resolve_env_override().is_some();
+    bbs::run_with_builder_fallback_anyhow(selected, explicit, |choice| {
+        let builder = bbs::resolve_builder_backend_with_override(Some(choice));
+        dev_build_with_builder_vm(env, flake_ref, profile, mode, builder.as_ref())
+    })
 }
 
 /// Read `MVM_NO_PERSISTENT_BUILDER`. Any non-empty value disables
@@ -759,7 +769,10 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
 
     let artifacts = builder
         .run_build(&job, &mounts)
-        .map_err(|e| anyhow::anyhow!("builder VM: {e}"))?;
+        // Preserve the `BuilderVmError` as a downcastable anyhow source (not a
+        // stringified context) so the single-shot caller's auto-fallback can
+        // detect a VMM-level failure (`run_with_builder_fallback_anyhow`).
+        .map_err(|e| anyhow::Error::new(e).context("builder VM"))?;
     let revision_hash = match artifacts {
         crate::builder_vm::BuilderArtifacts::Image { revision_hash, .. } => revision_hash,
         crate::builder_vm::BuilderArtifacts::InstallVolume { .. } => {
