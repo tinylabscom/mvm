@@ -36,9 +36,9 @@ the PTY slave via `TIOCSCTTY`. Add that ioctl. This is the only functional bug.
 Add to the `#[cfg(test)] mod tests` block in `crates/mvm-guest/src/console.rs` (after `test_is_active_default`, before the closing `}` at line 626):
 
 ```rust
-    // Linux-only: TIOCSCTTY + /dev/tty controlling-terminal semantics are
-    // Linux-specific. macOS dev hosts skip this; the Linux CI lane runs it.
-    #[cfg(target_os = "linux")]
+    // Portable: openpty + TIOCSCTTY + /dev/tty controlling-terminal semantics
+    // work on both Linux (the guest) and macOS (dev hosts), so this runs on
+    // both — the `TIOCSCTTY` const already carries per-OS values.
     #[test]
     fn child_acquires_controlling_tty() {
         let ws = Winsize {
