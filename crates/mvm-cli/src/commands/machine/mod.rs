@@ -261,9 +261,10 @@ pub(in crate::commands) struct MachineRunArgs {
 }
 
 impl MachineRunArgs {
-    /// Translate into the canonical `mvmctl run` argument shape. The
-    /// SDK-transport (`--mode`/`--dev`/`--prod`) and launch-plan surfaces are
-    /// pinned off — they are not part of the beginner contract.
+    /// Translate into the canonical transient-run argument shape. The
+    /// launch-plan and OCI prod-pin surfaces are pinned off — they are not
+    /// part of the beginner contract (the SDK live/plan/record transport was
+    /// retired with the top-level `run` verb).
     fn into_run_args(self) -> RunArgs {
         RunArgs {
             manifest: self.manifest,
@@ -280,11 +281,8 @@ impl MachineRunArgs {
             json: self.json,
             dry_run: self.dry_run,
             launch_plan: None,
-            mode: None,
-            dev: false,
             prod: false,
             argv: self.argv,
-            ack_divergence: Vec::new(),
         }
     }
 
@@ -2914,11 +2912,8 @@ mod tests {
         assert_eq!(run.image.as_deref(), Some("alpine"));
         assert!(run.manifest.is_none());
         assert!(run.launch_plan.is_none());
-        // SDK transport surfaces stay off — `machine run` is not an SDK verb.
-        assert!(run.mode.is_none());
-        assert!(!run.dev);
+        // OCI prod-pin stays off — `machine run` doesn't expose it.
         assert!(!run.prod);
-        assert!(run.ack_divergence.is_empty());
         // User-facing flags flow through untouched.
         assert!(run.json);
         assert!(run.dry_run);
