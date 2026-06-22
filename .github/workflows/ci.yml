@@ -140,6 +140,32 @@ jobs:
       - name: SDK stubs match the Rust schemas (no drift)
         run: cargo run -p xtask -- check-stubs
 
+      # Feature-gated test runs that the default `Test` workspace pass skips.
+      # They live here, not in `Test`, so they run in parallel off the merge
+      # queue's critical path (this job has headroom; `Test` is the long pole).
+      # Clippy above already compiled the workspace `--all-targets`, so the
+      # crate graph is warm for these feature-specific recompiles.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: hostd-transport feature tests (mvm-core)
+        # `hostd-transport` is off by default (plan 126 B5), so the default
+        # workspace run skips the protocol transport tests. Cover them here.
+        run: cargo nextest run -p mvm-core --features hostd-transport
+
+      - name: xtask man-page tests
+        # gen-man lives behind xtask's off-by-default `man` feature (it pulls
+        # mvm-cli + its heavy build.rs out of the default xtask graph), so the
+        # default workspace run skips its tests. Exercise the man-page path.
+        run: cargo nextest run -p xtask --features man
+
+      - name: Assert auto-detect on Linux picks libkrun
+        run: |
+          cargo test -p mvm-build --features builder-vm --lib \
+            builder_backend_select::tests::auto_detect_default_for_everything_else_picks_libkrun
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -179,27 +205,9 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --all-targets
 
-      - name: hostd-transport feature tests (mvm-core)
-        # `hostd-transport` is off by default (plan 126 B5), so the
-        # workspace run above skips the protocol transport tests. Run them
-        # explicitly so the gated surface stays covered.
-        run: cargo nextest run -p mvm-core --features hostd-transport
-
-      - name: xtask man-page tests
-        # gen-man lives behind xtask's off-by-default `man` feature (it pulls
-        # mvm-cli + its heavy build.rs out of the default xtask graph), so the
-        # workspace run above skips its tests. Exercise the man-page path here;
-        # the mvm-cli rlib it links was already built by the workspace run.
-        run: cargo nextest run -p xtask --features man
-
       - name: Run doctests
         # nextest does not run doctests; gate them separately.
         run: cargo test --workspace --doc
-
-      - name: Assert auto-detect on Linux picks libkrun
-        run: |
-          cargo test -p mvm-build --features builder-vm --lib \
-            builder_backend_select::tests::auto_detect_default_for_everything_else_picks_libkrun
 
   mcp-server-smoke:
     name: MCP server stdio roundtrip
