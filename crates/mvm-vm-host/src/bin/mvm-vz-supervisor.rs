@@ -103,15 +103,23 @@ fn ensure_self_signed() {
         if std::fs::write(&ent, VZ_ENTITLEMENTS_PLIST).is_err() {
             return;
         }
-        let signed = Command::new("codesign")
+        let output = Command::new("codesign")
             .args(["--sign", "-", "--force", "--entitlements"])
             .arg(&ent)
             .arg(&exe)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .output();
+        let signed = output.as_ref().map(|o| o.status.success()).unwrap_or(false);
         if !signed {
             eprintln!("mvm-vz-supervisor: ad-hoc codesign failed; VM start may be rejected");
+            // On success codesign's "replacing existing signature" line is
+            // discarded; on failure its stderr is the actionable detail.
+            if let Ok(o) = &output {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let stderr = stderr.trim_end();
+                if !stderr.is_empty() {
+                    eprintln!("{stderr}");
+                }
+            }
             return;
         }
     }
