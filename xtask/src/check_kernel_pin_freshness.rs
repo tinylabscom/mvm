@@ -84,7 +84,7 @@ fn eval_nixpkgs_linux_version(workspace: &Path) -> Option<String> {
     };
     let flake = format!("{}/nix/images/kernel", workspace.display());
     let attr = format!("packages.{arch}-linux.workload-vmlinux.version");
-    let out = Command::new("nix")
+    let out = Command::new(nix_bin())
         .args([
             "eval",
             "--raw",
@@ -99,6 +99,21 @@ fn eval_nixpkgs_linux_version(workspace: &Path) -> Option<String> {
     }
     let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!v.is_empty() && split_version(&v).is_some()).then_some(v)
+}
+
+/// Locate the `nix` binary: prefer one on `PATH` (CI with Nix installed),
+/// else the default install profile (a dev shell often doesn't export it).
+fn nix_bin() -> &'static str {
+    let on_path = Command::new("nix")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if on_path {
+        "nix"
+    } else {
+        "/nix/var/nix/profiles/default/bin/nix"
+    }
 }
 
 /// Fetch kernel.org's release list. Offline-tolerant: any failure yields an
