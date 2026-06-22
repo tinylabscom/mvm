@@ -40,16 +40,18 @@
           mvmSrc = workspace;
         }) { inherit system; };
 
-      # Workload kernel base — built-in DM_VERITY (no module tree), matching
-      # builder-vm's `workload-kernel` (nix/images/builder-vm/flake.nix:480-486).
-      # Imports the base through the raw workspaceRoot (not the filtered
-      # `workspace`), mirroring builder-vm's relative `./kernel/base.nix` import.
+      # Workload kernel — the single shared definition in
+      # `nix/images/kernel/`, identical to the one builder-vm builds. Both
+      # import through the raw `workspaceRoot` (not the filtered `workspace`)
+      # so the kernel resolves under the `path:` URL fetch; importing through
+      # `workspace` forces realisation, which `nix flake check --no-build`
+      # refuses. Consuming the shared `workload.nix` keeps the workload
+      # symbol set in ONE place — no second enable list to drift.
       kernelBaseFor = pkgs:
-        import (workspaceRoot + "/nix/images/builder-vm/kernel/base.nix")
-          { inherit pkgs; };
-      workloadKernelEnables = [ "MD" "BLK_DEV_DM" "DM_VERITY" ];
+        import (workspaceRoot + "/nix/images/kernel/base.nix") { inherit pkgs; };
       mkWorkloadKernel = pkgs:
-        (kernelBaseFor pkgs).mkKernel { extraEnables = workloadKernelEnables; };
+        import (workspaceRoot + "/nix/images/kernel/workload.nix")
+          { inherit pkgs; base = kernelBaseFor pkgs; };
 
       # Verity determinism — copied verbatim from runtime-overlay
       # (nix/images/runtime-overlay/flake.nix:180-203). MUST stay in lockstep
