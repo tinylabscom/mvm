@@ -20,7 +20,7 @@
  *   produces a Workload.
  * - `MVM_SDK_MODE=live` (Plan 73 Followup H-live): every
  *   `Sandbox` call shells to `$MVM_CLI_BIN` (`mvmctl up`,
- *   `mvmctl proc start`, `mvmctl fs write`, `mvmctl down`)
+ *   `mvmctl machine proc start`, `mvmctl machine fs write`, `mvmctl machine stop`)
  *   against a real microVM. The shell is dispatched by
  *   {@link LiveTransport} below.
  *
@@ -345,7 +345,7 @@ export interface SandboxExecOptions {
  *
  *  `exitCode` is the child's exit code (0 on success). `stdout`/`stderr`
  *  are captured strings — exec is a one-shot that *captures* the streams,
- *  the distinction from `commands.start` + `mvmctl proc wait`. */
+ *  the distinction from `commands.start` + `mvmctl machine proc wait`. */
 export interface ExecResult {
   exitCode: number;
   stdout: string;
@@ -386,7 +386,7 @@ export class LiveTransport {
   readonly vmId: string;
   readonly buildMode: "dev" | "prod";
   private killed = false;
-  // Long-running `mvmctl forward` proxies spawned by `forward()`. Torn
+  // Long-running `mvmctl machine forward` proxies spawned by `forward()`. Torn
   // down in `kill()` so a port forwarder never outlives the VM.
   private forwards: import("node:child_process").ChildProcess[] = [];
 
@@ -473,16 +473,16 @@ export class LiveTransport {
           `claim 4) strips the agent's \`do_exec\` handler in prod builds — ` +
           `re-build the template with \`mvmctl template build --dev <name>\`, ` +
           `or use \`files.write\` to stage inputs into the running VM instead.`,
-        { argv: ["proc", "start", this.vmId, ...argv] },
+        { argv: ["machine", "proc", "start", this.vmId, ...argv] },
       );
     }
-    const shell = [this.mvmCliBin, "proc", "start", this.vmId];
+    const shell = [this.mvmCliBin, "machine", "proc", "start", this.vmId];
     shell.push(...this.encodeEnvFlags(env, shell));
     shell.push("--", ...argv);
     this.runShell(shell);
   }
 
-  /** Encode `env` into `-e KEY=VALUE` flags for `mvmctl proc start`,
+  /** Encode `env` into `-e KEY=VALUE` flags for `mvmctl machine proc start`,
    *  rejecting non-literal (secret) values — live mode forwards only
    *  literals; secrets are injected host-side via `--secret` on `up`. */
   private encodeEnvFlags(
@@ -512,8 +512,8 @@ export class LiveTransport {
     return flags;
   }
 
-  /** One-shot exec: `mvmctl proc start ... -- argv` → pid_token, then
-   *  `mvmctl proc wait <token>` to capture stdout/stderr/exit. Refuses
+  /** One-shot exec: `mvmctl machine proc start ... -- argv` → pid_token, then
+   *  `mvmctl machine proc wait <token>` to capture stdout/stderr/exit. Refuses
    *  with {@link SandboxDevOnly} on a prod template (claim 4). */
   commandsExec(argv: string[], options: SandboxExecOptions = {}): ExecResult {
     if (this.buildMode !== "dev") {
@@ -523,14 +523,14 @@ export class LiveTransport {
           `claim 4) strips the agent's \`do_exec\` handler in prod builds — ` +
           `re-build the template with \`mvmctl template build --dev <name>\`, ` +
           `or use \`files.write\` to stage inputs into the running VM instead.`,
-        { argv: ["proc", "start", this.vmId, ...argv] },
+        { argv: ["machine", "proc", "start", this.vmId, ...argv] },
       );
     }
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const child = require("node:child_process") as typeof import("node:child_process");
 
     // 1) `proc start` → pid_token on stdout.
-    const startShell = [this.mvmCliBin, "proc", "start", this.vmId];
+    const startShell = [this.mvmCliBin, "machine", "proc", "start", this.vmId];
     startShell.push(...this.encodeEnvFlags(options.env, startShell));
     if (options.cwd !== undefined) startShell.push("--cwd", options.cwd);
     startShell.push("--", ...argv);
@@ -553,7 +553,7 @@ export class LiveTransport {
     }
     if (startResult.status !== 0) {
       throw new SandboxLiveError(
-        `\`mvmctl proc start\` failed with exit code ${startResult.status}`,
+        `\`mvmctl machine proc start\` failed with exit code ${startResult.status}`,
         {
           argv: startShell,
           exitCode: startResult.status,
@@ -564,13 +564,13 @@ export class LiveTransport {
     const pidToken = (startResult.stdout ?? "").trim();
     if (!pidToken) {
       throw new SandboxLiveError(
-        "`mvmctl proc start` produced no pid_token on stdout",
+        "`mvmctl machine proc start` produced no pid_token on stdout",
         { argv: startShell, stderr: startResult.stderr ?? "" },
       );
     }
 
     // 2) `proc wait <token>` → captured stdout/stderr/exit.
-    const waitShell = [this.mvmCliBin, "proc", "wait", this.vmId, pidToken];
+    const waitShell = [this.mvmCliBin, "machine", "proc", "wait", this.vmId, pidToken];
     if (options.timeout !== undefined) {
       waitShell.push("--timeout", String(Math.trunc(options.timeout)));
     }
@@ -591,7 +591,7 @@ export class LiveTransport {
     }
     if (waitResult.error) {
       throw new SandboxLiveError(
-        `\`mvmctl proc wait\` failed: ${waitResult.error.message}`,
+        `\`mvmctl machine proc wait\` failed: ${waitResult.error.message}`,
         { argv: waitShell },
       );
     }
@@ -603,7 +603,7 @@ export class LiveTransport {
   }
 
   filesWrite(path: string, data: Uint8Array): void {
-    const shell = [this.mvmCliBin, "fs", "write", this.vmId, path];
+    const shell = [this.mvmCliBin, "machine", "fs", "write", this.vmId, path];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const child = require("node:child_process") as typeof import("node:child_process");
     let result;
@@ -624,7 +624,7 @@ export class LiveTransport {
     }
     if (result.status !== 0) {
       throw new SandboxLiveError(
-        `\`mvmctl fs write\` failed with exit code ${result.status}`,
+        `\`mvmctl machine fs write\` failed with exit code ${result.status}`,
         {
           argv: shell,
           exitCode: result.status,
@@ -635,7 +635,7 @@ export class LiveTransport {
   }
 
   cp(source: string, destination: string): void {
-    const shell = [this.mvmCliBin, "cp", source, destination];
+    const shell = [this.mvmCliBin, "machine", "cp", source, destination];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const child = require("node:child_process") as typeof import("node:child_process");
     let result;
@@ -654,7 +654,7 @@ export class LiveTransport {
     }
     if (result.status !== 0) {
       throw new SandboxLiveError(
-        `\`mvmctl cp\` failed with exit code ${result.status}`,
+        `\`mvmctl machine cp\` failed with exit code ${result.status}`,
         {
           argv: shell,
           exitCode: result.status,
@@ -666,10 +666,10 @@ export class LiveTransport {
 
   forward(hostPort: number, guestPort: number): void {
     const spec = `${hostPort}:${guestPort}`;
-    const shell = [this.mvmCliBin, "forward", this.vmId, "--port", spec];
+    const shell = [this.mvmCliBin, "machine", "forward", this.vmId, "--port", spec];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const child = require("node:child_process") as typeof import("node:child_process");
-    // `mvmctl forward` blocks (runs the proxy until signalled), so spawn
+    // `mvmctl machine forward` blocks (runs the proxy until signalled), so spawn
     // it detached + tracked; `kill()` terminates it.
     let proc;
     try {
@@ -695,7 +695,7 @@ export class LiveTransport {
       }
     }
     this.forwards = [];
-    const shell = [this.mvmCliBin, "down", this.vmId];
+    const shell = [this.mvmCliBin, "machine", "stop", this.vmId];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const child = require("node:child_process") as typeof import("node:child_process");
     try {
@@ -708,12 +708,12 @@ export class LiveTransport {
         // orchestrator's TTL reaper.
         // eslint-disable-next-line no-console
         console.error(
-          `mvm-sdk live: \`mvmctl down ${this.vmId}\` exited with ${result.status}: ${result.stderr ?? ""}`,
+          `mvm-sdk live: \`mvmctl machine stop ${this.vmId}\` exited with ${result.status}: ${result.stderr ?? ""}`,
         );
       }
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.error(`mvm-sdk live: failed to spawn \`mvmctl down\`: ${String(err)}`);
+      console.error(`mvm-sdk live: failed to spawn \`mvmctl machine stop\`: ${String(err)}`);
     }
   }
 
@@ -902,7 +902,7 @@ export class Sandbox {
 
   /** One-shot: run `argv` inside the sandbox, capturing stdout / stderr /
    *  exit into an {@link ExecResult}. Convenience over `commands.start` +
-   *  `mvmctl proc wait`. Refuses with `SandboxDevOnly` on a prod template
+   *  `mvmctl machine proc wait`. Refuses with `SandboxDevOnly` on a prod template
    *  (claim 4).
    *
    *  Live mode only: in record mode this throws `SandboxModeError` — the
@@ -927,7 +927,7 @@ export class Sandbox {
 
   /** Copy a host file into the running sandbox at `guestPath`.
    *
-   *  Shells `mvmctl cp <hostPath> <vm>:<guestPath>` — the host file
+   *  Shells `mvmctl machine cp <hostPath> <vm>:<guestPath>` — the host file
    *  streams into the guest over the agent fs RPC.
    *
    *  Live mode only: in record mode this throws `SandboxModeError`. To
@@ -951,7 +951,7 @@ export class Sandbox {
 
   /** Copy a file out of the running sandbox to `hostPath`.
    *
-   *  Shells `mvmctl cp <vm>:<guestPath> <hostPath>` — the guest file
+   *  Shells `mvmctl machine cp <vm>:<guestPath> <hostPath>` — the guest file
    *  streams back over the agent fs RPC.
    *
    *  Live mode only: pulling a file from a running VM has no record-mode
@@ -974,7 +974,7 @@ export class Sandbox {
 
   /** Forward `hostPort` on the host to `guestPort` in the sandbox.
    *
-   *  Spawns `mvmctl forward <vm> --port <host>:<guest>` as a background
+   *  Spawns `mvmctl machine forward <vm> --port <host>:<guest>` as a background
    *  proxy that runs until the sandbox is torn down (`kill` /
    *  `[Symbol.dispose]` terminate it).
    *

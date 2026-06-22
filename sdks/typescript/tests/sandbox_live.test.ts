@@ -50,6 +50,10 @@ set -u
 verb=\${1:-}
 shift || true
 echo "$verb $*" >> ${JSON.stringify(log)}
+if [ "$verb" = "machine" ]; then
+  verb=\${1:-}
+  shift || true
+fi
 case "$verb" in
   up)
     if [ -t 0 ]; then :; else cat > ${JSON.stringify(path.join(stdinDir, "up-stdin.bin"))} || true; fi
@@ -84,7 +88,7 @@ case "$verb" in
     sleep ${forwardSleep}
     exit 0
     ;;
-  down)
+  stop)
     exit ${downExit}
     ;;
   *)
@@ -236,7 +240,7 @@ describe("Sandbox.commands.start (live mode)", () => {
 
     const calls = readFixtureLog();
     expect(calls.length).toBe(2);
-    expect(calls[1]).toMatch(/^proc start sb-dev-vm/);
+    expect(calls[1]).toMatch(/^machine proc start sb-dev-vm/);
     expect(calls[1]).toContain("-e MODE=test");
     expect(calls[1]).toContain("-- python run.py");
   });
@@ -261,7 +265,7 @@ describe("Sandbox.commands.start (live mode)", () => {
     // Critical: SDK must NOT have shelled to `mvmctl proc start`.
     const calls = readFixtureLog();
     expect(calls.length).toBe(1);
-    expect(calls.some((c) => c.startsWith("proc"))).toBe(false);
+    expect(calls.some((c) => c.startsWith("machine proc"))).toBe(false);
   });
 });
 
@@ -283,7 +287,7 @@ describe("Sandbox.files.write (live mode)", () => {
     sb.files.write("/app/config.json", new TextEncoder().encode('{"x":1}'));
 
     const calls = readFixtureLog();
-    expect(calls.some((c) => c.startsWith("fs write sb-fs-vm /app/config.json"))).toBe(true);
+    expect(calls.some((c) => c.startsWith("machine fs write sb-fs-vm /app/config.json"))).toBe(true);
     const stdinPath = path.join(tmpDir, "fixture-stdin", "fs-write-stdin.bin");
     expect(fs.readFileSync(stdinPath, "utf-8")).toBe('{"x":1}');
   });
@@ -307,7 +311,7 @@ describe("Sandbox.kill (live mode)", () => {
     sb.kill();
 
     const calls = readFixtureLog();
-    expect(calls).toContain("down sb-kill-vm");
+    expect(calls).toContain("machine stop sb-kill-vm");
   });
 
   it("[Symbol.dispose] kills once", () => {
@@ -324,7 +328,7 @@ describe("Sandbox.kill (live mode)", () => {
     const sb = mvm.Sandbox.create("python-dev");
     sb[Symbol.dispose]();
 
-    const downCalls = readFixtureLog().filter((c) => c.startsWith("down "));
+    const downCalls = readFixtureLog().filter((c) => c.startsWith("machine stop "));
     expect(downCalls.length).toBe(1);
   });
 });
@@ -346,7 +350,7 @@ describe("Sandbox.copyIn / copyOut (live mode)", () => {
 
     const calls = readFixtureLog();
     expect(
-      calls.some((c) => c.startsWith(`cp ${hostFile} sb-cp-vm:/app/local.txt`)),
+      calls.some((c) => c.startsWith(`machine cp ${hostFile} sb-cp-vm:/app/local.txt`)),
     ).toBe(true);
   });
 
@@ -363,7 +367,7 @@ describe("Sandbox.copyIn / copyOut (live mode)", () => {
 
     const calls = readFixtureLog();
     expect(
-      calls.some((c) => c.startsWith(`cp sb-cp-vm:/app/out.txt ${dest}`)),
+      calls.some((c) => c.startsWith(`machine cp sb-cp-vm:/app/out.txt ${dest}`)),
     ).toBe(true);
   });
 
@@ -413,7 +417,7 @@ describe("Sandbox.forward (live mode)", () => {
     );
     const calls = readFixtureLog();
     expect(
-      calls.some((c) => c.startsWith("forward sb-fwd-vm --port 8080:80")),
+      calls.some((c) => c.startsWith("machine forward sb-fwd-vm --port 8080:80")),
     ).toBe(true);
   });
 
@@ -459,10 +463,10 @@ describe("Sandbox.exec (live mode)", () => {
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toBe("4");
     const calls = readFixtureLog();
-    expect(calls.some((c) => c.startsWith("proc start sb-exec-vm"))).toBe(true);
+    expect(calls.some((c) => c.startsWith("machine proc start sb-exec-vm"))).toBe(true);
     expect(
       calls.some((c) =>
-        c.startsWith("proc wait sb-exec-vm pid-token-abc123"),
+        c.startsWith("machine proc wait sb-exec-vm pid-token-abc123"),
       ),
     ).toBe(true);
   });
@@ -491,7 +495,7 @@ describe("Sandbox.exec (live mode)", () => {
     sb.exec(["env"], { env: { MODE: "test" } });
 
     const calls = readFixtureLog();
-    const start = calls.find((c) => c.startsWith("proc start"));
+    const start = calls.find((c) => c.startsWith("machine proc start"));
     expect(start).toContain("-e MODE=test");
     expect(start).toContain("-- env");
   });
@@ -506,7 +510,7 @@ describe("Sandbox.exec (live mode)", () => {
     const sb = mvm.Sandbox.create("python-prod");
     expect(() => sb.exec(["python", "-c", "x"])).toThrow(mvm.SandboxDevOnly);
     // Claim 4: must not have shelled `mvmctl proc start`.
-    expect(readFixtureLog().some((c) => c.startsWith("proc"))).toBe(false);
+    expect(readFixtureLog().some((c) => c.startsWith("machine proc"))).toBe(false);
   });
 
   it("is refused in record mode", () => {
@@ -542,7 +546,7 @@ describe("Sandbox async surface", () => {
 
     const sb = mvm.Sandbox.create("python-dev");
     await sb[Symbol.asyncDispose]();
-    expect(readFixtureLog().some((c) => c.startsWith("down "))).toBe(true);
+    expect(readFixtureLog().some((c) => c.startsWith("machine stop "))).toBe(true);
   });
 });
 
@@ -595,7 +599,7 @@ describe("CodeSandbox", () => {
       expect(cs.run("print(2 + 2)")).toBe("4");
       const calls = readFixtureLog();
       expect(
-        calls.some((c) => c.startsWith("proc start sb-cs-vm") && c.includes("-- python -c")),
+        calls.some((c) => c.startsWith("machine proc start sb-cs-vm") && c.includes("-- python -c")),
       ).toBe(true);
     } finally {
       cs.kill();
@@ -648,7 +652,7 @@ describe("CodeSandbox", () => {
     try {
       expect(cs.runScript(hostScript)).toBe("ok");
       const calls = readFixtureLog();
-      expect(calls.some((c) => c.startsWith("cp ") && c.includes("sb-cs-vm:/tmp/job.py"))).toBe(true);
+      expect(calls.some((c) => c.startsWith("machine cp ") && c.includes("sb-cs-vm:/tmp/job.py"))).toBe(true);
       expect(calls.some((c) => c.includes("-- python /tmp/job.py"))).toBe(true);
     } finally {
       cs.kill();
@@ -688,7 +692,7 @@ describe("BrowserSandbox", () => {
       expect(bs.endpoint()).toBe("http://localhost:9222");
       const live = bs.sandbox._live as unknown as ForwardsPeek;
       await new Promise<void>((resolve) => live.forwards[0].on("exit", () => resolve()));
-      expect(readFixtureLog().some((c) => c.startsWith("forward sb-br-vm --port 9222:9222"))).toBe(true);
+      expect(readFixtureLog().some((c) => c.startsWith("machine forward sb-br-vm --port 9222:9222"))).toBe(true);
     } finally {
       bs.kill();
     }
@@ -706,7 +710,7 @@ describe("BrowserSandbox", () => {
       expect(bs.endpoint()).toBe("http://localhost:18222");
       const live = bs.sandbox._live as unknown as ForwardsPeek;
       await new Promise<void>((resolve) => live.forwards[0].on("exit", () => resolve()));
-      expect(readFixtureLog().some((c) => c.startsWith("forward sb-br-vm --port 18222:9222"))).toBe(true);
+      expect(readFixtureLog().some((c) => c.startsWith("machine forward sb-br-vm --port 18222:9222"))).toBe(true);
     } finally {
       bs.kill();
     }
