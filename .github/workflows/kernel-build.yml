@@ -81,10 +81,18 @@ jobs:
           ARTIFACT_HASH=$(sha256sum "staging/vmlinux-${ARCH}-workload" | cut -d' ' -f1)
           printf '{"kernel_version":"%s","config_hash":"%s","artifact_hash":"%s"}\n' \
             "$KVER" "$CONFIG_HASH" "$ARTIFACT_HASH" > "staging/kernel-${ARCH}.json"
+          # Resolved workload .config + size/symbol metrics — the inputs to
+          # the shrink audit + the check-kernel-config-budget gate.
+          cp "$CFG" "staging/workload-config-${ARCH}"
+          Y_COUNT=$(grep -c '=y$' "$CFG")
+          RAW_BYTES=$(stat -c%s "staging/vmlinux-${ARCH}-workload")
+          GZ_BYTES=$(gzip -c "staging/vmlinux-${ARCH}-workload" | wc -c)
+          printf '{"arch":"%s","y_symbol_count":%d,"vmlinux_bytes":%d,"vmlinux_gz_bytes":%d}\n' \
+            "$ARCH" "$Y_COUNT" "$RAW_BYTES" "$GZ_BYTES" > "staging/kernel-metrics-${ARCH}.json"
           cd staging
           sha256sum vmlinux-${ARCH}-* > "kernel-${ARCH}-checksums-sha256.txt"
           echo "=== kernel artifacts (${ARCH}) ==="
-          cat "kernel-${ARCH}-checksums-sha256.txt" "kernel-${ARCH}.json"
+          cat "kernel-${ARCH}-checksums-sha256.txt" "kernel-${ARCH}.json" "kernel-metrics-${ARCH}.json"
           du -h vmlinux-${ARCH}-*
 
       - name: Upload kernel artifacts (CI visibility)
@@ -96,6 +104,8 @@ jobs:
             staging/vmlinux-${{ matrix.arch }}-workload
             staging/kernel-${{ matrix.arch }}-checksums-sha256.txt
             staging/kernel-${{ matrix.arch }}.json
+            staging/kernel-metrics-${{ matrix.arch }}.json
+            staging/workload-config-${{ matrix.arch }}
 
       - name: Publish to release
         if: startsWith(github.ref, 'refs/tags/v')

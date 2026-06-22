@@ -27,4 +27,9 @@
 
 base.mkKernel {
   extraEnables = [ "MD" "BLK_DEV_DM" "DM_VERITY" "VIRTIO_FS" "FUSE_FS" ];
+  # Workload-only: the guest enforces egress host-side (egress proxy) + via
+  # blackhole routes (mvm-guest-netinit, rtnetlink), never in-guest iptables —
+  # so it needs no netfilter tables. The builder kernel keeps netfilter for its
+  # OUTPUT-chain egress lockdown, so this drop lives here, not in shared base.
+  extraDisables = [ "NETFILTER" ];
 }
