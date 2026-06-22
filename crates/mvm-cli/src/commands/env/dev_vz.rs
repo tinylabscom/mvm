@@ -4776,7 +4776,12 @@ mod builder_backend_attempt_order_tests {
         );
         assert_eq!(
             builder_backend_attempt_order(BuilderBackendChoice::Libkrun, false),
-            builder_attempt_order(BuilderBackendChoice::Libkrun, false, is_linux)
+            builder_attempt_order(
+                BuilderBackendChoice::Libkrun,
+                false,
+                is_linux,
+                mvm_build::builder_health::libkrun_marked_unavailable(),
+            )
         );
     }
 }

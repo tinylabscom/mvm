@@ -95,6 +95,10 @@ pub mod vz_builder;
 /// concrete driver the env-var resolved to.
 #[cfg(feature = "builder-vm")]
 pub mod builder_backend_select;
+/// Per-host builder-VM health cache (skip a libkrun backend that can't create
+/// its VM here). Gated with `builder_backend_select` — its only consumers are
+/// the builder-selection paths behind `builder-vm`.
+#[cfg(feature = "builder-vm")]
 pub mod builder_health;
 
 /// Host-side cross-compile + cache of the guest agent/netinit binaries
