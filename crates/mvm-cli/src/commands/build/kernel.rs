@@ -161,6 +161,7 @@ struct KernelMetrics<'a> {
 /// Count built-in (`=y`) symbols in a resolved kernel `.config` — the metric
 /// the `check-kernel-config-budget` gate ratchets on. Matches CI's
 /// `grep -c '=y$'`.
+#[cfg(feature = "builder-vm")]
 fn count_builtin_symbols(config: &str) -> usize {
     config
         .lines()
@@ -307,7 +308,7 @@ fn run_build(_args: BuildArgs, _verbose: bool) -> Result<()> {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "builder-vm"))]
 mod tests {
     use super::count_builtin_symbols;
 
