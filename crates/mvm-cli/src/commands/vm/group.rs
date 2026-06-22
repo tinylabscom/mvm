@@ -13,7 +13,8 @@ use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 use super::{
-    checkpoint, cp, diff, forward, fs, pause, proc, sandbox, session, set_ttl, volume, wait,
+    checkpoint, cp, diff, forward, fs, pause, proc, rekernel, sandbox, session, set_ttl, volume,
+    wait,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -75,6 +76,8 @@ pub(in crate::commands) enum VmCmd {
     /// Manage virtio-fs volume mounts
     #[command(hide = true)]
     Volume(volume::Args),
+    /// Relaunch a VM on a chosen/updated workload kernel
+    Rekernel(rekernel::Args),
 }
 
 impl VmCmd {
@@ -129,6 +132,7 @@ impl VmCmd {
             VmCmd::Sandbox(_) => "sandbox",
             VmCmd::Session(_) => "session",
             VmCmd::Volume(_) => "volume",
+            VmCmd::Rekernel(_) => "rekernel",
         }
     }
 }
@@ -152,5 +156,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         VmCmd::Sandbox(a) => sandbox::run(cli, a, cfg),
         VmCmd::Session(a) => session::run(cli, a, cfg),
         VmCmd::Volume(a) => volume::run(cli, a, cfg),
+        VmCmd::Rekernel(a) => rekernel::run(cli, a, cfg),
     }
 }

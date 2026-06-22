@@ -1484,6 +1484,13 @@ pub(in crate::commands) struct Args {
     /// claim-4 dev-only `do_exec` rule client-side.
     #[arg(long = "up-json")]
     pub up_json: bool,
+    /// Pin the workload kernel to the locally-built slim kernel in the mvm
+    /// cache (`mvmctl build kernel build --which workload`). When set, the
+    /// boot path uses the cached workload kernel instead of whatever the
+    /// image shipped; the image's own kernel file is ignored. If the cache
+    /// entry is absent, the boot fails with a clear build hint.
+    #[arg(long = "kernel-pin")]
+    pub kernel_pin: Option<String>,
     /// Scrub undeclared secrets/PII on egress to HOST (masks); `HOST=audit` only
     /// reports. Repeatable. Per-destination egress redaction.
     #[arg(long = "redact", value_name = "HOST[=audit]")]
@@ -1754,6 +1761,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         services_health_timeout_secs: cfg.effective_services_health_timeout_secs(),
         wait: args.wait,
         console: args.console,
+        kernel_pin: args.kernel_pin.as_deref(),
     })?;
 
     // After a successful boot, emit a
@@ -1874,6 +1882,10 @@ pub(in crate::commands) struct RunParams<'a> {
     /// attach an interactive PTY console to the guest and return when
     /// the shell exits (the VM stays running).
     pub(super) console: bool,
+    /// When `Some`, override the image's own kernel with the locally-built
+    /// workload kernel from the mvm cache. Absent = use image-supplied kernel
+    /// (existing behaviour unchanged).
+    pub(super) kernel_pin: Option<&'a str>,
 }
 
 pub(in crate::commands) struct PersistentImageStartParams<'a> {
@@ -2039,6 +2051,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<String> {
         services_health_timeout_secs,
         wait,
         console,
+        kernel_pin,
     } = params;
     let _span =
         tracing::info_span!("cmd_run", name = ?name, cpus = ?cpus, memory_mib = ?memory).entered();
@@ -2608,7 +2621,18 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<String> {
     // Vz-family backends need a real kernel file; mkGuest workload images ship
     // none (libkrun self-materializes its bundled kernel). Resolve the fallback
     // before either the snapshot-restore or cold-boot arm consumes vmlinux_path.
-    let vmlinux_path = resolve_workload_kernel(&vmlinux_path, effective_hypervisor)?;
+    let vmlinux_path = if kernel_pin.is_some() {
+        let cache_dir = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+        let arch = if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        let source_checkout = super::super::env::dev_vz::find_builder_vm_flake_is_source_checkout();
+        resolve_pinned_kernel(&cache_dir, arch, source_checkout)?
+    } else {
+        resolve_workload_kernel(&vmlinux_path, effective_hypervisor)?
+    };
 
     // If a template snapshot exists AND the backend supports snapshots,
     // restore from it instead of cold-booting.
@@ -3185,6 +3209,37 @@ pub(super) fn resolve_workload_kernel(
     )
 }
 
+/// Resolve the locally-built workload kernel from the mvm cache for a
+/// `--kernel-pin` boot. Does not fall back to the image-supplied kernel or
+/// the builder-VM fallback: the pin is explicit, so an absent cache entry
+/// is always a hard error with a build hint.
+///
+/// Returns `Ok(path_string)` when the kernel is cached, `Err` otherwise with
+/// a message that names the required build command.
+pub(super) fn resolve_pinned_kernel(
+    cache_dir: &std::path::Path,
+    arch: &str,
+    source_checkout: bool,
+) -> anyhow::Result<String> {
+    use mvm_build::kernel_fetch::{KernelResolution, resolve_kernel};
+    match resolve_kernel(cache_dir, arch, "workload", source_checkout) {
+        KernelResolution::Cached(p) => Ok(p.display().to_string()),
+        KernelResolution::NeedsBuild(p) => {
+            anyhow::bail!(
+                "kernel-pin: workload kernel not built yet (expected at {}); \
+                 run `mvmctl build kernel build --which workload` first",
+                p.display()
+            )
+        }
+        KernelResolution::NeedsFetch(_) => {
+            anyhow::bail!(
+                "kernel-pin: fetching pre-built workload kernels is not yet supported on \
+                 installed binaries; build from source or omit --kernel-pin"
+            )
+        }
+    }
+}
+
 /// Production wrapper: build the resolver from the mvm cache dir + the
 /// running mvmctl version, then attach for `hypervisor`. Called at each
 /// workload-boot `VmStartConfig` construction in [`run`].
@@ -3404,6 +3459,44 @@ mod resolve_workload_kernel_tests {
         let msg = err.to_string();
         assert!(msg.contains("dev up"), "expected 'dev up' in: {msg}");
         assert!(msg.contains("vz"), "expected hypervisor name in: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod resolve_pinned_kernel_tests {
+    use super::*;
+
+    #[test]
+    fn cached_kernel_returns_its_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel_path =
+            mvm_build::kernel_fetch::cached_kernel_path(tmp.path(), "aarch64", "workload");
+        std::fs::create_dir_all(kernel_path.parent().unwrap()).unwrap();
+        std::fs::write(&kernel_path, b"vmlinux").unwrap();
+        let result = resolve_pinned_kernel(tmp.path(), "aarch64", true).unwrap();
+        assert_eq!(result, kernel_path.display().to_string());
+    }
+
+    #[test]
+    fn source_checkout_without_cache_returns_err_with_build_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = resolve_pinned_kernel(tmp.path(), "aarch64", true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mvmctl build kernel build"),
+            "expected build hint in: {msg}"
+        );
+    }
+
+    #[test]
+    fn installed_binary_without_cache_returns_err_about_fetch_not_supported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = resolve_pinned_kernel(tmp.path(), "x86_64", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not yet supported"),
+            "expected fetch-unsupported note in: {msg}"
+        );
     }
 }
 
