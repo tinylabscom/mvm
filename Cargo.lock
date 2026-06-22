@@ -3242,6 +3242,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "fs2",
+ "hex",
  "hmac",
  "ipnet",
  "keyring",

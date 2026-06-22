@@ -30,6 +30,8 @@ pub mod egress_proxy;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
 pub mod fc_kernel;
 pub mod firecracker;
+/// Hash-verify a fetched kernel image against its [`mvm_core::kernel_artifact::KernelArtifactId`].
+pub mod kernel_fetch;
 /// Portable signed `.mvm` artifacts. A tar.gz wrapper around kernel +
 /// rootfs + verity sidecars + cmdline, with an Ed25519-signed manifest
 /// that hashes every payload.

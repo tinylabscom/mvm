@@ -720,7 +720,7 @@ const DEFAULT_RELEASE_BASE: &str = "https://github.com/tinylabscom/mvm/releases/
 /// in CI. Matches the env var name used by `download_dev_image` and
 /// `download_builder_vm_image` so the operator runbook covers all
 /// three.
-const SKIP_HASH_VERIFY_ENV: &str = "MVM_SKIP_HASH_VERIFY";
+pub(crate) const SKIP_HASH_VERIFY_ENV: &str = "MVM_SKIP_HASH_VERIFY";
 
 /// Release-side artifact names for one arch. Mirrors the
 /// `runtime-overlay-image` job's staging step in release.yml. Pure
@@ -892,6 +892,15 @@ fn parse_checksums_manifest(body: &str) -> std::collections::HashMap<String, Str
     map
 }
 
+/// Stream `path` through SHA-256, returning the lowercase hex digest.
+pub(crate) fn compute_file_sha256(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// Stream `path` through SHA-256 and compare to `expected`. On
 /// mismatch, delete the file (so retry can't pick up tainted
 /// bytes) and return a `ChecksumMismatch`. Honors
@@ -918,11 +927,7 @@ fn verify_file_sha256(
         });
     };
 
-    use sha2::{Digest, Sha256};
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = compute_file_sha256(path)?;
 
     if actual != *expected {
         let _ = std::fs::remove_file(path);
