@@ -72,9 +72,14 @@ spec by name). Auto-names reuse the transient `vm_name` generator — no second
 naming scheme.
 
 When `--name <N>` targets an existing spec with a **different** config, `run`
-**errors** and tells the user to pick another name or pass `--force` (which
-stops, overwrites, and restarts). Silently ignoring the new flags, or silently
-destroying machine state, are both rejected as footguns.
+**auto-recreates** the machine (stop the old instance, overwrite the spec,
+reboot), announced loudly on stderr naming the changed fields. *(Superseded: this
+originally errored-unless-`--force`. The convergent model won — a machine is
+defined by its config, so a config change converges to a fresh machine like
+`compose up`; durable data belongs in `--volume` host shares that live on the
+host and survive the recreate, so recreating loses nothing that matters. The
+loud notice keeps an unintended clobber, e.g. a typo'd `--image`, observable;
+silently ignoring the new flags is still rejected.)*
 
 ## Consequences
 

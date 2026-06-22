@@ -191,11 +191,6 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Accepted as an alias for `-t` so the conventional `-it` bundle parses.
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
-    /// Force-recreate a persistent machine whose on-disk spec exists with a
-    /// different config (stop + overwrite + restart). Without it, a config
-    /// mismatch is an error.
-    #[arg(long)]
-    pub force: bool,
     /// Argv to run inside the guest (use `--` to separate). Optional for
     /// persistent (`-d`/`--name`) and interactive (`-t`) modes; required for a
     /// plain transient run.
@@ -301,15 +296,16 @@ enum MachineRunMode {
 }
 
 /// What the persistent path should do with the on-disk spec for the target name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum SpecReconcile {
     /// No spec on disk — write `desired` and boot.
     Create,
     /// A spec with the same launch config already exists — keep it.
     Reuse,
-    /// A spec with a different config exists and `--force` was given — stop,
-    /// overwrite, reboot.
-    Recreate,
+    /// A spec with a different config exists — stop the old instance, overwrite,
+    /// and reboot. `changed` is a human summary of the differing fields for the
+    /// loud notice.
+    Recreate { changed: String },
 }
 
 /// An auto-generated machine name for `-d` without `--name`. Reuses the
@@ -347,39 +343,91 @@ fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.ssh_agent == b.ssh_agent
 }
 
+/// Human summary of which boot-affecting fields differ, for the loud
+/// "config changed, recreating" notice. Mirrors [`machine_config_matches`].
+fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> String {
+    let mut changed = Vec::new();
+    if current.image != desired.image {
+        changed.push("image");
+    }
+    if current.net != desired.net {
+        changed.push("net");
+    }
+    if current.allow_host != desired.allow_host {
+        changed.push("allow-host");
+    }
+    if current.cpus != desired.cpus {
+        changed.push("cpus");
+    }
+    if current.memory != desired.memory || current.mem_initial != desired.mem_initial {
+        changed.push("memory");
+    }
+    if current.profile != desired.profile {
+        changed.push("profile");
+    }
+    if current.volumes != desired.volumes {
+        changed.push("volumes");
+    }
+    if current.init != desired.init {
+        changed.push("init");
+    }
+    if current.ssh_agent != desired.ssh_agent {
+        changed.push("ssh-agent");
+    }
+    changed.join(", ")
+}
+
 /// Decide how to reconcile a desired spec against what's on disk. A
-/// same-config spec is reused; a different-config spec is an error unless
-/// `--force` recreates it. Silently ignoring new flags or silently destroying
-/// state are both footguns and are rejected.
-fn reconcile_machine_spec(
-    existing: Option<&MachineSpec>,
-    desired: &MachineSpec,
-    force: bool,
-) -> Result<SpecReconcile> {
+/// same-config spec is reused; a different-config spec **auto-recreates**
+/// (the caller stops the old instance, overwrites the spec, and reboots) so a
+/// config change converges like `compose up`. The machine is cattle —
+/// durable data belongs in `--volume` host shares, which live on the host and
+/// survive the recreate. The recreate is announced loudly by the caller (never
+/// silent) so an unintended clobber (e.g. a typo'd `--image`) is observable.
+fn reconcile_machine_spec(existing: Option<&MachineSpec>, desired: &MachineSpec) -> SpecReconcile {
     match existing {
-        None => Ok(SpecReconcile::Create),
-        Some(current) if machine_config_matches(current, desired) => Ok(SpecReconcile::Reuse),
-        Some(_) if force => Ok(SpecReconcile::Recreate),
-        Some(_) => bail!(
-            "machine {:?} exists with a different config; pass --force to recreate, \
-             or use a different name",
-            desired.name
-        ),
+        None => SpecReconcile::Create,
+        Some(current) if machine_config_matches(current, desired) => SpecReconcile::Reuse,
+        Some(current) => SpecReconcile::Recreate {
+            changed: machine_config_diff(current, desired),
+        },
     }
 }
 
-/// Host-directory shares (`--volume`) ride the transient `run_secure` path
-/// only. The persistent/interactive lifecycles boot through the `MachineSpec`,
-/// which carries no bind-share field, so refuse `--volume` there rather than
-/// silently dropping the share.
-fn reject_volume_for_managed_boot(args: &MachineRunArgs) -> Result<()> {
-    if !args.volume.is_empty() {
-        bail!(
-            "--volume host shares are not supported with -d/--name/-t yet; \
-             drop --volume, or use a plain transient run"
-        );
+/// A writable (`:rw`) host share needs a dev-capable profile, matching the
+/// transient-run gate and the `dev.init` / `ssh_agent` rule.
+fn profile_allows_writable_volume(profile: &str) -> bool {
+    matches!(profile, "dev" | "permissive")
+}
+
+/// Validate `--volume` specs and normalise them for storage in a managed
+/// `MachineSpec`. Each spec is run through the shared
+/// `vm_volume_from_spec_validated` choke point (protected-dir deny-list +
+/// guest-mount validation, claim 1) and its host path is canonicalised to an
+/// **absolute** path so a later reconnect from a different working directory
+/// still resolves the same share. `:rw` requires a dev-capable profile. The
+/// boot path re-validates via `build_machine_volume_cfg`, so this is the
+/// early, user-facing gate, not the only one.
+fn machine_run_volume_specs(args: &MachineRunArgs) -> Result<Vec<String>> {
+    let profile = run_profile_name(args.profile);
+    let mut out = Vec::with_capacity(args.volume.len());
+    for raw in &args.volume {
+        let spec = super::shared::parse_volume_spec(raw)?;
+        let vmv = super::shared::vm_volume_from_spec_validated(&spec)
+            .with_context(|| format!("volume {raw:?}"))?;
+        if !vmv.read_only && !profile_allows_writable_volume(profile) {
+            bail!(
+                "volume {raw:?} requests ':rw', which needs --profile dev or --profile permissive"
+            );
+        }
+        // Pin the canonical absolute host path; keep the guest[:size][:mode]
+        // tail verbatim so disk volumes and modifiers survive the round-trip.
+        let (_, tail) = raw
+            .split_once(':')
+            .expect("parse_volume_spec guarantees a host:guest separator");
+        out.push(format!("{}:{}", vmv.host, tail));
     }
-    Ok(())
+    Ok(out)
 }
 
 /// Interactive attach needs a real terminal: the console bridges raw-mode
@@ -425,7 +473,7 @@ fn machine_run_spec(args: &MachineRunArgs, name: String) -> Result<MachineSpec> 
         memory: args.memory.clone(),
         mem_initial: None,
         profile,
-        volumes: Vec::new(),
+        volumes: machine_run_volume_specs(args)?,
         init: Vec::new(),
         ssh_agent: false,
         created_at: Some(mvm_core::time::utc_now()),
@@ -1704,10 +1752,10 @@ fn resolve_persistent_spec(
         },
         Some(_) => {
             let desired = machine_run_spec(args, name.to_string())?;
-            let action = reconcile_machine_spec(existing.as_ref(), &desired, args.force)?;
+            let action = reconcile_machine_spec(existing.as_ref(), &desired);
             let spec = match action {
                 SpecReconcile::Reuse => existing.expect("reuse implies an existing spec"),
-                SpecReconcile::Create | SpecReconcile::Recreate => desired,
+                SpecReconcile::Create | SpecReconcile::Recreate { .. } => desired,
             };
             Ok((spec, action))
         }
@@ -1739,7 +1787,6 @@ fn stop_running_machine(name: &str) {
 /// signed-`ExecutionPlan` admission and default-deny egress are identical to
 /// `machine create` + `machine start`.
 fn run_persistent(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
-    reject_volume_for_managed_boot(&args)?;
     let name = resolve_machine_run_name(&args)?;
     let existing = load_machine_spec(&name).ok();
     let (spec, action) = resolve_persistent_spec(&args, &name, existing)?;
@@ -1785,7 +1832,12 @@ fn persist_and_boot_machine(
     match action {
         SpecReconcile::Reuse => {}
         SpecReconcile::Create => save_machine_spec(spec, false)?,
-        SpecReconcile::Recreate => {
+        SpecReconcile::Recreate { changed } => {
+            // Loud, never silent: a config change converges by replacing the VM,
+            // so an unintended clobber (typo'd flag) is at least observable.
+            eprintln!(
+                "machine {name:?}: config changed ({changed}) — stopping the old instance and recreating it"
+            );
             stop_running_machine(name);
             overwrite_machine_spec(spec)?;
         }
@@ -1806,7 +1858,6 @@ fn persist_and_boot_machine(
 fn run_interactive(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
     use std::io::IsTerminal as _;
     require_tty(std::io::stdin().is_terminal())?;
-    reject_volume_for_managed_boot(&args)?;
 
     let teardown = should_teardown_after_interactive(&args);
     let name = resolve_machine_run_name(&args)?;
@@ -2149,7 +2200,6 @@ mod tests {
         assert!(!args.detach);
         assert!(!args.tty);
         assert!(!args.interactive);
-        assert!(!args.force);
     }
 
     #[test]
@@ -2341,30 +2391,31 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_covers_create_reuse_error_and_force_recreate() {
+    fn reconcile_creates_reuses_and_auto_recreates_on_config_change() {
         let desired = spec_fixture("web");
 
         assert_eq!(
-            reconcile_machine_spec(None, &desired, false).expect("create"),
+            reconcile_machine_spec(None, &desired),
             SpecReconcile::Create
         );
 
         let same = spec_fixture("web");
         assert_eq!(
-            reconcile_machine_spec(Some(&same), &desired, false).expect("reuse"),
+            reconcile_machine_spec(Some(&same), &desired),
             SpecReconcile::Reuse
         );
 
+        // A different config auto-recreates (no --force) and reports what changed.
         let mut different = spec_fixture("web");
         different.image = "ubuntu:24.04".to_string();
-        let err = reconcile_machine_spec(Some(&different), &desired, false)
-            .expect_err("different config errors without --force");
-        assert!(err.to_string().contains("different config"), "msg: {err}");
-
-        assert_eq!(
-            reconcile_machine_spec(Some(&different), &desired, true).expect("recreate"),
-            SpecReconcile::Recreate
-        );
+        different.cpus += 1;
+        match reconcile_machine_spec(Some(&different), &desired) {
+            SpecReconcile::Recreate { changed } => {
+                assert!(changed.contains("image"), "changed: {changed}");
+                assert!(changed.contains("cpus"), "changed: {changed}");
+            }
+            other => panic!("expected Recreate, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2401,18 +2452,70 @@ mod tests {
     }
 
     #[test]
-    fn volume_host_share_is_refused_with_persistence() {
-        let with_share = parse_run(&[
-            "run", "--image", "x", "--name", "web", "--volume", "/h:/g:ro",
+    fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let host = dir.path().to_string_lossy().into_owned();
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "x",
+            "--name",
+            "web",
+            "--volume",
+            &format!("{host}:/work:ro"),
         ])
         .expect("parse");
-        let err = reject_volume_for_managed_boot(&with_share)
-            .expect_err("host shares are not supported on persistent machines");
-        assert!(err.to_string().contains("--volume"), "msg: {err}");
+        let spec = machine_run_spec(&args, "web".to_string()).expect("spec");
+        assert_eq!(spec.volumes.len(), 1);
+        let stored = &spec.volumes[0];
+        // Host pinned to an absolute (canonicalized) path so a reconnect from a
+        // different cwd still resolves; the guest+mode tail is preserved verbatim.
+        let host_part = stored.split(':').next().unwrap();
+        assert!(
+            std::path::Path::new(host_part).is_absolute(),
+            "host not absolute: {stored}"
+        );
+        assert!(stored.ends_with(":/work:ro"), "stored: {stored}");
+    }
 
-        let no_share =
-            parse_run(&["run", "--image", "x", "--name", "web", "--", "true"]).expect("parse");
-        reject_volume_for_managed_boot(&no_share).expect("no share is fine");
+    #[test]
+    fn run_rw_volume_requires_dev_profile() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let host = dir.path().to_string_lossy().into_owned();
+        // Default profile is `standard` → :rw refused.
+        let std_args = parse_run(&[
+            "run",
+            "--image",
+            "x",
+            "--name",
+            "web",
+            "--volume",
+            &format!("{host}:/work:rw"),
+        ])
+        .expect("parse");
+        let err = machine_run_spec(&std_args, "web".to_string())
+            .expect_err(":rw needs a dev-capable profile");
+        assert!(err.to_string().contains("profile dev"), "msg: {err}");
+
+        // With --profile dev the writable share is accepted.
+        let dev_args = parse_run(&[
+            "run",
+            "--image",
+            "x",
+            "--name",
+            "web",
+            "--profile",
+            "dev",
+            "--volume",
+            &format!("{host}:/work:rw"),
+        ])
+        .expect("parse");
+        let spec = machine_run_spec(&dev_args, "web".to_string()).expect("dev profile allows :rw");
+        assert!(
+            spec.volumes[0].ends_with(":/work:rw"),
+            "stored: {}",
+            spec.volumes[0]
+        );
     }
 
     #[test]
