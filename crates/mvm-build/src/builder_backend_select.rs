@@ -185,7 +185,19 @@ pub fn resolve_builder_backend_with_override(
 /// `verbose` streams the libkrun console; the QEMU path always logs to
 /// `console.log`.
 pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
-    match resolve_choice() {
+    resolve_stage0_backend_for_choice(resolve_choice(), verbose)
+}
+
+/// Stage 0 driver for an explicit `choice` — used by the auto-fallback loop to
+/// construct the next backend to try. QEMU when chosen; libkrun for everything
+/// else (Vz Stage 0 is a gap, and the "Stage 0 is libkrun even on Vz-default
+/// hosts" invariant holds — and the Linux fallback order only ever yields
+/// libkrun→qemu, never Vz).
+pub fn resolve_stage0_backend_for_choice(
+    choice: BuilderBackendChoice,
+    verbose: bool,
+) -> Box<dyn BuilderVm> {
+    match choice {
         BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
         _ => Box::new(LibkrunBuilderVm::default().with_verbose(verbose)),
     }
@@ -276,6 +288,52 @@ pub fn run_with_builder_fallback<T>(
                 last_err = Some(e);
             }
             // Last backend, or a genuine build error → surface it unchanged.
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.expect("builder_attempt_order is never empty"))
+}
+
+/// True when `e`'s anyhow chain carries a [VMM-level
+/// `BuilderVmError`](is_builder_vm_level_failure). The error must be preserved
+/// in the chain (`anyhow::Error::new(e)` / `.context(...)`), not stringified.
+fn anyhow_has_builder_vm_level_failure(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<BuilderVmError>()
+            .is_some_and(is_builder_vm_level_failure)
+    })
+}
+
+/// Like [`run_with_builder_fallback`] but for call sites whose `attempt`
+/// returns `anyhow::Result<T>` (the `BuilderVmError` is wrapped in an anyhow
+/// chain — e.g. the `dev_build` flake path). The fallback fires only when that
+/// chain contains a VMM-level `BuilderVmError`; a genuine build error (or a
+/// stringified one) surfaces unchanged with no retry.
+pub fn run_with_builder_fallback_anyhow<T>(
+    selected: BuilderBackendChoice,
+    explicit: bool,
+    mut attempt: impl FnMut(BuilderBackendChoice) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let order = builder_attempt_order(selected, explicit, is_linux_native_host());
+    let last_idx = order.len() - 1;
+    let mut last_err: Option<anyhow::Error> = None;
+    for (idx, choice) in order.iter().copied().enumerate() {
+        match attempt(choice) {
+            Ok(value) => return Ok(value),
+            Err(e) if idx < last_idx && anyhow_has_builder_vm_level_failure(&e) => {
+                tracing::warn!(
+                    error = %e,
+                    from = choice.name(),
+                    to = order[idx + 1].name(),
+                    "the {} builder VM could not run the build (VMM-level failure); \
+                     falling back to the {} builder \
+                     (re-run with `--builder {}` to disable the fallback)",
+                    choice.name(),
+                    order[idx + 1].name(),
+                    choice.name(),
+                );
+                last_err = Some(e);
+            }
             Err(e) => return Err(e),
         }
     }
@@ -643,6 +701,70 @@ mod tests {
             });
         assert!(matches!(result, Err(BuilderVmError::NixBuildFailed(_))));
         // Exactly one attempt — no qemu retry for a real build failure.
+        assert_eq!(*calls.borrow(), 1);
+    }
+
+    // ── anyhow-wrapped fallback (dev_build flake path) ───────────
+
+    #[test]
+    fn anyhow_chain_detects_wrapped_vmm_failure_only() {
+        // A preserved (downcastable) SupervisorExited → VMM-level.
+        let wrapped = anyhow::Error::new(BuilderVmError::SupervisorExited {
+            exit_code: 1,
+            vm_state_dir: "/x".into(),
+        })
+        .context("builder VM");
+        assert!(anyhow_has_builder_vm_level_failure(&wrapped));
+        // A real build error wrapped the same way → not VMM-level.
+        let build = anyhow::Error::new(BuilderVmError::NixBuildFailed("broken".into()))
+            .context("builder VM");
+        assert!(!anyhow_has_builder_vm_level_failure(&build));
+        // A *stringified* error (BuilderVmError lost) → not detectable, no retry.
+        let stringified = anyhow::anyhow!("builder VM: supervisor exited with non-zero status (1)");
+        assert!(!anyhow_has_builder_vm_level_failure(&stringified));
+    }
+
+    #[test]
+    fn run_with_fallback_anyhow_retries_qemu_on_wrapped_supervisor_exit() {
+        use std::cell::RefCell;
+        let on_linux = is_linux_native_host();
+        let calls = RefCell::new(Vec::new());
+        let result = run_with_builder_fallback_anyhow(BuilderBackendChoice::Libkrun, false, |c| {
+            calls.borrow_mut().push(c);
+            match c {
+                BuilderBackendChoice::Qemu => Ok(()),
+                _ => Err(anyhow::Error::new(BuilderVmError::SupervisorExited {
+                    exit_code: 1,
+                    vm_state_dir: "/x".into(),
+                })
+                .context("builder VM")),
+            }
+        });
+        if on_linux {
+            assert!(result.is_ok());
+            assert_eq!(
+                *calls.borrow(),
+                vec![BuilderBackendChoice::Libkrun, BuilderBackendChoice::Qemu]
+            );
+        } else {
+            assert!(result.is_err());
+            assert_eq!(*calls.borrow(), vec![BuilderBackendChoice::Libkrun]);
+        }
+    }
+
+    #[test]
+    fn run_with_fallback_anyhow_surfaces_real_build_error_without_retry() {
+        use std::cell::RefCell;
+        let calls = RefCell::new(0u32);
+        let result: anyhow::Result<()> =
+            run_with_builder_fallback_anyhow(BuilderBackendChoice::Libkrun, false, |_c| {
+                *calls.borrow_mut() += 1;
+                Err(
+                    anyhow::Error::new(BuilderVmError::NixBuildFailed("broken flake".into()))
+                        .context("builder VM"),
+                )
+            });
+        assert!(result.is_err());
         assert_eq!(*calls.borrow(), 1);
     }
 

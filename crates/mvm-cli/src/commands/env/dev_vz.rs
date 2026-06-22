@@ -2817,7 +2817,7 @@ fn run_stage0_rootfs_with_external_kernel(
     source_fingerprint: &str,
     verbose: bool,
 ) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
-    use mvm_build::builder_backend_select::resolve_stage0_backend;
+    use mvm_build::builder_backend_select as bbs;
 
     // Build only the rootfs (`stage0-rootfs`, no kernel in $out).
     std::fs::write(
@@ -2831,21 +2831,25 @@ fn run_stage0_rootfs_with_external_kernel(
         )
     })?;
 
-    let backend = resolve_stage0_backend(verbose);
-    backend
-        .run_stage0(
+    // Auto-fallback to qemu when an auto-detected libkrun fails to create its
+    // Stage 0 VM on Linux (rc -22); explicit `--builder` opts out.
+    let selected = bbs::resolve_choice();
+    let explicit = bbs::resolve_env_override().is_some();
+    bbs::run_with_builder_fallback(selected, explicit, |choice| {
+        bbs::resolve_stage0_backend_for_choice(choice, verbose).run_stage0(
             guest_root_dir,
             "/init",
             workspace_root,
             staging_dir,
             host_bin_dir,
         )
-        .map_err(|e| {
-            (
-                Stage0FailureStage::Build,
-                anyhow::anyhow!("Stage 0 rootfs build: {e}"),
-            )
-        })?;
+    })
+    .map_err(|e| {
+        (
+            Stage0FailureStage::Build,
+            anyhow::anyhow!("Stage 0 rootfs build: {e}"),
+        )
+    })?;
 
     // Pair the externally-acquired kernel as the image's vmlinux. The
     // published builder kernel is the same flake derivation `default`
@@ -2980,7 +2984,7 @@ pub(crate) fn build_kernel_via_stage0(
     ));
 
     {
-        use mvm_build::builder_backend_select::resolve_stage0_backend;
+        use mvm_build::builder_backend_select as bbs;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -3009,14 +3013,19 @@ pub(crate) fn build_kernel_via_stage0(
             }))
         };
 
-        let backend = resolve_stage0_backend(verbose);
-        let result = backend.run_stage0(
-            &root_dir,
-            "/init",
-            &workspace_root,
-            &staging_dir,
-            &host_bin_dir,
-        );
+        // Auto-fallback to qemu when an auto-detected libkrun fails to create
+        // its Stage 0 VM on Linux (rc -22); explicit `--builder` opts out.
+        let selected = bbs::resolve_choice();
+        let explicit = bbs::resolve_env_override().is_some();
+        let result = bbs::run_with_builder_fallback(selected, explicit, |choice| {
+            bbs::resolve_stage0_backend_for_choice(choice, verbose).run_stage0(
+                &root_dir,
+                "/init",
+                &workspace_root,
+                &staging_dir,
+                &host_bin_dir,
+            )
+        });
 
         stop.store(true, Ordering::Relaxed);
         if let Some(handle) = heartbeat {
@@ -3058,31 +3067,36 @@ fn run_stage0_root_dir(
     source_fingerprint: &str,
     verbose: bool,
 ) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
-    use mvm_build::builder_backend_select::resolve_stage0_backend;
+    use mvm_build::builder_backend_select as bbs;
 
-    // Dispatch Stage 0 through the `BuilderVm` trait.
-    // `resolve_stage0_backend` uses QEMU when explicitly chosen
-    // (`MVM_BUILDER_BACKEND=qemu`) and **libkrun otherwise** — including the
-    // Vz auto-detect default on macOS-26+, since Vz Stage 0 is still a gap.
+    // Dispatch Stage 0 through the `BuilderVm` trait. QEMU when explicitly
+    // chosen (`MVM_BUILDER_BACKEND=qemu`) and **libkrun otherwise** — including
+    // the Vz auto-detect default on macOS-26+, since Vz Stage 0 is still a gap.
     // That preserves the "Stage 0 is libkrun even on Vz-default hosts"
-    // invariant while adding QEMU as the second implemented backend.
-    // `verbose` makes the backend forward the in-guest nix `--print-build-logs`
-    // output (already streamed to the guest console) live to the host stderr.
-    let backend = resolve_stage0_backend(verbose);
-    backend
-        .run_stage0(
+    // invariant. `verbose` forwards the in-guest nix `--print-build-logs`
+    // output to host stderr.
+    //
+    // Auto-fallback: an auto-detected libkrun that fails to create its Stage 0
+    // VM on Linux (rc -22 / `KVM_SET_USER_MEMORY_REGION`) transparently retries
+    // on qemu; a genuine build error surfaces unchanged. Explicit
+    // `--builder`/`MVM_BUILDER_BACKEND` opts out.
+    let selected = bbs::resolve_choice();
+    let explicit = bbs::resolve_env_override().is_some();
+    bbs::run_with_builder_fallback(selected, explicit, |choice| {
+        bbs::resolve_stage0_backend_for_choice(choice, verbose).run_stage0(
             guest_root_dir,
             entry_path,
             workspace_root,
             staging_dir,
             host_bin_dir,
         )
-        .map_err(|e| {
-            (
-                Stage0FailureStage::Build,
-                anyhow::anyhow!("Stage 0 root-dir build: {e}"),
-            )
-        })?;
+    })
+    .map_err(|e| {
+        (
+            Stage0FailureStage::Build,
+            anyhow::anyhow!("Stage 0 root-dir build: {e}"),
+        )
+    })?;
 
     // Refuse to promote a rootfs the steady-state VM can't boot: walk the
     // freshly-built ext4 and confirm the `init=` target is present.
@@ -4684,19 +4698,25 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
     Ok((kernel, rootfs))
 }
 
+/// Backend attempt order for the dev-image / default-microvm builds. Delegates
+/// to the shared [`mvm_build::builder_backend_select::builder_attempt_order`]
+/// (one policy: auto Vz→libkrun, auto libkrun→qemu on Linux, explicit→single)
+/// so this CLI loop and the `mvm-build` build paths can't drift. The live
+/// platform supplies the `is_linux_native` input the shared (pure) policy takes.
 #[cfg(feature = "builder-vm")]
 fn builder_backend_attempt_order(
     selected: mvm_build::builder_backend_select::BuilderBackendChoice,
     explicit_override: bool,
 ) -> Vec<mvm_build::builder_backend_select::BuilderBackendChoice> {
-    use mvm_build::builder_backend_select::BuilderBackendChoice;
-
-    match (selected, explicit_override) {
-        (BuilderBackendChoice::Vz, false) => {
-            vec![BuilderBackendChoice::Vz, BuilderBackendChoice::Libkrun]
-        }
-        _ => vec![selected],
-    }
+    let is_linux_native = matches!(
+        mvm_core::platform::current(),
+        mvm_core::platform::Platform::LinuxNative
+    );
+    mvm_build::builder_backend_select::builder_attempt_order(
+        selected,
+        explicit_override,
+        is_linux_native,
+    )
 }
 
 #[cfg(all(test, feature = "builder-vm"))]
@@ -4721,14 +4741,32 @@ mod builder_backend_attempt_order_tests {
     }
 
     #[test]
-    fn libkrun_selection_stays_single_backend() {
-        assert_eq!(
-            builder_backend_attempt_order(BuilderBackendChoice::Libkrun, false),
-            vec![BuilderBackendChoice::Libkrun]
-        );
+    fn explicit_override_is_always_single_backend() {
+        // An explicit choice (CLI flag / env) never falls back, on any platform.
         assert_eq!(
             builder_backend_attempt_order(BuilderBackendChoice::Libkrun, true),
             vec![BuilderBackendChoice::Libkrun]
+        );
+        assert_eq!(
+            builder_backend_attempt_order(BuilderBackendChoice::Qemu, true),
+            vec![BuilderBackendChoice::Qemu]
+        );
+    }
+
+    #[test]
+    fn delegates_to_shared_policy_for_live_platform() {
+        // The wrapper only threads the live platform into the shared (pure)
+        // policy; the per-platform behaviour — including the Linux
+        // libkrun→qemu fallback — is exhaustively tested in mvm-build. Pin that
+        // the wrapper agrees with the shared policy on this host.
+        use mvm_build::builder_backend_select::builder_attempt_order;
+        let is_linux = matches!(
+            mvm_core::platform::current(),
+            mvm_core::platform::Platform::LinuxNative
+        );
+        assert_eq!(
+            builder_backend_attempt_order(BuilderBackendChoice::Libkrun, false),
+            builder_attempt_order(BuilderBackendChoice::Libkrun, false, is_linux)
         );
     }
 }
