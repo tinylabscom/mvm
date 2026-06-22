@@ -79,6 +79,10 @@ set -u
 verb=${{1:-}}
 shift || true
 echo "$verb $*" >> {log}
+if [ "$verb" = "machine" ]; then
+  verb=${{1:-}}
+  shift || true
+fi
 case "$verb" in
   up)
     echo '{envelope}'
@@ -96,7 +100,7 @@ case "$verb" in
     fi
     exit 0
     ;;
-  down)
+  stop)
     exit 0
     ;;
   *)
@@ -186,7 +190,7 @@ fn sdk_live_dev_template_shells_to_proc_start() {
     // 1: up --up-json, 2: proc start, 3: fs write, 4: down
     assert!(
         calls.len() >= 4,
-        "expected >= 4 mvmctl shells (up, proc start, fs write, down); got {calls:?}"
+        "expected >= 4 mvmctl shells (up, machine proc start, machine fs write, machine stop); got {calls:?}"
     );
     assert!(
         calls[0].starts_with("up --up-json"),
@@ -196,18 +200,20 @@ fn sdk_live_dev_template_shells_to_proc_start() {
     assert!(
         calls
             .iter()
-            .any(|c| c.starts_with("proc start sb-itest-vm")),
-        "expected a `proc start sb-itest-vm` shell; got {calls:?}"
+            .any(|c| c.starts_with("machine proc start sb-itest-vm")),
+        "expected a `machine proc start sb-itest-vm` shell; got {calls:?}"
     );
     assert!(
         calls
             .iter()
-            .any(|c| c.starts_with("fs write sb-itest-vm /app/data.bin")),
-        "expected a `fs write sb-itest-vm /app/data.bin` shell; got {calls:?}"
+            .any(|c| c.starts_with("machine fs write sb-itest-vm /app/data.bin")),
+        "expected a `machine fs write sb-itest-vm /app/data.bin` shell; got {calls:?}"
     );
     assert!(
-        calls.iter().any(|c| c.starts_with("down sb-itest-vm")),
-        "expected a `down sb-itest-vm` shell; got {calls:?}"
+        calls
+            .iter()
+            .any(|c| c.starts_with("machine stop sb-itest-vm")),
+        "expected a `machine stop sb-itest-vm` shell; got {calls:?}"
     );
 }
 
@@ -246,7 +252,7 @@ fn sdk_live_prod_template_raises_sandbox_dev_only_before_proc_start() {
 
     let calls = read_fixture_log(tmp.path());
     assert!(
-        !calls.iter().any(|c| c.starts_with("proc")),
+        !calls.iter().any(|c| c.starts_with("machine proc")),
         "SDK must NOT have shelled to `mvmctl proc start` against a prod template (security claim 4 client-side enforcement); but the fixture saw: {calls:?}"
     );
     assert!(

@@ -18,7 +18,7 @@ Two modes are live:
   lower the recording via ``compile_recording``.
 - ``MVM_SDK_MODE=live`` (Plan 73 Followup H-live): every
   ``Sandbox`` call shells to ``$MVM_CLI_BIN`` (``mvmctl up``,
-  ``mvmctl proc start``, ``mvmctl fs write``, ``mvmctl down``)
+  ``mvmctl machine proc start``, ``mvmctl fs write``, ``mvmctl down``)
   against a real microVM. The shell is dispatched by
   :class:`_LiveTransport` below.
 
@@ -627,11 +627,11 @@ class _LiveTransport:
                 f"strips the agent's `do_exec` handler in prod builds — re-build the "
                 f"template with `mvmctl template build --dev <name>`, or use "
                 f"`files.write` to stage inputs into the running VM instead.",
-                argv=["proc", "start", self.vm_id, *argv],
+                argv=["machine", "proc", "start", self.vm_id, *argv],
             )
-        shell = [self.mvm_cli_bin, "proc", "start", self.vm_id]
+        shell = [self.mvm_cli_bin, "machine", "proc", "start", self.vm_id]
         if env:
-            # `mvmctl proc start` expects `-e KEY=VALUE` pairs.
+            # `mvmctl machine proc start` expects `-e KEY=VALUE` pairs.
             # We only forward literal env values in live mode;
             # secret_ref values would need the host keystore round-trip
             # the orchestrator owns.
@@ -672,11 +672,11 @@ class _LiveTransport:
                 f"strips the agent's `do_exec` handler in prod builds — re-build the "
                 f"template with `mvmctl template build --dev <name>`, or use "
                 f"`files.write` to stage inputs into the running VM instead.",
-                argv=["proc", "start", self.vm_id, *argv],
+                argv=["machine", "proc", "start", self.vm_id, *argv],
             )
 
         # 1) `proc start` → pid_token on stdout.
-        start_shell: list[str] = [self.mvm_cli_bin, "proc", "start", self.vm_id]
+        start_shell: list[str] = [self.mvm_cli_bin, "machine", "proc", "start", self.vm_id]
         if env:
             for key, value in env.items():
                 if isinstance(value, str):
@@ -707,7 +707,7 @@ class _LiveTransport:
             ) from exc
         if start_result.returncode != 0:
             raise SandboxLiveError(
-                f"`mvmctl proc start` failed with exit code {start_result.returncode}",
+                f"`mvmctl machine proc start` failed with exit code {start_result.returncode}",
                 argv=start_shell,
                 exit_code=start_result.returncode,
                 stderr=start_result.stderr,
@@ -715,14 +715,15 @@ class _LiveTransport:
         pid_token = start_result.stdout.strip()
         if not pid_token:
             raise SandboxLiveError(
-                "`mvmctl proc start` produced no pid_token on stdout",
+                "`mvmctl machine proc start` produced no pid_token on stdout",
                 argv=start_shell,
                 stderr=start_result.stderr,
             )
 
-        # 2) `proc wait <token>` → captured stdout/stderr/exit.
+        # 2) `machine proc wait <token>` → captured stdout/stderr/exit.
         wait_shell: list[str] = [
             self.mvm_cli_bin,
+            "machine",
             "proc",
             "wait",
             self.vm_id,
@@ -764,7 +765,7 @@ class _LiveTransport:
         """Shell ``mvmctl fs write <vm> <path>`` with the file
         bytes piped through stdin. The mvmctl verb accepts stdin
         when ``--content`` is omitted."""
-        shell = [self.mvm_cli_bin, "fs", "write", self.vm_id, path]
+        shell = [self.mvm_cli_bin, "machine", "fs", "write", self.vm_id, path]
         try:
             result = subprocess.run(
                 shell,
@@ -787,9 +788,9 @@ class _LiveTransport:
 
     def cp(self, source: str, destination: str) -> None:
         """Shell ``mvmctl cp <source> <destination>``. Endpoints use
-        ``VM:/absolute/path`` for the guest side; `mvmctl cp` reads the
+        ``VM:/absolute/path`` for the guest side; `mvmctl machine cp` reads the
         host file and streams it over the agent fs RPC (and back)."""
-        shell = [self.mvm_cli_bin, "cp", source, destination]
+        shell = [self.mvm_cli_bin, "machine", "cp", source, destination]
         try:
             result = subprocess.run(shell, check=False, capture_output=True)
         except FileNotFoundError as exc:
@@ -799,19 +800,19 @@ class _LiveTransport:
             ) from exc
         if result.returncode != 0:
             raise SandboxLiveError(
-                f"`mvmctl cp` failed with exit code {result.returncode}",
+                f"`mvmctl machine cp` failed with exit code {result.returncode}",
                 argv=shell,
                 exit_code=result.returncode,
                 stderr=result.stderr.decode("utf-8", errors="replace"),
             )
 
     def forward(self, host_port: int, guest_port: int) -> None:
-        """Spawn ``mvmctl forward <vm> --port <host>:<guest>`` in the
-        background. `mvmctl forward` blocks (it runs the proxy until
+        """Spawn ``mvmctl machine forward <vm> --port <host>:<guest>`` in the
+        background. `mvmctl machine forward` blocks (it runs the proxy until
         signalled), so it is launched detached and tracked; `kill()`
         terminates every forwarder so none outlives the sandbox."""
         spec = f"{host_port}:{guest_port}"
-        shell = [self.mvm_cli_bin, "forward", self.vm_id, "--port", spec]
+        shell = [self.mvm_cli_bin, "machine", "forward", self.vm_id, "--port", spec]
         try:
             proc = subprocess.Popen(
                 shell,
@@ -837,7 +838,7 @@ class _LiveTransport:
             if proc.poll() is None:
                 proc.terminate()
         self._forwards.clear()
-        shell = [self.mvm_cli_bin, "down", self.vm_id]
+        shell = [self.mvm_cli_bin, "machine", "stop", self.vm_id]
         try:
             result = subprocess.run(
                 shell,
@@ -1177,7 +1178,7 @@ class Sandbox:
 
     def forward(self, host_port: int, guest_port: int) -> None:
         """Forward ``host_port`` on the host to ``guest_port`` in the
-        sandbox. Spawns ``mvmctl forward <vm> --port <host>:<guest>`` as
+        sandbox. Spawns ``mvmctl machine forward <vm> --port <host>:<guest>`` as
         a background proxy that runs until the sandbox is torn down
         (``kill`` / ``__exit__`` terminate it).
 
