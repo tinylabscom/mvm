@@ -2,7 +2,7 @@
 //!
 //! One `BridgeConfigJson` shape for every backend, carrying the common
 //! audit/plan substrate plus a [`BridgeEndpointKind`] discriminant that selects
-//! the transport. The `mvm-bridge` binary (Plan 209 Task 2) parses this once
+//! the transport. The `mvm-bridge` binary parses this once
 //! and builds the matching
 //! `mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints` variant, applying
 //! `mvm-jailer-lite` confinement through one cfg-gated codepath wherever the OS

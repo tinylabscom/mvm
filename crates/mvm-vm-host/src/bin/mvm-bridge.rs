@@ -1,4 +1,4 @@
-//! Shared per-VM bridge sidecar (ADR-094 / Plan 209).
+//! Shared per-VM bridge sidecar.
 //!
 //! One sidecar binary for every backend. Reads a single
 //! [`mvm_vm_host::bridge::parse::BridgeConfigJson`] document on stdin and
@@ -11,8 +11,9 @@
 //! three".
 //!
 //! Spawned by the active backend (`mvm-backend::microvm` Firecracker /
-//! `::vz` / `::libkrun` after Plan 209 Task 3) with an RAII teardown guard
-//! (`AttachedBridgeGuard` / `AttachedDrainerGuard`) that kills this process on
+//! `::vz` / `::libkrun` once the libkrun supervisor is split) with an RAII
+//! teardown guard (`AttachedBridgeGuard` / `AttachedDrainerGuard`) that kills
+//! this process on
 //! early return / panic / VM teardown; the bridge's own `catch_unwind →
 //! exit(1)` is the fail-closed signal for the claim-10 substrate.
 //!
@@ -176,8 +177,8 @@ fn run() -> Result<()> {
         observers,
         network_policy,
         // The native rvproxy flow-audit follower is the libkrun-native-gateway
-        // path; it is wired when libkrun moves onto this sidecar (Plan 209
-        // Task 3). FC + vz do not run a native rvproxy gateway.
+        // path; it is wired when libkrun moves onto this sidecar. FC + vz do not
+        // run a native rvproxy gateway.
         native_flow_audit_path: None,
     };
 
@@ -267,8 +268,9 @@ fn confine_for_endpoint(cfg: &BridgeConfigJson) -> Result<()> {
         // so refuse rather than ship an unconfined Linux path. VzIngest never
         // reaches here (vz is macOS).
         BridgeEndpointKind::LibkrunGvproxy { .. } => anyhow::bail!(
-            "libkrun-gvproxy confinement on Linux is wired in Plan 209 Task 3; refusing \
-             to run an unconfined Linux bridge"
+            "libkrun-gvproxy confinement on Linux is not yet wired (no producer emits \
+             this endpoint until the libkrun supervisor is split); refusing to run an \
+             unconfined Linux bridge"
         ),
         BridgeEndpointKind::VzIngest { .. } => Ok(()),
     }

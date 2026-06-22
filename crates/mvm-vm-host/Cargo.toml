@@ -38,11 +38,11 @@ path = "src/bin/mvm-vz-drainer.rs"
 name = "mvm-firecracker-bridge"
 path = "src/bin/mvm-firecracker-bridge.rs"
 
-# Shared per-VM bridge sidecar (ADR-094 / Plan 209) — folds the
-# mvm-firecracker-bridge (Passt) and mvm-vz-drainer (VzIngest) sidecars into
-# one. Cross-platform (not a whole-binary cfg gate): the Passt arm is
-# Linux-only and confined, the VzIngest arm is macOS; per-arm cfg gating lives
-# inside. Old bins stay until Plan 209 Task 4 moves their callers over.
+# Shared per-VM bridge sidecar — folds the mvm-firecracker-bridge (Passt) and
+# mvm-vz-drainer (VzIngest) sidecars into one. Cross-platform (not a
+# whole-binary cfg gate): the Passt arm is Linux-only and confined, the
+# VzIngest arm is macOS; per-arm cfg gating lives inside. The old per-backend
+# bins stay until their callers are moved over.
 [[bin]]
 name = "mvm-bridge"
 path = "src/bin/mvm-bridge.rs"

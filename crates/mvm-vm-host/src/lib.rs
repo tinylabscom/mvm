@@ -11,10 +11,10 @@
 //! `mvm-firecracker-bridge` bin and the fuzz harnesses consume.
 //! Folded in from the former `mvm-firecracker-bridge` crate.
 
-/// Unified per-VM bridge-sidecar stdin contract (ADR-093 / Plan 209).
-/// The shared `mvm-bridge` sidecar parses [`bridge::parse::BridgeConfigJson`]
-/// and dispatches on its endpoint discriminant; reuses the
-/// `firecracker_bridge::parse` plan-decode + passt-hash helpers verbatim.
+/// Unified per-VM bridge-sidecar stdin contract. The shared `mvm-bridge`
+/// sidecar parses [`bridge::parse::BridgeConfigJson`] and dispatches on its
+/// endpoint discriminant; reuses the `firecracker_bridge::parse` plan-decode +
+/// passt-hash helpers verbatim.
 pub mod bridge;
 
 pub mod exit_capture;
