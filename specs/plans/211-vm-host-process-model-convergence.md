@@ -1,4 +1,4 @@
-# Plan 209 — Per-VM host-process model convergence (one shared `mvm-bridge`, thin libkrun launcher)
+# Plan 211 — Per-VM host-process model convergence (one shared `mvm-bridge`, thin libkrun launcher)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:executing-plans to
 > implement this plan task-by-task, and superpowers:test-driven-development for

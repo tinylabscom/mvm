@@ -117,7 +117,7 @@ Binaries go from four (`mvm-libkrun-supervisor`, `mvm-vz-supervisor`,
   regardless of guest `--memory` (per-VM footprint is dominated by guest RAM);
   it is the same process count FC already pays. Net memory at fleet density is
   unchanged in practice.
-- **fd-passing is the real migration work** (see Plan 209). The gateway fds
+- **fd-passing is the real migration work** (see Plan 211). The gateway fds
   the libkrun supervisor sets up in-process must be handed to the sidecar via a
   socketpair — exactly the `gateway_fd_raw` / `supervisor_fd_raw` inheritance
   the FC path already encodes.
@@ -141,5 +141,5 @@ Binaries go from four (`mvm-libkrun-supervisor`, `mvm-vz-supervisor`,
   thin-launcher split is the larger and more durable simplification, and it is
   what makes the topology genuinely uniform.
 
-Implementation is sequenced in Plan 209
-(`specs/plans/209-vm-host-process-model-convergence.md`).
+Implementation is sequenced in Plan 211
+(`specs/plans/211-vm-host-process-model-convergence.md`).
