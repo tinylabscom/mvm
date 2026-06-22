@@ -610,32 +610,21 @@ fn dev_build_via_builder_vm_uncached(
             socket = %record.dispatch_socket_path.display(),
             "routing build through persistent supervisor"
         );
-        // Default-on typed route (a reachable mvm-builderd, unless the
-        // `MVM_BUILDERD_RAW_SHELL` debug gate forces legacy): build `/work#<attr>`
-        // through the resident daemon and read the daemon-exported artifacts off
-        // the `/job` share. Gated off / no daemon → `None` → legacy shell-job
-        // dispatch below; a daemon build failure or transport error → warn →
-        // legacy fallback (the typed path never turns a build the legacy path
-        // would pass into a failure).
+        // Typed-only persistent route: a reachable mvm-builderd builds
+        // `/work#<attr>` and the host reads the daemon-exported artifacts off
+        // the `/job` share. No reachable daemon → `None`; a daemon build
+        // failure or transport error → warn. Either falls through to the
+        // single-shot builder below — the safety net. The legacy in-VM
+        // shell-job dispatch was removed; typed is the only persistent path.
         match try_typed_persistent_build(env, &record, profile) {
             Some(Ok(result)) => return Ok(result),
             Some(Err(e)) => {
                 tracing::warn!(
                     error = %e,
-                    "typed builder dispatch failed; falling back to legacy shell-job dispatch"
+                    "typed builder dispatch failed; falling back to single-shot builder VM"
                 );
             }
             None => {}
-        }
-        let persistent = crate::persistent_builder::PersistentBuilderVm::new(record.clone());
-        match dev_build_with_builder_vm(env, flake_ref, profile, mode, &persistent) {
-            Ok(result) => return Ok(result),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "persistent dispatch failed; falling back to single-shot builder VM"
-                );
-            }
         }
     }
 
@@ -819,18 +808,15 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
 }
 
 /// Attempt a guest-image build through the resident `mvm-builderd` typed
-/// control plane instead of the legacy shell-job dispatch.
+/// control plane — the only persistent build route.
 ///
-/// Returns `None` when the typed route is not taken (the `MVM_BUILDERD_RAW_SHELL`
-/// debug gate forced legacy, or no reachable daemon) so the caller falls back to
-/// the legacy persistent dispatch; `Some(Ok(_))` once the daemon built the image and
+/// Returns `None` when there is no reachable daemon, so the caller falls back to
+/// the single-shot builder; `Some(Ok(_))` once the daemon built the image and
 /// exported its artifacts to the `/job` share, which we read into the dev build
 /// dir; `Some(Err(_))` on a daemon-reported build failure or a transport/IO
-/// error (the caller logs and falls back).
+/// error (the caller logs and falls back to the single-shot builder).
 ///
-/// Builds `/work#<attr>` — the same target, and the same no-`--override-input`,
-/// that the legacy persistent dispatch uses (`run_flake_dispatch` ignores the
-/// source-checkout staging too) — so the two paths are behaviourally equivalent.
+/// Builds `/work#<attr>`.
 #[cfg(feature = "builder-vm")]
 fn try_typed_persistent_build(
     env: &dyn ShellEnvironment,
