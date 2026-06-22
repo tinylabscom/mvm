@@ -2756,6 +2756,18 @@ impl KernelVariant {
         }
     }
 
+    /// Flake attr for the *resolved `.config`* of this kernel. The names are
+    /// historically irregular (the builder's predates the workload split), so
+    /// they're spelled out rather than derived from `attr()`. Stage 0 realises
+    /// this (a cached build dep of the kernel) and copies it out so the host
+    /// can report the `=y` symbol count without a CI round-trip.
+    fn config_attr(self) -> &'static str {
+        match self {
+            Self::Builder => "kernel-configfile",
+            Self::Workload => "workload-kernel-configfile",
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Builder => "builder",
@@ -2970,9 +2982,12 @@ pub(crate) fn build_kernel_via_stage0(
 
     // Point stage0-init at the kernel attr + kernel-only output. Absent this
     // file (the `dev up` path), stage0-init builds the full image.
+    // `MVM_STAGE0_CONFIG_ATTR` asks Stage 0 to also emit the resolved `.config`
+    // (a cached build dep — near-free) so the host can report the `=y` count.
     let conf = format!(
-        "MVM_STAGE0_BUILD_ATTR={}\nMVM_STAGE0_OUTPUT_MODE=kernel\n",
-        variant.attr()
+        "MVM_STAGE0_BUILD_ATTR={}\nMVM_STAGE0_OUTPUT_MODE=kernel\nMVM_STAGE0_CONFIG_ATTR={}\n",
+        variant.attr(),
+        variant.config_attr(),
     );
     std::fs::write(staging_dir.join("stage0-build.conf"), conf)
         .with_context(|| format!("writing stage0-build.conf in {}", staging_dir.display()))?;
@@ -3055,6 +3070,17 @@ pub(crate) fn build_kernel_via_stage0(
     let dest = out_dir_path.join("vmlinux");
     std::fs::copy(&built, &dest)
         .with_context(|| format!("copying kernel to {}", dest.display()))?;
+
+    // Promote the resolved `.config` Stage 0 emitted (best-effort — the kernel
+    // is the artifact that matters; a missing config just means no local
+    // metrics). Lands next to the kernel so `mvmctl` can count `=y` symbols.
+    let staged_config = staging_dir.join("mvm-kernel.config");
+    if staged_config.is_file() {
+        let config_dest = out_dir_path.join("config");
+        if let Err(e) = std::fs::copy(&staged_config, &config_dest) {
+            ui::warn(&format!("could not cache the resolved kernel config: {e}"));
+        }
+    }
     let _ = std::fs::remove_dir_all(&staging_dir);
 
     Ok(dest)
