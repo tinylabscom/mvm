@@ -610,12 +610,13 @@ fn dev_build_via_builder_vm_uncached(
             socket = %record.dispatch_socket_path.display(),
             "routing build through persistent supervisor"
         );
-        // Opt-in typed route (`MVM_BUILDERD_TYPED` + a reachable mvm-builderd):
-        // build `/work#<attr>` through the resident daemon and read the
-        // daemon-exported artifacts off the `/job` share. Not opted in / no
-        // daemon → `None` → legacy shell-job dispatch below; a daemon build
-        // failure or transport error → warn → legacy fallback (the opt-in path
-        // never turns a build the legacy path would pass into a failure).
+        // Default-on typed route (a reachable mvm-builderd, unless the
+        // `MVM_BUILDERD_RAW_SHELL` debug gate forces legacy): build `/work#<attr>`
+        // through the resident daemon and read the daemon-exported artifacts off
+        // the `/job` share. Gated off / no daemon → `None` → legacy shell-job
+        // dispatch below; a daemon build failure or transport error → warn →
+        // legacy fallback (the typed path never turns a build the legacy path
+        // would pass into a failure).
         match try_typed_persistent_build(env, &record, profile) {
             Some(Ok(result)) => return Ok(result),
             Some(Err(e)) => {
@@ -820,9 +821,9 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
 /// Attempt a guest-image build through the resident `mvm-builderd` typed
 /// control plane instead of the legacy shell-job dispatch.
 ///
-/// Returns `None` when the typed route is not taken (caller not opted in via
-/// `MVM_BUILDERD_TYPED`, or no reachable daemon) so the caller falls back to the
-/// legacy persistent dispatch; `Some(Ok(_))` once the daemon built the image and
+/// Returns `None` when the typed route is not taken (the `MVM_BUILDERD_RAW_SHELL`
+/// debug gate forced legacy, or no reachable daemon) so the caller falls back to
+/// the legacy persistent dispatch; `Some(Ok(_))` once the daemon built the image and
 /// exported its artifacts to the `/job` share, which we read into the dev build
 /// dir; `Some(Err(_))` on a daemon-reported build failure or a transport/IO
 /// error (the caller logs and falls back).

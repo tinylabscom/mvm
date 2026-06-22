@@ -340,21 +340,54 @@ arm lands with the daemon's image baking (boot-gated).
       `BuildGuestImage` over the live socket and prints the store path — the
       harness that surfaced the gap. Without this the typed build path was
       non-functional, so it could not have been artifact-equal.
-      **Remaining to make builds the default (deferred — needs a quiet box):**
-      1. Live override-free artifact-equality proof: with the rebaked daemon, run
-         `builderd-buildimage` for a clean target (one without a `git+file:///work`
-         input — a git *worktree*'s `.git` is a pointer file the builder VM can't
-         resolve; use `nixpkgs#hello` or a non-worktree checkout) and assert its
-         reported `store_path` equals a plain in-VM `nix build … --print-out-paths`
-         of the same target. Both dispatch paths run byte-identical `nix build`
-         argv, so equality is expected; this confirms no residual daemon-env drift.
-      2. Then flip the **build** default in `resolve_route` (build-specific, must
-         not also flip `FlakeCheck`): `try_typed_build` takes Typed when the daemon
-         is reachable, with a debug **opt-out** to force legacy.
-      3. That opt-out is the raw-shell debug gate below; once it lands, drop the
-         newly-routed file from the `check-builder-shell-job-sites` allowlist.
-- [ ] Gate raw shell execution behind an explicit debug/development flag.
-      Blocked on the line above — raw shell stays the default until a typed op replaces it; the gate flips once the typed path is the default.
+      **Build-default flip + raw-shell gate implemented (on branch
+      `feat/plan-204-wsd-flip-build-default`; merge held for a clean equality
+      proof):** `try_typed_build` now reads `build_typed_opt_in` instead of
+      `typed_opt_in`, so a guest-image build takes the typed route whenever a
+      daemon is reachable **unless** the `MVM_BUILDERD_RAW_SHELL` debug gate is
+      set truthy to force the legacy in-VM shell build. `try_typed_flake_check`
+      is untouched — flake check stays opt-in via `MVM_BUILDERD_TYPED`, so the
+      flip is build-only. Three new unit tests cover the default-on + gate
+      semantics and the build/flake-check independence. The
+      `check-builder-shell-job-sites` allowlist stays at 4 entries (no drop): the
+      legacy `HostVmRequest::Run` construction in `persistent_builder.rs` is
+      retained as the daemon-unreachable + raw-shell-debug fallback, so that file
+      still *constructs* a shell job and legitimately stays allowlisted — the
+      drop only applies if the fallback is later removed entirely.
+      **Routing behaviour live-confirmed on macOS-26 Vz:** with the gate unset
+      the build attempted the typed route by default (`dev_build`: "typed builder
+      dispatch failed; falling back…"), and with `MVM_BUILDERD_RAW_SHELL=1` it
+      went straight to the legacy shell-job channel with no typed attempt — both
+      directions observed in one run.
+      **Still blocked (the merge gate): the literal artifact-equality proof.**
+      A live equality run on this box hit exactly the documented cascade
+      (stale-resident-builder `/work`-not-a-flake, missing `mvm-vz-supervisor`
+      bin, stale dispatch socket, cold-cache Stage 0 `BadActivate`) — none of it
+      WS-D code — so `store_path` typed == in-VM `nix build … --print-out-paths`
+      (on a non-`git+file:///work` target such as `nixpkgs#hello`, same target
+      both paths) is not yet shown. Per the merge discipline the default-flip
+      stays on the branch until a clean per-backend equality proof is green
+      (libkrun + Vz on macOS, Firecracker on KVM); both dispatch paths run
+      byte-identical `nix build` argv, so equality is expected — the proof
+      confirms no residual daemon-env drift.
+      **Two follow-up blockers diagnosed + fixed (live clean-retry on macOS-26 Vz):**
+      (1) `mvmctl persistent-builder start` hardcoded `LibkrunPersistentHostVm`
+      and ignored `--builder vz`, so it could not bring up a *Vz* persistent
+      builder at all — fixed in #1245 (issue #1241): it now dispatches to
+      `VzPersistentBuilderVm` on `--builder vz` (validated live: a Vz builder
+      comes up, zero libkrun). (2) With that fix reaching the Vz path, the Vz
+      persistent builder then failed because gvproxy's `unixgram` socket path
+      exceeded the `AF_UNIX` `sun_path` limit (the long
+      `mvm-persistent-builder-vz-<session>` dir under a long cache/`$HOME`) —
+      fixed in #1248 (issue #1247): the over-limit socket relocates to a short
+      `<cache>/gv/<hash>.sock`. With #1245 + #1248 the code-level chain is
+      resolved; the literal Vz equality proof just needs a quiet-box run of
+      `persistent-builder start --builder vz` → typed-vs-legacy. The parallel
+      libkrun + Firecracker proofs cover the other two backends in the meantime.
+- [~] Gate raw shell execution behind an explicit debug/development flag.
+      Implemented as `MVM_BUILDERD_RAW_SHELL` (the build-route opt-out above), on
+      branch `feat/plan-204-wsd-flip-build-default`; merge held with the
+      build-default flip until the equality proof is green.
 - [x] Add a lint or structural test that prevents new normal-path shell jobs.
       `xtask check-builder-shell-job-sites` (CI Lint lane) freezes the set of
       `*/src/` files that construct a legacy `HostVmRequest::{Run,Build}` shell
