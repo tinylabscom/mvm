@@ -86,14 +86,6 @@ pub(in crate::commands) enum Commands {
     Doctor(env::doctor::Args),
     /// List running VMs
     Ls(vm::ps::Args),
-    /// Build and run a VM
-    ///
-    /// If neither `--flake` nor `--manifest` is supplied, the bundled
-    /// `nix/images/default-tenant/` image is used (built via Nix on first use,
-    /// cached at `~/.cache/mvm/default-microvm/`).
-    Up(vm::up::Args),
-    /// Run a command in a transient microVM (absorbed the former `exec`)
-    Run(vm::exec::RunArgs),
     /// Call a VM's baked entrypoint
     Invoke(vm::invoke::Args),
     /// Prepare the environment + pre-fetch the builder VM image
@@ -317,7 +309,6 @@ pub fn run() -> Result<()> {
         Commands::Image(a) => image::run(&cli, a, &cfg),
         Commands::Machine(a) => machine::run(&cli, a, &cfg),
         Commands::Storage(a) => storage::run(&cli, a, &cfg),
-        Commands::Up(a) => vm::up::run(&cli, a, &cfg),
         Commands::ShellInit(a) => env::shell_init::run(&cli, a, &cfg),
         Commands::Ops(a) => ops::group::run(&cli, a, &cfg),
         Commands::Network(a) => ops::network::run(&cli, a, &cfg),
@@ -326,7 +317,6 @@ pub fn run() -> Result<()> {
         Commands::Pool(a) => pool::run(&cli, a, &cfg),
         Commands::Reconcile(a) => ops::reconcile::run(&cli, a, &cfg),
         Commands::Init(a) => env::init::run(&cli, a, &cfg),
-        Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),
         Commands::Invoke(a) => vm::invoke::run(&cli, a, &cfg),
         Commands::Secret(a) => ops::secret::run(&cli, a, &cfg),
         Commands::Bundle(a) => bundle::run(&cli, a, &cfg),

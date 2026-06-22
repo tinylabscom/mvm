@@ -227,7 +227,6 @@ fn load_workload(args: &Args) -> Result<LoadedRecording> {
             Ok(LoadedRecording {
                 workload,
                 findings: Vec::new(),
-                digest_hex: String::new(),
                 secret_findings: Vec::new(),
             })
         }
@@ -241,7 +240,6 @@ fn load_workload(args: &Args) -> Result<LoadedRecording> {
             Ok(LoadedRecording {
                 workload,
                 findings: Vec::new(),
-                digest_hex: String::new(),
                 secret_findings: Vec::new(),
             })
         }
@@ -255,7 +253,6 @@ fn load_workload(args: &Args) -> Result<LoadedRecording> {
                 Ok((workload, _manifest)) => Ok(LoadedRecording {
                     workload,
                     findings: Vec::new(),
-                    digest_hex: String::new(),
                     secret_findings: Vec::new(),
                 }),
                 Err(ParseError::NoDecoratedFunction { .. }) => {
@@ -285,7 +282,6 @@ fn load_workload(args: &Args) -> Result<LoadedRecording> {
                         Ok((workload, _manifest)) => Ok(LoadedRecording {
                             workload,
                             findings: Vec::new(),
-                            digest_hex: String::new(),
                             secret_findings: Vec::new(),
                         }),
                         Err(ParseError::NoDecoratedFunction { .. }) => {

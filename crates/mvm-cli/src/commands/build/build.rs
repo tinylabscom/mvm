@@ -9,7 +9,8 @@ use crate::ui;
 use mvm::vm::template::lifecycle as tmpl;
 use mvm_backend::image;
 use mvm_core::manifest::{
-    self, Manifest, PersistedManifest, Provenance, resolve_manifest_config_path,
+    self, MANIFEST_SCHEMA_VERSION, Manifest, PersistedManifest, Provenance, canonical_key_for_path,
+    resolve_manifest_config_path,
 };
 use mvm_core::naming::validate_flake_ref;
 use mvm_core::user_config::MvmConfig;
@@ -626,6 +627,72 @@ fn lockfile_sha256s_under(project_root: &std::path::Path) -> Vec<String> {
         out.push(hex);
     }
     out
+}
+
+/// Build a Nix flake into a reusable template slot and return the slot hash.
+///
+/// This is the backing function for `machine run --flake <ref>`: it runs the
+/// same flake build as `mvmctl build --flake` but registers the result as a
+/// `PersistedManifest` slot so downstream persistent and transient runners can
+/// reference it by hash without re-running the build.
+///
+/// The slot hash is the `sha256(flake_synthetic_path)` key under
+/// `~/.cache/mvm/templates/`. Repeated calls with the same resolved flake ref
+/// return the same hash and skip the build on a cache hit.
+pub(in crate::commands) fn build_flake_to_slot(
+    flake_ref: &str,
+    profile: Option<&str>,
+) -> Result<String> {
+    validate_flake_ref(flake_ref)
+        .with_context(|| format!("Invalid flake reference: {:?}", flake_ref))?;
+
+    #[cfg(feature = "builder-vm")]
+    if std::env::var("MVM_BUILD_STUB_OUTDIR")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true)
+    {
+        crate::commands::env::dev_vz::bootstrap_builder_vm_image()
+            .context("ensuring the builder VM image before flake build")?;
+    }
+
+    let resolved = resolve_flake_ref(flake_ref)?;
+    let backend = mvm_backend::backend::AnyBackend::auto_select()
+        .name()
+        .to_string();
+    let mode = mvm_build::pipeline::BuildMode::Dev;
+
+    // Synthesize a manifest so we can use the slot-registration machinery.
+    // The manifest_path key is a deterministic fake path derived from the
+    // flake ref — it is never read from disk (the PersistedManifest records
+    // the resolved flake_ref directly) and exists solely to give the slot
+    // a stable sha256 key.
+    let synthetic_path_str = format!("<flake-slot>/{}", resolved);
+    let synthetic_path = std::path::Path::new(&synthetic_path_str);
+
+    let persisted = PersistedManifest {
+        schema_version: MANIFEST_SCHEMA_VERSION,
+        manifest_path: synthetic_path_str.clone(),
+        manifest_hash: canonical_key_for_path(synthetic_path)?,
+        flake_ref: resolved.clone(),
+        profile: profile.unwrap_or("default").to_string(),
+        vcpus: 2,
+        mem_mib: 512,
+        mem_initial_mib: None,
+        data_disk_mib: 0,
+        name: None,
+        backend,
+        provenance: Provenance::current(),
+        created_at: mvm_core::time::utc_now(),
+        updated_at: mvm_core::time::utc_now(),
+    };
+
+    let slot_hash = persisted.manifest_hash.clone();
+    let revision = tmpl::template_build_from_manifest(&persisted, false, false, mode)
+        .with_context(|| format!("building flake {resolved:?} into slot {slot_hash}"))?;
+
+    audit_build_ok("flake-slot", &resolved, &slot_hash, &revision.revision_hash);
+
+    Ok(slot_hash)
 }
 
 /// Read the volume's `meta.json.annotations.lockfile_sha256`. Returns

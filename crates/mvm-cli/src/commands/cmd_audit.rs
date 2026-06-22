@@ -147,8 +147,6 @@ impl Commands {
                 _ => false,
             },
             Commands::Ls(a) => a.json,
-            Commands::Up(a) => a.up_json,
-            Commands::Run(a) => a.json,
             Commands::Machine(a) => {
                 if let machine::MachineAction::Vm(ref cmd) = a.action {
                     cmd.emits_machine_readable_stdout()
@@ -182,7 +180,7 @@ impl Commands {
         matches!(
             self,
             // Lifecycle mutate/read on the local single-host path.
-            Commands::Up(_) | Commands::Run(_) | Commands::Dev(_)
+            Commands::Dev(_)
         )
     }
 
@@ -208,7 +206,6 @@ impl Commands {
             Commands::Storage(_) => "storage",
             // `build <sub>` delegates to the per-op verb (image/compile/validate/kernel).
             Commands::Build(a) => a.action.verb_name(),
-            Commands::Up(_) => "up",
             Commands::ShellInit(_) => "shell-init",
             // `ops <sub>` delegates to the per-op verb (metrics/bench/config/mcp).
             Commands::Ops(a) => a.action.verb_name(),
@@ -218,7 +215,6 @@ impl Commands {
             Commands::Pool(_) => "pool",
             Commands::Reconcile(_) => "reconcile",
             Commands::Init(_) => "init",
-            Commands::Run(_) => "run",
             Commands::Invoke(_) => "invoke",
             Commands::Secret(_) => "secret",
             Commands::Bundle(_) => "bundle",

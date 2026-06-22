@@ -134,9 +134,21 @@ impl MachineAction {
 pub(in crate::commands) struct MachineRunArgs {
     /// OCI image reference to boot (pulled or reused from the local cache).
     /// Required for a fresh boot; optional when reconnecting to an existing
-    /// persistent machine by `--name`.
-    #[arg(long, value_name = "REF")]
+    /// persistent machine by `--name`. Mutually exclusive with `--manifest`
+    /// and `--flake`.
+    #[arg(long, value_name = "REF", conflicts_with_all = ["manifest", "flake"])]
     pub image: Option<String>,
+    /// Pre-built manifest slot (path to `mvm.toml`, its directory, or a slot
+    /// name). Mutually exclusive with `--image` and `--flake`.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "flake"])]
+    pub manifest: Option<String>,
+    /// Nix flake reference — build in the builder VM, then boot the result.
+    /// Mutually exclusive with `--image` and `--manifest`.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "manifest"])]
+    pub flake: Option<String>,
+    /// Flake package variant (with `--flake`). Omit to use flake default.
+    #[arg(long, value_name = "PROFILE", requires = "flake")]
+    pub flake_profile: Option<String>,
     /// Enable dev-tier outbound networking (broad egress + DNS). Off by
     /// default (deny-all). Narrow it with `--allow-host`.
     #[arg(long)]
@@ -191,6 +203,17 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Accepted as an alias for `-t` so the conventional `-it` bundle parses.
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
+    /// Force-recreate a persistent machine whose on-disk spec exists with a
+    /// different config (stop + overwrite + restart). Without it, a config
+    /// mismatch is an error.
+    #[arg(long)]
+    pub force: bool,
+    /// Override the backend hypervisor (hidden; for testing only).
+    #[arg(long, value_name = "HYPERVISOR", hide = true)]
+    pub hypervisor: Option<String>,
+    /// Skip plan-admission signing (hidden; for testing only).
+    #[arg(long, hide = true)]
+    pub no_supervisor: bool,
     /// Argv to run inside the guest (use `--` to separate). Optional for
     /// persistent (`-d`/`--name`) and interactive (`-t`) modes; required for a
     /// plain transient run.
@@ -199,13 +222,12 @@ pub(in crate::commands) struct MachineRunArgs {
 }
 
 impl MachineRunArgs {
-    /// Translate into the canonical `mvmctl run` argument shape. `machine run` is
-    /// always an image-backed transient run, so the manifest, launch-plan, and
-    /// SDK-transport (`--mode`/`--dev`/`--prod`) surfaces are pinned off here —
-    /// they are not part of the beginner contract.
+    /// Translate into the canonical `mvmctl run` argument shape. The
+    /// SDK-transport (`--mode`/`--dev`/`--prod`) and launch-plan surfaces are
+    /// pinned off — they are not part of the beginner contract.
     fn into_run_args(self) -> RunArgs {
         RunArgs {
-            manifest: None,
+            manifest: self.manifest,
             image: self.image,
             net: self.net,
             allow_host: self.allow_host,
@@ -270,10 +292,13 @@ impl MachineRunArgs {
     }
 
     /// Fresh-boot modes (transient, interactive-transient) have no spec to fall
-    /// back on, so an image is mandatory.
+    /// back on, so an image, manifest, or flake is mandatory.
     fn require_image_for_fresh_boot(&self) -> Result<()> {
-        if self.image.is_none() {
-            bail!("machine run needs `--image <ref>` to boot a new machine");
+        if self.image.is_none() && self.manifest.is_none() && self.flake.is_none() {
+            bail!(
+                "machine run needs `--image <ref>`, `--manifest <path>`, or `--flake <path>` \
+                 to boot a new machine"
+            );
         }
         Ok(())
     }
@@ -332,6 +357,7 @@ fn resolve_machine_run_name(args: &MachineRunArgs) -> Result<String> {
 /// it changes on every start and must not trigger a collision.
 fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
     a.image == b.image
+        && a.manifest == b.manifest
         && a.net == b.net
         && a.allow_host == b.allow_host
         && a.cpus == b.cpus
@@ -384,13 +410,22 @@ fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> String {
 /// durable data belongs in `--volume` host shares, which live on the host and
 /// survive the recreate. The recreate is announced loudly by the caller (never
 /// silent) so an unintended clobber (e.g. a typo'd `--image`) is observable.
-fn reconcile_machine_spec(existing: Option<&MachineSpec>, desired: &MachineSpec) -> SpecReconcile {
+fn reconcile_machine_spec(
+    existing: Option<&MachineSpec>,
+    desired: &MachineSpec,
+    force: bool,
+) -> Result<SpecReconcile> {
     match existing {
-        None => SpecReconcile::Create,
-        Some(current) if machine_config_matches(current, desired) => SpecReconcile::Reuse,
-        Some(current) => SpecReconcile::Recreate {
+        None => Ok(SpecReconcile::Create),
+        Some(current) if machine_config_matches(current, desired) => Ok(SpecReconcile::Reuse),
+        Some(current) if force => Ok(SpecReconcile::Recreate {
             changed: machine_config_diff(current, desired),
-        },
+        }),
+        Some(_) => bail!(
+            "machine {:?} exists with a different config; pass --force to recreate, \
+             or use a different name",
+            desired.name
+        ),
     }
 }
 
@@ -453,12 +488,33 @@ fn should_teardown_after_interactive(args: &MachineRunArgs) -> bool {
 /// validation `machine create` applies (network policy, memory, profile) so the
 /// two entry points produce identical specs. The `run` surface intentionally
 /// omits disk volumes / init / ssh-agent — those stay manifest-driven.
-fn machine_run_spec(args: &MachineRunArgs, name: String) -> Result<MachineSpec> {
+///
+/// For flake sources, `resolved_manifest_slot` must already contain the
+/// built slot hash (the caller builds the flake before calling this function).
+fn machine_run_spec(
+    args: &MachineRunArgs,
+    name: String,
+    resolved_manifest_slot: Option<&str>,
+) -> Result<MachineSpec> {
     validate_machine_name(&name)?;
-    let image = args
-        .image
-        .clone()
-        .ok_or_else(|| anyhow!("machine run needs `--image <ref>` to create machine {name:?}"))?;
+    let (image, manifest) = if let Some(slot) = resolved_manifest_slot {
+        // Flake was pre-built; store the slot hash as the manifest source.
+        (None, Some(slot.to_string()))
+    } else if let Some(m) = &args.manifest {
+        // Manifest-backed: store the manifest ref.
+        (None, Some(m.clone()))
+    } else if let Some(img) = &args.image {
+        // Image-backed: store the OCI ref.
+        (Some(img.clone()), None)
+    } else if std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1") {
+        // Test escape: kernel + rootfs from env vars; no persistent source.
+        (None, None)
+    } else {
+        bail!(
+            "machine run needs `--image <ref>`, `--manifest <path>`, or `--flake <path>` \
+             to create machine {name:?}"
+        );
+    };
     super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
     let _ = validate_machine_memory(&args.memory, None)?;
     let profile = run_profile_name(args.profile).to_string();
@@ -466,6 +522,7 @@ fn machine_run_spec(args: &MachineRunArgs, name: String) -> Result<MachineSpec> 
         schema_version: MACHINE_SPEC_SCHEMA_VERSION,
         name,
         image,
+        manifest,
         resolved_digest: None,
         net: args.net,
         allow_host: args.allow_host.clone(),
@@ -487,7 +544,17 @@ fn machine_run_spec(args: &MachineRunArgs, name: String) -> Result<MachineSpec> 
 struct MachineSpec {
     schema_version: u32,
     name: String,
-    image: String,
+    /// OCI image reference. Present for image-backed machines.
+    /// Absent for manifest-backed machines (`manifest` is set instead).
+    /// Kept optional to remain deserializable from old spec files that
+    /// always serialised `image`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image: Option<String>,
+    /// Pre-built manifest slot hash or path. Present when the machine was
+    /// created with `--manifest` or (after a build) `--flake`. Absent for
+    /// image-backed machines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved_digest: Option<String>,
     net: bool,
@@ -590,6 +657,12 @@ pub(in crate::commands) struct MachineStartArgs {
     /// Validate and explain the effective start without booting a VM.
     #[arg(long)]
     pub dry_run: bool,
+    /// Override the backend hypervisor (hidden; for testing only).
+    #[arg(long, value_name = "HYPERVISOR", hide = true)]
+    pub hypervisor: Option<String>,
+    /// Skip plan-admission signing (hidden; for testing only).
+    #[arg(long, hide = true)]
+    pub no_supervisor: bool,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -644,7 +717,12 @@ struct MachineManifestSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MachineStartReceiptInput {
     machine_name: String,
-    image: String,
+    /// OCI image reference. Present for image-backed machines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image: Option<String>,
+    /// Pre-built manifest slot. Present for manifest- or flake-backed machines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved_digest: Option<String>,
     cpus: u32,
@@ -823,7 +901,8 @@ impl MachineCreateArgs {
         Ok(MachineSpec {
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: self.name,
-            image,
+            image: Some(image),
+            manifest: None,
             resolved_digest: None,
             net,
             allow_host,
@@ -1014,6 +1093,7 @@ fn machine_start_receipt_input(
     Ok(MachineStartReceiptInput {
         machine_name: spec.name.clone(),
         image: spec.image.clone(),
+        manifest: spec.manifest.clone(),
         resolved_digest: spec.resolved_digest.clone(),
         cpus: spec.cpus,
         memory: spec.memory.clone(),
@@ -1058,7 +1138,13 @@ fn machine_start_preflight_summary(
         will_execute: false,
         machine: MachineStartPreflightMachine {
             name: spec.name.clone(),
-            image_reference_sha256: sha256_hex(spec.image.as_bytes()),
+            image_reference_sha256: sha256_hex(
+                spec.image
+                    .as_deref()
+                    .or(spec.manifest.as_deref())
+                    .unwrap_or("")
+                    .as_bytes(),
+            ),
             resolved_digest: spec.resolved_digest.clone(),
         },
         invocation,
@@ -1391,7 +1477,12 @@ fn list_machines(args: MachineListArgs) -> Result<()> {
         println!("no machines");
     } else {
         for spec in specs {
-            println!("{}\t{}", spec.name, spec.image);
+            let source = spec
+                .image
+                .as_deref()
+                .or(spec.manifest.as_deref())
+                .unwrap_or("<no source>");
+            println!("{}\t{}", spec.name, source);
         }
     }
     Ok(())
@@ -1403,7 +1494,12 @@ fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&spec)?);
     } else {
         println!("name: {}", spec.name);
-        println!("image: {}", spec.image);
+        if let Some(image) = spec.image.as_deref() {
+            println!("image: {}", image);
+        }
+        if let Some(manifest) = spec.manifest.as_deref() {
+            println!("manifest: {}", manifest);
+        }
         if let Some(resolved_digest) = spec.resolved_digest.as_deref() {
             println!("resolved-digest: {resolved_digest}");
         }
@@ -1465,8 +1561,12 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         return Ok(());
     }
     enforce_dev_init_profile(&spec.profile, &spec.init)?;
-    let backend = super::shared::resolve_effective_hypervisor("firecracker");
-    let receipt_input = machine_start_receipt_input(&spec, &backend)?;
+    let effective_hypervisor = args
+        .hypervisor
+        .as_deref()
+        .map(String::from)
+        .unwrap_or_else(|| super::shared::resolve_effective_hypervisor("firecracker"));
+    let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
     let ssh_auth_sock = if spec.ssh_agent {
         Some(ssh_auth_sock_from_env()?)
     } else {
@@ -1476,29 +1576,74 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
     let (memory_mib, mem_initial_mib) =
         validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let volume_cfg = build_machine_volume_cfg(&spec.volumes)?;
-    let cached = super::image::resolve_or_pull_run_image(
-        &super::image::oci_cache_root(),
-        &spec.image,
-        false,
-    )?;
-    if cached.pulled {
-        let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
-        mvm_core::audit_emit!(
-            ImageFetch,
-            "source=machine_start reference={} digest={} prod=false layers={} trust_policy={} verification_status={} auth_source={}",
-            cached.reference,
-            cached.resolved_digest,
-            cached.provenance.layer_digests.len(),
-            cached.provenance.trust_policy,
-            cached.provenance.verification_status,
-            auth_source
-        );
-    }
+
+    // Direct-boot escape: kernel + rootfs supplied via env vars (test path only).
+    // Skips OCI image resolution and the default-microvm build entirely.
+    let (direct_boot_kernel, boot_label, boot_rootfs, boot_digest) = if std::env::var(
+        "MVM_DIRECT_BOOT",
+    )
+    .as_deref()
+        == Ok("1")
+    {
+        let kernel = std::env::var("MVM_KERNEL_PATH")
+            .map_err(|_| anyhow::anyhow!("MVM_DIRECT_BOOT requires MVM_KERNEL_PATH"))?;
+        let rootfs = std::env::var("MVM_ROOTFS_PATH")
+            .map_err(|_| anyhow::anyhow!("MVM_DIRECT_BOOT requires MVM_ROOTFS_PATH"))?;
+        (
+            Some(kernel),
+            "direct-boot".to_string(),
+            std::path::PathBuf::from(rootfs),
+            "direct-boot".to_string(),
+        )
+    } else {
+        // Boot source: OCI image or pre-built manifest slot.
+        let (label, rootfs, digest) = if let Some(slot_hash) = &spec.manifest {
+            let (_, _vmlinux, _initrd, rootfs, rev) =
+                mvm::vm::template::lifecycle::template_artifacts_for_slot(slot_hash).with_context(
+                    || format!("loading manifest slot {slot_hash:?} for machine start"),
+                )?;
+            (
+                format!("manifest:{slot_hash}"),
+                std::path::PathBuf::from(rootfs),
+                rev,
+            )
+        } else if let Some(image_ref) = &spec.image {
+            let cached = super::image::resolve_or_pull_run_image(
+                &super::image::oci_cache_root(),
+                image_ref,
+                false,
+            )?;
+            if cached.pulled {
+                let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
+                mvm_core::audit_emit!(
+                    ImageFetch,
+                    "source=machine_start reference={} digest={} prod=false layers={} trust_policy={} verification_status={} auth_source={}",
+                    cached.reference,
+                    cached.resolved_digest,
+                    cached.provenance.layer_digests.len(),
+                    cached.provenance.trust_policy,
+                    cached.provenance.verification_status,
+                    auth_source
+                );
+            }
+            (
+                cached.reference.clone(),
+                cached.rootfs_path.clone(),
+                cached.resolved_digest.clone(),
+            )
+        } else {
+            bail!(
+                "machine {name:?} spec has neither image nor manifest — use `machine rm` to remove and recreate it",
+                name = spec.name
+            );
+        };
+        (None, label, rootfs, digest)
+    };
     super::vm::up::start_persistent_oci_machine(super::vm::up::PersistentImageStartParams {
         name: &spec.name,
-        image_label: &cached.reference,
-        resolved_digest: &cached.resolved_digest,
-        rootfs_path: &cached.rootfs_path,
+        image_label: &boot_label,
+        resolved_digest: &boot_digest,
+        rootfs_path: &boot_rootfs,
         profile: &spec.profile,
         cpus: spec.cpus,
         memory_mib,
@@ -1506,9 +1651,13 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         volumes: &volume_cfg,
         network_policy,
         auth: machine_start_plan_auth_policy(&spec),
+        hypervisor_override: args.hypervisor.as_deref(),
+        no_supervisor: args.no_supervisor,
+        kernel_path: direct_boot_kernel,
     })?;
     if let Some(host_sock) = ssh_auth_sock.as_deref()
-        && let Err(err) = configure_machine_ssh_agent_forwarding(&spec.name, &backend, host_sock)
+        && let Err(err) =
+            configure_machine_ssh_agent_forwarding(&spec.name, &effective_hypervisor, host_sock)
     {
         stop_failed_machine_start(&spec.name);
         return Err(err);
@@ -1519,7 +1668,7 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         stop_failed_machine_start(&spec.name);
         return Err(err);
     }
-    mark_machine_started(&mut spec, cached.resolved_digest);
+    mark_machine_started(&mut spec, boot_digest);
     let started_at = spec
         .last_started_at
         .clone()
@@ -1737,29 +1886,39 @@ fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) -> Result<()>
 }
 
 /// Resolve the spec a persistent run should boot, reconciling the desired
-/// config (when `--image` is given) against any on-disk spec. Does **no** IO
-/// beyond loading: persistence happens in the caller, keyed off the returned
-/// action. With no `--image` this is a pure reconnect to an existing machine.
+/// config (when `--image`, `--manifest`, or a pre-built flake slot is given)
+/// against any on-disk spec. Does **no** IO beyond loading: persistence
+/// happens in the caller, keyed off the returned action. With no source flag
+/// this is a pure reconnect to an existing machine.
+///
+/// `resolved_manifest_slot` carries the slot hash for `--flake` runs where
+/// the flake was already built by the caller.
 fn resolve_persistent_spec(
     args: &MachineRunArgs,
     name: &str,
     existing: Option<MachineSpec>,
+    resolved_manifest_slot: Option<&str>,
 ) -> Result<(MachineSpec, SpecReconcile)> {
-    match args.image {
-        None => match existing {
+    let direct_boot = std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1");
+    let has_source = args.image.is_some()
+        || args.manifest.is_some()
+        || resolved_manifest_slot.is_some()
+        || direct_boot;
+    if !has_source {
+        return match existing {
             Some(spec) => Ok((spec, SpecReconcile::Reuse)),
-            None => bail!("machine {name:?} does not exist; pass --image to create it"),
-        },
-        Some(_) => {
-            let desired = machine_run_spec(args, name.to_string())?;
-            let action = reconcile_machine_spec(existing.as_ref(), &desired);
-            let spec = match action {
-                SpecReconcile::Reuse => existing.expect("reuse implies an existing spec"),
-                SpecReconcile::Create | SpecReconcile::Recreate { .. } => desired,
-            };
-            Ok((spec, action))
-        }
+            None => bail!(
+                "machine {name:?} does not exist; pass --image, --manifest, or --flake to create it"
+            ),
+        };
     }
+    let desired = machine_run_spec(args, name.to_string(), resolved_manifest_slot)?;
+    let action = reconcile_machine_spec(existing.as_ref(), &desired, args.force)?;
+    let spec = match action {
+        SpecReconcile::Reuse => existing.expect("reuse implies an existing spec"),
+        SpecReconcile::Create | SpecReconcile::Recreate { .. } => desired,
+    };
+    Ok((spec, action))
 }
 
 /// `kill(pid,0)`-cheap liveness probe via the active backend.
@@ -1801,10 +1960,15 @@ fn stop_transient_machine(name: &str) {
 /// existing create + start (+ exec) verbs — no new lifecycle code — so the
 /// signed-`ExecutionPlan` admission and default-deny egress are identical to
 /// `machine create` + `machine start`.
-fn run_persistent(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+fn run_persistent(
+    cli: &Cli,
+    args: MachineRunArgs,
+    cfg: &MvmConfig,
+    resolved_flake_slot: Option<&str>,
+) -> Result<()> {
     let name = resolve_machine_run_name(&args)?;
     let existing = load_machine_spec(&name).ok();
-    let (spec, action) = resolve_persistent_spec(&args, &name, existing)?;
+    let (spec, action) = resolve_persistent_spec(&args, &name, existing, resolved_flake_slot)?;
 
     // Dry-run: explain the effective start without persisting or booting.
     if args.dry_run {
@@ -1826,6 +1990,8 @@ fn run_persistent(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<()
             receipt: args.receipt.clone(),
             json: args.json,
             dry_run: false,
+            hypervisor: args.hypervisor.clone(),
+            no_supervisor: args.no_supervisor,
         },
     )?;
     if !booted && !args.json {
@@ -1870,7 +2036,12 @@ fn persist_and_boot_machine(
 /// a PTY shell through `console::run`, and tears the machine down on exit only
 /// when it is transient. Dev-only: claim 15's `enforce_accessible_gate` refuses
 /// a sealed machine before attach, and a non-TTY stdin is refused up front.
-fn run_interactive(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+fn run_interactive(
+    cli: &Cli,
+    args: MachineRunArgs,
+    cfg: &MvmConfig,
+    resolved_flake_slot: Option<&str>,
+) -> Result<()> {
     use std::io::IsTerminal as _;
     require_tty(std::io::stdin().is_terminal())?;
 
@@ -1884,7 +2055,7 @@ fn run_interactive(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<(
     // security gate, so it is not threaded in.
     super::vm::console::enforce_accessible_gate(&name, false)?;
 
-    let (spec, action) = resolve_persistent_spec(&args, &name, existing)?;
+    let (spec, action) = resolve_persistent_spec(&args, &name, existing, resolved_flake_slot)?;
 
     if args.dry_run {
         let summary = machine_start_preflight_summary(&spec, args.receipt.as_deref())?;
@@ -1905,6 +2076,8 @@ fn run_interactive(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<(
             receipt: None,
             json: false,
             dry_run: false,
+            hypervisor: args.hypervisor.clone(),
+            no_supervisor: args.no_supervisor,
         },
     )?;
 
@@ -1971,12 +2144,34 @@ fn run_persistent_post_start(
 /// Dispatch `machine run` to one of the three flag-selected lifecycles. The
 /// transient default routes into the unchanged `run_secure`; persistence and
 /// interactivity compose the existing machine verbs.
-fn run_dispatch(cli: &Cli, args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+///
+/// For `--flake` runs the flake is built in the builder VM first (before mode
+/// dispatch) so all three lifecycles can reference the resulting slot hash
+/// uniformly. The build happens once regardless of mode.
+fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+    // If a flake was given, build it into a slot before dispatching.
+    // The resolved slot hash replaces the `--flake` flag so all paths
+    // below treat it as a manifest-backed source.
+    let resolved_flake_slot = if let Some(flake_ref) = args.flake.take() {
+        let slot_hash = build::build_flake_to_slot(&flake_ref, args.flake_profile.as_deref())?;
+        Some(slot_hash)
+    } else {
+        None
+    };
+
     match args.resolve_mode()? {
-        MachineRunMode::Transient => run_secure(cli, args.into_run_args(), cfg),
-        MachineRunMode::Persistent => run_persistent(cli, args, cfg),
+        MachineRunMode::Transient => {
+            // For flake runs, pass the slot hash as the manifest.
+            if let Some(slot) = resolved_flake_slot {
+                args.manifest = Some(slot);
+            }
+            run_secure(cli, args.into_run_args(), cfg)
+        }
+        MachineRunMode::Persistent => {
+            run_persistent(cli, args, cfg, resolved_flake_slot.as_deref())
+        }
         MachineRunMode::InteractiveTransient | MachineRunMode::InteractivePersistent => {
-            run_interactive(cli, args, cfg)
+            run_interactive(cli, args, cfg, resolved_flake_slot.as_deref())
         }
     }
 }
@@ -2378,7 +2573,8 @@ mod tests {
         MachineSpec {
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: name.to_string(),
-            image: "alpine:latest".to_string(),
+            image: Some("alpine:latest".to_string()),
+            manifest: None,
             resolved_digest: None,
             net: false,
             allow_host: vec![],
@@ -2425,9 +2621,14 @@ mod tests {
 
         // A different config auto-recreates (no --force) and reports what changed.
         let mut different = spec_fixture("web");
-        different.image = "ubuntu:24.04".to_string();
+        different.image = Some("ubuntu:24.04".to_string());
         different.cpus += 1;
-        match reconcile_machine_spec(Some(&different), &desired) {
+        // A different config errors without --force, and recreates (reporting
+        // what changed) with it.
+        let err = reconcile_machine_spec(Some(&different), &desired, false)
+            .expect_err("different config errors without --force");
+        assert!(err.to_string().contains("different config"), "msg: {err}");
+        match reconcile_machine_spec(Some(&different), &desired, true).expect("recreate") {
             SpecReconcile::Recreate { changed } => {
                 assert!(changed.contains("image"), "changed: {changed}");
                 assert!(changed.contains("cpus"), "changed: {changed}");
@@ -2455,9 +2656,9 @@ mod tests {
             "api.example.com:443",
         ])
         .expect("parse");
-        let spec = machine_run_spec(&args, "web".to_string()).expect("spec");
+        let spec = machine_run_spec(&args, "web".to_string(), None).expect("spec");
         assert_eq!(spec.name, "web");
-        assert_eq!(spec.image, "alpine:3.20");
+        assert_eq!(spec.image.as_deref(), Some("alpine:3.20"));
         assert_eq!(spec.cpus, 4);
         assert_eq!(spec.memory, "1G");
         assert_eq!(spec.profile, "dev");
@@ -2542,12 +2743,13 @@ mod tests {
         let reconnect = parse_run(&["run", "--name", "web"]).expect("parse");
         let existing = spec_fixture("web");
         let (spec, action) =
-            resolve_persistent_spec(&reconnect, "web", Some(existing.clone())).expect("reconnect");
+            resolve_persistent_spec(&reconnect, "web", Some(existing.clone()), None)
+                .expect("reconnect");
         assert_eq!(action, SpecReconcile::Reuse);
         assert_eq!(spec, existing);
 
         // No `--image` and no on-disk spec: a clear "does not exist" error.
-        let err = resolve_persistent_spec(&reconnect, "web", None)
+        let err = resolve_persistent_spec(&reconnect, "web", None, None)
             .expect_err("reconnect to a missing machine errors");
         assert!(err.to_string().contains("does not exist"), "msg: {err}");
     }
@@ -2927,7 +3129,8 @@ mod tests {
         let mut spec = MachineSpec {
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: "web".to_string(),
-            image: "alpine:latest".to_string(),
+            image: Some("alpine:latest".to_string()),
+            manifest: None,
             resolved_digest: None,
             net: false,
             allow_host: Vec::new(),
@@ -3016,7 +3219,7 @@ ssh_agent = true
         .into_spec()
         .expect("manifest-backed spec");
 
-        assert_eq!(spec.image, "python:3.12-alpine");
+        assert_eq!(spec.image.as_deref(), Some("python:3.12-alpine"));
         assert!(spec.net);
         assert_eq!(spec.allow_host, vec!["api.example.com"]);
         assert_eq!(spec.cpus, 4);
@@ -3119,7 +3322,8 @@ ssh_agent = true
         let spec = MachineSpec {
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: "web".to_string(),
-            image: "ghcr.io/acme/web:latest".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
             resolved_digest: Some("sha256:abc".to_string()),
             net: false,
             allow_host: vec!["api.example.com".to_string()],
@@ -3158,7 +3362,8 @@ ssh_agent = true
         let spec = MachineSpec {
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: "web".to_string(),
-            image: "ghcr.io/acme/web:latest".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
             resolved_digest: Some("sha256:abc".to_string()),
             net: false,
             allow_host: Vec::new(),
@@ -3186,7 +3391,8 @@ ssh_agent = true
         let path = dir.path().join("machine-start.receipt.json");
         let invocation = MachineStartReceiptInput {
             machine_name: "web".to_string(),
-            image: "ghcr.io/acme/web:latest".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
             resolved_digest: Some("sha256:abc".to_string()),
             cpus: 2,
             memory: "512M".to_string(),
@@ -3227,7 +3433,8 @@ ssh_agent = true
         let spec = MachineSpec {
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: "web".to_string(),
-            image: "ghcr.io/acme/web:latest".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
             resolved_digest: None,
             net: false,
             allow_host: Vec::new(),
@@ -3387,7 +3594,8 @@ ssh_agent = true
         let spec = MachineSpec {
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: "web".to_string(),
-            image: "ghcr.io/acme/web:latest".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
             resolved_digest: None,
             net: false,
             allow_host: Vec::new(),
@@ -3439,7 +3647,8 @@ ssh_agent = true
         let spec = MachineSpec {
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: "web".to_string(),
-            image: "alpine:latest".to_string(),
+            image: Some("alpine:latest".to_string()),
+            manifest: None,
             resolved_digest: None,
             net: false,
             allow_host: Vec::new(),
@@ -3466,7 +3675,8 @@ ssh_agent = true
             let spec = MachineSpec {
                 schema_version: MACHINE_SPEC_SCHEMA_VERSION,
                 name: name.to_string(),
-                image: format!("example/{name}:latest"),
+                image: Some(format!("example/{name}:latest")),
+                manifest: None,
                 resolved_digest: None,
                 net: false,
                 allow_host: Vec::new(),
@@ -3522,7 +3732,8 @@ ssh_agent = true
         let spec = MachineSpec {
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: "web".to_string(),
-            image: "alpine:latest".to_string(),
+            image: Some("alpine:latest".to_string()),
+            manifest: None,
             resolved_digest: None,
             net: false,
             allow_host: Vec::new(),

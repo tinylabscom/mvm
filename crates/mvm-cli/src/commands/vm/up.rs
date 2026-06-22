@@ -1,4 +1,7 @@
-//! `mvmctl run` / `mvmctl up` / `mvmctl start` — boot a microVM from a flake or template.
+//! Legacy `up`/`run`/`start` entry points — now retired from the CLI, kept to
+//! supply internal helpers (`start_persistent_oci_machine`, `admit_plan_for_boot`,
+//! etc.) consumed by `machine/mod.rs`.
+#![allow(dead_code)]
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
@@ -1900,6 +1903,12 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub volumes: &'a [image::RuntimeVolume],
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
     pub auth: mvm_core::plan::AuthPolicy,
+    /// Override the backend (test escape; `None` = auto-detect).
+    pub hypervisor_override: Option<&'a str>,
+    /// Skip plan-admission signing (test escape).
+    pub no_supervisor: bool,
+    /// Pre-built kernel path: skips `ensure_default_microvm_image` when set.
+    pub kernel_path: Option<String>,
 }
 
 fn register_vm_name(vm_name: &str, network_name: &str) {
@@ -1935,11 +1944,20 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         volumes,
         network_policy,
         auth,
+        hypervisor_override,
+        no_supervisor,
+        kernel_path,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    let effective_hypervisor = super::shared::resolve_effective_hypervisor("firecracker");
-    let (kernel_path, _default_rootfs_path) =
-        ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
+    let effective_hypervisor = hypervisor_override
+        .map(String::from)
+        .unwrap_or_else(|| super::shared::resolve_effective_hypervisor("firecracker"));
+    let kernel_path = if let Some(k) = kernel_path {
+        k
+    } else {
+        let (k, _) = ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
+        k
+    };
     register_vm_name(name, "default");
 
     let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
@@ -1956,7 +1974,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         secret_release: mvm_core::plan::SecretReleasePolicy::default(),
         secrets: vec![],
         auth,
-        no_supervisor: false,
+        no_supervisor,
         ledger: &admission_ledger,
         keys_dir: None,
         audit_dir: None,

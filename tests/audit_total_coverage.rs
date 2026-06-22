@@ -386,13 +386,9 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("doctor", AuditPosture::ReadOnly),
     ("shell-init", AuditPosture::InteractiveOrControl),
     ("init", AuditPosture::InteractiveOrControl),
-    // VM lifecycle.
-    (
-        "up",
-        AuditPosture::Emits("plan.admitted+plan.launched+VmStart"),
-    ),
+    // VM lifecycle. `up` and `run` are retired; their postures live under
+    // `machine run` and `machine <sub>` respectively.
     ("ls", AuditPosture::ReadOnly),
-    ("run", AuditPosture::InteractiveOrControl),
     ("invoke", AuditPosture::Emits("plan.admitted+plan.launched")),
     // Build / artifact / registry. Plan 178 (D1) — image/compile/validate/
     // kernel grouped under `build <sub>`.
