@@ -1,4 +1,4 @@
-# ADR-093 — One slim microVM kernel, two backends, published and CVE-versioned
+# ADR-094 — One slim microVM kernel, two backends, published and CVE-versioned
 
 **Status:** Proposed
 **Date:** 2026-06-21
