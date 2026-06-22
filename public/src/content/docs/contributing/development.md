@@ -64,21 +64,22 @@ just release-build
 ### Kernel builds
 
 The builder-VM and workload microVM kernels are slim custom Linux
-builds (`nix/images/builder-vm/kernel/base.nix` + per-variant deltas in
-`nix/images/builder-vm/kernel/`). Because the config is custom,
-`cache.nixos.org` has no substitute, so the first `dev up` on a fresh
-machine compiles the kernel from source (3-10 min, memory-heavy).
+builds: one shared config in `nix/images/kernel/base.nix` plus a
+per-variant delta (`workload.nix` adds dm-verity; `builder.nix` adds
+the nix-build sandbox + egress-lockdown bits). Because the config is
+custom, `cache.nixos.org` has no substitute, so the first `dev up` on a
+fresh machine compiles the kernel from source (3-10 min, memory-heavy).
 
-`mvmctl kernel build` makes that compile explicit and one-time, so it
-stops hijacking your first `dev up`:
+`mvmctl build kernel build` makes that compile explicit and one-time, so
+it stops hijacking your first `dev up`:
 
 ```bash
 # Compile the builder kernel once into the cache + persistent nix store.
 # The next `dev up` reuses it (substituted, not rebuilt).
-just run -- kernel build --which builder
+just run -- build kernel build --which builder
 
 # Or both kernels:
-just run -- kernel build --all
+just run -- build kernel build --all
 ```
 
 To skip the kernel compile entirely on a fresh machine, boot the builder
@@ -99,10 +100,47 @@ Notes:
   download` once a release ships it.
 - On macOS the compile arm needs the libkrun trio (`slp/krun/*`), since
   Stage 0 is libkrun-backed even on Vz-default hosts.
-- Editing `base.nix` or the builder delta? Just re-run the command — a
+- Editing `base.nix` or a variant delta? Just re-run the command — a
   custom config always compiles locally; downloads only ever return the
   kernel that shipped with that exact `mvmctl` release. See ADR-046
   §"Amendment: kernel acquisition".
+
+#### Iterating on the kernel config (slimming, adding a driver)
+
+Changing `base.nix` / `workload.nix` / `builder.nix` and want to see the
+effect? The loop is build → boot-smoke → measure:
+
+```bash
+# 1. Build the variant you touched (compiles your edited config in Stage 0).
+just run -- build kernel build --which workload
+
+# 2. Boot-smoke it — a kernel that builds isn't proof it boots. Boot a
+#    throwaway VM and confirm the in-guest agent answers over vsock.
+just run -- up --flake examples/sleeper --hypervisor libkrun --name smoke -d
+just run -- machine boot-report smoke   # "control plane  ready" == good
+just run -- machine stop smoke
+```
+
+Two sharp edges worth knowing:
+
+- **A build that passes the config guard still has to boot.** After
+  `make olddefconfig`, the build asserts every requested `enable` is
+  still `=y` and fails loudly if one got dropped by a missing
+  dependency — but that guard can't tell you a *disable* removed
+  something the boot path needed. Only the boot-smoke proves that, so
+  never skip step 2.
+- **`enable` and `disable` are scoped.** A disable in the shared
+  `base.nix` hits *both* kernels; if only the workload should drop a
+  symbol (or only the builder needs one), put it in that variant's
+  delta. (The builder kernel, for example, keeps netfilter for its
+  egress lockdown while the workload drops it.)
+- **You can't read the resolved `.config` locally** — Stage 0 hands the
+  host a `vmlinux`, not the config. The `=y` symbol count + byte size
+  come from the `kernel-build` CI lane, which uploads
+  `workload-config-<arch>` and `kernel-metrics-<arch>.json`. Trigger it
+  without a release via `gh workflow run kernel-build.yml`. The
+  `check-kernel-config-budget` xtask gate fails CI if the `=y` count
+  regresses past `KERNEL_Y_BUDGET`.
 
 ## Testing
 
