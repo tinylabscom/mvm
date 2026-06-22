@@ -474,11 +474,19 @@
       # host-provided kernel — so it's published as an artifact ahead of
       # the runtime wiring, which is when its home moves out of this
       # builder-vm flake.
-      # The workload kernel's one delta over the shared base: dm-verity
-      # (Claim 3 — verified boot of the workload rootfs). The builder
-      # force-drops these (it boots `ro`, no roothash); workloads keep
-      # them. Shared between the kernel + its configfile output.
-      workloadKernelEnables = [ "MD" "BLK_DEV_DM" "DM_VERITY" ];
+      # The workload kernel's deltas over the shared base:
+      #   - dm-verity (Claim 3 — verified boot of the workload rootfs). The
+      #     builder force-drops these (it boots `ro`, no roothash); workloads
+      #     keep them.
+      #   - VIRTIO_FS / FUSE_FS — host-directory shares (`machine run --volume`
+      #     on a persistent/interactive machine). The guest init mounts each
+      #     `mvm.uvols=` cmdline entry as virtio-fs; without the built-in driver
+      #     (OCI rootfs carries no module tree) the mount fails "No such device".
+      #     Mirrors the builder kernel, which already enables both for its own
+      #     host shares. A share only exists when the host attaches one named in
+      #     the signed plan (Claim 1), so the driver adds no exposure on its own.
+      # Shared between the kernel + its configfile output.
+      workloadKernelEnables = [ "MD" "BLK_DEV_DM" "DM_VERITY" "VIRTIO_FS" "FUSE_FS" ];
       mkBuilderKernel = system:
         let pkgs = import nixpkgs { inherit system; };
         in import ./kernel { inherit pkgs; base = kernelBaseFor pkgs; };

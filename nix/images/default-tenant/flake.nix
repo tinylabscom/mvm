@@ -47,7 +47,11 @@
       kernelBaseFor = pkgs:
         import (workspaceRoot + "/nix/images/builder-vm/kernel/base.nix")
           { inherit pkgs; };
-      workloadKernelEnables = [ "MD" "BLK_DEV_DM" "DM_VERITY" ];
+      # Kept in sync with builder-vm/flake.nix workloadKernelEnables: dm-verity
+      # (Claim 3) + VIRTIO_FS/FUSE_FS so `machine run --volume` host shares mount
+      # in the guest (the init mounts each `mvm.uvols=` entry as virtio-fs; the
+      # OCI rootfs has no module tree, so the driver must be built in).
+      workloadKernelEnables = [ "MD" "BLK_DEV_DM" "DM_VERITY" "VIRTIO_FS" "FUSE_FS" ];
       mkWorkloadKernel = pkgs:
         (kernelBaseFor pkgs).mkKernel { extraEnables = workloadKernelEnables; };
 

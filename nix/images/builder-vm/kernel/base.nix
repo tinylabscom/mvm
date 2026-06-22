@@ -56,7 +56,9 @@ let
     "PCI" "PCI_MSI"
 
     # filesystems. OVERLAY_FS stays in base: the guest agent lands on
-    # an overlay. FUSE_FS is builder-only (it backs virtio-fs).
+    # an overlay. FUSE_FS / VIRTIO_FS (FUSE backs virtio-fs) are not in
+    # base but in both deltas — the builder mounts its own host shares and
+    # workloads now mount `machine run --volume` shares.
     # dm-verity (Claim 3 — verified boot) is a
     # *workload-only* delta, not base: the builder boots `root=/dev/vda
     # ro` with no roothash and never opens a dm device (its veritysetup
