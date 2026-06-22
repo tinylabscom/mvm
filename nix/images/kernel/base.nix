@@ -162,10 +162,11 @@ let
     # defconfig drags in. The SoC `ARCH_*` clusters are already off; these are
     # the orthogonal driver menus that survive that. None are on the virtio
     # microVM boot path (no GPIO/I2C/pinctrl/PMIC hardware; FDT boot, not EFI;
-    # egress is host-enforced, not in-guest netfilter; not a ChromeOS board).
+    # not a ChromeOS board). Netfilter is NOT cut here — the builder kernel
+    # needs it for its egress lockdown; the workload kernel drops it on its
+    # own (workload.nix extraDisables), since base is shared by both.
     "CHROME_PLATFORMS"     # ChromeOS embedded-controller drivers
     "EFI"                  # arm64 boots from the FDT, never the EFI stub/runtime
-    "NETFILTER"            # workload egress is host-enforced + blackhole routes
     "I2C"                  # no I2C buses behind virtio
     "GPIOLIB"              # no GPIO controllers
     "PINCTRL"              # SoC pin-mux
