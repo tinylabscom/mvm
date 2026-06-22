@@ -125,8 +125,14 @@
       # `nix flake check --no-build` (the "Nix flake check (Linux eval)"
       # lane) refuses — so the builder/workload kernel + their configfile
       # outputs must not route base through it.
+      # Import the shared kernel via `workspaceRoot` (the same mechanism
+      # this flake uses for `nix/lib`), NOT a bare `../kernel` relative
+      # path. Under the `path:` URL fetch the libkrun builder VM uses, a
+      # relative `..` resolves against the flake's *store copy* and
+      # escapes it; `workspaceRoot` points at the live workspace
+      # (`MVM_WORKSPACE_PATH`), so the sibling dir resolves.
       kernelBaseFor = pkgs:
-        import ../kernel/base.nix { inherit pkgs; };
+        import (workspaceRoot + "/nix/images/kernel/base.nix") { inherit pkgs; };
 
       # veritysetup sidecar bytes must not drift when nixpkgs revs. The
       # OCI-pull path runs `veritysetup format`
@@ -336,7 +342,7 @@
           # `linuxManualConfig` over `make defconfig` carved down by the
           # base disables. `CONFIG_MODULES=n` so the kernel has only what
           # `mvm-host-vm-init` uses built-in — no driver modules tree.
-          kernelPkg = import ../kernel/builder.nix { inherit pkgs; base = kernelBaseFor pkgs; };
+          kernelPkg = import (workspaceRoot + "/nix/images/kernel/builder.nix") { inherit pkgs; base = kernelBaseFor pkgs; };
           rootfs = mkBuilderVmRootfs { inherit system interactive; };
           kernelFile =
             if pkgs.stdenv.hostPlatform.isAarch64 then "Image" else "bzImage";
@@ -461,7 +467,7 @@
       # `disables` edits to confirm SoC platform clusters are gone.
       mkKernelConfigfile = system:
         let pkgs = import nixpkgs { inherit system; };
-        in (import ../kernel/builder.nix { inherit pkgs; base = kernelBaseFor pkgs; }).passthru.configfile;
+        in (import (workspaceRoot + "/nix/images/kernel/builder.nix") { inherit pkgs; base = kernelBaseFor pkgs; }).passthru.configfile;
 
       # Standalone kernel artifacts — targets for `mvmctl kernel build`
       # and the kernel-build GHA. The builder image's `default` output
@@ -476,13 +482,13 @@
       # when its home moves out of this builder-vm flake.
       mkBuilderKernel = system:
         let pkgs = import nixpkgs { inherit system; };
-        in import ../kernel/builder.nix { inherit pkgs; base = kernelBaseFor pkgs; };
+        in import (workspaceRoot + "/nix/images/kernel/builder.nix") { inherit pkgs; base = kernelBaseFor pkgs; };
       mkWorkloadKernel = system:
         let pkgs = import nixpkgs { inherit system; };
-        in import ../kernel/workload.nix { inherit pkgs; base = kernelBaseFor pkgs; };
+        in import (workspaceRoot + "/nix/images/kernel/workload.nix") { inherit pkgs; base = kernelBaseFor pkgs; };
       mkWorkloadKernelConfigfile = system:
         let pkgs = import nixpkgs { inherit system; };
-        in (import ../kernel/workload.nix { inherit pkgs; base = kernelBaseFor pkgs; }).passthru.configfile;
+        in (import (workspaceRoot + "/nix/images/kernel/workload.nix") { inherit pkgs; base = kernelBaseFor pkgs; }).passthru.configfile;
     in
     {
       packages = forAllSystems (system: {
