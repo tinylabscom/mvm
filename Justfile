@@ -28,6 +28,17 @@ build:
 check:
     cargo check --workspace --all-targets
 
+# Cross-compile every crate's lib for Linux (glibc) via zig — no Docker — so
+# cfg(target_os="linux") code a macOS host never compiles is caught locally.
+# --all-features reaches feature-gated modules (e.g. libkrun_builder). Lib-only:
+# linking the libkrun-sys bins needs target libkrun, which CI provides. Needs
+# `cargo install cargo-zigbuild`, a `zig` on PATH, and
+# `rustup target add x86_64-unknown-linux-gnu`. musl is intentionally not the
+# default — libc's ioctl request arg is c_int there vs c_ulong on glibc, so the
+# COW FICLONE path (mvm-backend) only type-checks against glibc.
+check-linux TARGET="x86_64-unknown-linux-gnu":
+    cargo zigbuild --target {{TARGET}} --workspace --lib --all-features
+
 # Run mvmctl with arguments
 run *ARGS:
     cargo run -- {{ARGS}}
