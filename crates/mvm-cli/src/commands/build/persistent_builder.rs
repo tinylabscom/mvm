@@ -36,13 +36,14 @@
 //! - Install variant dispatch.
 //! - Stderr streaming.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 use serde::{Deserialize, Serialize};
 
+use mvm_build::builder_backend_select::{BuilderBackendChoice, resolve_env_override};
 use mvm_build::builder_protocol::HostVmResponseRead;
 use mvm_build::builder_vm::BuilderJob;
 use mvm_build::libkrun_builder::{
@@ -51,6 +52,7 @@ use mvm_build::libkrun_builder::{
 use mvm_build::persistent_builder::{
     DispatchOutcome, PersistentBuilderSupervisor, current_unix_secs,
 };
+use mvm_build::vz_builder::VzPersistentBuilderVm;
 
 use crate::commands::Cli;
 
@@ -182,7 +184,38 @@ pub fn run(_cli: &Cli, args: Args) -> Result<()> {
     }
 }
 
+/// Which persistent builder backend `start` brings up. Both libkrun and Vz
+/// expose a persistent host VM with the same dispatch contract
+/// (`HostVmRequest` over the per-VM dispatch socket), so the session record and
+/// `submit`/`stop` are backend-agnostic — only the spawn differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersistentBackend {
+    Libkrun,
+    Vz,
+}
+
+/// Resolve the explicit backend selection (`--builder`, folded into
+/// `MVM_BUILDER_BACKEND` at startup, or the env var directly) to the persistent
+/// host VM to spawn. An unset selection keeps libkrun — the verb's default,
+/// independent of the platform auto-detect. QEMU has no persistent host VM
+/// (it's a dev/test one-shot backend), so it fails closed with guidance.
+fn persistent_backend(explicit: Option<BuilderBackendChoice>) -> Result<PersistentBackend> {
+    match explicit {
+        None | Some(BuilderBackendChoice::Libkrun) => Ok(PersistentBackend::Libkrun),
+        Some(BuilderBackendChoice::Vz) => Ok(PersistentBackend::Vz),
+        Some(BuilderBackendChoice::Qemu) => bail!(
+            "`mvmctl persistent-builder start` has no QEMU persistent builder \
+             (QEMU is a one-shot dev/test backend). Use `--builder libkrun` or \
+             `--builder vz` (or omit `--builder` for libkrun)."
+        ),
+    }
+}
+
 fn run_start(args: StartArgs) -> Result<()> {
+    // Resolve the backend from the explicit selection (the `--builder` flag is
+    // folded into `MVM_BUILDER_BACKEND` at startup, so the env reflects it).
+    let backend = persistent_backend(resolve_env_override())?;
+
     if read_session_record().is_ok() {
         bail!(
             "a persistent-builder session is already running. \
@@ -195,40 +228,74 @@ fn run_start(args: StartArgs) -> Result<()> {
         None => std::env::current_dir().context("resolving current dir for --workspace")?,
     };
 
-    let vm = LibkrunPersistentHostVm::new(&workspace);
-    let handle = vm
-        .start()
-        .context("spawning persistent builder VM (LibkrunPersistentHostVm::start)")?;
-
-    let supervisor_pid = handle_pid(&handle);
-    let record = SessionRecord {
-        session_id: handle.session_id().to_string(),
-        dispatch_socket_path: handle.dispatch_socket_path(),
-        job_dir: handle.job_dir().to_path_buf(),
-        workspace_root: workspace,
-        supervisor_pid,
-        last_activity_unix_secs: Some(current_unix_secs()),
+    let record = match backend {
+        PersistentBackend::Libkrun => start_libkrun_persistent(workspace)?,
+        PersistentBackend::Vz => start_vz_persistent(workspace)?,
     };
     write_session_record(&record)?;
-
-    // We intentionally LEAK the handle here — the supervisor
-    // child stays running after this process exits. `stop`
-    // reattaches via the PID in the session record. The held
-    // `_nix_store_lock` inside the handle goes away when this
-    // process exits but the kernel-level flock follows the fd,
-    // which the supervisor's parent (now PID 1 after we exit)
-    // doesn't own — so the lock is released on our exit. That's
-    // a known gap: between this exit and the supervisor exit,
-    // another `mvmctl deps install` can take the lock. The
-    // mvmctl-side session record acts as a soft mutex (start
-    // refuses if one exists). Hardening to keep the kernel lock
-    // alive across CLI invocations is a follow-up.
-    std::mem::forget(handle);
 
     println!("session_id: {}", record.session_id);
     println!("dispatch_socket: {}", record.dispatch_socket_path.display());
     println!("supervisor_pid: {}", record.supervisor_pid);
     Ok(())
+}
+
+/// Spawn the libkrun persistent builder and build its session record.
+fn start_libkrun_persistent(workspace: PathBuf) -> Result<SessionRecord> {
+    let vm = LibkrunPersistentHostVm::new(&workspace);
+    let handle = vm
+        .start()
+        .context("spawning persistent builder VM (LibkrunPersistentHostVm::start)")?;
+    let record = SessionRecord {
+        session_id: handle.session_id().to_string(),
+        dispatch_socket_path: handle.dispatch_socket_path(),
+        job_dir: handle.job_dir().to_path_buf(),
+        workspace_root: workspace,
+        supervisor_pid: read_supervisor_pid(handle.vm_state_dir()),
+        last_activity_unix_secs: Some(current_unix_secs()),
+    };
+    leak_handle(handle);
+    Ok(record)
+}
+
+/// Spawn the Vz persistent builder and build its session record. The dispatch
+/// contract is identical to libkrun's, so the record (and `submit`/`stop`) are
+/// unchanged; only the VM type differs. `VzPersistentBuilderVm::start` fails
+/// closed on a non-Vz host, so `--builder vz` on Linux surfaces a clear error.
+fn start_vz_persistent(workspace: PathBuf) -> Result<SessionRecord> {
+    let vm = VzPersistentBuilderVm::new(&workspace);
+    let handle = vm
+        .start()
+        .context("spawning persistent builder VM (VzPersistentBuilderVm::start)")?;
+    let record = SessionRecord {
+        session_id: handle.session_id().to_string(),
+        dispatch_socket_path: handle.dispatch_socket_path(),
+        job_dir: handle.job_dir().to_path_buf(),
+        workspace_root: workspace,
+        supervisor_pid: read_supervisor_pid(handle.vm_state_dir()),
+        last_activity_unix_secs: Some(current_unix_secs()),
+    };
+    leak_vz_handle(handle);
+    Ok(record)
+}
+
+/// Intentionally LEAK the libkrun handle so the supervisor child stays running
+/// after this process exits. `stop` reattaches via the PID in the session
+/// record. The held `_nix_store_lock` inside the handle goes away when this
+/// process exits, but the kernel-level flock follows the fd, which the
+/// supervisor's parent (now PID 1 after we exit) doesn't own — so the lock is
+/// released on our exit. That's a known gap: between this exit and the
+/// supervisor exit, another `mvmctl deps install` can take the lock. The
+/// session record acts as a soft mutex (start refuses if one exists).
+/// Hardening to keep the kernel lock alive across CLI invocations is a follow-up.
+fn leak_handle(handle: PersistentVmHandle) {
+    std::mem::forget(handle);
+}
+
+/// Vz counterpart of [`leak_handle`] — same rationale; the Vz supervisor child
+/// and nix-store flock outlive this process and are reaped by `stop` via PID.
+fn leak_vz_handle(handle: mvm_build::vz_builder::VzPersistentVmHandle) {
+    std::mem::forget(handle);
 }
 
 fn run_submit(args: SubmitArgs) -> Result<()> {
@@ -545,12 +612,11 @@ fn send_sigterm(pid: u32) {
 /// process id of `std::process::Child` by going through `id()`
 /// when available. Returns 0 if the handle's child has already
 /// been consumed.
-fn handle_pid(handle: &PersistentVmHandle) -> u32 {
-    // PersistentVmHandle's `Child` is private. We can't read its
-    // PID directly. For now read it from the supervisor's PID
-    // file at <vm_state_dir>/builder.pid which the libkrun
-    // supervisor writes (see SupervisorConfig::pid_file_name).
-    let pid_path = handle.vm_state_dir().join("builder.pid");
+fn read_supervisor_pid(vm_state_dir: &Path) -> u32 {
+    // The handle's `Child` is private, so read the PID from the
+    // supervisor's PID file at <vm_state_dir>/builder.pid. Both the libkrun
+    // and Vz supervisors write that same filename, so this is backend-agnostic.
+    let pid_path = vm_state_dir.join("builder.pid");
     // The PID file may not exist immediately — the supervisor
     // writes it after init. Brief retry.
     for _ in 0..50 {
@@ -577,6 +643,37 @@ fn _force_read_use(r: HostVmResponseRead) -> HostVmResponseRead {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistent_backend_unset_and_libkrun_select_libkrun() {
+        // No explicit selection → libkrun default, regardless of platform auto-detect.
+        assert_eq!(
+            persistent_backend(None).unwrap(),
+            PersistentBackend::Libkrun
+        );
+        assert_eq!(
+            persistent_backend(Some(BuilderBackendChoice::Libkrun)).unwrap(),
+            PersistentBackend::Libkrun
+        );
+    }
+
+    #[test]
+    fn persistent_backend_explicit_vz_selects_vz() {
+        assert_eq!(
+            persistent_backend(Some(BuilderBackendChoice::Vz)).unwrap(),
+            PersistentBackend::Vz
+        );
+    }
+
+    #[test]
+    fn persistent_backend_rejects_qemu_with_guidance() {
+        let err = persistent_backend(Some(BuilderBackendChoice::Qemu)).unwrap_err();
+        let msg = format!("{err}");
+        // Names QEMU's absence and points at the supported backends.
+        assert!(msg.contains("QEMU"), "{msg}");
+        assert!(msg.contains("libkrun"), "{msg}");
+        assert!(msg.contains("vz"), "{msg}");
+    }
 
     #[test]
     fn shell_escape_wraps_value_in_single_quotes() {
