@@ -613,3 +613,40 @@ boots + agent ready; `vm rekernel rk --flake examples/sleeper --kernel-pin 6.12.
 (`resolve_pinned_kernel` → cached workload `vmlinux`); `REKERNEL_EXIT=0`, VM restarts under
 libkrun, guest agent answers over vsock (`vm wait` → 0, control-plane ready, first accept
 914 ms). `up --kernel-pin`'s `None` path is byte-unchanged, so existing boots are unaffected.
+
+## Shrink campaign (2026-06-22) — drive to the floor
+
+Inventory-driven audit-subtraction, **every batch boot-validated live under libkrun**
+(`machine boot-report` -> control plane ready = agent answers over vsock) on both the
+workload *and* builder kernels, and cross-checked against a proven-minimal libkrun guest
+config as an upper bound.
+
+| | workload `=y` | vmlinux | gz |
+|---|---|---|---|
+| Baseline | 1716 | 21.2 MB | 9.4 MB |
+| Final (Batches 1-5) | **1327** (-389, -22.7%) | **16.0 MiB** (-20%) | 7.1 MB |
+
+Batches (each a separate boot-validated commit): **1** firmware/firewire/input/serio/hwmon/
+watchdog; **2** EFI/MFD/I2C/GPIO/pinctrl/ChromeOS-EC; **3** the whole PCI subsystem (virtio
+rides MMIO); **4** NFS/PHY-MDIO/VFIO/IPMI/cpufreq-cpuidle/SPI/NVMEM/PWM; **5** CORESIGHT/
+KVM/remoteproc-RPMSG/IOMMU/vendor-UARTs. Budget ratcheted 4096 -> **1327** and enforced in the
+`kernel-build` lane (reads the xtask constant). x86_64 lands at ~1130.
+
+**Guard earned its keep:** a netfilter cut placed in the shared `base.nix` cascaded into the
+builder kernel (which needs iptables for its egress lockdown). The enable-stick guard caught
+it in CI; fixed by moving the drop to `workload.nix` (workload-only). This is exactly the
+"requested enables must stick" guard requested during the machine-run-volume coordination.
+
+### Deferred follow-ups (shrink)
+
+- [ ] **Push toward the ~1005 reference floor.** The remaining ~320 `=y` gap is *entangled*,
+  not cruft: ARM/ARCH platform built-ins (largely arch-essential), NET woven through
+  virtio-net/IP core, the CRYPTO set the minimal reference itself keeps, and GPIO/MOUSE/MDIO
+  residuals *select-pulled* by the VT console (a disable is a no-op without cutting the
+  console). Each costs real boot-risk for marginal size — do it surgically, one
+  boot-validated batch at a time, only if the size genuinely matters.
+- [ ] **Per-arch budgets.** A single 1327 ceiling (the aarch64 max) is loose for x86_64
+  (~1130). Split if x86_64 regressions need tight guarding.
+- [x] **Local metrics tooling** — `build kernel build` now emits the resolved `.config` +
+  `kernel-metrics-<arch>.json` and `--boot-check` self-validates the boot (PR #1275), so the
+  build->measure loop no longer needs a CI round-trip.
