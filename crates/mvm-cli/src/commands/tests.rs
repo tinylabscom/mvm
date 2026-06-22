@@ -4000,3 +4000,51 @@ fn machine_console_refused_on_sealed_image() {
         "claim-15 gate must fire through machine console path: {err}"
     );
 }
+
+/// Contract guard: the live-mode SDKs (`sdks/python/mvm/_sandbox.py`,
+/// `sdks/typescript/src/_sandbox.ts`) shell each `Sandbox` operation to
+/// `mvmctl` as a fixed argv shape. Those commands MUST keep parsing, or the
+/// SDK live mode silently breaks at runtime — which is exactly what happened
+/// when the per-op verbs were folded under `machine`. This turns the next such
+/// rename into a CI failure instead of a shipped-broken SDK.
+#[test]
+fn sdk_live_mode_shelled_commands_keep_parsing() {
+    // Mirrors the argv built in the SDKs' live transports. Update both sides
+    // together if the CLI surface the SDK depends on changes.
+    let sdk_commands: &[&[&str]] = &[
+        &[
+            "machine", "proc", "start", "vm", "-e", "K=V", "--", "echo", "hi",
+        ],
+        &["machine", "proc", "wait", "vm", "tok", "--timeout", "30"],
+        &["machine", "fs", "write", "vm", "/app/data.bin"],
+        &["machine", "cp", "host.txt", "vm:/guest.txt"],
+        &["machine", "forward", "vm", "--port", "8080:80"],
+        &["machine", "stop", "vm"],
+        // Boot call — still on the legacy `up` verb until `machine run --up-json`
+        // ships and the SDK swaps over; update this entry then.
+        &[
+            "up",
+            "--up-json",
+            "--name",
+            "vm",
+            "--manifest",
+            "tmpl",
+            "--ttl",
+            "1800s",
+        ],
+    ];
+    for argv in sdk_commands {
+        let full: Vec<&str> = std::iter::once("mvmctl")
+            .chain(argv.iter().copied())
+            .collect();
+        if let Err(e) = Cli::try_parse_from(&full) {
+            panic!(
+                "live-mode SDK shells `mvmctl {}` but it no longer parses — this \
+                 breaks the Python/TS Sandbox SDKs at runtime. Preserve the CLI \
+                 surface the SDK depends on, or migrate the SDK + this guard \
+                 together.\n{e}",
+                argv.join(" ")
+            );
+        }
+    }
+}
