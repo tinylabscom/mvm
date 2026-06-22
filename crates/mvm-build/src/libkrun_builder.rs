@@ -1278,7 +1278,7 @@ fn align_up(n: u64, align: u64) -> u64 {
 /// exact size. Linux KVM rejects a `KVM_SET_USER_MEMORY_REGION` whose size is
 /// not a multiple of the host page size, so an unaligned `vmlinux` makes VM
 /// creation fail with `EINVAL` (`rc -22`) — distinct from a `nix build` error,
-/// and previously masked by the ADR-093 libkrun→QEMU fallback. macOS HVF has no
+/// and previously masked by the libkrun→QEMU builder fallback. macOS HVF has no
 /// such requirement, so this is a no-op off Linux.
 ///
 /// Return a kernel path whose file size is page-aligned: the original when it
