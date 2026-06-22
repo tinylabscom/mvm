@@ -169,6 +169,29 @@ stream — leave unchanged), `console::run` (PTY attach to reuse), and
       full nextest suite passes. (One unrelated `mvm-hostd` broker-UDS test flaked
       under parallel load and passes in isolation; not touched by this change.)
 
+## Post-merge regression: interactive PTY data port never reachable on Vz/libkrun
+
+Task 5 verified the `-d` boot over the **agent-port `Exec` transport** and the
+`-t` TTY refusal gate, but assumed (line above) the exec transport "backs the
+interactive shell, so the interactive path's plumbing is exercised here." That
+was wrong: the interactive PTY uses a **second** transport leg. `ConsoleOpen`
+returns a dynamic data port (`CONSOLE_PORT_BASE + session_id`, e.g. 20001) and
+the host then connects to it — a different socket than the agent port. The
+per-port-UDS backends (Vz, libkrun) bind only a *static* vsock port list at
+boot (`vsock.ports = [GUEST_AGENT_PORT]`), so that data-port socket never
+existed and every `machine run -t` / `machine shell` / `up --console` attach
+failed with `Failed to connect to console data port … No such file or
+directory`. Firecracker was unaffected (it multiplexes all ports over one UDS).
+
+Fixed: `VmStartConfig.dev_console` pre-opens the bounded console data range
+(`mvm_guest::vsock::dev_console_data_ports()`, 128 ports — the same range the
+builder VM already opens) on the per-port-UDS backends. `cmd_run` sets it from
+`--console`; `start_persistent_oci_machine` sets it `true` so managed machines
+stay shell-able for their whole life. Claim 15 is unchanged — the dev-shell
+agent + `enforce_accessible_gate` still bar a sealed prod guest, leaving the
+listeners inert there. Live-proven on macOS Vz: a managed alpine boot binds
+`vsock-20001.sock`…`vsock-20128.sock` and the guest agent answers.
+
 ## Out of scope
 
 - Idle auto-stop / TTL reaping of persistent machines (warm-pool/reaper work is

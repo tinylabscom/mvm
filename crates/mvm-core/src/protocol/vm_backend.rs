@@ -133,6 +133,17 @@ pub struct VmStartConfig {
     /// dev shells) sets this to `NetworkPolicy::unrestricted()` explicitly;
     /// it is never an implicit, backend-specific fallback.
     pub network_policy: crate::network_policy::NetworkPolicy,
+    /// Pre-open the host-side interactive-console data-port range so a PTY can
+    /// attach (`machine run -t`, `machine shell`, `up --console`). The
+    /// per-port-UDS backends (libkrun, Vz) bind a static vsock port list at
+    /// start and otherwise can't reach the agent's dynamic
+    /// `CONSOLE_PORT_BASE + session_id` data port; Firecracker multiplexes
+    /// every port over one UDS and ignores this. Off by default — set only
+    /// for dev-accessible managed machines and `--console`. Claim 15's
+    /// dev-shell-gated agent + the host `enforce_accessible_gate` still bar
+    /// interactive access to a sealed prod guest regardless of this flag, so
+    /// the extra listeners are inert there.
+    pub dev_console: bool,
 }
 
 /// A host:guest port mapping, backend-agnostic.

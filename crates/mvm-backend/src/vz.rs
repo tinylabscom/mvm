@@ -2011,7 +2011,18 @@ fn build_supervisor_config(
         disks,
         virtio_fs,
         vsock: vz::VsockConfig {
-            ports: vec![mvm_guest::vsock::GUEST_AGENT_PORT],
+            // The supervisor binds a host-side UDS listener per port at start.
+            // The agent port is always reachable; a dev-accessible machine
+            // additionally pre-opens the interactive-console data range so
+            // `machine run -t` / `machine shell` / `up --console` can reach the
+            // agent's dynamic `CONSOLE_PORT_BASE + session_id` data port.
+            ports: {
+                let mut ports = vec![mvm_guest::vsock::GUEST_AGENT_PORT];
+                if config.dev_console {
+                    ports.extend(mvm_guest::vsock::dev_console_data_ports());
+                }
+                ports
+            },
             socket_dir: vsock_dir,
             // Host-listens / guest-connects channels. Egress substitution: the
             // guest dials SUBSTITUTION_PORT, the supervisor accepts and splices to
@@ -3071,6 +3082,71 @@ mod tests {
             !tmp.path()
                 .join(crate::substitution_spawn::SUBST_PID_FILE)
                 .exists()
+        );
+    }
+
+    #[test]
+    fn build_supervisor_config_dev_console_pre_opens_console_data_ports() {
+        // A dev-accessible managed machine (`machine run -t` / `machine shell`
+        // / `up --console`) must pre-open the interactive-console data range,
+        // or the post-boot PTY attach can't reach the agent's dynamic
+        // `CONSOLE_PORT_BASE + session_id` data port over Vz's per-port UDS.
+        let mut cfg = VmStartConfig {
+            name: "console".into(),
+            cpus: 1,
+            memory_mib: 256,
+            dev_console: true,
+            ..Default::default()
+        };
+        cfg.kernel_path = Some("/abs/vmlinux".into());
+        cfg.rootfs_path = "/abs/rootfs.ext4".into();
+        let state_dir = Path::new("/tmp/vz-console-state");
+        let gvproxy_info = host_gvproxy::HostGvproxyInfo {
+            socket_path: state_dir.join("gvproxy.sock"),
+            pid: 0,
+        };
+        let built =
+            build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, &gvproxy_info).expect("build");
+
+        assert!(
+            built
+                .vsock
+                .ports
+                .contains(&mvm_guest::vsock::GUEST_AGENT_PORT),
+            "agent port must always be present"
+        );
+        assert!(
+            built
+                .vsock
+                .ports
+                .contains(&(mvm_guest::vsock::CONSOLE_PORT_BASE + 1)),
+            "first console data port must be pre-opened when dev_console is set"
+        );
+        assert!(
+            built.vsock.ports.contains(
+                &(mvm_guest::vsock::CONSOLE_PORT_BASE
+                    + mvm_guest::vsock::DEV_CONSOLE_DATA_PORT_COUNT)
+            ),
+            "last console data port must be pre-opened when dev_console is set"
+        );
+
+        // ...and a non-dev machine keeps the tight default (agent only).
+        let mut plain = VmStartConfig {
+            name: "plain".into(),
+            cpus: 1,
+            memory_mib: 256,
+            ..Default::default()
+        };
+        plain.kernel_path = Some("/abs/vmlinux".into());
+        plain.rootfs_path = "/abs/rootfs.ext4".into();
+        let built_plain = build_supervisor_config(&plain, "/abs/vmlinux", state_dir, &gvproxy_info)
+            .expect("build");
+        assert!(
+            !built_plain
+                .vsock
+                .ports
+                .contains(&(mvm_guest::vsock::CONSOLE_PORT_BASE + 1)),
+            "console range must NOT be opened when dev_console is unset"
         );
     }
 

@@ -84,6 +84,24 @@ pub const PORT_FORWARD_BASE: u32 = 10000;
 /// Base vsock port for interactive console PTY sessions.
 pub const CONSOLE_PORT_BASE: u32 = 20000;
 
+/// How many interactive-console data ports a dev-accessible VM pre-opens.
+/// The guest agent allocates `CONSOLE_PORT_BASE + session_id` per
+/// `ConsoleOpen`, with `session_id` incrementing monotonically over the VM's
+/// life (one active session at a time), so this bounds the number of console
+/// attaches before the pre-opened range is exhausted.
+pub const DEV_CONSOLE_DATA_PORT_COUNT: u32 = 128;
+
+/// The host-side console data-port range a dev-accessible VM pre-opens so an
+/// interactive PTY (`machine run -t`, `machine shell`, `up --console`) can
+/// reach the agent-allocated `CONSOLE_PORT_BASE + session_id` data channel.
+///
+/// The per-port-UDS backends (libkrun, Vz) bind a *static* vsock port list at
+/// start, so a dynamic data port is unreachable unless it was pre-declared;
+/// Firecracker multiplexes every port over one UDS and ignores this range.
+pub fn dev_console_data_ports() -> impl Iterator<Item = u32> {
+    (1..=DEV_CONSOLE_DATA_PORT_COUNT).map(|offset| CONSOLE_PORT_BASE + offset)
+}
+
 /// Default connect/read timeout in seconds.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
@@ -3165,6 +3183,20 @@ pub fn mount_volume_on(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_console_data_ports_cover_the_expected_range() {
+        let ports: Vec<u32> = dev_console_data_ports().collect();
+        assert_eq!(ports.len(), DEV_CONSOLE_DATA_PORT_COUNT as usize);
+        assert_eq!(ports.first().copied(), Some(CONSOLE_PORT_BASE + 1));
+        assert_eq!(
+            ports.last().copied(),
+            Some(CONSOLE_PORT_BASE + DEV_CONSOLE_DATA_PORT_COUNT)
+        );
+        // Disjoint from the agent + control ports (no allowlist overlap).
+        assert!(!ports.contains(&GUEST_AGENT_PORT));
+        assert!(!ports.contains(&CONSOLE_PORT_BASE));
+    }
 
     #[test]
     fn adaptive_backoff_grows_then_caps_and_is_never_zero() {

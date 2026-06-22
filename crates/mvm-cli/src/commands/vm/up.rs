@@ -1990,6 +1990,14 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         network_policy,
     }
     .into_start_config();
+    // A persistent named/detached machine is dev-accessible for its lifetime:
+    // `machine run -t` boots through here, and `machine shell` / `machine
+    // console` attach to it later. Pre-open the interactive-console data range
+    // so those attaches reach the agent's dynamic data port on the
+    // per-port-UDS backends (libkrun, Vz). Claim 15 still bars a sealed prod
+    // guest at the agent + `enforce_accessible_gate`, leaving the listeners
+    // inert there.
+    start_config.dev_console = true;
     attach_runtime_overlay_if_cached(&mut start_config, &effective_hypervisor);
     if let Some(ctx) = admission.as_ref() {
         thread_tenant_id(&mut start_config, &ctx.admitted);
@@ -2187,6 +2195,9 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<String> {
             cpus: direct_cpus,
             memory_mib: direct_mem,
             network_policy: network_policy.clone(),
+            // `up --console` attaches an interactive PTY after boot, so the
+            // per-port-UDS backends must pre-open the console data range.
+            dev_console: console,
             ..Default::default()
         };
         // Attach the verity-sealed runtime overlay (Firecracker only, non-fatal).

@@ -303,6 +303,19 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     krun = krun.with_kernel_format(kernel_format);
     krun.rootfs_path = Some(config.rootfs_path.clone());
 
+    // A dev-accessible managed machine (`machine run -t` / `machine shell` /
+    // `up --console`) pre-opens the interactive-console data range. libkrun
+    // binds one host UDS listener per registered port (`listen=true`, host
+    // dials → guest's vsock server), so the agent's dynamic
+    // `CONSOLE_PORT_BASE + session_id` data port is unreachable unless it was
+    // declared here. Left out of `krun_context_base` so the warm-standby base
+    // (no `VmStartConfig` yet) stays unchanged.
+    if config.dev_console {
+        for port in mvm_guest::vsock::dev_console_data_ports() {
+            krun = krun.add_vsock_port(port);
+        }
+    }
+
     // User-supplied volumes (--volume / MVM_VOLUMES). A directory share
     // is a virtio-fs device; a disk image is an extra virtio-blk device.
     // Tag/id `uvol{idx}` is the coordination key the guest mount manifest
@@ -1268,6 +1281,60 @@ mod tests {
             ..Default::default()
         }];
         assert!(build_supervisor_config(&ro_disk, tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn build_supervisor_config_dev_console_pre_opens_console_data_ports() {
+        // A dev-accessible managed machine must pre-open the console data
+        // range; libkrun binds one host UDS listener per registered port, so
+        // the agent's dynamic data port is otherwise unreachable on attach.
+        let config = VmStartConfig {
+            name: "console".into(),
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            kernel_path: Some("/tmp/vmlinux".into()),
+            cpus: 1,
+            memory_mib: 256,
+            dev_console: true,
+            ..Default::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = build_supervisor_config(&config, tmp.path()).expect("build");
+        assert!(
+            cfg.krun
+                .vsock_ports
+                .contains(&mvm_guest::vsock::GUEST_AGENT_PORT)
+        );
+        assert!(
+            cfg.krun
+                .vsock_ports
+                .contains(&(mvm_guest::vsock::CONSOLE_PORT_BASE + 1)),
+            "first console data port must be registered when dev_console is set"
+        );
+        assert!(
+            cfg.krun.vsock_ports.contains(
+                &(mvm_guest::vsock::CONSOLE_PORT_BASE
+                    + mvm_guest::vsock::DEV_CONSOLE_DATA_PORT_COUNT)
+            ),
+            "last console data port must be registered when dev_console is set"
+        );
+
+        // The default (non-dev) boot keeps the tight agent-only port set.
+        let plain = VmStartConfig {
+            name: "plain".into(),
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            kernel_path: Some("/tmp/vmlinux".into()),
+            cpus: 1,
+            memory_mib: 256,
+            ..Default::default()
+        };
+        let cfg_plain = build_supervisor_config(&plain, tmp.path()).expect("build");
+        assert!(
+            !cfg_plain
+                .krun
+                .vsock_ports
+                .contains(&(mvm_guest::vsock::CONSOLE_PORT_BASE + 1)),
+            "console range must NOT be registered when dev_console is unset"
+        );
     }
 
     #[test]
