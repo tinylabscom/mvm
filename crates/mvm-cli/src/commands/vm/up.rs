@@ -1308,6 +1308,29 @@ pub(super) fn resolve_pinned_kernel(
     }
 }
 
+/// Resolve a `--kernel-pin` request to a concrete workload-kernel path, or
+/// `None` when no pin was requested (the caller then falls back to the image's
+/// own kernel / the default microVM image). The pin selects the locally-built
+/// workload kernel from the mvm cache; presence is the signal — the value is a
+/// human label only. Shared by the canonical `machine run` boot path.
+pub(in crate::commands) fn resolve_kernel_pin_path(pinned: bool) -> anyhow::Result<Option<String>> {
+    if !pinned {
+        return Ok(None);
+    }
+    let cache_dir = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    let source_checkout = super::super::env::dev_vz::find_builder_vm_flake_is_source_checkout();
+    Ok(Some(resolve_pinned_kernel(
+        &cache_dir,
+        arch,
+        source_checkout,
+    )?))
+}
+
 /// Production wrapper: build the resolver from the mvm cache dir + the
 /// running mvmctl version, then attach for `hypervisor`. Called at each
 /// workload-boot `VmStartConfig` construction in [`run`].

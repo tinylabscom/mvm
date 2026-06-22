@@ -217,6 +217,11 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Skip plan-admission signing (hidden; for testing only).
     #[arg(long, hide = true)]
     pub no_supervisor: bool,
+    /// Boot the locally-built workload kernel from the mvm cache instead of the
+    /// image's own kernel. Presence is the signal; the value is a label only.
+    /// (Hidden — primarily threaded by `vm rekernel`.)
+    #[arg(long = "kernel-pin", value_name = "PIN", hide = true)]
+    pub kernel_pin: Option<String>,
     // ── Action axis: --entrypoint dispatches the image's baked entrypoint ──
     /// Call the image's baked `/etc/mvm/entrypoint` instead of running argv —
     /// the production-safe call surface (no shell, no argv override): dispatches
@@ -700,6 +705,11 @@ pub(in crate::commands) struct MachineStartArgs {
     /// Skip plan-admission signing (hidden; for testing only).
     #[arg(long, hide = true)]
     pub no_supervisor: bool,
+    /// Boot the locally-built workload kernel from the mvm cache instead of the
+    /// image's own kernel. Presence is the signal; the value is a label only.
+    /// (Hidden — primarily threaded by `vm rekernel`.)
+    #[arg(long = "kernel-pin", value_name = "PIN", hide = true)]
+    pub kernel_pin: Option<String>,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -1676,6 +1686,13 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         };
         (None, label, rootfs, digest)
     };
+    // A `--kernel-pin` request overrides the image's own kernel with the
+    // locally-built workload kernel (the canonical boot path for `vm rekernel`).
+    // Direct-boot's explicit kernel always wins.
+    let kernel_path = match direct_boot_kernel {
+        Some(k) => Some(k),
+        None => super::vm::up::resolve_kernel_pin_path(args.kernel_pin.is_some())?,
+    };
     super::vm::up::start_persistent_oci_machine(super::vm::up::PersistentImageStartParams {
         name: &spec.name,
         image_label: &boot_label,
@@ -1690,7 +1707,7 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         auth: machine_start_plan_auth_policy(&spec),
         hypervisor_override: args.hypervisor.as_deref(),
         no_supervisor: args.no_supervisor,
-        kernel_path: direct_boot_kernel,
+        kernel_path,
     })?;
     if let Some(host_sock) = ssh_auth_sock.as_deref()
         && let Err(err) =
@@ -2029,6 +2046,7 @@ fn run_persistent(
             dry_run: false,
             hypervisor: args.hypervisor.clone(),
             no_supervisor: args.no_supervisor,
+            kernel_pin: args.kernel_pin.clone(),
         },
     )?;
     if !booted && !args.json {
@@ -2115,6 +2133,7 @@ fn run_interactive(
             dry_run: false,
             hypervisor: args.hypervisor.clone(),
             no_supervisor: args.no_supervisor,
+            kernel_pin: args.kernel_pin.clone(),
         },
     )?;
 
@@ -2267,6 +2286,61 @@ fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<
             run_interactive(cli, args, cfg, resolved_flake_slot.as_deref())
         }
     }
+}
+
+/// Boot (or reboot) a persistent machine by name through the canonical
+/// `machine run` persistent path. `vm rekernel` uses this to relaunch a
+/// stopped machine on a pinned/updated kernel without re-implementing any boot
+/// logic. With no `flake` source the existing on-disk spec is reused (config
+/// preserved) and only the kernel is swapped via `kernel_pin`; a `flake` source
+/// rebuilds and recreates. The caller stops the machine first when a fresh boot
+/// is required (the persistent path no-ops when the target is already running).
+pub(in crate::commands) fn boot_persistent_by_name(
+    cli: &Cli,
+    cfg: &MvmConfig,
+    name: String,
+    flake: Option<String>,
+    kernel_pin: Option<String>,
+    hypervisor: Option<String>,
+) -> Result<()> {
+    run_dispatch(
+        cli,
+        MachineRunArgs {
+            name: Some(name),
+            flake,
+            kernel_pin,
+            hypervisor,
+            detach: true,
+            // Everything else takes machine-run defaults; a no-source reconnect
+            // reuses the existing spec, so these only apply on a --flake recreate.
+            image: None,
+            manifest: None,
+            flake_profile: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            memory: "512M".to_string(),
+            profile: RunProfile::Standard,
+            volume: Vec::new(),
+            env: Vec::new(),
+            timeout: None,
+            receipt: None,
+            json: false,
+            dry_run: false,
+            tty: false,
+            interactive: false,
+            force: false,
+            no_supervisor: false,
+            entrypoint: false,
+            stdin: None,
+            fresh: false,
+            reset: false,
+            from_workload_ir: None,
+            attach: false,
+            argv: Vec::new(),
+        },
+        cfg,
+    )
 }
 
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
@@ -2698,21 +2772,21 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_creates_reuses_and_auto_recreates_on_config_change() {
+    fn reconcile_creates_reuses_and_force_recreates_on_config_change() {
         let desired = spec_fixture("web");
 
         assert_eq!(
-            reconcile_machine_spec(None, &desired),
+            reconcile_machine_spec(None, &desired, false).expect("create"),
             SpecReconcile::Create
         );
 
         let same = spec_fixture("web");
         assert_eq!(
-            reconcile_machine_spec(Some(&same), &desired),
+            reconcile_machine_spec(Some(&same), &desired, false).expect("reuse"),
             SpecReconcile::Reuse
         );
 
-        // A different config auto-recreates (no --force) and reports what changed.
+        // A different config is force-gated: error without --force, recreate with.
         let mut different = spec_fixture("web");
         different.image = Some("ubuntu:24.04".to_string());
         different.cpus += 1;
@@ -2777,7 +2851,7 @@ mod tests {
             &format!("{host}:/work:ro"),
         ])
         .expect("parse");
-        let spec = machine_run_spec(&args, "web".to_string()).expect("spec");
+        let spec = machine_run_spec(&args, "web".to_string(), None).expect("spec");
         assert_eq!(spec.volumes.len(), 1);
         let stored = &spec.volumes[0];
         // Host pinned to an absolute (canonicalized) path so a reconnect from a
@@ -2805,7 +2879,7 @@ mod tests {
             &format!("{host}:/work:rw"),
         ])
         .expect("parse");
-        let err = machine_run_spec(&std_args, "web".to_string())
+        let err = machine_run_spec(&std_args, "web".to_string(), None)
             .expect_err(":rw needs a dev-capable profile");
         assert!(err.to_string().contains("profile dev"), "msg: {err}");
 
@@ -2822,7 +2896,8 @@ mod tests {
             &format!("{host}:/work:rw"),
         ])
         .expect("parse");
-        let spec = machine_run_spec(&dev_args, "web".to_string()).expect("dev profile allows :rw");
+        let spec =
+            machine_run_spec(&dev_args, "web".to_string(), None).expect("dev profile allows :rw");
         assert!(
             spec.volumes[0].ends_with(":/work:rw"),
             "stored: {}",
