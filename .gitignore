@@ -2,6 +2,7 @@
 # Swift Package Manager build output (mvm-providers/swift, mvm-vz-supervisor).
 **/.build/
 .playwright-mcp/
+.superpowers/
 .claude/*
 !.claude/settings.json
 **/node_modules
