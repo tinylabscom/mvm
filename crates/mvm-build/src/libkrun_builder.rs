@@ -1264,6 +1264,108 @@ impl BuilderVmImage {
 /// pre-populated with the variant's kernel cmdline (where applicable).
 /// `RootDir` images carry no cmdline — libkrun handles `set_root`
 /// mode without one.
+/// Page size KVM's `KVM_SET_USER_MEMORY_REGION` aligns to (4 KiB on x86_64 /
+/// aarch64 Linux, where the bug below manifests; larger guest pages are still
+/// multiples of it).
+const KVM_REGION_ALIGN: u64 = 4096;
+
+/// Round `n` up to the next multiple of `align`.
+fn align_up(n: u64, align: u64) -> u64 {
+    n.div_ceil(align) * align
+}
+
+/// libkrun maps the external kernel into guest memory with the kernel file's
+/// exact size. Linux KVM rejects a `KVM_SET_USER_MEMORY_REGION` whose size is
+/// not a multiple of the host page size, so an unaligned `vmlinux` makes VM
+/// creation fail with `EINVAL` (`rc -22`) — distinct from a `nix build` error,
+/// and previously masked by the ADR-093 libkrun→QEMU fallback. macOS HVF has no
+/// such requirement, so this is a no-op off Linux.
+///
+/// Return a kernel path whose file size is page-aligned: the original when it
+/// already is, otherwise a zero-padded sibling (`vmlinux` →
+/// `vmlinux.page-aligned`) created next to it and reused across builds. Trailing
+/// zeros are safe — libkrun loads the kernel from its own headers; the padded
+/// tail is unused guest RAM.
+fn page_aligned_kernel(kernel_path: &Path) -> Result<PathBuf, BuilderVmError> {
+    if !cfg!(target_os = "linux") {
+        return Ok(kernel_path.to_path_buf());
+    }
+    let size = std::fs::metadata(kernel_path)
+        .map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!(
+                "stat builder kernel {}: {e}",
+                kernel_path.display()
+            ))
+        })?
+        .len();
+    if size.is_multiple_of(KVM_REGION_ALIGN) {
+        return Ok(kernel_path.to_path_buf());
+    }
+    let aligned_size = align_up(size, KVM_REGION_ALIGN);
+    let aligned_path = kernel_path.with_extension("page-aligned");
+    if !aligned_copy_is_current(&aligned_path, aligned_size, kernel_path) {
+        write_zero_padded_copy(kernel_path, &aligned_path, aligned_size)?;
+    }
+    Ok(aligned_path)
+}
+
+/// True when `aligned_path` is a reusable cached copy: it exists, has the
+/// expected padded size, and is no older than the source (a rebuilt `vmlinux`
+/// regenerates it).
+fn aligned_copy_is_current(aligned_path: &Path, aligned_size: u64, source: &Path) -> bool {
+    let (Ok(a), Ok(s)) = (std::fs::metadata(aligned_path), std::fs::metadata(source)) else {
+        return false;
+    };
+    if a.len() != aligned_size {
+        return false;
+    }
+    matches!((a.modified(), s.modified()), (Ok(am), Ok(sm)) if am >= sm)
+}
+
+/// Copy `source` to `dest` and zero-extend it to `padded_size` (`set_len`
+/// zero-fills the tail). Written to a temp sibling then renamed so a concurrent
+/// reader never sees a half-written kernel.
+fn write_zero_padded_copy(
+    source: &Path,
+    dest: &Path,
+    padded_size: u64,
+) -> Result<(), BuilderVmError> {
+    let mut tmp = dest.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::copy(source, &tmp).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "copy kernel {} -> {}: {e}",
+            source.display(),
+            tmp.display()
+        ))
+    })?;
+    // `fs::copy` preserves the source's mode; the cached `vmlinux` comes from a
+    // read-only Nix store path, so make the working copy writable before we
+    // extend it (else `set_len` fails EACCES for a non-root builder).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("chmod {}: {e}", tmp.display()))
+        })?;
+    }
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&tmp)
+        .map_err(|e| BuilderVmError::ExtractionFailed(format!("open {}: {e}", tmp.display())))?;
+    f.set_len(padded_size)
+        .map_err(|e| BuilderVmError::ExtractionFailed(format!("pad {}: {e}", tmp.display())))?;
+    drop(f);
+    std::fs::rename(&tmp, dest).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "rename {} -> {}: {e}",
+            tmp.display(),
+            dest.display()
+        ))
+    })
+}
+
 fn krun_context_for_image(
     vm_name: &str,
     image: &BuilderVmImage,
@@ -1273,12 +1375,15 @@ fn krun_context_for_image(
             kernel_path,
             rootfs_path,
             cmdline,
-        } => Ok(KrunContext::new(
-            vm_name,
-            path_to_str(kernel_path, "kernel_path")?,
-            path_to_str(rootfs_path, "rootfs_path")?,
-        )
-        .with_cmdline(cmdline.as_str())),
+        } => {
+            let kernel = page_aligned_kernel(kernel_path)?;
+            Ok(KrunContext::new(
+                vm_name,
+                path_to_str(&kernel, "kernel_path")?,
+                path_to_str(rootfs_path, "rootfs_path")?,
+            )
+            .with_cmdline(cmdline.as_str()))
+        }
         BuilderVmImage::RootDir {
             root_dir,
             entry_path,
@@ -2433,6 +2538,88 @@ mod tests {
     use crate::builder_vm_runtime::{INSTALL_SPEC_FILENAME, shell_single_quote_escape};
     use mvm_core::util::test_env::TestEnv;
     use tempfile::TempDir;
+
+    #[test]
+    fn align_up_rounds_to_next_multiple() {
+        assert_eq!(align_up(0, 4096), 0);
+        assert_eq!(align_up(1, 4096), 4096);
+        assert_eq!(align_up(4096, 4096), 4096);
+        assert_eq!(align_up(4097, 4096), 8192);
+        // The real builder-kernel case: 8_963_072 (mod 4096 == 1024) → 8_966_144.
+        assert_eq!(align_up(8_963_072, 4096), 8_966_144);
+    }
+
+    #[test]
+    fn write_zero_padded_copy_pads_and_preserves_prefix() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("vmlinux");
+        let body = vec![0xABu8; 5000]; // not a multiple of 4096
+        std::fs::write(&src, &body).unwrap();
+        let dest = dir.path().join("vmlinux.page-aligned");
+        write_zero_padded_copy(&src, &dest, 8192).unwrap();
+
+        let padded = std::fs::read(&dest).unwrap();
+        assert_eq!(padded.len(), 8192, "padded to the page boundary");
+        assert_eq!(&padded[..5000], &body[..], "original bytes preserved");
+        assert!(padded[5000..].iter().all(|&b| b == 0), "tail zero-filled");
+        // The temp sibling is renamed away, not left behind.
+        assert!(!dir.path().join("vmlinux.page-aligned.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_zero_padded_copy_handles_read_only_source() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("vmlinux");
+        std::fs::write(&src, vec![0x5Au8; 5000]).unwrap();
+        // Mirror the cached kernel: a read-only Nix-store-style source.
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let dest = dir.path().join("vmlinux.page-aligned");
+        // Must not fail EACCES extending the copied (read-only) file.
+        write_zero_padded_copy(&src, &dest, 8192).unwrap();
+        assert_eq!(std::fs::metadata(&dest).unwrap().len(), 8192);
+    }
+
+    #[test]
+    fn aligned_copy_is_current_only_when_sized_and_fresh() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("vmlinux");
+        std::fs::write(&src, vec![1u8; 5000]).unwrap();
+        let aligned = dir.path().join("vmlinux.page-aligned");
+
+        // Absent → not current.
+        assert!(!aligned_copy_is_current(&aligned, 8192, &src));
+        // Wrong size → not current.
+        std::fs::write(&aligned, vec![0u8; 4096]).unwrap();
+        assert!(!aligned_copy_is_current(&aligned, 8192, &src));
+        // Correct size and at least as new as the source → current.
+        std::fs::write(&aligned, vec![0u8; 8192]).unwrap();
+        assert!(aligned_copy_is_current(&aligned, 8192, &src));
+    }
+
+    #[test]
+    fn page_aligned_kernel_passes_through_when_already_aligned() {
+        let dir = TempDir::new().unwrap();
+        let k = dir.path().join("vmlinux");
+        std::fs::write(&k, vec![0u8; 8192]).unwrap(); // multiple of 4096
+        // Already aligned → original path, no sibling created.
+        assert_eq!(page_aligned_kernel(&k).unwrap(), k);
+        assert!(!dir.path().join("vmlinux.page-aligned").exists());
+    }
+
+    // The padding path is Linux-only (KVM's alignment requirement; macOS HVF
+    // tolerates an unaligned kernel and `page_aligned_kernel` short-circuits).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn page_aligned_kernel_pads_unaligned_on_linux() {
+        let dir = TempDir::new().unwrap();
+        let k = dir.path().join("vmlinux");
+        std::fs::write(&k, vec![7u8; 5000]).unwrap(); // not a multiple of 4096
+        let aligned = page_aligned_kernel(&k).unwrap();
+        assert_eq!(aligned, dir.path().join("vmlinux.page-aligned"));
+        assert_eq!(std::fs::metadata(&aligned).unwrap().len(), 8192);
+    }
 
     fn ok_mounts(scratch: &TempDir) -> BuilderMounts {
         let flake = scratch.path().join("flake");
