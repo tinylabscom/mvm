@@ -67,7 +67,7 @@ let
 
     # process basics
     "BINFMT_ELF" "BINFMT_SCRIPT" "FUTEX" "EPOLL" "SIGNALFD"
-    "EVENTFD" "TIMERFD" "POSIX_MQUEUE" "SYSVIPC"
+    "EVENTFD" "TIMERFD" "SYSVIPC"
     "MULTIUSER" "SYSCTL" "PRINTK" "PRINTK_TIME" "KALLSYMS" "BUG"
     "RTC_CLASS" "HIGH_RES_TIMERS" "NO_HZ_IDLE"
 
@@ -99,6 +99,10 @@ let
     # Force-dropped (not merely absent from enables) so `olddefconfig`
     # drops a defconfig default instead of leaving it `=y`.
     "EXT4_USE_FOR_EXT2"  # nothing mounts ext2/ext3; ext4 only
+    # POSIX message queues: guests talk over vsock; neither the agent, a
+    # sealed workload, nor the nix-build sandbox open mq_*. Force-dropped to
+    # delete the mq_open/mq_timedsend/… syscall surface (defconfig has it =y).
+    "POSIX_MQUEUE"
 
     # Userspace-visible classes we don't need.
     "DRM" "SOUND" "USB" "WIRELESS" "BT" "FB"
