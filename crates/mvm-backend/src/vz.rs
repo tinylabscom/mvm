@@ -74,7 +74,7 @@ impl Drop for AttachedGvproxyGuard {
     }
 }
 
-/// Tear-down guard for the per-VM `mvm-vz-drainer`
+/// Tear-down guard for the per-VM `mvm-bridge`
 /// sidecar that bridges Swift's NDJSON `FlowEventWire` socket into the
 /// chain-signed audit pipeline. Mirrors
 /// `AttachedGvproxyGuard`'s shape: kills + reaps the child on `Drop` so
@@ -109,14 +109,14 @@ impl Drop for AttachedDrainerGuard {
                 tracing::warn!(
                     drainer_pid = pid,
                     error = %e,
-                    "AttachedDrainerGuard: kill mvm-vz-drainer failed on drop"
+                    "AttachedDrainerGuard: kill mvm-bridge failed on drop"
                 );
             }
             if let Err(e) = c.wait() {
                 tracing::warn!(
                     drainer_pid = pid,
                     error = %e,
-                    "AttachedDrainerGuard: wait mvm-vz-drainer failed on drop"
+                    "AttachedDrainerGuard: wait mvm-bridge failed on drop"
                 );
             }
         }
@@ -128,7 +128,7 @@ impl Drop for AttachedDrainerGuard {
 /// the same `~/.mvm/vms/<name>/` tree if a host happens to use both.
 const PID_FILE_NAME: &str = "vz.pid";
 
-/// PID file the `mvm-vz-drainer` sibling writes
+/// PID file the `mvm-bridge` sibling writes
 /// after a successful boot. Lives next to `vz.pid` so `VzBackend::stop`
 /// can reap the drainer the same way it reaps the supervisor.
 const DRAINER_PID_FILE_NAME: &str = "vz-drainer.pid";
@@ -278,7 +278,7 @@ impl VmBackend for VzBackend {
             disk.read_only = false;
         }
 
-        // Spawn the `mvm-vz-drainer` sibling between gvproxy and the Vz
+        // Spawn the `mvm-bridge` sibling between gvproxy and the Vz
         // VM boot. Closes the Vz audit carve-out: the drainer binds
         // `events_ingest_socket_path`,
         // reads Swift's NDJSON `FlowEventWire` stream, and chain-signs
@@ -393,7 +393,7 @@ impl VmBackend for VzBackend {
             tracing::warn!(
                 vm = %config.name,
                 error = %e,
-                "detach/persist mvm-vz-drainer PID failed (non-fatal); guard remains attached"
+                "detach/persist mvm-bridge PID failed (non-fatal); guard remains attached"
             );
         }
 
@@ -538,7 +538,7 @@ impl VmBackend for VzBackend {
             );
         }
 
-        // Reap the `mvm-vz-drainer` sibling that `start()` spawned and
+        // Reap the `mvm-bridge` sibling that `start()` spawned and
         // detached. Same SIGTERM → poll → SIGKILL ladder as the
         // supervisor; best-effort because some VMs have
         // no drainer (legacy callers without `plan_json`).
@@ -2191,7 +2191,7 @@ fn workspace_root_from_manifest_dir() -> Option<PathBuf> {
     manifest_dir.parent()?.parent().map(Path::to_path_buf)
 }
 
-const VZ_HELPER_BINARIES: [&str; 2] = ["mvm-vz-supervisor", "mvm-vz-drainer"];
+const VZ_HELPER_BINARIES: [&str; 2] = ["mvm-vz-supervisor", "mvm-bridge"];
 
 fn is_source_checkout_helper_dir(helper_dir: &Path, workspace_root: &Path) -> bool {
     helper_dir.starts_with(workspace_root) && source_checkout_helper_profile(helper_dir).is_some()
@@ -2217,7 +2217,7 @@ fn ensure_source_checkout_vz_helpers(workspace_root: &Path, helper_dir: &Path) -
 
     ui::info(
         "Building Vz helper binaries for this source checkout \
-         (mvm-vz-supervisor, mvm-vz-drainer)...",
+         (mvm-vz-supervisor, mvm-bridge)...",
     );
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut args = vec![
@@ -2227,7 +2227,7 @@ fn ensure_source_checkout_vz_helpers(workspace_root: &Path, helper_dir: &Path) -
         "--bin",
         "mvm-vz-supervisor",
         "--bin",
-        "mvm-vz-drainer",
+        "mvm-bridge",
     ];
     if source_checkout_helper_profile(helper_dir) == Some("release") {
         args.push("--release");
@@ -2312,7 +2312,7 @@ fn max_system_time(a: Option<SystemTime>, b: Option<SystemTime>) -> Option<Syste
     }
 }
 
-/// Spawn the `mvm-vz-drainer` sibling. Returns an
+/// Spawn the `mvm-bridge` sibling. Returns an
 /// [`AttachedDrainerGuard`] still holding the `Child`; the caller
 /// either lets the guard fall out of scope on early-return to kill the
 /// drainer, or calls [`AttachedDrainerGuard::detach`] after the Vz
@@ -2329,14 +2329,14 @@ fn spawn_vz_drainer(config: &VmStartConfig) -> Result<AttachedDrainerGuard> {
     let Some(plan_json) = config.plan_json.as_deref() else {
         tracing::debug!(
             vm = %config.name,
-            "no plan_json on VmStartConfig; skipping mvm-vz-drainer (legacy path)"
+            "no plan_json on VmStartConfig; skipping mvm-bridge (legacy path)"
         );
         return Ok(AttachedDrainerGuard { child: None });
     };
     if config.tenant_id.is_none() {
         tracing::warn!(
             vm = %config.name,
-            "plan_json set without tenant_id; skipping mvm-vz-drainer (wire-level inconsistency — \
+            "plan_json set without tenant_id; skipping mvm-bridge (wire-level inconsistency — \
              Plan 112 Phase 3c requires both for substrate path derivation)"
         );
         return Ok(AttachedDrainerGuard { child: None });
@@ -2345,24 +2345,32 @@ fn spawn_vz_drainer(config: &VmStartConfig) -> Result<AttachedDrainerGuard> {
     let data_dir = PathBuf::from(mvm_core::config::mvm_data_dir());
     let audit_dir = data_dir.join("audit");
     let audit_socket = audit_dir.join(format!("gateway-{}.sock", config.name));
-    let signing_key_path = data_dir.join("keys").join("host-signer.ed25519");
+    let keys_dir = data_dir.join("keys");
+    let signing_key_path = keys_dir.join("host-signer.ed25519");
     let events_socket = events_ingest_socket_path(&config.name);
 
+    // Unified `mvm_vm_host::bridge::parse::BridgeConfigJson` shape (built as raw
+    // JSON because mvm-backend cannot depend on the leaf bin crate). `keys_dir`
+    // is required by the unified contract (only used by Linux confinement; inert
+    // on the macOS vz path). No `network_policy_json`: the Swift NDJSON drainer
+    // path leaves it absent (the bridge's no-bundle arm fails closed to
+    // deny-all), matching the prior `network_policy: None`.
     let drainer_cfg = serde_json::json!({
         "vm_name": config.name,
         "audit_dir": audit_dir,
         "audit_socket": audit_socket,
+        "keys_dir": keys_dir,
         "signing_key_path": signing_key_path,
-        "events_socket_path": events_socket,
         "plan_json": plan_json,
         "bundle_json": config.bundle_json,
+        "endpoint": { "vz_ingest": { "events_socket_path": events_socket } },
     });
 
     let drainer_bin =
-        resolve_vz_drainer_path().map_err(|e| anyhow!("locate mvm-vz-drainer binary: {e}"))?;
+        resolve_vz_drainer_path().map_err(|e| anyhow!("locate mvm-bridge binary: {e}"))?;
 
     ui::info(&format!(
-        "Spawning mvm-vz-drainer for Vz VM '{}' via {}...",
+        "Spawning mvm-bridge for Vz VM '{}' via {}...",
         config.name,
         drainer_bin.display(),
     ));
@@ -2376,9 +2384,9 @@ fn spawn_vz_drainer(config: &VmStartConfig) -> Result<AttachedDrainerGuard> {
     child
         .stdin
         .take()
-        .ok_or_else(|| anyhow!("mvm-vz-drainer stdin was not piped"))?
+        .ok_or_else(|| anyhow!("mvm-bridge stdin was not piped"))?
         .write_all(drainer_cfg.to_string().as_bytes())
-        .map_err(|e| anyhow!("pipe DrainerConfig to mvm-vz-drainer stdin: {e}"))?;
+        .map_err(|e| anyhow!("pipe DrainerConfig to mvm-bridge stdin: {e}"))?;
 
     // Closing stdin (the take above already drops the writer once the
     // block ends) signals end-of-input to the drainer's `read_to_string`
@@ -2432,7 +2440,7 @@ fn write_drainer_pid_file(path: &Path, pid: u32) -> Result<()> {
     Ok(())
 }
 
-/// Reap the `mvm-vz-drainer` sibling spawned by
+/// Reap the `mvm-bridge` sibling spawned by
 /// `start()`. Best-effort: a missing PID file means the VM either had
 /// no drainer (legacy callers without `plan_json`) or the drainer
 /// already exited; in either case `stop()` proceeds. SIGTERM → poll →
@@ -2458,29 +2466,29 @@ fn reap_drainer(state_dir: &Path) {
     if pid_alive(pid) {
         tracing::warn!(
             drainer_pid = pid,
-            "mvm-vz-drainer did not exit after SIGTERM within {STOP_TIMEOUT:?}; sending SIGKILL"
+            "mvm-bridge did not exit after SIGTERM within {STOP_TIMEOUT:?}; sending SIGKILL"
         );
         send_signal(pid, libc::SIGKILL);
     }
     let _ = std::fs::remove_file(&pid_path);
 }
 
-/// Resolve the `mvm-vz-drainer` binary path,
+/// Resolve the `mvm-bridge` binary path,
 /// checking three sources in order, mirroring `resolve_supervisor_path`:
 ///
-/// 1. `MVM_VZ_DRAINER_PATH` — explicit override for tests +
+/// 1. `MVM_BRIDGE_PATH` — explicit override for tests +
 ///    `cargo run` workflows.
-/// 2. A binary named `mvm-vz-drainer` adjacent to the current
+/// 2. A binary named `mvm-bridge` adjacent to the current
 ///    executable — the layout produced by `cargo install` / Homebrew
 ///    bottles that ship `mvmctl` alongside the sidecars.
 /// 3. The source-checkout build output under
-///    `<workspace-root>/target/{release,debug}/mvm-vz-drainer`
+///    `<workspace-root>/target/{release,debug}/mvm-bridge`
 ///    (CLAUDE.md "Source-checkout builds never depend on mvm-published
 ///    artifacts"); this matters during local dev when `mvmctl` is
 ///    `cargo run` from the workspace root.
 fn resolve_vz_drainer_path() -> Result<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if let Some(p) = std::env::var_os("MVM_VZ_DRAINER_PATH") {
+    if let Some(p) = std::env::var_os("MVM_BRIDGE_PATH") {
         return resolve_vz_drainer_path_inner(Some(Path::new(&p)), None, &manifest_dir);
     }
 
@@ -2492,12 +2500,12 @@ fn resolve_vz_drainer_path() -> Result<PathBuf> {
             && is_source_checkout_helper_dir(dir, workspace_root)
         {
             ensure_source_checkout_vz_helpers(workspace_root, dir)?;
-            let candidate = dir.join("mvm-vz-drainer");
+            let candidate = dir.join("mvm-bridge");
             if candidate.is_file() {
                 return Ok(candidate);
             }
         } else {
-            let candidate = dir.join("mvm-vz-drainer");
+            let candidate = dir.join("mvm-bridge");
             if candidate.is_file() {
                 return Ok(candidate);
             }
@@ -2507,7 +2515,7 @@ fn resolve_vz_drainer_path() -> Result<PathBuf> {
     if let Some(workspace_root) = workspace_root {
         let helper_dir = workspace_root.join("target").join("debug");
         ensure_source_checkout_vz_helpers(workspace_root, &helper_dir)?;
-        let candidate = helper_dir.join("mvm-vz-drainer");
+        let candidate = helper_dir.join("mvm-bridge");
         if candidate.is_file() {
             return Ok(candidate);
         }
@@ -2529,14 +2537,14 @@ fn resolve_vz_drainer_path_inner(
             return Ok(path.to_path_buf());
         }
         bail!(
-            "MVM_VZ_DRAINER_PATH points at {} which is not a file",
+            "MVM_BRIDGE_PATH points at {} which is not a file",
             path.display()
         );
     }
     if let Some(exe) = current_exe
         && let Some(dir) = exe.parent()
     {
-        let candidate = dir.join("mvm-vz-drainer");
+        let candidate = dir.join("mvm-bridge");
         if candidate.is_file() {
             return Ok(candidate);
         }
@@ -2548,16 +2556,16 @@ fn resolve_vz_drainer_path_inner(
             let candidate = workspace_root
                 .join("target")
                 .join(variant)
-                .join("mvm-vz-drainer");
+                .join("mvm-bridge");
             if candidate.is_file() {
                 return Ok(candidate);
             }
         }
     }
     bail!(
-        "mvm-vz-drainer binary not found. Looked for: $MVM_VZ_DRAINER_PATH, \
-         alongside the current exe, and <workspace>/target/{{release,debug}}/mvm-vz-drainer. \
-         Build with `cargo build -p mvm-vz-drainer`."
+        "mvm-bridge binary not found. Looked for: $MVM_BRIDGE_PATH, \
+         alongside the current exe, and <workspace>/target/{{release,debug}}/mvm-bridge. \
+         Build with `cargo build -p mvm-vm-host --bin mvm-bridge`."
     )
 }
 
@@ -2591,7 +2599,7 @@ fn refuse_if_running(target_vm: &str) -> anyhow::Result<()> {
 /// Rebuild command for the Vz per-VM host binaries (the objc2 supervisor + the
 /// drainer sibling). `cargo run`/`test` never rebuilds these separate bin crates.
 const VZ_AUX_REBUILD_CMD: &str =
-    "cargo build -p mvm-vm-host --bin mvm-vz-supervisor --bin mvm-vz-drainer";
+    "cargo build -p mvm-vm-host --bin mvm-vz-supervisor --bin mvm-bridge";
 
 fn mtime_of(p: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
@@ -3336,7 +3344,7 @@ mod tests {
     #[test]
     fn resolve_vz_drainer_path_inner_env_pointing_at_missing_file_errors() {
         let manifest_dir = PathBuf::from("/nonexistent/manifest");
-        let bogus = Path::new("/definitely/not/there/mvm-vz-drainer");
+        let bogus = Path::new("/definitely/not/there/mvm-bridge");
         let err = resolve_vz_drainer_path_inner(Some(bogus), None, &manifest_dir)
             .expect_err("missing file must error");
         assert!(
@@ -3352,7 +3360,7 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap();
         let exe = tmp_dir.path().join("mvmctl");
         std::fs::write(&exe, b"#!fake").unwrap();
-        let drainer = tmp_dir.path().join("mvm-vz-drainer");
+        let drainer = tmp_dir.path().join("mvm-bridge");
         std::fs::write(&drainer, b"#!fake").unwrap();
         let manifest_dir = PathBuf::from("/nonexistent/manifest");
         let resolved =
@@ -3368,7 +3376,7 @@ mod tests {
             .expect_err("no candidate must error");
         let msg = err.to_string();
         assert!(
-            msg.contains("mvm-vz-drainer") && msg.contains("MVM_VZ_DRAINER_PATH"),
+            msg.contains("mvm-bridge") && msg.contains("MVM_BRIDGE_PATH"),
             "error names the binary + override env var: {msg}"
         );
     }
@@ -3406,7 +3414,7 @@ mod tests {
     fn helper_binaries_need_rebuild_when_any_helper_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let helper = tmp.path().join("mvm-vz-supervisor");
-        let missing = tmp.path().join("mvm-vz-drainer");
+        let missing = tmp.path().join("mvm-bridge");
         std::fs::write(&helper, b"helper").unwrap();
         let input = tmp.path().join("Cargo.lock");
         std::fs::write(&input, b"lock").unwrap();
@@ -3424,7 +3432,7 @@ mod tests {
         std::fs::write(&input, b"lock").unwrap();
         sleep_for_mtime_tick();
         let supervisor = tmp.path().join("mvm-vz-supervisor");
-        let drainer = tmp.path().join("mvm-vz-drainer");
+        let drainer = tmp.path().join("mvm-bridge");
         std::fs::write(&supervisor, b"supervisor").unwrap();
         std::fs::write(&drainer, b"drainer").unwrap();
 
@@ -3438,7 +3446,7 @@ mod tests {
     fn helper_binaries_need_rebuild_when_source_input_is_newer() {
         let tmp = tempfile::tempdir().unwrap();
         let supervisor = tmp.path().join("mvm-vz-supervisor");
-        let drainer = tmp.path().join("mvm-vz-drainer");
+        let drainer = tmp.path().join("mvm-bridge");
         std::fs::write(&supervisor, b"supervisor").unwrap();
         std::fs::write(&drainer, b"drainer").unwrap();
         sleep_for_mtime_tick();
