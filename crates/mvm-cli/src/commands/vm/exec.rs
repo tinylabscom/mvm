@@ -33,6 +33,10 @@ pub(in crate::commands) struct Args {
     /// fresh transient microVM — never the long-running `mvmctl dev` VM.
     #[arg(short = 'm', long)]
     pub manifest: Option<String>,
+    /// Internal (not a CLI flag): warm-pool size for this run, carried
+    /// from `machine run` dispatch. `> 0` ⇒ eligible to claim a warm standby.
+    #[arg(skip)]
+    pub warm_pool_size: u32,
     /// vCPU cores (default: 2)
     #[arg(long, default_value = "2")]
     pub cpus: u32,
@@ -92,6 +96,11 @@ pub(in crate::commands) struct RunArgs {
     /// performs the existing verified OCI pull and rootfs materialization path.
     #[arg(long, value_name = "REF")]
     pub image: Option<String>,
+    /// Internal (not a CLI flag): warm-pool size for this run, set by
+    /// `machine run` dispatch from the resolved run mode. `> 0` ⇒ eligible to
+    /// claim a pre-booted standby + replenish the pool.
+    #[arg(skip)]
+    pub warm_pool_size: u32,
     /// Enable dev-tier outbound networking (broad egress + DNS). Off by
     /// default (deny-all). Narrow it with `--allow-host`.
     #[arg(long)]
@@ -224,6 +233,7 @@ impl RunArgs {
     fn into_exec_args(self) -> Args {
         Args {
             manifest: self.manifest,
+            warm_pool_size: self.warm_pool_size,
             cpus: self.cpus,
             memory: self.memory,
             add_dir: self.add_dir,
@@ -657,6 +667,7 @@ fn build_exec_request(
         target,
         timeout_secs: args.timeout,
         network_policy,
+        warm_pool_size: args.warm_pool_size,
     })
 }
 
@@ -1323,6 +1334,7 @@ mod tests {
 
     fn run_args(profile: RunProfile) -> RunArgs {
         RunArgs {
+            warm_pool_size: 0,
             manifest: None,
             image: None,
             net: false,

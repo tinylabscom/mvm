@@ -284,6 +284,9 @@ impl MachineRunArgs {
     fn into_run_args(self) -> RunArgs {
         RunArgs {
             manifest: self.manifest,
+            // Default off; `run_dispatch` sets it for the warm-claim-eligible
+            // transient mode.
+            warm_pool_size: 0,
             image: self.image,
             net: self.net,
             allow_host: self.allow_host,
@@ -377,6 +380,24 @@ enum MachineRunMode {
     InteractiveTransient,
     /// Interactive PTY shell on a persistent machine (left up on exit).
     InteractivePersistent,
+}
+
+impl MachineRunMode {
+    /// Warm-pool size for this run mode. Transient and
+    /// interactive-transient runs are throwaway, auto-named cattle — eligible to
+    /// claim a pre-booted standby and to replenish the pool, so they take the
+    /// residency-policy size (`effective_warm_pool_size`). A user-named or `-d`
+    /// persistent machine is long-lived, not pool cattle, so it never claims
+    /// (size 0). `explicit` is a caller override (e.g. a future `--warm` flag),
+    /// applied only to the claim-eligible modes.
+    fn warm_pool_size(self, explicit: Option<u32>) -> u32 {
+        match self {
+            MachineRunMode::Transient | MachineRunMode::InteractiveTransient => {
+                mvm_core::residency::effective_warm_pool_size(explicit)
+            }
+            MachineRunMode::Persistent | MachineRunMode::InteractivePersistent => 0,
+        }
+    }
 }
 
 /// What the persistent path should do with the on-disk spec for the target name.
@@ -2365,13 +2386,27 @@ fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<
         return run_entrypoint_action(args, resolved_flake_slot);
     }
 
-    match args.resolve_mode()? {
+    let mode = args.resolve_mode()?;
+    // Resolve warm-pool eligibility per mode. Threaded into the
+    // claim path next; logged here so the dark-landed decision is observable
+    // (transient/interactive-transient take the residency size, persistent → 0).
+    tracing::debug!(
+        ?mode,
+        warm_pool_size = mode.warm_pool_size(None),
+        "machine run warm-pool eligibility"
+    );
+    match mode {
         MachineRunMode::Transient => {
             // For flake runs, pass the slot hash as the manifest.
             if let Some(slot) = resolved_flake_slot {
                 args.manifest = Some(slot);
             }
-            run_secure(cli, args.into_run_args(), cfg)
+            // A throwaway transient run is warm-claim
+            // eligible — carry the residency-policy size so `run_inner` can claim
+            // a pre-booted standby and replenish the pool.
+            let mut run_args = args.into_run_args();
+            run_args.warm_pool_size = mode.warm_pool_size(None);
+            run_secure(cli, run_args, cfg)
         }
         MachineRunMode::Persistent => {
             run_persistent(cli, args, cfg, resolved_flake_slot.as_deref())
@@ -2817,6 +2852,31 @@ mod tests {
             let mode = args.resolve_mode().expect("resolve");
             assert_eq!(mode, *expected, "argv {argv:?}");
         }
+    }
+
+    #[test]
+    fn warm_pool_size_is_claim_eligible_only_for_throwaway_runs() {
+        // Transient + interactive-transient are auto-named cattle → eligible:
+        // an explicit override is honoured verbatim (the residency-policy default
+        // for `None` is env-dependent, so the override path is the deterministic
+        // assertion).
+        assert_eq!(MachineRunMode::Transient.warm_pool_size(Some(3)), 3);
+        assert_eq!(
+            MachineRunMode::InteractiveTransient.warm_pool_size(Some(2)),
+            2
+        );
+        // A user-named / `-d` persistent machine is long-lived, never pooled —
+        // size 0 regardless of any override.
+        assert_eq!(MachineRunMode::Persistent.warm_pool_size(Some(5)), 0);
+        assert_eq!(MachineRunMode::Persistent.warm_pool_size(None), 0);
+        assert_eq!(
+            MachineRunMode::InteractivePersistent.warm_pool_size(Some(5)),
+            0
+        );
+        assert_eq!(
+            MachineRunMode::InteractivePersistent.warm_pool_size(None),
+            0
+        );
     }
 
     #[test]

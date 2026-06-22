@@ -9,10 +9,12 @@ mod image;
 mod machine;
 mod manifest;
 mod ops;
-/// Supervisor warm-pool: the `mvmctl pool warm/status` command + the
-/// launch glue (`try_warm_claim`/`replenish_after_launch`) the `up` path calls to claim a
-/// warm standby (auto-named, bridge-admitted launches) and top the pool back up.
-mod pool;
+/// Supervisor warm-pool: the `mvmctl pool warm/status` command + the launch glue
+/// (`try_warm_claim`/`replenish_after_launch`) the transient `machine run` path
+/// (`crate::exec::run_inner`) calls to claim a warm standby (auto-named,
+/// bridge-admitted launches) and top the pool back up. `pub(crate)` so the
+/// crate-root `exec` runner can reach the glue.
+pub(crate) mod pool;
 mod qemu_bridge;
 mod shared;
 mod ssh_agent_proxy;
