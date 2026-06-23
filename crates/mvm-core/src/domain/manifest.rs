@@ -492,6 +492,14 @@ pub fn resolve_manifest_config_path(path: &Path) -> Result<PathBuf> {
     Err(anyhow!("manifest path does not exist: {}", path.display()))
 }
 
+/// Registry key for an already-canonical manifest identity:
+/// `sha256(identity)` as 64-char hex.
+pub fn key_for_manifest_identity(identity: &str) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(identity.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 /// Canonical registry key for a manifest at `path`:
 /// `sha256(canonical_absolute_path)` as 64-char hex. Resolves
 /// symlinks so two access paths to the same file hash to the same
@@ -499,14 +507,11 @@ pub fn resolve_manifest_config_path(path: &Path) -> Result<PathBuf> {
 pub fn canonical_key_for_path(path: &Path) -> Result<String> {
     let canonical = std::fs::canonicalize(path)
         .with_context(|| format!("Failed to canonicalize {}", path.display()))?;
-    let bytes = canonical
+    let identity = canonical
         .as_os_str()
         .to_str()
-        .ok_or_else(|| anyhow!("canonical path contains non-UTF-8: {:?}", canonical))?
-        .as_bytes();
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(bytes);
-    Ok(format!("{:x}", hasher.finalize()))
+        .ok_or_else(|| anyhow!("canonical path contains non-UTF-8: {:?}", canonical))?;
+    Ok(key_for_manifest_identity(identity))
 }
 
 /// Slot directory for a given canonical-path-hash:
@@ -1254,6 +1259,19 @@ mod tests {
         let via_dot = canonical_key_for_path(&tmp.path().join("./mvm.toml")).unwrap();
         assert_eq!(direct, via_dot);
         assert_eq!(direct.len(), 64);
+    }
+
+    #[test]
+    fn manifest_identity_key_hashes_non_filesystem_identities() {
+        let key = key_for_manifest_identity("abc");
+        assert_eq!(
+            key,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+
+        let synthetic = key_for_manifest_identity("<flake-slot>/github:tinylabscom/mvm#default");
+        assert_eq!(synthetic.len(), 64);
+        assert!(synthetic.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
