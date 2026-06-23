@@ -9,8 +9,8 @@ use crate::ui;
 use mvm::vm::template::lifecycle as tmpl;
 use mvm_backend::image;
 use mvm_core::manifest::{
-    self, MANIFEST_SCHEMA_VERSION, Manifest, PersistedManifest, Provenance, canonical_key_for_path,
-    resolve_manifest_config_path,
+    self, MANIFEST_SCHEMA_VERSION, Manifest, PersistedManifest, Provenance,
+    key_for_manifest_identity, resolve_manifest_config_path,
 };
 use mvm_core::naming::validate_flake_ref;
 use mvm_core::user_config::MvmConfig;
@@ -666,25 +666,7 @@ pub(in crate::commands) fn build_flake_to_slot(
     // flake ref — it is never read from disk (the PersistedManifest records
     // the resolved flake_ref directly) and exists solely to give the slot
     // a stable sha256 key.
-    let synthetic_path_str = format!("<flake-slot>/{}", resolved);
-    let synthetic_path = std::path::Path::new(&synthetic_path_str);
-
-    let persisted = PersistedManifest {
-        schema_version: MANIFEST_SCHEMA_VERSION,
-        manifest_path: synthetic_path_str.clone(),
-        manifest_hash: canonical_key_for_path(synthetic_path)?,
-        flake_ref: resolved.clone(),
-        profile: profile.unwrap_or("default").to_string(),
-        vcpus: 2,
-        mem_mib: 512,
-        mem_initial_mib: None,
-        data_disk_mib: 0,
-        name: None,
-        backend,
-        provenance: Provenance::current(),
-        created_at: mvm_core::time::utc_now(),
-        updated_at: mvm_core::time::utc_now(),
-    };
+    let persisted = flake_slot_manifest(&resolved, profile, &backend);
 
     let slot_hash = persisted.manifest_hash.clone();
     let revision = tmpl::template_build_from_manifest(&persisted, false, false, mode)
@@ -693,6 +675,30 @@ pub(in crate::commands) fn build_flake_to_slot(
     audit_build_ok("flake-slot", &resolved, &slot_hash, &revision.revision_hash);
 
     Ok(slot_hash)
+}
+
+fn flake_slot_manifest(
+    resolved_flake_ref: &str,
+    profile: Option<&str>,
+    backend: &str,
+) -> PersistedManifest {
+    let synthetic_path = format!("<flake-slot>/{resolved_flake_ref}");
+    PersistedManifest {
+        schema_version: MANIFEST_SCHEMA_VERSION,
+        manifest_path: synthetic_path.clone(),
+        manifest_hash: key_for_manifest_identity(&synthetic_path),
+        flake_ref: resolved_flake_ref.to_string(),
+        profile: profile.unwrap_or("default").to_string(),
+        vcpus: 2,
+        mem_mib: 512,
+        mem_initial_mib: None,
+        data_disk_mib: 0,
+        name: None,
+        backend: backend.to_string(),
+        provenance: Provenance::current(),
+        created_at: mvm_core::time::utc_now(),
+        updated_at: mvm_core::time::utc_now(),
+    }
 }
 
 /// Read the volume's `meta.json.annotations.lockfile_sha256`. Returns
@@ -706,4 +712,23 @@ fn volume_lockfile_sha256(volume_dir: &std::path::Path) -> Option<String> {
         .get("lockfile_sha256")?
         .as_str()
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flake_slot_manifest_hashes_synthetic_identity_without_canonicalizing() {
+        let resolved = "/tmp/flake-that-does-not-exist";
+        let persisted = flake_slot_manifest(resolved, Some("minimal"), "mock");
+
+        assert_eq!(persisted.manifest_path, format!("<flake-slot>/{resolved}"));
+        assert_eq!(
+            persisted.manifest_hash,
+            key_for_manifest_identity(&persisted.manifest_path)
+        );
+        assert_eq!(persisted.flake_ref, resolved);
+        assert_eq!(persisted.profile, "minimal");
+    }
 }
