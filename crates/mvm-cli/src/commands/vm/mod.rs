@@ -28,6 +28,7 @@ pub(super) mod redaction_flags;
 pub(super) mod rekernel;
 pub(super) mod run_plan;
 pub(super) mod sandbox;
+pub(super) mod sdk_no_vm;
 pub(super) mod session;
 pub(super) mod set_ttl;
 pub(super) mod tenant_resolution;

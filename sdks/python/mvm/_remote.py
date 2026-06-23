@@ -128,12 +128,12 @@ DEFAULT_KILL_GRACE_SEC = 5.0
 # built.
 EMITTING_ENV_VAR = "MVM_EMITTING"
 
-# Slice E1b: setting MVM_NO_VM=1 routes dispatch through
-# `mvmctl invoke --no-vm`, which runs the wrapper directly on the
-# host (no VM boot, no vsock). Per-call module/function/source-path
-# are derived from the wrapped Python function via `inspect`. Only
-# valid for :class:`RemoteFunction` (cross-workload
-# :class:`WorkloadRef` calls have no local fn to introspect).
+# Setting MVM_NO_VM=1 routes dispatch through mvmctl's hidden SDK
+# host-wrapper transport, which runs the wrapper directly on the host
+# (no VM boot, no vsock). Per-call module/function/source-path are
+# derived from the wrapped Python function via `inspect`. Only valid
+# for :class:`RemoteFunction` (cross-workload :class:`WorkloadRef`
+# calls have no local fn to introspect).
 NO_VM_ENV_VAR = "MVM_NO_VM"
 
 
@@ -215,7 +215,7 @@ class NoVmIntrospectionError(MvmTransportError):
 
 
 def _no_vm_flags_for(fn: Callable[..., Any], format: str) -> list[str]:
-    """Derive the per-call `--no-vm` argv flags from the wrapped fn.
+    """Derive the per-call host-wrapper argv flags from the wrapped fn.
 
     The Rust side wants `--language` / `--module` / `--function` /
     `--format` / `--source-path` and uses these to write a temp
@@ -248,7 +248,6 @@ def _no_vm_flags_for(fn: Callable[..., Any], format: str) -> list[str]:
         ) from exc
     source_path = os.path.dirname(os.path.abspath(source_file))
     return [
-        "--no-vm",
         "--language", "python",
         "--module", module,
         "--function", function_name,
@@ -411,11 +410,11 @@ def _prepare_invoke(
     fn_selector: str | None = None,
     use_active_session: bool = True,
     fn: Callable[..., Any] | None = None,
-) -> tuple[list[str], bytes, float, int]:
+) -> tuple[list[str], bytes, float, int, str]:
     """Run pre-spawn checks shared by sync and async dispatch paths.
 
-    Returns ``(argv, payload, timeout_sec, output_cap_bytes)``. Raises
-    before any subprocess spawn, leaving no orphan process behind.
+    Returns ``(argv, payload, timeout_sec, output_cap_bytes, command_label)``.
+    Raises before any subprocess spawn, leaving no orphan process behind.
 
     ``fn_selector``: when set, append ``--fn <name>`` to the argv. The
     ``WorkloadRef`` proxy passes the attribute the user wrote so the
@@ -431,8 +430,8 @@ def _prepare_invoke(
 
     ``fn``: the wrapped Python function. Required when ``MVM_NO_VM=1``
     so the SDK can derive module / function / source-path from the
-    local definition and feed them to ``mvmctl invoke --no-vm``.
-    ``None`` is fine outside `--no-vm` mode.
+    local definition and feed them to mvmctl's hidden SDK no-VM transport.
+    ``None`` is fine outside no-VM mode.
     """
     _check_emitting_context(call_site)
     _check_id("workload_id", workload_id)
@@ -450,21 +449,24 @@ def _prepare_invoke(
     # after it as positional, so an id starting with `-` (already rejected
     # at IR + SDK level, but defense in depth) cannot be misparsed as a
     # flag. All optional flags must come *before* the separator.
-    argv: list[str] = [bin_path, "invoke"]
     no_vm = os.environ.get(NO_VM_ENV_VAR) == "1"
     if no_vm:
         if fn is None:
             raise NoVmIntrospectionError(
                 f"MVM_NO_VM=1 set but no local function available to "
-                f"introspect for {call_site}. --no-vm is only valid "
+                f"introspect for {call_site}. no-VM mode is only valid "
                 "for RemoteFunction calls; cross-workload WorkloadRef "
                 "dispatch requires a real VM."
             )
+        argv: list[str] = [bin_path, "__sdk-no-vm"]
+        command_label = "mvmctl __sdk-no-vm"
         argv += _no_vm_flags_for(fn, format)
-        # Sessions and --fn don't apply on the local-dispatch path:
-        # the wrapper picks `fn` from the inspected definition, and
+        # Sessions, --fn, and workload_id don't apply on the local-dispatch
+        # path: the wrapper picks `fn` from the inspected definition, and
         # there's no warm VM to attach to.
     else:
+        argv = [bin_path, "invoke"]
+        command_label = "mvmctl invoke"
         if use_active_session:
             session_id = current_session_id()
             if session_id is not None:
@@ -476,20 +478,28 @@ def _prepare_invoke(
     # mvmctl over our own stdin pipe; `--stdin -` tells mvmctl to
     # consume it rather than discarding stdin (default is empty).
     argv += ["--stdin", "-"]
-    argv += ["--", workload_id]
+    if not no_vm:
+        argv += ["--", workload_id]
     timeout = env_float("MVM_INVOKE_TIMEOUT_SEC", DEFAULT_INVOKE_TIMEOUT_SEC)
     cap = env_int("MVM_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)
-    return argv, payload, timeout, cap
+    return argv, payload, timeout, cap, command_label
 
 
-def _decode_or_raise(workload_id: str, format: str, returncode: int, stdout: bytes, stderr: bytes) -> Any:
+def _decode_or_raise(
+    workload_id: str,
+    format: str,
+    returncode: int,
+    stdout: bytes,
+    stderr: bytes,
+    command_label: str,
+) -> Any:
     if returncode != 0:
         envelope = _parse_error_envelope(stderr)
         if envelope is not None:
             raise envelope
         msg = stderr.decode("utf-8", errors="replace").strip()
         raise MvmTransportError(
-            f"mvmctl invoke {workload_id} exited {returncode}: {msg or '(no stderr)'}"
+            f"{command_label} {workload_id} exited {returncode}: {msg or '(no stderr)'}"
         )
     return _decode(format, stdout)
 
@@ -505,7 +515,7 @@ def _invoke_sync(
     use_active_session: bool = True,
     fn: Callable[..., Any] | None = None,
 ) -> Any:
-    argv, payload, timeout, cap = _prepare_invoke(
+    argv, payload, timeout, cap, command_label = _prepare_invoke(
         call_site,
         workload_id,
         format,
@@ -524,15 +534,22 @@ def _invoke_sync(
         )
     except TransportTimeout as exc:
         raise MvmTransportError(
-            f"mvmctl invoke {workload_id} timed out after {timeout}s"
+            f"{command_label} {workload_id} timed out after {timeout}s"
         ) from exc
     except TransportOutputOverflow as exc:
         raise MvmTransportError(
-            f"mvmctl invoke {workload_id} exceeded {cap}-byte output cap"
+            f"{command_label} {workload_id} exceeded {cap}-byte output cap"
         ) from exc
     except FileNotFoundError as exc:
         raise MvmTransportError(f"failed to spawn mvmctl: {exc}") from exc
-    return _decode_or_raise(workload_id, format, proc.returncode, proc.stdout, proc.stderr)
+    return _decode_or_raise(
+        workload_id,
+        format,
+        proc.returncode,
+        proc.stdout,
+        proc.stderr,
+        command_label,
+    )
 
 
 async def _invoke_async(
@@ -546,7 +563,7 @@ async def _invoke_async(
     use_active_session: bool = True,
     fn: Callable[..., Any] | None = None,
 ) -> Any:
-    argv, payload, timeout, cap = _prepare_invoke(
+    argv, payload, timeout, cap, command_label = _prepare_invoke(
         call_site,
         workload_id,
         format,
@@ -608,7 +625,7 @@ async def _invoke_async(
         except asyncio.TimeoutError as exc:
             await _terminate_process_group()
             raise MvmTransportError(
-                f"mvmctl invoke {workload_id} timed out after {timeout}s"
+                f"{command_label} {workload_id} timed out after {timeout}s"
             ) from exc
     except asyncio.CancelledError:
         await _terminate_process_group()
@@ -616,10 +633,17 @@ async def _invoke_async(
 
     if len(stdout) > cap or len(stderr) > cap:
         raise MvmTransportError(
-            f"mvmctl invoke {workload_id} exceeded {cap}-byte output cap"
+            f"{command_label} {workload_id} exceeded {cap}-byte output cap"
         )
 
-    return _decode_or_raise(workload_id, format, proc.returncode or 0, stdout, stderr)
+    return _decode_or_raise(
+        workload_id,
+        format,
+        proc.returncode or 0,
+        stdout,
+        stderr,
+        command_label,
+    )
 
 
 class RemoteFunction:

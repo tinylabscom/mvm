@@ -148,6 +148,7 @@ impl Commands {
             },
             Commands::Ls(a) => a.json,
             Commands::Run(a) => a.json,
+            Commands::SdkNoVm(_) => true,
             Commands::Machine(a) => match &a.action {
                 // Folded advanced ops delegate to their own check.
                 machine::MachineAction::Vm(cmd) => cmd.emits_machine_readable_stdout(),
@@ -201,6 +202,7 @@ impl Commands {
             Commands::Dev(_) => "dev",
             Commands::Ls(_) => "ls",
             Commands::Run(_) => "run",
+            Commands::SdkNoVm(_) => "__sdk-no-vm",
             Commands::Doctor(_) => "doctor",
             Commands::Manifest(_) => "manifest",
             Commands::Image(_) => "image",

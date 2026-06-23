@@ -1,6 +1,7 @@
 //! The core demo, end to end: `dev up` (builder VM) → `compile` the
-//! hello-app → `up` (build in-VM, boot, wait for the guest agent over
-//! vsock) → teardown. This is the regression guard for the whole spine.
+//! hello-app → `machine run --flake` (build in-VM, boot, wait for the
+//! guest agent over vsock) → teardown. This is the regression guard for
+//! the whole spine.
 //!
 //! Gated on `MVM_E2E_SMOKE=1` because it needs libkrun + the builder VM
 //! and runs for minutes; the default (ungated) run skips and passes.
@@ -11,9 +12,9 @@
 //! preferring libkrun over Vz on macOS 26+ (which is a deliberate Vz
 //! priority for general use; the demo wants the vsock path).
 //!
-//! `up` waits for the guest agent (`wait_for_guest_agent` → vsock Ping)
-//! and only prints `Guest agent not reachable.` on failure — so `up`
-//! exiting 0 *without* that line is the boot→ping proof.
+//! `machine run --flake` waits for the guest agent (`wait_for_guest_agent`
+//! → vsock Ping) and only prints `Guest agent not reachable.` on failure —
+//! so the command exiting 0 *without* that line is the boot→ping proof.
 //!
 //! NO-FREEZE design (this test cost multiple whole sessions, frozen).
 //! Two independent guards make a hang impossible:
@@ -38,6 +39,7 @@ const DEV_UP_BUDGET: Duration = Duration::from_secs(900);
 const COMPILE_BUDGET: Duration = Duration::from_secs(180);
 const UP_BUDGET: Duration = Duration::from_secs(900);
 const DOWN_BUDGET: Duration = Duration::from_secs(120);
+const WORKLOAD_NAME: &str = "core-demo-e2e";
 
 /// Outcome of one bounded `mvmctl` invocation.
 struct Step {
@@ -285,17 +287,22 @@ fn core_demo_dev_compile_up_ping() {
     );
     assert!(c.success, "compile failed: {}", c.output);
 
-    // 3) build + boot the workload microVM; `up` waits for the agent
-    //    over vsock (`wait_for_guest_agent` → protocol Ping). The proof
-    //    is twofold and scans BOTH streams (`up.output`): the wait
-    //    actually ran ("Waiting for guest agent...") AND it succeeded
+    // 3) build + boot the workload microVM; `machine run --flake` waits
+    //    for the agent over vsock (`wait_for_guest_agent` → protocol Ping).
+    //    The proof is twofold and scans BOTH streams (`up.output`): the
+    //    wait actually ran ("Waiting for guest agent...") AND it succeeded
     //    (no "Guest agent not reachable."). Checking only one of these
-    //    is how this test previously false-greened — `up` used to skip
-    //    the wait entirely on libkrun, and the warn line lands on
+    //    is how this test previously false-greened — the old boot path used
+    //    to skip the wait entirely on libkrun, and the warn line lands on
     //    stdout, not stderr.
     let up = mvmctl(
         &[
-            "up",
+            "machine",
+            "run",
+            "-d",
+            "--name",
+            WORKLOAD_NAME,
+            "--force",
             "--hypervisor",
             workload_hypervisor(),
             "--flake",
@@ -322,6 +329,12 @@ fn core_demo_dev_compile_up_ping() {
         up.output
     );
 
-    // 4) tear down the builder (best-effort, still bounded).
+    // 4) tear down the workload and builder (best-effort, still bounded).
+    let _ = mvmctl(
+        &["machine", "stop", WORKLOAD_NAME],
+        &scratch,
+        "machine-stop",
+        DOWN_BUDGET,
+    );
     let _ = mvmctl(&["dev", "down"], &scratch, "dev-down", DOWN_BUDGET);
 }

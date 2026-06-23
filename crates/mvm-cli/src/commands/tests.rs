@@ -530,6 +530,40 @@ fn run_kept_hidden_as_sdk_transport() {
 }
 
 #[test]
+fn sdk_no_vm_kept_hidden_as_sdk_transport() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "__sdk-no-vm",
+        "--language",
+        "python",
+        "--module",
+        "adder_mod",
+        "--function",
+        "add",
+        "--format",
+        "json",
+        "--source-path",
+        "/tmp/src",
+        "--stdin",
+        "-",
+    ])
+    .unwrap();
+    assert!(matches!(cli.command, Commands::SdkNoVm(_)));
+
+    let help = {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        cmd.write_long_help(&mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    };
+    assert!(
+        !help.contains("__sdk-no-vm"),
+        "`__sdk-no-vm` must be hidden from top-level help"
+    );
+}
+
+#[test]
 fn invoke_removed() {
     let result = Cli::try_parse_from(["mvmctl", "invoke", "tmpl"]);
     assert!(
