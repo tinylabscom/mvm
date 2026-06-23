@@ -1155,10 +1155,16 @@ let
     # the package's sbin subdir, not bin).
     mkdir -p "$out/usr/local/bin"
     ${lib.concatMapStringsSep "\n"
-      (pkg: ''
+      # `lib.getBin` resolves the package's `bin` output when it is multi-output
+      # (else the default). Without it, a split package's executables are missed:
+      # e.g. nixpkgs e2fsprogs ships `mkfs.ext4` in its `bin` output, so iterating
+      # `${pkg}/sbin` on the default (lib) output finds nothing and `/sbin/mkfs.ext4`
+      # is never created — which fails OCI rootfs materialization (`exited 127`).
+      (pkg:
+        let binOut = lib.getBin pkg; in ''
         for srcdir in bin sbin; do
-          if [ -d "${pkg}/$srcdir" ]; then
-            for binpath in "${pkg}/$srcdir"/*; do
+          if [ -d "${binOut}/$srcdir" ]; then
+            for binpath in "${binOut}/$srcdir"/*; do
               [ -e "$binpath" ] || continue
               name=$(basename "$binpath")
               ln -sf "$binpath" "$out/usr/local/bin/$name"

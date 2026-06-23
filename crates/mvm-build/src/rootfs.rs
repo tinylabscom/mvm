@@ -231,17 +231,15 @@ fn materialize_ext4_in_builder_vm(
 
 #[cfg(feature = "builder-vm")]
 fn ext4_materializer_choice() -> crate::builder_backend_select::BuilderBackendChoice {
-    use crate::builder_backend_select::{BuilderBackendChoice, resolve_env_override};
-
-    // Preserve the historical default: OCI materialization has always used
-    // libkrun unless an operator explicitly asks for QEMU. Do not use
-    // resolve_choice(), because macOS 26+ auto-detects Vz and Vz has no
-    // shell-job materializer yet.
-    match resolve_env_override() {
-        Some(BuilderBackendChoice::Qemu) => BuilderBackendChoice::Qemu,
-        Some(BuilderBackendChoice::Vz) => BuilderBackendChoice::Vz,
-        Some(BuilderBackendChoice::Libkrun) | None => BuilderBackendChoice::Libkrun,
-    }
+    // Use the resolved builder backend (override → env → auto-detect: macOS 26+
+    // Apple Silicon → Vz, everywhere else → libkrun). Vz now has a shell-job
+    // materializer (`vz_builder::run_shell_script`), so a Vz-default Mac
+    // materializes through its primary builder. Forcing libkrun here was wrong on
+    // macOS 26: the libkrun `aarch64` builder image is never built on a Vz host
+    // (`dev up` builds only the Vz image), so OCI materialize errored "builder VM
+    // image not found". libkrun/QEMU hosts are unaffected — `resolve_choice`
+    // still picks libkrun there.
+    crate::builder_backend_select::resolve_choice()
 }
 
 /// Safety margin (bytes) left between the formatted ext4 size and the
@@ -369,11 +367,17 @@ mod tests {
 
     #[cfg(feature = "builder-vm")]
     #[test]
-    fn materializer_defaults_to_libkrun_for_historical_compatibility() {
+    fn materializer_defaults_to_resolved_backend() {
         let mut env = TestEnv::new();
         env.remove(MVM_BUILDER_BACKEND_ENV);
 
-        assert_eq!(ext4_materializer_choice(), BuilderBackendChoice::Libkrun);
+        // No override → the resolved backend (macOS 26+ Apple Silicon → Vz,
+        // everywhere else → libkrun). On a Vz Mac, forcing libkrun looked for an
+        // `aarch64` builder image that is never built there.
+        assert_eq!(
+            ext4_materializer_choice(),
+            crate::builder_backend_select::auto_detect_default()
+        );
     }
 
     #[cfg(feature = "builder-vm")]
