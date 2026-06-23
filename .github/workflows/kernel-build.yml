@@ -85,17 +85,18 @@ jobs:
           # the shrink audit + the check-kernel-config-budget gate.
           cp "$CFG" "staging/workload-config-${ARCH}"
           Y_COUNT=$(grep -c '=y$' "$CFG")
-          # Symbol-budget ratchet: fail if the workload kernel grew a new
-          # built-in past the committed ceiling. The budget lives in the xtask
-          # (single source of truth) — read it out rather than duplicate it, so
-          # this can't drift from `cargo run -p xtask -- check-kernel-config-budget`.
-          BUDGET=$(grep -oP 'KERNEL_Y_BUDGET: usize = \K[0-9]+' \
+          # Per-arch symbol-budget ratchet: fail if this arch's workload kernel
+          # grew a new built-in past its committed ceiling. The budgets live in
+          # the xtask (single source of truth) — read the arch-specific one out
+          # rather than duplicate it, so this can't drift from
+          # `cargo run -p xtask -- check-kernel-config-budget`.
+          BUDGET=$(grep -oP "BUDGET_${ARCH^^}: usize = \K[0-9]+" \
             xtask/src/check_kernel_config_budget.rs)
           echo "workload kernel ${ARCH}: ${Y_COUNT} =y symbols (budget ${BUDGET})"
           if [ "$Y_COUNT" -gt "$BUDGET" ]; then
             echo "::error::workload kernel ${ARCH} has ${Y_COUNT} built-in (=y) symbols, \
               over the ${BUDGET} budget — a new subsystem was compiled in. Drop it, or bump \
-              KERNEL_Y_BUDGET in xtask/src/check_kernel_config_budget.rs with justification."
+              BUDGET_${ARCH^^} in xtask/src/check_kernel_config_budget.rs with justification."
             exit 1
           fi
           RAW_BYTES=$(stat -c%s "staging/vmlinux-${ARCH}-workload")
