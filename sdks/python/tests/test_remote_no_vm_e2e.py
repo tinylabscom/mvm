@@ -1,8 +1,8 @@
-"""End-to-end test for `mvmctl invoke --no-vm` against the real binary.
+"""End-to-end test for SDK no-VM dispatch against the real binary.
 
-Plan 60 Phase 5 Slice E1b. Validates the full SDK wire contract:
+Validates the full SDK wire contract:
 
-    Python SDK  --(encode args)-->  mvmctl invoke --no-vm
+    Python SDK  --(encode args)-->  mvmctl __sdk-no-vm
                                           |
                                           v
                                     embedded oneshot.py wrapper
@@ -99,7 +99,7 @@ def adder_module(tmp_path: Path) -> Iterator[object]:
 def _decorate(adder_module: object) -> mvm.RemoteFunction:
     """Wrap the imported `adder_mod.add` directly so its `__module__`
     points at `adder_mod` (not at this test file) — the SDK's
-    `--no-vm` argv-builder reads `fn.__module__` to tell mvmctl where
+    no-VM argv-builder reads `fn.__module__` to tell mvmctl where
     to import the function from.
     """
     return mvm.func(name="adder")(adder_module.add)
@@ -110,7 +110,7 @@ def test_no_vm_sync_roundtrip_returns_real_value(
     adder_module: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``f.sync(2, 3) == 5`` against the real mvmctl --no-vm path."""
+    """``f.sync(2, 3) == 5`` against the real mvmctl no-VM path."""
     monkeypatch.setenv("MVM_NO_VM", "1")
     monkeypatch.setenv("MVM_MVM_BIN", str(real_mvmctl))
 
@@ -123,7 +123,7 @@ def test_no_vm_async_roundtrip_returns_real_value(
     adder_module: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``await f(2, 3) == 5`` against the real mvmctl --no-vm path.
+    """``await f(2, 3) == 5`` against the real mvmctl no-VM path.
 
     Confirms the async dispatch path (the canonical SDK call form)
     works end-to-end, not just the sync escape hatch.

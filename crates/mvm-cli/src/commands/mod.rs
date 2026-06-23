@@ -94,6 +94,9 @@ pub(in crate::commands) enum Commands {
     /// rather than break that transport.
     #[command(hide = true)]
     Run(vm::exec::RunArgs),
+    /// Internal SDK host-dispatch transport for `MVM_NO_VM=1`.
+    #[command(name = "__sdk-no-vm", hide = true)]
+    SdkNoVm(vm::sdk_no_vm::Args),
     /// Prepare the environment + pre-fetch the builder VM image
     ///
     /// Runs host-tooling setup and pre-acquires the builder VM image so the
@@ -310,6 +313,7 @@ pub fn run() -> Result<()> {
         Commands::Dev(a) => env::dev::run(&cli, a, &cfg),
         Commands::Ls(a) => vm::ps::run(&cli, a, &cfg),
         Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),
+        Commands::SdkNoVm(a) => vm::sdk_no_vm::run(&a),
         Commands::Doctor(a) => env::doctor::run(&cli, a, &cfg),
         Commands::Build(a) => build::group::run(&cli, a, &cfg),
         Commands::Manifest(a) => manifest::run(&cli, a, &cfg),

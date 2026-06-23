@@ -391,6 +391,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Sandbox transport (`run --mode live/plan`); its posture is unchanged.
     ("ls", AuditPosture::ReadOnly),
     ("run", AuditPosture::InteractiveOrControl),
+    ("__sdk-no-vm", AuditPosture::InteractiveOrControl),
     // Build / artifact / registry. Plan 178 (D1) — image/compile/validate/
     // kernel grouped under `build <sub>`.
     ("build", AuditPosture::DelegatesToSub(BUILD_SUB)),
