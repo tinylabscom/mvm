@@ -18,6 +18,14 @@ const HANDLE_FILE: &str = "standby.json";
 /// TTL by this factor before the reaper finally removes it.
 const PARKED_TTL_MULTIPLIER: u64 = 6;
 
+/// Default TTL the lazy reapers ([`SupervisorStandbyPool::reap_stale`]) apply to
+/// idle standbys. There is no daemon, so expiry is enforced on-use: both the
+/// launch path and `cache prune` reap standbys older than this. Set a little
+/// above the always-warm idle window (residency `idle_timeout`, 20 min) so a
+/// freshly-warmed spare survives to its next claim, while a one-off run's
+/// leftover spare is cleaned by the next mvmctl invocation.
+pub const STANDBY_POOL_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 /// A view over `~/.mvm/pool/` (or a test root). Cheap to construct; all state is on disk.
 pub struct SupervisorStandbyPool {
     root: PathBuf,
@@ -199,6 +207,21 @@ fn set_mode_0700(p: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use mvm_core::vm_backend::{StandbyCompat, StandbyHandle, StandbyState};
+
+    #[test]
+    fn standby_pool_ttl_exceeds_always_warm_idle_window() {
+        // The on-use reaper (launch path + `cache prune`) must not evict a
+        // freshly-warmed spare before its next claim, so the reap TTL has to sit
+        // above the always-warm idle window. If the residency idle window grows
+        // past this, the launch reaper would churn the very spare it warms.
+        let warm_idle = mvm_core::residency::ResidencyPolicy::always_warm()
+            .idle_timeout()
+            .expect("always-warm has an idle timeout");
+        assert!(
+            STANDBY_POOL_TTL > warm_idle,
+            "STANDBY_POOL_TTL {STANDBY_POOL_TTL:?} must exceed always-warm idle {warm_idle:?}"
+        );
+    }
 
     fn handle(id: &str, kernel: &str, state: StandbyState) -> StandbyHandle {
         StandbyHandle {

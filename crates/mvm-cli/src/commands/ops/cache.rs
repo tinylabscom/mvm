@@ -387,8 +387,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // Reap stale supervisor standbys under `~/.mvm/pool/`.
             // The TTL guards a fresh pool (only dead-pid or expired standbys go); a
             // live-expired standby's entitled supervisor is SIGTERM'd before its dir is
-            // dropped, so idle entitled processes never accumulate.
-            const STANDBY_POOL_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+            // dropped, so idle entitled processes never accumulate. Shares
+            // `STANDBY_POOL_TTL` with the launch-path reaper so both agree on "stale".
+            use mvm_backend::standby_pool::STANDBY_POOL_TTL;
             if dry_run {
                 if let Ok(pool) = mvm_backend::standby_pool::SupervisorStandbyPool::open()
                     && let Ok(n) = pool.list().map(|v| v.len())

@@ -642,6 +642,12 @@ fn run_inner(
     }
     let t_admitted = timing.then(std::time::Instant::now);
 
+    // Reap dead/expired standbys before claiming/booting. There is no daemon, so
+    // this on-use reap is what enforces the standby TTL between invocations —
+    // without it a one-off run (or runs against different images) leaves warm
+    // spares resident until a manual `cache prune`. Best-effort; never blocks.
+    crate::commands::pool::reap_stale_standbys_best_effort();
+
     // Try a warm-pool claim before snapshot/cold-boot. A claimed
     // standby is pre-booted to agent-ready and runs under its own standby-id, so
     // rebind `vm_name` for the Ctrl-C handler, run_in_guest, and teardown below.

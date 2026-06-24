@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use mvm_backend::backend::AnyBackend;
 use mvm_backend::catalog::BackendKind;
-use mvm_backend::standby_pool::SupervisorStandbyPool;
+use mvm_backend::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool, now_unix_secs};
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
     StandbyClaim, StandbyCompat, StandbyHandle, StandbySpec, StandbyState, VmBackend, VmId,
@@ -370,6 +370,27 @@ fn warm_claim_plan_json(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Option<
         Some(plan) => Some(plan),
         None if backend.name() == "firecracker" => Some(String::new()),
         None => None,
+    }
+}
+
+/// Lazily reap dead/expired standbys on the launch path — the no-daemon
+/// reap-on-use counterpart to [`replenish_after_launch`]. Without a background
+/// daemon nothing enforces the standby TTL between invocations, so every launch
+/// expires stale spares itself; otherwise a one-off run, or runs against
+/// different images, leave standbys resident until a manual `cache prune`
+/// (`reap_stale` is only otherwise wired into `cache prune`). Best-effort: a
+/// reap failure must never block a launch, so it is logged at debug and
+/// swallowed. Uses the same [`STANDBY_POOL_TTL`] as `cache prune` so the two
+/// reapers agree on what "stale" means.
+pub fn reap_stale_standbys_best_effort() {
+    match SupervisorStandbyPool::open()
+        .and_then(|pool| pool.reap_stale(STANDBY_POOL_TTL, now_unix_secs()))
+    {
+        Ok(reaped) if !reaped.is_empty() => {
+            tracing::debug!(count = reaped.len(), "reaped stale standbys on launch");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::debug!(error = %e, "standby reap on launch failed (best-effort)"),
     }
 }
 
