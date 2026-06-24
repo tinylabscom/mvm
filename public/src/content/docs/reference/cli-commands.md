@@ -699,6 +699,8 @@ flow and the distinction between build time and runtime boot time.
 | Command | Description |
 |---------|-------------|
 | `mvmctl cache info` | Show cache directory path, disk usage, and a per-entry footprint breakdown (unrecognized entries are flagged) |
+| `mvmctl cache status` | Show local attested pack cache inventory, metadata readiness, expiry, revocation-check status, and instant-launch eligibility state |
+| `mvmctl cache status --json` | Emit the attested pack cache inventory as machine-readable JSON |
 | `mvmctl cache prune` | Remove stale temp files; report (but don't delete) unrecognized top-level cache dirs |
 | `mvmctl cache prune --dry-run` | Show what would be removed without deleting |
 | `mvmctl cache prune --orphan-builds` | Also sweep orphaned builds — built artifacts whose source `mvm.toml` is gone (equivalent to `mvmctl manifest prune --orphans`) |

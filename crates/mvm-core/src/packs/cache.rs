@@ -31,6 +31,26 @@ pub struct CachedPack {
     pub index: PackCacheIndex,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackCacheStatusEntry {
+    pub directory_name: String,
+    pub root: PathBuf,
+    pub index: Option<PackCacheIndex>,
+    pub readiness: PackCacheReadiness,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackCacheReadiness {
+    Ready,
+    Expired,
+    MissingIndex,
+    MalformedIndex,
+    UnsupportedIndexSchema,
+    DirectoryHashMismatch,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackCacheIndex {
@@ -70,6 +90,42 @@ impl PackCache {
 
     pub fn pack_dir(&self, pack_hash: &Sha256Hex) -> PathBuf {
         self.by_hash_dir().join(pack_hash.as_str())
+    }
+
+    pub fn status_entries(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<PackCacheStatusEntry>, PackCacheError> {
+        let by_hash_dir = self.by_hash_dir();
+        if !by_hash_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+
+        let entries = fs::read_dir(&by_hash_dir).map_err(|source| PackCacheError::Io {
+            path: by_hash_dir.clone(),
+            source,
+        })?;
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| PackCacheError::Io {
+                path: by_hash_dir.clone(),
+                source,
+            })?;
+            let root = entry.path();
+            if !root.is_dir() {
+                continue;
+            }
+            let directory_name = entry.file_name().to_string_lossy().into_owned();
+            out.push(status_entry_for_dir(directory_name, root, now));
+        }
+        out.sort_by(|a, b| {
+            let a_used = a.index.as_ref().map(|index| index.last_used_at);
+            let b_used = b.index.as_ref().map(|index| index.last_used_at);
+            b_used
+                .cmp(&a_used)
+                .then_with(|| a.directory_name.cmp(&b.directory_name))
+        });
+        Ok(out)
     }
 
     pub fn install_from_verified_root(
@@ -207,6 +263,76 @@ impl PackCache {
 impl Default for PackCache {
     fn default() -> Self {
         Self::new(Self::default_path())
+    }
+}
+
+fn status_entry_for_dir(
+    directory_name: String,
+    root: PathBuf,
+    now: DateTime<Utc>,
+) -> PackCacheStatusEntry {
+    let index_path = root.join(INDEX_FILENAME);
+    let index_bytes = match fs::read(&index_path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return PackCacheStatusEntry {
+                directory_name,
+                root,
+                index: None,
+                readiness: PackCacheReadiness::MissingIndex,
+                detail: Some("cache index missing".to_string()),
+            };
+        }
+        Err(err) => {
+            return PackCacheStatusEntry {
+                directory_name,
+                root,
+                index: None,
+                readiness: PackCacheReadiness::MalformedIndex,
+                detail: Some(format!("cache index unreadable: {err}")),
+            };
+        }
+    };
+    let index: PackCacheIndex = match serde_json::from_slice(&index_bytes) {
+        Ok(index) => index,
+        Err(err) => {
+            return PackCacheStatusEntry {
+                directory_name,
+                root,
+                index: None,
+                readiness: PackCacheReadiness::MalformedIndex,
+                detail: Some(format!("cache index malformed: {err}")),
+            };
+        }
+    };
+    let readiness = if index.schema_version != PACK_CACHE_SCHEMA_VERSION {
+        PackCacheReadiness::UnsupportedIndexSchema
+    } else if index.pack_hash.as_str() != directory_name {
+        PackCacheReadiness::DirectoryHashMismatch
+    } else if index.expires_at <= now {
+        PackCacheReadiness::Expired
+    } else {
+        PackCacheReadiness::Ready
+    };
+    let detail = match readiness {
+        PackCacheReadiness::Ready => None,
+        PackCacheReadiness::Expired => Some("trust metadata expired".to_string()),
+        PackCacheReadiness::UnsupportedIndexSchema => Some(format!(
+            "cache index schema version {} is unsupported",
+            index.schema_version
+        )),
+        PackCacheReadiness::DirectoryHashMismatch => Some(format!(
+            "cache directory name does not match pack hash {}",
+            index.pack_hash.as_str()
+        )),
+        PackCacheReadiness::MissingIndex | PackCacheReadiness::MalformedIndex => None,
+    };
+    PackCacheStatusEntry {
+        directory_name,
+        root,
+        index: Some(index),
+        readiness,
+        detail,
     }
 }
 
@@ -574,6 +700,77 @@ mod tests {
             .expect("resolve");
         assert_eq!(resolved.verified.pack_hash, f.manifest.outputs.pack_hash);
         assert_eq!(resolved.index.last_used_at, later_policy.now);
+    }
+
+    #[test]
+    fn status_entries_report_ready_expired_and_corrupt_entries() {
+        let f = fixture();
+        let cached = f
+            .cache
+            .install_from_verified_root(
+                &f.manifest,
+                f.source.path(),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("install");
+
+        let entries = f
+            .cache
+            .status_entries(f.policy.now)
+            .expect("status entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].readiness, PackCacheReadiness::Ready);
+        assert_eq!(entries[0].index.as_ref(), Some(&cached.index));
+
+        let mut expired = cached.index.clone();
+        expired.expires_at = utc(2026, 1, 1);
+        write_restricted_file(
+            &cached.root.join(INDEX_FILENAME),
+            &serde_json::to_vec(&expired).expect("serialize expired index"),
+        )
+        .expect("write expired index");
+
+        let malformed_dir = f.cache.by_hash_dir().join(hash("malformed").as_str());
+        fs::create_dir_all(&malformed_dir).expect("malformed dir");
+        fs::write(malformed_dir.join(INDEX_FILENAME), b"not json").expect("malformed index");
+
+        let missing_dir = f.cache.by_hash_dir().join(hash("missing").as_str());
+        fs::create_dir_all(&missing_dir).expect("missing dir");
+
+        let mismatch_dir = f.cache.by_hash_dir().join(hash("mismatch").as_str());
+        fs::create_dir_all(&mismatch_dir).expect("mismatch dir");
+        write_restricted_file(
+            &mismatch_dir.join(INDEX_FILENAME),
+            &serde_json::to_vec(&cached.index).expect("serialize mismatch index"),
+        )
+        .expect("write mismatch index");
+
+        let entries = f
+            .cache
+            .status_entries(f.policy.now)
+            .expect("status entries");
+        let readiness: BTreeMap<String, PackCacheReadiness> = entries
+            .into_iter()
+            .map(|entry| (entry.directory_name, entry.readiness))
+            .collect();
+        assert_eq!(
+            readiness.get(cached.verified.pack_hash.as_str()),
+            Some(&PackCacheReadiness::Expired)
+        );
+        assert_eq!(
+            readiness.get(hash("malformed").as_str()),
+            Some(&PackCacheReadiness::MalformedIndex)
+        );
+        assert_eq!(
+            readiness.get(hash("missing").as_str()),
+            Some(&PackCacheReadiness::MissingIndex)
+        );
+        assert_eq!(
+            readiness.get(hash("mismatch").as_str()),
+            Some(&PackCacheReadiness::DirectoryHashMismatch)
+        );
     }
 
     #[test]

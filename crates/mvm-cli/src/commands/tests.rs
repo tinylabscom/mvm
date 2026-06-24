@@ -3116,6 +3116,17 @@ fn test_cache_info() {
 }
 
 #[test]
+fn test_cache_status_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "cache", "status", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Cache(cache::Args {
+            action: CacheAction::Status { json: true }
+        })
+    ));
+}
+
+#[test]
 fn test_cache_prune() {
     let cli = Cli::try_parse_from(["mvmctl", "cache", "prune"]);
     assert!(cli.is_ok());

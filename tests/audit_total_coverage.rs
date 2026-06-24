@@ -143,6 +143,7 @@ const NETWORK_SUB: &[(&str, AuditPosture)] = &[
 
 const CACHE_SUB: &[(&str, AuditPosture)] = &[
     ("info", AuditPosture::ReadOnly),
+    ("status", AuditPosture::ReadOnly),
     ("prune", AuditPosture::Emits("CachePrune")),
     // #640 — clears a degraded builder store; emits CachePrune on the real run
     // (op=builder_store_repair). A `--dry-run` is read-only, but the posture

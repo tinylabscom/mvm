@@ -73,6 +73,19 @@ plan 25 sequences the work into six independently-shippable workstreams.
       the CLI cache-recognition regression. Network download/extraction,
       `mvm cache status`, `mvm cache prune`, and policy-aware pruning remain
       open.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream C cache status: `mvmctl cache status [--json]` now reports
+      attested pack cache inventory from the content-addressed pack index,
+      including per-pack readiness, kind, architecture, backend compatibility,
+      channel, expiry, size, file count, last-used time, last-verified time,
+      revocation-check state, and instant-launch eligibility state. The command
+      is read-only and labels metadata-ready packs as requiring launch-time
+      verifier/trust/revocation checks before use. Coverage: focused
+      `mvm-core` status-entry tests for ready, expired, missing-index,
+      malformed-index, and directory-hash-mismatch entries; focused `mvm-cli`
+      parser and status-row tests; full workspace `cargo test`, `cargo check`,
+      and `cargo clippy --workspace --all-targets -- -D warnings`.
 - [x] Closed
       [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
       as implementation-complete. The shipped ADR-076 DX/UX layer includes
