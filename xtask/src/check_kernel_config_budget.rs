@@ -20,12 +20,21 @@ use std::path::Path;
 
 /// Per-arch max built-in (`=y`) symbol counts. Tighten on every shrink; raising
 /// one must be justified in the PR that does. Tracks the audit-subtraction pass
-/// that took the baseline 1716 → these figures (PCI / EFI / MFD / I2C / GPIO /
-/// NFS / VFIO / IPMI / cpufreq / SPI / CORESIGHT / KVM / IOMMU / squashfs /
-/// suspend / SoC-errata and other off-the-boot-path subsystems), each cut
-/// boot-validated under libkrun.
-const BUDGET_AARCH64: usize = 1327;
-const BUDGET_X86_64: usize = 1130;
+/// that took the baseline 1716 → these figures (EFI / MFD / I2C / GPIO / NFS /
+/// VFIO / IPMI / cpufreq / SPI / CORESIGHT / KVM / IOMMU / squashfs / suspend /
+/// SoC-errata and other off-the-boot-path subsystems), each cut boot-validated
+/// under libkrun.
+///
+/// PCI was re-added after the initial shrink dropped it: vz (Apple
+/// Virtualization.framework) presents virtio over PCI, not MMIO, so a PCI-less
+/// kernel boots blind under vz (no console/net/block). Re-enabling PCI +
+/// PCI_MSI + VIRTIO_PCI raised x86_64 by 73 (1130 → 1203, measured). aarch64 is
+/// set to a comparable delta (core PCI is arch-shared; the SoC PCIe host
+/// controllers stay off since their deps are disabled) and is confirmed by CI's
+/// native aarch64 config build — ratchet it to the count CI reports if it
+/// differs.
+const BUDGET_AARCH64: usize = 1420;
+const BUDGET_X86_64: usize = 1203;
 
 /// Resolve the budget for a config path by the arch in its name. Unknown →
 /// the larger budget (fail-open on the ceiling, never a false pass on a real

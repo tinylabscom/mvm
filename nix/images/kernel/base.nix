@@ -47,12 +47,18 @@ let
   # `make olddefconfig` fills in transitive dependencies, so this names
   # only what we directly require.
   baseEnables = [
-    # virtio bus + transport (sans virtio-fs — that's builder-only;
-    # a sealed workload mounts no host shares). Shrink batch 3: PCI dropped —
-    # libkrun/Firecracker present virtio over the MMIO transport, so the whole
-    # PCI subsystem + its host-controller drivers are dead weight. virtio-pci
-    # goes with it; virtio-mmio carries every device.
-    "VIRTIO" "VIRTIO_MENU" "VIRTIO_MMIO"
+    # virtio bus + BOTH transports (sans virtio-fs — that's builder-only; a
+    # sealed workload mounts no host shares). Both transports are required
+    # because the backends differ: libkrun/Firecracker present virtio over
+    # MMIO, but **vz (Apple Virtualization.framework) presents virtio over
+    # PCI**. A kernel without PCI/VIRTIO_PCI boots blind under vz — no
+    # virtio-console (zero bytes on hvc0), no virtio-net, no virtio-block — so
+    # the vz builder + workload VMs hang at boot. PCI + PCI_MSI + VIRTIO_PCI
+    # therefore stay enabled; do not drop them as "MMIO-only dead weight" (that
+    # regression broke every vz boot on macOS). The generic ECAM PCI host
+    # controller AVF's bus needs comes from `make defconfig` once PCI is on.
+    "VIRTIO" "VIRTIO_MENU" "VIRTIO_MMIO" "VIRTIO_PCI"
+    "PCI" "PCI_MSI"
     "VIRTIO_BLK" "VIRTIO_NET" "VIRTIO_CONSOLE"
     "VSOCKETS" "VIRTIO_VSOCKETS" "VIRTIO_BALLOON"
     "HW_RANDOM" "HW_RANDOM_VIRTIO"
@@ -172,15 +178,16 @@ let
     "PINCTRL"              # SoC pin-mux
     "MFD_CORE"             # multi-function (PMIC) device core
 
-    # Shrink batch 3 — the whole PCI subsystem + host-controller drivers.
-    # Force-dropped (defconfig defaults it on) since virtio rides MMIO here.
-    "PCI"
+    # NOTE: PCI is intentionally NOT disabled — vz (Apple
+    # Virtualization.framework) presents virtio over PCI, so PCI + VIRTIO_PCI
+    # are in the enable list above. libkrun/Firecracker (MMIO) simply don't
+    # probe it. Dropping PCI here is what broke every vz boot on macOS.
 
     # Shrink batch 4 — more whole subsystems a sealed virtio microVM never
     # uses. Each cascades its family (drivers + helpers) via olddefconfig.
     "NFS_FS"               # no network filesystems mounted
     "PHYLIB" "MDIO_DEVICE" # ethernet PHY mgmt — virtio-net has no PHY
-    "VFIO"                 # device passthrough (and PCI is gone)
+    "VFIO"                 # device passthrough — unused (no PCI passthrough)
     "IPMI_HANDLER"         # no BMC / out-of-band mgmt
     "CPU_FREQ" "CPU_IDLE"  # no DVFS/idle-governor in a guest
     "SPI"                  # no SPI buses behind virtio (drops SPI flash/RTC/…)
