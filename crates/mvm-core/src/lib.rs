@@ -15,6 +15,7 @@ pub mod metering;
 pub mod migration;
 pub mod naming;
 pub mod observability;
+pub mod packs;
 pub mod user_config;
 
 /// Cryptographic primitives — attestation, key rotation, keystore,

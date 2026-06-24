@@ -1,6 +1,6 @@
 # Plan 213 — Attested fast-first-boot packs
 
-**Status: Proposed**
+**Status: In progress**
 **Owner:** mvm
 **Date:** 2026-06-24
 **Depends on:** [ADR-097](../adrs/097-attested-downloadable-runtime-and-builder-packs.md),
@@ -70,25 +70,25 @@ The target user-visible shape is:
 
 ### A. Pack identity, schema, and verification core
 
-- [ ] Add pack manifest types for runtime, builder, and image/project packs.
-- [ ] Represent pack kind, schema version, architecture, backend compatibility,
+- [x] Add pack manifest types for runtime, builder, and image/project packs.
+- [x] Represent pack kind, schema version, architecture, backend compatibility,
       required host capabilities, and policy compatibility as typed fields.
-- [ ] Represent input identities: flake lock hashes, derivation paths, NAR
+- [x] Represent input identities: flake lock hashes, derivation paths, NAR
       hashes, OCI digests, setup-command hashes, source revisions, and
       toolchain versions.
-- [ ] Represent output identities: pack hash, file hashes, closure hash, rootfs
+- [x] Represent output identities: pack hash, file hashes, closure hash, rootfs
       hash, kernel hash, initramfs or agent-rootfs hash, and builder-image hash.
-- [ ] Represent provenance: builder identity, build environment identity, build
+- [x] Represent provenance: builder identity, build environment identity, build
       timestamp, reproducibility status, SBOM reference, and signature bundle.
-- [ ] Represent trust metadata: signing key id, expiry, revocation channel,
+- [x] Represent trust metadata: signing key id, expiry, revocation channel,
       channel identity, mirror identity, and optional transparency-log reference.
-- [ ] Add serde roundtrip tests for every manifest type.
-- [ ] Add negative parser tests for missing hashes, unsupported schema versions,
+- [x] Add serde roundtrip tests for every manifest type.
+- [x] Add negative parser tests for missing hashes, unsupported schema versions,
       mutable OCI references, expired trust metadata, and incompatible
       architecture/backend declarations.
-- [ ] Add a verifier API that validates manifest schema, file hashes, aggregate
+- [x] Add a verifier API that validates manifest schema, file hashes, aggregate
       pack hash, signature bundle, expiry, revocation status, and local policy.
-- [ ] Add tamper tests proving changed file contents, changed manifests,
+- [x] Add tamper tests proving changed file contents, changed manifests,
       mismatched pack hashes, and revoked/expired signatures are rejected.
 
 ### B. Release production and artifact publishing

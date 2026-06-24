@@ -44,6 +44,19 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 ## Planning updates
 
+- [x] Started
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream A: `mvm_core::packs` now defines strict typed manifests for
+      runtime, builder, and image/project packs, including input/output
+      identities, provenance, trust metadata, signature bundles, local policy
+      compatibility, file hashes, and aggregate pack hashes. The verifier
+      checks schema version, file content hashes, pack hash, Ed25519 signature
+      bundle shape, expiry, revocation hook status, mutable OCI refusal, and
+      local architecture/backend/capability/policy compatibility. Coverage:
+      15 pack-focused tests for serde roundtrips, parser/validation refusals,
+      tampered files/manifests, mismatched pack hashes, and revoked/expired
+      signatures. Later Plan 213 release, cache, launch, builder, audit, and
+      documentation workstreams remain open.
 - [x] Closed
       [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
       as implementation-complete. The shipped ADR-076 DX/UX layer includes
