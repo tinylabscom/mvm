@@ -92,6 +92,36 @@ jobs:
           OPENSSL_VENDORED: 1
         run: cargo build --release --target "${TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
 
+      # The per-VM host processes mvmctl spawns at runtime (one process per
+      # guest). They are SEPARATE bin targets in `mvm-vm-host` — the root
+      # `cargo build` above only produces `mvmctl`, so without this step a
+      # downloaded (non-source) install has no `mvm-bridge` and the backend's
+      # adjacent-to-exe resolver (which also checks `MVM_BRIDGE_PATH` and the
+      # source-tree `target/`) finds nothing. They ship next to `mvmctl` in the
+      # tarball below so the resolver locates them.
+      #   - mvm-bridge: cross-platform external-VMM gateway/audit sidecar
+      #     (Firecracker passt + vz VzIngest). Builds everywhere, no extra deps.
+      #   - mvm-vz-supervisor (macOS only): the vz VMM supervisor.
+      #   - mvm-libkrun-supervisor (macOS only here): needs the libkrun-sys FFI,
+      #     which links libkrun — installed on the macOS runner above but not on
+      #     Linux ("Linux uses Firecracker"). Linux libkrun-supervisor packaging
+      #     needs a Linux libkrun build step — tracked as a follow-up.
+      - name: Build per-VM host binaries
+        env:
+          TARGET: ${{ matrix.target }}
+          OPENSSL_STATIC: 1
+          OPENSSL_VENDORED: 1
+        shell: bash
+        run: |
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            cargo build --release --target "${TARGET}" -p mvm-vm-host \
+              --bin mvm-bridge --bin mvm-vz-supervisor \
+              --bin mvm-libkrun-supervisor --features libkrun-sys
+          else
+            cargo build --release --target "${TARGET}" -p mvm-vm-host \
+              --bin mvm-bridge
+          fi
+
       - name: Smoke test binary (native targets only)
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
         env:
@@ -139,6 +169,14 @@ jobs:
 
           mkdir -p "staging/${ARCHIVE_NAME}"
           cp "target/${TARGET}/release/${BIN_NAME}" "staging/${ARCHIVE_NAME}/"
+          # Per-VM host processes (built in the prior step), shipped next to
+          # mvmctl so the backend's adjacent-to-exe resolver finds them on a
+          # downloaded install. copy-if-exists: the set differs by OS (macOS
+          # gets all three; Linux gets mvm-bridge only).
+          for hostbin in mvm-bridge mvm-vz-supervisor mvm-libkrun-supervisor; do
+            src="target/${TARGET}/release/${hostbin}"
+            [ -f "$src" ] && cp "$src" "staging/${ARCHIVE_NAME}/" && echo "bundled ${hostbin}"
+          done
           cp -r resources "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           cp README.md "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           # Include generated man pages
