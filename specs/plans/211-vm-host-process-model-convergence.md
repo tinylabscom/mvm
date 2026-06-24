@@ -253,18 +253,34 @@ vz now live-testable on macOS 26; FC still KVM-gated).
 
 ## Task 5: CI, fuzz, docs, claim integrity
 
-- [ ] Repoint the bridge fuzz lane (`firecracker-bridge-fuzz`) at the unified
-      parser; rename to `bridge-config-fuzz` if appropriate. One parser, one
-      fuzz target.
-- [ ] Update `.github/workflows/architecture.yml` substrate-server inventory and
-      `crates/mvm-vm-host/Cargo.toml` `[package.metadata.mvm.architecture]` to
-      describe the three-bin topology.
-- [ ] Update `mvmctl doctor` if it enumerates per-VM host bins; update any
-      contributor/reference docs that name `mvm-firecracker-bridge` /
-      `mvm-vz-drainer`.
-- [ ] Confirm `xtask check-claim-catalog`, `xtask check-handler-*`, and the
-      claim-10/12/13 witnesses stay green — this plan introduces no new claim and
-      must not weaken an existing one. No catalog edits expected.
+- [x] Repoint the bridge fuzz lane at the unified parser. Already done in Task 1/2:
+      the fuzz target is `fuzz_bridge_config_json` (one parser, one target). Task 5
+      renamed the two `security.yml` step labels from "Fuzz Firecracker bridge —"
+      to "Fuzz mvm-bridge —" and fixed the stale comment/path refs in
+      `fuzz/Cargo.toml` + the fuzz-target headers.
+- [x] `architecture.yml` substrate-server inventory + `crates/mvm-vm-host/Cargo.toml`
+      `[package.metadata.mvm.architecture]` — verified already correct (Task 4):
+      architecture.yml refers to the `mvm-vm-host` crate abstractly; the Cargo.toml
+      package description already names the 3-bin topology + the `mvm-bridge` fold.
+- [x] `mvmctl doctor` — verified it does **not** enumerate per-VM host bins (probes
+      `mvm-vz-supervisor` only). Updated contributor/reference docs naming the old
+      bins: `CLAUDE.md`, jailer `SECCOMP.md`/`LANDLOCK.md` + source-comment sweep in
+      `mvm-hostd/src/jailer/*`, `Cargo.toml`, `deps/libkrun-sys/src/lib.rs`,
+      `mvm-vm-host/src/firecracker_bridge/{mod,parse}.rs`. Historical "former/folded
+      from" phrasing left intact.
+- [x] `xtask check-claim-catalog`, `check-handler-*`, claim-10/12/13 witnesses —
+      no catalog edits; comments/docs-only change introduces no claim drift.
+
+**Deferred Task 5 follow-ups (not in the cleanup PR):**
+- [ ] **Packaging/embed**: `.github/workflows/release.yml` ships only `mvmctl` +
+      `resources/`; the per-VM host bins (`mvm-bridge`, `mvm-vz-supervisor`,
+      `mvm-libkrun-supervisor`) are **not** in the release tarball, so a downloaded
+      (non-source) mvmctl can't spawn `mvm-bridge` unless it's adjacent / on
+      `MVM_BRIDGE_PATH`. Pre-existing (the old bins weren't shipped either); needs a
+      release-pipeline change + verification. The DX-critical piece — own PR.
+- [ ] **`firecracker_bridge` module merge**: the module is now just shared parse
+      helpers re-exported by `bridge::parse`. Merging it into `bridge/` (and dropping
+      the misleading name) is a real refactor that touches the fuzz targets — own PR.
 - [ ] `just ci` green (fmt --all, nextest, doctests, clippy -D warnings).
 
 ## Task 6: Verification (FC = live-KVM gated; vz = macOS-26 gated)

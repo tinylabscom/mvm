@@ -1,6 +1,6 @@
 // Fuzz the host-side `BridgeConfigJson` JSON parser.
 //
-// `mvm-firecracker-bridge`'s `main()` reads a `BridgeConfigJson`
+// `mvm-bridge`'s `main()` reads a `BridgeConfigJson`
 // document on stdin before any libkrun / Firecracker / Landlock call.
 // The bytes come from a pipe `FirecrackerBackend` writes —
 // same-uid trust, but the parser is the entry point for the bridge's
@@ -14,7 +14,7 @@
 // the expected outcome for malformed bytes.
 //
 // `BridgeConfigJson` carries `#[serde(deny_unknown_fields)]` (see
-// `crates/mvm-firecracker-bridge/src/parse.rs`) so unknown /
+// `crates/mvm-vm-host/src/bridge/parse.rs`) so unknown /
 // attacker-controlled keys fail-closed during deserialization.
 
 #![no_main]

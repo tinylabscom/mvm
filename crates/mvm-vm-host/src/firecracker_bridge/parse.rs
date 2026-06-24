@@ -1,11 +1,11 @@
-//! Parser surface for `mvm-firecracker-bridge`.
+//! Parser surface for the `mvm-bridge` sidecar.
 //!
-//! Extracted from `src/main.rs` so the cargo-fuzz harness under
-//! `crates/mvm-firecracker-bridge/fuzz/` can call the same serde
-//! deserializers and the same hash-verify helper the binary uses at
-//! startup. The binary's `main()` imports [`BridgeConfigJson`],
-//! [`PasstHashesFile`], and [`verify_passt_hash`] from this module
-//! verbatim — there is no parser duplication.
+//! Kept in the library (not the bin) so the cargo-fuzz harness under
+//! `crates/mvm-vm-host/fuzz/` can call the same serde deserializers and the
+//! same hash-verify helper the sidecar uses at startup. `mvm-bridge`'s
+//! `main()` reuses [`BridgeConfigJson`], [`PasstHashesFile`], and
+//! [`verify_passt_hash`] from this module verbatim — there is no parser
+//! duplication.
 //!
 //! Both deserializer shapes carry `#[serde(deny_unknown_fields)]` so
 //! a malicious or merely sloppy producer can never inject an

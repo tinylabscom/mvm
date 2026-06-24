@@ -50,7 +50,7 @@ pub struct ConfinementSpec {
 }
 
 impl ConfinementSpec {
-    /// Canonical spec for `mvm-firecracker-bridge`. `SECCOMP.md` and
+    /// Canonical spec for the `mvm-bridge` sidecar. `SECCOMP.md` and
     /// `LANDLOCK.md` in the crate root document the rationale + review
     /// process for syscall additions.
     ///
@@ -171,7 +171,7 @@ fn existing_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 /// process on any error — there is no `disengage` API in either
 /// kernel LSM, and a half-confined process running attacker-influenced
 /// code is strictly worse than a confined one. The
-/// `mvm-firecracker-bridge` sidecar honours this contract by returning
+/// `mvm-bridge` sidecar honours this contract by returning
 /// the error up to `main`, which logs and exits nonzero; the
 /// supervisor's `BridgeRestartPolicy::HardFail` is the cleanup
 /// mechanism that turns the exit into a VM teardown.

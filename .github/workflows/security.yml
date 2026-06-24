@@ -379,12 +379,12 @@ jobs:
         # nightly cron, not on every mvm-oci PR.
         run: cargo fuzz run unpack_layer -- -max_total_time="$DURATION"
 
-      - name: Fuzz Firecracker bridge — BridgeConfigJson (host-side)
+      - name: Fuzz mvm-bridge — BridgeConfigJson (host-side)
         working-directory: crates/mvm-vm-host
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
-        # Plan 113 §Task 15 / ADR-064 — the `mvm-firecracker-bridge`
+        # Plan 113 §Task 15 / ADR-064 — the `mvm-bridge`
         # sidecar reads a `BridgeConfigJson` document on stdin BEFORE
         # installing `mvm-jailer-lite` confinement or touching the
         # parent-inherited socketpair fds. The producer (Task 13's
@@ -398,7 +398,7 @@ jobs:
         # deserialization.
         run: cargo fuzz run fuzz_bridge_config_json -- -max_total_time="$DURATION"
 
-      - name: Fuzz Firecracker bridge — passt-hashes TOML
+      - name: Fuzz mvm-bridge — passt-hashes TOML
         working-directory: crates/mvm-vm-host
         env:
           DURATION: ${{ steps.duration.outputs.secs }}

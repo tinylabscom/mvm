@@ -4,7 +4,7 @@ version = "0.0.0"
 publish = false
 edition = "2024"
 
-# Detach from the parent workspace — `crates/mvm-firecracker-bridge/fuzz`
+# Detach from the parent workspace — `crates/mvm-vm-host/fuzz`
 # is listed under `workspace.exclude` in the repo root Cargo.toml
 # because `libfuzzer-sys` only links cleanly under cargo-fuzz's wrapper
 # (which injects sanitizer + linker flags). An empty `[workspace]`
@@ -37,7 +37,7 @@ path = ".."
 # before installing Landlock + seccomp). Analog of
 # `fuzz_supervisor_config` and `fuzz_guest_request`; harness goal is
 # "never panic on any input." See
-# `crates/mvm-firecracker-bridge/fuzz/fuzz_targets/fuzz_bridge_config_json.rs`
+# `crates/mvm-vm-host/fuzz/fuzz_targets/fuzz_bridge_config_json.rs`
 # for the harness body.
 [[bin]]
 name = "fuzz_bridge_config_json"
