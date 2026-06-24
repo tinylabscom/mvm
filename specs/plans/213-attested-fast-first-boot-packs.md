@@ -111,14 +111,14 @@ The target user-visible shape is:
 
 ### C. Hardened local artifact cache
 
-- [ ] Add a content-addressed pack cache under the existing mvm cache helpers,
+- [x] Add a content-addressed pack cache under the existing mvm cache helpers,
       respecting `MVM_CACHE_DIR` and XDG isolation.
 - [ ] Download and extract packs into quarantine paths before atomic promotion.
-- [ ] Enforce restrictive permissions on cache directories and promoted pack
+- [x] Enforce restrictive permissions on cache directories and promoted pack
       contents.
-- [ ] Reverify manifest, hashes, signatures, expiry, revocation, and policy
+- [x] Reverify manifest, hashes, signatures, expiry, revocation, and policy
       compatibility before every use.
-- [ ] Add cache indexes for pack hash, kind, architecture, backend, channel,
+- [x] Add cache indexes for pack hash, kind, architecture, backend, channel,
       expiry, size, and last-used time.
 - [ ] Implement `mvm cache status` showing local packs, readiness, size, expiry,
       revocation state, and instant-launch eligibility.

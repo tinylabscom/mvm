@@ -5,6 +5,8 @@
 //! SHA-256 identities for every file, and is verified against local policy
 //! before any caller can consume the artifacts.
 
+pub mod cache;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::File;

@@ -555,6 +555,7 @@ const RECOGNIZED_CACHE_ENTRIES: &[&str] = &[
     "libkrunfw",         // kernel extracted from the libkrunfw dylib
     "host-bins",         // cross-compiled embedded host-vm binaries
     "guest-agent",       // built guest-agent staging
+    "packs",             // attested fast-first-boot pack cache
     "docker-nix-store",  // legacy Stage 0 store mount point
     "builder-nix-store", // legacy builder store mount point
     "dev",               // host-backed dev Nix-store overlay (dev down --reset)
@@ -1131,6 +1132,7 @@ mod tests {
             "libkrunfw",
             "host-bins",
             "guest-agent",
+            "packs",
         ] {
             assert!(
                 RECOGNIZED_CACHE_ENTRIES.contains(&known),
