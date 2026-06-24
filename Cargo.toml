@@ -64,7 +64,7 @@ members = [
     # cgroup + seccomp + binary hardening land in W1b.2.
     # Plan 113 / ADR-064 §Decision 5 — A2 confinement helper wrapping
     # seccompiler 0.5 + landlock 0.4. Called by the per-VM
-    # `mvm-firecracker-bridge` sidecar (Task 12) just after startup so
+    # `mvm-bridge` sidecar just after startup so
     # the kernel-LSM ruleset + seccomp filter are installed before the
     # packet loop touches untrusted bytes. Linux-only at runtime; the
     # crate compiles as inert stubs on macOS / Windows so workspace
@@ -350,7 +350,7 @@ mvm-backend = { path = "crates/mvm-backend", version = "0.16.1", default-feature
 mvm-egress-proxy = { path = "crates/mvm-egress-proxy", version = "0.16.1" }
 
 # Plan 113 / ADR-064 §Decision 5 — A2 confinement helper (seccompiler +
-# landlock). Consumed by the per-VM `mvm-firecracker-bridge` sidecar.
+# landlock). Consumed by the per-VM `mvm-bridge` sidecar.
 
 # Plan 113 §Task 10 / ADR-064 — per-VM Vz drainer binary crate. Leaf
 # entry consumed by `mvm-backend::vz::start()` (Task 11) via fork+exec;

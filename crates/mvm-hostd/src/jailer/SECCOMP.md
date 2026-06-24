@@ -14,7 +14,7 @@ Default action on disallowed syscall: **Trap** → SIGSYS, visible in
 core dumps + reproducible in tests.
 
 `SeccompAction::Trap` (vs `SeccompAction::Errno(EACCES)`) is
-intentional: the `mvm-firecracker-bridge` sidecar is *expected* to be
+intentional: the `mvm-bridge` sidecar is *expected* to be
 killed by SIGSYS on a forbidden syscall, and the supervisor's
 `BridgeRestartPolicy::HardFail` (ADR-064 §Decision 6) is the cleanup
 mechanism — the dead bridge tears down the VM. `Errno` would let a

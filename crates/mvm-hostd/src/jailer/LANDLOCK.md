@@ -43,7 +43,7 @@ preventing it from reading its own passt binary at all.
 `apply()` only returns `Ok(())` when the kernel reports
 `RulesetStatus::FullyEnforced`. `PartiallyEnforced` / `NotEnforced`
 return `JailerError::LandlockApply` so the caller can decide to abort
-(the `mvm-firecracker-bridge` sidecar aborts in that case — partial
+(the `mvm-bridge` sidecar aborts in that case — partial
 confinement is no confinement). See the partial-confinement contract
 doc on `confine_self` in `lib.rs` for the hard-exit requirement when
 seccomp fails *after* Landlock succeeds.

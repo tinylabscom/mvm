@@ -1,7 +1,7 @@
 // Fuzz the operator-curated `~/.mvm/passt-hashes.toml` parser.
 //
-// `verify_passt_hash` (`crates/mvm-firecracker-bridge/src/parse.rs`)
-// reads this file BEFORE installing `mvm-jailer-lite` confinement so
+// `verify_passt_hash` (`crates/mvm-vm-host/src/bridge/parse.rs`)
+// reads this file BEFORE installing jailer confinement so
 // the bridge can emit a clean remediation hint on a missing or
 // malformed allowlist (Cardoso minimum-viable-policy — the operator-
 // pinned allowlist is the supply-chain gate). A panic in the TOML
