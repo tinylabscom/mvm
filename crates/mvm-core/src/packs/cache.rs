@@ -1,6 +1,6 @@
 //! Content-addressed local cache for verified attested packs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read};
 use std::path::Component;
@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use super::{
     LocalPackPolicy, PackBackend, PackKind, PackManifest, PackRevocationChecker, PackTrustStore,
-    PackVerifyError, Sha256Hex, VerifiedPack, verify_pack_at,
+    PackVerifyError, SetupCacheLayerIdentity, Sha256Hex, VerifiedPack, verify_pack_at,
 };
 
 pub const PACK_CACHE_SCHEMA_VERSION: u32 = 1;
@@ -170,6 +170,8 @@ pub struct PackPrepareRequest {
     pub expected_kind: Option<PackKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pack_hash: Option<Sha256Hex>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_setup_cache_layers: Vec<SetupCacheLayerIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +212,8 @@ pub struct PackPrepareReport {
     pub download_required: bool,
     pub fast_path_eligible: bool,
     pub trust_state: PackTrustState,
+    #[serde(default)]
+    pub setup_cache: PackPrepareSetupCacheReport,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -239,6 +243,7 @@ pub enum PackPrepareReason {
     TrustUnavailable,
     CacheMetadataInvalid,
     InputMismatch,
+    SetupCacheMiss,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,6 +254,38 @@ pub enum PackTrustState {
     Untrusted,
     Expired,
     Revoked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackPrepareSetupCacheReport {
+    pub state: PackPrepareSetupCacheState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<PackPrepareSetupCacheLayerReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackPrepareSetupCacheState {
+    NotRequested,
+    Hit,
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackPrepareSetupCacheLayerReport {
+    pub cache_key: Sha256Hex,
+    pub state: PackPrepareSetupCacheLayerState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackPrepareSetupCacheLayerState {
+    Hit,
+    Missing,
 }
 
 impl PackCache {
@@ -653,10 +690,11 @@ impl PackCache {
 }
 
 impl PackPrepareReport {
-    fn ready(
+    fn ready_with_setup_cache(
         request: &PackPrepareRequest,
         index: &PackCacheIndex,
         root: &Path,
+        setup_cache: PackPrepareSetupCacheReport,
         detail: impl Into<String>,
     ) -> Self {
         Self {
@@ -672,6 +710,7 @@ impl PackPrepareReport {
             download_required: false,
             fast_path_eligible: true,
             trust_state: PackTrustState::Verified,
+            setup_cache,
             detail: Some(detail.into()),
         }
     }
@@ -690,6 +729,7 @@ impl PackPrepareReport {
             download_required: true,
             fast_path_eligible: false,
             trust_state: PackTrustState::NotChecked,
+            setup_cache: PackPrepareSetupCacheReport::not_requested(),
             detail: Some("no matching verified pack is cached".to_string()),
         }
     }
@@ -714,6 +754,33 @@ impl PackPrepareReport {
             download_required: false,
             fast_path_eligible: false,
             trust_state: PackTrustState::NotChecked,
+            setup_cache: PackPrepareSetupCacheReport::not_requested(),
+            detail: Some(detail.into()),
+        }
+    }
+
+    fn requires_builder_verified(
+        request: &PackPrepareRequest,
+        index: &PackCacheIndex,
+        root: &Path,
+        reason: PackPrepareReason,
+        setup_cache: PackPrepareSetupCacheReport,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            input: request.input.clone(),
+            requested_pack_hash: request.pack_hash.clone(),
+            state: PackPrepareState::RequiresBuilder,
+            reason: Some(reason),
+            pack_hash: Some(index.pack_hash.clone()),
+            kind: Some(index.kind.clone()),
+            cache_root: Some(root.to_path_buf()),
+            size_bytes: Some(index.size_bytes),
+            builder_vm_required: true,
+            download_required: false,
+            fast_path_eligible: false,
+            trust_state: PackTrustState::Verified,
+            setup_cache,
             detail: Some(detail.into()),
         }
     }
@@ -737,6 +804,7 @@ impl PackPrepareReport {
             download_required: false,
             fast_path_eligible: false,
             trust_state,
+            setup_cache: PackPrepareSetupCacheReport::not_requested(),
             detail: Some(detail.into()),
         }
     }
@@ -762,7 +830,70 @@ impl PackPrepareReport {
             download_required: false,
             fast_path_eligible: false,
             trust_state,
+            setup_cache: PackPrepareSetupCacheReport::not_requested(),
             detail: Some(detail.into()),
+        }
+    }
+}
+
+impl Default for PackPrepareSetupCacheReport {
+    fn default() -> Self {
+        Self::not_requested()
+    }
+}
+
+impl PackPrepareSetupCacheReport {
+    fn not_requested() -> Self {
+        Self {
+            state: PackPrepareSetupCacheState::NotRequested,
+            layers: Vec::new(),
+        }
+    }
+
+    fn for_manifest(
+        required: &[SetupCacheLayerIdentity],
+        manifest: &PackManifest,
+    ) -> PackPrepareSetupCacheReport {
+        if required.is_empty() {
+            return Self::not_requested();
+        }
+
+        let declared_keys = manifest
+            .inputs
+            .setup_cache_layers
+            .iter()
+            .map(|layer| layer.cache_key().as_str().to_string())
+            .collect::<BTreeSet<_>>();
+        let mut layers = Vec::with_capacity(required.len());
+        let mut all_hit = true;
+        for layer in required {
+            let cache_key = layer.cache_key();
+            let hit = declared_keys.contains(cache_key.as_str());
+            if !hit {
+                all_hit = false;
+            }
+            layers.push(PackPrepareSetupCacheLayerReport {
+                cache_key,
+                state: if hit {
+                    PackPrepareSetupCacheLayerState::Hit
+                } else {
+                    PackPrepareSetupCacheLayerState::Missing
+                },
+                detail: if hit {
+                    None
+                } else {
+                    Some("required setup-cache layer identity is not declared by the pack".into())
+                },
+            });
+        }
+
+        Self {
+            state: if all_hit {
+                PackPrepareSetupCacheState::Hit
+            } else {
+                PackPrepareSetupCacheState::Missing
+            },
+            layers,
         }
     }
 }
@@ -932,12 +1063,29 @@ fn prepare_report_for_manifest(
         );
     }
     match verify_pack_at(manifest, &status.root, policy, trust, revocations) {
-        Ok(_) => PackPrepareReport::ready(
-            request,
-            index,
-            &status.root,
-            "matching pack verified and is eligible for fast launch",
-        ),
+        Ok(_) => {
+            let setup_cache = PackPrepareSetupCacheReport::for_manifest(
+                &request.required_setup_cache_layers,
+                manifest,
+            );
+            if setup_cache.state == PackPrepareSetupCacheState::Missing {
+                return PackPrepareReport::requires_builder_verified(
+                    request,
+                    index,
+                    &status.root,
+                    PackPrepareReason::SetupCacheMiss,
+                    setup_cache,
+                    "matching pack verified but required setup-cache layers are missing",
+                );
+            }
+            PackPrepareReport::ready_with_setup_cache(
+                request,
+                index,
+                &status.root,
+                setup_cache,
+                "matching pack verified and is eligible for fast launch",
+            )
+        }
         Err(error) => {
             let reason = reason_for_verify_error(&error);
             let trust_state = trust_state_for_verify_error(&error);
@@ -1470,6 +1618,7 @@ mod tests {
             },
             expected_kind: Some(PackKind::Runtime),
             pack_hash: None,
+            required_setup_cache_layers: Vec::new(),
         }
     }
 
@@ -1482,11 +1631,25 @@ mod tests {
             },
             expected_kind: Some(PackKind::Runtime),
             pack_hash: None,
+            required_setup_cache_layers: Vec::new(),
         }
     }
 
     fn oci_input(f: &Fixture) -> String {
         f.manifest.inputs.oci_images[0].reference.clone()
+    }
+
+    fn setup_cache_layer(f: &Fixture) -> SetupCacheLayerIdentity {
+        f.manifest.inputs.setup_cache_layers[0].clone()
+    }
+
+    fn prepare_request_with_setup_cache(
+        input: String,
+        layer: SetupCacheLayerIdentity,
+    ) -> PackPrepareRequest {
+        let mut request = prepare_request(input);
+        request.required_setup_cache_layers = vec![layer];
+        request
     }
 
     fn install_fixture_pack(f: &Fixture) -> CachedPack {
@@ -1636,6 +1799,153 @@ mod tests {
         assert_eq!(report.trust_state, PackTrustState::Verified);
         assert!(report.fast_path_eligible);
         assert!(!report.builder_vm_required);
+        assert_eq!(
+            report.setup_cache.state,
+            PackPrepareSetupCacheState::NotRequested
+        );
+    }
+
+    #[test]
+    fn prepare_request_defaults_required_setup_cache_layers_for_older_json() {
+        let request: PackPrepareRequest = serde_json::from_value(serde_json::json!({
+            "input": {
+                "raw": "ghcr.io/tinylabs/mvm@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "kind": "oci_image"
+            },
+            "expected_kind": "runtime"
+        }))
+        .expect("old request shape deserializes");
+
+        assert!(request.required_setup_cache_layers.is_empty());
+    }
+
+    #[test]
+    fn prepare_report_marks_required_setup_cache_hit_ready() {
+        let f = fixture();
+        let cached = install_fixture_pack(&f);
+        let layer = setup_cache_layer(&f);
+        let expected_key = layer.cache_key();
+        let report = f
+            .cache
+            .prepare_report(
+                &prepare_request_with_setup_cache(oci_input(&f), layer),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepare report");
+
+        assert_eq!(report.state, PackPrepareState::Ready);
+        assert_eq!(report.pack_hash, Some(cached.verified.pack_hash));
+        assert_eq!(report.trust_state, PackTrustState::Verified);
+        assert_eq!(report.setup_cache.state, PackPrepareSetupCacheState::Hit);
+        assert_eq!(report.setup_cache.layers.len(), 1);
+        assert_eq!(report.setup_cache.layers[0].cache_key, expected_key);
+        assert_eq!(
+            report.setup_cache.layers[0].state,
+            PackPrepareSetupCacheLayerState::Hit
+        );
+        assert!(report.fast_path_eligible);
+        assert!(!report.builder_vm_required);
+    }
+
+    #[test]
+    fn prepare_report_requires_builder_when_setup_cache_layer_missing() {
+        let f = fixture();
+        install_fixture_pack(&f);
+        let mut layer = setup_cache_layer(&f);
+        layer.setup_command_hash = hash("changed-setup");
+        let expected_key = layer.cache_key();
+        let report = f
+            .cache
+            .prepare_report(
+                &prepare_request_with_setup_cache(oci_input(&f), layer),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepare report");
+
+        assert_eq!(report.state, PackPrepareState::RequiresBuilder);
+        assert_eq!(report.reason, Some(PackPrepareReason::SetupCacheMiss));
+        assert_eq!(report.trust_state, PackTrustState::Verified);
+        assert_eq!(
+            report.setup_cache.state,
+            PackPrepareSetupCacheState::Missing
+        );
+        assert_eq!(report.setup_cache.layers[0].cache_key, expected_key);
+        assert_eq!(
+            report.setup_cache.layers[0].state,
+            PackPrepareSetupCacheLayerState::Missing
+        );
+        assert!(report.builder_vm_required);
+        assert!(!report.fast_path_eligible);
+    }
+
+    #[test]
+    fn prepare_report_invalidates_setup_cache_on_each_identity_dimension() {
+        let f = fixture();
+        install_fixture_pack(&f);
+        let base = setup_cache_layer(&f);
+        let mut cases = Vec::new();
+
+        let mut changed = base.clone();
+        changed.image_digest = Some(digest("changed-oci"));
+        cases.push(("image digest", changed));
+
+        let mut changed = base.clone();
+        changed.flake_lock_hash = Some(hash("changed-flake-lock"));
+        cases.push(("flake lock hash", changed));
+
+        let mut changed = base.clone();
+        changed.setup_command_hash = hash("changed-setup");
+        cases.push(("setup command hash", changed));
+
+        let mut changed = base.clone();
+        changed.environment_hash = hash("changed-env");
+        cases.push(("environment hash", changed));
+
+        let mut changed = base.clone();
+        changed.mount_shape_hash = hash("changed-mounts");
+        cases.push(("mount shape hash", changed));
+
+        let mut changed = base.clone();
+        changed.runtime_pack_hash = hash("changed-runtime-pack");
+        cases.push(("runtime pack hash", changed));
+
+        let mut changed = base;
+        changed.policy_hash = hash("changed-policy");
+        cases.push(("policy hash", changed));
+
+        for (dimension, layer) in cases {
+            let report = f
+                .cache
+                .prepare_report(
+                    &prepare_request_with_setup_cache(oci_input(&f), layer),
+                    &f.policy,
+                    &f.trust,
+                    &f.revocations,
+                )
+                .unwrap_or_else(|error| panic!("{dimension} prepare report failed: {error}"));
+
+            assert_eq!(
+                report.state,
+                PackPrepareState::RequiresBuilder,
+                "{dimension} must invalidate setup-cache readiness"
+            );
+            assert_eq!(
+                report.reason,
+                Some(PackPrepareReason::SetupCacheMiss),
+                "{dimension} must report setup-cache miss"
+            );
+            assert_eq!(
+                report.setup_cache.state,
+                PackPrepareSetupCacheState::Missing,
+                "{dimension} must mark setup-cache missing"
+            );
+            assert!(report.builder_vm_required, "{dimension}");
+            assert!(!report.fast_path_eligible, "{dimension}");
+        }
     }
 
     #[test]

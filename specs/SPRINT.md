@@ -44,6 +44,20 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 ## Planning updates
 
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream G setup-cache prepare resolution: `PackPrepareRequest` can now
+      carry required setup-cache layer identities, and `PackPrepareReport`
+      reports a typed `setup_cache` state. Verified cached packs remain
+      fast-path eligible when all required setup-cache layer keys are declared
+      by the manifest; a missing or invalidated setup-cache layer now returns
+      `RequiresBuilder` with `setup_cache_miss` while preserving verified trust
+      state. Coverage: focused `mvm-core` prepare/cache tests for older request
+      default compatibility, required-layer hits, required-layer misses, and
+      invalidation across image digest, flake lock hash, setup command hash,
+      environment hash, mount shape hash, runtime pack hash, and policy hash.
+      Runtime setup-cache artifact production/consumption, builder-VM artifact
+      preparation, and launch admission consumption remain open.
 - [x] Started
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream A: `mvm_core::packs` now defines strict typed manifests for

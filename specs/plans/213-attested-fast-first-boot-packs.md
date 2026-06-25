@@ -229,6 +229,9 @@ The target user-visible shape is:
             deterministic cache keys over image digest, flake lock hash, setup
             command hash, environment hash, mount shape hash, runtime pack hash,
             and policy hash.
+      - [x] Resolve required setup-cache layer identities during prepare
+            readiness so verified packs report setup-cache hits and require
+            builder preparation on setup-cache misses or invalidation.
 - [ ] Add positive and negative tests for OCI digest resolution, flake lock
       resolution, setup-cache hits, and setup-cache invalidation.
       - [x] Add focused prepare tests for OCI digest-pinned canonicalization,
@@ -240,6 +243,11 @@ The target user-visible shape is:
       - [x] Add focused setup-cache identity tests for serde default
             compatibility, stable key derivation, per-dimension invalidation,
             and verifier refusal of source-less setup-cache layers.
+      - [x] Add focused prepare/cache tests for setup-cache request default
+            compatibility, required-layer hits, required-layer misses, and
+            invalidation across image digest, flake lock hash, setup command
+            hash, environment hash, mount shape hash, runtime pack hash, and
+            policy hash.
 
 ### H. Launch attestation and explainability
 
