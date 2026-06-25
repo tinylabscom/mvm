@@ -251,11 +251,11 @@ The target user-visible shape is:
 
 ### H. Launch attestation and explainability
 
-- [ ] Define the launch attestation record linking source input, builder
+- [x] Define the launch attestation record linking source input, builder
       identity, pack identity, local verification, snapshot/warm derivation,
       policy admission, command, and result.
-- [ ] Store launch records in a tamper-evident local audit log.
-- [ ] Include command, plan hash, network policy hash, artifact hashes,
+- [x] Store launch records in a tamper-evident local audit log.
+- [x] Include command, plan hash, network policy hash, artifact hashes,
       snapshot/warm identity, backend identity, launcher version, timestamps,
       exit status, and output digest metadata.
 - [ ] Implement `mvm explain <run-id>` for successful launches, builder-prepare
