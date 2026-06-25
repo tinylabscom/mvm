@@ -1,9 +1,14 @@
 //! `mvmctl cache` subcommand handlers.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::ui;
+use mvm_core::packs::cache::{
+    PACK_PROTECTION_FILENAME, PackCache, PackCacheReadiness, PackCacheStatusEntry,
+    PackProtectionRef, PackPruneAction, PackPruneEntry, PackPruneReason, PackPruneRequest,
+};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
@@ -63,6 +68,12 @@ pub(in crate::commands) enum CacheAction {
         #[arg(long)]
         json: bool,
     },
+    /// Show local attested pack cache readiness
+    Status {
+        /// Emit machine-readable JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
     /// Repair a degraded builder VM store. Clears
     /// `~/.cache/mvm/builder-vm/` so the next `dev up`/`build` cold-rebuilds it.
     /// Use this when `dev up` keeps failing with a dangling-store error
@@ -107,6 +118,48 @@ struct CacheDirEntry {
     recognized: bool,
 }
 
+/// Structured output for `cache status --json`.
+#[derive(serde::Serialize)]
+struct CacheStatus {
+    cache_dir: String,
+    pack_cache_dir: String,
+    pack_count: usize,
+    ready_count: usize,
+    expired_count: usize,
+    entries: Vec<PackStatusRow>,
+}
+
+/// One row of the attested pack-cache status table.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct PackStatusRow {
+    directory: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pack_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_arch: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    backend_compatibility: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_used_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_verified_at: Option<DateTime<Utc>>,
+    readiness: PackCacheReadiness,
+    revocation_state: &'static str,
+    instant_launch_eligibility: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
 fn collect_cache_info() -> Result<CacheInfo> {
     let cache_dir = mvm_core::config::mvm_cache_dir();
     let path = std::path::Path::new(&cache_dir);
@@ -144,6 +197,165 @@ fn collect_cache_info() -> Result<CacheInfo> {
         entries,
         detail_lines,
     })
+}
+
+fn collect_cache_status(now: DateTime<Utc>) -> Result<CacheStatus> {
+    let cache_dir = mvm_core::config::mvm_cache_dir();
+    let pack_cache = PackCache::default();
+    let entries: Vec<PackStatusRow> = pack_cache
+        .status_entries(now)?
+        .into_iter()
+        .map(pack_status_row)
+        .collect();
+    let ready_count = entries
+        .iter()
+        .filter(|entry| entry.readiness == PackCacheReadiness::Ready)
+        .count();
+    let expired_count = entries
+        .iter()
+        .filter(|entry| entry.readiness == PackCacheReadiness::Expired)
+        .count();
+    Ok(CacheStatus {
+        cache_dir,
+        pack_cache_dir: pack_cache.root().display().to_string(),
+        pack_count: entries.len(),
+        ready_count,
+        expired_count,
+        entries,
+    })
+}
+
+fn pack_status_row(entry: PackCacheStatusEntry) -> PackStatusRow {
+    let instant_launch_eligibility = match entry.readiness {
+        PackCacheReadiness::Ready => "requires_verification",
+        PackCacheReadiness::Expired => "expired",
+        PackCacheReadiness::MissingIndex
+        | PackCacheReadiness::MalformedIndex
+        | PackCacheReadiness::UnsupportedIndexSchema
+        | PackCacheReadiness::DirectoryHashMismatch => "unavailable",
+    };
+    let index = entry.index.as_ref();
+    PackStatusRow {
+        directory: entry.directory_name,
+        pack_hash: index.map(|index| index.pack_hash.as_str().to_string()),
+        kind: index.map(|index| pack_kind_name(&index.kind)),
+        target_arch: index.map(|index| index.target_arch.to_string()),
+        backend_compatibility: index
+            .map(|index| {
+                index
+                    .backend_compatibility
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        channel: index.map(|index| index.channel_identity.clone()),
+        expires_at: index.map(|index| index.expires_at),
+        size_bytes: index.map(|index| index.size_bytes),
+        file_count: index.map(|index| index.file_count),
+        last_used_at: index.map(|index| index.last_used_at),
+        last_verified_at: index.map(|index| index.last_verified_at),
+        readiness: entry.readiness,
+        revocation_state: "not_checked",
+        instant_launch_eligibility,
+        detail: entry.detail,
+    }
+}
+
+fn pack_kind_name(kind: &mvm_core::packs::PackKind) -> &'static str {
+    match kind {
+        mvm_core::packs::PackKind::Runtime => "runtime",
+        mvm_core::packs::PackKind::Builder => "builder",
+        mvm_core::packs::PackKind::ImageProject => "image_project",
+    }
+}
+
+fn readiness_name(readiness: PackCacheReadiness) -> &'static str {
+    match readiness {
+        PackCacheReadiness::Ready => "ready",
+        PackCacheReadiness::Expired => "expired",
+        PackCacheReadiness::MissingIndex => "missing_index",
+        PackCacheReadiness::MalformedIndex => "malformed_index",
+        PackCacheReadiness::UnsupportedIndexSchema => "unsupported_index_schema",
+        PackCacheReadiness::DirectoryHashMismatch => "directory_hash_mismatch",
+    }
+}
+
+fn pack_prune_reason_name(reason: PackPruneReason) -> &'static str {
+    match reason {
+        PackPruneReason::Ready => "ready",
+        PackPruneReason::Expired => "expired",
+        PackPruneReason::InvalidMetadata => "invalid_metadata",
+        PackPruneReason::Protected => "protected",
+    }
+}
+
+fn pack_prune_label(entry: &PackPruneEntry) -> &str {
+    entry
+        .pack_hash
+        .as_ref()
+        .map_or(entry.directory_name.as_str(), |hash| hash.as_str())
+}
+
+fn pack_protection_owner_kind_name(
+    kind: mvm_core::packs::cache::PackProtectionOwnerKind,
+) -> &'static str {
+    match kind {
+        mvm_core::packs::cache::PackProtectionOwnerKind::Snapshot => "snapshot",
+        mvm_core::packs::cache::PackProtectionOwnerKind::WarmStandby => "warm_standby",
+    }
+}
+
+fn collect_pack_prune_protections() -> Result<Vec<PackProtectionRef>> {
+    let mut roots = vec![mvm_core::config::checkpoints_dir()];
+    if let Ok(pool_dir) = mvm_core::config::mvm_pool_dir() {
+        roots.push(pool_dir);
+    }
+    collect_pack_prune_protections_from_roots(&roots)
+}
+
+fn collect_pack_prune_protections_from_roots(
+    roots: &[std::path::PathBuf],
+) -> Result<Vec<PackProtectionRef>> {
+    let mut protections = Vec::new();
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        for entry in walkdir(root).with_context(|| {
+            format!("scanning pack protection sidecars under {}", root.display())
+        })? {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.file_name().and_then(|name| name.to_str()) != Some(PACK_PROTECTION_FILENAME) {
+                continue;
+            }
+            protections.extend(read_pack_protection_file(&path)?);
+        }
+    }
+    protections.sort_by(|a, b| {
+        a.pack_hash
+            .as_str()
+            .cmp(b.pack_hash.as_str())
+            .then_with(|| {
+                pack_protection_owner_kind_name(a.owner_kind)
+                    .cmp(pack_protection_owner_kind_name(b.owner_kind))
+            })
+            .then_with(|| a.owner_id.cmp(&b.owner_id))
+    });
+    Ok(protections)
+}
+
+fn read_pack_protection_file(path: &std::path::Path) -> Result<Vec<PackProtectionRef>> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading pack protection sidecar {}", path.display()))?;
+    if let Ok(one) = serde_json::from_slice::<PackProtectionRef>(&bytes) {
+        return Ok(vec![one]);
+    }
+    serde_json::from_slice::<Vec<PackProtectionRef>>(&bytes)
+        .with_context(|| format!("parsing pack protection sidecar {}", path.display()))
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
@@ -192,6 +404,54 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     "If `dev up`/`build` fails with a dangling-store or mount error, \
                      run `mvmctl cache repair`."
                 );
+            }
+            Ok(())
+        }
+        CacheAction::Status { json } => {
+            let status = collect_cache_status(Utc::now())?;
+            if json {
+                crate::json_out::emit_json(&status)?;
+                return Ok(());
+            }
+            println!("Cache directory: {}", status.cache_dir);
+            println!("Pack cache: {}", status.pack_cache_dir);
+            if status.entries.is_empty() {
+                println!("No attested packs cached.");
+                return Ok(());
+            }
+            println!(
+                "Attested packs: {} ({} metadata-ready, {} expired)",
+                status.pack_count, status.ready_count, status.expired_count
+            );
+            for entry in &status.entries {
+                let pack_hash = entry.pack_hash.as_deref().unwrap_or(&entry.directory);
+                let kind = entry.kind.unwrap_or("unknown");
+                let arch = entry.target_arch.as_deref().unwrap_or("unknown");
+                let channel = entry.channel.as_deref().unwrap_or("unknown");
+                let size = entry
+                    .size_bytes
+                    .map(human_bytes)
+                    .unwrap_or_else(|| "?".into());
+                let backends = if entry.backend_compatibility.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    entry.backend_compatibility.join(",")
+                };
+                println!(
+                    "  {}  kind={} arch={} backend={} channel={} size={} readiness={} revocation={} instant={}",
+                    pack_hash,
+                    kind,
+                    arch,
+                    backends,
+                    channel,
+                    size,
+                    readiness_name(entry.readiness),
+                    entry.revocation_state,
+                    entry.instant_launch_eligibility
+                );
+                if let Some(detail) = &entry.detail {
+                    println!("    {detail}");
+                }
             }
             Ok(())
         }
@@ -337,6 +597,48 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // Prune: remove empty subdirectories and temp files
             let mut removed = 0u64;
             let mut freed = 0u64;
+
+            let pack_protections = collect_pack_prune_protections()?;
+            let pack_prune = PackCache::default().prune(&PackPruneRequest {
+                now: Utc::now(),
+                dry_run,
+                protected: pack_protections,
+            })?;
+            for entry in &pack_prune.entries {
+                match entry.action {
+                    PackPruneAction::Removed => {
+                        ui::info(&format!(
+                            "Removed attested pack {} ({}, {}).",
+                            pack_prune_label(entry),
+                            pack_prune_reason_name(entry.reason),
+                            human_bytes(entry.bytes)
+                        ));
+                    }
+                    PackPruneAction::WouldRemove => {
+                        ui::info(&format!(
+                            "(dry-run) Would remove attested pack {} ({}, {}).",
+                            pack_prune_label(entry),
+                            pack_prune_reason_name(entry.reason),
+                            human_bytes(entry.bytes)
+                        ));
+                    }
+                    PackPruneAction::Retained if entry.reason == PackPruneReason::Protected => {
+                        ui::info(&format!(
+                            "Keeping attested pack {}: protected by {} snapshot/standby reference(s).",
+                            pack_prune_label(entry),
+                            entry.protections.len()
+                        ));
+                    }
+                    PackPruneAction::Retained => {}
+                }
+            }
+            let pack_removed = if dry_run {
+                pack_prune.would_remove_count()
+            } else {
+                pack_prune.removed_count()
+            } as u64;
+            removed += pack_removed;
+            freed = freed.saturating_add(pack_prune.removed_bytes());
 
             // Sweep orphaned Stage 0 staging dirs first.
             // They live under `~/.cache/mvm/builder-vm/.<arch>.stage0-*`
@@ -1147,6 +1449,128 @@ mod tests {
                 "{name} not recognized"
             );
         }
+    }
+
+    #[test]
+    fn pack_status_row_ready_requires_launch_verification() {
+        let pack_hash = mvm_core::packs::Sha256Hex::from_bytes(b"pack");
+        let now = Utc::now();
+        let row = pack_status_row(PackCacheStatusEntry {
+            directory_name: pack_hash.as_str().to_string(),
+            root: std::path::PathBuf::from("/cache/packs/by-hash").join(pack_hash.as_str()),
+            index: Some(mvm_core::packs::cache::PackCacheIndex {
+                schema_version: mvm_core::packs::cache::PACK_CACHE_SCHEMA_VERSION,
+                pack_hash: pack_hash.clone(),
+                kind: mvm_core::packs::PackKind::Runtime,
+                target_arch: mvm_core::arch::GuestArch::Aarch64,
+                backend_compatibility: vec![mvm_core::packs::PackBackend::Libkrun],
+                channel_identity: "stable".to_string(),
+                expires_at: now,
+                size_bytes: 42,
+                file_count: 2,
+                last_used_at: now,
+                last_verified_at: now,
+            }),
+            readiness: PackCacheReadiness::Ready,
+            detail: None,
+        });
+
+        assert_eq!(row.pack_hash.as_deref(), Some(pack_hash.as_str()));
+        assert_eq!(row.kind, Some("runtime"));
+        assert_eq!(row.target_arch.as_deref(), Some("aarch64"));
+        assert_eq!(row.backend_compatibility, vec!["libkrun"]);
+        assert_eq!(row.revocation_state, "not_checked");
+        assert_eq!(row.instant_launch_eligibility, "requires_verification");
+    }
+
+    #[test]
+    fn pack_status_row_corrupt_entry_is_unavailable() {
+        let row = pack_status_row(PackCacheStatusEntry {
+            directory_name: "broken".to_string(),
+            root: std::path::PathBuf::from("/cache/packs/by-hash/broken"),
+            index: None,
+            readiness: PackCacheReadiness::MalformedIndex,
+            detail: Some("cache index malformed".to_string()),
+        });
+
+        assert_eq!(row.pack_hash, None);
+        assert_eq!(row.kind, None);
+        assert_eq!(row.readiness, PackCacheReadiness::MalformedIndex);
+        assert_eq!(row.instant_launch_eligibility, "unavailable");
+        assert_eq!(row.detail.as_deref(), Some("cache index malformed"));
+    }
+
+    #[test]
+    fn pack_protection_file_accepts_single_ref_and_array() {
+        let tmp = tempfile::tempdir().unwrap();
+        let one_path = tmp.path().join("one.json");
+        let many_path = tmp.path().join("many.json");
+        let first = PackProtectionRef {
+            pack_hash: mvm_core::packs::Sha256Hex::from_bytes(b"first"),
+            owner_kind: mvm_core::packs::cache::PackProtectionOwnerKind::Snapshot,
+            owner_id: "snapshot-a".to_string(),
+        };
+        let second = PackProtectionRef {
+            pack_hash: mvm_core::packs::Sha256Hex::from_bytes(b"second"),
+            owner_kind: mvm_core::packs::cache::PackProtectionOwnerKind::WarmStandby,
+            owner_id: "standby-a".to_string(),
+        };
+
+        std::fs::write(&one_path, serde_json::to_vec(&first).unwrap()).unwrap();
+        std::fs::write(
+            &many_path,
+            serde_json::to_vec(&vec![first.clone(), second.clone()]).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_pack_protection_file(&one_path).unwrap(),
+            vec![first.clone()]
+        );
+        assert_eq!(
+            read_pack_protection_file(&many_path).unwrap(),
+            vec![first, second]
+        );
+    }
+
+    #[test]
+    fn pack_protection_scan_recurses_sorts_and_rejects_malformed_sidecars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snapshots = tmp.path().join("checkpoints");
+        let pool = tmp.path().join("pool");
+        let snapshot_dir = snapshots.join("ckpt-a");
+        let standby_dir = pool.join("standby-a");
+        std::fs::create_dir_all(&snapshot_dir).unwrap();
+        std::fs::create_dir_all(&standby_dir).unwrap();
+
+        let standby_ref = PackProtectionRef {
+            pack_hash: mvm_core::packs::Sha256Hex::from_bytes(b"b"),
+            owner_kind: mvm_core::packs::cache::PackProtectionOwnerKind::WarmStandby,
+            owner_id: "standby-a".to_string(),
+        };
+        let snapshot_ref = PackProtectionRef {
+            pack_hash: mvm_core::packs::Sha256Hex::from_bytes(b"a"),
+            owner_kind: mvm_core::packs::cache::PackProtectionOwnerKind::Snapshot,
+            owner_id: "snapshot-a".to_string(),
+        };
+        std::fs::write(
+            snapshot_dir.join(PACK_PROTECTION_FILENAME),
+            serde_json::to_vec(&snapshot_ref).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            standby_dir.join(PACK_PROTECTION_FILENAME),
+            serde_json::to_vec(&standby_ref).unwrap(),
+        )
+        .unwrap();
+
+        let protections =
+            collect_pack_prune_protections_from_roots(&[snapshots.clone(), pool.clone()]).unwrap();
+        assert_eq!(protections, vec![standby_ref, snapshot_ref]);
+
+        std::fs::write(standby_dir.join(PACK_PROTECTION_FILENAME), b"not json").unwrap();
+        let err = collect_pack_prune_protections_from_roots(&[snapshots, pool]).unwrap_err();
+        assert!(err.to_string().contains("pack protection sidecar"));
     }
 
     /// Orphan classification flags only unrecognized entries and sorts the
