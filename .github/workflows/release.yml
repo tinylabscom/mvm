@@ -4,6 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  # Manual dry-run: validate the release build + packaging (binaries, host-bin
+  # bundling, Linux cross-build) on the real CI runners WITHOUT publishing.
+  # `dry_run=true` (the default) runs only the `build` job and skips the Nix
+  # image jobs, the publishing `release` job, and `verify-release`. A real
+  # release still happens via a `v*` tag push; an explicit `dry_run=false`
+  # dispatch publishes too (escape hatch).
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build + package only; do NOT publish (no GitHub release, no crates.io)"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -211,6 +223,9 @@ jobs:
   # — into this one; the sealed runtime builder for mvmd's pool-build
   # pipeline, if still needed, is sourced from mvmd, not built here.)
   builder-vm-image:
+    # Skipped on a dry-run dispatch — Nix image builds are slow and unchanged by
+    # the binary-packaging path a dry-run validates. Runs on tag push / dry_run=false.
+    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
     strategy:
       matrix:
         include:
@@ -279,6 +294,8 @@ jobs:
   # the arch suffix so the combined release-asset pool doesn't
   # collide between aarch64 and x86_64.
   runtime-overlay-image:
+    # Skipped on a dry-run dispatch (see builder-vm-image).
+    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
     strategy:
       matrix:
         include:
@@ -333,6 +350,8 @@ jobs:
   # mode, never published. `download_default_microvm_image` fetches these five
   # assets + the checksums.
   default-microvm:
+    # Skipped on a dry-run dispatch (see builder-vm-image).
+    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
     strategy:
       matrix:
         include:
@@ -389,7 +408,10 @@ jobs:
     # (mvmctl tarballs + checksums) that install.sh / `mvmctl update` /
     # the Homebrew tap consume. `!cancelled()` lets this run after image
     # jobs fail; the result check keeps the binary build a hard requirement.
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
+    # (the `build` job) but never reaches this publish job — only a tag push or
+    # an explicit dry_run=false dispatch publishes.
+    if: ${{ !cancelled() && needs.build.result == 'success' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
