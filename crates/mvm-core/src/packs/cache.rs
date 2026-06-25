@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{self, Read};
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -321,6 +323,78 @@ impl PackCache {
         self.resolve_verified(&verified.pack_hash, policy, trust, revocations)
     }
 
+    pub fn install_from_archive_reader<R: Read>(
+        &self,
+        archive: R,
+        policy: &LocalPackPolicy,
+        trust: &dyn PackTrustStore,
+        revocations: &dyn PackRevocationChecker,
+    ) -> Result<CachedPack, PackCacheError> {
+        self.ensure_layout()?;
+        let staging = self.archive_staging_dir()?;
+        if staging.exists() {
+            fs::remove_dir_all(&staging).map_err(|source| PackCacheError::Io {
+                path: staging.clone(),
+                source,
+            })?;
+        }
+        ensure_private_dir(&staging)?;
+        let result =
+            self.install_from_archive_reader_inner(&staging, archive, policy, trust, revocations);
+        if result.is_err() && staging.exists() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result
+    }
+
+    fn install_from_archive_reader_inner<R: Read>(
+        &self,
+        staging: &Path,
+        archive: R,
+        policy: &LocalPackPolicy,
+        trust: &dyn PackTrustStore,
+        revocations: &dyn PackRevocationChecker,
+    ) -> Result<CachedPack, PackCacheError> {
+        extract_pack_archive(archive, staging)?;
+        let manifest_path = staging.join(MANIFEST_FILENAME);
+        let manifest_bytes = fs::read(&manifest_path).map_err(|source| {
+            if source.kind() == io::ErrorKind::NotFound {
+                PackCacheError::MissingArchiveManifest
+            } else {
+                PackCacheError::Io {
+                    path: manifest_path.clone(),
+                    source,
+                }
+            }
+        })?;
+        let manifest: PackManifest = serde_json::from_slice(&manifest_bytes)?;
+        let verified = verify_pack_at(&manifest, staging, policy, trust, revocations)
+            .map_err(PackCacheError::VerifyStaging)?;
+
+        let final_dir = self.pack_dir(&verified.pack_hash);
+        if final_dir.exists() {
+            fs::remove_dir_all(staging).map_err(|source| PackCacheError::Io {
+                path: staging.to_path_buf(),
+                source,
+            })?;
+            return self.resolve_verified(&verified.pack_hash, policy, trust, revocations);
+        }
+
+        self.clean_stale_quarantine_for_pack(&verified.pack_hash)?;
+        let index = PackCacheIndex::from_manifest(&manifest, policy.now)?;
+        write_restricted_file(
+            &staging.join(INDEX_FILENAME),
+            &serde_json::to_vec(&index).map_err(PackCacheError::Json)?,
+        )?;
+        verify_pack_at(&manifest, staging, policy, trust, revocations)
+            .map_err(PackCacheError::VerifyStaging)?;
+        fs::rename(staging, &final_dir).map_err(|source| PackCacheError::Io {
+            path: final_dir.clone(),
+            source,
+        })?;
+        self.resolve_verified(&verified.pack_hash, policy, trust, revocations)
+    }
+
     pub fn resolve_verified(
         &self,
         pack_hash: &Sha256Hex,
@@ -399,6 +473,16 @@ impl PackCache {
         Ok(self
             .quarantine_dir()
             .join(format!("{}.{}.partial", pack_hash.as_str(), nonce)))
+    }
+
+    fn archive_staging_dir(&self) -> Result<PathBuf, PackCacheError> {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|source| PackCacheError::Clock(source.to_string()))?
+            .as_nanos();
+        Ok(self
+            .quarantine_dir()
+            .join(format!("archive.{nonce}.partial")))
     }
 }
 
@@ -629,6 +713,72 @@ fn set_restricted_file_permissions(path: &Path) -> Result<(), PackCacheError> {
     Ok(())
 }
 
+fn extract_pack_archive<R: Read>(archive: R, staging: &Path) -> Result<(), PackCacheError> {
+    let mut archive = tar::Archive::new(archive);
+    let entries = archive
+        .entries()
+        .map_err(|source| PackCacheError::ArchiveRead {
+            path: PathBuf::from("<archive>"),
+            source,
+        })?;
+    for entry in entries {
+        let mut entry = entry.map_err(|source| PackCacheError::ArchiveRead {
+            path: PathBuf::from("<archive>"),
+            source,
+        })?;
+        let raw_path = entry.path().map_err(|source| PackCacheError::ArchiveRead {
+            path: PathBuf::from("<archive>"),
+            source,
+        })?;
+        let relative = safe_archive_path(raw_path.as_ref())?;
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let destination = staging.join(&relative);
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            ensure_private_dir(&destination)?;
+        } else if entry_type.is_file() {
+            if let Some(parent) = destination.parent() {
+                ensure_private_dir(parent)?;
+            }
+            let mut out = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&destination)
+                .map_err(|source| PackCacheError::Io {
+                    path: destination.clone(),
+                    source,
+                })?;
+            io::copy(&mut entry, &mut out).map_err(|source| PackCacheError::ArchiveRead {
+                path: relative.clone(),
+                source,
+            })?;
+            set_restricted_file_permissions(&destination)?;
+        } else {
+            return Err(PackCacheError::UnsupportedArchiveEntry {
+                path: relative,
+                entry_type: format!("{entry_type:?}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn safe_archive_path(path: &Path) -> Result<PathBuf, PackCacheError> {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(PackCacheError::UnsafeArchivePath(path.to_path_buf()));
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Error)]
 pub enum PackCacheError {
     #[error("pack {0:?} is not cached")]
@@ -648,6 +798,17 @@ pub enum PackCacheError {
     SizeOverflow,
     #[error("pack source file is not a regular file: {0}")]
     NonRegularSource(PathBuf),
+    #[error("pack archive is missing manifest.json")]
+    MissingArchiveManifest,
+    #[error("pack archive path is unsafe: {0}")]
+    UnsafeArchivePath(PathBuf),
+    #[error("pack archive entry {path} has unsupported type {entry_type}")]
+    UnsupportedArchiveEntry { path: PathBuf, entry_type: String },
+    #[error("pack archive read failed at {}: {source}", path.display())]
+    ArchiveRead {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("pack cache clock error: {0}")]
     Clock(String),
     #[error("pack cache filesystem error at {}: {source}", path.display())]
@@ -665,6 +826,7 @@ pub enum PackCacheError {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::fs;
+    use std::io::Cursor;
 
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as B64;
@@ -850,6 +1012,68 @@ mod tests {
         }
     }
 
+    fn append_archive_file(builder: &mut tar::Builder<Vec<u8>>, path: &str, bytes: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, Cursor::new(bytes))
+            .expect("append archive file");
+    }
+
+    fn pack_archive_bytes(f: &Fixture) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        append_archive_file(
+            &mut builder,
+            MANIFEST_FILENAME,
+            &f.manifest.canonical_bytes().expect("manifest bytes"),
+        );
+        append_archive_file(&mut builder, "runtime/kernel", b"kernel");
+        append_archive_file(&mut builder, "runtime/initramfs", b"initramfs");
+        builder.finish().expect("finish archive");
+        builder.into_inner().expect("archive bytes")
+    }
+
+    fn archive_with_files(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, bytes) in files {
+            append_archive_file(&mut builder, path, bytes);
+        }
+        builder.finish().expect("finish archive");
+        builder.into_inner().expect("archive bytes")
+    }
+
+    fn raw_archive_with_file_path(path: &str, bytes: &[u8]) -> Vec<u8> {
+        fn write_octal(field: &mut [u8], value: u64) {
+            field.fill(0);
+            let digits = format!("{value:0width$o}", width = field.len() - 1);
+            field[..digits.len()].copy_from_slice(digits.as_bytes());
+        }
+
+        let mut header = [0u8; 512];
+        header[..path.len()].copy_from_slice(path.as_bytes());
+        write_octal(&mut header[100..108], 0o644);
+        write_octal(&mut header[108..116], 0);
+        write_octal(&mut header[116..124], 0);
+        write_octal(&mut header[124..136], bytes.len() as u64);
+        write_octal(&mut header[136..148], 0);
+        header[148..156].fill(b' ');
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let checksum: u32 = header.iter().map(|byte| u32::from(*byte)).sum();
+        let checksum_digits = format!("{checksum:06o}\0 ");
+        header[148..156].copy_from_slice(checksum_digits.as_bytes());
+
+        let mut archive = Vec::from(header);
+        archive.extend_from_slice(bytes);
+        let padding = (512 - (bytes.len() % 512)) % 512;
+        archive.resize(archive.len() + padding, 0);
+        archive.extend_from_slice(&[0u8; 1024]);
+        archive
+    }
+
     #[test]
     fn default_path_lives_under_mvm_cache_dir() {
         let root = PackCache::default_path();
@@ -890,6 +1114,158 @@ mod tests {
             .expect("resolve");
         assert_eq!(resolved.verified.pack_hash, f.manifest.outputs.pack_hash);
         assert_eq!(resolved.index.last_used_at, later_policy.now);
+    }
+
+    #[test]
+    fn install_archive_extracts_to_quarantine_and_promotes_atomically() {
+        let f = fixture();
+        let archive = pack_archive_bytes(&f);
+        let cached = f
+            .cache
+            .install_from_archive_reader(Cursor::new(archive), &f.policy, &f.trust, &f.revocations)
+            .expect("install archive");
+
+        assert_eq!(cached.verified.pack_hash, f.manifest.outputs.pack_hash);
+        assert!(cached.root.join(MANIFEST_FILENAME).is_file());
+        assert!(cached.root.join(INDEX_FILENAME).is_file());
+        assert_eq!(
+            fs::read(cached.root.join("runtime/kernel")).expect("read kernel"),
+            b"kernel"
+        );
+        assert!(
+            f.cache
+                .quarantine_dir()
+                .read_dir()
+                .expect("read quarantine")
+                .next()
+                .is_none(),
+            "successful promotion leaves no partial quarantine directory"
+        );
+    }
+
+    #[test]
+    fn archive_missing_manifest_cleans_partial_extraction() {
+        let f = fixture();
+        let archive = archive_with_files(&[("runtime/kernel", b"kernel")]);
+        let err = f
+            .cache
+            .install_from_archive_reader(Cursor::new(archive), &f.policy, &f.trust, &f.revocations)
+            .expect_err("manifest is required");
+
+        assert!(matches!(err, PackCacheError::MissingArchiveManifest));
+        assert!(!f.cache.pack_dir(&f.manifest.outputs.pack_hash).exists());
+        assert!(
+            f.cache
+                .quarantine_dir()
+                .read_dir()
+                .expect("read quarantine")
+                .next()
+                .is_none(),
+            "failed extraction removes partial quarantine directory"
+        );
+    }
+
+    #[test]
+    fn archive_duplicate_file_cleans_partial_extraction() {
+        let f = fixture();
+        let archive = archive_with_files(&[
+            (
+                MANIFEST_FILENAME,
+                &f.manifest.canonical_bytes().expect("manifest bytes"),
+            ),
+            ("runtime/kernel", b"kernel"),
+            ("runtime/kernel", b"kernel"),
+            ("runtime/initramfs", b"initramfs"),
+        ]);
+        let err = f
+            .cache
+            .install_from_archive_reader(Cursor::new(archive), &f.policy, &f.trust, &f.revocations)
+            .expect_err("duplicate file must fail");
+
+        assert!(matches!(err, PackCacheError::Io { .. }));
+        assert!(!f.cache.pack_dir(&f.manifest.outputs.pack_hash).exists());
+        assert!(
+            f.cache
+                .quarantine_dir()
+                .read_dir()
+                .expect("read quarantine")
+                .next()
+                .is_none(),
+            "partial extraction is cleaned after duplicate entry failure"
+        );
+    }
+
+    #[test]
+    fn archive_unsafe_paths_are_rejected_before_promotion() {
+        let f = fixture();
+        let archive = raw_archive_with_file_path("../escape", b"nope");
+        let err = f
+            .cache
+            .install_from_archive_reader(Cursor::new(archive), &f.policy, &f.trust, &f.revocations)
+            .expect_err("unsafe path must fail");
+
+        assert!(matches!(err, PackCacheError::UnsafeArchivePath(_)));
+        assert!(!f.cache.pack_dir(&f.manifest.outputs.pack_hash).exists());
+    }
+
+    #[test]
+    fn archive_symlink_entries_are_rejected_before_promotion() {
+        let f = fixture();
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_link_name("/etc/passwd").expect("set link name");
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "runtime/link", Cursor::new(Vec::new()))
+            .expect("append symlink");
+        builder.finish().expect("finish archive");
+        let archive = builder.into_inner().expect("archive bytes");
+
+        let err = f
+            .cache
+            .install_from_archive_reader(Cursor::new(archive), &f.policy, &f.trust, &f.revocations)
+            .expect_err("symlink entry must fail");
+
+        assert!(matches!(
+            err,
+            PackCacheError::UnsupportedArchiveEntry { .. }
+        ));
+        assert!(!f.cache.pack_dir(&f.manifest.outputs.pack_hash).exists());
+    }
+
+    #[test]
+    fn poisoned_archive_contents_never_promote() {
+        let f = fixture();
+        let mut builder = tar::Builder::new(Vec::new());
+        append_archive_file(
+            &mut builder,
+            MANIFEST_FILENAME,
+            &f.manifest.canonical_bytes().expect("manifest bytes"),
+        );
+        append_archive_file(&mut builder, "runtime/kernel", b"tampered");
+        append_archive_file(&mut builder, "runtime/initramfs", b"initramfs");
+        builder.finish().expect("finish archive");
+        let archive = builder.into_inner().expect("archive bytes");
+
+        let err = f
+            .cache
+            .install_from_archive_reader(Cursor::new(archive), &f.policy, &f.trust, &f.revocations)
+            .expect_err("tampered archive file must fail verification");
+
+        assert!(matches!(err, PackCacheError::VerifyStaging(_)));
+        assert!(!f.cache.pack_dir(&f.manifest.outputs.pack_hash).exists());
+        assert!(
+            f.cache
+                .quarantine_dir()
+                .read_dir()
+                .expect("read quarantine")
+                .next()
+                .is_none(),
+            "failed verification removes partial quarantine directory"
+        );
     }
 
     #[test]

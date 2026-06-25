@@ -88,6 +88,23 @@ plan 25 sequences the work into six independently-shippable workstreams.
       and `cargo clippy --workspace --all-targets -- -D warnings`.
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream C archive promotion: `mvm_core::packs::cache` now installs
+      pack tar archives by extracting them into fresh quarantine directories,
+      refusing unsafe archive paths, symlink/hardlink/special entries,
+      duplicate files, missing manifests, and poisoned file contents before
+      any content-addressed promotion. Archive installs write restrictive
+      file/directory permissions, verify staged manifest/file hashes/pack hash/
+      signature/expiry/revocation/policy compatibility, atomically promote only
+      after verification, and clean partial quarantine directories on failure.
+      Coverage: focused `mvm-core` cache tests for archive atomic promotion,
+      missing-manifest cleanup, duplicate-entry partial extraction cleanup,
+      unsafe path refusal, symlink entry refusal, poisoned archive refusal,
+      permission hardening, and the existing policy-aware prune path; full
+      workspace `cargo test`, `cargo check`, and
+      `cargo clippy --workspace --all-targets -- -D warnings`. Network pack
+      download wiring remains open for the prepare/cache UX.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream C cache prune: `mvmctl cache prune` now routes attested pack
       deletion through `mvm_core::packs::cache` policy logic. The default prune
       removes only expired or structurally invalid pack cache entries, supports

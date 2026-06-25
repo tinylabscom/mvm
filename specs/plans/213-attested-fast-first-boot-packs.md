@@ -114,6 +114,10 @@ The target user-visible shape is:
 - [x] Add a content-addressed pack cache under the existing mvm cache helpers,
       respecting `MVM_CACHE_DIR` and XDG isolation.
 - [ ] Download and extract packs into quarantine paths before atomic promotion.
+      - [x] Extract local pack archives into quarantine paths and atomically
+            promote only after manifest, hash, signature, expiry, revocation,
+            and policy verification pass.
+      - [ ] Wire network pack downloads into the prepare/cache UX.
 - [x] Enforce restrictive permissions on cache directories and promoted pack
       contents.
 - [x] Reverify manifest, hashes, signatures, expiry, revocation, and policy
@@ -126,6 +130,11 @@ The target user-visible shape is:
       remove packs needed by active snapshots or warm standbys.
 - [ ] Add tests for interrupted downloads, partial extraction, atomic promotion,
       permission hardening, cache poisoning attempts, and policy-aware pruning.
+      - [x] Cover partial archive extraction cleanup, atomic archive promotion,
+            archive permission hardening, unsafe archive paths, symlink archive
+            entries, archive cache-poisoning attempts, and policy-aware pruning.
+      - [ ] Cover interrupted network downloads when pack download transport is
+            wired into the prepare/cache UX.
 
 ### D. Install and prepare UX
 
