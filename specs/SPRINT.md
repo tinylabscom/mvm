@@ -105,6 +105,22 @@ plan 25 sequences the work into six independently-shippable workstreams.
       download resolution remains open.
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream C/D prepare resolver: `mvmctl prepare <image-or-flake>` now
+      resolves attested pack readiness from the local pack cache, verifies
+      matching cached packs through the existing manifest/hash/signature/expiry/
+      revocation/policy checks, reports precise preparation state for ready,
+      missing, mutable OCI, expired trust, revoked signer, unsupported backend,
+      and local-rebuild-required cases, and can install a local/HTTPS
+      `--pack-source` through the existing quarantine-to-atomic-promotion cache
+      path before resolving. `--dry-run` reports trust state, cached size when
+      known, download requirement, builder-VM requirement, and expected
+      fast-path eligibility without mutating the cache. Coverage: 7 focused
+      `mvm-core` resolver tests, focused `mvm-cli` prepare parser/helper tests,
+      and `audit_total_coverage` for the new top-level command. Runtime launch,
+      builder pack boot, snapshot/warm derivation, and `machine run`
+      preparation explanations remain open.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream C cache install/download: `mvmctl cache install-pack <SOURCE>`
       now reads local or HTTPS attested pack tar archives, refuses plain HTTP
       unless `--allow-http` is set, builds explicit local pack policy from

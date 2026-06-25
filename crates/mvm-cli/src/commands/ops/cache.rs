@@ -227,14 +227,14 @@ impl From<PackBackendArg> for PackBackend {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum PackArchiveSource {
+pub(in crate::commands) enum PackArchiveSource {
     File(PathBuf),
     Https(String),
     Http(String),
 }
 
 impl PackArchiveSource {
-    fn parse(source: &str) -> Self {
+    pub(in crate::commands) fn parse(source: &str) -> Self {
         if source.starts_with("https://") {
             Self::Https(source.to_string())
         } else if source.starts_with("http://") {
@@ -280,14 +280,14 @@ impl InstalledPack {
     }
 }
 
-struct InstallPackPolicyArgs {
-    backend: PackBackendArg,
-    policy_hash: String,
-    channels: Vec<String>,
-    host_capabilities: Vec<String>,
+pub(in crate::commands) struct PackPolicyArgs {
+    pub backend: PackBackendArg,
+    pub policy_hash: String,
+    pub channels: Vec<String>,
+    pub host_capabilities: Vec<String>,
 }
 
-fn build_install_pack_policy(args: InstallPackPolicyArgs) -> Result<LocalPackPolicy> {
+pub(in crate::commands) fn build_pack_policy(args: PackPolicyArgs) -> Result<LocalPackPolicy> {
     if args.channels.is_empty() {
         anyhow::bail!("at least one --channel is required");
     }
@@ -325,7 +325,10 @@ fn build_install_pack_policy(args: InstallPackPolicyArgs) -> Result<LocalPackPol
     })
 }
 
-fn load_pack_archive_bytes(source: &PackArchiveSource, allow_http: bool) -> Result<Vec<u8>> {
+pub(in crate::commands) fn load_pack_archive_bytes(
+    source: &PackArchiveSource,
+    allow_http: bool,
+) -> Result<Vec<u8>> {
     load_pack_archive_bytes_with(source, allow_http, crate::http::download_file)
 }
 
@@ -373,18 +376,18 @@ struct PackRevocationFileEntry {
 }
 
 #[derive(Debug)]
-struct LocalPackRevocations {
+pub(in crate::commands) struct LocalPackRevocations {
     revoked: BTreeMap<(String, String), String>,
 }
 
 impl LocalPackRevocations {
-    fn empty() -> Self {
+    pub(in crate::commands) fn empty() -> Self {
         Self {
             revoked: BTreeMap::new(),
         }
     }
 
-    fn from_path(path: &Path) -> Result<Self> {
+    pub(in crate::commands) fn from_path(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading pack revocation file {}", path.display()))?;
         let file: PackRevocationFile = serde_json::from_slice(&bytes)
@@ -731,7 +734,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         } => {
             let source = PackArchiveSource::parse(&source);
             let archive_bytes = load_pack_archive_bytes(&source, allow_http)?;
-            let policy = build_install_pack_policy(InstallPackPolicyArgs {
+            let policy = build_pack_policy(PackPolicyArgs {
                 backend,
                 policy_hash,
                 channels,
@@ -2044,7 +2047,7 @@ mod tests {
 
     #[test]
     fn build_install_pack_policy_rejects_bad_policy_hash() {
-        let err = build_install_pack_policy(InstallPackPolicyArgs {
+        let err = build_pack_policy(PackPolicyArgs {
             backend: PackBackendArg::Libkrun,
             policy_hash: "not-a-sha".to_string(),
             channels: vec!["stable".to_string()],
@@ -2057,7 +2060,7 @@ mod tests {
 
     #[test]
     fn build_install_pack_policy_rejects_empty_host_capability() {
-        let err = build_install_pack_policy(InstallPackPolicyArgs {
+        let err = build_pack_policy(PackPolicyArgs {
             backend: PackBackendArg::Libkrun,
             policy_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
@@ -2072,7 +2075,7 @@ mod tests {
     #[test]
     fn build_install_pack_policy_populates_backend_channels_and_capabilities() {
         let policy_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let policy = build_install_pack_policy(InstallPackPolicyArgs {
+        let policy = build_pack_policy(PackPolicyArgs {
             backend: PackBackendArg::Libkrun,
             policy_hash: policy_hash.to_string(),
             channels: vec!["stable".to_string(), "canary".to_string()],

@@ -407,6 +407,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("__ssh-agent-proxy", AuditPosture::InteractiveOrControl),
     ("catalog", AuditPosture::ReadOnly),
     ("image", AuditPosture::DelegatesToSub(IMAGE_SUB)),
+    ("prepare", AuditPosture::Emits("CachePackInstall")),
     // Plan 200 — beginner microVM workflows.
     ("machine", AuditPosture::DelegatesToSub(MACHINE_SUB)),
     // Operational surfaces.

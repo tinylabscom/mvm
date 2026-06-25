@@ -15,6 +15,7 @@ mod ops;
 /// bridge-admitted launches) and top the pool back up. `pub(crate)` so the
 /// crate-root `exec` runner can reach the glue.
 pub(crate) mod pool;
+mod prepare;
 mod qemu_bridge;
 mod shared;
 mod ssh_agent_proxy;
@@ -103,6 +104,9 @@ pub(in crate::commands) enum Commands {
     /// first `dev up` is fast. Run automatically by install.sh unless
     /// `MVM_SKIP_BUILDER_PREFETCH=1`.
     Bootstrap(bootstrap::Args),
+    /// Resolve and prepare attested packs for an image or flake
+    #[command(display_order = 6)]
+    Prepare(prepare::Args),
     /// Environment / install lifecycle (bootstrap, update, sign, …)
     #[command(hide = true)]
     Env(env::group::Args),
@@ -310,6 +314,7 @@ pub fn run() -> Result<()> {
     let result = match cli.command.clone() {
         Commands::Env(a) => env::group::run(&cli, a, &cfg),
         Commands::Bootstrap(a) => bootstrap::run(&cli, a, &cfg),
+        Commands::Prepare(a) => prepare::run(&cli, a, &cfg),
         Commands::Dev(a) => env::dev::run(&cli, a, &cfg),
         Commands::Ls(a) => vm::ps::run(&cli, a, &cfg),
         Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),

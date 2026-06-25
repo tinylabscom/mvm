@@ -118,7 +118,7 @@ The target user-visible shape is:
             promote only after manifest, hash, signature, expiry, revocation,
             and policy verification pass.
       - [x] Wire local/HTTPS pack downloads into the cache install UX.
-      - [ ] Wire pack download resolution into the prepare UX.
+      - [x] Wire pack download resolution into the prepare UX.
 - [x] Enforce restrictive permissions on cache directories and promoted pack
       contents.
 - [x] Reverify manifest, hashes, signatures, expiry, revocation, and policy
@@ -143,8 +143,13 @@ The target user-visible shape is:
       pack and builder pack when network and policy allow.
 - [ ] Add `mvm prepare <image-or-flake>` to resolve inputs, download or build
       packs, verify them, and optionally derive local snapshots/warm standbys.
+      - [x] Add cache-backed `mvm prepare <image-or-flake>` resolution that
+            verifies matching cached packs and optionally installs a local/HTTPS
+            `--pack-source` before resolving.
 - [ ] Add `mvm prepare --dry-run <image-or-flake>` showing download size, cache
       impact, builder-VM need, trust state, and expected fast-path eligibility.
+      - [x] Add dry-run reporting for cached-pack size, download requirement,
+            builder-VM requirement, trust state, and fast-path eligibility.
 - [ ] Make `machine run` report precise preparation reasons when instant launch
       is unavailable: missing pack, mutable input, private input, expired
       signature, revoked signer, unsupported backend, incompatible host, or local
@@ -152,7 +157,13 @@ The target user-visible shape is:
 - [ ] Add CLI integration tests for prepared fast-path messages, cache-miss
       messages, policy-refusal messages, and explicit builder-VM prepare
       messages.
+      - [x] Add focused core resolver tests for ready, missing, mutable OCI,
+            unsupported backend, expired trust metadata, revoked signer, and
+            local-rebuild-required states, plus CLI parser/helper tests for
+            `mvm prepare`.
 - [ ] Update CLI reference and getting-started docs for prepare/cache behavior.
+      - [x] Update the CLI reference for `mvm prepare` and its current
+            pack-resolution flags.
 
 ### E. Runtime pack launch path
 

@@ -162,6 +162,93 @@ pub struct PackCacheIndex {
     pub last_verified_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackPrepareRequest {
+    pub input: PackPrepareInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_kind: Option<PackKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_hash: Option<Sha256Hex>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackPrepareInput {
+    pub raw: String,
+    pub kind: PackPrepareInputKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackPrepareInputKind {
+    OciImage,
+    Flake,
+    LocalPath,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackPrepareReport {
+    pub input: PackPrepareInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_pack_hash: Option<Sha256Hex>,
+    pub state: PackPrepareState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<PackPrepareReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_hash: Option<Sha256Hex>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PackKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_root: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    pub builder_vm_required: bool,
+    pub download_required: bool,
+    pub fast_path_eligible: bool,
+    pub trust_state: PackTrustState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackPrepareState {
+    Ready,
+    Missing,
+    RequiresBuilder,
+    Refused,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackPrepareReason {
+    MissingPack,
+    MutableInput,
+    PrivateInput,
+    ExpiredSignature,
+    ExpiredTrustMetadata,
+    RevokedSigner,
+    UnsupportedBackend,
+    IncompatibleHost,
+    LocalRebuildRequired,
+    PolicyRefusal,
+    TrustUnavailable,
+    CacheMetadataInvalid,
+    InputMismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackTrustState {
+    Verified,
+    NotChecked,
+    Untrusted,
+    Expired,
+    Revoked,
+}
+
 impl PackCache {
     pub fn default_path() -> PathBuf {
         PathBuf::from(crate::config::mvm_cache_dir()).join(PACK_CACHE_DIR_NAME)
@@ -434,6 +521,83 @@ impl PackCache {
         })
     }
 
+    pub fn prepare_report(
+        &self,
+        request: &PackPrepareRequest,
+        policy: &LocalPackPolicy,
+        trust: &dyn PackTrustStore,
+        revocations: &dyn PackRevocationChecker,
+    ) -> Result<PackPrepareReport, PackCacheError> {
+        if request.input.kind == PackPrepareInputKind::OciImage
+            && !request.input.raw.contains("@sha256:")
+        {
+            return Ok(PackPrepareReport::refused(
+                request,
+                PackPrepareReason::MutableInput,
+                PackTrustState::NotChecked,
+                "OCI input must be pinned to a digest for attested fast launch",
+            ));
+        }
+
+        let mut input_mismatch = false;
+        for status in self.status_entries(policy.now)? {
+            let Some(index) = &status.index else {
+                continue;
+            };
+            if let Some(expected_hash) = &request.pack_hash
+                && &index.pack_hash != expected_hash
+            {
+                continue;
+            }
+            if let Some(expected_kind) = &request.expected_kind
+                && &index.kind != expected_kind
+            {
+                continue;
+            }
+
+            let manifest = match read_cached_manifest(&status.root) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    if request.pack_hash.as_ref() == Some(&index.pack_hash) {
+                        return Ok(PackPrepareReport::refused_for_index(
+                            request,
+                            index,
+                            &status.root,
+                            PackPrepareReason::CacheMetadataInvalid,
+                            PackTrustState::Untrusted,
+                            error.to_string(),
+                        ));
+                    }
+                    continue;
+                }
+            };
+            if !manifest_matches_input(&manifest, &request.input) {
+                input_mismatch = true;
+                continue;
+            }
+            return Ok(prepare_report_for_manifest(
+                request,
+                &status,
+                index,
+                &manifest,
+                policy,
+                trust,
+                revocations,
+            ));
+        }
+
+        if request.pack_hash.is_some() && input_mismatch {
+            return Ok(PackPrepareReport::refused(
+                request,
+                PackPrepareReason::InputMismatch,
+                PackTrustState::NotChecked,
+                "cached pack does not match the requested input",
+            ));
+        }
+
+        Ok(PackPrepareReport::missing(request))
+    }
+
     fn ensure_layout(&self) -> Result<(), PackCacheError> {
         ensure_private_dir(&self.root)?;
         ensure_private_dir(&self.by_hash_dir())?;
@@ -483,6 +647,121 @@ impl PackCache {
         Ok(self
             .quarantine_dir()
             .join(format!("archive.{nonce}.partial")))
+    }
+}
+
+impl PackPrepareReport {
+    fn ready(
+        request: &PackPrepareRequest,
+        index: &PackCacheIndex,
+        root: &Path,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            input: request.input.clone(),
+            requested_pack_hash: request.pack_hash.clone(),
+            state: PackPrepareState::Ready,
+            reason: None,
+            pack_hash: Some(index.pack_hash.clone()),
+            kind: Some(index.kind.clone()),
+            cache_root: Some(root.to_path_buf()),
+            size_bytes: Some(index.size_bytes),
+            builder_vm_required: false,
+            download_required: false,
+            fast_path_eligible: true,
+            trust_state: PackTrustState::Verified,
+            detail: Some(detail.into()),
+        }
+    }
+
+    fn missing(request: &PackPrepareRequest) -> Self {
+        Self {
+            input: request.input.clone(),
+            requested_pack_hash: request.pack_hash.clone(),
+            state: PackPrepareState::Missing,
+            reason: Some(PackPrepareReason::MissingPack),
+            pack_hash: request.pack_hash.clone(),
+            kind: request.expected_kind.clone(),
+            cache_root: None,
+            size_bytes: None,
+            builder_vm_required: true,
+            download_required: true,
+            fast_path_eligible: false,
+            trust_state: PackTrustState::NotChecked,
+            detail: Some("no matching verified pack is cached".to_string()),
+        }
+    }
+
+    fn requires_builder(
+        request: &PackPrepareRequest,
+        index: &PackCacheIndex,
+        root: &Path,
+        reason: PackPrepareReason,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            input: request.input.clone(),
+            requested_pack_hash: request.pack_hash.clone(),
+            state: PackPrepareState::RequiresBuilder,
+            reason: Some(reason),
+            pack_hash: Some(index.pack_hash.clone()),
+            kind: Some(index.kind.clone()),
+            cache_root: Some(root.to_path_buf()),
+            size_bytes: Some(index.size_bytes),
+            builder_vm_required: true,
+            download_required: false,
+            fast_path_eligible: false,
+            trust_state: PackTrustState::NotChecked,
+            detail: Some(detail.into()),
+        }
+    }
+
+    fn refused(
+        request: &PackPrepareRequest,
+        reason: PackPrepareReason,
+        trust_state: PackTrustState,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            input: request.input.clone(),
+            requested_pack_hash: request.pack_hash.clone(),
+            state: PackPrepareState::Refused,
+            reason: Some(reason),
+            pack_hash: request.pack_hash.clone(),
+            kind: request.expected_kind.clone(),
+            cache_root: None,
+            size_bytes: None,
+            builder_vm_required: false,
+            download_required: false,
+            fast_path_eligible: false,
+            trust_state,
+            detail: Some(detail.into()),
+        }
+    }
+
+    fn refused_for_index(
+        request: &PackPrepareRequest,
+        index: &PackCacheIndex,
+        root: &Path,
+        reason: PackPrepareReason,
+        trust_state: PackTrustState,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            input: request.input.clone(),
+            requested_pack_hash: request.pack_hash.clone(),
+            state: PackPrepareState::Refused,
+            reason: Some(reason),
+            pack_hash: Some(index.pack_hash.clone()),
+            kind: Some(index.kind.clone()),
+            cache_root: Some(root.to_path_buf()),
+            size_bytes: Some(index.size_bytes),
+            builder_vm_required: false,
+            download_required: false,
+            fast_path_eligible: false,
+            trust_state,
+            detail: Some(detail.into()),
+        }
     }
 }
 
@@ -607,6 +886,157 @@ fn status_entry_for_dir(
         index: Some(index),
         readiness,
         detail,
+    }
+}
+
+fn read_cached_manifest(root: &Path) -> Result<PackManifest, PackCacheError> {
+    let manifest_path = root.join(MANIFEST_FILENAME);
+    let manifest_bytes = fs::read(&manifest_path).map_err(|source| PackCacheError::Io {
+        path: manifest_path,
+        source,
+    })?;
+    serde_json::from_slice(&manifest_bytes).map_err(PackCacheError::Json)
+}
+
+fn prepare_report_for_manifest(
+    request: &PackPrepareRequest,
+    status: &PackCacheStatusEntry,
+    index: &PackCacheIndex,
+    manifest: &PackManifest,
+    policy: &LocalPackPolicy,
+    trust: &dyn PackTrustStore,
+    revocations: &dyn PackRevocationChecker,
+) -> PackPrepareReport {
+    if manifest.policy_compatibility.local_rebuild_required {
+        return PackPrepareReport::requires_builder(
+            request,
+            index,
+            &status.root,
+            PackPrepareReason::LocalRebuildRequired,
+            "pack policy declares that local rebuild is required",
+        );
+    }
+    if status.readiness != PackCacheReadiness::Ready {
+        return PackPrepareReport::refused_for_index(
+            request,
+            index,
+            &status.root,
+            reason_for_readiness(status.readiness),
+            trust_state_for_readiness(status.readiness),
+            status
+                .detail
+                .clone()
+                .unwrap_or_else(|| "pack cache metadata is not ready".to_string()),
+        );
+    }
+    match verify_pack_at(manifest, &status.root, policy, trust, revocations) {
+        Ok(_) => PackPrepareReport::ready(
+            request,
+            index,
+            &status.root,
+            "matching pack verified and is eligible for fast launch",
+        ),
+        Err(error) => {
+            let reason = reason_for_verify_error(&error);
+            let trust_state = trust_state_for_verify_error(&error);
+            PackPrepareReport::refused_for_index(
+                request,
+                index,
+                &status.root,
+                reason,
+                trust_state,
+                error.to_string(),
+            )
+        }
+    }
+}
+
+fn manifest_matches_input(manifest: &PackManifest, input: &PackPrepareInput) -> bool {
+    match input.kind {
+        PackPrepareInputKind::OciImage => manifest
+            .inputs
+            .oci_images
+            .iter()
+            .any(|oci| oci.reference == input.raw),
+        PackPrepareInputKind::Flake => manifest
+            .inputs
+            .flake_locks
+            .iter()
+            .any(|flake| flake.reference == input.raw),
+        PackPrepareInputKind::LocalPath => manifest
+            .inputs
+            .source_revisions
+            .iter()
+            .any(|source| source.repository == input.raw),
+    }
+}
+
+fn reason_for_readiness(readiness: PackCacheReadiness) -> PackPrepareReason {
+    match readiness {
+        PackCacheReadiness::Ready => PackPrepareReason::CacheMetadataInvalid,
+        PackCacheReadiness::Expired => PackPrepareReason::ExpiredTrustMetadata,
+        PackCacheReadiness::MissingIndex
+        | PackCacheReadiness::MalformedIndex
+        | PackCacheReadiness::UnsupportedIndexSchema
+        | PackCacheReadiness::DirectoryHashMismatch => PackPrepareReason::CacheMetadataInvalid,
+    }
+}
+
+fn trust_state_for_readiness(readiness: PackCacheReadiness) -> PackTrustState {
+    match readiness {
+        PackCacheReadiness::Ready => PackTrustState::NotChecked,
+        PackCacheReadiness::Expired => PackTrustState::Expired,
+        PackCacheReadiness::MissingIndex
+        | PackCacheReadiness::MalformedIndex
+        | PackCacheReadiness::UnsupportedIndexSchema
+        | PackCacheReadiness::DirectoryHashMismatch => PackTrustState::Untrusted,
+    }
+}
+
+fn reason_for_verify_error(error: &PackVerifyError) -> PackPrepareReason {
+    match error {
+        PackVerifyError::IncompatibleArchitecture { .. } => PackPrepareReason::IncompatibleHost,
+        PackVerifyError::IncompatibleBackend { .. } => PackPrepareReason::UnsupportedBackend,
+        PackVerifyError::ExpiredSignature { .. } => PackPrepareReason::ExpiredSignature,
+        PackVerifyError::ExpiredTrustMetadata { .. } => PackPrepareReason::ExpiredTrustMetadata,
+        PackVerifyError::Revoked { .. } => PackPrepareReason::RevokedSigner,
+        PackVerifyError::MutableOciReference { .. } => PackPrepareReason::MutableInput,
+        PackVerifyError::MissingHostCapability(_)
+        | PackVerifyError::PolicyHashMismatch { .. }
+        | PackVerifyError::ChannelNotAllowed(_) => PackPrepareReason::PolicyRefusal,
+        PackVerifyError::UnknownSigningKey { .. }
+        | PackVerifyError::SignatureInvalid
+        | PackVerifyError::SignatureMissingForKey(_)
+        | PackVerifyError::MalformedKeyId(_)
+        | PackVerifyError::MalformedSignature(_)
+        | PackVerifyError::SignatureBundleEmpty
+        | PackVerifyError::UnsupportedSignatureBundle => PackPrepareReason::TrustUnavailable,
+        PackVerifyError::UnsupportedSchemaVersion { .. }
+        | PackVerifyError::MissingOutputHash(_)
+        | PackVerifyError::UnsafeFilePath(_)
+        | PackVerifyError::DuplicateFile(_)
+        | PackVerifyError::FileReadFailed { .. }
+        | PackVerifyError::FileSizeMismatch { .. }
+        | PackVerifyError::FileHashMismatch { .. }
+        | PackVerifyError::PackHashMismatch { .. }
+        | PackVerifyError::Manifest(_) => PackPrepareReason::CacheMetadataInvalid,
+    }
+}
+
+fn trust_state_for_verify_error(error: &PackVerifyError) -> PackTrustState {
+    match error {
+        PackVerifyError::ExpiredSignature { .. } | PackVerifyError::ExpiredTrustMetadata { .. } => {
+            PackTrustState::Expired
+        }
+        PackVerifyError::Revoked { .. } => PackTrustState::Revoked,
+        PackVerifyError::UnknownSigningKey { .. }
+        | PackVerifyError::SignatureInvalid
+        | PackVerifyError::SignatureMissingForKey(_)
+        | PackVerifyError::MalformedKeyId(_)
+        | PackVerifyError::MalformedSignature(_)
+        | PackVerifyError::SignatureBundleEmpty
+        | PackVerifyError::UnsupportedSignatureBundle => PackTrustState::Untrusted,
+        _ => PackTrustState::NotChecked,
     }
 }
 
@@ -854,11 +1284,13 @@ mod tests {
         }
     }
 
-    struct StaticRevocation;
+    struct StaticRevocation {
+        status: RevocationStatus,
+    }
 
     impl PackRevocationChecker for StaticRevocation {
         fn status(&self, _key_id: &KeyId, _pack_hash: &Sha256Hex) -> RevocationStatus {
-            RevocationStatus::Good
+            self.status.clone()
         }
     }
 
@@ -1008,8 +1440,49 @@ mod tests {
             manifest,
             policy,
             trust,
-            revocations: StaticRevocation,
+            revocations: StaticRevocation {
+                status: RevocationStatus::Good,
+            },
         }
+    }
+
+    fn prepare_request(input: String) -> PackPrepareRequest {
+        PackPrepareRequest {
+            input: PackPrepareInput {
+                raw: input,
+                kind: PackPrepareInputKind::OciImage,
+            },
+            expected_kind: Some(PackKind::Runtime),
+            pack_hash: None,
+        }
+    }
+
+    fn oci_input(f: &Fixture) -> String {
+        f.manifest.inputs.oci_images[0].reference.clone()
+    }
+
+    fn install_fixture_pack(f: &Fixture) -> CachedPack {
+        f.cache
+            .install_from_verified_root(
+                &f.manifest,
+                f.source.path(),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("install fixture pack")
+    }
+
+    fn resign_manifest(manifest: &mut PackManifest) {
+        let key = signing_key();
+        manifest.outputs.pack_hash = manifest.computed_pack_hash().expect("pack hash");
+        let signature = key.sign(&manifest.signature_payload_bytes().expect("payload"));
+        manifest.provenance.signature_bundle.signatures = vec![PackSignature {
+            key_id: KeyId::from_pubkey(&key.verifying_key()),
+            signature_base64: B64.encode(signature.to_bytes()),
+            signed_at: utc(2026, 6, 24),
+            expires_at: utc(2026, 12, 31),
+        }];
     }
 
     fn append_archive_file(builder: &mut tar::Builder<Vec<u8>>, path: &str, bytes: &[u8]) {
@@ -1114,6 +1587,161 @@ mod tests {
             .expect("resolve");
         assert_eq!(resolved.verified.pack_hash, f.manifest.outputs.pack_hash);
         assert_eq!(resolved.index.last_used_at, later_policy.now);
+    }
+
+    #[test]
+    fn prepare_report_marks_matching_cached_pack_ready() {
+        let f = fixture();
+        let cached = install_fixture_pack(&f);
+        let report = f
+            .cache
+            .prepare_report(
+                &prepare_request(oci_input(&f)),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepare report");
+
+        assert_eq!(report.state, PackPrepareState::Ready);
+        assert_eq!(report.pack_hash, Some(cached.verified.pack_hash));
+        assert_eq!(report.trust_state, PackTrustState::Verified);
+        assert!(report.fast_path_eligible);
+        assert!(!report.builder_vm_required);
+    }
+
+    #[test]
+    fn prepare_report_rejects_mutable_oci_input_before_cache_lookup() {
+        let f = fixture();
+        let report = f
+            .cache
+            .prepare_report(
+                &prepare_request("ghcr.io/tinylabs/mvm:latest".to_string()),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepare report");
+
+        assert_eq!(report.state, PackPrepareState::Refused);
+        assert_eq!(report.reason, Some(PackPrepareReason::MutableInput));
+        assert_eq!(report.trust_state, PackTrustState::NotChecked);
+        assert!(!report.download_required);
+    }
+
+    #[test]
+    fn prepare_report_marks_uncached_input_missing_and_builder_required() {
+        let f = fixture();
+        let report = f
+            .cache
+            .prepare_report(
+                &prepare_request(format!(
+                    "ghcr.io/tinylabs/other@{}",
+                    digest("other").as_str()
+                )),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepare report");
+
+        assert_eq!(report.state, PackPrepareState::Missing);
+        assert_eq!(report.reason, Some(PackPrepareReason::MissingPack));
+        assert!(report.builder_vm_required);
+        assert!(report.download_required);
+    }
+
+    #[test]
+    fn prepare_report_maps_incompatible_backend_to_unsupported_backend() {
+        let f = fixture();
+        install_fixture_pack(&f);
+        let mut policy = f.policy.clone();
+        policy.backend = PackBackend::Qemu;
+        let report = f
+            .cache
+            .prepare_report(
+                &prepare_request(oci_input(&f)),
+                &policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepare report");
+
+        assert_eq!(report.state, PackPrepareState::Refused);
+        assert_eq!(report.reason, Some(PackPrepareReason::UnsupportedBackend));
+        assert_eq!(report.trust_state, PackTrustState::NotChecked);
+    }
+
+    #[test]
+    fn prepare_report_maps_expired_cache_metadata_to_expired_trust() {
+        let f = fixture();
+        let cached = install_fixture_pack(&f);
+        let mut expired = cached.index.clone();
+        expired.expires_at = utc(2026, 1, 1);
+        write_restricted_file(
+            &cached.root.join(INDEX_FILENAME),
+            &serde_json::to_vec(&expired).expect("serialize expired index"),
+        )
+        .expect("write expired index");
+
+        let report = f
+            .cache
+            .prepare_report(
+                &prepare_request(oci_input(&f)),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepare report");
+
+        assert_eq!(report.state, PackPrepareState::Refused);
+        assert_eq!(report.reason, Some(PackPrepareReason::ExpiredTrustMetadata));
+        assert_eq!(report.trust_state, PackTrustState::Expired);
+    }
+
+    #[test]
+    fn prepare_report_maps_revocation_to_revoked_signer() {
+        let mut f = fixture();
+        install_fixture_pack(&f);
+        f.revocations.status = RevocationStatus::Revoked {
+            reason: "key compromised".to_string(),
+        };
+        let report = f
+            .cache
+            .prepare_report(
+                &prepare_request(oci_input(&f)),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepare report");
+
+        assert_eq!(report.state, PackPrepareState::Refused);
+        assert_eq!(report.reason, Some(PackPrepareReason::RevokedSigner));
+        assert_eq!(report.trust_state, PackTrustState::Revoked);
+    }
+
+    #[test]
+    fn prepare_report_routes_local_rebuild_required_to_builder() {
+        let mut f = fixture();
+        f.manifest.policy_compatibility.local_rebuild_required = true;
+        resign_manifest(&mut f.manifest);
+        let cached = install_fixture_pack(&f);
+        let report = f
+            .cache
+            .prepare_report(
+                &prepare_request(oci_input(&f)),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepare report");
+
+        assert_eq!(report.state, PackPrepareState::RequiresBuilder);
+        assert_eq!(report.reason, Some(PackPrepareReason::LocalRebuildRequired));
+        assert_eq!(report.pack_hash, Some(cached.verified.pack_hash));
+        assert!(report.builder_vm_required);
+        assert!(!report.fast_path_eligible);
     }
 
     #[test]

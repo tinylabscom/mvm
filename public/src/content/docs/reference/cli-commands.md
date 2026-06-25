@@ -694,6 +694,15 @@ Build resolution order on first use:
 See [Builder VM](/guides/builder-vm/) for the host-orchestrated build
 flow and the distinction between build time and runtime boot time.
 
+## Prepare
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl prepare <IMAGE_OR_FLAKE> --policy-hash <SHA256> --backend <firecracker\|libkrun\|vz\|qemu\|docker> --channel <CHANNEL>` | Resolve the attested pack preparation state for an OCI image, flake, or local project path. The resolver verifies matching cached packs against local policy, trust-store keys, revocation metadata, manifest/file hashes, signature expiry, architecture, backend, and channel compatibility |
+| `mvmctl prepare --dry-run <IMAGE_OR_FLAKE> ...` | Report fast-path eligibility without downloading or installing packs. Output includes pack state, refusal reason, cached size when known, trust state, download requirement, and builder-VM requirement |
+| `mvmctl prepare <IMAGE_OR_FLAKE> --pack-source <SOURCE> ...` | Install a local or HTTPS attested pack archive through the same quarantine/verification/cache promotion path as `cache install-pack`, then resolve whether it satisfies the requested input. Plain HTTP requires `--allow-http` |
+| `mvmctl prepare <IMAGE_OR_FLAKE> --input-kind <oci-image\|flake\|local-path> --pack-kind <runtime\|builder\|image-project> ...` | Override input-kind inference or expected pack kind. `--pack-hash <SHA256>`, repeated `--host-capability`, `--trust-store <DIR>`, `--revocations <FILE>`, and `--json` are also supported |
+
 ## Cache
 
 | Command | Description |
