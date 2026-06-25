@@ -345,6 +345,15 @@ pub trait PackTrustStore {
     fn verifying_key(&self, key_id: &KeyId) -> Option<VerifyingKey>;
 }
 
+impl<T> PackTrustStore for T
+where
+    T: crate::plan::bundle::TrustStore + ?Sized,
+{
+    fn verifying_key(&self, key_id: &KeyId) -> Option<VerifyingKey> {
+        self.lookup(key_id)
+    }
+}
+
 pub trait PackRevocationChecker {
     fn status(&self, key_id: &KeyId, pack_hash: &Sha256Hex) -> RevocationStatus;
 }
@@ -785,6 +794,23 @@ mod tests {
 
     fn signing_key() -> SigningKey {
         SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    #[test]
+    fn fs_trust_store_satisfies_pack_trust_store() {
+        let key = signing_key();
+        let key_id = KeyId::from_pubkey(&key.verifying_key());
+        let tmp = TempDir::new().expect("tempdir");
+        fs::write(
+            tmp.path().join(format!("{}.pub", key_id.0)),
+            key.verifying_key().to_bytes(),
+        )
+        .expect("write pubkey");
+
+        let store = crate::plan::bundle::FsTrustStore::new(tmp.path());
+        let found = PackTrustStore::verifying_key(&store, &key_id).expect("trusted key");
+
+        assert_eq!(found, key.verifying_key());
     }
 
     fn fixture(kind: PackKind) -> Fixture {

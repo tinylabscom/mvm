@@ -136,6 +136,9 @@ pub enum LocalAuditKind {
     /// from `~/.cache/mvm`. Pure read-only `cache info` is not
     /// audited; the prune verb is, because it deletes host bytes.
     CachePrune,
+    /// `mvmctl cache install-pack` populated the attested pack cache
+    /// with a verified content-addressed pack.
+    CachePackInstall,
     /// `mvmctl cleanup` ran a host-side tier sweep
     /// (`--cache` / `--state` / `--nuclear`). The detail field carries
     /// the tier name, byte count freed, and number of top-level paths
@@ -1271,6 +1274,7 @@ mod tests {
             LocalAuditKind::ImageVerifyFailed,
             // Registry / cache mutations.
             LocalAuditKind::CachePrune,
+            LocalAuditKind::CachePackInstall,
             LocalAuditKind::SlotRemove,
             LocalAuditKind::SlotPrune,
             // Session lifecycle.
@@ -1321,6 +1325,7 @@ mod tests {
             ),
             (LocalAuditKind::ImageVerifyFailed, "image_verify_failed"),
             (LocalAuditKind::CachePrune, "cache_prune"),
+            (LocalAuditKind::CachePackInstall, "cache_pack_install"),
             (LocalAuditKind::SlotRemove, "slot_remove"),
             (LocalAuditKind::SlotPrune, "slot_prune"),
             (LocalAuditKind::SessionStart, "session_start"),

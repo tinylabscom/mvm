@@ -701,6 +701,7 @@ flow and the distinction between build time and runtime boot time.
 | `mvmctl cache info` | Show cache directory path, disk usage, and a per-entry footprint breakdown (unrecognized entries are flagged) |
 | `mvmctl cache status` | Show local attested pack cache inventory, metadata readiness, expiry, revocation-check status, and instant-launch eligibility state |
 | `mvmctl cache status --json` | Emit the attested pack cache inventory as machine-readable JSON |
+| `mvmctl cache install-pack <SOURCE> --policy-hash <SHA256> --backend <firecracker\|libkrun\|vz\|qemu\|docker> --channel <CHANNEL>` | Read a local or HTTPS attested pack tar archive, verify manifest hashes/signatures/trust metadata/revocation policy, and atomically install it into the pack cache. Repeat `--channel` and `--host-capability` as needed; use `--trust-store <DIR>` or `--revocations <FILE>` for local policy inputs. Plain HTTP requires `--allow-http` |
 | `mvmctl cache prune` | Remove stale temp files and expired/invalid attested pack entries; pack deletion refuses snapshot or warm-standby protection references; report (but don't delete) unrecognized top-level cache dirs |
 | `mvmctl cache prune --dry-run` | Show what would be removed without deleting |
 | `mvmctl cache prune --orphan-builds` | Also sweep orphaned builds — built artifacts whose source `mvm.toml` is gone (equivalent to `mvmctl manifest prune --orphans`) |

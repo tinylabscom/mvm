@@ -101,8 +101,24 @@ plan 25 sequences the work into six independently-shippable workstreams.
       unsafe path refusal, symlink entry refusal, poisoned archive refusal,
       permission hardening, and the existing policy-aware prune path; full
       workspace `cargo test`, `cargo check`, and
-      `cargo clippy --workspace --all-targets -- -D warnings`. Network pack
-      download wiring remains open for the prepare/cache UX.
+      `cargo clippy --workspace --all-targets -- -D warnings`. Prepare/runtime
+      download resolution remains open.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream C cache install/download: `mvmctl cache install-pack <SOURCE>`
+      now reads local or HTTPS attested pack tar archives, refuses plain HTTP
+      unless `--allow-http` is set, builds explicit local pack policy from
+      `--policy-hash`, `--backend`, repeated `--channel`, and repeated
+      `--host-capability`, reuses the existing trusted-publisher key store,
+      accepts an optional local revocation JSON file, and installs through the
+      existing quarantine-to-atomic-promotion archive cache path. The command
+      emits `CachePackInstall` audit records without logging full source URLs
+      or paths. Coverage: focused `mvm-core` trust-store adapter test, focused
+      `mvm-cli` parser/helper tests for install-pack policy flags, required
+      channel, source classification, local file reads, HTTP opt-in refusal,
+      interrupted download propagation, bad policy hashes, and revocation
+      schema/match behavior. Prepare UX and runtime launch integration remain
+      open.
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream C cache prune: `mvmctl cache prune` now routes attested pack

@@ -1,14 +1,24 @@
 //! `mvmctl cache` subcommand handlers.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use clap::{Args as ClapArgs, Subcommand};
+use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 
 use crate::ui;
-use mvm_core::packs::cache::{
-    PACK_PROTECTION_FILENAME, PackCache, PackCacheReadiness, PackCacheStatusEntry,
-    PackProtectionRef, PackPruneAction, PackPruneEntry, PackPruneReason, PackPruneRequest,
+use mvm_core::arch::GuestArch;
+use mvm_core::packs::{
+    HostCapability, LocalPackPolicy, PackBackend, PackRevocationChecker, RevocationStatus,
+    Sha256Hex,
+    cache::{
+        CachedPack, PACK_PROTECTION_FILENAME, PackCache, PackCacheReadiness, PackCacheStatusEntry,
+        PackProtectionRef, PackPruneAction, PackPruneEntry, PackPruneReason, PackPruneRequest,
+    },
 };
+use mvm_core::plan::bundle::{FsTrustStore, KeyId};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
@@ -70,6 +80,41 @@ pub(in crate::commands) enum CacheAction {
     },
     /// Show local attested pack cache readiness
     Status {
+        /// Emit machine-readable JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Download or read an attested pack archive, verify it, and install it
+    InstallPack {
+        /// Local pack tar archive path, or an `https://` URL. Plain HTTP is
+        /// refused unless `--allow-http` is passed.
+        #[arg(value_name = "SOURCE")]
+        source: String,
+        /// Expected local policy hash. The pack manifest must declare the same
+        /// hash before it can be cached.
+        #[arg(long, value_name = "SHA256")]
+        policy_hash: String,
+        /// Backend this host intends to use for the pack.
+        #[arg(long, value_enum)]
+        backend: PackBackendArg,
+        /// Allowed artifact channel identity. Repeat to allow multiple
+        /// channels.
+        #[arg(long = "channel", value_name = "CHANNEL", required = true)]
+        channels: Vec<String>,
+        /// Host capability made available to this pack policy. Repeat for
+        /// multiple capabilities.
+        #[arg(long = "host-capability", value_name = "CAPABILITY")]
+        host_capabilities: Vec<String>,
+        /// Override the trusted publisher key directory. Defaults to
+        /// `$MVM_DATA_DIR/trusted-publishers/`.
+        #[arg(long, value_name = "DIR")]
+        trust_store: Option<PathBuf>,
+        /// Optional local revocation JSON file for offline refused pack hashes.
+        #[arg(long, value_name = "FILE")]
+        revocations: Option<PathBuf>,
+        /// Allow plain-HTTP downloads. HTTPS or local files are preferred.
+        #[arg(long)]
+        allow_http: bool,
         /// Emit machine-readable JSON to stdout
         #[arg(long)]
         json: bool,
@@ -158,6 +203,224 @@ struct PackStatusRow {
     instant_launch_eligibility: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::commands) enum PackBackendArg {
+    Firecracker,
+    Libkrun,
+    Vz,
+    Qemu,
+    Docker,
+}
+
+impl From<PackBackendArg> for PackBackend {
+    fn from(value: PackBackendArg) -> Self {
+        match value {
+            PackBackendArg::Firecracker => PackBackend::Firecracker,
+            PackBackendArg::Libkrun => PackBackend::Libkrun,
+            PackBackendArg::Vz => PackBackend::Vz,
+            PackBackendArg::Qemu => PackBackend::Qemu,
+            PackBackendArg::Docker => PackBackend::Docker,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PackArchiveSource {
+    File(PathBuf),
+    Https(String),
+    Http(String),
+}
+
+impl PackArchiveSource {
+    fn parse(source: &str) -> Self {
+        if source.starts_with("https://") {
+            Self::Https(source.to_string())
+        } else if source.starts_with("http://") {
+            Self::Http(source.to_string())
+        } else {
+            Self::File(PathBuf::from(source))
+        }
+    }
+
+    fn audit_kind(&self) -> &'static str {
+        match self {
+            Self::File(_) => "file",
+            Self::Https(_) => "https",
+            Self::Http(_) => "http",
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct InstalledPack {
+    pack_hash: String,
+    kind: &'static str,
+    target_arch: String,
+    backend: String,
+    channel: String,
+    signer_key_id: String,
+    file_count: usize,
+    cache_root: String,
+}
+
+impl InstalledPack {
+    fn from_cached(cached: &CachedPack, backend: &PackBackend) -> Self {
+        Self {
+            pack_hash: cached.verified.pack_hash.as_str().to_string(),
+            kind: pack_kind_name(&cached.manifest.kind),
+            target_arch: cached.manifest.target_arch.to_string(),
+            backend: backend.to_string(),
+            channel: cached.manifest.trust.channel_identity.clone(),
+            signer_key_id: cached.verified.signer_key_id.0.clone(),
+            file_count: cached.verified.file_count,
+            cache_root: cached.root.display().to_string(),
+        }
+    }
+}
+
+struct InstallPackPolicyArgs {
+    backend: PackBackendArg,
+    policy_hash: String,
+    channels: Vec<String>,
+    host_capabilities: Vec<String>,
+}
+
+fn build_install_pack_policy(args: InstallPackPolicyArgs) -> Result<LocalPackPolicy> {
+    if args.channels.is_empty() {
+        anyhow::bail!("at least one --channel is required");
+    }
+    let policy_hash = Sha256Hex::new(args.policy_hash)
+        .context("invalid --policy-hash; expected lowercase SHA-256 hex")?;
+    let allowed_channels = args
+        .channels
+        .into_iter()
+        .map(|channel| {
+            let channel = channel.trim().to_string();
+            if channel.is_empty() {
+                anyhow::bail!("--channel must not be empty");
+            }
+            Ok(channel)
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    let host_capabilities = args
+        .host_capabilities
+        .into_iter()
+        .map(|capability| {
+            let capability = capability.trim().to_string();
+            if capability.is_empty() {
+                anyhow::bail!("--host-capability must not be empty");
+            }
+            Ok(HostCapability(capability))
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    Ok(LocalPackPolicy {
+        host_arch: GuestArch::host(),
+        backend: args.backend.into(),
+        host_capabilities,
+        policy_hash,
+        allowed_channels,
+        now: Utc::now(),
+    })
+}
+
+fn load_pack_archive_bytes(source: &PackArchiveSource, allow_http: bool) -> Result<Vec<u8>> {
+    load_pack_archive_bytes_with(source, allow_http, crate::http::download_file)
+}
+
+fn load_pack_archive_bytes_with(
+    source: &PackArchiveSource,
+    allow_http: bool,
+    downloader: impl Fn(&str, &Path) -> Result<()>,
+) -> Result<Vec<u8>> {
+    match source {
+        PackArchiveSource::File(path) => {
+            std::fs::read(path).with_context(|| format!("reading pack archive {}", path.display()))
+        }
+        PackArchiveSource::Https(url) => download_pack_archive_to_bytes(url, downloader),
+        PackArchiveSource::Http(url) => {
+            if !allow_http {
+                anyhow::bail!("plain-HTTP pack downloads require --allow-http");
+            }
+            download_pack_archive_to_bytes(url, downloader)
+        }
+    }
+}
+
+fn download_pack_archive_to_bytes(
+    url: &str,
+    downloader: impl Fn(&str, &Path) -> Result<()>,
+) -> Result<Vec<u8>> {
+    let tmp = tempfile::NamedTempFile::new().context("creating temporary pack download file")?;
+    downloader(url, tmp.path()).with_context(|| "downloading pack archive")?;
+    std::fs::read(tmp.path()).context("reading downloaded pack archive")
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PackRevocationFile {
+    schema_version: u32,
+    revoked: Vec<PackRevocationFileEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PackRevocationFileEntry {
+    signing_key_id: KeyId,
+    pack_hash: Sha256Hex,
+    reason: String,
+}
+
+#[derive(Debug)]
+struct LocalPackRevocations {
+    revoked: BTreeMap<(String, String), String>,
+}
+
+impl LocalPackRevocations {
+    fn empty() -> Self {
+        Self {
+            revoked: BTreeMap::new(),
+        }
+    }
+
+    fn from_path(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading pack revocation file {}", path.display()))?;
+        let file: PackRevocationFile = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing pack revocation file {}", path.display()))?;
+        if file.schema_version != 1 {
+            anyhow::bail!(
+                "unsupported pack revocation schema version {}; expected 1",
+                file.schema_version
+            );
+        }
+        let mut revoked = BTreeMap::new();
+        for entry in file.revoked {
+            if !entry.signing_key_id.is_well_formed() {
+                anyhow::bail!("malformed signing key id in pack revocation file");
+            }
+            if entry.reason.trim().is_empty() {
+                anyhow::bail!("pack revocation reason must not be empty");
+            }
+            revoked.insert(
+                (entry.signing_key_id.0, entry.pack_hash.as_str().to_string()),
+                entry.reason,
+            );
+        }
+        Ok(Self { revoked })
+    }
+}
+
+impl PackRevocationChecker for LocalPackRevocations {
+    fn status(&self, key_id: &KeyId, pack_hash: &Sha256Hex) -> RevocationStatus {
+        self.revoked
+            .get(&(key_id.0.clone(), pack_hash.as_str().to_string()))
+            .map(|reason| RevocationStatus::Revoked {
+                reason: reason.clone(),
+            })
+            .unwrap_or(RevocationStatus::Good)
+    }
 }
 
 fn collect_cache_info() -> Result<CacheInfo> {
@@ -453,6 +716,66 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     println!("    {detail}");
                 }
             }
+            Ok(())
+        }
+        CacheAction::InstallPack {
+            source,
+            policy_hash,
+            backend,
+            channels,
+            host_capabilities,
+            trust_store,
+            revocations,
+            allow_http,
+            json,
+        } => {
+            let source = PackArchiveSource::parse(&source);
+            let archive_bytes = load_pack_archive_bytes(&source, allow_http)?;
+            let policy = build_install_pack_policy(InstallPackPolicyArgs {
+                backend,
+                policy_hash,
+                channels,
+                host_capabilities,
+            })?;
+            let trust = match trust_store {
+                Some(path) => FsTrustStore::new(path),
+                None => FsTrustStore::default_path()
+                    .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?,
+            };
+            let revocations = match revocations {
+                Some(path) => LocalPackRevocations::from_path(&path)?,
+                None => LocalPackRevocations::empty(),
+            };
+            let cached = PackCache::default()
+                .install_from_archive_reader(
+                    Cursor::new(archive_bytes),
+                    &policy,
+                    &trust,
+                    &revocations,
+                )
+                .context("installing attested pack archive into cache")?;
+            mvm_core::audit_emit!(
+                CachePackInstall,
+                "pack_hash={} kind={} channel={} source_kind={} cache_root={}",
+                cached.verified.pack_hash.as_str(),
+                pack_kind_name(&cached.manifest.kind),
+                cached.manifest.trust.channel_identity,
+                source.audit_kind(),
+                cached.root.display()
+            );
+            let installed = InstalledPack::from_cached(&cached, &policy.backend);
+            if json {
+                crate::json_out::emit_json(&installed)?;
+                return Ok(());
+            }
+            ui::success(&format!("Installed attested pack {}", installed.pack_hash));
+            println!("  kind: {}", installed.kind);
+            println!("  arch: {}", installed.target_arch);
+            println!("  backend: {}", installed.backend);
+            println!("  channel: {}", installed.channel);
+            println!("  signer: {}", installed.signer_key_id);
+            println!("  files: {}", installed.file_count);
+            println!("  cache: {}", installed.cache_root);
             Ok(())
         }
         CacheAction::Repair {
@@ -1657,5 +1980,167 @@ mod tests {
         let rows = cache_dir_breakdown(root);
         assert_eq!(rows[0].0, "ur-seed", "largest entry first");
         assert!(rows.iter().any(|(n, _)| n == "stage0"));
+    }
+
+    #[test]
+    fn pack_archive_source_classifies_files_https_and_http() {
+        assert_eq!(
+            PackArchiveSource::parse("/tmp/pack.tar"),
+            PackArchiveSource::File(PathBuf::from("/tmp/pack.tar"))
+        );
+        assert_eq!(
+            PackArchiveSource::parse("https://example.test/pack.tar"),
+            PackArchiveSource::Https("https://example.test/pack.tar".to_string())
+        );
+        assert_eq!(
+            PackArchiveSource::parse("http://example.test/pack.tar"),
+            PackArchiveSource::Http("http://example.test/pack.tar".to_string())
+        );
+    }
+
+    #[test]
+    fn load_pack_archive_bytes_reads_local_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("pack.tar");
+        std::fs::write(&archive, b"pack bytes").unwrap();
+
+        let bytes = load_pack_archive_bytes(
+            &PackArchiveSource::File(archive),
+            /* allow_http = */ false,
+        )
+        .unwrap();
+
+        assert_eq!(bytes, b"pack bytes");
+    }
+
+    #[test]
+    fn load_pack_archive_bytes_refuses_http_without_opt_in() {
+        let err = load_pack_archive_bytes_with(
+            &PackArchiveSource::Http("http://example.test/pack.tar".to_string()),
+            /* allow_http = */ false,
+            |_url, _path| Ok(()),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("--allow-http"));
+    }
+
+    #[test]
+    fn load_pack_archive_bytes_does_not_return_interrupted_download_body() {
+        let err = load_pack_archive_bytes_with(
+            &PackArchiveSource::Https("https://example.test/pack.tar".to_string()),
+            /* allow_http = */ false,
+            |_url, path| {
+                std::fs::write(path, b"partial archive")?;
+                anyhow::bail!("connection reset")
+            },
+        )
+        .unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("downloading pack archive"));
+        assert!(msg.contains("connection reset"));
+    }
+
+    #[test]
+    fn build_install_pack_policy_rejects_bad_policy_hash() {
+        let err = build_install_pack_policy(InstallPackPolicyArgs {
+            backend: PackBackendArg::Libkrun,
+            policy_hash: "not-a-sha".to_string(),
+            channels: vec!["stable".to_string()],
+            host_capabilities: Vec::new(),
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid --policy-hash"));
+    }
+
+    #[test]
+    fn build_install_pack_policy_rejects_empty_host_capability() {
+        let err = build_install_pack_policy(InstallPackPolicyArgs {
+            backend: PackBackendArg::Libkrun,
+            policy_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            channels: vec!["stable".to_string()],
+            host_capabilities: vec![" ".to_string()],
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("--host-capability"));
+    }
+
+    #[test]
+    fn build_install_pack_policy_populates_backend_channels_and_capabilities() {
+        let policy_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let policy = build_install_pack_policy(InstallPackPolicyArgs {
+            backend: PackBackendArg::Libkrun,
+            policy_hash: policy_hash.to_string(),
+            channels: vec!["stable".to_string(), "canary".to_string()],
+            host_capabilities: vec!["vsock".to_string()],
+        })
+        .unwrap();
+
+        assert_eq!(policy.backend, PackBackend::Libkrun);
+        assert_eq!(policy.policy_hash.as_str(), policy_hash);
+        assert!(policy.allowed_channels.contains("stable"));
+        assert!(policy.allowed_channels.contains("canary"));
+        assert!(
+            policy
+                .host_capabilities
+                .contains(&HostCapability("vsock".to_string()))
+        );
+    }
+
+    #[test]
+    fn local_pack_revocations_rejects_unsupported_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("revocations.json");
+        std::fs::write(&path, r#"{"schema_version":2,"revoked":[]}"#).unwrap();
+
+        let err = LocalPackRevocations::from_path(&path).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("unsupported pack revocation schema")
+        );
+    }
+
+    #[test]
+    fn local_pack_revocations_matches_key_and_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("revocations.json");
+        let key_id = KeyId("0123456789abcdef0123456789abcdef".to_string());
+        let pack_hash =
+            Sha256Hex::new("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
+                .unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{
+                    "schema_version": 1,
+                    "revoked": [{{
+                        "signing_key_id": "{}",
+                        "pack_hash": "{}",
+                        "reason": "publisher key retired"
+                    }}]
+                }}"#,
+                key_id.0,
+                pack_hash.as_str()
+            ),
+        )
+        .unwrap();
+
+        let revocations = LocalPackRevocations::from_path(&path).unwrap();
+
+        assert_eq!(
+            revocations.status(&key_id, &pack_hash),
+            RevocationStatus::Revoked {
+                reason: "publisher key retired".to_string()
+            }
+        );
+        assert_eq!(
+            revocations.status(&key_id, &Sha256Hex::from_bytes(b"other")),
+            RevocationStatus::Good
+        );
     }
 }

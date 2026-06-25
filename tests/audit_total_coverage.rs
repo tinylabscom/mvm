@@ -144,6 +144,7 @@ const NETWORK_SUB: &[(&str, AuditPosture)] = &[
 const CACHE_SUB: &[(&str, AuditPosture)] = &[
     ("info", AuditPosture::ReadOnly),
     ("status", AuditPosture::ReadOnly),
+    ("install-pack", AuditPosture::Emits("CachePackInstall")),
     ("prune", AuditPosture::Emits("CachePrune")),
     // #640 — clears a degraded builder store; emits CachePrune on the real run
     // (op=builder_store_repair). A `--dry-run` is read-only, but the posture
@@ -572,6 +573,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // alphabetised within sections so a new audit kind's
         // addition is one obvious line.
         // Top-level + per-subgroup mutation kinds:
+        "CachePackInstall",
         "CachePrune",
         "ConfigChange",
         "DepsAudit",

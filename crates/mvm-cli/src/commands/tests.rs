@@ -21,7 +21,7 @@ use super::trust;
 use super::vm::{checkpoint, console, cp, exec, forward, group, pause, sandbox, session, volume};
 
 use audit::AuditAction;
-use cache::CacheAction;
+use cache::{CacheAction, PackBackendArg};
 use catalog::CatalogAction;
 use config::ConfigAction;
 use dev::{DevAction, DevCacheAction};
@@ -3124,6 +3124,81 @@ fn test_cache_status_json_parses() {
             action: CacheAction::Status { json: true }
         })
     ));
+}
+
+#[test]
+fn test_cache_install_pack_parses_policy_flags() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "cache",
+        "install-pack",
+        "https://example.test/runtime.tar",
+        "--policy-hash",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--backend",
+        "libkrun",
+        "--channel",
+        "stable",
+        "--host-capability",
+        "vsock",
+        "--trust-store",
+        "/tmp/trust",
+        "--revocations",
+        "/tmp/revocations.json",
+        "--allow-http",
+        "--json",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Commands::Cache(cache::Args {
+            action:
+                CacheAction::InstallPack {
+                    source,
+                    policy_hash,
+                    backend,
+                    channels,
+                    host_capabilities,
+                    trust_store,
+                    revocations,
+                    allow_http,
+                    json,
+                },
+        }) => {
+            assert_eq!(source, "https://example.test/runtime.tar");
+            assert_eq!(
+                policy_hash,
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            );
+            assert_eq!(backend, PackBackendArg::Libkrun);
+            assert_eq!(channels, vec!["stable"]);
+            assert_eq!(host_capabilities, vec!["vsock"]);
+            assert_eq!(trust_store.unwrap(), std::path::PathBuf::from("/tmp/trust"));
+            assert_eq!(
+                revocations.unwrap(),
+                std::path::PathBuf::from("/tmp/revocations.json")
+            );
+            assert!(allow_http);
+            assert!(json);
+        }
+        _ => panic!("Expected Cache InstallPack command"),
+    }
+}
+
+#[test]
+fn test_cache_install_pack_requires_channel() {
+    let parsed = Cli::try_parse_from([
+        "mvmctl",
+        "cache",
+        "install-pack",
+        "/tmp/runtime.tar",
+        "--policy-hash",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--backend",
+        "libkrun",
+    ]);
+
+    assert!(parsed.is_err());
 }
 
 #[test]
