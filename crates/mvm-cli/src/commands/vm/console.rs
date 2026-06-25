@@ -70,14 +70,16 @@ pub(in crate::commands) struct Args {
     /// Run a single command instead of an interactive shell
     #[arg(long)]
     pub command: Option<String>,
-    /// Bypass the sealed-image check (use with care: the image was
-    /// built without dev surface, so the in-VM agent may refuse
-    /// `Exec`/`ConsoleOpen` regardless).
+    /// Attempt the attach even when legacy metadata is incomplete. This never
+    /// bypasses a sealed-image refusal.
     #[arg(long)]
     pub force: bool,
     /// Extra KEY=VALUE environment entries for the guest dev shell/session.
     #[arg(skip)]
     pub env: Vec<(String, String)>,
+    /// Explicit PTY argv. Empty uses the guest agent default shell.
+    #[arg(skip)]
+    pub pty_argv: Vec<String>,
 }
 
 /// Refuse to attach if the VM's image was built sealed (dev = false /
@@ -87,14 +89,12 @@ pub(in crate::commands) struct Args {
 /// Reused by `machine run -t` (claim 15: no interactive access to a sealed
 /// production microVM).
 pub(in crate::commands) fn enforce_accessible_gate(name: &str, force: bool) -> Result<()> {
-    if force {
-        return Ok(());
-    }
+    let _ = force;
     match mvm::vm::runtime_meta::read(name) {
         Ok(Some(meta)) if !meta.accessible => anyhow::bail!(
             "console refused: VM {name:?} was built from a sealed image (passthru.mvm.accessible = false). \
              Sealed images don't ship the dev agent surface. \
-             Rebuild with `dev = true` or pass `--force` to attempt the attach anyway."
+             Rebuild with `dev = true` for interactive development."
         ),
         _ => Ok(()),
     }
@@ -156,7 +156,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         }
     } else {
         // Interactive PTY session
-        console_interactive_with_env(name, args.env)
+        console_interactive_with_env_and_argv(name, args.env, args.pty_argv)
     }
 }
 
@@ -199,6 +199,14 @@ pub(in crate::commands) fn console_interactive_with_env(
     name: &str,
     env: Vec<(String, String)>,
 ) -> Result<()> {
+    console_interactive_with_env_and_argv(name, env, Vec::new())
+}
+
+pub(in crate::commands) fn console_interactive_with_env_and_argv(
+    name: &str,
+    env: Vec<(String, String)>,
+    argv: Vec<String>,
+) -> Result<()> {
     let (cols, rows) = get_terminal_size();
 
     ui::info(&format!(
@@ -213,7 +221,12 @@ pub(in crate::commands) fn console_interactive_with_env(
         &mut stream,
         &[mvm_guest::vsock::GuestCapability::Console],
     )?;
-    let req = mvm_guest::vsock::GuestRequest::ConsoleOpen { cols, rows, env };
+    let req = mvm_guest::vsock::GuestRequest::ConsoleOpen {
+        cols,
+        rows,
+        env,
+        argv,
+    };
     // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
     let (session_id, data_port) = match mvm_guest::vsock::call_unary(&mut stream, &req)? {
@@ -618,7 +631,10 @@ mod accessible_gate_tests {
             let err = enforce_accessible_gate(name, false).expect_err("must refuse");
             let msg = err.to_string();
             assert!(msg.contains("sealed image"), "msg: {msg}");
-            assert!(msg.contains("--force"), "msg should hint at --force: {msg}");
+            assert!(
+                !msg.contains("--force"),
+                "msg must not suggest bypass: {msg}"
+            );
         });
     }
 
@@ -642,7 +658,7 @@ mod accessible_gate_tests {
     }
 
     #[test]
-    fn gate_force_bypasses_sealed_refusal() {
+    fn gate_force_does_not_bypass_sealed_refusal() {
         with_home(|_| {
             let name = "sealed-but-forced";
             write_meta(
@@ -653,7 +669,9 @@ mod accessible_gate_tests {
                 },
             )
             .expect("write");
-            assert!(enforce_accessible_gate(name, true).is_ok());
+            let err =
+                enforce_accessible_gate(name, true).expect_err("force must not bypass sealed");
+            assert!(err.to_string().contains("sealed image"), "msg: {err}");
         });
     }
 }

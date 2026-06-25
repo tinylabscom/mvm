@@ -213,10 +213,12 @@ To get an interactive shell, add `-it` (dev-only):
 mvmctl machine run -it --image <dev-image> -- /bin/sh   # drops into a shell
 ```
 
-`-it` is refused for a sealed/production image (claim 15: no interactive access
-to a sealed microVM) and when stdin is not a terminal — both fail fast with a
-clear message rather than hanging. To keep the machine after the shell exits,
-add `--name <N>` or `-d`.
+The command after `--` is the same command argv as a non-interactive run; `-it`
+only adds a PTY and forwards stdin. Omit the command to use the guest default
+shell. `-it` is refused for a sealed/production image (claim 15: no interactive
+access to a sealed microVM), with no `--force` override. It is also refused when
+stdin is not a terminal — both fail fast with a clear message rather than
+hanging. To keep the machine after the shell exits, add `--name <N>` or `-d`.
 
 ### `machine run --name X` recreated my machine
 

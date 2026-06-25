@@ -128,7 +128,9 @@ stream — leave unchanged), `console::run` (PTY attach to reuse), and
       machine; a fresh boot is re-checked by `console::run` post-boot. An
       auto-recreate (config change) still goes through the gate, so it cannot
       bypass claim 15. (`machine run` has no `--prod` flag — it is dev-tier; the
-      sealed-image/non-`dev-shell`-agent triggers are the relevant ones.)
+      sealed-image/non-`dev-shell`-agent triggers are the relevant ones.) A
+      later regression pass made this refusal non-bypassable: `--force` no
+      longer overrides `accessible=false`.
 - [x] `require_tty(stdin_is_tty)` refuses a non-TTY stdin up front with a clear
       message — no hang. Call site reads `std::io::stdin().is_terminal()`.
 - [x] Tests: `interactive_requires_a_host_tty`,
@@ -212,6 +214,30 @@ existing fast `backend.stop_transient` (the same path `mvmctl run` uses —
 SIGKILL up front, no grace) via a new `stop_transient_machine` helper, plus a
 one-line "Stopping transient machine …" notice for immediate feedback.
 Measured on macOS Vz: teardown after Ctrl+D dropped 6.44s → 0.06s.
+
+## Post-regression: `-it -- /bin/sh` parsed but did not open the requested shell
+
+`machine run --image alpine -it -- /bin/sh` parsed the trailing argv but the
+interactive path discarded it: `run_interactive` always called `console::run`
+with `command: None`, so the guest opened its default shell regardless of the
+user's argv. A first fix exposed the guest PTY implementation detail too
+directly by treating trailing argv as a raw `execve` command, which required an
+absolute `argv[0]` and diverged from non-interactive `machine run`.
+
+Fixed: `machine run` now has one user-facing argv model. Non-interactive runs
+still use the existing `Exec` stream path and return the command exit code;
+interactive runs adapt the same shell-quoted `exec <argv>` command into a PTY
+process (`/bin/sh -lc ...`) so `-it` changes terminal/stdin behavior, not argv
+semantics. Empty interactive argv still opens the guest default shell. The guest
+console protocol now carries optional explicit PTY argv for this adapter, but
+production isolation remains unchanged: `ConsoleOpen` and `Exec` are `DevOnly`
+verbs in the guest profile classifier, sealed-prod agents reject them, and the
+host metadata gate refuses `accessible=false` with no `--force` override.
+
+Coverage: `interactive_pty_argv_uses_same_command_quoting_as_exec`,
+`gate_force_does_not_bypass_sealed_refusal`, `machine_console_refused_on_sealed_image`,
+guest `test_sealed_prod_rejects_dev_only_verbs`, and the full workspace
+`cargo test --workspace`/clippy gates.
 
 ## Out of scope
 

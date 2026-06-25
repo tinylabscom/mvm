@@ -277,6 +277,8 @@ pub enum GuestRequest {
         rows: u16,
         #[serde(default)]
         env: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        argv: Vec<String>,
     },
     /// Close an active console session.
     ConsoleClose { session_id: u32 },
@@ -3257,6 +3259,7 @@ mod tests {
                 cols: 120,
                 rows: 40,
                 env: Vec::new(),
+                argv: Vec::new(),
             },
             GuestRequest::ConsoleClose { session_id: 1 },
             GuestRequest::ConsoleResize {
@@ -5481,6 +5484,7 @@ mod tests {
                 cols: 1,
                 rows: 1,
                 env: Vec::new(),
+                argv: Vec::new(),
             },
             GuestRequest::ConsoleClose { session_id: 1 },
             GuestRequest::ConsoleResize {
@@ -5609,6 +5613,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                argv: Vec::new(),
             },
             GuestRequest::ProcStart {
                 argv: vec!["/x".into()],
@@ -5979,6 +5984,7 @@ mod tests {
                     cols: 0,
                     rows: 0,
                     env: Vec::new(),
+                    argv: Vec::new(),
                 },
                 "console-open",
             ),
@@ -6149,6 +6155,39 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn console_open_missing_argv_defaults_empty() {
+        let req: GuestRequest =
+            serde_json::from_str(r#"{"ConsoleOpen":{"cols":80,"rows":24,"env":[]}}"#)
+                .expect("legacy console-open request should deserialize");
+        match req {
+            GuestRequest::ConsoleOpen { argv, .. } => assert!(argv.is_empty()),
+            other => panic!("expected ConsoleOpen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn console_open_preserves_explicit_argv() {
+        let req = GuestRequest::ConsoleOpen {
+            cols: 80,
+            rows: 24,
+            env: Vec::new(),
+            argv: vec!["/bin/sh".to_string()],
+        };
+        let json = serde_json::to_string(&req).expect("serialize console-open");
+        assert!(
+            json.contains(r#""argv":["/bin/sh"]"#),
+            "serialized request should carry argv: {json}"
+        );
+        let parsed: GuestRequest = serde_json::from_str(&json).expect("deserialize console-open");
+        match parsed {
+            GuestRequest::ConsoleOpen { argv, .. } => {
+                assert_eq!(argv, vec!["/bin/sh".to_string()]);
+            }
+            other => panic!("expected ConsoleOpen, got {other:?}"),
+        }
     }
 
     // send_exec_streaming host reader

@@ -2285,11 +2285,13 @@ fn test_console_with_command() {
             command,
             force,
             env,
+            pty_argv,
         }) => {
             assert_eq!(name, "myvm");
             assert_eq!(command.as_deref(), Some("ls"));
             assert!(!force, "default --force is off");
             assert!(env.is_empty());
+            assert!(pty_argv.is_empty());
         }
         _ => panic!("Expected machine console action"),
     }

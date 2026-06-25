@@ -32,6 +32,7 @@ pub struct ConsoleSession {
 #[derive(Debug)]
 pub enum ConsoleError {
     AlreadyActive,
+    InvalidCommand(String),
     OpenPtyFailed,
     ForkFailed,
     BindFailed(u32),
@@ -41,6 +42,7 @@ impl std::fmt::Display for ConsoleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AlreadyActive => write!(f, "a console session is already active"),
+            Self::InvalidCommand(message) => write!(f, "invalid console command: {message}"),
             Self::OpenPtyFailed => write!(f, "openpty() failed"),
             Self::ForkFailed => write!(f, "fork() failed"),
             Self::BindFailed(port) => write!(f, "failed to bind vsock port {port}"),
@@ -120,7 +122,16 @@ pub fn open_session(
     cols: u16,
     rows: u16,
     extra_env: &[(String, String)],
+    argv: &[String],
 ) -> Result<ConsoleSession, ConsoleError> {
+    let command_argv = build_console_argv(argv)?;
+    let command_path = command_argv[0].as_ptr().cast::<u8>();
+    let mut command_argv_ptrs: Vec<*const u8> = command_argv
+        .iter()
+        .map(|c| c.as_ptr().cast::<u8>())
+        .collect();
+    command_argv_ptrs.push(std::ptr::null());
+
     // Only one session at a time
     if CONSOLE_ACTIVE.swap(true, Ordering::SeqCst) {
         return Err(ConsoleError::AlreadyActive);
@@ -207,13 +218,9 @@ pub fn open_session(
             // Start in $HOME.
             let _ = chdir(c"/root".as_ptr().cast());
 
-            // Exec /bin/sh with the prepared environment. The path is
-            // absolute, so there is no PATH search (and thus no execvp
-            // allocation) to perform.
-            let shell = b"/bin/sh\0";
-            let dash_i = b"-i\0";
-            let argv: [*const u8; 3] = [shell.as_ptr(), dash_i.as_ptr(), std::ptr::null()];
-            execve(shell.as_ptr(), argv.as_ptr(), envp.as_ptr());
+            // Exec the prepared absolute command path. There is no PATH search
+            // here because the post-fork child must avoid allocation.
+            execve(command_path, command_argv_ptrs.as_ptr(), envp.as_ptr());
 
             std::process::exit(127);
         }
@@ -511,21 +518,39 @@ unsafe extern "C" {
 
 const SHUT_RDWR: i32 = 2;
 
-/// Build the shell's environment block as owned NUL-terminated C strings,
-/// inheriting the agent's current environment but overriding `HOME` and
-/// `TERM`. Constructed in the parent before `fork()` so the post-fork child
-/// can `execve` a fixed array without any allocation (see the async-signal
-/// safety note in `open_session`).
-fn build_shell_env() -> Vec<std::ffi::CString> {
-    build_shell_env_with(&[])
-}
-
 fn build_shell_env_with(extra_env: &[(String, String)]) -> Vec<std::ffi::CString> {
     build_shell_env_from(std::env::vars_os(), extra_env)
 }
 
-/// Pure core of [`build_shell_env`], parameterized over the source vars so it
-/// is testable without mutating process-global state.
+fn build_console_argv(argv: &[String]) -> Result<Vec<std::ffi::CString>, ConsoleError> {
+    let effective = if argv.is_empty() {
+        vec!["/bin/sh".to_string(), "-i".to_string()]
+    } else {
+        argv.to_vec()
+    };
+    if effective[0].is_empty() {
+        return Err(ConsoleError::InvalidCommand(
+            "argv[0] must not be empty".to_string(),
+        ));
+    }
+    if !effective[0].starts_with('/') {
+        return Err(ConsoleError::InvalidCommand(format!(
+            "argv[0] must be an absolute path, got {:?}",
+            effective[0]
+        )));
+    }
+    effective
+        .into_iter()
+        .map(|arg| {
+            std::ffi::CString::new(arg).map_err(|_| {
+                ConsoleError::InvalidCommand("argv must not contain NUL bytes".to_string())
+            })
+        })
+        .collect()
+}
+
+/// Pure core of the shell environment builder, parameterized over the source
+/// vars so it is testable without mutating process-global state.
 fn build_shell_env_from<I>(vars: I, extra_env: &[(String, String)]) -> Vec<std::ffi::CString>
 where
     I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
@@ -633,6 +658,46 @@ mod tests {
         );
         let strs: Vec<&str> = out.iter().filter_map(|c| c.to_str().ok()).collect();
         assert!(strs.contains(&"SSH_AUTH_SOCK=/run/mvm/ssh-agent.sock"));
+    }
+
+    #[test]
+    fn build_console_argv_defaults_to_interactive_shell() {
+        let argv = build_console_argv(&[]).expect("default shell argv");
+        let got: Vec<&str> = argv.iter().filter_map(|c| c.to_str().ok()).collect();
+        assert_eq!(got, ["/bin/sh", "-i"]);
+    }
+
+    #[test]
+    fn build_console_argv_accepts_absolute_explicit_command() {
+        let argv = build_console_argv(&["/bin/sh".to_string()]).expect("explicit shell argv");
+        let got: Vec<&str> = argv.iter().filter_map(|c| c.to_str().ok()).collect();
+        assert_eq!(got, ["/bin/sh"]);
+    }
+
+    #[test]
+    fn build_console_argv_rejects_relative_command() {
+        let err = build_console_argv(&["sh".to_string()]).expect_err("relative command is unsafe");
+        assert!(
+            err.to_string().contains("absolute path"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn open_session_rejects_invalid_argv_before_marking_active() {
+        CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
+        let err = match open_session(80, 24, &[], &["sh".to_string()]) {
+            Ok(_) => panic!("relative command should be rejected before PTY allocation"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("absolute path"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !is_active(),
+            "invalid argv must not leave the console marked active"
+        );
     }
 
     #[test]
