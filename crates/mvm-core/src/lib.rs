@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod checkpoint;
 pub mod config;
 pub mod dev_network;
+pub mod entrypoint_policy;
 pub mod exit_capture;
 pub mod kernel_advisory;
 pub mod kernel_artifact;

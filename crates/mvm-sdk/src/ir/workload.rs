@@ -220,7 +220,10 @@ pub enum Image {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Entrypoint {
     /// Command-style entrypoint: the wrapper exec's `command` once at
-    /// boot. Existing v0 shape, preserved.
+    /// boot. Existing v0 shape, preserved. Production validators reject
+    /// shell launchers here (`sh`, `bash`, `/usr/bin/env sh`,
+    /// `busybox sh`, etc.); use direct argv programs for production and
+    /// dev-only `machine run -it -- /bin/sh` for interactive shells.
     Command {
         command: Vec<String>,
         #[serde(default = "default_working_dir")]

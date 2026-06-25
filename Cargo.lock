@@ -2759,6 +2759,7 @@ dependencies = [
  "globset",
  "hex",
  "hmac",
+ "mvm-core",
  "mvm-guest",
  "schemars",
  "serde",

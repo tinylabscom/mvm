@@ -12,6 +12,7 @@
 //! [`EntrypointPolicy::production`].
 
 use std::fs::{File, Metadata};
+use std::io::{Read, Seek};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -111,10 +112,11 @@ impl EntrypointPolicy {
             }
         }
 
-        let file = File::open(&resolved).map_err(|e| ValidationError::Open {
+        let mut file = File::open(&resolved).map_err(|e| ValidationError::Open {
             path: resolved.clone(),
             source: e.to_string(),
         })?;
+        check_no_shell_shebang(&mut file, &resolved)?;
 
         Ok(ValidatedEntrypoint { resolved, file })
     }
@@ -151,6 +153,28 @@ fn check_metadata(
             path: path.to_path_buf(),
             mode: perm_bits,
             required: required_mode,
+        });
+    }
+    Ok(())
+}
+
+fn check_no_shell_shebang(file: &mut File, path: &Path) -> Result<(), ValidationError> {
+    const SHEBANG_SCAN_BYTES: usize = 256;
+    let mut prefix = [0u8; SHEBANG_SCAN_BYTES];
+    let len = file
+        .read(&mut prefix)
+        .map_err(|e| ValidationError::ReadEntrypoint {
+            path: path.to_path_buf(),
+            source: e.to_string(),
+        })?;
+    file.rewind().map_err(|e| ValidationError::ReadEntrypoint {
+        path: path.to_path_buf(),
+        source: e.to_string(),
+    })?;
+    if let Some(shell) = mvm_core::entrypoint_policy::detect_shell_shebang(&prefix[..len]) {
+        return Err(ValidationError::ShellEntrypoint {
+            path: path.to_path_buf(),
+            shell: shell.shell,
         });
     }
     Ok(())
@@ -229,6 +253,14 @@ pub enum ValidationError {
     Open {
         path: PathBuf,
         source: String,
+    },
+    ReadEntrypoint {
+        path: PathBuf,
+        source: String,
+    },
+    ShellEntrypoint {
+        path: PathBuf,
+        shell: String,
     },
 }
 
@@ -313,6 +345,14 @@ impl std::fmt::Display for ValidationError {
             ValidationError::Open { path, source } => {
                 write!(f, "open {}: {source}", path.display())
             }
+            ValidationError::ReadEntrypoint { path, source } => {
+                write!(f, "read entrypoint {}: {source}", path.display())
+            }
+            ValidationError::ShellEntrypoint { path, shell } => write!(
+                f,
+                "{} uses shell interpreter {shell:?}; production entrypoints must not be shell wrappers",
+                path.display()
+            ),
         }
     }
 }
@@ -325,7 +365,7 @@ impl std::error::Error for ValidationError {}
 // the host-side handler to emit as `EntrypointEvent`s.
 // ============================================================================
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
     Arc,
@@ -1031,10 +1071,34 @@ mod tests {
 
     #[test]
     fn test_validate_happy_path() {
-        let (tmp, marker, wrapper) = make_tree(0o555, b"#!/bin/sh\necho ok\n");
+        let (tmp, marker, wrapper) = make_tree(0o555, b"#!/usr/bin/env python3\nprint('ok')\n");
         let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o555);
         let validated = policy.validate().expect("validate should succeed");
         assert_eq!(validated.resolved, std::fs::canonicalize(&wrapper).unwrap());
+    }
+
+    #[test]
+    fn test_validate_rejects_shell_shebang() {
+        let (tmp, marker, _wrapper) = make_tree(0o555, b"#!/bin/sh\necho no\n");
+        let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o555);
+        match policy.validate() {
+            Err(ValidationError::ShellEntrypoint { shell, .. }) => {
+                assert_eq!(shell, "sh");
+            }
+            other => panic!("expected ShellEntrypoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_env_shell_shebang() {
+        let (tmp, marker, _wrapper) = make_tree(0o555, b"#!/usr/bin/env -S bash -eu\n");
+        let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o555);
+        match policy.validate() {
+            Err(ValidationError::ShellEntrypoint { shell, .. }) => {
+                assert_eq!(shell, "bash");
+            }
+            other => panic!("expected ShellEntrypoint, got {other:?}"),
+        }
     }
 
     #[test]

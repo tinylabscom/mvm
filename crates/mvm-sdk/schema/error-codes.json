@@ -70,6 +70,10 @@
       "description": "Two `entrypoints[]` entries declare the same `(module, function)` pair — function names must be unique within an app.",
       "applicable_fields": ["apps[*].entrypoints"]
     },
+    "E_SHELL_ENTRYPOINT_FORBIDDEN": {
+      "description": "A production command entrypoint launches a shell (`sh`, `bash`, `/usr/bin/env sh`, `busybox sh`, etc.). Production entrypoints must be direct argv programs or typed function wrappers; interactive shells are dev-only.",
+      "applicable_fields": ["apps[*].entrypoint.command", "apps[*].entrypoints[*].command"]
+    },
     "E_FUNCTION_NOT_FOUND": {
       "description": "An Entrypoint::Function declared `module:function` that does not resolve to a top-level function in the bundled source. ADR-0015 Phase 2: tree-sitter inspects the source after reachability scoping and rejects typos at compile time. Methods on classes and nested functions are not importable as `module.function` and will trip this check.",
       "applicable_fields": ["apps[*].entrypoints[*].function"]

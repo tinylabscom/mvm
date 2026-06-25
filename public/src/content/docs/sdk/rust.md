@@ -27,8 +27,8 @@ let workload = workload("worker")
     .app(
         app("worker")
             .source(local_path("."))
-            .image(nix_packages(["bash", "coreutils"]))
-            .entrypoint(entrypoint_command(["bash", "-lc", "echo ok"]))
+            .image(nix_packages(["python312"]))
+            .entrypoint(entrypoint_command(["python", "-m", "worker"]))
             .resources(resources(1, 256, 512))
             .build()?,
     )
