@@ -225,6 +225,10 @@ The target user-visible shape is:
 - [ ] Key setup-cache layers by image digest, flake lock hash, setup command
       hash, environment-relevant inputs, mount shape, runtime pack hash, and
       policy hash.
+      - [x] Add typed setup-cache layer identities to pack manifests and derive
+            deterministic cache keys over image digest, flake lock hash, setup
+            command hash, environment hash, mount shape hash, runtime pack hash,
+            and policy hash.
 - [ ] Add positive and negative tests for OCI digest resolution, flake lock
       resolution, setup-cache hits, and setup-cache invalidation.
       - [x] Add focused prepare tests for OCI digest-pinned canonicalization,
@@ -233,6 +237,9 @@ The target user-visible shape is:
       - [x] Add focused prepare/cache tests for local flake lock hash matching,
             mismatched flake lock refusal, remote flake lock resolver refusal,
             and non-flake flag refusal.
+      - [x] Add focused setup-cache identity tests for serde default
+            compatibility, stable key derivation, per-dimension invalidation,
+            and verifier refusal of source-less setup-cache layers.
 
 ### H. Launch attestation and explainability
 

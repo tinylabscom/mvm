@@ -1017,6 +1017,7 @@ fn reason_for_verify_error(error: &PackVerifyError) -> PackPrepareReason {
         | PackVerifyError::UnsupportedSignatureBundle => PackPrepareReason::TrustUnavailable,
         PackVerifyError::UnsupportedSchemaVersion { .. }
         | PackVerifyError::MissingOutputHash(_)
+        | PackVerifyError::InvalidSetupCacheLayer { .. }
         | PackVerifyError::UnsafeFilePath(_)
         | PackVerifyError::DuplicateFile(_)
         | PackVerifyError::FileReadFailed { .. }
@@ -1273,8 +1274,9 @@ mod tests {
     use crate::packs::{
         EMPTY_PACK_HASH, FlakeLockIdentity, HostCapability, OciDigest, OciInputIdentity, PackFile,
         PackInputs, PackOutputs, PackProvenance, PackSignature, PolicyCompatibility,
-        ReproducibilityStatus, RevocationStatus, SbomReference, SetupCommandIdentity,
-        SignatureBundle, SignatureFormat, SignaturePayload, SourceRevisionIdentity, TrustMetadata,
+        ReproducibilityStatus, RevocationStatus, SbomReference, SetupCacheLayerIdentity,
+        SetupCommandIdentity, SignatureBundle, SignatureFormat, SignaturePayload,
+        SourceRevisionIdentity, TrustMetadata,
     };
     use crate::plan::bundle::KeyId;
 
@@ -1362,6 +1364,15 @@ mod tests {
                 setup_commands: vec![SetupCommandIdentity {
                     command_hash: hash("setup"),
                     environment_hash: hash("env"),
+                }],
+                setup_cache_layers: vec![SetupCacheLayerIdentity {
+                    image_digest: Some(digest("oci")),
+                    flake_lock_hash: Some(hash("flake-lock")),
+                    setup_command_hash: hash("setup"),
+                    environment_hash: hash("env"),
+                    mount_shape_hash: hash("mounts"),
+                    runtime_pack_hash: hash("runtime-pack"),
+                    policy_hash: policy_hash.clone(),
                 }],
                 source_revisions: vec![SourceRevisionIdentity {
                     repository: "https://github.com/tinylabs/mvm".to_string(),

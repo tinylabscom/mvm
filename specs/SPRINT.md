@@ -105,6 +105,19 @@ plan 25 sequences the work into six independently-shippable workstreams.
       consumption and launch integration remain open.
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream G setup-cache identity: pack manifests now carry typed
+      setup-cache layer identities and derive deterministic layer keys over OCI
+      image digest, flake lock hash, setup command hash, environment hash,
+      mount shape hash, runtime pack hash, and policy hash. Pack verification
+      rejects source-less setup-cache layers that declare neither an image
+      digest nor a flake lock hash, and older manifests deserialize with an
+      empty setup-cache layer list. Coverage: focused `mvm-core` pack tests for
+      serde default compatibility, stable key derivation, per-dimension
+      invalidation, and verifier refusal of invalid setup-cache metadata.
+      Runtime setup-cache hit/miss wiring, builder-VM artifact preparation, and
+      launch admission consumption remain open.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream G local flake lock identity: `mvmctl prepare --resolve-flake-lock`
       now hashes a local `flake.lock` before cache-backed pack eligibility and
       carries that lock hash through `PackPrepareInput`, so matching cached
@@ -114,8 +127,8 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `mvm-cli` prepare tests for local lock hashing, remote resolver refusal,
       and non-flake flag refusal; focused `mvm-core` cache tests for lock-hash
       match and mismatch behavior. Remote flake lock resolution, builder-VM
-      artifact preparation, setup-cache keying, and launch admission wiring
-      remain open.
+      artifact preparation, setup-cache runtime hit/miss wiring, and launch
+      admission wiring remain open.
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream G prepare input eligibility: `mvmctl prepare --resolve-oci-digest`

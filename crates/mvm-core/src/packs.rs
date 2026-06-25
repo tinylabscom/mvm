@@ -179,6 +179,8 @@ pub struct PackInputs {
     pub nar_hashes: Vec<NarIdentity>,
     pub oci_images: Vec<OciInputIdentity>,
     pub setup_commands: Vec<SetupCommandIdentity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub setup_cache_layers: Vec<SetupCacheLayerIdentity>,
     pub source_revisions: Vec<SourceRevisionIdentity>,
     pub toolchain_versions: BTreeMap<String, String>,
 }
@@ -218,6 +220,71 @@ pub struct OciInputIdentity {
 pub struct SetupCommandIdentity {
     pub command_hash: Sha256Hex,
     pub environment_hash: Sha256Hex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupCacheLayerIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_digest: Option<OciDigest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flake_lock_hash: Option<Sha256Hex>,
+    pub setup_command_hash: Sha256Hex,
+    pub environment_hash: Sha256Hex,
+    pub mount_shape_hash: Sha256Hex,
+    pub runtime_pack_hash: Sha256Hex,
+    pub policy_hash: Sha256Hex,
+}
+
+impl SetupCacheLayerIdentity {
+    pub fn cache_key(&self) -> Sha256Hex {
+        let mut hasher = Sha256::new();
+        fold_hash_field(&mut hasher, "schema", b"mvm-setup-cache-layer-v1");
+        fold_hash_field(
+            &mut hasher,
+            "image_digest",
+            self.image_digest
+                .as_ref()
+                .map(OciDigest::as_str)
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        fold_hash_field(
+            &mut hasher,
+            "flake_lock_hash",
+            self.flake_lock_hash
+                .as_ref()
+                .map(Sha256Hex::as_str)
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        fold_hash_field(
+            &mut hasher,
+            "setup_command_hash",
+            self.setup_command_hash.as_str().as_bytes(),
+        );
+        fold_hash_field(
+            &mut hasher,
+            "environment_hash",
+            self.environment_hash.as_str().as_bytes(),
+        );
+        fold_hash_field(
+            &mut hasher,
+            "mount_shape_hash",
+            self.mount_shape_hash.as_str().as_bytes(),
+        );
+        fold_hash_field(
+            &mut hasher,
+            "runtime_pack_hash",
+            self.runtime_pack_hash.as_str().as_bytes(),
+        );
+        fold_hash_field(
+            &mut hasher,
+            "policy_hash",
+            self.policy_hash.as_str().as_bytes(),
+        );
+        Sha256Hex(format!("{:x}", hasher.finalize()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -437,6 +504,7 @@ pub fn validate_manifest(
     }
     validate_required_outputs(manifest)?;
     validate_oci_inputs(manifest)?;
+    validate_setup_cache_layers(manifest)?;
     validate_file_paths(manifest)?;
     validate_signature_bundle(manifest)?;
     Ok(())
@@ -578,6 +646,18 @@ fn validate_oci_inputs(manifest: &PackManifest) -> Result<(), PackVerifyError> {
     Ok(())
 }
 
+fn validate_setup_cache_layers(manifest: &PackManifest) -> Result<(), PackVerifyError> {
+    for (index, layer) in manifest.inputs.setup_cache_layers.iter().enumerate() {
+        if layer.image_digest.is_none() && layer.flake_lock_hash.is_none() {
+            return Err(PackVerifyError::InvalidSetupCacheLayer {
+                index,
+                reason: "missing image_digest or flake_lock_hash".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_file_paths(manifest: &PackManifest) -> Result<(), PackVerifyError> {
     let mut seen = BTreeSet::new();
     for file in &manifest.outputs.files {
@@ -651,6 +731,15 @@ fn hash_file(path: &Path) -> Result<(Sha256Hex, u64), String> {
     Ok((Sha256Hex(format!("{:x}", hasher.finalize())), total))
 }
 
+fn fold_hash_field(hasher: &mut Sha256, tag: &str, value: &[u8]) {
+    hasher.update(tag.as_bytes());
+    hasher.update(b"\0");
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(b"\0");
+    hasher.update(value);
+    hasher.update(b"\0");
+}
+
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64
         && value
@@ -691,6 +780,8 @@ pub enum PackVerifyError {
     MissingOutputHash(String),
     #[error("mutable OCI reference is not eligible for attested fast launch: {reference}")]
     MutableOciReference { reference: String },
+    #[error("invalid setup cache layer {index}: {reason}")]
+    InvalidSetupCacheLayer { index: usize, reason: String },
     #[error("unsafe pack file path {0:?}")]
     UnsafeFilePath(String),
     #[error("duplicate pack file path {0:?}")]
@@ -858,6 +949,15 @@ mod tests {
                     command_hash: hash("setup"),
                     environment_hash: hash("env"),
                 }],
+                setup_cache_layers: vec![SetupCacheLayerIdentity {
+                    image_digest: Some(digest("oci")),
+                    flake_lock_hash: Some(hash("flake-lock")),
+                    setup_command_hash: hash("setup"),
+                    environment_hash: hash("env"),
+                    mount_shape_hash: hash("mounts"),
+                    runtime_pack_hash: hash("runtime-pack"),
+                    policy_hash: policy_hash.clone(),
+                }],
                 source_revisions: vec![SourceRevisionIdentity {
                     repository: "https://github.com/tinylabs/mvm".to_string(),
                     revision: "abc123".to_string(),
@@ -993,6 +1093,81 @@ mod tests {
         let json = serde_json::to_string(&f.manifest).expect("serialize");
         let recovered: PackManifest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(recovered, f.manifest);
+    }
+
+    #[test]
+    fn setup_cache_layers_default_empty_for_older_manifests() {
+        let f = fixture(PackKind::ImageProject);
+        let mut value = serde_json::to_value(&f.manifest).expect("json");
+        value["inputs"]
+            .as_object_mut()
+            .expect("inputs object")
+            .remove("setup_cache_layers");
+
+        let recovered: PackManifest = serde_json::from_value(value).expect("deserialize");
+
+        assert!(recovered.inputs.setup_cache_layers.is_empty());
+    }
+
+    #[test]
+    fn setup_cache_key_is_stable_sha256_identity() {
+        let f = fixture(PackKind::ImageProject);
+        let layer = &f.manifest.inputs.setup_cache_layers[0];
+
+        let first = layer.cache_key();
+        let second = layer.cache_key();
+
+        assert_eq!(first, second);
+        assert_eq!(first.as_str().len(), 64);
+    }
+
+    #[test]
+    fn setup_cache_key_changes_for_each_declared_dimension() {
+        let f = fixture(PackKind::ImageProject);
+        let base = f.manifest.inputs.setup_cache_layers[0].clone();
+        let base_key = base.cache_key();
+
+        let mut changed = base.clone();
+        changed.image_digest = Some(digest("other-oci"));
+        assert_ne!(base_key, changed.cache_key());
+
+        let mut changed = base.clone();
+        changed.flake_lock_hash = Some(hash("other-flake-lock"));
+        assert_ne!(base_key, changed.cache_key());
+
+        let mut changed = base.clone();
+        changed.setup_command_hash = hash("other-setup");
+        assert_ne!(base_key, changed.cache_key());
+
+        let mut changed = base.clone();
+        changed.environment_hash = hash("other-env");
+        assert_ne!(base_key, changed.cache_key());
+
+        let mut changed = base.clone();
+        changed.mount_shape_hash = hash("other-mounts");
+        assert_ne!(base_key, changed.cache_key());
+
+        let mut changed = base.clone();
+        changed.runtime_pack_hash = hash("other-runtime-pack");
+        assert_ne!(base_key, changed.cache_key());
+
+        let mut changed = base;
+        changed.policy_hash = hash("other-policy");
+        assert_ne!(base_key, changed.cache_key());
+    }
+
+    #[test]
+    fn validation_rejects_setup_cache_layer_without_source_identity() {
+        let mut f = fixture(PackKind::ImageProject);
+        f.manifest.inputs.setup_cache_layers[0].image_digest = None;
+        f.manifest.inputs.setup_cache_layers[0].flake_lock_hash = None;
+
+        let err = verify(&f).expect_err("source-less setup cache layer rejected");
+
+        assert!(matches!(
+            err,
+            PackVerifyError::InvalidSetupCacheLayer { index: 0, .. }
+        ));
     }
 
     #[test]
