@@ -11,6 +11,7 @@ pub mod exit_capture;
 pub mod kernel_advisory;
 pub mod kernel_artifact;
 pub mod kernel_format;
+pub mod launch_attestation;
 pub mod metering;
 pub mod migration;
 pub mod naming;
