@@ -1285,6 +1285,12 @@
                 "rows"
               ],
               "properties": {
+                "argv": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "cols": {
                   "type": "integer",
                   "format": "uint16",

@@ -106,6 +106,7 @@ export type GuestRequest =
     }
   | {
       ConsoleOpen: {
+        argv?: string[];
         cols: number;
         env?: [string, string][];
         rows: number;
