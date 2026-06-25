@@ -105,6 +105,19 @@ plan 25 sequences the work into six independently-shippable workstreams.
       consumption and launch integration remain open.
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream G local flake lock identity: `mvmctl prepare --resolve-flake-lock`
+      now hashes a local `flake.lock` before cache-backed pack eligibility and
+      carries that lock hash through `PackPrepareInput`, so matching cached
+      packs must agree on both the resolved flake reference and lock hash.
+      Remote flake lock resolution is refused until the builder-VM resolver path
+      is wired through, and non-flake inputs reject the flag. Coverage: focused
+      `mvm-cli` prepare tests for local lock hashing, remote resolver refusal,
+      and non-flake flag refusal; focused `mvm-core` cache tests for lock-hash
+      match and mismatch behavior. Remote flake lock resolution, builder-VM
+      artifact preparation, setup-cache keying, and launch admission wiring
+      remain open.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream G prepare input eligibility: `mvmctl prepare --resolve-oci-digest`
       now resolves mutable OCI tags to Linux platform manifest digests before
       cache-backed pack eligibility checks, using the existing OCI reference

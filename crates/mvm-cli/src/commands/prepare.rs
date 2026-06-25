@@ -1,7 +1,8 @@
 //! Attested pack preparation and dry-run resolution.
 
+use std::fs;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, ValueEnum};
@@ -19,7 +20,7 @@ use super::ops::cache::{
     LocalPackRevocations, PackArchiveSource, PackBackendArg, PackPolicyArgs, build_pack_policy,
     load_pack_archive_bytes,
 };
-use super::shared::human_bytes;
+use super::shared::{human_bytes, resolve_flake_ref};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -37,6 +38,11 @@ pub(in crate::commands) struct Args {
     /// eligibility.
     #[arg(long)]
     pub resolve_oci_digest: bool,
+    /// Hash a local flake.lock before pack eligibility. Remote flake lock
+    /// resolution is builder-VM work and is refused here until that path is
+    /// wired through builderd.
+    #[arg(long)]
+    pub resolve_flake_lock: bool,
     /// Expected attested pack kind.
     #[arg(long = "pack-kind", value_enum, default_value = "image-project")]
     pub pack_kind: PreparePackKindArg,
@@ -192,13 +198,20 @@ fn resolve_prepare_input(
         .input_kind
         .map(Into::into)
         .unwrap_or_else(|| infer_input_kind(&args.input));
+    if args.resolve_flake_lock && kind != PackPrepareInputKind::Flake {
+        bail!("--resolve-flake-lock only applies to flake inputs");
+    }
     if kind != PackPrepareInputKind::OciImage {
         if args.resolve_oci_digest {
             bail!("--resolve-oci-digest only applies to OCI image inputs");
         }
+        if kind == PackPrepareInputKind::Flake {
+            return resolve_flake_prepare_input(args);
+        }
         return Ok(PackPrepareInput {
             raw: args.input.clone(),
             kind,
+            flake_lock_hash: None,
         });
     }
 
@@ -206,6 +219,7 @@ fn resolve_prepare_input(
         return Ok(PackPrepareInput {
             raw: args.input.clone(),
             kind,
+            flake_lock_hash: None,
         });
     }
 
@@ -217,6 +231,7 @@ fn resolve_prepare_input(
         return Ok(PackPrepareInput {
             raw: image_ref.canonical(),
             kind,
+            flake_lock_hash: None,
         });
     }
 
@@ -225,7 +240,48 @@ fn resolve_prepare_input(
     Ok(PackPrepareInput {
         raw: image_ref.canonical(),
         kind,
+        flake_lock_hash: None,
     })
+}
+
+fn resolve_flake_prepare_input(args: &Args) -> Result<PackPrepareInput> {
+    let raw = resolve_flake_ref(&args.input)?;
+    let flake_lock_hash = if args.resolve_flake_lock {
+        Some(resolve_local_flake_lock_hash(&raw)?)
+    } else {
+        None
+    };
+    Ok(PackPrepareInput {
+        raw,
+        kind: PackPrepareInputKind::Flake,
+        flake_lock_hash,
+    })
+}
+
+fn resolve_local_flake_lock_hash(resolved_flake_ref: &str) -> Result<Sha256Hex> {
+    let path_text = if let Some(path) = resolved_flake_ref.strip_prefix("path:") {
+        path
+    } else if resolved_flake_ref.contains(':') {
+        bail!("remote flake lock resolution requires the builder VM resolver path");
+    } else {
+        resolved_flake_ref
+    };
+    let flake_path = Path::new(path_text);
+    let flake_dir = if flake_path
+        .file_name()
+        .is_some_and(|name| name == "flake.nix")
+    {
+        flake_path
+            .parent()
+            .context("flake.nix path has no parent directory")?
+            .to_path_buf()
+    } else {
+        flake_path.to_path_buf()
+    };
+    let lock_path = flake_dir.join("flake.lock");
+    let bytes = fs::read(&lock_path)
+        .with_context(|| format!("reading flake lock file {}", lock_path.display()))?;
+    Ok(Sha256Hex::from_bytes(&bytes))
 }
 
 fn infer_input_kind(input: &str) -> PackPrepareInputKind {
@@ -248,6 +304,9 @@ fn infer_input_kind(input: &str) -> PackPrepareInputKind {
 
 fn print_report(report: &PackPrepareReport) {
     println!("Prepare input: {}", report.input.raw);
+    if let Some(lock_hash) = &report.input.flake_lock_hash {
+        println!("  flake lock: {}", lock_hash.as_str());
+    }
     println!("  state: {}", state_name(report.state));
     if let Some(reason) = report.reason {
         println!("  reason: {}", reason_name(reason));
@@ -380,6 +439,7 @@ mod tests {
             dry_run: true,
             input_kind: None,
             resolve_oci_digest: false,
+            resolve_flake_lock: false,
             pack_kind: PreparePackKindArg::ImageProject,
             pack_source: None,
             pack_hash: None,
@@ -503,6 +563,61 @@ mod tests {
 
         assert!(err.to_string().contains("resolver unavailable"));
         assert_eq!(resolver.calls(), 1);
+    }
+
+    #[test]
+    fn build_prepare_request_resolves_local_flake_lock_hash() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let flake_dir = temp.path().join("flake");
+        std::fs::create_dir(&flake_dir).expect("flake dir");
+        let lock_bytes = br#"{"nodes":{"root":{}},"root":"root","version":7}"#;
+        std::fs::write(flake_dir.join("flake.lock"), lock_bytes).expect("flake lock");
+        let mut args = base_args();
+        args.input = flake_dir.display().to_string();
+        args.input_kind = Some(PrepareInputKindArg::Flake);
+        args.resolve_flake_lock = true;
+        let resolver = FakeResolver::unavailable();
+        let expected_lock_hash = Sha256Hex::from_bytes(lock_bytes);
+
+        let request = build_prepare_request_with(&args, &resolver).expect("request");
+
+        assert_eq!(request.input.kind, PackPrepareInputKind::Flake);
+        assert_eq!(
+            request
+                .input
+                .flake_lock_hash
+                .as_ref()
+                .map(Sha256Hex::as_str),
+            Some(expected_lock_hash.as_str())
+        );
+        assert_eq!(resolver.calls(), 0);
+    }
+
+    #[test]
+    fn build_prepare_request_refuses_remote_flake_lock_resolution() {
+        let mut args = base_args();
+        args.input = "github:tinylabs/mvm".to_string();
+        args.input_kind = Some(PrepareInputKindArg::Flake);
+        args.resolve_flake_lock = true;
+        let resolver = FakeResolver::unavailable();
+
+        let err = build_prepare_request_with(&args, &resolver).expect_err("remote refused");
+
+        assert!(err.to_string().contains("requires the builder VM"));
+        assert_eq!(resolver.calls(), 0);
+    }
+
+    #[test]
+    fn build_prepare_request_rejects_flake_lock_resolution_for_non_flake_input() {
+        let mut args = base_args();
+        args.input = "alpine:3.19".to_string();
+        args.resolve_flake_lock = true;
+        let resolver = FakeResolver::unavailable();
+
+        let err = build_prepare_request_with(&args, &resolver).expect_err("non-flake rejected");
+
+        assert!(err.to_string().contains("only applies to flake inputs"));
+        assert_eq!(resolver.calls(), 0);
     }
 
     #[test]

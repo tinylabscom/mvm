@@ -177,6 +177,8 @@ pub struct PackPrepareRequest {
 pub struct PackPrepareInput {
     pub raw: String,
     pub kind: PackPrepareInputKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flake_lock_hash: Option<Sha256Hex>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -958,11 +960,13 @@ fn manifest_matches_input(manifest: &PackManifest, input: &PackPrepareInput) -> 
             .oci_images
             .iter()
             .any(|oci| oci.reference == input.raw),
-        PackPrepareInputKind::Flake => manifest
-            .inputs
-            .flake_locks
-            .iter()
-            .any(|flake| flake.reference == input.raw),
+        PackPrepareInputKind::Flake => manifest.inputs.flake_locks.iter().any(|flake| {
+            flake.reference == input.raw
+                && input
+                    .flake_lock_hash
+                    .as_ref()
+                    .is_none_or(|lock_hash| &flake.lock_hash == lock_hash)
+        }),
         PackPrepareInputKind::LocalPath => manifest
             .inputs
             .source_revisions
@@ -1451,6 +1455,19 @@ mod tests {
             input: PackPrepareInput {
                 raw: input,
                 kind: PackPrepareInputKind::OciImage,
+                flake_lock_hash: None,
+            },
+            expected_kind: Some(PackKind::Runtime),
+            pack_hash: None,
+        }
+    }
+
+    fn flake_prepare_request(reference: &str, lock_hash: Sha256Hex) -> PackPrepareRequest {
+        PackPrepareRequest {
+            input: PackPrepareInput {
+                raw: reference.to_string(),
+                kind: PackPrepareInputKind::Flake,
+                flake_lock_hash: Some(lock_hash),
             },
             expected_kind: Some(PackKind::Runtime),
             pack_hash: None,
@@ -1608,6 +1625,42 @@ mod tests {
         assert_eq!(report.trust_state, PackTrustState::Verified);
         assert!(report.fast_path_eligible);
         assert!(!report.builder_vm_required);
+    }
+
+    #[test]
+    fn prepare_report_matches_flake_lock_hash() {
+        let f = fixture();
+        let cached = install_fixture_pack(&f);
+        let report = f
+            .cache
+            .prepare_report(
+                &flake_prepare_request("github:tinylabs/mvm", hash("flake-lock")),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepare report");
+
+        assert_eq!(report.state, PackPrepareState::Ready);
+        assert_eq!(report.pack_hash, Some(cached.verified.pack_hash));
+        assert_eq!(report.trust_state, PackTrustState::Verified);
+    }
+
+    #[test]
+    fn prepare_report_refuses_mismatched_flake_lock_hash_for_requested_pack() {
+        let f = fixture();
+        let cached = install_fixture_pack(&f);
+        let mut request = flake_prepare_request("github:tinylabs/mvm", hash("other-flake-lock"));
+        request.pack_hash = Some(cached.verified.pack_hash);
+
+        let report = f
+            .cache
+            .prepare_report(&request, &f.policy, &f.trust, &f.revocations)
+            .expect("prepare report");
+
+        assert_eq!(report.state, PackPrepareState::Refused);
+        assert_eq!(report.reason, Some(PackPrepareReason::InputMismatch));
+        assert_eq!(report.trust_state, PackTrustState::NotChecked);
     }
 
     #[test]

@@ -216,6 +216,9 @@ The target user-visible shape is:
             resolution is explicitly requested.
 - [ ] Resolve flake inputs to committed locks before pack eligibility or
       admission.
+      - [x] Add explicit prepare-time `--resolve-flake-lock` support that hashes
+            local `flake.lock` files and requires cached pack manifests to match
+            the requested flake reference and lock hash.
 - [ ] Build unpublished or private OCI/flake artifacts inside the builder VM and
       publish them only to the local content-addressed cache unless the user
       explicitly exports them.
@@ -227,6 +230,9 @@ The target user-visible shape is:
       - [x] Add focused prepare tests for OCI digest-pinned canonicalization,
             explicit mutable-tag resolution, resolver failure, and the default
             mutable-input refusal path.
+      - [x] Add focused prepare/cache tests for local flake lock hash matching,
+            mismatched flake lock refusal, remote flake lock resolver refusal,
+            and non-flake flag refusal.
 
 ### H. Launch attestation and explainability
 

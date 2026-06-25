@@ -3213,6 +3213,7 @@ fn test_prepare_dry_run_parses_policy_and_resolution_flags() {
         "--input-kind",
         "oci-image",
         "--resolve-oci-digest",
+        "--resolve-flake-lock",
         "--pack-kind",
         "runtime",
         "--pack-source",
@@ -3242,6 +3243,7 @@ fn test_prepare_dry_run_parses_policy_and_resolution_flags() {
             dry_run,
             input_kind,
             resolve_oci_digest,
+            resolve_flake_lock,
             pack_kind,
             pack_source,
             pack_hash,
@@ -3258,6 +3260,7 @@ fn test_prepare_dry_run_parses_policy_and_resolution_flags() {
             assert!(dry_run);
             assert_eq!(input_kind, Some(PrepareInputKindArg::OciImage));
             assert!(resolve_oci_digest);
+            assert!(resolve_flake_lock);
             assert_eq!(pack_kind, PreparePackKindArg::Runtime);
             assert_eq!(
                 pack_source.as_deref(),
