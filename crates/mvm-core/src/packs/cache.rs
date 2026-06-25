@@ -1,5 +1,6 @@
 //! Content-addressed local cache for verified attested packs.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,6 +18,7 @@ pub const PACK_CACHE_SCHEMA_VERSION: u32 = 1;
 pub const PACK_CACHE_DIR_NAME: &str = "packs";
 pub const MANIFEST_FILENAME: &str = "manifest.json";
 pub const INDEX_FILENAME: &str = "cache-index.json";
+pub const PACK_PROTECTION_FILENAME: &str = "pack-protection.json";
 
 #[derive(Debug, Clone)]
 pub struct PackCache {
@@ -29,6 +31,97 @@ pub struct CachedPack {
     pub manifest: PackManifest,
     pub verified: VerifiedPack,
     pub index: PackCacheIndex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackProtectionRef {
+    pub pack_hash: Sha256Hex,
+    pub owner_kind: PackProtectionOwnerKind,
+    pub owner_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackProtectionOwnerKind {
+    Snapshot,
+    WarmStandby,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackPruneRequest {
+    pub now: DateTime<Utc>,
+    pub dry_run: bool,
+    pub protected: Vec<PackProtectionRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackPruneReport {
+    pub entries: Vec<PackPruneEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackPruneEntry {
+    pub directory_name: String,
+    pub root: PathBuf,
+    pub pack_hash: Option<Sha256Hex>,
+    pub readiness: PackCacheReadiness,
+    pub action: PackPruneAction,
+    pub reason: PackPruneReason,
+    pub bytes: u64,
+    pub protections: Vec<PackProtectionRef>,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackPruneAction {
+    Removed,
+    WouldRemove,
+    Retained,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackPruneReason {
+    Ready,
+    Expired,
+    InvalidMetadata,
+    Protected,
+}
+
+impl PackPruneReport {
+    pub fn removed_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.action == PackPruneAction::Removed)
+            .count()
+    }
+
+    pub fn would_remove_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.action == PackPruneAction::WouldRemove)
+            .count()
+    }
+
+    pub fn protected_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.reason == PackPruneReason::Protected)
+            .count()
+    }
+
+    pub fn removed_bytes(&self) -> u64 {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.action,
+                    PackPruneAction::Removed | PackPruneAction::WouldRemove
+                )
+            })
+            .map(|entry| entry.bytes)
+            .sum()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,7 +205,11 @@ impl PackCache {
                 source,
             })?;
             let root = entry.path();
-            if !root.is_dir() {
+            let metadata = fs::symlink_metadata(&root).map_err(|source| PackCacheError::Io {
+                path: root.clone(),
+                source,
+            })?;
+            if !metadata.file_type().is_dir() {
                 continue;
             }
             let directory_name = entry.file_name().to_string_lossy().into_owned();
@@ -126,6 +223,51 @@ impl PackCache {
                 .then_with(|| a.directory_name.cmp(&b.directory_name))
         });
         Ok(out)
+    }
+
+    pub fn prune(&self, request: &PackPruneRequest) -> Result<PackPruneReport, PackCacheError> {
+        let mut protections_by_hash: BTreeMap<String, Vec<PackProtectionRef>> = BTreeMap::new();
+        for protection in &request.protected {
+            protections_by_hash
+                .entry(protection.pack_hash.as_str().to_string())
+                .or_default()
+                .push(protection.clone());
+        }
+
+        let mut entries = Vec::new();
+        for status in self.status_entries(request.now)? {
+            let pack_hash = status_pack_hash(&status);
+            let protections = pack_hash
+                .as_ref()
+                .and_then(|hash| protections_by_hash.get(hash.as_str()).cloned())
+                .unwrap_or_default();
+            let candidate_reason = prune_candidate_reason(status.readiness);
+            let bytes = directory_size_bytes(&status.root)?;
+            let (action, reason) = match (candidate_reason, protections.is_empty()) {
+                (None, _) => (PackPruneAction::Retained, PackPruneReason::Ready),
+                (Some(_), false) => (PackPruneAction::Retained, PackPruneReason::Protected),
+                (Some(reason), true) if request.dry_run => (PackPruneAction::WouldRemove, reason),
+                (Some(reason), true) => {
+                    fs::remove_dir_all(&status.root).map_err(|source| PackCacheError::Io {
+                        path: status.root.clone(),
+                        source,
+                    })?;
+                    (PackPruneAction::Removed, reason)
+                }
+            };
+            entries.push(PackPruneEntry {
+                directory_name: status.directory_name,
+                root: status.root,
+                pack_hash,
+                readiness: status.readiness,
+                action,
+                reason,
+                bytes,
+                protections,
+                detail: status.detail,
+            });
+        }
+        Ok(PackPruneReport { entries })
     }
 
     pub fn install_from_verified_root(
@@ -264,6 +406,54 @@ impl Default for PackCache {
     fn default() -> Self {
         Self::new(Self::default_path())
     }
+}
+
+fn status_pack_hash(status: &PackCacheStatusEntry) -> Option<Sha256Hex> {
+    status
+        .index
+        .as_ref()
+        .map(|index| index.pack_hash.clone())
+        .or_else(|| Sha256Hex::new(status.directory_name.clone()).ok())
+}
+
+fn prune_candidate_reason(readiness: PackCacheReadiness) -> Option<PackPruneReason> {
+    match readiness {
+        PackCacheReadiness::Ready => None,
+        PackCacheReadiness::Expired => Some(PackPruneReason::Expired),
+        PackCacheReadiness::MissingIndex
+        | PackCacheReadiness::MalformedIndex
+        | PackCacheReadiness::UnsupportedIndexSchema
+        | PackCacheReadiness::DirectoryHashMismatch => Some(PackPruneReason::InvalidMetadata),
+    }
+}
+
+fn directory_size_bytes(path: &Path) -> Result<u64, PackCacheError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| PackCacheError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Ok(0);
+    }
+
+    let mut total = 0u64;
+    let entries = fs::read_dir(path).map_err(|source| PackCacheError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| PackCacheError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        total = total
+            .checked_add(directory_size_bytes(&entry.path())?)
+            .ok_or(PackCacheError::SizeOverflow)?;
+    }
+    Ok(total)
 }
 
 fn status_entry_for_dir(
@@ -770,6 +960,198 @@ mod tests {
         assert_eq!(
             readiness.get(hash("mismatch").as_str()),
             Some(&PackCacheReadiness::DirectoryHashMismatch)
+        );
+    }
+
+    #[test]
+    fn protection_ref_roundtrips_through_json() {
+        let protection = PackProtectionRef {
+            pack_hash: hash("protected"),
+            owner_kind: PackProtectionOwnerKind::Snapshot,
+            owner_id: "checkpoint-a".to_string(),
+        };
+
+        let json = serde_json::to_string(&protection).expect("serialize protection");
+        let back: PackProtectionRef = serde_json::from_str(&json).expect("parse protection");
+        assert_eq!(back, protection);
+        assert!(json.contains("snapshot"));
+    }
+
+    #[test]
+    fn prune_removes_expired_and_invalid_entries_but_keeps_ready() {
+        let f = fixture();
+        let cached = f
+            .cache
+            .install_from_verified_root(
+                &f.manifest,
+                f.source.path(),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("install");
+        let mut expired = cached.index.clone();
+        expired.expires_at = utc(2026, 1, 1);
+        write_restricted_file(
+            &cached.root.join(INDEX_FILENAME),
+            &serde_json::to_vec(&expired).expect("serialize expired index"),
+        )
+        .expect("write expired index");
+
+        let malformed_dir = f.cache.by_hash_dir().join(hash("malformed").as_str());
+        fs::create_dir_all(&malformed_dir).expect("malformed dir");
+        fs::write(malformed_dir.join(INDEX_FILENAME), b"not json").expect("malformed index");
+
+        let ready_hash = f.manifest.outputs.pack_hash.clone();
+        write_restricted_file(
+            &cached.root.join(INDEX_FILENAME),
+            &serde_json::to_vec(&cached.index).expect("serialize ready index"),
+        )
+        .expect("restore ready index");
+        let mut expired_index = cached.index.clone();
+        expired_index.pack_hash = hash("expired");
+        expired_index.expires_at = utc(2026, 1, 1);
+        let expired_dir = f.cache.by_hash_dir().join(expired_index.pack_hash.as_str());
+        fs::create_dir_all(&expired_dir).expect("expired dir");
+        write_restricted_file(
+            &expired_dir.join(INDEX_FILENAME),
+            &serde_json::to_vec(&expired_index).expect("serialize expired index"),
+        )
+        .expect("write expired index");
+
+        let report = f
+            .cache
+            .prune(&PackPruneRequest {
+                now: f.policy.now,
+                dry_run: false,
+                protected: Vec::new(),
+            })
+            .expect("prune");
+
+        assert_eq!(report.removed_count(), 2);
+        assert!(f.cache.pack_dir(&ready_hash).is_dir(), "ready pack is kept");
+        assert!(!malformed_dir.exists(), "malformed entry is removed");
+        assert!(!expired_dir.exists(), "expired entry is removed");
+        assert!(report.entries.iter().any(|entry| {
+            entry.pack_hash.as_ref() == Some(&ready_hash)
+                && entry.action == PackPruneAction::Retained
+                && entry.reason == PackPruneReason::Ready
+        }));
+    }
+
+    #[test]
+    fn prune_dry_run_reports_without_removing() {
+        let f = fixture();
+        let expired_hash = hash("expired-dry-run");
+        let expired_dir = f.cache.by_hash_dir().join(expired_hash.as_str());
+        fs::create_dir_all(&expired_dir).expect("expired dir");
+        let index = PackCacheIndex {
+            schema_version: PACK_CACHE_SCHEMA_VERSION,
+            pack_hash: expired_hash.clone(),
+            kind: PackKind::Runtime,
+            target_arch: GuestArch::host(),
+            backend_compatibility: vec![PackBackend::Libkrun],
+            channel_identity: "stable".to_string(),
+            expires_at: utc(2026, 1, 1),
+            size_bytes: 1,
+            file_count: 0,
+            last_used_at: utc(2026, 1, 1),
+            last_verified_at: utc(2026, 1, 1),
+        };
+        write_restricted_file(
+            &expired_dir.join(INDEX_FILENAME),
+            &serde_json::to_vec(&index).expect("serialize index"),
+        )
+        .expect("write index");
+
+        let report = f
+            .cache
+            .prune(&PackPruneRequest {
+                now: f.policy.now,
+                dry_run: true,
+                protected: Vec::new(),
+            })
+            .expect("prune");
+
+        assert_eq!(report.would_remove_count(), 1);
+        assert_eq!(report.removed_count(), 0);
+        assert!(expired_dir.is_dir(), "dry-run keeps the pack directory");
+    }
+
+    #[test]
+    fn prune_retains_protected_expired_pack() {
+        let f = fixture();
+        let protected_hash = hash("protected-expired");
+        let protected_dir = f.cache.by_hash_dir().join(protected_hash.as_str());
+        fs::create_dir_all(&protected_dir).expect("protected dir");
+        let index = PackCacheIndex {
+            schema_version: PACK_CACHE_SCHEMA_VERSION,
+            pack_hash: protected_hash.clone(),
+            kind: PackKind::Runtime,
+            target_arch: GuestArch::host(),
+            backend_compatibility: vec![PackBackend::Libkrun],
+            channel_identity: "stable".to_string(),
+            expires_at: utc(2026, 1, 1),
+            size_bytes: 1,
+            file_count: 0,
+            last_used_at: utc(2026, 1, 1),
+            last_verified_at: utc(2026, 1, 1),
+        };
+        write_restricted_file(
+            &protected_dir.join(INDEX_FILENAME),
+            &serde_json::to_vec(&index).expect("serialize index"),
+        )
+        .expect("write index");
+
+        let protection = PackProtectionRef {
+            pack_hash: protected_hash.clone(),
+            owner_kind: PackProtectionOwnerKind::WarmStandby,
+            owner_id: "standby-a".to_string(),
+        };
+        let report = f
+            .cache
+            .prune(&PackPruneRequest {
+                now: f.policy.now,
+                dry_run: false,
+                protected: vec![protection.clone()],
+            })
+            .expect("prune");
+
+        assert_eq!(report.removed_count(), 0);
+        assert_eq!(report.protected_count(), 1);
+        assert!(protected_dir.is_dir(), "protected pack is retained");
+        assert!(report.entries.iter().any(|entry| {
+            entry.pack_hash.as_ref() == Some(&protected_hash)
+                && entry.action == PackPruneAction::Retained
+                && entry.reason == PackPruneReason::Protected
+                && entry.protections == vec![protection.clone()]
+        }));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn prune_ignores_symlinked_pack_directory() {
+        let f = fixture();
+        let outside = TempDir::new().expect("outside tempdir");
+        fs::write(outside.path().join("sentinel"), b"keep").expect("write sentinel");
+        fs::create_dir_all(f.cache.by_hash_dir()).expect("by-hash dir");
+        let link_hash = hash("symlink");
+        std::os::unix::fs::symlink(outside.path(), f.cache.pack_dir(&link_hash))
+            .expect("symlink pack dir");
+
+        let report = f
+            .cache
+            .prune(&PackPruneRequest {
+                now: f.policy.now,
+                dry_run: false,
+                protected: Vec::new(),
+            })
+            .expect("prune");
+
+        assert!(report.entries.is_empty());
+        assert!(
+            outside.path().join("sentinel").is_file(),
+            "prune must not follow or remove symlinked cache entries"
         );
     }
 
