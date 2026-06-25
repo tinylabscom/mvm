@@ -3212,6 +3212,7 @@ fn test_prepare_dry_run_parses_policy_and_resolution_flags() {
         "--dry-run",
         "--input-kind",
         "oci-image",
+        "--resolve-oci-digest",
         "--pack-kind",
         "runtime",
         "--pack-source",
@@ -3240,6 +3241,7 @@ fn test_prepare_dry_run_parses_policy_and_resolution_flags() {
             input,
             dry_run,
             input_kind,
+            resolve_oci_digest,
             pack_kind,
             pack_source,
             pack_hash,
@@ -3255,6 +3257,7 @@ fn test_prepare_dry_run_parses_policy_and_resolution_flags() {
             assert!(input.starts_with("ghcr.io/tinylabs/mvm@sha256:"));
             assert!(dry_run);
             assert_eq!(input_kind, Some(PrepareInputKindArg::OciImage));
+            assert!(resolve_oci_digest);
             assert_eq!(pack_kind, PreparePackKindArg::Runtime);
             assert_eq!(
                 pack_source.as_deref(),

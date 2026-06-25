@@ -101,8 +101,22 @@ plan 25 sequences the work into six independently-shippable workstreams.
       unsafe path refusal, symlink entry refusal, poisoned archive refusal,
       permission hardening, and the existing policy-aware prune path; full
       workspace `cargo test`, `cargo check`, and
-      `cargo clippy --workspace --all-targets -- -D warnings`. Prepare/runtime
-      download resolution remains open.
+      `cargo clippy --workspace --all-targets -- -D warnings`. Runtime
+      consumption and launch integration remain open.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream G prepare input eligibility: `mvmctl prepare --resolve-oci-digest`
+      now resolves mutable OCI tags to Linux platform manifest digests before
+      cache-backed pack eligibility checks, using the existing OCI reference
+      parser/canonicalizer, manifest fetcher, platform selector, and registry
+      bearer-token lookup. Digest-pinned OCI inputs canonicalize without network
+      access, non-OCI inputs reject the flag, and mutable OCI inputs remain
+      fail-closed unless resolution is explicitly requested. Coverage: focused
+      `mvm-cli` prepare tests for digest-pinned canonicalization, explicit
+      mutable-tag resolution, default mutable-input behavior, resolver failure,
+      non-OCI flag refusal, and top-level CLI parsing. Flake lock resolution,
+      builder-VM artifact preparation, setup-cache keying, and launch admission
+      wiring remain open.
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream C/D prepare resolver: `mvmctl prepare <image-or-flake>` now

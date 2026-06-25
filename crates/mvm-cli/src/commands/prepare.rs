@@ -3,7 +3,7 @@
 use std::io::Cursor;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, ValueEnum};
 use mvm_core::packs::cache::{
     PackCache, PackPrepareInput, PackPrepareInputKind, PackPrepareReason, PackPrepareReport,
@@ -12,6 +12,7 @@ use mvm_core::packs::cache::{
 use mvm_core::packs::{PackKind, Sha256Hex};
 use mvm_core::plan::bundle::FsTrustStore;
 use mvm_core::user_config::MvmConfig;
+use mvm_oci::{ImageReference, LinuxPlatform, OciManifestFetcher};
 
 use super::Cli;
 use super::ops::cache::{
@@ -32,6 +33,10 @@ pub(in crate::commands) struct Args {
     /// Input kind. Defaults to a conservative inference from the input string.
     #[arg(long = "input-kind", value_enum)]
     pub input_kind: Option<PrepareInputKindArg>,
+    /// Resolve mutable OCI tags to a Linux platform digest before pack
+    /// eligibility.
+    #[arg(long)]
+    pub resolve_oci_digest: bool,
     /// Expected attested pack kind.
     #[arg(long = "pack-kind", value_enum, default_value = "image-project")]
     pub pack_kind: PreparePackKindArg,
@@ -135,6 +140,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 }
 
 fn build_prepare_request(args: &Args) -> Result<PackPrepareRequest> {
+    build_prepare_request_with(args, &RegistryPrepareOciDigestResolver)
+}
+
+fn build_prepare_request_with(
+    args: &Args,
+    resolver: &dyn PrepareOciDigestResolver,
+) -> Result<PackPrepareRequest> {
     let pack_hash = args
         .pack_hash
         .as_ref()
@@ -142,15 +154,77 @@ fn build_prepare_request(args: &Args) -> Result<PackPrepareRequest> {
         .transpose()
         .context("invalid --pack-hash; expected lowercase SHA-256 hex")?;
     Ok(PackPrepareRequest {
-        input: PackPrepareInput {
-            raw: args.input.clone(),
-            kind: args
-                .input_kind
-                .map(Into::into)
-                .unwrap_or_else(|| infer_input_kind(&args.input)),
-        },
+        input: resolve_prepare_input(args, resolver)?,
         expected_kind: Some(args.pack_kind.into()),
         pack_hash,
+    })
+}
+
+trait PrepareOciDigestResolver {
+    fn resolve_linux_digest(&self, image_ref: &ImageReference) -> Result<String>;
+}
+
+struct RegistryPrepareOciDigestResolver;
+
+impl PrepareOciDigestResolver for RegistryPrepareOciDigestResolver {
+    fn resolve_linux_digest(&self, image_ref: &ImageReference) -> Result<String> {
+        let auth = super::image::registry_auth_for(image_ref)?.into_auth();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("building Tokio runtime for OCI digest resolution")?;
+        let fetcher = OciManifestFetcher::with_auth(auth);
+        let fetched = runtime
+            .block_on(
+                fetcher
+                    .fetch_linux_platform_manifest(image_ref, &LinuxPlatform::for_current_arch()),
+            )
+            .context("resolving OCI image digest for pack eligibility")?;
+        Ok(fetched.digest)
+    }
+}
+
+fn resolve_prepare_input(
+    args: &Args,
+    resolver: &dyn PrepareOciDigestResolver,
+) -> Result<PackPrepareInput> {
+    let kind = args
+        .input_kind
+        .map(Into::into)
+        .unwrap_or_else(|| infer_input_kind(&args.input));
+    if kind != PackPrepareInputKind::OciImage {
+        if args.resolve_oci_digest {
+            bail!("--resolve-oci-digest only applies to OCI image inputs");
+        }
+        return Ok(PackPrepareInput {
+            raw: args.input.clone(),
+            kind,
+        });
+    }
+
+    if !args.resolve_oci_digest && !args.input.contains("@sha256:") {
+        return Ok(PackPrepareInput {
+            raw: args.input.clone(),
+            kind,
+        });
+    }
+
+    let mut image_ref: ImageReference = args
+        .input
+        .parse()
+        .with_context(|| format!("parsing OCI image reference {:?}", args.input))?;
+    if image_ref.is_digest_pinned() {
+        return Ok(PackPrepareInput {
+            raw: image_ref.canonical(),
+            kind,
+        });
+    }
+
+    let digest = resolver.resolve_linux_digest(&image_ref)?;
+    image_ref.digest = Some(digest);
+    Ok(PackPrepareInput {
+        raw: image_ref.canonical(),
+        kind,
     })
 }
 
@@ -264,12 +338,48 @@ impl From<PreparePackKindArg> for PackKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    struct FakeResolver {
+        digest: Option<String>,
+        calls: Cell<u32>,
+    }
+
+    impl FakeResolver {
+        fn resolving_to(digest: &str) -> Self {
+            Self {
+                digest: Some(digest.to_string()),
+                calls: Cell::new(0),
+            }
+        }
+
+        fn unavailable() -> Self {
+            Self {
+                digest: None,
+                calls: Cell::new(0),
+            }
+        }
+
+        fn calls(&self) -> u32 {
+            self.calls.get()
+        }
+    }
+
+    impl PrepareOciDigestResolver for FakeResolver {
+        fn resolve_linux_digest(&self, _image_ref: &ImageReference) -> Result<String> {
+            self.calls.set(self.calls.get() + 1);
+            self.digest
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("resolver unavailable"))
+        }
+    }
 
     fn base_args() -> Args {
         Args {
             input: "ghcr.io/tinylabs/mvm@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
             dry_run: true,
             input_kind: None,
+            resolve_oci_digest: false,
             pack_kind: PreparePackKindArg::ImageProject,
             pack_source: None,
             pack_hash: None,
@@ -317,6 +427,82 @@ mod tests {
         args.pack_hash = Some("not-a-sha".to_string());
         let err = build_prepare_request(&args).expect_err("bad hash rejected");
         assert!(err.to_string().contains("invalid --pack-hash"));
+    }
+
+    #[test]
+    fn build_prepare_request_leaves_mutable_oci_unresolved_without_flag() {
+        let mut args = base_args();
+        args.input = "alpine:3.19".to_string();
+        let resolver = FakeResolver::unavailable();
+
+        let request = build_prepare_request_with(&args, &resolver).expect("request");
+
+        assert_eq!(request.input.kind, PackPrepareInputKind::OciImage);
+        assert_eq!(request.input.raw, "alpine:3.19");
+        assert_eq!(resolver.calls(), 0);
+    }
+
+    #[test]
+    fn build_prepare_request_resolves_mutable_oci_when_explicit() {
+        let mut args = base_args();
+        args.input = "alpine:3.19".to_string();
+        args.resolve_oci_digest = true;
+        let resolver = FakeResolver::resolving_to(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+
+        let request = build_prepare_request_with(&args, &resolver).expect("request");
+
+        assert_eq!(request.input.kind, PackPrepareInputKind::OciImage);
+        assert_eq!(
+            request.input.raw,
+            "docker.io/library/alpine:3.19@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(resolver.calls(), 1);
+    }
+
+    #[test]
+    fn build_prepare_request_canonicalizes_digest_pinned_oci_without_resolver() {
+        let mut args = base_args();
+        args.input =
+            "alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_string();
+        let resolver = FakeResolver::unavailable();
+
+        let request = build_prepare_request_with(&args, &resolver).expect("request");
+
+        assert_eq!(
+            request.input.raw,
+            "docker.io/library/alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        assert_eq!(resolver.calls(), 0);
+    }
+
+    #[test]
+    fn build_prepare_request_rejects_oci_resolution_for_non_oci_input() {
+        let mut args = base_args();
+        args.input = "github:tinylabs/mvm".to_string();
+        args.input_kind = Some(PrepareInputKindArg::Flake);
+        args.resolve_oci_digest = true;
+        let resolver = FakeResolver::unavailable();
+
+        let err = build_prepare_request_with(&args, &resolver).expect_err("non-oci rejected");
+
+        assert!(err.to_string().contains("only applies to OCI image inputs"));
+        assert_eq!(resolver.calls(), 0);
+    }
+
+    #[test]
+    fn build_prepare_request_surfaces_oci_resolver_failures() {
+        let mut args = base_args();
+        args.input = "alpine:3.19".to_string();
+        args.resolve_oci_digest = true;
+        let resolver = FakeResolver::unavailable();
+
+        let err = build_prepare_request_with(&args, &resolver).expect_err("resolver failed");
+
+        assert!(err.to_string().contains("resolver unavailable"));
+        assert_eq!(resolver.calls(), 1);
     }
 
     #[test]

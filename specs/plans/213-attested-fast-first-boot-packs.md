@@ -207,8 +207,13 @@ The target user-visible shape is:
 ### G. OCI and flake artifact preparation
 
 - [ ] Resolve OCI tags to digests before pack eligibility or admission.
+      - [x] Add explicit prepare-time `--resolve-oci-digest` support that
+            resolves mutable OCI tags to Linux platform digests before
+            cache-backed pack eligibility checks.
 - [ ] Reject instant launch for mutable OCI inputs that cannot be resolved to a
       digest under current policy.
+      - [x] Keep prepare fail-closed for mutable OCI inputs unless digest
+            resolution is explicitly requested.
 - [ ] Resolve flake inputs to committed locks before pack eligibility or
       admission.
 - [ ] Build unpublished or private OCI/flake artifacts inside the builder VM and
@@ -219,6 +224,9 @@ The target user-visible shape is:
       policy hash.
 - [ ] Add positive and negative tests for OCI digest resolution, flake lock
       resolution, setup-cache hits, and setup-cache invalidation.
+      - [x] Add focused prepare tests for OCI digest-pinned canonicalization,
+            explicit mutable-tag resolution, resolver failure, and the default
+            mutable-input refusal path.
 
 ### H. Launch attestation and explainability
 
