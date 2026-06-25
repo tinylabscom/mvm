@@ -52,6 +52,48 @@ fn base_workload_validates() {
 }
 
 #[test]
+fn rejects_direct_shell_command_entrypoint() {
+    let mut w = base_workload();
+    w.apps[0].entrypoints = vec![Entrypoint::Command {
+        command: vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo no".to_string(),
+        ],
+        working_dir: "/app".to_string(),
+        env: Default::default(),
+    }];
+    let errs = validate(&w).unwrap_err();
+    let err = errs
+        .iter()
+        .find(|e| e.code == ErrorCode::ShellEntrypointForbidden)
+        .expect("expected E_SHELL_ENTRYPOINT_FORBIDDEN");
+    assert_eq!(err.path, ".apps[0].entrypoint.command");
+    assert!(err.detail.contains("sh"));
+}
+
+#[test]
+fn rejects_indirect_shell_command_entrypoint() {
+    let mut w = base_workload();
+    w.apps[0].entrypoints = vec![Entrypoint::Command {
+        command: vec![
+            "/usr/bin/env".to_string(),
+            "bash".to_string(),
+            "-lc".to_string(),
+            "echo no".to_string(),
+        ],
+        working_dir: "/app".to_string(),
+        env: Default::default(),
+    }];
+    let errs = validate(&w).unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|e| e.code == ErrorCode::ShellEntrypointForbidden),
+        "expected E_SHELL_ENTRYPOINT_FORBIDDEN, got {errs:?}"
+    );
+}
+
+#[test]
 fn rejects_unsupported_major() {
     let mut w = base_workload();
     w.schema_version = "1.0".to_string();

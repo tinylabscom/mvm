@@ -211,6 +211,21 @@ pub fn validate(workload: &Workload) -> Result<(), Vec<ValidationError>> {
                 Entrypoint::Command { env, .. } => env,
                 Entrypoint::Function { env, .. } => env,
             };
+            if let Entrypoint::Command { command, .. } = ep
+                && let Some(shell) =
+                    mvm_core::entrypoint_policy::detect_shell_entrypoint_argv(command)
+            {
+                errors.push(ValidationError {
+                    code: ErrorCode::ShellEntrypointForbidden,
+                    path: format!("{ep_path}.command"),
+                    detail: format!(
+                        "production command entrypoints may not launch a shell ({:?}). \
+                         Use a direct argv entrypoint such as `[\"python\", \"-m\", \"app\"]`, \
+                         or use a dev image plus `machine run -it -- {}` for interactive shells.",
+                        shell.shell, shell.shell
+                    ),
+                });
+            }
             if let Entrypoint::Function {
                 args_schema,
                 return_schema,
