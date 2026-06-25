@@ -1899,6 +1899,17 @@ fn machine_exec_command(argv: &[String]) -> String {
     format!("exec {}", quoted.join(" "))
 }
 
+fn machine_interactive_pty_argv(argv: &[String]) -> Vec<String> {
+    if argv.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        "/bin/sh".to_string(),
+        "-lc".to_string(),
+        machine_exec_command(argv),
+    ]
+}
+
 fn build_machine_volume_cfg(
     volume_specs: &[String],
 ) -> Result<Vec<mvm_backend::image::RuntimeVolume>> {
@@ -1958,6 +1969,7 @@ fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) -> Result<()>
             command: Some(machine_exec_command(&args.argv)),
             force: args.force,
             env: machine_console_env(spec.ssh_agent),
+            pty_argv: Vec::new(),
         },
         cfg,
     )
@@ -1972,6 +1984,7 @@ fn shell_machine(cli: &Cli, args: MachineShellArgs, cfg: &MvmConfig) -> Result<(
             command: None,
             force: args.force,
             env: machine_console_env(spec.ssh_agent),
+            pty_argv: Vec::new(),
         },
         cfg,
     )
@@ -2198,6 +2211,7 @@ fn run_interactive(
             command: None,
             force: false,
             env: machine_console_env(spec.ssh_agent),
+            pty_argv: machine_interactive_pty_argv(&args.argv),
         },
         cfg,
     );
@@ -2233,6 +2247,7 @@ fn run_persistent_post_start(
                 command: Some(machine_exec_command(&args.argv)),
                 force: false,
                 env: machine_console_env(spec.ssh_agent),
+                pty_argv: Vec::new(),
             },
             cfg,
         );
@@ -3111,6 +3126,25 @@ mod tests {
         assert!(
             msg.contains("tty") || msg.contains("terminal") || msg.contains("interactive"),
             "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn interactive_pty_argv_uses_same_command_quoting_as_exec() {
+        assert!(machine_interactive_pty_argv(&[]).is_empty());
+
+        let argv = vec![
+            "sh".to_string(),
+            "-lc".to_string(),
+            "echo hello world".to_string(),
+        ];
+        assert_eq!(
+            machine_interactive_pty_argv(&argv),
+            vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                machine_exec_command(&argv),
+            ]
         );
     }
 

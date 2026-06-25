@@ -300,8 +300,8 @@ never the token value.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl machine console <name>` | Interactive PTY shell into a running VM (vsock, no SSH) |
-| `mvmctl machine console <name> --command <cmd>` | Run a one-shot command in the VM |
+| `mvmctl machine console <name>` | Dev-only interactive PTY shell into a running VM (vsock, no SSH; refused for sealed/production VMs) |
+| `mvmctl machine console <name> --command <cmd>` | Dev-only one-shot command in the VM (refused for sealed/production VMs) |
 
 ## One-shot Run (transient runner)
 
@@ -370,7 +370,9 @@ flag:
 - **Interactive** (`-t`/`--tty`, with `-i` accepted so `-it` parses): attach a
   PTY shell. **Dev-only** — refused for a sealed image (claim 15) and when stdin
   is not a terminal. `-t` alone is a transient interactive machine (gone when the
-  shell exits); combine with `--name`/`-d` to keep it up.
+  shell exits); combine with `--name`/`-d` to keep it up. With a trailing
+  `-- <argv>`, the same argv is run with a PTY attached; without argv, the guest
+  default shell is used.
 
 Persistence and interactivity are independent: `--tty` never changes whether the
 machine survives. `--volume` host shares work on every mode — transient,
@@ -402,6 +404,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine run --name <name>` | Reconnect to an existing machine by name (no `--image` needed) |
 | `mvmctl machine run --name <name> --image <ref2>` | A changed config auto-recreates the machine (stop + reboot), announced on stderr |
 | `mvmctl machine run -it --image <ref>` | **Interactive** dev shell on a transient machine (gone on exit) |
+| `mvmctl machine run -it --image <ref> -- /bin/sh` | Interactive `/bin/sh` PTY on a transient machine |
 | `mvmctl machine run -it --name <name> --image <ref>` | Interactive dev shell on a persistent machine (left up on exit) |
 | `mvmctl machine create --name <name> --image <ref>` | Persist a named OCI-backed machine spec without booting it |
 | `mvmctl machine create --name <name> --manifest <path>` | Persist a named machine spec from an image-backed `mvm.toml` / `Mvmfile.toml` |
@@ -465,11 +468,13 @@ announced on stderr (`machine 'N': config changed (…) — stopping the old ins
 and recreating it`) so an unintended clobber, e.g. a typo'd `--image`, is visible.
 To keep two configs side by side, give them different `--name`s.
 
-**Interactive is dev-only.** `-t`/`--tty` attaches a PTY shell and is refused for
-a sealed/production image (claim 15 — no interactive access to a sealed microVM)
-and when stdin is not a terminal, both failing fast rather than hanging. It never
-affects persistence: `-it` alone is transient, `-it` with `--name`/`-d` keeps the
-machine. The design rationale and full behavior matrix are recorded in ADR-091
+**Interactive is dev-only.** `-t`/`--tty`, `machine shell`, `machine console`,
+and `machine exec` are refused for sealed/production images (claim 15 — no
+interactive or arbitrary shell access to a sealed microVM). There is no `--force`
+override for that refusal. `-it` also requires stdin to be a terminal, failing
+fast rather than hanging when it is not. It never affects persistence: `-it`
+alone is transient, `-it` with `--name`/`-d` keeps the machine. The design
+rationale and full behavior matrix are recorded in ADR-091
 (`specs/adrs/091-unified-machine-run-lifecycle.md`).
 
 `machine create` accepts either `--image <ref>` or an image-backed manifest, not

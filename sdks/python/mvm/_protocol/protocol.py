@@ -448,6 +448,7 @@ class GuestRequest16:
 class ConsoleOpen:
     cols: int
     rows: int
+    argv: Optional[List[str]] = None
     env: Optional[List[List[str]]] = field(default_factory=lambda: [])
 
 

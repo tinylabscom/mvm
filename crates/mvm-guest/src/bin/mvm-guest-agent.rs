@@ -2345,7 +2345,12 @@ fn handle_client(
         // above already rejects these verbs in sealed-prod, but the compile-time
         // gate is the load-bearing guarantee — no console code is even linked.
         #[cfg(feature = "dev-shell")]
-        GuestRequest::ConsoleOpen { cols, rows, env } => {
+        GuestRequest::ConsoleOpen {
+            cols,
+            rows,
+            env,
+            argv,
+        } => {
             // Check security policy — console requires access.console = true.
             // When no policy file is provisioned (dev mode), use permissive defaults.
             let policy = mvm_guest::builder_agent::load_security_policy()
@@ -2362,7 +2367,7 @@ fn handle_client(
                     },
                 );
             }
-            match mvm_guest::console::open_session(cols, rows, &env) {
+            match mvm_guest::console::open_session(cols, rows, &env, &argv) {
                 Ok(session) => {
                     let session_id = session.session_id;
                     let data_port = session.data_port;
