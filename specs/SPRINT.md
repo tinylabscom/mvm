@@ -46,6 +46,17 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream H launch-path attestation emission: admitted launch success
+      and failure emit typed records into the local hash-chained
+      launch-attestation log through the existing `plan.launched` /
+      `plan.failed` boundaries. The emitted record derives source, pack,
+      policy, backend, command, result, and error metadata from the admitted
+      signed plan without blocking a launch on local-log IO. Coverage: focused
+      `mvm-cli` tests for success, launch failure, refusal, builder fallback,
+      verification failure, and interrupted outcome emission. `mvm explain`
+      remains open.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream H launch attestation core: `mvm_core::launch_attestation`
       now defines typed per-run records for source input, builder identity,
       pack identity, local verification, snapshot/warm derivation, policy
@@ -55,8 +66,7 @@ plan 25 sequences the work into six independently-shippable workstreams.
       entry hashes and previous-hash links before accepting new appends.
       Coverage: focused `mvm-core` tests for serde roundtrip, builder
       validation, hash-chained append/read, modified-record tamper detection,
-      and reordered-record detection. Launch-path emission and `mvm explain`
-      remain open.
+      and reordered-record detection. `mvm explain` remains open.
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream G setup-cache prepare resolution: `PackPrepareRequest` can now

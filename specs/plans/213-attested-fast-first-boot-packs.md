@@ -260,9 +260,9 @@ The target user-visible shape is:
       exit status, and output digest metadata.
 - [ ] Implement `mvm explain <run-id>` for successful launches, builder-prepare
       launches, cache misses, and refusals.
-- [ ] Add tests proving audit records are emitted on success, refusal, builder
+- [x] Add tests proving audit records are emitted on success, refusal, builder
       fallback, verification failure, and interrupted launch.
-- [ ] Add tamper tests proving modified audit records are detected.
+- [x] Add tamper tests proving modified audit records are detected.
 
 ### I. Revocation, mirrors, and enterprise policy
 

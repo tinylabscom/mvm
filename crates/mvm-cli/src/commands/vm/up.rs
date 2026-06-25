@@ -10,7 +10,14 @@ use clap::Args as ClapArgs;
 use mvm_backend::backend::AnyBackend;
 use mvm_backend::image;
 use mvm_core::domain::instance::InstanceReadiness;
+use mvm_core::launch_attestation::{
+    BackendIdentity, BuilderIdentity, CommandIdentity, LaunchArtifactHash, LaunchAttestationLog,
+    LaunchAttestationRecord, LaunchDerivation, LaunchDerivationSource, LaunchOutcome,
+    LaunchPackIdentity, LaunchResult, LaunchRunId, LaunchSourceInput, LaunchSourceKind,
+    LocalVerification, PolicyAdmission,
+};
 use mvm_core::naming::validate_vm_name;
+use mvm_core::packs::{PackBackend, PackKind, Sha256Hex};
 
 use super::super::env::dev_vz::ensure_default_microvm_image;
 use super::audit_chain::{AuditEmitter, default_audit_dir};
@@ -795,6 +802,7 @@ pub(super) fn emit_launched_if(ctx: &Option<AdmissionContext>, backend: &str) {
     if let Err(e) = ctx.emitter.emit_launched(&ctx.admitted.plan, backend) {
         tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
     }
+    append_launch_attestation_if(ctx, backend, LaunchOutcome::Success, Some(0), None);
     if let Err(e) =
         super::plan_persist::write_plan(&ctx.admitted.plan.workload.0, &ctx.admitted.plan)
     {
@@ -830,6 +838,145 @@ pub(super) fn emit_failed_if(ctx: &Option<AdmissionContext>, class: &str, err: &
     let msg = format!("{err:#}");
     if let Err(e) = ctx.emitter.emit_failed(&ctx.admitted.plan, class, &msg) {
         tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
+    }
+    append_launch_attestation_if(
+        ctx,
+        &ctx.admitted.plan.runtime_profile.0,
+        failure_outcome(class),
+        None,
+        Some(err),
+    );
+}
+
+fn append_launch_attestation_if(
+    ctx: &AdmissionContext,
+    backend: &str,
+    outcome: LaunchOutcome,
+    exit_status: Option<i32>,
+    err: Option<&anyhow::Error>,
+) {
+    match build_launch_attestation_record(ctx, backend, outcome, exit_status, err)
+        .and_then(|record| Ok(LaunchAttestationLog::open_default()?.append(record)?))
+    {
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "launch attestation append failed (non-fatal)"),
+    }
+}
+
+fn build_launch_attestation_record(
+    ctx: &AdmissionContext,
+    backend: &str,
+    outcome: LaunchOutcome,
+    exit_status: Option<i32>,
+    err: Option<&anyhow::Error>,
+) -> Result<LaunchAttestationRecord> {
+    let plan = &ctx.admitted.plan;
+    let now = chrono::Utc::now();
+    let image_sha = Sha256Hex::new(plan.image.sha256.clone())
+        .context("admitted image sha256 is not a valid launch attestation hash")?;
+    let signed_plan_bytes =
+        serde_json::to_vec(&ctx.admitted.signed).context("serializing admitted signed plan")?;
+    let policy_material = format!(
+        "{}\n{}\n{}\n{}",
+        plan.network_policy.0, plan.fs_policy.0, plan.egress_policy.0, plan.tool_policy.0
+    );
+    let source_input = LaunchSourceInput {
+        kind: LaunchSourceKind::BuilderPrepared,
+        reference: plan.image.name.clone(),
+        identity_hash: Some(image_sha.clone()),
+        oci_digest: None,
+        flake_lock_hash: None,
+    };
+    let policy_admission = PolicyAdmission {
+        admitted: !matches!(outcome, LaunchOutcome::Refused),
+        plan_hash: Sha256Hex::from_bytes(&signed_plan_bytes),
+        policy_hash: Sha256Hex::from_bytes(policy_material.as_bytes()),
+        network_policy_hash: Sha256Hex::from_bytes(plan.network_policy.0.as_bytes()),
+        refusal_reason: matches!(outcome, LaunchOutcome::Refused).then(|| {
+            err.map(|e| format!("{e:#}"))
+                .unwrap_or_else(|| "launch refused".to_string())
+        }),
+    };
+    let command_material = format!("launch:{}:{}", plan.tenant.0, plan.workload.0);
+    LaunchAttestationRecord::builder(LaunchRunId::new(ctx.admitted.plan_id.0.clone())?)
+        .source_input(source_input)
+        .builder_identity(BuilderIdentity {
+            used_builder_vm: false,
+            builder_id: "local-admission".to_string(),
+            build_environment_id: None,
+        })
+        .pack(LaunchPackIdentity {
+            kind: PackKind::Runtime,
+            pack_hash: image_sha.clone(),
+            signer_key_id: plan.bundle.as_ref().map(|bundle| bundle.key_id.clone()),
+            channel: None,
+            artifact_hashes: vec![LaunchArtifactHash {
+                name: "rootfs".to_string(),
+                sha256: image_sha,
+            }],
+        })
+        .local_verification(LocalVerification {
+            verified_at: now,
+            verifier_version: env!("CARGO_PKG_VERSION").to_string(),
+            file_count: 1,
+            revocation_checked: plan.bundle.is_some(),
+            trust_root_hash: None,
+        })
+        .derivation(LaunchDerivation {
+            source: match outcome {
+                LaunchOutcome::Refused => LaunchDerivationSource::Refused,
+                LaunchOutcome::BuilderFallback => LaunchDerivationSource::BuilderPrepare,
+                _ => LaunchDerivationSource::PreparedColdBoot,
+            },
+            identity: Some(plan.plan_id.0.clone()),
+            parent_pack_hash: None,
+            readiness_proof_hash: None,
+        })
+        .policy_admission(policy_admission)
+        .command(CommandIdentity {
+            argv_redacted: vec!["<admitted-launch>".to_string()],
+            argv_digest: Sha256Hex::from_bytes(command_material.as_bytes()),
+            cwd_digest: None,
+            environment_digest: None,
+        })
+        .result(LaunchResult {
+            outcome,
+            exit_status,
+            output_digest: None,
+            error_digest: err.map(|e| Sha256Hex::from_bytes(format!("{e:#}").as_bytes())),
+        })
+        .backend(BackendIdentity {
+            backend: pack_backend_from_name(backend)?,
+            backend_version: env!("CARGO_PKG_VERSION").to_string(),
+            host_arch: mvm_core::arch::GuestArch::host(),
+        })
+        .launcher_version(env!("CARGO_PKG_VERSION"))
+        .started_at(now)
+        .finished_at(now)
+        .build()
+        .context("building launch attestation record")
+}
+
+fn failure_outcome(class: &str) -> LaunchOutcome {
+    match class {
+        "builder-fallback" => LaunchOutcome::BuilderFallback,
+        "refused" => LaunchOutcome::Refused,
+        "verification" | "policy-resolve" | "policy-audit-invalid" => {
+            LaunchOutcome::VerificationFailure
+        }
+        "interrupted" => LaunchOutcome::Interrupted,
+        _ => LaunchOutcome::LaunchFailure,
+    }
+}
+
+fn pack_backend_from_name(name: &str) -> Result<PackBackend> {
+    match name {
+        "firecracker" => Ok(PackBackend::Firecracker),
+        "libkrun" => Ok(PackBackend::Libkrun),
+        "vz" => Ok(PackBackend::Vz),
+        "qemu" => Ok(PackBackend::Qemu),
+        "docker" => Ok(PackBackend::Docker),
+        other => anyhow::bail!("unknown backend {other:?} for launch attestation"),
     }
 }
 
@@ -1548,6 +1695,40 @@ mod admit_plan_tests {
         path
     }
 
+    fn admit_test_plan(
+        vm_name: &str,
+        rootfs: &std::path::Path,
+        keys_dir: &std::path::Path,
+        audit_dir: &std::path::Path,
+    ) -> AdmissionContext {
+        let ledger = InMemoryNonceLedger::new();
+        admit_plan_for_boot(AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name,
+            backend_name: "firecracker",
+            rootfs_path: rootfs,
+            precomputed_image_sha256: None,
+            cpus: 2,
+            mem_mib: 512,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            auth: mvm_core::plan::AuthPolicy::none(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir),
+            audit_dir: Some(audit_dir),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+        })
+        .expect("admission")
+        .expect("Some when admission ran")
+    }
+
     /// Build a signed `.mvmpkg` archive in-memory so the
     /// `--bundle-pin` test path doesn't need a real fetched bundle.
     /// Uses mvm_plan's own writer + signing primitives.
@@ -1939,6 +2120,120 @@ mod admit_plan_tests {
             "backend-start",
             &anyhow::anyhow!("simulated failure"),
         );
+    }
+
+    #[test]
+    fn emit_launched_appends_launch_attestation_record() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let data_dir = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", data_dir.path());
+        env.set("MVM_STATE_DIR", data_dir.path().join("state"));
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"launch attestation rootfs");
+        let ctx = admit_test_plan(
+            "vm-attested-success",
+            &rootfs,
+            keys_dir.path(),
+            audit_dir.path(),
+        );
+        let plan_id = ctx.admitted.plan_id.0.clone();
+        let some = Some(ctx);
+
+        emit_launched_if(&some, "firecracker");
+
+        let verified = LaunchAttestationLog::open_default()
+            .expect("open launch attestation log")
+            .verify()
+            .expect("verify launch attestation log");
+        assert_eq!(verified.entries.len(), 1);
+        let record = &verified.entries[0].record;
+        assert_eq!(record.run_id.as_str(), plan_id);
+        assert_eq!(record.result.outcome, LaunchOutcome::Success);
+        assert_eq!(record.result.exit_status, Some(0));
+        assert_eq!(record.backend.backend, PackBackend::Firecracker);
+        assert!(record.policy_admission.admitted);
+        assert!(record.policy_admission.refusal_reason.is_none());
+    }
+
+    #[test]
+    fn emit_failed_appends_launch_failure_attestation_record() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let data_dir = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", data_dir.path());
+        env.set("MVM_STATE_DIR", data_dir.path().join("state"));
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"launch failure rootfs");
+        let ctx = admit_test_plan(
+            "vm-attested-failure",
+            &rootfs,
+            keys_dir.path(),
+            audit_dir.path(),
+        );
+        let some = Some(ctx);
+
+        emit_failed_if(
+            &some,
+            "backend-start",
+            &anyhow::anyhow!("backend unavailable"),
+        );
+
+        let verified = LaunchAttestationLog::open_default()
+            .expect("open launch attestation log")
+            .verify()
+            .expect("verify launch attestation log");
+        assert_eq!(verified.entries.len(), 1);
+        let record = &verified.entries[0].record;
+        assert_eq!(record.result.outcome, LaunchOutcome::LaunchFailure);
+        assert!(record.result.error_digest.is_some());
+        assert_eq!(record.result.exit_status, None);
+        assert!(record.policy_admission.admitted);
+    }
+
+    #[test]
+    fn emit_failed_maps_required_launch_attestation_outcomes() {
+        let cases = [
+            ("refused", LaunchOutcome::Refused),
+            ("builder-fallback", LaunchOutcome::BuilderFallback),
+            ("verification", LaunchOutcome::VerificationFailure),
+            ("interrupted", LaunchOutcome::Interrupted),
+        ];
+
+        for (class, expected) in cases {
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            let data_dir = tempfile::tempdir().unwrap();
+            env.set("MVM_DATA_DIR", data_dir.path());
+            env.set("MVM_STATE_DIR", data_dir.path().join("state"));
+            let keys_dir = tempfile::tempdir().unwrap();
+            let audit_dir = tempfile::tempdir().unwrap();
+            let rootfs_dir = tempfile::tempdir().unwrap();
+            let rootfs = write_rootfs(rootfs_dir.path(), class.as_bytes());
+            let ctx = admit_test_plan(
+                &format!("vm-attested-{class}"),
+                &rootfs,
+                keys_dir.path(),
+                audit_dir.path(),
+            );
+            let some = Some(ctx);
+
+            emit_failed_if(&some, class, &anyhow::anyhow!("{class} simulated"));
+
+            let verified = LaunchAttestationLog::open_default()
+                .expect("open launch attestation log")
+                .verify()
+                .expect("verify launch attestation log");
+            assert_eq!(verified.entries.len(), 1);
+            let record = &verified.entries[0].record;
+            assert_eq!(record.result.outcome, expected);
+            if expected == LaunchOutcome::Refused {
+                assert!(!record.policy_admission.admitted);
+                assert!(record.policy_admission.refusal_reason.is_some());
+                assert_eq!(record.derivation.source, LaunchDerivationSource::Refused);
+            }
+        }
     }
 
     // ──────────────────────────────────────────────────────────────
