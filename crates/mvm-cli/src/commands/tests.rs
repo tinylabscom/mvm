@@ -2509,6 +2509,17 @@ fn run_timeout_parses_to_some() {
 }
 
 #[test]
+fn machine_run_interactive_image_shell_dx_parses() {
+    let args = parse_machine_run(&["--net", "-it", "--image", "alpine", "--", "/bin/sh"])
+        .expect("parse Docker-style interactive shell run");
+    assert!(args.net);
+    assert!(args.tty);
+    assert!(args.interactive);
+    assert_eq!(args.image.as_deref(), Some("alpine"));
+    assert_eq!(args.argv, vec!["/bin/sh".to_string()]);
+}
+
+#[test]
 fn run_image_flag_parses() {
     let cli = Cli::try_parse_from([
         "mvmctl",
