@@ -122,7 +122,7 @@ The target user-visible shape is:
       expiry, size, and last-used time.
 - [x] Implement `mvm cache status` showing local packs, readiness, size, expiry,
       revocation state, and instant-launch eligibility.
-- [ ] Implement `mvm cache prune` with policy-aware deletion that refuses to
+- [x] Implement `mvm cache prune` with policy-aware deletion that refuses to
       remove packs needed by active snapshots or warm standbys.
 - [ ] Add tests for interrupted downloads, partial extraction, atomic promotion,
       permission hardening, cache poisoning attempts, and policy-aware pruning.
