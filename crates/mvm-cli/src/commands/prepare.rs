@@ -163,6 +163,7 @@ fn build_prepare_request_with(
         input: resolve_prepare_input(args, resolver)?,
         expected_kind: Some(args.pack_kind.into()),
         pack_hash,
+        required_setup_cache_layers: Vec::new(),
     })
 }
 
@@ -353,6 +354,7 @@ fn reason_name(reason: PackPrepareReason) -> &'static str {
         PackPrepareReason::TrustUnavailable => "trust_unavailable",
         PackPrepareReason::CacheMetadataInvalid => "cache_metadata_invalid",
         PackPrepareReason::InputMismatch => "input_mismatch",
+        PackPrepareReason::SetupCacheMiss => "setup_cache_miss",
     }
 }
 
