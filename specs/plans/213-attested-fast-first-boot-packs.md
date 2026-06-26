@@ -282,18 +282,36 @@ The target user-visible shape is:
 
 - [ ] Add artifact-channel configuration with pinned channel identity and signing
       key set.
+      - [x] Add local pack policy channel pins that bind allowed channel
+            identities to explicit signing-key ids for `mvm prepare`,
+            `mvm cache install-pack`, and bootstrap pack preload.
 - [ ] Add revocation metadata fetching and offline-cache behavior.
 - [ ] Add key rotation support that accepts overlapping keys only within an
       explicit policy window.
+      - [x] Add verifier-level key rotation windows that accept a channel
+            signing key only while the local policy window is active.
 - [ ] Add enterprise mirror configuration for pack downloads and revocation
       metadata.
+      - [x] Add local mirror identity policy validation for pack manifests and
+            expose `--mirror-identity` / `MVM_BOOTSTRAP_PACK_MIRROR_IDENTITY`
+            for mirror-only pack verification.
 - [ ] Add policy modes for online default, offline pinned, mirror-only, and
       local-rebuild-required operation.
+      - [x] Add typed pack policy modes and wire `online-default`,
+            `offline-pinned`, `mirror-only`, and `local-rebuild-required`
+            through prepare, cache install, and bootstrap preload policy
+            construction.
 - [ ] Add tests for revoked artifacts, expired artifacts, stale revocation
       metadata, mirror mismatch, offline pinned launch, and local-rebuild
       enforcement.
+      - [x] Add focused verifier/cache/CLI tests for missing offline channel
+            pins, wrong signing keys, closed key-rotation windows, mirror
+            mismatch, local-rebuild-required policy routing, and malformed
+            policy CLI inputs.
 - [ ] Document channel pinning, mirror setup, offline operation, and revocation
       behavior.
+      - [x] Document explicit policy mode, channel signing-key pins, and mirror
+            identity flags/env vars in the CLI reference and installation guide.
 
 ### J. Metrics, proof gates, and regression tests
 

@@ -23,7 +23,7 @@ use super::trust;
 use super::vm::{checkpoint, console, cp, exec, forward, group, pause, sandbox, session, volume};
 
 use audit::AuditAction;
-use cache::{CacheAction, PackBackendArg};
+use cache::{CacheAction, PackBackendArg, PackPolicyModeArg};
 use catalog::CatalogAction;
 use config::ConfigAction;
 use dev::{DevAction, DevCacheAction};
@@ -3162,6 +3162,9 @@ fn test_cache_install_pack_parses_policy_flags() {
                     backend,
                     channels,
                     host_capabilities,
+                    policy_mode,
+                    channel_signing_keys,
+                    mirror_identity,
                     trust_store,
                     revocations,
                     allow_http,
@@ -3176,6 +3179,9 @@ fn test_cache_install_pack_parses_policy_flags() {
             assert_eq!(backend, PackBackendArg::Libkrun);
             assert_eq!(channels, vec!["stable"]);
             assert_eq!(host_capabilities, vec!["vsock"]);
+            assert_eq!(policy_mode, PackPolicyModeArg::OnlineDefault);
+            assert!(channel_signing_keys.is_empty());
+            assert!(mirror_identity.is_none());
             assert_eq!(trust_store.unwrap(), std::path::PathBuf::from("/tmp/trust"));
             assert_eq!(
                 revocations.unwrap(),
@@ -3252,6 +3258,9 @@ fn test_prepare_dry_run_parses_policy_and_resolution_flags() {
             backend,
             channels,
             host_capabilities,
+            policy_mode,
+            channel_signing_keys,
+            mirror_identity,
             trust_store,
             revocations,
             allow_http,
@@ -3278,6 +3287,9 @@ fn test_prepare_dry_run_parses_policy_and_resolution_flags() {
             assert_eq!(backend, PackBackendArg::Libkrun);
             assert_eq!(channels, vec!["stable"]);
             assert_eq!(host_capabilities, vec!["vsock"]);
+            assert_eq!(policy_mode, PackPolicyModeArg::OnlineDefault);
+            assert!(channel_signing_keys.is_empty());
+            assert!(mirror_identity.is_none());
             assert_eq!(trust_store.unwrap(), std::path::PathBuf::from("/tmp/trust"));
             assert_eq!(
                 revocations.unwrap(),

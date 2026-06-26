@@ -405,7 +405,53 @@ pub struct LocalPackPolicy {
     pub host_capabilities: BTreeSet<HostCapability>,
     pub policy_hash: Sha256Hex,
     pub allowed_channels: BTreeSet<String>,
+    pub policy_mode: PackPolicyMode,
+    pub channel_policies: BTreeMap<String, ArtifactChannelPolicy>,
     pub now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PackPolicyMode {
+    #[default]
+    OnlineDefault,
+    OfflinePinned,
+    MirrorOnly,
+    LocalRebuildRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ArtifactChannelPolicy {
+    pub signing_keys: BTreeSet<KeyId>,
+    pub mirror_identity: Option<String>,
+    pub rotation_windows: Vec<PackKeyRotationWindow>,
+}
+
+impl ArtifactChannelPolicy {
+    pub fn allows_signing_key(&self, key_id: &KeyId, now: DateTime<Utc>) -> bool {
+        self.signing_keys.contains(key_id)
+            || self
+                .rotation_windows
+                .iter()
+                .any(|window| window.allows(key_id, now))
+    }
+
+    pub fn has_signing_key_policy(&self) -> bool {
+        !self.signing_keys.is_empty() || !self.rotation_windows.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackKeyRotationWindow {
+    pub key_id: KeyId,
+    pub not_before: DateTime<Utc>,
+    pub not_after: DateTime<Utc>,
+}
+
+impl PackKeyRotationWindow {
+    pub fn allows(&self, key_id: &KeyId, now: DateTime<Utc>) -> bool {
+        &self.key_id == key_id && self.not_before <= now && now < self.not_after
+    }
 }
 
 pub trait PackTrustStore {
@@ -461,6 +507,9 @@ pub fn validate_manifest(
     manifest: &PackManifest,
     policy: &LocalPackPolicy,
 ) -> Result<(), PackVerifyError> {
+    if policy.policy_mode == PackPolicyMode::LocalRebuildRequired {
+        return Err(PackVerifyError::LocalRebuildRequiredPolicy);
+    }
     if manifest.schema_version != PACK_SCHEMA_VERSION {
         return Err(PackVerifyError::UnsupportedSchemaVersion {
             got: manifest.schema_version,
@@ -497,6 +546,7 @@ pub fn validate_manifest(
             manifest.trust.channel_identity.clone(),
         ));
     }
+    validate_channel_policy(manifest, policy)?;
     if manifest.trust.expires_at <= policy.now {
         return Err(PackVerifyError::ExpiredTrustMetadata {
             expired_at: manifest.trust.expires_at,
@@ -507,6 +557,62 @@ pub fn validate_manifest(
     validate_setup_cache_layers(manifest)?;
     validate_file_paths(manifest)?;
     validate_signature_bundle(manifest)?;
+    Ok(())
+}
+
+fn validate_channel_policy(
+    manifest: &PackManifest,
+    policy: &LocalPackPolicy,
+) -> Result<(), PackVerifyError> {
+    let channel_policy = policy
+        .channel_policies
+        .get(&manifest.trust.channel_identity);
+    if matches!(
+        policy.policy_mode,
+        PackPolicyMode::OfflinePinned | PackPolicyMode::MirrorOnly
+    ) && channel_policy.is_none()
+    {
+        return Err(PackVerifyError::ChannelPolicyMissing(
+            manifest.trust.channel_identity.clone(),
+        ));
+    }
+
+    let Some(channel_policy) = channel_policy else {
+        return Ok(());
+    };
+    if channel_policy.has_signing_key_policy()
+        && !channel_policy.allows_signing_key(&manifest.trust.signing_key_id, policy.now)
+    {
+        return Err(PackVerifyError::SigningKeyNotAllowedForChannel {
+            channel: manifest.trust.channel_identity.clone(),
+            key_id: manifest.trust.signing_key_id.clone(),
+        });
+    }
+
+    if policy.policy_mode == PackPolicyMode::OfflinePinned
+        && !channel_policy.has_signing_key_policy()
+    {
+        return Err(PackVerifyError::ChannelSigningKeysMissing(
+            manifest.trust.channel_identity.clone(),
+        ));
+    }
+
+    if let Some(expected_mirror) = &channel_policy.mirror_identity {
+        match manifest.trust.mirror_identity.as_deref() {
+            Some(actual) if actual == expected_mirror => {}
+            _ => {
+                return Err(PackVerifyError::MirrorIdentityMismatch {
+                    expected: expected_mirror.clone(),
+                    actual: manifest.trust.mirror_identity.clone(),
+                });
+            }
+        }
+    } else if policy.policy_mode == PackPolicyMode::MirrorOnly {
+        return Err(PackVerifyError::MirrorPolicyMissing(
+            manifest.trust.channel_identity.clone(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -774,6 +880,21 @@ pub enum PackVerifyError {
     },
     #[error("pack channel {0:?} is not allowed by local policy")]
     ChannelNotAllowed(String),
+    #[error("pack channel {0:?} has no pinned policy for the selected policy mode")]
+    ChannelPolicyMissing(String),
+    #[error("pack channel {0:?} has no pinned signing keys for offline policy")]
+    ChannelSigningKeysMissing(String),
+    #[error("pack signing key {key_id:?} is not allowed for channel {channel:?}")]
+    SigningKeyNotAllowedForChannel { channel: String, key_id: KeyId },
+    #[error("pack mirror identity mismatch: expected {expected:?}, got {actual:?}")]
+    MirrorIdentityMismatch {
+        expected: String,
+        actual: Option<String>,
+    },
+    #[error("pack channel {0:?} has no mirror identity policy for mirror-only mode")]
+    MirrorPolicyMissing(String),
+    #[error("local policy requires a builder rebuild instead of using attested packs")]
+    LocalRebuildRequiredPolicy,
     #[error("pack trust metadata expired at {expired_at}")]
     ExpiredTrustMetadata { expired_at: DateTime<Utc> },
     #[error("pack is missing required output hash {0}")]
@@ -1044,6 +1165,8 @@ mod tests {
             host_capabilities: BTreeSet::from([HostCapability("vsock".to_string())]),
             policy_hash,
             allowed_channels: BTreeSet::from(["stable".to_string()]),
+            policy_mode: PackPolicyMode::OnlineDefault,
+            channel_policies: BTreeMap::new(),
             now,
         };
         let trust = MapTrustStore {
@@ -1280,6 +1403,104 @@ mod tests {
         };
         let err = verify(&f).expect_err("revoked pack rejected");
         assert!(matches!(err, PackVerifyError::Revoked { .. }));
+    }
+
+    #[test]
+    fn offline_pinned_policy_requires_channel_policy() {
+        let mut f = fixture(PackKind::Runtime);
+        f.policy.policy_mode = PackPolicyMode::OfflinePinned;
+
+        let err = verify(&f).expect_err("channel policy required");
+
+        assert!(matches!(
+            err,
+            PackVerifyError::ChannelPolicyMissing(channel) if channel == "stable"
+        ));
+    }
+
+    #[test]
+    fn pinned_channel_rejects_wrong_signing_key() {
+        let mut f = fixture(PackKind::Runtime);
+        f.policy.policy_mode = PackPolicyMode::OfflinePinned;
+        f.policy.channel_policies.insert(
+            "stable".to_string(),
+            ArtifactChannelPolicy {
+                signing_keys: BTreeSet::from([KeyId(
+                    "0123456789abcdef0123456789abcdef".to_string(),
+                )]),
+                mirror_identity: None,
+                rotation_windows: Vec::new(),
+            },
+        );
+
+        let err = verify(&f).expect_err("wrong key rejected");
+
+        assert!(matches!(
+            err,
+            PackVerifyError::SigningKeyNotAllowedForChannel { channel, .. } if channel == "stable"
+        ));
+    }
+
+    #[test]
+    fn rotation_key_is_accepted_only_inside_policy_window() {
+        let mut f = fixture(PackKind::Runtime);
+        f.policy.policy_mode = PackPolicyMode::OfflinePinned;
+        f.policy.channel_policies.insert(
+            "stable".to_string(),
+            ArtifactChannelPolicy {
+                signing_keys: BTreeSet::new(),
+                mirror_identity: None,
+                rotation_windows: vec![PackKeyRotationWindow {
+                    key_id: f.manifest.trust.signing_key_id.clone(),
+                    not_before: utc(2026, 6, 1),
+                    not_after: utc(2026, 7, 1),
+                }],
+            },
+        );
+
+        verify(&f).expect("rotation key accepted inside window");
+
+        f.policy.now = utc(2026, 7, 1);
+        let err = verify(&f).expect_err("closed rotation window rejected");
+        assert!(matches!(
+            err,
+            PackVerifyError::SigningKeyNotAllowedForChannel { .. }
+        ));
+    }
+
+    #[test]
+    fn mirror_only_policy_requires_matching_mirror_identity() {
+        let mut f = fixture(PackKind::Runtime);
+        f.policy.policy_mode = PackPolicyMode::MirrorOnly;
+        f.policy.channel_policies.insert(
+            "stable".to_string(),
+            ArtifactChannelPolicy {
+                signing_keys: BTreeSet::from([f.manifest.trust.signing_key_id.clone()]),
+                mirror_identity: Some("enterprise-mirror".to_string()),
+                rotation_windows: Vec::new(),
+            },
+        );
+
+        let err = verify(&f).expect_err("wrong mirror rejected");
+        assert!(matches!(
+            err,
+            PackVerifyError::MirrorIdentityMismatch { expected, actual }
+                if expected == "enterprise-mirror" && actual == Some("origin".to_string())
+        ));
+
+        f.manifest.trust.mirror_identity = Some("enterprise-mirror".to_string());
+        resign(&mut f.manifest);
+        verify(&f).expect("matching mirror accepted");
+    }
+
+    #[test]
+    fn local_rebuild_required_policy_refuses_pack_verification() {
+        let mut f = fixture(PackKind::Runtime);
+        f.policy.policy_mode = PackPolicyMode::LocalRebuildRequired;
+
+        let err = verify(&f).expect_err("local rebuild mode rejected");
+
+        assert!(matches!(err, PackVerifyError::LocalRebuildRequiredPolicy));
     }
 
     #[test]

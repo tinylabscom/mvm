@@ -17,8 +17,8 @@ use mvm_oci::{ImageReference, LinuxPlatform, OciManifestFetcher};
 
 use super::Cli;
 use super::ops::cache::{
-    LocalPackRevocations, PackArchiveSource, PackBackendArg, PackPolicyArgs, build_pack_policy,
-    load_pack_archive_bytes,
+    LocalPackRevocations, PackArchiveSource, PackBackendArg, PackPolicyArgs, PackPolicyModeArg,
+    build_pack_policy, load_pack_archive_bytes,
 };
 use super::shared::{human_bytes, resolve_flake_ref};
 
@@ -65,6 +65,17 @@ pub(in crate::commands) struct Args {
     /// capabilities.
     #[arg(long = "host-capability", value_name = "CAPABILITY")]
     pub host_capabilities: Vec<String>,
+    /// Pack policy mode. Stricter modes require pinned channel signing keys
+    /// and/or mirror identity metadata.
+    #[arg(long = "policy-mode", value_enum, default_value = "online-default")]
+    pub policy_mode: PackPolicyModeArg,
+    /// Pin a signing key to an allowed channel, formatted as
+    /// `CHANNEL=KEY_ID`. Repeat to allow overlapping keys.
+    #[arg(long = "channel-signing-key", value_name = "CHANNEL=KEY_ID")]
+    pub channel_signing_keys: Vec<String>,
+    /// Require prepared packs to declare this mirror identity.
+    #[arg(long = "mirror-identity", value_name = "MIRROR")]
+    pub mirror_identity: Option<String>,
     /// Override the trusted publisher key directory.
     #[arg(long, value_name = "DIR")]
     pub trust_store: Option<PathBuf>,
@@ -100,6 +111,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         policy_hash: args.policy_hash,
         channels: args.channels,
         host_capabilities: args.host_capabilities,
+        policy_mode: args.policy_mode,
+        channel_signing_keys: args.channel_signing_keys,
+        mirror_identity: args.mirror_identity,
     })?;
     let trust = match args.trust_store {
         Some(path) => FsTrustStore::new(path),
@@ -541,6 +555,9 @@ mod tests {
             backend: PackBackendArg::Libkrun,
             channels: vec!["stable".to_string()],
             host_capabilities: Vec::new(),
+            policy_mode: PackPolicyModeArg::OnlineDefault,
+            channel_signing_keys: Vec::new(),
+            mirror_identity: None,
             trust_store: None,
             revocations: None,
             allow_http: false,

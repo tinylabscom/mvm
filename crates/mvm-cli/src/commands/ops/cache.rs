@@ -11,8 +11,8 @@ use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use crate::ui;
 use mvm_core::arch::GuestArch;
 use mvm_core::packs::{
-    HostCapability, LocalPackPolicy, PackBackend, PackRevocationChecker, RevocationStatus,
-    Sha256Hex,
+    ArtifactChannelPolicy, HostCapability, LocalPackPolicy, PackBackend, PackPolicyMode,
+    PackRevocationChecker, RevocationStatus, Sha256Hex,
     cache::{
         CachedPack, PACK_PROTECTION_FILENAME, PackCache, PackCacheReadiness, PackCacheStatusEntry,
         PackProtectionRef, PackPruneAction, PackPruneEntry, PackPruneReason, PackPruneRequest,
@@ -105,6 +105,18 @@ pub(in crate::commands) enum CacheAction {
         /// multiple capabilities.
         #[arg(long = "host-capability", value_name = "CAPABILITY")]
         host_capabilities: Vec<String>,
+        /// Pack policy mode. Stricter modes require pinned channel signing keys
+        /// and/or mirror identity metadata.
+        #[arg(long = "policy-mode", value_enum, default_value = "online-default")]
+        policy_mode: PackPolicyModeArg,
+        /// Pin a signing key to an allowed channel, formatted as
+        /// `CHANNEL=KEY_ID`. Repeat to allow overlapping keys.
+        #[arg(long = "channel-signing-key", value_name = "CHANNEL=KEY_ID")]
+        channel_signing_keys: Vec<String>,
+        /// Require installed packs to declare this mirror identity. Intended
+        /// for enterprise mirror-only operation.
+        #[arg(long = "mirror-identity", value_name = "MIRROR")]
+        mirror_identity: Option<String>,
         /// Override the trusted publisher key directory. Defaults to
         /// `$MVM_DATA_DIR/trusted-publishers/`.
         #[arg(long, value_name = "DIR")]
@@ -226,6 +238,25 @@ impl From<PackBackendArg> for PackBackend {
     }
 }
 
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::commands) enum PackPolicyModeArg {
+    OnlineDefault,
+    OfflinePinned,
+    MirrorOnly,
+    LocalRebuildRequired,
+}
+
+impl From<PackPolicyModeArg> for PackPolicyMode {
+    fn from(value: PackPolicyModeArg) -> Self {
+        match value {
+            PackPolicyModeArg::OnlineDefault => PackPolicyMode::OnlineDefault,
+            PackPolicyModeArg::OfflinePinned => PackPolicyMode::OfflinePinned,
+            PackPolicyModeArg::MirrorOnly => PackPolicyMode::MirrorOnly,
+            PackPolicyModeArg::LocalRebuildRequired => PackPolicyMode::LocalRebuildRequired,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::commands) enum PackArchiveSource {
     File(PathBuf),
@@ -285,6 +316,9 @@ pub(in crate::commands) struct PackPolicyArgs {
     pub policy_hash: String,
     pub channels: Vec<String>,
     pub host_capabilities: Vec<String>,
+    pub policy_mode: PackPolicyModeArg,
+    pub channel_signing_keys: Vec<String>,
+    pub mirror_identity: Option<String>,
 }
 
 pub(in crate::commands) struct InstallPackFromSourceArgs {
@@ -323,14 +357,61 @@ pub(in crate::commands) fn build_pack_policy(args: PackPolicyArgs) -> Result<Loc
             Ok(HostCapability(capability))
         })
         .collect::<Result<BTreeSet<_>>>()?;
+    let channel_policies = build_channel_policies(
+        &allowed_channels,
+        args.channel_signing_keys,
+        args.mirror_identity,
+    )?;
     Ok(LocalPackPolicy {
         host_arch: GuestArch::host(),
         backend: args.backend.into(),
         host_capabilities,
         policy_hash,
         allowed_channels,
+        policy_mode: args.policy_mode.into(),
+        channel_policies,
         now: Utc::now(),
     })
+}
+
+fn build_channel_policies(
+    allowed_channels: &BTreeSet<String>,
+    channel_signing_keys: Vec<String>,
+    mirror_identity: Option<String>,
+) -> Result<BTreeMap<String, ArtifactChannelPolicy>> {
+    let mut policies = BTreeMap::<String, ArtifactChannelPolicy>::new();
+    for entry in channel_signing_keys {
+        let (channel, key_id) = entry.split_once('=').with_context(|| {
+            format!("--channel-signing-key must be CHANNEL=KEY_ID, got {entry:?}")
+        })?;
+        let channel = channel.trim();
+        if channel.is_empty() {
+            anyhow::bail!("--channel-signing-key channel must not be empty");
+        }
+        if !allowed_channels.contains(channel) {
+            anyhow::bail!("--channel-signing-key channel {channel:?} is not listed in --channel");
+        }
+        let key_id = KeyId(key_id.trim().to_string());
+        if !key_id.is_well_formed() {
+            anyhow::bail!("--channel-signing-key key id must be 32 lowercase hex characters");
+        }
+        policies
+            .entry(channel.to_string())
+            .or_default()
+            .signing_keys
+            .insert(key_id);
+    }
+    if let Some(mirror_identity) = mirror_identity {
+        let mirror_identity = mirror_identity.trim().to_string();
+        if mirror_identity.is_empty() {
+            anyhow::bail!("--mirror-identity must not be empty");
+        }
+        for channel in allowed_channels {
+            policies.entry(channel.clone()).or_default().mirror_identity =
+                Some(mirror_identity.clone());
+        }
+    }
+    Ok(policies)
 }
 
 pub(in crate::commands) fn install_pack_from_source(
@@ -754,6 +835,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             backend,
             channels,
             host_capabilities,
+            policy_mode,
+            channel_signing_keys,
+            mirror_identity,
             trust_store,
             revocations,
             allow_http,
@@ -769,6 +853,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     policy_hash,
                     channels,
                     host_capabilities,
+                    policy_mode,
+                    channel_signing_keys,
+                    mirror_identity,
                 },
                 trust_store,
                 revocations,
@@ -2069,6 +2156,9 @@ mod tests {
             policy_hash: "not-a-sha".to_string(),
             channels: vec!["stable".to_string()],
             host_capabilities: Vec::new(),
+            policy_mode: PackPolicyModeArg::OnlineDefault,
+            channel_signing_keys: Vec::new(),
+            mirror_identity: None,
         })
         .unwrap_err();
 
@@ -2083,6 +2173,9 @@ mod tests {
                 .to_string(),
             channels: vec!["stable".to_string()],
             host_capabilities: vec![" ".to_string()],
+            policy_mode: PackPolicyModeArg::OnlineDefault,
+            channel_signing_keys: Vec::new(),
+            mirror_identity: None,
         })
         .unwrap_err();
 
@@ -2097,11 +2190,18 @@ mod tests {
             policy_hash: policy_hash.to_string(),
             channels: vec!["stable".to_string(), "canary".to_string()],
             host_capabilities: vec!["vsock".to_string()],
+            policy_mode: PackPolicyModeArg::MirrorOnly,
+            channel_signing_keys: vec![
+                "stable=0123456789abcdef0123456789abcdef".to_string(),
+                "canary=abcdef0123456789abcdef0123456789".to_string(),
+            ],
+            mirror_identity: Some("enterprise-mirror".to_string()),
         })
         .unwrap();
 
         assert_eq!(policy.backend, PackBackend::Libkrun);
         assert_eq!(policy.policy_hash.as_str(), policy_hash);
+        assert_eq!(policy.policy_mode, PackPolicyMode::MirrorOnly);
         assert!(policy.allowed_channels.contains("stable"));
         assert!(policy.allowed_channels.contains("canary"));
         assert!(
@@ -2109,6 +2209,57 @@ mod tests {
                 .host_capabilities
                 .contains(&HostCapability("vsock".to_string()))
         );
+        assert_eq!(
+            policy
+                .channel_policies
+                .get("stable")
+                .expect("stable policy")
+                .mirror_identity
+                .as_deref(),
+            Some("enterprise-mirror")
+        );
+        assert!(
+            policy
+                .channel_policies
+                .get("stable")
+                .expect("stable policy")
+                .signing_keys
+                .contains(&KeyId("0123456789abcdef0123456789abcdef".to_string()))
+        );
+    }
+
+    #[test]
+    fn build_install_pack_policy_rejects_unlisted_channel_signing_key() {
+        let err = build_pack_policy(PackPolicyArgs {
+            backend: PackBackendArg::Libkrun,
+            policy_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            channels: vec!["stable".to_string()],
+            host_capabilities: Vec::new(),
+            policy_mode: PackPolicyModeArg::OfflinePinned,
+            channel_signing_keys: vec!["canary=0123456789abcdef0123456789abcdef".to_string()],
+            mirror_identity: None,
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("not listed in --channel"));
+    }
+
+    #[test]
+    fn build_install_pack_policy_rejects_malformed_channel_signing_key() {
+        let err = build_pack_policy(PackPolicyArgs {
+            backend: PackBackendArg::Libkrun,
+            policy_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            channels: vec!["stable".to_string()],
+            host_capabilities: Vec::new(),
+            policy_mode: PackPolicyModeArg::OfflinePinned,
+            channel_signing_keys: vec!["stable=bad-key".to_string()],
+            mirror_identity: None,
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("32 lowercase hex"));
     }
 
     #[test]

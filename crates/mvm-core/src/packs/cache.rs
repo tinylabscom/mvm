@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    LocalPackPolicy, PackBackend, PackKind, PackManifest, PackRevocationChecker, PackTrustStore,
-    PackVerifyError, SetupCacheLayerIdentity, Sha256Hex, VerifiedPack, verify_pack_at,
+    LocalPackPolicy, PackBackend, PackKind, PackManifest, PackPolicyMode, PackRevocationChecker,
+    PackTrustStore, PackVerifyError, SetupCacheLayerIdentity, Sha256Hex, VerifiedPack,
+    verify_pack_at,
 };
 
 pub const PACK_CACHE_SCHEMA_VERSION: u32 = 1;
@@ -567,6 +568,13 @@ impl PackCache {
         trust: &dyn PackTrustStore,
         revocations: &dyn PackRevocationChecker,
     ) -> Result<PackPrepareReport, PackCacheError> {
+        if policy.policy_mode == PackPolicyMode::LocalRebuildRequired {
+            return Ok(PackPrepareReport::requires_builder_without_pack(
+                request,
+                PackPrepareReason::LocalRebuildRequired,
+                "local policy requires builder preparation for this input",
+            ));
+        }
         if request.input.kind == PackPrepareInputKind::OciImage
             && !request.input.raw.contains("@sha256:")
         {
@@ -731,6 +739,29 @@ impl PackPrepareReport {
             trust_state: PackTrustState::NotChecked,
             setup_cache: PackPrepareSetupCacheReport::not_requested(),
             detail: Some("no matching verified pack is cached".to_string()),
+        }
+    }
+
+    fn requires_builder_without_pack(
+        request: &PackPrepareRequest,
+        reason: PackPrepareReason,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            input: request.input.clone(),
+            requested_pack_hash: request.pack_hash.clone(),
+            state: PackPrepareState::RequiresBuilder,
+            reason: Some(reason),
+            pack_hash: request.pack_hash.clone(),
+            kind: request.expected_kind.clone(),
+            cache_root: None,
+            size_bytes: None,
+            builder_vm_required: true,
+            download_required: false,
+            fast_path_eligible: false,
+            trust_state: PackTrustState::NotChecked,
+            setup_cache: PackPrepareSetupCacheReport::not_requested(),
+            detail: Some(detail.into()),
         }
     }
 
@@ -1155,7 +1186,13 @@ fn reason_for_verify_error(error: &PackVerifyError) -> PackPrepareReason {
         PackVerifyError::MutableOciReference { .. } => PackPrepareReason::MutableInput,
         PackVerifyError::MissingHostCapability(_)
         | PackVerifyError::PolicyHashMismatch { .. }
-        | PackVerifyError::ChannelNotAllowed(_) => PackPrepareReason::PolicyRefusal,
+        | PackVerifyError::ChannelNotAllowed(_)
+        | PackVerifyError::ChannelPolicyMissing(_)
+        | PackVerifyError::ChannelSigningKeysMissing(_)
+        | PackVerifyError::SigningKeyNotAllowedForChannel { .. }
+        | PackVerifyError::MirrorIdentityMismatch { .. }
+        | PackVerifyError::MirrorPolicyMissing(_) => PackPrepareReason::PolicyRefusal,
+        PackVerifyError::LocalRebuildRequiredPolicy => PackPrepareReason::LocalRebuildRequired,
         PackVerifyError::UnknownSigningKey { .. }
         | PackVerifyError::SignatureInvalid
         | PackVerifyError::SignatureMissingForKey(_)
@@ -1592,6 +1629,8 @@ mod tests {
             host_capabilities: BTreeSet::from([HostCapability("vsock".to_string())]),
             policy_hash,
             allowed_channels: BTreeSet::from(["stable".to_string()]),
+            policy_mode: PackPolicyMode::OnlineDefault,
+            channel_policies: BTreeMap::new(),
             now,
         };
         let trust = MapTrustStore {
@@ -2115,6 +2154,29 @@ mod tests {
         assert_eq!(report.reason, Some(PackPrepareReason::LocalRebuildRequired));
         assert_eq!(report.pack_hash, Some(cached.verified.pack_hash));
         assert!(report.builder_vm_required);
+        assert!(!report.fast_path_eligible);
+    }
+
+    #[test]
+    fn prepare_report_routes_local_rebuild_policy_to_builder_without_pack_lookup() {
+        let mut f = fixture();
+        f.policy.policy_mode = PackPolicyMode::LocalRebuildRequired;
+
+        let report = f
+            .cache
+            .prepare_report(
+                &prepare_request(oci_input(&f)),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepare report");
+
+        assert_eq!(report.state, PackPrepareState::RequiresBuilder);
+        assert_eq!(report.reason, Some(PackPrepareReason::LocalRebuildRequired));
+        assert_eq!(report.pack_hash, None);
+        assert!(report.builder_vm_required);
+        assert!(!report.download_required);
         assert!(!report.fast_path_eligible);
     }
 

@@ -14,7 +14,7 @@ use super::Cli;
 use super::setup::run_setup_steps;
 use crate::commands::ops::cache::{
     InstallPackFromSourceArgs, PackArchiveSource, PackBackendArg, PackPolicyArgs,
-    install_pack_from_source, pack_kind_name,
+    PackPolicyModeArg, install_pack_from_source, pack_kind_name,
 };
 
 const SKIP_PACK_PREFETCH_ENV: &str = "MVM_SKIP_PACK_PREFETCH";
@@ -24,6 +24,9 @@ const PACK_POLICY_HASH_ENV: &str = "MVM_BOOTSTRAP_PACK_POLICY_HASH";
 const PACK_BACKEND_ENV: &str = "MVM_BOOTSTRAP_PACK_BACKEND";
 const PACK_CHANNELS_ENV: &str = "MVM_BOOTSTRAP_PACK_CHANNELS";
 const PACK_HOST_CAPABILITIES_ENV: &str = "MVM_BOOTSTRAP_PACK_HOST_CAPABILITIES";
+const PACK_POLICY_MODE_ENV: &str = "MVM_BOOTSTRAP_PACK_POLICY_MODE";
+const PACK_CHANNEL_SIGNING_KEYS_ENV: &str = "MVM_BOOTSTRAP_PACK_CHANNEL_SIGNING_KEYS";
+const PACK_MIRROR_IDENTITY_ENV: &str = "MVM_BOOTSTRAP_PACK_MIRROR_IDENTITY";
 const PACK_TRUST_STORE_ENV: &str = "MVM_BOOTSTRAP_PACK_TRUST_STORE";
 const PACK_REVOCATIONS_ENV: &str = "MVM_BOOTSTRAP_PACK_REVOCATIONS";
 const PACK_ALLOW_HTTP_ENV: &str = "MVM_BOOTSTRAP_PACK_ALLOW_HTTP";
@@ -70,6 +73,9 @@ fn bootstrap_default_packs_from_env() -> Result<()> {
                 policy_hash: config.policy_hash.clone(),
                 channels: config.channels.clone(),
                 host_capabilities: config.host_capabilities.clone(),
+                policy_mode: config.policy_mode,
+                channel_signing_keys: config.channel_signing_keys.clone(),
+                mirror_identity: config.mirror_identity.clone(),
             },
             trust_store: config.trust_store.clone(),
             revocations: config.revocations.clone(),
@@ -100,6 +106,9 @@ struct BootstrapPackConfig {
     backend: PackBackendArg,
     channels: Vec<String>,
     host_capabilities: Vec<String>,
+    policy_mode: PackPolicyModeArg,
+    channel_signing_keys: Vec<String>,
+    mirror_identity: Option<String>,
     trust_store: Option<PathBuf>,
     revocations: Option<PathBuf>,
     allow_http: bool,
@@ -134,6 +143,14 @@ impl BootstrapPackConfig {
             host_capabilities: non_empty_env(&get, PACK_HOST_CAPABILITIES_ENV)
                 .map(|value| split_env_list(&value))
                 .unwrap_or_default(),
+            policy_mode: non_empty_env(&get, PACK_POLICY_MODE_ENV)
+                .map(|value| parse_bootstrap_pack_policy_mode(&value))
+                .transpose()?
+                .unwrap_or(PackPolicyModeArg::OnlineDefault),
+            channel_signing_keys: non_empty_env(&get, PACK_CHANNEL_SIGNING_KEYS_ENV)
+                .map(|value| split_env_list(&value))
+                .unwrap_or_default(),
+            mirror_identity: non_empty_env(&get, PACK_MIRROR_IDENTITY_ENV),
             trust_store: non_empty_env(&get, PACK_TRUST_STORE_ENV).map(PathBuf::from),
             revocations: non_empty_env(&get, PACK_REVOCATIONS_ENV).map(PathBuf::from),
             allow_http: get(PACK_ALLOW_HTTP_ENV).as_deref() == Some("1"),
@@ -182,6 +199,18 @@ fn parse_bootstrap_pack_backend(value: &str) -> Result<PackBackendArg> {
         "docker" => Ok(PackBackendArg::Docker),
         other => anyhow::bail!(
             "{PACK_BACKEND_ENV} must be one of firecracker, libkrun, vz, qemu, docker; got {other:?}"
+        ),
+    }
+}
+
+fn parse_bootstrap_pack_policy_mode(value: &str) -> Result<PackPolicyModeArg> {
+    match value {
+        "online-default" => Ok(PackPolicyModeArg::OnlineDefault),
+        "offline-pinned" => Ok(PackPolicyModeArg::OfflinePinned),
+        "mirror-only" => Ok(PackPolicyModeArg::MirrorOnly),
+        "local-rebuild-required" => Ok(PackPolicyModeArg::LocalRebuildRequired),
+        other => anyhow::bail!(
+            "{PACK_POLICY_MODE_ENV} must be one of online-default, offline-pinned, mirror-only, local-rebuild-required; got {other:?}"
         ),
     }
 }
@@ -259,6 +288,12 @@ mod tests {
             (PACK_BACKEND_ENV, "vz"),
             (PACK_CHANNELS_ENV, "stable, enterprise "),
             (PACK_HOST_CAPABILITIES_ENV, "vsock, hvf "),
+            (PACK_POLICY_MODE_ENV, "mirror-only"),
+            (
+                PACK_CHANNEL_SIGNING_KEYS_ENV,
+                "stable=0123456789abcdef0123456789abcdef",
+            ),
+            (PACK_MIRROR_IDENTITY_ENV, "enterprise-mirror"),
             (PACK_TRUST_STORE_ENV, "/tmp/trust"),
             (PACK_REVOCATIONS_ENV, "/tmp/revocations.json"),
             (PACK_ALLOW_HTTP_ENV, "1"),
@@ -277,6 +312,12 @@ mod tests {
         assert_eq!(config.backend, PackBackendArg::Vz);
         assert_eq!(config.channels, vec!["stable", "enterprise"]);
         assert_eq!(config.host_capabilities, vec!["vsock", "hvf"]);
+        assert_eq!(config.policy_mode, PackPolicyModeArg::MirrorOnly);
+        assert_eq!(
+            config.channel_signing_keys,
+            vec!["stable=0123456789abcdef0123456789abcdef"]
+        );
+        assert_eq!(config.mirror_identity.as_deref(), Some("enterprise-mirror"));
         assert_eq!(config.trust_store, Some(PathBuf::from("/tmp/trust")));
         assert_eq!(
             config.revocations,
@@ -308,5 +349,24 @@ mod tests {
         ])))
         .expect_err("bad backend rejected");
         assert!(err.to_string().contains(PACK_BACKEND_ENV));
+    }
+
+    #[test]
+    fn bootstrap_pack_config_rejects_unknown_policy_mode() {
+        let err = BootstrapPackConfig::from_lookup(lookup(BTreeMap::from([
+            (
+                RUNTIME_PACK_SOURCE_ENV,
+                "https://example.test/runtime.tar.gz",
+            ),
+            (
+                PACK_POLICY_HASH_ENV,
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+            (PACK_BACKEND_ENV, "vz"),
+            (PACK_CHANNELS_ENV, "stable"),
+            (PACK_POLICY_MODE_ENV, "unknown"),
+        ])))
+        .expect_err("bad policy mode rejected");
+        assert!(err.to_string().contains(PACK_POLICY_MODE_ENV));
     }
 }

@@ -15,6 +15,11 @@
 #   MVM_BOOTSTRAP_PACK_POLICY_HASH     required policy hash when pack sources are set
 #   MVM_BOOTSTRAP_PACK_BACKEND         firecracker, libkrun, vz, qemu, or docker
 #   MVM_BOOTSTRAP_PACK_CHANNELS        comma-separated allowed artifact channels
+#   MVM_BOOTSTRAP_PACK_POLICY_MODE     online-default, offline-pinned, mirror-only,
+#                                      or local-rebuild-required
+#   MVM_BOOTSTRAP_PACK_CHANNEL_SIGNING_KEYS
+#                                      comma-separated CHANNEL=KEY_ID pins
+#   MVM_BOOTSTRAP_PACK_MIRROR_IDENTITY required mirror identity for mirror-only preload
 #   MVM_UPDATE_API_URL     override https://api.github.com (tests)
 #   MVM_UPDATE_DOWNLOAD_URL override https://github.com (tests)
 set -eu

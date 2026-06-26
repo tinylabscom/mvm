@@ -46,6 +46,22 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream I policy/mirror slice: local pack verification now supports
+      typed policy modes (`online-default`, `offline-pinned`, `mirror-only`,
+      and `local-rebuild-required`), per-channel signing-key pins, verifier
+      key-rotation windows, and mirror identity checks. `mvm prepare`,
+      `mvmctl cache install-pack`, and bootstrap pack preload all share the
+      same policy construction, including `--channel-signing-key`,
+      `--mirror-identity`, and `MVM_BOOTSTRAP_PACK_*` env equivalents.
+      Coverage: focused core verifier tests for missing offline pins, wrong
+      signer, closed rotation windows, mirror mismatch, and local-rebuild
+      refusal; focused cache test for local-rebuild-required prepare routing;
+      focused CLI/bootstrap parser tests for policy mode, channel pin, mirror,
+      and malformed inputs. Workstream I remains open on revocation metadata
+      fetching, stale-revocation offline behavior, enterprise mirror source
+      resolution, and full revocation/mirror docs.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream D install/bootstrap preparation: `mvmctl bootstrap` can now
       preload attested runtime and builder packs when an operator supplies
       explicit pack sources plus local policy metadata through `MVM_BOOTSTRAP_*`
