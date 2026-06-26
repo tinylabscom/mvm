@@ -491,11 +491,19 @@ fn emit_machine_run_preparation_diagnostic(
     let Some(diagnostic) = machine_run_preparation_diagnostic(args, resolved_flake_slot) else {
         return;
     };
-    eprintln!("machine run preparation: instant launch unavailable");
-    eprintln!("  source: {}", diagnostic.source.name());
-    eprintln!("  reason: {}", diagnostic.reason_name());
-    eprintln!("  detail: {}", diagnostic.detail);
-    eprintln!("  next step: {}", diagnostic.next_step);
+    for line in machine_preparation_diagnostic_lines(&diagnostic) {
+        eprintln!("{line}");
+    }
+}
+
+fn machine_preparation_diagnostic_lines(diagnostic: &MachinePreparationDiagnostic) -> Vec<String> {
+    vec![
+        "machine run preparation: instant launch unavailable".to_string(),
+        format!("  source: {}", diagnostic.source.name()),
+        format!("  reason: {}", diagnostic.reason_name()),
+        format!("  detail: {}", diagnostic.detail),
+        format!("  next step: {}", diagnostic.next_step),
+    ]
 }
 
 /// What the persistent path should do with the on-disk spec for the target name.
@@ -3358,6 +3366,45 @@ mod tests {
         assert_eq!(diagnostic.source, MachinePreparationSource::Manifest);
         assert_eq!(diagnostic.reason, PackPrepareReason::MissingPack);
         assert_eq!(diagnostic.reason_name(), "missing_pack");
+    }
+
+    #[test]
+    fn preparation_diagnostic_lines_render_mutable_oci_message() {
+        let args = parse_run(&["run", "--image", "alpine:latest", "--dry-run", "--", "true"])
+            .expect("parse");
+        let diagnostic = machine_run_preparation_diagnostic(&args, None).expect("diagnostic");
+        let lines = machine_preparation_diagnostic_lines(&diagnostic);
+
+        assert_eq!(
+            lines[0],
+            "machine run preparation: instant launch unavailable"
+        );
+        assert!(lines.iter().any(|line| line == "  source: oci_image"));
+        assert!(lines.iter().any(|line| line == "  reason: mutable_input"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("--resolve-oci-digest"))
+        );
+    }
+
+    #[test]
+    fn preparation_diagnostic_lines_render_manifest_cache_miss_message() {
+        let args = parse_run(&[
+            "run",
+            "--manifest",
+            "slot-abc123",
+            "--dry-run",
+            "--",
+            "true",
+        ])
+        .expect("parse");
+        let diagnostic = machine_run_preparation_diagnostic(&args, None).expect("diagnostic");
+        let lines = machine_preparation_diagnostic_lines(&diagnostic);
+
+        assert!(lines.iter().any(|line| line == "  source: manifest"));
+        assert!(lines.iter().any(|line| line == "  reason: missing_pack"));
+        assert!(lines.iter().any(|line| line.contains("mvmctl prepare")));
     }
 
     #[test]

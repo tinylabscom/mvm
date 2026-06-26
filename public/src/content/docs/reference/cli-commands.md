@@ -431,7 +431,8 @@ stderr when the current source cannot use the instant-launch path. The reason
 codes match `mvmctl prepare`: mutable OCI tags report `mutable_input`,
 digest-pinned OCI or manifest sources without a selected verified pack report
 `missing_pack`, local flakes report `private_input`, and remote flakes report
-`local_rebuild_required`.
+`local_rebuild_required`. The human diagnostic always includes `source`,
+`reason`, `detail`, and `next step` fields.
 
 ### `machine run` lifecycles in practice
 
@@ -715,6 +716,11 @@ flow and the distinction between build time and runtime boot time.
 | `mvmctl prepare <IMAGE_OR_FLAKE> --input-kind <oci-image\|flake\|local-path> --pack-kind <runtime\|builder\|image-project> ...` | Override input-kind inference or expected pack kind. `--pack-hash <SHA256>`, repeated `--host-capability`, repeated `--channel-signing-key`, `--mirror-identity <MIRROR>`, `--pack-mirror-base <BASE>`, `--trust-store <DIR>`, `--revocations <FILE>`, `--revocations-source <SOURCE>`, and `--json` are also supported |
 | `mvmctl explain <RUN_ID>` | Verify the local hash-chained launch-attestation log, find the requested run id, and print the launch source, pack hashes, policy decision, derivation source, backend identity, command digest, result, and log-chain metadata |
 | `mvmctl explain <RUN_ID> --json` | Emit the verified attestation record plus sequence, previous-hash, entry-hash, and log-head metadata as machine-readable JSON |
+
+Human `mvmctl prepare` output always starts with the input and then reports
+`state`, `trust`, `fast path eligible`, `builder VM required`, and `download
+required`. When available it also reports `flake lock`, `reason`, `next step`,
+`pack`, `kind`, `size`, and `detail`.
 
 ## Cache
 

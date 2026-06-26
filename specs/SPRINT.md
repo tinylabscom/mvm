@@ -46,6 +46,17 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream D prepare UX output closeout: human `mvm prepare` reports now
+      route through a pure line renderer with focused tests for ready
+      fast-path, cache-miss next-step, and policy-refusal detail output.
+      `mvmctl machine run --dry-run` preparation diagnostics now use the same
+      tested line-construction shape for mutable OCI and manifest cache-miss
+      blockers. Docs pin the human output fields for prepare and machine-run
+      preparation diagnostics. Workstream D remains open only on the broader
+      install-time/default-pack preparation and builder/snapshot derivation
+      work that depends on the runtime and builder fast paths.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream I enterprise mirror source slice: `mvm prepare`,
       `mvmctl cache install-pack`, and bootstrap pack preload now resolve
       relative pack and revocation metadata sources under an operator-provided

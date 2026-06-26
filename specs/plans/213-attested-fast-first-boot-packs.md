@@ -150,11 +150,11 @@ The target user-visible shape is:
       - [x] Add cache-backed `mvm prepare <image-or-flake>` resolution that
             verifies matching cached packs and optionally installs a local/HTTPS
             `--pack-source` before resolving.
-- [ ] Add `mvm prepare --dry-run <image-or-flake>` showing download size, cache
+- [x] Add `mvm prepare --dry-run <image-or-flake>` showing download size, cache
       impact, builder-VM need, trust state, and expected fast-path eligibility.
       - [x] Add dry-run reporting for cached-pack size, download requirement,
             builder-VM requirement, trust state, and fast-path eligibility.
-- [ ] Make `machine run` report precise preparation reasons when instant launch
+- [x] Make `machine run` report precise preparation reasons when instant launch
       is unavailable: missing pack, mutable input, private input, expired
       signature, revoked signer, unsupported backend, incompatible host, or local
       rebuild required.
@@ -162,7 +162,7 @@ The target user-visible shape is:
             image, flake, and manifest sources with the shared
             `PackPrepareReason` names plus detail and next-step text before
             dispatching to the launch path.
-- [ ] Add CLI integration tests for prepared fast-path messages, cache-miss
+- [x] Add CLI integration tests for prepared fast-path messages, cache-miss
       messages, policy-refusal messages, and explicit builder-VM prepare
       messages.
       - [x] Add focused core resolver tests for ready, missing, mutable OCI,
@@ -173,11 +173,16 @@ The target user-visible shape is:
             preparation reason messages covering mutable OCI, digest-pinned OCI
             cache miss, local flake builder preparation, remote flake builder
             preparation, and manifest sources.
-- [ ] Update CLI reference and getting-started docs for prepare/cache behavior.
+      - [x] Add focused CLI output-contract tests for human `mvm prepare`
+            ready/cache-miss/policy-refusal reports and `machine run --dry-run`
+            preparation diagnostics.
+- [x] Update CLI reference and getting-started docs for prepare/cache behavior.
       - [x] Update the CLI reference for `mvm prepare` and its current
             pack-resolution flags.
       - [x] Update the CLI reference for `machine run --dry-run` preparation
             diagnostics and `mvm prepare` next-step hints.
+      - [x] Document the stable human output fields used by prepare and
+            machine-run preparation diagnostics.
 
 ### E. Runtime pack launch path
 

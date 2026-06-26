@@ -338,31 +338,44 @@ fn infer_input_kind(input: &str) -> PackPrepareInputKind {
 }
 
 fn print_report(report: &PackPrepareReport) {
-    println!("Prepare input: {}", report.input.raw);
-    if let Some(lock_hash) = &report.input.flake_lock_hash {
-        println!("  flake lock: {}", lock_hash.as_str());
+    for line in report_lines(report) {
+        println!("{line}");
     }
-    println!("  state: {}", state_name(report.state));
+}
+
+fn report_lines(report: &PackPrepareReport) -> Vec<String> {
+    let mut lines = vec![format!("Prepare input: {}", report.input.raw)];
+    if let Some(lock_hash) = &report.input.flake_lock_hash {
+        lines.push(format!("  flake lock: {}", lock_hash.as_str()));
+    }
+    lines.push(format!("  state: {}", state_name(report.state)));
     if let Some(reason) = report.reason {
-        println!("  reason: {}", reason_name(reason));
-        println!("  next step: {}", reason_next_step(reason));
+        lines.push(format!("  reason: {}", reason_name(reason)));
+        lines.push(format!("  next step: {}", reason_next_step(reason)));
     }
     if let Some(pack_hash) = &report.pack_hash {
-        println!("  pack: {}", pack_hash.as_str());
+        lines.push(format!("  pack: {}", pack_hash.as_str()));
     }
     if let Some(kind) = &report.kind {
-        println!("  kind: {}", pack_kind_name(kind));
+        lines.push(format!("  kind: {}", pack_kind_name(kind)));
     }
     if let Some(size_bytes) = report.size_bytes {
-        println!("  size: {}", human_bytes(size_bytes));
+        lines.push(format!("  size: {}", human_bytes(size_bytes)));
     }
-    println!("  trust: {}", trust_state_name(report.trust_state));
-    println!("  fast path eligible: {}", report.fast_path_eligible);
-    println!("  builder VM required: {}", report.builder_vm_required);
-    println!("  download required: {}", report.download_required);
+    lines.push(format!("  trust: {}", trust_state_name(report.trust_state)));
+    lines.push(format!(
+        "  fast path eligible: {}",
+        report.fast_path_eligible
+    ));
+    lines.push(format!(
+        "  builder VM required: {}",
+        report.builder_vm_required
+    ));
+    lines.push(format!("  download required: {}", report.download_required));
     if let Some(detail) = &report.detail {
-        println!("  detail: {detail}");
+        lines.push(format!("  detail: {detail}"));
     }
+    lines
 }
 
 fn state_name(state: PackPrepareState) -> &'static str {
@@ -822,6 +835,80 @@ mod tests {
         assert_eq!(
             reason_name(PackPrepareReason::SetupCacheMiss),
             "setup_cache_miss"
+        );
+    }
+
+    fn report_for_state(
+        state: PackPrepareState,
+        reason: Option<PackPrepareReason>,
+    ) -> PackPrepareReport {
+        PackPrepareReport {
+            input: PackPrepareInput {
+                raw: "alpine:latest".to_string(),
+                kind: PackPrepareInputKind::OciImage,
+                flake_lock_hash: None,
+            },
+            requested_pack_hash: None,
+            state,
+            reason,
+            pack_hash: (state == PackPrepareState::Ready).then(|| Sha256Hex::from_bytes(b"pack")),
+            kind: (state == PackPrepareState::Ready).then_some(PackKind::ImageProject),
+            cache_root: None,
+            size_bytes: (state == PackPrepareState::Ready).then_some(4096),
+            builder_vm_required: state == PackPrepareState::RequiresBuilder,
+            download_required: state == PackPrepareState::Missing,
+            fast_path_eligible: state == PackPrepareState::Ready,
+            trust_state: if state == PackPrepareState::Ready {
+                PackTrustState::Verified
+            } else {
+                PackTrustState::NotChecked
+            },
+            setup_cache: Default::default(),
+            detail: Some("operator-facing detail".to_string()),
+        }
+    }
+
+    #[test]
+    fn report_lines_render_ready_fast_path_summary() {
+        let lines = report_lines(&report_for_state(PackPrepareState::Ready, None));
+
+        assert!(lines.iter().any(|line| line == "  state: ready"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "  fast path eligible: true")
+        );
+        assert!(lines.iter().any(|line| line == "  trust: verified"));
+        assert!(lines.iter().any(|line| line == "  kind: image_project"));
+        assert!(lines.iter().any(|line| line == "  size: 4.0K"));
+    }
+
+    #[test]
+    fn report_lines_render_cache_miss_next_step() {
+        let lines = report_lines(&report_for_state(
+            PackPrepareState::Missing,
+            Some(PackPrepareReason::MissingPack),
+        ));
+
+        assert!(lines.iter().any(|line| line == "  state: missing"));
+        assert!(lines.iter().any(|line| line == "  reason: missing_pack"));
+        assert!(lines.iter().any(|line| line.contains("mvmctl prepare")));
+        assert!(lines.iter().any(|line| line == "  download required: true"));
+    }
+
+    #[test]
+    fn report_lines_render_policy_refusal_detail() {
+        let lines = report_lines(&report_for_state(
+            PackPrepareState::Refused,
+            Some(PackPrepareReason::PolicyRefusal),
+        ));
+
+        assert!(lines.iter().any(|line| line == "  state: refused"));
+        assert!(lines.iter().any(|line| line == "  reason: policy_refusal"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "  detail: operator-facing detail")
         );
     }
 }
