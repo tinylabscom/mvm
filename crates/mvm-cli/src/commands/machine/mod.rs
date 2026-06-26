@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 
 use mvm_core::atomic_io::atomic_write;
 use mvm_core::manifest::{Manifest, ManifestMachineWorkflow, resolve_manifest_config_path};
+use mvm_core::packs::cache::PackPrepareReason;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::util::parse_human_size;
 use mvm_core::vm_backend::{VmId, VmStatus};
@@ -37,6 +38,7 @@ use mvm_core::{config, naming};
 
 use super::Cli;
 use super::build::build;
+use super::prepare::{reason_detail, reason_name, reason_next_step};
 use super::vm::exec::{RunArgs, RunProfile, run_secure};
 use super::vm::group::VmCmd;
 #[cfg(test)]
@@ -398,6 +400,102 @@ impl MachineRunMode {
             MachineRunMode::Persistent | MachineRunMode::InteractivePersistent => 0,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MachinePreparationSource {
+    OciImage,
+    Flake,
+    Manifest,
+}
+
+impl MachinePreparationSource {
+    fn name(self) -> &'static str {
+        match self {
+            MachinePreparationSource::OciImage => "oci_image",
+            MachinePreparationSource::Flake => "flake",
+            MachinePreparationSource::Manifest => "manifest",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MachinePreparationDiagnostic {
+    source: MachinePreparationSource,
+    reason: PackPrepareReason,
+    detail: &'static str,
+    next_step: &'static str,
+}
+
+impl MachinePreparationDiagnostic {
+    fn new(source: MachinePreparationSource, reason: PackPrepareReason) -> Self {
+        Self {
+            source,
+            reason,
+            detail: reason_detail(reason),
+            next_step: reason_next_step(reason),
+        }
+    }
+
+    fn reason_name(&self) -> &'static str {
+        reason_name(self.reason)
+    }
+}
+
+fn machine_run_preparation_diagnostic(
+    args: &MachineRunArgs,
+    resolved_flake_slot: Option<&str>,
+) -> Option<MachinePreparationDiagnostic> {
+    if resolved_flake_slot.is_some() || args.manifest.is_some() {
+        return Some(MachinePreparationDiagnostic::new(
+            MachinePreparationSource::Manifest,
+            PackPrepareReason::MissingPack,
+        ));
+    }
+    if let Some(image) = args.image.as_deref() {
+        let reason = if image.contains("@sha256:") {
+            PackPrepareReason::MissingPack
+        } else {
+            PackPrepareReason::MutableInput
+        };
+        return Some(MachinePreparationDiagnostic::new(
+            MachinePreparationSource::OciImage,
+            reason,
+        ));
+    }
+    args.flake.as_deref().map(|flake| {
+        let reason = if flake_ref_is_local(flake) {
+            PackPrepareReason::PrivateInput
+        } else {
+            PackPrepareReason::LocalRebuildRequired
+        };
+        MachinePreparationDiagnostic::new(MachinePreparationSource::Flake, reason)
+    })
+}
+
+fn flake_ref_is_local(flake: &str) -> bool {
+    flake.starts_with('.')
+        || flake.starts_with('/')
+        || flake.starts_with("path:")
+        || flake == "flake.nix"
+        || flake.ends_with("/flake.nix")
+}
+
+fn emit_machine_run_preparation_diagnostic(
+    args: &MachineRunArgs,
+    resolved_flake_slot: Option<&str>,
+) {
+    if !args.dry_run {
+        return;
+    }
+    let Some(diagnostic) = machine_run_preparation_diagnostic(args, resolved_flake_slot) else {
+        return;
+    };
+    eprintln!("machine run preparation: instant launch unavailable");
+    eprintln!("  source: {}", diagnostic.source.name());
+    eprintln!("  reason: {}", diagnostic.reason_name());
+    eprintln!("  detail: {}", diagnostic.detail);
+    eprintln!("  next step: {}", diagnostic.next_step);
 }
 
 /// What the persistent path should do with the on-disk spec for the target name.
@@ -2374,6 +2472,8 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
 /// dispatch) so all three lifecycles can reference the resulting slot hash
 /// uniformly. The build happens once regardless of mode.
 fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+    emit_machine_run_preparation_diagnostic(&args, None);
+
     // If a flake was given, build it into a slot before dispatching.
     // The resolved slot hash replaces the `--flake` flag so all paths
     // below treat it as a manifest-backed source.
@@ -3174,6 +3274,90 @@ mod tests {
         assert!(run.json);
         assert!(run.dry_run);
         assert_eq!(run.argv, vec!["echo", "hi"]);
+    }
+
+    #[test]
+    fn preparation_diagnostic_reports_mutable_oci_inputs() {
+        let args = parse_run(&["run", "--image", "alpine:latest", "--dry-run", "--", "true"])
+            .expect("parse");
+        let diagnostic = machine_run_preparation_diagnostic(&args, None).expect("diagnostic");
+
+        assert_eq!(diagnostic.source, MachinePreparationSource::OciImage);
+        assert_eq!(diagnostic.reason, PackPrepareReason::MutableInput);
+        assert_eq!(diagnostic.reason_name(), "mutable_input");
+        assert!(
+            diagnostic
+                .detail
+                .contains("not eligible for instant launch")
+        );
+        assert!(diagnostic.next_step.contains("--resolve-oci-digest"));
+    }
+
+    #[test]
+    fn preparation_diagnostic_reports_missing_pack_for_digest_pinned_oci() {
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "ghcr.io/tinylabs/mvm@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--dry-run",
+            "--",
+            "true",
+        ])
+        .expect("parse");
+        let diagnostic = machine_run_preparation_diagnostic(&args, None).expect("diagnostic");
+
+        assert_eq!(diagnostic.source, MachinePreparationSource::OciImage);
+        assert_eq!(diagnostic.reason, PackPrepareReason::MissingPack);
+        assert_eq!(diagnostic.reason_name(), "missing_pack");
+        assert!(diagnostic.next_step.contains("mvmctl prepare"));
+    }
+
+    #[test]
+    fn preparation_diagnostic_reports_private_local_flake_inputs() {
+        let args = parse_run(&["run", "--flake", ".", "--dry-run", "--", "true"]).expect("parse");
+        let diagnostic = machine_run_preparation_diagnostic(&args, None).expect("diagnostic");
+
+        assert_eq!(diagnostic.source, MachinePreparationSource::Flake);
+        assert_eq!(diagnostic.reason, PackPrepareReason::PrivateInput);
+        assert_eq!(diagnostic.reason_name(), "private_input");
+        assert!(diagnostic.next_step.contains("builder VM"));
+    }
+
+    #[test]
+    fn preparation_diagnostic_reports_builder_prepare_for_remote_flake_inputs() {
+        let args = parse_run(&[
+            "run",
+            "--flake",
+            "github:tinylabs/mvm#default",
+            "--dry-run",
+            "--",
+            "true",
+        ])
+        .expect("parse");
+        let diagnostic = machine_run_preparation_diagnostic(&args, None).expect("diagnostic");
+
+        assert_eq!(diagnostic.source, MachinePreparationSource::Flake);
+        assert_eq!(diagnostic.reason, PackPrepareReason::LocalRebuildRequired);
+        assert_eq!(diagnostic.reason_name(), "local_rebuild_required");
+        assert!(diagnostic.next_step.contains("builder VM"));
+    }
+
+    #[test]
+    fn preparation_diagnostic_reports_missing_pack_for_manifest_sources() {
+        let args = parse_run(&[
+            "run",
+            "--manifest",
+            "slot-abc123",
+            "--dry-run",
+            "--",
+            "true",
+        ])
+        .expect("parse");
+        let diagnostic = machine_run_preparation_diagnostic(&args, None).expect("diagnostic");
+
+        assert_eq!(diagnostic.source, MachinePreparationSource::Manifest);
+        assert_eq!(diagnostic.reason, PackPrepareReason::MissingPack);
+        assert_eq!(diagnostic.reason_name(), "missing_pack");
     }
 
     #[test]

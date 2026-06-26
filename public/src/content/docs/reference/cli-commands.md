@@ -426,6 +426,13 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine check-artifact <artifact.mvm> --key <pubkey>` | Verify with an explicit raw Ed25519 public key |
 | `mvmctl machine check-artifact <artifact.mvm> --json` | Print the verified artifact/admission preview as JSON |
 
+`machine run --dry-run` also prints an attested-preparation diagnostic on
+stderr when the current source cannot use the instant-launch path. The reason
+codes match `mvmctl prepare`: mutable OCI tags report `mutable_input`,
+digest-pinned OCI or manifest sources without a selected verified pack report
+`missing_pack`, local flakes report `private_input`, and remote flakes report
+`local_rebuild_required`.
+
 ### `machine run` lifecycles in practice
 
 A transient run is the default and needs no flags — it boots, runs the command,
@@ -700,6 +707,7 @@ flow and the distinction between build time and runtime boot time.
 |---------|-------------|
 | `mvmctl prepare <IMAGE_OR_FLAKE> --policy-hash <SHA256> --backend <firecracker\|libkrun\|vz\|qemu\|docker> --channel <CHANNEL>` | Resolve the attested pack preparation state for an OCI image, flake, or local project path. The resolver verifies matching cached packs against local policy, trust-store keys, revocation metadata, manifest/file hashes, signature expiry, architecture, backend, and channel compatibility |
 | `mvmctl prepare --dry-run <IMAGE_OR_FLAKE> ...` | Report fast-path eligibility without downloading or installing packs. Output includes pack state, refusal reason, cached size when known, trust state, setup-cache state, download requirement, and builder-VM requirement. A verified pack with a required setup-cache miss reports `setup_cache_miss` and requires builder preparation |
+| `mvmctl prepare <IMAGE_OR_FLAKE> ...` | Human output includes the stable preparation reason code and a next-step hint when the resolver returns a refusal, cache miss, or builder-VM preparation requirement |
 | `mvmctl prepare <OCI_IMAGE> --resolve-oci-digest ...` | Resolve a mutable OCI tag to a Linux platform digest before checking pack eligibility. Without this explicit flag, mutable OCI inputs remain fail-closed and report `mutable_input` |
 | `mvmctl prepare <FLAKE> --resolve-flake-lock ...` | Hash a local `flake.lock` before checking pack eligibility, so cached packs must match both the resolved flake reference and lock hash. Remote flake lock resolution is refused until the builder-VM resolver path is wired through |
 | `mvmctl prepare <IMAGE_OR_FLAKE> --pack-source <SOURCE> ...` | Install a local or HTTPS attested pack archive through the same quarantine/verification/cache promotion path as `cache install-pack`, then resolve whether it satisfies the requested input. Plain HTTP requires `--allow-http` |

@@ -154,6 +154,10 @@ The target user-visible shape is:
       is unavailable: missing pack, mutable input, private input, expired
       signature, revoked signer, unsupported backend, incompatible host, or local
       rebuild required.
+      - [x] Add `machine run --dry-run` preparation diagnostics that classify
+            image, flake, and manifest sources with the shared
+            `PackPrepareReason` names plus detail and next-step text before
+            dispatching to the launch path.
 - [ ] Add CLI integration tests for prepared fast-path messages, cache-miss
       messages, policy-refusal messages, and explicit builder-VM prepare
       messages.
@@ -161,9 +165,15 @@ The target user-visible shape is:
             unsupported backend, expired trust metadata, revoked signer, and
             local-rebuild-required states, plus CLI parser/helper tests for
             `mvm prepare`.
+      - [x] Add focused CLI helper tests for `machine run --dry-run`
+            preparation reason messages covering mutable OCI, digest-pinned OCI
+            cache miss, local flake builder preparation, remote flake builder
+            preparation, and manifest sources.
 - [ ] Update CLI reference and getting-started docs for prepare/cache behavior.
       - [x] Update the CLI reference for `mvm prepare` and its current
             pack-resolution flags.
+      - [x] Update the CLI reference for `machine run --dry-run` preparation
+            diagnostics and `mvm prepare` next-step hints.
 
 ### E. Runtime pack launch path
 

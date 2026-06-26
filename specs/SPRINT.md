@@ -46,6 +46,20 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream D prepare UX: `mvm prepare` now shares stable
+      `PackPrepareReason` detail and next-step text with the machine-run
+      preflight path, and `mvmctl machine run --dry-run` emits a preparation
+      diagnostic before launch dispatch for mutable OCI tags, digest-pinned OCI
+      inputs without a selected verified pack, manifest sources, local/private
+      flakes, and remote flakes that require builder preparation. Coverage:
+      focused `mvm-cli` tests pin the reason names and machine-run source
+      classifier for mutable OCI, missing-pack OCI/manifest, private local
+      flake, and builder-required remote flake cases. Workstream D remains open
+      on install-time/default pack preparation, full launch-path pack
+      consumption, policy-refusal CLI integration coverage, and snapshot/warm
+      derivation.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream B release-pack publishing: `release.yml` now builds
       runtime-pack archives for the supported arch/backend matrix and
       builder-pack archives for both builder architectures from the existing

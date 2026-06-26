@@ -311,6 +311,7 @@ fn print_report(report: &PackPrepareReport) {
     println!("  state: {}", state_name(report.state));
     if let Some(reason) = report.reason {
         println!("  reason: {}", reason_name(reason));
+        println!("  next step: {}", reason_next_step(reason));
     }
     if let Some(pack_hash) = &report.pack_hash {
         println!("  pack: {}", pack_hash.as_str());
@@ -339,7 +340,7 @@ fn state_name(state: PackPrepareState) -> &'static str {
     }
 }
 
-fn reason_name(reason: PackPrepareReason) -> &'static str {
+pub(in crate::commands) fn reason_name(reason: PackPrepareReason) -> &'static str {
     match reason {
         PackPrepareReason::MissingPack => "missing_pack",
         PackPrepareReason::MutableInput => "mutable_input",
@@ -355,6 +356,97 @@ fn reason_name(reason: PackPrepareReason) -> &'static str {
         PackPrepareReason::CacheMetadataInvalid => "cache_metadata_invalid",
         PackPrepareReason::InputMismatch => "input_mismatch",
         PackPrepareReason::SetupCacheMiss => "setup_cache_miss",
+    }
+}
+
+pub(in crate::commands) fn reason_detail(reason: PackPrepareReason) -> &'static str {
+    match reason {
+        PackPrepareReason::MissingPack => {
+            "no verified attested pack is available for the requested input"
+        }
+        PackPrepareReason::MutableInput => {
+            "the input can change over time and is not eligible for instant launch"
+        }
+        PackPrepareReason::PrivateInput => {
+            "the input is local or private and must be prepared through the builder VM"
+        }
+        PackPrepareReason::ExpiredSignature => {
+            "the pack signature is outside its accepted validity window"
+        }
+        PackPrepareReason::ExpiredTrustMetadata => {
+            "the pack trust metadata is expired and must be refreshed"
+        }
+        PackPrepareReason::RevokedSigner => {
+            "the signer or pack hash is revoked by the active revocation metadata"
+        }
+        PackPrepareReason::UnsupportedBackend => {
+            "the pack does not declare compatibility with the selected backend"
+        }
+        PackPrepareReason::IncompatibleHost => {
+            "the host does not satisfy the pack architecture or capability requirements"
+        }
+        PackPrepareReason::LocalRebuildRequired => {
+            "local policy or source shape requires builder-VM preparation before launch"
+        }
+        PackPrepareReason::PolicyRefusal => {
+            "local artifact policy refused the pack for this launch"
+        }
+        PackPrepareReason::TrustUnavailable => {
+            "trusted publisher metadata is unavailable for this pack"
+        }
+        PackPrepareReason::CacheMetadataInvalid => {
+            "cached pack metadata is missing, malformed, or inconsistent"
+        }
+        PackPrepareReason::InputMismatch => {
+            "a cached pack was found but does not match the requested input identity"
+        }
+        PackPrepareReason::SetupCacheMiss => {
+            "the image/project pack is verified but required setup-cache layers are missing"
+        }
+    }
+}
+
+pub(in crate::commands) fn reason_next_step(reason: PackPrepareReason) -> &'static str {
+    match reason {
+        PackPrepareReason::MissingPack => {
+            "run `mvmctl prepare` with a matching pack source, or allow builder-VM preparation"
+        }
+        PackPrepareReason::MutableInput => {
+            "pin OCI inputs by digest or resolve them with `mvmctl prepare --resolve-oci-digest`"
+        }
+        PackPrepareReason::PrivateInput => {
+            "run `mvmctl prepare` from a trusted local checkout or let the builder VM prepare it"
+        }
+        PackPrepareReason::ExpiredSignature | PackPrepareReason::ExpiredTrustMetadata => {
+            "refresh the pack from the release channel or rebuild it locally"
+        }
+        PackPrepareReason::RevokedSigner => {
+            "refuse the artifact and rebuild from source with a non-revoked signer policy"
+        }
+        PackPrepareReason::UnsupportedBackend => {
+            "select a compatible backend or prepare a pack for this backend"
+        }
+        PackPrepareReason::IncompatibleHost => {
+            "prepare the artifact on a compatible host or choose a matching pack"
+        }
+        PackPrepareReason::LocalRebuildRequired => {
+            "let the builder VM rebuild and cache a local pack for this input"
+        }
+        PackPrepareReason::PolicyRefusal => {
+            "adjust local policy only if the artifact source is trusted, otherwise rebuild locally"
+        }
+        PackPrepareReason::TrustUnavailable => {
+            "configure trusted publisher metadata or use an offline-pinned policy"
+        }
+        PackPrepareReason::CacheMetadataInvalid => {
+            "remove the poisoned cache entry and reinstall the pack from a trusted source"
+        }
+        PackPrepareReason::InputMismatch => {
+            "prepare or install a pack whose manifest matches the requested input identity"
+        }
+        PackPrepareReason::SetupCacheMiss => {
+            "run builder-VM preparation to derive the missing setup-cache layers"
+        }
     }
 }
 
@@ -637,6 +729,52 @@ mod tests {
                 "ghcr.io/tinylabs/mvm@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             ),
             PackPrepareInputKind::OciImage
+        );
+    }
+
+    #[test]
+    fn prepare_reason_help_covers_all_reasons() {
+        let reasons = [
+            PackPrepareReason::MissingPack,
+            PackPrepareReason::MutableInput,
+            PackPrepareReason::PrivateInput,
+            PackPrepareReason::ExpiredSignature,
+            PackPrepareReason::ExpiredTrustMetadata,
+            PackPrepareReason::RevokedSigner,
+            PackPrepareReason::UnsupportedBackend,
+            PackPrepareReason::IncompatibleHost,
+            PackPrepareReason::LocalRebuildRequired,
+            PackPrepareReason::PolicyRefusal,
+            PackPrepareReason::TrustUnavailable,
+            PackPrepareReason::CacheMetadataInvalid,
+            PackPrepareReason::InputMismatch,
+            PackPrepareReason::SetupCacheMiss,
+        ];
+        for reason in reasons {
+            assert!(!reason_name(reason).is_empty());
+            assert!(!reason_detail(reason).is_empty());
+            assert!(!reason_next_step(reason).is_empty());
+        }
+    }
+
+    #[test]
+    fn prepare_reason_help_uses_stable_external_names() {
+        assert_eq!(reason_name(PackPrepareReason::MissingPack), "missing_pack");
+        assert_eq!(
+            reason_name(PackPrepareReason::MutableInput),
+            "mutable_input"
+        );
+        assert_eq!(
+            reason_name(PackPrepareReason::PrivateInput),
+            "private_input"
+        );
+        assert_eq!(
+            reason_name(PackPrepareReason::LocalRebuildRequired),
+            "local_rebuild_required"
+        );
+        assert_eq!(
+            reason_name(PackPrepareReason::SetupCacheMiss),
+            "setup_cache_miss"
         );
     }
 }
