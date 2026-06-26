@@ -46,6 +46,15 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream H explainability: `mvmctl explain <run-id>` now verifies the
+      local hash-chained launch-attestation log before lookup, fails closed on
+      tamper or missing run ids, and prints either a human summary or JSON
+      containing the verified attestation record plus sequence, previous-hash,
+      entry-hash, and log-head metadata. The CLI reference now documents the
+      command. Coverage: focused `mvm-cli` tests for lookup, missing records,
+      human rendering, parser coverage, and machine-readable stdout routing.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream H launch-path attestation emission: admitted launch success
       and failure emit typed records into the local hash-chained
       launch-attestation log through the existing `plan.launched` /
@@ -53,8 +62,8 @@ plan 25 sequences the work into six independently-shippable workstreams.
       policy, backend, command, result, and error metadata from the admitted
       signed plan without blocking a launch on local-log IO. Coverage: focused
       `mvm-cli` tests for success, launch failure, refusal, builder fallback,
-      verification failure, and interrupted outcome emission. `mvm explain`
-      remains open.
+      verification failure, and interrupted outcome emission. This left
+      `mvm explain` for the follow-up entry above.
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream H launch attestation core: `mvm_core::launch_attestation`
@@ -66,7 +75,8 @@ plan 25 sequences the work into six independently-shippable workstreams.
       entry hashes and previous-hash links before accepting new appends.
       Coverage: focused `mvm-core` tests for serde roundtrip, builder
       validation, hash-chained append/read, modified-record tamper detection,
-      and reordered-record detection. `mvm explain` remains open.
+      and reordered-record detection. Launch-path emission and `mvm explain`
+      are covered by the follow-up entries above.
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream G setup-cache prepare resolution: `PackPrepareRequest` can now

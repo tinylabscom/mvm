@@ -148,6 +148,7 @@ impl Commands {
             },
             Commands::Ls(a) => a.json,
             Commands::Prepare(a) => a.json,
+            Commands::Explain(a) => a.json,
             Commands::Run(a) => a.json,
             Commands::SdkNoVm(_) => true,
             Commands::Machine(a) => match &a.action {
@@ -201,6 +202,7 @@ impl Commands {
             Commands::Env(a) => a.action.verb_name(),
             Commands::Bootstrap(_) => "bootstrap",
             Commands::Prepare(_) => "prepare",
+            Commands::Explain(_) => "explain",
             Commands::Dev(_) => "dev",
             Commands::Ls(_) => "ls",
             Commands::Run(_) => "run",

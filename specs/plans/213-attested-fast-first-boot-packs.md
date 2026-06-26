@@ -258,7 +258,7 @@ The target user-visible shape is:
 - [x] Include command, plan hash, network policy hash, artifact hashes,
       snapshot/warm identity, backend identity, launcher version, timestamps,
       exit status, and output digest metadata.
-- [ ] Implement `mvm explain <run-id>` for successful launches, builder-prepare
+- [x] Implement `mvm explain <run-id>` for successful launches, builder-prepare
       launches, cache misses, and refusals.
 - [x] Add tests proving audit records are emitted on success, refusal, builder
       fallback, verification failure, and interrupted launch.
@@ -303,7 +303,7 @@ The target user-visible shape is:
 
 ### K. Documentation and migration
 
-- [ ] Update `public/src/content/docs/reference/cli-commands.md` for
+- [x] Update `public/src/content/docs/reference/cli-commands.md` for
       `mvm prepare`, `mvm cache status`, `mvm cache prune`, and `mvm explain`.
 - [ ] Update installation docs to describe install-time pack preparation,
       download sizes, cache locations, opt-out, and offline/mirror behavior.

@@ -13,6 +13,7 @@ use super::build::group as build_group;
 use super::catalog;
 use super::env::group as env_group;
 use super::env::{cleanup, dev, init, uninstall};
+use super::explain;
 use super::image;
 use super::machine;
 use super::ops;
@@ -3305,6 +3306,19 @@ fn test_prepare_requires_channel() {
 }
 
 #[test]
+fn test_explain_parses_run_id_and_json_flag() {
+    let cli = Cli::try_parse_from(["mvmctl", "explain", "run-123", "--json"]).unwrap();
+
+    match cli.command {
+        Commands::Explain(explain::Args { run_id, json }) => {
+            assert_eq!(run_id, "run-123");
+            assert!(json);
+        }
+        _ => panic!("Expected Explain command"),
+    }
+}
+
+#[test]
 fn test_cache_prune() {
     let cli = Cli::try_parse_from(["mvmctl", "cache", "prune"]);
     assert!(cli.is_ok());
@@ -4021,6 +4035,7 @@ fn read_only_and_vm_agnostic_commands_skip_entry_convergence() {
     // `reconcile` is the convergence verb itself — must not double-run on entry.
     assert!(!touches(&["mvmctl", "reconcile"]));
     assert!(!touches(&["mvmctl", "reconcile", "--dry-run"]));
+    assert!(!touches(&["mvmctl", "explain", "run-123"]));
 }
 
 #[test]
@@ -4049,6 +4064,9 @@ fn state_touching_json_commands_reserve_stdout_before_entry_convergence() {
         "mvmctl", "run", "--json", "--", "true"
     ]));
     assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "explain", "run-123", "--json"
+    ]));
+    assert!(emits_machine_readable_stdout(&[
         "mvmctl", "machine", "save", "myvm", "--json"
     ]));
     assert!(emits_machine_readable_stdout(&[
@@ -4064,6 +4082,9 @@ fn state_touching_json_commands_reserve_stdout_before_entry_convergence() {
 
     assert!(!emits_machine_readable_stdout(&["mvmctl", "ls"]));
     assert!(!emits_machine_readable_stdout(&["mvmctl", "dev", "status"]));
+    assert!(!emits_machine_readable_stdout(&[
+        "mvmctl", "explain", "run-123"
+    ]));
     // `mvmctl up` is retired; `up_removed` pins the removal separately.
 }
 

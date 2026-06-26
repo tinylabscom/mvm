@@ -28,7 +28,7 @@ verification under `trust`. Domains that already own their own subcommands
 | `ops <sub>` | `metrics`, `bench`, `config`, `mcp` |
 | `env <sub>` | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign` |
 | `trust <sub>` | `add`/`list`/`remove` (publishers), `attest`, `receipt`, `audit` |
-| Already-grouped top-level | `image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact` |
+| Already-grouped top-level | `prepare`, `explain`, `image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact` |
 
 **Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
 (further down) is the beginner-facing front door — one small command group for
@@ -704,6 +704,8 @@ flow and the distinction between build time and runtime boot time.
 | `mvmctl prepare <FLAKE> --resolve-flake-lock ...` | Hash a local `flake.lock` before checking pack eligibility, so cached packs must match both the resolved flake reference and lock hash. Remote flake lock resolution is refused until the builder-VM resolver path is wired through |
 | `mvmctl prepare <IMAGE_OR_FLAKE> --pack-source <SOURCE> ...` | Install a local or HTTPS attested pack archive through the same quarantine/verification/cache promotion path as `cache install-pack`, then resolve whether it satisfies the requested input. Plain HTTP requires `--allow-http` |
 | `mvmctl prepare <IMAGE_OR_FLAKE> --input-kind <oci-image\|flake\|local-path> --pack-kind <runtime\|builder\|image-project> ...` | Override input-kind inference or expected pack kind. `--pack-hash <SHA256>`, repeated `--host-capability`, `--trust-store <DIR>`, `--revocations <FILE>`, and `--json` are also supported |
+| `mvmctl explain <RUN_ID>` | Verify the local hash-chained launch-attestation log, find the requested run id, and print the launch source, pack hashes, policy decision, derivation source, backend identity, command digest, result, and log-chain metadata |
+| `mvmctl explain <RUN_ID> --json` | Emit the verified attestation record plus sequence, previous-hash, entry-hash, and log-head metadata as machine-readable JSON |
 
 ## Cache
 

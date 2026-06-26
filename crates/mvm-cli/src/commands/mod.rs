@@ -5,6 +5,7 @@ mod catalog;
 mod cmd_audit;
 mod deps;
 mod env;
+mod explain;
 mod image;
 mod machine;
 mod manifest;
@@ -107,6 +108,9 @@ pub(in crate::commands) enum Commands {
     /// Resolve and prepare attested packs for an image or flake
     #[command(display_order = 6)]
     Prepare(prepare::Args),
+    /// Explain a launch from the local attestation log
+    #[command(display_order = 7)]
+    Explain(explain::Args),
     /// Environment / install lifecycle (bootstrap, update, sign, …)
     #[command(hide = true)]
     Env(env::group::Args),
@@ -315,6 +319,7 @@ pub fn run() -> Result<()> {
         Commands::Env(a) => env::group::run(&cli, a, &cfg),
         Commands::Bootstrap(a) => bootstrap::run(&cli, a, &cfg),
         Commands::Prepare(a) => prepare::run(&cli, a, &cfg),
+        Commands::Explain(a) => explain::run(&cli, a, &cfg),
         Commands::Dev(a) => env::dev::run(&cli, a, &cfg),
         Commands::Ls(a) => vm::ps::run(&cli, a, &cfg),
         Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),
