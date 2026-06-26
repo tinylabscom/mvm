@@ -9,6 +9,12 @@
 #   MVM_INSTALL_DIR        install dir; default: ~/.local/bin
 #   MVM_SKIP_HASH_VERIFY   set to 1 to skip checksum (emergency only)
 #   MVM_SKIP_CODESIGN      set to 1 to skip macOS codesign
+#   MVM_SKIP_PACK_PREFETCH set to 1 to skip bootstrap pack preloading
+#   MVM_BOOTSTRAP_RUNTIME_PACK_SOURCE  local/HTTPS runtime pack archive to preload
+#   MVM_BOOTSTRAP_BUILDER_PACK_SOURCE  local/HTTPS builder pack archive to preload
+#   MVM_BOOTSTRAP_PACK_POLICY_HASH     required policy hash when pack sources are set
+#   MVM_BOOTSTRAP_PACK_BACKEND         firecracker, libkrun, vz, qemu, or docker
+#   MVM_BOOTSTRAP_PACK_CHANNELS        comma-separated allowed artifact channels
 #   MVM_UPDATE_API_URL     override https://api.github.com (tests)
 #   MVM_UPDATE_DOWNLOAD_URL override https://github.com (tests)
 set -eu

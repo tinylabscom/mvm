@@ -46,6 +46,22 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream D install/bootstrap preparation: `mvmctl bootstrap` can now
+      preload attested runtime and builder packs when an operator supplies
+      explicit pack sources plus local policy metadata through `MVM_BOOTSTRAP_*`
+      environment variables. The path reuses the existing quarantine-first
+      pack cache installer, honors `MVM_SKIP_PACK_PREFETCH=1`, emits a
+      cache-install audit event without recording full source URLs/paths, and
+      leaves bootstrap unchanged when no pack sources are configured. Coverage:
+      focused bootstrap parser tests for no-op, opt-out, missing policy
+      metadata, runtime+builder source parsing, channel/capability splitting,
+      trust/revocation paths, HTTP opt-in, and unknown backend refusal. Docs:
+      CLI reference, install-script env knobs, and installation guide updated.
+      Workstream D remains open on automatic channel/mirror policy,
+      launch-path prepared-pack consumption, snapshot/warm derivation, and
+      broader CLI policy-refusal integration coverage.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream D prepare UX: `mvm prepare` now shares stable
       `PackPrepareReason` detail and next-step text with the machine-run
       preflight path, and `mvmctl machine run --dry-run` emits a preparation

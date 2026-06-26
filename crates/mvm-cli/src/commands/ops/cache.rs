@@ -287,6 +287,14 @@ pub(in crate::commands) struct PackPolicyArgs {
     pub host_capabilities: Vec<String>,
 }
 
+pub(in crate::commands) struct InstallPackFromSourceArgs {
+    pub source: PackArchiveSource,
+    pub policy: PackPolicyArgs,
+    pub trust_store: Option<PathBuf>,
+    pub revocations: Option<PathBuf>,
+    pub allow_http: bool,
+}
+
 pub(in crate::commands) fn build_pack_policy(args: PackPolicyArgs) -> Result<LocalPackPolicy> {
     if args.channels.is_empty() {
         anyhow::bail!("at least one --channel is required");
@@ -323,6 +331,25 @@ pub(in crate::commands) fn build_pack_policy(args: PackPolicyArgs) -> Result<Loc
         allowed_channels,
         now: Utc::now(),
     })
+}
+
+pub(in crate::commands) fn install_pack_from_source(
+    args: InstallPackFromSourceArgs,
+) -> Result<CachedPack> {
+    let archive_bytes = load_pack_archive_bytes(&args.source, args.allow_http)?;
+    let policy = build_pack_policy(args.policy)?;
+    let trust = match args.trust_store {
+        Some(path) => FsTrustStore::new(path),
+        None => FsTrustStore::default_path()
+            .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?,
+    };
+    let revocations = match args.revocations {
+        Some(path) => LocalPackRevocations::from_path(&path)?,
+        None => LocalPackRevocations::empty(),
+    };
+    PackCache::default()
+        .install_from_archive_reader(Cursor::new(archive_bytes), &policy, &trust, &revocations)
+        .context("installing attested pack archive into cache")
 }
 
 pub(in crate::commands) fn load_pack_archive_bytes(
@@ -528,7 +555,7 @@ fn pack_status_row(entry: PackCacheStatusEntry) -> PackStatusRow {
     }
 }
 
-fn pack_kind_name(kind: &mvm_core::packs::PackKind) -> &'static str {
+pub(in crate::commands) fn pack_kind_name(kind: &mvm_core::packs::PackKind) -> &'static str {
     match kind {
         mvm_core::packs::PackKind::Runtime => "runtime",
         mvm_core::packs::PackKind::Builder => "builder",
@@ -733,40 +760,30 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             json,
         } => {
             let source = PackArchiveSource::parse(&source);
-            let archive_bytes = load_pack_archive_bytes(&source, allow_http)?;
-            let policy = build_pack_policy(PackPolicyArgs {
-                backend,
-                policy_hash,
-                channels,
-                host_capabilities,
+            let backend_for_summary = backend.into();
+            let source_kind = source.audit_kind();
+            let cached = install_pack_from_source(InstallPackFromSourceArgs {
+                source,
+                policy: PackPolicyArgs {
+                    backend,
+                    policy_hash,
+                    channels,
+                    host_capabilities,
+                },
+                trust_store,
+                revocations,
+                allow_http,
             })?;
-            let trust = match trust_store {
-                Some(path) => FsTrustStore::new(path),
-                None => FsTrustStore::default_path()
-                    .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?,
-            };
-            let revocations = match revocations {
-                Some(path) => LocalPackRevocations::from_path(&path)?,
-                None => LocalPackRevocations::empty(),
-            };
-            let cached = PackCache::default()
-                .install_from_archive_reader(
-                    Cursor::new(archive_bytes),
-                    &policy,
-                    &trust,
-                    &revocations,
-                )
-                .context("installing attested pack archive into cache")?;
             mvm_core::audit_emit!(
                 CachePackInstall,
                 "pack_hash={} kind={} channel={} source_kind={} cache_root={}",
                 cached.verified.pack_hash.as_str(),
                 pack_kind_name(&cached.manifest.kind),
                 cached.manifest.trust.channel_identity,
-                source.audit_kind(),
+                source_kind,
                 cached.root.display()
             );
-            let installed = InstalledPack::from_cached(&cached, &policy.backend);
+            let installed = InstalledPack::from_cached(&cached, &backend_for_summary);
             if json {
                 crate::json_out::emit_json(&installed)?;
                 return Ok(());

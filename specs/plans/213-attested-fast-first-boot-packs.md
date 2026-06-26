@@ -141,6 +141,10 @@ The target user-visible shape is:
 
 - [ ] Add install-time or first `mvm dev up` preparation for the default runtime
       pack and builder pack when network and policy allow.
+      - [x] Add explicit `mvmctl bootstrap` pack preloading from operator-provided
+            runtime/builder pack sources and policy metadata, using the existing
+            quarantine-first pack cache installer and `MVM_SKIP_PACK_PREFETCH`
+            opt-out.
 - [ ] Add `mvm prepare <image-or-flake>` to resolve inputs, download or build
       packs, verify them, and optionally derive local snapshots/warm standbys.
       - [x] Add cache-backed `mvm prepare <image-or-flake>` resolution that
@@ -317,6 +321,9 @@ The target user-visible shape is:
       `mvm prepare`, `mvm cache status`, `mvm cache prune`, and `mvm explain`.
 - [ ] Update installation docs to describe install-time pack preparation,
       download sizes, cache locations, opt-out, and offline/mirror behavior.
+      - [x] Document explicit bootstrap pack preloading inputs and the
+            `MVM_SKIP_PACK_PREFETCH` opt-out in the installation guide and CLI
+            environment-variable reference.
 - [ ] Update architecture docs to show build plane vs run plane and the artifact
       attestation chain.
 - [ ] Update troubleshooting docs for cache verification failures, revocation

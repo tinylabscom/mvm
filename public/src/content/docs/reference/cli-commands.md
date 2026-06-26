@@ -81,7 +81,7 @@ templates, the guest-RPC surface, fleet-shaped workflows).
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl bootstrap` | Prepare the environment: host tooling **and pre-fetch the builder VM image** so the first `dev up` is fast (no first-run download/build on the hot path). `install.sh` runs this automatically unless `MVM_SKIP_BUILDER_PREFETCH=1`. Idempotent — safe to re-run |
+| `mvmctl bootstrap` | Prepare the environment: host tooling, pre-fetch the builder VM image, and optionally preload attested runtime/builder packs when `MVM_BOOTSTRAP_*` pack policy variables are set. `install.sh` runs this automatically unless `MVM_SKIP_BUILDER_PREFETCH=1`. Idempotent — safe to re-run |
 | `mvmctl bootstrap --production` | Production mode (skip Homebrew, assume Linux with apt) |
 | `mvmctl env bootstrap` | Same as `mvmctl bootstrap` (the `env`-grouped form) |
 | `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects Vz on macOS 26+ Apple Silicon and retries with libkrun when that auto-selected Vz builder path fails; native KVM is used on Linux. |
@@ -805,3 +805,13 @@ All commands accept these global options:
 | `MVM_TENANT_KEY_<ID>` | Compatibility hook for tenant-scoped key material consumed by shared policy/keystore primitives. Fleet operators should configure tenant keys through `mvmd`. | None |
 | `MVM_SKIP_COSIGN_VERIFY` | Set to `1` to bypass cosign signature verification on prebuilt-image downloads. Documented escape hatch only; never set in CI or production. | Unset |
 | `MVM_SKIP_HASH_VERIFY` | Set to `1` to bypass SHA-256 verification on prebuilt-image downloads. Documented escape hatch only; never set in CI or production. | Unset |
+| `MVM_SKIP_PACK_PREFETCH` | Set to `1` to skip bootstrap pack preloading even when `MVM_BOOTSTRAP_*` pack sources are set. | Unset |
+| `MVM_BOOTSTRAP_RUNTIME_PACK_SOURCE` | Local path or HTTPS URL for a runtime pack archive to install during `mvmctl bootstrap`. Requires pack policy variables below. | Unset |
+| `MVM_BOOTSTRAP_BUILDER_PACK_SOURCE` | Local path or HTTPS URL for a builder pack archive to install during `mvmctl bootstrap`. Requires pack policy variables below. | Unset |
+| `MVM_BOOTSTRAP_PACK_POLICY_HASH` | Local policy hash required when a bootstrap pack source is set. | None |
+| `MVM_BOOTSTRAP_PACK_BACKEND` | Backend policy for bootstrap pack verification: `firecracker`, `libkrun`, `vz`, `qemu`, or `docker`. | None |
+| `MVM_BOOTSTRAP_PACK_CHANNELS` | Comma-separated allowed artifact channel identities for bootstrap pack verification. | None |
+| `MVM_BOOTSTRAP_PACK_HOST_CAPABILITIES` | Optional comma-separated host capability labels exposed to bootstrap pack verification. | Empty |
+| `MVM_BOOTSTRAP_PACK_TRUST_STORE` | Optional trusted-publisher key directory for bootstrap pack verification. Defaults to the normal trusted publisher path. | Default trust store |
+| `MVM_BOOTSTRAP_PACK_REVOCATIONS` | Optional local revocation JSON file for bootstrap pack verification. | None |
+| `MVM_BOOTSTRAP_PACK_ALLOW_HTTP` | Set to `1` to allow plain-HTTP bootstrap pack downloads. HTTPS or local files are preferred. | Unset |
