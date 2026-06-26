@@ -46,6 +46,19 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream E runtime-pack launch selection: `mvm_core::packs::cache`
+      now exposes a prepared-launch selection API on top of the existing
+      prepare resolver. It returns a launchable pack only when the report is
+      ready, verified, fast-path eligible, and carries the required pack hash,
+      kind, and cache root; cache misses, setup-cache misses, and malformed
+      ready reports fail closed before any builder preparation callback exists.
+      Coverage: focused `mvm-core` tests for verified runtime-pack selection,
+      cache-miss refusal, setup-cache-miss refusal, and malformed ready-report
+      refusal. Workstream E remains open on binding the selected pack into
+      per-run CoW sandboxes, snapshots, warm claims, guest-agent dispatch, and
+      live latency evidence.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream D prepare UX output closeout: human `mvm prepare` reports now
       route through a pure line renderer with focused tests for ready
       fast-path, cache-miss next-step, and policy-refusal detail output.

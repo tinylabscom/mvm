@@ -188,6 +188,11 @@ The target user-visible shape is:
 
 - [ ] Add a launch path that consumes a verified runtime pack without booting the
       builder VM.
+      - [x] Add a core prepared-launch selection API that reuses
+            `PackCache::prepare_report`, returns a launchable pack only for
+            verified ready fast-path reports, and fails closed for cache misses,
+            setup-cache misses, and malformed ready reports without invoking
+            builder preparation.
 - [ ] Create per-run CoW sandboxes from prepared image/project artifacts.
 - [ ] Derive an agent-ready local runtime snapshot after verifying the runtime
       pack and before injecting secrets.

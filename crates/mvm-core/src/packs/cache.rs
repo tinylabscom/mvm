@@ -219,6 +219,53 @@ pub struct PackPrepareReport {
     pub detail: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedLaunchSelection {
+    pub pack: PreparedLaunchPack,
+    pub report: PackPrepareReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedLaunchPack {
+    pub input: PackPrepareInput,
+    pub pack_hash: Sha256Hex,
+    pub kind: PackKind,
+    pub cache_root: PathBuf,
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Error)]
+pub enum PackLaunchSelectionError {
+    #[error(transparent)]
+    Cache(#[from] Box<PackCacheError>),
+    #[error("prepared pack is not launchable: state={state:?} reason={reason:?}")]
+    NotReady {
+        state: PackPrepareState,
+        reason: Option<PackPrepareReason>,
+        report: Box<PackPrepareReport>,
+    },
+    #[error("ready prepared-pack report is missing {field}")]
+    MissingReadyField {
+        field: &'static str,
+        report: Box<PackPrepareReport>,
+    },
+}
+
+impl From<PackCacheError> for PackLaunchSelectionError {
+    fn from(error: PackCacheError) -> Self {
+        Self::Cache(Box::new(error))
+    }
+}
+
+impl PackLaunchSelectionError {
+    pub fn report(&self) -> Option<&PackPrepareReport> {
+        match self {
+            Self::Cache(_) => None,
+            Self::NotReady { report, .. } | Self::MissingReadyField { report, .. } => Some(report),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PackPrepareState {
@@ -646,6 +693,17 @@ impl PackCache {
         Ok(PackPrepareReport::missing(request))
     }
 
+    pub fn select_prepared_launch(
+        &self,
+        request: &PackPrepareRequest,
+        policy: &LocalPackPolicy,
+        trust: &dyn PackTrustStore,
+        revocations: &dyn PackRevocationChecker,
+    ) -> Result<PreparedLaunchSelection, PackLaunchSelectionError> {
+        let report = self.prepare_report(request, policy, trust, revocations)?;
+        PreparedLaunchSelection::from_prepare_report(report)
+    }
+
     fn ensure_layout(&self) -> Result<(), PackCacheError> {
         ensure_private_dir(&self.root)?;
         ensure_private_dir(&self.by_hash_dir())?;
@@ -871,6 +929,54 @@ impl PackPrepareReport {
 impl Default for PackPrepareSetupCacheReport {
     fn default() -> Self {
         Self::not_requested()
+    }
+}
+
+impl PreparedLaunchSelection {
+    pub fn from_prepare_report(
+        report: PackPrepareReport,
+    ) -> Result<Self, PackLaunchSelectionError> {
+        if report.state != PackPrepareState::Ready
+            || !report.fast_path_eligible
+            || report.builder_vm_required
+            || report.trust_state != PackTrustState::Verified
+        {
+            return Err(PackLaunchSelectionError::NotReady {
+                state: report.state,
+                reason: report.reason,
+                report: Box::new(report),
+            });
+        }
+
+        let Some(pack_hash) = report.pack_hash.clone() else {
+            return Err(PackLaunchSelectionError::MissingReadyField {
+                field: "pack_hash",
+                report: Box::new(report),
+            });
+        };
+        let Some(kind) = report.kind.clone() else {
+            return Err(PackLaunchSelectionError::MissingReadyField {
+                field: "kind",
+                report: Box::new(report),
+            });
+        };
+        let Some(cache_root) = report.cache_root.clone() else {
+            return Err(PackLaunchSelectionError::MissingReadyField {
+                field: "cache_root",
+                report: Box::new(report),
+            });
+        };
+
+        Ok(Self {
+            pack: PreparedLaunchPack {
+                input: report.input.clone(),
+                pack_hash,
+                kind,
+                cache_root,
+                size_bytes: report.size_bytes,
+            },
+            report,
+        })
     }
 }
 
@@ -1856,6 +1962,56 @@ mod tests {
     }
 
     #[test]
+    fn select_prepared_launch_returns_verified_runtime_pack() {
+        let f = fixture();
+        let cached = install_fixture_pack(&f);
+        let selection = f
+            .cache
+            .select_prepared_launch(
+                &prepare_request(oci_input(&f)),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepared launch selection");
+
+        assert_eq!(selection.report.state, PackPrepareState::Ready);
+        assert_eq!(selection.pack.pack_hash, cached.verified.pack_hash);
+        assert_eq!(selection.pack.kind, PackKind::Runtime);
+        assert_eq!(selection.pack.cache_root, cached.root);
+        assert_eq!(selection.pack.input.raw, oci_input(&f));
+        assert!(!selection.report.builder_vm_required);
+        assert!(selection.report.fast_path_eligible);
+    }
+
+    #[test]
+    fn prepared_launch_selection_refuses_malformed_ready_report() {
+        let f = fixture();
+        install_fixture_pack(&f);
+        let mut report = f
+            .cache
+            .prepare_report(
+                &prepare_request(oci_input(&f)),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepare report");
+        report.cache_root = None;
+
+        let error = PreparedLaunchSelection::from_prepare_report(report)
+            .expect_err("ready report without cache root is malformed");
+
+        match error {
+            PackLaunchSelectionError::MissingReadyField { field, report } => {
+                assert_eq!(field, "cache_root");
+                assert_eq!(report.state, PackPrepareState::Ready);
+            }
+            other => panic!("unexpected selection error: {other}"),
+        }
+    }
+
+    #[test]
     fn prepare_request_defaults_required_setup_cache_layers_for_older_json() {
         let request: PackPrepareRequest = serde_json::from_value(serde_json::json!({
             "input": {
@@ -1930,6 +2086,39 @@ mod tests {
         );
         assert!(report.builder_vm_required);
         assert!(!report.fast_path_eligible);
+    }
+
+    #[test]
+    fn select_prepared_launch_refuses_setup_cache_miss() {
+        let f = fixture();
+        install_fixture_pack(&f);
+        let mut layer = setup_cache_layer(&f);
+        layer.setup_command_hash = hash("changed-setup");
+
+        let error = f
+            .cache
+            .select_prepared_launch(
+                &prepare_request_with_setup_cache(oci_input(&f), layer),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect_err("setup-cache miss is not launchable");
+
+        match error {
+            PackLaunchSelectionError::NotReady {
+                state,
+                reason,
+                report,
+            } => {
+                assert_eq!(state, PackPrepareState::RequiresBuilder);
+                assert_eq!(reason, Some(PackPrepareReason::SetupCacheMiss));
+                assert!(report.builder_vm_required);
+                assert!(!report.fast_path_eligible);
+                assert_eq!(report.trust_state, PackTrustState::Verified);
+            }
+            other => panic!("unexpected selection error: {other}"),
+        }
     }
 
     #[test]
@@ -2073,6 +2262,37 @@ mod tests {
         assert_eq!(report.reason, Some(PackPrepareReason::MissingPack));
         assert!(report.builder_vm_required);
         assert!(report.download_required);
+    }
+
+    #[test]
+    fn select_prepared_launch_refuses_cache_miss_without_builder_callback() {
+        let f = fixture();
+        let error = f
+            .cache
+            .select_prepared_launch(
+                &prepare_request(format!(
+                    "ghcr.io/tinylabs/other@{}",
+                    digest("other").as_str()
+                )),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect_err("cache miss is not launchable");
+
+        match error {
+            PackLaunchSelectionError::NotReady {
+                state,
+                reason,
+                report,
+            } => {
+                assert_eq!(state, PackPrepareState::Missing);
+                assert_eq!(reason, Some(PackPrepareReason::MissingPack));
+                assert!(report.builder_vm_required);
+                assert!(report.download_required);
+            }
+            other => panic!("unexpected selection error: {other}"),
+        }
     }
 
     #[test]
