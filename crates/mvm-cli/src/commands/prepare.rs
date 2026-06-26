@@ -17,8 +17,9 @@ use mvm_oci::{ImageReference, LinuxPlatform, OciManifestFetcher};
 
 use super::Cli;
 use super::ops::cache::{
-    PackArchiveSource, PackBackendArg, PackPolicyArgs, PackPolicyModeArg, PackRevocationSource,
-    build_pack_policy, load_pack_archive_bytes, load_pack_revocations,
+    PackBackendArg, PackMirrorBase, PackPolicyArgs, PackPolicyModeArg, build_pack_policy,
+    load_pack_archive_bytes, load_pack_revocations, resolve_pack_archive_source,
+    resolve_pack_revocation_source,
 };
 use super::shared::{human_bytes, resolve_flake_ref};
 
@@ -76,6 +77,10 @@ pub(in crate::commands) struct Args {
     /// Require prepared packs to declare this mirror identity.
     #[arg(long = "mirror-identity", value_name = "MIRROR")]
     pub mirror_identity: Option<String>,
+    /// Resolve relative pack and revocation sources against this mirror base.
+    /// HTTPS is preferred; plain HTTP still requires `--allow-http`.
+    #[arg(long = "pack-mirror-base", value_name = "BASE")]
+    pub pack_mirror_base: Option<String>,
     /// Override the trusted publisher key directory.
     #[arg(long, value_name = "DIR")]
     pub trust_store: Option<PathBuf>,
@@ -128,10 +133,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         None => FsTrustStore::default_path()
             .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?,
     };
+    let mirror_base = args.pack_mirror_base.as_deref().map(PackMirrorBase::parse);
     let revocation_source = args
         .revocations_source
         .as_deref()
-        .map(PackRevocationSource::parse);
+        .map(|source| resolve_pack_revocation_source(source, mirror_base.as_ref()))
+        .transpose()?;
     let revocations = load_pack_revocations(
         args.revocations.as_deref(),
         revocation_source.as_ref(),
@@ -141,7 +148,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     if let Some(source) = args.pack_source.as_deref()
         && !args.dry_run
     {
-        let source = PackArchiveSource::parse(source);
+        let source = resolve_pack_archive_source(source, mirror_base.as_ref())?;
         let archive_bytes = load_pack_archive_bytes(&source, args.allow_http)?;
         let cached = cache
             .install_from_archive_reader(Cursor::new(archive_bytes), &policy, &trust, &revocations)
@@ -578,6 +585,7 @@ mod tests {
             policy_mode: PackPolicyModeArg::OnlineDefault,
             channel_signing_keys: Vec::new(),
             mirror_identity: None,
+            pack_mirror_base: None,
             trust_store: None,
             revocations: None,
             revocations_source: None,

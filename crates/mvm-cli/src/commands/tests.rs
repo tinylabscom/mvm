@@ -3165,6 +3165,7 @@ fn test_cache_install_pack_parses_policy_flags() {
                     policy_mode,
                     channel_signing_keys,
                     mirror_identity,
+                    pack_mirror_base,
                     trust_store,
                     revocations,
                     revocations_source,
@@ -3183,14 +3184,55 @@ fn test_cache_install_pack_parses_policy_flags() {
             assert_eq!(policy_mode, PackPolicyModeArg::OnlineDefault);
             assert!(channel_signing_keys.is_empty());
             assert!(mirror_identity.is_none());
-            assert_eq!(trust_store.unwrap(), std::path::PathBuf::from("/tmp/trust"));
+            assert!(pack_mirror_base.is_none());
             assert_eq!(
-                revocations.unwrap(),
-                std::path::PathBuf::from("/tmp/revocations.json")
+                trust_store.as_deref(),
+                Some(std::path::Path::new("/tmp/trust"))
+            );
+            assert_eq!(
+                revocations.as_deref(),
+                Some(std::path::Path::new("/tmp/revocations.json"))
             );
             assert!(revocations_source.is_none());
             assert!(allow_http);
             assert!(json);
+        }
+        _ => panic!("Expected Cache InstallPack command"),
+    }
+}
+
+#[test]
+fn test_cache_install_pack_parses_pack_mirror_base() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "cache",
+        "install-pack",
+        "runtime/linux-aarch64.tar",
+        "--policy-hash",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--backend",
+        "libkrun",
+        "--channel",
+        "stable",
+        "--pack-mirror-base",
+        "https://mirror.example.test/mvm/packs",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Commands::Cache(cache::Args {
+            action:
+                CacheAction::InstallPack {
+                    source,
+                    pack_mirror_base,
+                    ..
+                },
+        }) => {
+            assert_eq!(source.as_ref(), "runtime/linux-aarch64.tar");
+            assert_eq!(
+                pack_mirror_base.as_deref(),
+                Some("https://mirror.example.test/mvm/packs")
+            );
         }
         _ => panic!("Expected Cache InstallPack command"),
     }
@@ -3327,6 +3369,7 @@ fn test_prepare_dry_run_parses_policy_and_resolution_flags() {
             policy_mode,
             channel_signing_keys,
             mirror_identity,
+            pack_mirror_base,
             trust_store,
             revocations,
             revocations_source,
@@ -3357,6 +3400,7 @@ fn test_prepare_dry_run_parses_policy_and_resolution_flags() {
             assert_eq!(policy_mode, PackPolicyModeArg::OnlineDefault);
             assert!(channel_signing_keys.is_empty());
             assert!(mirror_identity.is_none());
+            assert!(pack_mirror_base.is_none());
             assert_eq!(trust_store.unwrap(), std::path::PathBuf::from("/tmp/trust"));
             assert_eq!(
                 revocations.unwrap(),
@@ -3365,6 +3409,42 @@ fn test_prepare_dry_run_parses_policy_and_resolution_flags() {
             assert!(revocations_source.is_none());
             assert!(allow_http);
             assert!(json);
+        }
+        _ => panic!("Expected Prepare command"),
+    }
+}
+
+#[test]
+fn test_prepare_parses_pack_mirror_base() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "prepare",
+        "ghcr.io/tinylabs/mvm@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--dry-run",
+        "--pack-source",
+        "runtime/linux-aarch64.tar",
+        "--policy-hash",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--backend",
+        "libkrun",
+        "--channel",
+        "stable",
+        "--pack-mirror-base",
+        "https://mirror.example.test/mvm/packs",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Commands::Prepare(prepare::Args {
+            pack_source,
+            pack_mirror_base,
+            ..
+        }) => {
+            assert_eq!(pack_source.as_deref(), Some("runtime/linux-aarch64.tar"));
+            assert_eq!(
+                pack_mirror_base.as_deref(),
+                Some("https://mirror.example.test/mvm/packs")
+            );
         }
         _ => panic!("Expected Prepare command"),
     }

@@ -117,13 +117,17 @@ pub(in crate::commands) enum CacheAction {
         /// for enterprise mirror-only operation.
         #[arg(long = "mirror-identity", value_name = "MIRROR")]
         mirror_identity: Option<String>,
+        /// Resolve relative pack and revocation sources against this mirror
+        /// base. HTTPS is preferred; plain HTTP still requires `--allow-http`.
+        #[arg(long = "pack-mirror-base", value_name = "BASE", value_parser = parse_boxed_str)]
+        pack_mirror_base: Option<Box<str>>,
         /// Override the trusted publisher key directory. Defaults to
         /// `$MVM_DATA_DIR/trusted-publishers/`.
-        #[arg(long, value_name = "DIR")]
-        trust_store: Option<PathBuf>,
+        #[arg(long, value_name = "DIR", value_parser = parse_boxed_path)]
+        trust_store: Option<Box<Path>>,
         /// Optional local revocation JSON file for offline refused pack hashes.
-        #[arg(long, value_name = "FILE")]
-        revocations: Option<PathBuf>,
+        #[arg(long, value_name = "FILE", value_parser = parse_boxed_path)]
+        revocations: Option<Box<Path>>,
         /// Optional local or HTTPS revocation JSON source. Plain HTTP is
         /// refused unless `--allow-http` is passed.
         #[arg(
@@ -295,6 +299,90 @@ impl PackArchiveSource {
 
 fn parse_boxed_str(value: &str) -> Result<Box<str>, std::convert::Infallible> {
     Ok(value.into())
+}
+
+fn parse_boxed_path(value: &str) -> Result<Box<Path>, std::convert::Infallible> {
+    Ok(PathBuf::from(value).into_boxed_path())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::commands) enum PackMirrorBase {
+    File(PathBuf),
+    Https(String),
+    Http(String),
+}
+
+impl PackMirrorBase {
+    pub(in crate::commands) fn parse(base: &str) -> Self {
+        if base.starts_with("https://") {
+            Self::Https(base.to_string())
+        } else if base.starts_with("http://") {
+            Self::Http(base.to_string())
+        } else {
+            Self::File(PathBuf::from(base))
+        }
+    }
+}
+
+pub(in crate::commands) fn resolve_pack_archive_source(
+    source: &str,
+    mirror_base: Option<&PackMirrorBase>,
+) -> Result<PackArchiveSource> {
+    if source_has_scheme(source) || Path::new(source).is_absolute() {
+        return Ok(PackArchiveSource::parse(source));
+    }
+    let Some(mirror_base) = mirror_base else {
+        return Ok(PackArchiveSource::parse(source));
+    };
+    validate_mirror_relative_source(source)?;
+    Ok(match mirror_base {
+        PackMirrorBase::File(base) => PackArchiveSource::File(base.join(source)),
+        PackMirrorBase::Https(base) => PackArchiveSource::Https(join_mirror_url(base, source)),
+        PackMirrorBase::Http(base) => PackArchiveSource::Http(join_mirror_url(base, source)),
+    })
+}
+
+pub(in crate::commands) fn resolve_pack_revocation_source(
+    source: &str,
+    mirror_base: Option<&PackMirrorBase>,
+) -> Result<PackRevocationSource> {
+    if source_has_scheme(source) || Path::new(source).is_absolute() {
+        return Ok(PackRevocationSource::parse(source));
+    }
+    let Some(mirror_base) = mirror_base else {
+        return Ok(PackRevocationSource::parse(source));
+    };
+    validate_mirror_relative_source(source)?;
+    Ok(match mirror_base {
+        PackMirrorBase::File(base) => PackRevocationSource::File(base.join(source)),
+        PackMirrorBase::Https(base) => PackRevocationSource::Https(join_mirror_url(base, source)),
+        PackMirrorBase::Http(base) => PackRevocationSource::Http(join_mirror_url(base, source)),
+    })
+}
+
+fn source_has_scheme(source: &str) -> bool {
+    source.starts_with("https://") || source.starts_with("http://")
+}
+
+fn validate_mirror_relative_source(source: &str) -> Result<()> {
+    if source.trim().is_empty() {
+        anyhow::bail!("mirror-relative pack source must not be empty");
+    }
+    if Path::new(source)
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        anyhow::bail!("mirror-relative pack source must not contain '..'");
+    }
+    Ok(())
+}
+
+fn join_mirror_url(base: &str, source: &str) -> String {
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        source.trim_start_matches('/')
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -969,13 +1057,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             policy_mode,
             channel_signing_keys,
             mirror_identity,
+            pack_mirror_base,
             trust_store,
             revocations,
             revocations_source,
             allow_http,
             json,
         } => {
-            let source = PackArchiveSource::parse(&source);
+            let mirror_base = pack_mirror_base.as_deref().map(PackMirrorBase::parse);
+            let source = resolve_pack_archive_source(&source, mirror_base.as_ref())?;
             let backend_for_summary = backend.into();
             let source_kind = source.audit_kind();
             let cached = install_pack_from_source(InstallPackFromSourceArgs {
@@ -989,11 +1079,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     channel_signing_keys,
                     mirror_identity,
                 },
-                trust_store,
-                revocations,
+                trust_store: trust_store.map(|path| path.into_path_buf()),
+                revocations: revocations.map(|path| path.into_path_buf()),
                 revocations_source: revocations_source
                     .as_ref()
-                    .map(|source| PackRevocationSource::parse(source)),
+                    .map(|source| resolve_pack_revocation_source(source, mirror_base.as_ref()))
+                    .transpose()?,
                 allow_http,
             })?;
             mvm_core::audit_emit!(
@@ -2238,6 +2329,57 @@ mod tests {
             PackArchiveSource::parse("http://example.test/pack.tar"),
             PackArchiveSource::Http("http://example.test/pack.tar".to_string())
         );
+    }
+
+    #[test]
+    fn mirror_base_resolves_relative_pack_and_revocation_sources() {
+        let mirror = PackMirrorBase::parse("https://mirror.example.test/mvm/packs/");
+
+        assert_eq!(
+            resolve_pack_archive_source("runtime/linux-aarch64.tar", Some(&mirror)).unwrap(),
+            PackArchiveSource::Https(
+                "https://mirror.example.test/mvm/packs/runtime/linux-aarch64.tar".to_string()
+            )
+        );
+        assert_eq!(
+            resolve_pack_revocation_source("revocations/stable.json", Some(&mirror)).unwrap(),
+            PackRevocationSource::Https(
+                "https://mirror.example.test/mvm/packs/revocations/stable.json".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn mirror_base_resolves_relative_sources_under_local_base() {
+        let mirror = PackMirrorBase::parse("/srv/mvm-packs");
+
+        assert_eq!(
+            resolve_pack_archive_source("runtime/linux-aarch64.tar", Some(&mirror)).unwrap(),
+            PackArchiveSource::File(PathBuf::from("/srv/mvm-packs/runtime/linux-aarch64.tar"))
+        );
+    }
+
+    #[test]
+    fn mirror_base_leaves_explicit_sources_unchanged() {
+        let mirror = PackMirrorBase::parse("https://mirror.example.test/mvm/packs");
+
+        assert_eq!(
+            resolve_pack_archive_source("https://origin.example.test/runtime.tar", Some(&mirror))
+                .unwrap(),
+            PackArchiveSource::Https("https://origin.example.test/runtime.tar".to_string())
+        );
+        assert_eq!(
+            resolve_pack_archive_source("/tmp/runtime.tar", Some(&mirror)).unwrap(),
+            PackArchiveSource::File(PathBuf::from("/tmp/runtime.tar"))
+        );
+    }
+
+    #[test]
+    fn mirror_base_rejects_parent_relative_sources() {
+        let mirror = PackMirrorBase::parse("https://mirror.example.test/mvm/packs");
+        let err = resolve_pack_archive_source("../runtime.tar", Some(&mirror)).unwrap_err();
+
+        assert!(err.to_string().contains(".."));
     }
 
     #[test]

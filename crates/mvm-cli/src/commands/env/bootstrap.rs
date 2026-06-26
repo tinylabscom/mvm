@@ -13,8 +13,9 @@ use mvm_core::user_config::MvmConfig;
 use super::Cli;
 use super::setup::run_setup_steps;
 use crate::commands::ops::cache::{
-    InstallPackFromSourceArgs, PackArchiveSource, PackBackendArg, PackPolicyArgs,
-    PackPolicyModeArg, PackRevocationSource, install_pack_from_source, pack_kind_name,
+    InstallPackFromSourceArgs, PackBackendArg, PackMirrorBase, PackPolicyArgs, PackPolicyModeArg,
+    install_pack_from_source, pack_kind_name, resolve_pack_archive_source,
+    resolve_pack_revocation_source,
 };
 
 const SKIP_PACK_PREFETCH_ENV: &str = "MVM_SKIP_PACK_PREFETCH";
@@ -27,6 +28,7 @@ const PACK_HOST_CAPABILITIES_ENV: &str = "MVM_BOOTSTRAP_PACK_HOST_CAPABILITIES";
 const PACK_POLICY_MODE_ENV: &str = "MVM_BOOTSTRAP_PACK_POLICY_MODE";
 const PACK_CHANNEL_SIGNING_KEYS_ENV: &str = "MVM_BOOTSTRAP_PACK_CHANNEL_SIGNING_KEYS";
 const PACK_MIRROR_IDENTITY_ENV: &str = "MVM_BOOTSTRAP_PACK_MIRROR_IDENTITY";
+const PACK_MIRROR_BASE_ENV: &str = "MVM_BOOTSTRAP_PACK_MIRROR_BASE";
 const PACK_TRUST_STORE_ENV: &str = "MVM_BOOTSTRAP_PACK_TRUST_STORE";
 const PACK_REVOCATIONS_ENV: &str = "MVM_BOOTSTRAP_PACK_REVOCATIONS";
 const PACK_REVOCATIONS_SOURCE_ENV: &str = "MVM_BOOTSTRAP_PACK_REVOCATIONS_SOURCE";
@@ -63,12 +65,13 @@ fn bootstrap_default_packs_from_env() -> Result<()> {
     let Some(config) = BootstrapPackConfig::from_env()? else {
         return Ok(());
     };
+    let mirror_base = config.mirror_base.as_deref().map(PackMirrorBase::parse);
     for (label, source) in config.sources() {
         ui::info(&format!(
             "Installing default {label} pack into the attested cache..."
         ));
         let cached = install_pack_from_source(InstallPackFromSourceArgs {
-            source: PackArchiveSource::parse(source),
+            source: resolve_pack_archive_source(source, mirror_base.as_ref())?,
             policy: PackPolicyArgs {
                 backend: config.backend,
                 policy_hash: config.policy_hash.clone(),
@@ -83,7 +86,8 @@ fn bootstrap_default_packs_from_env() -> Result<()> {
             revocations_source: config
                 .revocations_source
                 .as_deref()
-                .map(PackRevocationSource::parse),
+                .map(|source| resolve_pack_revocation_source(source, mirror_base.as_ref()))
+                .transpose()?,
             allow_http: config.allow_http,
         })
         .with_context(|| format!("installing default {label} pack during bootstrap"))?;
@@ -114,6 +118,7 @@ struct BootstrapPackConfig {
     policy_mode: PackPolicyModeArg,
     channel_signing_keys: Vec<String>,
     mirror_identity: Option<String>,
+    mirror_base: Option<String>,
     trust_store: Option<PathBuf>,
     revocations: Option<PathBuf>,
     revocations_source: Option<String>,
@@ -164,6 +169,7 @@ impl BootstrapPackConfig {
                 .map(|value| split_env_list(&value))
                 .unwrap_or_default(),
             mirror_identity: non_empty_env(&get, PACK_MIRROR_IDENTITY_ENV),
+            mirror_base: non_empty_env(&get, PACK_MIRROR_BASE_ENV),
             trust_store: non_empty_env(&get, PACK_TRUST_STORE_ENV).map(PathBuf::from),
             revocations,
             revocations_source,
@@ -332,6 +338,7 @@ mod tests {
             vec!["stable=0123456789abcdef0123456789abcdef"]
         );
         assert_eq!(config.mirror_identity.as_deref(), Some("enterprise-mirror"));
+        assert_eq!(config.mirror_base, None);
         assert_eq!(config.trust_store, Some(PathBuf::from("/tmp/trust")));
         assert_eq!(
             config.revocations,
@@ -345,6 +352,35 @@ mod tests {
                 ("runtime", "https://example.test/runtime.tar.gz"),
                 ("builder", "/tmp/builder.tar.gz")
             ]
+        );
+    }
+
+    #[test]
+    fn bootstrap_pack_config_parses_mirror_base() {
+        let config = BootstrapPackConfig::from_lookup(lookup(BTreeMap::from([
+            (RUNTIME_PACK_SOURCE_ENV, "runtime/linux-aarch64.tar.gz"),
+            (
+                PACK_POLICY_HASH_ENV,
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+            (PACK_BACKEND_ENV, "libkrun"),
+            (PACK_CHANNELS_ENV, "stable"),
+            (
+                PACK_MIRROR_BASE_ENV,
+                "https://mirror.example.test/mvm/packs",
+            ),
+            (PACK_REVOCATIONS_SOURCE_ENV, "revocations/stable.json"),
+        ])))
+        .expect("config")
+        .expect("present");
+
+        assert_eq!(
+            config.mirror_base.as_deref(),
+            Some("https://mirror.example.test/mvm/packs")
+        );
+        assert_eq!(
+            config.revocations_source.as_deref(),
+            Some("revocations/stable.json")
         );
     }
 

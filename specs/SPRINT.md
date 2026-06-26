@@ -46,6 +46,21 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream I enterprise mirror source slice: `mvm prepare`,
+      `mvmctl cache install-pack`, and bootstrap pack preload now resolve
+      relative pack and revocation metadata sources under an operator-provided
+      mirror base (`--pack-mirror-base` or
+      `MVM_BOOTSTRAP_PACK_MIRROR_BASE`). Explicit local/HTTP(S) sources pass
+      through unchanged, mirror-relative `..` components are refused before
+      download or file read, and existing `--allow-http` policy still gates
+      plain-HTTP mirror downloads. Coverage: focused cache helper tests for
+      HTTPS/local mirror joins, explicit-source passthrough, and traversal
+      refusal; CLI parser tests for prepare/cache mirror flags; bootstrap
+      config parsing; and docs/status updates. Workstream I is closed for the
+      policy, revocation, mirror, and offline-operation scope currently
+      represented in Plan 213.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream I revocation fetch slice: `mvm prepare`, `mvmctl cache
       install-pack`, and bootstrap pack preload now accept local/HTTPS
       revocation metadata sources through `--revocations-source` and
@@ -54,8 +69,8 @@ plan 25 sequences the work into six independently-shippable workstreams.
       configurations. Coverage: focused cache helper tests for HTTPS fetch,
       plain-HTTP refusal, and local/source conflict handling; parser tests for
       prepare/cache source flags; bootstrap config conflict coverage; and
-      docs/status updates. Workstream I remains open on enterprise mirror
-      source resolution and full revocation/mirror operations docs.
+      docs/status updates. The follow-up enterprise mirror source slice closes
+      the remaining revocation/mirror operations gap.
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream I revocation freshness slice: local pack revocation metadata
