@@ -543,3 +543,76 @@ jobs:
             --assets-dir release-assets \
             --cosign \
             --expect-version "${TAG_NAME#v}"
+
+  reproduce-release-packs:
+    needs: [release]
+    if: ${{ needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Download published release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          mkdir -p release-assets
+          gh release download "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" --dir release-assets
+
+      - name: Rebuild one runtime pack and one builder pack from source pins
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p repro-assets
+
+          nix build "./nix/images/builder-vm#packages.x86_64-linux.default" \
+            --no-link --print-out-paths > /tmp/repro-builder-store-path.txt
+          BUILDER_STORE=$(head -1 /tmp/repro-builder-store-path.txt)
+          cp "$BUILDER_STORE/vmlinux" "repro-assets/builder-vm-vmlinux-x86_64"
+          cp "$BUILDER_STORE/rootfs.ext4" "repro-assets/builder-vm-rootfs-x86_64.ext4"
+          if [ -f "$BUILDER_STORE/cmdline.txt" ]; then
+            cp -L "$BUILDER_STORE/cmdline.txt" "repro-assets/builder-vm-x86_64.cmdline.txt"
+          fi
+          if [ -f "$BUILDER_STORE/manifest.json" ]; then
+            cp -L "$BUILDER_STORE/manifest.json" "repro-assets/builder-vm-x86_64.manifest.json"
+          fi
+
+          nix build "./nix/images/runtime-overlay#packages.x86_64-linux.default" \
+            --no-link --print-out-paths > /tmp/repro-runtime-store-path.txt
+          RUNTIME_STORE=$(head -1 /tmp/repro-runtime-store-path.txt)
+          cp -L "$RUNTIME_STORE/overlay.ext4" "repro-assets/runtime-overlay-x86_64.ext4"
+          cp -L "$RUNTIME_STORE/overlay.verity" "repro-assets/runtime-overlay-x86_64.verity"
+          cp -L "$RUNTIME_STORE/overlay.roothash" "repro-assets/runtime-overlay-x86_64.roothash"
+          cp -L "$RUNTIME_STORE/VERSION" "repro-assets/runtime-overlay-x86_64.VERSION"
+
+          nix build "./nix/images/default-tenant#packages.x86_64-linux.default" \
+            --impure --no-link --print-out-paths > /tmp/repro-default-store-path.txt
+          DEFAULT_STORE=$(head -1 /tmp/repro-default-store-path.txt)
+          cp -L "$DEFAULT_STORE/vmlinux" "repro-assets/default-microvm-vmlinux-x86_64"
+          cp -L "$DEFAULT_STORE/rootfs.ext4" "repro-assets/default-microvm-rootfs-x86_64.ext4"
+          cp -L "$DEFAULT_STORE/rootfs.verity" "repro-assets/default-microvm-rootfs-x86_64.verity"
+          cp -L "$DEFAULT_STORE/rootfs.roothash" "repro-assets/default-microvm-rootfs-x86_64.roothash"
+          cp -L "$DEFAULT_STORE/mvm-meta.json" "repro-assets/default-microvm-meta-x86_64.json"
+
+          bash packaging/release/build-release-packs.sh \
+            --assets-dir repro-assets \
+            --version "${TAG_NAME#v}" \
+            --git-revision "${GITHUB_SHA}" \
+            --sbom release-assets/sbom.cdx.json \
+            --runtime-packs "x86_64:firecracker" \
+            --builder-arches "x86_64"
+
+          for pack in mvm-runtime-pack-x86_64-firecracker mvm-builder-pack-x86_64; do
+            want=$(awk '{print $1}' "release-assets/${pack}.tar.gz.sha256")
+            got=$(sha256sum "repro-assets/${pack}.tar.gz" | awk '{print $1}')
+            if [ "$want" != "$got" ]; then
+              echo "::error::${pack} reproducibility mismatch: published=${want} rebuilt=${got}" >&2
+              exit 1
+            fi
+          done
+          echo "release pack reproducibility checks passed"

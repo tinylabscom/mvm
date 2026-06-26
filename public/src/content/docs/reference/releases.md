@@ -47,6 +47,11 @@ gate: it fails the release if a pack archive, checksum, manifest, provenance
 file, signature bundle, SBOM reference, or expected version field is missing or
 inconsistent.
 
+The release workflow also rebuilds one representative runtime pack
+(`mvm-runtime-pack-x86_64-firecracker`) and one builder pack
+(`mvm-builder-pack-x86_64`) from the tag's source pins and compares the rebuilt
+archive hashes with the published `.sha256` sidecars.
+
 ## Verifying provenance
 
 All release tarballs and pack manifests/provenance files are cosign-signed

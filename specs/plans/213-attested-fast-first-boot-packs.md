@@ -103,7 +103,7 @@ The target user-visible shape is:
       release pack.
 - [x] Add release verification checks that fail closed when any pack lacks a
       manifest, signature bundle, checksum, SBOM, or expected version metadata.
-- [ ] Add a reproducibility verification job that rebuilds at least one published
+- [x] Add a reproducibility verification job that rebuilds at least one published
       runtime pack and one published builder pack from source pins and compares
       output hashes.
 - [x] Document the release artifact matrix and channel semantics in the release

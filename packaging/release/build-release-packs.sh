@@ -161,7 +161,17 @@ build_archive() {
   for rel in "$@"; do
     cp "$ASSETS_DIR/$rel" "$tmp/$name/$rel"
   done
-  tar czf "$ASSETS_DIR/$name.tar.gz" -C "$tmp" "$name"
+  if tar --version 2>/dev/null | grep -qi "gnu tar"; then
+    tar --sort=name \
+      --mtime="UTC 1970-01-01" \
+      --owner=0 \
+      --group=0 \
+      --numeric-owner \
+      -czf "$ASSETS_DIR/$name.tar.gz" \
+      -C "$tmp" "$name"
+  else
+    tar czf "$ASSETS_DIR/$name.tar.gz" -C "$tmp" "$name"
+  fi
   rm -rf "$tmp"
   sha256_of "$ASSETS_DIR/$name.tar.gz" | awk -v file="$name.tar.gz" '{print $1 "  " file}' > "$ASSETS_DIR/$name.tar.gz.sha256"
 }

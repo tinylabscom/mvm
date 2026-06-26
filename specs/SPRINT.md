@@ -53,10 +53,12 @@ plan 25 sequences the work into six independently-shippable workstreams.
       archives plus pack metadata with cosign, and makes the post-publish
       release verifier fail closed on missing pack archives, checksums,
       manifests, provenance, signature bundles, SBOM references, or version
-      metadata. Coverage: `packaging/release/test-release-pack-gate.sh` covers
-      the happy path plus missing pack signature bundle, mismatched pack
-      version metadata, and missing pack input failure. The pack
-      rebuild-and-compare reproducibility job remains open.
+      metadata. The release workflow also rebuilds one representative
+      x86_64 runtime pack and one x86_64 builder pack from source pins and
+      compares archive hashes with the published sidecars. Coverage:
+      `packaging/release/test-release-pack-gate.sh` covers the happy path plus
+      missing pack signature bundle, mismatched pack version metadata, and
+      missing pack input failure. Workstream B is closed.
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream H explainability: `mvmctl explain <run-id>` now verifies the
