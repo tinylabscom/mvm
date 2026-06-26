@@ -46,6 +46,18 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream I revocation fetch slice: `mvm prepare`, `mvmctl cache
+      install-pack`, and bootstrap pack preload now accept local/HTTPS
+      revocation metadata sources through `--revocations-source` and
+      `MVM_BOOTSTRAP_PACK_REVOCATIONS_SOURCE`, parse the same fail-closed
+      revocation schema, and refuse ambiguous local-file plus source
+      configurations. Coverage: focused cache helper tests for HTTPS fetch,
+      plain-HTTP refusal, and local/source conflict handling; parser tests for
+      prepare/cache source flags; bootstrap config conflict coverage; and
+      docs/status updates. Workstream I remains open on enterprise mirror
+      source resolution and full revocation/mirror operations docs.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream I revocation freshness slice: local pack revocation metadata
       now optionally carries `fetched_at` and `max_age_seconds`; stale metadata
       fails closed during pack verification and prepare reports the stable
@@ -55,8 +67,8 @@ plan 25 sequences the work into six independently-shippable workstreams.
       stale revocation refusal, focused prepare/cache test for stale metadata
       mapping to a refusal, and focused CLI parser tests for stale, fresh, and
       malformed local revocation metadata. Workstream I remains open on
-      network revocation metadata fetching, enterprise mirror source
-      resolution, and full revocation/mirror operations docs.
+      enterprise mirror source resolution and full revocation/mirror operations
+      docs.
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream I policy/mirror slice: local pack verification now supports
@@ -70,9 +82,8 @@ plan 25 sequences the work into six independently-shippable workstreams.
       signer, closed rotation windows, mirror mismatch, and local-rebuild
       refusal; focused cache test for local-rebuild-required prepare routing;
       focused CLI/bootstrap parser tests for policy mode, channel pin, mirror,
-      and malformed inputs. Workstream I remains open on network revocation
-      metadata fetching, enterprise mirror source resolution, and full
-      revocation/mirror docs.
+      and malformed inputs. Workstream I remains open on enterprise mirror
+      source resolution and full revocation/mirror docs.
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream D install/bootstrap preparation: `mvmctl bootstrap` can now

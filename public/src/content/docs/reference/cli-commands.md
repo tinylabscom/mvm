@@ -712,7 +712,7 @@ flow and the distinction between build time and runtime boot time.
 | `mvmctl prepare <OCI_IMAGE> --resolve-oci-digest ...` | Resolve a mutable OCI tag to a Linux platform digest before checking pack eligibility. Without this explicit flag, mutable OCI inputs remain fail-closed and report `mutable_input` |
 | `mvmctl prepare <FLAKE> --resolve-flake-lock ...` | Hash a local `flake.lock` before checking pack eligibility, so cached packs must match both the resolved flake reference and lock hash. Remote flake lock resolution is refused until the builder-VM resolver path is wired through |
 | `mvmctl prepare <IMAGE_OR_FLAKE> --pack-source <SOURCE> ...` | Install a local or HTTPS attested pack archive through the same quarantine/verification/cache promotion path as `cache install-pack`, then resolve whether it satisfies the requested input. Plain HTTP requires `--allow-http` |
-| `mvmctl prepare <IMAGE_OR_FLAKE> --input-kind <oci-image\|flake\|local-path> --pack-kind <runtime\|builder\|image-project> ...` | Override input-kind inference or expected pack kind. `--pack-hash <SHA256>`, repeated `--host-capability`, repeated `--channel-signing-key`, `--mirror-identity <MIRROR>`, `--trust-store <DIR>`, `--revocations <FILE>`, and `--json` are also supported |
+| `mvmctl prepare <IMAGE_OR_FLAKE> --input-kind <oci-image\|flake\|local-path> --pack-kind <runtime\|builder\|image-project> ...` | Override input-kind inference or expected pack kind. `--pack-hash <SHA256>`, repeated `--host-capability`, repeated `--channel-signing-key`, `--mirror-identity <MIRROR>`, `--trust-store <DIR>`, `--revocations <FILE>`, `--revocations-source <SOURCE>`, and `--json` are also supported |
 | `mvmctl explain <RUN_ID>` | Verify the local hash-chained launch-attestation log, find the requested run id, and print the launch source, pack hashes, policy decision, derivation source, backend identity, command digest, result, and log-chain metadata |
 | `mvmctl explain <RUN_ID> --json` | Emit the verified attestation record plus sequence, previous-hash, entry-hash, and log-head metadata as machine-readable JSON |
 
@@ -723,7 +723,7 @@ flow and the distinction between build time and runtime boot time.
 | `mvmctl cache info` | Show cache directory path, disk usage, and a per-entry footprint breakdown (unrecognized entries are flagged) |
 | `mvmctl cache status` | Show local attested pack cache inventory, metadata readiness, expiry, revocation-check status, and instant-launch eligibility state |
 | `mvmctl cache status --json` | Emit the attested pack cache inventory as machine-readable JSON |
-| `mvmctl cache install-pack <SOURCE> --policy-hash <SHA256> --backend <firecracker\|libkrun\|vz\|qemu\|docker> --channel <CHANNEL>` | Read a local or HTTPS attested pack tar archive, verify manifest hashes/signatures/trust metadata/revocation policy, and atomically install it into the pack cache. Repeat `--channel` and `--host-capability` as needed; use `--policy-mode`, repeated `--channel-signing-key CHANNEL=KEY_ID`, `--mirror-identity <MIRROR>`, `--trust-store <DIR>`, or `--revocations <FILE>` for local policy inputs. Plain HTTP requires `--allow-http` |
+| `mvmctl cache install-pack <SOURCE> --policy-hash <SHA256> --backend <firecracker\|libkrun\|vz\|qemu\|docker> --channel <CHANNEL>` | Read a local or HTTPS attested pack tar archive, verify manifest hashes/signatures/trust metadata/revocation policy, and atomically install it into the pack cache. Repeat `--channel` and `--host-capability` as needed; use `--policy-mode`, repeated `--channel-signing-key CHANNEL=KEY_ID`, `--mirror-identity <MIRROR>`, `--trust-store <DIR>`, `--revocations <FILE>`, or `--revocations-source <SOURCE>` for local policy inputs. Plain HTTP requires `--allow-http` |
 | `mvmctl cache prune` | Remove stale temp files and expired/invalid attested pack entries; pack deletion refuses snapshot or warm-standby protection references; report (but don't delete) unrecognized top-level cache dirs |
 | `mvmctl cache prune --dry-run` | Show what would be removed without deleting |
 | `mvmctl cache prune --orphan-builds` | Also sweep orphaned builds — built artifacts whose source `mvm.toml` is gone (equivalent to `mvmctl manifest prune --orphans`) |
@@ -818,9 +818,12 @@ All commands accept these global options:
 | `MVM_BOOTSTRAP_PACK_MIRROR_IDENTITY` | Optional mirror identity required by `mirror-only` policy. | None |
 | `MVM_BOOTSTRAP_PACK_TRUST_STORE` | Optional trusted-publisher key directory for bootstrap pack verification. Defaults to the normal trusted publisher path. | Default trust store |
 | `MVM_BOOTSTRAP_PACK_REVOCATIONS` | Optional local revocation JSON file for bootstrap pack verification. | None |
-| `MVM_BOOTSTRAP_PACK_ALLOW_HTTP` | Set to `1` to allow plain-HTTP bootstrap pack downloads. HTTPS or local files are preferred. | Unset |
+| `MVM_BOOTSTRAP_PACK_REVOCATIONS_SOURCE` | Optional local or HTTPS revocation JSON source for bootstrap pack verification. Mutually exclusive with `MVM_BOOTSTRAP_PACK_REVOCATIONS`. | None |
+| `MVM_BOOTSTRAP_PACK_ALLOW_HTTP` | Set to `1` to allow plain-HTTP bootstrap pack and revocation-metadata downloads. HTTPS or local files are preferred. | Unset |
 
 Local pack revocation files use schema version 1 with a `revoked` list of
 `signing_key_id`, `pack_hash`, and `reason` entries. They may also include
 `fetched_at` and `max_age_seconds`; when both are present, stale revocation
 metadata fails closed with `stale_revocation_metadata` during pack verification.
+Use `--revocations-source` or `MVM_BOOTSTRAP_PACK_REVOCATIONS_SOURCE` to fetch
+the same schema from an HTTPS or local source.

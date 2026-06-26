@@ -88,12 +88,12 @@ pub(in crate::commands) enum CacheAction {
     InstallPack {
         /// Local pack tar archive path, or an `https://` URL. Plain HTTP is
         /// refused unless `--allow-http` is passed.
-        #[arg(value_name = "SOURCE")]
-        source: String,
+        #[arg(value_name = "SOURCE", value_parser = parse_boxed_str)]
+        source: Box<str>,
         /// Expected local policy hash. The pack manifest must declare the same
         /// hash before it can be cached.
-        #[arg(long, value_name = "SHA256")]
-        policy_hash: String,
+        #[arg(long, value_name = "SHA256", value_parser = parse_boxed_str)]
+        policy_hash: Box<str>,
         /// Backend this host intends to use for the pack.
         #[arg(long, value_enum)]
         backend: PackBackendArg,
@@ -124,6 +124,15 @@ pub(in crate::commands) enum CacheAction {
         /// Optional local revocation JSON file for offline refused pack hashes.
         #[arg(long, value_name = "FILE")]
         revocations: Option<PathBuf>,
+        /// Optional local or HTTPS revocation JSON source. Plain HTTP is
+        /// refused unless `--allow-http` is passed.
+        #[arg(
+            long = "revocations-source",
+            value_name = "SOURCE",
+            value_parser = parse_boxed_str,
+            conflicts_with = "revocations"
+        )]
+        revocations_source: Option<Box<str>>,
         /// Allow plain-HTTP downloads. HTTPS or local files are preferred.
         #[arg(long)]
         allow_http: bool,
@@ -284,6 +293,29 @@ impl PackArchiveSource {
     }
 }
 
+fn parse_boxed_str(value: &str) -> Result<Box<str>, std::convert::Infallible> {
+    Ok(value.into())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::commands) enum PackRevocationSource {
+    File(PathBuf),
+    Https(String),
+    Http(String),
+}
+
+impl PackRevocationSource {
+    pub(in crate::commands) fn parse(source: &str) -> Self {
+        if source.starts_with("https://") {
+            Self::Https(source.to_string())
+        } else if source.starts_with("http://") {
+            Self::Http(source.to_string())
+        } else {
+            Self::File(PathBuf::from(source))
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 struct InstalledPack {
     pack_hash: String,
@@ -326,6 +358,7 @@ pub(in crate::commands) struct InstallPackFromSourceArgs {
     pub policy: PackPolicyArgs,
     pub trust_store: Option<PathBuf>,
     pub revocations: Option<PathBuf>,
+    pub revocations_source: Option<PackRevocationSource>,
     pub allow_http: bool,
 }
 
@@ -424,10 +457,11 @@ pub(in crate::commands) fn install_pack_from_source(
         None => FsTrustStore::default_path()
             .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?,
     };
-    let revocations = match args.revocations {
-        Some(path) => LocalPackRevocations::from_path(&path)?,
-        None => LocalPackRevocations::empty(),
-    };
+    let revocations = load_pack_revocations(
+        args.revocations.as_deref(),
+        args.revocations_source.as_ref(),
+        args.allow_http,
+    )?;
     PackCache::default()
         .install_from_archive_reader(Cursor::new(archive_bytes), &policy, &trust, &revocations)
         .context("installing attested pack archive into cache")
@@ -506,8 +540,12 @@ impl LocalPackRevocations {
     pub(in crate::commands) fn from_path(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading pack revocation file {}", path.display()))?;
-        let file: PackRevocationFile = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parsing pack revocation file {}", path.display()))?;
+        Self::from_bytes(&bytes, &format!("pack revocation file {}", path.display()))
+    }
+
+    fn from_bytes(bytes: &[u8], label: &str) -> Result<Self> {
+        let file: PackRevocationFile =
+            serde_json::from_slice(bytes).with_context(|| format!("parsing {label}"))?;
         if file.schema_version != 1 {
             anyhow::bail!(
                 "unsupported pack revocation schema version {}; expected 1",
@@ -538,6 +576,66 @@ impl LocalPackRevocations {
             max_age_seconds: file.max_age_seconds,
         })
     }
+}
+
+pub(in crate::commands) fn load_pack_revocations(
+    revocations: Option<&Path>,
+    revocations_source: Option<&PackRevocationSource>,
+    allow_http: bool,
+) -> Result<LocalPackRevocations> {
+    load_pack_revocations_with(
+        revocations,
+        revocations_source,
+        allow_http,
+        crate::http::download_file,
+    )
+}
+
+fn load_pack_revocations_with(
+    revocations: Option<&Path>,
+    revocations_source: Option<&PackRevocationSource>,
+    allow_http: bool,
+    downloader: impl Fn(&str, &Path) -> Result<()>,
+) -> Result<LocalPackRevocations> {
+    match (revocations, revocations_source) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("use either --revocations or --revocations-source, not both")
+        }
+        (Some(path), None) => LocalPackRevocations::from_path(path),
+        (None, Some(source)) => {
+            load_pack_revocations_from_source_with(source, allow_http, downloader)
+        }
+        (None, None) => Ok(LocalPackRevocations::empty()),
+    }
+}
+
+fn load_pack_revocations_from_source_with(
+    source: &PackRevocationSource,
+    allow_http: bool,
+    downloader: impl Fn(&str, &Path) -> Result<()>,
+) -> Result<LocalPackRevocations> {
+    let bytes = match source {
+        PackRevocationSource::File(path) => std::fs::read(path)
+            .with_context(|| format!("reading pack revocation file {}", path.display()))?,
+        PackRevocationSource::Https(url) => download_pack_revocations_to_bytes(url, downloader)?,
+        PackRevocationSource::Http(url) => {
+            if !allow_http {
+                anyhow::bail!("plain-HTTP revocation metadata downloads require --allow-http");
+            }
+            download_pack_revocations_to_bytes(url, downloader)?
+        }
+    };
+    LocalPackRevocations::from_bytes(&bytes, "pack revocation metadata")
+}
+
+fn download_pack_revocations_to_bytes(
+    url: &str,
+    downloader: impl Fn(&str, &Path) -> Result<()>,
+) -> Result<Vec<u8>> {
+    let tmp =
+        tempfile::NamedTempFile::new().context("creating temporary revocation metadata file")?;
+    downloader(url, tmp.path()).with_context(|| "downloading pack revocation metadata")?;
+    std::fs::read(tmp.path()).context("reading downloaded pack revocation metadata")
 }
 
 impl PackRevocationChecker for LocalPackRevocations {
@@ -873,6 +971,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             mirror_identity,
             trust_store,
             revocations,
+            revocations_source,
             allow_http,
             json,
         } => {
@@ -883,7 +982,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 source,
                 policy: PackPolicyArgs {
                     backend,
-                    policy_hash,
+                    policy_hash: policy_hash.to_string(),
                     channels,
                     host_capabilities,
                     policy_mode,
@@ -892,6 +991,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 },
                 trust_store,
                 revocations,
+                revocations_source: revocations_source
+                    .as_ref()
+                    .map(|source| PackRevocationSource::parse(source)),
                 allow_http,
             })?;
             mvm_core::audit_emit!(
@@ -2180,6 +2282,71 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("downloading pack archive"));
         assert!(msg.contains("connection reset"));
+    }
+
+    #[test]
+    fn pack_revocation_source_classifies_files_https_and_http() {
+        assert_eq!(
+            PackRevocationSource::parse("/tmp/revocations.json"),
+            PackRevocationSource::File(PathBuf::from("/tmp/revocations.json"))
+        );
+        assert_eq!(
+            PackRevocationSource::parse("https://example.test/revocations.json"),
+            PackRevocationSource::Https("https://example.test/revocations.json".to_string())
+        );
+        assert_eq!(
+            PackRevocationSource::parse("http://example.test/revocations.json"),
+            PackRevocationSource::Http("http://example.test/revocations.json".to_string())
+        );
+    }
+
+    #[test]
+    fn load_pack_revocations_downloads_https_source() {
+        let revocations = load_pack_revocations_from_source_with(
+            &PackRevocationSource::Https("https://example.test/revocations.json".to_string()),
+            /* allow_http = */ false,
+            |url, path| {
+                assert_eq!(url, "https://example.test/revocations.json");
+                std::fs::write(path, r#"{"schema_version":1,"revoked":[]}"#)?;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            revocations.status(
+                &KeyId("0123456789abcdef0123456789abcdef".to_string()),
+                &Sha256Hex::from_bytes(b"pack"),
+            ),
+            RevocationStatus::Good
+        );
+    }
+
+    #[test]
+    fn load_pack_revocations_refuses_http_without_opt_in() {
+        let err = load_pack_revocations_from_source_with(
+            &PackRevocationSource::Http("http://example.test/revocations.json".to_string()),
+            /* allow_http = */ false,
+            |_url, _path| Ok(()),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("--allow-http"));
+    }
+
+    #[test]
+    fn load_pack_revocations_rejects_local_and_source_together() {
+        let err = load_pack_revocations_with(
+            Some(Path::new("/tmp/revocations.json")),
+            Some(&PackRevocationSource::Https(
+                "https://example.test/revocations.json".to_string(),
+            )),
+            /* allow_http = */ false,
+            |_url, _path| Ok(()),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("--revocations-source"));
     }
 
     #[test]

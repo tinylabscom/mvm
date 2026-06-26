@@ -3167,13 +3167,14 @@ fn test_cache_install_pack_parses_policy_flags() {
                     mirror_identity,
                     trust_store,
                     revocations,
+                    revocations_source,
                     allow_http,
                     json,
                 },
         }) => {
-            assert_eq!(source, "https://example.test/runtime.tar");
+            assert_eq!(source.as_ref(), "https://example.test/runtime.tar");
             assert_eq!(
-                policy_hash,
+                policy_hash.as_ref(),
                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             );
             assert_eq!(backend, PackBackendArg::Libkrun);
@@ -3187,6 +3188,7 @@ fn test_cache_install_pack_parses_policy_flags() {
                 revocations.unwrap(),
                 std::path::PathBuf::from("/tmp/revocations.json")
             );
+            assert!(revocations_source.is_none());
             assert!(allow_http);
             assert!(json);
         }
@@ -3205,6 +3207,70 @@ fn test_cache_install_pack_requires_channel() {
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "--backend",
         "libkrun",
+    ]);
+
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn test_cache_install_pack_parses_revocations_source() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "cache",
+        "install-pack",
+        "https://example.test/runtime.tar",
+        "--policy-hash",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--backend",
+        "libkrun",
+        "--channel",
+        "stable",
+        "--revocations-source",
+        "https://example.test/revocations.json",
+        "--json",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Commands::Cache(cache::Args {
+            action:
+                CacheAction::InstallPack {
+                    source,
+                    revocations,
+                    revocations_source,
+                    json,
+                    ..
+                },
+        }) => {
+            assert_eq!(source.as_ref(), "https://example.test/runtime.tar");
+            assert!(revocations.is_none());
+            assert_eq!(
+                revocations_source.as_deref(),
+                Some("https://example.test/revocations.json")
+            );
+            assert!(json);
+        }
+        _ => panic!("Expected Cache InstallPack command"),
+    }
+}
+
+#[test]
+fn test_cache_install_pack_rejects_revocations_file_and_source_together() {
+    let parsed = Cli::try_parse_from([
+        "mvmctl",
+        "cache",
+        "install-pack",
+        "https://example.test/runtime.tar",
+        "--policy-hash",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--backend",
+        "libkrun",
+        "--channel",
+        "stable",
+        "--revocations",
+        "/tmp/revocations.json",
+        "--revocations-source",
+        "https://example.test/revocations.json",
     ]);
 
     assert!(parsed.is_err());
@@ -3263,6 +3329,7 @@ fn test_prepare_dry_run_parses_policy_and_resolution_flags() {
             mirror_identity,
             trust_store,
             revocations,
+            revocations_source,
             allow_http,
             json,
         }) => {
@@ -3295,11 +3362,72 @@ fn test_prepare_dry_run_parses_policy_and_resolution_flags() {
                 revocations.unwrap(),
                 std::path::PathBuf::from("/tmp/revocations.json")
             );
+            assert!(revocations_source.is_none());
             assert!(allow_http);
             assert!(json);
         }
         _ => panic!("Expected Prepare command"),
     }
+}
+
+#[test]
+fn test_prepare_parses_revocations_source() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "prepare",
+        "ghcr.io/tinylabs/mvm@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--dry-run",
+        "--pack-kind",
+        "runtime",
+        "--policy-hash",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--backend",
+        "libkrun",
+        "--channel",
+        "stable",
+        "--revocations-source",
+        "https://example.test/revocations.json",
+        "--json",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Commands::Prepare(prepare::Args {
+            revocations,
+            revocations_source,
+            json,
+            ..
+        }) => {
+            assert!(revocations.is_none());
+            assert_eq!(
+                revocations_source.as_deref(),
+                Some("https://example.test/revocations.json")
+            );
+            assert!(json);
+        }
+        _ => panic!("Expected Prepare command"),
+    }
+}
+
+#[test]
+fn test_prepare_rejects_revocations_file_and_source_together() {
+    let parsed = Cli::try_parse_from([
+        "mvmctl",
+        "prepare",
+        "ghcr.io/tinylabs/mvm@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--policy-hash",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--backend",
+        "libkrun",
+        "--channel",
+        "stable",
+        "--revocations",
+        "/tmp/revocations.json",
+        "--revocations-source",
+        "https://example.test/revocations.json",
+    ]);
+
+    assert!(parsed.is_err());
 }
 
 #[test]

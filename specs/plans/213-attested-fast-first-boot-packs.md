@@ -289,6 +289,9 @@ The target user-visible shape is:
       - [x] Add offline revocation freshness metadata for local revocation
             files; stale metadata fails closed during pack verification and
             prepare reports `stale_revocation_metadata`.
+      - [x] Add local/HTTPS revocation metadata sources for `mvm prepare`,
+            `mvm cache install-pack`, and bootstrap pack preload, reusing the
+            same fail-closed local revocation schema.
 - [ ] Add key rotation support that accepts overlapping keys only within an
       explicit policy window.
       - [x] Add verifier-level key rotation windows that accept a channel
@@ -313,12 +316,18 @@ The target user-visible shape is:
             policy CLI inputs.
       - [x] Add focused verifier/cache/CLI tests for stale, fresh, and
             malformed offline revocation freshness metadata.
+      - [x] Add focused CLI/cache tests for HTTPS revocation metadata fetching,
+            plain-HTTP refusal, local/source conflict handling, and parser
+            coverage for source inputs.
 - [ ] Document channel pinning, mirror setup, offline operation, and revocation
       behavior.
       - [x] Document explicit policy mode, channel signing-key pins, and mirror
             identity flags/env vars in the CLI reference and installation guide.
       - [x] Document local revocation freshness fields and the
             `stale_revocation_metadata` refusal behavior in the CLI reference.
+      - [x] Document `--revocations-source` and
+            `MVM_BOOTSTRAP_PACK_REVOCATIONS_SOURCE` for fetched revocation
+            metadata.
 
 ### J. Metrics, proof gates, and regression tests
 

@@ -14,7 +14,7 @@ use super::Cli;
 use super::setup::run_setup_steps;
 use crate::commands::ops::cache::{
     InstallPackFromSourceArgs, PackArchiveSource, PackBackendArg, PackPolicyArgs,
-    PackPolicyModeArg, install_pack_from_source, pack_kind_name,
+    PackPolicyModeArg, PackRevocationSource, install_pack_from_source, pack_kind_name,
 };
 
 const SKIP_PACK_PREFETCH_ENV: &str = "MVM_SKIP_PACK_PREFETCH";
@@ -29,6 +29,7 @@ const PACK_CHANNEL_SIGNING_KEYS_ENV: &str = "MVM_BOOTSTRAP_PACK_CHANNEL_SIGNING_
 const PACK_MIRROR_IDENTITY_ENV: &str = "MVM_BOOTSTRAP_PACK_MIRROR_IDENTITY";
 const PACK_TRUST_STORE_ENV: &str = "MVM_BOOTSTRAP_PACK_TRUST_STORE";
 const PACK_REVOCATIONS_ENV: &str = "MVM_BOOTSTRAP_PACK_REVOCATIONS";
+const PACK_REVOCATIONS_SOURCE_ENV: &str = "MVM_BOOTSTRAP_PACK_REVOCATIONS_SOURCE";
 const PACK_ALLOW_HTTP_ENV: &str = "MVM_BOOTSTRAP_PACK_ALLOW_HTTP";
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -79,6 +80,10 @@ fn bootstrap_default_packs_from_env() -> Result<()> {
             },
             trust_store: config.trust_store.clone(),
             revocations: config.revocations.clone(),
+            revocations_source: config
+                .revocations_source
+                .as_deref()
+                .map(PackRevocationSource::parse),
             allow_http: config.allow_http,
         })
         .with_context(|| format!("installing default {label} pack during bootstrap"))?;
@@ -111,6 +116,7 @@ struct BootstrapPackConfig {
     mirror_identity: Option<String>,
     trust_store: Option<PathBuf>,
     revocations: Option<PathBuf>,
+    revocations_source: Option<String>,
     allow_http: bool,
 }
 
@@ -134,6 +140,13 @@ impl BootstrapPackConfig {
         if channels.is_empty() {
             anyhow::bail!("{PACK_CHANNELS_ENV} must contain at least one channel");
         }
+        let revocations = non_empty_env(&get, PACK_REVOCATIONS_ENV).map(PathBuf::from);
+        let revocations_source = non_empty_env(&get, PACK_REVOCATIONS_SOURCE_ENV);
+        if revocations.is_some() && revocations_source.is_some() {
+            anyhow::bail!(
+                "{PACK_REVOCATIONS_ENV} and {PACK_REVOCATIONS_SOURCE_ENV} cannot both be set"
+            );
+        }
         Ok(Some(Self {
             runtime_source,
             builder_source,
@@ -152,7 +165,8 @@ impl BootstrapPackConfig {
                 .unwrap_or_default(),
             mirror_identity: non_empty_env(&get, PACK_MIRROR_IDENTITY_ENV),
             trust_store: non_empty_env(&get, PACK_TRUST_STORE_ENV).map(PathBuf::from),
-            revocations: non_empty_env(&get, PACK_REVOCATIONS_ENV).map(PathBuf::from),
+            revocations,
+            revocations_source,
             allow_http: get(PACK_ALLOW_HTTP_ENV).as_deref() == Some("1"),
         }))
     }
@@ -323,6 +337,7 @@ mod tests {
             config.revocations,
             Some(PathBuf::from("/tmp/revocations.json"))
         );
+        assert_eq!(config.revocations_source, None);
         assert!(config.allow_http);
         assert_eq!(
             config.sources(),
@@ -331,6 +346,58 @@ mod tests {
                 ("builder", "/tmp/builder.tar.gz")
             ]
         );
+    }
+
+    #[test]
+    fn bootstrap_pack_config_parses_revocation_source() {
+        let config = BootstrapPackConfig::from_lookup(lookup(BTreeMap::from([
+            (
+                RUNTIME_PACK_SOURCE_ENV,
+                "https://example.test/runtime.tar.gz",
+            ),
+            (
+                PACK_POLICY_HASH_ENV,
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+            (PACK_BACKEND_ENV, "libkrun"),
+            (PACK_CHANNELS_ENV, "stable"),
+            (
+                PACK_REVOCATIONS_SOURCE_ENV,
+                "https://example.test/revocations.json",
+            ),
+        ])))
+        .expect("config")
+        .expect("present");
+
+        assert!(config.revocations.is_none());
+        assert_eq!(
+            config.revocations_source.as_deref(),
+            Some("https://example.test/revocations.json")
+        );
+    }
+
+    #[test]
+    fn bootstrap_pack_config_rejects_revocation_file_and_source_together() {
+        let err = BootstrapPackConfig::from_lookup(lookup(BTreeMap::from([
+            (
+                RUNTIME_PACK_SOURCE_ENV,
+                "https://example.test/runtime.tar.gz",
+            ),
+            (
+                PACK_POLICY_HASH_ENV,
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+            (PACK_BACKEND_ENV, "libkrun"),
+            (PACK_CHANNELS_ENV, "stable"),
+            (PACK_REVOCATIONS_ENV, "/tmp/revocations.json"),
+            (
+                PACK_REVOCATIONS_SOURCE_ENV,
+                "https://example.test/revocations.json",
+            ),
+        ])))
+        .expect_err("conflicting revocation metadata inputs rejected");
+
+        assert!(err.to_string().contains(PACK_REVOCATIONS_SOURCE_ENV));
     }
 
     #[test]

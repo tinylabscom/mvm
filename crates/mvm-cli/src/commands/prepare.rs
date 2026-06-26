@@ -17,8 +17,8 @@ use mvm_oci::{ImageReference, LinuxPlatform, OciManifestFetcher};
 
 use super::Cli;
 use super::ops::cache::{
-    LocalPackRevocations, PackArchiveSource, PackBackendArg, PackPolicyArgs, PackPolicyModeArg,
-    build_pack_policy, load_pack_archive_bytes,
+    PackArchiveSource, PackBackendArg, PackPolicyArgs, PackPolicyModeArg, PackRevocationSource,
+    build_pack_policy, load_pack_archive_bytes, load_pack_revocations,
 };
 use super::shared::{human_bytes, resolve_flake_ref};
 
@@ -82,6 +82,14 @@ pub(in crate::commands) struct Args {
     /// Optional local revocation JSON file for offline refused pack hashes.
     #[arg(long, value_name = "FILE")]
     pub revocations: Option<PathBuf>,
+    /// Optional local or HTTPS revocation JSON source. Plain HTTP is refused
+    /// unless `--allow-http` is passed.
+    #[arg(
+        long = "revocations-source",
+        value_name = "SOURCE",
+        conflicts_with = "revocations"
+    )]
+    pub revocations_source: Option<String>,
     /// Allow plain-HTTP pack downloads. HTTPS or local files are preferred.
     #[arg(long)]
     pub allow_http: bool,
@@ -120,10 +128,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         None => FsTrustStore::default_path()
             .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?,
     };
-    let revocations = match args.revocations {
-        Some(path) => LocalPackRevocations::from_path(&path)?,
-        None => LocalPackRevocations::empty(),
-    };
+    let revocation_source = args
+        .revocations_source
+        .as_deref()
+        .map(PackRevocationSource::parse);
+    let revocations = load_pack_revocations(
+        args.revocations.as_deref(),
+        revocation_source.as_ref(),
+        args.allow_http,
+    )?;
     let cache = PackCache::default();
     if let Some(source) = args.pack_source.as_deref()
         && !args.dry_run
@@ -567,6 +580,7 @@ mod tests {
             mirror_identity: None,
             trust_store: None,
             revocations: None,
+            revocations_source: None,
             allow_http: false,
             json: false,
         }
