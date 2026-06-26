@@ -46,6 +46,19 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream B release-pack publishing: `release.yml` now builds
+      runtime-pack archives for the supported arch/backend matrix and
+      builder-pack archives for both builder architectures from the existing
+      image outputs, emits pack manifests/provenance/checksums, signs pack
+      archives plus pack metadata with cosign, and makes the post-publish
+      release verifier fail closed on missing pack archives, checksums,
+      manifests, provenance, signature bundles, SBOM references, or version
+      metadata. Coverage: `packaging/release/test-release-pack-gate.sh` covers
+      the happy path plus missing pack signature bundle, mismatched pack
+      version metadata, and missing pack input failure. The pack
+      rebuild-and-compare reproducibility job remains open.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream H explainability: `mvmctl explain <run-id>` now verifies the
       local hash-chained launch-attestation log before lookup, fails closed on
       tamper or missing run ids, and prints either a human summary or JSON

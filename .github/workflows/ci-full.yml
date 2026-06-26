@@ -149,6 +149,9 @@ jobs:
       - name: host-binaries manifest parity (Plan 115 / ADR-065)
         run: cargo run -p xtask -- check-mvm-host-binaries-sync
 
+      - name: release pack asset gate self-test
+        run: bash packaging/release/test-release-pack-gate.sh
+
       - name: SDK stubs match the Rust schemas (no drift)
         run: cargo run -p xtask -- check-stubs
 

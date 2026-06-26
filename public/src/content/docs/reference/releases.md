@@ -6,11 +6,12 @@ description: "How mvm's v* release tags publish binaries, kernels, and images â€
 Every `v*` git tag fires two GitHub Actions workflows that publish a single
 GitHub Release:
 
-- **`release.yml`** builds `mvmctl` for all four targets
-  (`aarch64`/`x86_64` Ã— macOS/Linux), packages each as
+- **`release.yml`** builds `mvmctl` for the supported release targets,
+  packages each as
   `mvmctl-<target>.tar.gz` (binary + `resources/` + man pages), generates
-  `checksums-sha256.txt`, cosign-signs every tarball, and also builds the
-  dev / builder / default-microvm / builder-vm / runtime-overlay images.
+  `checksums-sha256.txt`, cosign-signs every tarball, builds the builder VM,
+  default microVM, and runtime-overlay images, and combines those image outputs
+  into signed runtime and builder release packs.
 - **`kernel-build.yml`** builds the slim builder + workload kernels on native
   aarch64 and x86_64 runners and uploads `vmlinux-<arch>-<variant>` +
   `kernel-<arch>-checksums-sha256.txt`.
@@ -25,10 +26,31 @@ GitHub Release:
 | `mvmctl update` | the tarball for the latest release, in-place swap |
 | `mvmctl kernel build --source download` | `vmlinux-<arch>-<variant>` + `kernel-<arch>-checksums-sha256.txt`, pinned to the binary's own release tag |
 
+## Attested fast-first-boot packs
+
+The release workflow publishes pack archives for the fast-first-boot cache path
+alongside the binary tarballs:
+
+| Pack | Assets |
+|------|--------|
+| Runtime pack | `mvm-runtime-pack-<arch>-<backend>.tar.gz`, `.tar.gz.sha256`, `.tar.gz.bundle`, `.manifest.json`, `.manifest.json.bundle`, `.provenance.json`, `.provenance.json.bundle` |
+| Builder pack | `mvm-builder-pack-<arch>.tar.gz`, `.tar.gz.sha256`, `.tar.gz.bundle`, `.manifest.json`, `.manifest.json.bundle`, `.provenance.json`, `.provenance.json.bundle` |
+
+Runtime packs are produced for the supported release matrix:
+`aarch64:vz`, `aarch64:libkrun`, `aarch64:firecracker`, and
+`x86_64:firecracker`. Builder packs are produced for `aarch64` and `x86_64`.
+
+Every pack manifest records the release version, git revision, archive SHA-256,
+file SHA-256s and sizes, SBOM SHA-256, channel (`github_release`), architecture,
+and backend where applicable. `verify-release-assets.sh` is the post-publish
+gate: it fails the release if a pack archive, checksum, manifest, provenance
+file, signature bundle, SBOM reference, or expected version field is missing or
+inconsistent.
+
 ## Verifying provenance
 
-All release tarballs are cosign-signed (keyless, GitHub OIDC). To verify
-manually:
+All release tarballs and pack manifests/provenance files are cosign-signed
+(keyless, GitHub OIDC). To verify manually:
 
 ```bash
 cosign verify-blob \

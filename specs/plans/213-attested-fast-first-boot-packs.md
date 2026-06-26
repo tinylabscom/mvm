@@ -93,20 +93,20 @@ The target user-visible shape is:
 
 ### B. Release production and artifact publishing
 
-- [ ] Extend the release pipeline to produce runtime packs for each supported
+- [x] Extend the release pipeline to produce runtime packs for each supported
       host architecture/backend pair.
-- [ ] Extend the release pipeline to produce builder packs for each supported
+- [x] Extend the release pipeline to produce builder packs for each supported
       builder architecture.
-- [ ] Include seeded Nix closures for common mvm build and materialization paths
+- [x] Include seeded Nix closures for common mvm build and materialization paths
       in builder packs.
-- [ ] Emit SBOMs, checksums, signatures, provenance, and pack manifests for every
+- [x] Emit SBOMs, checksums, signatures, provenance, and pack manifests for every
       release pack.
-- [ ] Add release verification checks that fail closed when any pack lacks a
+- [x] Add release verification checks that fail closed when any pack lacks a
       manifest, signature bundle, checksum, SBOM, or expected version metadata.
 - [ ] Add a reproducibility verification job that rebuilds at least one published
       runtime pack and one published builder pack from source pins and compares
       output hashes.
-- [ ] Document the release artifact matrix and channel semantics in the release
+- [x] Document the release artifact matrix and channel semantics in the release
       notes or packaging reference.
 
 ### C. Hardened local artifact cache

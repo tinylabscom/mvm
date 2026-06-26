@@ -153,6 +153,7 @@ the CI status panel rather than running them locally:
 | Seccomp tier functional denial | `security.yml::seccomp-functional` | `standard` tier blocks `socket(AF_INET)` at runtime |
 | Reproducibility | `security.yml::reproducibility` | Two clean builds of `mvmctl` are byte-identical |
 | Builder image reproducibility | `security.yml::builder-image-reproducibility` | Sealed builder image reproduces byte-for-byte |
+| Release pack asset gate | `release.yml::verify-release` | Runtime and builder packs have archives, checksums, manifests, provenance, signature bundles, SBOM references, and expected version metadata |
 | Cargo deny + audit | `security.yml::cargo-{deny,audit}` | Supply chain advisory + license clean |
 | Fuzz | `security.yml::fuzz` | vsock frame parser fuzz lanes pass for 5 min (30 min on cron) |
 | Flake lock cleanliness | `security.yml::flake-locks-clean` | Every `flake.lock` is committed + in sync |

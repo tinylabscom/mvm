@@ -137,6 +137,9 @@ jobs:
       - name: runtime-overlay version pinned to workspace
         run: cargo run -p xtask -- check-runtime-overlay-version
 
+      - name: release pack asset gate self-test
+        run: bash packaging/release/test-release-pack-gate.sh
+
       - name: SDK stubs match the Rust schemas (no drift)
         run: cargo run -p xtask -- check-stubs
 

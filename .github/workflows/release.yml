@@ -345,13 +345,10 @@ jobs:
 
   release:
     needs: [build, builder-vm-image, runtime-overlay-image, default-microvm]
-    # Gate the published release on the mvmctl binary build ONLY. The Nix
-    # image jobs still run and their artifacts are attached when present,
-    # but an image-build failure must not block the binary download
-    # (mvmctl tarballs + checksums) that install.sh / `mvmctl update` /
-    # the Homebrew tap consume. `!cancelled()` lets this run after image
-    # jobs fail; the result check keeps the binary build a hard requirement.
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    # Attested release packs are a fast-first-boot trust root. The release must
+    # fail closed if any image input needed to build runtime or builder packs is
+    # missing, rather than publishing a binary-only tag that looks pack-ready.
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.builder-vm-image.result == 'success' && needs.runtime-overlay-image.result == 'success' && needs.default-microvm.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -374,6 +371,17 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Build attested release packs
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          bash packaging/release/build-release-packs.sh \
+            --assets-dir artifacts \
+            --version "${TAG_NAME#v}" \
+            --git-revision "${GITHUB_SHA}" \
+            --sbom sbom.cdx.json
+
       - name: Generate combined checksum file
         shell: bash
         run: |
@@ -386,7 +394,9 @@ jobs:
       - name: Sign release tarballs and SBOM
         shell: bash
         run: |
-          # Sign each tarball — keyless OIDC, no secret key needed.
+          shopt -s nullglob
+          # Sign each tarball, including release pack archives — keyless OIDC,
+          # no secret key needed.
           # Produces a .bundle file per tarball containing signature + certificate chain.
           for tarball in artifacts/*.tar.gz; do
             cosign sign-blob \
@@ -402,6 +412,14 @@ jobs:
             --bundle sbom.cdx.json.bundle \
             sbom.cdx.json
           echo "Signed: sbom.cdx.json"
+
+          for blob in artifacts/mvm-*-pack-*.manifest.json artifacts/mvm-*-pack-*.provenance.json; do
+            cosign sign-blob \
+              --yes \
+              --bundle "${blob}.bundle" \
+              "${blob}"
+            echo "Signed: ${blob}"
+          done
 
       # Plan 36 / ADR 005: cosign-keyless-sign each per-(arch, variant)
       # SignedManifest JSON. The bundle (.bundle) carries the signature,
@@ -459,6 +477,16 @@ jobs:
             artifacts/default-microvm-rootfs-*
             artifacts/default-microvm-meta-*
             artifacts/default-microvm-*-checksums-sha256.txt
+            artifacts/mvm-runtime-pack-*.tar.gz.sha256
+            artifacts/mvm-runtime-pack-*.manifest.json
+            artifacts/mvm-runtime-pack-*.manifest.json.bundle
+            artifacts/mvm-runtime-pack-*.provenance.json
+            artifacts/mvm-runtime-pack-*.provenance.json.bundle
+            artifacts/mvm-builder-pack-*.tar.gz.sha256
+            artifacts/mvm-builder-pack-*.manifest.json
+            artifacts/mvm-builder-pack-*.manifest.json.bundle
+            artifacts/mvm-builder-pack-*.provenance.json
+            artifacts/mvm-builder-pack-*.provenance.json.bundle
             sbom.cdx.json
             sbom.cdx.json.bundle
           )
