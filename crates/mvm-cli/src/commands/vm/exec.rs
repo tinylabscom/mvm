@@ -37,6 +37,12 @@ pub(in crate::commands) struct Args {
     /// from `machine run` dispatch. `> 0` ⇒ eligible to claim a warm standby.
     #[arg(skip)]
     pub warm_pool_size: u32,
+    /// Internal (not a CLI flag): attach the command to a PTY.
+    #[arg(skip)]
+    pub pty: bool,
+    /// Internal (not a CLI flag): optional foreground transient VM identity.
+    #[arg(skip)]
+    pub vm_name: Option<String>,
     /// vCPU cores (default: 2)
     #[arg(long, default_value = "2")]
     pub cpus: u32,
@@ -101,6 +107,12 @@ pub(in crate::commands) struct RunArgs {
     /// claim a pre-booted standby + replenish the pool.
     #[arg(skip)]
     pub warm_pool_size: u32,
+    /// Internal (not a CLI flag): attach the command to a PTY.
+    #[arg(skip)]
+    pub pty: bool,
+    /// Internal (not a CLI flag): optional foreground transient VM identity.
+    #[arg(skip)]
+    pub vm_name: Option<String>,
     /// Enable dev-tier outbound networking (broad egress + DNS). Off by
     /// default (deny-all). Narrow it with `--allow-host`.
     #[arg(long)]
@@ -234,6 +246,8 @@ impl RunArgs {
         Args {
             manifest: self.manifest,
             warm_pool_size: self.warm_pool_size,
+            pty: self.pty,
+            vm_name: self.vm_name,
             cpus: self.cpus,
             memory: self.memory,
             add_dir: self.add_dir,
@@ -655,6 +669,7 @@ fn build_exec_request(
         }
     };
     Ok(crate::exec::ExecRequest {
+        name: args.vm_name,
         image,
         cpus: args.cpus,
         memory_mib,
@@ -666,6 +681,7 @@ fn build_exec_request(
         env: env_pairs,
         target,
         timeout_secs: args.timeout,
+        pty: args.pty,
         network_policy,
         warm_pool_size: args.warm_pool_size,
     })
@@ -1335,6 +1351,8 @@ mod tests {
     fn run_args(profile: RunProfile) -> RunArgs {
         RunArgs {
             warm_pool_size: 0,
+            pty: false,
+            vm_name: None,
             manifest: None,
             image: None,
             net: false,

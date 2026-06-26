@@ -236,8 +236,8 @@ highest):
   process and any tap interface don't get orphaned.
 - **Hard kill** (`kill -9` on `mvmctl exec` itself): teardown is
   best-effort; you may need `mvmctl ls` and `mvmctl machine stop <name>` to
-  clean up. Each transient VM is named `exec-<pid>-<rand>` so they're
-  easy to spot.
+  clean up. Each unnamed transient VM gets a generated name like
+  `brisk-otter-a1b2`, so it is easy to spot.
 
 ## Limits
 

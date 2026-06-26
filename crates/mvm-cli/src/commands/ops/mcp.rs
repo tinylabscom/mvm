@@ -415,6 +415,7 @@ impl ExecDispatcher {
     ) -> Result<crate::exec::ExecOutput, anyhow::Error> {
         let argv = bash_dash_c(&shell_escape(code));
         let req = crate::exec::ExecRequest {
+            name: None,
             image: crate::exec::ImageSource::Template(env.to_string()),
             // MCP sessions don't use the warm pool.
             warm_pool_size: 0,
@@ -425,6 +426,7 @@ impl ExecDispatcher {
             env: Vec::new(),
             target: crate::exec::ExecTarget::Inline { argv },
             timeout_secs: Some(timeout),
+            pty: false,
             // MCP runs untrusted code: deny egress by default.
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };

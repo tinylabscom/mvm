@@ -529,6 +529,8 @@ mod tests {
         RunArgs {
             manifest: None,
             warm_pool_size: 0,
+            pty: false,
+            vm_name: None,
             image: None,
             net: false,
             allow_host: Vec::new(),

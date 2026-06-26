@@ -17,6 +17,8 @@ use crate::vsock::CONSOLE_PORT_BASE;
 /// Tracks the active console session. Only one session at a time.
 static CONSOLE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CONSOLE_SESSION_ID: AtomicU32 = AtomicU32::new(0);
+static COMPLETED_SESSION_ID: AtomicU32 = AtomicU32::new(0);
+static COMPLETED_EXIT_CODE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 /// Active PTY master fd for resize support. -1 when no session is active.
 static CONSOLE_MASTER_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
@@ -139,6 +141,8 @@ pub fn open_session(
 
     let session_id = CONSOLE_SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1;
     let data_port = CONSOLE_PORT_BASE + session_id;
+    COMPLETED_SESSION_ID.store(0, Ordering::SeqCst);
+    COMPLETED_EXIT_CODE.store(0, Ordering::SeqCst);
 
     let ws = Winsize {
         ws_row: rows,
@@ -177,7 +181,6 @@ pub fn open_session(
     let shell_env = build_shell_env_with(extra_env);
     let mut envp: Vec<*const u8> = shell_env.iter().map(|c| c.as_ptr().cast::<u8>()).collect();
     envp.push(std::ptr::null());
-
     // SAFETY: fork() takes no arguments and has no preconditions; it returns
     // twice (0 in the child, the child pid in the parent).
     let pid = unsafe { fork() };
@@ -199,10 +202,10 @@ pub fn open_session(
         //
         // SAFETY: `slave_fd`/`master_fd` are valid fds from openpty; dup2's
         // target fds 0/1/2 are always valid; `argv` and `envp` are
-        // NUL-/NULL-terminated arrays whose backing storage (`shell_env`,
-        // the byte literals) was allocated in the parent before the fork and
-        // is unmodified in the child's copy-on-write image. `execve` replaces
-        // the process image and only returns on error.
+        // NUL-/NULL-terminated arrays whose backing storage was allocated in
+        // the parent before the fork and is unmodified in the child's
+        // copy-on-write image. `execve` replaces the process image and only
+        // returns on error.
         unsafe {
             close(master_fd);
             setsid();
@@ -313,11 +316,13 @@ pub fn close_session(session: &ConsoleSession) -> i32 {
     CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
 
     // Extract exit code
-    if status & 0x7f == 0 {
+    let exit_code = if status & 0x7f == 0 {
         (status >> 8) & 0xff // normal exit
     } else {
         128 + (status & 0x7f) // signal
-    }
+    };
+    record_completed_session(session.session_id, exit_code);
+    exit_code
 }
 
 /// Start the vsock data relay for a console session.
@@ -498,16 +503,31 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
 
     // Don't call close_session — we already waited and the fds are owned
     // by the File/UnixStream objects which will drop.
-    if status & 0x7f == 0 {
+    let exit_code = if status & 0x7f == 0 {
         (status >> 8) & 0xff
     } else {
         128 + (status & 0x7f)
-    }
+    };
+    record_completed_session(session.session_id, exit_code);
+    exit_code
 }
 
 /// Check if a console session is currently active.
 pub fn is_active() -> bool {
     CONSOLE_ACTIVE.load(Ordering::SeqCst)
+}
+
+fn record_completed_session(session_id: u32, exit_code: i32) {
+    COMPLETED_EXIT_CODE.store(exit_code, Ordering::SeqCst);
+    COMPLETED_SESSION_ID.store(session_id, Ordering::SeqCst);
+}
+
+pub fn completed_exit_code(session_id: u32) -> Option<i32> {
+    if COMPLETED_SESSION_ID.load(Ordering::SeqCst) == session_id {
+        Some(COMPLETED_EXIT_CODE.load(Ordering::SeqCst))
+    } else {
+        None
+    }
 }
 
 // FFI for chdir / shutdown
@@ -601,6 +621,10 @@ mod tests {
         );
         assert_eq!(ConsoleError::OpenPtyFailed.to_string(), "openpty() failed");
         assert_eq!(ConsoleError::ForkFailed.to_string(), "fork() failed");
+        assert_eq!(
+            ConsoleError::InvalidCommand.to_string(),
+            "console command contains an interior NUL"
+        );
         assert_eq!(
             ConsoleError::BindFailed(20001).to_string(),
             "failed to bind vsock port 20001"
