@@ -190,8 +190,8 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Validate and explain the effective run plan without booting a VM.
     #[arg(long)]
     pub dry_run: bool,
-    /// Persist the machine under this name: it survives the command and is
-    /// reconnectable via `machine shell/exec/stop`. Implies persistence.
+    /// Run under this machine identity. Foreground runs still tear down when
+    /// the command exits; use `machine create`/`start` for long-lived machines.
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
     /// Boot a persistent machine and return immediately. Auto-names the machine
@@ -209,13 +209,15 @@ pub(in crate::commands) struct MachineRunArgs {
     /// or a bare number of seconds. The reaper tears down expired machines.
     #[arg(long, value_name = "DURATION")]
     pub ttl: Option<String>,
-    /// Attach an interactive PTY shell (dev-only; refused for `--prod`/sealed
-    /// images). Does not affect persistence: `-t` alone is a transient
-    /// interactive machine, gone when the shell exits.
-    #[arg(short = 't', long)]
+    /// Attach the foreground command to an interactive PTY.
+    #[arg(short = 't', long, conflicts_with_all = ["detach", "up_json", "ttl"])]
     pub tty: bool,
     /// Accepted as an alias for `-t` so the conventional `-it` bundle parses.
-    #[arg(short = 'i', long = "interactive")]
+    #[arg(
+        short = 'i',
+        long = "interactive",
+        conflicts_with_all = ["detach", "up_json", "ttl"]
+    )]
     pub interactive: bool,
     /// Force-recreate a persistent machine whose on-disk spec exists with a
     /// different config (stop + overwrite + restart). Without it, a config
@@ -287,6 +289,8 @@ impl MachineRunArgs {
             // Default off; `run_dispatch` sets it for the warm-claim-eligible
             // transient mode.
             warm_pool_size: 0,
+            pty: false,
+            vm_name: self.name,
             image: self.image,
             net: self.net,
             allow_host: self.allow_host,
@@ -316,26 +320,27 @@ impl MachineRunArgs {
         self.tty || self.interactive
     }
 
-    /// `--name` or `-d`/`--detach`/`--up-json` makes the machine survive the command.
+    /// `-d`/`--detach`, `--up-json`, or `--ttl` makes the machine survive the command.
     /// `--tty` is deliberately NOT consulted here — persistence and
     /// interactivity are independent axes.
     fn persistent(&self) -> bool {
-        self.name.is_some() || self.detach || self.up_json
+        self.detach || self.up_json || self.ttl.is_some()
     }
 
-    /// Resolve the lifecycle mode purely from the flags. The only validation is
-    /// that a plain transient run carries a command; persistent and interactive
-    /// modes default to "just boot" / "default shell" respectively.
+    /// Resolve the lifecycle mode purely from the flags. Fresh foreground runs
+    /// need an image source and an argv; persistent runs just boot and return.
     fn resolve_mode(&self) -> Result<MachineRunMode> {
         let mode = match (self.interactive(), self.persistent()) {
-            // Persistent modes may reconnect to an existing machine by name, so
-            // `--image` is optional here (validated against spec existence in the
-            // persistent path).
-            (true, true) => MachineRunMode::InteractivePersistent,
+            (true, true) => bail!(
+                "`machine run -it` is foreground-only; use `machine exec --name <name> -it -- <cmd>` for an interactive command in a long-lived machine"
+            ),
             (false, true) => MachineRunMode::Persistent,
             // Fresh-boot modes always materialize a new VM and need an image.
             (true, false) => {
                 self.require_image_for_fresh_boot()?;
+                if self.argv.is_empty() {
+                    bail!("machine run -it needs a command after `--`, for example `-- /bin/sh`");
+                }
                 MachineRunMode::InteractiveTransient
             }
             (false, false) => {
@@ -343,8 +348,8 @@ impl MachineRunArgs {
                 if self.argv.is_empty() {
                     bail!(
                         "machine run needs a command: pass `-- <cmd>`, \
-                         or `-d`/`--name <N>` to boot a persistent machine, \
-                         or `-t` for an interactive shell"
+                         or `-d`/`--detach` to boot a persistent machine, \
+                         or `-it -- /bin/sh` for an interactive shell"
                     );
                 }
                 MachineRunMode::Transient
@@ -367,35 +372,32 @@ impl MachineRunArgs {
 }
 
 /// The lifecycle `machine run` resolves to, computed purely from the parsed
-/// flags. Persistence (`--name`/`-d`) and interactivity (`-t`/`-i`) are
-/// independent axes, so the interactive variants record whether the machine
-/// also persists.
+/// flags. Persistence (`-d`/`--up-json`/`--ttl`) and interactivity
+/// (`-t`/`-i`) are independent axes; `--name` is only an identity unless one of
+/// the persistence flags is present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MachineRunMode {
     /// Default one-shot: boot, run argv, tear down. Unchanged `run_secure`.
     Transient,
-    /// Persistent (named or detached), non-interactive.
+    /// Persistent (detached or lifecycle-managed), non-interactive.
     Persistent,
-    /// Interactive PTY shell on a throwaway machine (gone on shell exit).
+    /// Foreground command attached to a PTY on a transient machine.
     InteractiveTransient,
-    /// Interactive PTY shell on a persistent machine (left up on exit).
-    InteractivePersistent,
 }
 
 impl MachineRunMode {
-    /// Warm-pool size for this run mode. Transient and
-    /// interactive-transient runs are throwaway, auto-named cattle — eligible to
-    /// claim a pre-booted standby and to replenish the pool, so they take the
-    /// residency-policy size (`effective_warm_pool_size`). A user-named or `-d`
-    /// persistent machine is long-lived, not pool cattle, so it never claims
-    /// (size 0). `explicit` is a caller override (e.g. a future `--warm` flag),
-    /// applied only to the claim-eligible modes.
-    fn warm_pool_size(self, explicit: Option<u32>) -> u32 {
-        match self {
-            MachineRunMode::Transient | MachineRunMode::InteractiveTransient => {
+    /// Warm-pool size for this run mode. Only unnamed foreground transient
+    /// runs are throwaway cattle — eligible to claim a pre-booted standby and
+    /// to replenish the pool. A named foreground run has an observable VM
+    /// identity, and persistent machines are long-lived, so both cold-boot
+    /// under the requested identity.
+    fn warm_pool_size(self, explicit: Option<u32>, has_name: bool) -> u32 {
+        match (self, has_name) {
+            (MachineRunMode::Transient | MachineRunMode::InteractiveTransient, false) => {
                 mvm_core::residency::effective_warm_pool_size(explicit)
             }
-            MachineRunMode::Persistent | MachineRunMode::InteractivePersistent => 0,
+            (MachineRunMode::Transient | MachineRunMode::InteractiveTransient, true) => 0,
+            (MachineRunMode::Persistent, _) => 0,
         }
     }
 }
@@ -414,10 +416,10 @@ enum SpecReconcile {
 }
 
 /// An auto-generated machine name for `-d` without `--name`. Reuses the
-/// `mvm-core` instance-ID helper so there is one naming scheme, not two; the
-/// `i-<hex>` shape satisfies `validate_vm_name`.
+/// `mvm-core` helper so foreground and persistent generated names share one
+/// human-friendly naming scheme.
 fn auto_machine_name() -> String {
-    naming::generate_instance_id()
+    naming::generate_machine_name()
 }
 
 /// Resolve the persistent machine's name: the explicit `--name`, or an
@@ -559,12 +561,6 @@ fn require_tty(stdin_is_tty: bool) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// An interactive machine is torn down on shell exit only when it is transient
-/// (no `--name`/`-d`); a persistent one is left up.
-fn should_teardown_after_interactive(args: &MachineRunArgs) -> bool {
-    !args.persistent()
 }
 
 /// Build a persistent `MachineSpec` from the `run` flags. Mirrors the
@@ -765,6 +761,12 @@ pub(in crate::commands) struct MachineExecArgs {
     /// Bypass the sealed-image accessibility check.
     #[arg(long)]
     pub force: bool,
+    /// Attach the command to an interactive PTY.
+    #[arg(short = 't', long)]
+    pub tty: bool,
+    /// Accepted as an alias for `-t` so `-it` parses.
+    #[arg(short = 'i', long = "interactive")]
+    pub interactive: bool,
     /// Argv to run inside the guest (use `--` to separate).
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
     pub argv: Vec<String>,
@@ -1899,17 +1901,6 @@ fn machine_exec_command(argv: &[String]) -> String {
     format!("exec {}", quoted.join(" "))
 }
 
-fn machine_interactive_pty_argv(argv: &[String]) -> Vec<String> {
-    if argv.is_empty() {
-        return Vec::new();
-    }
-    vec![
-        "/bin/sh".to_string(),
-        "-lc".to_string(),
-        machine_exec_command(argv),
-    ]
-}
-
 fn build_machine_volume_cfg(
     volume_specs: &[String],
 ) -> Result<Vec<mvm_backend::image::RuntimeVolume>> {
@@ -1962,6 +1953,16 @@ fn stop_failed_machine_start(name: &str) {
 
 fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) -> Result<()> {
     let spec = ensure_machine_spec_exists(&args.name)?;
+    if args.tty || args.interactive {
+        use std::io::IsTerminal as _;
+        require_tty(std::io::stdin().is_terminal())?;
+        super::vm::console::enforce_accessible_gate(&args.name, args.force)?;
+        return console::console_pty_command(
+            &args.name,
+            machine_exec_command(&args.argv),
+            machine_console_env(spec.ssh_agent),
+        );
+    }
     console::run(
         cli,
         console::Args {
@@ -2053,21 +2054,6 @@ fn stop_running_machine(name: &str) {
     }
 }
 
-/// Fast teardown for a throwaway interactive-transient machine. The guest shell
-/// has already exited, so there is nothing to flush: SIGKILL the
-/// supervisor/drainer/gvproxy up front (`stop_transient`) instead of burning the
-/// graceful ACPI grace `stop()` waits out — on Vz that grace runs ~6s across the
-/// supervisor, gvproxy, and drainer, which reads as a hang after Ctrl+D. Mirrors
-/// the `mvmctl run` transient teardown.
-fn stop_transient_machine(name: &str) {
-    reap_proxy(name);
-    let backend =
-        AnyBackend::from_hypervisor(&super::shared::resolve_effective_hypervisor("firecracker"));
-    if let Err(err) = backend.stop_transient(&VmId(name.to_string())) {
-        tracing::warn!(error = %err, machine = name, "fast-stopping transient machine failed");
-    }
-}
-
 /// The persistent lifecycle: `machine run --name <N>` / `-d`. Composes the
 /// existing create + start (+ exec) verbs — no new lifecycle code — so the
 /// signed-`ExecutionPlan` admission and default-deny egress are identical to
@@ -2148,83 +2134,6 @@ fn persist_and_boot_machine(
         start_machine(start)?;
         Ok(true)
     }
-}
-
-/// The interactive lifecycle: `machine run -t`/`--tty`. Boots (or reconnects to)
-/// the machine via the same managed path as the persistent lifecycle, attaches
-/// a PTY shell through `console::run`, and tears the machine down on exit only
-/// when it is transient. Dev-only: claim 15's `enforce_accessible_gate` refuses
-/// a sealed machine before attach, and a non-TTY stdin is refused up front.
-fn run_interactive(
-    cli: &Cli,
-    args: MachineRunArgs,
-    cfg: &MvmConfig,
-    resolved_flake_slot: Option<&str>,
-) -> Result<()> {
-    use std::io::IsTerminal as _;
-    require_tty(std::io::stdin().is_terminal())?;
-
-    let teardown = should_teardown_after_interactive(&args);
-    let name = resolve_machine_run_name(&args)?;
-    let existing = load_machine_spec(&name).ok();
-
-    // Claim 15, before boot: a previously-started machine carries runtime meta,
-    // so a sealed one is refused here; a fresh boot is re-checked by
-    // `console::run` post-boot. The recreate `--force` must not bypass this
-    // security gate, so it is not threaded in.
-    super::vm::console::enforce_accessible_gate(&name, false)?;
-
-    let (spec, action) = resolve_persistent_spec(&args, &name, existing, resolved_flake_slot)?;
-
-    if args.dry_run {
-        let summary = machine_start_preflight_summary(&spec, args.receipt.as_deref())?;
-        if args.json {
-            println!("{}", serde_json::to_string_pretty(&summary)?);
-        } else {
-            print_machine_start_preflight_human(&summary);
-        }
-        return Ok(());
-    }
-
-    persist_and_boot_machine(
-        &name,
-        &spec,
-        action,
-        MachineStartArgs {
-            name: name.clone(),
-            receipt: None,
-            json: false,
-            dry_run: false,
-            quiet: true,
-            hypervisor: args.hypervisor.clone(),
-            no_supervisor: args.no_supervisor,
-            kernel_pin: args.kernel_pin.clone(),
-        },
-    )?;
-
-    // Attach the interactive PTY (command: None ⇒ a shell). `force: false`
-    // keeps claim 15 strict on the post-boot re-check.
-    let attached = console::run(
-        cli,
-        console::Args {
-            name: name.clone(),
-            command: None,
-            force: false,
-            env: machine_console_env(spec.ssh_agent),
-            pty_argv: machine_interactive_pty_argv(&args.argv),
-        },
-        cfg,
-    );
-
-    if teardown {
-        // Fast SIGKILL teardown — the shell already exited, so skip the graceful
-        // ACPI grace that otherwise sits silent for seconds after Ctrl+D.
-        println!("Stopping transient machine {name}.");
-        stop_transient_machine(&name);
-        // Best-effort: drop the throwaway spec we created for this session.
-        let _ = remove_machine_spec(&name, true);
-    }
-    attached
 }
 
 /// After the machine is up: run the command (streamed, machine left up), or —
@@ -2408,32 +2317,36 @@ fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<
     }
 
     let mode = args.resolve_mode()?;
+    let warm_pool_size = mode.warm_pool_size(None, args.name.is_some());
     // Resolve warm-pool eligibility per mode. Threaded into the
     // claim path next; logged here so the dark-landed decision is observable
-    // (transient/interactive-transient take the residency size, persistent → 0).
-    tracing::debug!(
-        ?mode,
-        warm_pool_size = mode.warm_pool_size(None),
-        "machine run warm-pool eligibility"
-    );
+    // (unnamed transient/interactive-transient take the residency size, named
+    // foreground and persistent → 0).
+    tracing::debug!(?mode, warm_pool_size, "machine run warm-pool eligibility");
     match mode {
         MachineRunMode::Transient => {
             // For flake runs, pass the slot hash as the manifest.
             if let Some(slot) = resolved_flake_slot {
                 args.manifest = Some(slot);
             }
-            // A throwaway transient run is warm-claim
-            // eligible — carry the residency-policy size so `run_inner` can claim
-            // a pre-booted standby and replenish the pool.
+            // Only unnamed throwaway transient runs are warm-claim eligible.
             let mut run_args = args.into_run_args();
-            run_args.warm_pool_size = mode.warm_pool_size(None);
+            run_args.warm_pool_size = warm_pool_size;
             run_secure(cli, run_args, cfg)
         }
         MachineRunMode::Persistent => {
             run_persistent(cli, args, cfg, resolved_flake_slot.as_deref())
         }
-        MachineRunMode::InteractiveTransient | MachineRunMode::InteractivePersistent => {
-            run_interactive(cli, args, cfg, resolved_flake_slot.as_deref())
+        MachineRunMode::InteractiveTransient => {
+            use std::io::IsTerminal as _;
+            require_tty(std::io::stdin().is_terminal())?;
+            if let Some(slot) = resolved_flake_slot {
+                args.manifest = Some(slot);
+            }
+            let mut run_args = args.into_run_args();
+            run_args.pty = true;
+            run_args.warm_pool_size = warm_pool_size;
+            run_secure(cli, run_args, cfg)
         }
     }
 }
@@ -2804,11 +2717,11 @@ mod tests {
     }
 
     #[test]
-    fn name_implies_persistence_without_detach() {
+    fn name_is_identity_not_persistence() {
         let args =
             parse_run(&["run", "--image", "alpine", "--name", "web", "--", "true"]).expect("parse");
         assert_eq!(args.name.as_deref(), Some("web"));
-        assert!(args.persistent());
+        assert!(!args.persistent());
         assert!(!args.detach);
         assert!(!args.interactive());
     }
@@ -2841,31 +2754,23 @@ mod tests {
             ),
             (
                 &["run", "--name", "web", "--image", "X", "--", "cmd"],
-                MachineRunMode::Persistent,
-            ),
-            (
-                &[
-                    "run", "-it", "--name", "web", "--image", "X", "--", "/bin/sh",
-                ],
-                MachineRunMode::InteractivePersistent,
+                MachineRunMode::Transient,
             ),
             (&["run", "-d", "--image", "X"], MachineRunMode::Persistent),
             (
                 &["run", "-d", "--name", "web", "--image", "X"],
                 MachineRunMode::Persistent,
             ),
-            (
-                &["run", "-t", "--image", "X"],
-                MachineRunMode::InteractiveTransient,
-            ),
-            (
-                &["run", "--name", "web", "--image", "X"],
-                MachineRunMode::Persistent,
-            ),
             // `--up-json` implies Persistent (SDK boot-and-return path).
             (
                 &["run", "--up-json", "--manifest", "tmpl"],
                 MachineRunMode::Persistent,
+            ),
+            (
+                &[
+                    "run", "-it", "--name", "web", "--image", "X", "--", "/bin/sh",
+                ],
+                MachineRunMode::InteractiveTransient,
             ),
         ];
         for (argv, expected) in cases {
@@ -2876,28 +2781,34 @@ mod tests {
     }
 
     #[test]
+    fn interactive_run_requires_foreground_argv() {
+        let args = parse_run(&["run", "-t", "--image", "X"]).expect("parse");
+        let err = args.resolve_mode().expect_err("interactive run needs argv");
+        assert!(err.to_string().contains("command after `--`"));
+    }
+
+    #[test]
     fn warm_pool_size_is_claim_eligible_only_for_throwaway_runs() {
-        // Transient + interactive-transient are auto-named cattle → eligible:
+        // Unnamed transient + interactive-transient are cattle → eligible:
         // an explicit override is honoured verbatim (the residency-policy default
         // for `None` is env-dependent, so the override path is the deterministic
         // assertion).
-        assert_eq!(MachineRunMode::Transient.warm_pool_size(Some(3)), 3);
+        assert_eq!(MachineRunMode::Transient.warm_pool_size(Some(3), false), 3);
         assert_eq!(
-            MachineRunMode::InteractiveTransient.warm_pool_size(Some(2)),
+            MachineRunMode::InteractiveTransient.warm_pool_size(Some(2), false),
             2
         );
-        // A user-named / `-d` persistent machine is long-lived, never pooled —
-        // size 0 regardless of any override.
-        assert_eq!(MachineRunMode::Persistent.warm_pool_size(Some(5)), 0);
-        assert_eq!(MachineRunMode::Persistent.warm_pool_size(None), 0);
+        // A user-named foreground run has an observable identity, so it never
+        // reuses pool cattle.
+        assert_eq!(MachineRunMode::Transient.warm_pool_size(Some(3), true), 0);
         assert_eq!(
-            MachineRunMode::InteractivePersistent.warm_pool_size(Some(5)),
+            MachineRunMode::InteractiveTransient.warm_pool_size(Some(2), true),
             0
         );
-        assert_eq!(
-            MachineRunMode::InteractivePersistent.warm_pool_size(None),
-            0
-        );
+        // A persistent machine is long-lived, never pooled — size 0 regardless
+        // of any override.
+        assert_eq!(MachineRunMode::Persistent.warm_pool_size(Some(5), false), 0);
+        assert_eq!(MachineRunMode::Persistent.warm_pool_size(None, true), 0);
     }
 
     #[test]
@@ -3127,37 +3038,6 @@ mod tests {
             msg.contains("tty") || msg.contains("terminal") || msg.contains("interactive"),
             "msg: {msg}"
         );
-    }
-
-    #[test]
-    fn interactive_pty_argv_uses_same_command_quoting_as_exec() {
-        assert!(machine_interactive_pty_argv(&[]).is_empty());
-
-        let argv = vec![
-            "sh".to_string(),
-            "-lc".to_string(),
-            "echo hello world".to_string(),
-        ];
-        assert_eq!(
-            machine_interactive_pty_argv(&argv),
-            vec![
-                "/bin/sh".to_string(),
-                "-lc".to_string(),
-                machine_exec_command(&argv),
-            ]
-        );
-    }
-
-    #[test]
-    fn interactive_tears_down_only_the_transient_machine() {
-        let transient = parse_run(&["run", "-t", "--image", "x"]).expect("parse");
-        assert!(should_teardown_after_interactive(&transient));
-
-        let named = parse_run(&["run", "-it", "--name", "web", "--image", "x"]).expect("parse");
-        assert!(!should_teardown_after_interactive(&named));
-
-        let detached = parse_run(&["run", "-it", "-d", "--image", "x"]).expect("parse");
-        assert!(!should_teardown_after_interactive(&detached));
     }
 
     #[test]
@@ -3473,6 +3353,8 @@ mod tests {
                 assert_eq!(args.name, "web");
                 assert_eq!(args.argv, vec!["echo", "hello world"]);
                 assert!(!args.force);
+                assert!(!args.tty);
+                assert!(!args.interactive);
             }
             other => panic!("expected exec action, got {other:?}"),
         }
@@ -3496,6 +3378,19 @@ mod tests {
     fn exec_requires_argv() {
         let err = parse(&["exec", "--name", "web"]).expect_err("argv is required");
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn exec_accepts_it_for_pty_command() {
+        match parse(&["exec", "--name", "web", "-it", "--", "/bin/sh"]).expect("parse") {
+            MachineAction::Exec(args) => {
+                assert_eq!(args.name, "web");
+                assert!(args.tty);
+                assert!(args.interactive);
+                assert_eq!(args.argv, vec!["/bin/sh"]);
+            }
+            other => panic!("expected exec action, got {other:?}"),
+        }
     }
 
     #[test]

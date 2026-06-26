@@ -192,14 +192,26 @@ fn touch_activity(name: &str) {
 /// sockets), Apple Container (via direct vsock), and vsock proxy (via
 /// daemon Unix socket for cross-process access).
 pub(in crate::commands) fn console_interactive(name: &str) -> Result<()> {
-    console_interactive_with_env(name, Vec::new())
+    console_interactive_with_env(name, Vec::new()).map(|_| ())
 }
 
 pub(in crate::commands) fn console_interactive_with_env(
     name: &str,
     env: Vec<(String, String)>,
+) -> Result<i32> {
+    console_pty_with_argv(name, env, Vec::new())
+}
+
+pub(crate) fn console_pty_command(
+    name: &str,
+    command: String,
+    env: Vec<(String, String)>,
 ) -> Result<()> {
-    console_interactive_with_env_and_argv(name, env, Vec::new())
+    let exit_code = run_pty_command_for_exit(name, command, env)?;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
 }
 
 pub(in crate::commands) fn console_interactive_with_env_and_argv(
@@ -207,6 +219,26 @@ pub(in crate::commands) fn console_interactive_with_env_and_argv(
     env: Vec<(String, String)>,
     argv: Vec<String>,
 ) -> Result<()> {
+    let exit_code = console_pty_with_argv(name, env, argv)?;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
+pub(crate) fn run_pty_command_for_exit(
+    name: &str,
+    command: String,
+    env: Vec<(String, String)>,
+) -> Result<i32> {
+    console_pty_with_argv(name, env, shell_command_argv(command))
+}
+
+fn shell_command_argv(command: String) -> Vec<String> {
+    vec!["/bin/sh".to_string(), "-lc".to_string(), command]
+}
+
+fn console_pty_with_argv(name: &str, env: Vec<(String, String)>, argv: Vec<String>) -> Result<i32> {
     let (cols, rows) = get_terminal_size();
 
     ui::info(&format!(
@@ -270,8 +302,23 @@ pub(in crate::commands) fn console_interactive_with_env_and_argv(
 
     mvm_core::audit_emit!(ConsoleSessionEnd, vm: name, "session_id={session_id}");
 
+    let exit_code = console_exit_code(&transport, session_id)?;
     println!("\nConsole session ended.");
-    result.map(|_| ())
+    result.map(|_| exit_code)
+}
+
+fn console_exit_code(transport: &Arc<dyn VsockTransport>, session_id: u32) -> Result<i32> {
+    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    mvm_guest::vsock::require_capabilities(
+        &mut stream,
+        &[mvm_guest::vsock::GuestCapability::Console],
+    )?;
+    let req = mvm_guest::vsock::GuestRequest::ConsoleClose { session_id };
+    match mvm_guest::vsock::call_unary(&mut stream, &req)? {
+        mvm_guest::vsock::GuestResponse::ConsoleExited { exit_code, .. } => Ok(exit_code),
+        mvm_guest::vsock::GuestResponse::Error { message } => anyhow::bail!("{message}"),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
 }
 
 /// Flag set by the SIGWINCH signal handler.

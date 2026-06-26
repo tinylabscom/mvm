@@ -2397,7 +2397,7 @@ fn handle_client(
         },
 
         #[cfg(feature = "dev-shell")]
-        GuestRequest::ConsoleClose { session_id: _ } => {
+        GuestRequest::ConsoleClose { session_id } => {
             // Console sessions end when the shell exits or the host disconnects.
             // Explicit close is a no-op if already closed.
             if mvm_guest::console::is_active() {
@@ -2405,9 +2405,14 @@ fn handle_client(
                     message: "explicit close not yet supported — disconnect to end session"
                         .to_string(),
                 }
+            } else if let Some(exit_code) = mvm_guest::console::completed_exit_code(session_id) {
+                GuestResponse::ConsoleExited {
+                    session_id,
+                    exit_code,
+                }
             } else {
                 GuestResponse::ConsoleExited {
-                    session_id: 0,
+                    session_id,
                     exit_code: 0,
                 }
             }

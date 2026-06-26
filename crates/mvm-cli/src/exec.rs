@@ -156,6 +156,9 @@ pub enum ImageSource {
 /// All inputs to the orchestrator.
 #[derive(Debug, Clone)]
 pub struct ExecRequest {
+    /// Optional VM identity for a foreground transient run. Absent generates a
+    /// throwaway name.
+    pub name: Option<String>,
     pub image: ImageSource,
     pub cpus: u32,
     pub memory_mib: u32,
@@ -173,6 +176,8 @@ pub struct ExecRequest {
     /// Timeout for the in-guest command in seconds. `None` ⇒ no per-command
     /// kill (the default for interactive/ad-hoc exec).
     pub timeout_secs: Option<u64>,
+    /// Run the command attached to a PTY instead of pipe-streamed stdio.
+    pub pty: bool,
     /// Effective egress policy for the transient VM. Defaults to
     /// `deny_all`; `--net` / `--allow-host` widen it. Threaded onto
     /// `VmStartConfig.network_policy` so every backend enforces the same
@@ -401,13 +406,7 @@ pub fn build_guest_wrapper(req: &ExecRequest, add_dir_labels: &[String]) -> Stri
 
 /// Generate a transient VM name for an exec invocation.
 pub fn transient_vm_name() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or_default();
-    let pid = std::process::id();
-    format!("exec-{pid:x}-{nanos:08x}")
+    mvm_core::naming::generate_machine_name()
 }
 
 /// Decide whether snapshot restore is safe for this request.
@@ -545,7 +544,7 @@ fn run_inner(
 
     // Build read-only ext4 images for each --add-dir, staged in a transient
     // VMS subdirectory so cleanup is straightforward.
-    let mut vm_name = transient_vm_name();
+    let mut vm_name = req.name.clone().unwrap_or_else(transient_vm_name);
     let staging_dir = format!("{}/{}/extras", mvm::config::VMS_DIR, vm_name);
     let mut volumes: Vec<mvm_backend::image::RuntimeVolume> = Vec::new();
     let mut add_dir_labels: Vec<String> = Vec::new();
@@ -881,6 +880,12 @@ fn run_in_guest(
     let vsock_ready = timing.then(std::time::Instant::now);
     let wrapper = build_guest_wrapper(req, labels);
 
+    if req.pty {
+        let exit_code =
+            crate::commands::vm::console::run_pty_command_for_exit(vm_name, wrapper, Vec::new())?;
+        return Ok((Either::Left(exit_code), vsock_ready));
+    }
+
     let transport = vsock_transport::for_vm(vm_name)?;
     let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
     // Inbound vsock RPC audit. exec.rs is a top-level module that can't
@@ -1112,6 +1117,7 @@ pub fn dispatch_in_session(
     // with no add_dirs (sessions don't take --add-dir). The wrapper
     // emits `set -e\n<env exports>\n<argv>\n`.
     let req = ExecRequest {
+        name: None,
         warm_pool_size: 0,
         image: ImageSource::Template(String::new()),
         cpus: 0,
@@ -1123,6 +1129,7 @@ pub fn dispatch_in_session(
             argv: vec!["bash".to_string(), "-c".to_string(), code],
         },
         timeout_secs,
+        pty: false,
         // Wrapper-string construction only — the session VM is already
         // running, so this never reaches a backend boot.
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
@@ -1309,6 +1316,7 @@ mod tests {
     #[test]
     fn target_command_inline_quotes_each_arg() {
         let req = ExecRequest {
+            name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
             cpus: 1,
@@ -1320,6 +1328,7 @@ mod tests {
                 argv: vec!["uname".into(), "-a".into()],
             },
             timeout_secs: Some(30),
+            pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
         assert_eq!(req.target_command(), "exec 'uname' '-a'");
@@ -1328,6 +1337,7 @@ mod tests {
     #[test]
     fn build_guest_wrapper_no_extras() {
         let req = ExecRequest {
+            name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
             cpus: 1,
@@ -1339,6 +1349,7 @@ mod tests {
                 argv: vec!["true".into()],
             },
             timeout_secs: Some(30),
+            pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
         let script = build_guest_wrapper(&req, &[]);
@@ -1351,6 +1362,7 @@ mod tests {
     #[test]
     fn build_guest_wrapper_mounts_and_env() {
         let req = ExecRequest {
+            name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
             cpus: 1,
@@ -1366,6 +1378,7 @@ mod tests {
                 argv: vec!["echo".into(), "$FOO".into()],
             },
             timeout_secs: Some(30),
+            pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
@@ -1378,6 +1391,7 @@ mod tests {
     #[test]
     fn build_guest_wrapper_writable_mount_drops_ro_flag() {
         let req = ExecRequest {
+            name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
             cpus: 1,
@@ -1393,6 +1407,7 @@ mod tests {
                 argv: vec!["true".into()],
             },
             timeout_secs: Some(30),
+            pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
@@ -1407,8 +1422,9 @@ mod tests {
     #[test]
     fn transient_vm_name_format() {
         let n = transient_vm_name();
-        assert!(n.starts_with("exec-"));
-        assert!(n.len() > "exec-".len());
+        mvm_core::naming::validate_vm_name(&n)
+            .unwrap_or_else(|e| panic!("transient name {n:?} invalid: {e}"));
+        assert_eq!(n.split('-').count(), 3);
         assert!(!n.contains(' '));
         assert!(!n.contains('/'));
     }
@@ -1609,6 +1625,7 @@ mod tests {
     #[test]
     fn target_command_launch_plan_quotes_argv() {
         let req = ExecRequest {
+            name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
             cpus: 1,
@@ -1624,6 +1641,7 @@ mod tests {
                 },
             },
             timeout_secs: Some(30),
+            pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
         assert_eq!(req.target_command(), "exec 'python' '-m' 'x'");
@@ -1635,6 +1653,7 @@ mod tests {
         env.insert("PORT".to_string(), "8080".to_string());
         env.insert("LOG".to_string(), "info".to_string());
         let req = ExecRequest {
+            name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
             cpus: 1,
@@ -1650,6 +1669,7 @@ mod tests {
                 },
             },
             timeout_secs: Some(30),
+            pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
         let script = build_guest_wrapper(&req, &[]);
@@ -1676,6 +1696,7 @@ mod tests {
     fn build_guest_wrapper_inline_target_unchanged() {
         // Sanity: inline target wrapper still does not emit cd or extra env blocks.
         let req = ExecRequest {
+            name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
             cpus: 1,
@@ -1687,6 +1708,7 @@ mod tests {
                 argv: vec!["true".into()],
             },
             timeout_secs: Some(30),
+            pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         };
         let script = build_guest_wrapper(&req, &[]);

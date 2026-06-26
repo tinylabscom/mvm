@@ -83,6 +83,27 @@ pub fn generate_instance_id() -> String {
     )
 }
 
+/// Generate a human-friendly VM name, e.g. "brisk-otter-a1b2".
+///
+/// The suffix keeps the name collision-resistant while preserving a stable,
+/// easy-to-say shape for CLI output and logs.
+pub fn generate_machine_name() -> String {
+    const ADJECTIVES: &[&str] = &[
+        "brisk", "calm", "clever", "cozy", "dapper", "fuzzy", "gentle", "glossy", "happy",
+        "lively", "merry", "nimble", "plucky", "quiet", "snug", "sunny",
+    ];
+    const ANIMALS: &[&str] = &[
+        "badger", "beaver", "finch", "gecko", "heron", "koala", "lemur", "lynx", "marten", "otter",
+        "panda", "pika", "puffin", "quokka", "stoat", "wombat",
+    ];
+
+    let bytes = rand_bytes();
+    let adjective = ADJECTIVES[usize::from(bytes[0]) % ADJECTIVES.len()];
+    let animal = ANIMALS[usize::from(bytes[1]) % ANIMALS.len()];
+    let suffix = u16::from_be_bytes([bytes[2], bytes[3]]);
+    format!("{adjective}-{animal}-{suffix:04x}")
+}
+
 /// Generate a TAP device name: tn<net_id>i<ip_offset>.
 /// Max 12 chars, fits within Linux 15-char IFNAMSIZ limit.
 pub fn tap_name(tenant_net_id: u16, ip_offset: u8) -> String {
@@ -170,6 +191,16 @@ mod tests {
         let id = generate_instance_id();
         assert!(id.starts_with("i-"));
         assert_eq!(id.len(), 10); // "i-" + 8 hex chars
+    }
+
+    #[test]
+    fn test_generate_machine_name_is_valid_vm_name() {
+        let name = generate_machine_name();
+        validate_vm_name(&name).unwrap_or_else(|e| panic!("generated name {name:?}: {e}"));
+        assert!(
+            name.split('-').count() == 3,
+            "expected adjective-animal-hex, got {name:?}"
+        );
     }
 
     #[test]
