@@ -286,6 +286,9 @@ The target user-visible shape is:
             identities to explicit signing-key ids for `mvm prepare`,
             `mvm cache install-pack`, and bootstrap pack preload.
 - [ ] Add revocation metadata fetching and offline-cache behavior.
+      - [x] Add offline revocation freshness metadata for local revocation
+            files; stale metadata fails closed during pack verification and
+            prepare reports `stale_revocation_metadata`.
 - [ ] Add key rotation support that accepts overlapping keys only within an
       explicit policy window.
       - [x] Add verifier-level key rotation windows that accept a channel
@@ -308,10 +311,14 @@ The target user-visible shape is:
             pins, wrong signing keys, closed key-rotation windows, mirror
             mismatch, local-rebuild-required policy routing, and malformed
             policy CLI inputs.
+      - [x] Add focused verifier/cache/CLI tests for stale, fresh, and
+            malformed offline revocation freshness metadata.
 - [ ] Document channel pinning, mirror setup, offline operation, and revocation
       behavior.
       - [x] Document explicit policy mode, channel signing-key pins, and mirror
             identity flags/env vars in the CLI reference and installation guide.
+      - [x] Document local revocation freshness fields and the
+            `stale_revocation_metadata` refusal behavior in the CLI reference.
 
 ### J. Metrics, proof gates, and regression tests
 

@@ -242,6 +242,7 @@ pub enum PackPrepareReason {
     LocalRebuildRequired,
     PolicyRefusal,
     TrustUnavailable,
+    StaleRevocationMetadata,
     CacheMetadataInvalid,
     InputMismatch,
     SetupCacheMiss,
@@ -1183,6 +1184,9 @@ fn reason_for_verify_error(error: &PackVerifyError) -> PackPrepareReason {
         PackVerifyError::ExpiredSignature { .. } => PackPrepareReason::ExpiredSignature,
         PackVerifyError::ExpiredTrustMetadata { .. } => PackPrepareReason::ExpiredTrustMetadata,
         PackVerifyError::Revoked { .. } => PackPrepareReason::RevokedSigner,
+        PackVerifyError::StaleRevocationMetadata { .. } => {
+            PackPrepareReason::StaleRevocationMetadata
+        }
         PackVerifyError::MutableOciReference { .. } => PackPrepareReason::MutableInput,
         PackVerifyError::MissingHostCapability(_)
         | PackVerifyError::PolicyHashMismatch { .. }
@@ -1219,6 +1223,7 @@ fn trust_state_for_verify_error(error: &PackVerifyError) -> PackTrustState {
             PackTrustState::Expired
         }
         PackVerifyError::Revoked { .. } => PackTrustState::Revoked,
+        PackVerifyError::StaleRevocationMetadata { .. } => PackTrustState::Untrusted,
         PackVerifyError::UnknownSigningKey { .. }
         | PackVerifyError::SignatureInvalid
         | PackVerifyError::SignatureMissingForKey(_)
@@ -1459,9 +1464,9 @@ mod tests {
     use crate::packs::{
         EMPTY_PACK_HASH, FlakeLockIdentity, HostCapability, OciDigest, OciInputIdentity, PackFile,
         PackInputs, PackOutputs, PackProvenance, PackSignature, PolicyCompatibility,
-        ReproducibilityStatus, RevocationStatus, SbomReference, SetupCacheLayerIdentity,
-        SetupCommandIdentity, SignatureBundle, SignatureFormat, SignaturePayload,
-        SourceRevisionIdentity, TrustMetadata,
+        ReproducibilityStatus, RevocationFreshness, RevocationStatus, SbomReference,
+        SetupCacheLayerIdentity, SetupCommandIdentity, SignatureBundle, SignatureFormat,
+        SignaturePayload, SourceRevisionIdentity, TrustMetadata,
     };
     use crate::plan::bundle::KeyId;
 
@@ -1477,11 +1482,16 @@ mod tests {
 
     struct StaticRevocation {
         status: RevocationStatus,
+        freshness: RevocationFreshness,
     }
 
     impl PackRevocationChecker for StaticRevocation {
         fn status(&self, _key_id: &KeyId, _pack_hash: &Sha256Hex) -> RevocationStatus {
             self.status.clone()
+        }
+
+        fn freshness(&self, _now: DateTime<Utc>) -> RevocationFreshness {
+            self.freshness.clone()
         }
     }
 
@@ -1644,6 +1654,7 @@ mod tests {
             trust,
             revocations: StaticRevocation {
                 status: RevocationStatus::Good,
+                freshness: RevocationFreshness::Fresh,
             },
         }
     }
@@ -2132,6 +2143,33 @@ mod tests {
         assert_eq!(report.state, PackPrepareState::Refused);
         assert_eq!(report.reason, Some(PackPrepareReason::RevokedSigner));
         assert_eq!(report.trust_state, PackTrustState::Revoked);
+    }
+
+    #[test]
+    fn prepare_report_maps_stale_revocation_metadata_to_refusal() {
+        let mut f = fixture();
+        install_fixture_pack(&f);
+        f.revocations.freshness = RevocationFreshness::Stale {
+            fetched_at: utc(2026, 6, 1),
+            max_age_seconds: 86_400,
+        };
+
+        let report = f
+            .cache
+            .prepare_report(
+                &prepare_request(oci_input(&f)),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepare report");
+
+        assert_eq!(report.state, PackPrepareState::Refused);
+        assert_eq!(
+            report.reason,
+            Some(PackPrepareReason::StaleRevocationMetadata)
+        );
+        assert_eq!(report.trust_state, PackTrustState::Untrusted);
     }
 
     #[test]

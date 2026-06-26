@@ -819,3 +819,8 @@ All commands accept these global options:
 | `MVM_BOOTSTRAP_PACK_TRUST_STORE` | Optional trusted-publisher key directory for bootstrap pack verification. Defaults to the normal trusted publisher path. | Default trust store |
 | `MVM_BOOTSTRAP_PACK_REVOCATIONS` | Optional local revocation JSON file for bootstrap pack verification. | None |
 | `MVM_BOOTSTRAP_PACK_ALLOW_HTTP` | Set to `1` to allow plain-HTTP bootstrap pack downloads. HTTPS or local files are preferred. | Unset |
+
+Local pack revocation files use schema version 1 with a `revoked` list of
+`signing_key_id`, `pack_hash`, and `reason` entries. They may also include
+`fetched_at` and `max_age_seconds`; when both are present, stale revocation
+metadata fails closed with `stale_revocation_metadata` during pack verification.

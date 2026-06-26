@@ -469,12 +469,25 @@ where
 
 pub trait PackRevocationChecker {
     fn status(&self, key_id: &KeyId, pack_hash: &Sha256Hex) -> RevocationStatus;
+
+    fn freshness(&self, _now: DateTime<Utc>) -> RevocationFreshness {
+        RevocationFreshness::Fresh
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RevocationStatus {
     Good,
     Revoked { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevocationFreshness {
+    Fresh,
+    Stale {
+        fetched_at: DateTime<Utc>,
+        max_age_seconds: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -495,7 +508,7 @@ pub fn verify_pack_at(
     verify_files(manifest, root)?;
     verify_pack_hash(manifest)?;
     verify_signature(manifest, policy, trust)?;
-    verify_revocation(manifest, revocations)?;
+    verify_revocation(manifest, policy, revocations)?;
     Ok(VerifiedPack {
         pack_hash: manifest.outputs.pack_hash.clone(),
         file_count: manifest.outputs.files.len(),
@@ -687,8 +700,21 @@ fn verify_signature(
 
 fn verify_revocation(
     manifest: &PackManifest,
+    policy: &LocalPackPolicy,
     revocations: &dyn PackRevocationChecker,
 ) -> Result<(), PackVerifyError> {
+    match revocations.freshness(policy.now) {
+        RevocationFreshness::Fresh => {}
+        RevocationFreshness::Stale {
+            fetched_at,
+            max_age_seconds,
+        } => {
+            return Err(PackVerifyError::StaleRevocationMetadata {
+                fetched_at,
+                max_age_seconds,
+            });
+        }
+    }
     match revocations.status(&manifest.trust.signing_key_id, &manifest.outputs.pack_hash) {
         RevocationStatus::Good => Ok(()),
         RevocationStatus::Revoked { reason } => Err(PackVerifyError::Revoked {
@@ -947,6 +973,13 @@ pub enum PackVerifyError {
     SignatureInvalid,
     #[error("pack signer {key_id:?} is revoked: {reason}")]
     Revoked { key_id: KeyId, reason: String },
+    #[error(
+        "pack revocation metadata is stale: fetched at {fetched_at}, max age {max_age_seconds}s"
+    )]
+    StaleRevocationMetadata {
+        fetched_at: DateTime<Utc>,
+        max_age_seconds: u64,
+    },
     #[error(transparent)]
     Manifest(#[from] PackManifestError),
 }
@@ -974,11 +1007,16 @@ mod tests {
 
     struct StaticRevocation {
         status: RevocationStatus,
+        freshness: RevocationFreshness,
     }
 
     impl PackRevocationChecker for StaticRevocation {
         fn status(&self, _key_id: &KeyId, _pack_hash: &Sha256Hex) -> RevocationStatus {
             self.status.clone()
+        }
+
+        fn freshness(&self, _now: DateTime<Utc>) -> RevocationFreshness {
+            self.freshness.clone()
         }
     }
 
@@ -1174,6 +1212,7 @@ mod tests {
         };
         let revocations = StaticRevocation {
             status: RevocationStatus::Good,
+            freshness: RevocationFreshness::Fresh,
         };
         Fixture {
             dir,
@@ -1403,6 +1442,25 @@ mod tests {
         };
         let err = verify(&f).expect_err("revoked pack rejected");
         assert!(matches!(err, PackVerifyError::Revoked { .. }));
+    }
+
+    #[test]
+    fn stale_revocation_metadata_is_rejected() {
+        let mut f = fixture(PackKind::Runtime);
+        f.revocations.freshness = RevocationFreshness::Stale {
+            fetched_at: utc(2026, 6, 1),
+            max_age_seconds: 86_400,
+        };
+
+        let err = verify(&f).expect_err("stale revocation metadata rejected");
+
+        assert!(matches!(
+            err,
+            PackVerifyError::StaleRevocationMetadata {
+                max_age_seconds: 86_400,
+                ..
+            }
+        ));
     }
 
     #[test]

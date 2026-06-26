@@ -12,7 +12,7 @@ use crate::ui;
 use mvm_core::arch::GuestArch;
 use mvm_core::packs::{
     ArtifactChannelPolicy, HostCapability, LocalPackPolicy, PackBackend, PackPolicyMode,
-    PackRevocationChecker, RevocationStatus, Sha256Hex,
+    PackRevocationChecker, RevocationFreshness, RevocationStatus, Sha256Hex,
     cache::{
         CachedPack, PACK_PROTECTION_FILENAME, PackCache, PackCacheReadiness, PackCacheStatusEntry,
         PackProtectionRef, PackPruneAction, PackPruneEntry, PackPruneReason, PackPruneRequest,
@@ -472,6 +472,10 @@ fn download_pack_archive_to_bytes(
 #[serde(deny_unknown_fields)]
 struct PackRevocationFile {
     schema_version: u32,
+    #[serde(default)]
+    fetched_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    max_age_seconds: Option<u64>,
     revoked: Vec<PackRevocationFileEntry>,
 }
 
@@ -486,12 +490,16 @@ struct PackRevocationFileEntry {
 #[derive(Debug)]
 pub(in crate::commands) struct LocalPackRevocations {
     revoked: BTreeMap<(String, String), String>,
+    fetched_at: Option<DateTime<Utc>>,
+    max_age_seconds: Option<u64>,
 }
 
 impl LocalPackRevocations {
     pub(in crate::commands) fn empty() -> Self {
         Self {
             revoked: BTreeMap::new(),
+            fetched_at: None,
+            max_age_seconds: None,
         }
     }
 
@@ -504,6 +512,11 @@ impl LocalPackRevocations {
             anyhow::bail!(
                 "unsupported pack revocation schema version {}; expected 1",
                 file.schema_version
+            );
+        }
+        if file.fetched_at.is_some() != file.max_age_seconds.is_some() {
+            anyhow::bail!(
+                "pack revocation file must include both fetched_at and max_age_seconds when freshness metadata is present"
             );
         }
         let mut revoked = BTreeMap::new();
@@ -519,7 +532,11 @@ impl LocalPackRevocations {
                 entry.reason,
             );
         }
-        Ok(Self { revoked })
+        Ok(Self {
+            revoked,
+            fetched_at: file.fetched_at,
+            max_age_seconds: file.max_age_seconds,
+        })
     }
 }
 
@@ -531,6 +548,22 @@ impl PackRevocationChecker for LocalPackRevocations {
                 reason: reason.clone(),
             })
             .unwrap_or(RevocationStatus::Good)
+    }
+
+    fn freshness(&self, now: DateTime<Utc>) -> RevocationFreshness {
+        let (Some(fetched_at), Some(max_age_seconds)) = (self.fetched_at, self.max_age_seconds)
+        else {
+            return RevocationFreshness::Fresh;
+        };
+        let max_age_seconds_i64 = max_age_seconds.min(i64::MAX as u64) as i64;
+        if now.signed_duration_since(fetched_at).num_seconds() > max_age_seconds_i64 {
+            RevocationFreshness::Stale {
+                fetched_at,
+                max_age_seconds,
+            }
+        } else {
+            RevocationFreshness::Fresh
+        }
     }
 }
 
@@ -2313,5 +2346,78 @@ mod tests {
             revocations.status(&key_id, &Sha256Hex::from_bytes(b"other")),
             RevocationStatus::Good
         );
+    }
+
+    #[test]
+    fn local_pack_revocations_reports_stale_freshness_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("revocations.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "schema_version": 1,
+                "fetched_at": "2026-06-01T00:00:00Z",
+                "max_age_seconds": 86400,
+                "revoked": []
+            }"#,
+        )
+        .unwrap();
+
+        let revocations = LocalPackRevocations::from_path(&path).unwrap();
+        let now = "2026-06-03T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("valid timestamp");
+
+        assert_eq!(
+            revocations.freshness(now),
+            RevocationFreshness::Stale {
+                fetched_at: "2026-06-01T00:00:00Z"
+                    .parse::<DateTime<Utc>>()
+                    .expect("valid timestamp"),
+                max_age_seconds: 86_400
+            }
+        );
+    }
+
+    #[test]
+    fn local_pack_revocations_accepts_fresh_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("revocations.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "schema_version": 1,
+                "fetched_at": "2026-06-01T00:00:00Z",
+                "max_age_seconds": 86400,
+                "revoked": []
+            }"#,
+        )
+        .unwrap();
+
+        let revocations = LocalPackRevocations::from_path(&path).unwrap();
+        let now = "2026-06-01T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("valid timestamp");
+
+        assert_eq!(revocations.freshness(now), RevocationFreshness::Fresh);
+    }
+
+    #[test]
+    fn local_pack_revocations_rejects_incomplete_freshness_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("revocations.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "schema_version": 1,
+                "fetched_at": "2026-06-01T00:00:00Z",
+                "revoked": []
+            }"#,
+        )
+        .unwrap();
+
+        let err = LocalPackRevocations::from_path(&path).unwrap_err();
+
+        assert!(err.to_string().contains("fetched_at and max_age_seconds"));
     }
 }

@@ -367,6 +367,7 @@ pub(in crate::commands) fn reason_name(reason: PackPrepareReason) -> &'static st
         PackPrepareReason::LocalRebuildRequired => "local_rebuild_required",
         PackPrepareReason::PolicyRefusal => "policy_refusal",
         PackPrepareReason::TrustUnavailable => "trust_unavailable",
+        PackPrepareReason::StaleRevocationMetadata => "stale_revocation_metadata",
         PackPrepareReason::CacheMetadataInvalid => "cache_metadata_invalid",
         PackPrepareReason::InputMismatch => "input_mismatch",
         PackPrepareReason::SetupCacheMiss => "setup_cache_miss",
@@ -407,6 +408,9 @@ pub(in crate::commands) fn reason_detail(reason: PackPrepareReason) -> &'static 
         }
         PackPrepareReason::TrustUnavailable => {
             "trusted publisher metadata is unavailable for this pack"
+        }
+        PackPrepareReason::StaleRevocationMetadata => {
+            "active revocation metadata is older than its declared freshness window"
         }
         PackPrepareReason::CacheMetadataInvalid => {
             "cached pack metadata is missing, malformed, or inconsistent"
@@ -451,6 +455,9 @@ pub(in crate::commands) fn reason_next_step(reason: PackPrepareReason) -> &'stat
         }
         PackPrepareReason::TrustUnavailable => {
             "configure trusted publisher metadata or use an offline-pinned policy"
+        }
+        PackPrepareReason::StaleRevocationMetadata => {
+            "refresh revocation metadata before using this pack, or rebuild locally"
         }
         PackPrepareReason::CacheMetadataInvalid => {
             "remove the poisoned cache entry and reinstall the pack from a trusted source"
@@ -763,6 +770,7 @@ mod tests {
             PackPrepareReason::LocalRebuildRequired,
             PackPrepareReason::PolicyRefusal,
             PackPrepareReason::TrustUnavailable,
+            PackPrepareReason::StaleRevocationMetadata,
             PackPrepareReason::CacheMetadataInvalid,
             PackPrepareReason::InputMismatch,
             PackPrepareReason::SetupCacheMiss,
