@@ -234,6 +234,16 @@ pub struct PreparedLaunchPack {
     pub size_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedRuntimeLaunchArtifacts {
+    pub pack_hash: Sha256Hex,
+    pub cache_root: PathBuf,
+    pub kernel: Option<PathBuf>,
+    pub rootfs: Option<PathBuf>,
+    pub initramfs: Option<PathBuf>,
+    pub agent_rootfs: Option<PathBuf>,
+}
+
 #[derive(Debug, Error)]
 pub enum PackLaunchSelectionError {
     #[error(transparent)]
@@ -249,6 +259,17 @@ pub enum PackLaunchSelectionError {
         field: &'static str,
         report: Box<PackPrepareReport>,
     },
+    #[error("prepared launch pack is {kind:?}, not a runtime pack")]
+    NotRuntimePack { kind: PackKind },
+    #[error("runtime pack manifest is missing a boot payload output")]
+    MissingRuntimeBootPayload,
+    #[error("runtime pack manifest output {field}={hash:?} has no matching file entry")]
+    MissingRuntimeFile {
+        field: &'static str,
+        hash: Sha256Hex,
+    },
+    #[error("runtime pack file path {path:?} is unsafe")]
+    UnsafeRuntimeFilePath { path: String },
 }
 
 impl From<PackCacheError> for PackLaunchSelectionError {
@@ -262,6 +283,10 @@ impl PackLaunchSelectionError {
         match self {
             Self::Cache(_) => None,
             Self::NotReady { report, .. } | Self::MissingReadyField { report, .. } => Some(report),
+            Self::NotRuntimePack { .. }
+            | Self::MissingRuntimeBootPayload
+            | Self::MissingRuntimeFile { .. }
+            | Self::UnsafeRuntimeFilePath { .. } => None,
         }
     }
 }
@@ -978,6 +1003,47 @@ impl PreparedLaunchSelection {
             report,
         })
     }
+
+    pub fn runtime_artifacts(
+        &self,
+    ) -> Result<PreparedRuntimeLaunchArtifacts, PackLaunchSelectionError> {
+        self.pack.runtime_artifacts()
+    }
+}
+
+impl PreparedLaunchPack {
+    pub fn runtime_artifacts(
+        &self,
+    ) -> Result<PreparedRuntimeLaunchArtifacts, PackLaunchSelectionError> {
+        if self.kind != PackKind::Runtime {
+            return Err(PackLaunchSelectionError::NotRuntimePack {
+                kind: self.kind.clone(),
+            });
+        }
+        let manifest = read_cached_manifest(&self.cache_root)?;
+        if manifest.kind != PackKind::Runtime {
+            return Err(PackLaunchSelectionError::NotRuntimePack {
+                kind: manifest.kind,
+            });
+        }
+        let kernel = optional_runtime_artifact_path(&self.cache_root, &manifest, "kernel_hash")?;
+        let rootfs = optional_runtime_artifact_path(&self.cache_root, &manifest, "rootfs_hash")?;
+        let initramfs =
+            optional_runtime_artifact_path(&self.cache_root, &manifest, "initramfs_hash")?;
+        let agent_rootfs =
+            optional_runtime_artifact_path(&self.cache_root, &manifest, "agent_rootfs_hash")?;
+        if rootfs.is_none() && initramfs.is_none() && agent_rootfs.is_none() {
+            return Err(PackLaunchSelectionError::MissingRuntimeBootPayload);
+        }
+        Ok(PreparedRuntimeLaunchArtifacts {
+            pack_hash: self.pack_hash.clone(),
+            cache_root: self.cache_root.clone(),
+            kernel,
+            rootfs,
+            initramfs,
+            agent_rootfs,
+        })
+    }
 }
 
 impl PackPrepareSetupCacheReport {
@@ -1167,6 +1233,57 @@ fn read_cached_manifest(root: &Path) -> Result<PackManifest, PackCacheError> {
         source,
     })?;
     serde_json::from_slice(&manifest_bytes).map_err(PackCacheError::Json)
+}
+
+fn optional_runtime_artifact_path(
+    cache_root: &Path,
+    manifest: &PackManifest,
+    field: &'static str,
+) -> Result<Option<PathBuf>, PackLaunchSelectionError> {
+    let Some(hash) = runtime_output_hash(manifest, field) else {
+        return Ok(None);
+    };
+    let file = manifest
+        .outputs
+        .files
+        .iter()
+        .find(|file| &file.sha256 == hash)
+        .ok_or_else(|| PackLaunchSelectionError::MissingRuntimeFile {
+            field,
+            hash: hash.clone(),
+        })?;
+    let relative = safe_pack_file_path(&file.path)?;
+    Ok(Some(cache_root.join(relative)))
+}
+
+fn runtime_output_hash<'a>(
+    manifest: &'a PackManifest,
+    field: &'static str,
+) -> Option<&'a Sha256Hex> {
+    match field {
+        "kernel_hash" => manifest.outputs.kernel_hash.as_ref(),
+        "rootfs_hash" => manifest.outputs.rootfs_hash.as_ref(),
+        "initramfs_hash" => manifest.outputs.initramfs_hash.as_ref(),
+        "agent_rootfs_hash" => manifest.outputs.agent_rootfs_hash.as_ref(),
+        _ => None,
+    }
+}
+
+fn safe_pack_file_path(path: &str) -> Result<PathBuf, PackLaunchSelectionError> {
+    let relative = Path::new(path);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(PackLaunchSelectionError::UnsafeRuntimeFilePath {
+            path: path.to_string(),
+        });
+    }
+    Ok(relative.to_path_buf())
 }
 
 fn prepare_report_for_manifest(
@@ -1982,6 +2099,102 @@ mod tests {
         assert_eq!(selection.pack.input.raw, oci_input(&f));
         assert!(!selection.report.builder_vm_required);
         assert!(selection.report.fast_path_eligible);
+    }
+
+    #[test]
+    fn prepared_runtime_artifacts_resolve_cache_paths() {
+        let f = fixture();
+        let cached = install_fixture_pack(&f);
+        let selection = f
+            .cache
+            .select_prepared_launch(
+                &prepare_request(oci_input(&f)),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepared launch selection");
+
+        let artifacts = selection
+            .runtime_artifacts()
+            .expect("runtime artifacts resolve");
+
+        assert_eq!(artifacts.pack_hash, cached.verified.pack_hash);
+        assert_eq!(artifacts.cache_root, cached.root);
+        assert_eq!(
+            artifacts.kernel.as_deref(),
+            Some(cached.root.join("runtime/kernel").as_path())
+        );
+        assert_eq!(
+            artifacts.initramfs.as_deref(),
+            Some(cached.root.join("runtime/initramfs").as_path())
+        );
+        assert!(artifacts.rootfs.is_none());
+        assert!(artifacts.agent_rootfs.is_none());
+    }
+
+    #[test]
+    fn prepared_runtime_artifacts_require_a_boot_payload() {
+        let f = fixture();
+        let cached = install_fixture_pack(&f);
+        let selection = f
+            .cache
+            .select_prepared_launch(
+                &prepare_request(oci_input(&f)),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepared launch selection");
+        let mut manifest = f.manifest.clone();
+        manifest.outputs.rootfs_hash = None;
+        manifest.outputs.initramfs_hash = None;
+        manifest.outputs.agent_rootfs_hash = None;
+        write_restricted_file(
+            &cached.root.join(MANIFEST_FILENAME),
+            &manifest.canonical_bytes().expect("manifest bytes"),
+        )
+        .expect("rewrite cached manifest");
+
+        let err = selection
+            .runtime_artifacts()
+            .expect_err("missing boot payload fails closed");
+
+        assert!(matches!(
+            err,
+            PackLaunchSelectionError::MissingRuntimeBootPayload
+        ));
+    }
+
+    #[test]
+    fn prepared_runtime_artifacts_refuse_unsafe_manifest_file_paths() {
+        let f = fixture();
+        let cached = install_fixture_pack(&f);
+        let selection = f
+            .cache
+            .select_prepared_launch(
+                &prepare_request(oci_input(&f)),
+                &f.policy,
+                &f.trust,
+                &f.revocations,
+            )
+            .expect("prepared launch selection");
+        let mut manifest = f.manifest.clone();
+        manifest.outputs.files[1].path = "../escape".to_string();
+        write_restricted_file(
+            &cached.root.join(MANIFEST_FILENAME),
+            &manifest.canonical_bytes().expect("manifest bytes"),
+        )
+        .expect("rewrite cached manifest");
+
+        let err = selection
+            .runtime_artifacts()
+            .expect_err("unsafe runtime path fails closed");
+
+        assert!(matches!(
+            err,
+            PackLaunchSelectionError::UnsafeRuntimeFilePath { .. }
+        ));
     }
 
     #[test]

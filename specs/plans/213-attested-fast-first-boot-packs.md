@@ -193,6 +193,10 @@ The target user-visible shape is:
             verified ready fast-path reports, and fails closed for cache misses,
             setup-cache misses, and malformed ready reports without invoking
             builder preparation.
+      - [x] Resolve a selected verified runtime pack into concrete cached
+            launch artifact paths by matching runtime output hashes to manifest
+            file entries, requiring at least one boot payload, and refusing
+            unsafe manifest file paths before launch code can consume them.
 - [ ] Create per-run CoW sandboxes from prepared image/project artifacts.
 - [ ] Derive an agent-ready local runtime snapshot after verifying the runtime
       pack and before injecting secrets.

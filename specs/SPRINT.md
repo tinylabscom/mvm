@@ -46,6 +46,18 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 - [x] Continued
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
+      Workstream E runtime-pack launch artifact resolution: selected verified
+      runtime packs now resolve to concrete cached launch artifact paths by
+      matching semantic runtime output hashes (`kernel_hash`, `rootfs_hash`,
+      `initramfs_hash`, `agent_rootfs_hash`) to manifest file entries. The
+      resolver requires at least one boot payload and refuses unsafe manifest
+      file paths before launch code can consume the pack. Coverage: focused
+      `mvm-core` tests for artifact path resolution, missing boot-payload
+      refusal, and unsafe-path refusal. Workstream E remains open on per-run
+      CoW sandboxes, snapshot/warm-claim launch paths, guest-agent dispatch,
+      and live latency evidence.
+- [x] Continued
+      [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream E runtime-pack launch selection: `mvm_core::packs::cache`
       now exposes a prepared-launch selection API on top of the existing
       prepare resolver. It returns a launchable pack only when the report is
