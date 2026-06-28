@@ -204,6 +204,7 @@ impl VmBackend for VzBackend {
             balloon: true,
             // Vz runs on macOS with APFS, so clonefile is available.
             fs_quick_checkpoint: cfg!(target_os = "macos"),
+            ..VmCapabilities::default()
         }
     }
 
