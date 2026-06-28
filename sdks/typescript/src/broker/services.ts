@@ -22,6 +22,7 @@ kind: "skipped"
  * Per-entry error code for batch responses.
  */
 <<<<<<< HEAD
+<<<<<<< HEAD
 export type EmitErrorCode = ("record_too_large" | "invalid_entry" | "audit_signer_error")
 =======
 export type EmitErrorCode =
@@ -29,6 +30,9 @@ export type EmitErrorCode =
   | "invalid_entry"
   | "audit_signer_error";
 >>>>>>> 423f7dfc (fix(xtask): make protocol stub codegen deterministic via explicit print width)
+=======
+export type EmitErrorCode = ("record_too_large" | "invalid_entry" | "audit_signer_error")
+>>>>>>> c34986d0 (fix(xtask): disable formatter in stub codegen for true determinism)
 /**
  * Reverse-DNS-like service identifier with a mandatory version segment.
  * 
