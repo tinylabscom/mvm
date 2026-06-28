@@ -231,18 +231,19 @@ fn run_python_codegen(workspace: &Path, schema: &Path, out: &Path, class_name: &
 
 fn run_ts_codegen(workspace: &Path, schema: &Path, out: &Path) -> Result<()> {
     let pkg = format!("json-schema-to-typescript@{JSON_SCHEMA_TO_TS_VERSION}");
-    // Force an explicit print width so the prettier pass the generator runs
-    // formats identically everywhere. Without it the effective width is the
-    // formatter's environment-dependent default, which drifts string-literal
-    // unions between single- and multi-line across machines and makes
-    // `check-stubs` non-deterministic (green locally, red in CI).
+    // Disable the generator's prettier pass. prettier is an unpinned transitive
+    // dep whose union-wrapping heuristic differs by version, so formatting drifts
+    // between machines (green locally, red in CI) no matter the print width.
+    // `--no-format` emits the generator's own deterministic output, which depends
+    // only on the pinned json-schema-to-typescript version — making `check-stubs`
+    // reproducible everywhere.
     let status = Command::new("npx")
         .args(["--yes", &pkg, "--input"])
         .arg(schema)
         .arg("--output")
         .arg(out)
         .arg("--no-additionalProperties")
-        .arg("--style.printWidth=80")
+        .arg("--no-format")
         .current_dir(workspace)
         .status()
         .context("spawning npx json-schema-to-typescript — install node + npx to run codegen")?;
