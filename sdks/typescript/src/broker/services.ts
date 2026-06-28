@@ -24,7 +24,10 @@ export type EmitBatchEntryStatus =
 /**
  * Per-entry error code for batch responses.
  */
-export type EmitErrorCode = "record_too_large" | "invalid_entry" | "audit_signer_error";
+export type EmitErrorCode =
+  | "record_too_large"
+  | "invalid_entry"
+  | "audit_signer_error";
 /**
  * Reverse-DNS-like service identifier with a mandatory version segment.
  *
