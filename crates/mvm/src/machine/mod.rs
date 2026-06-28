@@ -9,6 +9,8 @@
 //! Boot / exec / shell wiring lands on top of this seam in later work; this
 //! module is the construction + capability-gate backbone.
 
+use mvm_backend::AnyBackend;
+use mvm_backend::selection::SelectionError;
 use mvm_core::vm_backend::{RequiredCapabilities, VmCapabilities};
 
 /// How a machine reaches the network. Closed by default: a machine gets no
@@ -168,6 +170,13 @@ impl Machine {
             Err(CapabilityError { missing })
         }
     }
+
+    /// Choose the most-preferred backend whose capabilities can serve this
+    /// machine, failing closed with the per-candidate shortfall if none can.
+    /// This is selection only — it does not boot anything.
+    pub fn select_backend(&self) -> Result<AnyBackend, SelectionError> {
+        AnyBackend::select_capable(&self.required_capabilities())
+    }
 }
 
 #[cfg(test)]
@@ -250,5 +259,31 @@ mod tests {
             ..VmCapabilities::default()
         };
         assert!(machine.check_backend(&caps).is_ok());
+    }
+
+    #[test]
+    fn select_backend_picks_a_capable_backend_for_a_basic_machine() {
+        let machine = Machine::builder().image("alpine").build().unwrap();
+        let backend = machine.select_backend().unwrap();
+        assert!(backend.capabilities().vsock);
+    }
+
+    #[test]
+    fn select_backend_fails_closed_for_host_vsock_proxy_until_brokers_exist() {
+        // No backend advertises the broker capabilities yet, so a brokered-net
+        // machine is rejected rather than degraded onto a guest-NIC path.
+        let machine = Machine::builder()
+            .image("alpine")
+            .network(NetworkMode::HostVsockProxy)
+            .build()
+            .unwrap();
+        match machine.select_backend() {
+            Ok(_) => panic!("host-vsock-proxy has no capable backend yet; must fail closed"),
+            Err(err) => assert!(
+                err.shortfalls
+                    .iter()
+                    .all(|(_, m)| m.contains(&"host_vsock_proxy"))
+            ),
+        }
     }
 }
