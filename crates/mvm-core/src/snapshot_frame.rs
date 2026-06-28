@@ -166,6 +166,90 @@ pub fn parse_header(bytes: &[u8]) -> Result<FrameHeader, FrameError> {
     })
 }
 
+/// Byte length of one section-table entry: kind(2) + offset(8) + len(8).
+pub const SECTION_ENTRY_LEN: usize = 18;
+
+/// What a section carries. Unknown kinds are preserved (forward-compatible) so a
+/// newer writer's extra sections don't break an older reader that only consumes
+/// the kinds it knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionKind {
+    Ram,
+    Devices,
+    Vcpu,
+    ArtifactDigests,
+    Unknown(u16),
+}
+
+impl SectionKind {
+    fn from_u16(v: u16) -> Self {
+        match v {
+            1 => SectionKind::Ram,
+            2 => SectionKind::Devices,
+            3 => SectionKind::Vcpu,
+            4 => SectionKind::ArtifactDigests,
+            other => SectionKind::Unknown(other),
+        }
+    }
+}
+
+/// One parsed section: its kind and the validated byte range of its data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionEntry {
+    pub kind: SectionKind,
+    pub region: Region,
+}
+
+impl SectionEntry {
+    /// The section's data slice within `frame`, which must be the same bytes
+    /// [`parse_sections`] validated — so the range is guaranteed in bounds.
+    pub fn data<'a>(&self, frame: &'a [u8]) -> &'a [u8] {
+        &frame[self.region.offset..self.region.offset + self.region.len]
+    }
+}
+
+fn read_u16_le(b: &[u8], at: usize) -> u16 {
+    let mut a = [0u8; 2];
+    a.copy_from_slice(&b[at..at + 2]);
+    u16::from_le_bytes(a)
+}
+
+fn read_u64_le(b: &[u8], at: usize) -> u64 {
+    let mut a = [0u8; 8];
+    a.copy_from_slice(&b[at..at + 8]);
+    u64::from_le_bytes(a)
+}
+
+/// Parse the header and section table, validating every region against the
+/// frame length with overflow-safe math. Returns one [`SectionEntry`] per
+/// table row; unknown section kinds are preserved. Fails closed if the table
+/// or any section runs past the end of the frame. The per-section capacity is
+/// bounded because `section_count` already passed [`cap_count`].
+pub fn parse_sections(frame: &[u8]) -> Result<Vec<SectionEntry>, FrameError> {
+    let header = parse_header(frame)?;
+    let file_len = frame.len() as u64;
+
+    let table_len = (header.section_count as u64)
+        .checked_mul(SECTION_ENTRY_LEN as u64)
+        .ok_or(FrameError::RegionOutOfBounds {
+            offset: HEADER_LEN as u64,
+            len: u64::MAX,
+            file_len,
+        })?;
+    let table = checked_region(file_len, HEADER_LEN as u64, table_len)?;
+
+    let mut entries = Vec::with_capacity(header.section_count);
+    for i in 0..header.section_count {
+        let at = table.offset + i * SECTION_ENTRY_LEN;
+        let kind = SectionKind::from_u16(read_u16_le(frame, at));
+        let offset = read_u64_le(frame, at + 2);
+        let len = read_u64_le(frame, at + 10);
+        let region = checked_region(file_len, offset, len)?;
+        entries.push(SectionEntry { kind, region });
+    }
+    Ok(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +343,66 @@ mod tests {
         assert_eq!(header.arch, GuestArch::Aarch64);
         assert_eq!(header.backend_kind, 7);
         assert_eq!(header.section_count, 3);
+    }
+
+    /// Build a frame: header(`section_count`) + entries + concatenated section
+    /// data, with each entry's offset pointing at its data slice.
+    fn frame_with_sections(sections: &[(u16, &[u8])]) -> Vec<u8> {
+        let count = u16::try_from(sections.len()).unwrap();
+        let mut frame = header_bytes(FRAME_MAGIC, FRAME_VERSION, 0, count);
+        let mut data = Vec::new();
+        let data_base = HEADER_LEN + sections.len() * SECTION_ENTRY_LEN;
+        for (kind, bytes) in sections {
+            let offset = (data_base + data.len()) as u64;
+            frame.extend_from_slice(&kind.to_le_bytes());
+            frame.extend_from_slice(&offset.to_le_bytes());
+            frame.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            data.extend_from_slice(bytes);
+        }
+        frame.extend_from_slice(&data);
+        frame
+    }
+
+    #[test]
+    fn parse_sections_reads_table_and_returns_section_data() {
+        let frame = frame_with_sections(&[(1, b"abc"), (3, b"vcpu-state")]);
+        let sections = parse_sections(&frame).unwrap();
+
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].kind, SectionKind::Ram);
+        assert_eq!(sections[0].data(&frame), b"abc");
+        assert_eq!(sections[1].kind, SectionKind::Vcpu);
+        assert_eq!(sections[1].data(&frame), b"vcpu-state");
+    }
+
+    #[test]
+    fn parse_sections_rejects_table_past_end() {
+        // Header claims 2 sections but the table is truncated.
+        let mut frame = header_bytes(FRAME_MAGIC, FRAME_VERSION, 0, 2);
+        frame.extend_from_slice(&[0u8; SECTION_ENTRY_LEN]); // only one entry's worth
+        assert!(matches!(
+            parse_sections(&frame).unwrap_err(),
+            FrameError::RegionOutOfBounds { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_sections_rejects_section_region_out_of_bounds() {
+        // One entry whose data region runs past the end of the frame.
+        let mut frame = header_bytes(FRAME_MAGIC, FRAME_VERSION, 0, 1);
+        frame.extend_from_slice(&1u16.to_le_bytes()); // kind
+        frame.extend_from_slice(&(HEADER_LEN as u64 + SECTION_ENTRY_LEN as u64).to_le_bytes());
+        frame.extend_from_slice(&999u64.to_le_bytes()); // len far past end
+        assert!(matches!(
+            parse_sections(&frame).unwrap_err(),
+            FrameError::RegionOutOfBounds { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_sections_preserves_unknown_kinds() {
+        let frame = frame_with_sections(&[(4242, b"x")]);
+        let sections = parse_sections(&frame).unwrap();
+        assert_eq!(sections[0].kind, SectionKind::Unknown(4242));
     }
 }
