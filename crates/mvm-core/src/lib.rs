@@ -37,6 +37,9 @@ pub mod platform;
 pub mod policy;
 pub mod protocol;
 pub mod residency;
+/// Hardened snapshot frame v0: cap-bounded, fail-closed parsing of the
+/// snapshot container mvm controls (eager-CoW / raw-hypervisor path).
+pub mod snapshot_frame;
 /// The guest↔host substitution-endpoint wire contract, shared so the
 /// in-guest client and the host server serialize identical bytes.
 pub mod substitution_wire;
