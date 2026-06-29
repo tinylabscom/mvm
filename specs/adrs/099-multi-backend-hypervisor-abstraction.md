@@ -94,9 +94,21 @@ VmBackend (product/CLI/mvmd) ─ AnyBackend dispatch
 - ⏳ Migrate the `hvf::kernel_boot` run loop onto the seam (drive `step()` →
   dispatch `VcpuExit` to the `vmm` devices) so it is backend-generic; the inline
   `sys` calls in `kernel_boot` collapse into `HvfVm`/`HvfVcpu`.
-- ⏳ `kvm::KvmVm` — the Linux backend (`kvm-ioctls`/`kvm-bindings`). KVM is
-  *simpler* than HVF: the kernel decodes MMIO (`VcpuExit::Mmio`, no ESR), and
-  PSCI + the arch timer are in-kernel.
+- ✅ **x86_64 KVM boot live-proven to userspace** — a `kvm-ioctls` driver
+  (`spikes/kvm-x86-boot/`) boots a stock distro `bzImage` on `/dev/kvm` straight
+  to **PID 1** (`Run /init as init process` → the init's own marker → clean
+  shutdown). KVM is *simpler* than HVF on the run loop: the kernel decodes MMIO
+  (`VcpuExit::Mmio`/`Io`, no ESR to parse). The x86 host device path the spike
+  pins down for the backend: 64-bit long-mode entry (page tables + GDT +
+  `efer.LME`, kernel at 1 MiB, entry `+0x200`), **`KVM_SET_CPUID2`** with the
+  host-supported CPUID (without it the kernel's early page-table math faults), a
+  **two-entry e820** map (0–640 KiB, then 1 MiB–end; a single entry falls back to
+  legacy e801 → no RAM → `alloc_low_pages` panic), the **in-kernel irqchip +
+  `KVM_CREATE_PIT2`** (no PIT → the kernel hangs after APIC setup waiting for
+  timer ticks), and a 16550 serial for the console. Folding this into
+  `kvm::KvmVm` behind the seam (reusing the arch-neutral virtqueue logic) is next.
+- ⏳ `kvm::KvmVm` (arm64) — on an aarch64 KVM host the *whole* `vmm` device model
+  reuses unchanged behind the seam.
 - ⏳ `whp::WhpVm` — Windows, later.
 
 ### Cross-architecture note (KVM reuse)
@@ -107,9 +119,10 @@ an **aarch64 KVM host** — there the KVM backend is just the seam's ioctl glue
 (create VM/vgic-v3/vcpu, `KVM_RUN` → `VcpuExit::Mmio` → the same devices,
 `KVM_IRQ_LINE` for virtio). On x86_64 KVM the *virtqueue logic* still reuses, but
 the boot (boot_params/long-mode), console (16550 PIO), and interrupt controller
-(IOAPIC) are a separate x86 device path. KVM itself is validated live on an
-x86_64 host (a `kvm-ioctls` guest ran on `/dev/kvm` and the host captured its
-serial output); the clean whole-`vmm` reuse proof wants an aarch64 KVM box.
+(IOAPIC + PIT) are a separate x86 device path — now **live-proven to userspace**
+on an x86_64 host (`spikes/kvm-x86-boot/` boots a stock `bzImage` to PID 1 on
+`/dev/kvm`). The clean whole-`vmm` reuse (the arm64 device model unchanged behind
+the seam) wants an aarch64 KVM box, but the x86 backend stands on its own proof.
 
 ## Alternatives considered
 
