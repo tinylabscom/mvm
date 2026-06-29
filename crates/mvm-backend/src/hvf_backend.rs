@@ -137,6 +137,7 @@ impl VmBackend for HvfBackend {
             console_log: console_log.clone(),
             pid_file: pid_file.clone(),
             workload_exit,
+            network_policy: config.network_policy.clone(),
             timeout_secs,
         };
         let json = serde_json::to_string(&cfg)

@@ -171,6 +171,14 @@ fn main() -> anyhow::Result<()> {
         Duration::from_secs(cfg.timeout_secs)
     };
 
+    // Project the VM's network policy into the vsock egress gateway (claim-10,
+    // ADR-100). deny-all / unrestricted are exact; DNS-pinned host allowlists need
+    // the admitted plan's pins threaded in (follow-on) and fail closed until then.
+    let egress = mvm_backend::vmm::egress_gate::EgressGate::from_network_policy(
+        &cfg.network_policy,
+        &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
+        "",
+    );
     let result = mvm_backend::hvf::boot_kernel_until(
         &image,
         initramfs.as_deref(),
@@ -178,6 +186,7 @@ fn main() -> anyhow::Result<()> {
         cfg.vsock,
         timeout,
         &STOP,
+        egress,
     );
 
     // The VM has stopped: drop the PID file and flush whatever console we

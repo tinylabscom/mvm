@@ -37,6 +37,10 @@ pub struct HvfSupervisorConfig {
     /// when the guest reports it over the workload-exit vsock port — the transient
     /// run-to-exit result the backend's `wait` reads.
     pub workload_exit: PathBuf,
+    /// The VM's resolved network policy — the supervisor projects it into the
+    /// vsock egress gateway (claim-10, ADR-100). Omitted ⇒ deny-all (fail closed).
+    #[serde(default = "mvm_core::policy::network_policy::NetworkPolicy::deny_all")]
+    pub network_policy: mvm_core::policy::network_policy::NetworkPolicy,
     /// Run budget in seconds — a booting kernel never exits on its own, so the
     /// guest is forced out after this long. The backend sets it from the VM's
     /// requested lifetime.
@@ -57,6 +61,7 @@ mod tests {
             console_log: "/state/console.log".into(),
             pid_file: "/state/hvf.pid".into(),
             workload_exit: "/state/workload.exit".into(),
+            network_policy: mvm_core::policy::network_policy::NetworkPolicy::deny_all(),
             timeout_secs: 30,
         };
         let json = serde_json::to_string(&cfg).unwrap();

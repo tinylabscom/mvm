@@ -47,6 +47,24 @@ impl EgressGate {
         Self { egress }
     }
 
+    /// Build a gate from a VM's resolved [`NetworkPolicy`] via the shared claim-10
+    /// projection. **Fails closed:** any projection error (e.g. a host-allowlist
+    /// rule whose DNS pin hasn't been threaded in yet) yields default-deny rather
+    /// than a permissive gate. This is the supervisor's path to the admitted
+    /// plan's policy (ADR-100).
+    ///
+    /// [`NetworkPolicy`]: mvm_core::policy::network_policy::NetworkPolicy
+    pub fn from_network_policy(
+        policy: &mvm_core::policy::network_policy::NetworkPolicy,
+        pins: &mvm_core::policy::dns_pin::DnsPinRegistry,
+        now: &str,
+    ) -> Self {
+        match mvm_core::policy::projection::canonicalize_network_policy(policy, pins, now) {
+            Ok(canon) => Self::new(canon),
+            Err(_) => Self::default_deny(),
+        }
+    }
+
     /// Decide a TCP connect to an already-resolved address.
     pub fn decide_addr(&self, ip: IpAddr, port: u16) -> EgressVerdict {
         if self.egress.permits(&Proto::Tcp, ip, port) {
@@ -153,6 +171,41 @@ mod tests {
                 ip: "93.184.216.34".parse().unwrap(),
                 port: 80
             }
+        );
+    }
+
+    /// `from_network_policy` is the supervisor's path: deny-all ⇒ deny,
+    /// unrestricted ⇒ admit, and any projection error ⇒ fail-closed deny.
+    #[test]
+    fn from_network_policy_threads_the_real_policy_and_fails_closed() {
+        use mvm_core::policy::dns_pin::DnsPinRegistry;
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let pins = DnsPinRegistry::new();
+        let now = "2026-01-01T00:00:00Z";
+
+        let deny = EgressGate::from_network_policy(&NetworkPolicy::deny_all(), &pins, now);
+        assert_eq!(deny.decide_request("1.1.1.1:443"), EgressVerdict::Deny);
+
+        let open = EgressGate::from_network_policy(&NetworkPolicy::unrestricted(), &pins, now);
+        assert_eq!(
+            open.decide_request("93.184.216.34:80"),
+            EgressVerdict::Allow {
+                ip: "93.184.216.34".parse().unwrap(),
+                port: 80
+            }
+        );
+
+        // A host-allowlist rule with no DNS pin can't project → fail closed (deny),
+        // never a permissive gate.
+        let unpinned = NetworkPolicy::allow_list(vec![HostPort {
+            host: "example.com".into(),
+            port: 443,
+        }]);
+        let gate = EgressGate::from_network_policy(&unpinned, &pins, now);
+        assert_eq!(
+            gate.decide_request("93.184.216.34:443"),
+            EgressVerdict::Deny
         );
     }
 }

@@ -96,13 +96,22 @@ pub fn boot_kernel(
     timeout: Duration,
 ) -> Result<KernelBootResult, HvfError> {
     static NEVER_STOP: AtomicBool = AtomicBool::new(false);
-    boot_kernel_impl(image, initramfs, disk, vsock, timeout, &NEVER_STOP)
+    boot_kernel_impl(
+        image,
+        initramfs,
+        disk,
+        vsock,
+        timeout,
+        &NEVER_STOP,
+        egress_gate_from_env(),
+    )
 }
 
-/// Like [`boot_kernel`], but also stops as soon as `stop` is set — a
-/// persistent-until-stop VM. The supervisor sets `stop` from a SIGTERM handler so
-/// `HvfBackend::stop` ends the guest cleanly (console flushed) instead of a
-/// timeout. `timeout` still caps the run as a backstop.
+/// Like [`boot_kernel`], but stops as soon as `stop` is set — a
+/// persistent-until-stop VM — and drives egress through the caller-supplied
+/// `egress` gateway (the supervisor builds it from the admitted plan's network
+/// policy; ADR-100). The supervisor sets `stop` from a SIGTERM handler so
+/// `HvfBackend::stop` ends the guest cleanly. `timeout` still caps the run.
 pub fn boot_kernel_until(
     image: &[u8],
     initramfs: Option<&[u8]>,
@@ -110,8 +119,9 @@ pub fn boot_kernel_until(
     vsock: bool,
     timeout: Duration,
     stop: &'static AtomicBool,
+    egress: crate::vmm::egress_gate::EgressGate,
 ) -> Result<KernelBootResult, HvfError> {
-    boot_kernel_impl(image, initramfs, disk, vsock, timeout, stop)
+    boot_kernel_impl(image, initramfs, disk, vsock, timeout, stop, egress)
 }
 
 fn boot_kernel_impl(
@@ -121,6 +131,7 @@ fn boot_kernel_impl(
     vsock: bool,
     timeout: Duration,
     stop: &'static AtomicBool,
+    egress: crate::vmm::egress_gate::EgressGate,
 ) -> Result<KernelBootResult, HvfError> {
     // Validate it's an arm64 Image; we load at the fixed boot-protocol offset.
     let _hdr = kernel_image::parse(image).map_err(|_| HvfError::BadKernel)?;
@@ -196,7 +207,18 @@ fn boot_kernel_impl(
             dealloc(ram, layout);
             return Err(HvfError::VmCreate(rc));
         }
-        let r = run(ram, entry, dtb_addr, disk, vsock, timeout, stop);
+        let r = run(
+            ram,
+            entry,
+            dtb_addr,
+            RunInputs {
+                disk,
+                vsock,
+                timeout,
+                egress,
+            },
+            stop,
+        );
         hv_vm_destroy();
         r
     };
@@ -238,15 +260,28 @@ fn egress_gate_from_env() -> crate::vmm::egress_gate::EgressGate {
 /// # Safety
 /// Between `hv_vm_create`/`hv_vm_destroy`; `ram` holds RAM_SIZE bytes with the
 /// kernel + DTB loaded.
+/// Device + run inputs for [`run`], bundled to keep its argument count sane.
+struct RunInputs<'a> {
+    disk: Option<&'a [u8]>,
+    vsock: bool,
+    timeout: Duration,
+    /// Host egress gateway policy (ADR-100).
+    egress: crate::vmm::egress_gate::EgressGate,
+}
+
 unsafe fn run(
     ram: *mut u8,
     entry: u64,
     dtb_addr: u64,
-    disk: Option<&[u8]>,
-    vsock: bool,
-    timeout: Duration,
+    inputs: RunInputs,
     stop: &'static AtomicBool,
 ) -> Result<KernelBootResult, HvfError> {
+    let RunInputs {
+        disk,
+        vsock,
+        timeout,
+        egress,
+    } = inputs;
     unsafe {
         // In-kernel GICv3 — created after the VM, before any vCPU. Base
         // addresses must match the DTB's intc node, or the kernel's IRQ/timer
@@ -339,7 +374,7 @@ unsafe fn run(
         // claim-10 default-deny until the plan's policy is threaded in (ADR-100).
         if let Some(v) = vsock_dev.as_mut() {
             v.capture_workload_exit(stop);
-            v.set_egress_gate(egress_gate_from_env());
+            v.set_egress_gate(egress);
         }
 
         // Diagnostics gathered by the exception hook (HVC/PSCI + other traps).
