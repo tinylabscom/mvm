@@ -128,4 +128,31 @@ mod tests {
             }
         );
     }
+
+    /// The gate composes with the real `NetworkPolicy` projection — the path the
+    /// HVF supervisor will thread in (deny-all ⇒ deny, unrestricted ⇒ admit).
+    #[test]
+    fn gate_honors_a_real_network_policy_projection() {
+        use mvm_core::policy::dns_pin::DnsPinRegistry;
+        use mvm_core::policy::network_policy::NetworkPolicy;
+        use mvm_core::policy::projection::canonicalize_network_policy;
+
+        let pins = DnsPinRegistry::new();
+        let now = "2026-01-01T00:00:00Z";
+
+        let deny = canonicalize_network_policy(&NetworkPolicy::deny_all(), &pins, now).unwrap();
+        assert_eq!(
+            EgressGate::new(deny).decide_request("1.1.1.1:443"),
+            EgressVerdict::Deny
+        );
+
+        let open = canonicalize_network_policy(&NetworkPolicy::unrestricted(), &pins, now).unwrap();
+        assert_eq!(
+            EgressGate::new(open).decide_request("93.184.216.34:80"),
+            EgressVerdict::Allow {
+                ip: "93.184.216.34".parse().unwrap(),
+                port: 80
+            }
+        );
+    }
 }
