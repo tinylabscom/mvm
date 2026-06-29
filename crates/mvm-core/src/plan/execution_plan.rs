@@ -18,15 +18,9 @@ use crate::plan::types::{
     SignedImageRef, TenantId, WorkloadId,
 };
 
-/// Wire-format version of the `ExecutionPlan`.
-///
-/// This project has no production plans in the wild, so there is no version
-/// history to preserve — the schema is simply **version 1**. Do not bump it per
-/// field; only bump once a real older consumer exists that must fail closed on a
-/// format it cannot parse. New fields are added with `#[serde(default)]` so the
-/// current schema stays self-consistent without a version dance. The verifier
-/// still rejects a plan whose `schema_version` exceeds this build's (consulted
-/// before per-field deserialisation), so a future bump remains fail-closed.
+/// Wire-format version of the `ExecutionPlan`. New fields are additive with
+/// `#[serde(default)]`; the verifier rejects any plan whose `schema_version`
+/// exceeds this build's, before per-field deserialisation.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Typed contract for one workload's execution.
