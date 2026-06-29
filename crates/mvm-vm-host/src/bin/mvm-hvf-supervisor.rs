@@ -1,6 +1,6 @@
 //! `mvm-hvf-supervisor` — one process per raw-HVF guest (Plan 214 / ADR-098).
 //!
-//! Reads an [`mvm_vm_host::hvf_supervisor::HvfSupervisorConfig`] JSON document on
+//! Reads an [`mvm_build::hvf_supervisor::HvfSupervisorConfig`] JSON document on
 //! stdin (written by `mvm_backend::hvf`), self-signs the `hypervisor`
 //! entitlement, boots the guest via `mvm_backend::hvf::boot_kernel` (which drives
 //! the unified `vmm::run` loop), captures its console to the configured log, and
@@ -112,7 +112,7 @@ fn main() -> anyhow::Result<()> {
     use std::time::Duration;
 
     use anyhow::Context;
-    use mvm_vm_host::hvf_supervisor::HvfSupervisorConfig;
+    use mvm_build::hvf_supervisor::HvfSupervisorConfig;
 
     // Sign + re-exec before anything else (preserves the stdin config pipe).
     ensure_self_signed();

@@ -30,6 +30,9 @@ pub mod egress_proxy;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
 pub mod fc_kernel;
 pub mod firecracker;
+/// Config contract for the `mvm-hvf-supervisor` per-VM host process (raw HVF
+/// macOS backend, Plan 214). Shared by `mvm_backend::hvf` (writer) + the bin.
+pub mod hvf_supervisor;
 /// Hash-verify a fetched kernel image against its [`mvm_core::kernel_artifact::KernelArtifactId`].
 pub mod kernel_fetch;
 /// Portable signed `.mvm` artifacts. A tar.gz wrapper around kernel +
