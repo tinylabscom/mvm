@@ -77,6 +77,12 @@ fn main() {
                         r.egress_denied
                     );
                 }
+                if !r.egress_allowed.is_empty() {
+                    println!(
+                        "egress ALLOWED (policy-admitted over vsock): {:?}",
+                        r.egress_allowed
+                    );
+                }
                 if let Some(code) = r.workload_exit_code {
                     println!("workload exited: code={code}");
                 }

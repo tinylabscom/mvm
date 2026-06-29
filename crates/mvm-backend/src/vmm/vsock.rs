@@ -151,9 +151,14 @@ pub struct VirtioVsock {
     egress: Option<super::egress_gate::EgressGate>,
     /// Egress targets the gateway refused (claim-10) — for audit/verification.
     pub egress_denied: Vec<String>,
-    /// Egress targets the gateway admitted (the connect/proxy data path is the
-    /// next slice; today an admitted request is recorded then the stream is reset).
+    /// Egress targets the gateway admitted (recorded when the host TCP connection
+    /// is established).
     pub egress_allowed: Vec<String>,
+    /// Open host TCP connections for admitted egress streams, keyed by the guest's
+    /// vsock src_port. The first frame on a stream is the connect target; later
+    /// frames are proxied to the socket (synchronous request/response — full async
+    /// streaming is the next slice).
+    egress_conns: std::collections::HashMap<u32, std::net::TcpStream>,
 }
 
 impl VirtioVsock {
@@ -178,6 +183,7 @@ impl VirtioVsock {
             egress: None,
             egress_denied: Vec::new(),
             egress_allowed: Vec::new(),
+            egress_conns: std::collections::HashMap::new(),
         }
     }
 
@@ -345,23 +351,69 @@ impl VirtioVsock {
         }
     }
 
-    /// Decide a guest egress request (target `"ip:port"`) against the gateway
-    /// policy (claim-10 default-deny) — ADR-100. No gate ⇒ deny. The connect/proxy
-    /// data path is the next slice; for now an admitted target is recorded and the
-    /// stream is reset, and a refused one is reset (never reaching the network).
+    /// Host egress gateway over vsock (ADR-100). The first frame on an egress
+    /// stream is the connect target `"ip:port"`: it is decided against the gateway
+    /// policy (claim-10 default-deny) and, if admitted, a host TCP connection is
+    /// opened. Subsequent frames are proxied to that socket and the reply is
+    /// delivered back to the guest (synchronous request/response; full async
+    /// streaming is the next slice). A refused target never reaches the network.
     fn handle_egress_request(&mut self, hdr: &Hdr, payload: &[u8]) {
+        use std::io::{Read, Write};
+
         use super::egress_gate::EgressVerdict;
+
+        // Established stream → proxy this frame to the host socket + return its reply.
+        if self.egress_conns.contains_key(&hdr.src_port) {
+            let reply = {
+                let stream = self.egress_conns.get_mut(&hdr.src_port).expect("checked");
+                let _ = stream.write_all(payload);
+                let mut buf = vec![0u8; 16 * 1024];
+                match stream.read(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        buf.truncate(n);
+                        Some(buf)
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(bytes) = reply {
+                self.queue_reply(hdr, OP_RW, &bytes);
+            }
+            return;
+        }
+
+        // First frame = the connect target.
         let target = String::from_utf8_lossy(payload).trim().to_string();
         let verdict = match &self.egress {
             Some(gate) => gate.decide_request(&target),
             None => EgressVerdict::Deny, // fail closed when no gateway is installed
         };
         match verdict {
-            EgressVerdict::Allow { .. } => self.egress_allowed.push(target),
-            EgressVerdict::Deny | EgressVerdict::Malformed => self.egress_denied.push(target),
+            EgressVerdict::Allow { ip, port } => {
+                match std::net::TcpStream::connect_timeout(
+                    &std::net::SocketAddr::new(ip, port),
+                    std::time::Duration::from_secs(2),
+                ) {
+                    Ok(stream) => {
+                        let _ =
+                            stream.set_read_timeout(Some(std::time::Duration::from_millis(800)));
+                        self.egress_conns.insert(hdr.src_port, stream);
+                        self.egress_allowed.push(target);
+                        // Acknowledge the established connection.
+                        self.queue_reply(hdr, OP_CREDIT_UPDATE, &[]);
+                    }
+                    Err(_) => {
+                        self.egress_denied
+                            .push(format!("{target} (connect failed)"));
+                        self.queue_reply(hdr, OP_RST, &[]);
+                    }
+                }
+            }
+            EgressVerdict::Deny | EgressVerdict::Malformed => {
+                self.egress_denied.push(target);
+                self.queue_reply(hdr, OP_RST, &[]);
+            }
         }
-        // Reset the stream either way until the connect/proxy data path lands.
-        self.queue_reply(hdr, OP_RST, &[]);
     }
 
     /// Queue a host→guest reply (src/dst swapped from the inbound header).

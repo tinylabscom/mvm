@@ -82,6 +82,8 @@ pub struct KernelBootResult {
     pub workload_exit_code: Option<i32>,
     /// Egress targets the vsock gateway refused (claim-10 default-deny, ADR-100).
     pub egress_denied: Vec<String>,
+    /// Egress targets the vsock gateway admitted + connected (ADR-100).
+    pub egress_allowed: Vec<String>,
 }
 
 /// Boot `image` (an arm64 `Image`) under HVF, optionally with an `initramfs`
@@ -203,6 +205,36 @@ fn boot_kernel_impl(
     result
 }
 
+/// Build the egress gateway policy. Until the admitted plan's network policy is
+/// threaded through (the productionized path), a dev hook
+/// `MVM_HVF_EGRESS_ALLOW=<ip>:<port>` admits one TCP destination; otherwise the
+/// gate is claim-10 default-deny (ADR-100).
+fn egress_gate_from_env() -> crate::vmm::egress_gate::EgressGate {
+    use crate::vmm::egress_gate::EgressGate;
+    use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
+
+    let Ok(spec) = std::env::var("MVM_HVF_EGRESS_ALLOW") else {
+        return EgressGate::default_deny();
+    };
+    match spec.parse::<std::net::SocketAddr>() {
+        Ok(addr) => {
+            let cidr = if addr.is_ipv4() {
+                format!("{}/32", addr.ip())
+            } else {
+                format!("{}/128", addr.ip())
+            };
+            let rule = CanonicalRule {
+                proto: Proto::Tcp,
+                net: cidr.parse().expect("host cidr"),
+                port_lo: addr.port(),
+                port_hi: addr.port(),
+            };
+            EgressGate::new(CanonicalEgress::Rules(vec![rule]))
+        }
+        Err(_) => EgressGate::default_deny(),
+    }
+}
+
 /// # Safety
 /// Between `hv_vm_create`/`hv_vm_destroy`; `ram` holds RAM_SIZE bytes with the
 /// kernel + DTB loaded.
@@ -307,7 +339,7 @@ unsafe fn run(
         // claim-10 default-deny until the plan's policy is threaded in (ADR-100).
         if let Some(v) = vsock_dev.as_mut() {
             v.capture_workload_exit(stop);
-            v.set_egress_gate(crate::vmm::egress_gate::EgressGate::default_deny());
+            v.set_egress_gate(egress_gate_from_env());
         }
 
         // Diagnostics gathered by the exception hook (HVC/PSCI + other traps).
@@ -386,6 +418,7 @@ unsafe fn run(
             r.vsock_received = vs.received.clone();
             r.workload_exit_code = vs.workload_exit_code;
             r.egress_denied = vs.egress_denied.clone();
+            r.egress_allowed = vs.egress_allowed.clone();
         }
         Ok(r)
     }
