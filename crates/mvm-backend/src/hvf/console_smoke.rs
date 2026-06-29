@@ -16,9 +16,9 @@ use std::alloc::{Layout, alloc_zeroed, dealloc};
 
 use super::HvfError;
 use super::boot_smoke::{GUEST_RAM_SIZE, PAGE};
-use super::device::{MmioDevice, Pl011};
 use super::sys::*;
 use super::vcpu::{advance_pc, decode_data_abort, esr_ec, read_gp, write_gp};
+use crate::vmm::device::{MmioDevice, Pl011};
 
 /// PL011 base, well above the 2 MiB of mapped guest RAM so accesses to it fault
 /// out as MMIO rather than hitting backing memory.

@@ -5,11 +5,10 @@
 //! listener that accepts any connection and captures what the guest sends (the
 //! shape `mvm-init` lifecycle markers + the agent will use). Three queues:
 //! rx (host→guest), tx (guest→host), event. Requests are serviced synchronously
-//! in the guest's `QueueNotify` MMIO exit and completed by raising the device
-//! SPI via `hv_gic_set_spi`.
+//! in the guest's `QueueNotify` MMIO exit and completed by the backend raising
+//! the device's SPI line.
 
 use super::guest_mem::GuestMem;
-use super::sys::hv_gic_set_spi;
 
 const VIRTIO_MAGIC: u32 = 0x7472_6976;
 const VIRTIO_VERSION: u32 = 2;
@@ -356,11 +355,9 @@ impl VirtioVsock {
         self.interrupt_status |= 1;
     }
 
-    pub fn inject_irq(&self) {
-        // SAFETY: FFI to the process-global in-kernel GIC; edge-raise only.
-        unsafe {
-            let _ = hv_gic_set_spi(self.irq, true);
-        }
+    /// The device's SPI INTID — raised by the platform run loop on completion.
+    pub fn irq(&self) -> u32 {
+        self.irq
     }
 }
 

@@ -1,9 +1,9 @@
-//! Minimal MMIO device model for the HVF console path.
+//! Minimal MMIO device model for the guest console path.
 //!
-//! A guest access to an unmapped guest-physical address traps out of
-//! `hv_vcpu_run` as a data abort; the run loop decodes the faulting access and
-//! dispatches it here. Today that is just enough of a PL011 UART for a kernel's
-//! `earlycon` to emit bytes — the first guest output beyond the boot proof.
+//! A guest access to an unmapped guest-physical address traps the vCPU as a data
+//! abort; the backend's run loop decodes the faulting access and dispatches it
+//! here. Today that is just enough of a PL011 UART for a kernel's `earlycon` to
+//! emit bytes — the first guest output beyond the boot proof.
 
 /// A memory-mapped device occupying `[base, base+len)` in guest-physical space.
 pub trait MmioDevice {

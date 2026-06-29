@@ -15,18 +15,11 @@
 mod backend;
 mod boot_smoke;
 mod console_smoke;
-mod device;
-mod fdt;
-mod guest_mem;
 mod kernel_boot;
-mod kernel_image;
 mod sys;
 mod vcpu;
-mod virtio;
-mod vsock;
 
 pub use backend::HvfBackend;
 pub use boot_smoke::{BootProof, HvfError, MAGIC, boot_smoke, probe_available};
 pub use console_smoke::{ConsoleProof, console_smoke};
-pub use device::{MmioDevice, Pl011};
 pub use kernel_boot::{KernelBootResult, boot_kernel};

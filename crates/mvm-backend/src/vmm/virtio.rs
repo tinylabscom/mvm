@@ -3,14 +3,13 @@
 //! Enough of the virtio-blk device for a guest kernel to detect `/dev/vda`,
 //! negotiate `VIRTIO_F_VERSION_1`, set up its single request queue, and read or
 //! write sectors. Requests are serviced synchronously inside the guest's
-//! `QueueNotify` MMIO exit: the queue is drained, the used ring updated, and an
-//! edge SPI pulsed via `hv_gic_set_spi` so the guest's ISR completes the I/O.
+//! `QueueNotify` MMIO exit: the queue is drained, the used ring updated, and the
+//! backend raises the device's edge SPI so the guest's ISR completes the I/O.
 //!
 //! Guest-physical addresses in the virtqueue are translated against the single
 //! mapped RAM region (`ram_base .. ram_base+ram_size`), bounds-checked.
 
 use super::guest_mem::GuestMem;
-use super::sys::hv_gic_set_spi;
 
 const VIRTIO_MAGIC: u32 = 0x7472_6976; // "virt"
 const VIRTIO_VERSION: u32 = 2;
@@ -310,16 +309,10 @@ impl VirtioBlk {
         }
     }
 
-    /// Raise the device's SPI so the guest takes the completion interrupt.
-    pub fn inject_irq(&self) {
-        // Edge-triggered (per the DTB): raise the line; HVF's in-kernel GIC
-        // latches the rising edge and auto-deasserts on the guest's EOI, so the
-        // next completion edges again. Do NOT drop it here — that would cancel
-        // the pending interrupt before the guest can take it.
-        // SAFETY: FFI to the process-global in-kernel GIC.
-        unsafe {
-            let _ = hv_gic_set_spi(self.irq, true);
-        }
+    /// The device's SPI INTID — the platform run loop raises it on completion
+    /// (HVF: `hv_gic_set_spi`; KVM: `KVM_IRQ_LINE`; WHP: `WHvRequestInterrupt`).
+    pub fn irq(&self) -> u32 {
+        self.irq
     }
 }
 

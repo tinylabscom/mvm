@@ -21,12 +21,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::HvfError;
-use super::device::{MmioDevice, Pl011};
 use super::sys::*;
 use super::vcpu::{advance_pc, decode_data_abort, esr_ec, read_gp, write_gp};
-use super::virtio::VirtioBlk;
-use super::vsock::VirtioVsock;
-use super::{fdt, kernel_image};
+use crate::vmm::device::{MmioDevice, Pl011};
+use crate::vmm::virtio::VirtioBlk;
+use crate::vmm::vsock::VirtioVsock;
+use crate::vmm::{fdt, kernel_image};
 
 /// Guest RAM base (2 GiB, per the aarch64 Linux boot convention) and size
 /// (512 MiB). The GIC + PL011 sit below RAM so their accesses fault out as MMIO.
@@ -373,7 +373,7 @@ unsafe fn drive(
                         if da.is_write {
                             let v = read_gp(vcpu, da.reg)?;
                             if vio.write(offset, v) {
-                                vio.inject_irq();
+                                hv_gic_set_spi(vio.irq(), true);
                             }
                         } else {
                             let v = vio.read(offset);
@@ -386,7 +386,7 @@ unsafe fn drive(
                         if da.is_write {
                             let v = read_gp(vcpu, da.reg)?;
                             if vs.write(offset, v) {
-                                vs.inject_irq();
+                                hv_gic_set_spi(vs.irq(), true);
                             }
                         } else {
                             let v = vs.read(offset);

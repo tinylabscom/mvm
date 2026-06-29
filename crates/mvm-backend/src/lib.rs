@@ -57,9 +57,9 @@ pub(crate) mod egress_shared;
 pub mod firecracker;
 pub mod handle_registry;
 pub(crate) mod host_agent_spawn;
-/// Raw HVF (`Hypervisor.framework`) backend spike — guest-RAM mapping + minimal
-/// boot primitive (Plan 214 Phase 11 / ADR-098). macOS / Apple-silicon only;
-/// links the system framework, so it is cfg-gated off every other target.
+/// Raw HVF (`Hypervisor.framework`) backend spike — drives [`vmm`] on macOS /
+/// Apple silicon (Plan 214 Phase 11 / ADR-098). Links the system framework, so
+/// it is cfg-gated off every other target.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod hvf;
 pub mod image;
@@ -79,6 +79,10 @@ pub mod standby_pool;
 /// Shared per-VM substitution-endpoint spawn/reap helpers used by the
 /// QEMU + Firecracker launch paths (one impl, no drift).
 pub(crate) mod substitution_spawn;
+/// Portable, hypervisor-agnostic VMM device model (guest memory, FDT, kernel
+/// loading, virtio-mmio block/vsock). Compiles on every target; the per-platform
+/// backends (HVF/KVM/WHP) drive it. The "no VMM lock-in" seam (Plan 214).
+pub mod vmm;
 // Vz (Apple Virtualization.framework) backend. Currently a skeleton:
 // trait surface + capabilities + security profile + availability
 // probe; lifecycle methods land in a follow-up slice.
