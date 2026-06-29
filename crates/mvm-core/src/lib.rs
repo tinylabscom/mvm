@@ -9,6 +9,8 @@ pub mod config;
 pub mod dev_network;
 /// Host egress-broker decision logic (closed-by-default allow/deny per request).
 pub mod egress_broker;
+/// Egress-broker handler: compose decision + trace into an audit record.
+pub mod egress_handler;
 pub mod entrypoint_policy;
 pub mod exit_capture;
 /// Guest `mvm-netd` helpers (proxy env-var injection for cooperative apps).
