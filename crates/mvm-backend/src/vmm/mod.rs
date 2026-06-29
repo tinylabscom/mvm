@@ -13,6 +13,7 @@
 pub mod device;
 pub mod fdt;
 pub mod guest_mem;
+pub mod hv;
 pub mod kernel_image;
 pub mod virtio;
 pub mod vsock;
