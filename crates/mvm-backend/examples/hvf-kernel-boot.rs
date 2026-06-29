@@ -64,14 +64,13 @@ fn main() {
                     r.console.len()
                 );
                 println!(
-                    "diag: data_aborts={} mmio_writes={} hvc_calls={} other_exc={} final_pc={:#x}",
-                    r.data_aborts, r.mmio_writes, r.hvc_calls, r.other_exceptions, r.final_pc
+                    "diag: hvc_calls={} other_exc={} final_pc={:#x}",
+                    r.hvc_calls, r.other_exceptions, r.final_pc
                 );
                 println!(
                     "diag: psci_fns={:#x?} other_ecs={:#x?}",
                     r.psci_fns, r.other_ecs
                 );
-                println!("diag: fault_addrs={:#x?}", r.fault_addrs);
                 if !r.vsock_received.is_empty() {
                     println!(
                         "vsock host received: {:?}",

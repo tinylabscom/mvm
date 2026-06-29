@@ -1,9 +1,9 @@
 //! HVF implementation of the portable hypervisor seam ([`crate::vmm::hv`]).
 //!
 //! Thin wrappers over [`super::sys`] that bind the HVF backend to the
-//! `HypervisorVm`/`HypervisorVcpu` contract so the (forthcoming) generic run
-//! loop can drive HVF and KVM identically. The existing `kernel_boot` run loop
-//! still calls `sys` directly; it migrates onto this contract next.
+//! `HypervisorVm`/`HypervisorVcpu` contract, so the generic run loop
+//! ([`crate::vmm::run`]) drives HVF and KVM identically. `kernel_boot` boots a
+//! live arm64 Linux guest through exactly this path.
 
 use std::cell::Cell;
 
@@ -38,6 +38,18 @@ pub struct HvfVcpu {
     vcpu: hv_vcpu_t,
     exit: *mut hv_vcpu_exit_t,
     pending_read: Cell<Option<(u8, u8)>>,
+}
+
+impl HvfVcpu {
+    /// Wrap a raw vCPU created via `sys` (the kernel-boot path owns VM creation
+    /// directly). The caller owns the vCPU's lifetime (`hv_vcpu_destroy`).
+    pub(super) fn from_raw(vcpu: hv_vcpu_t, exit: *mut hv_vcpu_exit_t) -> Self {
+        Self {
+            vcpu,
+            exit,
+            pending_read: Cell::new(None),
+        }
+    }
 }
 
 /// Map a decoded data abort to the portable exit + (for a load) the destination
@@ -105,47 +117,59 @@ impl HypervisorVcpu for HvfVcpu {
     }
 
     fn step(&self) -> Result<VcpuExit, HvfError> {
-        self.pending_read.set(None);
-        // SAFETY: live vCPU; `exit` is the kernel-owned struct for it.
-        let e = unsafe {
-            let rc = hv_vcpu_run(self.vcpu);
-            if rc != HV_SUCCESS {
-                return Err(HvfError::Run(rc));
-            }
-            *self.exit
-        };
-        match e.reason {
-            HV_EXIT_REASON_VTIMER_ACTIVATED => Ok(VcpuExit::VTimer),
-            HV_EXIT_REASON_CANCELED => Ok(VcpuExit::Canceled),
-            HV_EXIT_REASON_EXCEPTION if esr_ec(e.exception.syndrome) == EC_DATA_ABORT_LOWER_EL => {
-                let esr = e.exception.syndrome;
-                let phys_addr = e.exception.physical_address;
-                let (exit, pending) = classify_data_abort(esr, phys_addr);
-                self.pending_read.set(pending);
-                if pending.is_none() {
-                    // Store: read the value out of the guest reg and advance PC
-                    // now; the run loop applies `data` to the device model.
-                    let da = decode_data_abort(esr);
-                    // SAFETY: live vCPU; reg from the decoded abort.
-                    let data = unsafe { read_gp(self.vcpu, da.reg)? };
-                    // SAFETY: live vCPU.
-                    unsafe { advance_pc(self.vcpu)? };
-                    Ok(VcpuExit::Mmio {
-                        phys_addr,
-                        write: true,
-                        len: da.size,
-                        data,
-                    })
-                } else {
-                    Ok(exit)
+        loop {
+            self.pending_read.set(None);
+            // SAFETY: live vCPU; `exit` is the kernel-owned struct for it.
+            let e = unsafe {
+                let rc = hv_vcpu_run(self.vcpu);
+                if rc != HV_SUCCESS {
+                    return Err(HvfError::Run(rc));
                 }
+                *self.exit
+            };
+            match e.reason {
+                HV_EXIT_REASON_VTIMER_ACTIVATED => return Ok(VcpuExit::VTimer),
+                HV_EXIT_REASON_CANCELED => return Ok(VcpuExit::Canceled),
+                HV_EXIT_REASON_EXCEPTION
+                    if esr_ec(e.exception.syndrome) == EC_DATA_ABORT_LOWER_EL =>
+                {
+                    let esr = e.exception.syndrome;
+                    let phys_addr = e.exception.physical_address;
+                    let da = decode_data_abort(esr);
+                    if !da.isv {
+                        // No instruction syndrome to emulate the access (e.g. cache
+                        // maintenance): skip it and re-enter.
+                        // SAFETY: live vCPU.
+                        unsafe { advance_pc(self.vcpu)? };
+                        continue;
+                    }
+                    let (exit, pending) = classify_data_abort(esr, phys_addr);
+                    self.pending_read.set(pending);
+                    if pending.is_none() {
+                        // Store: read the value out of the guest reg + advance PC
+                        // now; the run loop applies `data` to the device model.
+                        // SAFETY: live vCPU; reg from the decoded abort.
+                        let data = unsafe { read_gp(self.vcpu, da.reg)? };
+                        // SAFETY: live vCPU.
+                        unsafe { advance_pc(self.vcpu)? };
+                        return Ok(VcpuExit::Mmio {
+                            phys_addr,
+                            write: true,
+                            len: da.size,
+                            data,
+                        });
+                    }
+                    return Ok(exit);
+                }
+                // Non-MMIO traps (HVC/PSCI, unknowns) stay raw for the caller hook.
+                HV_EXIT_REASON_EXCEPTION => {
+                    return Ok(VcpuExit::Exception {
+                        syndrome: e.exception.syndrome,
+                        phys_addr: e.exception.physical_address,
+                    });
+                }
+                other => return Ok(VcpuExit::Unknown(other)),
             }
-            // Non-MMIO traps (HVC/PSCI, unknowns) stay raw for the caller.
-            HV_EXIT_REASON_EXCEPTION => Ok(VcpuExit::Exception {
-                syndrome: e.exception.syndrome,
-                phys_addr: e.exception.physical_address,
-            }),
-            other => Ok(VcpuExit::Unknown(other)),
         }
     }
 

@@ -98,8 +98,15 @@ VmBackend (product/CLI/mvmd) ─ AnyBackend dispatch
   caller hook. `RunDevice` is implemented for `Pl011`/`VirtioBlk`/`VirtioVsock`.
   Mock-tested with a scripted vCPU (7 tests: read-completion, write+offset, IRQ
   raise, PIO-by-port + RAZ, cancel, exception hook, vtimer); compiles on macOS +
-  both Linux targets. Remaining: point `hvf::kernel_boot` (and the KVM boot path)
-  at it — collapsing the inline `sys` loop — and drive a live boot through it.
+  both Linux targets.
+- ✅ **HVF boots a live arm64 Linux guest through the unified loop.**
+  `hvf::kernel_boot` now wraps its raw vCPU in `HvfVcpu` and drives it via
+  `vmm::run`: the inline `sys` decode/dispatch loop is gone; PL011/virtio-blk/
+  virtio-vsock dispatch through `RunDevice` + `complete_read`, PSCI/HVC via the
+  exception hook, and the watchdog via the seam's `force_exit`. Live-verified on
+  Apple silicon: boots to **PID 1**, reads a virtio-blk disk, and round-trips a
+  virtio-vsock message — same result as the pre-migration path. The KVM boot path
+  gets the same loop once driven on the box (the spike already proves the guest).
 - ✅ **x86_64 KVM boot live-proven to userspace** — a `kvm-ioctls` driver
   (`spikes/kvm-x86-boot/`) boots a stock distro `bzImage` on `/dev/kvm` straight
   to **PID 1** (`Run /init as init process` → the init's own marker → clean

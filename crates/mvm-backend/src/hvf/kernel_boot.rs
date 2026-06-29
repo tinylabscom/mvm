@@ -21,9 +21,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::HvfError;
+use super::hv_impl::{HvfHandle, HvfVcpu};
 use super::sys::*;
-use super::vcpu::{advance_pc, decode_data_abort, esr_ec, read_gp, write_gp};
-use crate::vmm::device::{MmioDevice, Pl011};
+use super::vcpu::esr_ec;
+use crate::vmm::device::Pl011;
+use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
+use crate::vmm::run::{self, RunControl, RunDevice, RunOutcome};
 use crate::vmm::virtio::VirtioBlk;
 use crate::vmm::vsock::VirtioVsock;
 use crate::vmm::{fdt, kernel_image};
@@ -59,18 +62,12 @@ pub struct KernelBootResult {
     pub console: Vec<u8>,
     /// Final vCPU exit reason.
     pub exit_reason: hv_exit_reason_t,
-    /// PL011 data-register writes serviced.
-    pub mmio_writes: usize,
     /// PSCI HVC calls serviced.
     pub hvc_calls: usize,
     /// True if the watchdog forced the run to stop (expected for a live boot).
     pub stopped_by_watchdog: bool,
-    /// Total data-abort (MMIO) exits.
-    pub data_aborts: usize,
     /// Synchronous exceptions other than HVC/data-abort.
     pub other_exceptions: usize,
-    /// First distinct faulting MMIO addresses (capped).
-    pub fault_addrs: Vec<u64>,
     /// PSCI function ids requested (capped).
     pub psci_fns: Vec<u64>,
     /// Distinct exception classes seen on the "other" path (capped).
@@ -210,38 +207,37 @@ unsafe fn run(
             return Err(HvfError::Map(rc));
         }
 
-        let mut vcpu: hv_vcpu_t = 0;
+        let mut vcpu_id: hv_vcpu_t = 0;
         let mut exit: *mut hv_vcpu_exit_t = core::ptr::null_mut();
-        let rc = hv_vcpu_create(&mut vcpu, &mut exit, core::ptr::null_mut());
+        let rc = hv_vcpu_create(&mut vcpu_id, &mut exit, core::ptr::null_mut());
         if rc != HV_SUCCESS {
             return Err(HvfError::VcpuCreate(rc));
         }
+        // Wrap the raw vCPU in the seam type and drive it through the unified run
+        // loop (crate::vmm::run) — the same body the KVM backend uses.
+        let vcpu = HvfVcpu::from_raw(vcpu_id, exit);
 
-        // MPIDR_EL1 affinity 0 — must match FDT cpu@0 reg and the GIC
-        // redistributor frame, or the kernel can't find the redistributor for
-        // this CPU (gic_populate_rdist walks off the region and faults).
-        if hv_vcpu_set_sys_reg(vcpu, HV_SYS_REG_MPIDR_EL1, 0) != HV_SUCCESS {
-            hv_vcpu_destroy(vcpu);
-            return Err(HvfError::SetReg(0));
+        // MPIDR_EL1 affinity 0 must match FDT cpu@0 + the GIC redistributor frame
+        // (else gic_populate_rdist walks off the region and faults). arm64 boot
+        // protocol: x0=DTB, x1..x3=0, PC=entry, EL1h with DAIF masked.
+        let setup = vcpu
+            .set_sys(SysReg::MpidrEl1, 0)
+            .and_then(|()| vcpu.set_core(CoreReg::Pc, entry))
+            .and_then(|()| vcpu.set_core(CoreReg::Cpsr, 0x3c5))
+            .and_then(|()| vcpu.set_core(CoreReg::X(0), dtb_addr))
+            .and_then(|()| vcpu.set_core(CoreReg::X(1), 0))
+            .and_then(|()| vcpu.set_core(CoreReg::X(2), 0))
+            .and_then(|()| vcpu.set_core(CoreReg::X(3), 0));
+        if let Err(e) = setup {
+            hv_vcpu_destroy(vcpu_id);
+            return Err(e);
         }
 
-        // arm64 boot protocol: x0=DTB, x1..x3=0, PC=entry, EL1h with DAIF masked.
-        let ok = hv_vcpu_set_reg(vcpu, HV_REG_PC, entry) == HV_SUCCESS
-            && hv_vcpu_set_reg(vcpu, HV_REG_CPSR, 0x3c5) == HV_SUCCESS
-            && hv_vcpu_set_reg(vcpu, HV_REG_X0, dtb_addr) == HV_SUCCESS
-            && hv_vcpu_set_reg(vcpu, HV_REG_X1, 0) == HV_SUCCESS
-            && hv_vcpu_set_reg(vcpu, HV_REG_X2, 0) == HV_SUCCESS
-            && hv_vcpu_set_reg(vcpu, HV_REG_X3, 0) == HV_SUCCESS;
-        if !ok {
-            hv_vcpu_destroy(vcpu);
-            return Err(HvfError::SetReg(0));
-        }
-
-        // Watchdog: a booting kernel never exits on its own, so force the vCPU
-        // out after `timeout`. The flag lets a clean early exit skip the wait.
+        // Watchdog: a booting kernel never exits on its own, so force the vCPU out
+        // after `timeout` via the seam's cross-thread cancel.
         let done = Arc::new(AtomicBool::new(false));
         let done_w = done.clone();
-        let vcpu_w = vcpu;
+        let handle = vcpu.exit_token();
         let watchdog = std::thread::spawn(move || {
             let step = Duration::from_millis(50);
             let mut waited = Duration::ZERO;
@@ -252,9 +248,7 @@ unsafe fn run(
                 std::thread::sleep(step);
                 waited += step;
             }
-            let arr = [vcpu_w];
-            // SAFETY: hv_vcpus_exit is the documented cross-thread cancel.
-            hv_vcpus_exit(arr.as_ptr(), 1);
+            HvfHandle::force_exit(&[handle]);
         });
 
         let mut uart = Pl011::new(UART_BASE);
@@ -270,141 +264,82 @@ unsafe fn run(
         });
         let mut vsock_dev =
             vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, RAM_SIZE));
-        let mut r = KernelBootResult::default();
-        let outcome = drive(
-            vcpu,
-            exit,
-            &mut uart,
-            virtio.as_mut(),
-            vsock_dev.as_mut(),
-            &mut r,
-        );
+
+        // Diagnostics gathered by the exception hook (HVC/PSCI + other traps).
+        let mut hvc_calls = 0usize;
+        let mut other_exceptions = 0usize;
+        let mut psci_fns: Vec<u64> = Vec::new();
+        let mut other_ecs: Vec<u32> = Vec::new();
+
+        // Scope the device list so its mutable borrows end before we read the
+        // device output below.
+        let outcome = {
+            let mut devices: Vec<&mut dyn RunDevice> = vec![&mut uart];
+            if let Some(v) = virtio.as_mut() {
+                devices.push(v);
+            }
+            if let Some(v) = vsock_dev.as_mut() {
+                devices.push(v);
+            }
+            let set_irq = |intid: u32, level: bool| -> Result<(), HvfError> {
+                // SAFETY: FFI to the process-global in-kernel GIC (nested in the
+                // enclosing `unsafe` block).
+                if hv_gic_set_spi(intid, level) == HV_SUCCESS {
+                    Ok(())
+                } else {
+                    Err(HvfError::GicCreate(0))
+                }
+            };
+            run::run(&vcpu, set_irq, &mut devices, |vc: &HvfVcpu, esr, _phys| {
+                if esr_ec(esr) == EC_HVC_AARCH64 {
+                    hvc_calls += 1;
+                    let fn_id = vc.get_core(CoreReg::X(0))?;
+                    if psci_fns.len() < 16 && !psci_fns.contains(&fn_id) {
+                        psci_fns.push(fn_id);
+                    }
+                    match fn_id {
+                        PSCI_SYSTEM_OFF | PSCI_SYSTEM_RESET => return Ok(RunControl::Stop),
+                        PSCI_VERSION_FN => vc.set_core(CoreReg::X(0), 0x1_0000)?, // PSCI v1.0
+                        _ => vc.set_core(CoreReg::X(0), PSCI_NOT_SUPPORTED)?,
+                    }
+                    // HVC is completed: HVF already advanced PC. Do NOT advance.
+                    Ok(RunControl::Continue)
+                } else {
+                    let ec = esr_ec(esr);
+                    other_exceptions += 1;
+                    if other_ecs.len() < 16 && !other_ecs.contains(&ec) {
+                        other_ecs.push(ec);
+                    }
+                    // Advance past the faulting instruction and keep going.
+                    let pc = vc.get_core(CoreReg::Pc)?;
+                    vc.set_core(CoreReg::Pc, pc + 4)?;
+                    Ok(RunControl::Continue)
+                }
+            })?
+        };
+
         done.store(true, Ordering::Relaxed);
         let _ = watchdog.join();
-        let mut pc = 0u64;
-        hv_vcpu_get_reg(vcpu, HV_REG_PC, &mut pc);
-        hv_vcpu_destroy(vcpu);
+        let final_pc = vcpu.get_core(CoreReg::Pc).unwrap_or(0);
+        hv_vcpu_destroy(vcpu_id);
 
-        outcome?;
+        let mut r = KernelBootResult {
+            console: uart.output,
+            exit_reason: match outcome {
+                RunOutcome::Canceled => HV_EXIT_REASON_CANCELED,
+                _ => HV_EXIT_REASON_EXCEPTION,
+            },
+            hvc_calls,
+            stopped_by_watchdog: outcome == RunOutcome::Canceled,
+            other_exceptions,
+            psci_fns,
+            other_ecs,
+            final_pc,
+            ..Default::default()
+        };
         if let Some(vs) = &vsock_dev {
             r.vsock_received = vs.received.clone();
         }
-        r.console = uart.output;
-        r.final_pc = pc;
-        r.stopped_by_watchdog = r.exit_reason == HV_EXIT_REASON_CANCELED;
         Ok(r)
-    }
-}
-
-/// The kernel run loop, accumulating diagnostics into `r`.
-///
-/// # Safety
-/// `vcpu`/`exit` come from a live `hv_vcpu_create` on this thread.
-unsafe fn drive(
-    vcpu: hv_vcpu_t,
-    exit: *mut hv_vcpu_exit_t,
-    uart: &mut Pl011,
-    mut virtio: Option<&mut VirtioBlk>,
-    mut vsock: Option<&mut VirtioVsock>,
-    r: &mut KernelBootResult,
-) -> Result<(), HvfError> {
-    unsafe {
-        loop {
-            let rc = hv_vcpu_run(vcpu);
-            if rc != HV_SUCCESS {
-                return Err(HvfError::Run(rc));
-            }
-            let e = *exit;
-            match e.reason {
-                HV_EXIT_REASON_VTIMER_ACTIVATED => continue,
-                HV_EXIT_REASON_CANCELED => {
-                    r.exit_reason = e.reason;
-                    return Ok(());
-                }
-                HV_EXIT_REASON_EXCEPTION => {}
-                other => return Err(HvfError::UnexpectedExit(other)),
-            }
-
-            let esr = e.exception.syndrome;
-            match esr_ec(esr) {
-                EC_HVC_AARCH64 => {
-                    r.hvc_calls += 1;
-                    let fn_id = read_gp(vcpu, 0)?;
-                    if r.psci_fns.len() < 16 && !r.psci_fns.contains(&fn_id) {
-                        r.psci_fns.push(fn_id);
-                    }
-                    match fn_id {
-                        PSCI_SYSTEM_OFF | PSCI_SYSTEM_RESET => {
-                            r.exit_reason = e.reason;
-                            return Ok(());
-                        }
-                        PSCI_VERSION_FN => write_gp(vcpu, 0, 0x1_0000)?, // PSCI v1.0
-                        _ => write_gp(vcpu, 0, PSCI_NOT_SUPPORTED)?,
-                    }
-                    // HVC is a completed synchronous exception: HVF already
-                    // points PC at the instruction after `hvc`. Do NOT advance
-                    // again or we skip an instruction and corrupt the guest.
-                }
-                EC_DATA_ABORT_LOWER_EL => {
-                    r.data_aborts += 1;
-                    let da = decode_data_abort(esr);
-                    let ipa = e.exception.physical_address;
-                    if r.fault_addrs.len() < 16 && !r.fault_addrs.contains(&ipa) {
-                        r.fault_addrs.push(ipa);
-                    }
-                    if !da.isv {
-                        advance_pc(vcpu)?;
-                        continue;
-                    }
-                    if uart.contains(ipa) {
-                        let offset = ipa - uart.base();
-                        if da.is_write {
-                            let v = read_gp(vcpu, da.reg)?;
-                            uart.write(offset, v, da.size);
-                            r.mmio_writes += 1;
-                        } else {
-                            let v = uart.read(offset, da.size);
-                            write_gp(vcpu, da.reg, v)?;
-                        }
-                    } else if let Some(vio) = virtio.as_deref_mut()
-                        && vio.contains(ipa)
-                    {
-                        let offset = ipa - vio.base();
-                        if da.is_write {
-                            let v = read_gp(vcpu, da.reg)?;
-                            if vio.write(offset, v) {
-                                hv_gic_set_spi(vio.irq(), true);
-                            }
-                        } else {
-                            let v = vio.read(offset);
-                            write_gp(vcpu, da.reg, v)?;
-                        }
-                    } else if let Some(vs) = vsock.as_deref_mut()
-                        && vs.contains(ipa)
-                    {
-                        let offset = ipa - vs.base();
-                        if da.is_write {
-                            let v = read_gp(vcpu, da.reg)?;
-                            if vs.write(offset, v) {
-                                hv_gic_set_spi(vs.irq(), true);
-                            }
-                        } else {
-                            let v = vs.read(offset);
-                            write_gp(vcpu, da.reg, v)?;
-                        }
-                    } else if !da.is_write {
-                        write_gp(vcpu, da.reg, 0)?; // unmodeled device: RAZ/WI
-                    }
-                    advance_pc(vcpu)?;
-                }
-                ec => {
-                    r.other_exceptions += 1;
-                    if r.other_ecs.len() < 16 && !r.other_ecs.contains(&ec) {
-                        r.other_ecs.push(ec);
-                    }
-                    advance_pc(vcpu)?;
-                }
-            }
-        }
     }
 }
