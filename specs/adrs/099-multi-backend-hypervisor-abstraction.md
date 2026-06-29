@@ -91,9 +91,15 @@ VmBackend (product/CLI/mvmd) ─ AnyBackend dispatch
 - ✅ `hvf::{HvfVm, HvfVcpu, HvfHandle}` implement the seam (thin wrappers over the
   existing HVF FFI), validating the contract against a real, live-proven backend;
   `ActiveVm` binds on macOS.
-- ⏳ Migrate the `hvf::kernel_boot` run loop onto the seam (drive `step()` →
-  dispatch `VcpuExit` to the `vmm` devices) so it is backend-generic; the inline
-  `sys` calls in `kernel_boot` collapse into `HvfVm`/`HvfVcpu`.
+- ✅ **Unified run loop** (`vmm::run`) — one body, generic over `HypervisorVcpu`:
+  `step()` → dispatch decoded `Mmio`/`Io` to a `RunDevice` list (matched by guest
+  address / port) → `complete_read` on a read → `set_irq` on a write that raises
+  a line; `Halt`/`Canceled` end it; non-MMIO exceptions (arm64 PSCI/HVC) go to a
+  caller hook. `RunDevice` is implemented for `Pl011`/`VirtioBlk`/`VirtioVsock`.
+  Mock-tested with a scripted vCPU (7 tests: read-completion, write+offset, IRQ
+  raise, PIO-by-port + RAZ, cancel, exception hook, vtimer); compiles on macOS +
+  both Linux targets. Remaining: point `hvf::kernel_boot` (and the KVM boot path)
+  at it — collapsing the inline `sys` loop — and drive a live boot through it.
 - ✅ **x86_64 KVM boot live-proven to userspace** — a `kvm-ioctls` driver
   (`spikes/kvm-x86-boot/`) boots a stock distro `bzImage` on `/dev/kvm` straight
   to **PID 1** (`Run /init as init process` → the init's own marker → clean
