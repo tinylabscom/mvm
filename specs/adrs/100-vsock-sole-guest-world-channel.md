@@ -111,6 +111,27 @@ The guest therefore has exactly one device class for talking to anything: vsock.
    so a regression that re-adds a guest NIC fails closed — the machine-checked
    form of this invariant.
 
+## Status (HVF reference, live-proven on Apple silicon)
+
+Step 1 is substantially realized on HVF:
+
+- ✅ No guest NIC; the guest's only off-guest channels are vsock (control, the
+  transient workload-exit signal, and egress).
+- ✅ Egress **deny by default** — a NIC-less guest's connect request over vsock is
+  refused unless policy admits it (`vmm::egress_gate` reuses the claim-10
+  `CanonicalEgress`).
+- ✅ Egress **allow + TCP proxy** when admitted — the host opens the socket and
+  proxies bytes; an echo round-trips guest → vsock → host TCP → guest.
+- ✅ The gate is built from the **admitted plan's `NetworkPolicy`**, with the
+  supervisor **resolving host-allowlist DNS pins** at startup; fails closed.
+- ⏳ The proxy is currently **synchronous request/response** (the common workload
+  shape). Full **async bidirectional streaming** (server-push / long-lived streams
+  delivered to an idle guest) needs the run-loop `poll`/IRQ rx-wake path debugged
+  — a first attempt surfaced a subtle virtio-mmio async-rx-wake issue and was
+  reverted rather than shipped half-working.
+
+Steps 2 (converge FC/libkrun/vz off their NICs) and 3 (the CI guard) remain.
+
 ## Alternatives considered
 
 - **Keep per-backend NICs with host-enforced default-deny (today's posture).**
