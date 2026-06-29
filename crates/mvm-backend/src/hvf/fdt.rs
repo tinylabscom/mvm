@@ -162,6 +162,9 @@ const CLOCK_PHANDLE: u32 = 2;
 const FDT_IRQ_SPI: u32 = 0;
 const FDT_IRQ_PPI: u32 = 1;
 const IRQ_LEVEL_HI: u32 = 4;
+/// Edge-rising required for virtio on HVF's in-kernel GIC: it auto-deasserts the
+/// SPI on guest EOI, which only works with edge semantics.
+const IRQ_EDGE_RISING: u32 = 1;
 
 /// Build a device tree for an arm64 Linux guest: one CPU, GICv3, arch timer,
 /// PL011 console (with IRQ + clock), PSCI over HVC, memory, and `/chosen`
@@ -171,6 +174,7 @@ pub fn build_dtb(
     ram_base: u64,
     ram_size: u64,
     initrd: Option<(u64, u64)>,
+    virtio: Option<(u64, u32)>,
 ) -> Vec<u8> {
     let reg_pair = |addr: u64, size: u64| {
         [
@@ -268,6 +272,14 @@ pub fn build_dtb(
     f.prop_str("method", "hvc");
     f.end_node();
 
+    if let Some((base, irq)) = virtio {
+        f.begin_node(&format!("virtio_mmio@{base:x}"));
+        f.prop_str("compatible", "virtio,mmio");
+        f.prop_cells("reg", &reg_pair(base, 0x200));
+        f.prop_cells("interrupts", &[FDT_IRQ_SPI, irq - 32, IRQ_EDGE_RISING]);
+        f.end_node();
+    }
+
     f.end_node(); // root
     f.finish()
 }
@@ -287,6 +299,7 @@ mod tests {
             0x4000_0000,
             0x2000_0000,
             None,
+            None,
         );
         assert_eq!(be32(&dtb, 0), FDT_MAGIC);
         assert_eq!(be32(&dtb, 4) as usize, dtb.len(), "totalsize == blob len");
@@ -305,6 +318,7 @@ mod tests {
             "earlycon=pl011,mmio32,0x9000000",
             0x4000_0000,
             0x2000_0000,
+            None,
             None,
         );
         let needle = b"earlycon=pl011,mmio32,0x9000000";
@@ -330,13 +344,14 @@ mod tests {
 
     #[test]
     fn initrd_props_present_only_when_supplied() {
-        let without = build_dtb("x", 0x8000_0000, 0x2000_0000, None);
+        let without = build_dtb("x", 0x8000_0000, 0x2000_0000, None, None);
         assert!(!without.windows(18).any(|w| w == b"linux,initrd-start"));
         let with = build_dtb(
             "x",
             0x8000_0000,
             0x2000_0000,
             Some((0x9000_0000, 0x9000_0600)),
+            None,
         );
         assert!(with.windows(18).any(|w| w == b"linux,initrd-start"));
         assert!(with.windows(16).any(|w| w == b"linux,initrd-end"));
@@ -344,7 +359,7 @@ mod tests {
 
     #[test]
     fn struct_block_is_4_byte_aligned() {
-        let dtb = build_dtb("x", 0x4000_0000, 0x1000_0000, None);
+        let dtb = build_dtb("x", 0x4000_0000, 0x1000_0000, None, None);
         assert!(be32(&dtb, 8).is_multiple_of(4), "off_dt_struct 4-aligned");
         assert!(be32(&dtb, 16).is_multiple_of(8), "off_mem_rsvmap 8-aligned");
     }

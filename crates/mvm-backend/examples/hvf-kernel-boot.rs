@@ -29,17 +29,28 @@ fn main() {
         let initramfs = std::env::var("MVM_HVF_INITRAMFS")
             .ok()
             .map(|p| std::fs::read(&p).expect("read initramfs"));
+        let disk = std::env::var("MVM_HVF_DISK")
+            .ok()
+            .map(|p| std::fs::read(&p).expect("read disk"));
         println!(
-            "booting {} ({} bytes){} under HVF…",
+            "booting {} ({} bytes){}{} under HVF…",
             path,
             image.len(),
             initramfs
                 .as_ref()
                 .map(|r| format!(" + initramfs ({} bytes)", r.len()))
+                .unwrap_or_default(),
+            disk.as_ref()
+                .map(|d| format!(" + disk ({} bytes)", d.len()))
                 .unwrap_or_default()
         );
 
-        match mvm_backend::hvf::boot_kernel(&image, initramfs.as_deref(), Duration::from_secs(3)) {
+        match mvm_backend::hvf::boot_kernel(
+            &image,
+            initramfs.as_deref(),
+            disk.as_deref(),
+            Duration::from_secs(3),
+        ) {
             Ok(r) => {
                 println!("---- guest earlycon ----");
                 print!("{}", String::from_utf8_lossy(&r.console));

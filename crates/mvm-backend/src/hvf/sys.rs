@@ -114,6 +114,9 @@ unsafe extern "C" {
         base: hv_ipa_t,
     ) -> hv_return_t;
     pub fn hv_gic_create(config: hv_gic_config_t) -> hv_return_t;
+    /// Raise/lower a Shared Peripheral Interrupt line (absolute INTID). Used to
+    /// signal virtio device completions to the guest.
+    pub fn hv_gic_set_spi(intid: u32, level: bool) -> hv_return_t;
     pub fn hv_gic_get_distributor_size(size: *mut usize) -> hv_return_t;
     pub fn hv_gic_get_distributor_base_alignment(alignment: *mut usize) -> hv_return_t;
     pub fn hv_gic_get_redistributor_size(size: *mut usize) -> hv_return_t;

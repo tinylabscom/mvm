@@ -21,6 +21,7 @@ mod kernel_boot;
 mod kernel_image;
 mod sys;
 mod vcpu;
+mod virtio;
 
 pub use backend::HvfBackend;
 pub use boot_smoke::{BootProof, HvfError, MAGIC, boot_smoke, probe_available};

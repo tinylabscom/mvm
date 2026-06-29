@@ -24,6 +24,7 @@ use super::HvfError;
 use super::device::{MmioDevice, Pl011};
 use super::sys::*;
 use super::vcpu::{advance_pc, decode_data_abort, esr_ec, read_gp, write_gp};
+use super::virtio::VirtioBlk;
 use super::{fdt, kernel_image};
 
 /// Guest RAM base (2 GiB, per the aarch64 Linux boot convention) and size
@@ -39,6 +40,9 @@ const FDT_MAX_SIZE: u64 = 0x20_0000;
 /// DTB window).
 const INITRD_OFFSET: u64 = 0x1000_0000;
 const UART_BASE: u64 = fdt::SERIAL_MMIO_BASE;
+/// virtio-mmio device window (above the GIC, below RAM) + its SPI.
+const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
+const VIRTIO_IRQ: u32 = 48;
 
 const PSCI_VERSION_FN: u64 = 0x8400_0000;
 const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
@@ -77,6 +81,7 @@ pub struct KernelBootResult {
 pub fn boot_kernel(
     image: &[u8],
     initramfs: Option<&[u8]>,
+    disk: Option<&[u8]>,
     timeout: Duration,
 ) -> Result<KernelBootResult, HvfError> {
     // Validate it's an arm64 Image; we load at the fixed boot-protocol offset.
@@ -110,7 +115,14 @@ pub fn boot_kernel(
             RAM_BASE + INITRD_OFFSET + rd.len() as u64,
         )
     });
-    let dtb = fdt::build_dtb(&bootargs, RAM_BASE, RAM_SIZE as u64, initrd_bounds);
+    let virtio_node = disk.map(|_| (VIRTIO_MMIO_BASE, VIRTIO_IRQ));
+    let dtb = fdt::build_dtb(
+        &bootargs,
+        RAM_BASE,
+        RAM_SIZE as u64,
+        initrd_bounds,
+        virtio_node,
+    );
     if dtb.len() > FDT_MAX_SIZE as usize {
         // SAFETY: same layout.
         unsafe { dealloc(ram, layout) };
@@ -140,7 +152,7 @@ pub fn boot_kernel(
             dealloc(ram, layout);
             return Err(HvfError::VmCreate(rc));
         }
-        let r = run(ram, entry, dtb_addr, timeout);
+        let r = run(ram, entry, dtb_addr, disk, timeout);
         hv_vm_destroy();
         r
     };
@@ -156,6 +168,7 @@ unsafe fn run(
     ram: *mut u8,
     entry: u64,
     dtb_addr: u64,
+    disk: Option<&[u8]>,
     timeout: Duration,
 ) -> Result<KernelBootResult, HvfError> {
     unsafe {
@@ -232,8 +245,18 @@ unsafe fn run(
         });
 
         let mut uart = Pl011::new(UART_BASE);
+        let mut virtio = disk.map(|d| {
+            VirtioBlk::new(
+                VIRTIO_MMIO_BASE,
+                VIRTIO_IRQ,
+                ram,
+                RAM_BASE,
+                RAM_SIZE,
+                d.to_vec(),
+            )
+        });
         let mut r = KernelBootResult::default();
-        let outcome = drive(vcpu, exit, &mut uart, &mut r);
+        let outcome = drive(vcpu, exit, &mut uart, virtio.as_mut(), &mut r);
         done.store(true, Ordering::Relaxed);
         let _ = watchdog.join();
         let mut pc = 0u64;
@@ -256,6 +279,7 @@ unsafe fn drive(
     vcpu: hv_vcpu_t,
     exit: *mut hv_vcpu_exit_t,
     uart: &mut Pl011,
+    mut virtio: Option<&mut VirtioBlk>,
     r: &mut KernelBootResult,
 ) -> Result<(), HvfError> {
     unsafe {
@@ -314,6 +338,19 @@ unsafe fn drive(
                             r.mmio_writes += 1;
                         } else {
                             let v = uart.read(offset, da.size);
+                            write_gp(vcpu, da.reg, v)?;
+                        }
+                    } else if let Some(vio) = virtio.as_deref_mut()
+                        && vio.contains(ipa)
+                    {
+                        let offset = ipa - vio.base();
+                        if da.is_write {
+                            let v = read_gp(vcpu, da.reg)?;
+                            if vio.write(offset, v) {
+                                vio.inject_irq();
+                            }
+                        } else {
+                            let v = vio.read(offset);
                             write_gp(vcpu, da.reg, v)?;
                         }
                     } else if !da.is_write {
