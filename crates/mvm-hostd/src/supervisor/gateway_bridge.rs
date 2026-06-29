@@ -4478,6 +4478,7 @@ mod tests {
             TenantId, TimeoutSpec, WorkloadId,
         };
         ExecutionPlan {
+            build_provenance: Default::default(),
             snapshot_at: Default::default(),
             network_mode: Default::default(),
             schema_version: SCHEMA_VERSION,

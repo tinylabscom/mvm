@@ -14,9 +14,9 @@ use crate::lifecycle::SnapshotAt;
 use crate::plan::bundle::PlanArtifact;
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, AuthPolicy,
-    DepsVolumeBinding, FsPolicyRef, HostShareGrant, KeyRotationSpec, NetworkMode, Nonce, PlanId,
-    PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
-    SignedImageRef, TenantId, WorkloadId,
+    BuildProvenance, DepsVolumeBinding, FsPolicyRef, HostShareGrant, KeyRotationSpec, NetworkMode,
+    Nonce, PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef,
+    SecretBinding, SignedImageRef, TenantId, WorkloadId,
 };
 use crate::plan::verb::VerbId;
 
@@ -84,6 +84,14 @@ pub struct ExecutionPlan {
     /// `#[serde(default)]` so a plan without the field deserializes as `None`.
     #[serde(default)]
     pub snapshot_at: Option<SnapshotAt>,
+
+    /// Build provenance: the input kind/ref, input pin, builder identity, and
+    /// per-artifact digests behind this launch — so a run is traceable to exact
+    /// deterministic inputs and outputs. `None` (default) = not recorded for this
+    /// workload. The deterministic build pipeline populates it.
+    /// `#[serde(default)]` so a plan without the field deserializes as `None`.
+    #[serde(default)]
+    pub build_provenance: Option<BuildProvenance>,
 
     /// Filesystem policy reference.
     pub fs_policy: FsPolicyRef,
