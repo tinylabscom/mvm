@@ -11,6 +11,7 @@
 //! This module compiles on every target; it is the "no VMM lock-in" seam.
 
 pub mod device;
+pub mod egress_gate;
 pub mod fdt;
 pub mod guest_mem;
 pub mod hv;
