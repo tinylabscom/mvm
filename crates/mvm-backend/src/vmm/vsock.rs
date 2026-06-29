@@ -138,6 +138,13 @@ pub struct VirtioVsock {
     fwd_cnt: u32,
     /// Pending packets to deliver to the guest on its rx queue.
     pending_rx: Vec<(Hdr, Vec<u8>)>,
+    /// Workload exit code captured from a guest write to
+    /// [`WORKLOAD_EXIT_PORT`](mvm_guest::vsock::WORKLOAD_EXIT_PORT) (4-byte LE
+    /// i32) — the transient run-to-exit signal. `Some` once the guest reports.
+    pub workload_exit_code: Option<i32>,
+    /// Set when the workload-exit code arrives, so the run loop's watchdog ends a
+    /// transient VM (the same flag the SIGTERM/stop path uses).
+    exit_stop: Option<&'static std::sync::atomic::AtomicBool>,
 }
 
 impl VirtioVsock {
@@ -157,7 +164,16 @@ impl VirtioVsock {
             received: Vec::new(),
             fwd_cnt: 0,
             pending_rx: Vec::new(),
+            workload_exit_code: None,
+            exit_stop: None,
         }
+    }
+
+    /// Capture the transient workload-exit code: a guest write of a 4-byte LE i32
+    /// to [`WORKLOAD_EXIT_PORT`](mvm_guest::vsock::WORKLOAD_EXIT_PORT) records the
+    /// code and sets `stop` so the run loop ends (VM life = workload life).
+    pub fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
+        self.exit_stop = Some(stop);
     }
 
     pub fn base(&self) -> u64 {
@@ -278,7 +294,21 @@ impl VirtioVsock {
             }
             OP_RW => {
                 let n = (hdr.len as usize).min(payload.len());
-                self.received.extend_from_slice(&payload[..n]);
+                if hdr.dst_port == mvm_guest::vsock::WORKLOAD_EXIT_PORT {
+                    // Transient workload-exit signal: a 4-byte LE i32 exit code.
+                    // Record it and request stop (VM life = workload life).
+                    if n >= 4 {
+                        self.workload_exit_code =
+                            Some(i32::from_le_bytes(payload[..4].try_into().unwrap()));
+                    } else {
+                        self.workload_exit_code = Some(0);
+                    }
+                    if let Some(stop) = self.exit_stop {
+                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                } else {
+                    self.received.extend_from_slice(&payload[..n]);
+                }
                 self.fwd_cnt = self.fwd_cnt.wrapping_add(n as u32);
                 // Acknowledge consumed bytes so the guest's credit recovers.
                 self.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);

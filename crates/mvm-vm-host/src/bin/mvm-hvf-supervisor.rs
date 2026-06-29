@@ -106,6 +106,17 @@ fn ensure_self_signed() {
     std::process::exit(1);
 }
 
+/// Set by the SIGTERM/SIGINT handler; `boot_kernel_until`'s watchdog polls it and
+/// force-exits the guest so a stop flushes the console + drops the PID file
+/// cleanly (vs the kernel being killed mid-run).
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+extern "C" fn on_stop_signal(_: libc::c_int) {
+    STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn main() -> anyhow::Result<()> {
     use std::io::{Read, Write};
@@ -116,6 +127,15 @@ fn main() -> anyhow::Result<()> {
 
     // Sign + re-exec before anything else (preserves the stdin config pipe).
     ensure_self_signed();
+
+    // Graceful stop: SIGTERM/SIGINT set STOP, which the boot watchdog observes and
+    // force-exits the guest (then we flush the console + drop the PID file).
+    // SAFETY: installing a trivial async-signal-safe handler (an atomic store).
+    unsafe {
+        let h = on_stop_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        libc::signal(libc::SIGTERM, h);
+        libc::signal(libc::SIGINT, h);
+    }
 
     let mut raw = String::new();
     std::io::stdin()
@@ -143,18 +163,21 @@ fn main() -> anyhow::Result<()> {
         .map(std::fs::read)
         .transpose()
         .context("read disk")?;
-    let timeout = Duration::from_secs(if cfg.timeout_secs == 0 {
-        30
+    // timeout_secs == 0 ⇒ persistent: run until stopped (SIGTERM). A multi-year
+    // cap backstops a stuck guest. Otherwise it's a bounded run.
+    let timeout = if cfg.timeout_secs == 0 {
+        Duration::from_secs(10 * 365 * 24 * 60 * 60)
     } else {
-        cfg.timeout_secs
-    });
+        Duration::from_secs(cfg.timeout_secs)
+    };
 
-    let result = mvm_backend::hvf::boot_kernel(
+    let result = mvm_backend::hvf::boot_kernel_until(
         &image,
         initramfs.as_deref(),
         disk.as_deref(),
         cfg.vsock,
         timeout,
+        &STOP,
     );
 
     // The VM has stopped: drop the PID file and flush whatever console we
@@ -163,6 +186,14 @@ fn main() -> anyhow::Result<()> {
     let r = result.map_err(|e| anyhow::anyhow!("hvf boot failed: {e:?}"))?;
     if let Ok(mut f) = std::fs::File::create(&cfg.console_log) {
         let _ = f.write_all(&r.console);
+    }
+
+    // Transient run-to-exit: if the guest reported a workload exit code over the
+    // vsock exit port, persist it (the backend's `wait` reads this) and mirror it
+    // as our own process exit code.
+    if let Some(code) = r.workload_exit_code {
+        let _ = std::fs::write(&cfg.workload_exit, code.to_string());
+        std::process::exit(code);
     }
     Ok(())
 }

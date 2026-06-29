@@ -8,9 +8,11 @@
 //! `console.log`. The guest boots through `boot_kernel` → the unified `vmm::run`
 //! loop inside the supervisor.
 //!
-//! Today: a bounded run (the supervisor's `boot_kernel` timeout) with vsock +
-//! optional virtio-blk. Not yet: persistent-until-stop (needs an in-guest stop
-//! channel), pause/resume/snapshot, and host-mediated networking/egress.
+//! Transient by default (VM life = workload life): the guest runs its entrypoint
+//! and reports its exit code over the workload-exit vsock port, which ends the run;
+//! `wait` returns that code. A persistent (`-d`) VM instead runs until `stop`. With
+//! vsock + optional virtio-blk. Not yet: pause/resume/snapshot, and vsock-mediated
+//! networking/egress (ADR-100).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -20,7 +22,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_build::hvf_supervisor::HvfSupervisorConfig;
 use mvm_core::config::{mvm_data_dir, vm_state_dir};
-use mvm_core::vm_backend::{VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus};
+use mvm_core::vm_backend::{
+    VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+};
 
 use crate::base::ui;
 
@@ -109,11 +113,17 @@ impl VmBackend for HvfBackend {
         // Create/truncate the console capture file up front.
         let _ = crate::libkrun::open_console_capture(&console_log);
 
+        // Clear any prior run's exit code so `wait` reads only this launch's.
+        let workload_exit = state_dir.join("workload.exit");
+        let _ = std::fs::remove_file(&workload_exit);
+
         let disk = Some(config.rootfs_path.clone())
             .filter(|p| !p.is_empty())
             .map(PathBuf::from);
-        // Bounded run length; the supervisor's boot_kernel forces the guest out
-        // after this (a booting kernel never exits on its own). 0 ⇒ its default.
+        // A transient workload ends the VM by reporting its exit code over the
+        // vsock exit port (the default — VM life = workload life); a persistent
+        // (`-d`) VM ends on `stop`. MVM_HVF_TIMEOUT is only a backstop cap
+        // (0 = none) against a guest that never reports + is never stopped.
         let timeout_secs = std::env::var("MVM_HVF_TIMEOUT")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -126,6 +136,7 @@ impl VmBackend for HvfBackend {
             vsock: true,
             console_log: console_log.clone(),
             pid_file: pid_file.clone(),
+            workload_exit,
             timeout_secs,
         };
         let json = serde_json::to_string(&cfg)
@@ -188,6 +199,15 @@ impl VmBackend for HvfBackend {
             console_log.display()
         ));
         Ok(VmId(config.name.clone()))
+    }
+
+    fn wait(&self, id: &VmId) -> Result<VmExitStatus> {
+        // Transient run-to-exit: block until the supervisor persists the guest's
+        // workload exit code to `<state>/workload.exit` (shared helper, same file
+        // every backend writes).
+        Ok(crate::workload_wait::wait_for_workload_exit(&vm_state_dir(
+            &id.0,
+        )))
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {

@@ -33,6 +33,10 @@ pub struct HvfSupervisorConfig {
     /// Where to write this process's PID once booting starts (the backend polls
     /// for it to confirm launch, and reads it to stop/status the VM).
     pub pid_file: PathBuf,
+    /// Where to persist the workload exit code (`<state>/workload.exit`, decimal)
+    /// when the guest reports it over the workload-exit vsock port — the transient
+    /// run-to-exit result the backend's `wait` reads.
+    pub workload_exit: PathBuf,
     /// Run budget in seconds — a booting kernel never exits on its own, so the
     /// guest is forced out after this long. The backend sets it from the VM's
     /// requested lifetime.
@@ -52,6 +56,7 @@ mod tests {
             vsock: true,
             console_log: "/state/console.log".into(),
             pid_file: "/state/hvf.pid".into(),
+            workload_exit: "/state/workload.exit".into(),
             timeout_secs: 30,
         };
         let json = serde_json::to_string(&cfg).unwrap();
@@ -63,8 +68,7 @@ mod tests {
 
     #[test]
     fn optional_fields_default() {
-        let json =
-            r#"{"kernel":"/k/Image","console_log":"/c.log","pid_file":"/p.pid","timeout_secs":5}"#;
+        let json = r#"{"kernel":"/k/Image","console_log":"/c.log","pid_file":"/p.pid","workload_exit":"/w.exit","timeout_secs":5}"#;
         let cfg: HvfSupervisorConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.initramfs, None);
         assert_eq!(cfg.disk, None);
@@ -75,8 +79,7 @@ mod tests {
     #[test]
     fn unknown_field_is_rejected() {
         // deny_unknown_fields: a typo'd / unexpected field fails closed.
-        let json =
-            r#"{"kernel":"/k","console_log":"/c","pid_file":"/p","timeout_secs":1,"bogus":1}"#;
+        let json = r#"{"kernel":"/k","console_log":"/c","pid_file":"/p","workload_exit":"/w","timeout_secs":1,"bogus":1}"#;
         assert!(serde_json::from_str::<HvfSupervisorConfig>(json).is_err());
     }
 }
