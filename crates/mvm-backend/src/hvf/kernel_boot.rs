@@ -80,6 +80,8 @@ pub struct KernelBootResult {
     /// port (the transient run-to-exit signal). `None` for a run that ended by
     /// timeout/stop without a workload-exit report.
     pub workload_exit_code: Option<i32>,
+    /// Egress targets the vsock gateway refused (claim-10 default-deny, ADR-100).
+    pub egress_denied: Vec<String>,
 }
 
 /// Boot `image` (an arm64 `Image`) under HVF, optionally with an `initramfs`
@@ -301,9 +303,11 @@ unsafe fn run(
         let mut vsock_dev =
             vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, RAM_SIZE));
         // Transient run-to-exit: a guest write of the exit code to the workload
-        // exit port stops the run (and is captured below).
+        // exit port stops the run (and is captured below). Egress over vsock is
+        // claim-10 default-deny until the plan's policy is threaded in (ADR-100).
         if let Some(v) = vsock_dev.as_mut() {
             v.capture_workload_exit(stop);
+            v.set_egress_gate(crate::vmm::egress_gate::EgressGate::default_deny());
         }
 
         // Diagnostics gathered by the exception hook (HVC/PSCI + other traps).
@@ -381,6 +385,7 @@ unsafe fn run(
         if let Some(vs) = &vsock_dev {
             r.vsock_received = vs.received.clone();
             r.workload_exit_code = vs.workload_exit_code;
+            r.egress_denied = vs.egress_denied.clone();
         }
         Ok(r)
     }

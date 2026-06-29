@@ -145,6 +145,15 @@ pub struct VirtioVsock {
     /// Set when the workload-exit code arrives, so the run loop's watchdog ends a
     /// transient VM (the same flag the SIGTERM/stop path uses).
     exit_stop: Option<&'static std::sync::atomic::AtomicBool>,
+    /// Host egress gateway policy (ADR-100). When set, a guest connect request to
+    /// the egress port is decided here (claim-10 default-deny) before any host
+    /// socket is opened. `None` ⇒ egress requests are refused outright.
+    egress: Option<super::egress_gate::EgressGate>,
+    /// Egress targets the gateway refused (claim-10) — for audit/verification.
+    pub egress_denied: Vec<String>,
+    /// Egress targets the gateway admitted (the connect/proxy data path is the
+    /// next slice; today an admitted request is recorded then the stream is reset).
+    pub egress_allowed: Vec<String>,
 }
 
 impl VirtioVsock {
@@ -166,7 +175,17 @@ impl VirtioVsock {
             pending_rx: Vec::new(),
             workload_exit_code: None,
             exit_stop: None,
+            egress: None,
+            egress_denied: Vec::new(),
+            egress_allowed: Vec::new(),
         }
+    }
+
+    /// Install the host egress gateway policy (ADR-100). A guest connect request
+    /// to the egress port is then decided against `gate` (claim-10 default-deny)
+    /// before any host connection is opened.
+    pub fn set_egress_gate(&mut self, gate: super::egress_gate::EgressGate) {
+        self.egress = Some(gate);
     }
 
     /// Capture the transient workload-exit code: a guest write of a 4-byte LE i32
@@ -306,6 +325,13 @@ impl VirtioVsock {
                     if let Some(stop) = self.exit_stop {
                         stop.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
+                } else if hdr.dst_port == mvm_guest::vsock::SUBSTITUTION_PORT {
+                    // Egress request (ADR-100): the payload is the connect target
+                    // "ip:port". The gateway decides per the plan's policy
+                    // (claim-10 default-deny) before any host socket is opened.
+                    self.handle_egress_request(&hdr, &payload[..n]);
+                    self.fwd_cnt = self.fwd_cnt.wrapping_add(n as u32);
+                    return;
                 } else {
                     self.received.extend_from_slice(&payload[..n]);
                 }
@@ -317,6 +343,25 @@ impl VirtioVsock {
             OP_SHUTDOWN => self.queue_reply(&hdr, OP_RST, &[]),
             _ => {}
         }
+    }
+
+    /// Decide a guest egress request (target `"ip:port"`) against the gateway
+    /// policy (claim-10 default-deny) — ADR-100. No gate ⇒ deny. The connect/proxy
+    /// data path is the next slice; for now an admitted target is recorded and the
+    /// stream is reset, and a refused one is reset (never reaching the network).
+    fn handle_egress_request(&mut self, hdr: &Hdr, payload: &[u8]) {
+        use super::egress_gate::EgressVerdict;
+        let target = String::from_utf8_lossy(payload).trim().to_string();
+        let verdict = match &self.egress {
+            Some(gate) => gate.decide_request(&target),
+            None => EgressVerdict::Deny, // fail closed when no gateway is installed
+        };
+        match verdict {
+            EgressVerdict::Allow { .. } => self.egress_allowed.push(target),
+            EgressVerdict::Deny | EgressVerdict::Malformed => self.egress_denied.push(target),
+        }
+        // Reset the stream either way until the connect/proxy data path lands.
+        self.queue_reply(hdr, OP_RST, &[]);
     }
 
     /// Queue a host→guest reply (src/dst swapped from the inbound header).

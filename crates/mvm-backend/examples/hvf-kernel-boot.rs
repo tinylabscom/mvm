@@ -71,6 +71,15 @@ fn main() {
                     "diag: psci_fns={:#x?} other_ecs={:#x?}",
                     r.psci_fns, r.other_ecs
                 );
+                if !r.egress_denied.is_empty() {
+                    println!(
+                        "egress DENIED (claim-10 default-deny over vsock): {:?}",
+                        r.egress_denied
+                    );
+                }
+                if let Some(code) = r.workload_exit_code {
+                    println!("workload exited: code={code}");
+                }
                 if !r.vsock_received.is_empty() {
                     println!(
                         "vsock host received: {:?}",
