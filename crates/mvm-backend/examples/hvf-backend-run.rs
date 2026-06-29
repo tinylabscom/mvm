@@ -13,7 +13,7 @@
 fn main() {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        use mvm_backend::hvf::HvfBackend;
+        use mvm_backend::hvf_backend::HvfBackend;
         use mvm_core::vm_backend::{VmBackend, VmStartConfig, VmStatus};
         use std::time::Duration;
 

@@ -62,6 +62,11 @@ pub(crate) mod host_agent_spawn;
 /// it is cfg-gated off every other target.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod hvf;
+/// `HvfBackend` — the `VmBackend` for the raw-HVF macOS path (Plan 214). Compiles
+/// on every target (lifecycle = spawn the detached `mvm-hvf-supervisor` + track
+/// PID files; only availability probing is macOS-specific), so it registers in
+/// `AnyBackend`/the catalog without cfg-gymnastics.
+pub mod hvf_backend;
 pub mod image;
 /// KVM (Linux) backend — drives [`vmm`] on Linux via `kvm-ioctls`, implementing
 /// the [`vmm::hv`] seam (Plan 214 / ADR-099). `kvm::x86_boot` is pure logic

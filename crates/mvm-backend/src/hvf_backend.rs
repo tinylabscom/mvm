@@ -281,18 +281,32 @@ impl VmBackend for HvfBackend {
     }
 
     fn is_available(&self) -> Result<bool> {
-        Ok(super::probe_available())
+        Ok(hvf_probe())
     }
 
     fn install(&self) -> Result<()> {
         ui::info("Hypervisor.framework is built into macOS; no host install needed.");
-        if !super::probe_available() {
+        if !hvf_probe() {
             ui::info(
-                "HVF probe failed — ensure the binary is codesigned with \
-                 com.apple.security.hypervisor.",
+                "HVF unavailable — needs macOS / Apple silicon (and the binary \
+                 codesigned with com.apple.security.hypervisor).",
             );
         }
         Ok(())
+    }
+}
+
+/// Probe whether HVF can actually run here. The backend's lifecycle is
+/// platform-agnostic (spawns a binary + tracks PID files), so it compiles
+/// everywhere; only this probe is macOS/Apple-silicon-specific.
+fn hvf_probe() -> bool {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        crate::hvf::probe_available()
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        false
     }
 }
 
