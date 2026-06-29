@@ -5,8 +5,11 @@
 //! loop can drive HVF and KVM identically. The existing `kernel_boot` run loop
 //! still calls `sys` directly; it migrates onto this contract next.
 
+use std::cell::Cell;
+
 use super::HvfError;
 use super::sys::*;
+use super::vcpu::{advance_pc, decode_data_abort, esr_ec, read_gp, write_gp};
 use crate::vmm::fdt;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, HypervisorVm, SysReg, VcpuExit, VcpuHandle, prot};
 
@@ -28,10 +31,27 @@ impl VcpuHandle for HvfHandle {
     }
 }
 
-/// HVF vCPU: the handle + the kernel-owned exit struct pointer.
+/// HVF vCPU: the handle + the kernel-owned exit struct pointer. `pending_read`
+/// records the destination GP register + width of a load data abort that
+/// `step` surfaced, so `complete_read` can write the value and advance PC.
 pub struct HvfVcpu {
     vcpu: hv_vcpu_t,
     exit: *mut hv_vcpu_exit_t,
+    pending_read: Cell<Option<(u8, u8)>>,
+}
+
+/// Map a decoded data abort to the portable exit + (for a load) the destination
+/// register/width to complete later. Pure; the store value is filled by `step`.
+fn classify_data_abort(esr: u64, phys_addr: u64) -> (VcpuExit, Option<(u8, u8)>) {
+    let da = decode_data_abort(esr);
+    let exit = VcpuExit::Mmio {
+        phys_addr,
+        write: da.is_write,
+        len: da.size,
+        data: 0,
+    };
+    let pending = (!da.is_write).then_some((da.reg, da.size));
+    (exit, pending)
 }
 
 fn core_id(reg: CoreReg) -> hv_reg_t {
@@ -85,6 +105,7 @@ impl HypervisorVcpu for HvfVcpu {
     }
 
     fn step(&self) -> Result<VcpuExit, HvfError> {
+        self.pending_read.set(None);
         // SAFETY: live vCPU; `exit` is the kernel-owned struct for it.
         let e = unsafe {
             let rc = hv_vcpu_run(self.vcpu);
@@ -93,16 +114,50 @@ impl HypervisorVcpu for HvfVcpu {
             }
             *self.exit
         };
-        Ok(match e.reason {
-            HV_EXIT_REASON_VTIMER_ACTIVATED => VcpuExit::VTimer,
-            HV_EXIT_REASON_CANCELED => VcpuExit::Canceled,
-            // HVF surfaces the raw arm64 trap; the run loop decodes the ESR.
-            HV_EXIT_REASON_EXCEPTION => VcpuExit::Exception {
+        match e.reason {
+            HV_EXIT_REASON_VTIMER_ACTIVATED => Ok(VcpuExit::VTimer),
+            HV_EXIT_REASON_CANCELED => Ok(VcpuExit::Canceled),
+            HV_EXIT_REASON_EXCEPTION if esr_ec(e.exception.syndrome) == EC_DATA_ABORT_LOWER_EL => {
+                let esr = e.exception.syndrome;
+                let phys_addr = e.exception.physical_address;
+                let (exit, pending) = classify_data_abort(esr, phys_addr);
+                self.pending_read.set(pending);
+                if pending.is_none() {
+                    // Store: read the value out of the guest reg and advance PC
+                    // now; the run loop applies `data` to the device model.
+                    let da = decode_data_abort(esr);
+                    // SAFETY: live vCPU; reg from the decoded abort.
+                    let data = unsafe { read_gp(self.vcpu, da.reg)? };
+                    // SAFETY: live vCPU.
+                    unsafe { advance_pc(self.vcpu)? };
+                    Ok(VcpuExit::Mmio {
+                        phys_addr,
+                        write: true,
+                        len: da.size,
+                        data,
+                    })
+                } else {
+                    Ok(exit)
+                }
+            }
+            // Non-MMIO traps (HVC/PSCI, unknowns) stay raw for the caller.
+            HV_EXIT_REASON_EXCEPTION => Ok(VcpuExit::Exception {
                 syndrome: e.exception.syndrome,
                 phys_addr: e.exception.physical_address,
-            },
-            other => VcpuExit::Unknown(other),
-        })
+            }),
+            other => Ok(VcpuExit::Unknown(other)),
+        }
+    }
+
+    fn complete_read(&self, value: u64) -> Result<(), HvfError> {
+        if let Some((reg, _size)) = self.pending_read.take() {
+            // SAFETY: live vCPU; reg from a decoded load data abort.
+            unsafe {
+                write_gp(self.vcpu, reg, value)?;
+                advance_pc(self.vcpu)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -165,7 +220,11 @@ impl HypervisorVm for HvfVm {
         if rc != HV_SUCCESS {
             return Err(HvfError::VcpuCreate(rc));
         }
-        Ok(HvfVcpu { vcpu, exit })
+        Ok(HvfVcpu {
+            vcpu,
+            exit,
+            pending_read: Cell::new(None),
+        })
     }
 
     fn set_irq(&self, intid: u32, level: bool) -> Result<(), HvfError> {
@@ -175,5 +234,47 @@ impl HypervisorVm for HvfVm {
             return Err(HvfError::GicCreate(rc));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn da_esr(iss: u64) -> u64 {
+        (u64::from(EC_DATA_ABORT_LOWER_EL) << 26) | iss
+    }
+
+    #[test]
+    fn load_classifies_as_read_with_pending_dest() {
+        // ISV, byte width (size field 0), load, destination X5.
+        let esr = da_esr((1 << 24) | (5 << 16));
+        let (exit, pending) = classify_data_abort(esr, 0x900_0000);
+        assert_eq!(pending, Some((5, 1)));
+        assert!(matches!(
+            exit,
+            VcpuExit::Mmio {
+                phys_addr: 0x900_0000,
+                write: false,
+                len: 1,
+                data: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn store_classifies_as_write_no_pending() {
+        // ISV, word width (size field 2 -> 4 bytes), store, source X0.
+        let esr = da_esr((1 << 24) | (2 << 22) | (1 << 6));
+        let (exit, pending) = classify_data_abort(esr, 0x900_0000);
+        assert_eq!(pending, None);
+        assert!(matches!(
+            exit,
+            VcpuExit::Mmio {
+                write: true,
+                len: 4,
+                ..
+            }
+        ));
     }
 }

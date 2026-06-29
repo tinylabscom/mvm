@@ -111,8 +111,16 @@ VmBackend (product/CLI/mvmd) ─ AnyBackend dispatch
   `boot_x86` applying the entry regs, a `tgkill`-based `force_exit`). `ActiveVm`
   binds to `KvmVm` on linux/x86_64. The boot setup is the pure, **unit-tested**
   `kvm::x86_boot` (7 tests; compiles on every host); the ioctl glue compiles on
-  linux/x86_64. Remaining: wire the unified run loop's `Io`/`Mmio` **read**
-  completion + drive a live boot through the backend (vs. the standalone spike).
+  linux/x86_64.
+- ✅ **Read-completion closed in the seam.** `step()` now always yields a *decoded*
+  `Mmio`/`Io` (HVF decodes its data-abort ESR into the same form KVM gets from the
+  kernel), and `HypervisorVcpu::complete_read(value)` delivers a load result
+  natively: KVM fills the `kvm_run` data buffer (kernel finishes on re-entry); HVF
+  writes the destination register + advances PC. So the (forthcoming) unified run
+  loop is one body — `step` → dispatch `Mmio`/`Io` to the `vmm` devices →
+  `complete_read` on a read — across both backends. (HVF decode unit-tested;
+  stores self-complete in `step`.) Remaining: write that unified run loop against
+  the `vmm` devices + drive a live boot through the backend (vs. the spike).
 - ⏳ `kvm::KvmVm` (arm64) — on an aarch64 KVM host the *whole* `vmm` device model
   reuses unchanged behind the seam.
 - ⏳ `whp::WhpVm` — Windows, later.

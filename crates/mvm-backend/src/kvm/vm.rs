@@ -3,11 +3,12 @@
 //! `KvmVm` / `KvmVcpu` are thin wrappers over `kvm-ioctls`, binding the Linux
 //! backend to the same `HypervisorVm`/`HypervisorVcpu` contract HVF implements.
 //! The x86 boot register setup lives outside the (aarch64) register seam — see
-//! [`KvmVm::boot_x86`], which applies [`x86_boot::BootRegs`] directly. The unified
-//! run-loop read-completion (filling an `Io`/`Mmio` *read* result) is the next
-//! slice; lifecycle, mapping, IRQ, boot, and exit decoding are wired here.
+//! [`KvmVm::boot_x86`], which applies [`x86_boot::BootRegs`] directly. Lifecycle,
+//! mapping, IRQ, boot, exit decoding, and read-completion (`complete_read` fills
+//! the `kvm_run` data buffer so the kernel finishes a load on re-entry) are all
+//! wired here.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use kvm_bindings::{
@@ -98,6 +99,9 @@ pub struct KvmVcpu {
     fd: RefCell<VcpuFd>,
     pid: i32,
     tid: i32,
+    /// Data buffer (into the `kvm_run` mmap) + width of a pending guest read that
+    /// `step` surfaced; `complete_read` writes the value here before re-entry.
+    pending_read: Cell<Option<(*mut u8, usize)>>,
 }
 
 impl KvmVcpu {
@@ -193,6 +197,7 @@ impl HypervisorVcpu for KvmVcpu {
     }
 
     fn step(&self) -> Result<VcpuExit, KvmError> {
+        self.pending_read.set(None);
         let mut fd = self.fd.borrow_mut();
         match fd.run() {
             Ok(KvmExit::IoOut(port, data)) => Ok(VcpuExit::Io {
@@ -201,29 +206,47 @@ impl HypervisorVcpu for KvmVcpu {
                 size: data.len() as u8,
                 data: le_u32(data),
             }),
-            Ok(KvmExit::IoIn(port, data)) => Ok(VcpuExit::Io {
-                port,
-                write: false,
-                size: data.len() as u8,
-                data: 0, // read result filled by the run loop (next slice)
-            }),
+            Ok(KvmExit::IoIn(port, data)) => {
+                self.pending_read.set(Some((data.as_mut_ptr(), data.len())));
+                Ok(VcpuExit::Io {
+                    port,
+                    write: false,
+                    size: data.len() as u8,
+                    data: 0,
+                })
+            }
             Ok(KvmExit::MmioWrite(addr, data)) => Ok(VcpuExit::Mmio {
                 phys_addr: addr,
                 write: true,
                 len: data.len() as u8,
                 data: le_u64(data),
             }),
-            Ok(KvmExit::MmioRead(addr, data)) => Ok(VcpuExit::Mmio {
-                phys_addr: addr,
-                write: false,
-                len: data.len() as u8,
-                data: 0,
-            }),
+            Ok(KvmExit::MmioRead(addr, data)) => {
+                self.pending_read.set(Some((data.as_mut_ptr(), data.len())));
+                Ok(VcpuExit::Mmio {
+                    phys_addr: addr,
+                    write: false,
+                    len: data.len() as u8,
+                    data: 0,
+                })
+            }
             Ok(KvmExit::Hlt) | Ok(KvmExit::Shutdown) => Ok(VcpuExit::Halt),
             Ok(other) => Ok(VcpuExit::Unknown(kvm_exit_code(&other))),
             Err(e) if e.errno() == libc::EINTR => Ok(VcpuExit::Canceled),
             Err(e) => Err(KvmError::Kvm(e)),
         }
+    }
+
+    fn complete_read(&self, value: u64) -> Result<(), KvmError> {
+        if let Some((ptr, len)) = self.pending_read.take() {
+            let bytes = value.to_le_bytes();
+            let n = len.min(bytes.len());
+            // SAFETY: ptr points into this vCPU's kvm_run mmap, valid until the
+            // next run(); n <= 8 = the pending read width. Single-threaded vCPU,
+            // no outstanding borrow of the kvm_run.
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, n) };
+        }
+        Ok(())
     }
 }
 
@@ -293,6 +316,7 @@ impl HypervisorVm for KvmVm {
             fd: RefCell::new(fd),
             pid,
             tid,
+            pending_read: Cell::new(None),
         })
     }
 

@@ -112,8 +112,22 @@ pub trait HypervisorVcpu {
     fn set_sys(&self, reg: SysReg, value: u64) -> Result<(), Self::Error>;
 
     /// Run the vCPU until it exits. Hot path: returns a `Copy` exit, no
-    /// allocation, inlinable under static dispatch.
+    /// allocation, inlinable under static dispatch. A guest *read* surfaces as
+    /// `Mmio`/`Io` with `write == false` and `data == 0`; the run loop computes
+    /// the value from the device model and hands it back via [`complete_read`]
+    /// before the next `step`.
+    ///
+    /// [`complete_read`]: HypervisorVcpu::complete_read
     fn step(&self) -> Result<VcpuExit, Self::Error>;
+
+    /// Deliver the result `value` of the read that the last [`step`] surfaced
+    /// (`Mmio`/`Io`, `write == false`) to the guest, completing the load: KVM
+    /// fills the `kvm_run` data buffer (the kernel finishes the load on
+    /// re-entry); HVF writes the destination register and advances PC. A no-op
+    /// if the last exit was not a pending read.
+    ///
+    /// [`step`]: HypervisorVcpu::step
+    fn complete_read(&self, value: u64) -> Result<(), Self::Error>;
 }
 
 /// A VM: owns guest physical memory, its interrupt controller, and creates
