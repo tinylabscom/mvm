@@ -5,6 +5,7 @@
 //! slice) and compiles + unit-tests on every host. The ioctl glue ([`vm`]) is
 //! Linux-only. The boot recipe is live-proven in `spikes/kvm-x86-boot/`.
 
+pub mod serial;
 pub mod x86_boot;
 
 // The ioctl glue is x86_64-specific (x86 boot regs, segments, CPUID). aarch64

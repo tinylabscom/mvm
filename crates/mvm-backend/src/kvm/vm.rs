@@ -9,15 +9,19 @@
 //! wired here.
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::time::Duration;
 
 use kvm_bindings::{
     KVM_MAX_CPUID_ENTRIES, kvm_pit_config, kvm_segment, kvm_userspace_memory_region,
 };
 use kvm_ioctls::{Kvm, VcpuExit as KvmExit, VcpuFd, VmFd};
 
+use super::serial::Serial16550;
 use super::x86_boot;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, HypervisorVm, SysReg, VcpuExit, VcpuHandle};
+use crate::vmm::run::{self, RunControl, RunDevice};
 
 /// Backend-native error.
 #[derive(Debug)]
@@ -72,6 +76,54 @@ impl KvmVm {
         let vcpu = self.create_vcpu()?;
         vcpu.apply_boot_regs(&regs)?;
         Ok(vcpu)
+    }
+
+    /// Boot an x86_64 bzImage already loaded in `mem` (mapped at gpa 0 via
+    /// [`HypervisorVm::map_ram`]) and drive it through the unified run loop
+    /// ([`crate::vmm::run`]) with a 16550 console until it halts or `timeout`
+    /// elapses, returning the console bytes. This is the *same* loop body the HVF
+    /// backend uses — the x86 console is the only backend-specific piece.
+    pub fn boot_to_console(
+        &self,
+        mem: &mut [u8],
+        cfg: &x86_boot::BootConfig,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, KvmError> {
+        let vcpu = self.boot_x86(mem, cfg)?;
+
+        // Watchdog: force the vCPU out of KVM_RUN after `timeout` via the seam's
+        // cross-thread cancel (a booting kernel never returns on its own).
+        let done = Arc::new(AtomicBool::new(false));
+        let done_w = done.clone();
+        let handle = vcpu.exit_token();
+        let watchdog = std::thread::spawn(move || {
+            let step = Duration::from_millis(50);
+            let mut waited = Duration::ZERO;
+            while waited < timeout {
+                if done_w.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(step);
+                waited += step;
+            }
+            KvmHandle::force_exit(&[handle]);
+        });
+
+        let mut serial = Serial16550::new(0x3f8);
+        let outcome = {
+            let mut devices: Vec<&mut dyn RunDevice> = vec![&mut serial];
+            run::run(
+                &vcpu,
+                |intid, level| self.set_irq(intid, level),
+                &mut devices,
+                // x86 KVM decodes every exit; the exception hook is never reached.
+                |_: &KvmVcpu, _, _| Ok(RunControl::Stop),
+            )
+        };
+        done.store(true, Ordering::Relaxed);
+        let _ = watchdog.join();
+        outcome?;
+        Ok(serial.output)
     }
 }
 
