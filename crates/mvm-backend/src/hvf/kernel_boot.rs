@@ -35,6 +35,9 @@ const PAGE: usize = 16384;
 const KERNEL_LOAD_OFFSET: u64 = 0x8_0000;
 /// DTB reserved window at the top of RAM (matches `fdt::FDT_MAX_SIZE` budget).
 const FDT_MAX_SIZE: u64 = 0x20_0000;
+/// initramfs load offset within RAM (256 MiB in — clear of the kernel, below the
+/// DTB window).
+const INITRD_OFFSET: u64 = 0x1000_0000;
 const UART_BASE: u64 = fdt::SERIAL_MMIO_BASE;
 
 const PSCI_VERSION_FN: u64 = 0x8400_0000;
@@ -69,14 +72,25 @@ pub struct KernelBootResult {
     pub final_pc: u64,
 }
 
-/// Boot `image` (an arm64 `Image`) under HVF, returning what it printed within
-/// `timeout`.
-pub fn boot_kernel(image: &[u8], timeout: Duration) -> Result<KernelBootResult, HvfError> {
+/// Boot `image` (an arm64 `Image`) under HVF, optionally with an `initramfs`
+/// (cpio, gzip-or-raw), returning what it printed within `timeout`.
+pub fn boot_kernel(
+    image: &[u8],
+    initramfs: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<KernelBootResult, HvfError> {
     // Validate it's an arm64 Image; we load at the fixed boot-protocol offset.
     let _hdr = kernel_image::parse(image).map_err(|_| HvfError::BadKernel)?;
     let load_off = KERNEL_LOAD_OFFSET as usize;
     let dtb_off = RAM_SIZE - FDT_MAX_SIZE as usize; // DTB window at top of RAM
     if load_off + image.len() > dtb_off {
+        return Err(HvfError::BadKernel);
+    }
+    // Place initramfs at INITRD_OFFSET; must clear the kernel and the DTB window.
+    let initrd_off = INITRD_OFFSET as usize;
+    if let Some(rd) = initramfs
+        && (initrd_off < load_off + image.len() || initrd_off + rd.len() > dtb_off)
+    {
         return Err(HvfError::BadKernel);
     }
 
@@ -90,7 +104,13 @@ pub fn boot_kernel(image: &[u8], timeout: Duration) -> Result<KernelBootResult, 
     let bootargs = std::env::var("MVM_HVF_BOOTARGS").unwrap_or_else(|_| {
         format!("earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8")
     });
-    let dtb = fdt::build_dtb(&bootargs, RAM_BASE, RAM_SIZE as u64);
+    let initrd_bounds = initramfs.map(|rd| {
+        (
+            RAM_BASE + INITRD_OFFSET,
+            RAM_BASE + INITRD_OFFSET + rd.len() as u64,
+        )
+    });
+    let dtb = fdt::build_dtb(&bootargs, RAM_BASE, RAM_SIZE as u64, initrd_bounds);
     if dtb.len() > FDT_MAX_SIZE as usize {
         // SAFETY: same layout.
         unsafe { dealloc(ram, layout) };
@@ -100,11 +120,14 @@ pub fn boot_kernel(image: &[u8], timeout: Duration) -> Result<KernelBootResult, 
         let _ = std::fs::write(path, &dtb);
     }
 
-    // SAFETY: `ram` owns RAM_SIZE writable bytes; both regions are bounds-checked
-    // above to fit.
+    // SAFETY: `ram` owns RAM_SIZE writable bytes; every region is bounds-checked
+    // above to fit and not overlap.
     unsafe {
         core::ptr::copy_nonoverlapping(image.as_ptr(), ram.add(load_off), image.len());
         core::ptr::copy_nonoverlapping(dtb.as_ptr(), ram.add(dtb_off), dtb.len());
+        if let Some(rd) = initramfs {
+            core::ptr::copy_nonoverlapping(rd.as_ptr(), ram.add(initrd_off), rd.len());
+        }
     }
 
     let entry = RAM_BASE + KERNEL_LOAD_OFFSET;

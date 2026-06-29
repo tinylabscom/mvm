@@ -26,9 +26,20 @@ fn main() {
                 std::process::exit(2);
             }
         };
-        println!("booting {} ({} bytes) under HVF…", path, image.len());
+        let initramfs = std::env::var("MVM_HVF_INITRAMFS")
+            .ok()
+            .map(|p| std::fs::read(&p).expect("read initramfs"));
+        println!(
+            "booting {} ({} bytes){} under HVF…",
+            path,
+            image.len(),
+            initramfs
+                .as_ref()
+                .map(|r| format!(" + initramfs ({} bytes)", r.len()))
+                .unwrap_or_default()
+        );
 
-        match mvm_backend::hvf::boot_kernel(&image, Duration::from_secs(3)) {
+        match mvm_backend::hvf::boot_kernel(&image, initramfs.as_deref(), Duration::from_secs(3)) {
             Ok(r) => {
                 println!("---- guest earlycon ----");
                 print!("{}", String::from_utf8_lossy(&r.console));
@@ -52,7 +63,13 @@ fn main() {
                     eprintln!("no console output captured");
                     std::process::exit(1);
                 }
-                println!("PROOF: a real arm64 Linux kernel executed under HVF and printed.");
+                let userspace = r.console.windows(17).any(|w| w == b"USERSPACE REACHED");
+                let proof = if userspace {
+                    "PROOF: a real arm64 Linux kernel booted to userspace (PID 1) under HVF."
+                } else {
+                    "PROOF: a real arm64 Linux kernel executed under HVF and printed."
+                };
+                println!("{proof}");
             }
             Err(e) => {
                 eprintln!("kernel boot failed: {e:?}");
