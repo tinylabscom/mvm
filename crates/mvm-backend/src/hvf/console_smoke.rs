@@ -18,6 +18,7 @@ use super::HvfError;
 use super::boot_smoke::{GUEST_RAM_SIZE, PAGE};
 use super::device::{MmioDevice, Pl011};
 use super::sys::*;
+use super::vcpu::{advance_pc, decode_data_abort, esr_ec, read_gp, write_gp};
 
 /// PL011 base, well above the 2 MiB of mapped guest RAM so accesses to it fault
 /// out as MMIO rather than hitting backing memory.
@@ -51,34 +52,6 @@ pub struct ConsoleProof {
     pub output: Vec<u8>,
     pub mmio_writes: usize,
     pub exit_reason: hv_exit_reason_t,
-}
-
-/// A decoded data-abort syndrome (ESR ISS for a GP-register load/store).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DataAbort {
-    /// Instruction syndrome valid — required to emulate the access.
-    isv: bool,
-    /// Access width in bytes.
-    size: u8,
-    /// GP register index (X0..X30, or 31 = XZR/WZR).
-    reg: u8,
-    /// True for a store, false for a load.
-    is_write: bool,
-}
-
-/// Exception class field of an ESR value.
-fn esr_ec(esr: u64) -> u32 {
-    ((esr >> 26) & 0x3f) as u32
-}
-
-/// Decode the data-abort ISS fields used for MMIO emulation.
-fn decode_data_abort(esr: u64) -> DataAbort {
-    DataAbort {
-        isv: (esr >> 24) & 1 == 1,
-        size: 1u8 << ((esr >> 22) & 3),
-        reg: ((esr >> 16) & 0x1f) as u8,
-        is_write: (esr >> 6) & 1 == 1,
-    }
 }
 
 /// Run the console stand-in and return what it printed via the emulated UART.
@@ -202,88 +175,9 @@ unsafe fn drive(
     }
 }
 
-/// Read GP register `reg` (X0..X30); index 31 is XZR and reads as 0.
-///
-/// # Safety
-/// `vcpu` must be a live handle.
-unsafe fn read_gp(vcpu: hv_vcpu_t, reg: u8) -> Result<u64, HvfError> {
-    if u32::from(reg) > HV_REG_X30 {
-        return Ok(0);
-    }
-    let mut v = 0u64;
-    // SAFETY: HV_REG_X0 + reg is a valid GP register index for reg in 0..=30.
-    let rc = unsafe { hv_vcpu_get_reg(vcpu, HV_REG_X0 + u32::from(reg), &mut v) };
-    if rc != HV_SUCCESS {
-        return Err(HvfError::GetReg(rc));
-    }
-    Ok(v)
-}
-
-/// Write GP register `reg` (X0..X30); index 31 is WZR/XZR and is discarded.
-///
-/// # Safety
-/// `vcpu` must be a live handle.
-unsafe fn write_gp(vcpu: hv_vcpu_t, reg: u8, value: u64) -> Result<(), HvfError> {
-    if u32::from(reg) > HV_REG_X30 {
-        return Ok(());
-    }
-    // SAFETY: HV_REG_X0 + reg is a valid GP register index for reg in 0..=30.
-    let rc = unsafe { hv_vcpu_set_reg(vcpu, HV_REG_X0 + u32::from(reg), value) };
-    if rc != HV_SUCCESS {
-        return Err(HvfError::SetReg(rc));
-    }
-    Ok(())
-}
-
-/// Advance PC past the faulting (4-byte) instruction so the guest resumes after
-/// the emulated access instead of re-faulting on it.
-///
-/// # Safety
-/// `vcpu` must be a live handle.
-unsafe fn advance_pc(vcpu: hv_vcpu_t) -> Result<(), HvfError> {
-    let mut pc = 0u64;
-    // SAFETY: HV_REG_PC is a valid register on a live vCPU.
-    unsafe {
-        if hv_vcpu_get_reg(vcpu, HV_REG_PC, &mut pc) != HV_SUCCESS {
-            return Err(HvfError::GetReg(0));
-        }
-        if hv_vcpu_set_reg(vcpu, HV_REG_PC, pc + 4) != HV_SUCCESS {
-            return Err(HvfError::SetReg(0));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn esr_ec_extracts_exception_class() {
-        // syndrome=0x5a000000 (the boot proof's hvc): EC = 0x16.
-        assert_eq!(esr_ec(0x5a00_0000), EC_HVC_AARCH64);
-    }
-
-    #[test]
-    fn decodes_a_32bit_store_to_x0() {
-        // ISV=1, SAS=2 (word, 4 bytes), SRT=0, WnR=1.
-        let iss = (1 << 24) | (2 << 22) | (0 << 16) | (1 << 6);
-        let esr = (u64::from(EC_DATA_ABORT_LOWER_EL) << 26) | iss;
-        let da = decode_data_abort(esr);
-        assert!(da.isv && da.is_write);
-        assert_eq!(da.size, 4);
-        assert_eq!(da.reg, 0);
-    }
-
-    #[test]
-    fn decodes_a_byte_load_to_x5() {
-        // ISV=1, SAS=0 (byte), SRT=5, WnR=0.
-        let iss = (1 << 24) | (0 << 22) | (5 << 16);
-        let da = decode_data_abort(iss);
-        assert!(da.isv && !da.is_write);
-        assert_eq!(da.size, 1);
-        assert_eq!(da.reg, 5);
-    }
 
     // Live run needs the hypervisor entitlement — run the hvf-console-smoke
     // example. Ignored here as the executable spec of the expected result.

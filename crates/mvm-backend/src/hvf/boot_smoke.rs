@@ -65,6 +65,10 @@ pub enum HvfError {
     UnexpectedExit(hv_exit_reason_t),
     /// An exception with an unexpected class (ESR `EC`).
     UnexpectedException(u32),
+    /// The supplied kernel image is not a usable arm64 `Image`.
+    BadKernel,
+    /// In-kernel GICv3 creation failed (needs macOS 15+).
+    GicCreate(hv_return_t),
 }
 
 /// Whether this host can create an HVF VM right now: both the platform supports

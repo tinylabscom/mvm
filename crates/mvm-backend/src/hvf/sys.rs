@@ -36,6 +36,8 @@ pub const HV_MEMORY_EXEC: hv_memory_flags_t = 1 << 2;
 pub type hv_reg_t = u32;
 pub const HV_REG_X0: hv_reg_t = 0;
 pub const HV_REG_X1: hv_reg_t = 1;
+pub const HV_REG_X2: hv_reg_t = 2;
+pub const HV_REG_X3: hv_reg_t = 3;
 /// Highest general-purpose register index; X0..X30 are contiguous from 0, so a
 /// GP register index `n` maps directly to `HV_REG_X0 + n`.
 pub const HV_REG_X30: hv_reg_t = 30;
@@ -89,4 +91,24 @@ unsafe extern "C" {
     pub fn hv_vcpu_run(vcpu: hv_vcpu_t) -> hv_return_t;
     pub fn hv_vcpu_set_reg(vcpu: hv_vcpu_t, reg: hv_reg_t, value: u64) -> hv_return_t;
     pub fn hv_vcpu_get_reg(vcpu: hv_vcpu_t, reg: hv_reg_t, value: *mut u64) -> hv_return_t;
+    /// Force the listed vCPUs out of `hv_vcpu_run` (they exit with
+    /// `HV_EXIT_REASON_CANCELED`). Safe to call from another thread — used as a
+    /// run watchdog.
+    pub fn hv_vcpus_exit(vcpus: *const hv_vcpu_t, vcpu_count: u32) -> hv_return_t;
+
+    // In-kernel GICv3 (macOS 15+). Created after `hv_vm_create` and before
+    // `hv_vcpu_create`; base addresses must match the device tree.
+    pub fn hv_gic_config_create() -> hv_gic_config_t;
+    pub fn hv_gic_config_set_distributor_base(
+        config: hv_gic_config_t,
+        base: hv_ipa_t,
+    ) -> hv_return_t;
+    pub fn hv_gic_config_set_redistributor_base(
+        config: hv_gic_config_t,
+        base: hv_ipa_t,
+    ) -> hv_return_t;
+    pub fn hv_gic_create(config: hv_gic_config_t) -> hv_return_t;
 }
+
+/// Opaque `hv_gic_config_t`.
+pub type hv_gic_config_t = *mut c_void;
