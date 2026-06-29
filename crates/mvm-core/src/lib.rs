@@ -11,6 +11,8 @@ pub mod dev_network;
 pub mod egress_broker;
 pub mod entrypoint_policy;
 pub mod exit_capture;
+/// Host ingress-broker decision logic (host listener only by explicit policy).
+pub mod ingress_broker;
 /// `mvm-init` supervisor core logic: metadata → exec spec, marker progression.
 pub mod init_supervisor;
 pub mod kernel_advisory;
