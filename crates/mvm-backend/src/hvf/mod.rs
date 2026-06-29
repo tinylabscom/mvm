@@ -12,7 +12,9 @@
 //! `com.apple.security.hypervisor` entitlement (already applied by
 //! [`crate::codesign`]).
 
+mod backend;
 mod boot_smoke;
 mod sys;
 
-pub use boot_smoke::{BootProof, HvfError, MAGIC, boot_smoke};
+pub use backend::HvfBackend;
+pub use boot_smoke::{BootProof, HvfError, MAGIC, boot_smoke, probe_available};

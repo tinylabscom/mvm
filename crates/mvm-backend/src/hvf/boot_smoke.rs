@@ -59,6 +59,21 @@ pub enum HvfError {
     GetReg(hv_return_t),
 }
 
+/// Whether this host can create an HVF VM right now: both the platform supports
+/// it and the launching binary carries the `com.apple.security.hypervisor`
+/// entitlement. Creates and immediately destroys a bare VM (no vCPU, no memory).
+pub fn probe_available() -> bool {
+    // SAFETY: hv_vm_create with NULL config is the documented availability probe;
+    // it is balanced by hv_vm_destroy on success and creates nothing on failure.
+    unsafe {
+        if hv_vm_create(core::ptr::null_mut()) != HV_SUCCESS {
+            return false;
+        }
+        hv_vm_destroy();
+        true
+    }
+}
+
 /// Map guest RAM, run the [`PROGRAM`], and report what the guest produced.
 ///
 /// One VM per process is an HVF constraint, and the vCPU must be created and run
