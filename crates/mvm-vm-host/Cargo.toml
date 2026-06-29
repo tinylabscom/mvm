@@ -45,6 +45,12 @@ path = "src/bin/mvm-bridge.rs"
 name = "mvm-vz-supervisor"
 path = "src/bin/mvm-vz-supervisor.rs"
 
+# Per-VM host process for the raw HVF macOS backend (Plan 214). cfg-gated to
+# macOS/aarch64 in source; a stub elsewhere.
+[[bin]]
+name = "mvm-hvf-supervisor"
+path = "src/bin/mvm-hvf-supervisor.rs"
+
 [dependencies]
 mvm-core = { workspace = true }
 mvm-hostd = { workspace = true }

@@ -22,6 +22,11 @@ pub mod bridge;
 pub mod exit_capture;
 pub mod firecracker_bridge;
 
+/// Config contract for the `mvm-hvf-supervisor` per-VM host process (raw HVF
+/// macOS backend, Plan 214). The bin reads it as JSON on stdin; kept in the lib
+/// so the (de)serialize contract is unit-tested without a live boot.
+pub mod hvf_supervisor;
+
 /// The prelaunched-supervisor attach verify+merge. Pure (no VM, no
 /// `start_enter`) so the rejection ladder is unit-testable.
 pub mod prelaunch;
