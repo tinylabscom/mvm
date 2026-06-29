@@ -32,6 +32,7 @@ mod check_no_spec_refs_in_comments;
 mod check_runtime_overlay_version;
 mod check_spec_numbers;
 mod check_trust_gradient;
+mod check_vsock_only_egress;
 mod gen_stubs;
 mod perf;
 
@@ -131,6 +132,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_trust_gradient::run(&workspace)
         }
+        Some("check-vsock-only-egress") => {
+            let workspace = workspace_root();
+            check_vsock_only_egress::run(&workspace)
+        }
         Some("check-mvm-host-binaries-sync") => {
             let workspace = workspace_root();
             check_mvm_host_binaries_sync::run(&workspace)
@@ -159,7 +164,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-trust-gradient, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-trust-gradient, check-vsock-only-egress, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {

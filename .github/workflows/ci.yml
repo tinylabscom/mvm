@@ -110,6 +110,9 @@ jobs:
       - name: Trust-gradient ledger
         run: cargo run -p xtask -- check-trust-gradient
 
+      - name: vsock-only egress (no guest NIC on the vmm/HVF path, ADR-100)
+        run: cargo run -p xtask -- check-vsock-only-egress
+
       - name: host-binaries manifest parity
         run: cargo run -p xtask -- check-mvm-host-binaries-sync
 
