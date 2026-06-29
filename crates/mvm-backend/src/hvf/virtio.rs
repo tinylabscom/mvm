@@ -9,6 +9,7 @@
 //! Guest-physical addresses in the virtqueue are translated against the single
 //! mapped RAM region (`ram_base .. ram_base+ram_size`), bounds-checked.
 
+use super::guest_mem::GuestMem;
 use super::sys::hv_gic_set_spi;
 
 const VIRTIO_MAGIC: u32 = 0x7472_6976; // "virt"
@@ -56,9 +57,7 @@ const VIRTIO_BLK_S_IOERR: u8 = 1;
 pub struct VirtioBlk {
     base: u64,
     irq: u32,
-    ram: *mut u8,
-    ram_base: u64,
-    ram_size: usize,
+    mem: GuestMem,
     disk: Vec<u8>,
 
     device_features_sel: u32,
@@ -88,9 +87,8 @@ impl VirtioBlk {
         Self {
             base,
             irq,
-            ram,
-            ram_base,
-            ram_size,
+            // SAFETY: forwarded from this fn's contract.
+            mem: unsafe { GuestMem::new(ram, ram_base, ram_size) },
             disk,
             device_features_sel: 0,
             driver_features_sel: 0,
@@ -112,46 +110,24 @@ impl VirtioBlk {
         addr >= self.base && addr < self.base + MMIO_LEN
     }
 
-    /// Host pointer for a guest-physical range, bounds-checked against RAM.
+    // Guest-memory access delegates to the shared bounds-checked view.
     fn host(&self, gpa: u64, len: usize) -> Option<*mut u8> {
-        if gpa < self.ram_base {
-            return None;
-        }
-        let off = (gpa - self.ram_base) as usize;
-        if off.checked_add(len)? > self.ram_size {
-            return None;
-        }
-        // SAFETY: offset is within the mapped region by the checks above.
-        Some(unsafe { self.ram.add(off) })
-    }
-
-    fn rd<const N: usize>(&self, gpa: u64) -> Option<[u8; N]> {
-        let p = self.host(gpa, N)?;
-        let mut b = [0u8; N];
-        // SAFETY: `p` is valid for N bytes.
-        unsafe { core::ptr::copy_nonoverlapping(p, b.as_mut_ptr(), N) };
-        Some(b)
+        self.mem.host(gpa, len)
     }
     fn rd_u16(&self, gpa: u64) -> u16 {
-        self.rd::<2>(gpa).map_or(0, u16::from_le_bytes)
+        self.mem.rd_u16(gpa)
     }
     fn rd_u32(&self, gpa: u64) -> u32 {
-        self.rd::<4>(gpa).map_or(0, u32::from_le_bytes)
+        self.mem.rd_u32(gpa)
     }
     fn rd_u64(&self, gpa: u64) -> u64 {
-        self.rd::<8>(gpa).map_or(0, u64::from_le_bytes)
+        self.mem.rd_u64(gpa)
     }
     fn wr_u16(&self, gpa: u64, v: u16) {
-        if let Some(p) = self.host(gpa, 2) {
-            // SAFETY: `p` valid for 2 bytes.
-            unsafe { core::ptr::copy_nonoverlapping(v.to_le_bytes().as_ptr(), p, 2) };
-        }
+        self.mem.wr_u16(gpa, v)
     }
     fn wr_u8(&self, gpa: u64, v: u8) {
-        if let Some(p) = self.host(gpa, 1) {
-            // SAFETY: `p` valid for 1 byte.
-            unsafe { *p = v };
-        }
+        self.mem.wr_u8(gpa, v)
     }
 
     /// Handle an MMIO read at `offset` from the device base.

@@ -32,6 +32,7 @@ fn main() {
         let disk = std::env::var("MVM_HVF_DISK")
             .ok()
             .map(|p| std::fs::read(&p).expect("read disk"));
+        let vsock = std::env::var_os("MVM_HVF_VSOCK").is_some();
         println!(
             "booting {} ({} bytes){}{} under HVF…",
             path,
@@ -49,6 +50,7 @@ fn main() {
             &image,
             initramfs.as_deref(),
             disk.as_deref(),
+            vsock,
             Duration::from_secs(3),
         ) {
             Ok(r) => {
@@ -70,6 +72,12 @@ fn main() {
                     r.psci_fns, r.other_ecs
                 );
                 println!("diag: fault_addrs={:#x?}", r.fault_addrs);
+                if !r.vsock_received.is_empty() {
+                    println!(
+                        "vsock host received: {:?}",
+                        String::from_utf8_lossy(&r.vsock_received)
+                    );
+                }
                 if r.console.is_empty() {
                     eprintln!("no console output captured");
                     std::process::exit(1);

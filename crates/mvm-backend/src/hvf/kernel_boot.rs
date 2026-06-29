@@ -25,6 +25,7 @@ use super::device::{MmioDevice, Pl011};
 use super::sys::*;
 use super::vcpu::{advance_pc, decode_data_abort, esr_ec, read_gp, write_gp};
 use super::virtio::VirtioBlk;
+use super::vsock::VirtioVsock;
 use super::{fdt, kernel_image};
 
 /// Guest RAM base (2 GiB, per the aarch64 Linux boot convention) and size
@@ -40,9 +41,11 @@ const FDT_MAX_SIZE: u64 = 0x20_0000;
 /// DTB window).
 const INITRD_OFFSET: u64 = 0x1000_0000;
 const UART_BASE: u64 = fdt::SERIAL_MMIO_BASE;
-/// virtio-mmio device window (above the GIC, below RAM) + its SPI.
+/// virtio-mmio device windows (above the GIC, below RAM) + their SPIs.
 const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
 const VIRTIO_IRQ: u32 = 48;
+const VSOCK_MMIO_BASE: u64 = 0x0a00_0200;
+const VSOCK_IRQ: u32 = 49;
 
 const PSCI_VERSION_FN: u64 = 0x8400_0000;
 const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
@@ -74,6 +77,8 @@ pub struct KernelBootResult {
     pub other_ecs: Vec<u32>,
     /// vCPU PC when the run ended.
     pub final_pc: u64,
+    /// Bytes the guest sent to the host over virtio-vsock.
+    pub vsock_received: Vec<u8>,
 }
 
 /// Boot `image` (an arm64 `Image`) under HVF, optionally with an `initramfs`
@@ -82,6 +87,7 @@ pub fn boot_kernel(
     image: &[u8],
     initramfs: Option<&[u8]>,
     disk: Option<&[u8]>,
+    vsock: bool,
     timeout: Duration,
 ) -> Result<KernelBootResult, HvfError> {
     // Validate it's an arm64 Image; we load at the fixed boot-protocol offset.
@@ -115,13 +121,19 @@ pub fn boot_kernel(
             RAM_BASE + INITRD_OFFSET + rd.len() as u64,
         )
     });
-    let virtio_node = disk.map(|_| (VIRTIO_MMIO_BASE, VIRTIO_IRQ));
+    let mut virtio_nodes: Vec<(u64, u32)> = Vec::new();
+    if disk.is_some() {
+        virtio_nodes.push((VIRTIO_MMIO_BASE, VIRTIO_IRQ));
+    }
+    if vsock {
+        virtio_nodes.push((VSOCK_MMIO_BASE, VSOCK_IRQ));
+    }
     let dtb = fdt::build_dtb(
         &bootargs,
         RAM_BASE,
         RAM_SIZE as u64,
         initrd_bounds,
-        virtio_node,
+        &virtio_nodes,
     );
     if dtb.len() > FDT_MAX_SIZE as usize {
         // SAFETY: same layout.
@@ -152,7 +164,7 @@ pub fn boot_kernel(
             dealloc(ram, layout);
             return Err(HvfError::VmCreate(rc));
         }
-        let r = run(ram, entry, dtb_addr, disk, timeout);
+        let r = run(ram, entry, dtb_addr, disk, vsock, timeout);
         hv_vm_destroy();
         r
     };
@@ -169,6 +181,7 @@ unsafe fn run(
     entry: u64,
     dtb_addr: u64,
     disk: Option<&[u8]>,
+    vsock: bool,
     timeout: Duration,
 ) -> Result<KernelBootResult, HvfError> {
     unsafe {
@@ -255,8 +268,17 @@ unsafe fn run(
                 d.to_vec(),
             )
         });
+        let mut vsock_dev =
+            vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, RAM_SIZE));
         let mut r = KernelBootResult::default();
-        let outcome = drive(vcpu, exit, &mut uart, virtio.as_mut(), &mut r);
+        let outcome = drive(
+            vcpu,
+            exit,
+            &mut uart,
+            virtio.as_mut(),
+            vsock_dev.as_mut(),
+            &mut r,
+        );
         done.store(true, Ordering::Relaxed);
         let _ = watchdog.join();
         let mut pc = 0u64;
@@ -264,6 +286,9 @@ unsafe fn run(
         hv_vcpu_destroy(vcpu);
 
         outcome?;
+        if let Some(vs) = &vsock_dev {
+            r.vsock_received = vs.received.clone();
+        }
         r.console = uart.output;
         r.final_pc = pc;
         r.stopped_by_watchdog = r.exit_reason == HV_EXIT_REASON_CANCELED;
@@ -280,6 +305,7 @@ unsafe fn drive(
     exit: *mut hv_vcpu_exit_t,
     uart: &mut Pl011,
     mut virtio: Option<&mut VirtioBlk>,
+    mut vsock: Option<&mut VirtioVsock>,
     r: &mut KernelBootResult,
 ) -> Result<(), HvfError> {
     unsafe {
@@ -351,6 +377,19 @@ unsafe fn drive(
                             }
                         } else {
                             let v = vio.read(offset);
+                            write_gp(vcpu, da.reg, v)?;
+                        }
+                    } else if let Some(vs) = vsock.as_deref_mut()
+                        && vs.contains(ipa)
+                    {
+                        let offset = ipa - vs.base();
+                        if da.is_write {
+                            let v = read_gp(vcpu, da.reg)?;
+                            if vs.write(offset, v) {
+                                vs.inject_irq();
+                            }
+                        } else {
+                            let v = vs.read(offset);
                             write_gp(vcpu, da.reg, v)?;
                         }
                     } else if !da.is_write {
