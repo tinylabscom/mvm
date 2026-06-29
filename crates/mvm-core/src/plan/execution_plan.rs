@@ -10,6 +10,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::lifecycle::SnapshotAt;
 use crate::plan::bundle::PlanArtifact;
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, AuthPolicy,
@@ -75,6 +76,14 @@ pub struct ExecutionPlan {
     /// closed default.
     #[serde(default)]
     pub network_mode: NetworkMode,
+
+    /// Opt-in warm-snapshot timing. `None` (default) = this workload is not
+    /// warm-snapshotted; `Some(at)` = the host may capture a warm snapshot when
+    /// the guest reaches `at`'s trigger marker (`mvm-init` lifecycle). Part of
+    /// the signed contract so the snapshot point is admitted, not host-chosen.
+    /// `#[serde(default)]` so a pre-v8 plan deserializes as `None`.
+    #[serde(default)]
+    pub snapshot_at: Option<SnapshotAt>,
 
     /// Filesystem policy reference.
     pub fs_policy: FsPolicyRef,

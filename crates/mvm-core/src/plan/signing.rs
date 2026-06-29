@@ -200,6 +200,7 @@ pub mod test_support {
     /// Callers override `valid_from`/`valid_until`/`nonce` for their scenario.
     pub fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
+            snapshot_at: Default::default(),
             network_mode: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("01HXTESTPLAN000000000000".to_string()),
@@ -459,6 +460,32 @@ mod tests {
         let json = serde_json::to_string(&plan).unwrap();
         let parsed: ExecutionPlan = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.network_mode, NetworkMode::HostVsockProxy);
+    }
+
+    #[test]
+    fn plan_without_snapshot_at_field_defaults_to_none() {
+        // A plan serialized before `snapshot_at` existed must still deserialize,
+        // defaulting to `None` (not warm-snapshotted) — `serde(default)`.
+        let plan = sample_plan();
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value.as_object_mut().unwrap().remove("snapshot_at");
+        assert!(value.get("snapshot_at").is_none());
+        let parsed: ExecutionPlan = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.snapshot_at, None);
+    }
+
+    #[test]
+    fn snapshot_at_round_trips_in_the_plan() {
+        use crate::lifecycle::SnapshotAt;
+        let mut plan = sample_plan();
+        plan.snapshot_at = Some(SnapshotAt::AfterWarmup);
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(
+            json.contains("after_warmup"),
+            "snake_case wire token: {json}"
+        );
+        let parsed: ExecutionPlan = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.snapshot_at, Some(SnapshotAt::AfterWarmup));
     }
 
     #[test]

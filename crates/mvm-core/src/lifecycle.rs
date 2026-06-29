@@ -77,7 +77,8 @@ impl LifecycleMarker {
 }
 
 /// When to capture a warm snapshot of a guest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SnapshotAt {
     /// Before the workload entrypoint runs — fastest to capture, coldest cache.
     PreExec,

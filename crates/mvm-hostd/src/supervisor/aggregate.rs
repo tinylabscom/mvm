@@ -1149,6 +1149,7 @@ mod tests {
 
     fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
+            snapshot_at: Default::default(),
             network_mode: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("01HXTEST0000000000000000".to_string()),
