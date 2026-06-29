@@ -8,11 +8,12 @@
 //! its own). The captured bytes are the kernel's earlycon output — proof that
 //! real Linux boots and prints on this backend.
 //!
-//! Creates HVF's in-kernel GICv3 + arch timer so the kernel's IRQ subsystem
-//! comes up: a real kernel boots through banner, PSCI, CPU-feature detection,
-//! memory init, and into `init_IRQ`, driving the PL011 console the whole way.
-//! Full boot-to-userspace additionally needs the GIC redistributor MMIO exposed
-//! to the guest and a root filesystem (next slices).
+//! Creates HVF's in-kernel GICv3 + arch timer and sets the vCPU's `MPIDR_EL1`
+//! affinity to match the redistributor, so the kernel's interrupt + timer
+//! subsystems come fully up: a real kernel boots all the way through driver and
+//! filesystem init to `prepare_namespace`, driving the PL011 console throughout.
+//! It then panics mounting the root fs because none is supplied — providing a
+//! root filesystem (initramfs / virtio-blk) is the next slice.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::sync::Arc;
@@ -35,17 +36,6 @@ const KERNEL_LOAD_OFFSET: u64 = 0x8_0000;
 /// DTB reserved window at the top of RAM (matches `fdt::FDT_MAX_SIZE` budget).
 const FDT_MAX_SIZE: u64 = 0x20_0000;
 const UART_BASE: u64 = fdt::SERIAL_MMIO_BASE;
-
-/// GIC ID-register offset (`PIDR2`) within a 64 KiB GIC frame, and the value
-/// reporting GICv3 (ArchRev=3 in bits 7:4) — the one GIC register HVF's
-/// in-kernel GIC does not emulate for us.
-const GIC_PIDR2_OFFSET: u64 = 0xffe8;
-const GICV3_PIDR2_ARCHREV: u64 = 0x30;
-
-/// GIC MMIO window (distributor + redistributor), below RAM.
-fn in_gic_range(addr: u64) -> bool {
-    (fdt::GICV3_DIST_BASE..fdt::GICV3_REDIST_BASE + 0x10_0000).contains(&addr)
-}
 
 const PSCI_VERSION_FN: u64 = 0x8400_0000;
 const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
@@ -178,6 +168,14 @@ unsafe fn run(
             return Err(HvfError::VcpuCreate(rc));
         }
 
+        // MPIDR_EL1 affinity 0 — must match FDT cpu@0 reg and the GIC
+        // redistributor frame, or the kernel can't find the redistributor for
+        // this CPU (gic_populate_rdist walks off the region and faults).
+        if hv_vcpu_set_sys_reg(vcpu, HV_SYS_REG_MPIDR_EL1, 0) != HV_SUCCESS {
+            hv_vcpu_destroy(vcpu);
+            return Err(HvfError::SetReg(0));
+        }
+
         // arm64 boot protocol: x0=DTB, x1..x3=0, PC=entry, EL1h with DAIF masked.
         let ok = hv_vcpu_set_reg(vcpu, HV_REG_PC, entry) == HV_SUCCESS
             && hv_vcpu_set_reg(vcpu, HV_REG_CPSR, 0x3c5) == HV_SUCCESS
@@ -296,18 +294,7 @@ unsafe fn drive(
                             write_gp(vcpu, da.reg, v)?;
                         }
                     } else if !da.is_write {
-                        // Unmodeled MMIO is read-as-zero, except the GIC PIDR2 ID
-                        // register (offset 0xffe8): HVF's in-kernel GIC emulates
-                        // the functional registers but not this ID register, and
-                        // the driver needs ArchRev=3 to recognize the GICv3
-                        // redistributor. Without it the driver derives a bad base
-                        // and faults during IRQ setup.
-                        let val = if in_gic_range(ipa) && ipa & 0xffff == GIC_PIDR2_OFFSET {
-                            GICV3_PIDR2_ARCHREV
-                        } else {
-                            0
-                        };
-                        write_gp(vcpu, da.reg, val)?;
+                        write_gp(vcpu, da.reg, 0)?; // unmodeled device: RAZ/WI
                     }
                     advance_pc(vcpu)?;
                 }

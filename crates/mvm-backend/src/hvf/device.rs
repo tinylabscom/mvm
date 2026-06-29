@@ -34,6 +34,12 @@ impl Pl011 {
     /// sees an idle, ready transmitter.
     const FR_TXFE: u64 = 1 << 7;
 
+    /// PrimeCell/peripheral ID register block (0xFE0..0xFFC), 8 words.
+    const PERIPH_ID0: u64 = 0xFE0;
+    const PCELL_ID3: u64 = 0xFFC;
+    /// PL011 identity: PeriphID 0x00041011, PrimeCell ID 0xB105F00D.
+    const ID_REGS: [u64; 8] = [0x11, 0x10, 0x14, 0x00, 0x0D, 0xF0, 0x05, 0xB1];
+
     pub fn new(base: u64) -> Self {
         Self {
             base,
@@ -63,6 +69,12 @@ impl MmioDevice for Pl011 {
     fn read(&mut self, offset: u64, _size: u8) -> u64 {
         match offset {
             Self::FR => Self::FR_TXFE, // always ready to transmit
+            // PrimeCell + peripheral ID registers, so the real `ttyAMA0` driver
+            // (not just earlycon) recognizes us as a PL011 and attaches.
+            // periphid 0x00041011, cellid 0xb105f00d.
+            o if (Self::PERIPH_ID0..=Self::PCELL_ID3).contains(&o) => {
+                Self::ID_REGS[((o - Self::PERIPH_ID0) / 4) as usize]
+            }
             _ => 0,
         }
     }

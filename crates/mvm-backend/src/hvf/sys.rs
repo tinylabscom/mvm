@@ -44,6 +44,11 @@ pub const HV_REG_X30: hv_reg_t = 30;
 pub const HV_REG_PC: hv_reg_t = 31;
 pub const HV_REG_CPSR: hv_reg_t = 34;
 
+/// `hv_sys_reg_t` — encoded AArch64 system register id (op0/op1/crn/crm/op2).
+pub type hv_sys_reg_t = u32;
+/// `MPIDR_EL1` — must hold the vCPU's affinity so the GIC redistributor matches.
+pub const HV_SYS_REG_MPIDR_EL1: hv_sys_reg_t = 0xc005;
+
 /// Exception class (ESR `EC`, bits 31:26) values the run loop dispatches on.
 pub const EC_HVC_AARCH64: u32 = 0x16;
 pub const EC_DATA_ABORT_LOWER_EL: u32 = 0x24;
@@ -91,6 +96,7 @@ unsafe extern "C" {
     pub fn hv_vcpu_run(vcpu: hv_vcpu_t) -> hv_return_t;
     pub fn hv_vcpu_set_reg(vcpu: hv_vcpu_t, reg: hv_reg_t, value: u64) -> hv_return_t;
     pub fn hv_vcpu_get_reg(vcpu: hv_vcpu_t, reg: hv_reg_t, value: *mut u64) -> hv_return_t;
+    pub fn hv_vcpu_set_sys_reg(vcpu: hv_vcpu_t, reg: hv_sys_reg_t, value: u64) -> hv_return_t;
     /// Force the listed vCPUs out of `hv_vcpu_run` (they exit with
     /// `HV_EXIT_REASON_CANCELED`). Safe to call from another thread — used as a
     /// run watchdog.
@@ -108,6 +114,14 @@ unsafe extern "C" {
         base: hv_ipa_t,
     ) -> hv_return_t;
     pub fn hv_gic_create(config: hv_gic_config_t) -> hv_return_t;
+    pub fn hv_gic_get_distributor_size(size: *mut usize) -> hv_return_t;
+    pub fn hv_gic_get_distributor_base_alignment(alignment: *mut usize) -> hv_return_t;
+    pub fn hv_gic_get_redistributor_size(size: *mut usize) -> hv_return_t;
+    pub fn hv_gic_get_redistributor_base_alignment(alignment: *mut usize) -> hv_return_t;
+    pub fn hv_gic_get_spi_interrupt_range(
+        spi_intid_base: *mut u32,
+        spi_intid_count: *mut u32,
+    ) -> hv_return_t;
 }
 
 /// Opaque `hv_gic_config_t`.
