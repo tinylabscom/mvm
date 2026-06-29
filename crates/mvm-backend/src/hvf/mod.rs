@@ -14,7 +14,11 @@
 
 mod backend;
 mod boot_smoke;
+mod console_smoke;
+mod device;
 mod sys;
 
 pub use backend::HvfBackend;
 pub use boot_smoke::{BootProof, HvfError, MAGIC, boot_smoke, probe_available};
+pub use console_smoke::{ConsoleProof, console_smoke};
+pub use device::{MmioDevice, Pl011};

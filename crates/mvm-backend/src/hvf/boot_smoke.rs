@@ -17,9 +17,9 @@ use std::alloc::{Layout, alloc_zeroed, dealloc};
 use super::sys::*;
 
 /// 2 MiB of guest RAM (a multiple of the 16 KiB Apple-silicon page size).
-const GUEST_RAM_SIZE: usize = 0x20_0000;
+pub(super) const GUEST_RAM_SIZE: usize = 0x20_0000;
 /// Apple-silicon hypervisor page size; `hv_vm_map` requires page alignment.
-const PAGE: usize = 16384;
+pub(super) const PAGE: usize = 16384;
 /// Where the guest stores its magic word (inside the mapped region).
 const DATA_IPA: u64 = 0x1000;
 /// The value the guest puts in `x0` and stores to `DATA_IPA`.
@@ -57,6 +57,14 @@ pub enum HvfError {
     SetReg(hv_return_t),
     Run(hv_return_t),
     GetReg(hv_return_t),
+    /// A data abort whose syndrome is not decodable (ISV=0) — can't emulate it.
+    NoSyndrome,
+    /// MMIO fault outside any modeled device's range.
+    UnhandledMmio(u64),
+    /// vCPU exited for a reason the loop doesn't handle.
+    UnexpectedExit(hv_exit_reason_t),
+    /// An exception with an unexpected class (ESR `EC`).
+    UnexpectedException(u32),
 }
 
 /// Whether this host can create an HVF VM right now: both the platform supports

@@ -36,8 +36,15 @@ pub const HV_MEMORY_EXEC: hv_memory_flags_t = 1 << 2;
 pub type hv_reg_t = u32;
 pub const HV_REG_X0: hv_reg_t = 0;
 pub const HV_REG_X1: hv_reg_t = 1;
+/// Highest general-purpose register index; X0..X30 are contiguous from 0, so a
+/// GP register index `n` maps directly to `HV_REG_X0 + n`.
+pub const HV_REG_X30: hv_reg_t = 30;
 pub const HV_REG_PC: hv_reg_t = 31;
 pub const HV_REG_CPSR: hv_reg_t = 34;
+
+/// Exception class (ESR `EC`, bits 31:26) values the run loop dispatches on.
+pub const EC_HVC_AARCH64: u32 = 0x16;
+pub const EC_DATA_ABORT_LOWER_EL: u32 = 0x24;
 
 /// `hv_exit_reason_t`.
 pub type hv_exit_reason_t = u32;
