@@ -1,6 +1,10 @@
 # ADR-082 — Rust-native egress gateway replaces the vendored Go gateway
 
-**Status:** Accepted
+**Status:** Superseded by Plan 214 / ADR-098 (2026-06-28). The Rust-native
+virtio-net egress gateway (rvproxy) is dropped along with the gvproxy/passt
+guest-NIC model: the target architecture gives the guest **no NIC** and brokers
+all egress over host vsock. The rvproxy implementation, its `native` networking
+mode, and the parity CI gate are removed. Historical context retained below.
 **Amends:** [ADR-055](055-passt-virtio-net.md) (libkrun/Vz networking via gvproxy + passt)
 **Preserves:** [ADR-058](058-claim-10-bytes-leaving-trust-boundary.md) no-bypass invariant; claim 10 (default-deny egress); Plan 141 flow observation; Plan 129 egress secret substitution
 

@@ -1,11 +1,13 @@
 # ADR-078 — First-party virtio-net gateway ownership via rvproxy
 
-**Status:** accepted 2026-06-10. Implemented by
-`specs/plans/179-rvproxy-gvproxy-replacement.md`. **Amends ADR-055** (the
-`gvproxy` backend remains the macOS/libkrun networking shape, but its
-implementation no longer has to be upstream `gvproxy`) and extends the
-claim-10 no-bypass posture in ADR-058 and the network-provider seam in
-ADR-064.
+**Status:** Superseded by Plan 214 / ADR-098 (2026-06-28). The first-party
+virtio-net gateway (rvproxy) is dropped: the target architecture has **no guest
+NIC** and routes all guest traffic through a host-side vsock broker, so a
+guest-facing virtio-net gateway is no longer part of the design. The rvproxy
+parity CI gate is removed. Historical context retained below.
+
+Originally accepted 2026-06-10; amended ADR-055 and extended the claim-10
+no-bypass posture in ADR-058 and the network-provider seam in ADR-064.
 
 ## Context
 
