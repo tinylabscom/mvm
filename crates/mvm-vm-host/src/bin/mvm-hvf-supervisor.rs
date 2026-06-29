@@ -117,6 +117,37 @@ extern "C" fn on_stop_signal(_: libc::c_int) {
     STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Resolve a network policy's host-allowlist entries to IPs (the admission-time
+/// DNS pin) so `host:port` rules gate at L4 — mirrors mvm-hostd's gateway-bridge
+/// `resolve_bare_dns_pins`. Literal IPs need no lookup; an unresolvable host pins
+/// an empty IP set so the projection fails CLOSED (deny) rather than widening.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn resolve_dns_pins(
+    np: &mvm_core::policy::network_policy::NetworkPolicy,
+) -> mvm_core::policy::dns_pin::DnsPinRegistry {
+    use std::net::{IpAddr, ToSocketAddrs};
+    let mut reg = mvm_core::policy::dns_pin::DnsPinRegistry::new();
+    let Some(rules) = np.resolve_rules() else {
+        return reg; // unrestricted: no L4 pin set
+    };
+    for hp in rules {
+        let ips: Vec<IpAddr> = if let Ok(ip) = hp.host.parse::<IpAddr>() {
+            vec![ip]
+        } else {
+            (hp.host.as_str(), 0u16)
+                .to_socket_addrs()
+                .map(|addrs| addrs.map(|sa| sa.ip()).collect())
+                .unwrap_or_default()
+        };
+        reg.add(mvm_core::policy::dns_pin::DnsPin::new(
+            hp.host,
+            ips,
+            chrono::Duration::hours(24),
+        ));
+    }
+    reg
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn main() -> anyhow::Result<()> {
     use std::io::{Read, Write};
@@ -172,12 +203,15 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Project the VM's network policy into the vsock egress gateway (claim-10,
-    // ADR-100). deny-all / unrestricted are exact; DNS-pinned host allowlists need
-    // the admitted plan's pins threaded in (follow-on) and fail closed until then.
+    // ADR-100): resolve any host-allowlist entries to IPs once (the admission-time
+    // DNS pin), then project. deny-all / unrestricted need no pins; a host that
+    // fails to resolve pins an empty set so the projection fails CLOSED.
+    let pins = resolve_dns_pins(&cfg.network_policy);
+    let now = chrono::Utc::now().to_rfc3339();
     let egress = mvm_backend::vmm::egress_gate::EgressGate::from_network_policy(
         &cfg.network_policy,
-        &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
-        "",
+        &pins,
+        &now,
     );
     let result = mvm_backend::hvf::boot_kernel_until(
         &image,
@@ -189,19 +223,20 @@ fn main() -> anyhow::Result<()> {
         egress,
     );
 
-    // The VM has stopped: drop the PID file and flush whatever console we
-    // captured (capture-only console — written on exit, like the vz path).
-    let _ = std::fs::remove_file(&cfg.pid_file);
+    // The VM has stopped. Persist the outputs (console + workload exit code)
+    // BEFORE removing the PID file: the backend keys "stopped" on the PID file via
+    // status/wait, so dropping it first races a reader to an empty console.
     let r = result.map_err(|e| anyhow::anyhow!("hvf boot failed: {e:?}"))?;
     if let Ok(mut f) = std::fs::File::create(&cfg.console_log) {
         let _ = f.write_all(&r.console);
     }
-
-    // Transient run-to-exit: if the guest reported a workload exit code over the
-    // vsock exit port, persist it (the backend's `wait` reads this) and mirror it
-    // as our own process exit code.
+    // Transient run-to-exit: persist the workload exit code (the backend's `wait`
+    // reads this) so it is durable before "stopped" is observable.
     if let Some(code) = r.workload_exit_code {
         let _ = std::fs::write(&cfg.workload_exit, code.to_string());
+    }
+    let _ = std::fs::remove_file(&cfg.pid_file);
+    if let Some(code) = r.workload_exit_code {
         std::process::exit(code);
     }
     Ok(())

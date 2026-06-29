@@ -208,4 +208,36 @@ mod tests {
             EgressVerdict::Deny
         );
     }
+
+    /// An IP-host allow-list with the matching pin admits exactly that
+    /// destination — the supervisor's resolved-pin path (a literal IP "resolves"
+    /// to itself).
+    #[test]
+    fn ip_allow_list_with_pin_admits_only_that_destination() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let now = "2026-01-01T00:00:00Z";
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "192.168.4.23",
+            vec!["192.168.4.23".parse().unwrap()],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![HostPort {
+            host: "192.168.4.23".into(),
+            port: 19099,
+        }]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, now);
+        assert_eq!(
+            gate.decide_request("192.168.4.23:19099"),
+            EgressVerdict::Allow {
+                ip: "192.168.4.23".parse().unwrap(),
+                port: 19099
+            }
+        );
+        assert_eq!(gate.decide_request("192.168.4.23:80"), EgressVerdict::Deny);
+        assert_eq!(gate.decide_request("8.8.8.8:19099"), EgressVerdict::Deny);
+    }
 }
