@@ -11,6 +11,10 @@ pub mod dev_network;
 pub mod egress_broker;
 /// Egress-broker handler: compose decision + trace into an audit record.
 pub mod egress_handler;
+/// Host-side egress secret substitution (destination-bound; closed by default).
+/// Secrets are substituted into outbound requests host-side and never enter the
+/// guest.
+pub mod egress_substitution;
 pub mod entrypoint_policy;
 pub mod exit_capture;
 /// Guest `mvm-netd` helpers (proxy env-var injection for cooperative apps).
