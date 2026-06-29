@@ -334,26 +334,36 @@ unsafe fn run(
             return Err(e);
         }
 
-        // Watchdog: a booting kernel never exits on its own, so force the vCPU out
-        // after `timeout`, or as soon as `stop` is set (graceful stop), via the
-        // seam's cross-thread cancel.
+        // Watchdog + heartbeat: a booting kernel never exits on its own, so force
+        // the vCPU out after `timeout` or as soon as `stop` is set (graceful stop).
+        // Between those, a periodic force-exit acts as a heartbeat: it breaks the
+        // guest out of WFI so the run loop can poll host-side async work (drain an
+        // egress socket into a guest blocked in `recv` — ADR-100). The run loop
+        // treats a forced exit as a stop only when `stop` is set, so a heartbeat
+        // wake just polls and continues. On timeout we set `stop` first so the run
+        // loop ends.
         let done = Arc::new(AtomicBool::new(false));
         let done_w = done.clone();
         let handle = vcpu.exit_token();
         let watchdog = std::thread::spawn(move || {
-            let step = Duration::from_millis(50);
+            let step = Duration::from_millis(5);
             let mut waited = Duration::ZERO;
-            while waited < timeout {
+            loop {
+                std::thread::sleep(step);
                 if done_w.load(Ordering::Relaxed) {
-                    return;
+                    return; // run already ended; don't poke a finishing vCPU
                 }
                 if stop.load(Ordering::Relaxed) {
-                    break; // requested stop → force-exit below
+                    break; // requested stop / workload-exit → final force-exit below
                 }
-                std::thread::sleep(step);
                 waited += step;
+                if waited >= timeout {
+                    stop.store(true, Ordering::Relaxed); // timeout → end the run
+                    break;
+                }
+                HvfHandle::force_exit(&[handle]); // heartbeat: wake the run loop
             }
-            HvfHandle::force_exit(&[handle]);
+            HvfHandle::force_exit(&[handle]); // final wake → loop sees stop, returns
         });
 
         let mut uart = Pl011::new(UART_BASE);
@@ -402,32 +412,41 @@ unsafe fn run(
                     Err(HvfError::GicCreate(0))
                 }
             };
-            run::run(&vcpu, set_irq, &mut devices, |vc: &HvfVcpu, esr, _phys| {
-                if esr_ec(esr) == EC_HVC_AARCH64 {
-                    hvc_calls += 1;
-                    let fn_id = vc.get_core(CoreReg::X(0))?;
-                    if psci_fns.len() < 16 && !psci_fns.contains(&fn_id) {
-                        psci_fns.push(fn_id);
+            run::run(
+                &vcpu,
+                set_irq,
+                &mut devices,
+                |vc: &HvfVcpu, esr, _phys| {
+                    if esr_ec(esr) == EC_HVC_AARCH64 {
+                        hvc_calls += 1;
+                        let fn_id = vc.get_core(CoreReg::X(0))?;
+                        if psci_fns.len() < 16 && !psci_fns.contains(&fn_id) {
+                            psci_fns.push(fn_id);
+                        }
+                        match fn_id {
+                            PSCI_SYSTEM_OFF | PSCI_SYSTEM_RESET => return Ok(RunControl::Stop),
+                            PSCI_VERSION_FN => vc.set_core(CoreReg::X(0), 0x1_0000)?, // PSCI v1.0
+                            _ => vc.set_core(CoreReg::X(0), PSCI_NOT_SUPPORTED)?,
+                        }
+                        // HVC is completed: HVF already advanced PC. Do NOT advance.
+                        Ok(RunControl::Continue)
+                    } else {
+                        let ec = esr_ec(esr);
+                        other_exceptions += 1;
+                        if other_ecs.len() < 16 && !other_ecs.contains(&ec) {
+                            other_ecs.push(ec);
+                        }
+                        // Advance past the faulting instruction and keep going.
+                        let pc = vc.get_core(CoreReg::Pc)?;
+                        vc.set_core(CoreReg::Pc, pc + 4)?;
+                        Ok(RunControl::Continue)
                     }
-                    match fn_id {
-                        PSCI_SYSTEM_OFF | PSCI_SYSTEM_RESET => return Ok(RunControl::Stop),
-                        PSCI_VERSION_FN => vc.set_core(CoreReg::X(0), 0x1_0000)?, // PSCI v1.0
-                        _ => vc.set_core(CoreReg::X(0), PSCI_NOT_SUPPORTED)?,
-                    }
-                    // HVC is completed: HVF already advanced PC. Do NOT advance.
-                    Ok(RunControl::Continue)
-                } else {
-                    let ec = esr_ec(esr);
-                    other_exceptions += 1;
-                    if other_ecs.len() < 16 && !other_ecs.contains(&ec) {
-                        other_ecs.push(ec);
-                    }
-                    // Advance past the faulting instruction and keep going.
-                    let pc = vc.get_core(CoreReg::Pc)?;
-                    vc.set_core(CoreReg::Pc, pc + 4)?;
-                    Ok(RunControl::Continue)
-                }
-            })?
+                },
+                // A forced exit is a real stop only when `stop` is set (timeout or
+                // graceful); otherwise it's a heartbeat wake so the run loop can drain
+                // egress sockets into a guest blocked in WFI (ADR-100 async proxy).
+                move || stop.load(Ordering::Relaxed),
+            )?
         };
 
         done.store(true, Ordering::Relaxed);

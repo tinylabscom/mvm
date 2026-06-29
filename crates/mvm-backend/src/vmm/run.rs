@@ -26,6 +26,13 @@ pub trait RunDevice {
     fn read(&mut self, offset: u64, size: u8) -> u64;
     /// Service a guest store; return `Some(irq)` to raise that interrupt line.
     fn write(&mut self, offset: u64, value: u64, size: u8) -> Option<u32>;
+    /// Do pending host-side async work (e.g. drain a backing socket into the
+    /// guest's rx queue) and return `Some(irq)` if the guest needs an interrupt.
+    /// Called on every timer tick so host→guest delivery happens even when the
+    /// guest isn't doing MMIO. Default: nothing to do.
+    fn poll(&mut self) -> Option<u32> {
+        None
+    }
 }
 
 /// Whether the loop should keep running after a caller-handled exception.
@@ -89,21 +96,51 @@ where
 /// - `on_exception(vcpu, syndrome, phys_addr)` handles a non-MMIO exception
 ///   (arm64 PSCI/HVC); return [`RunControl::Stop`] to end the run. x86 KVM never
 ///   reaches it (every exit is decoded).
-pub fn run<C, S, X>(
+/// - `should_stop()` disambiguates a forced exit ([`VcpuExit::Canceled`]): a real
+///   stop (watchdog timeout / graceful stop) returns `true` and ends the run; a
+///   `false` means the cancel was a *heartbeat wake* to let host-side async work
+///   run (e.g. draining an egress socket into the guest's rx queue while the guest
+///   is idle in WFI), so the loop polls devices and keeps going. Backends with no
+///   async host I/O pass `|| true` (a cancel always stops).
+pub fn run<C, S, X, Q>(
     vcpu: &C,
     set_irq: S,
     devices: &mut [&mut dyn RunDevice],
     mut on_exception: X,
+    should_stop: Q,
 ) -> Result<RunOutcome, C::Error>
 where
     C: HypervisorVcpu,
     S: Fn(u32, bool) -> Result<(), C::Error>,
     X: FnMut(&C, u64, u64) -> Result<RunControl, C::Error>,
+    Q: Fn() -> bool,
 {
     loop {
         match vcpu.step()? {
-            VcpuExit::VTimer => {}
-            VcpuExit::Canceled => return Ok(RunOutcome::Canceled),
+            VcpuExit::VTimer => {
+                // Host→guest async work each timer tick (e.g. drain an egress
+                // socket into the guest's rx queue), so delivery happens even
+                // when the guest is idle in WFI rather than doing MMIO.
+                for d in devices.iter_mut() {
+                    if let Some(irq) = d.poll() {
+                        set_irq(irq, true)?;
+                    }
+                }
+            }
+            VcpuExit::Canceled => {
+                // A forced exit: either a real stop or a heartbeat wake. Poll
+                // host-side async work either way (this is how an egress reply
+                // reaches a guest blocked in WFI), then end only if a stop was
+                // actually requested.
+                for d in devices.iter_mut() {
+                    if let Some(irq) = d.poll() {
+                        set_irq(irq, true)?;
+                    }
+                }
+                if should_stop() {
+                    return Ok(RunOutcome::Canceled);
+                }
+            }
             VcpuExit::Halt => return Ok(RunOutcome::Halt),
             VcpuExit::Mmio {
                 phys_addr,
@@ -187,6 +224,11 @@ impl RunDevice for super::vsock::VirtioVsock {
     }
     fn write(&mut self, offset: u64, value: u64, _size: u8) -> Option<u32> {
         self.write(offset, value).then(|| self.irq())
+    }
+    fn poll(&mut self) -> Option<u32> {
+        // Host→guest half of the egress proxy: drain admitted sockets into the rx
+        // queue each timer tick.
+        self.drain_egress()
     }
 }
 
@@ -277,6 +319,94 @@ mod tests {
         Ok(RunControl::Stop)
     }
 
+    /// A device whose `poll()` reports an interrupt exactly once — models an
+    /// async host→guest delivery (e.g. an egress reply arriving) that the run loop
+    /// must drain on a timer tick / heartbeat wake.
+    struct PollDev {
+        irq: u32,
+        polls: u32,
+        delivered: bool,
+    }
+    impl RunDevice for PollDev {
+        fn contains(&self, _addr: u64) -> bool {
+            false
+        }
+        fn base(&self) -> u64 {
+            0
+        }
+        fn read(&mut self, _: u64, _: u8) -> u64 {
+            0
+        }
+        fn write(&mut self, _: u64, _: u64, _: u8) -> Option<u32> {
+            None
+        }
+        fn poll(&mut self) -> Option<u32> {
+            self.polls += 1;
+            if self.delivered {
+                None
+            } else {
+                self.delivered = true;
+                Some(self.irq)
+            }
+        }
+    }
+
+    /// A heartbeat wake (`Canceled` with `should_stop()==false`) polls devices,
+    /// raises any reported IRQ, and keeps running — it must NOT end the run.
+    #[test]
+    fn canceled_with_no_stop_polls_then_continues() {
+        // Two cancels (heartbeats) then the guest halts.
+        let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled, VcpuExit::Canceled, VcpuExit::Halt]);
+        let raised = RefCell::new(Vec::new());
+        let mut dev = PollDev {
+            irq: 7,
+            polls: 0,
+            delivered: false,
+        };
+        let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
+        let out = run(
+            &vcpu,
+            |intid, level| {
+                raised.borrow_mut().push((intid, level));
+                Ok(())
+            },
+            &mut devs,
+            no_exceptions,
+            || false, // never a real stop → cancels are heartbeat wakes
+        )
+        .unwrap();
+        assert_eq!(out, RunOutcome::Halt); // ran to the guest halt, not the cancel
+        assert_eq!(*raised.borrow(), vec![(7u32, true)]); // delivered exactly once
+        assert_eq!(dev.polls, 2); // polled on each heartbeat wake
+    }
+
+    /// A real stop (`Canceled` with `should_stop()==true`) still drains one final
+    /// poll, then ends the run as `Canceled`.
+    #[test]
+    fn canceled_with_stop_polls_then_returns() {
+        let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled]);
+        let raised = RefCell::new(Vec::new());
+        let mut dev = PollDev {
+            irq: 9,
+            polls: 0,
+            delivered: false,
+        };
+        let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
+        let out = run(
+            &vcpu,
+            |intid, level| {
+                raised.borrow_mut().push((intid, level));
+                Ok(())
+            },
+            &mut devs,
+            no_exceptions,
+            || true, // real stop
+        )
+        .unwrap();
+        assert_eq!(out, RunOutcome::Canceled);
+        assert_eq!(*raised.borrow(), vec![(9u32, true)]); // final drain still delivered
+    }
+
     #[test]
     fn read_is_completed_with_the_device_value() {
         let vcpu = ScriptVcpu::new(vec![
@@ -295,7 +425,7 @@ mod tests {
             writes: vec![],
         };
         let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
-        let out = run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions).unwrap();
+        let out = run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions, || true).unwrap();
         assert_eq!(out, RunOutcome::Halt);
         assert_eq!(*vcpu.reads.borrow(), vec![0xdead_beef]);
     }
@@ -318,7 +448,7 @@ mod tests {
             writes: vec![],
         };
         let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
-        run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions).unwrap();
+        run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions, || true).unwrap();
         assert_eq!(dev.writes, vec![(0x10, 0x55)]);
         assert!(
             vcpu.reads.borrow().is_empty(),
@@ -353,6 +483,7 @@ mod tests {
             },
             &mut devs,
             no_exceptions,
+            || true,
         )
         .unwrap();
         assert_eq!(*raised.borrow(), vec![(42u32, true)]);
@@ -382,7 +513,7 @@ mod tests {
             writes: vec![],
         };
         let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
-        run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions).unwrap();
+        run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions, || true).unwrap();
         assert_eq!(*vcpu.reads.borrow(), vec![0xab, 0]); // device value, then RAZ
     }
 
@@ -390,7 +521,7 @@ mod tests {
     fn canceled_exit_ends_the_run() {
         let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled]);
         let mut devs: Vec<&mut dyn RunDevice> = vec![];
-        let out = run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions).unwrap();
+        let out = run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions, || true).unwrap();
         assert_eq!(out, RunOutcome::Canceled);
     }
 
@@ -421,6 +552,7 @@ mod tests {
                     RunControl::Continue
                 })
             },
+            || true,
         )
         .unwrap();
         assert_eq!(out, RunOutcome::Stopped);
@@ -431,7 +563,7 @@ mod tests {
     fn vtimer_is_ignored_and_the_loop_continues() {
         let vcpu = ScriptVcpu::new(vec![VcpuExit::VTimer, VcpuExit::VTimer, VcpuExit::Halt]);
         let mut devs: Vec<&mut dyn RunDevice> = vec![];
-        let out = run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions).unwrap();
+        let out = run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions, || true).unwrap();
         assert_eq!(out, RunOutcome::Halt);
     }
 }

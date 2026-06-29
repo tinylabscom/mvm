@@ -118,6 +118,8 @@ impl KvmVm {
                 &mut devices,
                 // x86 KVM decodes every exit; the exception hook is never reached.
                 |_: &KvmVcpu, _, _| Ok(RunControl::Stop),
+                // No async host I/O on this path yet → a forced exit always stops.
+                || true,
             )
         };
         done.store(true, Ordering::Relaxed);

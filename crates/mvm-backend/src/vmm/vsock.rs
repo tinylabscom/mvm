@@ -155,10 +155,11 @@ pub struct VirtioVsock {
     /// is established).
     pub egress_allowed: Vec<String>,
     /// Open host TCP connections for admitted egress streams, keyed by the guest's
-    /// vsock src_port. The first frame on a stream is the connect target; later
-    /// frames are proxied to the socket (synchronous request/response — full async
-    /// streaming is the next slice).
-    egress_conns: std::collections::HashMap<u32, std::net::TcpStream>,
+    /// vsock src_port. Value = the non-blocking socket + the guest packet header
+    /// (so [`Self::drain_egress`] can frame socket→guest bytes on the right stream).
+    /// The first frame on a stream is the connect target; later frames are written
+    /// to the socket and its replies are delivered asynchronously via `drain_egress`.
+    egress_conns: std::collections::HashMap<u32, (std::net::TcpStream, Hdr)>,
 }
 
 impl VirtioVsock {
@@ -354,31 +355,31 @@ impl VirtioVsock {
     /// Host egress gateway over vsock (ADR-100). The first frame on an egress
     /// stream is the connect target `"ip:port"`: it is decided against the gateway
     /// policy (claim-10 default-deny) and, if admitted, a host TCP connection is
-    /// opened. Subsequent frames are proxied to that socket and the reply is
-    /// delivered back to the guest (synchronous request/response; full async
-    /// streaming is the next slice). A refused target never reaches the network.
+    /// opened (non-blocking). Subsequent frames are written to that socket; its
+    /// replies / streamed bytes are delivered back to the guest asynchronously in
+    /// [`Self::drain_egress`]. A refused target never reaches the network.
     fn handle_egress_request(&mut self, hdr: &Hdr, payload: &[u8]) {
-        use std::io::{Read, Write};
+        use std::io::Write;
 
         use super::egress_gate::EgressVerdict;
 
-        // Established stream → proxy this frame to the host socket + return its reply.
-        if self.egress_conns.contains_key(&hdr.src_port) {
-            let reply = {
-                let stream = self.egress_conns.get_mut(&hdr.src_port).expect("checked");
-                let _ = stream.write_all(payload);
-                let mut buf = vec![0u8; 16 * 1024];
-                match stream.read(&mut buf) {
-                    Ok(n) if n > 0 => {
-                        buf.truncate(n);
-                        Some(buf)
+        // Established stream → write this frame to the host socket (replies arrive
+        // asynchronously via `drain_egress`, so streaming / server-push works).
+        if let Some((stream, _)) = self.egress_conns.get_mut(&hdr.src_port) {
+            let mut off = 0;
+            let mut spins = 0u32;
+            while off < payload.len() {
+                match stream.write(&payload[off..]) {
+                    Ok(0) => break,
+                    Ok(n) => off += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && spins < 10_000 => {
+                        spins += 1;
+                        std::thread::yield_now();
                     }
-                    _ => None,
+                    Err(_) => break,
                 }
-            };
-            if let Some(bytes) = reply {
-                self.queue_reply(hdr, OP_RW, &bytes);
             }
+            self.fwd_cnt = self.fwd_cnt.wrapping_add(payload.len() as u32);
             return;
         }
 
@@ -395,9 +396,10 @@ impl VirtioVsock {
                     std::time::Duration::from_secs(2),
                 ) {
                     Ok(stream) => {
-                        let _ =
-                            stream.set_read_timeout(Some(std::time::Duration::from_millis(800)));
-                        self.egress_conns.insert(hdr.src_port, stream);
+                        // Non-blocking so `drain_egress` can read replies without
+                        // stalling the run loop.
+                        let _ = stream.set_nonblocking(true);
+                        self.egress_conns.insert(hdr.src_port, (stream, *hdr));
                         self.egress_allowed.push(target);
                         // Acknowledge the established connection.
                         self.queue_reply(hdr, OP_CREDIT_UPDATE, &[]);
@@ -413,6 +415,46 @@ impl VirtioVsock {
                 self.egress_denied.push(target);
                 self.queue_reply(hdr, OP_RST, &[]);
             }
+        }
+    }
+
+    /// Drain admitted egress sockets into the guest's rx queue — the host→guest
+    /// half of the proxy, called on every timer tick (via [`RunDevice::poll`]) so
+    /// replies + streamed bytes reach the guest even when it is idle in WFI.
+    /// Returns `Some(irq)` if a reply was delivered into a posted rx buffer.
+    pub fn drain_egress(&mut self) -> Option<u32> {
+        use std::io::Read;
+
+        if self.egress_conns.is_empty() {
+            return None;
+        }
+        let mut replies: Vec<(Hdr, Vec<u8>)> = Vec::new();
+        let mut closed: Vec<u32> = Vec::new();
+        for (port, (stream, hdr)) in self.egress_conns.iter_mut() {
+            let mut buf = vec![0u8; 16 * 1024];
+            match stream.read(&mut buf) {
+                Ok(0) => closed.push(*port), // peer EOF
+                Ok(n) => {
+                    buf.truncate(n);
+                    replies.push((*hdr, buf));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => closed.push(*port),
+            }
+        }
+        for port in &closed {
+            self.egress_conns.remove(port);
+        }
+        for (hdr, bytes) in replies {
+            self.queue_reply(&hdr, OP_RW, &bytes);
+        }
+        // Always attempt to flush: a reply queued on an earlier tick (before the
+        // guest posted an rx buffer) must still deliver now. `flush_rx` is a cheap
+        // no-op when nothing is pending.
+        if self.flush_rx() {
+            Some(self.irq)
+        } else {
+            None
         }
     }
 
