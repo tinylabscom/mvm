@@ -105,8 +105,14 @@ VmBackend (product/CLI/mvmd) ─ AnyBackend dispatch
   **two-entry e820** map (0–640 KiB, then 1 MiB–end; a single entry falls back to
   legacy e801 → no RAM → `alloc_low_pages` panic), the **in-kernel irqchip +
   `KVM_CREATE_PIT2`** (no PIT → the kernel hangs after APIC setup waiting for
-  timer ticks), and a 16550 serial for the console. Folding this into
-  `kvm::KvmVm` behind the seam (reusing the arch-neutral virtqueue logic) is next.
+  timer ticks), and a 16550 serial for the console.
+- ✅ `kvm::KvmVm` / `KvmVcpu` (x86_64) — implement the seam over `kvm-ioctls`
+  (`create`/`map_ram`/`create_vcpu`+CPUID/`set_irq`/`step`→`Io`/`Mmio`/`Halt`,
+  `boot_x86` applying the entry regs, a `tgkill`-based `force_exit`). `ActiveVm`
+  binds to `KvmVm` on linux/x86_64. The boot setup is the pure, **unit-tested**
+  `kvm::x86_boot` (7 tests; compiles on every host); the ioctl glue compiles on
+  linux/x86_64. Remaining: wire the unified run loop's `Io`/`Mmio` **read**
+  completion + drive a live boot through the backend (vs. the standalone spike).
 - ⏳ `kvm::KvmVm` (arm64) — on an aarch64 KVM host the *whole* `vmm` device model
   reuses unchanged behind the seam.
 - ⏳ `whp::WhpVm` — Windows, later.

@@ -156,7 +156,12 @@ pub trait HypervisorVm: Sized {
 // orchestration names `Active*` and never a concrete backend type.
 // ----------------------------------------------------------------------------
 
-/// The hypervisor backend selected for this build (HVF today). Bound as a
-/// concrete type so all dispatch is static.
+/// The hypervisor backend selected for this build. Bound as a concrete type so
+/// all dispatch is static.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub type ActiveVm = crate::hvf::HvfVm;
+
+/// Linux/x86_64 → KVM. (aarch64 KVM, which reuses the whole arm64 device model,
+/// is a later slice; see ADR-099.)
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub type ActiveVm = crate::kvm::KvmVm;

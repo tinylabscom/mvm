@@ -63,6 +63,10 @@ pub(crate) mod host_agent_spawn;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod hvf;
 pub mod image;
+/// KVM (Linux) backend — drives [`vmm`] on Linux via `kvm-ioctls`, implementing
+/// the [`vmm::hv`] seam (Plan 214 / ADR-099). `kvm::x86_boot` is pure logic
+/// (compiles + tests everywhere); the ioctl glue is Linux-only.
+pub mod kvm;
 pub mod libkrun;
 pub mod microvm;
 pub mod mock;
