@@ -57,6 +57,11 @@ pub(crate) mod egress_shared;
 pub mod firecracker;
 pub mod handle_registry;
 pub(crate) mod host_agent_spawn;
+/// Raw HVF (`Hypervisor.framework`) backend spike — guest-RAM mapping + minimal
+/// boot primitive (Plan 214 Phase 11 / ADR-098). macOS / Apple-silicon only;
+/// links the system framework, so it is cfg-gated off every other target.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod hvf;
 pub mod image;
 pub mod libkrun;
 pub mod microvm;
