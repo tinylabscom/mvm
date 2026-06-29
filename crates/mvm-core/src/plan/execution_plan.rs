@@ -18,45 +18,16 @@ use crate::plan::types::{
     SignedImageRef, TenantId, WorkloadId,
 };
 
-/// Wire-format version. Bump when fields change in a way older
-/// verifiers can't ignore. Older verifiers must fail closed on
-/// unknown schema versions rather than silently skipping unknown
-/// fields — the schema_version field is consulted before any
-/// per-field deserialisation.
+/// Wire-format version of the `ExecutionPlan`.
 ///
-/// Bumped 1 → 2 with the addition of `valid_from` / `valid_until` /
-/// `nonce`. Older verifiers will reject v2 plans with
-/// `UnsupportedSchema`; this is the correct fail-closed behavior —
-/// they can't enforce the validity window they don't understand.
-///
-/// Bumped 2 → 3 with the addition of `bundle: Option<PlanArtifact>` —
-/// the supervisor's admit path re-verifies the pinned bundle archive
-/// before backend dispatch (claim 9 fully load-bearing at launch, not
-/// just at fetch). Older verifiers will reject v3 plans with
-/// `UnsupportedSchema` because they don't know how to re-verify
-/// the binding.
-///
-/// Bumped 3 → 4 with the addition of intent-bound
-/// `admission_profile`: older verifiers do not know how to check
-/// that seccomp, network, tool, secret-release, and audit controls
-/// were resolved under one profile, so they must reject rather than
-/// silently ignore the binding.
-///
-/// Bumped 4 → 5 with the addition of `shares` (user host-fs grants):
-/// an older verifier doesn't know to enforce that the launch config's
-/// volumes are a subset of the admitted grants (claim 1 / claim 8), so
-/// it must reject rather than admit a plan whose shares it can't check.
-///
-/// Bumped 5 → 6 with the addition of `auth`: an older verifier doesn't
-/// know that a plan can carry a host-auth capability such as dev-tier
-/// ssh-agent socket forwarding, so it must reject rather than admit a plan
-/// whose auth boundary it can't check or audit.
-///
-/// Bumped 6 → 7 with the addition of `network_mode`: a typed networking
-/// transport (closed-by-default no-NIC vs. brokered host-vsock-proxy). An older
-/// verifier doesn't know to enforce the transport the plan declares, so it must
-/// reject a v7 plan rather than admit one whose networking it can't constrain.
-pub const SCHEMA_VERSION: u32 = 7;
+/// This project has no production plans in the wild, so there is no version
+/// history to preserve — the schema is simply **version 1**. Do not bump it per
+/// field; only bump once a real older consumer exists that must fail closed on a
+/// format it cannot parse. New fields are added with `#[serde(default)]` so the
+/// current schema stays self-consistent without a version dance. The verifier
+/// still rejects a plan whose `schema_version` exceeds this build's (consulted
+/// before per-field deserialisation), so a future bump remains fail-closed.
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// Typed contract for one workload's execution.
 ///
@@ -105,7 +76,7 @@ pub struct ExecutionPlan {
     /// Networking transport mode. Closed by default ([`NetworkMode::None`]): no
     /// guest NIC, nothing reachable. `HostVsockProxy` selects brokered egress/
     /// ingress over vsock; `network_policy` still gates which endpoints are
-    /// reachable. `#[serde(default)]` so a pre-v7 plan deserializes as the safe
+    /// reachable. `#[serde(default)]` so a plan without the field deserializes as the safe
     /// closed default.
     #[serde(default)]
     pub network_mode: NetworkMode,

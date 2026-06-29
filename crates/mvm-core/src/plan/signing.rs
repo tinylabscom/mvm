@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_v7_plan_without_network_mode_defaults_to_none() {
+    fn plan_without_network_mode_field_defaults_to_none() {
         use crate::plan::types::NetworkMode;
         // A plan serialized before `network_mode` existed (field absent) must
         // still deserialize, defaulting to the closed `None` (`serde(default)`).
