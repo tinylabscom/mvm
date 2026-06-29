@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::plan::bundle::PlanArtifact;
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, AuthPolicy,
-    DepsVolumeBinding, FsPolicyRef, HostShareGrant, KeyRotationSpec, Nonce, PlanId, PolicyRef,
-    PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding, SignedImageRef,
-    TenantId, WorkloadId,
+    DepsVolumeBinding, FsPolicyRef, HostShareGrant, KeyRotationSpec, NetworkMode, Nonce, PlanId,
+    PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
+    SignedImageRef, TenantId, WorkloadId,
 };
 
 /// Wire-format version. Bump when fields change in a way older
@@ -51,7 +51,12 @@ use crate::plan::types::{
 /// know that a plan can carry a host-auth capability such as dev-tier
 /// ssh-agent socket forwarding, so it must reject rather than admit a plan
 /// whose auth boundary it can't check or audit.
-pub const SCHEMA_VERSION: u32 = 6;
+///
+/// Bumped 6 → 7 with the addition of `network_mode`: a typed networking
+/// transport (closed-by-default no-NIC vs. brokered host-vsock-proxy). An older
+/// verifier doesn't know to enforce the transport the plan declares, so it must
+/// reject a v7 plan rather than admit one whose networking it can't constrain.
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Typed contract for one workload's execution.
 ///
@@ -96,6 +101,14 @@ pub struct ExecutionPlan {
     /// Network policy reference. Wired to `mvm-core::policy::EgressPolicy`
     /// (L7 + PII rules) via the supervisor's `SupervisorEgressProxy`.
     pub network_policy: PolicyRef,
+
+    /// Networking transport mode. Closed by default ([`NetworkMode::None`]): no
+    /// guest NIC, nothing reachable. `HostVsockProxy` selects brokered egress/
+    /// ingress over vsock; `network_policy` still gates which endpoints are
+    /// reachable. `#[serde(default)]` so a pre-v7 plan deserializes as the safe
+    /// closed default.
+    #[serde(default)]
+    pub network_mode: NetworkMode,
 
     /// Filesystem policy reference.
     pub fs_policy: FsPolicyRef,

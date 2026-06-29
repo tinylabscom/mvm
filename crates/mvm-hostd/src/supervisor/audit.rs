@@ -308,6 +308,7 @@ mod tests {
 
     fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
+            network_mode: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("plan-x".to_string()),
             plan_version: 7,

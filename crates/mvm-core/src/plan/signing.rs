@@ -200,6 +200,7 @@ pub mod test_support {
     /// Callers override `valid_from`/`valid_until`/`nonce` for their scenario.
     pub fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
+            network_mode: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("01HXTESTPLAN000000000000".to_string()),
             plan_version: 1,
@@ -434,6 +435,29 @@ mod tests {
             Err(PlanVerifyError::SignatureInvalid(_)) => {}
             other => panic!("expected SignatureInvalid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pre_v7_plan_without_network_mode_defaults_to_none() {
+        use crate::plan::types::NetworkMode;
+        // A plan serialized before `network_mode` existed (field absent) must
+        // still deserialize, defaulting to the closed `None` (`serde(default)`).
+        let plan = sample_plan();
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value.as_object_mut().unwrap().remove("network_mode");
+        assert!(value.get("network_mode").is_none());
+        let parsed: ExecutionPlan = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.network_mode, NetworkMode::None);
+    }
+
+    #[test]
+    fn network_mode_round_trips_in_the_plan() {
+        use crate::plan::types::NetworkMode;
+        let mut plan = sample_plan();
+        plan.network_mode = NetworkMode::HostVsockProxy;
+        let json = serde_json::to_string(&plan).unwrap();
+        let parsed: ExecutionPlan = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.network_mode, NetworkMode::HostVsockProxy);
     }
 
     #[test]
