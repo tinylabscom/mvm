@@ -153,6 +153,12 @@ pub struct VirtioVsock {
     /// Inbound vsock header per egress stream (keyed by guest `src_port`), so a
     /// reply the header-agnostic proxy produces can be framed on the right stream.
     egress_hdrs: std::collections::HashMap<u32, Hdr>,
+    /// Host→guest agent stream bridge — the inbound counterpart of `egress`. Host
+    /// RPC clients connect to its Unix socket and reach the guest agent on
+    /// [`GUEST_AGENT_PORT`](mvm_guest::vsock::GUEST_AGENT_PORT); the device frames
+    /// its `OP_REQUEST`/`OP_RW` onto the rx queue and routes the guest's replies
+    /// back to the host socket.
+    agent: super::agent_bridge::AgentBridge,
 }
 
 impl VirtioVsock {
@@ -176,7 +182,23 @@ impl VirtioVsock {
             exit_stop: None,
             egress: super::egress_proxy::EgressProxy::new(),
             egress_hdrs: std::collections::HashMap::new(),
+            agent: super::agent_bridge::AgentBridge::new(),
         }
+    }
+
+    /// Expose the host-side agent listener at `path` (host→guest). Host RPC
+    /// clients connect here; the bridge opens a vsock stream to the guest agent on
+    /// [`GUEST_AGENT_PORT`](mvm_guest::vsock::GUEST_AGENT_PORT). The inbound
+    /// counterpart of [`set_egress_gate`](Self::set_egress_gate).
+    pub fn set_agent_socket(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        self.agent.bind(path)
+    }
+
+    /// Share the heartbeat activity counter with the agent bridge so an open agent
+    /// stream keeps the run loop waking an idle guest (the same counter the egress
+    /// proxy uses).
+    pub fn set_agent_activity(&mut self, counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        self.agent.set_activity(counter);
     }
 
     /// Install the host egress gateway policy (ADR-100). A guest connect request
@@ -320,6 +342,26 @@ impl VirtioVsock {
     }
 
     fn handle_packet(&mut self, hdr: Hdr, payload: &[u8]) {
+        // Guest→host packet on a host-initiated agent stream: the host opened it,
+        // so the guest agent's reply is addressed to our host-assigned src_port
+        // (dst_port here). Route to the agent bridge, not the listener paths.
+        if self.agent.is_agent_stream(hdr.dst_port) {
+            match hdr.op {
+                OP_RESPONSE => self.agent.on_established(hdr.dst_port),
+                OP_RW => {
+                    let n = (hdr.len as usize).min(payload.len());
+                    self.agent.write_to_host(hdr.dst_port, &payload[..n]);
+                    self.fwd_cnt = self.fwd_cnt.wrapping_add(n as u32);
+                    self.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                }
+                OP_SHUTDOWN | OP_RST => {
+                    self.agent.close(hdr.dst_port);
+                    self.queue_reply(&hdr, OP_RST, &[]);
+                }
+                _ => {}
+            }
+            return;
+        }
         match hdr.op {
             OP_REQUEST => {
                 // Accept the connection: reply RESPONSE with our credit.
@@ -399,6 +441,46 @@ impl VirtioVsock {
         } else {
             None
         }
+    }
+
+    /// Drive the host→guest agent bridge each tick: open a vsock stream for each new
+    /// host connection (`OP_REQUEST` to the guest agent on
+    /// [`GUEST_AGENT_PORT`](mvm_guest::vsock::GUEST_AGENT_PORT)) and relay host→guest
+    /// request bytes (`OP_RW`). The guest's replies are routed back to the host
+    /// socket in [`handle_packet`](Self::handle_packet). Returns `Some(irq)` when a
+    /// packet was delivered into a posted rx buffer.
+    pub fn drain_agent(&mut self) -> Option<u32> {
+        for conn_id in self.agent.accept_new() {
+            self.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_REQUEST, &[]);
+        }
+        for (conn_id, bytes) in self.agent.drain_host() {
+            self.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_RW, &bytes);
+        }
+        if self.flush_rx() {
+            Some(self.irq)
+        } else {
+            None
+        }
+    }
+
+    /// Frame a host-*initiated* host→guest packet for an agent stream. Unlike
+    /// [`queue_reply`](Self::queue_reply) (which swaps an inbound header), this
+    /// builds a fresh header for a stream the host opened: `src_port` is the
+    /// host-assigned conn id, `dst_port` the guest's listener.
+    fn queue_host_packet(&mut self, src_port: u32, dst_port: u32, op: u16, payload: &[u8]) {
+        let hdr = Hdr {
+            src_cid: HOST_CID,
+            dst_cid: GUEST_CID,
+            src_port,
+            dst_port,
+            len: payload.len() as u32,
+            typ: TYPE_STREAM,
+            op,
+            flags: 0,
+            buf_alloc: HOST_BUF_ALLOC,
+            fwd_cnt: self.fwd_cnt,
+        };
+        self.pending_rx.push((hdr, payload.to_vec()));
     }
 
     /// Queue a host→guest reply (src/dst swapped from the inbound header).
@@ -551,5 +633,53 @@ mod tests {
         };
         d.handle_packet(rw, b"hello");
         assert_eq!(d.received, b"hello");
+    }
+
+    #[test]
+    fn host_agent_connection_frames_op_request_and_routes_replies() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("agent.sock");
+        let mut d = dev();
+        d.set_agent_socket(&sock).unwrap();
+
+        // A host RPC client connects to the agent socket.
+        let _client = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+
+        // drain_agent accepts it and frames an OP_REQUEST to the guest agent port.
+        let mut hdr = None;
+        for _ in 0..200 {
+            let _ = d.drain_agent();
+            if let Some((h, _)) = d.pending_rx.first() {
+                hdr = Some(*h);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let hdr = hdr.expect("OP_REQUEST framed for the host connection");
+        assert_eq!(hdr.op, OP_REQUEST);
+        assert_eq!(hdr.dst_port, mvm_guest::vsock::GUEST_AGENT_PORT);
+        assert_eq!(hdr.src_cid, HOST_CID);
+        assert_eq!(hdr.dst_cid, GUEST_CID);
+        // The host-assigned src_port is now an agent stream, so a guest reply
+        // addressed to it routes to the bridge rather than the capture path.
+        let conn_id = hdr.src_port;
+        assert!(d.agent.is_agent_stream(conn_id));
+
+        let reply = Hdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: mvm_guest::vsock::GUEST_AGENT_PORT,
+            dst_port: conn_id,
+            len: 5,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(reply, b"world");
+        // Routed to the bridge (host socket), NOT appended to the guest-capture buf.
+        assert!(
+            d.received.is_empty(),
+            "agent-stream bytes must not hit the capture path"
+        );
     }
 }

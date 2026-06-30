@@ -363,6 +363,13 @@ unsafe fn run(
         // no host push to wait for, so the host can idle instead of waking 200×/s.
         let egress_active = Arc::new(AtomicUsize::new(0));
         let egress_active_w = egress_active.clone();
+        // Host agent listener path (host→guest RPC, GUEST_AGENT_PORT). When bound,
+        // the heartbeat fires unconditionally so the run loop polls the listener +
+        // services agent streams even while the guest is idle in WFI — an agent VM
+        // exists to answer host RPC, so the wake is warranted. (A transient
+        // run-to-exit VM leaves this unset and keeps the egress-gated heartbeat.)
+        let agent_socket = std::env::var("MVM_HVF_AGENT_SOCKET").ok();
+        let agent_bound = agent_socket.is_some();
         let handle = vcpu.exit_token();
         let watchdog = std::thread::spawn(move || {
             let step = Duration::from_millis(5);
@@ -380,9 +387,10 @@ unsafe fn run(
                     stop.store(true, Ordering::Relaxed); // timeout → end the run
                     break;
                 }
-                // Heartbeat only when there's host→guest egress to deliver.
-                if egress_active_w.load(Ordering::Relaxed) > 0 {
-                    HvfHandle::force_exit(&[handle]); // wake the run loop to drain
+                // Heartbeat while an agent listener is bound (accept/serve RPC) or
+                // there's host→guest egress to deliver.
+                if agent_bound || egress_active_w.load(Ordering::Relaxed) > 0 {
+                    HvfHandle::force_exit(&[handle]); // wake the run loop to poll
                 }
             }
             HvfHandle::force_exit(&[handle]); // final wake → loop sees stop, returns
@@ -408,6 +416,14 @@ unsafe fn run(
             v.capture_workload_exit(stop);
             v.set_egress_gate(egress);
             v.set_egress_activity(egress_active.clone());
+            // Host→guest agent RPC (GUEST_AGENT_PORT): expose the listener so host
+            // clients (`machine invoke`) reach the guest agent over vsock (ADR-100).
+            if let Some(path) = &agent_socket {
+                v.set_agent_activity(egress_active.clone());
+                if let Err(e) = v.set_agent_socket(std::path::Path::new(path)) {
+                    eprintln!("mvm-hvf: agent socket bind failed at {path}: {e}");
+                }
+            }
         }
 
         // Diagnostics gathered by the exception hook (HVC/PSCI + other traps).

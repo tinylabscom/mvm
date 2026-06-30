@@ -10,6 +10,7 @@
 //!
 //! This module compiles on every target; it is the "no VMM lock-in" seam.
 
+pub(crate) mod agent_bridge;
 pub mod device;
 pub mod egress_gate;
 pub(crate) mod egress_proxy;
