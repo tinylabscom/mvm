@@ -20,6 +20,10 @@ path = "src/bin/mvm-addon-vsock-bridge.rs"
 name = "mvm-exit-report"
 path = "src/bin/mvm-exit-report.rs"
 
+[[bin]]
+name = "mvm-egress-client"
+path = "src/bin/mvm-egress-client.rs"
+
 [dependencies]
 mvm-core.workspace = true
 anyhow.workspace = true

@@ -7,9 +7,12 @@
 //! - [`addon_dns`] — loopback DNS resolver (`mvm-addon-dns`).
 //! - [`addon_vsock_bridge`] — loopback TCP ↔ host-vsock bridge
 //!   (`mvm-addon-vsock-bridge`).
+//! - [`egress_client`] — loopback SOCKS5 → host-vsock egress proxy
+//!   (`mvm-egress-client`, ADR-100).
 //!
 //! Folded in from the former `mvm-addon-dns` + `mvm-addon-vsock-bridge`
 //! crates.
 
 pub mod addon_dns;
 pub mod addon_vsock_bridge;
+pub mod egress_client;
