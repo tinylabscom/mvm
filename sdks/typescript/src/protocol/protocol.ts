@@ -751,13 +751,7 @@ export type VolumeMountResult =
  * Class of error returned in `VolumeMountResult::Error`. Closed enum so the host can branch on `kind` without parsing message text. (Renamed from `ShareErrorKind`.)
  */
 export type VolumeMountErrorKind =
-  | "BadPath"
-  | "PolicyDenied"
-  | "BadVolumeName"
-  | "MountFailed"
-  | "Busy"
-  | "IoError"
-  | "Other";
+  "BadPath" | "PolicyDenied" | "BadVolumeName" | "MountFailed" | "Busy" | "IoError" | "Other";
 
 /**
  * Schema root: both wire directions under one document so the shared `$defs` (`FsResult`, `ProcResult`, `EntrypointEvent`, …) are emitted once and the generated clients reference a single definition set.
