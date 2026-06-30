@@ -52,14 +52,13 @@ const HOST_CID: u64 = 2;
 const GUEST_CID: u64 = 3;
 const HOST_BUF_ALLOC: u32 = 256 * 1024;
 
-// vsock packet ops. A few are shared with the egress proxy (which builds reply
-// frames), so they are crate-visible.
+// vsock packet ops.
 const OP_REQUEST: u16 = 1;
 const OP_RESPONSE: u16 = 2;
-pub(crate) const OP_RST: u16 = 3;
+const OP_RST: u16 = 3;
 const OP_SHUTDOWN: u16 = 4;
-pub(crate) const OP_RW: u16 = 5;
-pub(crate) const OP_CREDIT_UPDATE: u16 = 6;
+const OP_RW: u16 = 5;
+const OP_CREDIT_UPDATE: u16 = 6;
 const OP_CREDIT_REQUEST: u16 = 7;
 const TYPE_STREAM: u16 = 1;
 
@@ -74,10 +73,9 @@ struct Queue {
     last_avail: u16,
 }
 
-/// The vsock packet header (little-endian, 44 bytes). Crate-visible so the egress
-/// proxy can hold a stream's header opaquely to frame its replies.
+/// The vsock packet header (little-endian, 44 bytes).
 #[derive(Default, Clone, Copy)]
-pub(crate) struct Hdr {
+struct Hdr {
     src_cid: u64,
     dst_cid: u64,
     src_port: u32,
@@ -149,8 +147,12 @@ pub struct VirtioVsock {
     exit_stop: Option<&'static std::sync::atomic::AtomicBool>,
     /// Host vsock egress gateway (ADR-100): policy + open connections. Drives the
     /// claim-10 decision + the TCP proxy; the device only frames its replies onto
-    /// the rx queue.
+    /// the rx queue. The proxy core is transport-agnostic (keyed by stream id), so
+    /// the device keeps the inbound header per stream to frame async replies back.
     egress: super::egress_proxy::EgressProxy,
+    /// Inbound vsock header per egress stream (keyed by guest `src_port`), so a
+    /// reply the header-agnostic proxy produces can be framed on the right stream.
+    egress_hdrs: std::collections::HashMap<u32, Hdr>,
 }
 
 impl VirtioVsock {
@@ -173,6 +175,7 @@ impl VirtioVsock {
             workload_exit_code: None,
             exit_stop: None,
             egress: super::egress_proxy::EgressProxy::new(),
+            egress_hdrs: std::collections::HashMap::new(),
         }
     }
 
@@ -356,12 +359,18 @@ impl VirtioVsock {
         }
     }
 
-    /// Frame an inbound egress request to the [`EgressProxy`] and queue whatever
-    /// control replies it returns (ADR-100). The decision + TCP proxy live in the
-    /// proxy; the device only owns the rx framing.
+    /// Frame an inbound egress request to the [`EgressProxy`] and map its action to
+    /// a vsock control reply (ADR-100). The decision + TCP proxy live in the proxy;
+    /// the device owns the rx framing and the per-stream header.
     fn handle_egress_request(&mut self, hdr: &Hdr, payload: &[u8]) {
-        for (h, op, bytes) in self.egress.handle_request(hdr.src_port, *hdr, payload) {
-            self.queue_reply(&h, op, &bytes);
+        use super::egress_proxy::EgressAction;
+        match self.egress.handle_frame(hdr.src_port, payload) {
+            EgressAction::Opened => {
+                self.egress_hdrs.insert(hdr.src_port, *hdr);
+                self.queue_reply(hdr, OP_CREDIT_UPDATE, &[]); // ack the established stream
+            }
+            EgressAction::Refused => self.queue_reply(hdr, OP_RST, &[]),
+            EgressAction::Wrote => {}
         }
     }
 
@@ -373,8 +382,14 @@ impl VirtioVsock {
         if !self.egress.has_active() {
             return None;
         }
-        for (h, op, bytes) in self.egress.drain() {
-            self.queue_reply(&h, op, &bytes);
+        let drained = self.egress.drain();
+        for (conn_id, bytes) in drained.ready {
+            if let Some(h) = self.egress_hdrs.get(&conn_id).copied() {
+                self.queue_reply(&h, OP_RW, &bytes);
+            }
+        }
+        for conn_id in drained.closed {
+            self.egress_hdrs.remove(&conn_id);
         }
         // Always attempt to flush: a reply queued on an earlier tick (before the
         // guest posted an rx buffer) must still deliver now. `flush_rx` is a cheap
