@@ -86,6 +86,21 @@ pub struct KernelBootResult {
     pub egress_allowed: Vec<String>,
 }
 
+/// Kernel cmdline used when `MVM_HVF_BOOTARGS` is unset. Always wires the PL011
+/// console (earlycon + `ttyAMA0`). When a virtio-blk disk is attached it is a
+/// real mkGuest workload rootfs, so mount it and run the baked init —
+/// `root=/dev/vda rw init=/init`, the same contract the Vz/firecracker backends
+/// boot mkGuest images with. Disk-less boots (initramfs / freestanding payloads)
+/// keep the bare console args.
+fn default_bootargs(has_disk: bool) -> String {
+    let mut args =
+        format!("earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8");
+    if has_disk {
+        args.push_str(" root=/dev/vda rw init=/init");
+    }
+    args
+}
+
 /// Boot `image` (an arm64 `Image`) under HVF, optionally with an `initramfs`
 /// (cpio, gzip-or-raw), returning what it printed within `timeout`.
 pub fn boot_kernel(
@@ -155,9 +170,8 @@ fn boot_kernel_impl(
         return Err(HvfError::Alloc);
     }
 
-    let bootargs = std::env::var("MVM_HVF_BOOTARGS").unwrap_or_else(|_| {
-        format!("earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8")
-    });
+    let bootargs =
+        std::env::var("MVM_HVF_BOOTARGS").unwrap_or_else(|_| default_bootargs(disk.is_some()));
     let initrd_bounds = initramfs.map(|rd| {
         (
             RAM_BASE + INITRD_OFFSET,
@@ -484,5 +498,38 @@ unsafe fn run(
             r.egress_allowed = vs.egress_allowed().to_vec();
         }
         Ok(r)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_bootargs_mounts_rootfs_when_disk_present() {
+        // A virtio-blk disk is a real mkGuest workload rootfs: mount it and run
+        // the baked init, matching the `root=/dev/vda rw init=/init` contract
+        // the other backends boot mkGuest images with.
+        let with = default_bootargs(true);
+        assert!(
+            with.contains("root=/dev/vda rw"),
+            "real workload must mount the virtio-blk rootfs: {with}"
+        );
+        assert!(
+            with.contains("init=/init"),
+            "must run the mkGuest init: {with}"
+        );
+        assert!(with.contains("console=ttyAMA0"), "console wired: {with}");
+
+        // Disk-less boots (initramfs / freestanding demos) keep the demo args.
+        let without = default_bootargs(false);
+        assert!(
+            !without.contains("root="),
+            "disk-less boot must not mount a root: {without}"
+        );
+        assert!(
+            without.contains("console=ttyAMA0"),
+            "console wired: {without}"
+        );
     }
 }
