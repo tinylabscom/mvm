@@ -158,8 +158,10 @@ async fn serve(mut client: TcpStream) -> std::io::Result<()> {
             return Err(e);
         }
     };
-    // First frame on the egress stream = the connect target (the host decides).
+    // First line on the egress stream = the connect target, newline-terminated so
+    // the host egress server can delimit it on a raw byte stream (the host decides).
     upstream.write_all(target.as_bytes()).await?;
+    upstream.write_all(b"\n").await?;
     upstream.flush().await?;
     reply(&mut client, REP_SUCCESS).await?;
     tokio::io::copy_bidirectional(&mut client, &mut upstream)
