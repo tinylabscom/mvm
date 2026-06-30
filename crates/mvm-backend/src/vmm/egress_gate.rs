@@ -13,6 +13,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+use mvm_core::policy::dns_pin::DnsPinRegistry;
 use mvm_core::policy::projection::{CanonicalEgress, Proto};
 
 /// Outcome of an egress request.
@@ -27,10 +28,15 @@ pub enum EgressVerdict {
 }
 
 /// The host-side egress decision for one VM, wrapping its resolved
-/// [`CanonicalEgress`] grant.
+/// [`CanonicalEgress`] grant plus the DNS pin registry used to resolve a
+/// `hostname:port` request host-side (DNS-over-vsock — ADR-100).
 #[derive(Debug, Clone)]
 pub struct EgressGate {
     egress: CanonicalEgress,
+    /// Host→pinned-IP map. A guest using a `socks5h` client sends a *hostname*; the
+    /// trusted host resolves it here (against the same pins `canonicalize` used) and
+    /// policy-checks the pinned IP before connecting. The guest never resolves.
+    pins: DnsPinRegistry,
 }
 
 impl EgressGate {
@@ -39,12 +45,16 @@ impl EgressGate {
     pub fn default_deny() -> Self {
         Self {
             egress: CanonicalEgress::Rules(Vec::new()),
+            pins: DnsPinRegistry::new(),
         }
     }
 
-    /// A gate over an explicit resolved grant.
+    /// A gate over an explicit resolved grant (no host-name resolution).
     pub fn new(egress: CanonicalEgress) -> Self {
-        Self { egress }
+        Self {
+            egress,
+            pins: DnsPinRegistry::new(),
+        }
     }
 
     /// Build a gate from a VM's resolved [`NetworkPolicy`] via the shared claim-10
@@ -60,7 +70,10 @@ impl EgressGate {
         now: &str,
     ) -> Self {
         match mvm_core::policy::projection::canonicalize_network_policy(policy, pins, now) {
-            Ok(canon) => Self::new(canon),
+            Ok(canon) => Self {
+                egress: canon,
+                pins: pins.clone(),
+            },
             Err(_) => Self::default_deny(),
         }
     }
@@ -74,13 +87,37 @@ impl EgressGate {
         }
     }
 
-    /// Decide a guest connect request of the form `"<ip>:<port>"` (a numeric
-    /// address — DNS resolution, when added, happens before this). A request that
-    /// does not parse is [`EgressVerdict::Malformed`] (fail-closed: no connection).
+    /// Decide a guest connect request — either a numeric `"<ip>:<port>"` or a
+    /// `"<hostname>:<port>"` (DNS-over-vsock: the `socks5h` client sends a name and
+    /// the host resolves it here against the pin registry, never the guest). A
+    /// hostname with no matching pin is refused (`Deny`); an unparseable target is
+    /// `Malformed`. Fail-closed throughout.
     pub fn decide_request(&self, target: &str) -> EgressVerdict {
-        match target.trim().parse::<SocketAddr>() {
-            Ok(addr) => self.decide_addr(addr.ip(), addr.port()),
-            Err(_) => EgressVerdict::Malformed,
+        let target = target.trim();
+        // Numeric ip:port — decide directly.
+        if let Ok(addr) = target.parse::<SocketAddr>() {
+            return self.decide_addr(addr.ip(), addr.port());
+        }
+        // hostname:port — resolve host-side against the pinned set, then policy-check
+        // each pinned IP. Admit iff some pinned IP is permitted.
+        match target.rsplit_once(':') {
+            Some((host, port_str)) => match port_str.parse::<u16>() {
+                Ok(port) => match self.pins.lookup(host) {
+                    Some(pin) => pin
+                        .ips
+                        .iter()
+                        .find_map(|ip| match self.decide_addr(*ip, port) {
+                            EgressVerdict::Allow { ip, port } => {
+                                Some(EgressVerdict::Allow { ip, port })
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(EgressVerdict::Deny),
+                    None => EgressVerdict::Deny, // valid host:port, no pin → not admitted
+                },
+                Err(_) => EgressVerdict::Malformed,
+            },
+            None => EgressVerdict::Malformed,
         }
     }
 }
@@ -239,5 +276,62 @@ mod tests {
         );
         assert_eq!(gate.decide_request("192.168.4.23:80"), EgressVerdict::Deny);
         assert_eq!(gate.decide_request("8.8.8.8:19099"), EgressVerdict::Deny);
+    }
+
+    /// DNS-over-vsock: a `socks5h` client sends a *hostname*; the gate resolves it
+    /// host-side against the pin registry, admits the pinned IP only for the
+    /// policy-allowed port, and refuses unknown names / wrong ports / non-IP-stack
+    /// junk — all without the guest ever resolving anything.
+    #[test]
+    fn hostname_request_resolved_host_side_against_pins() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let now = "2026-01-01T00:00:00Z";
+        let pinned: IpAddr = "93.184.216.34".parse().unwrap();
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "api.example.test",
+            vec![pinned],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![HostPort {
+            host: "api.example.test".into(),
+            port: 443,
+        }]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, now);
+
+        // hostname:port → resolved + admitted to the pinned IP.
+        assert_eq!(
+            gate.decide_request("api.example.test:443"),
+            EgressVerdict::Allow {
+                ip: pinned,
+                port: 443
+            }
+        );
+        // right host, disallowed port → deny.
+        assert_eq!(
+            gate.decide_request("api.example.test:80"),
+            EgressVerdict::Deny
+        );
+        // unknown host (no pin) → deny, not malformed.
+        assert_eq!(
+            gate.decide_request("evil.example.test:443"),
+            EgressVerdict::Deny
+        );
+        // unparseable → malformed.
+        assert_eq!(
+            gate.decide_request("not-a-target"),
+            EgressVerdict::Malformed
+        );
+        // the pinned IP directly still works (numeric path).
+        assert_eq!(
+            gate.decide_request("93.184.216.34:443"),
+            EgressVerdict::Allow {
+                ip: pinned,
+                port: 443
+            }
+        );
     }
 }
