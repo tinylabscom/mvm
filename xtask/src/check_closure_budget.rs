@@ -22,9 +22,10 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// [`BUDGET_TARGET`]. Baseline measured 2026-06-17 against the audited default
-/// closure. Lower it freely as deps drop; raising it must be justified in the
-/// PR that does.
-const CLOSURE_BUDGET: usize = 335;
+/// closure. The Linux KVM backend adds one audited ioctl-wrapper crate to the
+/// default Linux release path. Lower it freely as deps drop; raising it must be
+/// justified in the change that does.
+const CLOSURE_BUDGET: usize = 336;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;
