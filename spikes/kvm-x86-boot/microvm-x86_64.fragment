@@ -1,0 +1,51 @@
+# Thin x86_64 microVM guest kernel — mvm in-house VMM (KVM/HVF) guests.
+#
+# vsock-only egress (ADR-100): NO guest NIC, no IP stack, no USB/wireless/sound/PCI/
+# graphics. Only what a NIC-less workload guest needs: a serial console, an
+# initramfs, ELF exec, and virtio-mmio + vsock. Built on top of `make tinyconfig`,
+# this yields a ~1.1 MiB bzImage (vs ~12 MiB for x86_64_defconfig).
+#
+# Build (on a Linux x86_64 host with a kernel source tree):
+#   make tinyconfig
+#   ./scripts/kconfig/merge_config.sh -m .config microvm-x86_64.fragment
+#   make olddefconfig
+#   make -j"$(nproc)" bzImage     # -> arch/x86/boot/bzImage
+#
+# Live-proven: the KVM backend (`kvm-backend-egress` example) boots this with a
+# static-init initramfs and the guest reaches the host vsock egress gateway with no
+# NIC (claim-10 admit + bidirectional proxy). Counterpart to the arm64 slim kernel
+# in nix/images/kernel/base.nix.
+
+CONFIG_64BIT=y
+CONFIG_SMP=y
+
+# Console + early boot diagnostics (ttyS0; the VMM models a polled 16550).
+CONFIG_PRINTK=y
+CONFIG_PRINTK_TIME=y
+CONFIG_TTY=y
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_EARLY_PRINTK=y
+
+# Run a static init from an initramfs.
+CONFIG_BINFMT_ELF=y
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_MULTIUSER=y
+CONFIG_FUTEX=y
+CONFIG_POSIX_TIMERS=y
+
+# IOAPIC: the vsock device's IRQ (the VMM pulses an edge on this line).
+CONFIG_X86_LOCAL_APIC=y
+CONFIG_X86_IO_APIC=y
+
+# Networking: vsock only — no INET, no netdevices (there is no NIC).
+CONFIG_NET=y
+CONFIG_VSOCKETS=y
+
+# virtio over mmio, discovered from the kernel cmdline (x86 has no DT/ACPI for it),
+# plus the virtio-vsock transport.
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_MENU=y
+CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
+CONFIG_VIRTIO_VSOCKETS=y
