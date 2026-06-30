@@ -34,6 +34,7 @@ pub mod backend;
 pub mod catalog;
 pub mod checkpoint;
 pub mod codesign;
+pub mod driver;
 // Shared host-side substrate (config + shell + linux_env + ui +
 // runtime_meta + cow + snapshot_integrity) — folded in from the
 // former Lima-era `mvm-base` crate. It lives here, not in `mvm`,
