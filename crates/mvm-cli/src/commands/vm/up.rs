@@ -839,13 +839,13 @@ pub(super) fn emit_failed_if(ctx: &Option<AdmissionContext>, class: &str, err: &
 /// persist:
 ///
 /// - **Firecracker**: the nft TAP-redirect moat reads the plan at spawn time.
-/// - **vz / libkrun (macOS)**: the substitution endpoint reads
+/// - **vz / libkrun / hvf (macOS)**: the substitution endpoint reads
 ///   `<state_dir>/plan.json` inside `start()` to decide whether to spawn.
 ///
 /// QEMU is excluded: it reads the in-memory config and must not overwrite the
 /// persisted plan.
 pub(super) fn persists_plan_before_start(hypervisor: &str) -> bool {
-    matches!(hypervisor, "firecracker" | "vz" | "libkrun")
+    matches!(hypervisor, "firecracker" | "vz" | "libkrun" | "hvf")
 }
 
 pub(super) fn load_workload_ir(
@@ -2682,5 +2682,21 @@ port_hi  = 443
             content.contains("\"error_class\":\"policy-l4-spec-invalid\""),
             "audit chain must classify the failure: {content}"
         );
+    }
+
+    #[test]
+    fn persists_plan_before_start_covers_the_substitution_backends() {
+        // The substitution endpoint reads <state_dir>/plan.json inside start() to
+        // decide whether to spawn, so every backend that spawns it must persist the
+        // plan first — including the in-house hvf backend. QEMU must not (it would
+        // overwrite the in-memory config).
+        for hv in ["firecracker", "vz", "libkrun", "hvf"] {
+            assert!(
+                persists_plan_before_start(hv),
+                "{hv} spawns the substitution endpoint and must persist plan.json"
+            );
+        }
+        assert!(!persists_plan_before_start("qemu"));
+        assert!(!persists_plan_before_start("mock"));
     }
 }
