@@ -160,6 +160,11 @@ pub struct VirtioVsock {
     /// The first frame on a stream is the connect target; later frames are written
     /// to the socket and its replies are delivered asynchronously via `drain_egress`.
     egress_conns: std::collections::HashMap<u32, (std::net::TcpStream, Hdr)>,
+    /// Count of open egress connections, published for the host run loop's
+    /// heartbeat: the loop only needs to wake an idle (WFI) guest to deliver host
+    /// pushes while at least one egress socket is open, so the heartbeat is gated
+    /// on this being non-zero (a guest with no egress lets the host idle).
+    egress_active: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl VirtioVsock {
@@ -185,6 +190,7 @@ impl VirtioVsock {
             egress_denied: Vec::new(),
             egress_allowed: Vec::new(),
             egress_conns: std::collections::HashMap::new(),
+            egress_active: None,
         }
     }
 
@@ -193,6 +199,12 @@ impl VirtioVsock {
     /// before any host connection is opened.
     pub fn set_egress_gate(&mut self, gate: super::egress_gate::EgressGate) {
         self.egress = Some(gate);
+    }
+
+    /// Share the open-egress-connection counter with the host run loop so its
+    /// heartbeat can be gated on there being host→guest work to deliver.
+    pub fn set_egress_activity(&mut self, counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        self.egress_active = Some(counter);
     }
 
     /// Capture the transient workload-exit code: a guest write of a 4-byte LE i32
@@ -401,6 +413,9 @@ impl VirtioVsock {
                         let _ = stream.set_nonblocking(true);
                         self.egress_conns.insert(hdr.src_port, (stream, *hdr));
                         self.egress_allowed.push(target);
+                        if let Some(c) = &self.egress_active {
+                            c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         // Acknowledge the established connection.
                         self.queue_reply(hdr, OP_CREDIT_UPDATE, &[]);
                     }
@@ -443,7 +458,11 @@ impl VirtioVsock {
             }
         }
         for port in &closed {
-            self.egress_conns.remove(port);
+            if self.egress_conns.remove(port).is_some()
+                && let Some(c) = &self.egress_active
+            {
+                c.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         for (hdr, bytes) in replies {
             self.queue_reply(&hdr, OP_RW, &bytes);

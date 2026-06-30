@@ -17,7 +17,7 @@
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::HvfError;
@@ -344,6 +344,11 @@ unsafe fn run(
         // loop ends.
         let done = Arc::new(AtomicBool::new(false));
         let done_w = done.clone();
+        // Open-egress-connection count, shared with the vsock device. The heartbeat
+        // only fires while this is non-zero — a guest with no open egress socket has
+        // no host push to wait for, so the host can idle instead of waking 200×/s.
+        let egress_active = Arc::new(AtomicUsize::new(0));
+        let egress_active_w = egress_active.clone();
         let handle = vcpu.exit_token();
         let watchdog = std::thread::spawn(move || {
             let step = Duration::from_millis(5);
@@ -361,7 +366,10 @@ unsafe fn run(
                     stop.store(true, Ordering::Relaxed); // timeout → end the run
                     break;
                 }
-                HvfHandle::force_exit(&[handle]); // heartbeat: wake the run loop
+                // Heartbeat only when there's host→guest egress to deliver.
+                if egress_active_w.load(Ordering::Relaxed) > 0 {
+                    HvfHandle::force_exit(&[handle]); // wake the run loop to drain
+                }
             }
             HvfHandle::force_exit(&[handle]); // final wake → loop sees stop, returns
         });
@@ -385,6 +393,7 @@ unsafe fn run(
         if let Some(v) = vsock_dev.as_mut() {
             v.capture_workload_exit(stop);
             v.set_egress_gate(egress);
+            v.set_egress_activity(egress_active.clone());
         }
 
         // Diagnostics gathered by the exception hook (HVC/PSCI + other traps).
