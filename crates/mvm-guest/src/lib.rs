@@ -6,6 +6,8 @@
 /// `ServiceResponse`. The workload→host call half of the broker path.
 pub mod broker_client;
 pub mod builder_agent;
+/// Builder-VM file transfer over vsock (the in-house VMM has no virtio-fs).
+pub mod builder_transfer;
 /// PTY-over-vsock interactive console — the single dev-only interactive path
 /// into a guest. Gated behind `dev-shell` so the relay symbols are absent from
 /// a sealed production agent (claim 15: no interactive access to a sealed prod
