@@ -98,18 +98,43 @@ The guest therefore has exactly one device class for talking to anything: vsock.
   it is held to the invariant on the workload path for uniformity, but its
   non-enforcement is already documented and it is never `auto_select`ed.
 
+## The end state: one vsock egress gateway, no network layer
+
+There is **no guest NIC and no host network-gateway layer at all**. A workload
+guest has no `eth0` and no IP stack beyond loopback (used only by the in-guest
+egress shim). Every outbound flow is the guest opening a **vsock** stream to a
+single host-side **egress gateway**, which is the sole chokepoint and does *both*
+jobs:
+
+- **Claim 10** — the allow/deny decision (`EgressGate` over `CanonicalEgress`).
+- **Claims 12/13** — for a bound-secret destination, the credential substitution
+  (the placeholder→real-credential rewrite) the terminator does today.
+
+This deletes the entire userspace network plane — **passt, gvproxy, the in-house
+rvproxy, and the nft/redirect terminator all go away**. They exist only to gateway
+a guest NIC's IP traffic; with no NIC there is nothing for them to do. "vsock ports"
+(`5251` exit, `5252` agent, `5253` substitution, a new egress port) are just how the
+single vsock transport multiplexes services — they are not network ports and not a
+NIC.
+
+**Protocol scope.** The gateway proxies **TCP**, and DNS is resolved host-side via
+the pin registry. UDP/QUIC (HTTP/3), ICMP, and raw sockets are *not* carried by a
+TCP-only gateway; if they come into scope they get an explicit datagram-over-vsock
+path in the gateway — never a NIC. For headless TCP/HTTP(S) workloads this is the
+full surface.
+
 ## Implementation / migration plan
 
-1. **HVF implements it natively (reference).** HVF has no NIC today, so it is the
-   clean slate: its egress is vsock-only from the first line — guest → vsock →
-   host gateway with claim-10 default-deny. This becomes the model the others
-   converge to (and is HVF's "workload parity" networking step).
-2. **Converge Firecracker / libkrun / vz** onto the same host vsock gateway; then
-   delete their virtio-net attach paths.
-3. **CI guard.** A lint/test asserts no workload guest config attaches a
-   virtio-net device (no `add_net` / tap / passt / gvproxy on the workload path),
-   so a regression that re-adds a guest NIC fails closed — the machine-checked
-   form of this invariant.
+1. **HVF implements it natively (reference).** HVF has no NIC, so it is the clean
+   slate: guest → vsock → host gateway with claim-10 default-deny, live-proven.
+2. **Converge Firecracker / libkrun / vz** onto the *same* single vsock gateway:
+   move claim-10 egress **and** claims-12/13 substitution onto the vsock egress
+   path, then delete the NIC attach **and** the whole gateway layer (passt /
+   gvproxy / rvproxy / terminator) for workload VMs. The builder VM (not a
+   workload) is out of scope and keeps its NIC.
+3. **CI guard.** A lint/test asserts no workload guest config attaches a virtio-net
+   device or a userspace gateway (no `add_net` / tap / passt / gvproxy / rvproxy on
+   the workload path), so a regression that re-adds the network plane fails closed.
 
 ## Status (HVF reference, live-proven on Apple silicon)
 
@@ -133,9 +158,15 @@ Step 1 is realized on HVF:
   drain the socket — confirmed by tracing.)
 - ✅ **CI guard** (`xtask check-vsock-only-egress`) keeps the vmm/HVF path NIC-free.
 
-Step 1 (HVF reference) is complete. Step 2 — converge Firecracker/libkrun/vz off
-their NICs onto this gateway, then widen the CI guard to them — remains; it is a
-larger, per-backend change to the production workload paths.
+Step 1 (HVF reference) is complete, and the shared host-side pieces for Step 2 are
+built + unit-tested: the transport-agnostic `EgressProxy` core, the in-guest
+SOCKS→vsock client (`mvm-egress-client`), and the async host egress server
+(`mvm_vm_host::egress_server`, reusing `EgressGate`). Step 2 — converge
+Firecracker/libkrun/vz onto the single vsock gateway (egress **+** substitution),
+delete the NIC + gateway layer, widen the CI guard — remains; it changes the
+claims-12/13 implementation (substitution moves onto the vsock path), so it is a
+security-touching, per-backend change. See
+`specs/notes/2026-06-29-adr100-step2.3-libkrun-cutover-plan.md`.
 
 ## Alternatives considered
 
@@ -146,3 +177,11 @@ larger, per-backend change to the production workload paths.
 - **A guest NIC routed to a host gateway (no in-guest policy, but a real NIC).**
   Still a NIC + IP stack in the guest and still per-VMM netdev wiring; gives up
   the single-seam and surface-reduction wins. Rejected.
+- **Keep the userspace network gateway (passt / gvproxy / rvproxy) and enforce on
+  it.** This is today's transition posture and what claims 10/12/13 are built on
+  for the NIC backends. Rejected as the end state: it keeps an IP stack in every
+  guest and a userspace network plane (three proxies + an nft/redirect terminator)
+  to audit, when vsock already gives one host↔guest channel. The gateway exists
+  only to service a guest NIC; removing the NIC removes the reason for it. Its one
+  real capability beyond a TCP vsock gateway is arbitrary-IP/UDP — addressed by a
+  datagram-over-vsock path if needed, not by retaining the network plane.
