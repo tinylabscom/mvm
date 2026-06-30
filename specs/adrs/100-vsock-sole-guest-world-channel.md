@@ -145,7 +145,23 @@ full surface.
    device or a userspace gateway (no `add_net` / tap / passt / gvproxy / rvproxy on
    the workload path), so a regression that re-adds the network plane fails closed.
 
-## Status (HVF reference, live-proven on Apple silicon)
+## Status
+
+Both **in-house VMM** paths now prove vsock-only egress live, reusing one
+`EgressProxy` + run loop + heartbeat:
+
+- **HVF / macOS / Apple silicon** — the reference (details below).
+- **KVM / x86_64 / Linux** — `KvmVm::boot_with_egress` puts the same `VirtioVsock` +
+  `EgressProxy` on a virtio-mmio window (no guest NIC). Live on real `/dev/kvm`: a
+  NIC-less guest (kernel built with `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES` +
+  `VIRTIO_VSOCKETS` `=y`) opened a vsock stream → host admitted it (claim-10,
+  `egress_allowed`) → opened the real TCP connection → the echo round-tripped back
+  (`reply n=4 data=ping`). KVM specifics vs HVF: the SIGUSR1 heartbeat breaks the
+  in-kernel HLT, and the device IRQ is **pulsed** (x86 IOAPIC edge delivery) so async
+  replies reach an idle guest. The third-party VMMs (libkrun/vz/Firecracker) are the
+  remaining convergence (Step 2 below); the in-house path is the destination runtime.
+
+### HVF reference (Apple silicon)
 
 Step 1 is realized on HVF:
 
