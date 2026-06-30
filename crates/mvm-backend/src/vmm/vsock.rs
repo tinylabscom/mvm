@@ -346,6 +346,12 @@ impl VirtioVsock {
         // so the guest agent's reply is addressed to our host-assigned src_port
         // (dst_port here). Route to the agent bridge, not the listener paths.
         if self.agent.is_agent_stream(hdr.dst_port) {
+            agent_dbg(&format!(
+                "guest op={} ({} bytes) for agent stream {}",
+                hdr.op,
+                payload.len(),
+                hdr.dst_port
+            ));
             match hdr.op {
                 OP_RESPONSE => self.agent.on_established(hdr.dst_port),
                 OP_RW => {
@@ -450,10 +456,22 @@ impl VirtioVsock {
     /// socket in [`handle_packet`](Self::handle_packet). Returns `Some(irq)` when a
     /// packet was delivered into a posted rx buffer.
     pub fn drain_agent(&mut self) -> Option<u32> {
-        for conn_id in self.agent.accept_new() {
+        let opened = self.agent.accept_new();
+        if !opened.is_empty() {
+            agent_dbg(&format!(
+                "accepted {} host conn(s) → OP_REQUEST to :{}",
+                opened.len(),
+                mvm_guest::vsock::GUEST_AGENT_PORT
+            ));
+        }
+        for conn_id in opened {
             self.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_REQUEST, &[]);
         }
         for (conn_id, bytes) in self.agent.drain_host() {
+            agent_dbg(&format!(
+                "host→guest {} bytes on stream {conn_id}",
+                bytes.len()
+            ));
             self.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_RW, &bytes);
         }
         if self.flush_rx() {
@@ -552,6 +570,21 @@ impl VirtioVsock {
     /// The device's SPI INTID — raised by the platform run loop on completion.
     pub fn irq(&self) -> u32 {
         self.irq
+    }
+}
+
+/// Debug trace for the host↔guest agent relay, gated on `MVM_HVF_AGENT_DEBUG` so
+/// it is silent in normal operation. Goes to stderr (the supervisor inherits it).
+fn agent_dbg(msg: &str) {
+    if let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(f, "[agent-bridge] {msg}");
+        }
     }
 }
 

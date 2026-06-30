@@ -66,6 +66,7 @@ impl AgentBridge {
         let l = UnixListener::bind(path)?;
         l.set_nonblocking(true)?;
         self.listener = Some(l);
+        dbg_log(&format!("bind ok at {} (listener stored)", path.display()));
         Ok(())
     }
 
@@ -86,6 +87,7 @@ impl AgentBridge {
     pub fn accept_new(&mut self) -> Vec<u32> {
         let mut opened = Vec::new();
         let Some(listener) = &self.listener else {
+            dbg_log("accept_new: no listener bound on this bridge");
             return opened;
         };
         loop {
@@ -170,6 +172,21 @@ impl AgentBridge {
             } else {
                 c.fetch_sub((-delta) as usize, Ordering::Relaxed);
             }
+        }
+    }
+}
+
+/// Debug trace gated on `MVM_HVF_AGENT_DEBUG` (a file path), mirroring the vsock
+/// device's `agent_dbg`. Silent in normal operation.
+fn dbg_log(msg: &str) {
+    if let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(f, "[agent-bridge] {msg}");
         }
     }
 }
