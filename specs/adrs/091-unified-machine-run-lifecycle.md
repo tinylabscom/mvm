@@ -81,6 +81,34 @@ host and survive the recreate, so recreating loses nothing that matters. The
 loud notice keeps an unintended clobber, e.g. a typo'd `--image`, observable;
 silently ignoring the new flags is still rejected.)*
 
+### 4. Production lifecycle is entrypoint-driven; the guest never idles to "stay up"
+
+A microVM always has an entrypoint (the user's workload), and it is preserved end
+to end: the CLI/SDK/flake declare it, mkGuest bakes it to `/etc/mvm/entrypoint`,
+and every backend — including the in-house HVF/KVM VMM — boots `init=/init`, the
+mkGuest PID-1 wrapper that runs the baked entrypoint. `init=/init` is never a
+bypass; the entrypoint survives the boot path unchanged.
+
+In **production** (a sealed image) the lifecycle is uniform and strict: PID 1 runs
+the entrypoint and the VM **shuts down with the entrypoint's exit code** (captured
+by `/init` and reported over the workload-exit vsock port). There is **no shell**
+(claim 15) and **no guest-side "stay up regardless" idle**. We deliberately reject
+the idle-keep-alive shape: a PID 1 that idles to hold a VM open after its workload
+exited is a resource-consuming zombie that *hides* the failure behind a
+still-"running" VM. A *persistent* production service stays up because its
+entrypoint is long-running; when that entrypoint exits, the VM exits with the code
+and **restart/persistence is the control plane's (mvmd) policy** — reconcile,
+reschedule, or keep-for-postmortem — never a guest behavior. This keeps the guest a
+pure workload runner and orchestration where it belongs.
+
+Consequently `-d`/`--detach` (and the SDK's `MachineRun::detach()`, the host-side
+counterpart added so SDK callers can request it too) are **host-side**: they
+detach the caller and make the machine addressable by name; they introduce **no**
+guest-side stay-up. The only stay-up conveniences — the *dev* image's idle PID 1
+and on-demand `machine shell`/`exec` PTY — are dev-only by construction and remain
+gated by claim 15 / `enforce_accessible_gate`. There is no production code path
+that adds a shell or an idle keep-alive, and none should be added.
+
 ## Consequences
 
 - The original command works in dev (`run -it --image <dev-image> -- /bin/sh`
