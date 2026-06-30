@@ -480,8 +480,8 @@ unsafe fn run(
         if let Some(vs) = &vsock_dev {
             r.vsock_received = vs.received.clone();
             r.workload_exit_code = vs.workload_exit_code;
-            r.egress_denied = vs.egress_denied.clone();
-            r.egress_allowed = vs.egress_allowed.clone();
+            r.egress_denied = vs.egress_denied().to_vec();
+            r.egress_allowed = vs.egress_allowed().to_vec();
         }
         Ok(r)
     }

@@ -52,13 +52,14 @@ const HOST_CID: u64 = 2;
 const GUEST_CID: u64 = 3;
 const HOST_BUF_ALLOC: u32 = 256 * 1024;
 
-// vsock packet ops.
+// vsock packet ops. A few are shared with the egress proxy (which builds reply
+// frames), so they are crate-visible.
 const OP_REQUEST: u16 = 1;
 const OP_RESPONSE: u16 = 2;
-const OP_RST: u16 = 3;
+pub(crate) const OP_RST: u16 = 3;
 const OP_SHUTDOWN: u16 = 4;
-const OP_RW: u16 = 5;
-const OP_CREDIT_UPDATE: u16 = 6;
+pub(crate) const OP_RW: u16 = 5;
+pub(crate) const OP_CREDIT_UPDATE: u16 = 6;
 const OP_CREDIT_REQUEST: u16 = 7;
 const TYPE_STREAM: u16 = 1;
 
@@ -73,9 +74,10 @@ struct Queue {
     last_avail: u16,
 }
 
-/// The vsock packet header (little-endian, 44 bytes).
+/// The vsock packet header (little-endian, 44 bytes). Crate-visible so the egress
+/// proxy can hold a stream's header opaquely to frame its replies.
 #[derive(Default, Clone, Copy)]
-struct Hdr {
+pub(crate) struct Hdr {
     src_cid: u64,
     dst_cid: u64,
     src_port: u32,
@@ -145,26 +147,10 @@ pub struct VirtioVsock {
     /// Set when the workload-exit code arrives, so the run loop's watchdog ends a
     /// transient VM (the same flag the SIGTERM/stop path uses).
     exit_stop: Option<&'static std::sync::atomic::AtomicBool>,
-    /// Host egress gateway policy (ADR-100). When set, a guest connect request to
-    /// the egress port is decided here (claim-10 default-deny) before any host
-    /// socket is opened. `None` ⇒ egress requests are refused outright.
-    egress: Option<super::egress_gate::EgressGate>,
-    /// Egress targets the gateway refused (claim-10) — for audit/verification.
-    pub egress_denied: Vec<String>,
-    /// Egress targets the gateway admitted (recorded when the host TCP connection
-    /// is established).
-    pub egress_allowed: Vec<String>,
-    /// Open host TCP connections for admitted egress streams, keyed by the guest's
-    /// vsock src_port. Value = the non-blocking socket + the guest packet header
-    /// (so [`Self::drain_egress`] can frame socket→guest bytes on the right stream).
-    /// The first frame on a stream is the connect target; later frames are written
-    /// to the socket and its replies are delivered asynchronously via `drain_egress`.
-    egress_conns: std::collections::HashMap<u32, (std::net::TcpStream, Hdr)>,
-    /// Count of open egress connections, published for the host run loop's
-    /// heartbeat: the loop only needs to wake an idle (WFI) guest to deliver host
-    /// pushes while at least one egress socket is open, so the heartbeat is gated
-    /// on this being non-zero (a guest with no egress lets the host idle).
-    egress_active: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    /// Host vsock egress gateway (ADR-100): policy + open connections. Drives the
+    /// claim-10 decision + the TCP proxy; the device only frames its replies onto
+    /// the rx queue.
+    egress: super::egress_proxy::EgressProxy,
 }
 
 impl VirtioVsock {
@@ -186,11 +172,7 @@ impl VirtioVsock {
             pending_rx: Vec::new(),
             workload_exit_code: None,
             exit_stop: None,
-            egress: None,
-            egress_denied: Vec::new(),
-            egress_allowed: Vec::new(),
-            egress_conns: std::collections::HashMap::new(),
-            egress_active: None,
+            egress: super::egress_proxy::EgressProxy::new(),
         }
     }
 
@@ -198,13 +180,23 @@ impl VirtioVsock {
     /// to the egress port is then decided against `gate` (claim-10 default-deny)
     /// before any host connection is opened.
     pub fn set_egress_gate(&mut self, gate: super::egress_gate::EgressGate) {
-        self.egress = Some(gate);
+        self.egress.set_gate(gate);
     }
 
     /// Share the open-egress-connection counter with the host run loop so its
     /// heartbeat can be gated on there being host→guest work to deliver.
     pub fn set_egress_activity(&mut self, counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) {
-        self.egress_active = Some(counter);
+        self.egress.set_activity(counter);
+    }
+
+    /// Egress targets the gateway refused (claim-10) — for audit / verification.
+    pub fn egress_denied(&self) -> &[String] {
+        &self.egress.denied
+    }
+
+    /// Egress targets the gateway admitted + connected — for audit / verification.
+    pub fn egress_allowed(&self) -> &[String] {
+        &self.egress.allowed
     }
 
     /// Capture the transient workload-exit code: a guest write of a 4-byte LE i32
@@ -364,72 +356,12 @@ impl VirtioVsock {
         }
     }
 
-    /// Host egress gateway over vsock (ADR-100). The first frame on an egress
-    /// stream is the connect target `"ip:port"`: it is decided against the gateway
-    /// policy (claim-10 default-deny) and, if admitted, a host TCP connection is
-    /// opened (non-blocking). Subsequent frames are written to that socket; its
-    /// replies / streamed bytes are delivered back to the guest asynchronously in
-    /// [`Self::drain_egress`]. A refused target never reaches the network.
+    /// Frame an inbound egress request to the [`EgressProxy`] and queue whatever
+    /// control replies it returns (ADR-100). The decision + TCP proxy live in the
+    /// proxy; the device only owns the rx framing.
     fn handle_egress_request(&mut self, hdr: &Hdr, payload: &[u8]) {
-        use std::io::Write;
-
-        use super::egress_gate::EgressVerdict;
-
-        // Established stream → write this frame to the host socket (replies arrive
-        // asynchronously via `drain_egress`, so streaming / server-push works).
-        if let Some((stream, _)) = self.egress_conns.get_mut(&hdr.src_port) {
-            let mut off = 0;
-            let mut spins = 0u32;
-            while off < payload.len() {
-                match stream.write(&payload[off..]) {
-                    Ok(0) => break,
-                    Ok(n) => off += n,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && spins < 10_000 => {
-                        spins += 1;
-                        std::thread::yield_now();
-                    }
-                    Err(_) => break,
-                }
-            }
-            self.fwd_cnt = self.fwd_cnt.wrapping_add(payload.len() as u32);
-            return;
-        }
-
-        // First frame = the connect target.
-        let target = String::from_utf8_lossy(payload).trim().to_string();
-        let verdict = match &self.egress {
-            Some(gate) => gate.decide_request(&target),
-            None => EgressVerdict::Deny, // fail closed when no gateway is installed
-        };
-        match verdict {
-            EgressVerdict::Allow { ip, port } => {
-                match std::net::TcpStream::connect_timeout(
-                    &std::net::SocketAddr::new(ip, port),
-                    std::time::Duration::from_secs(2),
-                ) {
-                    Ok(stream) => {
-                        // Non-blocking so `drain_egress` can read replies without
-                        // stalling the run loop.
-                        let _ = stream.set_nonblocking(true);
-                        self.egress_conns.insert(hdr.src_port, (stream, *hdr));
-                        self.egress_allowed.push(target);
-                        if let Some(c) = &self.egress_active {
-                            c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        // Acknowledge the established connection.
-                        self.queue_reply(hdr, OP_CREDIT_UPDATE, &[]);
-                    }
-                    Err(_) => {
-                        self.egress_denied
-                            .push(format!("{target} (connect failed)"));
-                        self.queue_reply(hdr, OP_RST, &[]);
-                    }
-                }
-            }
-            EgressVerdict::Deny | EgressVerdict::Malformed => {
-                self.egress_denied.push(target);
-                self.queue_reply(hdr, OP_RST, &[]);
-            }
+        for (h, op, bytes) in self.egress.handle_request(hdr.src_port, *hdr, payload) {
+            self.queue_reply(&h, op, &bytes);
         }
     }
 
@@ -438,34 +370,11 @@ impl VirtioVsock {
     /// replies + streamed bytes reach the guest even when it is idle in WFI.
     /// Returns `Some(irq)` if a reply was delivered into a posted rx buffer.
     pub fn drain_egress(&mut self) -> Option<u32> {
-        use std::io::Read;
-
-        if self.egress_conns.is_empty() {
+        if !self.egress.has_active() {
             return None;
         }
-        let mut replies: Vec<(Hdr, Vec<u8>)> = Vec::new();
-        let mut closed: Vec<u32> = Vec::new();
-        for (port, (stream, hdr)) in self.egress_conns.iter_mut() {
-            let mut buf = vec![0u8; 16 * 1024];
-            match stream.read(&mut buf) {
-                Ok(0) => closed.push(*port), // peer EOF
-                Ok(n) => {
-                    buf.truncate(n);
-                    replies.push((*hdr, buf));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(_) => closed.push(*port),
-            }
-        }
-        for port in &closed {
-            if self.egress_conns.remove(port).is_some()
-                && let Some(c) = &self.egress_active
-            {
-                c.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-        for (hdr, bytes) in replies {
-            self.queue_reply(&hdr, OP_RW, &bytes);
+        for (h, op, bytes) in self.egress.drain() {
+            self.queue_reply(&h, op, &bytes);
         }
         // Always attempt to flush: a reply queued on an earlier tick (before the
         // guest posted an rx buffer) must still deliver now. `flush_rx` is a cheap

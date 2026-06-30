@@ -12,6 +12,7 @@
 
 pub mod device;
 pub mod egress_gate;
+pub(crate) mod egress_proxy;
 pub mod fdt;
 pub mod guest_mem;
 pub mod hv;
