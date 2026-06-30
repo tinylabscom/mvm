@@ -108,19 +108,21 @@ fn main() {
         eprintln!("egress allowed: {:?}", result.egress_allowed);
         eprintln!("egress denied:  {:?}", result.egress_denied);
         eprintln!("workload exit:  {:?}", result.workload_exit_code);
-        let reply = result.console.windows(4).any(|w| w == b"ping")
-            || result
-                .egress_allowed
-                .iter()
-                .any(|t| Some(t) == allow.as_ref());
-        if reply {
+        // The proof is host-side truth: the gate admitted + opened the target
+        // (egress_allowed), not a console substring. A clean round-trip also
+        // reports workload_exit == Some(0) from the guest.
+        let proxied = result
+            .egress_allowed
+            .iter()
+            .any(|t| Some(t) == allow.as_ref());
+        if proxied {
             eprintln!(
                 "PROOF: x86_64 KVM guest reached {} over vsock with NO NIC — claim-10 \
                  gate admitted + proxied (same EgressProxy as HVF).",
                 allow.as_deref().unwrap_or("?")
             );
         } else {
-            eprintln!("no proxied egress observed");
+            eprintln!("no proxied egress observed (egress_allowed empty)");
             std::process::exit(1);
         }
     }
