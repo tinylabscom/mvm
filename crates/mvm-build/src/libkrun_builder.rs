@@ -1641,35 +1641,85 @@ pub(crate) fn unique_job_id() -> String {
 /// resolver in `mvm-backend::libkrun::resolve_supervisor_path`
 /// (kept local rather than re-exported to keep the dep graph
 /// flat). Order: env override → next to current_exe → PATH.
+/// Where [`resolve_supervisor_path`] found the supervisor binary. The source
+/// matters because a PATH hit is an installed copy (`cargo install`) that a
+/// source-checkout `cargo build` never refreshes — so it can silently lag the
+/// driver and reintroduce stale-supervisor failures (gvproxy-orphan teardown
+/// noise, `deny_unknown_fields` rejects of newer `SupervisorConfig` fields).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorSource {
+    EnvOverride,
+    NextToExe,
+    Path,
+}
+
+/// Pure precedence over the three already-probed candidates: explicit env
+/// override > a binary next to the running exe (a fresh local build) > whatever
+/// is on `$PATH`. Each arg is `Some` only when that candidate exists. Returns
+/// the chosen path and where it came from, or `None` when nothing resolved.
+/// Split out from [`resolve_supervisor_path`] so the precedence — and the
+/// "fell back to PATH" signal that drives the staleness warning — is unit
+/// testable without touching the process environment.
+fn choose_supervisor(
+    env_override: Option<PathBuf>,
+    next_to_exe: Option<PathBuf>,
+    on_path: Option<PathBuf>,
+) -> Option<(PathBuf, SupervisorSource)> {
+    if let Some(p) = env_override {
+        return Some((p, SupervisorSource::EnvOverride));
+    }
+    if let Some(p) = next_to_exe {
+        return Some((p, SupervisorSource::NextToExe));
+    }
+    on_path.map(|p| (p, SupervisorSource::Path))
+}
+
 fn resolve_supervisor_path() -> Result<PathBuf, BuilderVmError> {
-    if let Some(p) = std::env::var_os("MVM_LIBKRUN_SUPERVISOR_PATH") {
-        let path = PathBuf::from(p);
-        if path.is_file() {
-            return Ok(path);
+    // An explicit override that points at a non-file is a hard error, not a
+    // silent fall-through to a different binary — surface the operator's typo.
+    let env_override = match std::env::var_os("MVM_LIBKRUN_SUPERVISOR_PATH") {
+        Some(p) => {
+            let path = PathBuf::from(p);
+            if !path.is_file() {
+                return Err(BuilderVmError::LibkrunUnavailable(format!(
+                    "MVM_LIBKRUN_SUPERVISOR_PATH points at {} which is not a file",
+                    path.display()
+                )));
+            }
+            Some(path)
         }
-        return Err(BuilderVmError::LibkrunUnavailable(format!(
-            "MVM_LIBKRUN_SUPERVISOR_PATH points at {} which is not a file",
-            path.display()
-        )));
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join("mvm-libkrun-supervisor");
-        if candidate.is_file() {
-            return Ok(candidate);
+        None => None,
+    };
+    let next_to_exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("mvm-libkrun-supervisor")))
+        .filter(|candidate| candidate.is_file());
+    let on_path = which::which("mvm-libkrun-supervisor").ok();
+
+    match choose_supervisor(env_override, next_to_exe, on_path) {
+        Some((path, SupervisorSource::Path)) => {
+            // The stale-install trap: a `cargo install`ed copy on $PATH is used
+            // because no fresh binary sits next to the exe. Source checkouts
+            // never rebuild it, so it drifts from the driver. Warn loudly with
+            // the one-line fix rather than booting a mismatched supervisor.
+            tracing::warn!(
+                supervisor = %path.display(),
+                "using mvm-libkrun-supervisor from $PATH — a source checkout's `cargo build` \
+                 does not refresh this installed copy, so it can lag the driver and reintroduce \
+                 stale-supervisor failures. Rebuild a fresh one next to the exe with \
+                 `cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys`."
+            );
+            Ok(path)
         }
+        Some((path, _)) => Ok(path),
+        None => Err(BuilderVmError::LibkrunUnavailable(
+            "mvm-libkrun-supervisor binary not found. \
+             Looked for: $MVM_LIBKRUN_SUPERVISOR_PATH, alongside the current exe, and on $PATH. \
+             Build it with `cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys` \
+             or set MVM_LIBKRUN_SUPERVISOR_PATH=/abs/path/to/the/binary."
+                .to_string(),
+        )),
     }
-    if let Ok(path) = which::which("mvm-libkrun-supervisor") {
-        return Ok(path);
-    }
-    Err(BuilderVmError::LibkrunUnavailable(
-        "mvm-libkrun-supervisor binary not found. \
-         Looked for: $MVM_LIBKRUN_SUPERVISOR_PATH, alongside the current exe, and on $PATH. \
-         Install via `cargo install --path crates/mvm-libkrun --features libkrun-sys` \
-         or set MVM_LIBKRUN_SUPERVISOR_PATH=/abs/path/to/the/binary."
-            .to_string(),
-    ))
 }
 
 /// Spawn `mvm-libkrun-supervisor`, pipe a `SupervisorConfig`
@@ -3748,5 +3798,30 @@ mod tests {
         assert!(!vm.verbose, "default is quiet");
         let vm = LibkrunBuilderVm::default().with_verbose(true);
         assert!(vm.verbose, "with_verbose(true) flips the flag");
+    }
+
+    #[test]
+    fn choose_supervisor_prefers_env_then_next_to_exe_then_path() {
+        let env = PathBuf::from("/env/mvm-libkrun-supervisor");
+        let exe = PathBuf::from("/exe/mvm-libkrun-supervisor");
+        let path = PathBuf::from("/usr/bin/mvm-libkrun-supervisor");
+
+        // Env override wins over everything.
+        assert_eq!(
+            choose_supervisor(Some(env.clone()), Some(exe.clone()), Some(path.clone())),
+            Some((env.clone(), SupervisorSource::EnvOverride))
+        );
+        // Next-to-exe wins over PATH when no env override.
+        assert_eq!(
+            choose_supervisor(None, Some(exe.clone()), Some(path.clone())),
+            Some((exe, SupervisorSource::NextToExe))
+        );
+        // PATH is the last resort — and is flagged as such so the caller can warn.
+        assert_eq!(
+            choose_supervisor(None, None, Some(path.clone())),
+            Some((path, SupervisorSource::Path))
+        );
+        // Nothing found.
+        assert_eq!(choose_supervisor(None, None, None), None);
     }
 }
