@@ -100,11 +100,10 @@ The guest therefore has exactly one device class for talking to anything: vsock.
 
 ## The end state: one vsock egress gateway, no network layer
 
-There is **no guest NIC and no host network-gateway layer at all**. A workload
-guest has no `eth0` and no IP stack beyond loopback (used only by the in-guest
-egress shim). Every outbound flow is the guest opening a **vsock** stream to a
-single host-side **egress gateway**, which is the sole chokepoint and does *both*
-jobs:
+There is **no guest NIC and no host network-gateway layer at all** — no `eth0`, no
+bridged/external interface, no userspace network gateway (passt/gvproxy/rvproxy).
+Every outbound flow is the guest opening a **vsock** stream to a single host-side
+**egress gateway**, which is the sole chokepoint and does *both* jobs:
 
 - **Claim 10** — the allow/deny decision (`EgressGate` over `CanonicalEgress`).
 - **Claims 12/13** — for a bound-secret destination, the credential substitution
@@ -132,6 +131,62 @@ TCP-only gateway; if they come into scope they get an explicit datagram-over-vso
 path in the gateway — never a NIC. For headless TCP/HTTP(S) workloads this is the
 full surface.
 
+## Two planes over vsock: control + transparent data
+
+A workload guest's vsock carries two distinct things, both already per-VM and
+policy-gated:
+
+**Control plane (commands).** Multiplexed by well-known vsock port:
+- `5252` **guest agent** — host→guest `GuestRequest` control: `ProtocolHello`
+  (capability negotiation), `Ping`, `WorkerStatus`, `SleepPrep`/`Wake` (warm-pool
+  lifecycle), `PrimedStatus` (warm-snapshot barrier), `CheckpointIntegrations`,
+  `ProbeStatus`, `Exec` (dev-only), + the agent RPC family.
+- `5300` **broker** — workload→host `ServiceCall`, binding-gated + audited (claims
+  12/13): `host.secrets.v1` (destination/time-bound creds — no raw secret crosses),
+  `host.audit.v1`, `host.time.v1`, `host.cost.v1`.
+- `5251` workload-exit, `5253` egress gateway, `10000+` port-forward, `20000+`
+  console, `5301` ssh-agent (dev).
+New control surface = a new `host.<svc>.v1` broker method or a new `GuestRequest`;
+both ride the existing gated/audited paths.
+
+**Data plane (egress) — must be transparent.** The requirement: an unmodified
+workload doing an ordinary `connect()` (incl. HTTP/HTTPS) reaches the network over
+vsock with **zero awareness** that there is no NIC. Two levels:
+
+- *Opt-in* (shipped, `mvm-egress-client`): `ALL_PROXY=socks5h://127.0.0.1:<port>` →
+  SOCKS→vsock. Loopback-only, no IP stack — but anything that ignores proxy env or
+  speaks non-HTTP TCP bypasses it. Insufficient for full transparency.
+- *Full transparency* (to build): intercept **all** outbound TCP regardless of the
+  app, in the guest, and funnel it to the egress gateway. The **host side is
+  unchanged** — `EgressProxy` already takes `(target, byte-stream)` → claim-10
+  decide → proxy. Two guest-side mechanisms:
+  - **(a) TUN + userspace netstack (recommended).** A guest TUN captures egress IP
+    packets; an in-guest userspace TCP/IP stack (e.g. `smoltcp`) terminates each TCP
+    flow, extracts `(dst, stream)`, and opens a vsock egress stream with that target.
+    Pure userspace, no netfilter; the gvisor-tap-vsock pattern funneled to vsock.
+  - **(b) netfilter REDIRECT + transparent proxy.** A default route into a dummy
+    interface + `nft` REDIRECT of all OUTPUT TCP to a local transparent proxy that
+    reads `SO_ORIGINAL_DST` → vsock. This is exactly the existing rvproxy/terminator
+    mechanism, fed locally instead of from a NIC and forwarding over vsock instead
+    of gvproxy.
+
+  HTTPS is just TCP here — the encrypted bytes are forwarded; no TLS termination for
+  plain egress. (TLS-*terminating* credential substitution is the separate
+  claims-12/13 behavior, only for explicitly bound-secret hosts.)
+
+**Refinement to "no IP stack beyond loopback".** Full transparency requires the
+guest IP stack to be *present* (loopback + a TUN/dummy route so `connect()` resolves
+locally) — but with **no egress path except vsock**. The invariant is precisely *no
+external NIC and no userspace network gateway*; an in-guest interception layer that
+terminates traffic and funnels it to vsock is the allowed mechanism, not a violation.
+
+**DNS.** Names must resolve without a NIC: either the in-guest resolver
+(`mvm-addon-dns`) answers from host-side resolution / the claim-10 pin registry, or
+DNS rides a host resolver over vsock (DNS-over-vsock). UDP/53 needs one of these
+paths. **UDP/QUIC** egress (HTTP/3) is out of scope until the gateway grows a
+datagram-over-vsock channel; transparent interception should fail closed (or fall
+back to TCP) for it rather than leak to a NIC.
+
 ## Implementation / migration plan
 
 1. **HVF implements it natively (reference).** HVF has no NIC, so it is the clean
@@ -144,6 +199,12 @@ full surface.
 3. **CI guard.** A lint/test asserts no workload guest config attaches a virtio-net
    device or a userspace gateway (no `add_net` / tap / passt / gvproxy / rvproxy on
    the workload path), so a regression that re-adds the network plane fails closed.
+4. **Transparent guest interception layer** (built once, used by every backend): the
+   in-guest TUN + userspace netstack (recommended) or REDIRECT-proxy that turns any
+   workload `connect()` into a vsock egress stream — so unmodified HTTP/HTTPS/TCP
+   workloads ride vsock with no awareness. Plus DNS resolution without a NIC (see
+   "Two planes" above). The opt-in `mvm-egress-client` (SOCKS→vsock) is the bridge
+   until this lands.
 
 ## Status
 
@@ -210,3 +271,12 @@ security-touching, per-backend change. See
   only to service a guest NIC; removing the NIC removes the reason for it. Its one
   real capability beyond a TCP vsock gateway is arbitrary-IP/UDP — addressed by a
   datagram-over-vsock path if needed, not by retaining the network plane.
+- **`LD_PRELOAD` / syscall-shim `connect()` interception for transparency.**
+  Rejected: it only covers dynamically-linked libc callers — static binaries, Go's
+  own syscalls, and anything not going through libc bypass it, so it can't be the
+  enforcement boundary. The TUN+netstack (or netfilter REDIRECT) interception works
+  for *any* TCP regardless of language/linkage, below the application.
+- **Proxy-env only (`ALL_PROXY` → SOCKS→vsock) as the sole egress path.** Shipped as
+  the opt-in bridge (`mvm-egress-client`), but rejected as the end state: it relies
+  on the workload honoring proxy env and speaking HTTP-ish protocols. Full
+  transparency needs interception below the app.
