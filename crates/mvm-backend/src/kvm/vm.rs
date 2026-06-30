@@ -490,7 +490,20 @@ impl HypervisorVm for KvmVm {
     }
 
     fn set_irq(&self, intid: u32, level: bool) -> Result<(), KvmError> {
-        self.vm.set_irq_line(intid, level)?;
+        if level {
+            // x86 IOAPIC delivers on the low→high edge. The device model only ever
+            // asserts (the run loop raises an IRQ when a device has work), and it
+            // does not lower the line, so a second assert on an already-high line
+            // produces no new edge — a later async notification (e.g. an egress
+            // reply drained on a heartbeat tick, after the guest's recv has
+            // blocked) would be lost. Pulse instead: assert then deassert, so every
+            // notification is a fresh edge. The guest's own connect-time IRQ (raised
+            // during its notify) is unaffected.
+            self.vm.set_irq_line(intid, true)?;
+            self.vm.set_irq_line(intid, false)?;
+        } else {
+            self.vm.set_irq_line(intid, false)?;
+        }
         Ok(())
     }
 }
