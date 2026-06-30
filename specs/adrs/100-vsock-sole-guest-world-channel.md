@@ -149,43 +149,95 @@ policy-gated:
 New control surface = a new `host.<svc>.v1` broker method or a new `GuestRequest`;
 both ride the existing gated/audited paths.
 
-**Data plane (egress) — must be transparent.** The requirement: an unmodified
-workload doing an ordinary `connect()` (incl. HTTP/HTTPS) reaches the network over
-vsock with **zero awareness** that there is no NIC. Two levels:
+**Data plane (egress) — vsock is the *only* primitive (hard invariant).** This is
+the security design, not merely minimalism: a workload guest has **no NIC, no IP
+routing, no userspace network gateway (no gvproxy/passt/rvproxy), no TUN, no
+netfilter.** Its sole means of reaching anything off-guest is an `AF_VSOCK` stream to
+the host egress gateway. There is no network in the guest to attack, misconfigure, or
+escape onto; a direct `connect(realIP)` has nowhere to route, so egress is *only*
+possible by asking the host. The reach the guest has is exactly what the host's
+policy grants — enforced by **absence of any other path**, not by a firewall the
+guest could fight.
 
-- *Opt-in* (shipped, `mvm-egress-client`): `ALL_PROXY=socks5h://127.0.0.1:<port>` →
-  SOCKS→vsock. Loopback-only, no IP stack — but anything that ignores proxy env or
-  speaks non-HTTP TCP bypasses it. Insufficient for full transparency.
-- *Full transparency* (to build): intercept **all** outbound TCP regardless of the
-  app, in the guest, and funnel it to the egress gateway. The **host side is
-  unchanged** — `EgressProxy` already takes `(target, byte-stream)` → claim-10
-  decide → proxy. Two guest-side mechanisms:
-  - **(a) TUN + userspace netstack (recommended).** A guest TUN captures egress IP
-    packets; an in-guest userspace TCP/IP stack (e.g. `smoltcp`) terminates each TCP
-    flow, extracts `(dst, stream)`, and opens a vsock egress stream with that target.
-    Pure userspace, no netfilter; the gvisor-tap-vsock pattern funneled to vsock.
-  - **(b) netfilter REDIRECT + transparent proxy.** A default route into a dummy
-    interface + `nft` REDIRECT of all OUTPUT TCP to a local transparent proxy that
-    reads `SO_ORIGINAL_DST` → vsock. This is exactly the existing rvproxy/terminator
-    mechanism, fed locally instead of from a NIC and forwarding over vsock instead
-    of gvproxy.
+How a workload's traffic gets onto vsock without an in-guest IP stack:
 
-  HTTPS is just TCP here — the encrypted bytes are forwarded; no TLS termination for
-  plain egress. (TLS-*terminating* credential substitution is the separate
-  claims-12/13 behavior, only for explicitly bound-secret hosts.)
+- **Runtime/SDK-native (the production path).** The mvm runtime serves the workload's
+  egress through the in-guest `mvm-egress-client` (loopback SOCKS5 → vsock) and sets
+  `ALL_PROXY=socks5h://127.0.0.1:<port>`. Standard HTTP clients (curl, requests,
+  fetch, Go `net/http` — all honor proxy env) thus reach the network transparently
+  with **only loopback present** — no NIC, no route, no netfilter, no IP stack beyond
+  `lo`. The mvm SDK wires this automatically, so SDK workloads are transparent. With
+  `socks5h`, the client sends the **hostname**, not a resolved IP — so DNS happens
+  *host-side* (see below); the guest never resolves and never needs a resolver.
+- **AF_VSOCK-native (the purest variant).** A workload (or the runtime) speaks the
+  vsock egress protocol directly — zero IP stack at all, not even loopback. Used where
+  the runtime fully owns the socket layer.
 
-**Refinement to "no IP stack beyond loopback".** Full transparency requires the
-guest IP stack to be *present* (loopback + a TUN/dummy route so `connect()` resolves
-locally) — but with **no egress path except vsock**. The invariant is precisely *no
-external NIC and no userspace network gateway*; an in-guest interception layer that
-terminates traffic and funnels it to vsock is the allowed mechanism, not a violation.
+The **host side is unchanged in shape**: the egress gateway takes `(target,
+byte-stream)` → claim-10 decide → proxy. HTTPS is forwarded TCP bytes (no
+termination); TLS-terminating credential substitution is the separate claims-12/13
+behavior, only for bound-secret hosts.
 
-**DNS.** Names must resolve without a NIC: either the in-guest resolver
-(`mvm-addon-dns`) answers from host-side resolution / the claim-10 pin registry, or
-DNS rides a host resolver over vsock (DNS-over-vsock). UDP/53 needs one of these
-paths. **UDP/QUIC** egress (HTTP/3) is out of scope until the gateway grows a
-datagram-over-vsock channel; transparent interception should fail closed (or fall
-back to TCP) for it rather than leak to a NIC.
+**DNS = host-side resolution over vsock (no guest resolver).** Because the client
+uses `socks5h`, the guest sends `"hostname:port"` over vsock and the **host** gateway
+resolves the name — checking it against the claim-10 host-allowlist / DNS pin registry
+*before* connecting, and connecting to the pinned IP. This is "DNS-over-vsock" in the
+literal sense: the name travels the vsock and the trusted host does the lookup +
+policy check. No `mvm-addon-dns`, no in-guest UDP/53. (Policies are naturally
+host-based — "allow `api.stripe.com:443`" — so host-side name resolution *is* the
+enforcement point.)
+
+**Explicitly out of scope (deliberate trade):**
+- *Full transparency for arbitrary raw `AF_INET` binaries.* A static binary that
+  ignores proxy env and calls `connect(realIP)` directly cannot be intercepted
+  without an in-guest IP stack (TUN/netfilter) — which this design **rejects** (it
+  would re-introduce "a network in the guest"). Such workloads must use the
+  SDK/runtime egress. We accept a strictly smaller, unbypassable guest over
+  capturing raw IP egress.
+- *UDP/QUIC (HTTP/3), ICMP, raw sockets.* Not carried by a TCP vsock gateway; they'd
+  need a datagram-over-vsock channel, never a NIC.
+
+The `spikes/transparent-egress/` (netfilter REDIRECT) and the TUN+`smoltcp` sketch
+are **illustrative of full transparency only — not the production direction**: both
+require an in-guest IP stack, which the hard invariant above forbids.
+
+## Security model + mvmd integration
+
+**The host egress gateway is the trust boundary. Everything in the guest is
+untrusted.** The guest can express *intent* ("connect me to `host:port`, here are
+the bytes"); it cannot *act*. The host makes the real connection, on the guest's
+behalf, only if the admitted policy permits it. Concretely:
+
+- **Guest-side code is untrusted plumbing.** `mvm-egress-client`, `ALL_PROXY`, and
+  the (rejected-for-production) TUN/netfilter spikes are conveniences for getting a
+  workload's bytes onto vsock. None of them enforces anything — a fully compromised
+  guest (root) can tamper with all of it. Security does **not** depend on them.
+- **The boundary is the host gateway**, outside the guest's control: it makes the
+  claim-10 decision, resolves names against the pin registry, opens the socket, and
+  for bound-secret destinations performs the claims-12/13 substitution (the guest
+  never receives raw secrets). A compromised guest still reaches only what policy
+  admits, because it has no other path out and the host is the one dialing.
+- **Confined transport.** vsock is host↔guest point-to-point (guest can only address
+  CID 2); no NIC means no L2/L3, no lateral movement to other VMs, no raw-packet
+  exfil. The attack surface collapses to "the messages the guest sends the gateway",
+  which are parsed by a fuzzed parser (claim 5) and policy-checked.
+
+**mvmd (the orchestration layer) owns policy; the per-VM host gateway enforces it.**
+This is the control-plane / data-plane split:
+
+- **mvmd = control plane.** It owns tenants/pools and authors each workload's
+  `NetworkPolicy` (the claim-10 allow-list of `host:port` it may reach, the
+  bound-secret → destination bindings), signs it into the `ExecutionPlan`, and
+  schedules the microVM.
+- **host gateway = data-plane enforcement.** Per VM, it builds its `EgressGate` from
+  the admitted plan's `NetworkPolicy`, then decides every vsock egress request
+  (default-deny), resolves names host-side against the pins, and emits chain-signed
+  audit entries. The same plan drives substitution.
+
+So the fleet decides *what each microVM is permitted to reach*; the per-VM gateway
+enforces it on every request, with no egress path the guest can take around it. This
+is capability-based egress at fleet scale, and it is exactly the property mvmd needs
+to safely run untrusted multi-tenant workloads.
 
 ## Implementation / migration plan
 
@@ -199,16 +251,15 @@ back to TCP) for it rather than leak to a NIC.
 3. **CI guard.** A lint/test asserts no workload guest config attaches a virtio-net
    device or a userspace gateway (no `add_net` / tap / passt / gvproxy / rvproxy on
    the workload path), so a regression that re-adds the network plane fails closed.
-4. **Transparent guest interception layer** (built once, used by every backend): the
-   in-guest TUN + userspace netstack (recommended) or REDIRECT-proxy that turns any
-   workload `connect()` into a vsock egress stream — so unmodified HTTP/HTTPS/TCP
-   workloads ride vsock with no awareness. Plus DNS resolution without a NIC (see
-   "Two planes" above). The opt-in `mvm-egress-client` (SOCKS→vsock) is the bridge
-   until this lands. **Prototyped + live-proven** via mechanism (b) (REDIRECT proxy)
-   in `spikes/transparent-egress/`: an unmodified plain `connect()` (no proxy env)
-   in a NIC-less guest round-tripped through the host gateway on `/dev/kvm`.
-   Productionizing = a guest helper (and/or the TUN+netstack variant) +
-   DNS-over-vsock + the UDP decision.
+4. **Guest egress shim = `mvm-egress-client` (loopback SOCKS5 → vsock), the runtime
+   sets `ALL_PROXY`.** No in-guest IP stack beyond `lo`; no TUN, no netfilter. The
+   `spikes/transparent-egress/` REDIRECT prototype and the TUN+`smoltcp` sketch are
+   **illustrative of full transparency only and are not productionized** — they need
+   an in-guest IP stack, which the hard invariant forbids.
+5. **DNS-over-vsock = host-side name resolution in the gateway.** Extend `EgressGate`
+   to accept a `"hostname:port"` target (sent by the `socks5h` client), resolve it
+   against the claim-10 host-allowlist / DNS pin registry, and connect the pinned IP.
+   No guest resolver, no UDP/53.
 
 ## Status
 
@@ -275,12 +326,19 @@ security-touching, per-backend change. See
   only to service a guest NIC; removing the NIC removes the reason for it. Its one
   real capability beyond a TCP vsock gateway is arbitrary-IP/UDP — addressed by a
   datagram-over-vsock path if needed, not by retaining the network plane.
-- **`LD_PRELOAD` / syscall-shim `connect()` interception for transparency.**
-  Rejected: it only covers dynamically-linked libc callers — static binaries, Go's
-  own syscalls, and anything not going through libc bypass it, so it can't be the
-  enforcement boundary. The TUN+netstack (or netfilter REDIRECT) interception works
-  for *any* TCP regardless of language/linkage, below the application.
-- **Proxy-env only (`ALL_PROXY` → SOCKS→vsock) as the sole egress path.** Shipped as
-  the opt-in bridge (`mvm-egress-client`), but rejected as the end state: it relies
-  on the workload honoring proxy env and speaking HTTP-ish protocols. Full
-  transparency needs interception below the app.
+- **In-guest TUN + userspace netstack (`smoltcp`), or netfilter REDIRECT, for full
+  transparency.** Both work (the REDIRECT variant is live-proven in
+  `spikes/transparent-egress/`) and capture *any* raw `connect()`. **Rejected for
+  production**: both require an in-guest IP stack (TUN/netfilter/routing) — i.e. "a
+  network in the guest" — which is exactly the surface this ADR removes. They stay as
+  illustrative spikes. (smoltcp's license is fine — `0BSD`, the most permissive there
+  is, already on `deny.toml`'s allow-list — so the rejection is about guest surface,
+  not licensing.)
+- **`LD_PRELOAD` / syscall-shim `connect()` interception.** Rejected: covers only
+  dynamically-linked libc callers (static/Go/non-libc bypass it) and isn't a
+  boundary anyway.
+- **Proxy-env / SDK-native (`ALL_PROXY` → `mvm-egress-client` → vsock) — CHOSEN.**
+  This is the production path: loopback-only (no NIC/route/netfilter/IP-stack), the
+  runtime sets `ALL_PROXY`, and `socks5h` pushes DNS to the host. The accepted cost
+  is that a raw-`AF_INET` binary ignoring proxy env has no egress (no route) and must
+  use the SDK/runtime — a deliberate trade for an unbypassable, network-free guest.
