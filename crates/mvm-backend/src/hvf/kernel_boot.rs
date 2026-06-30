@@ -370,6 +370,11 @@ unsafe fn run(
         // run-to-exit VM leaves this unset and keeps the egress-gated heartbeat.)
         let agent_socket = std::env::var("MVM_HVF_AGENT_SOCKET").ok();
         let agent_bound = agent_socket.is_some();
+        // Per-VM substitution-endpoint socket (ADR-101). When wired, EGRESS_PORT
+        // carries the WireRequest substitution protocol to the endpoint (claims
+        // 10/12/13). Dev/live hook today, mirroring the agent socket; the
+        // productionized path threads it through the supervisor config.
+        let substitution_socket = std::env::var("MVM_HVF_SUBSTITUTION_SOCKET").ok();
         let handle = vcpu.exit_token();
         let watchdog = std::thread::spawn(move || {
             let step = Duration::from_millis(5);
@@ -423,6 +428,13 @@ unsafe fn run(
                 if let Err(e) = v.set_agent_socket(std::path::Path::new(path)) {
                     eprintln!("mvm-hvf: agent socket bind failed at {path}: {e}");
                 }
+            }
+            // Substitution gateway (ADR-101): route EGRESS_PORT to the per-VM
+            // endpoint. Shares the egress heartbeat counter so an in-flight
+            // WireRequest awaiting its reply keeps the run loop polling.
+            if let Some(path) = &substitution_socket {
+                v.set_substitution_activity(egress_active.clone());
+                v.set_substitution_endpoint(std::path::Path::new(path));
             }
         }
 

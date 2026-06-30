@@ -19,5 +19,6 @@ pub mod guest_mem;
 pub mod hv;
 pub mod kernel_image;
 pub mod run;
+pub(crate) mod substitution_bridge;
 pub mod virtio;
 pub mod vsock;
