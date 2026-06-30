@@ -52,7 +52,7 @@ use crate::substitution_spawn::EndpointGuard;
 /// Spawn the per-VM substitution endpoint when the admitted plan carries egress
 /// secrets, returning an armed [`EndpointGuard`]; a secret-free plan (or no
 /// `plan.json`) yields a defused no-op guard. The libkrun guest reaches the
-/// proxy-aware endpoint by dialing `connect_host_vsock(SUBSTITUTION_PORT)`.
+/// proxy-aware endpoint by dialing `connect_host_vsock(EGRESS_PORT)`.
 /// The native gateway forwards intercepted `:80/:443` flows to the host
 /// loopback terminator on `terminator_port`.
 fn spawn_libkrun_egress_endpoint_if_needed(
@@ -77,10 +77,7 @@ fn spawn_libkrun_egress_endpoint_if_needed(
         secrets: &secrets,
         redaction: &redaction,
         transport: EndpointTransport::Uds {
-            path: mvm_core::config::vm_vsock_port_socket(
-                vm_name,
-                mvm_guest::vsock::SUBSTITUTION_PORT,
-            ),
+            path: mvm_core::config::vm_vsock_port_socket(vm_name, mvm_guest::vsock::EGRESS_PORT),
         },
         terminator_listen: Some(SocketAddr::from(([127, 0, 0, 1], terminator_port))),
         tls_intermediate,
@@ -165,7 +162,7 @@ fn krun_context_base(
         // Egress substitution channel (listen=false → host binds). Registered
         // unconditionally; fail-closed: when the plan carries no secrets nothing
         // binds the UDS, so a stray guest dial gets ECONNREFUSED.
-        .add_host_listen_port(mvm_guest::vsock::SUBSTITUTION_PORT)
+        .add_host_listen_port(mvm_guest::vsock::EGRESS_PORT)
         // Host-services broker channel (listen=false → host binds). Registered
         // unconditionally so libkrun proxies the guest's connect; fail-closed:
         // nothing binds the UDS until the per-VM broker subprocess is spawned,
@@ -1531,14 +1528,14 @@ mod tests {
         assert!(
             cfg.krun
                 .host_listen_ports
-                .contains(&mvm_guest::vsock::SUBSTITUTION_PORT),
-            "SUBSTITUTION_PORT must be in host_listen_ports"
+                .contains(&mvm_guest::vsock::EGRESS_PORT),
+            "EGRESS_PORT must be in host_listen_ports"
         );
         assert!(
             !cfg.krun
                 .vsock_ports
-                .contains(&mvm_guest::vsock::SUBSTITUTION_PORT),
-            "SUBSTITUTION_PORT must not appear in vsock_ports"
+                .contains(&mvm_guest::vsock::EGRESS_PORT),
+            "EGRESS_PORT must not appear in vsock_ports"
         );
     }
 

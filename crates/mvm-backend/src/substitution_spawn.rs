@@ -30,7 +30,7 @@ use std::time::Duration;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EndpointTransport {
     /// Host AF_VSOCK listener on this port (QEMU). The guest dials
-    /// `connect_host_vsock(SUBSTITUTION_PORT)`.
+    /// `connect_host_vsock(EGRESS_PORT)`.
     Vsock { port: u32 },
     /// Host UDS the per-port vsock proxy forwards to (Firecracker/libkrun).
     Uds { path: PathBuf },

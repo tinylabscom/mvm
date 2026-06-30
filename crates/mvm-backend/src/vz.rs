@@ -1878,7 +1878,7 @@ fn remove_instance_rootfs(vm_name: &str) {
 /// Spawn the per-VM substitution endpoint when the admitted plan carries egress
 /// secrets, returning an armed [`EndpointGuard`]; a secret-free plan (or no
 /// `plan.json`) yields a defused no-op guard. The Vz guest reaches the endpoint
-/// by dialing `connect_host_vsock(SUBSTITUTION_PORT)`; the supervisor's
+/// by dialing `connect_host_vsock(EGRESS_PORT)`; the supervisor's
 /// host-listen proxy splices that to the per-VM `vsock/` UDS the endpoint binds,
 /// so the transport is `Uds`. No transparent terminator on this path
 /// (`terminator_listen: None`), hence no per-VM TLS intermediate.
@@ -1903,10 +1903,7 @@ fn spawn_vz_egress_endpoint_if_needed(
         // Vz routes guest→host through the per-VM UDS the supervisor's
         // host-listen proxy forwards into; the endpoint binds it under `vsock/`.
         transport: EndpointTransport::Uds {
-            path: mvm_core::config::vm_vz_vsock_port_socket(
-                vm_name,
-                mvm_guest::vsock::SUBSTITUTION_PORT,
-            ),
+            path: mvm_core::config::vm_vz_vsock_port_socket(vm_name, mvm_guest::vsock::EGRESS_PORT),
         },
         terminator_listen: None,
         tls_intermediate: None,
@@ -2025,14 +2022,14 @@ fn build_supervisor_config(
             },
             socket_dir: vsock_dir,
             // Host-listens / guest-connects channels. Egress substitution: the
-            // guest dials SUBSTITUTION_PORT, the supervisor accepts and splices to
+            // guest dials EGRESS_PORT, the supervisor accepts and splices to
             // the per-VM UDS the substitution endpoint binds. Host-services
             // broker: the guest dials BROKER_PORT, the supervisor splices to the
             // per-VM broker subprocess UDS. Both unconditional — fail-closed:
             // nothing binds those UDS until the respective endpoint/subprocess is
             // spawned, so a stray guest dial gets refused.
             host_listen_ports: vec![
-                mvm_guest::vsock::SUBSTITUTION_PORT,
+                mvm_guest::vsock::EGRESS_PORT,
                 mvm_guest::vsock::BROKER_PORT,
                 mvm_guest::vsock::SSH_AGENT_PORT,
             ],
@@ -2995,21 +2992,18 @@ mod tests {
         assert!(built.virtio_fs.is_empty());
         assert_eq!(built.vsock.ports, vec![mvm_guest::vsock::GUEST_AGENT_PORT]);
         // The egress-substitution channel is host-listens / guest-connects: the
-        // supervisor must listen on SUBSTITUTION_PORT so the guest can dial it.
+        // supervisor must listen on EGRESS_PORT so the guest can dial it.
         assert!(
             built
                 .vsock
                 .host_listen_ports
-                .contains(&mvm_guest::vsock::SUBSTITUTION_PORT),
-            "SUBSTITUTION_PORT must be in vsock.host_listen_ports"
+                .contains(&mvm_guest::vsock::EGRESS_PORT),
+            "EGRESS_PORT must be in vsock.host_listen_ports"
         );
         // ...and it must NOT appear in the host-dials-guest proxy port set.
         assert!(
-            !built
-                .vsock
-                .ports
-                .contains(&mvm_guest::vsock::SUBSTITUTION_PORT),
-            "SUBSTITUTION_PORT must not appear in vsock.ports"
+            !built.vsock.ports.contains(&mvm_guest::vsock::EGRESS_PORT),
+            "EGRESS_PORT must not appear in vsock.ports"
         );
         // The host-services broker port is host-listens / guest-connects too:
         // the supervisor must listen on BROKER_PORT so the guest can dial it

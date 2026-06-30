@@ -112,10 +112,19 @@ jobs:
 
 This deletes the entire userspace network plane — **passt, gvproxy, the in-house
 rvproxy, and the nft/redirect terminator all go away**. They exist only to gateway
-a guest NIC's IP traffic; with no NIC there is nothing for them to do. "vsock ports"
-(`5251` exit, `5252` agent, `5253` substitution, a new egress port) are just how the
-single vsock transport multiplexes services — they are not network ports and not a
-NIC.
+a guest NIC's IP traffic; with no NIC there is nothing for them to do.
+
+**One egress port, not two — substitution is a behavior.** Credential substitution
+is not a separate channel or port; it is what the egress gateway *does* when a
+flow's target is a bound-secret host. So there is a single **egress-gateway port**
+(`EGRESS_PORT` — the number `SUBSTITUTION_PORT` already used, since the substitution
+channel was always host-mediated egress), alongside `5251` workload-exit and `5252`
+agent control. Each microVM has its **own** vsock transport (its own device + host
+endpoint + per-VM gateway/policy); these port numbers are a fixed, well-known
+*service map* reused per VM — a constant like a registered TCP port, not a secret and
+not per-VM-unique. Isolation is in the per-VM transport + per-VM policy, never in the
+port number. Concurrent egress streams from one guest share the one egress port,
+distinguished by the guest's source port.
 
 **Protocol scope.** The gateway proxies **TCP**, and DNS is resolved host-side via
 the pin registry. UDP/QUIC (HTTP/3), ICMP, and raw sockets are *not* carried by a

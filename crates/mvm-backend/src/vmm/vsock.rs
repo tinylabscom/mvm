@@ -339,7 +339,7 @@ impl VirtioVsock {
                     if let Some(stop) = self.exit_stop {
                         stop.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
-                } else if hdr.dst_port == mvm_guest::vsock::SUBSTITUTION_PORT {
+                } else if hdr.dst_port == mvm_guest::vsock::EGRESS_PORT {
                     // Egress request (ADR-100): the payload is the connect target
                     // "ip:port". The gateway decides per the plan's policy
                     // (claim-10 default-deny) before any host socket is opened.

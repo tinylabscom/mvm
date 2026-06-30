@@ -47,12 +47,15 @@ pub const GUEST_AGENT_PORT: u32 = 5252;
 /// format: a single 4-byte little-endian `i32`.
 pub const WORKLOAD_EXIT_PORT: u32 = 5251;
 
-/// vsock port the host substitution endpoint is exposed
-/// on. The in-guest forward proxy connects here; the host bin maps it to the
-/// UDS where `SubstitutionService` listens. Distinct from the removed 5300/5301
-/// secrets channel. NOTE: exposing this port end-to-end needs the
-/// host-side proxy port-allowlist to admit it — part of the bin glue.
-pub const SUBSTITUTION_PORT: u32 = 5253;
+/// vsock port of the **host egress gateway** (ADR-100) — the single host-mediated
+/// egress chokepoint. The in-guest egress client connects here; the host's per-VM
+/// gateway makes the claim-10 allow/deny decision and proxies the flow, and for a
+/// bound-secret destination performs the claims-12/13 credential substitution (a
+/// *behavior* of this one gateway, not a separate channel — this port was always
+/// host-mediated egress, formerly named `EGRESS_PORT`). Each microVM has its
+/// own vsock; this is a fixed well-known service number reused per VM, not a secret.
+/// NOTE: exposing it end-to-end needs the host-side proxy port-allowlist to admit it.
+pub const EGRESS_PORT: u32 = 5253;
 
 /// vsock port the host-services broker is exposed on. The in-guest broker
 /// client ([`crate::broker_client`]) dials this to reach the supervisor's
@@ -60,7 +63,7 @@ pub const SUBSTITUTION_PORT: u32 = 5253;
 /// connection, enforces the `ExecutionPlan.services` binding, and proxies the
 /// `ServiceCall` to the `mvm-broker` subprocess. The host admits it via its
 /// `host_listen_ports` allowlist — a one-port, audited widening, the same
-/// mechanism [`SUBSTITUTION_PORT`] uses.
+/// mechanism [`EGRESS_PORT`] uses.
 ///
 /// 5300 sits above the privileged range and above 5251/5252/5253, and below
 /// the port-forward range ([`PORT_FORWARD_BASE`] = 10_000) and the

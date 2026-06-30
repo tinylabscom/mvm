@@ -20,7 +20,7 @@ use crate::addon_vsock_bridge::connect_host_vsock;
 
 /// Host vsock port of the egress gateway.
 ///
-/// Must match `mvm_guest::vsock::SUBSTITUTION_PORT`. mvm-guest is not a dep of this
+/// Must match `mvm_guest::vsock::EGRESS_PORT`. mvm-guest is not a dep of this
 /// crate (see `mvm-exit-report`) — keep in sync manually.
 pub const EGRESS_VSOCK_PORT: u32 = 5253;
 
