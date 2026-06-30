@@ -252,6 +252,13 @@ let
     inherit mvmSrc;
   };
 
+  # Egress shim (ADR-100) — loopback SOCKS5 → host vsock egress gateway. Baked
+  # unconditionally (inert unless /init starts it when the boot env requests
+  # vsock-only egress); the guest's sole path off-VM under the no-NIC model.
+  egressClientPkg = pkgs.callPackage ../packages/mvm-egress-client.nix {
+    inherit mvmSrc;
+  };
+
   # In-guest host.audit.v1 driver — test fixture, baked only when
   # `withAuditProbe`. Compiled lazily (Nix only evaluates this when the
   # bake below references it) so the default path adds no build cost.
@@ -627,6 +634,26 @@ let
         -- /usr/local/bin/mvm-addon-dns &
     fi
 
+    # Stage 2.6 — vsock egress shim (ADR-100). When the boot env requests vsock-only
+    # egress (the backend sets MVM_VSOCK_EGRESS for a vsock-gateway backend — HVF/KVM
+    # today), bring up loopback, start the SOCKS5→vsock shim under the agent uid, and
+    # point the workload's proxy env at it. `socks5h` makes the host resolve names
+    # (DNS-over-vsock); the guest has no NIC, so this is its only path off-VM. The
+    # exports reach the entrypoint (setpriv preserves env). Inert when the flag is
+    # unset, so NIC backends keep their existing path untouched.
+    if [ -n "$MVM_VSOCK_EGRESS" ] && [ -x /usr/local/bin/mvm-egress-client ]; then
+      /bin/busybox ip link set lo up 2>/dev/null || true
+      /bin/busybox setsid ${pkgs.util-linux}/bin/setpriv \
+        --reuid=${toString agentUid} --regid=${toString agentUid} \
+        --clear-groups --no-new-privs \
+        -- /usr/local/bin/mvm-egress-client &
+      export ALL_PROXY="socks5h://127.0.0.1:1080"
+      export HTTP_PROXY="$ALL_PROXY"
+      export HTTPS_PROXY="$ALL_PROXY"
+      export http_proxy="$ALL_PROXY"
+      export https_proxy="$ALL_PROXY"
+    fi
+
     # Stage 2.5 — guest agent supervisor. Fork the agent into
     # the background under its own uid before we drop to the
     # entrypoint. The agent is responsible for vsock RPC (host
@@ -816,6 +843,7 @@ let
   # unaffected. See `crates/mvm-addon-dns` for details.
   mvmAddonDnsBinary = "${addonDnsPkg}/bin/mvm-addon-dns";
   mvmExitReportBinary = "${exitReportPkg}/bin/mvm-exit-report";
+  mvmEgressClientBinary = "${egressClientPkg}/bin/mvm-egress-client";
   mvmAuditProbeBinary = "${auditProbePkg}/bin/audit-probe";
 
   # extraFiles — three accepted spec shapes per target path:
@@ -1033,6 +1061,12 @@ let
     # poweroff regardless of whether dev-shell features are compiled in.
     cp ${mvmExitReportBinary} "$out/usr/local/bin/mvm-exit-report"
     chmod 0555 "$out/usr/local/bin/mvm-exit-report"
+
+    # Egress shim (ADR-100) — unconditional bake; inert unless /init starts it when
+    # the boot env requests vsock-only egress (no NIC). The guest's sole path off-VM
+    # under the no-network model.
+    cp ${mvmEgressClientBinary} "$out/usr/local/bin/mvm-egress-client"
+    chmod 0555 "$out/usr/local/bin/mvm-egress-client"
 
     # In-guest host.audit.v1 driver — test fixture, baked only when the
     # caller opts in. The production guest closure never carries it.
