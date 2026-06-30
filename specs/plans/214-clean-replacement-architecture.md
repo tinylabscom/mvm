@@ -168,20 +168,16 @@ pub struct VmmSpec {
 }
 ```
 
-Create `crates/mvm-backend/src/driver/mod.rs`:
+Create `crates/mvm-backend/src/driver/mod.rs` — **only the `spec` module for now**; Task 2 adds `traits` and `mock`, so each task compiles on its own:
 
 ```rust
 //! The `VmmDriver` seam: VMM mechanics written once per VMM, with role policy
 //! (workload admission/egress/audit, builder orchestration) living in the role
 //! runners above it.
 
-pub mod mock;
 pub mod spec;
-pub mod traits;
 
-pub use mock::{MockDriver, MockRunningVm};
 pub use spec::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
-pub use traits::{DuplexStream, RunningVm, VmmDriver};
 ```
 
 Add to `crates/mvm-backend/src/lib.rs`, alongside the other `pub mod` declarations:
@@ -190,18 +186,10 @@ Add to `crates/mvm-backend/src/lib.rs`, alongside the other `pub mod` declaratio
 pub mod driver;
 ```
 
-Create placeholder `crates/mvm-backend/src/driver/traits.rs` and `crates/mvm-backend/src/driver/mock.rs` as empty files for now (Tasks 2–3 fill them; the `pub mod` lines in `mod.rs` need them to exist to compile). Put a single line in each:
-
-```rust
-// filled in by the next task
-```
-
-This makes `mod.rs`'s `pub use` lines fail to resolve until Tasks 2–3 land, so **build `spec.rs` in isolation first** by temporarily commenting the `mock`/`traits` lines in `mod.rs`, or simply land Tasks 1–3 before running the crate build. Prefer the latter: write all three files, then run the test.
-
 - [ ] **Step 3: Run the test to verify it passes**
 
 Run: `~/.cargo/bin/cargo nextest run -p mvm-backend driver::spec`
-Expected: `block_dev_device_node_maps_slot_to_letter` PASS. (If `mod.rs`'s `pub use mock::…`/`traits::…` lines don't yet resolve, finish Tasks 2–3 first, then run.)
+Expected: `block_dev_device_node_maps_slot_to_letter` PASS. The crate compiles — `mod.rs` references only `spec`, which exists.
 
 - [ ] **Step 4: Commit**
 
@@ -217,6 +205,7 @@ git commit -m "feat(driver): VmmSpec — the no-NIC physical recipe for the VmmD
 **Files:**
 - Create: `crates/mvm-backend/src/driver/traits.rs`
 - Create: `crates/mvm-backend/src/driver/mock.rs`
+- Modify: `crates/mvm-backend/src/driver/mod.rs` (add `traits` + `mock` modules and re-exports)
 - Test: in `crates/mvm-backend/src/driver/mock.rs` (`#[cfg(test)] mod tests`)
 
 **Interfaces:**
@@ -434,15 +423,33 @@ impl RunningVm for MockRunningVm {
 }
 ```
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [ ] **Step 5: Wire `traits` + `mock` into `mod.rs`**
+
+Update `crates/mvm-backend/src/driver/mod.rs` to declare and re-export the two new modules (it currently has only `spec`):
+
+```rust
+//! The `VmmDriver` seam: VMM mechanics written once per VMM, with role policy
+//! (workload admission/egress/audit, builder orchestration) living in the role
+//! runners above it.
+
+pub mod mock;
+pub mod spec;
+pub mod traits;
+
+pub use mock::{MockDriver, MockRunningVm};
+pub use spec::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
+pub use traits::{DuplexStream, RunningVm, VmmDriver};
+```
+
+- [ ] **Step 6: Run the test to verify it passes**
 
 Run: `~/.cargo/bin/cargo nextest run -p mvm-backend driver::`
 Expected: both `driver::spec` and `driver::mock::tests::mock_driver_records_booted_spec_and_scripts_exit` PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add crates/mvm-backend/src/driver/traits.rs crates/mvm-backend/src/driver/mock.rs
+git add crates/mvm-backend/src/driver/traits.rs crates/mvm-backend/src/driver/mock.rs crates/mvm-backend/src/driver/mod.rs
 git commit -m "feat(driver): VmmDriver/RunningVm seam + hypervisor-free MockDriver"
 ```
 
@@ -516,6 +523,6 @@ git commit -m "test(driver): lock the MockRunningVm loopback vsock contract"
 ## S0 self-review
 
 - **Spec coverage (S0 scope only):** `VmmSpec` no-NIC recipe ✓ (Task 1); `VmmDriver`/`RunningVm` seam ✓ (Task 2); `MockDriver` records spec + scripts exit + loopback vsock ✓ (Tasks 2–3). Bridge promotion, the role runners, and any real driver are explicitly out of S0 (S1+).
-- **Placeholder scan:** every step carries real code or an exact command — no TBD/TODO. The empty-file note in Task 1 Step 2 is a build-ordering instruction, not a code placeholder; Tasks 2–3 replace those files in full.
+- **Placeholder scan:** every step carries real code or an exact command — no TBD/TODO. Each task compiles standalone: Task 1's `mod.rs` declares only `spec`; Task 2 extends it with `traits`/`mock` in the same task that creates them.
 - **Type consistency:** `VmId(pub String)`, `VmExitStatus { code, success }`, `VmStatus::Running`, `VmCapabilities { vsock, .. }`, `SnapshotCapability::Unsupported` all match `mvm-core/src/protocol/vm_backend.rs`. `MockDriver::take_guest_end(&VmId, u32)` keys match `vsock_connect`'s insert key `(self.id.0, guest_port)`.
 - **Additive guarantee:** only `lib.rs` gains one `pub mod driver;` line; no existing module is modified, so no claim witness can move in S0.
