@@ -232,7 +232,7 @@ let
   #     → `do_exec` stripped → CI's symbol-absence gate passes
   #
   # Either way the binary is the production Rust build, not a stub.
-  guestAgentPkg = pkgs.callPackage../packages/mvm-guest-agent.nix {
+  guestAgentPkg = pkgs.callPackage ../packages/mvm-guest-agent.nix {
     inherit mvmSrc withDevShell;
   };
 
@@ -242,27 +242,27 @@ let
   # zone empty" pattern from `specs/contracts/local-addon-dns.md`);
   # /init activates it only when a zone file is present, so a guest
   # without addons keeps its baked /etc/resolv.conf byte-for-byte.
-  addonDnsPkg = pkgs.callPackage../packages/mvm-addon-dns.nix {
+  addonDnsPkg = pkgs.callPackage ../packages/mvm-addon-dns.nix {
     inherit mvmSrc;
   };
 
   # Exit reporter — records workload exit status before poweroff.
   # Baked unconditionally into every guest rootfs (prod and dev).
-  exitReportPkg = pkgs.callPackage../packages/mvm-exit-report.nix {
+  exitReportPkg = pkgs.callPackage ../packages/mvm-exit-report.nix {
     inherit mvmSrc;
   };
 
   # Egress shim  — loopback SOCKS5 → host vsock egress gateway. Baked
   # unconditionally (inert unless /init starts it when the boot env requests
   # vsock-only egress); the guest's sole path off-VM under the no-NIC model.
-  egressClientPkg = pkgs.callPackage../packages/mvm-egress-client.nix {
+  egressClientPkg = pkgs.callPackage ../packages/mvm-egress-client.nix {
     inherit mvmSrc;
   };
 
   # In-guest host.audit.v1 driver — test fixture, baked only when
   # `withAuditProbe`. Compiled lazily (Nix only evaluates this when the
   # bake below references it) so the default path adds no build cost.
-  auditProbePkg = pkgs.callPackage../packages/mvm-audit-probe.nix {
+  auditProbePkg = pkgs.callPackage ../packages/mvm-audit-probe.nix {
     inherit mvmSrc;
   };
 
@@ -623,7 +623,7 @@ let
       # Build the new resolv.conf in /run (tmpfs, always writable)
       # and bind-mount it over /etc/resolv.conf. The:: literal is
       # written via printf so the heredoc body stays parameter-free.
-      printf 'nameserver 127.0.0.1\nnameserver::1\n' > /run/mvm/resolv.conf
+      printf 'nameserver 127.0.0.1\nnameserver ::1\n' > /run/mvm/resolv.conf
       /bin/busybox chmod 0644 /run/mvm/resolv.conf
       /bin/busybox mount --bind /run/mvm/resolv.conf /etc/resolv.conf
 
@@ -712,7 +712,7 @@ let
       # On libkrun this just swaps a blocking console read for an explicit
       # idle — same "stay alive", no change to the agent shell path. A
       # busybox-portable loop avoids depending on `sleep infinity`.
-      while:; do /bin/busybox sleep 2147483647; done
+      while :; do /bin/busybox sleep 2147483647; done
     fi
 
     # Stage 4.5 — mvm runtime overlay env.
@@ -1221,7 +1221,7 @@ let
     storePaths = [ rootfsTree ];
     volumeLabel = "mvm-${name}";
     populateImageCommands = ''
-      cp -a --reflink=auto ${rootfsTree}/../files/
+      cp -a --reflink=auto ${rootfsTree}/. ./files/
     '';
   };
 
