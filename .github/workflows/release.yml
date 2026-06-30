@@ -77,9 +77,18 @@ jobs:
       # kernel-extraction path needs libkrunfw. Both ship via the slp/krun
       # Homebrew tap. Without them the build panics in libkrun-sys/build.rs
       # ("libkrun.h was not found"). Linux uses Firecracker — no libkrun.
+      #
+      # `brew trust` is required since Homebrew began refusing to auto-load
+      # formulae from third-party ("untrusted") taps: installing
+      # `slp/krun/libkrun` pulls a transitive formula (`virglrenderer`) from the
+      # same tap, and without trust the install fails with "Refusing to load
+      # formula ... from untrusted tap slp/krun". Tap + trust before installing.
       - name: Install libkrun (macOS backend FFI)
         if: runner.os == 'macOS'
-        run: brew install slp/krun/libkrun slp/krun/libkrunfw
+        run: |
+          brew tap slp/krun
+          brew trust slp/krun
+          brew install slp/krun/libkrun slp/krun/libkrunfw
 
       - name: Install cross-compilation tools (Linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -143,7 +152,7 @@ jobs:
           BIN="target/${TARGET}/release/mvmctl"
           "$BIN" --version
           "$BIN" --help > /dev/null
-          "$BIN" metrics --json | python3 -c "
+          "$BIN" ops metrics --json | python3 -c "
           import sys, json
           d = json.load(sys.stdin)
           # metrics JSON is sectioned: counters live under 'global'.
