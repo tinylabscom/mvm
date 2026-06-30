@@ -40,12 +40,32 @@ fn main() {
         // ping until it answers or the VM's timeout window closes. Each ping is a
         // fresh host connection: while the agent isn't listening the guest RSTs the
         // stream and we retry; once it's up the bridge relays the Ping/Pong.
+        // Each probe is a fresh host connection → the bridge opens a vsock stream
+        // to the agent. The agent enforces a ProtocolHello-first cutover, so do the
+        // real handshake (ProtocolHello → ProtocolHelloAck) — a full host→guest
+        // round-trip. Its success proves the agent is reachable over the bridge.
+        // (`ping_at` is legacy: it sends a bare Ping with no hello, which the agent
+        // rejects.) While the agent isn't up yet the guest RSTs the stream; we retry.
         let mut ok = false;
         for i in 0..120 {
-            if let Ok(true) = mvm_guest::vsock::ping_at(&sock) {
-                println!("PING answered after ~{}ms", i * 500);
-                ok = true;
-                break;
+            if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&sock) {
+                match mvm_guest::vsock::negotiate_protocol(&mut s, Vec::new()) {
+                    Ok(n) => {
+                        println!(
+                            "agent handshake OK after ~{}ms (agent v{}, proto {})",
+                            i * 500,
+                            n.agent_version,
+                            n.agent_protocol_version
+                        );
+                        ok = true;
+                        break;
+                    }
+                    Err(e) => {
+                        if i % 6 == 0 {
+                            println!("probe {i}: {e}");
+                        }
+                    }
+                }
             }
             std::thread::sleep(Duration::from_millis(500));
         }
