@@ -1,6 +1,6 @@
 //! Raw HVF (`Hypervisor.framework`) backend — spike scaffold.
 //!
-//! Plan 214 Phase 11 / ADR-098: a macOS backend built directly on
+//! Raw HVF macOS backend: a macOS backend built directly on
 //! `Hypervisor.framework` instead of the higher-level Virtualization.framework
 //! (`vz`), so the destination macOS path owns its device model and warm-start
 //! path. This module is the spike substrate: the FFI surface ([`sys`]) and the

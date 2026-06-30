@@ -1,4 +1,4 @@
-//! The host-side vsock egress gateway (ADR-100), independent of the transport.
+//! The host-side vsock egress gateway , independent of the transport.
 //!
 //! A NIC-less guest asks the host to open an outbound connection: the first frame
 //! on an egress stream is the connect target `"ip:port"`, decided here against the

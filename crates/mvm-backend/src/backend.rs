@@ -478,11 +478,11 @@ pub enum AnyBackend {
     /// [`crate::mock::MockBackend`] for the rationale and security
     /// profile (Tier 3 / claims unknown).
     Mock(MockBackend),
-    /// Raw HVF — Hypervisor.framework on macOS / Apple silicon (Plan 214),
+    /// Raw HVF — Hypervisor.framework on macOS / Apple silicon,
     /// driven by the unified `vmm::run` loop via the detached
     /// `mvm-hvf-supervisor`. Opt-in via `--hypervisor hvf` / `MVM_BACKEND=hvf`;
     /// `auto_select` doesn't pick it yet (Vz remains the macOS-26 default until
-    /// HVF reaches workload parity). The destination macOS backend (ADR-098).
+    /// HVF reaches workload parity). The destination macOS backend.
     Hvf(HvfBackend),
 }
 
@@ -637,7 +637,7 @@ impl AnyBackend {
             AnyBackend::Qemu(_) => None,
             // HVF is not a workload backend YET, but the remaining bar is narrow +
             // specific. Already proven on the in-house VMM: claim 10 default-deny
-            // egress (EgressGate/EgressProxy, ADR-100), a real mkGuest workload
+            // egress (EgressGate/EgressProxy), a real mkGuest workload
             // boot, and a host-reachable guest agent over vsock. The remaining bar
             // is claims 12/13 secret-substitution parity — HVF has no per-VM
             // substitution endpoint, so it cannot carry secret-bearing untrusted

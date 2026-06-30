@@ -1,4 +1,4 @@
-//! `HvfBackend` — the `VmBackend` impl for the raw-HVF macOS path (Plan 214).
+//! `HvfBackend` — the `VmBackend` impl for the raw-HVF macOS path.
 //!
 //! Lifecycle mirrors the other detached-supervisor backends (vz/libkrun): `start`
 //! builds an [`HvfSupervisorConfig`] from the `VmStartConfig`, spawns
@@ -12,7 +12,7 @@
 //! and reports its exit code over the workload-exit vsock port, which ends the run;
 //! `wait` returns that code. A persistent (`-d`) VM instead runs until `stop`. With
 //! vsock + optional virtio-blk. Not yet: pause/resume/snapshot, and vsock-mediated
-//! networking/egress (ADR-100).
+//! networking/egress.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

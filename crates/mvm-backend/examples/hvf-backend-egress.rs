@@ -1,5 +1,5 @@
 //! Prove the end-to-end policy-driven vsock egress through the HVF backend +
-//! supervisor (ADR-100): a VM started with an allow-list `NetworkPolicy` reaches
+//! supervisor: a VM started with an allow-list `NetworkPolicy` reaches
 //! the admitted destination over vsock; the supervisor resolves the host pin,
 //! projects the gate, and proxies. macOS / Apple-silicon.
 //!
@@ -11,7 +11,7 @@
 //!   MVM_HVF_KERNEL=/tmp/mvm-hvf-kernel/Image-builder \
 //!   MVM_HVF_INITRD=/tmp/hvf-init-echo/initramfs.cpio \
 //!   MVM_HVF_EGRESS_HOST=192.168.4.23 MVM_HVF_EGRESS_PORT=19099 \
-//!   ./target/debug/examples/hvf-backend-egress
+//!  ./target/debug/examples/hvf-backend-egress
 //! ```
 
 fn main() {

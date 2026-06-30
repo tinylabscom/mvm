@@ -47,7 +47,7 @@ pub const GUEST_AGENT_PORT: u32 = 5252;
 /// format: a single 4-byte little-endian `i32`.
 pub const WORKLOAD_EXIT_PORT: u32 = 5251;
 
-/// vsock port of the **host egress gateway** (ADR-100) — the single host-mediated
+/// vsock port of the **host egress gateway**  — the single host-mediated
 /// egress chokepoint. The in-guest egress client connects here; the host's per-VM
 /// gateway makes the claim-10 allow/deny decision and proxies the flow, and for a
 /// bound-secret destination performs the claims-12/13 credential substitution (a
@@ -4340,7 +4340,7 @@ mod tests {
             GuestRequest::RunEntrypoint {
                 stdin,
                 timeout_secs: 5,
-                ..
+               ..
             } if stdin.is_empty()
         ));
     }
@@ -4561,7 +4561,7 @@ mod tests {
             GuestRequest::RunEntrypoint {
                 stdin,
                 timeout_secs: 15,
-                ..
+               ..
             } if stdin.is_empty()
         ));
     }
@@ -6228,7 +6228,7 @@ mod tests {
         let guest_handle = std::thread::spawn(move || {
             answer_exec_protocol_hello(&mut guest);
             let req: GuestRequest = read_frame(&mut guest).unwrap();
-            assert!(matches!(req, GuestRequest::Exec { ref command, .. } if command == "echo hi"));
+            assert!(matches!(req, GuestRequest::Exec { ref command,.. } if command == "echo hi"));
             write_frame(
                 &mut guest,
                 &GuestResponse::ExecEvent(ExecEvent::Stdout {
@@ -6419,7 +6419,7 @@ mod rpc_client_tests {
             verb: "Exec".into(),
         };
         let err = check_response(&GuestRequest::Ping, resp);
-        assert!(matches!(err, Err(RpcError::UnsupportedInProfile { verb, .. }) if verb == "Exec"));
+        assert!(matches!(err, Err(RpcError::UnsupportedInProfile { verb,.. }) if verb == "Exec"));
     }
 
     #[test]

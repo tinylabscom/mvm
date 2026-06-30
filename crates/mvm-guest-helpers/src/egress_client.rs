@@ -1,4 +1,4 @@
-//! In-guest SOCKS5 → vsock egress client (ADR-100).
+//! In-guest SOCKS5 → vsock egress client.
 //!
 //! A NIC-less workload reaches the network only through the host vsock egress
 //! gateway. This is the guest-side translator: a SOCKS5 (no-auth, CONNECT) proxy on
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn format_target_ipv6_is_bracketed() {
         let mut a = [0u8; 16];
-        a[15] = 1; // ::1
+        a[15] = 1; //::1
         assert_eq!(format_target(ATYP_IPV6, &a, 443).unwrap(), "[::1]:443");
     }
 

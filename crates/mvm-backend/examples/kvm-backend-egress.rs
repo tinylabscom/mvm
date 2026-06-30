@@ -1,5 +1,5 @@
 //! Boot an x86_64 Linux guest under the mvm KVM backend with **vsock-only egress**
-//! (ADR-100) — no guest NIC. Proves the Linux in-house path: the guest reaches the
+//!  — no guest NIC. Proves the Linux in-house path: the guest reaches the
 //! network only by opening a vsock stream to the host egress gateway, which decides
 //! each target against the claim-10 policy and proxies admitted flows. Same run
 //! loop + `EgressProxy` the HVF backend uses.

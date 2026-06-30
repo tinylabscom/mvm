@@ -8,7 +8,7 @@
 //! - [`addon_vsock_bridge`] — loopback TCP ↔ host-vsock bridge
 //!   (`mvm-addon-vsock-bridge`).
 //! - [`egress_client`] — loopback SOCKS5 → host-vsock egress proxy
-//!   (`mvm-egress-client`, ADR-100).
+//!   (`mvm-egress-client`).
 //!
 //! Folded in from the former `mvm-addon-dns` + `mvm-addon-vsock-bridge`
 //! crates.

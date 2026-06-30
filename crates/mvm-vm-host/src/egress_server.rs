@@ -1,4 +1,4 @@
-//! Host-side vsock egress server (ADR-100) for the external-VMM (libkrun) path.
+//! Host-side vsock egress server  for the external-VMM (libkrun) path.
 //!
 //! The in-guest `mvm-egress-client` dials the host egress vsock port and writes the
 //! connect target as a newline-terminated `"host:port\n"` first line, then streams
@@ -182,7 +182,7 @@ mod tests {
         client.write_all(b"93.184.216.34:8080\n").await.unwrap();
         drop(client);
 
-        let gate = allow("93.184.216.34/32", 80); // only :80 admitted
+        let gate = allow("93.184.216.34/32", 80); // only:80 admitted
         serve(server, &gate, |_ip, _port| async move {
             panic!("non-admitted port must not dial");
         })

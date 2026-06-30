@@ -19,7 +19,7 @@
 /// passt-hash helpers verbatim.
 pub mod bridge;
 
-/// Host-side vsock egress server (ADR-100): terminates the libkrun host-listen UDS,
+/// Host-side vsock egress server: terminates the libkrun host-listen UDS,
 /// decides the target against the shared claim-10 `EgressGate`, and proxies admitted
 /// flows. The async per-connection counterpart to HVF's in-process gateway.
 pub mod egress_server;

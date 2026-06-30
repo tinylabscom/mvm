@@ -1,4 +1,4 @@
-//! The host vsock egress gateway's allow/deny decision (ADR-100).
+//! The host vsock egress gateway's allow/deny decision.
 //!
 //! Under the vsock-only invariant a workload guest has no NIC: it asks the host
 //! to open an outbound connection over vsock, and this gate decides whether the
@@ -29,7 +29,7 @@ pub enum EgressVerdict {
 
 /// The host-side egress decision for one VM, wrapping its resolved
 /// [`CanonicalEgress`] grant plus the DNS pin registry used to resolve a
-/// `hostname:port` request host-side (DNS-over-vsock — ADR-100).
+/// `hostname:port` request host-side (DNS-over-vsock).
 #[derive(Debug, Clone)]
 pub struct EgressGate {
     egress: CanonicalEgress,
@@ -61,7 +61,7 @@ impl EgressGate {
     /// projection. **Fails closed:** any projection error (e.g. a host-allowlist
     /// rule whose DNS pin hasn't been threaded in yet) yields default-deny rather
     /// than a permissive gate. This is the supervisor's path to the admitted
-    /// plan's policy (ADR-100).
+    /// plan's policy.
     ///
     /// [`NetworkPolicy`]: mvm_core::policy::network_policy::NetworkPolicy
     pub fn from_network_policy(

@@ -1,4 +1,4 @@
-# `mvm-egress-client` — production in-guest egress shim (ADR-100).
+# `mvm-egress-client` — production in-guest egress shim.
 #
 # Built from `crates/mvm-guest-helpers` in the workspace. A loopback SOCKS5 proxy
 # that funnels the workload's egress to the host vsock egress gateway — the guest's
@@ -39,7 +39,7 @@ pkgs.rustPlatform.buildRustPackage {
 
   meta = with lib; {
     description =
-      "mvm in-guest egress shim — loopback SOCKS5 to the host vsock egress gateway (ADR-100)";
+      "mvm in-guest egress shim — loopback SOCKS5 to the host vsock egress gateway ";
     homepage = "https://github.com/tinylabscom/mvm";
     license = licenses.asl20;
     platforms = platforms.linux;

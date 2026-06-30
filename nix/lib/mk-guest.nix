@@ -225,14 +225,14 @@ let
   # (the `prod-agent-no-exec` CI gate). We tie it to
   # `isDev` here so the same `mkGuest` call:
   #
-  #   - Dev image (`entrypoint.shell = ...`, or `dev = true`)
+  #   - Dev image (`entrypoint.shell =...`, or `dev = true`)
   #     → `do_exec` compiled in → `mvmctl exec`/`mvmctl console` work
   #   - Prod/sealed image (`entrypoint.command`/`services`, or
   #     `dev = false`)
   #     → `do_exec` stripped → CI's symbol-absence gate passes
   #
   # Either way the binary is the production Rust build, not a stub.
-  guestAgentPkg = pkgs.callPackage ../packages/mvm-guest-agent.nix {
+  guestAgentPkg = pkgs.callPackage../packages/mvm-guest-agent.nix {
     inherit mvmSrc withDevShell;
   };
 
@@ -242,27 +242,27 @@ let
   # zone empty" pattern from `specs/contracts/local-addon-dns.md`);
   # /init activates it only when a zone file is present, so a guest
   # without addons keeps its baked /etc/resolv.conf byte-for-byte.
-  addonDnsPkg = pkgs.callPackage ../packages/mvm-addon-dns.nix {
+  addonDnsPkg = pkgs.callPackage../packages/mvm-addon-dns.nix {
     inherit mvmSrc;
   };
 
   # Exit reporter — records workload exit status before poweroff.
   # Baked unconditionally into every guest rootfs (prod and dev).
-  exitReportPkg = pkgs.callPackage ../packages/mvm-exit-report.nix {
+  exitReportPkg = pkgs.callPackage../packages/mvm-exit-report.nix {
     inherit mvmSrc;
   };
 
-  # Egress shim (ADR-100) — loopback SOCKS5 → host vsock egress gateway. Baked
+  # Egress shim  — loopback SOCKS5 → host vsock egress gateway. Baked
   # unconditionally (inert unless /init starts it when the boot env requests
   # vsock-only egress); the guest's sole path off-VM under the no-NIC model.
-  egressClientPkg = pkgs.callPackage ../packages/mvm-egress-client.nix {
+  egressClientPkg = pkgs.callPackage../packages/mvm-egress-client.nix {
     inherit mvmSrc;
   };
 
   # In-guest host.audit.v1 driver — test fixture, baked only when
   # `withAuditProbe`. Compiled lazily (Nix only evaluates this when the
   # bake below references it) so the default path adds no build cost.
-  auditProbePkg = pkgs.callPackage ../packages/mvm-audit-probe.nix {
+  auditProbePkg = pkgs.callPackage../packages/mvm-audit-probe.nix {
     inherit mvmSrc;
   };
 
@@ -524,7 +524,7 @@ let
       # (a workload still reaches cache.nixos.org/api.github.com etc.).
       if cat /etc/ssl/certs/ca-bundle.crt /run/mvm/egress-ca.crt \
           > /run/mvm/ca-bundle.crt 2>/dev/null; then
-        :
+       :
       else
         /bin/busybox cp /run/mvm/egress-ca.crt /run/mvm/ca-bundle.crt
       fi
@@ -616,14 +616,14 @@ let
       if [ -r /etc/resolv.conf ]; then
         /bin/busybox cp /etc/resolv.conf /run/mvm/upstream-resolv.conf
       else
-        : > /run/mvm/upstream-resolv.conf
+       : > /run/mvm/upstream-resolv.conf
       fi
       /bin/busybox chmod 0644 /run/mvm/upstream-resolv.conf
 
       # Build the new resolv.conf in /run (tmpfs, always writable)
-      # and bind-mount it over /etc/resolv.conf. The :: literal is
+      # and bind-mount it over /etc/resolv.conf. The:: literal is
       # written via printf so the heredoc body stays parameter-free.
-      printf 'nameserver 127.0.0.1\nnameserver ::1\n' > /run/mvm/resolv.conf
+      printf 'nameserver 127.0.0.1\nnameserver::1\n' > /run/mvm/resolv.conf
       /bin/busybox chmod 0644 /run/mvm/resolv.conf
       /bin/busybox mount --bind /run/mvm/resolv.conf /etc/resolv.conf
 
@@ -634,7 +634,7 @@ let
         -- /usr/local/bin/mvm-addon-dns &
     fi
 
-    # Stage 2.6 — vsock egress shim (ADR-100). When the boot env requests vsock-only
+    # Stage 2.6 — vsock egress shim. When the boot env requests vsock-only
     # egress (the backend sets MVM_VSOCK_EGRESS for a vsock-gateway backend — HVF/KVM
     # today), bring up loopback, start the SOCKS5→vsock shim under the agent uid, and
     # point the workload's proxy env at it. `socks5h` makes the host resolve names
@@ -712,7 +712,7 @@ let
       # On libkrun this just swaps a blocking console read for an explicit
       # idle — same "stay alive", no change to the agent shell path. A
       # busybox-portable loop avoids depending on `sleep infinity`.
-      while :; do /bin/busybox sleep 2147483647; done
+      while:; do /bin/busybox sleep 2147483647; done
     fi
 
     # Stage 4.5 — mvm runtime overlay env.
@@ -752,7 +752,7 @@ let
     # workload that reads stdin shortly after boot. /dev/null is the correct
     # stdin for a non-interactive sealed workload; stdout/stderr stay on the
     # console for capture, and the exit-code capture below is unaffected.
-    . "$MVM_BOOT" </dev/null
+   . "$MVM_BOOT" </dev/null
     MVM_CODE=$?
     # Report the exit code to the host (best-effort), then power off —
     # never reboot. The host reads it from the control vsock port.
@@ -1062,7 +1062,7 @@ let
     cp ${mvmExitReportBinary} "$out/usr/local/bin/mvm-exit-report"
     chmod 0555 "$out/usr/local/bin/mvm-exit-report"
 
-    # Egress shim (ADR-100) — unconditional bake; inert unless /init starts it when
+    # Egress shim  — unconditional bake; inert unless /init starts it when
     # the boot env requests vsock-only egress (no NIC). The guest's sole path off-VM
     # under the no-network model.
     cp ${mvmEgressClientBinary} "$out/usr/local/bin/mvm-egress-client"
@@ -1221,7 +1221,7 @@ let
     storePaths = [ rootfsTree ];
     volumeLabel = "mvm-${name}";
     populateImageCommands = ''
-      cp -a --reflink=auto ${rootfsTree}/. ./files/
+      cp -a --reflink=auto ${rootfsTree}/../files/
     '';
   };
 

@@ -80,9 +80,9 @@ pub struct KernelBootResult {
     /// port (the transient run-to-exit signal). `None` for a run that ended by
     /// timeout/stop without a workload-exit report.
     pub workload_exit_code: Option<i32>,
-    /// Egress targets the vsock gateway refused (claim-10 default-deny, ADR-100).
+    /// Egress targets the vsock gateway refused (claim-10 default-deny).
     pub egress_denied: Vec<String>,
-    /// Egress targets the vsock gateway admitted + connected (ADR-100).
+    /// Egress targets the vsock gateway admitted + connected.
     pub egress_allowed: Vec<String>,
 }
 
@@ -125,7 +125,7 @@ pub fn boot_kernel(
 /// Like [`boot_kernel`], but stops as soon as `stop` is set — a
 /// persistent-until-stop VM — and drives egress through the caller-supplied
 /// `egress` gateway (the supervisor builds it from the admitted plan's network
-/// policy; ADR-100). The supervisor sets `stop` from a SIGTERM handler so
+/// policy). The supervisor sets `stop` from a SIGTERM handler so
 /// `HvfBackend::stop` ends the guest cleanly. `timeout` still caps the run.
 pub fn boot_kernel_until(
     image: &[u8],
@@ -244,7 +244,7 @@ fn boot_kernel_impl(
 /// Build the egress gateway policy. Until the admitted plan's network policy is
 /// threaded through (the productionized path), a dev hook
 /// `MVM_HVF_EGRESS_ALLOW=<ip>:<port>` admits one TCP destination; otherwise the
-/// gate is claim-10 default-deny (ADR-100).
+/// gate is claim-10 default-deny.
 fn egress_gate_from_env() -> crate::vmm::egress_gate::EgressGate {
     use crate::vmm::egress_gate::EgressGate;
     use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
@@ -279,7 +279,7 @@ struct RunInputs<'a> {
     disk: Option<&'a [u8]>,
     vsock: bool,
     timeout: Duration,
-    /// Host egress gateway policy (ADR-100).
+    /// Host egress gateway policy.
     egress: crate::vmm::egress_gate::EgressGate,
 }
 
@@ -352,7 +352,7 @@ unsafe fn run(
         // the vCPU out after `timeout` or as soon as `stop` is set (graceful stop).
         // Between those, a periodic force-exit acts as a heartbeat: it breaks the
         // guest out of WFI so the run loop can poll host-side async work (drain an
-        // egress socket into a guest blocked in `recv` — ADR-100). The run loop
+        // egress socket into a guest blocked in `recv`). The run loop
         // treats a forced exit as a stop only when `stop` is set, so a heartbeat
         // wake just polls and continues. On timeout we set `stop` first so the run
         // loop ends.
@@ -411,13 +411,13 @@ unsafe fn run(
             vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, RAM_SIZE));
         // Transient run-to-exit: a guest write of the exit code to the workload
         // exit port stops the run (and is captured below). Egress over vsock is
-        // claim-10 default-deny until the plan's policy is threaded in (ADR-100).
+        // claim-10 default-deny until the plan's policy is threaded in.
         if let Some(v) = vsock_dev.as_mut() {
             v.capture_workload_exit(stop);
             v.set_egress_gate(egress);
             v.set_egress_activity(egress_active.clone());
             // Host→guest agent RPC (GUEST_AGENT_PORT): expose the listener so host
-            // clients (`machine invoke`) reach the guest agent over vsock (ADR-100).
+            // clients (`machine invoke`) reach the guest agent over vsock.
             if let Some(path) = &agent_socket {
                 v.set_agent_activity(egress_active.clone());
                 if let Err(e) = v.set_agent_socket(std::path::Path::new(path)) {
@@ -483,7 +483,7 @@ unsafe fn run(
                 },
                 // A forced exit is a real stop only when `stop` is set (timeout or
                 // graceful); otherwise it's a heartbeat wake so the run loop can drain
-                // egress sockets into a guest blocked in WFI (ADR-100 async proxy).
+                // egress sockets into a guest blocked in WFI (vsock-only egress async proxy).
                 move || stop.load(Ordering::Relaxed),
             )?
         };

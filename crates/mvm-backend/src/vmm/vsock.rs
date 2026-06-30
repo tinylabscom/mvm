@@ -145,7 +145,7 @@ pub struct VirtioVsock {
     /// Set when the workload-exit code arrives, so the run loop's watchdog ends a
     /// transient VM (the same flag the SIGTERM/stop path uses).
     exit_stop: Option<&'static std::sync::atomic::AtomicBool>,
-    /// Host vsock egress gateway (ADR-100): policy + open connections. Drives the
+    /// Host vsock egress gateway: policy + open connections. Drives the
     /// claim-10 decision + the TCP proxy; the device only frames its replies onto
     /// the rx queue. The proxy core is transport-agnostic (keyed by stream id), so
     /// the device keeps the inbound header per stream to frame async replies back.
@@ -201,7 +201,7 @@ impl VirtioVsock {
         self.agent.set_activity(counter);
     }
 
-    /// Install the host egress gateway policy (ADR-100). A guest connect request
+    /// Install the host egress gateway policy. A guest connect request
     /// to the egress port is then decided against `gate` (claim-10 default-deny)
     /// before any host connection is opened.
     pub fn set_egress_gate(&mut self, gate: super::egress_gate::EgressGate) {
@@ -388,7 +388,7 @@ impl VirtioVsock {
                         stop.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                 } else if hdr.dst_port == mvm_guest::vsock::EGRESS_PORT {
-                    // Egress request (ADR-100): the payload is the connect target
+                    // Egress request: the payload is the connect target
                     // "ip:port". The gateway decides per the plan's policy
                     // (claim-10 default-deny) before any host socket is opened.
                     self.handle_egress_request(&hdr, &payload[..n]);
@@ -408,7 +408,7 @@ impl VirtioVsock {
     }
 
     /// Frame an inbound egress request to the [`EgressProxy`] and map its action to
-    /// a vsock control reply (ADR-100). The decision + TCP proxy live in the proxy;
+    /// a vsock control reply. The decision + TCP proxy live in the proxy;
     /// the device owns the rx framing and the per-stream header.
     fn handle_egress_request(&mut self, hdr: &Hdr, payload: &[u8]) {
         use super::egress_proxy::EgressAction;
@@ -459,7 +459,7 @@ impl VirtioVsock {
         let opened = self.agent.accept_new();
         if !opened.is_empty() {
             agent_dbg(&format!(
-                "accepted {} host conn(s) → OP_REQUEST to :{}",
+                "accepted {} host conn(s) → OP_REQUEST to:{}",
                 opened.len(),
                 mvm_guest::vsock::GUEST_AGENT_PORT
             ));

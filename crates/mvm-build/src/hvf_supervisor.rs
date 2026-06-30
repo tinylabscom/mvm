@@ -1,12 +1,12 @@
 //! Config contract for `mvm-hvf-supervisor` — the per-VM host process for the
-//! raw HVF macOS backend (Plan 214). Lives here (below both `mvm-backend` and
+//! raw HVF macOS backend. Lives here (below both `mvm-backend` and
 //! `mvm-vm-host`) so the writer (`mvm_backend::hvf::HvfBackend`) and the reader
 //! (the `mvm-hvf-supervisor` bin) share one definition — the same way the vz
 //! `SupervisorConfig` does. The backend writes this as JSON on the supervisor's
 //! stdin; the supervisor boots the guest and captures its console.
 //!
 //! `#[serde(deny_unknown_fields)]` keeps the host↔supervisor contract
-//! fail-closed (claim 4.1 / W4.1): an unexpected field is a hard parse error,
+//! fail-closed (strict-schema): an unexpected field is a hard parse error,
 //! never a silently-ignored option.
 
 use std::path::PathBuf;
@@ -38,7 +38,7 @@ pub struct HvfSupervisorConfig {
     /// run-to-exit result the backend's `wait` reads.
     pub workload_exit: PathBuf,
     /// The VM's resolved network policy — the supervisor projects it into the
-    /// vsock egress gateway (claim-10, ADR-100). Omitted ⇒ deny-all (fail closed).
+    /// vsock egress gateway (claim-10). Omitted ⇒ deny-all (fail closed).
     #[serde(default = "mvm_core::policy::network_policy::NetworkPolicy::deny_all")]
     pub network_policy: mvm_core::policy::network_policy::NetworkPolicy,
     /// Run budget in seconds — a booting kernel never exits on its own, so the

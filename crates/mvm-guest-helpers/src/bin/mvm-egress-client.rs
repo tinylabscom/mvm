@@ -1,4 +1,4 @@
-//! `mvm-egress-client` — in-guest SOCKS5 → vsock egress proxy (ADR-100).
+//! `mvm-egress-client` — in-guest SOCKS5 → vsock egress proxy.
 //!
 //! Runs inside a NIC-less microVM guest. Listens for SOCKS5 CONNECT on loopback
 //! and forwards each connection's target over AF_VSOCK to the host egress gateway,

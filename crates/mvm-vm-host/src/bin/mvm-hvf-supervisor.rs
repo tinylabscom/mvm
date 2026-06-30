@@ -1,4 +1,4 @@
-//! `mvm-hvf-supervisor` — one process per raw-HVF guest (Plan 214 / ADR-098).
+//! `mvm-hvf-supervisor` — one process per raw-HVF guest.
 //!
 //! Reads an [`mvm_build::hvf_supervisor::HvfSupervisorConfig`] JSON document on
 //! stdin (written by `mvm_backend::hvf`), self-signs the `hypervisor`
@@ -203,7 +203,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Project the VM's network policy into the vsock egress gateway (claim-10,
-    // ADR-100): resolve any host-allowlist entries to IPs once (the admission-time
+    // vsock-only egress): resolve any host-allowlist entries to IPs once (the admission-time
     // DNS pin), then project. deny-all / unrestricted need no pins; a host that
     // fails to resolve pins an empty set so the projection fails CLOSED.
     let pins = resolve_dns_pins(&cfg.network_policy);

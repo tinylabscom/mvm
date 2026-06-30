@@ -1,6 +1,6 @@
 //! `xtask check-vsock-only-egress`
 //!
-//! ADR-100: a workload guest's only off-guest channel is vsock — there is **no
+//! vsock-only egress: a workload guest's only off-guest channel is vsock — there is **no
 //! guest NIC**, and egress flows guest → vsock → the host gateway. This gate
 //! locks that in for the converged vsock-only path (the portable `vmm` device
 //! model + the raw-HVF backend): a regression that attaches a virtio-net device,
@@ -8,7 +8,7 @@
 //! fails closed here.
 //!
 //! Scope note: Firecracker / libkrun / vz still attach a virtio-net NIC today and
-//! are converging onto the vsock gateway separately (ADR-100 step 2) — they are
+//! are converging onto the vsock gateway separately (vsock-only egress step 2) — they are
 //! deliberately **out of scope** for this gate until that lands, so it guards only
 //! the directories that are supposed to already be NIC-free.
 
@@ -63,7 +63,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     if !hits.is_empty() {
         bail!(
             "check-vsock-only-egress: a guest NIC / net gateway token appears on the \
-             vsock-only path (ADR-100 — no guest NIC; egress is vsock-mediated):\n{}",
+             vsock-only path (vsock-only egress — no guest NIC; egress is vsock-mediated):\n{}",
             hits.join("\n")
         );
     }

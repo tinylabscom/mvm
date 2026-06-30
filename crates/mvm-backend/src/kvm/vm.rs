@@ -47,9 +47,9 @@ pub struct KvmEgressResult {
     /// Workload exit code, if the guest reported one over the vsock workload-exit
     /// port (the transient run-to-exit signal).
     pub workload_exit_code: Option<i32>,
-    /// Egress targets the vsock gateway refused (claim-10 default-deny, ADR-100).
+    /// Egress targets the vsock gateway refused (claim-10 default-deny).
     pub egress_denied: Vec<String>,
-    /// Egress targets the vsock gateway admitted + connected (ADR-100).
+    /// Egress targets the vsock gateway admitted + connected.
     pub egress_allowed: Vec<String>,
 }
 
@@ -159,7 +159,7 @@ impl KvmVm {
     }
 
     /// Boot an x86_64 bzImage (loaded in `mem`) with the **vsock egress gateway**
-    /// (ADR-100) — no guest NIC. The guest reaches the network only by opening a
+    ///  — no guest NIC. The guest reaches the network only by opening a
     /// vsock stream to [`VSOCK_MMIO_BASE`]'s device on the egress port; the host
     /// decides each target against `gate` (claim-10) and proxies admitted flows.
     /// This is the same run loop + `EgressProxy` HVF uses; the KVM specifics are the

@@ -8,6 +8,9 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+[package.metadata.mvm.architecture]
+substrate_server_category = "in-guest local egress plumbing (loopback SOCKS5 listener to host vsock gateway)"
+
 [[bin]]
 name = "mvm-addon-dns"
 path = "src/bin/mvm-addon-dns.rs"

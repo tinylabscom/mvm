@@ -8,6 +8,9 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+[package.metadata.mvm.architecture]
+substrate_server_category = "per-VM provider plumbing (host agent UDS bridge + backend-local vsock listeners)"
+
 # ── What this crate owns ───────────────────────────────────────────
 #
 # Concrete `VmBackend` implementations that are *not* coupled to the
@@ -123,7 +126,7 @@ objc2-virtualization = { version = "0.3", features = [
     "VZVirtioSocketConnection",
 ] }
 
-# KVM backend (Plan 214 / ADR-099). Pre-generated bindings + safe ioctl wrappers;
+# KVM backend. Pre-generated bindings + safe ioctl wrappers;
 # the in-repo kvm::x86_boot logic is pure and platform-independent.
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-ioctls = "0.21"
