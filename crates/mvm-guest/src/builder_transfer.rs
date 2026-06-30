@@ -25,6 +25,7 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// Cap on a single frame's JSON header (paths are short; this is generous).
@@ -158,33 +159,40 @@ fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
     Ok(out)
 }
 
-/// Write a length-prefixed JSON frame (4-byte big-endian length + body).
 fn write_frame<W: Write>(out: &mut W, frame: &Frame) -> Result<()> {
-    let body = serde_json::to_vec(frame).context("encode transfer frame")?;
-    let len: u32 = body
-        .len()
-        .try_into()
-        .context("transfer frame header too large")?;
+    write_msg(out, frame)
+}
+
+fn read_frame<R: Read>(input: &mut R) -> Result<Frame> {
+    read_msg(input)
+}
+
+/// Write a length-prefixed JSON message (4-byte big-endian length + JSON body) —
+/// the shared framing for the transfer file headers and the build-session control
+/// messages built on top of them.
+pub fn write_msg<W: Write, T: Serialize>(out: &mut W, msg: &T) -> Result<()> {
+    let body = serde_json::to_vec(msg).context("encode framed message")?;
+    let len: u32 = body.len().try_into().context("framed message too large")?;
     out.write_all(&len.to_be_bytes())?;
     out.write_all(&body)?;
     Ok(())
 }
 
-/// Read one length-prefixed JSON frame. The cap bounds a hostile header.
-fn read_frame<R: Read>(input: &mut R) -> Result<Frame> {
+/// Read one length-prefixed JSON message. The cap bounds a hostile header.
+pub fn read_msg<R: Read, T: DeserializeOwned>(input: &mut R) -> Result<T> {
     let mut len_buf = [0u8; 4];
     input
         .read_exact(&mut len_buf)
-        .context("read transfer frame length")?;
+        .context("read framed message length")?;
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > MAX_HEADER_BYTES {
-        bail!("transfer frame header {len} exceeds the {MAX_HEADER_BYTES}-byte cap");
+        bail!("framed message header {len} exceeds the {MAX_HEADER_BYTES}-byte cap");
     }
     let mut body = vec![0u8; len];
     input
         .read_exact(&mut body)
-        .context("read transfer frame body")?;
-    serde_json::from_slice(&body).context("decode transfer frame")
+        .context("read framed message body")?;
+    serde_json::from_slice(&body).context("decode framed message")
 }
 
 #[cfg(unix)]
