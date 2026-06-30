@@ -635,9 +635,16 @@ impl AnyBackend {
             AnyBackend::Vz(b) => Some(b),
             AnyBackend::Mock(b) => Some(b),
             AnyBackend::Qemu(_) => None,
-            // HVF carries no untrusted workload yet — host-mediated networking +
-            // default-deny egress (claim 10) aren't wired, so it's barred from the
-            // workload path like Qemu until that parity lands.
+            // HVF is not a workload backend YET, but the remaining bar is narrow +
+            // specific. Already proven on the in-house VMM: claim 10 default-deny
+            // egress (EgressGate/EgressProxy, ADR-100), a real mkGuest workload
+            // boot, and a host-reachable guest agent over vsock. The remaining bar
+            // is claims 12/13 secret-substitution parity — HVF has no per-VM
+            // substitution endpoint, so it cannot carry secret-bearing untrusted
+            // workloads (it would have to declare EgressSubstitutionTransport::None,
+            // a half-capable backend that wouldn't let us retire Vz). Fold secret
+            // substitution onto the vsock gateway (the VsockUdsChannel shape Vz
+            // declares) first; then flip this to Some.
             AnyBackend::Hvf(_) => None,
         }
     }
