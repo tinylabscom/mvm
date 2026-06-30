@@ -10,7 +10,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use kvm_bindings::{
@@ -20,8 +20,38 @@ use kvm_ioctls::{Kvm, VcpuExit as KvmExit, VcpuFd, VmFd};
 
 use super::serial::Serial16550;
 use super::x86_boot;
+use crate::vmm::egress_gate::EgressGate;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, HypervisorVm, SysReg, VcpuExit, VcpuHandle};
 use crate::vmm::run::{self, RunControl, RunDevice};
+use crate::vmm::vsock::VirtioVsock;
+
+/// virtio-mmio window for the guest's vsock device (above RAM, below the 4 GiB
+/// PCI hole) and its IOAPIC GSI. The guest learns it from the kernel cmdline arg
+/// [`vsock_mmio_cmdline_arg`]; the run loop dispatches MMIO here to [`VirtioVsock`].
+pub const VSOCK_MMIO_BASE: u64 = 0xd000_0000;
+pub const VSOCK_MMIO_LEN: u64 = 0x200;
+pub const VSOCK_IRQ: u32 = 5;
+
+/// Kernel cmdline fragment that tells the guest where the vsock virtio-mmio device
+/// is (`virtio_mmio.device=<size>@<base>:<irq>`). The caller appends this to
+/// `BootConfig.cmdline` so the guest binds `virtio_vsock` on the right window.
+pub fn vsock_mmio_cmdline_arg() -> String {
+    format!("virtio_mmio.device={VSOCK_MMIO_LEN:#x}@{VSOCK_MMIO_BASE:#x}:{VSOCK_IRQ}")
+}
+
+/// Outcome of an egress-enabled KVM boot.
+#[derive(Debug, Default)]
+pub struct KvmEgressResult {
+    /// Bytes the guest emitted on the 16550 console.
+    pub console: Vec<u8>,
+    /// Workload exit code, if the guest reported one over the vsock workload-exit
+    /// port (the transient run-to-exit signal).
+    pub workload_exit_code: Option<i32>,
+    /// Egress targets the vsock gateway refused (claim-10 default-deny, ADR-100).
+    pub egress_denied: Vec<String>,
+    /// Egress targets the vsock gateway admitted + connected (ADR-100).
+    pub egress_allowed: Vec<String>,
+}
 
 /// Backend-native error.
 #[derive(Debug)]
@@ -126,6 +156,91 @@ impl KvmVm {
         let _ = watchdog.join();
         outcome?;
         Ok(serial.output)
+    }
+
+    /// Boot an x86_64 bzImage (loaded in `mem`) with the **vsock egress gateway**
+    /// (ADR-100) — no guest NIC. The guest reaches the network only by opening a
+    /// vsock stream to [`VSOCK_MMIO_BASE`]'s device on the egress port; the host
+    /// decides each target against `gate` (claim-10) and proxies admitted flows.
+    /// This is the same run loop + `EgressProxy` HVF uses; the KVM specifics are the
+    /// virtio-mmio window + the SIGUSR1 heartbeat that breaks the in-kernel HLT so
+    /// host→guest replies reach an idle guest. `stop` ends the run (timeout or a
+    /// caller signal). The caller must append [`vsock_mmio_cmdline_arg`] to the
+    /// kernel cmdline.
+    pub fn boot_with_egress(
+        &self,
+        mem: &mut [u8],
+        cfg: &x86_boot::BootConfig,
+        timeout: Duration,
+        gate: EgressGate,
+        stop: &'static AtomicBool,
+    ) -> Result<KvmEgressResult, KvmError> {
+        let ram_ptr = mem.as_mut_ptr();
+        let ram_len = mem.len();
+        let vcpu = self.boot_x86(mem, cfg)?;
+
+        // Watchdog + heartbeat: end the run on timeout/stop; between those, a
+        // periodic force-exit breaks the guest's in-kernel HLT so the run loop can
+        // poll host I/O (drain egress sockets into a guest idle in `recv`). The run
+        // loop treats a forced exit (Canceled) as a stop only when `stop` is set.
+        let done = Arc::new(AtomicBool::new(false));
+        let done_w = done.clone();
+        let egress_active = Arc::new(AtomicUsize::new(0));
+        let egress_active_w = egress_active.clone();
+        let handle = vcpu.exit_token();
+        let watchdog = std::thread::spawn(move || {
+            let step = Duration::from_millis(5);
+            let mut waited = Duration::ZERO;
+            loop {
+                std::thread::sleep(step);
+                if done_w.load(Ordering::Relaxed) {
+                    return;
+                }
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                waited += step;
+                if waited >= timeout {
+                    stop.store(true, Ordering::Relaxed);
+                    break;
+                }
+                if egress_active_w.load(Ordering::Relaxed) > 0 {
+                    KvmHandle::force_exit(&[handle]);
+                }
+            }
+            KvmHandle::force_exit(&[handle]);
+        });
+
+        let mut serial = Serial16550::new(0x3f8);
+        // SAFETY: `ram_ptr`/`ram_len` is the guest RAM mapped at gpa 0 for this VM's
+        // lifetime; the device shares it with the running guest (standard VMM
+        // aliasing, as on HVF).
+        let mut vsock =
+            unsafe { VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram_ptr, 0, ram_len) };
+        vsock.capture_workload_exit(stop);
+        vsock.set_egress_gate(gate);
+        vsock.set_egress_activity(egress_active.clone());
+
+        let outcome = {
+            let mut devices: Vec<&mut dyn RunDevice> = vec![&mut serial, &mut vsock];
+            run::run(
+                &vcpu,
+                |intid, level| self.set_irq(intid, level),
+                &mut devices,
+                |_: &KvmVcpu, _, _| Ok(RunControl::Stop),
+                || stop.load(Ordering::Relaxed),
+            )
+        };
+        done.store(true, Ordering::Relaxed);
+        let _ = watchdog.join();
+        outcome?;
+
+        Ok(KvmEgressResult {
+            console: serial.output,
+            workload_exit_code: vsock.workload_exit_code,
+            egress_denied: vsock.egress_denied().to_vec(),
+            egress_allowed: vsock.egress_allowed().to_vec(),
+        })
     }
 }
 
