@@ -16,6 +16,7 @@
 //! root filesystem (initramfs / virtio-blk) is the next slice.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -101,6 +102,18 @@ fn default_bootargs(has_disk: bool) -> String {
     args
 }
 
+/// Host-side channels the supervisor wires into the guest's vsock device: the
+/// claim-10 egress gateway policy (ADR-100), the per-VM host→guest agent RPC
+/// socket, and the per-VM substitution-endpoint socket (ADR-101). Bundled so the
+/// boot entry stays under the argument-count lint. The two socket paths fall back
+/// to the `MVM_HVF_{AGENT,SUBSTITUTION}_SOCKET` env hooks when `None` (dev/live
+/// drivers); the productionized path threads them through the supervisor config.
+pub struct HostChannels {
+    pub egress: crate::vmm::egress_gate::EgressGate,
+    pub agent_socket: Option<PathBuf>,
+    pub substitution_socket: Option<PathBuf>,
+}
+
 /// Boot `image` (an arm64 `Image`) under HVF, optionally with an `initramfs`
 /// (cpio, gzip-or-raw), returning what it printed within `timeout`.
 pub fn boot_kernel(
@@ -118,15 +131,20 @@ pub fn boot_kernel(
         vsock,
         timeout,
         &NEVER_STOP,
-        egress_gate_from_env(),
+        HostChannels {
+            egress: egress_gate_from_env(),
+            agent_socket: None,
+            substitution_socket: None,
+        },
     )
 }
 
 /// Like [`boot_kernel`], but stops as soon as `stop` is set — a
-/// persistent-until-stop VM — and drives egress through the caller-supplied
-/// `egress` gateway (the supervisor builds it from the admitted plan's network
-/// policy). The supervisor sets `stop` from a SIGTERM handler so
-/// `HvfBackend::stop` ends the guest cleanly. `timeout` still caps the run.
+/// persistent-until-stop VM — and drives egress + the agent/substitution channels
+/// through the caller-supplied [`HostChannels`] (the supervisor builds them from
+/// the admitted plan + per-VM socket paths). The supervisor sets `stop` from a
+/// SIGTERM handler so `HvfBackend::stop` ends the guest cleanly. `timeout` still
+/// caps the run.
 pub fn boot_kernel_until(
     image: &[u8],
     initramfs: Option<&[u8]>,
@@ -134,9 +152,9 @@ pub fn boot_kernel_until(
     vsock: bool,
     timeout: Duration,
     stop: &'static AtomicBool,
-    egress: crate::vmm::egress_gate::EgressGate,
+    channels: HostChannels,
 ) -> Result<KernelBootResult, HvfError> {
-    boot_kernel_impl(image, initramfs, disk, vsock, timeout, stop, egress)
+    boot_kernel_impl(image, initramfs, disk, vsock, timeout, stop, channels)
 }
 
 fn boot_kernel_impl(
@@ -146,7 +164,7 @@ fn boot_kernel_impl(
     vsock: bool,
     timeout: Duration,
     stop: &'static AtomicBool,
-    egress: crate::vmm::egress_gate::EgressGate,
+    channels: HostChannels,
 ) -> Result<KernelBootResult, HvfError> {
     // Validate it's an arm64 Image; we load at the fixed boot-protocol offset.
     let _hdr = kernel_image::parse(image).map_err(|_| HvfError::BadKernel)?;
@@ -229,7 +247,9 @@ fn boot_kernel_impl(
                 disk,
                 vsock,
                 timeout,
-                egress,
+                egress: channels.egress,
+                agent_socket: channels.agent_socket,
+                substitution_socket: channels.substitution_socket,
             },
             stop,
         );
@@ -281,6 +301,11 @@ struct RunInputs<'a> {
     timeout: Duration,
     /// Host egress gateway policy.
     egress: crate::vmm::egress_gate::EgressGate,
+    /// Per-VM agent RPC socket (productionized off `MVM_HVF_AGENT_SOCKET`).
+    agent_socket: Option<PathBuf>,
+    /// Per-VM substitution-endpoint socket (productionized off
+    /// `MVM_HVF_SUBSTITUTION_SOCKET`; ADR-101).
+    substitution_socket: Option<PathBuf>,
 }
 
 unsafe fn run(
@@ -295,6 +320,8 @@ unsafe fn run(
         vsock,
         timeout,
         egress,
+        agent_socket,
+        substitution_socket,
     } = inputs;
     unsafe {
         // In-kernel GICv3 — created after the VM, before any vCPU. Base
@@ -368,13 +395,13 @@ unsafe fn run(
         // services agent streams even while the guest is idle in WFI — an agent VM
         // exists to answer host RPC, so the wake is warranted. (A transient
         // run-to-exit VM leaves this unset and keeps the egress-gated heartbeat.)
-        let agent_socket = std::env::var("MVM_HVF_AGENT_SOCKET").ok();
+        // Per-VM socket paths come from the supervisor config; fall back to the
+        // dev/live env hooks when the config omits them (the example drivers).
+        let agent_socket =
+            agent_socket.or_else(|| std::env::var_os("MVM_HVF_AGENT_SOCKET").map(PathBuf::from));
         let agent_bound = agent_socket.is_some();
-        // Per-VM substitution-endpoint socket (ADR-101). When wired, EGRESS_PORT
-        // carries the WireRequest substitution protocol to the endpoint (claims
-        // 10/12/13). Dev/live hook today, mirroring the agent socket; the
-        // productionized path threads it through the supervisor config.
-        let substitution_socket = std::env::var("MVM_HVF_SUBSTITUTION_SOCKET").ok();
+        let substitution_socket = substitution_socket
+            .or_else(|| std::env::var_os("MVM_HVF_SUBSTITUTION_SOCKET").map(PathBuf::from));
         let handle = vcpu.exit_token();
         let watchdog = std::thread::spawn(move || {
             let step = Duration::from_millis(5);
@@ -425,8 +452,11 @@ unsafe fn run(
             // clients (`machine invoke`) reach the guest agent over vsock.
             if let Some(path) = &agent_socket {
                 v.set_agent_activity(egress_active.clone());
-                if let Err(e) = v.set_agent_socket(std::path::Path::new(path)) {
-                    eprintln!("mvm-hvf: agent socket bind failed at {path}: {e}");
+                if let Err(e) = v.set_agent_socket(path) {
+                    eprintln!(
+                        "mvm-hvf: agent socket bind failed at {}: {e}",
+                        path.display()
+                    );
                 }
             }
             // Substitution gateway (ADR-101): route EGRESS_PORT to the per-VM
@@ -434,7 +464,7 @@ unsafe fn run(
             // WireRequest awaiting its reply keeps the run loop polling.
             if let Some(path) = &substitution_socket {
                 v.set_substitution_activity(egress_active.clone());
-                v.set_substitution_endpoint(std::path::Path::new(path));
+                v.set_substitution_endpoint(path);
             }
         }
 

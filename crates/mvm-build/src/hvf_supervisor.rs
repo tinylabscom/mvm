@@ -45,6 +45,19 @@ pub struct HvfSupervisorConfig {
     /// guest is forced out after this long. The backend sets it from the VM's
     /// requested lifetime.
     pub timeout_secs: u64,
+    /// Per-VM host→guest agent RPC socket. The supervisor binds it so host clients
+    /// (`machine invoke`) reach the guest agent over vsock. `None` ⇒ no agent
+    /// listener (the supervisor falls back to the `MVM_HVF_AGENT_SOCKET` dev hook).
+    /// Threading it here is the productionized path off that env hook.
+    #[serde(default)]
+    pub agent_socket: Option<PathBuf>,
+    /// Per-VM substitution-endpoint socket (ADR-101). When set, the supervisor
+    /// routes `EGRESS_PORT` to the `mvm-substitution-endpoint` bound here
+    /// (WireRequest substitution; claims 10/12/13). `None` ⇒ the legacy raw-TCP
+    /// egress path (no secret-bearing egress). The backend spawns the endpoint and
+    /// sets this only when the admitted plan carries egress secrets.
+    #[serde(default)]
+    pub substitution_socket: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -63,12 +76,23 @@ mod tests {
             workload_exit: "/state/workload.exit".into(),
             network_policy: mvm_core::policy::network_policy::NetworkPolicy::deny_all(),
             timeout_secs: 30,
+            agent_socket: Some("/state/hvf-agent.sock".into()),
+            substitution_socket: Some("/state/substitution-endpoint.sock".into()),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert_eq!(
             serde_json::from_str::<HvfSupervisorConfig>(&json).unwrap(),
             cfg
         );
+    }
+
+    #[test]
+    fn socket_fields_default_to_none() {
+        // Older configs (and non-secret VMs) omit the socket fields → None.
+        let json = r#"{"kernel":"/k/Image","console_log":"/c.log","pid_file":"/p.pid","workload_exit":"/w.exit","timeout_secs":5}"#;
+        let cfg: HvfSupervisorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.agent_socket, None);
+        assert_eq!(cfg.substitution_socket, None);
     }
 
     #[test]

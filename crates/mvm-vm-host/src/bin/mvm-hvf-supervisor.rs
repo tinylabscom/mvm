@@ -220,7 +220,11 @@ fn main() -> anyhow::Result<()> {
         cfg.vsock,
         timeout,
         &STOP,
-        egress,
+        mvm_backend::hvf::HostChannels {
+            egress,
+            agent_socket: cfg.agent_socket.clone(),
+            substitution_socket: cfg.substitution_socket.clone(),
+        },
     );
 
     // The VM has stopped. Persist the outputs (console + workload exit code)

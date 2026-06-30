@@ -77,6 +77,44 @@ fn vms_root() -> PathBuf {
     PathBuf::from(mvm_data_dir()).join("vms")
 }
 
+/// Spawn the per-VM substitution endpoint when the admitted plan carries egress
+/// secrets (ADR-101), returning an armed `EndpointGuard` and the endpoint socket
+/// path to hand the supervisor; a secret-free plan (or no `plan.json`) yields a
+/// defused no-op guard and `None`. Unlike Vz — where the Swift supervisor proxies
+/// the guest vsock dial to the endpoint — the in-house VMM's substitution bridge
+/// connects the guest's `EGRESS_PORT` stream straight to this socket, so the
+/// transport is the per-VM `Uds` the endpoint binds. Mirrors
+/// `vz::spawn_vz_egress_endpoint_if_needed`.
+fn spawn_hvf_egress_endpoint_if_needed(
+    vm_name: &str,
+    state_dir: &Path,
+) -> Result<(crate::substitution_spawn::EndpointGuard, Option<PathBuf>)> {
+    use crate::substitution_spawn::{
+        EndpointGuard, EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
+    };
+    let Some((secrets, redaction, tenant)) =
+        crate::egress_shared::decode_plan_secrets_from_state(state_dir)?
+    else {
+        return Ok((EndpointGuard::defused(), None));
+    };
+    let socket = mvm_core::config::vm_substitution_endpoint_socket(vm_name);
+    spawn_substitution_endpoint(SubstitutionSpawnParams {
+        vm_name,
+        state_dir,
+        tenant: &tenant,
+        secrets: &secrets,
+        redaction: &redaction,
+        transport: EndpointTransport::Uds {
+            path: socket.clone(),
+        },
+        // The in-house VMM has no transparent :80/:443 terminator — all egress is
+        // the proxy-aware WireRequest path, so no terminator + no per-VM TLS.
+        terminator_listen: None,
+        tls_intermediate: None,
+    })?;
+    Ok((EndpointGuard::new(vm_name), Some(socket)))
+}
+
 impl VmBackend for HvfBackend {
     fn name(&self) -> &str {
         "hvf"
@@ -117,6 +155,19 @@ impl VmBackend for HvfBackend {
         let workload_exit = state_dir.join("workload.exit");
         let _ = std::fs::remove_file(&workload_exit);
 
+        // Spawn the per-VM substitution endpoint when the admitted plan carries
+        // egress secrets (ADR-101). The guard reaps it on any early return below —
+        // so a decrypted-secret process can't outlive a failed launch — and is
+        // defused once boot is confirmed (the stop path then owns teardown). A
+        // secret-free plan yields a defused no-op guard and no endpoint socket.
+        let (mut endpoint_guard, substitution_socket) =
+            spawn_hvf_egress_endpoint_if_needed(&config.name, &state_dir)?;
+        // Productionized per-VM agent RPC socket threaded through the supervisor
+        // config; the `MVM_HVF_AGENT_SOCKET` dev hook still wins for live drivers.
+        let agent_socket = std::env::var_os("MVM_HVF_AGENT_SOCKET")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| state_dir.join("hvf-agent.sock"));
+
         let disk = Some(config.rootfs_path.clone())
             .filter(|p| !p.is_empty())
             .map(PathBuf::from);
@@ -139,6 +190,8 @@ impl VmBackend for HvfBackend {
             workload_exit,
             network_policy: config.network_policy.clone(),
             timeout_secs,
+            agent_socket: Some(agent_socket),
+            substitution_socket,
         };
         let json = serde_json::to_string(&cfg)
             .map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
@@ -190,6 +243,11 @@ impl VmBackend for HvfBackend {
             std::thread::sleep(Duration::from_millis(50));
         }
 
+        // Boot confirmed: the supervisor's device is wired to the endpoint, so it
+        // must outlive this launch. Defuse the guard (its Drop becomes a no-op);
+        // the stop path now owns reaping the endpoint.
+        endpoint_guard.defuse();
+
         // Detach: dropping the `Child` does not kill the process, so the
         // supervisor outlives this CLI invocation (reaped via its PID file).
         drop(child);
@@ -212,7 +270,12 @@ impl VmBackend for HvfBackend {
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
-        let pid_path = vm_state_dir(&id.0).join(PID_FILE_NAME);
+        let state_dir = vm_state_dir(&id.0);
+        // Reap the per-VM substitution endpoint first (before the not-running
+        // check), so a crashed VM's decrypted-secret process can't outlive the
+        // guest. Idempotent + no-op when the VM spawned none (no secrets).
+        crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &id.0);
+        let pid_path = state_dir.join(PID_FILE_NAME);
         if let Some(pid) = read_pid(&pid_path) {
             // SIGTERM (default action terminates — the supervisor installs no
             // handler), then SIGKILL if it lingers. The HVF VM dies with it.
@@ -361,6 +424,25 @@ mod tests {
         let id = VmId("hvf-nonexistent-test-vm".into());
         assert_eq!(HvfBackend.status(&id).unwrap(), VmStatus::Stopped);
         assert!(HvfBackend.stop(&id).is_ok());
+    }
+
+    #[test]
+    fn substitution_endpoint_not_spawned_when_no_secrets() {
+        // A state dir with no plan.json (or a secret-free plan) must not spawn the
+        // endpoint: the guard is defused (Drop no-op) and there is no socket to
+        // hand the supervisor, so EGRESS_PORT keeps the legacy egress path.
+        let tmp = tempfile::tempdir().unwrap();
+        let (guard, socket) =
+            spawn_hvf_egress_endpoint_if_needed("hvf-no-secrets-vm", tmp.path()).unwrap();
+        assert!(
+            socket.is_none(),
+            "a secret-free plan must not yield an endpoint socket"
+        );
+        assert!(
+            !tmp.path().join("substitution.pid").exists(),
+            "no endpoint process for a secret-free plan"
+        );
+        drop(guard); // defused → Drop reaps nothing
     }
 
     #[test]
