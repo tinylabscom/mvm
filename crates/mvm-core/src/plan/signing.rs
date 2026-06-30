@@ -464,8 +464,8 @@ mod tests {
 
     #[test]
     fn plan_without_snapshot_at_field_defaults_to_none() {
-        // A plan serialized before `snapshot_at` existed must still deserialize,
-        // defaulting to `None` (not warm-snapshotted) — `serde(default)`.
+        // A plan whose JSON lacks `snapshot_at` must still deserialize,
+        // defaulting to `None` via `serde(default)`.
         let plan = sample_plan();
         let mut value = serde_json::to_value(&plan).unwrap();
         value.as_object_mut().unwrap().remove("snapshot_at");

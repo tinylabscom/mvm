@@ -81,7 +81,7 @@ pub struct ExecutionPlan {
     /// warm-snapshotted; `Some(at)` = the host may capture a warm snapshot when
     /// the guest reaches `at`'s trigger marker (`mvm-init` lifecycle). Part of
     /// the signed contract so the snapshot point is admitted, not host-chosen.
-    /// `#[serde(default)]` so a pre-v8 plan deserializes as `None`.
+    /// `#[serde(default)]` so a plan without the field deserializes as `None`.
     #[serde(default)]
     pub snapshot_at: Option<SnapshotAt>,
 
