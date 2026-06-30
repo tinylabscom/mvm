@@ -204,7 +204,11 @@ back to TCP) for it rather than leak to a NIC.
    workload `connect()` into a vsock egress stream — so unmodified HTTP/HTTPS/TCP
    workloads ride vsock with no awareness. Plus DNS resolution without a NIC (see
    "Two planes" above). The opt-in `mvm-egress-client` (SOCKS→vsock) is the bridge
-   until this lands.
+   until this lands. **Prototyped + live-proven** via mechanism (b) (REDIRECT proxy)
+   in `spikes/transparent-egress/`: an unmodified plain `connect()` (no proxy env)
+   in a NIC-less guest round-tripped through the host gateway on `/dev/kvm`.
+   Productionizing = a guest helper (and/or the TUN+netstack variant) +
+   DNS-over-vsock + the UDP decision.
 
 ## Status
 
