@@ -446,7 +446,6 @@ unsafe fn run(
         // claim-10 default-deny until the plan's policy is threaded in.
         if let Some(v) = vsock_dev.as_mut() {
             v.capture_workload_exit(stop);
-            v.set_egress_gate(egress);
             v.set_egress_activity(egress_active.clone());
             // Host→guest agent RPC (GUEST_AGENT_PORT): expose the listener so host
             // clients (`machine invoke`) reach the guest agent over vsock.
@@ -459,13 +458,19 @@ unsafe fn run(
                     );
                 }
             }
-            // Substitution gateway: route EGRESS_PORT to the per-VM
-            // endpoint. Shares the egress heartbeat counter so an in-flight
-            // WireRequest awaiting its reply keeps the run loop polling.
+            // Substitution gateway: route EGRESS_PORT to the per-VM endpoint. The
+            // bridge makes the claim-10 decision on the first frame using the same
+            // gate the raw-egress path uses (hence a clone), then relays admitted
+            // streams to the secrets endpoint. Shares the egress heartbeat counter
+            // so an in-flight WireRequest awaiting its reply keeps the loop polling.
             if let Some(path) = &substitution_socket {
                 v.set_substitution_activity(egress_active.clone());
+                v.set_substitution_gate(egress.clone());
                 v.set_substitution_endpoint(path);
             }
+            // The raw-egress gate takes ownership last (the substitution path only
+            // needs a clone above).
+            v.set_egress_gate(egress);
         }
 
         // Diagnostics gathered by the exception hook (HVC/PSCI + other traps).

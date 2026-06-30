@@ -2486,6 +2486,7 @@ name = "mvm-backend"
 version = "0.16.1"
 dependencies = [
  "anyhow",
+ "base64",
  "block2",
  "colored",
  "dispatch2",
@@ -2513,6 +2514,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "url",
  "uuid",
  "which 7.0.3",
 ]

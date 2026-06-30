@@ -161,8 +161,9 @@ pub struct VirtioVsock {
     agent: super::agent_bridge::AgentBridge,
     /// Per-VM substitution gateway. When a substitution endpoint UDS is
     /// configured, `EGRESS_PORT` carries the WireRequest substitution protocol and
-    /// routes here instead of the raw-TCP `egress` proxy; claims 10/12/13 are all
-    /// decided in the endpoint subprocess this bridges to.
+    /// routes here instead of the raw-TCP `egress` proxy. The bridge makes the
+    /// claim-10 decision on the first frame (reusing the egress gate), then relays
+    /// admitted streams to the endpoint subprocess that enforces claims 12/13.
     substitution: super::substitution_bridge::SubstitutionBridge,
     /// Inbound vsock header per substitution stream (keyed by guest `src_port`), so
     /// an endpoint reply can be framed back on the right stream.
@@ -230,6 +231,14 @@ impl VirtioVsock {
     /// raw-TCP egress proxy. Without it, `EGRESS_PORT` keeps the legacy egress path.
     pub fn set_substitution_endpoint(&mut self, path: &std::path::Path) {
         self.substitution.set_endpoint(path);
+    }
+
+    /// Install the claim-10 policy on the substitution gateway — the same
+    /// [`EgressGate`](super::egress_gate::EgressGate) the raw-egress path uses, so
+    /// a destination the network policy forbids is refused at the bridge before the
+    /// secrets endpoint is contacted.
+    pub fn set_substitution_gate(&mut self, gate: super::egress_gate::EgressGate) {
+        self.substitution.set_gate(gate);
     }
 
     /// Share the heartbeat activity counter with the substitution gateway so an
@@ -467,18 +476,25 @@ impl VirtioVsock {
     }
 
     /// Frame an inbound substitution request to the [`SubstitutionBridge`] and map
-    /// its action to a vsock control reply. The bridge relays the bytes
-    /// to the per-VM endpoint, which makes every claim-10/12/13 decision; the device
-    /// owns only the rx framing and the per-stream header.
+    /// its action to a vsock control reply. The bridge enforces claim-10 on the
+    /// first frame and relays admitted streams to the per-VM endpoint (claims
+    /// 12/13); the device owns only the rx framing and the per-stream header.
     fn handle_substitution_request(&mut self, hdr: &Hdr, payload: &[u8]) {
         use super::substitution_bridge::SubstitutionAction;
         match self.substitution.handle_frame(hdr.src_port, payload) {
-            SubstitutionAction::Relayed => {
+            // Relayed (admitted) or Pending (buffering the first frame): ack the
+            // bytes so the guest's credit recovers, and keep the stream's header
+            // for framing replies / a later reset.
+            SubstitutionAction::Relayed | SubstitutionAction::Pending => {
                 self.substitution_hdrs.insert(hdr.src_port, *hdr);
-                self.queue_reply(hdr, OP_CREDIT_UPDATE, &[]); // ack the relayed bytes
+                self.queue_reply(hdr, OP_CREDIT_UPDATE, &[]);
             }
-            // Fail-closed: no endpoint reachable → reset the stream (no egress).
-            SubstitutionAction::Refused => self.queue_reply(hdr, OP_RST, &[]),
+            // Fail-closed: no endpoint, a claim-10 deny, or a malformed frame →
+            // reset the stream (no egress).
+            SubstitutionAction::Refused => {
+                self.substitution_hdrs.remove(&hdr.src_port);
+                self.queue_reply(hdr, OP_RST, &[]);
+            }
         }
     }
 
@@ -752,49 +768,89 @@ mod tests {
         assert_eq!(d.received, b"hello");
     }
 
-    /// With a substitution endpoint wired, a guest OP_RW to `EGRESS_PORT` is
-    /// relayed to the endpoint (not captured as raw bytes, not handed to the
-    /// raw-TCP egress proxy), and the endpoint's reply frames back to the guest as
-    /// OP_RW on the same stream.
+    /// Build a `(gate-admitting-the-host, framed-WireRequest)` pair for the
+    /// substitution device tests: the gate self-pins `host:port`, the frame targets
+    /// `https://<host>/v1`.
+    #[cfg(test)]
+    fn subst_gate_and_frame(
+        host: &str,
+        port: u16,
+    ) -> (crate::vmm::egress_gate::EgressGate, Vec<u8>) {
+        use base64::Engine;
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+        use mvm_core::substitution_wire::WireRequest;
+
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            host,
+            vec!["93.184.216.34".parse().unwrap()],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let gate = crate::vmm::egress_gate::EgressGate::from_network_policy(
+            &NetworkPolicy::allow_list(vec![HostPort {
+                host: host.into(),
+                port,
+            }]),
+            &pins,
+            "2026-01-01T00:00:00Z",
+        );
+        let req = WireRequest {
+            method: "POST".into(),
+            url: format!("https://{host}/v1"),
+            headers: vec![("authorization".into(), "Bearer mvm-secret-abc".into())],
+            body_b64: base64::engine::general_purpose::STANDARD.encode(b"{}"),
+        };
+        let body = serde_json::to_vec(&req).unwrap();
+        let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+        frame.extend_from_slice(&body);
+        (gate, frame)
+    }
+
+    /// With a substitution endpoint wired, a guest OP_RW to `EGRESS_PORT` carrying a
+    /// WireRequest to an *admitted* destination is relayed to the endpoint (not
+    /// captured as raw bytes, not handed to the raw-TCP egress proxy), and the
+    /// endpoint's reply frames back to the guest as OP_RW on the same stream.
     #[test]
-    fn egress_port_routes_to_substitution_endpoint_when_wired() {
+    fn egress_port_routes_admitted_request_to_substitution_endpoint() {
         use std::io::{Read, Write};
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("subst.sock");
 
-        // Mock endpoint: read the relayed request, reply "REPLY:" + it.
+        // Mock endpoint: read the relayed frame, reply "REPLY:" + it.
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let server = std::thread::spawn(move || {
             let (mut c, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 64];
+            let mut buf = [0u8; 256];
             let n = c.read(&mut buf).unwrap();
             let mut reply = b"REPLY:".to_vec();
             reply.extend_from_slice(&buf[..n]);
             c.write_all(&reply).unwrap();
         });
 
+        let (gate, frame) = subst_gate_and_frame("api.openai.com", 443);
         let mut d = dev();
         d.set_substitution_endpoint(&sock);
+        d.set_substitution_gate(gate);
 
-        // Guest sends a WireRequest frame to EGRESS_PORT.
         let rw = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 1000,
             dst_port: mvm_guest::vsock::EGRESS_PORT,
-            len: 11,
+            len: frame.len() as u32,
             op: OP_RW,
             typ: TYPE_STREAM,
             ..Default::default()
         };
-        d.handle_packet(rw, b"WireRequest");
+        d.handle_packet(rw, &frame);
 
-        // Routed to the endpoint, NOT the raw capture buffer.
+        // Routed to the endpoint, NOT the raw capture buffer; the stream is acked.
         assert!(
             d.received.is_empty(),
             "substitution bytes must not hit the capture path"
         );
-        // An ack (credit update) was queued for the relayed stream.
         assert!(
             d.pending_rx.iter().any(|(h, _)| h.op == OP_CREDIT_UPDATE),
             "relayed stream must be acked"
@@ -816,8 +872,70 @@ mod tests {
         }
         let (h, payload) = reply.expect("endpoint reply framed back to the guest");
         assert_eq!(h.src_port, mvm_guest::vsock::EGRESS_PORT); // swapped from inbound
-        assert_eq!(payload, b"REPLY:WireRequest");
+        assert!(
+            payload.starts_with(b"REPLY:"),
+            "reply must be the endpoint's echoed frame"
+        );
         server.join().unwrap();
+    }
+
+    /// Claim-10 at the device: a WireRequest to a destination the gate does NOT
+    /// admit is reset (OP_RST), never relayed — the endpoint (here a live socket
+    /// that would accept) is never contacted, so nothing reaches the wire.
+    #[test]
+    fn egress_port_resets_unadmitted_substitution_request() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("subst.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let contacted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let contacted_w = contacted.clone();
+        let server = std::thread::spawn(move || {
+            // If the bridge wrongly relayed, the endpoint would accept a connection.
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            for _ in 0..40 {
+                if let Ok((mut c, _)) = listener.accept() {
+                    let mut b = [0u8; 8];
+                    let _ = c.read(&mut b);
+                    contacted_w.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+
+        // Gate admits api.openai.com; the request targets a different host.
+        let (gate, _admitted) = subst_gate_and_frame("api.openai.com", 443);
+        let (_g2, denied_frame) = subst_gate_and_frame("evil.example.com", 443);
+        let mut d = dev();
+        d.set_substitution_endpoint(&sock);
+        d.set_substitution_gate(gate);
+
+        let rw = Hdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 1234,
+            dst_port: mvm_guest::vsock::EGRESS_PORT,
+            len: denied_frame.len() as u32,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(rw, &denied_frame);
+
+        // The stream was reset, not acked/relayed.
+        assert!(
+            d.pending_rx.iter().any(|(h, _)| h.op == OP_RST),
+            "a claim-10-denied request must be reset"
+        );
+        assert!(d.received.is_empty());
+        let _ = server.join();
+        assert!(
+            !contacted.load(std::sync::atomic::Ordering::Relaxed),
+            "the secrets endpoint must not be contacted for a denied destination"
+        );
     }
 
     /// Without a substitution endpoint, `EGRESS_PORT` keeps the legacy raw-TCP

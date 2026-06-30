@@ -48,47 +48,61 @@ the same capability without regressing the claim-10 it already has.
 ## Decision
 
 **On the in-house VMM, `EGRESS_PORT` (5253) carries exactly one protocol — the
-WireRequest substitution protocol — and exactly one enforcer: the per-VM
-`mvm-substitution-endpoint`, which decides claims 10, 12, and 13 for every request.**
+WireRequest substitution protocol — through one host gateway (the per-VM
+`SubstitutionBridge`) that pipelines two enforcement stages on every request:
+claim-10 at the bridge (the existing egress gate) and claims 12/13 at the per-VM
+`mvm-substitution-endpoint`.**
 
-1. **One protocol on the wire.** 5253 speaks WireRequest only. This is what the
-   guest's sole egress client already sends and what Vz already terminates, so the
-   guest image stays backend-agnostic. The raw-`"ip:port"` `EgressProxy` protocol
-   is spoken by no guest; it is **retired from the workload egress path** (the
-   examples that drove it directly are reframed as device/relay tests, not a guest
-   transport). There is no first-frame peek and therefore no protocol-confusion
-   surface.
+1. **One protocol per route, chosen at configuration time — never by peeking the
+   wire.** For a secret-bearing workload (a substitution endpoint is configured)
+   5253 routes to the `SubstitutionBridge` and speaks WireRequest only — what the
+   guest's sole egress client sends and what Vz terminates, so the guest image stays
+   backend-agnostic. For a workload with no endpoint, 5253 keeps the legacy raw-
+   `"ip:port"` `EgressProxy` route. The device picks the route from VM configuration
+   (is an endpoint wired?), not from inspecting guest bytes — so there is no
+   protocol-confusion surface between the two. The bridge does parse the first frame
+   of its own protocol, but only to make the claim-10 decision; it never has to
+   guess *which* protocol a stream is.
 
-2. **A dumb host relay.** A per-VM `SubstitutionBridge` in `vmm/` bridges each
-   guest→host 5253 vsock stream to the per-VM endpoint's Unix socket, mirroring
-   `AgentBridge`/`EgressProxy` (transport-agnostic, keyed by the guest `src_port`,
-   speaks raw bytes). It parses nothing and enforces nothing — it moves bytes
-   between the device and the endpoint UDS. This reuses the
-   `EndpointTransport::Uds { path }` channel the libkrun/vz backends already use,
-   so the endpoint binary is unchanged on its listener side.
+2. **A per-VM `SubstitutionBridge` in `vmm/` is the host gateway.** It bridges each
+   guest→host 5253 vsock stream to the per-VM endpoint's Unix socket, keyed by the
+   guest `src_port`, reusing the `EndpointTransport::Uds { path }` channel the
+   libkrun/vz backends already use (so the endpoint binary is unchanged). It is
+   **frame-aware for exactly one decision**: it buffers the first WireRequest frame,
+   extracts the destination host:port from its `url`, and makes the claim-10
+   allow/deny call (below) *before* opening the endpoint — then becomes a plain byte
+   relay for the rest of the connection.
 
-3. **All enforcement folds into the one endpoint** (option *b*, not multiplexing):
-   - **Claim 13** — raw secret never crosses; the guest holds only `mvm-secret-<hex>`
-     placeholders (unchanged endpoint behavior).
-   - **Claim 12** — per-secret destination binding; an unbound destination →
-     `WireResponse::Refused`, no upstream connection (unchanged).
-   - **Claim 10** — the signed plan's network policy is added to `EndpointConfig`;
-     the endpoint refuses any destination the policy does not admit (default-deny)
-     **before** binding/forwarding. This is the new enforcement this ADR mandates,
-     and it is *essential, not deferrable*: routing WireRequests to an endpoint
-     that did not gate the destination would let a placeholder-free request reach
-     any host — a claim-10 regression. One process now owns the whole egress
-     decision.
+3. **Enforcement is a two-stage pipeline on the one stream** — both stages run for
+   every request, so there is no protocol-confusion surface and no place to smuggle
+   traffic past a gate:
+   - **Claim 10 — at the bridge.** The bridge decides the destination against the
+     *same* `EgressGate` the device's raw-egress path uses (`vmm/egress_gate.rs`,
+     default-deny, DNS-pin host resolution). An unadmitted destination is refused
+     *before the endpoint is contacted* — check-then-relay, never relay-then-check
+     (which would leak bytes past the gate). This keeps claim-10 where the in-house
+     VMM already enforces it (the egress gate) and keeps the secrets moat focused on
+     secrets. **Why not in the endpoint:** folding the network policy into the
+     shared `mvm-substitution-endpoint` would change the moat that *every* backend
+     (Firecracker/libkrun/vz) spawns and force-touch all four spawn call sites for a
+     gate the in-house VMM already owns. Enforcing at the bridge is HVF-local — zero
+     shared-code change — and reuses the existing gate.
+   - **Claims 12/13 — at the endpoint** (unchanged). Once admitted, the stream is
+     relayed to the per-VM `mvm-substitution-endpoint`, which binding-checks the
+     secret (claim 12 — unbound → `WireResponse::Refused`, no upstream) and never
+     lets a raw secret cross (claim 13 — the guest holds only `mvm-secret-<hex>`).
 
 4. **Lifecycle.** The endpoint is spawned/reaped through the existing shared moat
    (`substitution_spawn::{spawn_substitution_endpoint, reap_substitution_endpoint}`,
    `EndpointTransport::Uds`), called from `HvfBackend::{start,stop}` exactly as
-   `VzBackend` calls it. It is spawned whenever the admitted plan permits egress
-   (secret bindings present, or a network policy that admits any host). A pure
-   default-deny / no-egress workload spawns no endpoint; the bridge's connect to
-   the absent UDS then fails closed (no egress), which is the correct default-deny
-   outcome. The decrypted-secret process never outlives a failed launch
-   (`EndpointGuard`) or the guest (reap-before-not-running, as on Vz).
+   `VzBackend` calls it — unchanged: spawned when the admitted plan carries secret
+   bindings, reaped before the not-running check on stop. The decrypted-secret
+   process never outlives a failed launch (`EndpointGuard`) or the guest. The bridge
+   is wired (endpoint socket + claim-10 gate) only when that endpoint exists; a
+   secret-free workload keeps the legacy raw-egress path. Note this means a
+   *no-secret but allow-listed* workload still egresses over the legacy path, not
+   the WireRequest gateway — the same scope Vz has today; widening the bridge to all
+   egress is a later step, not required to carry secret-bearing workloads.
 
 5. **`HvfBackend` declares `EgressSubstitutionTransport::VsockUdsChannel`** and
    `backend.rs::as_workload_backend` returns `Some` for `Hvf` — but only **after**
@@ -108,23 +122,32 @@ WireRequest substitution protocol — and exactly one enforcer: the per-VM
   contract, and forks egress policy across two enforcers (the claim-10 gate would
   not see substitution traffic, and vice-versa) — the same split-brain risk as (a),
   just statically partitioned.
-- **(b) One protocol, one enforcer** is the only option with no shape-guess and no
-  split enforcement: every byte of guest egress is a WireRequest, decided in one
-  process that holds claim-10, claim-12, and claim-13 together. It also matches Vz
-  (`VsockUdsChannel`) and the guest contract verbatim, so the guest image and the
-  `WorkloadBackend` seam need no per-backend special-casing.
+- **(b) One protocol, one gateway, a two-stage pipeline** is the chosen option: a
+  secret-bearing stream is WireRequest only, through one host gateway that runs
+  claim-10 (bridge) then claims 12/13 (endpoint) in sequence — no shape-guess, no
+  split-by-protocol. It matches Vz (`VsockUdsChannel`) and the guest contract, so
+  the guest image and the `WorkloadBackend` seam need no per-backend special-casing.
+  Claim-10 lives at the **bridge** rather than inside the endpoint deliberately:
+  folding the network policy into the shared `mvm-substitution-endpoint` would
+  change the secrets moat that Firecracker/libkrun/vz all spawn and force-touch
+  every spawn call site, to enforce a decision the in-house VMM's egress gate
+  already makes. Bridge-side claim-10 is HVF-local (zero shared-code change) and a
+  true pipeline (both stages run on every request), so it is not the split-brain of
+  (a)/(c) — there is exactly one route a secret-bearing stream can take, and it
+  passes both gates.
 
 ## Consequences
 
 - The in-house VMM gains secret-bearing workload support and HVF can retire Vz
   (Plan 214) once verified.
-- `EgressProxy`'s raw-`"ip:port"` role on the workload path is superseded. Its core
-  (`vmm/egress_proxy.rs`) and the `EgressGate` (`vmm/egress_gate.rs`) are not
-  deleted in this step — claim-10 policy construction is reused by the endpoint —
-  but the device no longer routes 5253 OP_RW to it for a workload guest.
-- The endpoint subprocess is now an egress dependency for *any* admitted egress,
-  not only secret-bearing egress. The fail-closed-on-absent-UDS property keeps a
-  spawn failure safe.
+- `EgressProxy` (`vmm/egress_proxy.rs`) stays the route for a no-endpoint workload;
+  for a secret-bearing one, 5253 routes to the bridge instead. The `EgressGate`
+  (`vmm/egress_gate.rs`) is shared by both routes — the device hands a clone to the
+  bridge so claim-10 is one rule set whichever route a stream takes.
+- The shared `mvm-substitution-endpoint` and its spawn path are **unchanged** by
+  this ADR (no `network_policy` field, no touched call sites) — claim-10 is added
+  at the HVF bridge, not the moat. The endpoint remains spawned only for a
+  secret-bearing plan.
 - Non-HTTP raw-TCP egress is **out of scope**: the WireRequest gateway is HTTP(S)
   absolute-form only, matching Vz's capability. The in-house VMM never carried a
   guest raw-TCP egress client, so nothing regresses. If a future workload needs

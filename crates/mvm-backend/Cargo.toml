@@ -85,9 +85,15 @@ tempfile.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
+# `url` parses the WireRequest target host:port for the substitution bridge's
+# claim-10 gate (vetted parser rather than hand-rolled URL splitting on a
+# security path); same version mvm-hostd/mvm-oci use.
+url = "2"
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+# `base64` builds WireRequest body fixtures in the substitution-bridge tests.
+base64.workspace = true
 
 # Apple Virtualization.framework bindings (objc2) for the providers
 # interface — folded in with the former mvm-providers crate. macOS-only;
