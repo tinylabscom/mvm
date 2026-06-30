@@ -486,7 +486,7 @@ pub fn vm_substitution_env_path(name: &str) -> std::path::PathBuf {
 
 /// Per-VM Unix socket the `mvm-substitution-endpoint` binds and the in-house VMM's
 /// substitution bridge connects to: `<vm_state_dir>/substitution-endpoint.sock`
-/// (ADR-101). Unlike the Vz path (where the Swift supervisor proxies the guest
+///. Unlike the Vz path (where the Swift supervisor proxies the guest
 /// vsock dial to a `vsock/`-nested socket), the in-house VMM's device bridges
 /// `EGRESS_PORT` straight to this socket, so it lives at the state-dir root. Single
 /// source of truth: the backend spawn (which binds it) and the supervisor config
@@ -958,7 +958,7 @@ mod tests {
             vm_vsock_port_socket("foo", 5252)
         );
         // The in-house VMM's substitution-endpoint socket sits at the state-dir
-        // root (the device bridges to it directly; ADR-101) and honors MVM_DATA_DIR.
+        // root (the device bridges to it directly) and honors MVM_DATA_DIR.
         assert_eq!(
             vm_substitution_endpoint_socket("foo"),
             std::path::PathBuf::from("/custom/data/vms/foo/substitution-endpoint.sock")

@@ -103,8 +103,8 @@ fn default_bootargs(has_disk: bool) -> String {
 }
 
 /// Host-side channels the supervisor wires into the guest's vsock device: the
-/// claim-10 egress gateway policy (ADR-100), the per-VM host→guest agent RPC
-/// socket, and the per-VM substitution-endpoint socket (ADR-101). Bundled so the
+/// claim-10 egress gateway policy, the per-VM host→guest agent RPC
+/// socket, and the per-VM substitution-endpoint socket. Bundled so the
 /// boot entry stays under the argument-count lint. The two socket paths fall back
 /// to the `MVM_HVF_{AGENT,SUBSTITUTION}_SOCKET` env hooks when `None` (dev/live
 /// drivers); the productionized path threads them through the supervisor config.
@@ -304,7 +304,7 @@ struct RunInputs<'a> {
     /// Per-VM agent RPC socket (productionized off `MVM_HVF_AGENT_SOCKET`).
     agent_socket: Option<PathBuf>,
     /// Per-VM substitution-endpoint socket (productionized off
-    /// `MVM_HVF_SUBSTITUTION_SOCKET`; ADR-101).
+    /// `MVM_HVF_SUBSTITUTION_SOCKET`).
     substitution_socket: Option<PathBuf>,
 }
 
@@ -459,7 +459,7 @@ unsafe fn run(
                     );
                 }
             }
-            // Substitution gateway (ADR-101): route EGRESS_PORT to the per-VM
+            // Substitution gateway: route EGRESS_PORT to the per-VM
             // endpoint. Shares the egress heartbeat counter so an in-flight
             // WireRequest awaiting its reply keeps the run loop polling.
             if let Some(path) = &substitution_socket {

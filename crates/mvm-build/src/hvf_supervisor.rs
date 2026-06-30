@@ -51,7 +51,7 @@ pub struct HvfSupervisorConfig {
     /// Threading it here is the productionized path off that env hook.
     #[serde(default)]
     pub agent_socket: Option<PathBuf>,
-    /// Per-VM substitution-endpoint socket (ADR-101). When set, the supervisor
+    /// Per-VM substitution-endpoint socket. When set, the supervisor
     /// routes `EGRESS_PORT` to the `mvm-substitution-endpoint` bound here
     /// (WireRequest substitution; claims 10/12/13). `None` ⇒ the legacy raw-TCP
     /// egress path (no secret-bearing egress). The backend spawns the endpoint and

@@ -3,7 +3,7 @@
 //! On the in-house VMM, [`EGRESS_PORT`](mvm_guest::vsock::EGRESS_PORT) (5253)
 //! carries exactly one protocol — the WireRequest substitution protocol the
 //! guest's forward-proxy speaks — and exactly one enforcer: the per-VM
-//! `mvm-substitution-endpoint`, which decides claims 10/12/13 (ADR-101). This
+//! `mvm-substitution-endpoint`, which decides claims 10/12/13. This
 //! bridge is the transport between the two: for each guest→host stream on 5253 it
 //! opens a Unix-socket connection to that endpoint and relays bytes both ways.
 //!
@@ -12,7 +12,7 @@
 //! parses no WireRequest and enforces no policy — every decision lives in the
 //! endpoint it forwards to. The only judgement it makes is fail-closed: with no
 //! endpoint configured, or if the endpoint socket can't be reached, the stream is
-//! reset and no bytes leave the host (default-deny, ADR-100/claim-10).
+//! reset and no bytes leave the host (default-deny, claim-10).
 
 use std::collections::HashMap;
 use std::io::{Read, Write};

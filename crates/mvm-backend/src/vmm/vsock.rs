@@ -159,7 +159,7 @@ pub struct VirtioVsock {
     /// its `OP_REQUEST`/`OP_RW` onto the rx queue and routes the guest's replies
     /// back to the host socket.
     agent: super::agent_bridge::AgentBridge,
-    /// Per-VM substitution gateway (ADR-101). When a substitution endpoint UDS is
+    /// Per-VM substitution gateway. When a substitution endpoint UDS is
     /// configured, `EGRESS_PORT` carries the WireRequest substitution protocol and
     /// routes here instead of the raw-TCP `egress` proxy; claims 10/12/13 are all
     /// decided in the endpoint subprocess this bridges to.
@@ -225,7 +225,7 @@ impl VirtioVsock {
     }
 
     /// Point the substitution gateway at this VM's `mvm-substitution-endpoint`
-    /// Unix socket (ADR-101). Once set, a guest connect to `EGRESS_PORT` is relayed
+    /// Unix socket. Once set, a guest connect to `EGRESS_PORT` is relayed
     /// to the endpoint (WireRequest substitution; claims 10/12/13) rather than the
     /// raw-TCP egress proxy. Without it, `EGRESS_PORT` keeps the legacy egress path.
     pub fn set_substitution_endpoint(&mut self, path: &std::path::Path) {
@@ -467,7 +467,7 @@ impl VirtioVsock {
     }
 
     /// Frame an inbound substitution request to the [`SubstitutionBridge`] and map
-    /// its action to a vsock control reply (ADR-101). The bridge relays the bytes
+    /// its action to a vsock control reply. The bridge relays the bytes
     /// to the per-VM endpoint, which makes every claim-10/12/13 decision; the device
     /// owns only the rx framing and the per-stream header.
     fn handle_substitution_request(&mut self, hdr: &Hdr, payload: &[u8]) {
@@ -755,7 +755,7 @@ mod tests {
     /// With a substitution endpoint wired, a guest OP_RW to `EGRESS_PORT` is
     /// relayed to the endpoint (not captured as raw bytes, not handed to the
     /// raw-TCP egress proxy), and the endpoint's reply frames back to the guest as
-    /// OP_RW on the same stream (ADR-101).
+    /// OP_RW on the same stream.
     #[test]
     fn egress_port_routes_to_substitution_endpoint_when_wired() {
         use std::io::{Read, Write};

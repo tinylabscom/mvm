@@ -78,7 +78,7 @@ fn vms_root() -> PathBuf {
 }
 
 /// Spawn the per-VM substitution endpoint when the admitted plan carries egress
-/// secrets (ADR-101), returning an armed `EndpointGuard` and the endpoint socket
+/// secrets, returning an armed `EndpointGuard` and the endpoint socket
 /// path to hand the supervisor; a secret-free plan (or no `plan.json`) yields a
 /// defused no-op guard and `None`. Unlike Vz — where the Swift supervisor proxies
 /// the guest vsock dial to the endpoint — the in-house VMM's substitution bridge
@@ -156,7 +156,7 @@ impl VmBackend for HvfBackend {
         let _ = std::fs::remove_file(&workload_exit);
 
         // Spawn the per-VM substitution endpoint when the admitted plan carries
-        // egress secrets (ADR-101). The guard reaps it on any early return below —
+        // egress secrets. The guard reaps it on any early return below —
         // so a decrypted-secret process can't outlive a failed launch — and is
         // defused once boot is confirmed (the stop path then owns teardown). A
         // secret-free plan yields a defused no-op guard and no endpoint socket.
