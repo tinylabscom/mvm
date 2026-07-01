@@ -103,7 +103,44 @@ no backend flipped, no legacy path deleted — all additive):
   `SubstitutionBridge::set_relay_only` skips the in-loop gate + parse and pipes
   bytes to the endpoint. Relay mode drops the in-loop `EgressGate` entirely.
 
-### Remaining (do NOT flip until the live verdict is green)
+### P1.4 + P1.5 — DONE, live verdict GREEN (2026-06-30)
+
+- **P1.4** `feat(backend): wire InHouseDriver::boot to the relay supervisor path` —
+  `VmmSpec` gained `initramfs`; `boot` maps the policy-free spec → a relay
+  `HvfSupervisorConfig` (`egress_relay_socket` = the `EGRESS_PORT` `VsockPort.host_uds`,
+  no in-loop policy) and returns a `RunningVm`. Fails closed with no `EGRESS_PORT`
+  socket or a bundled kernel.
+- **Corrected echo init** — `crates/mvm-backend/examples/hvf-egress-guest/{init.c,build.sh}`:
+  freestanding aarch64, mounts procfs, reads `mvm.egress_target` from `/proc/cmdline`
+  (no hardcoded IP), sends `target\n` then `ping`. Reproducible cpio build.
+- **P1.5 live proof** `test(hvf): live proof — claim-10 egress enforced by the host
+  endpoint` (`examples/hvf-relay-egress`). Runs the echo guest through `InHouseDriver`
+  with `EGRESS_PORT` relayed to a per-VM endpoint (`egress_mode: Raw`,
+  `network_policy: Some(allow_list)`). **Verified on macOS-26 Apple silicon:**
+  `admitted destination reachable: true`, `non-admitted destination reachable: false`
+  — claim-10 preserved with the gate in the endpoint, the run loop a pure relay.
+
+**Environment gotcha that cost time (record it):** `/tmp/mvm-hvf-kernel/Image` (the
+example default) is a broken kernel — it produces **zero** earlycon bytes. The
+working kernel on this box is `/tmp/mvm-hvf-kernel/Image-builder`. A broken kernel
+file masquerading as a console/code bug is the same class of trap as a stale dev IP.
+Use `Image-builder` (or rebuild `Image`).
+
+### Legacy-gate deletion — DEFERRED to the HvfBackend→relay migration (Phase 2)
+
+The G1 "delete the legacy in-loop gate + `network_policy`" step is **not** safe yet:
+`HvfBackend::start` (the current production HVF workload path) still sets
+`network_policy` and relies on the in-loop `EgressGate` / `EgressProxy` /
+`SubstitutionBridge` gate. Deleting them now would leave HvfBackend with **no**
+claim-10 enforcement — a regression, and exactly the "window with no gate" the
+invariant forbids. The relay path is proven and available (via `InHouseDriver`), but
+HvfBackend hasn't been routed onto it, and the WireRequest (secret-bearing) relay
+path is not yet live-verified (only the Raw path is). So the legacy gate stays until
+Phase 2 routes `HvfBackend` (or `WorkloadRunner<InHouseDriver>`) through the relay and
+re-verifies BOTH the Raw and Wire paths live; then `EgressProxy` + the in-loop gate +
+`HvfSupervisorConfig.network_policy` become dead and are deleted together.
+
+### (superseded) original remaining plan
 
 - **P1.4 — wire `InHouseDriver::boot` + a live harness.** `boot` maps the
   policy-free `VmmSpec` → a relay `HvfSupervisorConfig` (`egress_relay_socket` =
