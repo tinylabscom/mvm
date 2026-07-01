@@ -2146,6 +2146,28 @@
           "additionalProperties": false
         },
         {
+          "description": "The pinned verb grant does not authorize this verb for the workload. Wire-stable. Universal — may answer any request.",
+          "type": "object",
+          "required": [
+            "VerbNotAuthorized"
+          ],
+          "properties": {
+            "VerbNotAuthorized": {
+              "type": "object",
+              "required": [
+                "verb"
+              ],
+              "properties": {
+                "verb": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "description": "Per-integration status report.",
           "type": "object",
           "required": [

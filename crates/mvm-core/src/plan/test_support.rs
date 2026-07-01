@@ -144,6 +144,7 @@ impl PlanFixture {
             valid_from: self.valid_from.unwrap_or(now),
             valid_until: self.valid_until.unwrap_or(now + Duration::minutes(10)),
             nonce: Nonce::from_bytes(self.nonce),
+            agent_verbs: None,
             bundle: None,
             deps_volume: None,
             shares: Vec::new(),

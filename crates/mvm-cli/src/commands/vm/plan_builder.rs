@@ -157,6 +157,9 @@ pub struct SynthesisInput<'a> {
     /// (unconstrained); supervisor-injected per-event extras are applied
     /// separately at audit-emit time and do not modify the plan's stored labels.
     pub audit_labels: AuditLabels,
+    /// Per-workload agent verb allow-list threaded verbatim into the plan.
+    /// `None` preserves the current class/profile-gate-only behavior.
+    pub agent_verbs: Option<Vec<mvm_core::plan::VerbId>>,
 }
 
 /// Build an unsigned `ExecutionPlan` from CLI-shaped input.
@@ -268,6 +271,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         valid_from: now,
         valid_until: now + Duration::minutes(VALIDITY_WINDOW_MINUTES),
         nonce,
+        agent_verbs: input.agent_verbs.clone(),
         bundle: input.bundle_pin.clone(),
         // Populated by the caller when an `mvmctl up --from-workload-ir
         // <path>` invocation drove `install_app_deps` to a sealed
@@ -379,6 +383,7 @@ mod tests {
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             audit_labels: Default::default(),
+            agent_verbs: None,
         }
     }
 

@@ -17,6 +17,7 @@ use crate::plan::types::{
     PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
     SignedImageRef, TenantId, WorkloadId,
 };
+use crate::plan::verb::VerbId;
 
 /// Wire-format version of the `ExecutionPlan`. New fields are additive with
 /// `#[serde(default)]`; the verifier rejects any plan whose `schema_version`
@@ -134,6 +135,14 @@ pub struct ExecutionPlan {
     /// nonce.
     pub nonce: Nonce,
 
+    /// Per-workload agent verb allow-list. `None` (or absent) → the
+    /// guest applies the class/profile gate only (current behavior).
+    /// `Some(set)` → the guest also requires each control verb to be a
+    /// baseline verb or present in this set. Strictly subtractive: this
+    /// can only narrow, never widen, the class gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_verbs: Option<Vec<VerbId>>,
+
     /// Optional pin to a content-addressed `.mvmpkg` bundle. When
     /// present, the supervisor's admit path re-runs
     /// [`crate::plan::bundle::read_and_verify_bundle`] against the
@@ -168,4 +177,39 @@ pub struct ExecutionPlan {
     /// any share the plan didn't name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares: Vec<HostShareGrant>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::signing::test_support::sample_plan;
+
+    #[test]
+    fn agent_verbs_defaults_none_and_roundtrips() {
+        let plan = sample_plan();
+        assert!(plan.agent_verbs.is_none(), "field must default to None");
+
+        // None => key is omitted entirely, not serialized as null.
+        let s = serde_json::to_string(&plan).unwrap();
+        assert!(
+            !s.contains("agent_verbs"),
+            "None agent_verbs must be omitted, not serialized as null"
+        );
+
+        // Absent in JSON => None (serde default), preserving old plans.
+        let mut v = serde_json::to_value(&plan).unwrap();
+        v.as_object_mut().unwrap().remove("agent_verbs");
+        let back: ExecutionPlan = serde_json::from_value(v).unwrap();
+        assert!(back.agent_verbs.is_none());
+
+        // Present => preserved.
+        let mut with = plan.clone();
+        with.agent_verbs = Some(vec![
+            VerbId::new("run-entrypoint").unwrap(),
+            VerbId::new("ping").unwrap(),
+        ]);
+        let round: ExecutionPlan =
+            serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(round.agent_verbs, with.agent_verbs);
+    }
 }

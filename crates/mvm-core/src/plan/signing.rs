@@ -251,6 +251,7 @@ pub mod test_support {
             valid_from: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
             valid_until: Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
             nonce: Nonce::from_bytes([0xab; 16]),
+            agent_verbs: None,
             bundle: None,
             deps_volume: None,
             shares: Vec::new(),
