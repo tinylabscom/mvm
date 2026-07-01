@@ -2270,6 +2270,10 @@ pub fn configure_flake_microvm_with_drives_dir(
         Some(token) => format!("{boot_args} {token}"),
         None => boot_args,
     };
+    let boot_args = match verb_grant_cmdline_token(&config.slot.name) {
+        Some(token) => format!("{boot_args} {token}"),
+        None => boot_args,
+    };
 
     // FC's x86_64 loader needs an uncompressed ELF `vmlinux`, but the
     // published default-microvm x86_64 kernel is a bzImage (named `vmlinux`),
@@ -2906,6 +2910,22 @@ fn secret_env_cmdline_token(vm_name: &str) -> Option<String> {
     let bytes = std::fs::read(&path).ok()?;
     let pairs: Vec<(String, String)> = serde_json::from_slice(&bytes).ok()?;
     mvm_core::vm_backend::encode_secret_env_cmdline(&pairs)
+}
+
+/// The `mvm.verb_grant=<hex>` cmdline token for `vm_name`, or `None` when
+/// no verb-grant sidecar was minted (plan carried no `agent_verbs`). Reads
+/// the envelope the admission path wrote to `<vm_state_dir>/verb-grant.json`
+/// and encodes it. Best-effort: a missing or malformed sidecar yields `None`
+/// (grant-less boot), mirroring `secret_env_cmdline_token`.
+///
+/// Exported as `pub(crate)` so the libkrun, Vz, and QEMU cmdline builders
+/// can append the same token without duplicating the sidecar-read logic.
+pub(crate) fn verb_grant_cmdline_token(vm_name: &str) -> Option<String> {
+    let path = mvm_core::config::vm_state_dir(vm_name).join("verb-grant.json");
+    let bytes = std::fs::read(&path).ok()?;
+    let envelope: mvm_core::protocol::vm_backend::VerbGrantEnvelope =
+        serde_json::from_slice(&bytes).ok()?;
+    mvm_core::vm_backend::encode_verb_grant_cmdline(&envelope)
 }
 
 /// Spawn the `mvm-bridge` sibling. Creates a UNIX
@@ -4067,6 +4087,71 @@ mod tests {
         assert!(
             result.is_err(),
             "a failing liveness probe must surface, not be swallowed"
+        );
+    }
+
+    // ---- verb_grant_cmdline_token ----
+
+    #[test]
+    fn verb_grant_cmdline_token_some_when_sidecar_present() {
+        use mvm_core::plan::{Nonce, VerbGrant, VerbId};
+        use mvm_core::protocol::vm_backend::{VerbGrantEnvelope, decode_verb_grant_cmdline};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+
+        let vm_name = "verb-grant-token-test";
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Construct a plausible envelope. The token builder reads and
+        // re-encodes; it does not verify the signature, so a stub sig
+        // is sufficient here. Signature correctness is exercised in the
+        // plan_admission mint test.
+        let nonce = Nonce::from_bytes([5u8; 16]);
+        // Use a far-future not_after to avoid expiry: 2099-01-01T00:00:00Z.
+        let not_after = mvm_core::time::parse_iso8601("2099-01-01T00:00:00Z").unwrap();
+        let grant = VerbGrant {
+            session_id: vm_name.to_string(),
+            plan_nonce: nonce.clone(),
+            not_after,
+            verbs: vec![VerbId::new("run-entrypoint").unwrap()],
+            sig: vec![0u8; 64],
+        };
+        // pubkey_hex must be non-empty for encode_verb_grant_cmdline to return Some.
+        let pubkey_hex = "aa".repeat(32);
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex,
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            grant,
+        };
+        let json = serde_json::to_vec(&envelope).unwrap();
+        std::fs::write(state_dir.join("verb-grant.json"), &json).unwrap();
+
+        let token = verb_grant_cmdline_token(vm_name).expect("token must be Some");
+        assert!(
+            token.starts_with("mvm.verb_grant="),
+            "token must start with mvm.verb_grant="
+        );
+        let hex_part = token.trim_start_matches("mvm.verb_grant=");
+        let roundtrip = decode_verb_grant_cmdline(hex_part).unwrap();
+        assert_eq!(roundtrip.plan_nonce_hex, nonce.as_hex());
+    }
+
+    #[test]
+    fn verb_grant_cmdline_token_none_when_sidecar_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+
+        let vm_name = "no-grant-vm";
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        assert!(
+            verb_grant_cmdline_token(vm_name).is_none(),
+            "absent sidecar must yield None"
         );
     }
 }

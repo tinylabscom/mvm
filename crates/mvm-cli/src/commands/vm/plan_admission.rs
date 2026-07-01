@@ -358,6 +358,69 @@ pub(crate) fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -
     if let Some(bundle_json) = cfg.bundle_json.as_deref() {
         write_secret_file(&state_dir.join("bundle.json"), bundle_json.as_bytes())?;
     }
+    mint_verb_grant_sidecar(plan_json, &cfg.name, &state_dir)?;
+    Ok(())
+}
+
+/// If the plan carries `agent_verbs`, mint a signed `VerbGrantEnvelope` and
+/// write it to `<state_dir>/verb-grant.json` (mode 0600). Absent verbs ⇒ no
+/// file written (grant-less boot). Best-effort key load — the key is created
+/// on first use by `load_or_init_at` against the default keys dir.
+///
+/// The sidecar is consumed by the backend's `verb_grant_cmdline_token` at
+/// launch time and carried to the guest on the kernel cmdline.
+fn mint_verb_grant_sidecar(
+    plan_json: &str,
+    vm_name: &str,
+    state_dir: &std::path::Path,
+) -> Result<()> {
+    use mvm_core::plan::SignedExecutionPlan;
+    use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+
+    // Best-effort parse: a missing or malformed plan_json skips the
+    // sidecar (grant-less boot), matching the fail-open posture of the
+    // other cmdline token producers.
+    let Ok(signed) = serde_json::from_str::<SignedExecutionPlan>(plan_json) else {
+        return Ok(());
+    };
+    let Ok(plan) = serde_json::from_slice::<ExecutionPlan>(&signed.0.payload) else {
+        return Ok(());
+    };
+
+    let Some(verbs) = plan.agent_verbs else {
+        // No verb grant requested — grant-less boot.
+        return Ok(());
+    };
+
+    let keys_dir = mvm_core::config::mvm_keys_dir();
+    let signer = super::host_signer::load_or_init_at(&keys_dir)
+        .context("load host signer for verb-grant mint")?;
+    let keystore = mvm_hostd::host_signer::keystore::Keystore::load_from_file(&signer.secret_path)
+        .context("load Keystore from host-signer key file")?;
+
+    let grant = mvm_hostd::host_signer::mint_verb_grant(
+        &keystore,
+        vm_name,
+        &plan.nonce,
+        plan.valid_until,
+        verbs,
+    )
+    .context("mint verb grant")?;
+
+    let pubkey_hex: String = keystore
+        .pub_key()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let plan_nonce_hex = plan.nonce.as_hex().to_string();
+
+    let envelope = VerbGrantEnvelope {
+        pubkey_hex,
+        plan_nonce_hex,
+        grant,
+    };
+    let envelope_json = serde_json::to_vec(&envelope).context("serialize VerbGrantEnvelope")?;
+    write_secret_file(&state_dir.join("verb-grant.json"), &envelope_json)?;
     Ok(())
 }
 
@@ -1088,5 +1151,102 @@ mod tests {
         assert!(!admitted.plan.audit_labels["intent"].is_empty());
         assert!(!admitted.plan.audit_labels["admission_profile"].is_empty());
         assert_eq!(admitted.plan.audit_labels["seccomp_tier"], "standard");
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // verb-grant sidecar: stash_plan_for_bridge mint path
+    // ───────────────────────────────────────────────────────────────
+
+    #[test]
+    #[cfg(unix)]
+    fn stash_plan_for_bridge_writes_verb_grant_when_agent_verbs_present() {
+        use ed25519_dalek::VerifyingKey;
+        use mvm_core::plan::VerbId;
+        use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+        use mvm_core::vm_backend::VmStartConfig;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+
+        // Build an admitted plan that carries agent_verbs.
+        let mut input = fixture_input("vm-verb-grant");
+        input.agent_verbs = Some(vec![VerbId::new("run-entrypoint").unwrap()]);
+        let admitted = admit_for_run(
+            &input,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            None,
+        )
+        .expect("admit with agent_verbs");
+
+        let mut cfg = VmStartConfig {
+            name: "vm-verb-grant".into(),
+            ..Default::default()
+        };
+        populate_audit_substrate(&mut cfg, &admitted, None).expect("populate");
+        stash_plan_for_bridge(&cfg).expect("stash succeeds");
+
+        let grant_path = dir.path().join("vms/vm-verb-grant/verb-grant.json");
+        assert!(grant_path.exists(), "verb-grant.json must be written");
+        let mode = std::fs::metadata(&grant_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "verb-grant.json must be mode 0600");
+
+        // Parse the envelope and verify the grant under the signer key.
+        let raw = std::fs::read(&grant_path).unwrap();
+        let envelope: VerbGrantEnvelope = serde_json::from_slice(&raw).unwrap();
+        assert!(!envelope.pubkey_hex.is_empty(), "pubkey_hex must be set");
+        assert_eq!(
+            envelope.plan_nonce_hex,
+            admitted.plan.nonce.as_hex(),
+            "nonce hex must match plan"
+        );
+        let pub_arr: [u8; 32] = hex::decode(&envelope.pubkey_hex)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let vk = VerifyingKey::from_bytes(&pub_arr).unwrap();
+        envelope
+            .grant
+            .verify(
+                &vk,
+                "vm-verb-grant",
+                &admitted.plan.nonce,
+                SystemClock.now(),
+            )
+            .expect("grant must verify under the signer key");
+    }
+
+    #[test]
+    fn stash_plan_for_bridge_no_verb_grant_when_agent_verbs_absent() {
+        use mvm_core::vm_backend::VmStartConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+
+        // Plain plan with no agent_verbs — the fixture default.
+        let admitted = admit_for_run(
+            &fixture_input("vm-no-verbs"),
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            None,
+        )
+        .expect("admit without agent_verbs");
+
+        let mut cfg = VmStartConfig {
+            name: "vm-no-verbs".into(),
+            ..Default::default()
+        };
+        populate_audit_substrate(&mut cfg, &admitted, None).expect("populate");
+        stash_plan_for_bridge(&cfg).expect("stash succeeds");
+
+        assert!(
+            !dir.path().join("vms/vm-no-verbs/verb-grant.json").exists(),
+            "verb-grant.json must NOT be written when agent_verbs is None"
+        );
     }
 }

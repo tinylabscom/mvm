@@ -289,6 +289,10 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         cmdline.push(' ');
         cmdline.push_str(&uvols);
     }
+    if let Some(token) = crate::microvm::verb_grant_cmdline_token(&config.name) {
+        cmdline.push(' ');
+        cmdline.push_str(&token);
+    }
     // Workload-independent KrunContext (kernel + resources + vsock + gateway), shared
     // verbatim with the standby spawn so the two paths can't drift. The cold path
     // then sets the workload rootfs + user volumes below.
