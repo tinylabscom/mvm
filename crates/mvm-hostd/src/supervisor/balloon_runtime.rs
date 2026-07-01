@@ -291,6 +291,7 @@ mod tests {
                 tap_networking: false,
                 balloon: self.balloon_supported,
                 fs_quick_checkpoint: false,
+                ..VmCapabilities::default()
             }
         }
         fn start_with_mode(

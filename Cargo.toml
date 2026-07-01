@@ -28,6 +28,7 @@ members = [
     # JSON-in/JSON-out cdylib every language SDK loads through a thin FFI
     # shim, so adding a language carries no new Rust binding code.
     "crates/mvm-host-services-ffi",
+    "crates/mvm-client",
     "crates/mvm-mcp",
     # plan 74 W1 — OCI image distribution client (registry resolution,
     # manifest fetch, digest verification; layer fetch + ext4 unpack +
@@ -97,6 +98,11 @@ members = [
 # errors. ADR-002 §W4.2.
 exclude = [
     "crates/mvm-guest/fuzz",
+    # Plan 214 Phase 8 — hardened snapshot-frame parser fuzz harness
+    # (`parse_header` / `parse_sections`, the cap-before-alloc /
+    # bounds-checked path). Same libfuzzer-sys linker-flag constraints as
+    # the other fuzz crates.
+    "crates/mvm-core/fuzz",
     # Plan 85 §R1 / Phase A.2 — layer-unpack fuzz harness. Same
     # libfuzzer-sys linker-flag constraints as the mvm-guest fuzz
     # crate; CI gate at `.github/workflows/security.yml::fuzz` (the

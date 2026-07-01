@@ -34,6 +34,7 @@ pub mod backend;
 pub mod catalog;
 pub mod checkpoint;
 pub mod codesign;
+pub mod driver;
 // Shared host-side substrate (config + shell + linux_env + ui +
 // runtime_meta + cow + snapshot_integrity) — folded in from the
 // former Lima-era `mvm-base` crate. It lives here, not in `mvm`,
@@ -68,6 +69,8 @@ pub mod network;
 pub mod network_provider;
 /// QEMU workload runtime backend (dev/test).
 pub mod qemu;
+/// Capability-aware backend selection (fail-closed, no silent downgrade).
+pub mod selection;
 /// Backend-agnostic supervisor standby pool registry (`~/.mvm/pool/`
 /// state-dir; record/select-idle-by-kernel/remove/reap).
 pub mod standby_pool;

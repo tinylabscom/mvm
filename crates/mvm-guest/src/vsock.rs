@@ -891,6 +891,31 @@ impl GuestRequest {
                 | (RequestClass::BuilderOnly, AgentProfile::Builder)
         )
     }
+
+    /// The kebab `kind_name()`s of every `ProdSafe` control verb —
+    /// the candidate members of an `agent_verbs` grant. Single source
+    /// of truth; the classification guard test keeps this in lockstep
+    /// with `class()`.
+    pub fn prod_safe_verb_names() -> &'static [&'static str] {
+        &[
+            "protocol-hello",
+            "ping",
+            "readiness-status",
+            "worker-status",
+            "sleep-prep",
+            "wake",
+            "integration-status",
+            "checkpoint-integrations",
+            "probe-status",
+            "primed-status",
+            "post-restore",
+            "entrypoint-status",
+            "run-entrypoint",
+            "mount-volume",
+            "unmount-volume",
+            "update-idle-timeout",
+        ]
+    }
 }
 
 /// Response from guest vsock agent to host.
@@ -944,6 +969,9 @@ pub enum GuestResponse {
         /// `verb_name()` of the rejected request. Wire-stable.
         verb: String,
     },
+    /// The pinned verb grant does not authorize this verb for the
+    /// workload. Wire-stable. Universal — may answer any request.
+    VerbNotAuthorized { verb: String },
     /// Per-integration status report.
     IntegrationStatusReport {
         integrations: Vec<crate::integrations::IntegrationStateReport>,
@@ -1105,7 +1133,7 @@ name_enum! {
     /// (exhaustive match).
     pub enum ResponseVariant {
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
-        Pong, Error, UnsupportedInProfile, IntegrationStatusReport,
+        Pong, Error, UnsupportedInProfile, VerbNotAuthorized, IntegrationStatusReport,
         CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, ExecEvent,
         ExecBatchResult,
         PostRestoreAck, FsDiffResult, PortForwardStarted,
@@ -1124,7 +1152,9 @@ impl ResponseVariant {
     pub fn is_universal(self) -> bool {
         matches!(
             self,
-            ResponseVariant::Error | ResponseVariant::UnsupportedInProfile
+            ResponseVariant::Error
+                | ResponseVariant::UnsupportedInProfile
+                | ResponseVariant::VerbNotAuthorized
         )
     }
 }
@@ -1221,6 +1251,7 @@ impl GuestResponse {
             GuestResponse::Pong => ResponseVariant::Pong,
             GuestResponse::Error { .. } => ResponseVariant::Error,
             GuestResponse::UnsupportedInProfile { .. } => ResponseVariant::UnsupportedInProfile,
+            GuestResponse::VerbNotAuthorized { .. } => ResponseVariant::VerbNotAuthorized,
             GuestResponse::IntegrationStatusReport { .. } => {
                 ResponseVariant::IntegrationStatusReport
             }
@@ -1278,6 +1309,12 @@ pub enum RpcError {
         /// `verb_name()` of the rejected request.
         verb: String,
     },
+    /// The pinned verb grant does not authorize this verb.
+    #[error("verb {verb} not authorized by the session's verb grant")]
+    VerbNotAuthorized {
+        /// `kind_name()` (kebab-case) of the rejected request.
+        verb: String,
+    },
     /// The agent returned a response variant not in the verb's
     /// `response_contract()` — a protocol violation.
     #[error("guest agent returned {got:?} for {verb}, not in its contract {expected:?}")]
@@ -1315,6 +1352,7 @@ pub fn check_response(req: &GuestRequest, resp: GuestResponse) -> Result<GuestRe
         GuestResponse::UnsupportedInProfile { profile, verb } => {
             Err(RpcError::UnsupportedInProfile { profile, verb })
         }
+        GuestResponse::VerbNotAuthorized { verb } => Err(RpcError::VerbNotAuthorized { verb }),
         other => {
             let got = other.variant();
             let contract = req.response_contract();
@@ -1357,6 +1395,107 @@ pub fn call_streaming(
             return Ok(());
         }
         frame = check_response(req, read_frame::<GuestResponse>(stream)?)?;
+    }
+}
+
+/// Grant intersection, applied AFTER `allowed_in`. `None` grant => no
+/// restriction (class gate only). Baseline/listed verbs pass.
+pub fn enforce_verb_grant(
+    req: &GuestRequest,
+    grant: Option<&mvm_core::plan::VerbGrant>,
+) -> Option<GuestResponse> {
+    match grant {
+        None => None,
+        Some(g) if g.permits(req.kind_name()) => None,
+        Some(_) => Some(GuestResponse::VerbNotAuthorized {
+            verb: req.kind_name().to_string(),
+        }),
+    }
+}
+
+/// Well-known guest path where the trusted launcher provisions the host
+/// signer's Ed25519 public key (32-byte key, lowercase hex, no trailing
+/// newline required). Populated out-of-band via the config drive (a later
+/// task mounts it); absent on legacy/grant-less boots.
+pub const HOST_SIGNER_PUBKEY_PATH: &str = "/etc/mvm/host-signer.pub";
+
+/// Load the host-signer verifying key from `path`.
+///
+/// - File absent  -> `Ok(None)`   (grant-less boot; no key to verify against)
+/// - File present, valid 64-char hex of a 32-byte Ed25519 key -> `Ok(Some(key))`
+/// - File present but malformed -> `Err`  (fail closed; do not silently ignore)
+pub fn load_host_signer_verifying_key(
+    path: &std::path::Path,
+) -> anyhow::Result<Option<ed25519_dalek::VerifyingKey>> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow::anyhow!("failed to read host-signer pubkey: {e}")),
+    };
+    let hex = raw.trim_ascii();
+    if hex.len() != 64 {
+        anyhow::bail!(
+            "host-signer pubkey at {} must be exactly 64 hex chars, got {}",
+            path.display(),
+            hex.len()
+        );
+    }
+    let mut bytes = [0u8; 32];
+    for (i, pair) in hex.as_bytes().chunks(2).enumerate() {
+        let hi = hex_nibble(pair[0]).ok_or_else(|| {
+            anyhow::anyhow!(
+                "host-signer pubkey has invalid hex char {:?}",
+                pair[0] as char
+            )
+        })?;
+        let lo = hex_nibble(pair[1]).ok_or_else(|| {
+            anyhow::anyhow!(
+                "host-signer pubkey has invalid hex char {:?}",
+                pair[1] as char
+            )
+        })?;
+        bytes[i] = (hi << 4) | lo;
+    }
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+        .map_err(|e| anyhow::anyhow!("host-signer pubkey is not a valid Ed25519 key: {e}"))?;
+    Ok(Some(key))
+}
+
+/// Decode a single ASCII hex nibble ('0'-'9', 'a'-'f') to its value.
+/// Returns `None` for any other character (including uppercase).
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    }
+}
+
+/// Verify an incoming grant against the provisioned host-signer key and the
+/// live session binding, returning the grant to pin.
+///
+/// - `grant` `None`                        -> `Ok(None)` (workload shipped no grant; class gate only)
+/// - `grant` `Some` but `host_signer_key` `None` -> `Err` (fail closed — a grant arrived but
+///   we have no key to trust it against; letting it silently pass would disable enforcement)
+/// - `grant` `Some` + `key` `Some`         -> `verify(session_id, plan_nonce, now)`; `Ok(Some(clone))` or `Err`
+pub fn pin_verb_grant(
+    grant: Option<&mvm_core::plan::VerbGrant>,
+    host_signer_key: Option<&ed25519_dalek::VerifyingKey>,
+    session_id: &str,
+    plan_nonce: &mvm_core::plan::Nonce,
+    now: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<Option<mvm_core::plan::VerbGrant>> {
+    match (grant, host_signer_key) {
+        (None, _) => Ok(None),
+        (Some(_), None) => anyhow::bail!(
+            "verb grant present but no host-signer key provisioned — cannot verify; \
+             rejecting to prevent unverifiable grant from bypassing enforcement"
+        ),
+        (Some(g), Some(key)) => {
+            g.verify(key, session_id, plan_nonce, now)
+                .map_err(|e| anyhow::anyhow!("verb grant verification failed: {e}"))?;
+            Ok(Some(g.clone()))
+        }
     }
 }
 
@@ -5415,34 +5554,11 @@ mod tests {
     // profile classifier
     // ========================================================================
 
-    /// Every `GuestRequest` variant must classify as either `ProdSafe`
-    /// or `DevOnly` today. Compile-fail when a new variant is added
-    /// without being classified — the exhaustive match inside
-    /// `class()` guarantees that, and this test fails closed if the
-    /// variant ever lands in an unexpected class.
-    #[test]
-    fn test_request_class_coverage_matches_sealed_prod_allowlist() {
-        let prod_safe_verbs: &[&str] = &[
-            "ProtocolHello",
-            "WorkerStatus",
-            "SleepPrep",
-            "Wake",
-            "Ping",
-            "IntegrationStatus",
-            "CheckpointIntegrations",
-            "ProbeStatus",
-            "RunEntrypoint",
-            "PostRestore",
-            "EntrypointStatus",
-            "ReadinessStatus",
-            "MountVolume",
-            "UnmountVolume",
-            "UpdateIdleTimeout",
-        ];
-
-        // One representative `GuestRequest` value per variant. Used to
-        // exercise `class()` + `verb_name()` together.
-        let all: Vec<GuestRequest> = vec![
+    /// One representative value per `GuestRequest` variant. Both the
+    /// classification test and the `prod_safe_verb_names` guard share
+    /// this list — a single source of truth that must grow with the enum.
+    fn every_guest_request_variant() -> Vec<GuestRequest> {
+        vec![
             GuestRequest::ProtocolHello {
                 host_protocol_version: 1,
                 min_supported_version: 1,
@@ -5567,7 +5683,42 @@ mod tests {
                 code: "x".into(),
                 timeout_secs: Some(1),
             },
+            GuestRequest::PrimedStatus,
+            GuestRequest::ExecBatch {
+                stages: vec![],
+                commands: vec![],
+                timeout_secs: None,
+            },
+        ]
+    }
+
+    /// Every `GuestRequest` variant must classify as either `ProdSafe`
+    /// or `DevOnly` today. Compile-fail when a new variant is added
+    /// without being classified — the exhaustive match inside
+    /// `class()` guarantees that, and this test fails closed if the
+    /// variant ever lands in an unexpected class.
+    #[test]
+    fn test_request_class_coverage_matches_sealed_prod_allowlist() {
+        let prod_safe_verbs: &[&str] = &[
+            "ProtocolHello",
+            "WorkerStatus",
+            "SleepPrep",
+            "Wake",
+            "Ping",
+            "IntegrationStatus",
+            "CheckpointIntegrations",
+            "ProbeStatus",
+            "PrimedStatus",
+            "RunEntrypoint",
+            "PostRestore",
+            "EntrypointStatus",
+            "ReadinessStatus",
+            "MountVolume",
+            "UnmountVolume",
+            "UpdateIdleTimeout",
         ];
+
+        let all = every_guest_request_variant();
 
         // Every variant has a stable verb_name; that name appears in
         // exactly one of the two classification buckets.
@@ -5599,6 +5750,36 @@ mod tests {
                 "SealedProd verb {v} missing from coverage"
             );
         }
+    }
+
+    #[test]
+    fn prod_safe_verb_names_matches_classification() {
+        let listed: std::collections::BTreeSet<&str> = GuestRequest::prod_safe_verb_names()
+            .iter()
+            .copied()
+            .collect();
+        for req in every_guest_request_variant() {
+            let name = req.kind_name();
+            let is_prod = matches!(req.class(), RequestClass::ProdSafe);
+            assert_eq!(
+                listed.contains(name),
+                is_prod,
+                "{name}: listed={} but class ProdSafe={}",
+                listed.contains(name),
+                is_prod
+            );
+        }
+        // No duplicates, all non-empty.
+        assert_eq!(
+            listed.len(),
+            GuestRequest::prod_safe_verb_names().len(),
+            "duplicate in prod_safe_verb_names"
+        );
+        assert!(
+            GuestRequest::prod_safe_verb_names()
+                .iter()
+                .all(|n| !n.is_empty())
+        );
     }
 
     #[test]
@@ -6499,5 +6680,152 @@ mod rpc_client_tests {
         let mut events = 0usize;
         call_streaming(&mut client, &req, |_e| events += 1).unwrap();
         assert_eq!(events, 2);
+    }
+
+    // ---- enforce_verb_grant ----
+
+    #[test]
+    fn grant_denies_unlisted_but_allows_listed_and_baseline() {
+        use mvm_core::plan::{Nonce, VerbGrant, VerbId};
+        let now = chrono::Utc::now();
+        let grant = VerbGrant {
+            session_id: "s".into(),
+            plan_nonce: Nonce::from_bytes([0u8; 16]),
+            not_after: now + chrono::Duration::minutes(1),
+            verbs: vec![VerbId::new("run-entrypoint").unwrap()],
+            sig: vec![],
+        };
+        // listed => allowed
+        let run = GuestRequest::RunEntrypoint {
+            stdin: vec![],
+            timeout_secs: 1,
+            env: vec![],
+        };
+        assert!(enforce_verb_grant(&run, Some(&grant)).is_none());
+        // baseline => allowed even though not listed
+        assert!(enforce_verb_grant(&GuestRequest::Ping, Some(&grant)).is_none());
+        // ProdSafe but unlisted => denied
+        let idle = GuestRequest::UpdateIdleTimeout { secs: 0 };
+        let idle_name = idle.kind_name();
+        match enforce_verb_grant(&idle, Some(&grant)) {
+            Some(GuestResponse::VerbNotAuthorized { verb }) => assert_eq!(verb, idle_name),
+            other => panic!("expected VerbNotAuthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_grant_is_class_gate_only() {
+        let idle = GuestRequest::UpdateIdleTimeout { secs: 0 };
+        assert!(
+            enforce_verb_grant(&idle, None).is_none(),
+            "None grant must not deny anything"
+        );
+    }
+
+    // ---- load_host_signer_verifying_key ----
+
+    #[test]
+    fn load_host_signer_key_absent_missing_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        // absent -> Ok(None)
+        assert!(
+            load_host_signer_verifying_key(&dir.path().join("nope"))
+                .unwrap()
+                .is_none()
+        );
+        // valid -> Ok(Some)
+        let k = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let hexpath = dir.path().join("ok.pub");
+        let hex: String = k
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        std::fs::write(&hexpath, format!("{hex}\n")).unwrap(); // trailing newline tolerated
+        let loaded = load_host_signer_verifying_key(&hexpath).unwrap().unwrap();
+        assert_eq!(loaded.to_bytes(), k.verifying_key().to_bytes());
+        // malformed -> Err
+        let bad = dir.path().join("bad.pub");
+        std::fs::write(&bad, "not-hex").unwrap();
+        assert!(load_host_signer_verifying_key(&bad).is_err());
+    }
+
+    // ---- pin_verb_grant ----
+
+    #[test]
+    fn pin_verb_grant_valid_forged_replay_expired_and_no_key() {
+        use mvm_core::plan::{Nonce, VerbGrant, VerbId};
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
+        let session = "sess-H";
+        let nonce = Nonce::from_bytes([4u8; 16]);
+        let now = chrono::Utc::now();
+        let mut good = VerbGrant {
+            session_id: session.into(),
+            plan_nonce: nonce.clone(),
+            not_after: now + chrono::Duration::minutes(1),
+            verbs: vec![VerbId::new("ping").unwrap()],
+            sig: vec![],
+        };
+        good.sig = {
+            use ed25519_dalek::Signer;
+            signer.sign(&good.signing_bytes()).to_bytes().to_vec()
+        };
+
+        // valid, key present -> Some
+        assert!(
+            pin_verb_grant(
+                Some(&good),
+                Some(&signer.verifying_key()),
+                session,
+                &nonce,
+                now
+            )
+            .unwrap()
+            .is_some()
+        );
+        // no grant -> None regardless of key
+        assert!(
+            pin_verb_grant(None, Some(&signer.verifying_key()), session, &nonce, now)
+                .unwrap()
+                .is_none()
+        );
+        // grant present but NO key provisioned -> Err (fail closed)
+        assert!(pin_verb_grant(Some(&good), None, session, &nonce, now).is_err());
+        // forged key -> Err
+        let attacker = ed25519_dalek::SigningKey::from_bytes(&[6u8; 32]);
+        assert!(
+            pin_verb_grant(
+                Some(&good),
+                Some(&attacker.verifying_key()),
+                session,
+                &nonce,
+                now
+            )
+            .is_err()
+        );
+        // replay onto other session -> Err
+        assert!(
+            pin_verb_grant(
+                Some(&good),
+                Some(&signer.verifying_key()),
+                "other",
+                &nonce,
+                now
+            )
+            .is_err()
+        );
+        // expired -> Err
+        let later = good.not_after + chrono::Duration::seconds(1);
+        assert!(
+            pin_verb_grant(
+                Some(&good),
+                Some(&signer.verifying_key()),
+                session,
+                &nonce,
+                later
+            )
+            .is_err()
+        );
     }
 }

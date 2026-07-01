@@ -24,3 +24,5 @@
 pub mod config;
 pub mod keystore;
 pub mod server;
+pub mod verb_grant_mint;
+pub use verb_grant_mint::mint_verb_grant;

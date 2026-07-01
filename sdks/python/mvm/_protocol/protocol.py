@@ -748,6 +748,16 @@ class GuestResponse8:
 
 
 @dataclass
+class VerbNotAuthorized:
+    verb: str
+
+
+@dataclass
+class GuestResponse9:
+    VerbNotAuthorized: VerbNotAuthorized
+
+
+@dataclass
 class CheckpointResult:
     failed: List[str]
     success: bool
@@ -755,7 +765,7 @@ class CheckpointResult:
 
 
 @dataclass
-class GuestResponse10:
+class GuestResponse11:
     CheckpointResult: CheckpointResult
 
 
@@ -765,12 +775,12 @@ class PrimedStatusReport:
 
 
 @dataclass
-class GuestResponse12:
+class GuestResponse13:
     PrimedStatusReport: PrimedStatusReport
 
 
 @dataclass
-class GuestResponse14:
+class GuestResponse15:
     ExecEvent: ExecEvent
 
 
@@ -780,7 +790,7 @@ class ExecBatchResult:
 
 
 @dataclass
-class GuestResponse15:
+class GuestResponse16:
     ExecBatchResult: ExecBatchResult
 
 
@@ -792,7 +802,7 @@ class PostRestoreAck:
 
 
 @dataclass
-class GuestResponse16:
+class GuestResponse17:
     PostRestoreAck: PostRestoreAck
 
 
@@ -803,7 +813,7 @@ class PortForwardStarted:
 
 
 @dataclass
-class GuestResponse18:
+class GuestResponse19:
     PortForwardStarted: PortForwardStarted
 
 
@@ -814,7 +824,7 @@ class UnixSocketForwardStarted:
 
 
 @dataclass
-class GuestResponse19:
+class GuestResponse20:
     UnixSocketForwardStarted: UnixSocketForwardStarted
 
 
@@ -825,7 +835,7 @@ class ConsoleOpened:
 
 
 @dataclass
-class GuestResponse20:
+class GuestResponse21:
     ConsoleOpened: ConsoleOpened
 
 
@@ -836,7 +846,7 @@ class ConsoleExited:
 
 
 @dataclass
-class GuestResponse21:
+class GuestResponse22:
     ConsoleExited: ConsoleExited
 
 
@@ -846,7 +856,7 @@ class ConsoleResized:
 
 
 @dataclass
-class GuestResponse22:
+class GuestResponse23:
     ConsoleResized: ConsoleResized
 
 
@@ -858,7 +868,7 @@ class EntrypointStatusReport:
 
 
 @dataclass
-class GuestResponse23:
+class GuestResponse24:
     EntrypointStatusReport: EntrypointStatusReport
 
 
@@ -869,7 +879,7 @@ class UpdateIdleTimeoutAck:
 
 
 @dataclass
-class GuestResponse29:
+class GuestResponse30:
     UpdateIdleTimeoutAck: UpdateIdleTimeoutAck
 
 
@@ -1355,12 +1365,12 @@ class ProbeStatusReport:
 
 
 @dataclass
-class GuestResponse11:
+class GuestResponse12:
     ProbeStatusReport: ProbeStatusReport
 
 
 @dataclass
-class GuestResponse13:
+class GuestResponse14:
     EntrypointEvent: EntrypointEvent
 
 
@@ -1370,27 +1380,27 @@ class FsDiffResult:
 
 
 @dataclass
-class GuestResponse17:
+class GuestResponse18:
     FsDiffResult: FsDiffResult
 
 
 @dataclass
-class GuestResponse24:
+class GuestResponse25:
     ReadinessStatusReport: ReadinessReport
 
 
 @dataclass
-class GuestResponse25:
+class GuestResponse26:
     FsResult: FsResult
 
 
 @dataclass
-class GuestResponse27:
+class GuestResponse28:
     ProcWaitEvent: ProcWaitEvent
 
 
 @dataclass
-class GuestResponse28:
+class GuestResponse29:
     VolumeMountResult: VolumeMountResult
 
 
@@ -1432,12 +1442,12 @@ class IntegrationStatusReport:
 
 
 @dataclass
-class GuestResponse9:
+class GuestResponse10:
     IntegrationStatusReport: IntegrationStatusReport
 
 
 @dataclass
-class GuestResponse26:
+class GuestResponse27:
     ProcResult: ProcResult
 
 
@@ -1471,6 +1481,7 @@ GuestResponse = Union[
     GuestResponse27,
     GuestResponse28,
     GuestResponse29,
+    GuestResponse30,
 ]
 
 

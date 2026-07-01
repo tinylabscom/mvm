@@ -93,6 +93,8 @@ impl PlanFixture {
     pub fn build(self) -> ExecutionPlan {
         let now = Utc::now();
         ExecutionPlan {
+            snapshot_at: Default::default(),
+            network_mode: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId(self.plan_id),
             plan_version: 1,
@@ -143,6 +145,7 @@ impl PlanFixture {
             valid_from: self.valid_from.unwrap_or(now),
             valid_until: self.valid_until.unwrap_or(now + Duration::minutes(10)),
             nonce: Nonce::from_bytes(self.nonce),
+            agent_verbs: None,
             bundle: None,
             deps_volume: None,
             shares: Vec::new(),

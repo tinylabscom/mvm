@@ -15,9 +15,10 @@ contract. WS-1 transport, WS-1.5 parity scaffold, native config emission/launch,
 native flow-audit refeed, and binary-discriminating native enforcement witnesses
 are landed. The macOS/libkrun default selection now chooses native when
 `MVM_GATEWAY_BIN` is configured, while explicit `MVM_NETWORKING=gvproxy` and the
-no-candidate fallback remain available. The parity workflow now has a stable
-required-check shim, and `rvproxy gateway parity` is now required by `main`
-branch protection on PR and merge-group SHAs. The rvproxy transparent
+no-candidate fallback remain available. The old cross-repo
+`rvproxy`/`gvproxy` parity CI lane has been retired because it no longer matches
+the active gateway strategy; `main` branch protection no longer requires the
+`rvproxy gateway parity` shim. The rvproxy transparent
 interception contract landed upstream; this branch wires the mvm libkrun native
 gateway config to a host loopback terminator and marks libkrun transparent-
 terminator-capable. Vz remains guarded until its launch path emits and uses the
@@ -98,7 +99,8 @@ own internal default).
       the single-threaded pump). Vz `vfkit` + Firecracker `passt` replacements
       still pending. Owner: coordinated with the rvproxy session (their Plan 014
       R3).
-- [x] **WS-1.5 — parity-gate scaffold.** `scripts/rvproxy-gateway-parity.sh`
+- [x] **WS-1.5 — parity-gate scaffold.** Historical scaffold:
+      `scripts/rvproxy-gateway-parity.sh`
       runs the claim-10 / flow-audit / Plan-129-substitution witness families
       plus the binary-discriminating conformance gate
       (`gvproxy_dhcp_offer_roundtrips_through_bridge`) against both gvproxy
@@ -108,8 +110,8 @@ own internal default).
       enforcement witnesses are bridge-side and binary-agnostic *today*, so this
       proves transport/conformance parity; the enforcement arm becomes
       binary-discriminating only once WS-2 moves enforcement onto rvproxy's
-      native flow API. CI lane LIVE: `.github/workflows/rvproxy-parity.yml`
-      runs the script on `macos-latest`, building the candidate from a pinned
+      native flow API. Historical CI lane: `.github/workflows/rvproxy-parity.yml`
+      ran the script on `macos-latest`, building the candidate from a pinned
       rvproxy rev (`RVPROXY_DEFAULT_REF`=`520a5dc`, overridable via the
       `workflow_dispatch` input) cloned with the `RVPROXY_CHECKOUT_TOKEN` repo
       secret, gvproxy as the control; fail-closed without the secret.
@@ -117,13 +119,11 @@ own internal default).
       enforcement witnesses green). Triggers: `workflow_dispatch` + a
       paths-filtered `pull_request` (gateway-contract files; macos-latest is
       ~10× ubuntu cost per ADR-038, so the filter keeps it off unrelated PRs).
-      Scaffold complete. The required-check shim is now in the workflow:
-      `rvproxy gateway parity` runs on every PR and merge-group SHA, passes
-      cheaply when no gateway-contract files changed, and requires the macOS
-      `rvproxy vs gvproxy parity` job to pass when they did. The stable
-      `rvproxy gateway parity` context is required in `main` branch protection
-      for both PR and queue SHAs. Remaining maintenance: bump
-      `RVPROXY_DEFAULT_REF` as rvproxy lands gateway changes.
+      Scaffold complete. Retired 2026-06-30: the repository no longer carries
+      the `rvproxy`/`gvproxy` parity workflow or script, and `main` branch
+      protection no longer requires the stable `rvproxy gateway parity` context.
+      Future native-gateway proof belongs in the active backend/security gates,
+      not a cross-repo `gvproxy` comparison lane.
 - [ ] **WS-2 — flow-decision + audit seam.** Port `gateway_bridge`'s
       `PlanFlowPolicy` deny-by-default gate + flow-audit onto rvproxy's native
       flow API; delete the in-line splice/`etherparse` wrapper (Plan 141) and the
@@ -262,9 +262,10 @@ own internal default).
         to a denied dst, and asserts rvproxy **exports a `verdict:"denied"` flow
         record** — proving native deny-by-default enforcement. gvproxy can do
         neither (no `run --config`, no flow export), so it discriminates the
-        binary. Wired as `scripts/rvproxy-gateway-parity.sh` step [2/4]
-        (`run_native_enforcement`), required to PASS in the verdict. Validated
-        locally: all four arms green against the rvproxy binary + gvproxy control.
+        binary. This was formerly wired through the now-retired
+        `scripts/rvproxy-gateway-parity.sh` step [2/4]
+        (`run_native_enforcement`). Validated locally: all four arms green
+        against the rvproxy binary + gvproxy control.
   - [x] **2d task 2b — native allow/deny matrix (binary-discriminating).**
         `rvproxy_native_admits_listed_denies_unlisted` renders ONE `[policy]` with
         an L4 allow rule for a public /24 + deny-by-default and probes it twice
@@ -280,9 +281,9 @@ own internal default).
         address before the L4 allow-list is consulted; the unlisted-deny half
         proves the frame path enforces under this config, so the listed half is
         meaningful. Both native witnesses share a `native_first_frame_probe`
-        helper. Folded into `scripts/rvproxy-gateway-parity.sh` step [2/4]
-        (`run_native_enforcement` now runs the whole `rvproxy_native` family).
-        Validated locally: all four gate arms green, both witnesses 5/5.
+        helper. This was formerly folded into the retired
+        `scripts/rvproxy-gateway-parity.sh` step [2/4]. Validated locally: all
+        four gate arms green, both witnesses 5/5.
   - [x] **2d task 2c — remove the dead mvm-side open-policy slot.**
         `BridgeConfig.policy` and the production `AllowAll` `FlowPolicy` are
         gone. `run_bridge_inner` already derived the live flow gate from the
@@ -325,14 +326,12 @@ own internal default).
         marked capable yet because its current launch path does not emit the
         native rvproxy config.
   - [x] **2d task 2g — required-check shim for parity gate.**
-        `.github/workflows/rvproxy-parity.yml` now emits a stable
-        `rvproxy gateway parity` check on every PR. It detects gateway-contract
-        path changes in a cheap Ubuntu job; unrelated PRs/merge groups pass
-        without spending macOS minutes, while relevant PRs/merge groups must pass the macOS
-        `rvproxy vs gvproxy parity` candidate/control run. This makes the gate
-        safe to add to branch protection without hanging unrelated PRs. The
-        `rvproxy gateway parity` context is now required by `main` branch
-        protection on PR and merge-group SHAs.
+        Historical status: `.github/workflows/rvproxy-parity.yml` emitted a
+        stable `rvproxy gateway parity` check on every PR and used a cheap
+        Ubuntu path detector to avoid macOS spend on unrelated changes. Retired
+        2026-06-30 because the cross-repo `rvproxy`/`gvproxy` comparison lane no
+        longer matches the active gateway strategy; the workflow/script are gone
+        and branch protection no longer requires the shim context.
   - [ ] **2d — remaining: Vz terminator wiring + splice deletion.**
         Libkrun native rvproxy launches now wire transparent interception to the
         host terminator and pass the capability gate. Vz still needs equivalent
@@ -491,14 +490,13 @@ rung is its own PR.
       `require_transparent_egress_terminator(&dyn WorkloadBackend)` to accept
       them. Flipped before rungs 2/4 pass, this unit test is a tripwire: mvm
       asserting a capability rvproxy can't back is now a red test.
-- [ ] **4 — native-path enforcement parity (CI, binary-discriminating).** Extend
-      `scripts/rvproxy-gateway-parity.sh`'s native-enforcement step (it already
-      plays a VMM directly against rvproxy's vfkit socket, no full VM): a guest
-      TCP SYN to `:443` → rvproxy redirects to the terminator dst **and** conveys
-      the original dst; a policy-denied flow is dropped *before* redirect;
-      terminator-down → flow denied (not leaked). gvproxy can do none of these, so
-      it discriminates the binary — proving the candidate implements R4, not just
-      parses its config.
+- [ ] **4 — native-path enforcement parity (CI).** Add the transparent-path
+      enforcement witness to the active backend/security gates: a guest TCP SYN
+      to `:443` redirects to the terminator dst **and** conveys the original dst;
+      a policy-denied flow is dropped *before* redirect; terminator-down denies
+      the flow rather than leaking it. This replaces the retired
+      `rvproxy`/`gvproxy` comparison lane with proof against the gateway strategy
+      the product actually uses.
 - [ ] **5 — live egress proof + repeatable artifact.** A live libkrun boot with a
       workload egressing to `:443`: assert the host terminator received the flow
       with the original dst, substitution happened, the claim-13 placeholder
@@ -517,11 +515,10 @@ rung is its own PR.
 
 rvproxy R2 shipped, and mvm has consumed the subprocess-facing pieces needed for
 native config emission plus flow-audit JSONL refeed. Remaining dependency work
-is the cutover contract: keep the stable `rvproxy gateway parity` check required,
-land the rvproxy transparent-terminator schema/implementation for
-macOS/Vz/libkrun (rvproxy `specs/plans/014` §R4), wire mvm once that schema
-exists per the hookup ladder above, and only then delete the splice and default
-to the native path.
+is the cutover contract: land the transparent-terminator schema/implementation
+for macOS/Vz/libkrun, wire mvm once that schema exists per the hookup ladder
+above, prove it through active backend/security gates, and only then delete the
+splice and default to the native path.
 
 ## Cross-repo dependency
 rvproxy `specs/plans/014-mvm-adoption-requirements.md` (mvm-authored requirements)

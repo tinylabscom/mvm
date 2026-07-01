@@ -367,6 +367,7 @@ fn synthesis_input_for_app<'a>(workload: &'a Workload, app: &'a App) -> Result<S
         shares: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         audit_labels: Default::default(),
+        agent_verbs: None,
     })
 }
 
@@ -537,6 +538,7 @@ mod tests {
             cpus: 2,
             memory: "512M".to_string(),
             profile: RunProfile::Standard,
+            agent_verb: Vec::new(),
             add_dir: Vec::new(),
             env: Vec::new(),
             timeout: Some(60),

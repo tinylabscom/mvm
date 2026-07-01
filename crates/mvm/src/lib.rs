@@ -9,6 +9,7 @@
 // resolving without forcing a sibling-repo update.
 
 pub mod build_env;
+pub mod machine;
 pub mod security;
 pub mod storage;
 pub mod vsock_transport;
@@ -18,6 +19,12 @@ pub mod vm;
 // Embedded-library surface for the warm-lease ergonomics.
 pub use vm::exec_builder::{ExecBuilder, ExecOutcome};
 pub use vm::lease::{AcquireSpec, WarmLease};
+
+// The Machine product abstraction — the construction + capability-gate seam
+// the CLI, mvmd, and the SDKs share.
+pub use machine::{
+    CapabilityError, LaunchInputs, Machine, MachineBuilder, MachineError, MachineSpec, NetworkMode,
+};
 
 // Substrate re-exports — see crate doc comment.
 pub use mvm_backend::base::{config, linux_env, shell, ui};

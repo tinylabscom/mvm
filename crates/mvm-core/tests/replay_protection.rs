@@ -16,6 +16,8 @@ use mvm_core::plan::{ExecutionPlan, SCHEMA_VERSION};
 
 fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
     ExecutionPlan {
+        snapshot_at: Default::default(),
+        network_mode: Default::default(),
         schema_version: SCHEMA_VERSION,
         plan_id: PlanId("test-plan-001".to_string()),
         plan_version: 1,
@@ -63,6 +65,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
         valid_from: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
         valid_until: Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
         nonce: Nonce::from_bytes(nonce),
+        agent_verbs: None,
         bundle: None,
         deps_volume: None,
         shares: Vec::new(),

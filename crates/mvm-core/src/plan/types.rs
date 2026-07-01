@@ -9,6 +9,23 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// How a workload reaches the network. Closed by default: the guest gets no
+/// virtio-net device and can reach nothing until networking is explicitly
+/// requested. [`HostVsockProxy`](NetworkMode::HostVsockProxy) is the brokered,
+/// no-NIC transport — egress and ingress are mediated by host brokers over
+/// vsock, and the `network_policy` allowlist still gates which endpoints are
+/// reachable. Carried in the signed `ExecutionPlan` so the transport is part of
+/// the admitted contract, not a host-wide setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkMode {
+    /// No guest NIC, no broker — the workload cannot reach the network.
+    #[default]
+    None,
+    /// No guest NIC; egress and ingress are mediated by host brokers over vsock.
+    HostVsockProxy,
+}
+
 /// Stable identifier for an `ExecutionPlan` instance. Currently a
 /// ULID; we keep the type opaque so the constructor can switch
 /// generators (UUIDv7, snowflake, etc.) without touching the wire
@@ -715,5 +732,27 @@ mod signed_image_ref_tests {
         assert!(json.contains("\"entrypoint_present\":false"), "{json}");
         let back: SignedImageRef = serde_json::from_str(&json).unwrap();
         assert!(!back.entrypoint_present);
+    }
+}
+
+#[cfg(test)]
+mod network_mode_tests {
+    use super::*;
+
+    #[test]
+    fn default_is_closed_none() {
+        assert_eq!(NetworkMode::default(), NetworkMode::None);
+    }
+
+    #[test]
+    fn serde_uses_snake_case_tokens() {
+        assert_eq!(
+            serde_json::to_string(&NetworkMode::HostVsockProxy).unwrap(),
+            "\"host_vsock_proxy\""
+        );
+        assert_eq!(
+            serde_json::from_str::<NetworkMode>("\"none\"").unwrap(),
+            NetworkMode::None
+        );
     }
 }
