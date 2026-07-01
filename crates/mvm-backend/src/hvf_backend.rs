@@ -227,6 +227,9 @@ impl VmBackend for HvfBackend {
 
         let cfg = HvfSupervisorConfig {
             kernel: PathBuf::from(kernel),
+            // Workload path: the supervisor's default cmdline (`init=/init`) is the
+            // mkGuest contract, so leave it unset.
+            cmdline: None,
             initramfs: config.initrd_path.clone().map(PathBuf::from),
             disk,
             vsock: true,

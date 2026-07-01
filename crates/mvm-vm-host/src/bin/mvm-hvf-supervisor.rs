@@ -185,6 +185,7 @@ fn main() -> anyhow::Result<()> {
             agent_socket: cfg.agent_socket.clone(),
             substitution_socket: cfg.substitution_socket.clone(),
             egress_relay: cfg.egress_relay_socket.clone(),
+            cmdline: cfg.cmdline.clone(),
         },
     );
 

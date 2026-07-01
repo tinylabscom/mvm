@@ -105,8 +105,17 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         anyhow!("in-house workload spec is missing the EGRESS_PORT vsock relay socket")
     })?;
 
+    // An empty spec cmdline means "use the supervisor's workload default"
+    // (`init=/init`); a non-empty one (e.g. the builder rootfs's
+    // `init=/sbin/mvm-host-vm-init`) is threaded through verbatim.
+    let cmdline = {
+        let c = spec.cmdline.trim();
+        (!c.is_empty()).then(|| c.to_string())
+    };
+
     Ok(HvfSupervisorConfig {
         kernel,
+        cmdline,
         initramfs: spec.initramfs.clone(),
         disk,
         vsock: true,
@@ -385,6 +394,31 @@ mod tests {
         assert!(cfg.vsock);
         // No blocks → no disk.
         assert_eq!(cfg.disk, None);
+        // Empty spec cmdline ⇒ None (supervisor uses its workload default).
+        assert_eq!(cfg.cmdline, None);
+    }
+
+    #[test]
+    fn relay_config_threads_a_non_empty_cmdline_and_drops_an_empty_one() {
+        // The builder rootfs boots a different PID 1 than the mkGuest workload
+        // default, so its cmdline must reach the supervisor verbatim.
+        let mut spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![egress_port("/run/egress.sock")],
+            vec![],
+        );
+        spec.cmdline = "  console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init  ".into();
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        // Trimmed, threaded verbatim.
+        assert_eq!(
+            cfg.cmdline.as_deref(),
+            Some("console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init")
+        );
+
+        // A whitespace-only cmdline collapses to None (default applies).
+        spec.cmdline = "   ".into();
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(cfg.cmdline, None);
     }
 
     #[test]

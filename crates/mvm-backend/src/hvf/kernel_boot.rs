@@ -98,10 +98,10 @@ fn default_bootargs(has_disk: bool) -> String {
     args
 }
 
-/// Host-side channels the supervisor wires into the guest's vsock device: the
-/// per-VM host→guest agent RPC socket, the per-VM substitution-endpoint socket,
-/// and the per-VM egress relay UDS. Bundled so the boot entry stays under the
-/// argument-count lint. The two socket paths fall back to the
+/// Host-supplied boot inputs the supervisor threads into a guest: the vsock
+/// channels (per-VM host→guest agent RPC socket, substitution-endpoint socket,
+/// egress relay UDS) plus the kernel cmdline. Bundled so the boot entry stays
+/// under the argument-count lint. The two socket paths fall back to the
 /// `MVM_HVF_{AGENT,SUBSTITUTION}_SOCKET` env hooks when `None` (dev/live drivers);
 /// the productionized path threads them through the supervisor config.
 pub struct HostChannels {
@@ -111,6 +111,12 @@ pub struct HostChannels {
     /// endpoint gates (claim-10) and substitutes secrets. `None` ⇒ egress fails
     /// closed at the bridge (an in-house VM must always carry a relay socket).
     pub egress_relay: Option<PathBuf>,
+    /// Full kernel cmdline. `None` ⇒ the built-in [`default_bootargs`] (workload
+    /// default: `init=/init`). A caller that boots an image expecting a different
+    /// PID 1 — e.g. the builder rootfs, whose init is the static
+    /// `/sbin/mvm-host-vm-init`, not the `/init` shell script — sets it here.
+    /// `MVM_HVF_BOOTARGS` still overrides both (dev hook).
+    pub cmdline: Option<String>,
 }
 
 /// Boot `image` (an arm64 `Image`) under HVF, optionally with an `initramfs`
@@ -134,6 +140,7 @@ pub fn boot_kernel(
             agent_socket: None,
             substitution_socket: None,
             egress_relay: None,
+            cmdline: None,
         },
     )
 }
@@ -187,11 +194,16 @@ fn boot_kernel_impl(
         return Err(HvfError::Alloc);
     }
 
-    // Base cmdline (or a full override), plus optional appended args. The append
-    // hook lets a caller thread runtime-discovered values (e.g. a dynamically
-    // bound egress target) into the guest without reproducing the whole default.
-    let mut bootargs =
-        std::env::var("MVM_HVF_BOOTARGS").unwrap_or_else(|_| default_bootargs(disk.is_some()));
+    // Base cmdline, plus optional appended args. Precedence: the `MVM_HVF_BOOTARGS`
+    // dev override wins, then the caller-supplied cmdline (the builder rootfs needs
+    // `init=/sbin/mvm-host-vm-init`, not the workload `init=/init`), then the
+    // built-in default. The append hook lets a caller thread runtime-discovered
+    // values (e.g. a dynamically bound egress target) on top without reproducing
+    // the whole base.
+    let mut bootargs = std::env::var("MVM_HVF_BOOTARGS")
+        .ok()
+        .or_else(|| channels.cmdline.clone())
+        .unwrap_or_else(|| default_bootargs(disk.is_some()));
     if let Ok(extra) = std::env::var("MVM_HVF_BOOTARGS_EXTRA") {
         let extra = extra.trim();
         if !extra.is_empty() {

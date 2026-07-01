@@ -19,6 +19,12 @@ use serde::{Deserialize, Serialize};
 pub struct HvfSupervisorConfig {
     /// arm64 `Image` to boot.
     pub kernel: PathBuf,
+    /// Full kernel cmdline. `None` ⇒ the supervisor's built-in default (workload
+    /// contract: `init=/init`). Set it to boot an image whose PID 1 differs — e.g.
+    /// the builder rootfs, which boots the static `/sbin/mvm-host-vm-init`. The
+    /// `MVM_HVF_BOOTARGS` env override still wins over this (dev hook).
+    #[serde(default)]
+    pub cmdline: Option<String>,
     /// Optional initramfs (cpio, gzip-or-raw).
     #[serde(default)]
     pub initramfs: Option<PathBuf>,
@@ -70,6 +76,7 @@ mod tests {
     fn json_roundtrip_with_all_fields() {
         let cfg = HvfSupervisorConfig {
             kernel: "/k/Image".into(),
+            cmdline: Some("console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init".into()),
             initramfs: Some("/k/initrd.cpio".into()),
             disk: Some("/k/disk.img".into()),
             vsock: true,
@@ -102,6 +109,7 @@ mod tests {
     fn optional_fields_default() {
         let json = r#"{"kernel":"/k/Image","console_log":"/c.log","pid_file":"/p.pid","workload_exit":"/w.exit","timeout_secs":5}"#;
         let cfg: HvfSupervisorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.cmdline, None);
         assert_eq!(cfg.initramfs, None);
         assert_eq!(cfg.disk, None);
         assert!(!cfg.vsock);
