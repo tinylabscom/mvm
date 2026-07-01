@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use mvm_build::hvf_supervisor::HvfSupervisorConfig;
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{
@@ -202,10 +202,16 @@ impl VmmDriver for InHouseDriver {
         // outlives this call (reaped via its PID file by `kill`).
         drop(child);
 
+        // The agent RPC socket the supervisor binds for this VM (host→guest agent
+        // bridge on GUEST_AGENT_PORT). Prefer the spec's own port; fall back to the
+        // standing convention so a later `attach` re-derives the same path.
+        let agent_socket = vsock_socket(spec, GUEST_AGENT_PORT)
+            .unwrap_or_else(|| in_house_agent_socket(&paths.state_dir));
         Ok(Box::new(InHouseRunningVm {
             id: VmId(spec.name.clone()),
             state_dir: paths.state_dir,
             pid_file: paths.pid_file,
+            agent_socket,
         }))
     }
 
@@ -216,10 +222,17 @@ impl VmmDriver for InHouseDriver {
         let state_dir = vm_state_dir(&id.0);
         Ok(Box::new(InHouseRunningVm {
             pid_file: state_dir.join(PID_FILE_NAME),
+            agent_socket: in_house_agent_socket(&state_dir),
             state_dir,
             id: id.clone(),
         }))
     }
+}
+
+/// The per-VM agent RPC socket path (host→guest agent bridge). Matches the
+/// standing socket a `WorkloadRunner` binds so `attach` re-derives it.
+fn in_house_agent_socket(state_dir: &std::path::Path) -> PathBuf {
+    state_dir.join("agent.sock")
 }
 
 /// A live in-house VM: the detached `mvm-hvf-supervisor` tracked by its PID file,
@@ -228,6 +241,8 @@ struct InHouseRunningVm {
     id: VmId,
     state_dir: PathBuf,
     pid_file: PathBuf,
+    /// Host→guest agent RPC socket the supervisor bound for this VM.
+    agent_socket: PathBuf,
 }
 
 impl RunningVm for InHouseRunningVm {
@@ -264,8 +279,25 @@ impl RunningVm for InHouseRunningVm {
         })
     }
 
-    fn vsock_connect(&self, _guest_port: u32) -> Result<Box<dyn DuplexStream>> {
-        bail!("in-house driver vsock_connect is not yet implemented")
+    fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
+        // The in-house VMM bridges exactly one host→guest channel: the agent RPC
+        // port, exposed as the per-VM agent socket the supervisor binds. A connect
+        // to that UDS is a stream to the guest agent (the bridge opens the vsock
+        // leg). Other ports are not host-dialable on this backend.
+        if guest_port != GUEST_AGENT_PORT {
+            bail!(
+                "in-house driver vsock_connect supports only the agent port ({GUEST_AGENT_PORT}); \
+                 got {guest_port}"
+            );
+        }
+        let stream =
+            std::os::unix::net::UnixStream::connect(&self.agent_socket).with_context(|| {
+                format!(
+                    "connect to in-house agent socket {}",
+                    self.agent_socket.display()
+                )
+            })?;
+        Ok(Box::new(stream))
     }
 }
 
@@ -395,5 +427,42 @@ mod tests {
             vec![],
         );
         assert!(relay_supervisor_config(&spec, &sample_paths()).is_err());
+    }
+
+    #[test]
+    fn vsock_connect_reaches_the_agent_socket_and_rejects_other_ports() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("agent.sock");
+        // Stand-in for the supervisor's agent bridge: echo one byte back.
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut c, _)) = listener.accept() {
+                let mut b = [0u8; 1];
+                if c.read_exact(&mut b).is_ok() {
+                    let _ = c.write_all(&b);
+                }
+            }
+        });
+
+        let vm = InHouseRunningVm {
+            id: VmId("agent-vm".into()),
+            state_dir: dir.path().to_path_buf(),
+            pid_file: dir.path().join(PID_FILE_NAME),
+            agent_socket: sock,
+        };
+
+        // The agent port connects + round-trips through the socket.
+        let mut s = vm.vsock_connect(GUEST_AGENT_PORT).unwrap();
+        s.write_all(b"x").unwrap();
+        let mut got = [0u8; 1];
+        s.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"x");
+        server.join().unwrap();
+
+        // Any other guest port is not host-dialable on this backend.
+        assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
     }
 }
