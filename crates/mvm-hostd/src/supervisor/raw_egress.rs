@@ -179,7 +179,6 @@ fn handle_raw_conn_blocking(
     gate: &EgressGate,
     timeout: Duration,
 ) -> std::io::Result<()> {
-    use std::io::{Read, Write};
     use std::os::fd::{FromRawFd, OwnedFd};
 
     // Adopt the fd; a File over a socket fd gives blocking Read+Write.
