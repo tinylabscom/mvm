@@ -132,6 +132,22 @@ struct SandboxPage {
     data: Vec<SandboxDto>,
 }
 
+/// The gateway's single-item envelope (`{ data: {...}, metadata: {...} }`).
+#[derive(serde::Deserialize)]
+struct SandboxEnvelope {
+    data: SandboxDto,
+}
+
+/// Body for `POST /api/v1/sandboxes`. Only the fields the create endpoint
+/// accepts; region/labels/ports default server-side.
+#[derive(serde::Serialize)]
+struct CreateSandboxBody<'a> {
+    name: &'a str,
+    image: &'a str,
+    memory_mib: u32,
+    vcpus: u32,
+}
+
 /// Map the gateway's status string onto the facade status. Unknown values fail
 /// safe to `Failed` rather than a misleading `Running`.
 fn map_status(s: &str) -> MachineStatus {
@@ -182,10 +198,36 @@ impl MvmClient for GatewayBackend {
         Ok(filter_machines(machines, &filter))
     }
 
-    async fn run_machine(&self, _spec: MachineSpec) -> Result<MachineState> {
-        Err(MvmError::Backend {
-            reason: "gateway run not yet wired (MachineSpec -> create-sandbox body)".into(),
-        })
+    async fn run_machine(&self, spec: MachineSpec) -> Result<MachineState> {
+        // The create-sandbox endpoint has no env field; refuse rather than
+        // silently drop env the workload would expect.
+        if !spec.env.is_empty() {
+            return Err(MvmError::InvalidSpec {
+                reason: "gateway create-sandbox does not accept env vars; bake them into the image or leave env empty".into(),
+            });
+        }
+        let url = self.endpoint("/api/v1/sandboxes")?;
+        let body = CreateSandboxBody {
+            name: &spec.name,
+            image: &spec.image,
+            memory_mib: spec.memory_mib,
+            vcpus: spec.cpus,
+        };
+        let resp = self
+            .authed(self.http.post(url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| MvmError::Backend {
+                reason: format!("create request failed: {e}"),
+            })?;
+        if let Some(e) = status_error(resp.status(), &spec.name) {
+            return Err(e);
+        }
+        let env: SandboxEnvelope = resp.json().await.map_err(|e| MvmError::Backend {
+            reason: format!("parsing create response: {e}"),
+        })?;
+        Ok(env.data.into())
     }
 
     async fn stop_machine(&self, id: &MachineId) -> Result<()> {
@@ -334,6 +376,31 @@ mod tests {
         let out = filter_machines(ms, &f);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "a");
+    }
+
+    #[tokio::test]
+    async fn run_refuses_env_the_gateway_cannot_honor() {
+        let be = GatewayBackend::new(cfg("https://fleet.example.com")).unwrap();
+        let spec = MachineSpec {
+            name: "w".into(),
+            image: "i".into(),
+            cpus: 1,
+            memory_mib: 64,
+            env: vec![("A".into(), "B".into())],
+        };
+        // The env guard fires before any request, so no server is needed.
+        let err = be.run_machine(spec).await.unwrap_err();
+        assert!(matches!(err, MvmError::InvalidSpec { .. }));
+    }
+
+    #[test]
+    fn create_response_envelope_maps_to_machine() {
+        // Mirrors ApiResponse<SandboxRecord> = { data: {...}, metadata: {...} }.
+        let json = r#"{"data":{"sandbox_id":"sbx-9","name":"api","status":"starting","image":"x","memory_mib":256,"vcpus":2,"tenant_id":"t","pool_id":"default","workspace_id":"w","created_at":"now"},"metadata":{"request_id":"r","timestamp":"now"}}"#;
+        let env: SandboxEnvelope = serde_json::from_str(json).unwrap();
+        let m: MachineState = env.data.into();
+        assert_eq!(m.id, MachineId("sbx-9".into()));
+        assert_eq!(m.status, MachineStatus::Starting);
     }
 
     #[test]
