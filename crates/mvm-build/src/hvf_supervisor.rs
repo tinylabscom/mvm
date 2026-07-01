@@ -58,6 +58,12 @@ pub struct HvfSupervisorConfig {
     /// sets this only when the admitted plan carries egress secrets.
     #[serde(default)]
     pub substitution_socket: Option<PathBuf>,
+    /// Per-VM unified egress bridge UDS. When set, the supervisor wires
+    /// `EGRESS_PORT` as a pure relay to it — the endpoint bound here gates
+    /// (claim-10) and substitutes secrets, so `network_policy` is unused for this
+    /// VM. `None` ⇒ the in-loop-gated paths (raw egress / gated substitution).
+    #[serde(default)]
+    pub egress_relay_socket: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -78,6 +84,7 @@ mod tests {
             timeout_secs: 30,
             agent_socket: Some("/state/hvf-agent.sock".into()),
             substitution_socket: Some("/state/substitution-endpoint.sock".into()),
+            egress_relay_socket: Some("/state/egress-bridge.sock".into()),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert_eq!(
@@ -93,6 +100,7 @@ mod tests {
         let cfg: HvfSupervisorConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.agent_socket, None);
         assert_eq!(cfg.substitution_socket, None);
+        assert_eq!(cfg.egress_relay_socket, None);
     }
 
     #[test]

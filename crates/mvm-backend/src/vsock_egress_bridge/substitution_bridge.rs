@@ -76,6 +76,11 @@ pub(crate) struct SubstitutionBridge {
     /// Claim-10 gate — the same policy the device's raw-egress path enforces.
     /// `None` ⇒ deny everything (fail closed with no policy installed).
     gate: Option<EgressGate>,
+    /// Pure-relay mode: skip the in-loop claim-10 gate and the WireRequest parse
+    /// entirely — open the endpoint on the first frame and relay byte-for-byte. The
+    /// endpoint is the sole gate (it checks claim-10 and substitutes), and the
+    /// stream may be raw TCP rather than a WireRequest, so it must not be parsed.
+    relay_only: bool,
     /// Open streams keyed by the guest vsock `src_port`.
     conns: HashMap<u32, SubstConn>,
     /// Open-(admitted-)connection count, published for the run loop heartbeat so it
@@ -88,6 +93,7 @@ impl SubstitutionBridge {
         Self {
             endpoint: None,
             gate: None,
+            relay_only: false,
             conns: HashMap::new(),
             active: None,
         }
@@ -102,6 +108,13 @@ impl SubstitutionBridge {
     /// set, every destination is refused.
     pub fn set_gate(&mut self, gate: EgressGate) {
         self.gate = Some(gate);
+    }
+
+    /// Make the bridge a pure relay: no in-loop claim-10 gate, no WireRequest
+    /// parse — every stream opens the endpoint on its first frame and relays
+    /// verbatim. The endpoint gates + substitutes; this is the sole-gate posture.
+    pub fn set_relay_only(&mut self) {
+        self.relay_only = true;
     }
 
     /// Whether a substitution endpoint is configured. The device uses this to
@@ -134,7 +147,7 @@ impl SubstitutionBridge {
                 return SubstitutionAction::Relayed;
             }
             conn.pending.extend_from_slice(payload);
-            return self.decide(conn_id);
+            return self.progress(conn_id);
         }
         // New stream — needs a configured endpoint, else fail closed.
         if self.endpoint.is_none() {
@@ -148,7 +161,49 @@ impl SubstitutionBridge {
                 admitted: false,
             },
         );
-        self.decide(conn_id)
+        self.progress(conn_id)
+    }
+
+    /// Advance a buffering stream one step: in relay-only mode open the endpoint
+    /// and relay immediately (no gate, no parse); otherwise make the claim-10
+    /// decision from the accumulated bytes.
+    fn progress(&mut self, conn_id: u32) -> SubstitutionAction {
+        if self.relay_only {
+            self.relay_open(conn_id)
+        } else {
+            self.decide(conn_id)
+        }
+    }
+
+    /// Relay-only admit: open the endpoint straight away and flush all buffered
+    /// bytes, with no gate decision and no WireRequest parse (the endpoint is the
+    /// gate; the stream may be raw TCP). No endpoint or a connect failure fails
+    /// closed.
+    fn relay_open(&mut self, conn_id: u32) -> SubstitutionAction {
+        let Some(path) = self.endpoint.clone() else {
+            self.conns.remove(&conn_id);
+            return SubstitutionAction::Refused;
+        };
+        match UnixStream::connect(&path) {
+            Ok(stream) => {
+                let _ = stream.set_nonblocking(true);
+                let Some(conn) = self.conns.get_mut(&conn_id) else {
+                    return SubstitutionAction::Refused;
+                };
+                let buffered = std::mem::take(&mut conn.pending);
+                conn.upstream = Some(stream);
+                conn.admitted = true;
+                if let Some(up) = conn.upstream.as_mut() {
+                    write_nonblocking(up, &buffered);
+                }
+                self.bump(1);
+                SubstitutionAction::Relayed
+            }
+            Err(_) => {
+                self.conns.remove(&conn_id);
+                SubstitutionAction::Refused
+            }
+        }
     }
 
     /// Make (or defer) the claim-10 decision for a buffering stream from its
@@ -477,5 +532,63 @@ mod tests {
         }
         assert!(!b.has_active());
         assert_eq!(active.load(Ordering::Relaxed), 0);
+    }
+
+    /// Relay-only: no gate installed, `set_relay_only`, a raw first frame (NOT a
+    /// WireRequest) is relayed byte-for-byte to the endpoint and the endpoint's
+    /// reply drains back to the guest. The bridge never parses or gates.
+    #[test]
+    fn relay_only_relays_without_a_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("subst.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 64];
+            let n = c.read(&mut buf).unwrap();
+            let mut reply = b"OK:".to_vec();
+            reply.extend_from_slice(&buf[..n]);
+            c.write_all(&reply).unwrap();
+            buf[..n].to_vec()
+        });
+
+        let mut b = SubstitutionBridge::new();
+        // No gate at all — relay mode must not consult one.
+        b.set_endpoint(&sock);
+        b.set_relay_only();
+
+        // A raw TCP-style first frame, not a framed WireRequest.
+        let raw = b"1.2.3.4:80\n";
+        assert_eq!(b.handle_frame(3, raw), SubstitutionAction::Relayed);
+        assert!(b.has_active());
+
+        let got_by_endpoint = server.join().unwrap();
+        assert_eq!(got_by_endpoint, raw, "endpoint got the raw bytes verbatim");
+
+        let mut reply = None;
+        for _ in 0..200 {
+            let d = b.drain();
+            if let Some((cid, bytes)) = d.ready.into_iter().next() {
+                assert_eq!(cid, 3);
+                reply = Some(bytes);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let reply = reply.expect("endpoint reply drained back");
+        assert!(reply.starts_with(b"OK:"));
+        assert!(reply.ends_with(raw));
+    }
+
+    /// Relay-only still fails closed with no endpoint configured — nothing leaves.
+    #[test]
+    fn relay_only_without_endpoint_fails_closed() {
+        let mut b = SubstitutionBridge::new();
+        b.set_relay_only();
+        assert_eq!(
+            b.handle_frame(5, b"1.2.3.4:80\n"),
+            SubstitutionAction::Refused
+        );
+        assert!(!b.has_active());
     }
 }

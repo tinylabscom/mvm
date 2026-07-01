@@ -112,6 +112,9 @@ pub struct HostChannels {
     pub egress: crate::vmm::egress_gate::EgressGate,
     pub agent_socket: Option<PathBuf>,
     pub substitution_socket: Option<PathBuf>,
+    /// Per-VM unified egress bridge UDS. When set, `EGRESS_PORT` relays here with
+    /// no in-loop gate — the endpoint gates (claim-10) and substitutes secrets.
+    pub egress_relay: Option<PathBuf>,
 }
 
 /// Boot `image` (an arm64 `Image`) under HVF, optionally with an `initramfs`
@@ -135,6 +138,7 @@ pub fn boot_kernel(
             egress: egress_gate_from_env(),
             agent_socket: None,
             substitution_socket: None,
+            egress_relay: None,
         },
     )
 }
@@ -260,6 +264,7 @@ fn boot_kernel_impl(
                 egress: channels.egress,
                 agent_socket: channels.agent_socket,
                 substitution_socket: channels.substitution_socket,
+                egress_relay: channels.egress_relay,
             },
             stop,
         );
@@ -316,6 +321,9 @@ struct RunInputs<'a> {
     /// Per-VM substitution-endpoint socket (productionized off
     /// `MVM_HVF_SUBSTITUTION_SOCKET`).
     substitution_socket: Option<PathBuf>,
+    /// Per-VM unified egress bridge UDS. When set, `EGRESS_PORT` relays here with
+    /// no in-loop gate — the endpoint is the sole gate + substituter.
+    egress_relay: Option<PathBuf>,
 }
 
 unsafe fn run(
@@ -332,6 +340,7 @@ unsafe fn run(
         egress,
         agent_socket,
         substitution_socket,
+        egress_relay,
     } = inputs;
     unsafe {
         // In-kernel GICv3 — created after the VM, before any vCPU. Base
@@ -468,19 +477,31 @@ unsafe fn run(
                     );
                 }
             }
-            // Substitution gateway: route EGRESS_PORT to the per-VM endpoint. The
-            // bridge makes the claim-10 decision on the first frame using the same
-            // gate the raw-egress path uses (hence a clone), then relays admitted
-            // streams to the secrets endpoint. Shares the egress heartbeat counter
-            // so an in-flight WireRequest awaiting its reply keeps the loop polling.
-            if let Some(path) = &substitution_socket {
+            // Egress routing for EGRESS_PORT. Relay mode takes precedence: when a
+            // per-VM unified egress bridge UDS is set, the device is a pure relay to
+            // it and the endpoint owns the whole egress decision (claim-10 +
+            // substitution). The in-loop `egress` gate is then unused and dropped.
+            // Otherwise the legacy in-loop-gated paths run exactly as before.
+            if let Some(relay) = &egress_relay {
                 v.set_substitution_activity(egress_active.clone());
-                v.set_substitution_gate(egress.clone());
-                v.set_substitution_endpoint(path);
+                v.set_substitution_endpoint(relay);
+                v.set_substitution_relay_only();
+            } else {
+                // Substitution gateway: route EGRESS_PORT to the per-VM endpoint.
+                // The bridge makes the claim-10 decision on the first frame using
+                // the same gate the raw-egress path uses (hence a clone), then
+                // relays admitted streams to the secrets endpoint. Shares the egress
+                // heartbeat counter so an in-flight WireRequest awaiting its reply
+                // keeps the loop polling.
+                if let Some(path) = &substitution_socket {
+                    v.set_substitution_activity(egress_active.clone());
+                    v.set_substitution_gate(egress.clone());
+                    v.set_substitution_endpoint(path);
+                }
+                // The raw-egress gate takes ownership last (the substitution path
+                // only needs a clone above).
+                v.set_egress_gate(egress);
             }
-            // The raw-egress gate takes ownership last (the substitution path only
-            // needs a clone above).
-            v.set_egress_gate(egress);
         }
 
         // Diagnostics gathered by the exception hook (HVC/PSCI + other traps).

@@ -241,6 +241,15 @@ impl VirtioVsock {
         self.substitution.set_gate(gate);
     }
 
+    /// Put the substitution gateway into pure-relay mode: `EGRESS_PORT` streams are
+    /// relayed to the endpoint with no in-loop claim-10 gate and no WireRequest
+    /// parse — the endpoint makes the whole egress decision (claim-10 + secret
+    /// substitution). Use instead of [`set_substitution_gate`](Self::set_substitution_gate)
+    /// when the endpoint is the sole gate.
+    pub fn set_substitution_relay_only(&mut self) {
+        self.substitution.set_relay_only();
+    }
+
     /// Share the heartbeat activity counter with the substitution gateway so an
     /// open substitution stream awaiting an endpoint reply keeps the run loop waking
     /// an idle guest (the same counter the egress proxy + agent bridge use).
@@ -427,12 +436,16 @@ impl VirtioVsock {
                 } else if hdr.dst_port == mvm_guest::vsock::EGRESS_PORT {
                     // The egress port carries one of two protocols, chosen at
                     // configuration time (not by peeking the bytes): if a
-                    // substitution endpoint is wired for this VM, the stream speaks
-                    // the WireRequest substitution protocol and is relayed to the
-                    // endpoint, which makes the whole egress decision. Otherwise it
-                    // is the legacy raw-TCP egress request — payload "ip:port",
-                    // decided against the default-deny gate before any host socket
-                    // is opened.
+                    // substitution endpoint is wired for this VM, the stream is
+                    // relayed to the endpoint, which makes the whole egress
+                    // decision. Otherwise it is the legacy raw-TCP egress request —
+                    // payload "ip:port", decided against the default-deny gate
+                    // before any host socket is opened.
+                    //
+                    // When the substitution bridge is in relay-only mode the entire
+                    // egress decision (claim-10 default-deny + secret substitution)
+                    // is the endpoint's: the device parses nothing and gates
+                    // nothing, it only relays the stream both ways.
                     if self.substitution.has_endpoint() {
                         self.handle_substitution_request(&hdr, &payload[..n]);
                     } else {
@@ -877,6 +890,69 @@ mod tests {
             "reply must be the endpoint's echoed frame"
         );
         server.join().unwrap();
+    }
+
+    /// Relay-only mode: with `set_substitution_relay_only` and NO gate installed, a
+    /// raw first frame to `EGRESS_PORT` (not a WireRequest) is relayed straight to
+    /// the endpoint — the device consults no gate and parses nothing. The endpoint
+    /// is the sole gate now.
+    #[test]
+    fn egress_port_relay_only_relays_raw_frame_without_gate() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("subst.sock");
+
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 64];
+            let n = c.read(&mut buf).unwrap();
+            let mut reply = b"OK:".to_vec();
+            reply.extend_from_slice(&buf[..n]);
+            c.write_all(&reply).unwrap();
+            buf[..n].to_vec()
+        });
+
+        let mut d = dev();
+        d.set_substitution_endpoint(&sock);
+        d.set_substitution_relay_only(); // no gate, endpoint is the gate
+
+        let raw = b"1.2.3.4:80\n".to_vec();
+        let rw = Hdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 1500,
+            dst_port: mvm_guest::vsock::EGRESS_PORT,
+            len: raw.len() as u32,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(rw, &raw);
+
+        // Relayed (not captured), stream acked.
+        assert!(d.received.is_empty());
+        assert!(d.pending_rx.iter().any(|(h, _)| h.op == OP_CREDIT_UPDATE));
+
+        let got_by_endpoint = server.join().unwrap();
+        assert_eq!(got_by_endpoint, raw, "endpoint got the raw bytes verbatim");
+
+        let mut reply = None;
+        for _ in 0..200 {
+            let _ = d.drain_substitution();
+            if let Some((h, payload)) = d
+                .pending_rx
+                .iter()
+                .find(|(h, _)| h.op == OP_RW && h.dst_port == 1500)
+            {
+                reply = Some((*h, payload.clone()));
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let (h, payload) = reply.expect("endpoint reply framed back to the guest");
+        assert_eq!(h.src_port, mvm_guest::vsock::EGRESS_PORT);
+        assert!(payload.starts_with(b"OK:"));
     }
 
     /// Claim-10 at the device: a WireRequest to a destination the gate does NOT

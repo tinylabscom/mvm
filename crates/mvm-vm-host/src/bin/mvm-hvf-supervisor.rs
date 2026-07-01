@@ -224,6 +224,7 @@ fn main() -> anyhow::Result<()> {
             egress,
             agent_socket: cfg.agent_socket.clone(),
             substitution_socket: cfg.substitution_socket.clone(),
+            egress_relay: cfg.egress_relay_socket.clone(),
         },
     );
 

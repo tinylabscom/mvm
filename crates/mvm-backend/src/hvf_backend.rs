@@ -192,6 +192,7 @@ impl VmBackend for HvfBackend {
             timeout_secs,
             agent_socket: Some(agent_socket),
             substitution_socket,
+            egress_relay_socket: None,
         };
         let json = serde_json::to_string(&cfg)
             .map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
