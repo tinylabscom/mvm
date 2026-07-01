@@ -90,27 +90,15 @@
 
 ## Background — what is mvm? (draft)
 
-If you've never touched mvm, here's everything you need to follow the rest of this post.
+If you've never touched mvm, a few paragraphs will get you oriented.
 
-**mvm is a command-line tool for running microVMs.** You point it at a container image and it boots that image inside a real, isolated Linux virtual machine — `mvmctl run --image alpine -- echo hi`. The whole design goal is to make that feel about as light as running a container while giving you the isolation of a full VM.
+mvm is a command-line tool for running microVMs. You hand it a container image and it boots that image inside a real, isolated Linux virtual machine — `mvmctl run --image alpine -- echo hi` — and the whole point is to make that feel about as lightweight as running a container while giving you the isolation of a full VM.
 
-**Why a microVM instead of a container?** A container isn't really its own machine — it's a set of processes running on *your* kernel, walled off with namespaces and cgroups. A microVM is an actual virtual machine: it boots its own Linux kernel behind a hardware hypervisor, so a compromise inside the guest can't reach the host kernel the way a container escape can. The trick that makes this practical is stripping the VM down to almost nothing — a minimal kernel, a few paravirtual devices, no BIOS, no emulated legacy hardware — so it boots in a fraction of a second. Firecracker, the microVM monitor AWS built for Lambda, is the canonical example; mvm uses it on Linux.
+That distinction carries more weight than it sounds. A container isn't really its own machine; it's a set of processes sharing *your* kernel, fenced off with namespaces and cgroups. A microVM is an actual virtual machine with its own kernel running behind a hardware hypervisor, so a break-in inside the guest is contained by the CPU's virtualization boundary rather than by kernel features that occasionally spring leaks. That isolation used to mean a slow, heavy VM — but a microVM strips the machine down to almost nothing (a minimal kernel, a handful of virtual devices, no BIOS or emulated legacy hardware), which pulls boot times back down to a fraction of a second. Firecracker, the monitor AWS wrote to run Lambda and Fargate, is the canonical example, and it's what mvm uses on Linux.
 
-**The catch that drives this whole post: you can't run Firecracker on a Mac.** Firecracker needs KVM, the Linux kernel's virtualization interface, which doesn't exist on macOS. So mvm has to use whichever hypervisor the host *does* offer, and that changes by platform:
+Which brings us to the complication at the heart of this post: Firecracker only runs on Linux. It leans on KVM, the kernel's hardware-virtualization interface, and there is no KVM on macOS. But mvm is a tool people run on their laptops — most of them Macs — so it can't insist on Firecracker. Instead it uses whatever hypervisor the host happens to offer: Firecracker on Linux, libkrun (a lightweight in-process monitor) on older macOS, and Apple's own Virtualization.framework — which we'll call vz — on macOS 26 and up. The thing to hold onto is that the *same one-line command* boots on a *different hypervisor* depending on who runs it, and those hypervisors, as the next section shows, don't present the guest's virtual hardware the same way.
 
-- **Linux** → **Firecracker** (via `/dev/kvm`)
-- **older macOS** → **libkrun**, a lightweight in-process VM monitor
-- **macOS 26+** → **Apple's Virtualization.framework**, which we call **vz**
-
-So the same one-line command runs on a *different hypervisor* depending on who typed it — and, as the next section shows, those hypervisors don't hand the guest its virtual devices the same way.
-
-**A few more words you'll see:**
-- **Host** and **guest** — the host is your laptop running `mvmctl`; the guest is the Linux VM it boots.
-- **virtio** — the standard way a guest talks to its virtual disk, network, console, etc.: a paravirtual device protocol every modern Linux kernel speaks.
-- **vsock** — a socket that connects host and guest directly (no network involved), which mvm uses to reach a small **guest agent** process running inside the VM.
-- **builder VM** — mvm builds its guest images with Nix and, for reproducibility, runs Nix *inside its own Linux VM* rather than on your host. So two VMs appear in this story: the *builder VM* that produces images and the *workload VM* that runs yours. Both boot the same shared kernel.
-
-With that, the failure in the next section — a guest that boots but comes up deaf and blind — will make sense.
+A little shared vocabulary and you're set. The *host* is your laptop running `mvmctl`; the *guest* is the Linux VM it boots. The guest reaches its virtual disk, network, and console through *virtio*, the paravirtual device standard every modern Linux kernel speaks, and the host talks to a small agent process inside the guest over *vsock*, a direct host-to-guest socket that never touches the network. One last wrinkle worth planting now: mvm builds its guest images with Nix, and for reproducibility it runs Nix *inside its own Linux VM* rather than on your host — so two VMs keep turning up in these stories, the *builder VM* that produces images and the *workload VM* that runs yours. Both boot the same kernel, which is precisely why a single kernel change can knock out both at once.
 
 ---
 
