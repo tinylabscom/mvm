@@ -182,6 +182,59 @@ pub struct SubstitutionSpawnParams<'a> {
     /// `(cert_pem, key_pem)` of the per-VM intermediate for the `https`
     /// terminator; the key never reaches the guest. `None` ⇒ `http`-only.
     pub tls_intermediate: Option<(String, String)>,
+    /// The VM's resolved claim-10 network policy. `Some` ⇒ the endpoint gates
+    /// egress itself (the relay path — the run loop no longer gates); `None` ⇒
+    /// ungated here (the legacy in-loop gate is the enforcer).
+    pub network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
+    /// True ⇒ the guest speaks raw TCP egress (`host:port` first line) and the
+    /// endpoint serves `egress_mode: "raw"`; false ⇒ the WireRequest substitution
+    /// protocol (`"wire"`, the default). A VM's mode is fixed at admission.
+    pub raw_egress: bool,
+}
+
+/// Build the EndpointConfig JSON the endpoint reads on stdin. Pure (no spawn)
+/// so the wire form — including the claim-10 policy + egress mode — is unit-testable.
+fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_json::Value {
+    let mut cfg = serde_json::json!({
+        "tenant_id": params.tenant,
+        "secrets": params.secrets,
+        // Per-destination redaction policy from the signed plan; the endpoint
+        // applies it to the cleartext it forwards. Default (all-off) is harmless.
+        "redaction": serde_json::to_value(params.redaction)
+            .expect("RedactionPolicy serializes to JSON"),
+        // Backend-shaped guest→host channel: FC/QEMU dial the per-port vsock
+        // (Vsock); libkrun/vz route through the per-VM UDS the VMM proxies (Uds).
+        "transport": serde_json::to_value(&params.transport)
+            .expect("EndpointTransport serializes to JSON"),
+        // Which egress protocol the relayed stream carries. Always emit: an
+        // explicit "wire" is identical to the endpoint's default, so legacy
+        // callers stay backward compatible.
+        "egress_mode": if params.raw_egress { "raw" } else { "wire" },
+    });
+    if let Some(addr) = params.terminator_listen {
+        // `EndpointConfig.terminator_listen: Option<SocketAddr>`:
+        // present ⇒ the endpoint runs the host TCP terminator concurrently with
+        // the vsock substitution transport. `SocketAddr`'s Display ("ip:port")
+        // is the wire form `serde(SocketAddr)` round-trips.
+        cfg["terminator_listen"] = serde_json::Value::String(addr.to_string());
+    }
+    if let Some((cert_pem, key_pem)) = &params.tls_intermediate {
+        // `EndpointConfig.tls_intermediate`: the per-VM name-constrained
+        // intermediate the `https` terminator mints per-SNI leaves under. The
+        // KEY only ever reaches this host endpoint — never the guest.
+        cfg["tls_intermediate"] = serde_json::json!({
+            "cert_pem": cert_pem,
+            "key_pem": key_pem,
+        });
+    }
+    if let Some(policy) = params.network_policy {
+        // `EndpointConfig.network_policy`: present ⇒ the endpoint gates every
+        // destination itself. Omitted when `None` so legacy configs are
+        // byte-identical to before (the in-loop gate stays the enforcer).
+        cfg["network_policy"] =
+            serde_json::to_value(policy).expect("NetworkPolicy serializes to JSON");
+    }
+    cfg
 }
 
 /// Spawn the per-VM `mvm-substitution-endpoint` moat. Hands it the
@@ -196,46 +249,12 @@ pub struct SubstitutionSpawnParams<'a> {
 /// address space — only the opaque placeholders are persisted/handed out.
 pub fn spawn_substitution_endpoint(params: SubstitutionSpawnParams<'_>) -> Result<()> {
     use std::io::Write;
+    let cfg = build_endpoint_config_json(&params);
     let SubstitutionSpawnParams {
-        vm_name,
-        state_dir,
-        tenant,
-        secrets,
-        redaction,
-        transport,
-        terminator_listen,
-        tls_intermediate,
+        vm_name, state_dir, ..
     } = params;
 
     let bin = resolve_substitution_endpoint_path()?;
-    let mut cfg = serde_json::json!({
-        "tenant_id": tenant,
-        "secrets": secrets,
-        // Per-destination redaction policy from the signed plan; the endpoint
-        // applies it to the cleartext it forwards. Default (all-off) is harmless.
-        "redaction": serde_json::to_value(redaction)
-            .expect("RedactionPolicy serializes to JSON"),
-        // Backend-shaped guest→host channel: FC/QEMU dial the per-port vsock
-        // (Vsock); libkrun/vz route through the per-VM UDS the VMM proxies (Uds).
-        "transport": serde_json::to_value(&transport)
-            .expect("EndpointTransport serializes to JSON"),
-    });
-    if let Some(addr) = terminator_listen {
-        // `EndpointConfig.terminator_listen: Option<SocketAddr>`:
-        // present ⇒ the endpoint runs the host TCP terminator concurrently with
-        // the vsock substitution transport. `SocketAddr`'s Display ("ip:port")
-        // is the wire form `serde(SocketAddr)` round-trips.
-        cfg["terminator_listen"] = serde_json::Value::String(addr.to_string());
-    }
-    if let Some((cert_pem, key_pem)) = tls_intermediate {
-        // `EndpointConfig.tls_intermediate`: the per-VM name-constrained
-        // intermediate the `https` terminator mints per-SNI leaves under. The
-        // KEY only ever reaches this host endpoint — never the guest.
-        cfg["tls_intermediate"] = serde_json::json!({
-            "cert_pem": cert_pem,
-            "key_pem": key_pem,
-        });
-    }
 
     let mut cmd = Command::new(&bin);
     cmd.stdin(std::process::Stdio::piped())
@@ -449,6 +468,8 @@ mod tests {
             transport: EndpointTransport::Uds { path: sock.clone() },
             terminator_listen: None,
             tls_intermediate: None,
+            network_policy: None,
+            raw_egress: false,
         });
 
         // Restore env before asserting so a failure can't leak it.
@@ -470,6 +491,67 @@ mod tests {
         assert_eq!(v["transport"]["path"], sock.to_string_lossy().as_ref());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // Build a minimal params (empty secrets, default redaction, UDS transport,
+    // no terminator/TLS) so the pure JSON builder can be exercised without a spawn.
+    fn minimal_params<'a>(
+        redaction: &'a mvm_core::policy::RedactionPolicy,
+        sock: &Path,
+        network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
+        raw_egress: bool,
+    ) -> SubstitutionSpawnParams<'a> {
+        SubstitutionSpawnParams {
+            vm_name: "cfg-vm",
+            state_dir: Path::new("/tmp"),
+            tenant: "tenant-x",
+            secrets: &[],
+            redaction,
+            transport: EndpointTransport::Uds {
+                path: sock.to_path_buf(),
+            },
+            terminator_listen: None,
+            tls_intermediate: None,
+            network_policy,
+            raw_egress,
+        }
+    }
+
+    // Legacy callers pass `None`/`false`: the config must omit `network_policy`
+    // entirely (byte-identical to before) and default the egress mode to `wire`
+    // (which equals the endpoint's own default). The base fields still present.
+    #[test]
+    fn endpoint_config_json_omits_policy_and_defaults_to_wire_when_legacy() {
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let sock = Path::new("/tmp/vsock-5253.sock");
+        let cfg = build_endpoint_config_json(&minimal_params(&redaction, sock, None, false));
+
+        assert!(
+            cfg.get("network_policy").is_none(),
+            "legacy config must not carry a network_policy key"
+        );
+        assert_eq!(cfg["egress_mode"], "wire");
+        // Base fields carried through the extraction.
+        assert_eq!(cfg["tenant_id"], "tenant-x");
+        assert_eq!(cfg["secrets"], serde_json::json!([]));
+        assert_eq!(cfg["transport"]["kind"], "uds");
+    }
+
+    // The relay path: `Some(policy)` + `raw_egress: true` must land the policy in
+    // the config (deserializing back to the same policy) and select `raw` mode.
+    #[test]
+    fn endpoint_config_json_carries_policy_and_raw_when_set() {
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let sock = Path::new("/tmp/vsock-5253.sock");
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("api.openai.com", 443)]);
+        let cfg =
+            build_endpoint_config_json(&minimal_params(&redaction, sock, Some(&policy), true));
+
+        assert_eq!(cfg["egress_mode"], "raw");
+        let round: NetworkPolicy = serde_json::from_value(cfg["network_policy"].clone())
+            .expect("network_policy deserializes back");
+        assert_eq!(round, policy);
     }
 
     // ── the cert-to-guest / key-to-endpoint split ──

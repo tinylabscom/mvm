@@ -1907,6 +1907,8 @@ fn spawn_vz_egress_endpoint_if_needed(
         },
         terminator_listen: None,
         tls_intermediate: None,
+        network_policy: None,
+        raw_egress: false,
     })?;
     Ok(EndpointGuard::new(vm_name))
 }

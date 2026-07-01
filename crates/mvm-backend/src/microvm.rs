@@ -2858,6 +2858,8 @@ fn spawn_egress_endpoint(config: &FlakeRunConfig) -> Result<EndpointGuard> {
         },
         terminator_listen: Some(listen),
         tls_intermediate,
+        network_policy: None,
+        raw_egress: false,
     })?;
     Ok(EndpointGuard::new(name))
 }

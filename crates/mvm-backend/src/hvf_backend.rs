@@ -133,6 +133,8 @@ fn spawn_hvf_egress_endpoint_if_needed(
         // the proxy-aware WireRequest path, so no terminator + no per-VM TLS.
         terminator_listen: None,
         tls_intermediate: None,
+        network_policy: None,
+        raw_egress: false,
     })?;
     Ok((EndpointGuard::new(vm_name), Some(socket)))
 }

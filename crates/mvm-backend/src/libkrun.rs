@@ -81,6 +81,8 @@ fn spawn_libkrun_egress_endpoint_if_needed(
         },
         terminator_listen: Some(SocketAddr::from(([127, 0, 0, 1], terminator_port))),
         tls_intermediate,
+        network_policy: None,
+        raw_egress: false,
     })?;
     Ok(EndpointGuard::new(vm_name))
 }
