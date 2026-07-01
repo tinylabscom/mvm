@@ -78,7 +78,12 @@ fn main() {
             host_bin_dir: &bins,
             output_size: 64 << 20,
             vcpus: 2,
-            memory_mib: 512,
+            // Builder-appropriate RAM (a real nix build OOMs at 512 MiB);
+            // overridable to exercise the configurable-RAM path.
+            memory_mib: std::env::var("MVM_BUILDER_MEM_MIB")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8192),
         })
         .expect("builder build");
 

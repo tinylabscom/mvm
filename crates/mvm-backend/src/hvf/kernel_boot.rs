@@ -32,11 +32,23 @@ use crate::vmm::virtio::{DiskImage, VirtioBlk};
 use crate::vmm::vsock::VirtioVsock;
 use crate::vmm::{fdt, kernel_image};
 
-/// Guest RAM base (2 GiB, per the aarch64 Linux boot convention) and size
-/// (512 MiB). The GIC + PL011 sit below RAM so their accesses fault out as MMIO.
+/// Guest RAM base (2 GiB, per the aarch64 Linux boot convention). The GIC +
+/// PL011 sit below RAM so their accesses fault out as MMIO.
 const RAM_BASE: u64 = 0x8000_0000;
-const RAM_SIZE: usize = 0x2000_0000;
+/// Default guest RAM (512 MiB) when the caller specifies none — enough for a
+/// demo/agent boot. A builder overrides it (a `nix build` OOMs at 512 MiB).
+const DEFAULT_RAM_SIZE: usize = 0x2000_0000;
 const PAGE: usize = 16384;
+
+/// Guest RAM in bytes for `mem_mib` MiB, or the default when `mem_mib` is 0.
+/// A MiB is a multiple of `PAGE` (16 KiB), so the result is always page-aligned.
+fn ram_size_bytes(mem_mib: u32) -> usize {
+    if mem_mib == 0 {
+        DEFAULT_RAM_SIZE
+    } else {
+        (mem_mib as usize) * 1024 * 1024
+    }
+}
 /// Linux aarch64 loads/enters the kernel at RAM start + 0x80000.
 const KERNEL_LOAD_OFFSET: u64 = 0x8_0000;
 /// DTB reserved window at the top of RAM (matches `fdt::FDT_MAX_SIZE` budget).
@@ -135,6 +147,9 @@ pub struct HostChannels {
     /// `/sbin/mvm-host-vm-init`, not the `/init` shell script — sets it here.
     /// `MVM_HVF_BOOTARGS` still overrides both (dev hook).
     pub cmdline: Option<String>,
+    /// Guest RAM in MiB. `0` ⇒ the built-in default (512 MiB). A builder sets
+    /// several GiB so `nix build` doesn't OOM.
+    pub mem_mib: u32,
 }
 
 /// Boot `image` (an arm64 `Image`) under HVF, optionally with an `initramfs`
@@ -159,6 +174,7 @@ pub fn boot_kernel(
             substitution_socket: None,
             egress_relay: None,
             cmdline: None,
+            mem_mib: 0,
         },
     )
 }
@@ -195,8 +211,9 @@ fn boot_kernel_impl(
     }
     // Validate it's an arm64 Image; we load at the fixed boot-protocol offset.
     let _hdr = kernel_image::parse(image).map_err(|_| HvfError::BadKernel)?;
+    let ram_size = ram_size_bytes(channels.mem_mib);
     let load_off = KERNEL_LOAD_OFFSET as usize;
-    let dtb_off = RAM_SIZE - FDT_MAX_SIZE as usize; // DTB window at top of RAM
+    let dtb_off = ram_size - FDT_MAX_SIZE as usize; // DTB window at top of RAM
     if load_off + image.len() > dtb_off {
         return Err(HvfError::BadKernel);
     }
@@ -208,7 +225,7 @@ fn boot_kernel_impl(
         return Err(HvfError::BadKernel);
     }
 
-    let layout = Layout::from_size_align(RAM_SIZE, PAGE).map_err(|_| HvfError::Alloc)?;
+    let layout = Layout::from_size_align(ram_size, PAGE).map_err(|_| HvfError::Alloc)?;
     // SAFETY: non-zero layout; null-checked; freed on every return path.
     let ram = unsafe { alloc_zeroed(layout) };
     if ram.is_null() {
@@ -248,7 +265,7 @@ fn boot_kernel_impl(
     let dtb = fdt::build_dtb(
         &bootargs,
         RAM_BASE,
-        RAM_SIZE as u64,
+        ram_size as u64,
         initrd_bounds,
         &virtio_nodes,
     );
@@ -289,6 +306,7 @@ fn boot_kernel_impl(
                 disks,
                 vsock,
                 timeout,
+                ram_size,
                 agent_socket: channels.agent_socket,
                 substitution_socket: channels.substitution_socket,
                 egress_relay: channels.egress_relay,
@@ -311,6 +329,8 @@ struct RunInputs {
     disks: Vec<DiskImage>,
     vsock: bool,
     timeout: Duration,
+    /// Mapped guest RAM size in bytes (matches the host allocation).
+    ram_size: usize,
     /// Per-VM agent RPC socket (productionized off `MVM_HVF_AGENT_SOCKET`).
     agent_socket: Option<PathBuf>,
     /// Per-VM substitution-endpoint socket (productionized off
@@ -332,6 +352,7 @@ unsafe fn run(
         disks,
         vsock,
         timeout,
+        ram_size,
         agent_socket,
         substitution_socket,
         egress_relay,
@@ -357,7 +378,7 @@ unsafe fn run(
         }
 
         let flags = HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC;
-        let rc = hv_vm_map(ram.cast(), RAM_BASE, RAM_SIZE, flags);
+        let rc = hv_vm_map(ram.cast(), RAM_BASE, ram_size, flags);
         if rc != HV_SUCCESS {
             return Err(HvfError::Map(rc));
         }
@@ -450,11 +471,11 @@ unsafe fn run(
                 let (base, irq) = disk_mmio(i);
                 // SAFETY: `ram` is the mapped guest RAM, valid for the run (this
                 // whole fn body is already within an `unsafe` block).
-                VirtioBlk::new(base, irq, ram, RAM_BASE, RAM_SIZE, img)
+                VirtioBlk::new(base, irq, ram, RAM_BASE, ram_size, img)
             })
             .collect();
         let mut vsock_dev =
-            vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, RAM_SIZE));
+            vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, ram_size));
         // Transient run-to-exit: a guest write of the exit code to the workload
         // exit port stops the run (and is captured below).
         if let Some(v) = vsock_dev.as_mut() {

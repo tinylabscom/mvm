@@ -69,6 +69,8 @@ fn main() {
     let cfg = HvfSupervisorConfig {
         kernel: kernel.clone(),
         cmdline: None,
+        // The patcher just mounts + copies; the default RAM is plenty.
+        memory_mib: 0,
         initramfs: Some(initramfs_path.clone()),
         disks: vec![HvfDisk {
             path: out.clone(),

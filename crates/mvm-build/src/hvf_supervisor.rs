@@ -44,6 +44,10 @@ pub struct HvfSupervisorConfig {
     /// `MVM_HVF_BOOTARGS` env override still wins over this (dev hook).
     #[serde(default)]
     pub cmdline: Option<String>,
+    /// Guest RAM in MiB. `0` (the default) ⇒ the supervisor's built-in default
+    /// (512 MiB). A builder sets several GiB so `nix build` doesn't OOM.
+    #[serde(default)]
+    pub memory_mib: u32,
     /// Optional initramfs (cpio, gzip-or-raw).
     #[serde(default)]
     pub initramfs: Option<PathBuf>,
@@ -97,6 +101,7 @@ mod tests {
         let cfg = HvfSupervisorConfig {
             kernel: "/k/Image".into(),
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init".into()),
+            memory_mib: 8192,
             initramfs: Some("/k/initrd.cpio".into()),
             disks: vec![
                 HvfDisk {

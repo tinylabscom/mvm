@@ -200,6 +200,7 @@ fn main() -> anyhow::Result<()> {
             substitution_socket: cfg.substitution_socket.clone(),
             egress_relay: cfg.egress_relay_socket.clone(),
             cmdline: cfg.cmdline.clone(),
+            mem_mib: cfg.memory_mib,
         },
     );
 

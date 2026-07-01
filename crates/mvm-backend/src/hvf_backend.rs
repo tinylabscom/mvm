@@ -240,6 +240,7 @@ impl VmBackend for HvfBackend {
             // Workload path: the supervisor's default cmdline (`init=/init`) is the
             // mkGuest contract, so leave it unset.
             cmdline: None,
+            memory_mib: config.memory_mib,
             initramfs: config.initrd_path.clone().map(PathBuf::from),
             disks,
             vsock: true,
