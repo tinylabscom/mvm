@@ -2,9 +2,12 @@
 //! small, driver-independent unit so the workload role's translation of an
 //! admitted launch config into a physical `VmmSpec` is testable without a VM.
 
-use mvm_core::vm_backend::VmStartConfig;
+use std::path::Path;
 
-use crate::driver::BlockDev;
+use mvm_core::vm_backend::VmStartConfig;
+use mvm_guest::vsock::{EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT};
+
+use crate::driver::{BlockDev, VsockDirection, VsockPort};
 
 /// The ordered virtio-blk list for a sealed workload: the read-only rootfs at
 /// `/dev/vda` (slot 0), its dm-verity Merkle sidecar at `/dev/vdb` (slot 1) when
@@ -39,6 +42,42 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
     }
 
     blocks
+}
+
+/// The host-side unix sockets a workload's standing vsock channels bind to.
+pub struct WorkloadSockets<'a> {
+    /// Agent RPC: the host dials the guest agent listening on `GUEST_AGENT_PORT`.
+    pub agent: &'a Path,
+    /// Egress gateway: the guest dials `EGRESS_PORT`; the host-side bridge
+    /// (claim-10 gate + substitution) listens here — the sole path off the box.
+    pub egress_gateway: &'a Path,
+    /// Workload exit: the guest dials `WORKLOAD_EXIT_PORT` to report its exit code.
+    pub exit: &'a Path,
+}
+
+/// The standing vsock ports every workload VM carries: the agent RPC channel the
+/// host dials, and the two channels the guest dials — egress (to the host
+/// gateway) and exit (to report its status). Console data ports are dev-only and
+/// attached separately when a session opens, so they are not part of the sealed
+/// workload's fixed set.
+pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
+    vec![
+        VsockPort {
+            guest_port: GUEST_AGENT_PORT,
+            host_uds: socks.agent.into(),
+            direction: VsockDirection::HostDials,
+        },
+        VsockPort {
+            guest_port: EGRESS_PORT,
+            host_uds: socks.egress_gateway.into(),
+            direction: VsockDirection::GuestDials,
+        },
+        VsockPort {
+            guest_port: WORKLOAD_EXIT_PORT,
+            host_uds: socks.exit.into(),
+            direction: VsockDirection::GuestDials,
+        },
+    ]
 }
 
 #[cfg(test)]
@@ -105,5 +144,31 @@ mod tests {
             ..base()
         };
         assert_eq!(nodes(&workload_blocks(&cfg)), vec!["/dev/vda"]);
+    }
+
+    #[test]
+    fn workload_vsock_ports_wire_the_three_standing_channels_with_correct_direction() {
+        let socks = WorkloadSockets {
+            agent: Path::new("/run/agent.sock"),
+            egress_gateway: Path::new("/run/egress.sock"),
+            exit: Path::new("/run/workload.exit"),
+        };
+        let ports = workload_vsock_ports(&socks);
+
+        // Agent: host dials the guest; egress + exit: the guest dials the host.
+        let by_port: std::collections::HashMap<u32, &VsockPort> =
+            ports.iter().map(|p| (p.guest_port, p)).collect();
+
+        let agent = by_port[&GUEST_AGENT_PORT];
+        assert_eq!(agent.direction, VsockDirection::HostDials);
+        assert_eq!(agent.host_uds, PathBuf::from("/run/agent.sock"));
+
+        let egress = by_port[&EGRESS_PORT];
+        assert_eq!(egress.direction, VsockDirection::GuestDials);
+        assert_eq!(egress.host_uds, PathBuf::from("/run/egress.sock"));
+
+        let exit = by_port[&WORKLOAD_EXIT_PORT];
+        assert_eq!(exit.direction, VsockDirection::GuestDials);
+        assert_eq!(exit.host_uds, PathBuf::from("/run/workload.exit"));
     }
 }
