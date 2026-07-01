@@ -139,6 +139,65 @@ fn spawn_hvf_egress_endpoint_if_needed(
     Ok((EndpointGuard::new(vm_name), Some(socket)))
 }
 
+// Opt-in to the relay path (the endpoint owns the egress gate) while the legacy
+// in-loop gate stays the default until the relay is live-verified.
+fn hvf_egress_relay_enabled() -> bool {
+    std::env::var("MVM_HVF_EGRESS_RELAY").as_deref() == Ok("1")
+}
+
+/// Always spawn the per-VM gating endpoint carrying the resolved `NetworkPolicy`,
+/// returning an armed `EndpointGuard` and the endpoint socket to hand the
+/// supervisor as its `egress_relay_socket`. Unlike the legacy helper, a secret-free
+/// workload still gets an endpoint here — it is the sole egress gate now, so it must
+/// run for every VM. When the plan carries no secrets, the endpoint runs raw (no
+/// substitution) but still enforces the policy.
+fn spawn_hvf_gating_endpoint(
+    vm_name: &str,
+    state_dir: &Path,
+    network_policy: &mvm_core::policy::network_policy::NetworkPolicy,
+    config_tenant: &str,
+) -> Result<(crate::substitution_spawn::EndpointGuard, PathBuf)> {
+    use crate::substitution_spawn::{
+        EndpointGuard, EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
+    };
+    use mvm_core::policy::RedactionPolicy;
+
+    // Owned defaults + the decoded plan outlive the params below so the borrows
+    // stay valid across both branches.
+    let default_redaction = RedactionPolicy::default();
+    let decoded = crate::egress_shared::decode_plan_secrets_from_state(state_dir)?;
+    let (secrets, redaction, tenant): (&[_], &RedactionPolicy, &str) = match &decoded {
+        Some((s, r, t)) => (s.as_slice(), r, t.as_str()),
+        None => (
+            &[],
+            &default_redaction,
+            if config_tenant.is_empty() {
+                "local"
+            } else {
+                config_tenant
+            },
+        ),
+    };
+    let socket = mvm_core::config::vm_substitution_endpoint_socket(vm_name);
+    spawn_substitution_endpoint(SubstitutionSpawnParams {
+        vm_name,
+        state_dir,
+        tenant,
+        secrets,
+        redaction,
+        transport: EndpointTransport::Uds {
+            path: socket.clone(),
+        },
+        // The in-house VMM has no transparent :80/:443 terminator — all egress is
+        // the proxy-aware WireRequest path, so no terminator + no per-VM TLS.
+        terminator_listen: None,
+        tls_intermediate: None,
+        network_policy: Some(network_policy),
+        raw_egress: secrets.is_empty(),
+    })?;
+    Ok((EndpointGuard::new(vm_name), socket))
+}
+
 impl VmBackend for HvfBackend {
     fn name(&self) -> &str {
         "hvf"
@@ -179,13 +238,27 @@ impl VmBackend for HvfBackend {
         let workload_exit = state_dir.join("workload.exit");
         let _ = std::fs::remove_file(&workload_exit);
 
-        // Spawn the per-VM substitution endpoint when the admitted plan carries
-        // egress secrets. The guard reaps it on any early return below —
-        // so a decrypted-secret process can't outlive a failed launch — and is
-        // defused once boot is confirmed (the stop path then owns teardown). A
-        // secret-free plan yields a defused no-op guard and no endpoint socket.
-        let (mut endpoint_guard, substitution_socket) =
-            spawn_hvf_egress_endpoint_if_needed(&config.name, &state_dir)?;
+        // Two egress paths. Legacy (default): spawn the substitution endpoint only
+        // when the admitted plan carries secrets, and let the run loop's in-loop
+        // gate enforce policy off `network_policy`. Relay (opt-in): always spawn the
+        // gating endpoint carrying the resolved policy and route egress at it via
+        // `egress_relay_socket` — the sole gate. Either way the guard reaps the
+        // endpoint on any early return below (a decrypted-secret process can't
+        // outlive a failed launch) and is defused once boot is confirmed (the stop
+        // path then owns teardown).
+        let (mut endpoint_guard, substitution_socket, egress_relay_socket) =
+            if hvf_egress_relay_enabled() {
+                let (g, uds) = spawn_hvf_gating_endpoint(
+                    &config.name,
+                    &state_dir,
+                    &config.network_policy,
+                    config.tenant_id.as_deref().unwrap_or(""),
+                )?;
+                (g, None, Some(uds))
+            } else {
+                let (g, sub) = spawn_hvf_egress_endpoint_if_needed(&config.name, &state_dir)?;
+                (g, sub, None)
+            };
         // Productionized per-VM agent RPC socket threaded through the supervisor
         // config; the `MVM_HVF_AGENT_SOCKET` dev hook still wins for live drivers.
         let agent_socket = std::env::var_os("MVM_HVF_AGENT_SOCKET")
@@ -216,7 +289,7 @@ impl VmBackend for HvfBackend {
             timeout_secs,
             agent_socket: Some(agent_socket),
             substitution_socket,
-            egress_relay_socket: None,
+            egress_relay_socket,
         };
         let json = serde_json::to_string(&cfg)
             .map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
@@ -453,6 +526,21 @@ mod tests {
             "no endpoint process for a secret-free plan"
         );
         drop(guard); // defused → Drop reaps nothing
+    }
+
+    #[test]
+    fn egress_relay_flag_gates_the_relay_path() {
+        use mvm_core::util::test_env::TestEnv;
+        let mut env = TestEnv::new();
+        env.remove("MVM_HVF_EGRESS_RELAY");
+        assert!(
+            !hvf_egress_relay_enabled(),
+            "default is the legacy in-loop gate"
+        );
+        env.set("MVM_HVF_EGRESS_RELAY", "1");
+        assert!(hvf_egress_relay_enabled(), "=1 opts into the relay path");
+        env.set("MVM_HVF_EGRESS_RELAY", "0");
+        assert!(!hvf_egress_relay_enabled(), "only =1 enables the relay");
     }
 
     #[test]
