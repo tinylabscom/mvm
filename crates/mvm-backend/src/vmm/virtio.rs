@@ -9,6 +9,10 @@
 //! Guest-physical addresses in the virtqueue are translated against the single
 //! mapped RAM region (`ram_base .. ram_base+ram_size`), bounds-checked.
 
+use std::fs::{File, OpenOptions};
+use std::os::unix::fs::FileExt;
+use std::path::Path;
+
 use super::guest_mem::GuestMem;
 
 const VIRTIO_MAGIC: u32 = 0x7472_6976; // "virt"
@@ -51,13 +55,131 @@ const VIRTIO_BLK_T_IN: u32 = 0; // read
 const VIRTIO_BLK_T_OUT: u32 = 1; // write
 const VIRTIO_BLK_S_OK: u8 = 0;
 const VIRTIO_BLK_S_IOERR: u8 = 1;
+/// virtio-blk feature bit 5 (low feature word): the device is read-only. Offered
+/// for a read-only backing so the guest mounts it `ro`; writes are also rejected
+/// at the device (below), so RO is hypervisor-enforced, not guest-honour-system.
+const VIRTIO_BLK_F_RO: u32 = 1 << 5;
 
-/// A virtio-mmio block device backed by an in-memory disk.
+/// Backing store for a virtio-blk device.
+///
+/// `Mem` keeps the whole image in host RAM — fine for tests and small ephemeral
+/// disks, but writes don't persist past the VM. `File` serves the image with
+/// `pread`/`pwrite` against the host file, so (a) a large disk (e.g. the builder's
+/// nix-store) costs no host memory, and (b) writes persist to the file across
+/// runs. A `read_only` file rejects guest writes at the device.
+pub enum DiskImage {
+    Mem(Vec<u8>),
+    File {
+        file: File,
+        len: u64,
+        read_only: bool,
+    },
+}
+
+impl DiskImage {
+    /// In-memory image (tests, small ephemeral disks).
+    pub fn mem(bytes: Vec<u8>) -> Self {
+        Self::Mem(bytes)
+    }
+
+    /// Open a file-backed image, read-write unless `read_only`. The capacity is
+    /// the file's current length (images are pre-sized by the caller).
+    pub fn open(path: &Path, read_only: bool) -> std::io::Result<Self> {
+        let file = OpenOptions::new().read(true).write(!read_only).open(path)?;
+        let len = file.metadata()?.len();
+        Ok(Self::File {
+            file,
+            len,
+            read_only,
+        })
+    }
+
+    /// Capacity in bytes.
+    fn len(&self) -> u64 {
+        match self {
+            Self::Mem(v) => v.len() as u64,
+            Self::File { len, .. } => *len,
+        }
+    }
+
+    fn read_only(&self) -> bool {
+        match self {
+            Self::Mem(_) => false,
+            Self::File { read_only, .. } => *read_only,
+        }
+    }
+
+    /// Fill `buf` from the image at byte offset `off`, zero-filling any bytes past
+    /// end-of-image (a guest read past capacity reads zeros, never host junk).
+    fn read_at(&self, off: u64, buf: &mut [u8]) {
+        buf.fill(0);
+        match self {
+            Self::Mem(v) => {
+                let start = off.min(v.len() as u64) as usize;
+                let n = buf.len().min(v.len() - start);
+                buf[..n].copy_from_slice(&v[start..start + n]);
+            }
+            Self::File { file, len, .. } => {
+                if off >= *len {
+                    return;
+                }
+                let want = ((*len - off).min(buf.len() as u64)) as usize;
+                let mut done = 0;
+                while done < want {
+                    match file.read_at(&mut buf[done..want], off + done as u64) {
+                        Ok(0) => break,
+                        Ok(n) => done += n,
+                        Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Write `buf` to the image at byte offset `off`, clamped to capacity (the
+    /// image is never grown). Returns `false` if the write is rejected (read-only)
+    /// or the backing I/O fails — the caller reports `VIRTIO_BLK_S_IOERR`.
+    fn write_at(&mut self, off: u64, buf: &[u8]) -> bool {
+        match self {
+            Self::Mem(v) => {
+                if off >= v.len() as u64 {
+                    return false;
+                }
+                let start = off as usize;
+                let n = buf.len().min(v.len() - start);
+                v[start..start + n].copy_from_slice(&buf[..n]);
+                true
+            }
+            Self::File {
+                read_only: true, ..
+            } => false,
+            Self::File { file, len, .. } => {
+                if off >= *len {
+                    return false;
+                }
+                let want = ((*len - off).min(buf.len() as u64)) as usize;
+                let mut done = 0;
+                while done < want {
+                    match file.write_at(&buf[done..want], off + done as u64) {
+                        Ok(0) => return false,
+                        Ok(n) => done += n,
+                        Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => return false,
+                    }
+                }
+                true
+            }
+        }
+    }
+}
+
+/// A virtio-mmio block device backed by a [`DiskImage`].
 pub struct VirtioBlk {
     base: u64,
     irq: u32,
     mem: GuestMem,
-    disk: Vec<u8>,
+    disk: DiskImage,
 
     device_features_sel: u32,
     driver_features_sel: u32,
@@ -81,7 +203,7 @@ impl VirtioBlk {
         ram: *mut u8,
         ram_base: u64,
         ram_size: usize,
-        disk: Vec<u8>,
+        disk: DiskImage,
     ) -> Self {
         Self {
             base,
@@ -136,16 +258,18 @@ impl VirtioBlk {
             R_VERSION => VIRTIO_VERSION,
             R_DEVICE_ID => VIRTIO_ID_BLOCK,
             R_VENDOR_ID => VIRTIO_VENDOR,
-            // Only VIRTIO_F_VERSION_1 (feature bit 32) is offered.
+            // High word (bit 32): VIRTIO_F_VERSION_1. Low word: VIRTIO_BLK_F_RO
+            // for a read-only backing (else no low-word features).
             R_DEVICE_FEATURES if self.device_features_sel == 1 => 1,
+            R_DEVICE_FEATURES if self.disk.read_only() => VIRTIO_BLK_F_RO,
             R_DEVICE_FEATURES => 0,
             R_QUEUE_NUM_MAX => QUEUE_SIZE_MAX,
             R_QUEUE_READY => self.queue_ready,
             R_INTERRUPT_STATUS => self.interrupt_status,
             R_STATUS => self.status,
             // block config: capacity in 512-byte sectors (u64 at +0/+4).
-            R_CONFIG => (self.disk.len() as u64 / SECTOR) as u32,
-            o if o == R_CONFIG + 4 => ((self.disk.len() as u64 / SECTOR) >> 32) as u32,
+            R_CONFIG => (self.disk.len() / SECTOR) as u32,
+            o if o == R_CONFIG + 4 => ((self.disk.len() / SECTOR) >> 32) as u32,
             _ => 0,
         })
     }
@@ -235,6 +359,7 @@ impl VirtioBlk {
         let mut flags = self.rd_u16(d0 + 12);
         let mut written: u32 = 0;
         let mut status_addr: Option<u64> = None;
+        let mut io_ok = true;
         let mut guard = 0u32;
         while flags & VIRTQ_DESC_F_NEXT != 0 {
             let next = self.rd_u16(desc_at(idx) + 14);
@@ -254,7 +379,7 @@ impl VirtioBlk {
                 status_addr = Some(addr);
             } else {
                 // data descriptor
-                self.transfer(req_type, sector, addr, len, &mut written);
+                io_ok &= self.transfer(req_type, sector, addr, len, &mut written);
                 sector += u64::from(len) / SECTOR;
             }
             idx = next;
@@ -264,7 +389,7 @@ impl VirtioBlk {
                 break;
             }
         }
-        let ok = matches!(req_type, VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT);
+        let ok = io_ok && matches!(req_type, VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT);
         if let Some(s) = status_addr {
             self.wr_u8(
                 s,
@@ -279,33 +404,43 @@ impl VirtioBlk {
         written
     }
 
-    /// Copy one data descriptor between the disk and guest memory.
-    fn transfer(&mut self, req_type: u32, sector: u64, addr: u64, len: u32, written: &mut u32) {
-        let disk_off = (sector * SECTOR) as usize;
+    /// Copy one data descriptor between the disk and guest memory. Returns whether
+    /// the backing I/O succeeded — a write to a read-only disk (or a failed host
+    /// write) returns `false`, which surfaces to the guest as `VIRTIO_BLK_S_IOERR`.
+    fn transfer(
+        &mut self,
+        req_type: u32,
+        sector: u64,
+        addr: u64,
+        len: u32,
+        written: &mut u32,
+    ) -> bool {
+        let disk_off = sector * SECTOR;
         let len = len as usize;
         match req_type {
             VIRTIO_BLK_T_IN => {
-                if let Some(dst) = self.host(addr, len) {
-                    for i in 0..len {
-                        let b = self.disk.get(disk_off + i).copied().unwrap_or(0);
-                        // SAFETY: dst valid for `len` bytes.
-                        unsafe { *dst.add(i) = b };
-                    }
-                    *written += len as u32;
-                }
+                // `host()` returns a raw pointer (no live borrow), so reading the
+                // backing into a scratch buffer and copying it in is borrow-clean.
+                let Some(dst) = self.host(addr, len) else {
+                    return true;
+                };
+                let mut tmp = vec![0u8; len];
+                self.disk.read_at(disk_off, &mut tmp);
+                // SAFETY: dst is valid for `len` bytes (bounds-checked by host()).
+                unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), dst, len) };
+                *written += len as u32;
+                true
             }
             VIRTIO_BLK_T_OUT => {
-                if let Some(src) = self.host(addr, len) {
-                    for i in 0..len {
-                        // SAFETY: src valid for `len` bytes.
-                        let b = unsafe { *src.add(i) };
-                        if disk_off + i < self.disk.len() {
-                            self.disk[disk_off + i] = b;
-                        }
-                    }
-                }
+                let Some(src) = self.host(addr, len) else {
+                    return true;
+                };
+                let mut tmp = vec![0u8; len];
+                // SAFETY: src is valid for `len` bytes (bounds-checked by host()).
+                unsafe { core::ptr::copy_nonoverlapping(src, tmp.as_mut_ptr(), len) };
+                self.disk.write_at(disk_off, &tmp)
             }
-            _ => {}
+            _ => true,
         }
     }
 
@@ -330,7 +465,7 @@ mod tests {
                 ram.as_mut_ptr(),
                 0x4000_0000,
                 ram.len(),
-                disk,
+                DiskImage::mem(disk),
             )
         }
     }
@@ -418,8 +553,16 @@ mod tests {
         disk[..11].copy_from_slice(b"DISK-BYTES!");
 
         // SAFETY: ram outlives the device for the test.
-        let mut d =
-            unsafe { VirtioBlk::new(0x0a00_0000, 48, ram.as_mut_ptr(), BASE, ram.len(), disk) };
+        let mut d = unsafe {
+            VirtioBlk::new(
+                0x0a00_0000,
+                48,
+                ram.as_mut_ptr(),
+                BASE,
+                ram.len(),
+                DiskImage::mem(disk),
+            )
+        };
         d.write(R_QUEUE_NUM, 4);
         d.write(R_QUEUE_DESC_LO, desc & 0xffff_ffff);
         d.write(R_QUEUE_DRIVER_LO, avail & 0xffff_ffff);
@@ -437,5 +580,89 @@ mod tests {
             ]),
             1
         );
+    }
+
+    #[test]
+    fn disk_image_mem_reads_writes_and_clamps_to_capacity() {
+        let mut d = DiskImage::mem(vec![0u8; 32]);
+        assert_eq!(d.len(), 32);
+        assert!(!d.read_only());
+        assert!(d.write_at(4, b"hello"));
+        let mut buf = [0u8; 5];
+        d.read_at(4, &mut buf);
+        assert_eq!(&buf, b"hello");
+        // A write starting past capacity is rejected; a read past EOF zero-fills.
+        assert!(!d.write_at(64, b"x"));
+        let mut z = [1u8; 4];
+        d.read_at(30, &mut z);
+        assert_eq!(z, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn disk_image_file_backed_read_zero_fills_past_eof() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"DISK-BYTES!").unwrap();
+        f.flush().unwrap();
+        let d = DiskImage::open(f.path(), true).unwrap();
+        assert_eq!(d.len(), 11);
+        assert!(d.read_only());
+        let mut buf = [9u8; 16];
+        d.read_at(0, &mut buf);
+        assert_eq!(&buf[..11], b"DISK-BYTES!");
+        assert_eq!(&buf[11..], &[0u8; 5]); // past EOF is zero, never host junk
+    }
+
+    #[test]
+    fn disk_image_file_backed_write_persists_to_the_host_file() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        f.as_file().set_len(64).unwrap();
+        let mut d = DiskImage::open(f.path(), false).unwrap();
+        assert!(d.write_at(8, b"persist-me"));
+        drop(d);
+        // Re-read the file from scratch: the write reached the host file.
+        let raw = std::fs::read(f.path()).unwrap();
+        assert_eq!(&raw[8..18], b"persist-me");
+    }
+
+    #[test]
+    fn disk_image_read_only_file_rejects_writes() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        f.as_file().set_len(64).unwrap();
+        let mut d = DiskImage::open(f.path(), true).unwrap();
+        assert!(!d.write_at(0, b"nope"));
+        let raw = std::fs::read(f.path()).unwrap();
+        assert!(
+            raw.iter().all(|&b| b == 0),
+            "read-only file must be untouched"
+        );
+    }
+
+    #[test]
+    fn read_only_backing_offers_the_ro_feature_bit() {
+        let mut ram = vec![0u8; 0x10000];
+        let f = tempfile::NamedTempFile::new().unwrap();
+        f.as_file().set_len(512).unwrap();
+        let img = DiskImage::open(f.path(), true).unwrap();
+        // SAFETY: ram outlives the device for the test.
+        let mut d = unsafe {
+            VirtioBlk::new(
+                0x0a00_0000,
+                48,
+                ram.as_mut_ptr(),
+                0x4000_0000,
+                ram.len(),
+                img,
+            )
+        };
+        // Low feature word advertises RO; high word still offers VERSION_1.
+        d.write(R_DEVICE_FEATURES_SEL, 0);
+        assert_eq!(d.read(R_DEVICE_FEATURES) as u32, VIRTIO_BLK_F_RO);
+        d.write(R_DEVICE_FEATURES_SEL, 1);
+        assert_eq!(d.read(R_DEVICE_FEATURES) as u32, 1);
+        // A writable (mem) backing offers no low-word features.
+        let mut w = dev(vec![0u8; 512]);
+        w.write(R_DEVICE_FEATURES_SEL, 0);
+        assert_eq!(w.read(R_DEVICE_FEATURES) as u32, 0);
     }
 }

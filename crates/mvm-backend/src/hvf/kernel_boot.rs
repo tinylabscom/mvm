@@ -428,7 +428,7 @@ unsafe fn run(
                 ram,
                 RAM_BASE,
                 RAM_SIZE,
-                d.to_vec(),
+                crate::vmm::virtio::DiskImage::mem(d.to_vec()),
             )
         });
         let mut vsock_dev =
