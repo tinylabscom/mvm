@@ -37,7 +37,8 @@ use mvm_guest::probes::{self, ProbeEntry, ProbeOutputFormat, ProbeResult};
 use mvm_guest::runtime_config::{self, ConcurrencyConfig};
 use mvm_guest::vsock::{
     BootTimingReport, ComponentState, EntrypointEvent, FsChange, FsChangeKind, GUEST_AGENT_PORT,
-    GuestRequest, GuestResponse, ReadinessReport, RunEntrypointError, enforce_verb_grant,
+    GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, ReadinessReport, RunEntrypointError,
+    enforce_verb_grant, load_host_signer_verifying_key,
 };
 use mvm_guest::worker_pool::{DispatchError, DispatchOutcome, WorkerPool};
 use mvm_guest::worker_protocol::WorkerOutcome;
@@ -306,6 +307,14 @@ struct AgentBootState {
     /// no grant is pinned — the class gate (`allowed_in`) is the only
     /// verb filter.
     verb_grant: Option<mvm_core::plan::VerbGrant>,
+    /// Host-signer Ed25519 verifying key loaded from the config drive at
+    /// boot. `None` on legacy/grant-less boots (the key file is absent).
+    /// Required to verify an incoming `VerbGrant`; if a grant arrives but
+    /// this is `None`, `pin_verb_grant` returns `Err` (fail closed).
+    /// Read by the dispatch loop when it calls `pin_verb_grant` (wired in
+    /// a later task).
+    #[allow(dead_code)]
+    host_signer_key: Option<ed25519_dalek::VerifyingKey>,
 }
 
 #[derive(Default)]
@@ -320,7 +329,11 @@ struct BootStateInner {
 }
 
 impl AgentBootState {
-    fn new(profile: AgentProfile, boot_at: std::time::Instant) -> Self {
+    fn new(
+        profile: AgentProfile,
+        boot_at: std::time::Instant,
+        host_signer_key: Option<ed25519_dalek::VerifyingKey>,
+    ) -> Self {
         Self {
             inner: Mutex::new(BootStateInner {
                 // Two components start `Starting` rather than the
@@ -339,6 +352,7 @@ impl AgentBootState {
             profile,
             boot_at,
             verb_grant: None,
+            host_signer_key,
         }
     }
 
@@ -2978,13 +2992,34 @@ fn main() {
     // Record boot time for startup grace period tracking.
     let boot_at = std::time::Instant::now();
 
+    // Load the host-signer Ed25519 public key from the config drive, if
+    // the launcher has provisioned one. Absent = grant-less boot (benign);
+    // malformed = log a warning and continue without a key so the agent
+    // doesn't crash on a partial or legacy config drive. A grant that
+    // arrives later without a key will be refused by `pin_verb_grant`.
+    let host_signer_key =
+        match load_host_signer_verifying_key(std::path::Path::new(HOST_SIGNER_PUBKEY_PATH)) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!(
+                    "mvm-guest-agent: warning — could not load host-signer pubkey from \
+                     {HOST_SIGNER_PUBKEY_PATH}: {e}"
+                );
+                None
+            }
+        };
+
     // Shared readiness state. Created AFTER vsock bind+listen so
     // `mark_vsock_bound` stamps an accurate
     // `vsock_bound_ms`. Cloned into every handler thread via
     // `Arc::clone` — the inner Mutex serialises the few writes
     // (`set_entrypoint`, `set_warm_pool`, …) without measurable
     // contention because writes only fire at boot completion events.
-    let boot_state = Arc::new(AgentBootState::new(active_profile, boot_at));
+    let boot_state = Arc::new(AgentBootState::new(
+        active_profile,
+        boot_at,
+        host_signer_key,
+    ));
     boot_state.mark_vsock_bound();
     eprintln!(
         "mvm-guest-agent: control plane ready ({}ms)",
@@ -3376,6 +3411,7 @@ mod tests {
         let boot_state = Arc::new(AgentBootState::new(
             AgentProfile::Dev,
             std::time::Instant::now(),
+            None,
         ));
         boot_state.mark_vsock_bound();
 
@@ -3437,6 +3473,7 @@ mod tests {
         let boot_state = Arc::new(AgentBootState::new(
             AgentProfile::Dev,
             std::time::Instant::now(),
+            None,
         ));
         boot_state.mark_vsock_bound();
 
@@ -3715,7 +3752,7 @@ mod tests {
     // ─── AgentBootState transitions ────
 
     fn fresh_boot_state() -> AgentBootState {
-        AgentBootState::new(AgentProfile::SealedProd, std::time::Instant::now())
+        AgentBootState::new(AgentProfile::SealedProd, std::time::Instant::now(), None)
     }
 
     #[test]
