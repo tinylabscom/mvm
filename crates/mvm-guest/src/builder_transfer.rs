@@ -209,7 +209,11 @@ fn unix_mode(_meta: &std::fs::Metadata) -> u32 {
 #[cfg(unix)]
 fn set_unix_mode(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777))
+    // Applied on the receive side, where the sender is untrusted (the host reads
+    // the guest's build output). Mask to the low permission bits only: a hostile
+    // sender must not be able to write a setuid/setgid/sticky file. Build
+    // artifacts never legitimately need those high bits.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o777))
         .with_context(|| format!("chmod {}", path.display()))
 }
 
@@ -267,6 +271,42 @@ mod tests {
                 .mode();
             assert_eq!(m & 0o777, 0o755, "mode preserved");
         }
+    }
+
+    /// A hostile sender's setuid/setgid/sticky bits are stripped on receive: the
+    /// receive side is the trust boundary, so the host never writes a setuid file
+    /// from a guest-controlled mode.
+    #[cfg(unix)]
+    #[test]
+    fn receive_strips_setuid_setgid_sticky_from_untrusted_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        // Craft the stream by hand — a frame whose mode carries setuid (0o4000),
+        // setgid (0o2000), and sticky (0o1000) on top of rwxr-xr-x.
+        let mut buf = Vec::new();
+        write_frame(
+            &mut buf,
+            &Frame::File {
+                rel_path: "evil".into(),
+                mode: 0o7755,
+                len: 3,
+            },
+        )
+        .unwrap();
+        buf.extend_from_slice(b"abc");
+        write_frame(&mut buf, &Frame::End).unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        receive_into(&mut Cursor::new(buf), dst.path()).unwrap();
+        let m = std::fs::metadata(dst.path().join("evil"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            m & 0o7000,
+            0,
+            "no setuid/setgid/sticky bit survives receive"
+        );
+        assert_eq!(m & 0o777, 0o755, "the low permission bits are preserved");
     }
 
     /// An empty file transfers (zero content bytes, no desync).
