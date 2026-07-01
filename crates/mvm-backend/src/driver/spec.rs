@@ -23,6 +23,11 @@ pub enum KernelImage {
 pub struct BlockDev {
     pub source: PathBuf,
     pub read_only: bool,
+    /// Load the whole image into guest RAM and drop writes on exit, instead of
+    /// serving it from the host file. A writable workload rootfs sets this (its
+    /// mutations must not persist to the shared base image); a builder's
+    /// nix-store / output disk clears it so writes persist to the host file.
+    pub ephemeral: bool,
     pub slot: u8,
 }
 
@@ -79,6 +84,11 @@ pub struct VmmSpec {
     pub blocks: Vec<BlockDev>,
     pub vsock: Vec<VsockPort>,
     pub console: ConsoleCapture,
+    /// Trusted-builder VM: it carries no untrusted workload, so it boots WITHOUT
+    /// the claim-10 egress gate (no `EGRESS_PORT` relay required). A workload
+    /// leaves this `false` so a missing egress relay fails closed rather than
+    /// booting ungated.
+    pub trusted_builder: bool,
 }
 
 #[cfg(test)]
@@ -90,6 +100,7 @@ mod tests {
         let mk = |slot| BlockDev {
             source: "/x".into(),
             read_only: true,
+            ephemeral: false,
             slot,
         };
         assert_eq!(mk(0).device_node(), "/dev/vda");

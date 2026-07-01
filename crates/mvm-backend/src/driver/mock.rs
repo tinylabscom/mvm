@@ -144,6 +144,7 @@ mod tests {
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),
             },
+            trusted_builder: false,
         }
     }
 

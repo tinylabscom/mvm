@@ -27,6 +27,8 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
     let ro = |source: &str, slot: u8| BlockDev {
         source: source.into(),
         read_only: true,
+        // Read-only blocks are file-served (hypervisor-enforced RO), never RAM-backed.
+        ephemeral: false,
         slot,
     };
 
@@ -128,6 +130,8 @@ pub fn workload_spec(inputs: &WorkloadSpecInputs) -> VmmSpec {
         console: ConsoleCapture {
             log_path: inputs.console_log.clone(),
         },
+        // A workload is untrusted: it must route egress through the gated endpoint.
+        trusted_builder: false,
     }
 }
 

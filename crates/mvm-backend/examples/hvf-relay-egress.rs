@@ -178,6 +178,7 @@ fn main() {
             console: ConsoleCapture {
                 log_path: state_dir.join("console.log"),
             },
+            trusted_builder: false,
         };
 
         let driver = InHouseDriver::new();

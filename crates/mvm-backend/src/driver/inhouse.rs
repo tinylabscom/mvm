@@ -97,10 +97,11 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         }
     };
 
-    // Every block in slot order becomes a virtio-blk device (`/dev/vda`…). A
-    // writable workload rootfs stays ephemeral (RAM-backed) so guest writes don't
-    // mutate the shared base image; a read-only block is file-served with
-    // hypervisor-enforced RO.
+    // Every block in slot order becomes a virtio-blk device (`/dev/vda`…). Each
+    // block carries its own read-only + ephemeral policy: a read-only block is
+    // file-served with hypervisor-enforced RO; an ephemeral block is RAM-backed
+    // (writes dropped on exit); a writable non-ephemeral block persists to the
+    // host file (the builder's nix-store / output disks).
     let mut ordered: Vec<&crate::driver::BlockDev> = spec.blocks.iter().collect();
     ordered.sort_by_key(|b| b.slot);
     let disks = ordered
@@ -108,13 +109,20 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         .map(|b| HvfDisk {
             path: b.source.clone(),
             read_only: b.read_only,
-            ephemeral: !b.read_only,
+            ephemeral: b.ephemeral,
         })
         .collect();
 
-    let egress_relay_socket = vsock_socket(spec, EGRESS_PORT).ok_or_else(|| {
-        anyhow!("in-house workload spec is missing the EGRESS_PORT vsock relay socket")
-    })?;
+    // A workload MUST route egress through the gated endpoint — a missing relay
+    // fails closed. A trusted builder carries no untrusted workload and boots with
+    // no egress gate, so it has no relay socket.
+    let egress_relay_socket = if spec.trusted_builder {
+        None
+    } else {
+        Some(vsock_socket(spec, EGRESS_PORT).ok_or_else(|| {
+            anyhow!("in-house workload spec is missing the EGRESS_PORT vsock relay socket")
+        })?)
+    };
 
     // An empty spec cmdline means "use the supervisor's workload default"
     // (`init=/init`); a non-empty one (e.g. the builder rootfs's
@@ -136,7 +144,7 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         timeout_secs: paths.timeout_secs,
         agent_socket: vsock_socket(spec, GUEST_AGENT_PORT),
         substitution_socket: None,
-        egress_relay_socket: Some(egress_relay_socket),
+        egress_relay_socket,
     })
 }
 
@@ -356,6 +364,7 @@ mod tests {
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),
             },
+            trusted_builder: false,
         }
     }
 
@@ -433,34 +442,53 @@ mod tests {
     }
 
     #[test]
-    fn relay_config_maps_blocks_to_disks_in_slot_order_with_ro_and_ephemeral() {
+    fn relay_config_maps_blocks_to_disks_in_slot_order_carrying_ro_and_ephemeral() {
         let spec = spec_with(
             KernelImage::Path("/img/Image".into()),
             vec![egress_port("/run/egress.sock")],
             vec![
-                // Deliberately out of slot order + mixed ro to prove sorting + flags.
+                // Out of slot order, mixed flags — proves sorting + per-disk policy
+                // pass through verbatim (a builder's persistent nix-store is
+                // writable AND non-ephemeral).
                 BlockDev {
                     source: "/img/nix-store.img".into(),
                     read_only: false,
+                    ephemeral: false,
                     slot: 1,
                 },
                 BlockDev {
                     source: "/img/rootfs.ext4".into(),
                     read_only: true,
+                    ephemeral: false,
                     slot: 0,
                 },
             ],
         );
         let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
         assert_eq!(cfg.disks.len(), 2);
-        // vda = slot 0: read-only rootfs, file-served (not ephemeral).
+        // vda = slot 0: read-only rootfs, file-served.
         assert_eq!(cfg.disks[0].path, PathBuf::from("/img/rootfs.ext4"));
         assert!(cfg.disks[0].read_only);
         assert!(!cfg.disks[0].ephemeral);
-        // vdb = slot 1: writable → ephemeral (RAM-backed, writes don't persist).
+        // vdb = slot 1: writable + persistent (not ephemeral) — writes hit the file.
         assert_eq!(cfg.disks[1].path, PathBuf::from("/img/nix-store.img"));
         assert!(!cfg.disks[1].read_only);
-        assert!(cfg.disks[1].ephemeral);
+        assert!(!cfg.disks[1].ephemeral);
+    }
+
+    #[test]
+    fn relay_config_trusted_builder_needs_no_egress_relay() {
+        // A trusted builder boots with no egress gate — no EGRESS_PORT required,
+        // and no relay socket is wired. (A workload without one still fails closed;
+        // see relay_config_missing_egress_port_fails_closed.)
+        let mut spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![agent_port("/run/agent.sock")],
+            vec![],
+        );
+        spec.trusted_builder = true;
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(cfg.egress_relay_socket, None);
     }
 
     #[test]
