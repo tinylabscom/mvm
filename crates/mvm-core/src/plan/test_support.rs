@@ -93,6 +93,7 @@ impl PlanFixture {
     pub fn build(self) -> ExecutionPlan {
         let now = Utc::now();
         ExecutionPlan {
+            snapshot_at: Default::default(),
             network_mode: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId(self.plan_id),
