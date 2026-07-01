@@ -29,7 +29,7 @@
 - Test: inline `#[cfg(test)]` in `verb.rs`
 
 **Interfaces:**
-- Produces: `VerbId(String)` with `VerbId::new(&str) -> Result<VerbId, VerbIdError>`, `VerbId::as_str(&self) -> &str`, `impl Display`, `Serialize`/`Deserialize` (transparent string). A `VerbId` is a `GuestRequest::verb_name()` value (`crates/mvm-guest/src/vsock.rs:760`) — a non-empty kebab-case token `[a-z][a-z0-9-]*`.
+- Produces: `VerbId(String)` with `VerbId::new(&str) -> Result<VerbId, VerbIdError>`, `VerbId::as_str(&self) -> &str`, `impl Display`, `Serialize`/`Deserialize` (transparent string). A `VerbId` is a `GuestRequest::kind_name()` value (`crates/mvm-guest/src/vsock.rs:555`) — the kebab-case identifier, a non-empty token `[a-z][a-z0-9-]*`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -77,7 +77,7 @@ Expected: FAIL — `verb.rs` / `VerbId` does not exist.
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 
-/// A guest-agent control-verb identifier: the stable `verb_name()` token
+/// A guest-agent control-verb identifier: the stable `kind_name()` token
 /// (non-empty kebab-case). Validated at construction so an `agent_verbs`
 /// grant can never carry an unparseable verb.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
@@ -519,7 +519,7 @@ git commit -m "feat: VerbGrant type with host-signer mint and session/time-bound
 - Test: inline in `vsock.rs` tests (sibling to the class-gate tests at `:5418`/`:5578`).
 
 **Interfaces:**
-- Consumes: `VerbGrant::permits` (Task 3), `GuestRequest::verb_name` (`:760`), `allowed_in` (`:884`).
+- Consumes: `VerbGrant::permits` (Task 3), `GuestRequest::kind_name` (`:555`), `allowed_in` (`:884`).
 - Produces: `GuestResponse::VerbNotAuthorized { verb: String }`; a helper `fn enforce_verb_grant(req: &GuestRequest, grant: Option<&VerbGrant>) -> Option<GuestResponse>` returning `Some(VerbNotAuthorized)` when denied, `None` when allowed.
 
 - [ ] **Step 1: Write the failing test**
@@ -544,7 +544,7 @@ fn grant_denies_unlisted_but_allows_listed_and_baseline() {
     // ProdSafe but unlisted => denied
     let idle = GuestRequest::UpdateIdleTimeout { /* fill minimal fields */ };
     match enforce_verb_grant(&idle, Some(&grant)) {
-        Some(GuestResponse::VerbNotAuthorized { verb }) => assert_eq!(verb, idle.verb_name()),
+        Some(GuestResponse::VerbNotAuthorized { verb }) => assert_eq!(verb, idle.kind_name()),
         other => panic!("expected VerbNotAuthorized, got {other:?}"),
     }
 }
@@ -583,8 +583,8 @@ Add the enforcement helper:
 pub fn enforce_verb_grant(req: &GuestRequest, grant: Option<&VerbGrant>) -> Option<GuestResponse> {
     match grant {
         None => None,
-        Some(g) if g.permits(req.verb_name()) => None,
-        Some(_) => Some(GuestResponse::VerbNotAuthorized { verb: req.verb_name().to_string() }),
+        Some(g) if g.permits(req.kind_name()) => None,
+        Some(_) => Some(GuestResponse::VerbNotAuthorized { verb: req.kind_name().to_string() }),
     }
 }
 ```
@@ -615,6 +615,8 @@ git commit -m "feat(guest): enforce plan-bound verb grant after the class gate"
 ---
 
 ### Task 5: Deliver + verify the grant at the ProtocolHello handshake
+
+> **Reshaped for the 5-B decision (real key separation) into 5a–5d; only 5a landed on the core branch. 5b (guest mounts config drive), 5c (supervisor mints grant + provisions host-signer pubkey via config drive), 5d (deliver grant over ProtocolHello + thread supervisor→caller) and Task 6 (audit) are deferred to a follow-on branch validated on a live boot.**
 
 **Files:**
 - Modify guest read side: `crates/mvm-guest/src/vsock.rs` handshake (`ProtocolHello` / the hello-read path around `:2211`–`:2322`) to carry an optional `verb_grant` and the host-signer verifying key.

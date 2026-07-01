@@ -1,10 +1,11 @@
 # ADR-103: Plan-bound agent verb capabilities
 
 - Status: Proposed
+- Note: Landed in two stages — the signed-type + guest-enforcement core (Plan 215 Tasks 1–5a) first; the out-of-band host-signer-key provisioning + wire delivery (5b–5d) as a follow-on, since the key separation becomes an active boundary only under the ADR-090 decomposition.
 - Date: 2026-06-30
 - Owner: MVM Project
 - Related: ADR-002 (microVM security posture — claim 4 `do_exec`, claim 15 sealed interactivity), ADR-041 (signed audited execution plans — claim 8), ADR-049 (secret substitution — time/destination-bound signed credentials), ADR-059 / ADR-062 (host services broker — claim 12 binding-gated dispatch), ADR-090 (resident daemon trust gradient)
-- Sequenced by: (plan TBD — writing-plans follow-up)
+- Sequenced by: [Plan 215](../plans/215-plan-bound-agent-verb-capabilities.md)
 
 ## Context
 
@@ -79,13 +80,11 @@ ceremony; `SCHEMA_VERSION` stays as-is):
 /// Per-workload agent verb allow-list. `None`/absent → class-gate-only
 /// (current behavior, preserves dev flows). `Some(set)` → the agent
 /// accepts a control verb only if it passes the class gate AND its
-/// `verb_name()` is in `set` (or is baseline). Strictly subtractive.
+/// `kind_name()` is in `set` (or is baseline). Strictly subtractive.
 pub agent_verbs: Option<Vec<VerbId>>,
 ```
 
-`VerbId` is the stable `GuestRequest::verb_name()` string (`vsock.rs:760`), validated at
-parse time — the identifier already used in `UnsupportedInProfile` responses, so it is
-wire-stable by construction.
+`VerbId` is the stable `GuestRequest::kind_name()` string (`vsock.rs:555`) — the kebab-case identifier used in `UnsupportedInProfile` responses and validated at parse time by `kind_name_strings_are_kebab_case`. Wire-stable by construction.
 
 At admission the supervisor mints a session token and signs it with the host-signer key:
 

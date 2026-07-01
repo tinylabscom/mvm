@@ -14,7 +14,7 @@ pub struct VerbGrant {
     pub plan_nonce: Nonce,
     pub not_after: DateTime<Utc>,
     pub verbs: Vec<VerbId>,
-    /// Ed25519 signature over `signing_bytes()`, hex-encoded for wire compactness.
+    /// Raw Ed25519 signature bytes (64) over signing_bytes(); serialized as a JSON array.
     pub sig: Vec<u8>,
 }
 
@@ -61,7 +61,7 @@ impl VerbGrant {
         if self.session_id != session_id {
             return Err(VerbGrantError::SessionMismatch);
         }
-        if self.plan_nonce.as_hex() != plan_nonce.as_hex() {
+        if self.plan_nonce != *plan_nonce {
             return Err(VerbGrantError::NonceMismatch);
         }
         if now > self.not_after {
