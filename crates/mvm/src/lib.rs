@@ -23,7 +23,7 @@ pub use vm::lease::{AcquireSpec, WarmLease};
 // The Machine product abstraction — the construction + capability-gate seam
 // the CLI, mvmd, and the SDKs share.
 pub use machine::{
-    CapabilityError, Machine, MachineBuilder, MachineError, MachineSpec, NetworkMode,
+    CapabilityError, LaunchInputs, Machine, MachineBuilder, MachineError, MachineSpec, NetworkMode,
 };
 
 // Substrate re-exports — see crate doc comment.
