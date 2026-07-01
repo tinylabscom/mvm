@@ -367,6 +367,7 @@ fn synthesis_input_for_app<'a>(workload: &'a Workload, app: &'a App) -> Result<S
         shares: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         audit_labels: Default::default(),
+        agent_verbs: None,
     })
 }
 
