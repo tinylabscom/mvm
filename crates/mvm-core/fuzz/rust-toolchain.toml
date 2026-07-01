@@ -1,0 +1,6 @@
+[toolchain]
+# cargo-fuzz emits `-Z sanitizer=address` flags that only work on nightly.
+# The repo root pins stable; this local pin keeps the fuzz lane on nightly
+# without affecting the rest of the workspace (cargo walks up for
+# rust-toolchain.toml independent of workspace boundaries).
+channel = "nightly"
