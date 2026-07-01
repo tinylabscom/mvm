@@ -188,8 +188,18 @@ fn boot_kernel_impl(
         return Err(HvfError::Alloc);
     }
 
-    let bootargs =
+    // Base cmdline (or a full override), plus optional appended args. The append
+    // hook lets a caller thread runtime-discovered values (e.g. a dynamically
+    // bound egress target) into the guest without reproducing the whole default.
+    let mut bootargs =
         std::env::var("MVM_HVF_BOOTARGS").unwrap_or_else(|_| default_bootargs(disk.is_some()));
+    if let Ok(extra) = std::env::var("MVM_HVF_BOOTARGS_EXTRA") {
+        let extra = extra.trim();
+        if !extra.is_empty() {
+            bootargs.push(' ');
+            bootargs.push_str(extra);
+        }
+    }
     let initrd_bounds = initramfs.map(|rd| {
         (
             RAM_BASE + INITRD_OFFSET,
