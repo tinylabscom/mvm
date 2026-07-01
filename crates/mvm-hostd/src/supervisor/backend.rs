@@ -224,6 +224,7 @@ mod tests {
         let expected_slot = config.slot.clone();
         let launcher = FirecrackerRunConfigLauncher::new(config).expect("valid config");
         let plan = ExecutionPlan {
+            build_provenance: Default::default(),
             snapshot_at: Default::default(),
             network_mode: Default::default(),
             schema_version: mvm_core::plan::SCHEMA_VERSION,

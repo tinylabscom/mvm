@@ -26,6 +26,65 @@ pub enum NetworkMode {
     HostVsockProxy,
 }
 
+/// How the workload image was specified — the source the deterministic build
+/// pipeline consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputKind {
+    /// An OCI image reference.
+    Oci,
+    /// A bundled Nix template.
+    NixTemplate,
+    /// A Nix flake output (`.#app`).
+    NixFlake,
+    /// A local repo/project with detected Nix metadata.
+    LocalProject,
+}
+
+/// Content-addressed digests (hex sha256) of the artifacts a build produced,
+/// recorded so a launch is traceable to exact bytes. `None` = not applicable to
+/// this workload (e.g. no initramfs).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactDigests {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initramfs: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mvm_init: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mvm_netd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_base: Option<String>,
+}
+
+/// Provenance of a workload build: what input was consumed, pinned how, by which
+/// builder, producing which artifacts. Recorded in the signed plan so a launch
+/// is traceable end-to-end to deterministic inputs and outputs. The build
+/// pipeline populates it; absence (`None` on the plan) means provenance was not
+/// recorded for this workload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildProvenance {
+    /// Which kind of source produced this image.
+    pub input_kind: InputKind,
+    /// The supplied reference: OCI ref, flake ref, template name, or local
+    /// project path.
+    pub input_ref: String,
+    /// Pin of the input: image manifest digest, `flake.lock` hash, etc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_digest: Option<String>,
+    /// Identity/fingerprint of the builder VM that produced the artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder_id: Option<String>,
+    /// Content-addressed digests of the produced artifacts.
+    #[serde(default)]
+    pub artifacts: ArtifactDigests,
+}
+
 /// Stable identifier for an `ExecutionPlan` instance. Currently a
 /// ULID; we keep the type opaque so the constructor can switch
 /// generators (UUIDv7, snowflake, etc.) without touching the wire
@@ -753,6 +812,56 @@ mod network_mode_tests {
         assert_eq!(
             serde_json::from_str::<NetworkMode>("\"none\"").unwrap(),
             NetworkMode::None
+        );
+    }
+}
+
+#[cfg(test)]
+mod build_provenance_tests {
+    use super::*;
+
+    #[test]
+    fn input_kind_uses_snake_case_tokens() {
+        assert_eq!(
+            serde_json::to_string(&InputKind::NixFlake).unwrap(),
+            "\"nix_flake\""
+        );
+        assert_eq!(
+            serde_json::from_str::<InputKind>("\"local_project\"").unwrap(),
+            InputKind::LocalProject
+        );
+    }
+
+    #[test]
+    fn provenance_round_trips_with_digests() {
+        let prov = BuildProvenance {
+            input_kind: InputKind::Oci,
+            input_ref: "docker.io/library/alpine@sha256:abc".to_string(),
+            lock_digest: Some("sha256:manifest".to_string()),
+            builder_id: Some("builder-vz-01".to_string()),
+            artifacts: ArtifactDigests {
+                kernel: Some("k".repeat(64)),
+                rootfs: Some("r".repeat(64)),
+                mvm_init: Some("i".repeat(64)),
+                ..Default::default()
+            },
+        };
+        let json = serde_json::to_string(&prov).unwrap();
+        let back: BuildProvenance = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, prov);
+    }
+
+    #[test]
+    fn absent_artifact_digests_are_omitted_not_null() {
+        let digests = ArtifactDigests {
+            kernel: Some("k".repeat(64)),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&digests).unwrap();
+        assert!(json.contains("kernel"));
+        assert!(
+            !json.contains("initramfs"),
+            "absent digests omitted: {json}"
         );
     }
 }

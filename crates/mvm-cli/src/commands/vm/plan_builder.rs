@@ -236,6 +236,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     };
 
     Ok(ExecutionPlan {
+        build_provenance: Default::default(),
         snapshot_at: Default::default(),
         network_mode: Default::default(),
         schema_version: SCHEMA_VERSION,

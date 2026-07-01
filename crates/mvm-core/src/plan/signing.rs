@@ -200,6 +200,7 @@ pub mod test_support {
     /// Callers override `valid_from`/`valid_until`/`nonce` for their scenario.
     pub fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
+            build_provenance: Default::default(),
             snapshot_at: Default::default(),
             network_mode: Default::default(),
             schema_version: SCHEMA_VERSION,
@@ -486,6 +487,37 @@ mod tests {
         );
         let parsed: ExecutionPlan = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.snapshot_at, Some(SnapshotAt::AfterWarmup));
+    }
+
+    #[test]
+    fn plan_without_build_provenance_defaults_to_none() {
+        let plan = sample_plan();
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value.as_object_mut().unwrap().remove("build_provenance");
+        assert!(value.get("build_provenance").is_none());
+        let parsed: ExecutionPlan = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.build_provenance, None);
+    }
+
+    #[test]
+    fn build_provenance_round_trips_in_the_plan() {
+        use crate::plan::types::{ArtifactDigests, BuildProvenance, InputKind};
+        let mut plan = sample_plan();
+        plan.build_provenance = Some(BuildProvenance {
+            input_kind: InputKind::NixFlake,
+            input_ref: ".#app".to_string(),
+            lock_digest: Some("sha256:lock".to_string()),
+            builder_id: Some("builder-01".to_string()),
+            artifacts: ArtifactDigests {
+                kernel: Some("k".repeat(64)),
+                rootfs: Some("r".repeat(64)),
+                ..Default::default()
+            },
+        });
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(json.contains("nix_flake"), "snake_case input kind: {json}");
+        let parsed: ExecutionPlan = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.build_provenance, plan.build_provenance);
     }
 
     #[test]
