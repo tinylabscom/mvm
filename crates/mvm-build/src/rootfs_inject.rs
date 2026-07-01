@@ -149,7 +149,7 @@ mod tests {
                 String::from_utf8(buf[name_start..name_start + namesize - 1].to_vec()).unwrap();
             // data starts after (header+name) padded to 4.
             let mut data_start = name_start + namesize;
-            while data_start % 4 != 0 {
+            while !data_start.is_multiple_of(4) {
                 data_start += 1;
             }
             if name == "TRAILER!!!" {
@@ -157,7 +157,7 @@ mod tests {
             }
             out.push((name, mode, filesize));
             let mut next = data_start + filesize;
-            while next % 4 != 0 {
+            while !next.is_multiple_of(4) {
                 next += 1;
             }
             off = next;
@@ -228,7 +228,7 @@ mod tests {
             let name =
                 String::from_utf8(buf[name_start..name_start + namesize - 1].to_vec()).unwrap();
             let mut data_start = name_start + namesize;
-            while data_start % 4 != 0 {
+            while !data_start.is_multiple_of(4) {
                 data_start += 1;
             }
             if name == "TRAILER!!!" {
@@ -238,7 +238,7 @@ mod tests {
                 return String::from_utf8(buf[data_start..data_start + filesize].to_vec()).unwrap();
             }
             let mut next = data_start + filesize;
-            while next % 4 != 0 {
+            while !next.is_multiple_of(4) {
                 next += 1;
             }
             off = next;

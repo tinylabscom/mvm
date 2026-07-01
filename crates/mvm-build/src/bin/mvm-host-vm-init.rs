@@ -942,16 +942,16 @@ mod linux {
         // /out is backed on the nix-store disk (the virtio-fs mounts above no-op'd).
         // Staging must precede dispatch, which reads /job. Fatal on failure — the
         // job can't run without its inputs.
-        if let Some(t) = &disk_transport {
-            if let Err(e) = stage_disk_transport_input(t) {
-                eprintln!("mvm-host-vm-init: disk-transport input staging failed: {e}");
-                write_result(2, &format!("disk-transport input staging failed: {e}"));
-                stamp(&timings, |t| {
-                    t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
-                });
-                write_boot_timings(&timings);
-                return power_off();
-            }
+        if let Some(t) = &disk_transport
+            && let Err(e) = stage_disk_transport_input(t)
+        {
+            eprintln!("mvm-host-vm-init: disk-transport input staging failed: {e}");
+            write_result(2, &format!("disk-transport input staging failed: {e}"));
+            stamp(&timings, |t| {
+                t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
+            });
+            write_boot_timings(&timings);
+            return power_off();
         }
 
         // Fork the guest agent under setpriv so the builder/dev VM runs
@@ -1037,10 +1037,10 @@ mod linux {
         // Disk-transport mode: tar /out (artifacts + result) onto the output disk
         // for the host to read back. Best-effort — the console + exit code still
         // convey failure if this can't complete.
-        if let Some(t) = &disk_transport {
-            if let Err(e) = collect_disk_transport_output(t) {
-                eprintln!("mvm-host-vm-init: disk-transport output collection failed: {e}");
-            }
+        if let Some(t) = &disk_transport
+            && let Err(e) = collect_disk_transport_output(t)
+        {
+            eprintln!("mvm-host-vm-init: disk-transport output collection failed: {e}");
         }
         // Best-effort vsock send of the
         // `HostVmResponse::Result` frame the host's

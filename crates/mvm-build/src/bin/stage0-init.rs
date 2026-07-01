@@ -604,10 +604,9 @@ mod linux {
         // artifact that matters.
         if mode == "kernel"
             && let Some(config_attr) = conf.get("MVM_STAGE0_CONFIG_ATTR")
+            && let Err(e) = emit_resolved_config(&nix, &arch, config_attr)
         {
-            if let Err(e) = emit_resolved_config(&nix, &arch, config_attr) {
-                eprintln!("stage0-init: skipping kernel-config emit: {e}");
-            }
+            eprintln!("stage0-init: skipping kernel-config emit: {e}");
         }
         Ok(())
     }
