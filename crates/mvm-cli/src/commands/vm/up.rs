@@ -960,10 +960,6 @@ pub(in crate::commands) struct Args {
     /// Network allowlist entry (format: HOST:PORT). Repeatable
     #[arg(long)]
     pub network_allow: Vec<String>,
-    /// Restrict the guest agent to these control verbs (repeatable). Overrides
-    /// the computed sealed-prod default. Values must be production-safe verbs.
-    #[arg(long = "agent-verb", value_name = "VERB")]
-    pub agent_verb: Vec<String>,
     /// Named security profile selecting the per-seam capability matrix
     /// (seccomp tier + egress posture). Defaults to `production`: the
     /// highest-security, deployable posture (seccomp floor + deny-all egress).
