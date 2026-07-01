@@ -65,16 +65,16 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-async-trait = "0.1"
+async-trait.workspace = true
 serde = { workspace = true, features = ["derive"] }
-thiserror = { workspace = true }
+thiserror = "1"
 
 [dev-dependencies]
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 ```
 
-If `async-trait` is not yet a workspace dependency, add `async-trait = "0.1"` under root `[workspace.dependencies]` and use `async-trait.workspace = true` here to match repo convention.
+Note: `async-trait`, `serde`, `serde_json`, and `tokio` are already workspace dependencies; `thiserror` is a **direct** version dep in this repo (`mvm-core` uses `thiserror = "1"`), not a workspace dep — hence the literal version here.
 
 - [ ] **Step 3: Write `crates/mvm-client/src/lib.rs`**
 
