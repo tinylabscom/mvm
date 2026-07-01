@@ -19,12 +19,20 @@ use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirecti
 /// sidecars are integrity data the guest only reads. The all-three-or-none
 /// overlay rule mirrors `VmStartConfig`'s own contract — a partial overlay set
 /// is treated as no overlay rather than a half-configured boot.
+///
+/// An empty `rootfs_path` yields no disks at all — an initramfs-only guest boots
+/// entirely from RAM (matching `HvfBackend`'s own empty-path skip). The verity
+/// and overlay disks presuppose a rootfs, so they are dropped with it.
 pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
     let ro = |source: &str, slot: u8| BlockDev {
         source: source.into(),
         read_only: true,
         slot,
     };
+
+    if config.rootfs_path.is_empty() {
+        return Vec::new();
+    }
 
     let mut blocks = vec![ro(&config.rootfs_path, 0)];
 
@@ -146,6 +154,18 @@ mod tests {
         assert_eq!(nodes(&blocks), vec!["/dev/vda"]);
         assert_eq!(blocks[0].source, PathBuf::from("/img/rootfs.ext4"));
         assert!(blocks[0].read_only);
+    }
+
+    #[test]
+    fn empty_rootfs_yields_no_blocks() {
+        // An initramfs-only guest boots from RAM: no rootfs disk, and the verity /
+        // overlay disks (which presuppose a rootfs) are dropped with it.
+        let cfg = VmStartConfig {
+            rootfs_path: String::new(),
+            verity_path: Some("/img/rootfs.verity".into()),
+            ..base()
+        };
+        assert!(workload_blocks(&cfg).is_empty());
     }
 
     #[test]
