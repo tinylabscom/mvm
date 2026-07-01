@@ -944,6 +944,9 @@ pub enum GuestResponse {
         /// `verb_name()` of the rejected request. Wire-stable.
         verb: String,
     },
+    /// The pinned verb grant does not authorize this verb for the
+    /// workload. Wire-stable. Universal — may answer any request.
+    VerbNotAuthorized { verb: String },
     /// Per-integration status report.
     IntegrationStatusReport {
         integrations: Vec<crate::integrations::IntegrationStateReport>,
@@ -1105,7 +1108,7 @@ name_enum! {
     /// (exhaustive match).
     pub enum ResponseVariant {
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
-        Pong, Error, UnsupportedInProfile, IntegrationStatusReport,
+        Pong, Error, UnsupportedInProfile, VerbNotAuthorized, IntegrationStatusReport,
         CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, ExecEvent,
         ExecBatchResult,
         PostRestoreAck, FsDiffResult, PortForwardStarted,
@@ -1124,7 +1127,9 @@ impl ResponseVariant {
     pub fn is_universal(self) -> bool {
         matches!(
             self,
-            ResponseVariant::Error | ResponseVariant::UnsupportedInProfile
+            ResponseVariant::Error
+                | ResponseVariant::UnsupportedInProfile
+                | ResponseVariant::VerbNotAuthorized
         )
     }
 }
@@ -1221,6 +1226,7 @@ impl GuestResponse {
             GuestResponse::Pong => ResponseVariant::Pong,
             GuestResponse::Error { .. } => ResponseVariant::Error,
             GuestResponse::UnsupportedInProfile { .. } => ResponseVariant::UnsupportedInProfile,
+            GuestResponse::VerbNotAuthorized { .. } => ResponseVariant::VerbNotAuthorized,
             GuestResponse::IntegrationStatusReport { .. } => {
                 ResponseVariant::IntegrationStatusReport
             }
@@ -1278,6 +1284,12 @@ pub enum RpcError {
         /// `verb_name()` of the rejected request.
         verb: String,
     },
+    /// The pinned verb grant does not authorize this verb.
+    #[error("verb {verb} not authorized by the session's verb grant")]
+    VerbNotAuthorized {
+        /// `verb_name()` of the rejected request.
+        verb: String,
+    },
     /// The agent returned a response variant not in the verb's
     /// `response_contract()` — a protocol violation.
     #[error("guest agent returned {got:?} for {verb}, not in its contract {expected:?}")]
@@ -1315,6 +1327,7 @@ pub fn check_response(req: &GuestRequest, resp: GuestResponse) -> Result<GuestRe
         GuestResponse::UnsupportedInProfile { profile, verb } => {
             Err(RpcError::UnsupportedInProfile { profile, verb })
         }
+        GuestResponse::VerbNotAuthorized { verb } => Err(RpcError::VerbNotAuthorized { verb }),
         other => {
             let got = other.variant();
             let contract = req.response_contract();
@@ -1357,6 +1370,21 @@ pub fn call_streaming(
             return Ok(());
         }
         frame = check_response(req, read_frame::<GuestResponse>(stream)?)?;
+    }
+}
+
+/// Grant intersection, applied AFTER `allowed_in`. `None` grant => no
+/// restriction (class gate only). Baseline/listed verbs pass.
+pub fn enforce_verb_grant(
+    req: &GuestRequest,
+    grant: Option<&mvm_core::plan::VerbGrant>,
+) -> Option<GuestResponse> {
+    match grant {
+        None => None,
+        Some(g) if g.permits(req.kind_name()) => None,
+        Some(_) => Some(GuestResponse::VerbNotAuthorized {
+            verb: req.verb_name().to_string(),
+        }),
     }
 }
 
@@ -6499,5 +6527,45 @@ mod rpc_client_tests {
         let mut events = 0usize;
         call_streaming(&mut client, &req, |_e| events += 1).unwrap();
         assert_eq!(events, 2);
+    }
+
+    // ---- enforce_verb_grant ----
+
+    #[test]
+    fn grant_denies_unlisted_but_allows_listed_and_baseline() {
+        use mvm_core::plan::{Nonce, VerbGrant, VerbId};
+        let now = chrono::Utc::now();
+        let grant = VerbGrant {
+            session_id: "s".into(),
+            plan_nonce: Nonce::from_bytes([0u8; 16]),
+            not_after: now + chrono::Duration::minutes(1),
+            verbs: vec![VerbId::new("run-entrypoint").unwrap()],
+            sig: vec![],
+        };
+        // listed => allowed
+        let run = GuestRequest::RunEntrypoint {
+            stdin: vec![],
+            timeout_secs: 1,
+            env: vec![],
+        };
+        assert!(enforce_verb_grant(&run, Some(&grant)).is_none());
+        // baseline => allowed even though not listed
+        assert!(enforce_verb_grant(&GuestRequest::Ping, Some(&grant)).is_none());
+        // ProdSafe but unlisted => denied
+        let idle = GuestRequest::UpdateIdleTimeout { secs: 0 };
+        let idle_name = idle.verb_name();
+        match enforce_verb_grant(&idle, Some(&grant)) {
+            Some(GuestResponse::VerbNotAuthorized { verb }) => assert_eq!(verb, idle_name),
+            other => panic!("expected VerbNotAuthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_grant_is_class_gate_only() {
+        let idle = GuestRequest::UpdateIdleTimeout { secs: 0 };
+        assert!(
+            enforce_verb_grant(&idle, None).is_none(),
+            "None grant must not deny anything"
+        );
     }
 }

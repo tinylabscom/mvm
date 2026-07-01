@@ -37,7 +37,7 @@ use mvm_guest::probes::{self, ProbeEntry, ProbeOutputFormat, ProbeResult};
 use mvm_guest::runtime_config::{self, ConcurrencyConfig};
 use mvm_guest::vsock::{
     BootTimingReport, ComponentState, EntrypointEvent, FsChange, FsChangeKind, GUEST_AGENT_PORT,
-    GuestRequest, GuestResponse, ReadinessReport, RunEntrypointError,
+    GuestRequest, GuestResponse, ReadinessReport, RunEntrypointError, enforce_verb_grant,
 };
 use mvm_guest::worker_pool::{DispatchError, DispatchOutcome, WorkerPool};
 use mvm_guest::worker_protocol::WorkerOutcome;
@@ -302,6 +302,10 @@ struct AgentBootState {
     inner: Mutex<BootStateInner>,
     profile: AgentProfile,
     boot_at: std::time::Instant,
+    /// Plan-bound verb capability grant for this session. `None` means
+    /// no grant is pinned — the class gate (`allowed_in`) is the only
+    /// filter. Task 5 populates this from the admission handshake.
+    verb_grant: Option<mvm_core::plan::VerbGrant>,
 }
 
 #[derive(Default)]
@@ -334,6 +338,7 @@ impl AgentBootState {
             }),
             profile,
             boot_at,
+            verb_grant: None,
         }
     }
 
@@ -2124,6 +2129,11 @@ fn handle_client(
             profile: active_profile,
             verb: req.verb_name().to_string(),
         };
+        write_response(&mut file, &resp);
+        return;
+    }
+
+    if let Some(resp) = enforce_verb_grant(&req, boot_state.verb_grant.as_ref()) {
         write_response(&mut file, &resp);
         return;
     }
