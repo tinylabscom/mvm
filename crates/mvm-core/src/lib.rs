@@ -53,6 +53,8 @@ pub mod snapshot_frame;
 /// The guest↔host substitution-endpoint wire contract, shared so the
 /// in-guest client and the host server serialize identical bytes.
 pub mod substitution_wire;
+/// W3C-shaped distributed trace context for end-to-end audit correlation.
+pub mod trace_context;
 pub mod transcript;
 pub mod util;
 
