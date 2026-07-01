@@ -1,6 +1,6 @@
 //! Live proof that `WorkloadRunner` — the driver-generic workload start over the
 //! `VmmDriver` seam — boots a real guest with claim-10 egress enforced by the
-//! host endpoint. This exercises the ADR-102 core path (spawn the gating endpoint
+//! host endpoint. This exercises the core path (spawn the gating endpoint
 //! → map the config to a `VmmSpec` → `InHouseDriver::boot`), which is distinct
 //! from `HvfBackend`'s inline start and is what will replace it.
 //!

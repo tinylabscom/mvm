@@ -2602,6 +2602,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-client"
+version = "0.16.1"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "mvm-core"
 version = "0.16.1"
 dependencies = [
