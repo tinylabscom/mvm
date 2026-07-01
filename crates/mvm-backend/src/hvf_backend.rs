@@ -30,25 +30,47 @@ use crate::base::ui;
 
 /// PID file the supervisor writes inside `vm_state_dir`. Distinct from the other
 /// backends' markers so HVF VMs coexist under the same `~/.mvm/vms/` root.
-const PID_FILE_NAME: &str = "hvf.pid";
-/// How long `start` waits for the supervisor to confirm boot (PID file).
-const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const PID_FILE_NAME: &str = "hvf.pid";
+/// How long `start` waits for the supervisor to confirm boot (PID file). Shared
+/// with the in-house driver, which spawns the same supervisor binary.
+pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Raw HVF (`Hypervisor.framework`) backend. macOS / Apple-silicon only.
 pub struct HvfBackend;
 
-fn read_pid(path: &Path) -> Option<libc::pid_t> {
+pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-fn pid_alive(pid: libc::pid_t) -> bool {
+pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
     // SAFETY: signal 0 probes existence/permission without delivering a signal.
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// SIGTERM a recorded pid, then SIGKILL if it lingers past a short grace. The
+/// supervisor installs no SIGTERM handler, so the default action terminates it
+/// and the HVF VM dies with it. Shared by the `VmBackend` stop path and the
+/// in-house driver's `kill`.
+pub(crate) fn terminate_pid(pid: libc::pid_t) {
+    // SAFETY: signalling a pid we recorded from our own supervisor.
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pid_alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if pid_alive(pid) {
+        // SAFETY: same pid.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+}
+
 /// Locate the per-VM supervisor binary: `$MVM_HVF_SUPERVISOR_PATH`, else
 /// alongside the current executable (release + `cargo` layouts both put it there).
-fn resolve_supervisor_path() -> Result<PathBuf> {
+pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("MVM_HVF_SUPERVISOR_PATH") {
         let path = PathBuf::from(p);
         if path.is_file() {
@@ -278,22 +300,7 @@ impl VmBackend for HvfBackend {
         crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &id.0);
         let pid_path = state_dir.join(PID_FILE_NAME);
         if let Some(pid) = read_pid(&pid_path) {
-            // SIGTERM (default action terminates — the supervisor installs no
-            // handler), then SIGKILL if it lingers. The HVF VM dies with it.
-            // SAFETY: signalling a pid we recorded.
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while pid_alive(pid) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            if pid_alive(pid) {
-                // SAFETY: same pid.
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                }
-            }
+            terminate_pid(pid);
         }
         let _ = std::fs::remove_file(&pid_path);
         Ok(())

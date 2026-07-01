@@ -126,6 +126,7 @@ mod tests {
         VmmSpec {
             name: name.to_string(),
             kernel: KernelImage::Bundled,
+            initramfs: None,
             cmdline: String::new(),
             vcpus: 1,
             memory_mib: 256,

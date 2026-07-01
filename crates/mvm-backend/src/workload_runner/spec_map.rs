@@ -106,6 +106,11 @@ pub fn workload_spec(inputs: &WorkloadSpecInputs) -> VmmSpec {
     VmmSpec {
         name: config.name.clone(),
         kernel,
+        initramfs: config
+            .initrd_path
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from),
         cmdline: inputs.cmdline.clone(),
         vcpus: config.cpus,
         memory_mib: config.memory_mib,
@@ -240,6 +245,32 @@ mod tests {
         assert_eq!(nodes(&spec.blocks), vec!["/dev/vda", "/dev/vdb"]);
         assert_eq!(spec.vsock.len(), 3);
         assert_eq!(spec.console.log_path, PathBuf::from("/run/console.log"));
+    }
+
+    #[test]
+    fn workload_spec_maps_initrd_path_to_initramfs() {
+        let cfg = VmStartConfig {
+            initrd_path: Some("/img/initrd.cpio".into()),
+            ..base()
+        };
+        let spec = workload_spec(&WorkloadSpecInputs {
+            config: &cfg,
+            sockets: sample_sockets(),
+            cmdline: String::new(),
+            console_log: PathBuf::from("/run/console.log"),
+        });
+        assert_eq!(spec.initramfs, Some(PathBuf::from("/img/initrd.cpio")));
+    }
+
+    #[test]
+    fn workload_spec_without_initrd_has_no_initramfs() {
+        let spec = workload_spec(&WorkloadSpecInputs {
+            config: &base(),
+            sockets: sample_sockets(),
+            cmdline: String::new(),
+            console_log: PathBuf::from("/run/console.log"),
+        });
+        assert_eq!(spec.initramfs, None);
     }
 
     #[test]

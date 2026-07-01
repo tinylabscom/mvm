@@ -67,6 +67,9 @@ pub struct ConsoleCapture {
 pub struct VmmSpec {
     pub name: String,
     pub kernel: KernelImage,
+    /// Optional initramfs the kernel unpacks before pivoting to the rootfs. Real
+    /// verified-boot workloads (dm-verity init) and the echo-guest proof boot one.
+    pub initramfs: Option<PathBuf>,
     pub cmdline: String,
     pub vcpus: u32,
     pub memory_mib: u32,
