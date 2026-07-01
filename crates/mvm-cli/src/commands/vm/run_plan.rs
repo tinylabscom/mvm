@@ -538,6 +538,7 @@ mod tests {
             cpus: 2,
             memory: "512M".to_string(),
             profile: RunProfile::Standard,
+            agent_verb: Vec::new(),
             add_dir: Vec::new(),
             env: Vec::new(),
             timeout: Some(60),

@@ -1,4 +1,4 @@
-//! Self-hosting builder-rootfs bootstrap (Plan 214, Option B): inject the freshly
+//! Self-hosting builder-rootfs bootstrap: inject the freshly
 //! cross-compiled `mvm-host-vm-init` into a builder rootfs using ONLY the in-house
 //! VMM — no vz, no legacy builder. Thin driver over
 //! `mvm_backend::builder_runner::inject_host_binaries`. Output: a patched rootfs
