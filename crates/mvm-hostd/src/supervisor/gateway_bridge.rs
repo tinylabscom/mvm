@@ -4478,6 +4478,7 @@ mod tests {
             TenantId, TimeoutSpec, WorkloadId,
         };
         ExecutionPlan {
+            network_mode: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("test-plan".into()),
             plan_version: 1,
