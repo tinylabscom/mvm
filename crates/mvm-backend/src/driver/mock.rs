@@ -19,6 +19,7 @@ type GuestEnds = Arc<Mutex<HashMap<(String, u32), UnixStream>>>;
 #[derive(Clone)]
 pub struct MockDriver {
     exit: VmExitStatus,
+    status: VmStatus,
     booted: Arc<Mutex<Vec<VmmSpec>>>,
     guest_ends: GuestEnds,
 }
@@ -30,13 +31,21 @@ impl Default for MockDriver {
 }
 
 impl MockDriver {
-    /// A mock whose VMs return `exit` from `wait()`.
+    /// A mock whose VMs return `exit` from `wait()` and report `Running`.
     pub fn with_exit(exit: VmExitStatus) -> Self {
         Self {
             exit,
+            status: VmStatus::Running,
             booted: Arc::new(Mutex::new(Vec::new())),
             guest_ends: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Set the `status()` the mock's VMs report — e.g. `Stopped` to model a
+    /// run-to-completion (builder) VM that has already powered off.
+    pub fn reporting_status(mut self, status: VmStatus) -> Self {
+        self.status = status;
+        self
     }
 
     /// The specs this driver has booted, in order.
@@ -75,6 +84,7 @@ impl VmmDriver for MockDriver {
         Ok(Box::new(MockRunningVm {
             id: VmId(spec.name.clone()),
             exit: self.exit,
+            status: self.status.clone(),
             guest_ends: Arc::clone(&self.guest_ends),
         }))
     }
@@ -83,6 +93,7 @@ impl VmmDriver for MockDriver {
         Ok(Box::new(MockRunningVm {
             id: id.clone(),
             exit: self.exit,
+            status: self.status.clone(),
             guest_ends: Arc::clone(&self.guest_ends),
         }))
     }
@@ -93,6 +104,7 @@ impl VmmDriver for MockDriver {
 pub struct MockRunningVm {
     id: VmId,
     exit: VmExitStatus,
+    status: VmStatus,
     guest_ends: GuestEnds,
 }
 
@@ -113,7 +125,7 @@ impl RunningVm for MockRunningVm {
         Ok(())
     }
     fn status(&self) -> Result<VmStatus> {
-        Ok(VmStatus::Running)
+        Ok(self.status.clone())
     }
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
         let (host, guest) = UnixStream::pair().map_err(|e| anyhow!("socketpair: {e}"))?;

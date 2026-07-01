@@ -3,6 +3,7 @@
 //! egress endpoint (the builder carries no untrusted workload), no virtio-fs.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -10,7 +11,7 @@ use mvm_build::builder_disk_transport::{
     InputTree, create_output_disk, pack_input_disk, read_output_disk,
 };
 use mvm_core::config::vm_state_dir;
-use mvm_core::vm_backend::VmExitStatus;
+use mvm_core::vm_backend::VmStatus;
 
 use super::spec::{BuilderSpecInputs, builder_spec};
 use crate::driver::VmmDriver;
@@ -18,6 +19,11 @@ use crate::driver::VmmDriver;
 /// The minimum input-disk size; the disk grows past this to hold the packed
 /// `{job, work, mvm-bins}` tar (a few MiB of scripts + cross-compiled binaries).
 const INPUT_DISK_MIN: u64 = 16 << 20;
+
+/// Host-side backstop while waiting for the builder VM to power off. The VM's own
+/// run budget (`MVM_HVF_TIMEOUT`) is the real bound — this only guards against a
+/// supervisor that never drops its PID file. A `nix build` can take many minutes.
+const BUILD_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Resolved inputs for one builder run. The caller (the builder-selection layer)
 /// resolves the builder VM image + the persistent nix-store disk and stages the
@@ -44,7 +50,10 @@ pub struct BuilderBuild<'a> {
 
 /// What a builder run produced.
 pub struct BuilderOutcome {
-    pub exit: VmExitStatus,
+    /// True if the builder VM powered off on its own; false if the host-side
+    /// backstop fired first. The authoritative build exit code lives in the
+    /// output dir's `result` sidecar (the caller finalizes it).
+    pub stopped: bool,
     /// Directory the guest's output tar was extracted into (`rootfs.ext4`,
     /// `result`, `boot-timings.json`). The caller finalizes it into a
     /// `BuilderArtifacts`.
@@ -108,10 +117,26 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         });
 
         let vm = self.driver.boot(&spec)?;
-        let exit = vm.wait()?;
+        // A builder is run-to-completion: the guest powers off after the job, and
+        // `status()` flips to Stopped/Failed when the supervisor drops its PID
+        // file. (Unlike a workload, it reports no exit code over vsock — its result
+        // is the output tar's `result` sidecar.)
+        let deadline = Instant::now() + BUILD_WAIT_TIMEOUT;
+        let mut stopped = false;
+        while Instant::now() < deadline {
+            if !matches!(vm.status()?, VmStatus::Running) {
+                stopped = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
         // The guest wrote a tar onto the output disk; extract it host-side.
         read_output_disk(&output_disk, &output_dir)?;
-        Ok(BuilderOutcome { exit, output_dir })
+        Ok(BuilderOutcome {
+            stopped,
+            output_dir,
+        })
     }
 }
 
@@ -145,11 +170,9 @@ mod tests {
             std::fs::write(f, b"x").unwrap();
         }
 
-        let exit = VmExitStatus {
-            code: Some(0),
-            success: true,
-        };
-        let runner = BuilderRunner::new(MockDriver::with_exit(exit));
+        // A run-to-completion builder: the mock VM reports Stopped so the
+        // poll-until-off loop returns at once.
+        let runner = BuilderRunner::new(MockDriver::default().reporting_status(VmStatus::Stopped));
         let outcome = runner
             .build(&BuilderBuild {
                 name: "bld-unit",
@@ -165,7 +188,7 @@ mod tests {
             })
             .expect("build orchestrates against the mock driver");
 
-        assert_eq!(outcome.exit, exit);
+        assert!(outcome.stopped);
         // A single builder spec was booted: 4 disks, trusted, builder cmdline.
         let specs = runner.driver.booted_specs();
         assert_eq!(specs.len(), 1);
