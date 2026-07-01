@@ -212,6 +212,18 @@ impl VmmDriver for InHouseDriver {
             pid_file: paths.pid_file,
         }))
     }
+
+    fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
+        // The handle is entirely disk-backed (the supervisor's pid file + the
+        // persisted workload-exit code under the VM's state dir), so reattaching is
+        // just re-deriving those paths — no live boot state to recover.
+        let state_dir = vm_state_dir(&id.0);
+        Ok(Box::new(InHouseRunningVm {
+            pid_file: state_dir.join(PID_FILE_NAME),
+            state_dir,
+            id: id.clone(),
+        }))
+    }
 }
 
 /// A live in-house VM: the detached `mvm-hvf-supervisor` tracked by its PID file,
@@ -309,6 +321,17 @@ mod tests {
         assert_eq!(d.name(), "hvf");
         assert!(d.capabilities().vsock);
         assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
+    }
+
+    #[test]
+    fn attach_builds_a_disk_backed_handle_that_reports_stopped_for_a_missing_vm() {
+        // Reattaching needs no boot state — it re-derives the state dir. A VM that
+        // never ran (or has exited) reports Stopped rather than erroring.
+        let vm = InHouseDriver::new()
+            .attach(&VmId("hvf-nonexistent-attach-test-vm".into()))
+            .unwrap();
+        assert_eq!(vm.id().0, "hvf-nonexistent-attach-test-vm");
+        assert_eq!(vm.status().unwrap(), VmStatus::Stopped);
     }
 
     #[test]

@@ -78,6 +78,14 @@ impl VmmDriver for MockDriver {
             guest_ends: Arc::clone(&self.guest_ends),
         }))
     }
+
+    fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
+        Ok(Box::new(MockRunningVm {
+            id: id.clone(),
+            exit: self.exit,
+            guest_ends: Arc::clone(&self.guest_ends),
+        }))
+    }
 }
 
 /// A `MockDriver`'s live VM: a scripted exit + a per-port loopback vsock whose
@@ -157,6 +165,19 @@ mod tests {
         );
         assert_eq!(vm.id(), &VmId("probe".into()));
         assert_eq!(driver.name(), "mock");
+    }
+
+    #[test]
+    fn attach_returns_a_handle_for_the_id_without_booting() {
+        let driver = MockDriver::with_exit(VmExitStatus {
+            code: Some(7),
+            success: false,
+        });
+        let vm = driver.attach(&VmId("already-running".into())).unwrap();
+        assert_eq!(vm.id(), &VmId("already-running".into()));
+        assert_eq!(vm.wait().unwrap().code, Some(7));
+        // attach records no boot — only boot() pushes a spec.
+        assert!(driver.booted_specs().is_empty());
     }
 
     #[test]
