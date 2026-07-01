@@ -122,3 +122,29 @@ no backend flipped, no legacy path deleted — all additive):
   one refused, with the gate now in the endpoint. Only after GREEN: delete the
   in-loop `EgressGate` from `HostChannels`/the run loop and `network_policy` from
   `HvfSupervisorConfig` (and the now-dead `EgressProxy`, once nothing routes to it).
+
+### P1.5 blocker found — the on-disk echo init is stale and protocol-incompatible
+
+`/tmp/hvf-init-echo/init.c` (the initramfs the `hvf-backend-egress` example boots)
+is stale in two ways that break the relay live-verify:
+
+1. It **hardcodes** `192.168.4.23:19099` and does NOT read `mvm.egress_target`
+   from `/proc/cmdline` — despite the example already injecting the discovered LAN
+   address via `MVM_HVF_BOOTARGS_EXTRA`. A hardcoded dev IP is exactly the
+   masquerade-as-egress-bug trap; the init must read the cmdline.
+2. It sends the target with **no trailing `\n`** (it relied on the old in-loop
+   `EgressProxy` consuming the first *vsock frame* as the target). In the relay
+   model the run loop pipes the guest stream byte-for-byte to the endpoint UDS, so
+   vsock frame boundaries are lost — the endpoint's `raw_egress::read_target_line`
+   needs a `\n` delimiter (which the real `mvm-guest-helpers::egress_client`
+   already sends). So the echo init MUST send `mvm.egress_target` + `\n`, then the
+   request bytes.
+
+**P1.5 therefore includes authoring a correct minimal echo init** (arm64 freestanding
+C or a small Rust `no_std`/musl static bin): parse `mvm.egress_target=<host:port>`
+from `/proc/cmdline`, connect vsock `EGRESS_PORT`, write `target\n`, write `ping`,
+read the reply, print `egress reply over vsock: <reply>`, then write the exit port.
+Rebuild the cpio. Prove BOTH the admitted destination (reply received) and a
+non-admitted one (no reply — refused at the endpoint gate). There is no in-repo
+build script for this initramfs today; add one under the example's tooling so the
+proof is reproducible rather than a `/tmp` artifact.
