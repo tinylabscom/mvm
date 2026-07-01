@@ -17,6 +17,8 @@ pub mod exit_capture;
 pub mod guest_netd;
 /// Host ingress-broker decision logic (host listener only by explicit policy).
 pub mod ingress_broker;
+/// Ingress-broker handler: compose decision + trace into an audit record.
+pub mod ingress_handler;
 /// `mvm-init` supervisor core logic: metadata → exec spec, marker progression.
 pub mod init_supervisor;
 pub mod kernel_advisory;
