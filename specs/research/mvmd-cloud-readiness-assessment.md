@@ -3,7 +3,7 @@
 **Status:** Research (handoff)
 **Date:** 2026-07-01
 **Audience:** engineering partner picking up the cloud-tier security work
-**Related:** `specs/notes/mvm-client-facade-design.md` (the client facade this sprint started from), ADR-002 (local security posture), ADR-104 (to be written — cloud trust boundary)
+**Related:** `specs/notes/mvm-client-facade-design.md` (the client facade this sprint started from), ADR-002 (local security posture), `specs/adrs/104-cloud-control-plane-trust-boundary.md` (cloud trust boundary — the superset threat model this assessment motivates)
 
 ## TL;DR
 
