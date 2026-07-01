@@ -23,6 +23,8 @@ pub mod guest_netd;
 pub mod ingress_broker;
 /// Ingress-broker handler: compose decision + trace into an audit record.
 pub mod ingress_handler;
+/// Ingress secret redaction (mask known secret values before they reach the guest).
+pub mod ingress_redaction;
 /// `mvm-init` supervisor core logic: metadata → exec spec, marker progression.
 pub mod init_supervisor;
 pub mod kernel_advisory;

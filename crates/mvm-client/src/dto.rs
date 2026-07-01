@@ -48,6 +48,11 @@ impl MachineFilter {
     pub fn all() -> Self {
         Self::default()
     }
+
+    /// Whether `m` passes this filter. Absent fields don't constrain.
+    pub fn matches(&self, m: &MachineState) -> bool {
+        self.name.as_ref().is_none_or(|n| *n == m.name) && self.status.is_none_or(|s| s == m.status)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
