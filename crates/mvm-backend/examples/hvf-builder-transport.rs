@@ -43,19 +43,20 @@ fn main() {
     }
     std::fs::write(work.join("marker"), b"HELLO-FROM-WORK").unwrap();
     std::fs::write(bins.join("placeholder"), b"bin").unwrap();
-    // Trivial job — no nix. Prove the transport moves data both ways: read an
-    // input from /work, write an artifact to /out. write_result drops /job/result;
-    // the guest folds both into the output tar.
-    std::fs::write(
-        job.join("cmd.sh"),
-        b"#!/bin/sh\nset -eu\n\
-          echo \"STEP1-OK marker=$(cat /work/marker)\" > /out/rootfs.ext4\n\
-          echo \"work-listing:\" >> /out/rootfs.ext4\n\
-          ls /work >> /out/rootfs.ext4\n\
-          echo \"mvm-bins-listing:\" >> /out/rootfs.ext4\n\
-          ls /mvm-bins >> /out/rootfs.ext4\n",
-    )
-    .unwrap();
+    // MVM_BUILDER_CMD_FILE overrides the job's cmd.sh (e.g. a nix build); default
+    // is a trivial no-nix job that proves the transport moves data both ways.
+    let default_cmd = "#!/bin/sh\nset -eu\n\
+         echo \"STEP1-OK marker=$(cat /work/marker)\" > /out/rootfs.ext4\n\
+         echo \"work-listing:\" >> /out/rootfs.ext4\n\
+         ls /work >> /out/rootfs.ext4\n\
+         echo \"mvm-bins-listing:\" >> /out/rootfs.ext4\n\
+         ls /mvm-bins >> /out/rootfs.ext4\n"
+        .to_string();
+    let cmd = match std::env::var("MVM_BUILDER_CMD_FILE") {
+        Ok(f) => std::fs::read_to_string(&f).expect("read MVM_BUILDER_CMD_FILE"),
+        Err(_) => default_cmd,
+    };
+    std::fs::write(job.join("cmd.sh"), cmd).unwrap();
 
     // Empty nix-store scratch — the guest formats + seeds it at boot.
     let nix_store = scratch.join("nix-store.img");
@@ -106,17 +107,23 @@ fn main() {
     }
     let body = std::fs::read_to_string(&rootfs_out).unwrap_or_default();
     println!("--- /out/rootfs.ext4 (written by the guest cmd.sh) ---\n{body}");
-    if let Ok(r) = std::fs::read_to_string(outcome.output_dir.join("result")) {
-        println!("--- result ---\n{r}");
-    }
-    if body.contains("STEP1-OK marker=HELLO-FROM-WORK") {
+    let result = std::fs::read_to_string(outcome.output_dir.join("result")).unwrap_or_default();
+    println!("--- result ---\n{result}");
+
+    let custom = std::env::var("MVM_BUILDER_CMD_FILE").is_ok();
+    let ok = if custom {
+        // A custom job (e.g. nix build) passes when it exited 0.
+        result.contains("\"exit_code\":0")
+    } else {
+        body.contains("STEP1-OK marker=HELLO-FROM-WORK")
+    };
+    if ok {
         println!(
-            "PROOF: the disk transport round-tripped on HVF — the input disk reached \
-             the guest, cmd.sh read /work and wrote /out, and the output tar came \
-             back to the host. No vz, no virtio-fs, no nix."
+            "PROOF: the builder ran on the in-house HVF VMM and the output tar came \
+             back to the host. No vz, no virtio-fs."
         );
     } else {
-        eprintln!("FAILED: output present but the expected marker is missing");
+        eprintln!("FAILED: job did not complete cleanly (see output + result above)");
         std::process::exit(1);
     }
 }
