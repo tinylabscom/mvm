@@ -50,6 +50,9 @@ pub mod persistent_builder;
 /// OCI-unpacked tree to ext4 rootfs image. The host only allocates the
 /// sparse file; formatting and copying happen inside the builder VM.
 pub mod rootfs;
+/// Self-hosting builder-rootfs bootstrap: inject freshly built mvm host binaries
+/// into a rootfs via an initramfs patcher on the in-house VMM (no legacy builder).
+pub mod rootfs_inject;
 pub mod stage0;
 pub mod template_reuse;
 /// Type-safe interface to the `mvm-vz-supervisor` binary —
