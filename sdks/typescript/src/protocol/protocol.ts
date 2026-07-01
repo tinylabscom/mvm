@@ -263,6 +263,10 @@ profile: AgentProfile
 verb: string
 }
 } | {
+VerbNotAuthorized: {
+verb: string
+}
+} | {
 IntegrationStatusReport: {
 integrations: IntegrationStateReport[]
 }
