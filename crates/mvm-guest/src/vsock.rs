@@ -1287,7 +1287,7 @@ pub enum RpcError {
     /// The pinned verb grant does not authorize this verb.
     #[error("verb {verb} not authorized by the session's verb grant")]
     VerbNotAuthorized {
-        /// `verb_name()` of the rejected request.
+        /// `kind_name()` (kebab-case) of the rejected request.
         verb: String,
     },
     /// The agent returned a response variant not in the verb's
@@ -1383,7 +1383,7 @@ pub fn enforce_verb_grant(
         None => None,
         Some(g) if g.permits(req.kind_name()) => None,
         Some(_) => Some(GuestResponse::VerbNotAuthorized {
-            verb: req.verb_name().to_string(),
+            verb: req.kind_name().to_string(),
         }),
     }
 }
@@ -6553,7 +6553,7 @@ mod rpc_client_tests {
         assert!(enforce_verb_grant(&GuestRequest::Ping, Some(&grant)).is_none());
         // ProdSafe but unlisted => denied
         let idle = GuestRequest::UpdateIdleTimeout { secs: 0 };
-        let idle_name = idle.verb_name();
+        let idle_name = idle.kind_name();
         match enforce_verb_grant(&idle, Some(&grant)) {
             Some(GuestResponse::VerbNotAuthorized { verb }) => assert_eq!(verb, idle_name),
             other => panic!("expected VerbNotAuthorized, got {other:?}"),

@@ -302,9 +302,9 @@ struct AgentBootState {
     inner: Mutex<BootStateInner>,
     profile: AgentProfile,
     boot_at: std::time::Instant,
-    /// Plan-bound verb capability grant for this session. `None` means
+    /// Pinned agent-verb grant from the admission handshake; `None` means
     /// no grant is pinned — the class gate (`allowed_in`) is the only
-    /// filter. Task 5 populates this from the admission handshake.
+    /// verb filter.
     verb_grant: Option<mvm_core::plan::VerbGrant>,
 }
 
