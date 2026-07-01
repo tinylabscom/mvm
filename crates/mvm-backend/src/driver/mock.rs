@@ -157,4 +157,27 @@ mod tests {
         assert_eq!(vm.id(), &VmId("probe".into()));
         assert_eq!(driver.name(), "mock");
     }
+
+    #[test]
+    fn mock_vsock_connect_loops_host_and_guest_both_ways() {
+        use std::io::{Read, Write};
+
+        let driver = MockDriver::default();
+        let vm = driver.boot(&sample_spec("v")).unwrap();
+
+        let mut host = vm.vsock_connect(5253).unwrap();
+        let mut guest = driver
+            .take_guest_end(vm.id(), 5253)
+            .expect("guest end registered by vsock_connect");
+
+        host.write_all(b"ping").unwrap();
+        let mut got = [0u8; 4];
+        guest.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"ping");
+
+        guest.write_all(b"pong").unwrap();
+        let mut back = [0u8; 4];
+        host.read_exact(&mut back).unwrap();
+        assert_eq!(&back, b"pong");
+    }
 }
