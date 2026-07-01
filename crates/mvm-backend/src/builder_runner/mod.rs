@@ -4,8 +4,10 @@
 //! egress endpoint, no virtio-fs. `spec` is pure (unit-testable without a VM);
 //! `runner` owns the disk prep + VM lifecycle.
 
+pub mod inhouse_builder;
 pub mod runner;
 pub mod spec;
 
+pub use inhouse_builder::InHouseBuilderVm;
 pub use runner::{BuilderBuild, BuilderOutcome, BuilderRunner};
 pub use spec::{BUILDER_CMDLINE, BuilderSpecInputs, builder_spec};
