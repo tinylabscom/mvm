@@ -1523,8 +1523,12 @@ pub fn load_pinned_verb_grant(
             return None;
         }
     };
-    // Derive the verifying key directly from envelope.pubkey_hex — the launcher
-    // signed both the grant and the envelope, so this is a self-consistent trust root.
+    // The verifying key rides in the same launcher-provisioned envelope as the grant,
+    // so this signature is an integrity check over a cmdline-provisioned blob — NOT proof
+    // of an independent issuer. Trust here derives entirely from kernel-cmdline provenance
+    // (only the launcher sets the cmdline that /init decodes into /run/mvm); a workload or a
+    // separate caller cannot forge it, but this does not provide cryptographic key
+    // separation from an independent anchor. A build-time-provisioned anchor is tracked.
     let host_key = match verifying_key_from_hex(&envelope.pubkey_hex) {
         Ok(k) => k,
         Err(e) => {

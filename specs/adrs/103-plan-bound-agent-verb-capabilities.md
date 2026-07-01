@@ -130,6 +130,22 @@ guest with the host-signer verifying key (or a delegation chain to it) and verif
 grant against it — separately from the per-session frame-signing key. This invariant is
 load-bearing; a Plan that collapses the two keys silently defeats the ADR.
 
+**Delivered status (Plan 216 — honest limitation).** The follow-on delivers the grant to
+the guest over the kernel cmdline (`mvm.verb_grant=`), and the host-signer public key
+rides *in the same envelope* as the grant. This means the delivered mechanism does **not**
+yet provide cryptographic key separation: the Ed25519 signature is an integrity check over
+a launcher-provisioned blob, and its trust root is entirely the kernel-cmdline provenance
+(only the trusted launcher sets the cmdline `/init` decodes into `/run/mvm/`). This is
+sound against the in-scope adversaries — an untrusted workload and a separate 5252 caller
+cannot forge the cmdline — but it is *trusted-channel provisioning*, not verification
+against an independent anchor. The obstacle is structural: the host-signer key is per-host
+and minted at admission, so no independent pre-provisioned anchor exists to check against.
+Achieving real key separation requires provisioning a trust anchor the grant-issuer cannot
+swap (e.g. a signing key baked into the verity-sealed image at build time) — tracked as a
+follow-up; until then, this ADR's "key separation" is an aspiration the delivered code does
+not meet, and the claim must not be promoted to the ADR-002 ledger on the strength of the
+cmdline mechanism alone.
+
 ### Denials are audited (claim-12 parity)
 
 A grant refusal returns a new wire-stable `GuestResponse::VerbNotAuthorized { verb }`
