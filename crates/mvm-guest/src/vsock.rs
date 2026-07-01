@@ -891,6 +891,31 @@ impl GuestRequest {
                 | (RequestClass::BuilderOnly, AgentProfile::Builder)
         )
     }
+
+    /// The kebab `kind_name()`s of every `ProdSafe` control verb —
+    /// the candidate members of an `agent_verbs` grant. Single source
+    /// of truth; the classification guard test keeps this in lockstep
+    /// with `class()`.
+    pub fn prod_safe_verb_names() -> &'static [&'static str] {
+        &[
+            "protocol-hello",
+            "ping",
+            "readiness-status",
+            "worker-status",
+            "sleep-prep",
+            "wake",
+            "integration-status",
+            "checkpoint-integrations",
+            "probe-status",
+            "primed-status",
+            "post-restore",
+            "entrypoint-status",
+            "run-entrypoint",
+            "mount-volume",
+            "unmount-volume",
+            "update-idle-timeout",
+        ]
+    }
 }
 
 /// Response from guest vsock agent to host.
@@ -5529,34 +5554,11 @@ mod tests {
     // profile classifier
     // ========================================================================
 
-    /// Every `GuestRequest` variant must classify as either `ProdSafe`
-    /// or `DevOnly` today. Compile-fail when a new variant is added
-    /// without being classified — the exhaustive match inside
-    /// `class()` guarantees that, and this test fails closed if the
-    /// variant ever lands in an unexpected class.
-    #[test]
-    fn test_request_class_coverage_matches_sealed_prod_allowlist() {
-        let prod_safe_verbs: &[&str] = &[
-            "ProtocolHello",
-            "WorkerStatus",
-            "SleepPrep",
-            "Wake",
-            "Ping",
-            "IntegrationStatus",
-            "CheckpointIntegrations",
-            "ProbeStatus",
-            "RunEntrypoint",
-            "PostRestore",
-            "EntrypointStatus",
-            "ReadinessStatus",
-            "MountVolume",
-            "UnmountVolume",
-            "UpdateIdleTimeout",
-        ];
-
-        // One representative `GuestRequest` value per variant. Used to
-        // exercise `class()` + `verb_name()` together.
-        let all: Vec<GuestRequest> = vec![
+    /// One representative value per `GuestRequest` variant. Both the
+    /// classification test and the `prod_safe_verb_names` guard share
+    /// this list — a single source of truth that must grow with the enum.
+    fn every_guest_request_variant() -> Vec<GuestRequest> {
+        vec![
             GuestRequest::ProtocolHello {
                 host_protocol_version: 1,
                 min_supported_version: 1,
@@ -5681,7 +5683,42 @@ mod tests {
                 code: "x".into(),
                 timeout_secs: Some(1),
             },
+            GuestRequest::PrimedStatus,
+            GuestRequest::ExecBatch {
+                stages: vec![],
+                commands: vec![],
+                timeout_secs: None,
+            },
+        ]
+    }
+
+    /// Every `GuestRequest` variant must classify as either `ProdSafe`
+    /// or `DevOnly` today. Compile-fail when a new variant is added
+    /// without being classified — the exhaustive match inside
+    /// `class()` guarantees that, and this test fails closed if the
+    /// variant ever lands in an unexpected class.
+    #[test]
+    fn test_request_class_coverage_matches_sealed_prod_allowlist() {
+        let prod_safe_verbs: &[&str] = &[
+            "ProtocolHello",
+            "WorkerStatus",
+            "SleepPrep",
+            "Wake",
+            "Ping",
+            "IntegrationStatus",
+            "CheckpointIntegrations",
+            "ProbeStatus",
+            "PrimedStatus",
+            "RunEntrypoint",
+            "PostRestore",
+            "EntrypointStatus",
+            "ReadinessStatus",
+            "MountVolume",
+            "UnmountVolume",
+            "UpdateIdleTimeout",
         ];
+
+        let all = every_guest_request_variant();
 
         // Every variant has a stable verb_name; that name appears in
         // exactly one of the two classification buckets.
@@ -5713,6 +5750,36 @@ mod tests {
                 "SealedProd verb {v} missing from coverage"
             );
         }
+    }
+
+    #[test]
+    fn prod_safe_verb_names_matches_classification() {
+        let listed: std::collections::BTreeSet<&str> = GuestRequest::prod_safe_verb_names()
+            .iter()
+            .copied()
+            .collect();
+        for req in every_guest_request_variant() {
+            let name = req.kind_name();
+            let is_prod = matches!(req.class(), RequestClass::ProdSafe);
+            assert_eq!(
+                listed.contains(name),
+                is_prod,
+                "{name}: listed={} but class ProdSafe={}",
+                listed.contains(name),
+                is_prod
+            );
+        }
+        // No duplicates, all non-empty.
+        assert_eq!(
+            listed.len(),
+            GuestRequest::prod_safe_verb_names().len(),
+            "duplicate in prod_safe_verb_names"
+        );
+        assert!(
+            GuestRequest::prod_safe_verb_names()
+                .iter()
+                .all(|n| !n.is_empty())
+        );
     }
 
     #[test]

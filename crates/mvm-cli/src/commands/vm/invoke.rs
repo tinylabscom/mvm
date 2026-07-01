@@ -179,6 +179,8 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
                             shares: vec![],
                             redaction: mvm_core::policy::RedactionPolicy::default(),
                             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+                            agent_verb_override: vec![],
+                            is_sealed_prod: true,
                         })?;
                         let Some(c) = ctx else { return Ok(None) };
                         // Persist the bare admitted plan to the per-VM state dir
