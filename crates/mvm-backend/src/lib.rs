@@ -102,6 +102,9 @@ pub mod vsock_egress_bridge;
 pub mod vz;
 // Rust client for the Vz supervisor's control socket
 // (PAUSE / RESUME / BALLOON / SAVE). Used by VzBackend.
+/// The builder role layer: boots a builder VM over the `VmmDriver` seam with the
+/// disk-only job/artifact transport (trusted, no egress endpoint, no virtio-fs).
+pub mod builder_runner;
 pub mod vz_control;
 /// `WorkloadBackend` marker trait — the type-level permission to carry an
 /// untrusted workload. The admitted launch path accepts `&dyn WorkloadBackend`
