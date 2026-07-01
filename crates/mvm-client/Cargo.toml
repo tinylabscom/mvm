@@ -4,10 +4,22 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# The remote GatewayBackend (REST -> mvmd-gateway). Off by default so a
+# pure-local consumer stays light; a remote/studio build turns it on.
+remote = ["dep:reqwest"]
+# The in-process LocalBackend (this host's microVMs). Pulls the runtime/backend
+# crates, so a remote-only build (studio) leaves it off.
+local = ["dep:mvm-backend", "dep:mvm-core"]
+
 [dependencies]
 async-trait.workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror = "1"
+reqwest = { workspace = true, optional = true }
+mvm-backend = { workspace = true, optional = true, default-features = false }
+mvm-core = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

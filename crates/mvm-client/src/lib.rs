@@ -5,9 +5,15 @@
 //! that owns the path (the local host, or mvmd), never by this client.
 
 pub mod client;
+pub mod connect;
 pub mod dto;
 pub mod error;
+#[cfg(feature = "remote")]
+pub mod gateway;
+#[cfg(feature = "local")]
+pub mod local;
 pub mod mock;
 
 pub use client::MvmClient;
+pub use connect::{Target, connect};
 pub use error::{MvmError, Result};
