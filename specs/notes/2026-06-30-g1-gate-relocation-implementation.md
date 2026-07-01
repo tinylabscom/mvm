@@ -83,3 +83,42 @@ attack surface). So `EndpointConfig` carries an egress mode alongside the policy
 **Invariant:** the relay has no upstream path except through the gating endpoint,
 so there is no window where guest egress reaches the network ungated. The live
 verdict confirms it adversarially (a non-admitted destination stays blocked).
+
+## Status (as of 2026-06-30)
+
+Done, committed, unit-tested (fmt / clippy / `check-vsock-only-egress` all clean;
+no backend flipped, no legacy path deleted — all additive):
+
+- **P1.1** `feat(hostd): substitution endpoint gains the claim-10 egress gate` —
+  `EndpointConfig.network_policy: Option<NetworkPolicy>`; `assemble` builds the
+  shared `EgressGate`; `SubstitutionService::process` refuses an unadmitted
+  destination before substitute/forward. `None` ⇒ ungated (legacy). Tests prove
+  no secret crosses on a denial.
+- **P1.2** `feat(hostd): endpoint gains a raw-TCP egress serve mode` —
+  `EndpointConfig.egress_mode: {Wire(default), Raw}`; `raw_egress::serve_raw_egress`
+  reads `host:port\n`, gates via the same `EgressGate`, connects + splices. The
+  endpoint is now the unified bridge for BOTH protocols.
+- **P1.3** `feat(backend): in-house VMM run loop gains a pure-relay egress mode` —
+  `HostChannels.egress_relay` / `HvfSupervisorConfig.egress_relay_socket`;
+  `SubstitutionBridge::set_relay_only` skips the in-loop gate + parse and pipes
+  bytes to the endpoint. Relay mode drops the in-loop `EgressGate` entirely.
+
+### Remaining (do NOT flip until the live verdict is green)
+
+- **P1.4 — wire `InHouseDriver::boot` + a live harness.** `boot` maps the
+  policy-free `VmmSpec` → a relay `HvfSupervisorConfig` (`egress_relay_socket` =
+  the `EGRESS_PORT` `VsockPort.host_uds`; no `network_policy`), spawns
+  `mvm-hvf-supervisor`, and returns a `RunningVm` wrapping the supervisor child +
+  `workload.exit` + pid file (extract the mechanics from `HvfBackend::start`). The
+  NetworkPolicy stays with the caller, which spawns the endpoint bound to that UDS
+  with `network_policy: Some(policy)` + `egress_mode: Raw`. (Full `WorkloadRunner`
+  is Phase 2; the Phase-1 live proof can use a thin harness / the example.)
+- **P1.5 — live-verify on HVF, then delete the legacy gate.** The example's echo
+  guest speaks the raw SOCKS→`host:port` protocol, so the endpoint runs
+  `egress_mode: Raw`. Rebuild the aux bins explicitly
+  (`cargo build -p mvm-vm-host --bin mvm-hvf-supervisor`,
+  `cargo build -p mvm-hostd --bin mvm-substitution-endpoint`) — `cargo run/test`
+  won't. The proof must show: admitted LAN destination reachable AND a non-admitted
+  one refused, with the gate now in the endpoint. Only after GREEN: delete the
+  in-loop `EgressGate` from `HostChannels`/the run loop and `network_policy` from
+  `HvfSupervisorConfig` (and the now-dead `EgressProxy`, once nothing routes to it).
