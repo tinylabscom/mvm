@@ -637,3 +637,53 @@ Expected: clean. The moved modules' tests (`egress_gate`, `egress_proxy`, `subst
 git add -A
 git commit -m "refactor(backend): promote the vsock egress bridge out of the vmm device model"
 ```
+
+---
+
+### S1b — G1 gate-relocation design (implementation-ready)
+
+**Current wiring (verified in code):** `mvm-hvf-supervisor` builds
+`EgressGate::from_network_policy(cfg.network_policy, pins, now)` in-process and passes it
+into `hvf::boot_kernel_until` via `HostChannels { egress, agent_socket, substitution_socket }`.
+`vmm::run` consumes `HostChannels.egress` in its async egress delivery (`drain_egress`), gating
++ proxying the guest's `EGRESS_PORT` stream itself; bound-secret flows are relayed to
+`substitution_socket` (the per-VM `mvm-substitution-endpoint`). So the claim-10 gate lives **in
+the guest's run loop**, inside the supervisor process.
+
+**G1 target:** the gate moves out of the run loop into the host-side bridge, so the driver is
+pure mechanics.
+
+1. **Endpoint becomes the unified bridge.** `mvm-substitution-endpoint` gains the claim-10 gate:
+   `EndpointConfig` carries the resolved `NetworkPolicy` (+ DNS pins); the endpoint builds the
+   `EgressGate` and refuses a non-admitted destination **before** connecting/substituting. It
+   already owns substitution (claims 12/13), so it becomes the single `vsock_egress_bridge`
+   process (gate + substitution in one endpoint — ADR-101's intent).
+2. **Run loop becomes a relay.** `HostChannels` drops `egress: EgressGate`; the run loop relays
+   the guest's `EGRESS_PORT` stream straight to a host UDS (the endpoint). Mechanically this is
+   what it already does for `substitution_socket` — generalize it to carry *all* egress, not just
+   bound-secret flows. `vmm/egress_proxy` (the in-run-loop gate+proxy) is deleted from this path.
+3. **Config loses policy.** `HvfSupervisorConfig` drops `network_policy`; it gains (or reuses
+   `substitution_socket` as) the single egress-relay UDS. The supervisor no longer resolves pins
+   or builds a gate.
+4. **Runner owns the gate.** `WorkloadRunner` spawns the endpoint with the resolved policy (+ pins)
+   and threads its UDS into the `VmmSpec`'s `EGRESS_PORT` `VsockPort.host_uds`. `InHouseDriver::boot`
+   maps the (policy-free) `VmmSpec` → the relay config + spawns the supervisor + returns a `RunningVm`.
+
+**Migration (additive-first, no flag day):**
+- Add the relay mode to the supervisor/run loop *alongside* the legacy in-loop gate (select on
+  whether the config carries a policy vs a relay socket) — backward compatible; the current
+  `HvfBackend::start` path keeps working.
+- Add the gate to the endpoint (unit-test: admitted destination forwarded, non-admitted refused,
+  no raw secret crosses).
+- Wire `InHouseDriver::boot` + `WorkloadRunner` to the relay path.
+- **Live-verify (the adversarial gate):** the `examples/hvf-backend-egress` proof (address-agnostic)
+  must still show the guest reaching the admitted destination **and** a non-admitted one refused —
+  i.e. claim-10 enforcement is preserved with the gate now in the endpoint, not the run loop. Only
+  after a green live verdict: delete the legacy in-loop gate + `network_policy` from the config.
+
+**Security invariant to hold throughout:** there must be **no window** where the guest's egress
+reaches the network without passing the gate. Because the endpoint gates *before* it connects
+upstream, and the run loop only relays to the endpoint (never dials upstream itself), the
+no-bypass property holds by construction — the relay has no path to the network except through the
+gating endpoint. This is the property the live verification must confirm adversarially (a
+non-admitted destination stays blocked).
