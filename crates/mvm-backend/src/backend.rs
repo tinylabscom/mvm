@@ -11,6 +11,7 @@ use mvm_core::vm_backend::{
 // (`config`, `shell`, `runtime_meta`) lives in `crate::base`.
 use crate::base::config::{PortMapping, VMS_DIR, VmSlot};
 use crate::base::shell::run_in_vm_stdout;
+use crate::hvf_backend::HvfBackend;
 use crate::image::RuntimeVolume;
 use crate::libkrun::LibkrunBackend;
 use crate::microvm::{DriveFile, FlakeRunConfig};
@@ -477,6 +478,12 @@ pub enum AnyBackend {
     /// [`crate::mock::MockBackend`] for the rationale and security
     /// profile (Tier 3 / claims unknown).
     Mock(MockBackend),
+    /// Raw HVF — Hypervisor.framework on macOS / Apple silicon (Plan 214),
+    /// driven by the unified `vmm::run` loop via the detached
+    /// `mvm-hvf-supervisor`. Opt-in via `--hypervisor hvf` / `MVM_BACKEND=hvf`;
+    /// `auto_select` doesn't pick it yet (Vz remains the macOS-26 default until
+    /// HVF reaches workload parity). The destination macOS backend (ADR-098).
+    Hvf(HvfBackend),
 }
 
 impl AnyBackend {
@@ -628,6 +635,10 @@ impl AnyBackend {
             AnyBackend::Vz(b) => Some(b),
             AnyBackend::Mock(b) => Some(b),
             AnyBackend::Qemu(_) => None,
+            // HVF carries no untrusted workload yet — host-mediated networking +
+            // default-deny egress (claim 10) aren't wired, so it's barred from the
+            // workload path like Qemu until that parity lands.
+            AnyBackend::Hvf(_) => None,
         }
     }
 
@@ -975,6 +986,20 @@ mod tests {
     }
 
     #[test]
+    fn test_any_backend_from_hypervisor_hvf() {
+        // `--hypervisor hvf` (and the `hypervisor` alias) resolve to HvfBackend.
+        for sel in ["hvf", "hypervisor"] {
+            let backend = AnyBackend::from_hypervisor(sel);
+            assert!(matches!(backend, AnyBackend::Hvf(_)), "selector {sel}");
+            assert_eq!(backend.name(), "hvf");
+        }
+        assert_eq!(
+            AnyBackend::from_hypervisor("hvf").kind(),
+            catalog::BackendKind::Hvf
+        );
+    }
+
+    #[test]
     fn test_any_backend_from_hypervisor_unknown_defaults() {
         let backend = AnyBackend::from_hypervisor("unknown");
         assert_eq!(backend.name(), "firecracker");
@@ -1117,6 +1142,16 @@ mod tests {
                     None,
                     None,
                     false,
+                    false,
+                    false,
+                ),
+                (
+                    "hvf",
+                    vec!["hypervisor"],
+                    BackendTier::Tier2,
+                    Some("hvf.pid"),
+                    Some(5),
+                    true,
                     false,
                     false,
                 ),

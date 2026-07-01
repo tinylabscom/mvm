@@ -99,6 +99,16 @@ VmBackend (product/CLI/mvmd) ─ AnyBackend dispatch
   Mock-tested with a scripted vCPU (7 tests: read-completion, write+offset, IRQ
   raise, PIO-by-port + RAZ, cancel, exception hook, vtimer); compiles on macOS +
   both Linux targets.
+- ✅ **HVF `VmBackend` + selection.** `mvm-hvf-supervisor` (the detached per-VM
+  host process, `mvm-vm-host`) self-signs the hypervisor entitlement, reads an
+  `HvfSupervisorConfig` (in `mvm-build`, shared with the backend) on stdin, boots
+  via `boot_kernel`→`vmm::run`, and captures `console.log` + a PID file.
+  `HvfBackend` (always-compiled `crate::hvf_backend`) implements the lifecycle
+  over it — `start` spawns + waits for the PID file, `stop`/`status`/`list`/`logs`
+  track it — and is registered in the catalog + `AnyBackend` so
+  `--hypervisor hvf` / `MVM_BACKEND=hvf` select it. Live-verified end to end on
+  Apple silicon (start → status Running → guest to PID 1 + virtio-blk → logs →
+  stop). `as_workload_backend` returns `None` until egress parity lands.
 - ✅ **HVF boots a live arm64 Linux guest through the unified loop.**
   `hvf::kernel_boot` now wraps its raw vCPU in `HvfVcpu` and drives it via
   `vmm::run`: the inline `sys` decode/dispatch loop is gone; PL011/virtio-blk/

@@ -76,6 +76,10 @@ pub struct KernelBootResult {
     pub final_pc: u64,
     /// Bytes the guest sent to the host over virtio-vsock.
     pub vsock_received: Vec<u8>,
+    /// Workload exit code, if the guest reported one over the workload-exit vsock
+    /// port (the transient run-to-exit signal). `None` for a run that ended by
+    /// timeout/stop without a workload-exit report.
+    pub workload_exit_code: Option<i32>,
 }
 
 /// Boot `image` (an arm64 `Image`) under HVF, optionally with an `initramfs`
@@ -86,6 +90,33 @@ pub fn boot_kernel(
     disk: Option<&[u8]>,
     vsock: bool,
     timeout: Duration,
+) -> Result<KernelBootResult, HvfError> {
+    static NEVER_STOP: AtomicBool = AtomicBool::new(false);
+    boot_kernel_impl(image, initramfs, disk, vsock, timeout, &NEVER_STOP)
+}
+
+/// Like [`boot_kernel`], but also stops as soon as `stop` is set — a
+/// persistent-until-stop VM. The supervisor sets `stop` from a SIGTERM handler so
+/// `HvfBackend::stop` ends the guest cleanly (console flushed) instead of a
+/// timeout. `timeout` still caps the run as a backstop.
+pub fn boot_kernel_until(
+    image: &[u8],
+    initramfs: Option<&[u8]>,
+    disk: Option<&[u8]>,
+    vsock: bool,
+    timeout: Duration,
+    stop: &'static AtomicBool,
+) -> Result<KernelBootResult, HvfError> {
+    boot_kernel_impl(image, initramfs, disk, vsock, timeout, stop)
+}
+
+fn boot_kernel_impl(
+    image: &[u8],
+    initramfs: Option<&[u8]>,
+    disk: Option<&[u8]>,
+    vsock: bool,
+    timeout: Duration,
+    stop: &'static AtomicBool,
 ) -> Result<KernelBootResult, HvfError> {
     // Validate it's an arm64 Image; we load at the fixed boot-protocol offset.
     let _hdr = kernel_image::parse(image).map_err(|_| HvfError::BadKernel)?;
@@ -161,7 +192,7 @@ pub fn boot_kernel(
             dealloc(ram, layout);
             return Err(HvfError::VmCreate(rc));
         }
-        let r = run(ram, entry, dtb_addr, disk, vsock, timeout);
+        let r = run(ram, entry, dtb_addr, disk, vsock, timeout, stop);
         hv_vm_destroy();
         r
     };
@@ -180,6 +211,7 @@ unsafe fn run(
     disk: Option<&[u8]>,
     vsock: bool,
     timeout: Duration,
+    stop: &'static AtomicBool,
 ) -> Result<KernelBootResult, HvfError> {
     unsafe {
         // In-kernel GICv3 — created after the VM, before any vCPU. Base
@@ -234,7 +266,8 @@ unsafe fn run(
         }
 
         // Watchdog: a booting kernel never exits on its own, so force the vCPU out
-        // after `timeout` via the seam's cross-thread cancel.
+        // after `timeout`, or as soon as `stop` is set (graceful stop), via the
+        // seam's cross-thread cancel.
         let done = Arc::new(AtomicBool::new(false));
         let done_w = done.clone();
         let handle = vcpu.exit_token();
@@ -244,6 +277,9 @@ unsafe fn run(
             while waited < timeout {
                 if done_w.load(Ordering::Relaxed) {
                     return;
+                }
+                if stop.load(Ordering::Relaxed) {
+                    break; // requested stop → force-exit below
                 }
                 std::thread::sleep(step);
                 waited += step;
@@ -264,6 +300,11 @@ unsafe fn run(
         });
         let mut vsock_dev =
             vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, RAM_SIZE));
+        // Transient run-to-exit: a guest write of the exit code to the workload
+        // exit port stops the run (and is captured below).
+        if let Some(v) = vsock_dev.as_mut() {
+            v.capture_workload_exit(stop);
+        }
 
         // Diagnostics gathered by the exception hook (HVC/PSCI + other traps).
         let mut hvc_calls = 0usize;
@@ -339,6 +380,7 @@ unsafe fn run(
         };
         if let Some(vs) = &vsock_dev {
             r.vsock_received = vs.received.clone();
+            r.workload_exit_code = vs.workload_exit_code;
         }
         Ok(r)
     }

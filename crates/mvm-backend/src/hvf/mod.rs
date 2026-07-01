@@ -12,7 +12,6 @@
 //! `com.apple.security.hypervisor` entitlement (already applied by
 //! [`crate::codesign`]).
 
-mod backend;
 mod boot_smoke;
 mod console_smoke;
 mod hv_impl;
@@ -20,8 +19,7 @@ mod kernel_boot;
 mod sys;
 mod vcpu;
 
-pub use backend::HvfBackend;
 pub use boot_smoke::{BootProof, HvfError, MAGIC, boot_smoke, probe_available};
 pub use console_smoke::{ConsoleProof, console_smoke};
 pub use hv_impl::{HvfHandle, HvfVcpu, HvfVm};
-pub use kernel_boot::{KernelBootResult, boot_kernel};
+pub use kernel_boot::{KernelBootResult, boot_kernel, boot_kernel_until};
