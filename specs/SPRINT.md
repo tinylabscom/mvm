@@ -3444,3 +3444,11 @@ macOS 14+. All libkrun pool tests pass untouched. 298 mvm-backend lib tests, 974
 tests, 5117 workspace tests all green. Self-replenish landed in #840: a Vz claim that
 drains the pool triggers a detached background `pool warm` re-warm so the pool is
 self-maintaining (claim returns fast; the pool tops itself back up off the hot path).
+
+### Plan 217 — Agent-verbs population — COMPLETE
+
+All three tasks merged on branch `feat-plan-215-agent-verbs-populate`:
+
+- [x] Task 1: `GuestRequest::prod_safe_verb_names()` — canonical ProdSafe verb list in mvm-guest, guarded by `prod_safe_verb_names_matches_classification`.
+- [x] Task 2: `default_agent_verbs(is_sealed_prod, has_shares) -> Option<Vec<VerbId>>` + `parse_agent_verb_override(&[String]) -> Result<Option<Vec<VerbId>>>` in `crates/mvm-cli/src/commands/vm/agent_verbs.rs`. Five tests (dev/prod/shares/devonly/override).
+- [x] Task 3: `--agent-verb VERB` (repeatable) added to `MachineRunArgs` (the live `machine run` surface; the flag also covers transient runs via `RunArgs.agent_verb` threaded into the admit closure). `AdmitPlanForBootParams` gains `agent_verb_override: Vec<String>` + `is_sealed_prod: bool`; `SynthesisInput.agent_verbs` wired at `admit_plan_for_boot` as `parse_agent_verb_override(&p.agent_verb_override)?.or_else(|| default_agent_verbs(p.is_sealed_prod, !p.shares.is_empty()))`. `MachineSpec.agent_verb` persists the CLI override for persistent machines; `PersistentImageStartParams.agent_verb` threads it to the admit site; `start_persistent_oci_machine` derives `is_sealed_prod = profile != "dev"`. Test `up_populates_agent_verbs_default_and_override` in `up.rs`; `agent_verb_flag_persisted_in_spec_and_survives_roundtrip` + `agent_verb_forwarded_to_run_args_on_transient_path` + `agent_verb_empty_on_transient_path_when_not_specified` in `machine/mod.rs`. **Note:** runtime enforcement only activates once the grant-delivery path (PR #1385) lands — populating the field is a prerequisite, not sufficient alone.

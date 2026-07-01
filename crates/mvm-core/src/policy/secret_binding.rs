@@ -5,13 +5,13 @@ use std::str::FromStr;
 /// A secret binding maps an environment variable to a target domain,
 /// optionally specifying which HTTP header carries the credential.
 ///
-/// When injected into a microVM, the secret value is written to the
-/// secrets drive (readable only by the guest agent). A placeholder
-/// value is set in the guest environment so tools that check for the
-/// variable's existence pass their preflight checks.
-///
-/// Combined with [`NetworkPolicy`](crate::network_policy::NetworkPolicy)
-/// allowlists, secrets can only be sent to their bound domains.
+/// The secret value **never enters the microVM.** The guest only ever sees an
+/// opaque placeholder (set in its environment so tools that check the variable's
+/// existence pass their preflight checks). The real value lives only host-side
+/// and is substituted into the outbound request by the host egress broker, bound
+/// to [`target_host`](SecretBinding::target_host) — see
+/// `mvm_core::egress_substitution`. There is no path that delivers the value to
+/// the guest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretBinding {
     /// Environment variable name (e.g., `OPENAI_API_KEY`).
@@ -72,12 +72,6 @@ impl SecretBinding {
     pub fn placeholder(&self) -> String {
         format!("{}{}", PLACEHOLDER_PREFIX, self.env_var)
     }
-
-    /// Generate a secret file entry for the secrets drive.
-    /// The file is named after the env var (lowercase, dots replaced).
-    pub fn secret_filename(&self) -> String {
-        self.env_var.to_lowercase().replace('.', "_")
-    }
 }
 
 impl fmt::Display for SecretBinding {
@@ -132,125 +126,6 @@ impl FromStr for SecretBinding {
             header,
             value,
         })
-    }
-}
-
-/// Resolved secret bindings ready for injection into a microVM.
-/// Contains the actual secret values (resolved from env or explicit).
-///
-/// Hand-written `Debug` rather than derived: the resolved bindings
-/// carry plaintext secret values via `ResolvedBinding::value`. The
-/// derived Debug would print those at any `{:?}` site (logs, panics,
-/// trace spans). Custom impl prints binding count + per-binding
-/// metadata sans value.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ResolvedSecrets {
-    pub bindings: Vec<ResolvedBinding>,
-}
-
-// allow(secret-debug): hand-written Debug below redacts the
-// `value` field of every binding.
-impl std::fmt::Debug for ResolvedSecrets {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResolvedSecrets")
-            .field("bindings", &self.bindings)
-            .finish()
-    }
-}
-
-/// A single resolved secret binding with its actual value.
-///
-/// Hand-written `Debug` prints the env-var / host / header (which
-/// are addressing metadata, not secrets) but redacts `value` to
-/// `<N bytes>`.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ResolvedBinding {
-    pub env_var: String,
-    pub target_host: String,
-    pub header: String,
-    pub value: String,
-}
-
-// allow(secret-debug): hand-written Debug below redacts the
-// `value` field. The other fields name *where* the secret goes, not
-// what it is.
-impl std::fmt::Debug for ResolvedBinding {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResolvedBinding")
-            .field("env_var", &self.env_var)
-            .field("target_host", &self.target_host)
-            .field("header", &self.header)
-            .field("value", &format_args!("<{} bytes>", self.value.len()))
-            .finish()
-    }
-}
-
-impl ResolvedSecrets {
-    /// Resolve all bindings, reading values from environment where needed.
-    pub fn resolve(bindings: &[SecretBinding]) -> anyhow::Result<Self> {
-        let resolved = bindings
-            .iter()
-            .map(|b| {
-                let value = b.resolve_value()?;
-                Ok(ResolvedBinding {
-                    env_var: b.env_var.clone(),
-                    target_host: b.target_host.clone(),
-                    header: b.header.clone(),
-                    value,
-                })
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        Ok(Self { bindings: resolved })
-    }
-
-    /// Generate secret files for the secrets drive.
-    /// Each binding produces a JSON file with the secret metadata + value.
-    pub fn to_secret_files(&self) -> Vec<(String, String)> {
-        self.bindings
-            .iter()
-            .map(|b| {
-                let filename = b.env_var.to_lowercase().replace('.', "_");
-                let content = serde_json::json!({
-                    "env_var": b.env_var,
-                    "target_host": b.target_host,
-                    "header": b.header,
-                    "value": b.value,
-                });
-                (filename, content.to_string())
-            })
-            .collect()
-    }
-
-    /// Generate placeholder environment variable entries for the config drive.
-    /// These let tools pass "is API key set?" checks without exposing real values.
-    pub fn placeholder_env_vars(&self) -> Vec<(String, String)> {
-        self.bindings
-            .iter()
-            .map(|b| {
-                (
-                    b.env_var.clone(),
-                    format!("{}{}", PLACEHOLDER_PREFIX, b.env_var),
-                )
-            })
-            .collect()
-    }
-
-    /// Generate a manifest summarizing which secrets are bound to which domains.
-    /// Written to the config drive for the guest agent to read on boot.
-    pub fn manifest_json(&self) -> String {
-        let entries: Vec<serde_json::Value> = self
-            .bindings
-            .iter()
-            .map(|b| {
-                serde_json::json!({
-                    "env_var": b.env_var,
-                    "target_host": b.target_host,
-                    "header": b.header,
-                    "secret_file": b.env_var.to_lowercase().replace('.', "_"),
-                })
-            })
-            .collect();
-        serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string())
     }
 }
 
@@ -362,109 +237,5 @@ mod tests {
     fn resolve_value_missing_env() {
         let b = SecretBinding::new("DEFINITELY_NOT_SET_XYZ", "host.com");
         assert!(b.resolve_value().is_err());
-    }
-
-    #[test]
-    fn resolved_secrets_files() {
-        let resolved = ResolvedSecrets {
-            bindings: vec![ResolvedBinding {
-                env_var: "OPENAI_API_KEY".to_string(),
-                target_host: "api.openai.com".to_string(),
-                header: "Authorization".to_string(),
-                value: "sk-test".to_string(),
-            }],
-        };
-        let files = resolved.to_secret_files();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].0, "openai_api_key");
-        assert!(files[0].1.contains("sk-test"));
-    }
-
-    #[test]
-    fn resolved_secrets_placeholders() {
-        let resolved = ResolvedSecrets {
-            bindings: vec![
-                ResolvedBinding {
-                    env_var: "KEY_A".to_string(),
-                    target_host: "a.com".to_string(),
-                    header: "Authorization".to_string(),
-                    value: "val-a".to_string(),
-                },
-                ResolvedBinding {
-                    env_var: "KEY_B".to_string(),
-                    target_host: "b.com".to_string(),
-                    header: "x-token".to_string(),
-                    value: "val-b".to_string(),
-                },
-            ],
-        };
-        let placeholders = resolved.placeholder_env_vars();
-        assert_eq!(placeholders.len(), 2);
-        assert_eq!(placeholders[0].0, "KEY_A");
-        assert_eq!(placeholders[0].1, "mvm-managed:KEY_A");
-    }
-
-    #[test]
-    fn resolved_secrets_manifest() {
-        let resolved = ResolvedSecrets {
-            bindings: vec![ResolvedBinding {
-                env_var: "KEY".to_string(),
-                target_host: "host.com".to_string(),
-                header: "x-token".to_string(),
-                value: "secret".to_string(),
-            }],
-        };
-        let manifest = resolved.manifest_json();
-        let parsed: Vec<serde_json::Value> = serde_json::from_str(&manifest).unwrap();
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0]["env_var"], "KEY");
-        assert_eq!(parsed[0]["target_host"], "host.com");
-        // Manifest should NOT contain the actual secret value
-        assert!(parsed[0].get("value").is_none());
-    }
-
-    #[test]
-    fn debug_redacts_resolved_binding_value() {
-        let secret = "super-secret-token-value";
-        let binding = ResolvedBinding {
-            env_var: "API_KEY".to_string(),
-            target_host: "api.example.com".to_string(),
-            header: "authorization".to_string(),
-            value: secret.to_string(),
-        };
-        let dbg = format!("{binding:?}");
-        // The plaintext value must never reach a `{:?}` site.
-        assert!(
-            !dbg.contains(secret),
-            "ResolvedBinding Debug leaked the secret value: {dbg}"
-        );
-        // Addressing metadata is not secret and must stay visible.
-        assert!(dbg.contains("API_KEY"));
-        assert!(dbg.contains("api.example.com"));
-        // The value is redacted to its byte length.
-        assert!(
-            dbg.contains(&format!("<{} bytes>", secret.len())),
-            "expected byte-length redaction, got: {dbg}"
-        );
-    }
-
-    #[test]
-    fn debug_redacts_resolved_secrets_values() {
-        let secret = "another-secret-0xDEADBEEF";
-        let resolved = ResolvedSecrets {
-            bindings: vec![ResolvedBinding {
-                env_var: "TOKEN".to_string(),
-                target_host: "host.com".to_string(),
-                header: "x-token".to_string(),
-                value: secret.to_string(),
-            }],
-        };
-        // `ResolvedSecrets` Debug delegates to each binding's redacting Debug.
-        let dbg = format!("{resolved:?}");
-        assert!(
-            !dbg.contains(secret),
-            "ResolvedSecrets Debug leaked a secret value: {dbg}"
-        );
-        assert!(dbg.contains(&format!("<{} bytes>", secret.len())));
     }
 }

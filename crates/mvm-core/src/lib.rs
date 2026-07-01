@@ -9,12 +9,22 @@ pub mod config;
 pub mod dev_network;
 /// Host egress-broker decision logic (closed-by-default allow/deny per request).
 pub mod egress_broker;
+/// Egress-broker handler: compose decision + trace into an audit record.
+pub mod egress_handler;
+/// Host-side egress secret substitution (destination-bound; closed by default).
+/// Secrets are substituted into outbound requests host-side and never enter the
+/// guest.
+pub mod egress_substitution;
 pub mod entrypoint_policy;
 pub mod exit_capture;
 /// Guest `mvm-netd` helpers (proxy env-var injection for cooperative apps).
 pub mod guest_netd;
 /// Host ingress-broker decision logic (host listener only by explicit policy).
 pub mod ingress_broker;
+/// Ingress-broker handler: compose decision + trace into an audit record.
+pub mod ingress_handler;
+/// Ingress secret redaction (mask known secret values before they reach the guest).
+pub mod ingress_redaction;
 /// `mvm-init` supervisor core logic: metadata → exec spec, marker progression.
 pub mod init_supervisor;
 pub mod kernel_advisory;

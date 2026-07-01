@@ -148,6 +148,15 @@ pub(super) struct AdmitPlanForBootParams<'a> {
     /// signed plan so the bridge never relies on an unsigned bare carrier to
     /// authorize outbound traffic.
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
+    /// Raw `--agent-verb` strings from the CLI. Empty ⇒ use the computed
+    /// default. Validated inside `admit_plan_for_boot` via
+    /// `parse_agent_verb_override`; any unknown/DevOnly verb is an error.
+    pub agent_verb_override: Vec<String>,
+    /// Whether the workload runs under the sealed-prod posture (`true`) or
+    /// the dev posture (`false`). Controls `default_agent_verbs`: dev gets
+    /// `None` (class-gate only), prod gets the full ProdSafe set minus
+    /// volume verbs when there are no host shares.
+    pub is_sealed_prod: bool,
 }
 
 /// Build the signed-plan host-fs grant list from the resolved volume
@@ -455,7 +464,10 @@ pub(super) fn admit_plan_for_boot(
         shares: p.shares.clone(),
         redaction: p.redaction.clone(),
         audit_labels: Default::default(),
-        agent_verbs: None,
+        agent_verbs: super::agent_verbs::parse_agent_verb_override(&p.agent_verb_override)?
+            .or_else(|| {
+                super::agent_verbs::default_agent_verbs(p.is_sealed_prod, !p.shares.is_empty())
+            }),
     };
     let admission_ctx = match (&bundle_resolver, &bundle_trust) {
         (Some(r), Some(t)) => Some(BundleAdmissionContext {
@@ -642,6 +654,8 @@ fn untrusted_transient_admit_in(
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            is_sealed_prod: true,
         })?;
         let Some(c) = ctx else { return Ok(None) };
         // Persist the bare plan so the pre-start moat / endpoint can read it on
@@ -1078,6 +1092,9 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub no_supervisor: bool,
     /// Pre-built kernel path: skips `ensure_default_microvm_image` when set.
     pub kernel_path: Option<String>,
+    /// Raw `--agent-verb` strings from the CLI. Empty ⇒ use the computed
+    /// sealed-prod default.
+    pub agent_verb: Vec<String>,
 }
 
 fn register_vm_name(vm_name: &str, network_name: &str) {
@@ -1116,6 +1133,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         hypervisor_override,
         no_supervisor,
         kernel_path,
+        agent_verb,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     let effective_hypervisor = hypervisor_override
@@ -1153,6 +1171,8 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         shares: shares_from_volume_cfg(volumes),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: network_policy.clone(),
+        agent_verb_override: agent_verb.to_vec(),
+        is_sealed_prod: profile != "dev",
     })?;
     let mut start_config = VmStartParams {
         name: name.to_string(),
@@ -1674,6 +1694,8 @@ mod admit_plan_tests {
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            is_sealed_prod: true,
         })
         .expect("must succeed");
         assert!(result.is_none(), "no_supervisor must return None");
@@ -1708,6 +1730,8 @@ mod admit_plan_tests {
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            is_sealed_prod: true,
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1763,6 +1787,8 @@ mod admit_plan_tests {
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            is_sealed_prod: true,
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1855,6 +1881,8 @@ mod admit_plan_tests {
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            is_sealed_prod: true,
         })
         .expect_err("missing rootfs must fail");
         assert!(
@@ -1896,6 +1924,8 @@ mod admit_plan_tests {
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            is_sealed_prod: true,
         })
         .unwrap()
         .unwrap();
@@ -1921,6 +1951,8 @@ mod admit_plan_tests {
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            is_sealed_prod: true,
         })
         .unwrap()
         .unwrap();
@@ -1988,6 +2020,8 @@ mod admit_plan_tests {
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            is_sealed_prod: true,
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -2038,6 +2072,8 @@ mod admit_plan_tests {
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: NetworkPolicy::allow_list(vec![HostPort::new("93.184.216.34", 443)]),
+            agent_verb_override: vec![],
+            is_sealed_prod: true,
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -2095,6 +2131,8 @@ mod admit_plan_tests {
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::unrestricted(),
+            agent_verb_override: vec![],
+            is_sealed_prod: true,
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -2688,6 +2726,34 @@ port_hi  = 443
         assert!(
             content.contains("\"error_class\":\"policy-l4-spec-invalid\""),
             "audit chain must classify the failure: {content}"
+        );
+    }
+
+    #[test]
+    fn up_populates_agent_verbs_default_and_override() {
+        use crate::commands::vm::agent_verbs::{default_agent_verbs, parse_agent_verb_override};
+        // Default path: sealed-prod, no shares → run-entrypoint present, mount-volume absent.
+        let d = parse_agent_verb_override(&[])
+            .unwrap()
+            .or_else(|| default_agent_verbs(true, false))
+            .unwrap();
+        assert!(d.iter().any(|v| v.as_str() == "run-entrypoint"));
+        assert!(!d.iter().any(|v| v.as_str() == "mount-volume"));
+        // Override path: explicit set replaces the default.
+        let o = parse_agent_verb_override(&["run-entrypoint".into()])
+            .unwrap()
+            .or_else(|| default_agent_verbs(true, false))
+            .unwrap();
+        assert_eq!(
+            o.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+            ["run-entrypoint"]
+        );
+        // Dev path: None (class-gate only).
+        assert!(
+            parse_agent_verb_override(&[])
+                .unwrap()
+                .or_else(|| default_agent_verbs(false, false))
+                .is_none()
         );
     }
 }

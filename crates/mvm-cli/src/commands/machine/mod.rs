@@ -169,6 +169,10 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Security profile for the run.
     #[arg(long, value_enum, default_value = "standard")]
     pub profile: RunProfile,
+    /// Restrict the guest agent to these control verbs (repeatable). Overrides
+    /// the computed sealed-prod default. Values must be production-safe verbs.
+    #[arg(long = "agent-verb", value_name = "VERB")]
+    pub agent_verb: Vec<String>,
     /// Share a host directory into the guest: `HOST_PATH:/GUEST_PATH[:MODE]`.
     /// MODE defaults to `ro`; `rw` needs `--profile dev` or `permissive`.
     /// (No short flag: `-v` is the global verbosity counter and `-d` is
@@ -302,6 +306,7 @@ impl MachineRunArgs {
             cpus: self.cpus,
             memory: self.memory,
             profile: self.profile,
+            agent_verb: self.agent_verb,
             add_dir: self.volume,
             env: self.env,
             timeout: self.timeout,
@@ -454,6 +459,7 @@ fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.volumes == b.volumes
         && a.init == b.init
         && a.ssh_agent == b.ssh_agent
+        && a.agent_verb == b.agent_verb
 }
 
 /// Human summary of which boot-affecting fields differ, for the loud
@@ -489,6 +495,9 @@ fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> String {
     }
     if current.ssh_agent != desired.ssh_agent {
         changed.push("ssh-agent");
+    }
+    if current.agent_verb != desired.agent_verb {
+        changed.push("agent-verb");
     }
     changed.join(", ")
 }
@@ -617,6 +626,7 @@ fn machine_run_spec(
         volumes: machine_run_volume_specs(args)?,
         init: Vec::new(),
         ssh_agent: false,
+        agent_verb: args.agent_verb.clone(),
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
     })
@@ -654,6 +664,10 @@ struct MachineSpec {
     init: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     ssh_agent: bool,
+    /// Explicit agent verb allowlist from `--agent-verb`. Empty ⇒ use the
+    /// computed sealed-prod default at each start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    agent_verb: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1017,6 +1031,7 @@ impl MachineCreateArgs {
             volumes,
             init,
             ssh_agent,
+            agent_verb: Vec::new(),
             created_at: Some(mvm_core::time::utc_now()),
             last_started_at: None,
         })
@@ -1765,6 +1780,7 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         hypervisor_override: args.hypervisor.as_deref(),
         no_supervisor: args.no_supervisor,
         kernel_path,
+        agent_verb: spec.agent_verb.clone(),
     })?;
     if let Some(host_sock) = ssh_auth_sock.as_deref()
         && let Err(err) =
@@ -2394,6 +2410,7 @@ pub(in crate::commands) fn boot_persistent_by_name(
             cpus: 2,
             memory: "512M".to_string(),
             profile: RunProfile::Standard,
+            agent_verb: Vec::new(),
             volume: Vec::new(),
             env: Vec::new(),
             timeout: None,
@@ -2855,6 +2872,7 @@ mod tests {
             volumes: vec![],
             init: vec![],
             ssh_agent: false,
+            agent_verb: vec![],
             created_at: None,
             last_started_at: None,
         }
@@ -2952,6 +2970,55 @@ mod tests {
         assert!(spec.volumes.is_empty());
         assert!(spec.init.is_empty());
         assert!(!spec.ssh_agent);
+        // No --agent-verb: spec stores an empty list (computed default applies at start).
+        assert!(spec.agent_verb.is_empty());
+    }
+
+    #[test]
+    fn agent_verb_flag_persisted_in_spec_and_survives_roundtrip() {
+        let _state = IsolatedMachineState::new();
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "alpine:3.20",
+            "--name",
+            "web",
+            "--agent-verb",
+            "run-entrypoint",
+            "--agent-verb",
+            "resolve-secret",
+        ])
+        .expect("parse");
+        let spec = machine_run_spec(&args, "web".to_string(), None).expect("spec");
+        assert_eq!(
+            spec.agent_verb,
+            vec!["run-entrypoint".to_string(), "resolve-secret".to_string()]
+        );
+        // Round-trip: save → load preserves the verb list.
+        save_machine_spec(&spec, false).expect("save");
+        let loaded = load_machine_spec("web").expect("load");
+        assert_eq!(loaded.agent_verb, spec.agent_verb);
+        // When the field is absent from the JSON (old spec), deserializes as empty.
+        let path = config::machine_spec_path("other");
+        atomic_write(
+            &path,
+            br#"{
+              "schema_version": 1,
+              "name": "other",
+              "image": "alpine:latest",
+              "net": false,
+              "allow_host": [],
+              "cpus": 2,
+              "memory": "512M",
+              "profile": "standard"
+            }"#,
+        )
+        .expect("write");
+        let old = load_machine_spec("other").expect("load old spec without agent_verb");
+        assert!(
+            old.agent_verb.is_empty(),
+            "missing field must default to empty"
+        );
     }
 
     #[test]
@@ -3098,6 +3165,34 @@ mod tests {
         assert!(run.json);
         assert!(run.dry_run);
         assert_eq!(run.argv, vec!["echo", "hi"]);
+    }
+
+    #[test]
+    fn agent_verb_forwarded_to_run_args_on_transient_path() {
+        // `--agent-verb` on a transient run (no --name/-d) must flow into
+        // RunArgs.agent_verb so the transient admit site uses it instead of
+        // falling back to the computed default.
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "alpine",
+            "--agent-verb",
+            "run-entrypoint",
+            "--agent-verb",
+            "ping",
+            "--",
+            "true",
+        ])
+        .expect("parse");
+        let run = args.into_run_args();
+        assert_eq!(run.agent_verb, vec!["run-entrypoint", "ping"]);
+    }
+
+    #[test]
+    fn agent_verb_empty_on_transient_path_when_not_specified() {
+        let args = parse_run(&["run", "--image", "alpine", "--", "true"]).expect("parse");
+        let run = args.into_run_args();
+        assert!(run.agent_verb.is_empty());
     }
 
     #[test]
@@ -3440,6 +3535,7 @@ mod tests {
             volumes: Vec::new(),
             init: Vec::new(),
             ssh_agent: false,
+            agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
         };
@@ -3633,6 +3729,7 @@ ssh_agent = true
             volumes: vec!["/Users/example/src:/work:rw".to_string()],
             init: vec!["pip install -r requirements.txt".to_string()],
             ssh_agent: false,
+            agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
         };
@@ -3673,6 +3770,7 @@ ssh_agent = true
             volumes: Vec::new(),
             init: Vec::new(),
             ssh_agent: true,
+            agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
         };
@@ -3744,6 +3842,7 @@ ssh_agent = true
             volumes: Vec::new(),
             init: Vec::new(),
             ssh_agent: true,
+            agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
         };
@@ -3905,6 +4004,7 @@ ssh_agent = true
             volumes: Vec::new(),
             init: Vec::new(),
             ssh_agent: true,
+            agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
         };
@@ -3958,6 +4058,7 @@ ssh_agent = true
             volumes: Vec::new(),
             init: Vec::new(),
             ssh_agent: false,
+            agent_verb: Vec::new(),
             created_at: Some(mvm_core::time::utc_now()),
             last_started_at: None,
         };
@@ -3986,6 +4087,7 @@ ssh_agent = true
                 volumes: Vec::new(),
                 init: Vec::new(),
                 ssh_agent: false,
+                agent_verb: Vec::new(),
                 created_at: Some(mvm_core::time::utc_now()),
                 last_started_at: None,
             };
@@ -4043,6 +4145,7 @@ ssh_agent = true
             volumes: Vec::new(),
             init: Vec::new(),
             ssh_agent: false,
+            agent_verb: Vec::new(),
             created_at: Some(mvm_core::time::utc_now()),
             last_started_at: None,
         };

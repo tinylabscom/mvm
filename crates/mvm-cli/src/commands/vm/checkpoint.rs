@@ -889,6 +889,8 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
         shares: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+        agent_verb_override: vec![],
+        is_sealed_prod: true,
     })?;
 
     // Serialize the admitted plan envelope so the backend can inject it into
@@ -1035,6 +1037,8 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         shares: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+        agent_verb_override: vec![],
+        is_sealed_prod: true,
     })?;
 
     let mut start_config = mvm_core::vm_backend::VmStartConfig {
