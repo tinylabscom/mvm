@@ -2,6 +2,9 @@ pub mod app_deps;
 pub mod app_deps_gate;
 pub mod artifacts;
 pub mod backend;
+/// Disk-only job/artifact transport for the in-house-VMM builder (tar-over-raw-
+/// disk, so the host never formats or reads a guest filesystem).
+pub mod builder_disk_transport;
 /// Vsock dispatch wire types for the persistent builder VM.
 pub mod builder_protocol;
 pub mod builder_route;
