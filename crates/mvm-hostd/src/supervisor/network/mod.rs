@@ -921,6 +921,7 @@ mod tests {
             TenantId, TimeoutSpec, WorkloadId,
         };
         ExecutionPlan {
+            network_mode: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("test-plan".into()),
             plan_version: 1,
@@ -974,6 +975,7 @@ mod tests {
             bundle: None,
             deps_volume: None,
             shares: Vec::new(),
+            agent_verbs: None,
         }
     }
 

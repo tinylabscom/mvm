@@ -161,12 +161,13 @@ impl VmBackend for HvfBackend {
         // vsock is live-proven through the unified run loop; the rest land as
         // pause/snapshot/networking are wired onto the primitive.
         VmCapabilities {
-            pause_resume: false,
-            snapshots: false,
             vsock: true,
-            tap_networking: false,
-            balloon: false,
-            fs_quick_checkpoint: false,
+            // The in-house VMM is vsock-only by design: no guest NIC, and egress
+            // rides the host vsock proxy (the gating endpoint), not a guest NIC.
+            no_guest_nic: true,
+            host_vsock_proxy: true,
+            // pause/snapshot/cow/remap land as they are wired onto the primitive.
+            ..Default::default()
         }
     }
 

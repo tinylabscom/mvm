@@ -13,45 +13,16 @@ use serde::{Deserialize, Serialize};
 use crate::plan::bundle::PlanArtifact;
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, AuthPolicy,
-    DepsVolumeBinding, FsPolicyRef, HostShareGrant, KeyRotationSpec, Nonce, PlanId, PolicyRef,
-    PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding, SignedImageRef,
-    TenantId, WorkloadId,
+    DepsVolumeBinding, FsPolicyRef, HostShareGrant, KeyRotationSpec, NetworkMode, Nonce, PlanId,
+    PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
+    SignedImageRef, TenantId, WorkloadId,
 };
+use crate::plan::verb::VerbId;
 
-/// Wire-format version. Bump when fields change in a way older
-/// verifiers can't ignore. Older verifiers must fail closed on
-/// unknown schema versions rather than silently skipping unknown
-/// fields — the schema_version field is consulted before any
-/// per-field deserialisation.
-///
-/// Bumped 1 → 2 with the addition of `valid_from` / `valid_until` /
-/// `nonce`. Older verifiers will reject v2 plans with
-/// `UnsupportedSchema`; this is the correct fail-closed behavior —
-/// they can't enforce the validity window they don't understand.
-///
-/// Bumped 2 → 3 with the addition of `bundle: Option<PlanArtifact>` —
-/// the supervisor's admit path re-verifies the pinned bundle archive
-/// before backend dispatch (claim 9 fully load-bearing at launch, not
-/// just at fetch). Older verifiers will reject v3 plans with
-/// `UnsupportedSchema` because they don't know how to re-verify
-/// the binding.
-///
-/// Bumped 3 → 4 with the addition of intent-bound
-/// `admission_profile`: older verifiers do not know how to check
-/// that seccomp, network, tool, secret-release, and audit controls
-/// were resolved under one profile, so they must reject rather than
-/// silently ignore the binding.
-///
-/// Bumped 4 → 5 with the addition of `shares` (user host-fs grants):
-/// an older verifier doesn't know to enforce that the launch config's
-/// volumes are a subset of the admitted grants (claim 1 / claim 8), so
-/// it must reject rather than admit a plan whose shares it can't check.
-///
-/// Bumped 5 → 6 with the addition of `auth`: an older verifier doesn't
-/// know that a plan can carry a host-auth capability such as dev-tier
-/// ssh-agent socket forwarding, so it must reject rather than admit a plan
-/// whose auth boundary it can't check or audit.
-pub const SCHEMA_VERSION: u32 = 6;
+/// Wire-format version of the `ExecutionPlan`. New fields are additive with
+/// `#[serde(default)]`; the verifier rejects any plan whose `schema_version`
+/// exceeds this build's, before per-field deserialisation.
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// Typed contract for one workload's execution.
 ///
@@ -96,6 +67,14 @@ pub struct ExecutionPlan {
     /// Network policy reference. Wired to `mvm-core::policy::EgressPolicy`
     /// (L7 + PII rules) via the supervisor's `SupervisorEgressProxy`.
     pub network_policy: PolicyRef,
+
+    /// Networking transport mode. Closed by default ([`NetworkMode::None`]): no
+    /// guest NIC, nothing reachable. `HostVsockProxy` selects brokered egress/
+    /// ingress over vsock; `network_policy` still gates which endpoints are
+    /// reachable. `#[serde(default)]` so a plan without the field deserializes as the safe
+    /// closed default.
+    #[serde(default)]
+    pub network_mode: NetworkMode,
 
     /// Filesystem policy reference.
     pub fs_policy: FsPolicyRef,
@@ -156,6 +135,14 @@ pub struct ExecutionPlan {
     /// nonce.
     pub nonce: Nonce,
 
+    /// Per-workload agent verb allow-list. `None` (or absent) → the
+    /// guest applies the class/profile gate only (current behavior).
+    /// `Some(set)` → the guest also requires each control verb to be a
+    /// baseline verb or present in this set. Strictly subtractive: this
+    /// can only narrow, never widen, the class gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_verbs: Option<Vec<VerbId>>,
+
     /// Optional pin to a content-addressed `.mvmpkg` bundle. When
     /// present, the supervisor's admit path re-runs
     /// [`crate::plan::bundle::read_and_verify_bundle`] against the
@@ -190,4 +177,39 @@ pub struct ExecutionPlan {
     /// any share the plan didn't name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares: Vec<HostShareGrant>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::signing::test_support::sample_plan;
+
+    #[test]
+    fn agent_verbs_defaults_none_and_roundtrips() {
+        let plan = sample_plan();
+        assert!(plan.agent_verbs.is_none(), "field must default to None");
+
+        // None => key is omitted entirely, not serialized as null.
+        let s = serde_json::to_string(&plan).unwrap();
+        assert!(
+            !s.contains("agent_verbs"),
+            "None agent_verbs must be omitted, not serialized as null"
+        );
+
+        // Absent in JSON => None (serde default), preserving old plans.
+        let mut v = serde_json::to_value(&plan).unwrap();
+        v.as_object_mut().unwrap().remove("agent_verbs");
+        let back: ExecutionPlan = serde_json::from_value(v).unwrap();
+        assert!(back.agent_verbs.is_none());
+
+        // Present => preserved.
+        let mut with = plan.clone();
+        with.agent_verbs = Some(vec![
+            VerbId::new("run-entrypoint").unwrap(),
+            VerbId::new("ping").unwrap(),
+        ]);
+        let round: ExecutionPlan =
+            serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(round.agent_verbs, with.agent_verbs);
+    }
 }

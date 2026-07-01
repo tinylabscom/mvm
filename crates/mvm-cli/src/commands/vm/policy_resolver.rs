@@ -604,6 +604,7 @@ mod tests {
     fn fixture_plan() -> ExecutionPlan {
         let now = chrono::Utc::now();
         ExecutionPlan {
+            network_mode: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("plan-test".to_string()),
             plan_version: 1,
@@ -657,6 +658,7 @@ mod tests {
             bundle: None,
             deps_volume: None,
             shares: Vec::new(),
+            agent_verbs: None,
         }
     }
 

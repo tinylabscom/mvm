@@ -7,11 +7,33 @@ pub mod catalog;
 pub mod checkpoint;
 pub mod config;
 pub mod dev_network;
+/// Host egress-broker decision logic (closed-by-default allow/deny per request).
+pub mod egress_broker;
+/// Egress-broker handler: compose decision + trace into an audit record.
+pub mod egress_handler;
+/// Host-side egress secret substitution (destination-bound; closed by default).
+/// Secrets are substituted into outbound requests host-side and never enter the
+/// guest.
+pub mod egress_substitution;
 pub mod entrypoint_policy;
 pub mod exit_capture;
+/// Guest `mvm-netd` helpers (proxy env-var injection for cooperative apps).
+pub mod guest_netd;
+/// Host ingress-broker decision logic (host listener only by explicit policy).
+pub mod ingress_broker;
+/// Ingress-broker handler: compose decision + trace into an audit record.
+pub mod ingress_handler;
+/// `mvm-init` supervisor core logic: metadata → exec spec, marker progression.
+pub mod init_supervisor;
 pub mod kernel_advisory;
 pub mod kernel_artifact;
 pub mod kernel_format;
+/// Flat launch-metadata parsers for `mvm-init` (no JSON in PID 1).
+pub mod launch_metadata;
+/// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host contract).
+pub mod lifecycle;
+/// Resident-memory accounting for warm pools (learned charge + admission).
+pub mod memory_budget;
 pub mod metering;
 pub mod migration;
 pub mod naming;
@@ -37,9 +59,14 @@ pub mod platform;
 pub mod policy;
 pub mod protocol;
 pub mod residency;
+/// Hardened snapshot frame v0: cap-bounded, fail-closed parsing of the
+/// snapshot container mvm controls (eager-CoW / raw-hypervisor path).
+pub mod snapshot_frame;
 /// The guest↔host substitution-endpoint wire contract, shared so the
 /// in-guest client and the host server serialize identical bytes.
 pub mod substitution_wire;
+/// W3C-shaped distributed trace context for end-to-end audit correlation.
+pub mod trace_context;
 pub mod transcript;
 pub mod util;
 

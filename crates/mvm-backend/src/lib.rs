@@ -83,6 +83,8 @@ pub mod network;
 pub mod network_provider;
 /// QEMU workload runtime backend (dev/test).
 pub mod qemu;
+/// Capability-aware backend selection (fail-closed, no silent downgrade).
+pub mod selection;
 /// Backend-agnostic supervisor standby pool registry (`~/.mvm/pool/`
 /// state-dir; record/select-idle-by-kernel/remove/reap).
 pub mod standby_pool;

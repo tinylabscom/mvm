@@ -214,6 +214,7 @@ impl VmBackend for FirecrackerBackend {
             tap_networking: true,
             balloon: true,
             fs_quick_checkpoint: false,
+            ..VmCapabilities::default()
         }
     }
 
@@ -1531,5 +1532,24 @@ mod tests {
             fc.snapshot_capability()
                 .satisfies(SnapshotCapability::LiveMemory)
         );
+    }
+
+    #[test]
+    fn no_backend_advertises_production_ssh() {
+        // The capability layer encodes the SSH ban: no backend may advertise an
+        // in-guest SSH server. A future backend that flips this trips here.
+        let backends: [(&str, AnyBackend); 5] = [
+            ("firecracker", AnyBackend::Firecracker(FirecrackerBackend)),
+            ("libkrun", AnyBackend::Libkrun(LibkrunBackend)),
+            ("vz", AnyBackend::Vz(VzBackend)),
+            ("qemu", AnyBackend::Qemu(QemuBackend)),
+            ("mock", AnyBackend::Mock(MockBackend::new())),
+        ];
+        for (name, backend) in backends {
+            assert!(
+                !backend.capabilities().production_ssh,
+                "{name} backend must not advertise production SSH"
+            );
+        }
     }
 }

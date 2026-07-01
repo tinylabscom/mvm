@@ -475,6 +475,98 @@ pub struct VmCapabilities {
     /// copy-on-write (APFS `clonefile` on macOS). Independent of `snapshots`,
     /// which is the memory-state save/restore capability.
     pub fs_quick_checkpoint: bool,
+    /// Backend can map a host file-backed region and present it to the guest
+    /// as RAM — the prerequisite for eager copy-on-write restore.
+    pub guest_memory_mapping: bool,
+    /// Backend can remap guest RAM at a fixed host virtual address across a
+    /// restore cycle (eager-CoW return-to-pool).
+    pub fixed_address_remap: bool,
+    /// Backend can capture device state into a snapshot frame mvm controls.
+    pub device_state_snapshot: bool,
+    /// Backend can capture vCPU state into a snapshot frame mvm controls.
+    pub vcpu_state_snapshot: bool,
+    /// Backend can restore a guest by eager copy-on-write (`MAP_PRIVATE`) of a
+    /// snapshot RAM section — the primary local warm-restore path.
+    pub eager_cow_restore: bool,
+    /// Backend can run a guest with no virtio-net device (no guest NIC).
+    pub no_guest_nic: bool,
+    /// Backend supports host/vsock-mediated networking (egress/ingress brokers
+    /// over vsock) instead of a guest NIC.
+    pub host_vsock_proxy: bool,
+    /// Backend can carry an interactive PTY exec/console session.
+    pub pty_exec: bool,
+    /// Backend permits an in-guest SSH server (production SSH). Always `false`
+    /// for every production backend; a plan requiring it is rejected.
+    pub production_ssh: bool,
+}
+
+/// The capabilities a run/plan requires from its backend.
+///
+/// Selection fails closed: a backend that does not advertise every required
+/// capability is rejected with the named shortfall rather than silently
+/// degraded onto a weaker backend.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequiredCapabilities {
+    pub eager_cow_restore: bool,
+    pub guest_memory_mapping: bool,
+    pub fixed_address_remap: bool,
+    pub device_state_snapshot: bool,
+    pub vcpu_state_snapshot: bool,
+    pub vsock: bool,
+    pub no_guest_nic: bool,
+    pub host_vsock_proxy: bool,
+    pub pty_exec: bool,
+}
+
+impl VmCapabilities {
+    /// Names of the capabilities `required` asks for that this backend does
+    /// not advertise. Empty means the backend can serve the request.
+    pub fn shortfall(&self, required: &RequiredCapabilities) -> Vec<&'static str> {
+        let checks: [(bool, bool, &'static str); 9] = [
+            (
+                required.eager_cow_restore,
+                self.eager_cow_restore,
+                "eager_cow_restore",
+            ),
+            (
+                required.guest_memory_mapping,
+                self.guest_memory_mapping,
+                "guest_memory_mapping",
+            ),
+            (
+                required.fixed_address_remap,
+                self.fixed_address_remap,
+                "fixed_address_remap",
+            ),
+            (
+                required.device_state_snapshot,
+                self.device_state_snapshot,
+                "device_state_snapshot",
+            ),
+            (
+                required.vcpu_state_snapshot,
+                self.vcpu_state_snapshot,
+                "vcpu_state_snapshot",
+            ),
+            (required.vsock, self.vsock, "vsock"),
+            (required.no_guest_nic, self.no_guest_nic, "no_guest_nic"),
+            (
+                required.host_vsock_proxy,
+                self.host_vsock_proxy,
+                "host_vsock_proxy",
+            ),
+            (required.pty_exec, self.pty_exec, "pty_exec"),
+        ];
+        checks
+            .into_iter()
+            .filter_map(|(req, have, name)| (req && !have).then_some(name))
+            .collect()
+    }
+
+    /// Whether this backend can serve every capability `required` asks for.
+    pub fn satisfies(&self, required: &RequiredCapabilities) -> bool {
+        self.shortfall(required).is_empty()
+    }
 }
 
 /// How thoroughly a backend can warm-start a VM from a snapshot. Distinct
@@ -1769,6 +1861,58 @@ mod tests {
         assert!(!caps.vsock);
         assert!(!caps.tap_networking);
         assert!(!caps.balloon);
+    }
+
+    #[test]
+    fn shortfall_names_each_required_but_missing_capability() {
+        // A backend advertising nothing cannot satisfy a run that requires
+        // eager-CoW restore + vsock; the shortfall must name both so selection
+        // fails closed with a recovery hint instead of silently degrading.
+        let caps = VmCapabilities::default();
+        let required = RequiredCapabilities {
+            eager_cow_restore: true,
+            vsock: true,
+            ..Default::default()
+        };
+
+        let missing = caps.shortfall(&required);
+
+        assert!(missing.contains(&"eager_cow_restore"));
+        assert!(missing.contains(&"vsock"));
+        assert!(!caps.satisfies(&required));
+    }
+
+    #[test]
+    fn satisfies_when_backend_advertises_every_required_capability() {
+        let caps = VmCapabilities {
+            vsock: true,
+            eager_cow_restore: true,
+            host_vsock_proxy: true,
+            ..VmCapabilities::default()
+        };
+        let required = RequiredCapabilities {
+            vsock: true,
+            eager_cow_restore: true,
+            host_vsock_proxy: true,
+            ..Default::default()
+        };
+
+        assert!(caps.shortfall(&required).is_empty());
+        assert!(caps.satisfies(&required));
+    }
+
+    #[test]
+    fn empty_requirement_is_satisfied_by_any_backend() {
+        // A run requiring nothing must not be rejected.
+        assert!(VmCapabilities::default().satisfies(&RequiredCapabilities::default()));
+    }
+
+    #[test]
+    fn default_capabilities_forbid_production_ssh() {
+        // The capability layer records the SSH ban: backends build their caps
+        // from this default, so none advertises an in-guest SSH server unless a
+        // future change explicitly (and visibly) flips it.
+        assert!(!VmCapabilities::default().production_ssh);
     }
 
     #[test]

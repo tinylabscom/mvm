@@ -117,6 +117,7 @@ impl VmBackend for MockBackend {
             tap_networking: false,
             balloon: false,
             fs_quick_checkpoint: false,
+            ..VmCapabilities::default()
         }
     }
 

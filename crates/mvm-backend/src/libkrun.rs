@@ -448,6 +448,7 @@ impl VmBackend for LibkrunBackend {
             // file, not an APFS clone-eligible volume mount; no
             // clonefile shortcut here.
             fs_quick_checkpoint: false,
+            ..VmCapabilities::default()
         }
     }
 

@@ -31,6 +31,8 @@ pub mod signing;
 pub mod test_support;
 pub mod types;
 pub mod validity;
+pub mod verb;
+pub mod verb_grant;
 
 pub use bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleInstallError, BundleManifest,
@@ -52,4 +54,8 @@ pub use types::{
     RuntimeProfileRef, SecretBinding, SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef,
     TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
 };
-pub use validity::{NonceStore, PlanValidityError, check_window};
+pub use validity::{
+    CheckedFreshness, Freshness, FreshnessClaims, NonceStore, PlanValidityError, check_window,
+};
+pub use verb::{VerbId, VerbIdError};
+pub use verb_grant::{VerbGrant, VerbGrantError};
