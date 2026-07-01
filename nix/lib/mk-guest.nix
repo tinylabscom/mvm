@@ -561,35 +561,21 @@ let
       echo "mvm-init: injected per-run secret placeholder env"
     fi
 
-    # Stage 2.475 — decode the per-run verb-grant token and provision the
-    # host-signer pubkey so the agent can pin and verify the grant at boot.
+    # Stage 2.475 — decode the per-run verb-grant token.
     #
     # The launcher writes `mvm.verb_grant=<hex(JSON)>` onto the kernel cmdline
     # using the same hex encoding as stages 2.46/2.47. We decode the JSON blob
-    # to `/run/mvm/verb-grant.json` (tmpfs, mode 0644) and extract the
-    # `pubkey_hex` field to `/run/mvm/host-signer.pub` so the agent can call
-    # `load_host_signer_verifying_key` and then `pin_verb_grant` without any
-    # config-disk dependency. Absent token ⇒ whole block is a no-op (byte-
-    # identical boot; agent starts with no grant pinned, class gate only).
+    # to `/run/mvm/verb-grant.json` (tmpfs, mode 0644). The agent derives the
+    # host-signer key directly from the envelope's `pubkey_hex` field in Rust.
+    # Absent token ⇒ whole block is a no-op (byte-identical boot; agent starts
+    # with no grant pinned, class gate only).
     MVM_VERB_GRANT_HEX=$(/bin/busybox sed -n 's/.*\bmvm\.verb_grant=\([^ ]*\).*/\1/p' /proc/cmdline)
     if [ -n "$MVM_VERB_GRANT_HEX" ]; then
       /bin/busybox mkdir -p /run/mvm
       printf '%b' "$(echo "$MVM_VERB_GRANT_HEX" | /bin/busybox sed 's/../\\x&/g')" \
         > /run/mvm/verb-grant.json
       /bin/busybox chmod 0644 /run/mvm/verb-grant.json
-      # Extract the pubkey_hex field: the JSON is compact/single-line with no
-      # whitespace around the colon (produced by serde_json::to_vec); match
-      # "pubkey_hex":"<value>" and capture the hex string.
-      MVM_HOST_SIGNER_PUB=$(/bin/busybox sed -n 's/.*"pubkey_hex":"\([0-9a-f]*\)".*/\1/p' \
-        /run/mvm/verb-grant.json)
-      if [ -n "$MVM_HOST_SIGNER_PUB" ]; then
-        printf '%s' "$MVM_HOST_SIGNER_PUB" > /run/mvm/host-signer.pub
-        /bin/busybox chmod 0644 /run/mvm/host-signer.pub
-        echo "mvm-init: provisioned verb-grant and host-signer pubkey"
-      else
-        echo "mvm-init: verb-grant token present but pubkey_hex missing — skipping"
-        /bin/busybox rm -f /run/mvm/verb-grant.json
-      fi
+      echo "mvm-init: provisioned verb-grant"
     fi
 
     # Stage 2.48 — local addon DNS bootstrap.

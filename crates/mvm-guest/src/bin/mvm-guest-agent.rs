@@ -37,8 +37,8 @@ use mvm_guest::probes::{self, ProbeEntry, ProbeOutputFormat, ProbeResult};
 use mvm_guest::runtime_config::{self, ConcurrencyConfig};
 use mvm_guest::vsock::{
     BootTimingReport, ComponentState, EntrypointEvent, FsChange, FsChangeKind, GUEST_AGENT_PORT,
-    GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, ReadinessReport, RunEntrypointError,
-    enforce_verb_grant, load_pinned_verb_grant,
+    GuestRequest, GuestResponse, ReadinessReport, RunEntrypointError, enforce_verb_grant,
+    load_pinned_verb_grant,
 };
 use mvm_guest::worker_pool::{DispatchError, DispatchOutcome, WorkerPool};
 use mvm_guest::worker_protocol::WorkerOutcome;
@@ -2987,7 +2987,6 @@ fn main() {
     // contention because writes only fire at boot completion events.
     let pinned_verb_grant = load_pinned_verb_grant(
         std::path::Path::new("/run/mvm/verb-grant.json"),
-        std::path::Path::new(HOST_SIGNER_PUBKEY_PATH),
         chrono::Utc::now(),
     );
     let mut boot_state_val = AgentBootState::new(active_profile, boot_at);
