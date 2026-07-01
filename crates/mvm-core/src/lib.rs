@@ -9,6 +9,8 @@ pub mod config;
 pub mod dev_network;
 pub mod entrypoint_policy;
 pub mod exit_capture;
+/// `mvm-init` supervisor core logic: metadata → exec spec, marker progression.
+pub mod init_supervisor;
 pub mod kernel_advisory;
 pub mod kernel_artifact;
 pub mod kernel_format;
