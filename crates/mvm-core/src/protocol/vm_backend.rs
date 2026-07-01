@@ -262,6 +262,60 @@ pub fn encode_secret_env_cmdline(pairs: &[(String, String)]) -> Option<String> {
     Some(format!("mvm.secret_env={hex}"))
 }
 
+/// Envelope carried in the `mvm.verb_grant=<hex(JSON)>` kernel-cmdline token.
+///
+/// The host hex-encodes the JSON so the value is a single space/newline-free
+/// token that `/proc/cmdline` round-trips without quoting. The guest decodes
+/// the hex, parses the JSON with `deny_unknown_fields`, then passes the inner
+/// `VerbGrant` to `pin_verb_grant` for signature verification before use.
+///
+/// `pubkey_hex` is the 32-byte Ed25519 verifying key in lowercase hex.
+/// `plan_nonce_hex` is the `Nonce::as_hex()` of the plan nonce the grant was
+/// issued under — the guest uses it as the `plan_nonce` argument to
+/// `VerbGrant::verify`. Fixed-field-order struct: `serde_json::to_vec` output
+/// is byte-deterministic with no external canonicalizer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerbGrantEnvelope {
+    pub pubkey_hex: String,
+    pub plan_nonce_hex: String,
+    pub grant: crate::plan::VerbGrant,
+}
+
+/// Encode a `VerbGrantEnvelope` as a single `mvm.verb_grant=<hex(JSON)>`
+/// kernel-cmdline token. Returns `None` if `env.pubkey_hex` is empty (no
+/// key ⇒ nothing to verify against) or if serialization fails. The hex
+/// encoding keeps the token space/newline-free for `/proc/cmdline`.
+pub fn encode_verb_grant_cmdline(env: &VerbGrantEnvelope) -> Option<String> {
+    if env.pubkey_hex.is_empty() {
+        return None;
+    }
+    let json = serde_json::to_vec(env).ok()?;
+    let hex: String = json.iter().map(|b| format!("{b:02x}")).collect();
+    Some(format!("mvm.verb_grant={hex}"))
+}
+
+/// Decode the hex value of a `mvm.verb_grant=` cmdline token (the part after
+/// the `=`) into a `VerbGrantEnvelope`. Returns `Err` on malformed hex or
+/// unknown JSON fields (fail-closed).
+pub fn decode_verb_grant_cmdline(token_value_hex: &str) -> anyhow::Result<VerbGrantEnvelope> {
+    let bytes: Result<Vec<u8>, _> = (0..token_value_hex.len())
+        .step_by(2)
+        .map(|i| {
+            token_value_hex
+                .get(i..i + 2)
+                .ok_or_else(|| anyhow::anyhow!("odd-length hex"))
+                .and_then(|pair| {
+                    u8::from_str_radix(pair, 16)
+                        .map_err(|_| anyhow::anyhow!("non-hex byte at position {i}"))
+                })
+        })
+        .collect();
+    let bytes = bytes?;
+    let env: VerbGrantEnvelope = serde_json::from_slice(&bytes)?;
+    Ok(env)
+}
+
 /// A file to inject into the guest (config or secret).
 #[derive(Debug, Clone)]
 pub struct VmFile {
@@ -2127,5 +2181,95 @@ mod tests {
         };
         assert!(profile.dropped_claims().is_empty());
         assert!(profile.na_claims().is_empty());
+    }
+
+    #[test]
+    fn encode_verb_grant_cmdline_empty_pubkey_is_none() {
+        use crate::plan::{Nonce, VerbGrant, VerbId};
+        use chrono::{Duration, Utc};
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let k = SigningKey::from_bytes(&[3u8; 32]);
+        let nonce = Nonce::from_bytes([1u8; 16]);
+        let now = Utc::now();
+        let mut grant = VerbGrant {
+            session_id: "sess-x".into(),
+            plan_nonce: nonce.clone(),
+            not_after: now + Duration::minutes(5),
+            verbs: vec![VerbId::new("run-entrypoint").unwrap()],
+            sig: vec![],
+        };
+        grant.sig = k.sign(&grant.signing_bytes()).to_bytes().to_vec();
+        let env = VerbGrantEnvelope {
+            pubkey_hex: String::new(),
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            grant,
+        };
+        assert!(encode_verb_grant_cmdline(&env).is_none());
+    }
+
+    #[test]
+    fn encode_verb_grant_cmdline_round_trips_as_single_token() {
+        use crate::plan::{Nonce, VerbGrant, VerbId};
+        use chrono::{Duration, Utc};
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let k = SigningKey::from_bytes(&[7u8; 32]);
+        let nonce = Nonce::from_bytes([2u8; 16]);
+        let now = Utc::now();
+        let mut grant = VerbGrant {
+            session_id: "sess-rt".into(),
+            plan_nonce: nonce.clone(),
+            not_after: now + Duration::minutes(10),
+            verbs: vec![
+                VerbId::new("run-entrypoint").unwrap(),
+                VerbId::new("ping").unwrap(),
+            ],
+            sig: vec![],
+        };
+        grant.sig = k.sign(&grant.signing_bytes()).to_bytes().to_vec();
+
+        let pubkey_hex: String = k
+            .verifying_key()
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let plan_nonce_hex = nonce.as_hex().to_string();
+
+        let env = VerbGrantEnvelope {
+            pubkey_hex: pubkey_hex.clone(),
+            plan_nonce_hex: plan_nonce_hex.clone(),
+            grant: grant.clone(),
+        };
+
+        let token = encode_verb_grant_cmdline(&env).unwrap();
+        assert!(token.starts_with("mvm.verb_grant="));
+        // Single cmdline token — no spaces or newlines.
+        assert!(!token.contains(' ') && !token.contains('\n'));
+
+        let hex_value = token.strip_prefix("mvm.verb_grant=").unwrap();
+        let decoded = decode_verb_grant_cmdline(hex_value).unwrap();
+
+        assert_eq!(decoded.pubkey_hex, pubkey_hex);
+        assert_eq!(decoded.plan_nonce_hex, plan_nonce_hex);
+        assert_eq!(decoded.grant.session_id, grant.session_id);
+        assert_eq!(decoded.grant.verbs, grant.verbs);
+        assert_eq!(decoded.grant.sig, grant.sig);
+    }
+
+    #[test]
+    fn decode_rejects_malformed_hex() {
+        let result = decode_verb_grant_cmdline("zzzz");
+        assert!(result.is_err(), "non-hex input must be rejected");
+    }
+
+    #[test]
+    fn decode_rejects_unknown_field() {
+        // Build valid JSON with an extra field; deny_unknown_fields must reject it.
+        let bad = r#"{"pubkey_hex":"aa","plan_nonce_hex":"bb","grant":{},"extra":"bad"}"#;
+        let hex: String = bad.bytes().map(|b| format!("{b:02x}")).collect();
+        let result = decode_verb_grant_cmdline(&hex);
+        assert!(result.is_err(), "unknown field must be rejected");
     }
 }
