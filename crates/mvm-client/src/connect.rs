@@ -3,7 +3,7 @@
 //! knowing — or being able to pick apart — the transport underneath.
 
 use crate::client::MvmClient;
-use crate::error::{MvmError, Result};
+use crate::error::Result;
 
 /// Which backend to talk to.
 pub enum Target {
@@ -45,16 +45,20 @@ fn gateway_backend(base_url: String, token: String) -> Result<Box<dyn MvmClient>
 
 #[cfg(not(feature = "remote"))]
 fn gateway_backend(_base_url: String, _token: String) -> Result<Box<dyn MvmClient>> {
-    Err(MvmError::Backend {
+    Err(crate::error::MvmError::Backend {
         reason: "gateway target requires the 'remote' feature".into(),
     })
 }
 
+#[cfg(feature = "local")]
 fn local_backend() -> Result<Box<dyn MvmClient>> {
-    // LocalBackend lands with the machine-library boot/list seam; until then a
-    // local target fails honestly rather than pretending to work.
-    Err(MvmError::Backend {
-        reason: "local backend not yet available".into(),
+    Ok(Box::new(crate::local::LocalBackend::new()))
+}
+
+#[cfg(not(feature = "local"))]
+fn local_backend() -> Result<Box<dyn MvmClient>> {
+    Err(crate::error::MvmError::Backend {
+        reason: "local target requires the 'local' feature".into(),
     })
 }
 
@@ -62,9 +66,16 @@ fn local_backend() -> Result<Box<dyn MvmClient>> {
 mod tests {
     use super::*;
 
+    #[cfg(not(feature = "local"))]
     #[test]
     fn connect_local_reports_not_available() {
         assert!(connect(Target::Local).is_err());
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn connect_local_builds_when_feature_on() {
+        assert!(connect(Target::Local).is_ok());
     }
 
     #[test]

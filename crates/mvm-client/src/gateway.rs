@@ -170,11 +170,7 @@ impl From<SandboxDto> for MachineState {
 }
 
 fn filter_machines(machines: Vec<MachineState>, filter: &MachineFilter) -> Vec<MachineState> {
-    machines
-        .into_iter()
-        .filter(|m| filter.name.as_ref().is_none_or(|n| *n == m.name))
-        .filter(|m| filter.status.is_none_or(|s| s == m.status))
-        .collect()
+    machines.into_iter().filter(|m| filter.matches(m)).collect()
 }
 
 #[async_trait]

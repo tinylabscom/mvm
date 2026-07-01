@@ -2581,6 +2581,8 @@ name = "mvm-client"
 version = "0.16.1"
 dependencies = [
  "async-trait",
+ "mvm-backend",
+ "mvm-core",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

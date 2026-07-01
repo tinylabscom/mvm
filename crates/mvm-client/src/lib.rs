@@ -10,6 +10,8 @@ pub mod dto;
 pub mod error;
 #[cfg(feature = "remote")]
 pub mod gateway;
+#[cfg(feature = "local")]
+pub mod local;
 pub mod mock;
 
 pub use client::MvmClient;
