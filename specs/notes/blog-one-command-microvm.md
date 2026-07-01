@@ -15,6 +15,15 @@
 - Thesis: a single command is a *user-facing* simplicity paid for by *cross-cutting* complexity — and requiring it for a **downloaded** artifact (not your dev checkout) brings a dozen hidden assumptions due at once.
 - Two distinct problems: (a) the layers that must line up for the guest to boot, and (b) the meta-problem of **proving** they line up without cutting a real release.
 
+### 1.5 Background: what mvm is, and the words we'll need *(read this first)*
+- **What mvm is:** a command-line tool (`mvmctl`) for building and running lightweight **microVMs** on macOS and Linux. Target UX: run a container/OCI image inside a real, isolated Linux VM with one command.
+- **microVM vs container, in two sentences:** a container shares the host's kernel (namespaces + cgroups); a **microVM boots its own kernel behind a hypervisor** — hardware-level isolation, but small and fast (sub-second boot, a handful of virtual devices). Firecracker (the thing behind AWS Lambda/Fargate) is the reference point.
+- **Host vs guest:** the *host* is your Mac/Linux box running `mvmctl`; the *guest* is the Linux VM it boots.
+- **Two kinds of VM in play:** a **builder VM** (mvm builds guest images with Nix, and runs Nix *inside a Linux VM* for determinism) and a **workload VM** (runs your actual image). Both boot the same shared kernel — which is why the kernel story hits both.
+- **The backends, and why they differ by platform:** you can't run Firecracker on macOS (no KVM), so the *same command* dispatches to a **different hypervisor** depending on the host — **Firecracker** (Linux/KVM), **libkrun** (older macOS), or **Apple's Virtualization.framework — "vz"** (macOS 26+). This platform-dependent dispatch is the seed of the whole post.
+- **Vocabulary the rest leans on:** *virtio* (the standard paravirtual device protocol — disk, net, console, vsock), *vsock* (a host↔guest socket channel), the *guest agent* (a small in-guest process the host talks to over vsock), and *supervisors/sidecars* (host-side helper processes mvm spawns per VM).
+- **Why it's here:** every later section assumes this. A reader who's never heard of mvm should still follow the "guest boots blind" story.
+
 ### 2. The command is a small lie (process topology)
 - Naive model: "a CLI runs a VM." Reality: `mvmctl` orchestrates **multiple host processes** per guest — a per-VM supervisor (`mvm-vz-supervisor` / `mvm-libkrun-supervisor`) and a gateway/audit sidecar (`mvm-bridge`).
 - Why split (external-VMM backends fork+exec a supervisor; the bridge enforces egress/audit out-of-process).
@@ -75,6 +84,33 @@
 - "Layer cake" diagram: download → install (adjacent bins) → resolve → sign → boot (PCI!) → bridge → guest.
 - PR trail (the receipts).
 - Checklist: "Is your one-command CLI actually downloadable?" (ships all processes? resolves adjacent? signs at runtime? builds deterministically? has a no-publish dry-run?).
+- **Glossary** — one-line definitions (drafted below) for skimmers who jump straight to a section.
+
+---
+
+## Background — what is mvm? (draft)
+
+If you've never touched mvm, here's everything you need to follow the rest of this post.
+
+**mvm is a command-line tool for running microVMs.** You point it at a container image and it boots that image inside a real, isolated Linux virtual machine — `mvmctl run --image alpine -- echo hi`. The whole design goal is to make that feel about as light as running a container while giving you the isolation of a full VM.
+
+**Why a microVM instead of a container?** A container isn't really its own machine — it's a set of processes running on *your* kernel, walled off with namespaces and cgroups. A microVM is an actual virtual machine: it boots its own Linux kernel behind a hardware hypervisor, so a compromise inside the guest can't reach the host kernel the way a container escape can. The trick that makes this practical is stripping the VM down to almost nothing — a minimal kernel, a few paravirtual devices, no BIOS, no emulated legacy hardware — so it boots in a fraction of a second. Firecracker, the microVM monitor AWS built for Lambda, is the canonical example; mvm uses it on Linux.
+
+**The catch that drives this whole post: you can't run Firecracker on a Mac.** Firecracker needs KVM, the Linux kernel's virtualization interface, which doesn't exist on macOS. So mvm has to use whichever hypervisor the host *does* offer, and that changes by platform:
+
+- **Linux** → **Firecracker** (via `/dev/kvm`)
+- **older macOS** → **libkrun**, a lightweight in-process VM monitor
+- **macOS 26+** → **Apple's Virtualization.framework**, which we call **vz**
+
+So the same one-line command runs on a *different hypervisor* depending on who typed it — and, as the next section shows, those hypervisors don't hand the guest its virtual devices the same way.
+
+**A few more words you'll see:**
+- **Host** and **guest** — the host is your laptop running `mvmctl`; the guest is the Linux VM it boots.
+- **virtio** — the standard way a guest talks to its virtual disk, network, console, etc.: a paravirtual device protocol every modern Linux kernel speaks.
+- **vsock** — a socket that connects host and guest directly (no network involved), which mvm uses to reach a small **guest agent** process running inside the VM.
+- **builder VM** — mvm builds its guest images with Nix and, for reproducibility, runs Nix *inside its own Linux VM* rather than on your host. So two VMs appear in this story: the *builder VM* that produces images and the *workload VM* that runs yours. Both boot the same shared kernel.
+
+With that, the failure in the next section — a guest that boots but comes up deaf and blind — will make sense.
 
 ---
 
@@ -108,3 +144,19 @@ Both "bugs" closed on that one change.
 There's a real tension worth naming, because it's not a story about a careless mistake. The slimming was *correct engineering* — a smaller kernel is less attack surface and a faster boot, and re-adding PCI cost us about 73 built-in symbols we'd rather not carry. The failure wasn't the ambition to slim; it was that a **shared artifact serving several consumers with different, invisible contracts** is a landmine, and the contract that got violated (device presentation) is exactly the kind that never shows up in a type signature or a linker error. You only find out at boot, on one specific backend, as a symptom in a different subsystem.
 
 The durable lesson: when one artifact has to satisfy multiple backends, the backends' *implicit* requirements need to be as loud as their explicit ones. A comment that says "MMIO-only, dead weight" is a claim about all consumers, and it was wrong about one of them. We now keep PCI in with a comment that spells out *why* — that vz needs it — so the next person running a subtraction pass reads the whole sentence. And the broader defense isn't a comment at all: it's that a shared kernel change isn't "done" when it compiles and passes a size gate; it's done when it has **booted, once, on every backend that consumes it.** Two of three green is how you ship a guest that comes up blind.
+
+---
+
+## Appendix — Glossary (draft)
+
+- **microVM** — a stripped-down virtual machine (minimal kernel, a few paravirtual devices, no legacy hardware) that boots in a fraction of a second; VM-grade isolation at near-container speed.
+- **host / guest** — the host is your Mac/Linux machine running `mvmctl`; the guest is the Linux VM it boots.
+- **hypervisor / backend** — the thing that actually runs the VM. mvm's backends: **Firecracker** (Linux/KVM), **libkrun** (older macOS, in-process), **vz** (Apple's Virtualization.framework, macOS 26+).
+- **KVM** — the Linux kernel's hardware-virtualization interface (`/dev/kvm`). Firecracker needs it; it doesn't exist on macOS.
+- **virtio** — the standard paravirtual device protocol a guest uses for disk, network, console, vsock, etc.
+- **PCI vs MMIO** — the two *buses* virtio devices can be attached to. libkrun/Firecracker use MMIO; vz uses PCI. The guest kernel needs the matching support compiled in to see its devices (Section 3).
+- **vsock** — a direct host↔guest socket channel (no network) used to reach the guest agent.
+- **guest agent** — a small process inside the VM that the host talks to over vsock (readiness, exec, etc.).
+- **builder VM vs workload VM** — mvm runs Nix *inside a Linux VM* to build guest images (the builder VM); the workload VM is the one that runs your image. Both boot the same shared kernel.
+- **supervisor / sidecar** — host-side helper processes mvm spawns per guest: a per-VM VMM *supervisor* (`mvm-vz-supervisor` / `mvm-libkrun-supervisor`) and the `mvm-bridge` gateway/audit *sidecar*.
+- **mvmctl** — the CLI binary; "mvm" is the project.
