@@ -201,6 +201,11 @@ pub(in crate::commands) struct RunArgs {
     /// admission: what you previewed is not what would ship.
     #[arg(long = "ack-divergence", value_name = "KIND")]
     pub ack_divergence: Vec<String>,
+    /// Internal (not a CLI flag): raw `--agent-verb` values forwarded from
+    /// `machine run`. Empty ⇒ the computed sealed-prod default is used at
+    /// the admit site.
+    #[arg(skip)]
+    pub agent_verb: Vec<String>,
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
@@ -321,6 +326,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     let admit_cpus = args.cpus;
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
     let admit_network_policy = network_policy.clone();
+    let admit_agent_verb = args.agent_verb.clone();
     // The audit substrate carries no emitter, so stash the AdmissionContext here
     // as the closure runs (during boot) and emit launched/failed after `run`
     // returns — mirroring `up.rs`, so the claim-8 admitted/launched/failed
@@ -355,7 +361,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             shares: vec![],
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: admit_network_policy.clone(),
-            agent_verb_override: vec![],
+            agent_verb_override: admit_agent_verb.clone(),
             is_sealed_prod: true,
         })?;
         let Some(c) = ctx else { return Ok(None) };
@@ -1363,6 +1369,7 @@ mod tests {
             cpus: 2,
             memory: "512M".to_string(),
             profile,
+            agent_verb: Vec::new(),
             add_dir: Vec::new(),
             env: Vec::new(),
             timeout: Some(60),

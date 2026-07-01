@@ -306,6 +306,7 @@ impl MachineRunArgs {
             cpus: self.cpus,
             memory: self.memory,
             profile: self.profile,
+            agent_verb: self.agent_verb,
             add_dir: self.volume,
             env: self.env,
             timeout: self.timeout,
@@ -3164,6 +3165,34 @@ mod tests {
         assert!(run.json);
         assert!(run.dry_run);
         assert_eq!(run.argv, vec!["echo", "hi"]);
+    }
+
+    #[test]
+    fn agent_verb_forwarded_to_run_args_on_transient_path() {
+        // `--agent-verb` on a transient run (no --name/-d) must flow into
+        // RunArgs.agent_verb so the transient admit site uses it instead of
+        // falling back to the computed default.
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "alpine",
+            "--agent-verb",
+            "run-entrypoint",
+            "--agent-verb",
+            "ping",
+            "--",
+            "true",
+        ])
+        .expect("parse");
+        let run = args.into_run_args();
+        assert_eq!(run.agent_verb, vec!["run-entrypoint", "ping"]);
+    }
+
+    #[test]
+    fn agent_verb_empty_on_transient_path_when_not_specified() {
+        let args = parse_run(&["run", "--image", "alpine", "--", "true"]).expect("parse");
+        let run = args.into_run_args();
+        assert!(run.agent_verb.is_empty());
     }
 
     #[test]

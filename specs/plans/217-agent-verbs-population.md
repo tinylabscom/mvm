@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Populate `ExecutionPlan.agent_verbs` at synthesis with a computed-minimal set for sealed-prod workloads (overridable by CLI), so the plan-bound verb enforcement stops being dormant.
+**Goal:** Populate `ExecutionPlan.agent_verbs` at synthesis with a computed-minimal set for sealed-prod workloads (overridable by CLI). This is a prerequisite for plan-bound verb enforcement: it supplies the field. Runtime enforcement already exists in the guest (subtractive intersection); it only activates once the grant-delivery path (minting, delivering, and pinning the grant — a separate follow-on tracked in PR #1385) also lands. On `main` today the guest never pins a grant, so populating `agent_verbs` has no runtime effect yet; this plan wires the synthesis side so the delivery side has something to deliver.
 
-**Architecture:** Purely synthesis-side. A canonical ProdSafe verb list lives in `mvm-guest`; a pure `default_agent_verbs(is_sealed_prod, has_shares)` computes the minimal set (all ProdSafe minus the volume verbs when the workload declares no shares; `None` for dev = class-gate-only); `mvmctl up` computes `override ?? default` and passes it into the existing `SynthesisInput.agent_verbs` field. No guest/enforcement change — the guest already intersects the set subtractively.
+**Architecture:** Purely synthesis-side. A canonical ProdSafe verb list lives in `mvm-guest`; a pure `default_agent_verbs(is_sealed_prod, has_shares)` computes the minimal set (all ProdSafe minus the volume verbs when the workload declares no shares; `None` for dev = class-gate-only); `machine run` computes `override ?? default` and passes it into the existing `SynthesisInput.agent_verbs` field via `admit_plan_for_boot`. The CLI flag (`--agent-verb`, repeatable) lives on `MachineRunArgs` (both transient and persistent paths); the persistent path stores it in `MachineSpec.agent_verb` and threads it via `PersistentImageStartParams`; the transient path threads it via `RunArgs.agent_verb` into the closure-captured admit params. No guest/enforcement change — the guest already intersects the set subtractively.
 
 **Tech Stack:** Rust, `clap` (CLI), `serde`. Tests via `cargo nextest`.
 
@@ -12,7 +12,7 @@
 
 - **STACKS ON #1380 (Plan 215 core).** This plan REQUIRES `mvm_core::plan::VerbId` and the `ExecutionPlan.agent_verbs: Option<Vec<VerbId>>` field + `SynthesisInput.agent_verbs: Option<Vec<VerbId>>` — all added by #1380, which is NOT yet on `main` at authoring time. **Do not start until #1380 has merged to `main`**, then branch this off fresh `main`. If `grep -c agent_verbs crates/mvm-core/src/plan/execution_plan.rs` returns 0, #1380 has not landed — stop.
 - **Strictly subtractive is already enforced.** The guest intersects `agent_verbs` with the class/profile gate (`enforce_verb_grant` after `allowed_in`). This plan only *supplies* the set; it never needs to touch enforcement. A CLI override can therefore never grant more than the profile allows.
-- **Reuse first.** The CLI flag mirrors `--network-allow` (`crates/mvm-cli/src/commands/vm/up.rs:947`). The ProdSafe list is the single source of truth in `mvm-guest`; do not hardcode a second copy anywhere.
+- **Reuse first.** The CLI flag mirrors `--network-allow`. The ProdSafe list is the single source of truth in `mvm-guest`; do not hardcode a second copy anywhere.
 - **Conservative default is deliberate.** All host-lifecycle/status ProdSafe verbs stay in the default unconditionally (pause/resume/snapshot/pooling are host-initiated and must never break); the ONLY attenuation is dropping `mount-volume`/`unmount-volume` when the plan has no `shares`.
 - **Dev is unaffected.** Non-sealed-prod → `agent_verbs = None` (class-gate-only), byte-identical to today.
 - **No spec/PR/ADR/task citations in code comments** (CI lint `check-no-spec-refs-in-comments` fails on `Task N`/`Plan N`/`ADR-`/`#NNN`). Reasoning stays in this doc.
@@ -234,15 +234,18 @@ git commit -m "feat(cli): default_agent_verbs + --agent-verb override parsing"
 
 ---
 
-### Task 3: Wire the flag + default into `mvmctl up` synthesis
+### Task 3: Wire the flag + default into plan synthesis
 
-**Files:**
-- Modify: `crates/mvm-cli/src/commands/vm/up.rs` — add the `--agent-verb` arg to the `Args` struct (near `network_allow` at `:947`); at the `SynthesisInput { … }` construction (`:430`), set `agent_verbs = parse_agent_verb_override(&args.agent_verb)? .or_else(|| default_agent_verbs(is_sealed_prod, !shares.is_empty()))`.
-- Test: extend the existing `up.rs` synthesis tests (the ones building `SynthesisInput` at `:2150`/`:2252`/…), or add a focused test.
+**Files (as implemented):**
+- `crates/mvm-cli/src/commands/machine/mod.rs` — `--agent-verb` on `MachineRunArgs` (the live CLI surface); persisted in `MachineSpec.agent_verb`; threaded via `PersistentImageStartParams.agent_verb` for persistent runs and via `RunArgs.agent_verb` → closure-captured `admit_agent_verb` for transient runs.
+- `crates/mvm-cli/src/commands/vm/exec.rs` — `RunArgs` gained `agent_verb: Vec<String>` (internal, `#[arg(skip)]`); the transient admit closure uses it as `agent_verb_override`.
+- `crates/mvm-cli/src/commands/vm/up.rs` — `AdmitPlanForBootParams` gained `agent_verb_override: Vec<String>` + `is_sealed_prod: bool`; `SynthesisInput.agent_verbs` wired at `admit_plan_for_boot`.
+
+**Note:** The original plan said to add `--agent-verb` to `up::Args` (the retired `vm up` struct). The implemented surface is `MachineRunArgs` in `machine/mod.rs` — `machine run` is the live workload CLI; `up::Args` is an internal struct no longer reachable from a user-visible verb. The wiring path through `admit_plan_for_boot` and `SynthesisInput` is unchanged from the plan's intent.
 
 **Interfaces:**
 - Consumes: `default_agent_verbs`, `parse_agent_verb_override` (Task 2); the existing `SynthesisInput.agent_verbs` field (from #1380).
-- Produces: a populated `ExecutionPlan.agent_verbs` for `mvmctl up`.
+- Produces: a populated `ExecutionPlan.agent_verbs` for both transient and persistent `machine run`.
 
 - [ ] **Step 1: Ground the sealed-prod signal.** Grep how `up.rs` resolves prod vs dev today: `grep -n "security_profile\|AgentProfile\|SealedProd\|is_prod\|dev_mode" crates/mvm-cli/src/commands/vm/up.rs`. If there is an already-resolved `AgentProfile`/`AdmissionProfile`, derive `is_sealed_prod` from it (`== AgentProfile::SealedProd`). Otherwise use `args.security_profile.as_deref() != Some("dev")` (production is the default per `--security-profile` at `:954`). Record which you used.
 
