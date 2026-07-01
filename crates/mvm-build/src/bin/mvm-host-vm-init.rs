@@ -211,6 +211,39 @@ fn parse_user_volumes_cmdline(cmdline: &str) -> Vec<UserVolMount> {
     out
 }
 
+/// Disk-transport config parsed from the kernel cmdline. The in-house VMM has no
+/// virtio-fs, so the builder moves the job in and the artifacts out over raw
+/// disks (tar-on-a-block-device) instead of virtio-fs shares.
+/// `mvm.builder_transport=disk` enables it; `mvm.builder_input=` /
+/// `mvm.builder_output=` name the block devices (defaulting to the vdc/vdd
+/// convention). Absent ⇒ `None`, and the init keeps the virtio-fs path unchanged.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, PartialEq, Eq)]
+struct DiskTransport {
+    input_dev: String,
+    output_dev: String,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_disk_transport_cmdline(cmdline: &str) -> Option<DiskTransport> {
+    let mut enabled = false;
+    let mut input = None;
+    let mut output = None;
+    for tok in cmdline.split_whitespace() {
+        if let Some(v) = tok.strip_prefix("mvm.builder_transport=") {
+            enabled = v == "disk";
+        } else if let Some(v) = tok.strip_prefix("mvm.builder_input=") {
+            input = Some(v.to_string());
+        } else if let Some(v) = tok.strip_prefix("mvm.builder_output=") {
+            output = Some(v.to_string());
+        }
+    }
+    enabled.then(|| DiskTransport {
+        input_dev: input.unwrap_or_else(|| "/dev/vdc".to_string()),
+        output_dev: output.unwrap_or_else(|| "/dev/vdd".to_string()),
+    })
+}
+
 /// Bytes from the start of the ext4 superblock that the host-side
 /// geometry check reads. The high-32 bits of `s_blocks_count` live
 /// at superblock offset `0x150` (336), so 512 is the smallest
@@ -529,6 +562,39 @@ mod tests {
         assert_eq!(got[0].target, "/ok");
     }
 
+    #[test]
+    fn parse_disk_transport_absent_is_none() {
+        assert_eq!(
+            parse_disk_transport_cmdline("console=ttyAMA0 root=/dev/vda ro"),
+            None
+        );
+        // The flag present but not "disk" is also off.
+        assert_eq!(
+            parse_disk_transport_cmdline("mvm.builder_transport=virtiofs"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_disk_transport_defaults_the_device_names() {
+        let t = parse_disk_transport_cmdline(
+            "console=ttyAMA0 mvm.builder_transport=disk root=/dev/vda ro",
+        )
+        .unwrap();
+        assert_eq!(t.input_dev, "/dev/vdc");
+        assert_eq!(t.output_dev, "/dev/vdd");
+    }
+
+    #[test]
+    fn parse_disk_transport_honours_explicit_devices() {
+        let t = parse_disk_transport_cmdline(
+            "mvm.builder_transport=disk mvm.builder_input=/dev/vde mvm.builder_output=/dev/vdf",
+        )
+        .unwrap();
+        assert_eq!(t.input_dev, "/dev/vde");
+        assert_eq!(t.output_dev, "/dev/vdf");
+    }
+
     /// Build a synthetic ext4 superblock buffer (just the fields
     /// `parse_ext4_recorded_size_bytes` reads).
     fn synth_sb(blocks_lo: u32, blocks_hi: u32, log_block_size: u32) -> Vec<u8> {
@@ -826,6 +892,12 @@ mod linux {
         // Threads write into the same `Mutex<BootTimings>`;
         // contention is a non-issue (a handful of writes per
         // boot, none on the hot path).
+        // Disk-transport mode (the in-house VMM has no virtio-fs): decided once
+        // from the cmdline. `None` keeps the virtio-fs builder path unchanged.
+        let disk_transport = crate::parse_disk_transport_cmdline(
+            &std::fs::read_to_string("/proc/cmdline").unwrap_or_default(),
+        );
+
         let track_b = {
             let timings = Arc::clone(&timings);
             std::thread::spawn(move || setup_modules_and_virtiofs(&timings, anchor))
@@ -865,6 +937,22 @@ mod linux {
         // we don't abort the build for them.
         let _ = track_b.join();
         let _ = track_c.join();
+
+        // Disk-transport mode: /job, /work, /mvm-bins come off the input disk and
+        // /out is backed on the nix-store disk (the virtio-fs mounts above no-op'd).
+        // Staging must precede dispatch, which reads /job. Fatal on failure — the
+        // job can't run without its inputs.
+        if let Some(t) = &disk_transport {
+            if let Err(e) = stage_disk_transport_input(t) {
+                eprintln!("mvm-host-vm-init: disk-transport input staging failed: {e}");
+                write_result(2, &format!("disk-transport input staging failed: {e}"));
+                stamp(&timings, |t| {
+                    t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
+                });
+                write_boot_timings(&timings);
+                return power_off();
+            }
+        }
 
         // Fork the guest agent under setpriv so the builder/dev VM runs
         // the *same* agent every workload VM does (vsock 5252). Non-fatal
@@ -946,6 +1034,14 @@ mod linux {
             t.job_end_ms = Some(BootTimings::ms_since(anchor))
         });
         write_result(code, &tail);
+        // Disk-transport mode: tar /out (artifacts + result) onto the output disk
+        // for the host to read back. Best-effort — the console + exit code still
+        // convey failure if this can't complete.
+        if let Some(t) = &disk_transport {
+            if let Err(e) = collect_disk_transport_output(t) {
+                eprintln!("mvm-host-vm-init: disk-transport output collection failed: {e}");
+            }
+        }
         // Best-effort vsock send of the
         // `HostVmResponse::Result` frame the host's
         // `mvm_build::builder_protocol::read_host_vm_response_from_socket`
@@ -2101,6 +2197,82 @@ mod linux {
         };
         mount(Some(tag), target, Some("virtiofs"), flags, None::<&str>)
             .map_err(|e| format!("mount virtiofs {tag} -> {target}: {e}"))
+    }
+
+    /// Disk-transport staging root (tmpfs). The input disk's tar is extracted
+    /// here so `/job`, `/work`, `/mvm-bins` become writable bind targets — the
+    /// virtio-fs path binds host dirs, but the disk path must leave `/job`
+    /// writable so `write_result` can drop `/job/result`.
+    const DISK_INPUT_STAGE: &str = "/run/builder-input";
+
+    /// Populate `/job`, `/work`, `/mvm-bins` from the input disk and back `/out`
+    /// with a writable dir on the persistent nix-store disk. This is the
+    /// disk-transport equivalent of the virtio-fs shares, for the in-house VMM
+    /// (which has no virtio-fs). A tmpfs `/out` would be capped by guest RAM —
+    /// too small for a built rootfs — so `/out` lives on the big nix-store disk.
+    fn stage_disk_transport_input(t: &crate::DiskTransport) -> Result<(), String> {
+        std::fs::create_dir_all(DISK_INPUT_STAGE)
+            .map_err(|e| format!("mkdir {DISK_INPUT_STAGE}: {e}"))?;
+        mount_fs("tmpfs", DISK_INPUT_STAGE, "tmpfs")?;
+        // Extract the input tar straight off the raw block device; tar stops at
+        // the archive EOF marker before the disk's zero padding.
+        let status = Command::new("/bin/busybox")
+            .args(["tar", "xf", &t.input_dev, "-C", DISK_INPUT_STAGE])
+            .status()
+            .map_err(|e| format!("spawn tar x {}: {e}", t.input_dev))?;
+        if !status.success() {
+            return Err(format!("tar x {} exited {:?}", t.input_dev, status.code()));
+        }
+        for (name, target) in [
+            ("job", JOB_DIR),
+            ("work", WORK_DIR),
+            ("mvm-bins", HOST_BIN_DIR),
+        ] {
+            let src = format!("{DISK_INPUT_STAGE}/{name}");
+            if Path::new(&src).exists() {
+                std::fs::create_dir_all(target).map_err(|e| format!("mkdir {target}: {e}"))?;
+                disk_bind_mount(&src, target)?;
+            }
+        }
+        let out_backing = format!("{NIX_STORE_MOUNT}/out");
+        std::fs::create_dir_all(&out_backing).map_err(|e| format!("mkdir {out_backing}: {e}"))?;
+        std::fs::create_dir_all(OUT_DIR).map_err(|e| format!("mkdir {OUT_DIR}: {e}"))?;
+        disk_bind_mount(&out_backing, OUT_DIR)?;
+        Ok(())
+    }
+
+    /// After the job: fold the result + boot-timings into `/out` and write the
+    /// artifact tar onto the raw output block device for the host to read back
+    /// with `builder_disk_transport::read_output_disk`.
+    fn collect_disk_transport_output(t: &crate::DiskTransport) -> Result<(), String> {
+        for f in ["result", "boot-timings.json"] {
+            let src = format!("{JOB_DIR}/{f}");
+            if Path::new(&src).exists() {
+                let _ = std::fs::copy(&src, format!("{OUT_DIR}/{f}"));
+            }
+        }
+        let status = Command::new("/bin/busybox")
+            .args(["tar", "cf", &t.output_dev, "-C", OUT_DIR, "."])
+            .status()
+            .map_err(|e| format!("spawn tar c {}: {e}", t.output_dev))?;
+        if !status.success() {
+            return Err(format!("tar c {} exited {:?}", t.output_dev, status.code()));
+        }
+        Ok(())
+    }
+
+    /// Bind-mount `src` onto `target` (disk-transport staging helper; kept
+    /// distinct from the nix-overlay `bind_mount` which is `cfg(linux)`-only).
+    fn disk_bind_mount(src: &str, target: &str) -> Result<(), String> {
+        use nix::mount::{MsFlags, mount};
+        mount(
+            Some(src),
+            target,
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>,
+        )
+        .map_err(|e| format!("bind {src} -> {target}: {e}"))
     }
 
     fn run_modprobe(module: &str) {
