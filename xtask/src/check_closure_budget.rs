@@ -24,7 +24,11 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// [`BUDGET_TARGET`]. Baseline measured 2026-06-17 against the audited default
 /// closure. Lower it freely as deps drop; raising it must be justified in the
 /// PR that does.
-const CLOSURE_BUDGET: usize = 335;
+///
+/// 335 → 336: the in-house VMM's Linux/KVM driver (`kvm-ioctls`) enters the
+/// default `cfg(linux)` closure. It is the destination Linux runtime, not
+/// optional bloat, so it belongs in the default binary.
+const CLOSURE_BUDGET: usize = 336;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;
