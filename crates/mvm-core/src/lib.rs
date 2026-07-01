@@ -16,6 +16,8 @@ pub mod kernel_format;
 pub mod launch_metadata;
 /// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host contract).
 pub mod lifecycle;
+/// Resident-memory accounting for warm pools (learned charge + admission).
+pub mod memory_budget;
 pub mod metering;
 pub mod migration;
 pub mod naming;
