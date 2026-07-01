@@ -12,13 +12,15 @@
 
 pub(crate) mod agent_bridge;
 pub mod device;
-pub mod egress_gate;
-pub(crate) mod egress_proxy;
+// Promoted to the top-level backend-agnostic bridge module; re-exported at the
+// old paths so the in-house run loop and cross-crate consumers keep working.
+pub use crate::vsock_egress_bridge::egress_gate;
+pub(crate) use crate::vsock_egress_bridge::{egress_proxy, substitution_bridge};
 pub mod fdt;
 pub mod guest_mem;
 pub mod hv;
 pub mod kernel_image;
 pub mod run;
-pub(crate) mod substitution_bridge;
+
 pub mod virtio;
 pub mod vsock;

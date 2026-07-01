@@ -93,6 +93,9 @@ pub(crate) mod substitution_spawn;
 /// loading, virtio-mmio block/vsock). Compiles on every target; the per-platform
 /// backends (HVF/KVM/WHP) drive it. The "no VMM lock-in" seam.
 pub mod vmm;
+/// The single host-side vsock egress bridge. Backend-agnostic; every VMM path
+/// enforces claim-10 / claims-12/13 through exactly this module.
+pub mod vsock_egress_bridge;
 // Vz (Apple Virtualization.framework) backend. Currently a skeleton:
 // trait surface + capabilities + security profile + availability
 // probe; lifecycle methods land in a follow-up slice.

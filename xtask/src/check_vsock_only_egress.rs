@@ -17,7 +17,11 @@ use regex::Regex;
 use std::path::{Path, PathBuf};
 
 /// Directories that implement the vsock-only path and must stay NIC-free.
-const GUARDED_DIRS: &[&str] = &["crates/mvm-backend/src/vmm", "crates/mvm-backend/src/hvf"];
+const GUARDED_DIRS: &[&str] = &[
+    "crates/mvm-backend/src/vmm",
+    "crates/mvm-backend/src/hvf",
+    "crates/mvm-backend/src/vsock_egress_bridge",
+];
 
 /// Tokens that signal a guest NIC / userspace net gateway on the data path.
 /// `virtio_net`/`virtio-net`, a virtio net device id, tap attach, or the
