@@ -28,6 +28,7 @@ members = [
     # JSON-in/JSON-out cdylib every language SDK loads through a thin FFI
     # shim, so adding a language carries no new Rust binding code.
     "crates/mvm-host-services-ffi",
+    "crates/mvm-client",
     "crates/mvm-mcp",
     # plan 74 W1 — OCI image distribution client (registry resolution,
     # manifest fetch, digest verification; layer fetch + ext4 unpack +
