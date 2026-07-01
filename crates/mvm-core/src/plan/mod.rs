@@ -52,4 +52,6 @@ pub use types::{
     RuntimeProfileRef, SecretBinding, SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef,
     TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
 };
-pub use validity::{NonceStore, PlanValidityError, check_window};
+pub use validity::{
+    CheckedFreshness, Freshness, FreshnessClaims, NonceStore, PlanValidityError, check_window,
+};
