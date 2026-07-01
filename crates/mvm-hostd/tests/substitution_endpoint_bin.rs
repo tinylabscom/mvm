@@ -137,3 +137,97 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
     }
     drop(guard);
 }
+
+/// The endpoint's claim-10 gate is the outer fence in the real relay-delivery
+/// path: a WireRequest to a destination the secret binding WOULD allow is still
+/// refused when the network policy doesn't admit it — the gate runs before the
+/// claim-12 bind-check and before any forward. This is exactly the frame the run
+/// loop relays to the endpoint in relay mode, driven against the real bin.
+#[test]
+fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("substitution.sock");
+
+    // A Bearer secret bound to api.openai.com — the destination the request
+    // targets, so a refusal here can only be the network-policy gate, not a
+    // binding mismatch.
+    FileBindingStore::with_dir(dir.path().join("bindings"))
+        .put(
+            "local",
+            "openai",
+            &SecretBindingMeta {
+                auth_type: AuthType::Bearer,
+                allowed_hosts: vec!["api.openai.com".into()],
+                sigv4: None,
+            },
+        )
+        .unwrap();
+    FileSecretStore::with_dir(dir.path().join("secrets"))
+        .put(
+            "local",
+            "openai",
+            &SecretBox::new(Box::new("sk-live-xyz".to_string())),
+        )
+        .unwrap();
+
+    let cfg = EndpointConfig {
+        tenant_id: "local".into(),
+        secrets: vec![SecretBinding {
+            name: "OPENAI_API_KEY".into(),
+            source: SecretSource::Keystore {
+                address: "openai".into(),
+            },
+        }],
+        transport: EndpointTransport::Uds { path: sock.clone() },
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        forward_timeout_secs: 30,
+        secret_store_dir: Some(dir.path().join("secrets")),
+        binding_store_dir: Some(dir.path().join("bindings")),
+        terminator_listen: None,
+        tls_intermediate: None,
+        // Deny-all: the endpoint gates every destination — even the bound one.
+        network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::deny_all()),
+        egress_mode: mvm_hostd::supervisor::substitution_endpoint::EgressMode::Wire,
+    };
+
+    let mut child = Command::new(BIN)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn endpoint bin");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+    drop(stdin);
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let guard = Kill(child);
+
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("read handshake line");
+    let handed: Vec<(String, String)> = serde_json::from_str(line.trim()).expect("handshake json");
+    let placeholder = handed[0].1.clone();
+
+    let mut conn = UnixStream::connect(&sock).expect("connect to endpoint UDS");
+    let req = WireRequest {
+        method: "POST".into(),
+        // A destination the binding allows — only the claim-10 gate can refuse it.
+        url: "https://api.openai.com/v1".into(),
+        headers: vec![("authorization".into(), format!("Bearer {placeholder}"))],
+        body_b64: String::new(),
+    };
+    write_frame(&mut conn, &req);
+    let resp: WireResponse = read_frame(&mut conn);
+    match resp {
+        WireResponse::Refused { message } => {
+            let m = message.to_lowercase();
+            assert!(
+                m.contains("claim-10") || m.contains("network policy"),
+                "expected a claim-10 network-policy refusal (not a binding refusal), got: {message}"
+            );
+        }
+        WireResponse::Ok { status, .. } => {
+            panic!("deny-all policy must refuse the destination, got Ok status {status}")
+        }
+    }
+    drop(guard);
+}
