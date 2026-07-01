@@ -7,7 +7,6 @@ use mvm_guest::vsock::GuestRequest;
 /// - Sealed-prod → all ProdSafe verbs, minus the volume verbs when the
 ///   workload declares no shares (the only safe per-workload attenuation;
 ///   host-lifecycle verbs stay so pause/resume/snapshot/pooling never break).
-#[allow(dead_code)]
 pub(crate) fn default_agent_verbs(is_sealed_prod: bool, has_shares: bool) -> Option<Vec<VerbId>> {
     if !is_sealed_prod {
         return None;
@@ -23,7 +22,6 @@ pub(crate) fn default_agent_verbs(is_sealed_prod: bool, has_shares: bool) -> Opt
 /// Validate CLI `--agent-verb` values into an override set. Empty ⇒ `None`
 /// (use the computed default). Any value that is not a known ProdSafe verb
 /// (unknown, DevOnly, or malformed) is a hard error.
-#[allow(dead_code)]
 pub(crate) fn parse_agent_verb_override(raw: &[String]) -> Result<Option<Vec<VerbId>>> {
     if raw.is_empty() {
         return Ok(None);
@@ -49,13 +47,6 @@ pub(crate) fn parse_agent_verb_override(raw: &[String]) -> Result<Option<Vec<Ver
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[allow(dead_code)]
-    fn names(v: &Option<Vec<VerbId>>) -> Vec<String> {
-        v.as_ref()
-            .map(|s| s.iter().map(|x| x.as_str().to_string()).collect())
-            .unwrap_or_default()
-    }
 
     #[test]
     fn dev_gets_no_restriction() {

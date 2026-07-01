@@ -1765,6 +1765,7 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         hypervisor_override: args.hypervisor.as_deref(),
         no_supervisor: args.no_supervisor,
         kernel_path,
+        agent_verb: vec![],
     })?;
     if let Some(host_sock) = ssh_auth_sock.as_deref()
         && let Err(err) =
