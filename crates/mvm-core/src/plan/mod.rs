@@ -31,6 +31,7 @@ pub mod signing;
 pub mod test_support;
 pub mod types;
 pub mod validity;
+pub mod verb;
 
 pub use bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleInstallError, BundleManifest,
@@ -53,3 +54,4 @@ pub use types::{
     TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
 };
 pub use validity::{NonceStore, PlanValidityError, check_window};
+pub use verb::{VerbId, VerbIdError};
