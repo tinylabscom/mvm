@@ -185,3 +185,26 @@ Rebuild the cpio. Prove BOTH the admitted destination (reply received) and a
 non-admitted one (no reply — refused at the endpoint gate). There is no in-repo
 build script for this initramfs today; add one under the example's tooling so the
 proof is reproducible rather than a `/tmp` artifact.
+
+## Phase 2 frontier (verified against code, 2026-06-30 — start here)
+
+G1 (P1.1–P1.5) is DONE + live-verified. Phase 2 is genuinely NOT STARTED — confirmed:
+- `WorkloadRunner` does not exist yet (P2.1 open).
+- No Wire/secret-bearing relay live proof (P2.2 open).
+- `HvfBackend::start` still sets `network_policy` + `egress_relay_socket: None`
+  (`hvf_backend.rs:215,219`) — the production HVF path still uses the LEGACY in-loop
+  gate; not routed through the relay (P2.3 open).
+- `vsock_egress_bridge::egress_proxy::EgressProxy` still present + used by
+  `vmm/vsock.rs` — legacy gate NOT deleted (P2.4 open).
+
+Tools already in place for P2.1: `workload_spec` (VmStartConfig→VmmSpec),
+`InHouseDriver::boot` (relay path, live-proven), and `spawn_substitution_endpoint` +
+`build_endpoint_config_json` now carry `network_policy` + `raw_egress` (the gating
+endpoint spawn). So `WorkloadRunner` spawns a gating endpoint with
+`network_policy: Some(resolved)` + `raw_egress` (Raw if no secrets, else Wire), threads
+its UDS into the `EGRESS_PORT` `VsockPort.host_uds`, and boots via `InHouseDriver`.
+
+Execution order unchanged: P2.1 WorkloadRunner (test vs MockDriver) → P2.2 Wire live
+proof → P2.3 route HvfBackend/machine-run through WorkloadRunner<InHouseDriver> +
+re-verify → P2.4 delete the in-loop gate + EgressProxy + network_policy. Legacy stays
+until BOTH Raw and Wire relay paths are live-green.
