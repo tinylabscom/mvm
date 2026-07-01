@@ -88,6 +88,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         terminator_listen: None,
         tls_intermediate: None,
         network_policy: None,
+        egress_mode: mvm_hostd::supervisor::substitution_endpoint::EgressMode::Wire,
     };
 
     let mut child = Command::new(BIN)

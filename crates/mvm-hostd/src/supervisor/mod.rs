@@ -70,6 +70,10 @@ pub mod network;
 pub mod pii_redactor;
 pub mod policy_tool_gate;
 pub mod proxy;
+/// The raw-TCP egress serve loop for the substitution endpoint: a NIC-less guest
+/// whose plan carries no secrets sends `host:port` then splices bytes, gated by
+/// the same claim-10 [`egress_gate`](mvm_backend::vmm::egress_gate) the wire path uses.
+pub mod raw_egress;
 pub mod reaper;
 pub mod redaction_resolve;
 /// Chain-signed `secret.substituted` / `secret.placeholder_dropped`

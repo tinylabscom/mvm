@@ -62,11 +62,37 @@ fn resolve_dns_pins(
     reg
 }
 
+/// Build the claim-10 egress gate for a resolved network policy: resolve the
+/// host-allowlist DNS pins once (fails closed on an unresolvable host), then
+/// project through the shared claim-10 gate every backend agrees on. The
+/// WireRequest `assemble` and the raw-egress bin both go through here so the two
+/// serve paths gate on byte-identical decisions.
+pub fn build_egress_gate(
+    policy: &mvm_core::policy::network_policy::NetworkPolicy,
+) -> mvm_backend::vmm::egress_gate::EgressGate {
+    let pins = resolve_dns_pins(policy);
+    let now = chrono::Utc::now().to_rfc3339();
+    mvm_backend::vmm::egress_gate::EgressGate::from_network_policy(policy, &pins, &now)
+}
+
 /// How the guest reaches this endpoint. Defined in `mvm-backend` (next to the
 /// `spawn_substitution_endpoint` writer) and re-exported here so the bin, its
 /// tests, and `EndpointConfig` share one wire definition without a dependency
 /// cycle (mvm-hostd → mvm-backend, never the reverse).
 pub use mvm_backend::EndpointTransport;
+
+/// Which egress protocol the guest speaks on the relayed EGRESS_PORT stream.
+/// A VM uses exactly one, fixed at admission (secrets ⇒ WireRequest, else raw),
+/// so the endpoint is told the mode rather than sniffing untrusted guest bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressMode {
+    /// Framed WireRequest substitution (claims 12/13) — the default, secret-bearing path.
+    #[default]
+    Wire,
+    /// Raw TCP: first line `host:port`, then a byte splice. No secrets.
+    Raw,
+}
 
 /// The per-VM name-constrained intermediate the terminator
 /// terminates bound-host TLS under. The guest trusts the matching cert (delivered
@@ -141,6 +167,11 @@ pub struct EndpointConfig {
     /// closed when set: an unadmitted destination is refused before any forward.
     #[serde(default)]
     pub network_policy: Option<mvm_core::policy::network_policy::NetworkPolicy>,
+    /// Which egress protocol the relayed guest stream carries. `Wire` (default,
+    /// secret-bearing) keeps the existing WireRequest substitution serve loop; `Raw`
+    /// selects the raw-TCP splice serve loop. Fixed at admission — never sniffed.
+    #[serde(default)]
+    pub egress_mode: EgressMode,
 }
 
 /// Parse an [`EndpointConfig`] from the JSON the backend writes on stdin.
@@ -220,10 +251,7 @@ pub fn assemble(
     // projection every backend shares, and attach it. Absent ⇒ no gate here.
     let service = match &cfg.network_policy {
         Some(policy) => {
-            let pins = resolve_dns_pins(policy);
-            let now = chrono::Utc::now().to_rfc3339();
-            let gate =
-                mvm_backend::vmm::egress_gate::EgressGate::from_network_policy(policy, &pins, &now);
+            let gate = build_egress_gate(policy);
             // from_plan just minted this Arc with no other holders, so the unwrap
             // is infallible; attach the gate, then re-wrap.
             let svc = Arc::try_unwrap(service)
@@ -301,6 +329,7 @@ mod tests {
             terminator_listen: None,
             tls_intermediate: None,
             network_policy: None,
+            egress_mode: EgressMode::Wire,
         }
     }
 
@@ -509,6 +538,31 @@ mod tests {
         });
         let cfg = parse(&serde_json::to_vec(&json).unwrap()).unwrap();
         assert!(cfg.network_policy.is_none());
+    }
+
+    #[test]
+    fn config_roundtrips_egress_mode_raw() {
+        // The raw-egress mode selection must survive the stdin wire form so the
+        // bin picks the raw splice loop for exactly the VMs admitted without secrets.
+        let mut cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
+        cfg.egress_mode = EgressMode::Raw;
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        assert_eq!(parse(&bytes).unwrap(), cfg);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["egress_mode"], serde_json::json!("raw"));
+    }
+
+    #[test]
+    fn config_defaults_egress_mode_to_wire() {
+        // A config without `egress_mode` parses (field is `#[serde(default)]`) and
+        // defaults to the secret-bearing WireRequest path — byte-identical to before.
+        let json = serde_json::json!({
+            "tenant_id": "local",
+            "secrets": [],
+            "transport": {"kind": "uds", "path": "/tmp/sub.sock"},
+        });
+        let cfg = parse(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert_eq!(cfg.egress_mode, EgressMode::Wire);
     }
 
     #[test]
