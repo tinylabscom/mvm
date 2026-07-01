@@ -75,7 +75,7 @@ pub(in crate::commands) enum MachineAction {
     /// Stop a running VM by name, or all running VMs with --all
     #[command(display_order = 5)]
     Stop(MachineStopArgs),
-    /// Remove one persistent named machine spec
+    /// Remove one or more persistent named machine specs (or --all)
     #[command(name = "rm", display_order = 6)]
     Rm(MachineRemoveArgs),
     /// List persistent named machine specs
@@ -730,9 +730,18 @@ pub(in crate::commands) struct MachineInspectArgs {
 }
 
 #[derive(ClapArgs, Debug, Clone)]
+#[command(group(
+    clap::ArgGroup::new("target")
+        .required(true)
+        .args(["names", "all"])
+))]
 pub(in crate::commands) struct MachineRemoveArgs {
-    /// Persistent machine name.
-    pub name: String,
+    /// Persistent machine name(s).
+    #[arg(value_name = "NAME")]
+    pub names: Vec<String>,
+    /// Remove all persistent machine specs.
+    #[arg(long, conflicts_with = "names")]
+    pub all: bool,
     /// Confirm deletion.
     #[arg(long)]
     pub yes: bool,
@@ -1647,14 +1656,63 @@ fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the concrete set of machine names a `rm` invocation targets. With
+/// `--all` this is every persisted spec (already name-sorted); otherwise it is
+/// the positional names, de-duplicated while preserving argument order.
+fn resolve_remove_targets(all: bool, names: &[String]) -> Result<Vec<String>> {
+    if all {
+        return Ok(list_machine_specs()?
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect());
+    }
+    let mut targets = Vec::with_capacity(names.len());
+    for name in names {
+        if !targets.contains(name) {
+            targets.push(name.clone());
+        }
+    }
+    Ok(targets)
+}
+
 fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
     let json = args.json;
-    let summary = remove_machine_spec(&args.name, args.yes)?;
-    mvm_core::audit_emit!(ConfigChange, vm: &summary.name, "action=machine.rm");
+    let targets = resolve_remove_targets(args.all, &args.names)?;
+    if targets.is_empty() {
+        // Only reachable via `--all` against an empty machine store; the
+        // required arg-group rejects a bare `rm` before we get here.
+        if json {
+            println!("[]");
+        } else {
+            println!("no machines");
+        }
+        return Ok(());
+    }
+    if !args.yes {
+        bail!(
+            "refusing to remove {} machine(s) without --yes",
+            targets.len()
+        );
+    }
+    // Validate the whole set before deleting anything so a single typo doesn't
+    // leave a partially-removed batch behind (all-or-nothing on missing specs).
+    for name in &targets {
+        validate_machine_name(name)?;
+        if !config::machine_state_dir(name).exists() {
+            bail!("machine {:?} does not exist", name);
+        }
+    }
+    let mut summaries = Vec::with_capacity(targets.len());
+    for name in &targets {
+        let summary = remove_machine_spec(name, true)?;
+        mvm_core::audit_emit!(ConfigChange, vm: &summary.name, "action=machine.rm");
+        if !json {
+            println!("removed machine {}", summary.name);
+        }
+        summaries.push(summary);
+    }
     if json {
-        println!("{}", serde_json::to_string_pretty(&summary)?);
-    } else {
-        println!("removed machine {}", summary.name);
+        println!("{}", serde_json::to_string_pretty(&summaries)?);
     }
     Ok(())
 }
@@ -3429,12 +3487,43 @@ mod tests {
         }
         match parse(&["rm", "web", "--yes", "--json"]).expect("parse") {
             MachineAction::Rm(args) => {
-                assert_eq!(args.name, "web");
+                assert_eq!(args.names, vec!["web"]);
+                assert!(!args.all);
                 assert!(args.yes);
                 assert!(args.json);
             }
             other => panic!("expected rm action, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rm_parses_multiple_names_and_all() {
+        match parse(&["rm", "web", "db", "cache", "--yes"]).expect("parse") {
+            MachineAction::Rm(args) => {
+                assert_eq!(args.names, vec!["web", "db", "cache"]);
+                assert!(!args.all);
+                assert!(args.yes);
+            }
+            other => panic!("expected rm action, got {other:?}"),
+        }
+        match parse(&["rm", "--all", "--yes"]).expect("parse") {
+            MachineAction::Rm(args) => {
+                assert!(args.names.is_empty());
+                assert!(args.all);
+                assert!(args.yes);
+            }
+            other => panic!("expected rm action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rm_requires_a_target_and_rejects_names_with_all() {
+        // Bare `rm` names no machine and doesn't pass --all.
+        let err = parse(&["rm", "--yes"]).expect_err("a target is required");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        // --all is mutually exclusive with explicit names.
+        let err = parse(&["rm", "web", "--all", "--yes"]).expect_err("names conflict with --all");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
@@ -4157,6 +4246,108 @@ ssh_agent = true
         assert_eq!(summary.name, "web");
         assert!(summary.removed);
         assert!(!config::machine_state_dir("web").exists());
+    }
+
+    fn seed_machine_spec(name: &str) {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: name.to_string(),
+            image: Some(format!("example/{name}:latest")),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "standard".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: false,
+            agent_verb: Vec::new(),
+            created_at: Some(mvm_core::time::utc_now()),
+            last_started_at: None,
+        };
+        save_machine_spec(&spec, false).expect("save");
+    }
+
+    fn rm_args(names: &[&str], all: bool, yes: bool) -> MachineRemoveArgs {
+        MachineRemoveArgs {
+            names: names.iter().map(|n| n.to_string()).collect(),
+            all,
+            yes,
+            json: false,
+        }
+    }
+
+    #[test]
+    fn remove_machine_deletes_multiple_named_specs() {
+        let _state = IsolatedMachineState::new();
+        for name in ["web", "db", "cache"] {
+            seed_machine_spec(name);
+        }
+        remove_machine(rm_args(&["web", "cache"], false, true)).expect("remove batch");
+        assert!(!config::machine_state_dir("web").exists());
+        assert!(!config::machine_state_dir("cache").exists());
+        // Untargeted machine is untouched.
+        assert!(config::machine_state_dir("db").exists());
+    }
+
+    #[test]
+    fn remove_machine_all_deletes_every_spec() {
+        let _state = IsolatedMachineState::new();
+        for name in ["web", "db", "cache"] {
+            seed_machine_spec(name);
+        }
+        remove_machine(rm_args(&[], true, true)).expect("remove all");
+        assert!(list_machine_specs().expect("list").is_empty());
+    }
+
+    #[test]
+    fn remove_machine_all_on_empty_store_is_a_noop() {
+        let _state = IsolatedMachineState::new();
+        remove_machine(rm_args(&[], true, true)).expect("remove all on empty store");
+    }
+
+    #[test]
+    fn remove_machine_batch_requires_confirmation_and_keeps_all_specs() {
+        let _state = IsolatedMachineState::new();
+        for name in ["web", "db"] {
+            seed_machine_spec(name);
+        }
+        let err = remove_machine(rm_args(&["web", "db"], false, false))
+            .expect_err("confirmation required");
+        assert!(err.to_string().contains("without --yes"));
+        // Nothing removed when confirmation is missing.
+        assert!(config::machine_state_dir("web").exists());
+        assert!(config::machine_state_dir("db").exists());
+    }
+
+    #[test]
+    fn remove_machine_batch_is_all_or_nothing_on_a_missing_spec() {
+        let _state = IsolatedMachineState::new();
+        seed_machine_spec("web");
+        let err = remove_machine(rm_args(&["web", "ghost"], false, true))
+            .expect_err("missing spec aborts the batch");
+        assert!(err.to_string().contains("does not exist"));
+        // The valid target survives because validation precedes deletion.
+        assert!(config::machine_state_dir("web").exists());
+    }
+
+    #[test]
+    fn resolve_remove_targets_dedupes_named_and_enumerates_all() {
+        let _state = IsolatedMachineState::new();
+        for name in ["alpha", "zeta"] {
+            seed_machine_spec(name);
+        }
+        let named = resolve_remove_targets(
+            false,
+            &["web".to_string(), "db".to_string(), "web".to_string()],
+        )
+        .expect("resolve named");
+        assert_eq!(named, vec!["web", "db"]);
+        let all = resolve_remove_targets(true, &[]).expect("resolve all");
+        assert_eq!(all, vec!["alpha", "zeta"]);
     }
 
     #[test]

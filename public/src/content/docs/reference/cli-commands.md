@@ -414,8 +414,9 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine ls --json` | Print persisted named machine specs as JSON |
 | `mvmctl machine inspect <name>` | Show one persisted named machine spec |
 | `mvmctl machine inspect <name> --json` | Print one persisted named machine spec as JSON |
-| `mvmctl machine rm <name> --yes` | Remove one persisted named machine spec |
-| `mvmctl machine rm <name> --yes --json` | Print a JSON deletion summary |
+| `mvmctl machine rm <name>... --yes` | Remove one or more persisted named machine specs |
+| `mvmctl machine rm --all --yes` | Remove every persisted named machine spec |
+| `mvmctl machine rm <name>... --yes --json` | Print a JSON array deletion summary |
 | `mvmctl machine exec --name <name> -- <cmd>...` | Run a command in an already-started named machine |
 | `mvmctl machine exec --name <name> -it -- <cmd>...` | Run a command in an already-started named machine attached to a PTY |
 | `mvmctl machine shell --name <name>` | Attach an interactive shell/console to an already-started named machine |
