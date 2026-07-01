@@ -175,6 +175,43 @@ impl KvmVm {
         gate: EgressGate,
         stop: &'static AtomicBool,
     ) -> Result<KvmEgressResult, KvmError> {
+        self.run_with_vsock_egress(mem, cfg, timeout, stop, |vsock, active| {
+            vsock.set_egress_gate(gate);
+            vsock.set_egress_activity(active.clone());
+        })
+    }
+
+    /// Like [`boot_with_egress`], but the guest's egress port is a **pure relay**
+    /// to the host-side gating endpoint bound at `endpoint_uds` — no in-loop gate.
+    /// The endpoint owns the claim-10 decision (and substitution); the run loop
+    /// only pipes bytes. The vsock-only egress end state: one host bridge, no
+    /// in-VMM gate. The caller spawns the endpoint with the admitted policy.
+    pub fn boot_with_relay(
+        &self,
+        mem: &mut [u8],
+        cfg: &x86_boot::BootConfig,
+        timeout: Duration,
+        endpoint_uds: &std::path::Path,
+        stop: &'static AtomicBool,
+    ) -> Result<KvmEgressResult, KvmError> {
+        self.run_with_vsock_egress(mem, cfg, timeout, stop, |vsock, active| {
+            vsock.set_substitution_activity(active.clone());
+            vsock.set_substitution_endpoint(endpoint_uds);
+            vsock.set_substitution_relay_only();
+        })
+    }
+
+    /// Shared boot + run-loop body for the two egress modes. `wire` installs the
+    /// egress handling on the vsock device — the in-loop gate, or the relay to the
+    /// host endpoint.
+    fn run_with_vsock_egress(
+        &self,
+        mem: &mut [u8],
+        cfg: &x86_boot::BootConfig,
+        timeout: Duration,
+        stop: &'static AtomicBool,
+        wire: impl FnOnce(&mut VirtioVsock, &Arc<AtomicUsize>),
+    ) -> Result<KvmEgressResult, KvmError> {
         let ram_ptr = mem.as_mut_ptr();
         let ram_len = mem.len();
         let vcpu = self.boot_x86(mem, cfg)?;
@@ -218,8 +255,7 @@ impl KvmVm {
         let mut vsock =
             unsafe { VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram_ptr, 0, ram_len) };
         vsock.capture_workload_exit(stop);
-        vsock.set_egress_gate(gate);
-        vsock.set_egress_activity(egress_active.clone());
+        wire(&mut vsock, &egress_active);
 
         let outcome = {
             let mut devices: Vec<&mut dyn RunDevice> = vec![&mut serial, &mut vsock];
