@@ -22,11 +22,28 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_build::hvf_supervisor::HvfSupervisorConfig;
 use mvm_core::config::{mvm_data_dir, vm_state_dir};
+use mvm_core::plan::SecretBinding;
+use mvm_core::policy::RedactionPolicy;
+use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::{
     VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
 use crate::base::ui;
+use crate::driver::InHouseDriver;
+use crate::workload_runner::{RealEndpointSpawner, WorkloadLaunchInputs, WorkloadRunner};
+
+/// Env flag opting `HvfBackend::start` onto the relay egress path — routing the
+/// workload through `WorkloadRunner<InHouseDriver>` and the host-side gating
+/// endpoint instead of the legacy in-loop supervisor gate. Off by default: the
+/// relay's WireRequest path is not yet live-proven, so legacy stays the default
+/// until that proof lands and the default flips.
+const RELAY_EGRESS_ENV: &str = "MVM_HVF_EGRESS_RELAY";
+
+/// Default tenant stamped on a relay endpoint for a secret-free plan that carries
+/// no tenant of its own. The relay path always spawns a gating endpoint (the sole
+/// egress gate), so it always needs a tenant even when the plan has no secrets.
+const RELAY_DEFAULT_TENANT: &str = "local";
 
 /// PID file the supervisor writes inside `vm_state_dir`. Distinct from the other
 /// backends' markers so HVF VMs coexist under the same `~/.mvm/vms/` root.
@@ -99,6 +116,56 @@ fn vms_root() -> PathBuf {
     PathBuf::from(mvm_data_dir()).join("vms")
 }
 
+/// The egress inputs the relay path resolves from an admitted `VmStartConfig`
+/// and its persisted plan: the claim-10 policy the endpoint gates against plus
+/// the tenant/secrets/redaction the substitution endpoint needs. Owned so the
+/// borrow the `WorkloadRunner` takes is straightforward.
+struct RelayEgressInputs {
+    tenant: String,
+    secrets: Vec<SecretBinding>,
+    redaction: RedactionPolicy,
+    network_policy: NetworkPolicy,
+}
+
+/// Resolve the relay egress inputs. A plan carrying egress secrets (`decoded`
+/// `Some`) contributes its secret bindings, redaction, and tenant (the tenant the
+/// plan was admitted under). A secret-free plan (`None`) is the raw path — no
+/// secrets, default redaction, tenant from the config (else [`RELAY_DEFAULT_TENANT`]).
+/// Either way the endpoint gates against the admitted config's `network_policy`.
+fn resolve_relay_egress_inputs(
+    config: &VmStartConfig,
+    decoded: Option<(Vec<SecretBinding>, RedactionPolicy, String)>,
+) -> RelayEgressInputs {
+    let network_policy = config.network_policy.clone();
+    match decoded {
+        Some((secrets, redaction, tenant)) => RelayEgressInputs {
+            tenant,
+            secrets,
+            redaction,
+            network_policy,
+        },
+        None => RelayEgressInputs {
+            tenant: config
+                .tenant_id
+                .clone()
+                .unwrap_or_else(|| RELAY_DEFAULT_TENANT.to_string()),
+            secrets: Vec::new(),
+            redaction: RedactionPolicy::default(),
+            network_policy,
+        },
+    }
+}
+
+/// Whether the relay egress path is opt-in-enabled. Pure over the raw env value
+/// so it is testable without touching the process environment: truthy is `1` or
+/// `true` (case-insensitive); anything else — including unset — is off.
+fn relay_egress_enabled_from(v: Option<&str>) -> bool {
+    matches!(
+        v.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true")
+    )
+}
+
 /// Spawn the per-VM substitution endpoint when the admitted plan carries egress
 /// secrets, returning an armed `EndpointGuard` and the endpoint socket
 /// path to hand the supervisor; a secret-free plan (or no `plan.json`) yields a
@@ -139,6 +206,55 @@ fn spawn_hvf_egress_endpoint_if_needed(
     Ok((EndpointGuard::new(vm_name), Some(socket)))
 }
 
+impl HvfBackend {
+    /// The relay egress path (opt-in via [`RELAY_EGRESS_ENV`]): route the workload
+    /// through `WorkloadRunner<InHouseDriver>` so the host-side gating endpoint is
+    /// the sole path off the box — claim 10 enforced at the endpoint, the run loop
+    /// a pure relay — replacing the legacy in-loop supervisor gate. The
+    /// `InHouseDriver` writes the same `hvf.pid` / `console.log` / `workload.exit`
+    /// under the VM state dir that `stop`/`status`/`wait`/`list` read, so the rest
+    /// of the lifecycle is unchanged. Fail-closed: if the runner errors after
+    /// spawning the endpoint, reap it so a decrypted-secret process can't outlive
+    /// a failed launch.
+    fn start_via_relay(&self, config: &VmStartConfig) -> Result<VmId> {
+        let state_dir = vm_state_dir(&config.name);
+        std::fs::create_dir_all(&state_dir)
+            .with_context(|| format!("create state dir {}", state_dir.display()))?;
+
+        let decoded = crate::egress_shared::decode_plan_secrets_from_state(&state_dir)?;
+        let egress = resolve_relay_egress_inputs(config, decoded);
+
+        let runner = WorkloadRunner::new(InHouseDriver::new(), RealEndpointSpawner);
+        // The in-house driver assembles the kernel cmdline inside the supervisor,
+        // so the spec cmdline is unused on this path — pass empty.
+        let inputs = WorkloadLaunchInputs {
+            config,
+            tenant: &egress.tenant,
+            secrets: &egress.secrets,
+            redaction: &egress.redaction,
+            network_policy: &egress.network_policy,
+            cmdline: String::new(),
+        };
+
+        ui::info(&format!(
+            "Starting HVF VM '{}' via the relay egress path...",
+            config.name
+        ));
+        match runner.start_workload(&inputs) {
+            Ok(_vm) => {
+                // Detached: the supervisor lives on via its PID file; dropping the
+                // handle does not kill it (InHouseRunningVm has no Drop).
+                ui::success(&format!("HVF VM '{}' started (relay egress).", config.name));
+                Ok(VmId(config.name.clone()))
+            }
+            Err(e) => {
+                crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &config.name);
+                Err(e)
+            }
+        }
+    }
+}
+
 impl VmBackend for HvfBackend {
     fn name(&self) -> &str {
         "hvf"
@@ -158,6 +274,12 @@ impl VmBackend for HvfBackend {
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
+        // Opt-in relay egress path routes through WorkloadRunner + the gating
+        // endpoint; the default stays the legacy in-loop gate until the relay's
+        // WireRequest path is live-proven and the default flips.
+        if relay_egress_enabled_from(std::env::var(RELAY_EGRESS_ENV).ok().as_deref()) {
+            return self.start_via_relay(config);
+        }
         // No parent-entitlement gate here: the detached supervisor self-signs the
         // hypervisor entitlement and does the HVF work. The parent (CLI) only
         // spawns it, so it needn't be entitled. (`is_available` still probes for
@@ -453,6 +575,76 @@ mod tests {
             "no endpoint process for a secret-free plan"
         );
         drop(guard); // defused → Drop reaps nothing
+    }
+
+    #[test]
+    fn relay_egress_inputs_carry_decoded_plan_secrets_over_the_config_policy() {
+        use mvm_core::plan::SecretSource;
+        use mvm_core::policy::network_policy::HostPort;
+
+        let config = VmStartConfig {
+            name: "w".into(),
+            tenant_id: Some("config-tenant".into()),
+            network_policy: NetworkPolicy::allow_list(vec![HostPort::new("api.openai.com", 443)]),
+            ..Default::default()
+        };
+        let secret = SecretBinding {
+            name: "OPENAI_API_KEY".into(),
+            source: SecretSource::Static { value: "sk".into() },
+        };
+        let decoded = Some((
+            vec![secret],
+            RedactionPolicy::default(),
+            "plan-tenant".into(),
+        ));
+
+        let out = resolve_relay_egress_inputs(&config, decoded);
+        // The plan's own tenant wins when it carries secrets; the endpoint gates
+        // against the config's admitted policy either way.
+        assert_eq!(out.tenant, "plan-tenant");
+        assert_eq!(out.secrets.len(), 1);
+        assert_eq!(out.secrets[0].name, "OPENAI_API_KEY");
+        assert_eq!(out.network_policy, config.network_policy);
+    }
+
+    #[test]
+    fn relay_egress_inputs_for_a_secret_free_plan_are_raw_with_the_config_tenant() {
+        let config = VmStartConfig {
+            name: "w".into(),
+            tenant_id: Some("config-tenant".into()),
+            network_policy: NetworkPolicy::deny_all(),
+            ..Default::default()
+        };
+        let out = resolve_relay_egress_inputs(&config, None);
+        assert!(out.secrets.is_empty(), "no plan secrets ⇒ raw egress");
+        assert_eq!(out.tenant, "config-tenant");
+        assert_eq!(
+            serde_json::to_value(&out.redaction).unwrap(),
+            serde_json::to_value(RedactionPolicy::default()).unwrap()
+        );
+        assert_eq!(out.network_policy, NetworkPolicy::deny_all());
+    }
+
+    #[test]
+    fn relay_egress_inputs_default_the_tenant_when_config_has_none() {
+        let config = VmStartConfig {
+            name: "w".into(),
+            tenant_id: None,
+            ..Default::default()
+        };
+        let out = resolve_relay_egress_inputs(&config, None);
+        assert_eq!(out.tenant, RELAY_DEFAULT_TENANT);
+    }
+
+    #[test]
+    fn relay_egress_flag_is_off_unless_truthy() {
+        assert!(!relay_egress_enabled_from(None), "unset ⇒ legacy default");
+        assert!(!relay_egress_enabled_from(Some("0")));
+        assert!(!relay_egress_enabled_from(Some("")));
+        assert!(!relay_egress_enabled_from(Some("no")));
+        assert!(relay_egress_enabled_from(Some("1")));
+        assert!(relay_egress_enabled_from(Some("true")));
+        assert!(relay_egress_enabled_from(Some("TRUE")), "case-insensitive");
     }
 
     #[test]
