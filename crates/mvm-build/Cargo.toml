@@ -21,6 +21,15 @@ path = "src/bin/mvm-host-vm-init.rs"
 name = "mvm-egress-proxy"
 path = "src/bin/mvm-egress-proxy.rs"
 
+# Self-hosting builder-rootfs bootstrap patcher: PID 1 from an initramfs on the
+# in-house VMM. Mounts the target rootfs read-write and injects the freshly built
+# mvm host binaries per /payload/manifest, then powers off. Cross-compiled to
+# static aarch64-musl; never installed in a VM rootfs (initramfs-only, absent
+# from the host-binaries sync gate).
+[[bin]]
+name = "mvm-rootfs-patcher"
+path = "src/bin/mvm-rootfs-patcher.rs"
+
 # PID 1 of the nix-tarball Stage 0 seed. Cross-compiled to
 # static aarch64-musl + embedded by mvm-cli/build.rs (via SEED_BINARIES),
 # same treatment as mvm-host-vm-init. Host-side only — never installed in a

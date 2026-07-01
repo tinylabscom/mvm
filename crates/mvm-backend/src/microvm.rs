@@ -2854,10 +2854,12 @@ fn spawn_egress_endpoint(config: &FlakeRunConfig) -> Result<EndpointGuard> {
         secrets: &secrets,
         redaction: &redaction,
         transport: crate::substitution_spawn::EndpointTransport::Vsock {
-            port: mvm_guest::vsock::SUBSTITUTION_PORT,
+            port: mvm_guest::vsock::EGRESS_PORT,
         },
         terminator_listen: Some(listen),
         tls_intermediate,
+        network_policy: None,
+        raw_egress: false,
     })?;
     Ok(EndpointGuard::new(name))
 }

@@ -2136,6 +2136,12 @@ impl VzPersistentVmHandle {
 /// dir (mirrors the value passed in [`build_vz_persistent_supervisor_config`]).
 const PERSISTENT_VZ_PID_FILE: &str = "builder.pid";
 
+/// Session id of the always-warm dev builder VM that `mvmctl dev up` boots
+/// (`mvm-persistent-builder-vz-dev`). Fixed — not the random per-build id the
+/// warm pool uses — so `dev down`, the dev shell, and the flake-build dev env
+/// all agree on which persistent builder is "the dev VM".
+pub const DEV_SESSION_ID: &str = "dev";
+
 /// State dir for a [`VzPersistentBuilderVm`] booted with a known
 /// `session_id`. Same layout `start` derives, lifted out so a separate
 /// process (e.g. `mvmctl dev down`) can locate the VM without the

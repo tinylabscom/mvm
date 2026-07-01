@@ -30,7 +30,7 @@ pub(in crate::commands) const DEV_VM_NAME: &str = "mvm-dev";
 /// process can locate the supervisor PID file under
 /// `~/.cache/mvm/builder-vm/vms/mvm-persistent-builder-vz-dev/` and reap it.
 #[cfg(feature = "builder-vm")]
-const DEV_VM_SESSION_ID: &str = "dev";
+const DEV_VM_SESSION_ID: &str = mvm_build::vz_builder::DEV_SESSION_ID;
 #[cfg(feature = "builder-vm")]
 const DEV_VZ_ACTIVITY_FILE: &str = "last-activity-unix-secs";
 const BUILDER_VM_SOURCE_FINGERPRINT_FILE: &str = ".mvm-source.sha256";

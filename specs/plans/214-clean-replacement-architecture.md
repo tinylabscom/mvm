@@ -526,3 +526,164 @@ git commit -m "test(driver): lock the MockRunningVm loopback vsock contract"
 - **Placeholder scan:** every step carries real code or an exact command — no TBD/TODO. Each task compiles standalone: Task 1's `mod.rs` declares only `spec`; Task 2 extends it with `traits`/`mock` in the same task that creates them.
 - **Type consistency:** `VmId(pub String)`, `VmExitStatus { code, success }`, `VmStatus::Running`, `VmCapabilities { vsock, .. }`, `SnapshotCapability::Unsupported` all match `mvm-core/src/protocol/vm_backend.rs`. `MockDriver::take_guest_end(&VmId, u32)` keys match `vsock_connect`'s insert key `(self.id.0, guest_port)`.
 - **Additive guarantee:** only `lib.rs` gains one `pub mod driver;` line; no existing module is modified, so no claim witness can move in S0.
+
+---
+
+## S1 — design (InHouseDriver + WorkloadRunner, HVF reference proof)
+
+**Goal:** route the HVF workload path through the new seam — a `WorkloadRunner` (the sole `WorkloadBackend`) holding an `InHouseDriver: VmmDriver` — and prove parity against the current `HvfBackend` on a live boot, without moving any claim witness incorrectly.
+
+**Ground truth from the current code:**
+- HVF is an *external-supervisor* launch model: `HvfBackend::start(&VmStartConfig)` builds an `HvfSupervisorConfig` (`crates/mvm-build/src/hvf_supervisor.rs`: `kernel`, `initramfs`, `disk`, `vsock`, `console_log`, `pid_file`, `workload_exit`, `network_policy`, `timeout_secs`, `agent_socket`, `substitution_socket`), spawns the detached `mvm-hvf-supervisor` subprocess with the JSON on stdin, and waits on the PID file. The in-house `vmm::run` loop runs *inside* that subprocess.
+- The claim-10 `EgressGate` is built **inside the supervisor** from `cfg.network_policy` (`crates/mvm-vm-host/src/bin/mvm-hvf-supervisor.rs:211`, `EgressGate::from_network_policy`); the run loop's `egress_proxy`/`substitution_bridge` enforce it and relay bound-secret flows to the separate `substitution_socket` endpoint (claims 12/13).
+- The bridge modules are consumed cross-crate: `mvm-vm-host` (`egress_server.rs`, `mvm-hvf-supervisor.rs`), `mvm-backend` (`kvm/vm.rs`, `hvf/kernel_boot.rs`), and examples import `mvm_backend::vmm::egress_gate`.
+
+### OPEN DECISION (security-critical) — where does the claim-10 gate run in the unified model?
+
+The seam says the driver is pure mechanics and one host-side `vsock_egress_bridge` carries claims 10/12/13 for every backend. But today the in-house VMM's claim-10 gate runs *inside* the supervisor, fed by `network_policy` in the config. Two coherent resolutions:
+
+- **G1 — gate in a host-side bridge process (ADR-pure, maximal uniformity).** `WorkloadRunner` spawns one `vsock_egress_bridge` process (claim-10 gate + claims-12/13 substitution) with the resolved policy. `VmmSpec` carries a `VsockPort { guest_port: EGRESS_PORT, host_uds: <bridge uds>, GuestDials }`. Every VMM — including the in-house supervisor — becomes policy-free and just relays the guest's `EGRESS_PORT` stream to that UDS (the supervisor already relays to `substitution_socket`, so this is the same move generalized). `HvfSupervisorConfig` loses `network_policy`. End state: one egress codepath, driver truly pure mechanics. Cost: changes the in-house supervisor/run loop (remove the in-process gate, keep only relay) — a real change to the code deliverable-3-style enforcement rides on.
+- **G2 — gate stays in-VMM, policy threaded as a non-spec boot param.** Keep the supervisor's in-process gate; `WorkloadRunner` hands the policy to `InHouseDriver::boot` via a parameter *outside* `VmmSpec`. Smaller change, but the driver now receives policy (weakens "pure mechanics") and each VMM keeps its own in-process gate — the per-backend egress divergence the restructure targets is not fully removed.
+
+**DECIDED: G1 (2026-06-30).** The gate moves into a host-side `vsock_egress_bridge` process the `WorkloadRunner` spawns; every VMM (incl. the in-house supervisor) becomes policy-free and relays `EGRESS_PORT` to the bridge UDS.
+
+**Recommendation: G1.** It is the ADR's actual intent ("one host-side bridge for every backend; the driver only wires the wire"), and it is what lets Firecracker (S4) drop nftables onto the *same* bridge rather than a second in-VMM gate. G2 is a shortcut that leaves the divergence in place and would have to be undone at S4 anyway. G1's cost — moving the in-house gate out of the supervisor into a host bridge process — is paid once here and is the reference the other backends copy. This decision is a prerequisite to authoring S1b/S1c tasks; it must be settled before execution.
+
+### Sub-slices (task detail authored per sub-slice at execution, after the G1/G2 call)
+
+- **S1a — promote the bridge (non-live, unit-tested).** Move `vmm/{egress_gate,egress_proxy,substitution_bridge}` into a top-level `mvm_backend::vsock_egress_bridge` module. Keep `pub use` re-exports at the old `vmm::` paths so the cross-crate consumers (`mvm-vm-host`, `kvm/vm.rs`, `hvf/kernel_boot.rs`, examples) stay green — pure move + re-export, zero behavior change. Under G1 this module also gains the standalone bridge-process entry the runner spawns.
+- **S1b — `InHouseDriver: VmmDriver` (mostly non-live).** Extract the supervisor-spawn + `HvfSupervisorConfig`-build + PID-wait mechanics from `HvfBackend::start` into `InHouseDriver::boot(&VmmSpec)`; `RunningVm` wraps the supervisor child + `workload_exit` vsock port + PID file. Under G1, `boot` maps `VmmSpec` (no policy) → a policy-free `HvfSupervisorConfig`. Unit-test the `VmmSpec → HvfSupervisorConfig` mapping directly.
+- **S1c — `WorkloadRunner` (mostly non-live).** New `WorkloadRunner` holding a `dyn VmmDriver`, the sole `impl WorkloadBackend`. Maps `VmStartConfig → VmmSpec`, admits the plan, spawns the egress bridge + substitution endpoint (G1), emits audit, calls `driver.boot`. `HvfBackend` becomes a thin constructor `WorkloadRunner::new(InHouseDriver::new())`. Unit-test the `VmStartConfig → VmmSpec` mapping and the bridge-spawn wiring against `MockDriver`.
+- **S1d — live HVF parity (live, this Mac).** Boot a real workload through `WorkloadRunner<InHouseDriver>` and compare to the old `HvfBackend` path: same exit code, same egress allow/deny verdict via `examples/egress-probe`, same audit-chain entries. Only after parity passes is the old `HvfBackend` internals swap complete.
+
+Firecracker/libkrun/vz are untouched in S1 (still their own `AnyBackend` variants); S1 proves the seam on the cleanest VMM first.
+
+---
+
+### S1a — task detail (bridge promotion; behavior-preserving move + re-export)
+
+**Single refactor task.** Relocate the three bridge modules out of the in-house VMM device model into a top-level, backend-agnostic `vsock_egress_bridge` module, preserving every consumer path via re-exports. No behavior change — the existing bridge tests + a green workspace are the proof (a move-refactor has no new failing test to write first).
+
+**Files:**
+- Move (git mv, preserve history): `crates/mvm-backend/src/vmm/egress_gate.rs` → `crates/mvm-backend/src/vsock_egress_bridge/egress_gate.rs`; `…/vmm/egress_proxy.rs` → `…/vsock_egress_bridge/egress_proxy.rs`; `…/vmm/substitution_bridge.rs` → `…/vsock_egress_bridge/substitution_bridge.rs`
+- Create: `crates/mvm-backend/src/vsock_egress_bridge/mod.rs`
+- Modify: `crates/mvm-backend/src/vmm/mod.rs` (replace the three `mod` decls with re-exports)
+- Modify: `crates/mvm-backend/src/lib.rs` (add `pub mod vsock_egress_bridge;`)
+- Modify: `xtask/src/check_vsock_only_egress.rs` (add the new dir to `GUARDED_DIRS`)
+
+**Why it's clean:** `egress_proxy` + `substitution_bridge` reference only `super::egress_gate` (all three move together, so `super::` still resolves); the sole other `super::` uses are `use super::*;` inside each file's own `#[cfg(test)] mod tests` (self-referential). Internal consumers reach the modules via `crate::vmm::egress_gate` (in `hvf/kernel_boot.rs`, `kvm/vm.rs`, `vmm/vsock.rs`, `vmm/run.rs`) and `mvm-vm-host` reaches `egress_gate` cross-crate — all preserved by the re-exports below.
+
+- [ ] **Step 1: Create the new module root.** `crates/mvm-backend/src/vsock_egress_bridge/mod.rs`:
+
+```rust
+//! The single host-side vsock egress bridge: the one place the claim-10 gate and
+//! claims-12/13 substitution are enforced, for every backend. Promoted out of the
+//! in-house VMM device model so it is backend-agnostic and one implementation
+//! serves all backends.
+
+pub mod egress_gate;
+pub(crate) mod egress_proxy;
+pub(crate) mod substitution_bridge;
+```
+
+- [ ] **Step 2: Move the three files** with `git mv` (keeps blame):
+
+```bash
+cd crates/mvm-backend/src
+git mv vmm/egress_gate.rs vsock_egress_bridge/egress_gate.rs
+git mv vmm/egress_proxy.rs vsock_egress_bridge/egress_proxy.rs
+git mv vmm/substitution_bridge.rs vsock_egress_bridge/substitution_bridge.rs
+```
+
+- [ ] **Step 3: Replace the module decls in `vmm/mod.rs` with re-exports.** Find the lines `pub mod egress_gate;`, `pub(crate) mod egress_proxy;`, `pub(crate) mod substitution_bridge;` and replace all three with:
+
+```rust
+// Promoted to the top-level backend-agnostic bridge module; re-exported at the
+// old paths so the in-house run loop and cross-crate consumers keep working.
+pub use crate::vsock_egress_bridge::egress_gate;
+pub(crate) use crate::vsock_egress_bridge::{egress_proxy, substitution_bridge};
+```
+
+- [ ] **Step 4: Register the module.** Add to `crates/mvm-backend/src/lib.rs`, near the other `pub mod` lines:
+
+```rust
+pub mod vsock_egress_bridge;
+```
+
+- [ ] **Step 5: Extend the NIC-free guard** so it covers the egress code in its new home. In `xtask/src/check_vsock_only_egress.rs`, add the new dir to `GUARDED_DIRS`:
+
+```rust
+const GUARDED_DIRS: &[&str] = &[
+    "crates/mvm-backend/src/vmm",
+    "crates/mvm-backend/src/hvf",
+    "crates/mvm-backend/src/vsock_egress_bridge",
+];
+```
+
+- [ ] **Step 6: Run the full gates** (a move-refactor is proven by the existing suite staying green):
+
+```bash
+~/.cargo/bin/cargo fmt --all -- --check
+~/.cargo/bin/cargo clippy --workspace --all-targets -- -D warnings
+~/.cargo/bin/cargo nextest run -p mvm-backend        # the moved bridge tests + all backend tests
+~/.cargo/bin/cargo run -p xtask -- check-vsock-only-egress
+```
+
+Expected: clean. The moved modules' tests (`egress_gate`, `egress_proxy`, `substitution_bridge`) run under their new paths; every consumer resolves through the re-exports; the guard now reports the `vsock_egress_bridge` dir as NIC-free.
+
+- [ ] **Step 7: Commit.**
+
+```bash
+git add -A
+git commit -m "refactor(backend): promote the vsock egress bridge out of the vmm device model"
+```
+
+---
+
+### S1b — G1 gate-relocation design (implementation-ready)
+
+**Current wiring (verified in code):** `mvm-hvf-supervisor` builds
+`EgressGate::from_network_policy(cfg.network_policy, pins, now)` in-process and passes it
+into `hvf::boot_kernel_until` via `HostChannels { egress, agent_socket, substitution_socket }`.
+`vmm::run` consumes `HostChannels.egress` in its async egress delivery (`drain_egress`), gating
++ proxying the guest's `EGRESS_PORT` stream itself; bound-secret flows are relayed to
+`substitution_socket` (the per-VM `mvm-substitution-endpoint`). So the claim-10 gate lives **in
+the guest's run loop**, inside the supervisor process.
+
+**G1 target:** the gate moves out of the run loop into the host-side bridge, so the driver is
+pure mechanics.
+
+1. **Endpoint becomes the unified bridge.** `mvm-substitution-endpoint` gains the claim-10 gate:
+   `EndpointConfig` carries the resolved `NetworkPolicy` (+ DNS pins); the endpoint builds the
+   `EgressGate` and refuses a non-admitted destination **before** connecting/substituting. It
+   already owns substitution (claims 12/13), so it becomes the single `vsock_egress_bridge`
+   process (gate + substitution in one endpoint — ADR-101's intent).
+2. **Run loop becomes a relay.** `HostChannels` drops `egress: EgressGate`; the run loop relays
+   the guest's `EGRESS_PORT` stream straight to a host UDS (the endpoint). Mechanically this is
+   what it already does for `substitution_socket` — generalize it to carry *all* egress, not just
+   bound-secret flows. `vmm/egress_proxy` (the in-run-loop gate+proxy) is deleted from this path.
+3. **Config loses policy.** `HvfSupervisorConfig` drops `network_policy`; it gains (or reuses
+   `substitution_socket` as) the single egress-relay UDS. The supervisor no longer resolves pins
+   or builds a gate.
+4. **Runner owns the gate.** `WorkloadRunner` spawns the endpoint with the resolved policy (+ pins)
+   and threads its UDS into the `VmmSpec`'s `EGRESS_PORT` `VsockPort.host_uds`. `InHouseDriver::boot`
+   maps the (policy-free) `VmmSpec` → the relay config + spawns the supervisor + returns a `RunningVm`.
+
+**Migration (additive-first, no flag day):**
+- Add the relay mode to the supervisor/run loop *alongside* the legacy in-loop gate (select on
+  whether the config carries a policy vs a relay socket) — backward compatible; the current
+  `HvfBackend::start` path keeps working.
+- Add the gate to the endpoint (unit-test: admitted destination forwarded, non-admitted refused,
+  no raw secret crosses).
+- Wire `InHouseDriver::boot` + `WorkloadRunner` to the relay path.
+- **Live-verify (the adversarial gate):** the `examples/hvf-backend-egress` proof (address-agnostic)
+  must still show the guest reaching the admitted destination **and** a non-admitted one refused —
+  i.e. claim-10 enforcement is preserved with the gate now in the endpoint, not the run loop. Only
+  after a green live verdict: delete the legacy in-loop gate + `network_policy` from the config.
+
+**Security invariant to hold throughout:** there must be **no window** where the guest's egress
+reaches the network without passing the gate. Because the endpoint gates *before* it connects
+upstream, and the run loop only relays to the endpoint (never dials upstream itself), the
+no-bypass property holds by construction — the relay has no path to the network except through the
+gating endpoint. This is the property the live verification must confirm adversarially (a
+non-admitted destination stays blocked).

@@ -45,5 +45,8 @@ pub const HOST_BINARIES: &[HostBinary] = &[
 /// and are absent from `nix/lib/mvm-host-binaries.nix` (the
 /// `check-mvm-host-binaries-sync` xtask only mirrors `HOST_BINARIES`).
 /// The host extracts these by name and lays them down directly:
-/// `stage0-init` becomes the Stage 0 nix-seed's `/init`.
-pub const SEED_BINARIES: &[&str] = &["stage0-init"];
+/// `stage0-init` becomes the Stage 0 nix-seed's `/init`;
+/// `mvm-rootfs-patcher` becomes the self-hosting bootstrap's inject-initramfs
+/// `/init` (re-bakes a builder rootfs with the current host binaries on the
+/// in-house VMM — no legacy builder).
+pub const SEED_BINARIES: &[&str] = &["stage0-init", "mvm-rootfs-patcher"];

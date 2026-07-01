@@ -25,6 +25,12 @@ pub trait VmmDriver: Send + Sync {
     fn snapshot_capability(&self) -> SnapshotCapability;
     /// Boot the VM described by `spec`, returning a live handle.
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>>;
+
+    /// Reconstruct a live handle for an already-running VM by id — the stateless
+    /// lifecycle entry (stop/status/wait from a process that didn't boot it). The
+    /// handle is disk-backed (pid file + exit record), so no in-memory boot state
+    /// is needed; a returned handle whose VM has since exited reports `Stopped`.
+    fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>>;
 }
 
 /// A live VM handle. Launch-model-agnostic: an in-process VMM, a subprocess,

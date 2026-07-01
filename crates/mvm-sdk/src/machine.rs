@@ -195,6 +195,7 @@ pub struct MachineRunBuilder {
     receipt: Option<String>,
     json: bool,
     dry_run: bool,
+    detach: bool,
 }
 
 impl MachineRunBuilder {
@@ -310,6 +311,16 @@ impl MachineRunBuilder {
         self
     }
 
+    /// Run the machine detached (persistent): boot it and return immediately
+    /// instead of blocking until it exits. Maps to the CLI's `-d`/`--detach`. A
+    /// detached machine stays up for the host to attach to / drive over the agent;
+    /// the default (`false`) is the transient run-to-exit lifecycle, where the call
+    /// blocks and the machine shuts down with its entrypoint's exit code.
+    pub fn detach(mut self, enabled: bool) -> Self {
+        self.detach = enabled;
+        self
+    }
+
     /// Return the `machine` subcommand argv, excluding the `mvmctl` program.
     pub fn machine_args(&self) -> Result<Vec<String>, MachineError> {
         let image = require_option(&self.image, "image")?;
@@ -339,6 +350,9 @@ impl MachineRunBuilder {
         }
         if self.dry_run {
             args.push("--dry-run".to_string());
+        }
+        if self.detach {
+            args.push("--detach".to_string());
         }
         args.push("--".to_string());
         args.extend(self.command.iter().cloned());
@@ -820,4 +834,35 @@ fn validate_strings(values: &[String], label: &str) -> Result<(), MachineError> 
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_builder_detach_emits_flag_and_default_omits_it() {
+        // detach(true) → the persistent/detached CLI flag is emitted.
+        let args = MachineRun::builder()
+            .image("ghcr.io/example/app:latest")
+            .command(["/bin/server"])
+            .detach(true)
+            .machine_args()
+            .expect("args");
+        assert!(
+            args.contains(&"--detach".to_string()),
+            "detach(true) must emit --detach: {args:?}"
+        );
+
+        // Default (transient run-to-exit) omits the flag.
+        let args = MachineRun::builder()
+            .image("ghcr.io/example/app:latest")
+            .command(["/bin/server"])
+            .machine_args()
+            .expect("args");
+        assert!(
+            !args.contains(&"--detach".to_string()),
+            "default (transient) must omit --detach: {args:?}"
+        );
+    }
 }

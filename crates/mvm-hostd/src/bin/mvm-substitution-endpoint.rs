@@ -31,7 +31,7 @@ use tracing::info;
 
 use mvm_hostd::keyholder::secret_placeholder_env;
 use mvm_hostd::supervisor::substitution_endpoint::{
-    EndpointConfig, EndpointTransport, assemble, parse,
+    EgressMode, EndpointConfig, EndpointTransport, assemble, build_egress_gate, parse,
 };
 
 fn read_stdin_blocking() -> Result<Vec<u8>> {
@@ -106,8 +106,18 @@ fn main() -> Result<()> {
     // any confinement error aborts before the first guest connection.
     runtime.block_on(async move {
         confine_endpoint(&cfg)?;
-        serve(service, bound, terminator, forward_timeout).await
+        serve(&cfg, service, bound, terminator, forward_timeout).await
     })
+}
+
+/// Build the raw-egress claim-10 gate for a config: use the threaded network
+/// policy when present, else fail closed with default-deny. Raw mode carries no
+/// secrets, so this gate is the entire egress admission decision.
+fn raw_egress_gate(cfg: &EndpointConfig) -> mvm_backend::vmm::egress_gate::EgressGate {
+    match &cfg.network_policy {
+        Some(policy) => build_egress_gate(policy),
+        None => mvm_backend::vmm::egress_gate::EgressGate::default_deny(),
+    }
 }
 
 /// Apply mvm's self-confinement (Landlock FS + seccomp-BPF) to the endpoint.
@@ -205,6 +215,7 @@ fn bind_terminator(addr: Option<std::net::SocketAddr>) -> Result<Option<std::net
 /// loops run concurrently: a terminated guest reaches the substitution channel
 /// (placeholder-bearing requests) AND the redirected terminator path.
 async fn serve(
+    cfg: &EndpointConfig,
     service: std::sync::Arc<mvm_hostd::supervisor::substitution_proxy::SubstitutionService>,
     bound: Bound,
     terminator: Option<std::net::TcpListener>,
@@ -223,6 +234,25 @@ async fn serve(
         None => None,
     };
 
+    match cfg.egress_mode {
+        // Default, secret-bearing path: framed WireRequest substitution.
+        EgressMode::Wire => serve_wire(service, bound, forward_timeout).await?,
+        // No secrets: the relayed stream is raw TCP, gated then spliced.
+        EgressMode::Raw => serve_raw(cfg, bound, forward_timeout).await?,
+    }
+
+    if let Some(task) = terminator_task {
+        task.abort();
+    }
+    Ok(())
+}
+
+/// The WireRequest substitution serve loop over the adopted listener.
+async fn serve_wire(
+    service: std::sync::Arc<mvm_hostd::supervisor::substitution_proxy::SubstitutionService>,
+    bound: Bound,
+    _forward_timeout: std::time::Duration,
+) -> Result<()> {
     match bound {
         Bound::Uds(std_listener) => {
             let listener = tokio::net::UnixListener::from_std(std_listener)
@@ -232,9 +262,28 @@ async fn serve(
         #[cfg(target_os = "linux")]
         Bound::Vsock(listener) => service.serve_vsock(listener).await,
     }
+    Ok(())
+}
 
-    if let Some(task) = terminator_task {
-        task.abort();
+/// The raw-TCP egress serve loop over the adopted listener, gated by the config's
+/// network policy (default-deny when absent — fail closed).
+async fn serve_raw(
+    cfg: &EndpointConfig,
+    bound: Bound,
+    forward_timeout: std::time::Duration,
+) -> Result<()> {
+    use mvm_hostd::supervisor::raw_egress;
+    let gate = std::sync::Arc::new(raw_egress_gate(cfg));
+    match bound {
+        Bound::Uds(std_listener) => {
+            let listener = tokio::net::UnixListener::from_std(std_listener)
+                .context("adopting UDS listener into the tokio runtime")?;
+            raw_egress::serve_raw_egress(listener, gate, forward_timeout).await;
+        }
+        #[cfg(target_os = "linux")]
+        Bound::Vsock(listener) => {
+            raw_egress::serve_raw_egress_vsock(listener, gate, forward_timeout).await;
+        }
     }
     Ok(())
 }

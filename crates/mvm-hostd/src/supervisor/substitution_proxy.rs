@@ -367,6 +367,17 @@ pub(crate) fn destination_host(url: &str) -> Result<String, ProxyError> {
         .ok_or_else(|| ProxyError::BadUrl(url.to_string()))
 }
 
+/// The `host:port` the egress gate decides on, using the scheme's default port
+/// when the URL omits one. `None` when the URL has no parseable host or port —
+/// which the caller treats as a claim-10 refusal (fail closed).
+fn url_host_port(url: &str) -> Option<String> {
+    let u = Url::parse(url).ok()?;
+    match (u.host_str(), u.port_or_known_default()) {
+        (Some(host), Some(port)) => Some(format!("{host}:{port}")),
+        _ => None,
+    }
+}
+
 /// Capture per-secret audit metadata (name + auth-type) for every header that
 /// carries a known placeholder — BEFORE substitution consumes the request.
 /// `resolve_meta` touches no secret value, so this is claim-13 safe. Shared by
@@ -614,6 +625,11 @@ pub struct SubstitutionService {
     /// Per-destination redaction policy. Default = curated baseline (entropy +
     /// names off); a profile opts a destination into entropy/name redaction.
     redaction_policy: mvm_core::policy::RedactionPolicy,
+    /// Claim-10 egress gate. When present, every outbound destination is checked
+    /// against the VM's resolved network policy before any forward — an
+    /// unadmitted `host:port` is refused here. `None` ⇒ this endpoint does not
+    /// gate (the run loop's gate is still active); a `Some` gate fails closed.
+    egress_gate: Option<mvm_backend::vmm::egress_gate::EgressGate>,
 }
 
 impl SubstitutionService {
@@ -630,6 +646,7 @@ impl SubstitutionService {
             recorder: None,
             tls_intermediate: None,
             redaction_policy: mvm_core::policy::RedactionPolicy::default(),
+            egress_gate: None,
         }
     }
 
@@ -673,6 +690,13 @@ impl SubstitutionService {
         intermediate: mvm_core::crypto::egress_ca::VmIntermediate,
     ) -> Self {
         self.tls_intermediate = Some(Arc::new(intermediate));
+        self
+    }
+
+    /// Attach the claim-10 egress gate. Once attached, `process` refuses any
+    /// destination the VM's network policy doesn't admit before forwarding.
+    pub fn with_egress_gate(mut self, gate: mvm_backend::vmm::egress_gate::EgressGate) -> Self {
+        self.egress_gate = Some(gate);
         self
     }
 
@@ -1084,6 +1108,24 @@ impl SubstitutionService {
         // Capture audit metadata (name + auth-type per substituted secret, and
         // the destination) before `prepare_request` consumes `req`.
         let destination = destination_host(&req.url).ok();
+        // Claim-10: gate the full host:port against the VM's admitted network
+        // policy before anything reaches the wire. Fail closed — a URL without a
+        // parseable host:port, or a destination the policy doesn't admit, is
+        // refused here. (Audit of the claim-10 denial is a later increment; the
+        // refusal itself is the enforcement.)
+        if let Some(gate) = &self.egress_gate {
+            let admitted = url_host_port(&req.url).as_deref().is_some_and(|hp| {
+                matches!(
+                    gate.decide_request(hp),
+                    mvm_backend::vmm::egress_gate::EgressVerdict::Allow { .. }
+                )
+            });
+            if !admitted {
+                return WireResponse::Refused {
+                    message: "egress destination not admitted by network policy (claim-10)".into(),
+                };
+            }
+        }
         let substituted = collect_substituted_meta(&endpoint, &req.headers);
         // Resolve the per-destination redaction action; clone so it outlives
         // `req` (which `redact_outbound` then `prepare_request` consume).
@@ -2081,6 +2123,139 @@ mod server_tests {
         assert!(matches!(resp, WireResponse::Ok { .. }), "{resp:?}");
         let seen = forwarder.seen.lock().unwrap().clone().unwrap();
         assert_eq!(seen.body, b"{\"prompt\":\"hello world\"}");
+    }
+
+    /// Build a claim-10 gate over an allow-list of literal `host:port` rules,
+    /// each self-pinned so a literal-IP destination projects. `from_network_policy`
+    /// fails closed on any projection error.
+    fn gate_admitting(hosts: &[(&str, u16)]) -> mvm_backend::vmm::egress_gate::EgressGate {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+        let mut pins = DnsPinRegistry::new();
+        let rules = hosts
+            .iter()
+            .map(|(h, p)| {
+                if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+                    pins.add(DnsPin::new(*h, vec![ip], chrono::Duration::hours(1)));
+                }
+                HostPort::new(*h, *p)
+            })
+            .collect();
+        let policy = NetworkPolicy::allow_list(rules);
+        mvm_backend::vmm::egress_gate::EgressGate::from_network_policy(
+            &policy,
+            &pins,
+            "2026-01-01T00:00:00Z",
+        )
+    }
+
+    /// A destination the gate admits is forwarded — the gate lets an admitted
+    /// `host:port` through to the substitution + forward path unchanged.
+    #[tokio::test]
+    async fn gate_admitted_destination_is_forwarded() {
+        // A public literal IP (loopback / private ranges are mandatory-deny at
+        // decision time, so they can never stand in for an admitted destination).
+        let (service, ph, forwarder, _dir) = service_with("sk-live-zzz", &["93.184.216.34"]);
+        let service = Arc::new(
+            Arc::try_unwrap(service)
+                .ok()
+                .expect("fresh service Arc")
+                .with_egress_gate(gate_admitting(&[("93.184.216.34", 80)])),
+        );
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "http://93.184.216.34/v1".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: B64.encode(b"{}"),
+        };
+        let resp = service.process(wire).await;
+        assert!(matches!(resp, WireResponse::Ok { .. }), "{resp:?}");
+        assert!(
+            forwarder.seen.lock().unwrap().is_some(),
+            "admitted destination should have been forwarded"
+        );
+    }
+
+    /// A destination the gate does NOT admit is refused before any forward — the
+    /// mock forwarder never sees it, so no placeholder-substituted credential can
+    /// cross to an unadmitted host.
+    #[tokio::test]
+    async fn gate_non_admitted_destination_is_refused_before_forward() {
+        // The secret binding would allow the request host, proving the gate is the
+        // outer fence: it refuses a destination the gate's allow-list omits even
+        // though the credential is bound to it.
+        let (service, ph, forwarder, _dir) = service_with("sk-live-zzz", &["93.184.216.34"]);
+        // Gate admits a *different* public host than the request targets.
+        let service = Arc::new(
+            Arc::try_unwrap(service)
+                .ok()
+                .expect("fresh service Arc")
+                .with_egress_gate(gate_admitting(&[("1.1.1.1", 443)])),
+        );
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "http://93.184.216.34/v1".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: B64.encode(b"{}"),
+        };
+        let resp = service.process(wire).await;
+        match resp {
+            WireResponse::Refused { message } => assert!(
+                message.contains("claim-10"),
+                "expected claim-10 refusal, got: {message}"
+            ),
+            WireResponse::Ok { .. } => panic!("unadmitted destination was forwarded"),
+        }
+        // The credential-bearing request never reached the forward leg.
+        assert!(
+            forwarder.seen.lock().unwrap().is_none(),
+            "forwarder must not see a request the gate refused (no secret crosses)"
+        );
+    }
+
+    /// A deny-all gate refuses even a destination the secret binding would allow —
+    /// the gate is the outer claim-10 fence, applied before substitution/forward.
+    #[tokio::test]
+    async fn gate_deny_all_refuses_before_forward() {
+        let (service, ph, forwarder, _dir) = service_with("sk-live-zzz", &["127.0.0.1"]);
+        let deny = mvm_backend::vmm::egress_gate::EgressGate::default_deny();
+        let service = Arc::new(
+            Arc::try_unwrap(service)
+                .ok()
+                .expect("fresh service Arc")
+                .with_egress_gate(deny),
+        );
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "http://127.0.0.1/v1".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: B64.encode(b"{}"),
+        };
+        let resp = service.process(wire).await;
+        assert!(matches!(resp, WireResponse::Refused { .. }), "{resp:?}");
+        assert!(
+            forwarder.seen.lock().unwrap().is_none(),
+            "deny-all must refuse before the forward leg"
+        );
+    }
+
+    /// Backward compat: with no gate installed, `process` forwards exactly as
+    /// before — the additive field is inert when absent.
+    #[tokio::test]
+    async fn no_gate_installed_forwards_as_before() {
+        let (service, ph, forwarder, _dir) = service_with("sk-live-zzz", &["api.openai.com"]);
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://api.openai.com/v1".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: B64.encode(b"{}"),
+        };
+        let resp = service.process(wire).await;
+        assert!(matches!(resp, WireResponse::Ok { .. }), "{resp:?}");
+        assert!(
+            forwarder.seen.lock().unwrap().is_some(),
+            "no gate ⇒ existing forward behavior unchanged"
+        );
     }
 
     #[test]

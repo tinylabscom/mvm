@@ -8,6 +8,9 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+[package.metadata.mvm.architecture]
+substrate_server_category = "per-VM provider plumbing (host agent UDS bridge + backend-local vsock listeners)"
+
 # ── What this crate owns ───────────────────────────────────────────
 #
 # Concrete `VmBackend` implementations that are *not* coupled to the
@@ -82,9 +85,15 @@ tempfile.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
+# `url` parses the WireRequest target host:port for the substitution bridge's
+# claim-10 gate (vetted parser rather than hand-rolled URL splitting on a
+# security path); same version mvm-hostd/mvm-oci use.
+url = "2"
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+# `base64` builds WireRequest body fixtures in the substitution-bridge tests.
+base64.workspace = true
 
 # Apple Virtualization.framework bindings (objc2) for the providers
 # interface — folded in with the former mvm-providers crate. macOS-only;
@@ -122,6 +131,12 @@ objc2-virtualization = { version = "0.3", features = [
     "VZVirtioSocketDeviceConfiguration",
     "VZVirtioSocketConnection",
 ] }
+
+# KVM backend. Pre-generated bindings + safe ioctl wrappers;
+# the in-repo kvm::x86_boot logic is pure and platform-independent.
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-ioctls = "0.21"
+kvm-bindings = "0.11"
 
 [features]
 default = []

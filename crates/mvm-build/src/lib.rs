@@ -2,6 +2,9 @@ pub mod app_deps;
 pub mod app_deps_gate;
 pub mod artifacts;
 pub mod backend;
+/// Disk-only job/artifact transport for the in-house-VMM builder (tar-over-raw-
+/// disk, so the host never formats or reads a guest filesystem).
+pub mod builder_disk_transport;
 /// Vsock dispatch wire types for the persistent builder VM.
 pub mod builder_protocol;
 pub mod builder_route;
@@ -30,6 +33,9 @@ pub mod egress_proxy;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
 pub mod fc_kernel;
 pub mod firecracker;
+/// Config contract for the `mvm-hvf-supervisor` per-VM host process (raw HVF
+/// macOS backend, raw HVF backend). Shared by `mvm_backend::hvf` (writer) + the bin.
+pub mod hvf_supervisor;
 /// Hash-verify a fetched kernel image against its [`mvm_core::kernel_artifact::KernelArtifactId`].
 pub mod kernel_fetch;
 /// Portable signed `.mvm` artifacts. A tar.gz wrapper around kernel +
@@ -44,6 +50,9 @@ pub mod persistent_builder;
 /// OCI-unpacked tree to ext4 rootfs image. The host only allocates the
 /// sparse file; formatting and copying happen inside the builder VM.
 pub mod rootfs;
+/// Self-hosting builder-rootfs bootstrap: inject freshly built mvm host binaries
+/// into a rootfs via an initramfs patcher on the in-house VMM (no legacy builder).
+pub mod rootfs_inject;
 pub mod stage0;
 pub mod template_reuse;
 /// Type-safe interface to the `mvm-vz-supervisor` binary —

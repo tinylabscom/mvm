@@ -49,7 +49,7 @@ pub mod base;
 pub(crate) mod broker_services_spawn;
 pub mod compat;
 /// Per-VM transparent egress redirect (nft prerouting REDIRECT scoped
-/// to the guest TAP) steering guest :80 to the host-side substitution
+/// to the guest TAP) steering guest:80 to the host-side substitution
 /// terminator. Linux-only mechanism; consumed by the FC path.
 pub mod egress_redirect;
 /// Cfg-free decode of the admitted plan's egress secret bindings, shared by
@@ -58,7 +58,21 @@ pub(crate) mod egress_shared;
 pub mod firecracker;
 pub mod handle_registry;
 pub(crate) mod host_agent_spawn;
+/// Raw HVF (`Hypervisor.framework`) backend spike — drives [`vmm`] on macOS /
+/// Apple silicon. Links the system framework, so
+/// it is cfg-gated off every other target.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod hvf;
+/// `HvfBackend` — the `VmBackend` for the raw-HVF macOS path. Compiles
+/// on every target (lifecycle = spawn the detached `mvm-hvf-supervisor` + track
+/// PID files; only availability probing is macOS-specific), so it registers in
+/// `AnyBackend`/the catalog without cfg-gymnastics.
+pub mod hvf_backend;
 pub mod image;
+/// KVM (Linux) backend — drives [`vmm`] on Linux via `kvm-ioctls`, implementing
+/// the [`vmm::hv`] seam. `kvm::x86_boot` is pure logic
+/// (compiles + tests everywhere); the ioctl glue is Linux-only.
+pub mod kvm;
 pub mod libkrun;
 pub mod microvm;
 pub mod mock;
@@ -77,17 +91,28 @@ pub mod standby_pool;
 /// Shared per-VM substitution-endpoint spawn/reap helpers used by the
 /// QEMU + Firecracker launch paths (one impl, no drift).
 pub(crate) mod substitution_spawn;
+/// Portable, hypervisor-agnostic VMM device model (guest memory, FDT, kernel
+/// loading, virtio-mmio block/vsock). Compiles on every target; the per-platform
+/// backends (HVF/KVM/WHP) drive it. The "no VMM lock-in" seam.
+pub mod vmm;
+/// The single host-side vsock egress bridge. Backend-agnostic; every VMM path
+/// enforces claim-10 / claims-12/13 through exactly this module.
+pub mod vsock_egress_bridge;
 // Vz (Apple Virtualization.framework) backend. Currently a skeleton:
 // trait surface + capabilities + security profile + availability
 // probe; lifecycle methods land in a follow-up slice.
 pub mod vz;
 // Rust client for the Vz supervisor's control socket
 // (PAUSE / RESUME / BALLOON / SAVE). Used by VzBackend.
+/// The builder role layer: boots a builder VM over the `VmmDriver` seam with the
+/// disk-only job/artifact transport (trusted, no egress endpoint, no virtio-fs).
+pub mod builder_runner;
 pub mod vz_control;
 /// `WorkloadBackend` marker trait — the type-level permission to carry an
 /// untrusted workload. The admitted launch path accepts `&dyn WorkloadBackend`
 /// only, so a non-workload backend (QEMU dev/test, mock) cannot reach it.
 pub mod workload_backend;
+pub mod workload_runner;
 mod workload_wait;
 
 pub use backend::{AnyBackend, FirecrackerBackend, FirecrackerConfig};

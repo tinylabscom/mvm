@@ -13,7 +13,7 @@ use std::os::unix::net::UnixStream;
 use anyhow::Result;
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 
-use crate::vsock::{SUBSTITUTION_PORT, connect_host_vsock, read_frame, write_frame};
+use crate::vsock::{EGRESS_PORT, connect_host_vsock, read_frame, write_frame};
 
 /// Relay one request to the host substitution endpoint over an already-open
 /// stream, returning its reply. One framed `WireRequest` out, one framed
@@ -24,11 +24,11 @@ pub fn relay(stream: &mut UnixStream, req: &WireRequest) -> Result<WireResponse>
 }
 
 /// Open a **guest→host** vsock stream to the host substitution endpoint
-/// ([`SUBSTITUTION_PORT`]) and relay one request. Uses an AF_VSOCK connect to
+/// ([`EGRESS_PORT`]) and relay one request. Uses an AF_VSOCK connect to
 /// the host (CID 2) — backend-agnostic on the guest side — not the host→guest
 /// UDS-multiplexer path.
 pub fn substitute(req: &WireRequest, timeout_secs: u64) -> Result<WireResponse> {
-    let mut stream = connect_host_vsock(SUBSTITUTION_PORT, timeout_secs)?;
+    let mut stream = connect_host_vsock(EGRESS_PORT, timeout_secs)?;
     relay(&mut stream, req)
 }
 

@@ -1,0 +1,26 @@
+//! Raw HVF (`Hypervisor.framework`) backend — spike scaffold.
+//!
+//! Raw HVF macOS backend: a macOS backend built directly on
+//! `Hypervisor.framework` instead of the higher-level Virtualization.framework
+//! (`vz`), so the destination macOS path owns its device model and warm-start
+//! path. This module is the spike substrate: the FFI surface ([`sys`]) and the
+//! guest-RAM-mapping + minimal-boot proof ([`boot_smoke`]) that establishes the
+//! primitive on real hardware. The full `VmBackend` impl (device model, vsock,
+//! snapshot, console) is later work that builds on this primitive.
+//!
+//! Apple-silicon macOS only; every entry point needs the
+//! `com.apple.security.hypervisor` entitlement (already applied by
+//! [`crate::codesign`]).
+
+mod boot_smoke;
+mod console_smoke;
+mod hv_impl;
+mod kernel_boot;
+mod sys;
+mod vcpu;
+
+pub use crate::vmm::virtio::DiskImage;
+pub use boot_smoke::{BootProof, HvfError, MAGIC, boot_smoke, probe_available};
+pub use console_smoke::{ConsoleProof, console_smoke};
+pub use hv_impl::{HvfHandle, HvfVcpu, HvfVm};
+pub use kernel_boot::{HostChannels, KernelBootResult, boot_kernel, boot_kernel_until};

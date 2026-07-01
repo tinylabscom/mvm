@@ -98,31 +98,6 @@ macro_rules! backend_catalog {
                 }
             }
         }
-
-        impl AnyBackend {
-            /// The typed discriminant for this backend. Lets callers branch on
-            /// `BackendKind::Vz` etc. instead of string-matching `name()`.
-            pub fn kind(&self) -> BackendKind {
-                match self {
-                    $(Self::$kind(_) => BackendKind::$kind),*
-                }
-            }
-
-            pub(crate) fn inner(&self) -> &dyn VmBackend {
-                match self {
-                    $(Self::$kind(backend) => backend),*
-                }
-            }
-
-            /// Consume the enum into a shared `VmBackend` trait object for
-            /// generic consumers that only need the behavior surface.
-            pub fn into_dyn(self) -> std::sync::Arc<dyn VmBackend> {
-                match self {
-                    $(Self::$kind(backend) =>
-                        std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>),*
-                }
-            }
-        }
     };
 }
 
@@ -184,6 +159,18 @@ backend_catalog![
         marker_file: None,
         started_vm_probe_order: None,
         list_all: false,
+        balloon_support: false,
+        warm_start_support: false
+    },
+    {
+        kind: Hvf,
+        selector: "hvf",
+        aliases: ["hypervisor"],
+        constructor: AnyBackend::Hvf(crate::hvf_backend::HvfBackend),
+        tier: Tier2,
+        marker_file: Some("hvf.pid"),
+        started_vm_probe_order: Some(5),
+        list_all: true,
         balloon_support: false,
         warm_start_support: false
     }
@@ -309,12 +296,12 @@ mod tests {
         );
         assert_eq!(
             selectors(list_all_descriptors()),
-            ["firecracker", "libkrun", "qemu"]
+            ["firecracker", "libkrun", "qemu", "hvf"]
         );
         // Started-VM probe is sorted by probe order, not declaration order.
         assert_eq!(
             selectors(started_vm_probe_descriptors().into_iter()),
-            ["qemu", "libkrun", "firecracker", "vz"]
+            ["qemu", "libkrun", "firecracker", "vz", "hvf"]
         );
     }
 }

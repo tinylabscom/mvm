@@ -94,14 +94,35 @@ fn is_stdin_tty() -> bool {
     unsafe { libc::isatty(std::io::stdin().as_raw_fd()) == 1 }
 }
 
-/// Connect to the AVF dev VM's guest-agent vsock through the vz
-/// supervisor's per-port Unix socket (`<vm_vz_vsock_dir>/vsock-<port>.sock`)
-/// — the same path `VzTransport` uses. AVF dev VMs run under the per-VM
-/// vz supervisor; the supervisor is the cross-process vsock server, so a
-/// plain connect to its listener is the whole transport.
+/// Name of the Vz dev VM. `mvmctl dev up` boots it as the persistent builder
+/// `mvm-persistent-builder-vz-dev` (session [`vz_builder::DEV_SESSION_ID`]) under
+/// the cache dir; this is the display name the dev env carries.
+const DEV_VM_NAME: &str = "mvm-dev";
+
+/// Host vsock dir the dev env connects through.
+///
+/// The Vz dev VM is the persistent builder under the *cache* dir
+/// (`persistent_vz_vsock_dir`, session "dev") — the exact path `mvmctl dev
+/// shell` uses — NOT the legacy `~/.mvm/vms/<id>` *data*-dir path that
+/// `vm_vz_vsock_dir` yields. Routing the flake-build env to the data-dir path
+/// was the bug that left `machine run --flake` unable to reach the dev VM that
+/// `dev up` (and the auto-start) actually boots. Any non-dev `vm_id` keeps the
+/// legacy per-VM path.
+fn dev_vsock_dir(vm_id: &str) -> std::path::PathBuf {
+    if vm_id == DEV_VM_NAME {
+        mvm_build::vz_builder::persistent_vz_vsock_dir(mvm_build::vz_builder::DEV_SESSION_ID)
+    } else {
+        mvm_core::config::vm_vz_vsock_dir(vm_id)
+    }
+}
+
+/// Connect to the AVF dev VM's guest-agent vsock through the vz supervisor's
+/// per-port Unix socket (`<vsock_dir>/vsock-<port>.sock`) — the same listener
+/// `VzTransport` uses. AVF dev VMs run under the per-VM vz supervisor; the
+/// supervisor is the cross-process vsock server, so a plain connect to its
+/// listener is the whole transport.
 fn connect_dev_vsock(vm_id: &str, port: u32) -> std::io::Result<std::os::unix::net::UnixStream> {
-    let sock = mvm_core::config::vm_vz_vsock_dir(vm_id)
-        .join(mvm_core::config::vsock_socket_filename(port));
+    let sock = dev_vsock_dir(vm_id).join(mvm_core::config::vsock_socket_filename(port));
     std::os::unix::net::UnixStream::connect(sock)
 }
 
@@ -293,7 +314,7 @@ pub fn create_linux_env() -> Box<dyn LinuxEnv> {
     let plat = platform::current();
 
     if plat.is_vz_default_tier() {
-        return Box::new(VzDevEnv::new("mvm-dev"));
+        return Box::new(VzDevEnv::new(DEV_VM_NAME));
     }
 
     Box::new(NativeEnv)
@@ -331,6 +352,28 @@ mod tests {
     fn test_vz_dev_env_name() {
         let env = VzDevEnv::new("mvm-dev");
         assert_eq!(env.vm_id, "mvm-dev");
+    }
+
+    #[test]
+    fn dev_vm_connects_via_persistent_builder_path_not_legacy() {
+        // The Vz dev VM is the persistent builder under the cache dir (session
+        // "dev"), NOT the legacy ~/.mvm/vms/<id> path. Regression guard for the
+        // vm_id/path mismatch that left `machine run --flake` unable to reach
+        // the dev VM that `dev up` actually boots.
+        let dev = dev_vsock_dir(DEV_VM_NAME);
+        let expected =
+            mvm_build::vz_builder::persistent_vz_vsock_dir(mvm_build::vz_builder::DEV_SESSION_ID);
+        assert_eq!(
+            dev, expected,
+            "dev VM must use the persistent-builder cache path"
+        );
+
+        let other = dev_vsock_dir("mvm-other");
+        assert_eq!(other, mvm_core::config::vm_vz_vsock_dir("mvm-other"));
+        assert_ne!(
+            dev, other,
+            "dev VM path must not collapse to the legacy per-VM path"
+        );
     }
 
     /// `auto_start_allowed` is precedence-sensitive across env vars; a

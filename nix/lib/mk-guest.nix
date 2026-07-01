@@ -225,7 +225,7 @@ let
   # (the `prod-agent-no-exec` CI gate). We tie it to
   # `isDev` here so the same `mkGuest` call:
   #
-  #   - Dev image (`entrypoint.shell = ...`, or `dev = true`)
+  #   - Dev image (`entrypoint.shell =...`, or `dev = true`)
   #     → `do_exec` compiled in → `mvmctl exec`/`mvmctl console` work
   #   - Prod/sealed image (`entrypoint.command`/`services`, or
   #     `dev = false`)
@@ -249,6 +249,13 @@ let
   # Exit reporter — records workload exit status before poweroff.
   # Baked unconditionally into every guest rootfs (prod and dev).
   exitReportPkg = pkgs.callPackage ../packages/mvm-exit-report.nix {
+    inherit mvmSrc;
+  };
+
+  # Egress shim  — loopback SOCKS5 → host vsock egress gateway. Baked
+  # unconditionally (inert unless /init starts it when the boot env requests
+  # vsock-only egress); the guest's sole path off-VM under the no-NIC model.
+  egressClientPkg = pkgs.callPackage ../packages/mvm-egress-client.nix {
     inherit mvmSrc;
   };
 
@@ -517,7 +524,7 @@ let
       # (a workload still reaches cache.nixos.org/api.github.com etc.).
       if cat /etc/ssl/certs/ca-bundle.crt /run/mvm/egress-ca.crt \
           > /run/mvm/ca-bundle.crt 2>/dev/null; then
-        :
+       :
       else
         /bin/busybox cp /run/mvm/egress-ca.crt /run/mvm/ca-bundle.crt
       fi
@@ -609,12 +616,12 @@ let
       if [ -r /etc/resolv.conf ]; then
         /bin/busybox cp /etc/resolv.conf /run/mvm/upstream-resolv.conf
       else
-        : > /run/mvm/upstream-resolv.conf
+       : > /run/mvm/upstream-resolv.conf
       fi
       /bin/busybox chmod 0644 /run/mvm/upstream-resolv.conf
 
       # Build the new resolv.conf in /run (tmpfs, always writable)
-      # and bind-mount it over /etc/resolv.conf. The :: literal is
+      # and bind-mount it over /etc/resolv.conf. The:: literal is
       # written via printf so the heredoc body stays parameter-free.
       printf 'nameserver 127.0.0.1\nnameserver ::1\n' > /run/mvm/resolv.conf
       /bin/busybox chmod 0644 /run/mvm/resolv.conf
@@ -625,6 +632,26 @@ let
         --clear-groups --no-new-privs \
         --inh-caps=+net_bind_service --ambient-caps=+net_bind_service \
         -- /usr/local/bin/mvm-addon-dns &
+    fi
+
+    # Stage 2.6 — vsock egress shim. When the boot env requests vsock-only
+    # egress (the backend sets MVM_VSOCK_EGRESS for a vsock-gateway backend — HVF/KVM
+    # today), bring up loopback, start the SOCKS5→vsock shim under the agent uid, and
+    # point the workload's proxy env at it. `socks5h` makes the host resolve names
+    # (DNS-over-vsock); the guest has no NIC, so this is its only path off-VM. The
+    # exports reach the entrypoint (setpriv preserves env). Inert when the flag is
+    # unset, so NIC backends keep their existing path untouched.
+    if [ -n "$MVM_VSOCK_EGRESS" ] && [ -x /usr/local/bin/mvm-egress-client ]; then
+      /bin/busybox ip link set lo up 2>/dev/null || true
+      /bin/busybox setsid ${pkgs.util-linux}/bin/setpriv \
+        --reuid=${toString agentUid} --regid=${toString agentUid} \
+        --clear-groups --no-new-privs \
+        -- /usr/local/bin/mvm-egress-client &
+      export ALL_PROXY="socks5h://127.0.0.1:1080"
+      export HTTP_PROXY="$ALL_PROXY"
+      export HTTPS_PROXY="$ALL_PROXY"
+      export http_proxy="$ALL_PROXY"
+      export https_proxy="$ALL_PROXY"
     fi
 
     # Stage 2.5 — guest agent supervisor. Fork the agent into
@@ -725,7 +752,7 @@ let
     # workload that reads stdin shortly after boot. /dev/null is the correct
     # stdin for a non-interactive sealed workload; stdout/stderr stay on the
     # console for capture, and the exit-code capture below is unaffected.
-    . "$MVM_BOOT" </dev/null
+   . "$MVM_BOOT" </dev/null
     MVM_CODE=$?
     # Report the exit code to the host (best-effort), then power off —
     # never reboot. The host reads it from the control vsock port.
@@ -816,6 +843,7 @@ let
   # unaffected. See `crates/mvm-addon-dns` for details.
   mvmAddonDnsBinary = "${addonDnsPkg}/bin/mvm-addon-dns";
   mvmExitReportBinary = "${exitReportPkg}/bin/mvm-exit-report";
+  mvmEgressClientBinary = "${egressClientPkg}/bin/mvm-egress-client";
   mvmAuditProbeBinary = "${auditProbePkg}/bin/audit-probe";
 
   # extraFiles — three accepted spec shapes per target path:
@@ -1033,6 +1061,12 @@ let
     # poweroff regardless of whether dev-shell features are compiled in.
     cp ${mvmExitReportBinary} "$out/usr/local/bin/mvm-exit-report"
     chmod 0555 "$out/usr/local/bin/mvm-exit-report"
+
+    # Egress shim  — unconditional bake; inert unless /init starts it when
+    # the boot env requests vsock-only egress (no NIC). The guest's sole path off-VM
+    # under the no-network model.
+    cp ${mvmEgressClientBinary} "$out/usr/local/bin/mvm-egress-client"
+    chmod 0555 "$out/usr/local/bin/mvm-egress-client"
 
     # In-guest host.audit.v1 driver — test fixture, baked only when the
     # caller opts in. The production guest closure never carries it.
