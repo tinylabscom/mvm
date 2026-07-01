@@ -1,4 +1,4 @@
-# Plan-bound Agent Verb Grant: Out-of-Band Delivery + End-to-End Wiring
+# Plan 218 — Plan-bound Agent Verb Grant: Out-of-Band Delivery + End-to-End Wiring
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -42,7 +42,7 @@ Because delivery is the cmdline (Fork 2), the grant is minted where the *other* 
 - **Placeholders/values never confused.** Unlike `mvm.secret_env` (placeholders only, claim 13), the verb-grant token carries a *public* key + a signed grant — no secret. It is safe on `/proc/cmdline`.
 - **Fail-open on absence, fail-closed on tampering.** A malformed/missing token ⇒ grant-less boot (class gate only), mirroring the best-effort egress-ca/secret-env decoders. A *present* grant that fails verify ⇒ `pin_verb_grant` errors and the agent boots with no grant pinned (the landed core already refuses to silently pass an unverifiable grant).
 - **No spec/PR/ADR citations in code comments** (repo rule). Reasoning stays here.
-- **Docs upkeep:** on completion, tick Plan 216 in `specs/REFACTOR-STATUS.md` and reflect status in `specs/SPRINT.md` in the same change; flip ADR-103 `Status: Proposed → Accepted` if the maintainer approves.
+- **Docs upkeep:** on completion, tick Plan 218 in `specs/REFACTOR-STATUS.md` and reflect status in `specs/SPRINT.md` in the same change; flip ADR-103 `Status: Proposed → Accepted` if the maintainer approves.
 
 ---
 
@@ -148,8 +148,8 @@ The unit tests prove every seam in isolation; this is the one thing they cannot:
 - [ ] `cargo test --workspace --doc`
 - [ ] `cargo clippy --workspace -- -D warnings`
 - [ ] `just check-linux` (the cmdline append touches `cfg(linux)` FC + qemu paths)
-- [ ] Update `specs/REFACTOR-STATUS.md` (tick Plan 216) + `specs/SPRINT.md` same commit.
-- [ ] Flip ADR-103 `Status: Proposed → Accepted` if the maintainer approves; update its `Sequenced by:` to reference Plan 216 for the delivery leg.
+- [ ] Update `specs/REFACTOR-STATUS.md` (tick Plan 218) + `specs/SPRINT.md` same commit.
+- [ ] Flip ADR-103 `Status: Proposed → Accepted` if the maintainer approves; update its `Sequenced by:` to reference Plan 218 for the delivery leg.
 
 ## Self-Review
 
