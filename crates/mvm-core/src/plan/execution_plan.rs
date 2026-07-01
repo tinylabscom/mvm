@@ -162,7 +162,7 @@ pub struct ExecutionPlan {
     /// `Some(set)` → the guest also requires each control verb to be a
     /// baseline verb or present in this set. Strictly subtractive: this
     /// can only narrow, never widen, the class gate.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_verbs: Option<Vec<VerbId>>,
 
     /// Optional pin to a content-addressed `.mvmpkg` bundle. When
@@ -210,6 +210,13 @@ mod tests {
     fn agent_verbs_defaults_none_and_roundtrips() {
         let plan = sample_plan();
         assert!(plan.agent_verbs.is_none(), "field must default to None");
+
+        // None => key is omitted entirely, not serialized as null.
+        let s = serde_json::to_string(&plan).unwrap();
+        assert!(
+            !s.contains("agent_verbs"),
+            "None agent_verbs must be omitted, not serialized as null"
+        );
 
         // Absent in JSON => None (serde default), preserving old plans.
         let mut v = serde_json::to_value(&plan).unwrap();
