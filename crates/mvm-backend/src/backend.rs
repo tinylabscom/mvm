@@ -635,17 +635,11 @@ impl AnyBackend {
             AnyBackend::Vz(b) => Some(b),
             AnyBackend::Mock(b) => Some(b),
             AnyBackend::Qemu(_) => None,
-            // HVF is not a workload backend YET, but the remaining bar is narrow +
-            // specific. Already proven on the in-house VMM: claim 10 default-deny
-            // egress (EgressGate/EgressProxy), a real mkGuest workload
-            // boot, and a host-reachable guest agent over vsock. The remaining bar
-            // is claims 12/13 secret-substitution parity — HVF has no per-VM
-            // substitution endpoint, so it cannot carry secret-bearing untrusted
-            // workloads (it would have to declare EgressSubstitutionTransport::None,
-            // a half-capable backend that wouldn't let us retire Vz). Fold secret
-            // substitution onto the vsock gateway (the VsockUdsChannel shape Vz
-            // declares) first; then flip this to Some.
-            AnyBackend::Hvf(_) => None,
+            // HVF carries untrusted workloads: claim-10 default-deny egress, a real
+            // mkGuest workload boot, a host-reachable guest agent, and now the
+            // secret-substitution gateway (claim-10 at the substitution bridge,
+            // claims 12/13 at the per-VM endpoint) all run on the in-house VMM.
+            AnyBackend::Hvf(b) => Some(b),
         }
     }
 
@@ -1372,7 +1366,7 @@ mod tests {
     fn as_workload_backend_some_for_workload_variants() {
         // mock is included: it is the hermetic lifecycle test double that
         // stands in for a workload backend on the admitted path.
-        for name in ["firecracker", "libkrun", "vz", "mock"] {
+        for name in ["firecracker", "libkrun", "vz", "hvf", "mock"] {
             let backend = AnyBackend::from_hypervisor(name);
             assert!(
                 backend.as_workload_backend().is_some(),
