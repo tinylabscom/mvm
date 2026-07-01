@@ -32,6 +32,36 @@ fn default_forward_timeout_secs() -> u64 {
     30
 }
 
+/// Resolve a network policy's host-allowlist entries to IPs (the admission-time
+/// DNS pin) so `host:port` rules gate at L4. Literal IPs need no lookup; an
+/// unresolvable host pins an empty IP set so the projection fails CLOSED (deny)
+/// rather than widening.
+fn resolve_dns_pins(
+    np: &mvm_core::policy::network_policy::NetworkPolicy,
+) -> mvm_core::policy::dns_pin::DnsPinRegistry {
+    use std::net::{IpAddr, ToSocketAddrs};
+    let mut reg = mvm_core::policy::dns_pin::DnsPinRegistry::new();
+    let Some(rules) = np.resolve_rules() else {
+        return reg; // unrestricted: no L4 pin set
+    };
+    for hp in rules {
+        let ips: Vec<IpAddr> = if let Ok(ip) = hp.host.parse::<IpAddr>() {
+            vec![ip]
+        } else {
+            (hp.host.as_str(), 0u16)
+                .to_socket_addrs()
+                .map(|addrs| addrs.map(|sa| sa.ip()).collect())
+                .unwrap_or_default()
+        };
+        reg.add(mvm_core::policy::dns_pin::DnsPin::new(
+            hp.host,
+            ips,
+            chrono::Duration::hours(24),
+        ));
+    }
+    reg
+}
+
 /// How the guest reaches this endpoint. Defined in `mvm-backend` (next to the
 /// `spawn_substitution_endpoint` writer) and re-exported here so the bin, its
 /// tests, and `EndpointConfig` share one wire definition without a dependency
@@ -105,6 +135,12 @@ pub struct EndpointConfig {
     /// the matching cert to the guest's trust bundle.
     #[serde(default)]
     pub tls_intermediate: Option<TlsIntermediate>,
+    /// The VM's resolved network policy for claim-10 egress. When set, the endpoint
+    /// gates every destination itself (the run loop relays without gating); absent ⇒
+    /// the endpoint does not gate (the legacy in-loop gate is still active). Fail
+    /// closed when set: an unadmitted destination is refused before any forward.
+    #[serde(default)]
+    pub network_policy: Option<mvm_core::policy::network_policy::NetworkPolicy>,
 }
 
 /// Parse an [`EndpointConfig`] from the JSON the backend writes on stdin.
@@ -177,6 +213,27 @@ pub fn assemble(
             tls_intermediate,
             recorder,
         })?;
+
+    // Claim-10: when the backend threaded the VM's resolved network policy, this
+    // endpoint becomes the egress gate. Resolve host-allowlist pins once (fails
+    // closed on an unresolvable host), build the gate over the same claim-10
+    // projection every backend shares, and attach it. Absent ⇒ no gate here.
+    let service = match &cfg.network_policy {
+        Some(policy) => {
+            let pins = resolve_dns_pins(policy);
+            let now = chrono::Utc::now().to_rfc3339();
+            let gate =
+                mvm_backend::vmm::egress_gate::EgressGate::from_network_policy(policy, &pins, &now);
+            // from_plan just minted this Arc with no other holders, so the unwrap
+            // is infallible; attach the gate, then re-wrap.
+            let svc = Arc::try_unwrap(service)
+                .map_err(|_| anyhow::anyhow!("substitution service Arc unexpectedly shared"))?
+                .with_egress_gate(gate);
+            Arc::new(svc)
+        }
+        None => service,
+    };
+
     Ok((service, handed))
 }
 
@@ -243,6 +300,7 @@ mod tests {
             binding_store_dir: Some(dir.join("bindings")),
             terminator_listen: None,
             tls_intermediate: None,
+            network_policy: None,
         }
     }
 
@@ -427,6 +485,30 @@ mod tests {
             .redactor_redact_bytes_for(body, action)
             .map(|(out, _)| out)
             .unwrap_or_else(|| body.to_vec())
+    }
+
+    #[test]
+    fn config_roundtrips_network_policy_when_set() {
+        // The claim-10 policy the backend threads must survive the stdin wire
+        // form untouched, so the endpoint gates on exactly what was admitted.
+        let mut cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
+        cfg.network_policy = Some(mvm_core::policy::network_policy::NetworkPolicy::deny_all());
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        assert_eq!(parse(&bytes).unwrap(), cfg);
+        assert!(parse(&bytes).unwrap().network_policy.is_some());
+    }
+
+    #[test]
+    fn config_defaults_network_policy_to_none() {
+        // A config without a `network_policy` block parses (field is
+        // `#[serde(default)]`) — the endpoint then does not gate.
+        let json = serde_json::json!({
+            "tenant_id": "local",
+            "secrets": [],
+            "transport": {"kind": "uds", "path": "/tmp/sub.sock"},
+        });
+        let cfg = parse(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(cfg.network_policy.is_none());
     }
 
     #[test]

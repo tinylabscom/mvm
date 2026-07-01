@@ -87,6 +87,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         binding_store_dir: Some(dir.path().join("bindings")),
         terminator_listen: None,
         tls_intermediate: None,
+        network_policy: None,
     };
 
     let mut child = Command::new(BIN)
