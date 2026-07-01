@@ -1,12 +1,12 @@
 //! Config contract for `mvm-hvf-supervisor` — the per-VM host process for the
-//! raw HVF macOS backend (Plan 214). Lives here (below both `mvm-backend` and
+//! raw HVF macOS backend. Lives here (below both `mvm-backend` and
 //! `mvm-vm-host`) so the writer (`mvm_backend::hvf::HvfBackend`) and the reader
 //! (the `mvm-hvf-supervisor` bin) share one definition — the same way the vz
 //! `SupervisorConfig` does. The backend writes this as JSON on the supervisor's
 //! stdin; the supervisor boots the guest and captures its console.
 //!
 //! `#[serde(deny_unknown_fields)]` keeps the host↔supervisor contract
-//! fail-closed (claim 4.1 / W4.1): an unexpected field is a hard parse error,
+//! fail-closed: an unexpected field is a hard parse error,
 //! never a silently-ignored option.
 
 use std::path::PathBuf;

@@ -478,11 +478,11 @@ pub enum AnyBackend {
     /// [`crate::mock::MockBackend`] for the rationale and security
     /// profile (Tier 3 / claims unknown).
     Mock(MockBackend),
-    /// Raw HVF — Hypervisor.framework on macOS / Apple silicon (Plan 214),
+    /// Raw HVF — Hypervisor.framework on macOS / Apple silicon,
     /// driven by the unified `vmm::run` loop via the detached
     /// `mvm-hvf-supervisor`. Opt-in via `--hypervisor hvf` / `MVM_BACKEND=hvf`;
     /// `auto_select` doesn't pick it yet (Vz remains the macOS-26 default until
-    /// HVF reaches workload parity). The destination macOS backend (ADR-098).
+    /// HVF reaches workload parity). The destination macOS backend.
     Hvf(HvfBackend),
 }
 

@@ -26,7 +26,7 @@ const UART_BASE: u64 = 0x0900_0000;
 
 /// Hand-assembled arm64 stand-in for a kernel's earlycon writes, from IPA 0:
 /// ```text
-///   movz x1, #0x0900, lsl #16   ; 0xD2A12001  x1 = UART_BASE (0x09000000)
+///   movz x1, #0x0900, lsl #0x10 ; 0xD2A12001  x1 = UART_BASE (0x09000000)
 ///   movz x0, #'O'               ; 0xD28009E0
 ///   str  w0, [x1]               ; 0xB9000020  -> MMIO data abort
 ///   movz x0, #'K'               ; 0xD2800960

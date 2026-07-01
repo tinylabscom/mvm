@@ -1,4 +1,4 @@
-//! `mvm-hvf-supervisor` — one process per raw-HVF guest (Plan 214 / ADR-098).
+//! `mvm-hvf-supervisor` — one process per raw-HVF guest.
 //!
 //! Reads an [`mvm_build::hvf_supervisor::HvfSupervisorConfig`] JSON document on
 //! stdin (written by `mvm_backend::hvf`), self-signs the `hypervisor`

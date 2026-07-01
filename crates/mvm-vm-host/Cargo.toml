@@ -45,7 +45,7 @@ path = "src/bin/mvm-bridge.rs"
 name = "mvm-vz-supervisor"
 path = "src/bin/mvm-vz-supervisor.rs"
 
-# Per-VM host process for the raw HVF macOS backend (Plan 214). cfg-gated to
+# Per-VM host process for the raw HVF macOS backend. cfg-gated to
 # macOS/aarch64 in source; a stub elsewhere.
 [[bin]]
 name = "mvm-hvf-supervisor"

@@ -58,18 +58,18 @@ pub mod firecracker;
 pub mod handle_registry;
 pub(crate) mod host_agent_spawn;
 /// Raw HVF (`Hypervisor.framework`) backend spike — drives [`vmm`] on macOS /
-/// Apple silicon (Plan 214 Phase 11 / ADR-098). Links the system framework, so
+/// Apple silicon. Links the system framework, so
 /// it is cfg-gated off every other target.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod hvf;
-/// `HvfBackend` — the `VmBackend` for the raw-HVF macOS path (Plan 214). Compiles
+/// `HvfBackend` — the `VmBackend` for the raw-HVF macOS path. Compiles
 /// on every target (lifecycle = spawn the detached `mvm-hvf-supervisor` + track
 /// PID files; only availability probing is macOS-specific), so it registers in
 /// `AnyBackend`/the catalog without cfg-gymnastics.
 pub mod hvf_backend;
 pub mod image;
 /// KVM (Linux) backend — drives [`vmm`] on Linux via `kvm-ioctls`, implementing
-/// the [`vmm::hv`] seam (Plan 214 / ADR-099). `kvm::x86_boot` is pure logic
+/// the [`vmm::hv`] seam. `kvm::x86_boot` is pure logic
 /// (compiles + tests everywhere); the ioctl glue is Linux-only.
 pub mod kvm;
 pub mod libkrun;
@@ -90,7 +90,7 @@ pub mod standby_pool;
 pub(crate) mod substitution_spawn;
 /// Portable, hypervisor-agnostic VMM device model (guest memory, FDT, kernel
 /// loading, virtio-mmio block/vsock). Compiles on every target; the per-platform
-/// backends (HVF/KVM/WHP) drive it. The "no VMM lock-in" seam (Plan 214).
+/// backends (HVF/KVM/WHP) drive it. The "no VMM lock-in" seam.
 pub mod vmm;
 // Vz (Apple Virtualization.framework) backend. Currently a skeleton:
 // trait surface + capabilities + security profile + availability

@@ -176,6 +176,6 @@ pub trait HypervisorVm: Sized {
 pub type ActiveVm = crate::hvf::HvfVm;
 
 /// Linux/x86_64 → KVM. (aarch64 KVM, which reuses the whole arm64 device model,
-/// is a later slice; see ADR-099.)
+/// is a later slice.)
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub type ActiveVm = crate::kvm::KvmVm;
