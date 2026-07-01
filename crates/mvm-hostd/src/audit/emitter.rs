@@ -286,6 +286,19 @@ impl AuditEmitter {
         )
     }
 
+    /// Emit `verb_denied` — fires when the host caller receives a
+    /// `VerbNotAuthorized` response from the guest agent. Records the
+    /// denied verb name in the chain-signed log so refusals are
+    /// observable and tamper-evident (claim-12 parity). No payload
+    /// bytes are emitted; the verb name is a label.
+    pub fn emit_verb_denied(&self, plan: &ExecutionPlan, verb: &str) -> Result<()> {
+        self.emit(
+            plan,
+            "verb_denied",
+            [("verb".to_string(), verb.to_string())],
+        )
+    }
+
     /// Emit `plan.failed` — fires on any error path between admission
     /// and successful boot. `class` is a short tag (`backend-start`,
     /// `snapshot-restore`, etc.) the operator can grep for; `message`
@@ -565,6 +578,45 @@ mod tests {
             Err(err) => err,
         };
         assert!(format!("{err:#}").contains("absolute path"));
+    }
+
+    #[test]
+    fn verb_denied_entry_is_chained_and_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-VD");
+
+        emitter.emit_admitted(&plan, "host:test").unwrap();
+        emitter
+            .emit_verb_denied(&plan, "update-idle-timeout")
+            .unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("audit file exists");
+
+        // Both category and verb name must appear in the log.
+        assert!(
+            content.contains("verb_denied"),
+            "log must contain verb_denied category"
+        );
+        assert!(
+            content.contains("update-idle-timeout"),
+            "log must contain the denied verb name"
+        );
+
+        // The two-entry chain must verify clean.
+        let count = verify_audit_chain(&path, &vk).unwrap();
+        assert_eq!(count, 2, "admitted + verb_denied must form a valid chain");
+
+        // A byte-flip in the log must break verify_audit_chain.
+        let tampered = content.replace("verb_denied", "verb_permitted");
+        std::fs::write(&path, tampered).unwrap();
+        assert!(
+            verify_audit_chain(&path, &vk).is_err(),
+            "tampered log must fail chain verification"
+        );
     }
 
     #[test]
