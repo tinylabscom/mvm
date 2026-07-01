@@ -31,7 +31,7 @@ This file's detailed tasks implement **S0 only** — the additive crate + trait 
 | Slice | Deliverable | Status |
 |---|---|---|
 | **S0** | `crates/mvm-client/`: `MvmClient` trait + typed `dto` module + `MockBackend`; additive, unit-tested | **this plan** |
-| S1 | `LocalBackend` — implement the trait over in-process `mvmctl` machine lifecycle (extract a callable library surface where the ops are still clap-only); witness = temp-`MVM_DATA_DIR` run→list→stop roundtrip | next |
+| S1 | `LocalBackend` — implement the trait over in-process machine lifecycle. Built **on the Plan 214 `mvm::machine` library**, not a forked boot path. **S1a** (list/stop/logs against stable `AnyBackend` seams; `run` returns an honest "pending" error) is executable once the machine spec/types are public; **S1b** wires `run` through `MachineBuilder`→launch after `feat/plan-214-machine-run` lands. See the S1 section below. | scoped; gated on Plan 214 machine lib |
 | S2 | `mvmctl` consumes `mvm-client::LocalBackend` for its local `machine` verbs (behaviour-preserving); `mvm-studio` can link the same crate | later |
 | S3 | `GatewayBackend` — `reqwest` → `mvmd-gateway` over the shared DTO contract, no mvmd imports. **Gated on ADR-104 Accepted + Plan 57 CT-1 (cross-tenant isolation) green** | later |
 | S4 | `--remote <url>` CLI flag + backend selection + fail-closed client rules (TLS-or-refuse, mTLS-preferred, keychain/env token, endpoint-bound, version-skew hard-fail) | later |
@@ -581,6 +581,28 @@ git commit -m "feat(client): in-memory MockBackend + lifecycle roundtrip"
 - **Type consistency:** `run_machine` returns `MachineState` in Task 4's interface, Task 5's mock, and its test — consistent. `MachineFilter::all()`, `MachineId(String)`, and `MachineStatus` snake_case wire are used identically across Tasks 3–5.
 - **Placeholder scan:** module stubs in Task 1 are explicitly replaced by Tasks 2–5; no `TODO`/`TBD` remains in shipped code.
 
-## Notes for S1 (next slice, not this plan)
+## S1 — `LocalBackend` (scope; sequenced on the Plan 214 machine library)
 
-`LocalBackend` will need a callable `mvmctl` library surface for machine lifecycle — today those ops are clap command handlers under `crates/mvm-cli/src/commands/machine/`. S1's first task is to extract the run/list/stop/logs logic into a library entrypoint the backend can call in-process (mirroring how `mvmd-gateway` already links `mvmctl` as a library), then implement `LocalBackend` against it. Witness: a `run → list → stop` roundtrip against a temp `MVM_DATA_DIR`.
+**Deliverable:** a `LocalBackend` implementing `MvmClient` by driving local microVM lifecycle in-process, witnessed by a `run → list → stop` roundtrip against a temp `MVM_DATA_DIR`.
+
+### Seam analysis (what's callable on `main` today)
+
+| Op | Seam on `main` | Stability |
+|---|---|---|
+| `list_machines` | machine specs under `mvm_core::config::machine_state_root()` (`<MVM_DATA_DIR>/machines/<name>/machine.json`) + `mvm_backend::AnyBackend::{status,list}` | **stable** |
+| `stop_machine` | `AnyBackend::stop(&VmId(name))` | **stable** |
+| `machine_logs` | `AnyBackend::logs(&VmId, lines, hypervisor)` | **stable** |
+| `run_machine` (boot) | **no exported seam yet** — boot is embedded in `crates/mvm-cli/src/commands/vm/up.rs::start_persistent_oci_machine`, coupled to admission/signing | **volatile — under active construction** |
+
+### Decision — build on the Plan 214 machine library; do NOT fork the boot path
+
+The boot seam `run_machine` needs is exactly what **Plan 214** is landing on `main` right now: `crates/mvm/src/machine/` (`Machine` / `MachineBuilder` → `select_backend` → *translate to a launchable `VmStartConfig`*, merged in #1337 / #1339 / #1340), with `machine run` wiring in flight on `feat/plan-214-machine-run`. Forking a second boot path from `up.rs` would duplicate that work, violate reuse-first, and race an active effort (see the standing rule against reimplementing existing machinery and against working over another session's live area).
+
+Therefore S1 **consumes** the `mvm::machine` library for `run_machine` (`MachineBuilder` from the `MachineSpec` DTO → launch), and the stable `AnyBackend` + `mvm_core::config` seams for `list`/`stop`/`logs`. `LocalBackend` lives where it can reach both — it depends on `mvm` (runtime) and `mvm-backend`; to keep the facade light for remote-only consumers, gate `LocalBackend` behind a `local` cargo feature on `mvm-client` (default on for the CLI, off for a pure-REST studio build).
+
+### Sequencing
+
+- **S1a (executable now, non-throwaway):** `LocalBackend` `list_machines` / `stop_machine` / `machine_logs` against the stable `AnyBackend` + machine-spec seams; `run_machine` returns `MvmError::Backend { reason: "boot seam pending machine-library launch path" }` (fail honest, never silent stub). Witness: seed a machine spec in a temp `MVM_DATA_DIR`, assert `list` maps it to `MachineState` and `stop` is dispatched.
+- **S1b (after `feat/plan-214-machine-run` lands on `main`):** wire `run_machine` through `mvm::machine::MachineBuilder` → launch; complete the `run → list → stop` witness. This is the slice that removes the interim error.
+
+Coordinate S1b timing with the Plan 214 machine-run owner so the launch entrypoint `LocalBackend` calls is a supported public seam, not a reach-in.
