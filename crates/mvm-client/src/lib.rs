@@ -9,5 +9,5 @@ pub mod dto;
 pub mod error;
 pub mod mock;
 
-// Crate-root re-exports are added by the tasks that define each item
-// (`error`, then `client`) so the crate builds at every step.
+pub use client::MvmClient;
+pub use error::{MvmError, Result};
