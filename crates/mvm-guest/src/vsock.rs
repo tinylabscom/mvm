@@ -1388,11 +1388,12 @@ pub fn enforce_verb_grant(
     }
 }
 
-/// Well-known guest path where the trusted launcher provisions the host
-/// signer's Ed25519 public key (32-byte key, lowercase hex, no trailing
-/// newline required). Populated out-of-band via the config drive (a later
-/// task mounts it); absent on legacy/grant-less boots.
-pub const HOST_SIGNER_PUBKEY_PATH: &str = "/etc/mvm/host-signer.pub";
+/// Well-known guest path where `/init` writes the host-signer's Ed25519
+/// public key decoded from the `mvm.verb_grant=` kernel-cmdline token.
+/// Lives on tmpfs (`/run/mvm/`) so it persists across the lifetime of this
+/// boot but is not part of the dm-verity-sealed rootfs.
+/// Absent on grant-less boots.
+pub const HOST_SIGNER_PUBKEY_PATH: &str = "/run/mvm/host-signer.pub";
 
 /// Load the host-signer verifying key from `path`.
 ///
@@ -1470,6 +1471,83 @@ pub fn pin_verb_grant(
             g.verify(key, session_id, plan_nonce, now)
                 .map_err(|e| anyhow::anyhow!("verb grant verification failed: {e}"))?;
             Ok(Some(g.clone()))
+        }
+    }
+}
+
+/// Read the pinned verb grant written by `/init` and verify it before use.
+///
+/// The grant's trust derives from the host-signer pubkey provisioned
+/// out-of-band by the launcher via the kernel cmdline; session_id and
+/// plan_nonce from the envelope are checked against the signed payload
+/// for consistency, not as independent replay oracles.
+///
+/// Returns:
+/// - `Some(grant)` when both files are present and the grant verifies.
+/// - `None` when `grant_path` is absent (no-grant boot; class gate only).
+/// - `None` when `pubkey_path` is absent or the grant fails verification
+///   (logs a warning; does not crash the agent).
+pub fn load_pinned_verb_grant(
+    grant_path: &std::path::Path,
+    pubkey_path: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<mvm_core::plan::VerbGrant> {
+    // Grant file absent → no grant on this boot.
+    let raw = match std::fs::read(grant_path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!("mvm-guest-agent: could not read verb-grant file: {e}");
+            return None;
+        }
+    };
+    let envelope: mvm_core::protocol::vm_backend::VerbGrantEnvelope =
+        match serde_json::from_slice(&raw) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("mvm-guest-agent: verb-grant.json malformed, booting without grant: {e}");
+                return None;
+            }
+        };
+    let plan_nonce = match mvm_core::plan::Nonce::from_hex(&envelope.plan_nonce_hex) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!(
+                "mvm-guest-agent: verb-grant plan_nonce_hex invalid, booting without grant: {e}"
+            );
+            return None;
+        }
+    };
+    // Pubkey absent → the grant arrived but we have no key to trust it against.
+    // Treat as fail-closed: log and return None (do not propagate an unverified grant).
+    let host_key = match load_host_signer_verifying_key(pubkey_path) {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            eprintln!(
+                "mvm-guest-agent: verb-grant present but host-signer pubkey absent at {}, \
+                 booting without grant",
+                pubkey_path.display()
+            );
+            return None;
+        }
+        Err(e) => {
+            eprintln!("mvm-guest-agent: host-signer pubkey malformed, booting without grant: {e}");
+            return None;
+        }
+    };
+    match pin_verb_grant(
+        Some(&envelope.grant),
+        Some(&host_key),
+        &envelope.grant.session_id,
+        &plan_nonce,
+        now,
+    ) {
+        Ok(pinned) => pinned,
+        Err(e) => {
+            eprintln!(
+                "mvm-guest-agent: verb-grant verification failed, booting without grant: {e}"
+            );
+            None
         }
     }
 }
@@ -6759,6 +6837,140 @@ mod rpc_client_tests {
                 later
             )
             .is_err()
+        );
+    }
+
+    // ---- load_pinned_verb_grant ----
+
+    /// Build a signed VerbGrant + VerbGrantEnvelope in a tempdir,
+    /// returning (dir, grant_path, pubkey_path, signer, nonce).
+    #[cfg(test)]
+    fn write_grant_fixture(
+        dir: &std::path::Path,
+        signer: &ed25519_dalek::SigningKey,
+        session: &str,
+        nonce: &mvm_core::plan::Nonce,
+        valid_minutes: i64,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use mvm_core::plan::{VerbGrant, VerbId};
+        use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+        let now = chrono::Utc::now();
+        let mut grant = VerbGrant {
+            session_id: session.into(),
+            plan_nonce: nonce.clone(),
+            not_after: now + chrono::Duration::minutes(valid_minutes),
+            verbs: vec![VerbId::new("ping").unwrap()],
+            sig: vec![],
+        };
+        grant.sig = {
+            use ed25519_dalek::Signer;
+            signer.sign(&grant.signing_bytes()).to_bytes().to_vec()
+        };
+        let pubkey_hex: String = signer
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: pubkey_hex.clone(),
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            grant,
+        };
+        let grant_path = dir.join("verb-grant.json");
+        std::fs::write(&grant_path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        let pubkey_path = dir.join("host-signer.pub");
+        std::fs::write(&pubkey_path, &pubkey_hex).unwrap();
+        (grant_path, pubkey_path)
+    }
+
+    #[test]
+    fn load_pinned_verb_grant_valid_returns_some() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([8u8; 16]);
+        let (grant_path, pubkey_path) =
+            write_grant_fixture(dir.path(), &signer, "sess-valid", &nonce, 10);
+        let now = chrono::Utc::now();
+        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, now);
+        assert!(
+            result.is_some(),
+            "valid grant + matching key must return Some"
+        );
+        let g = result.unwrap();
+        assert_eq!(g.session_id, "sess-valid");
+    }
+
+    #[test]
+    fn load_pinned_verb_grant_wrong_key_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let attacker = ed25519_dalek::SigningKey::from_bytes(&[10u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([11u8; 16]);
+        // Write the grant signed by `signer`, but pubkey_path for `attacker`
+        use mvm_core::plan::{VerbGrant, VerbId};
+        use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+        let now = chrono::Utc::now();
+        let mut grant = VerbGrant {
+            session_id: "sess-wrong-key".into(),
+            plan_nonce: nonce.clone(),
+            not_after: now + chrono::Duration::minutes(10),
+            verbs: vec![VerbId::new("ping").unwrap()],
+            sig: vec![],
+        };
+        grant.sig = {
+            use ed25519_dalek::Signer;
+            signer.sign(&grant.signing_bytes()).to_bytes().to_vec()
+        };
+        // Envelope carries the ATTACKER's pubkey but the grant is signed by `signer`
+        let attacker_pubkey_hex: String = attacker
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: attacker_pubkey_hex.clone(),
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            grant,
+        };
+        let grant_path = dir.path().join("verb-grant.json");
+        std::fs::write(&grant_path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        let pubkey_path = dir.path().join("host-signer.pub");
+        std::fs::write(&pubkey_path, &attacker_pubkey_hex).unwrap();
+        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, now);
+        assert!(
+            result.is_none(),
+            "grant signed by different key must return None (verify fails)"
+        );
+    }
+
+    #[test]
+    fn load_pinned_verb_grant_pubkey_absent_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[12u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([13u8; 16]);
+        let (grant_path, _pubkey_path) =
+            write_grant_fixture(dir.path(), &signer, "sess-no-key", &nonce, 10);
+        // pubkey file is not written — point at a nonexistent path
+        let missing_pubkey = dir.path().join("no-such.pub");
+        let now = chrono::Utc::now();
+        let result = load_pinned_verb_grant(&grant_path, &missing_pubkey, now);
+        assert!(
+            result.is_none(),
+            "grant present but pubkey absent must return None (fail-closed, no crash)"
+        );
+    }
+
+    #[test]
+    fn load_pinned_verb_grant_absent_grant_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_grant = dir.path().join("no-grant.json");
+        let missing_pubkey = dir.path().join("no-key.pub");
+        let result = load_pinned_verb_grant(&missing_grant, &missing_pubkey, chrono::Utc::now());
+        assert!(
+            result.is_none(),
+            "absent grant file must return None (no-op boot)"
         );
     }
 }
