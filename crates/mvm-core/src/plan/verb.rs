@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 
-/// A guest-agent control-verb identifier: the stable `verb_name()` token
+/// A guest-agent control-verb identifier: the stable `kind_name()` token
 /// (non-empty kebab-case). Validated at construction so an `agent_verbs`
 /// grant can never carry an unparseable verb.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]

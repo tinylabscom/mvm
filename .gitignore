@@ -16,6 +16,8 @@ man/*.1
 nixos.qcow2
 .ash_history
 keys
+# Stray Rust compiled artifacts (e.g. a misdirected --out-dir); never tracked.
+*.rlib
 # Local dev-image build output. The sibling `nix/images/builder/` and
 # `nix/images/builder-vm/` directories are flake sources and stay
 # tracked; this one is a build artifact that can run into the hundreds
