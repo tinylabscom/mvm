@@ -439,6 +439,7 @@ mod tests {
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             audit_labels: Default::default(),
+            agent_verbs: None,
         }
     }
 

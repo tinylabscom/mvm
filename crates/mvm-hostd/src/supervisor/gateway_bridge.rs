@@ -4531,6 +4531,7 @@ mod tests {
             bundle: None,
             deps_volume: None,
             shares: Vec::new(),
+            agent_verbs: None,
         }
     }
 }
