@@ -22,10 +22,27 @@ pub struct RedactionResult {
 /// Mask every occurrence of any known secret value in `buffer` before it is
 /// delivered to the guest. Binary-safe (operates on raw bytes). Empty secret
 /// values are ignored — they would otherwise match everywhere.
+///
+/// `buffer` must be a **complete** inbound message, not one chunk of a stream:
+/// matching is per-buffer, so a secret split across two buffers would slip
+/// through the seam. A streaming caller must reassemble (or carry the trailing
+/// `max_secret_len - 1` bytes across chunk boundaries) before calling this.
+///
+/// Matching is exact-byte on the secret's raw value. A secret the upstream
+/// echoes back **transformed** (base64/percent-encoded, case-folded) will not
+/// match — value-based masking sees only the literal bytes.
 pub fn redact_for_guest(buffer: &[u8], secret_values: &[&str]) -> RedactionResult {
+    // Mask longest secrets first. `replace_all` is non-overlapping, so if a
+    // shorter secret is a substring/prefix of a longer one and were masked
+    // first, the longer secret's tail would survive (e.g. masking "AAA" inside
+    // "AAAA" leaves a trailing "A"). Longest-first masks the full secret before
+    // any of its substrings are considered.
+    let mut ordered: Vec<&str> = secret_values.to_vec();
+    ordered.sort_by_key(|s| std::cmp::Reverse(s.len()));
+
     let mut redacted = buffer.to_vec();
     let mut hits = 0;
-    for secret in secret_values {
+    for secret in ordered {
         let needle = secret.as_bytes();
         if needle.is_empty() {
             continue;
@@ -114,5 +131,42 @@ mod tests {
         assert_eq!(result.hits, 1);
         assert!(!result.redacted.windows(5).any(|w| w == b"TOKEN"));
         assert_eq!(result.redacted.first(), Some(&0xff));
+    }
+
+    #[test]
+    fn longer_secret_tail_does_not_leak_when_prefix_listed_first() {
+        // A shorter secret that prefixes a longer one, listed first, must not
+        // leave the longer secret's tail in the buffer.
+        let body = b"key=sk-live-12345 end";
+        let result = redact_for_guest(body, &["sk-live", "sk-live-12345"]);
+        assert!(
+            !result
+                .redacted
+                .windows("sk-live-12345".len())
+                .any(|w| w == b"sk-live-12345"),
+            "full secret must not survive"
+        );
+        assert!(
+            !result
+                .redacted
+                .windows("-12345".len())
+                .any(|w| w == b"-12345"),
+            "the longer secret's tail must not leak"
+        );
+    }
+
+    #[test]
+    fn overlapping_substring_secrets_fully_masked_regardless_of_order() {
+        for order in [["AAA", "AAAA"], ["AAAA", "AAA"]] {
+            let result = redact_for_guest(b"xAAAAx", &order);
+            assert!(
+                !result.redacted.windows(4).any(|w| w == b"AAAA"),
+                "full secret must not survive (order {order:?})"
+            );
+            assert!(
+                !result.redacted.windows(3).any(|w| w == b"AAA"),
+                "no secret substring may leak (order {order:?})"
+            );
+        }
     }
 }
