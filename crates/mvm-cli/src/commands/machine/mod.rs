@@ -224,8 +224,13 @@ pub(in crate::commands) struct MachineRunArgs {
     /// mismatch is an error.
     #[arg(long)]
     pub force: bool,
-    /// Override the backend hypervisor (hidden; for testing only).
-    #[arg(long, value_name = "HYPERVISOR", hide = true)]
+    /// Workload VMM backend. Defaults to the host's best supported backend
+    /// (Linux+KVM → firecracker; macOS 26+ → vz; macOS 13-25 → libkrun). On a
+    /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
+    /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
+    /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is
+    /// the env equivalent.
+    #[arg(long, value_name = "HYPERVISOR")]
     pub hypervisor: Option<String>,
     /// Skip plan-admission signing (hidden; for testing only).
     #[arg(long, hide = true)]
@@ -740,8 +745,13 @@ pub(in crate::commands) struct MachineStartArgs {
     /// when an interactive shell attach follows. Not a CLI flag.
     #[arg(skip)]
     pub quiet: bool,
-    /// Override the backend hypervisor (hidden; for testing only).
-    #[arg(long, value_name = "HYPERVISOR", hide = true)]
+    /// Workload VMM backend. Defaults to the host's best supported backend
+    /// (Linux+KVM → firecracker; macOS 26+ → vz; macOS 13-25 → libkrun). On a
+    /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
+    /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
+    /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is
+    /// the env equivalent.
+    #[arg(long, value_name = "HYPERVISOR")]
     pub hypervisor: Option<String>,
     /// Skip plan-admission signing (hidden; for testing only).
     #[arg(long, hide = true)]

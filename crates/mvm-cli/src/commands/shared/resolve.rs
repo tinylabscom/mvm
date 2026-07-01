@@ -239,11 +239,25 @@ fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
 /// Resolve the requested hypervisor to the effective one for this host. `firecracker`
 /// (the default `--hypervisor`) auto-detects: KVM → firecracker, macOS 26+ Apple Silicon
 /// → vz, macOS 13-25 + libkrun → libkrun, else firecracker (surfaces a clear
-/// "not available" error). Any explicit value is returned as-is. Single source of truth,
-/// shared by `mvmctl up` and `mvmctl pool` so they agree on the backend.
+/// "not available" error). Any explicit value is returned as-is. The `MVM_HYPERVISOR`
+/// env var (alias `MVM_BACKEND`) overrides auto-detect — the workload-VMM override
+/// mirroring `MVM_BUILDER_BACKEND` for the builder, so a Linux/KVM host can opt into
+/// `libkrun` instead of the Firecracker default. Single source of truth, shared by
+/// the run/pool paths so they agree on the backend.
 pub fn resolve_effective_hypervisor(requested: &str) -> String {
     if requested != "firecracker" {
         return requested.to_string();
+    }
+    // Env override (auto-detect mode only — an explicit `--hypervisor` flag already
+    // won above): `MVM_HYPERVISOR=<firecracker|libkrun|vz|hvf|qemu>`, with the older
+    // `MVM_BACKEND` kept as a back-compat alias. Does not change the platform default.
+    for var in ["MVM_HYPERVISOR", "MVM_BACKEND"] {
+        if let Some(name) = std::env::var_os(var) {
+            let name = name.to_string_lossy().trim().to_ascii_lowercase();
+            if !name.is_empty() {
+                return name;
+            }
+        }
     }
     let plat = mvm_core::platform::current();
     if plat.has_kvm() {
@@ -358,5 +372,50 @@ mod tests {
             "libkrun:l4-host-port"
         );
         assert_eq!(egress_enforcement_label("vz", &p), "vz:l4-host-port");
+    }
+
+    /// An explicit `--hypervisor <x>` (anything but the `firecracker`
+    /// auto-detect sentinel) is returned verbatim — so a Linux/KVM host can
+    /// select `libkrun` (or any other backend) without env.
+    #[test]
+    fn explicit_hypervisor_is_returned_verbatim() {
+        assert_eq!(resolve_effective_hypervisor("libkrun"), "libkrun");
+        assert_eq!(resolve_effective_hypervisor("vz"), "vz");
+        assert_eq!(resolve_effective_hypervisor("hvf"), "hvf");
+        assert_eq!(resolve_effective_hypervisor("qemu"), "qemu");
+    }
+
+    /// `MVM_HYPERVISOR` overrides auto-detect (and `MVM_BACKEND` is the
+    /// back-compat alias); an explicit flag still wins over both. Process-isolated
+    /// under nextest; restored here so a threaded runner doesn't leak it.
+    #[test]
+    fn env_overrides_auto_detect_with_alias() {
+        let saved_hv = std::env::var_os("MVM_HYPERVISOR");
+        let saved_be = std::env::var_os("MVM_BACKEND");
+        // SAFETY: test-local env mutation, restored before returning.
+        unsafe {
+            std::env::remove_var("MVM_BACKEND");
+            std::env::set_var("MVM_HYPERVISOR", "libkrun");
+        }
+        assert_eq!(resolve_effective_hypervisor("firecracker"), "libkrun");
+        // An explicit flag wins over the env override.
+        assert_eq!(resolve_effective_hypervisor("vz"), "vz");
+        // The older alias is still honored.
+        unsafe {
+            std::env::remove_var("MVM_HYPERVISOR");
+            std::env::set_var("MVM_BACKEND", "hvf");
+        }
+        assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
+        // SAFETY: restore prior values.
+        unsafe {
+            match saved_hv {
+                Some(v) => std::env::set_var("MVM_HYPERVISOR", v),
+                None => std::env::remove_var("MVM_HYPERVISOR"),
+            }
+            match saved_be {
+                Some(v) => std::env::set_var("MVM_BACKEND", v),
+                None => std::env::remove_var("MVM_BACKEND"),
+            }
+        }
     }
 }
