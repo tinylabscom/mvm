@@ -26,7 +26,12 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
         slot,
     };
 
-    let mut blocks = vec![ro(&config.rootfs_path, 0)];
+    // An empty rootfs_path means an initramfs-only guest (no sealed rootfs) —
+    // skip the slot-0 disk rather than attach a bogus empty-source virtio-blk.
+    let mut blocks = Vec::new();
+    if !config.rootfs_path.is_empty() {
+        blocks.push(ro(&config.rootfs_path, 0));
+    }
 
     if let Some(verity) = &config.verity_path {
         blocks.push(ro(verity, 1));
@@ -138,6 +143,23 @@ mod tests {
 
     fn nodes(blocks: &[BlockDev]) -> Vec<String> {
         blocks.iter().map(BlockDev::device_node).collect()
+    }
+
+    #[test]
+    fn empty_rootfs_path_yields_no_blocks() {
+        // An initramfs-only guest (e.g. the egress live-proof echo guest) carries no
+        // sealed rootfs. An empty `rootfs_path` must not synthesize a bogus
+        // empty-source virtio-blk — the legacy backend filtered this before the
+        // WorkloadRunner path existed.
+        let cfg = VmStartConfig {
+            name: "w".into(),
+            rootfs_path: String::new(),
+            ..Default::default()
+        };
+        assert!(
+            workload_blocks(&cfg).is_empty(),
+            "empty rootfs_path must yield no disks"
+        );
     }
 
     #[test]
