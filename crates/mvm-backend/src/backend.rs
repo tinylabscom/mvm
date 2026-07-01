@@ -11,6 +11,7 @@ use mvm_core::vm_backend::{
 // (`config`, `shell`, `runtime_meta`) lives in `crate::base`.
 use crate::base::config::{PortMapping, VMS_DIR, VmSlot};
 use crate::base::shell::run_in_vm_stdout;
+use crate::driver::InHouseDriver;
 use crate::hvf_backend::HvfBackend;
 use crate::image::RuntimeVolume;
 use crate::libkrun::LibkrunBackend;
@@ -18,7 +19,13 @@ use crate::microvm::{DriveFile, FlakeRunConfig};
 use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
 use crate::vz::VzBackend;
+use crate::workload_runner::{RealEndpointSpawner, WorkloadRunner};
 use crate::{firecracker, microvm};
+
+/// The in-house VMM driven through the unified workload-runner role over the
+/// driver seam. One alias keeps the long generic instantiation readable at the
+/// enum variant and its construction site.
+type InHouseRunner = WorkloadRunner<InHouseDriver, RealEndpointSpawner>;
 
 /// Firecracker VM configuration for the [`VmBackend`] trait.
 ///
@@ -484,6 +491,13 @@ pub enum AnyBackend {
     /// `auto_select` doesn't pick it yet (Vz remains the macOS-26 default until
     /// HVF reaches workload parity). The destination macOS backend.
     Hvf(HvfBackend),
+    /// The in-house VMM driven through the unified `WorkloadRunner` over the
+    /// driver seam — the role-runner that will replace the per-backend
+    /// Hvf/Libkrun/Vz/FC `start()` copies. Opt-in via `--hypervisor inhouse`;
+    /// the `hvf` selector still resolves to `HvfBackend` until the runner is the
+    /// proven default. Same in-house VMM, tier, and security profile as `Hvf` —
+    /// just reached via the runner role.
+    InHouse(InHouseRunner),
 }
 
 impl AnyBackend {
@@ -509,6 +523,15 @@ impl AnyBackend {
     /// `"vz"` (Apple Virtualization.framework, macOS), `"libkrun"`
     /// (Linux KVM / macOS HVF). Unknown names fall back to Firecracker.
     pub fn from_hypervisor(name: &str) -> Self {
+        // The runner isn't const-constructible, so it can't live in the catalog
+        // table; special-case its opt-in selector before the descriptor lookup.
+        // Every other selector — `hvf` included — stays byte-identical.
+        if matches!(name, "inhouse" | "in-house") {
+            return Self::InHouse(WorkloadRunner::new(
+                InHouseDriver::new(),
+                RealEndpointSpawner,
+            ));
+        }
         catalog::descriptor_for_selector(name)
             .map(|descriptor| descriptor.instantiate())
             .unwrap_or_else(Self::default_backend)
@@ -589,6 +612,48 @@ impl AnyBackend {
         vms
     }
 
+    /// The typed discriminant for this backend. Lets callers branch on
+    /// `BackendKind::Vz` etc. instead of string-matching `name()`. The runner-role
+    /// variant reports the same in-house VMM kind as the raw `Hvf` variant.
+    pub fn kind(&self) -> catalog::BackendKind {
+        match self {
+            Self::Firecracker(_) => catalog::BackendKind::Firecracker,
+            Self::Libkrun(_) => catalog::BackendKind::Libkrun,
+            Self::Vz(_) => catalog::BackendKind::Vz,
+            Self::Qemu(_) => catalog::BackendKind::Qemu,
+            Self::Mock(_) => catalog::BackendKind::Mock,
+            Self::Hvf(_) | Self::InHouse(_) => catalog::BackendKind::Hvf,
+        }
+    }
+
+    pub(crate) fn inner(&self) -> &dyn VmBackend {
+        match self {
+            Self::Firecracker(backend) => backend,
+            Self::Libkrun(backend) => backend,
+            Self::Vz(backend) => backend,
+            Self::Qemu(backend) => backend,
+            Self::Mock(backend) => backend,
+            Self::Hvf(backend) => backend,
+            Self::InHouse(backend) => backend,
+        }
+    }
+
+    /// Consume the enum into a shared `VmBackend` trait object for generic
+    /// consumers that only need the behavior surface.
+    pub fn into_dyn(self) -> std::sync::Arc<dyn VmBackend> {
+        match self {
+            Self::Firecracker(backend) => {
+                std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>
+            }
+            Self::Libkrun(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
+            Self::Vz(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
+            Self::Qemu(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
+            Self::Mock(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
+            Self::Hvf(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
+            Self::InHouse(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
+        }
+    }
+
     /// Isolation tier of this backend. Used by `mvmctl up` to refuse
     /// silent Tier 2 downgrades on production-like launches, and by
     /// `mvmctl doctor` to surface what's actually running on the host.
@@ -640,6 +705,9 @@ impl AnyBackend {
             // secret-substitution gateway (claim-10 at the substitution bridge,
             // claims 12/13 at the per-VM endpoint) all run on the in-house VMM.
             AnyBackend::Hvf(b) => Some(b),
+            // Same in-house VMM as Hvf, reached via the runner role: claim-10 at
+            // the endpoint, claims 12/13 at the per-VM substitution endpoint.
+            AnyBackend::InHouse(b) => Some(b),
         }
     }
 
@@ -998,6 +1066,32 @@ mod tests {
             AnyBackend::from_hypervisor("hvf").kind(),
             catalog::BackendKind::Hvf
         );
+    }
+
+    #[test]
+    fn from_hypervisor_inhouse_selects_the_workload_runner() {
+        // The opt-in `inhouse`/`in-house` selector constructs the runner-role
+        // backend. Its VmBackend name delegates to the in-house driver ("hvf"),
+        // and it is a workload backend (carries untrusted workloads).
+        for sel in ["inhouse", "in-house"] {
+            let backend = AnyBackend::from_hypervisor(sel);
+            assert!(matches!(backend, AnyBackend::InHouse(_)), "selector {sel}");
+            assert_eq!(backend.as_vm_backend().name(), "hvf", "selector {sel}");
+            assert!(
+                backend.as_workload_backend().is_some(),
+                "selector {sel}: runner must be a workload backend"
+            );
+            assert_eq!(backend.kind(), catalog::BackendKind::Hvf, "selector {sel}");
+        }
+    }
+
+    #[test]
+    fn from_hypervisor_hvf_still_selects_hvf_backend() {
+        // The new selector is purely additive: `hvf` must still resolve to the
+        // raw HvfBackend, unchanged by the runner opt-in.
+        let backend = AnyBackend::from_hypervisor("hvf");
+        assert!(matches!(backend, AnyBackend::Hvf(_)));
+        assert_eq!(backend.name(), "hvf");
     }
 
     #[test]

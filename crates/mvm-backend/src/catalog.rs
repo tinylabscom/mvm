@@ -98,31 +98,6 @@ macro_rules! backend_catalog {
                 }
             }
         }
-
-        impl AnyBackend {
-            /// The typed discriminant for this backend. Lets callers branch on
-            /// `BackendKind::Vz` etc. instead of string-matching `name()`.
-            pub fn kind(&self) -> BackendKind {
-                match self {
-                    $(Self::$kind(_) => BackendKind::$kind),*
-                }
-            }
-
-            pub(crate) fn inner(&self) -> &dyn VmBackend {
-                match self {
-                    $(Self::$kind(backend) => backend),*
-                }
-            }
-
-            /// Consume the enum into a shared `VmBackend` trait object for
-            /// generic consumers that only need the behavior surface.
-            pub fn into_dyn(self) -> std::sync::Arc<dyn VmBackend> {
-                match self {
-                    $(Self::$kind(backend) =>
-                        std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>),*
-                }
-            }
-        }
     };
 }
 
