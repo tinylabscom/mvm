@@ -11,7 +11,8 @@
 
 use mvm_backend::AnyBackend;
 use mvm_backend::selection::SelectionError;
-use mvm_core::vm_backend::{RequiredCapabilities, VmCapabilities};
+use mvm_core::network_policy::NetworkPolicy;
+use mvm_core::vm_backend::{RequiredCapabilities, VmCapabilities, VmStartConfig};
 
 /// How a machine reaches the network. Closed by default: a machine gets no
 /// guest NIC, and reaches nothing until networking is explicitly requested.
@@ -122,6 +123,17 @@ pub struct MachineSpec {
     pub pty: bool,
 }
 
+/// Resolved launch inputs for a machine: the per-run name plus the artifact
+/// paths the deterministic build/artifact pipeline produced for the image.
+/// Kept separate from [`MachineSpec`] because artifact resolution is the
+/// pipeline's job, not the builder's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchInputs {
+    pub name: String,
+    pub rootfs_path: String,
+    pub kernel_path: Option<String>,
+}
+
 /// A workload machine. Construct via [`Machine::builder`]. Boot / exec / shell
 /// are layered on this handle in later work.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +188,26 @@ impl Machine {
     /// This is selection only — it does not boot anything.
     pub fn select_backend(&self) -> Result<AnyBackend, SelectionError> {
         AnyBackend::select_capable(&self.required_capabilities())
+    }
+
+    /// Translate this machine plus resolved artifacts into a backend-agnostic
+    /// [`VmStartConfig`] a backend can launch. Transient by default
+    /// (`warm_pool_size = 0`).
+    pub fn to_start_config(&self, inputs: LaunchInputs) -> VmStartConfig {
+        // Closed by default. `NetworkMode::HostVsockProxy` will resolve to a
+        // broker-backed policy once the brokers land; until then it cannot be
+        // selected (see `select_backend`), so deny-all is the honest mapping.
+        let network_policy = NetworkPolicy::deny_all();
+        VmStartConfig {
+            name: inputs.name,
+            rootfs_path: inputs.rootfs_path,
+            kernel_path: inputs.kernel_path,
+            cpus: self.spec.cpus,
+            memory_mib: u32::try_from(self.spec.memory_mib).unwrap_or(u32::MAX),
+            network_policy,
+            warm_pool_size: 0,
+            ..Default::default()
+        }
     }
 }
 
@@ -285,5 +317,58 @@ mod tests {
                     .all(|(_, m)| m.contains(&"host_vsock_proxy"))
             ),
         }
+    }
+
+    #[test]
+    fn to_start_config_carries_resources_and_artifacts() {
+        let machine = Machine::builder()
+            .image("alpine")
+            .cpus(2)
+            .memory_mib(1024)
+            .build()
+            .unwrap();
+        let cfg = machine.to_start_config(LaunchInputs {
+            name: "m1".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            kernel_path: Some("/store/vmlinux".into()),
+        });
+        assert_eq!(cfg.name, "m1");
+        assert_eq!(cfg.rootfs_path, "/store/rootfs.ext4");
+        assert_eq!(cfg.kernel_path.as_deref(), Some("/store/vmlinux"));
+        assert_eq!(cfg.cpus, 2);
+        assert_eq!(cfg.memory_mib, 1024);
+        assert_eq!(cfg.warm_pool_size, 0, "transient by default");
+    }
+
+    #[test]
+    fn to_start_config_no_network_is_deny_all() {
+        let machine = Machine::builder().image("alpine").build().unwrap();
+        let cfg = machine.to_start_config(LaunchInputs {
+            name: "m1".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            kernel_path: None,
+        });
+        assert_eq!(
+            cfg.network_policy,
+            mvm_core::network_policy::NetworkPolicy::deny_all()
+        );
+    }
+
+    #[test]
+    fn produced_config_is_launchable_by_a_backend() {
+        // Prove the translation yields a config a backend accepts: the mock
+        // (the VmBackend test double) starts it and records a running VM.
+        use mvm_backend::mock::MockBackend;
+        use mvm_core::vm_backend::VmBackend;
+
+        let machine = Machine::builder().image("alpine").build().unwrap();
+        let cfg = machine.to_start_config(LaunchInputs {
+            name: "m1".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            kernel_path: None,
+        });
+        let backend = MockBackend::new();
+        let id = backend.start(&cfg).unwrap();
+        backend.stop(&id).unwrap();
     }
 }
