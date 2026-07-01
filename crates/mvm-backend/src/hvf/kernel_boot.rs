@@ -28,7 +28,7 @@ use super::vcpu::esr_ec;
 use crate::vmm::device::Pl011;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
 use crate::vmm::run::{self, RunControl, RunDevice, RunOutcome};
-use crate::vmm::virtio::VirtioBlk;
+use crate::vmm::virtio::{DiskImage, VirtioBlk};
 use crate::vmm::vsock::VirtioVsock;
 use crate::vmm::{fdt, kernel_image};
 
@@ -50,6 +50,24 @@ const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
 const VIRTIO_IRQ: u32 = 48;
 const VSOCK_MMIO_BASE: u64 = 0x0a00_0200;
 const VSOCK_IRQ: u32 = 49;
+/// virtio-mmio window stride; each device occupies one 0x200 slot.
+const MMIO_STRIDE: u64 = 0x200;
+/// Max virtio-blk devices (`/dev/vda`..). Bounds the reserved window band.
+const MAX_DISKS: usize = 4;
+
+/// MMIO base + SPI for virtio-blk device `i` (`/dev/vda` = 0). Disk 0 keeps the
+/// original single-disk window; disks 1+ sit *above* the vsock slot, so vsock's
+/// address/IRQ stay fixed and the live-verified agent/egress path is untouched.
+fn disk_mmio(i: usize) -> (u64, u32) {
+    if i == 0 {
+        (VIRTIO_MMIO_BASE, VIRTIO_IRQ)
+    } else {
+        (
+            VIRTIO_MMIO_BASE + (i as u64 + 1) * MMIO_STRIDE,
+            VIRTIO_IRQ + i as u32 + 1,
+        )
+    }
+}
 
 const PSCI_VERSION_FN: u64 = 0x8400_0000;
 const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
@@ -124,7 +142,7 @@ pub struct HostChannels {
 pub fn boot_kernel(
     image: &[u8],
     initramfs: Option<&[u8]>,
-    disk: Option<&[u8]>,
+    disks: Vec<DiskImage>,
     vsock: bool,
     timeout: Duration,
 ) -> Result<KernelBootResult, HvfError> {
@@ -132,7 +150,7 @@ pub fn boot_kernel(
     boot_kernel_impl(
         image,
         initramfs,
-        disk,
+        disks,
         vsock,
         timeout,
         &NEVER_STOP,
@@ -154,24 +172,27 @@ pub fn boot_kernel(
 pub fn boot_kernel_until(
     image: &[u8],
     initramfs: Option<&[u8]>,
-    disk: Option<&[u8]>,
+    disks: Vec<DiskImage>,
     vsock: bool,
     timeout: Duration,
     stop: &'static AtomicBool,
     channels: HostChannels,
 ) -> Result<KernelBootResult, HvfError> {
-    boot_kernel_impl(image, initramfs, disk, vsock, timeout, stop, channels)
+    boot_kernel_impl(image, initramfs, disks, vsock, timeout, stop, channels)
 }
 
 fn boot_kernel_impl(
     image: &[u8],
     initramfs: Option<&[u8]>,
-    disk: Option<&[u8]>,
+    disks: Vec<DiskImage>,
     vsock: bool,
     timeout: Duration,
     stop: &'static AtomicBool,
     channels: HostChannels,
 ) -> Result<KernelBootResult, HvfError> {
+    if disks.len() > MAX_DISKS {
+        return Err(HvfError::BadKernel);
+    }
     // Validate it's an arm64 Image; we load at the fixed boot-protocol offset.
     let _hdr = kernel_image::parse(image).map_err(|_| HvfError::BadKernel)?;
     let load_off = KERNEL_LOAD_OFFSET as usize;
@@ -203,7 +224,7 @@ fn boot_kernel_impl(
     let mut bootargs = std::env::var("MVM_HVF_BOOTARGS")
         .ok()
         .or_else(|| channels.cmdline.clone())
-        .unwrap_or_else(|| default_bootargs(disk.is_some()));
+        .unwrap_or_else(|| default_bootargs(!disks.is_empty()));
     if let Ok(extra) = std::env::var("MVM_HVF_BOOTARGS_EXTRA") {
         let extra = extra.trim();
         if !extra.is_empty() {
@@ -218,8 +239,8 @@ fn boot_kernel_impl(
         )
     });
     let mut virtio_nodes: Vec<(u64, u32)> = Vec::new();
-    if disk.is_some() {
-        virtio_nodes.push((VIRTIO_MMIO_BASE, VIRTIO_IRQ));
+    for i in 0..disks.len() {
+        virtio_nodes.push(disk_mmio(i));
     }
     if vsock {
         virtio_nodes.push((VSOCK_MMIO_BASE, VSOCK_IRQ));
@@ -265,7 +286,7 @@ fn boot_kernel_impl(
             entry,
             dtb_addr,
             RunInputs {
-                disk,
+                disks,
                 vsock,
                 timeout,
                 agent_socket: channels.agent_socket,
@@ -286,8 +307,8 @@ fn boot_kernel_impl(
 /// Between `hv_vm_create`/`hv_vm_destroy`; `ram` holds RAM_SIZE bytes with the
 /// kernel + DTB loaded.
 /// Device + run inputs for [`run`], bundled to keep its argument count sane.
-struct RunInputs<'a> {
-    disk: Option<&'a [u8]>,
+struct RunInputs {
+    disks: Vec<DiskImage>,
     vsock: bool,
     timeout: Duration,
     /// Per-VM agent RPC socket (productionized off `MVM_HVF_AGENT_SOCKET`).
@@ -308,7 +329,7 @@ unsafe fn run(
     stop: &'static AtomicBool,
 ) -> Result<KernelBootResult, HvfError> {
     let RunInputs {
-        disk,
+        disks,
         vsock,
         timeout,
         agent_socket,
@@ -421,16 +442,17 @@ unsafe fn run(
         });
 
         let mut uart = Pl011::new(UART_BASE);
-        let mut virtio = disk.map(|d| {
-            VirtioBlk::new(
-                VIRTIO_MMIO_BASE,
-                VIRTIO_IRQ,
-                ram,
-                RAM_BASE,
-                RAM_SIZE,
-                crate::vmm::virtio::DiskImage::mem(d.to_vec()),
-            )
-        });
+        // One virtio-blk per disk image (`/dev/vda`, `/dev/vdb`, …) at its window.
+        let mut virtio_disks: Vec<VirtioBlk> = disks
+            .into_iter()
+            .enumerate()
+            .map(|(i, img)| {
+                let (base, irq) = disk_mmio(i);
+                // SAFETY: `ram` is the mapped guest RAM, valid for the run (this
+                // whole fn body is already within an `unsafe` block).
+                VirtioBlk::new(base, irq, ram, RAM_BASE, RAM_SIZE, img)
+            })
+            .collect();
         let mut vsock_dev =
             vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, RAM_SIZE));
         // Transient run-to-exit: a guest write of the exit code to the workload
@@ -471,7 +493,7 @@ unsafe fn run(
         // device output below.
         let outcome = {
             let mut devices: Vec<&mut dyn RunDevice> = vec![&mut uart];
-            if let Some(v) = virtio.as_mut() {
+            for v in virtio_disks.iter_mut() {
                 devices.push(v);
             }
             if let Some(v) = vsock_dev.as_mut() {

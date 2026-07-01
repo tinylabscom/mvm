@@ -157,12 +157,26 @@ fn main() -> anyhow::Result<()> {
         .map(std::fs::read)
         .transpose()
         .context("read initramfs")?;
-    let disk = cfg
-        .disk
-        .as_ref()
-        .map(std::fs::read)
-        .transpose()
-        .context("read disk")?;
+    // Build the virtio-blk backings in `/dev/vda`… order. A read-only disk is
+    // file-served (hypervisor-enforced RO, no RAM cost); a read-write disk is
+    // file-served and persists writes; an ephemeral disk is loaded into RAM and
+    // its writes are dropped on exit (a workload rootfs that must not mutate its
+    // shared base image).
+    let mut disks = Vec::with_capacity(cfg.disks.len());
+    for d in &cfg.disks {
+        let img = if d.read_only {
+            mvm_backend::hvf::DiskImage::open(&d.path, true)
+                .with_context(|| format!("open read-only disk {}", d.path.display()))?
+        } else if d.ephemeral {
+            let bytes = std::fs::read(&d.path)
+                .with_context(|| format!("read ephemeral disk {}", d.path.display()))?;
+            mvm_backend::hvf::DiskImage::mem(bytes)
+        } else {
+            mvm_backend::hvf::DiskImage::open(&d.path, false)
+                .with_context(|| format!("open read-write disk {}", d.path.display()))?
+        };
+        disks.push(img);
+    }
     // timeout_secs == 0 ⇒ persistent: run until stopped (SIGTERM). A multi-year
     // cap backstops a stuck guest. Otherwise it's a bounded run.
     let timeout = if cfg.timeout_secs == 0 {
@@ -177,7 +191,7 @@ fn main() -> anyhow::Result<()> {
     let result = mvm_backend::hvf::boot_kernel_until(
         &image,
         initramfs.as_deref(),
-        disk.as_deref(),
+        disks,
         cfg.vsock,
         timeout,
         &STOP,

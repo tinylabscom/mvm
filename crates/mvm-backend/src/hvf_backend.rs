@@ -20,7 +20,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_build::hvf_supervisor::HvfSupervisorConfig;
+use mvm_build::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::{mvm_data_dir, vm_state_dir};
 use mvm_core::vm_backend::{
     VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
@@ -213,9 +213,18 @@ impl VmBackend for HvfBackend {
             .map(PathBuf::from)
             .unwrap_or_else(|| state_dir.join("hvf-agent.sock"));
 
-        let disk = Some(config.rootfs_path.clone())
+        // Single workload rootfs → one ephemeral (RAM-backed) writable disk: the
+        // guest mounts it `rw` but its writes must not persist to the base image.
+        let disks = Some(config.rootfs_path.clone())
             .filter(|p| !p.is_empty())
-            .map(PathBuf::from);
+            .map(|p| {
+                vec![HvfDisk {
+                    path: PathBuf::from(p),
+                    read_only: false,
+                    ephemeral: true,
+                }]
+            })
+            .unwrap_or_default();
         // A transient workload ends the VM by reporting its exit code over the
         // vsock exit port (the default — VM life = workload life); a persistent
         // (`-d`) VM ends on `stop`. MVM_HVF_TIMEOUT is only a backstop cap
@@ -231,7 +240,7 @@ impl VmBackend for HvfBackend {
             // mkGuest contract, so leave it unset.
             cmdline: None,
             initramfs: config.initrd_path.clone().map(PathBuf::from),
-            disk,
+            disks,
             vsock: true,
             console_log: console_log.clone(),
             pid_file: pid_file.clone(),

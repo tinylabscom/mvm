@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_build::hvf_supervisor::HvfSupervisorConfig;
+use mvm_build::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{
     SnapshotCapability, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
@@ -97,9 +97,20 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         }
     };
 
-    // The HVF supervisor takes a single virtio-blk device today; the sealed
-    // rootfs is slot 0. Multi-disk (verity sidecar + overlay) is a follow-up.
-    let disk = spec.blocks.first().map(|b| b.source.clone());
+    // Every block in slot order becomes a virtio-blk device (`/dev/vda`…). A
+    // writable workload rootfs stays ephemeral (RAM-backed) so guest writes don't
+    // mutate the shared base image; a read-only block is file-served with
+    // hypervisor-enforced RO.
+    let mut ordered: Vec<&crate::driver::BlockDev> = spec.blocks.iter().collect();
+    ordered.sort_by_key(|b| b.slot);
+    let disks = ordered
+        .iter()
+        .map(|b| HvfDisk {
+            path: b.source.clone(),
+            read_only: b.read_only,
+            ephemeral: !b.read_only,
+        })
+        .collect();
 
     let egress_relay_socket = vsock_socket(spec, EGRESS_PORT).ok_or_else(|| {
         anyhow!("in-house workload spec is missing the EGRESS_PORT vsock relay socket")
@@ -117,7 +128,7 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         kernel,
         cmdline,
         initramfs: spec.initramfs.clone(),
-        disk,
+        disks,
         vsock: true,
         console_log: paths.console_log.clone(),
         pid_file: paths.pid_file.clone(),
@@ -392,8 +403,8 @@ mod tests {
         assert_eq!(cfg.agent_socket, Some(PathBuf::from("/run/agent.sock")));
         assert_eq!(cfg.substitution_socket, None);
         assert!(cfg.vsock);
-        // No blocks → no disk.
-        assert_eq!(cfg.disk, None);
+        // No blocks → no disks.
+        assert!(cfg.disks.is_empty());
         // Empty spec cmdline ⇒ None (supervisor uses its workload default).
         assert_eq!(cfg.cmdline, None);
     }
@@ -422,18 +433,34 @@ mod tests {
     }
 
     #[test]
-    fn relay_config_takes_the_first_block_as_the_single_disk() {
+    fn relay_config_maps_blocks_to_disks_in_slot_order_with_ro_and_ephemeral() {
         let spec = spec_with(
             KernelImage::Path("/img/Image".into()),
             vec![egress_port("/run/egress.sock")],
-            vec![BlockDev {
-                source: "/img/rootfs.ext4".into(),
-                read_only: true,
-                slot: 0,
-            }],
+            vec![
+                // Deliberately out of slot order + mixed ro to prove sorting + flags.
+                BlockDev {
+                    source: "/img/nix-store.img".into(),
+                    read_only: false,
+                    slot: 1,
+                },
+                BlockDev {
+                    source: "/img/rootfs.ext4".into(),
+                    read_only: true,
+                    slot: 0,
+                },
+            ],
         );
         let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
-        assert_eq!(cfg.disk, Some(PathBuf::from("/img/rootfs.ext4")));
+        assert_eq!(cfg.disks.len(), 2);
+        // vda = slot 0: read-only rootfs, file-served (not ephemeral).
+        assert_eq!(cfg.disks[0].path, PathBuf::from("/img/rootfs.ext4"));
+        assert!(cfg.disks[0].read_only);
+        assert!(!cfg.disks[0].ephemeral);
+        // vdb = slot 1: writable → ephemeral (RAM-backed, writes don't persist).
+        assert_eq!(cfg.disks[1].path, PathBuf::from("/img/nix-store.img"));
+        assert!(!cfg.disks[1].read_only);
+        assert!(cfg.disks[1].ephemeral);
     }
 
     #[test]

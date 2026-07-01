@@ -29,9 +29,16 @@ fn main() {
         let initramfs = std::env::var("MVM_HVF_INITRAMFS")
             .ok()
             .map(|p| std::fs::read(&p).expect("read initramfs"));
-        let disk = std::env::var("MVM_HVF_DISK")
-            .ok()
-            .map(|p| std::fs::read(&p).expect("read disk"));
+        // MVM_HVF_DISK (optional) mounts a file-backed rootfs read-only; unset for
+        // a disk-less (initramfs / freestanding) boot.
+        let disks = std::env::var_os("MVM_HVF_DISK")
+            .map(|p| {
+                vec![
+                    mvm_backend::hvf::DiskImage::open(std::path::Path::new(&p), true)
+                        .expect("open disk"),
+                ]
+            })
+            .unwrap_or_default();
         let vsock = std::env::var_os("MVM_HVF_VSOCK").is_some();
         println!(
             "booting {} ({} bytes){}{} under HVF…",
@@ -41,15 +48,13 @@ fn main() {
                 .as_ref()
                 .map(|r| format!(" + initramfs ({} bytes)", r.len()))
                 .unwrap_or_default(),
-            disk.as_ref()
-                .map(|d| format!(" + disk ({} bytes)", d.len()))
-                .unwrap_or_default()
+            if disks.is_empty() { "" } else { " + disk" }
         );
 
         match mvm_backend::hvf::boot_kernel(
             &image,
             initramfs.as_deref(),
-            disk.as_deref(),
+            disks,
             vsock,
             Duration::from_secs(3),
         ) {

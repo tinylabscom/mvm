@@ -13,6 +13,25 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// One virtio-blk device attached to the guest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HvfDisk {
+    /// Host path to the backing image.
+    pub path: PathBuf,
+    /// Attach read-only — hypervisor-enforced: the device advertises
+    /// `VIRTIO_BLK_F_RO` and rejects guest writes. A read-write disk persists
+    /// guest writes back to the host file (e.g. the builder's nix-store).
+    #[serde(default)]
+    pub read_only: bool,
+    /// Load the whole image into guest RAM and drop writes on exit, rather than
+    /// serving it from the host file. For a writable rootfs whose mutations must
+    /// not persist to a shared base image (the workload default). Ignored when
+    /// `read_only` — a read-only disk is always served straight from the file.
+    #[serde(default)]
+    pub ephemeral: bool,
+}
+
 /// Everything the supervisor needs to boot one guest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,9 +47,10 @@ pub struct HvfSupervisorConfig {
     /// Optional initramfs (cpio, gzip-or-raw).
     #[serde(default)]
     pub initramfs: Option<PathBuf>,
-    /// Optional virtio-blk backing image.
+    /// virtio-blk devices in `/dev/vda`, `/dev/vdb`, … order. Empty ⇒ a disk-less
+    /// (initramfs / freestanding) boot.
     #[serde(default)]
-    pub disk: Option<PathBuf>,
+    pub disks: Vec<HvfDisk>,
     /// Attach a virtio-vsock device.
     #[serde(default)]
     pub vsock: bool,
@@ -78,7 +98,18 @@ mod tests {
             kernel: "/k/Image".into(),
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init".into()),
             initramfs: Some("/k/initrd.cpio".into()),
-            disk: Some("/k/disk.img".into()),
+            disks: vec![
+                HvfDisk {
+                    path: "/k/rootfs.ext4".into(),
+                    read_only: true,
+                    ephemeral: false,
+                },
+                HvfDisk {
+                    path: "/k/nix-store.img".into(),
+                    read_only: false,
+                    ephemeral: false,
+                },
+            ],
             vsock: true,
             console_log: "/state/console.log".into(),
             pid_file: "/state/hvf.pid".into(),
@@ -111,7 +142,7 @@ mod tests {
         let cfg: HvfSupervisorConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.cmdline, None);
         assert_eq!(cfg.initramfs, None);
-        assert_eq!(cfg.disk, None);
+        assert!(cfg.disks.is_empty());
         assert!(!cfg.vsock);
         assert_eq!(cfg.timeout_secs, 5);
     }
