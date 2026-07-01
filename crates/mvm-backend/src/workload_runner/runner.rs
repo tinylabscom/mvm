@@ -9,16 +9,21 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use mvm_core::config::{vm_state_dir, vm_substitution_endpoint_socket};
+use mvm_core::config::{mvm_data_dir, vm_state_dir, vm_substitution_endpoint_socket};
 use mvm_core::plan::SecretBinding;
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
-use mvm_core::vm_backend::VmStartConfig;
+use mvm_core::vm_backend::{
+    VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+};
 
 use crate::driver::{RunningVm, VmmDriver};
+use crate::egress_shared::decode_plan_secrets_from_state;
 use crate::substitution_spawn::{
-    EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
+    EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
+    spawn_substitution_endpoint,
 };
+use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 use crate::workload_runner::spec_map::{WorkloadSockets, WorkloadSpecInputs, workload_spec};
 
 /// What the workload runner needs to stand up the per-VM gating endpoint.
@@ -36,7 +41,7 @@ pub struct EndpointSpawnRequest<'a> {
 /// Stand up the per-VM gating endpoint; return the host UDS the guest's
 /// EGRESS_PORT relays to. The one host-side egress bridge (claim-10 gate +
 /// claims 12/13 substitution).
-pub trait EndpointSpawner {
+pub trait EndpointSpawner: Send + Sync {
     fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> Result<PathBuf>;
 }
 
@@ -142,10 +147,149 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
     }
 }
 
+/// The runner IS the workload backend: the lifecycle runs through the `VmmDriver`
+/// seam (`boot` on start, `attach` for stop/status/wait/pause/resume) instead of
+/// per-backend code. State is disk-backed under the per-VM `vm_state_dir`, so a
+/// stateless CLI invocation reconstructs a handle by id.
+impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> VmBackend for WorkloadRunner<D, S> {
+    fn name(&self) -> &str {
+        self.driver.name()
+    }
+
+    fn capabilities(&self) -> VmCapabilities {
+        self.driver.capabilities()
+    }
+
+    fn is_available(&self) -> Result<bool> {
+        self.driver.is_available()
+    }
+
+    fn start(&self, config: &VmStartConfig) -> Result<VmId> {
+        let state_dir = vm_state_dir(&config.name);
+        std::fs::create_dir_all(&state_dir)
+            .with_context(|| format!("create state dir {}", state_dir.display()))?;
+
+        // Owned decode + defaults must outlive the `WorkloadLaunchInputs` borrows
+        // below, so bind them here rather than inline.
+        let default_redaction = RedactionPolicy::default();
+        let decoded = decode_plan_secrets_from_state(&state_dir)?;
+        let (secrets, redaction, tenant): (&[SecretBinding], &RedactionPolicy, &str) =
+            match &decoded {
+                Some((s, r, t)) => (s.as_slice(), r, t.as_str()),
+                None => (
+                    &[],
+                    &default_redaction,
+                    config.tenant_id.as_deref().unwrap_or("local"),
+                ),
+            };
+
+        let inputs = WorkloadLaunchInputs {
+            config,
+            tenant,
+            secrets,
+            redaction,
+            network_policy: &config.network_policy,
+            cmdline: String::new(),
+        };
+        // The supervisor + endpoint are detached/disk-backed; the live handle is
+        // reconstructed by id via `attach`, so the boot handle is dropped here.
+        let _vm = self.start_workload(&inputs)?;
+        Ok(VmId(config.name.clone()))
+    }
+
+    fn wait(&self, id: &VmId) -> Result<VmExitStatus> {
+        self.driver.attach(id)?.wait()
+    }
+
+    fn stop(&self, id: &VmId) -> Result<()> {
+        // Reap the per-VM secrets endpoint first, so a crashed VM's
+        // decrypted-secret process can't outlive the guest. Idempotent + a no-op
+        // when the VM spawned none.
+        reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        self.driver.attach(id)?.kill()
+    }
+
+    fn stop_all(&self) -> Result<()> {
+        for vm in self.list()? {
+            let _ = self.stop(&vm.id);
+        }
+        Ok(())
+    }
+
+    fn pause(&self, id: &VmId) -> Result<()> {
+        self.driver.attach(id)?.pause()
+    }
+
+    fn resume(&self, id: &VmId) -> Result<()> {
+        self.driver.attach(id)?.resume()
+    }
+
+    fn status(&self, id: &VmId) -> Result<VmStatus> {
+        self.driver.attach(id)?.status()
+    }
+
+    fn logs(&self, id: &VmId, _lines: u32, _hypervisor: bool) -> Result<String> {
+        // Capture-only console; one log (no separate hypervisor stream).
+        let log = vm_state_dir(&id.0).join("console.log");
+        std::fs::read_to_string(&log).with_context(|| format!("read {}", log.display()))
+    }
+
+    fn list(&self) -> Result<Vec<VmInfo>> {
+        let root = PathBuf::from(mvm_data_dir()).join("vms");
+        let entries = match std::fs::read_dir(&root) {
+            Ok(it) => it,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(anyhow::anyhow!("read {}: {e}", root.display())),
+        };
+        let mut vms = Vec::new();
+        for entry in entries.flatten() {
+            // console.log is the generic marker that a workload booted in this
+            // state dir (every backend captures it). A driver-provided marker
+            // could replace this later.
+            if !entry.path().join("console.log").exists() {
+                continue;
+            }
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let id = VmId(name.clone());
+            let status = self.status(&id).unwrap_or(VmStatus::Stopped);
+            vms.push(VmInfo {
+                id,
+                name,
+                status,
+                guest_ip: None,
+                cpus: 0,
+                memory_mib: 0,
+                profile: None,
+                revision: None,
+                flake_ref: None,
+                ports: Vec::new(),
+            });
+        }
+        Ok(vms)
+    }
+
+    fn install(&self) -> Result<()> {
+        // The in-house VMM needs no host install.
+        Ok(())
+    }
+}
+
+impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> WorkloadBackend
+    for WorkloadRunner<D, S>
+{
+    fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
+        // The runner always routes egress through the per-VM vsock UDS endpoint —
+        // the sole gate off the box. No transparent :80/:443 terminator.
+        EgressSubstitutionTransport::VsockUdsChannel
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     use mvm_core::plan::{SecretBinding, SecretSource};
     use mvm_guest::vsock::EGRESS_PORT;
@@ -153,10 +297,11 @@ mod tests {
     use crate::driver::mock::MockDriver;
 
     /// An `EndpointSpawner` test double: records the request it was handed and
-    /// returns a canned UDS without spawning any process.
+    /// returns a canned UDS without spawning any process. `Mutex` (not `RefCell`)
+    /// so it satisfies the `Send + Sync` a `VmBackend` spawner must be.
     struct RecordingSpawner {
         uds: PathBuf,
-        seen: RefCell<Option<Recorded>>,
+        seen: Mutex<Option<Recorded>>,
     }
 
     struct Recorded {
@@ -170,14 +315,14 @@ mod tests {
         fn new(uds: &str) -> Self {
             Self {
                 uds: PathBuf::from(uds),
-                seen: RefCell::new(None),
+                seen: Mutex::new(None),
             }
         }
     }
 
     impl EndpointSpawner for RecordingSpawner {
         fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> Result<PathBuf> {
-            *self.seen.borrow_mut() = Some(Recorded {
+            *self.seen.lock().unwrap() = Some(Recorded {
                 raw_egress: req.raw_egress,
                 tenant: req.tenant.to_string(),
                 secrets_len: req.secrets.len(),
@@ -269,7 +414,8 @@ mod tests {
             raw_runner
                 .spawner
                 .seen
-                .borrow()
+                .lock()
+                .unwrap()
                 .as_ref()
                 .unwrap()
                 .raw_egress
@@ -290,7 +436,7 @@ mod tests {
                 cmdline: String::new(),
             })
             .unwrap();
-        let recorded = wire_runner.spawner.seen.borrow();
+        let recorded = wire_runner.spawner.seen.lock().unwrap();
         let recorded = recorded.as_ref().unwrap();
         assert!(!recorded.raw_egress);
         assert_eq!(recorded.secrets_len, 1);
@@ -315,9 +461,42 @@ mod tests {
             })
             .unwrap();
 
-        let recorded = runner.spawner.seen.borrow();
+        let recorded = runner.spawner.seen.lock().unwrap();
         let recorded = recorded.as_ref().unwrap();
         assert_eq!(recorded.tenant, "acme");
         assert_eq!(recorded.policy, NetworkPolicy::deny_all());
+    }
+
+    #[test]
+    fn vmbackend_start_then_status_wait_stop_via_the_driver() {
+        let exit = VmExitStatus {
+            code: Some(0),
+            success: true,
+        };
+        let runner = WorkloadRunner::new(
+            MockDriver::with_exit(exit),
+            RecordingSpawner::new("/run/ep.sock"),
+        );
+
+        let id = runner.start(&config("w")).expect("start succeeds");
+        assert_eq!(id.0, "w");
+
+        // attach hands back a MockRunningVm, so the lifecycle works with no real VM.
+        assert_eq!(runner.status(&id).unwrap(), VmStatus::Running);
+        assert_eq!(runner.wait(&id).unwrap(), exit);
+        // stop reaps a nonexistent endpoint (no-op) then kills the attached handle.
+        assert!(runner.stop(&VmId("w".into())).is_ok());
+    }
+
+    #[test]
+    fn vmbackend_name_and_capabilities_delegate_to_the_driver() {
+        let driver = MockDriver::default();
+        let want_name = driver.name().to_string();
+        let want_caps = driver.capabilities();
+        let runner = WorkloadRunner::new(driver, RecordingSpawner::new("/run/ep.sock"));
+
+        assert_eq!(runner.name(), want_name);
+        assert_eq!(runner.capabilities().vsock, want_caps.vsock);
+        assert!(runner.is_available().unwrap());
     }
 }

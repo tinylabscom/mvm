@@ -46,11 +46,9 @@ fn main() {
     use std::time::{Duration, Instant};
 
     use mvm_backend::driver::InHouseDriver;
-    use mvm_backend::workload_runner::{RealEndpointSpawner, WorkloadLaunchInputs, WorkloadRunner};
-    use mvm_core::config::vm_state_dir;
-    use mvm_core::policy::RedactionPolicy;
+    use mvm_backend::workload_runner::{RealEndpointSpawner, WorkloadRunner};
     use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
-    use mvm_core::vm_backend::{VmStartConfig, VmStatus};
+    use mvm_core::vm_backend::{VmBackend, VmStartConfig, VmStatus};
 
     let lan = discover_lan_ipv4().expect(
         "no private non-loopback IPv4 interface — this proof needs a routable LAN address \
@@ -96,40 +94,33 @@ fn main() {
         std::env::set_var("MVM_HVF_TIMEOUT", "8");
     }
 
-    // No rootfs disk — the echo guest is initramfs-only.
+    // No rootfs disk — the echo guest is initramfs-only. Drive the full VmBackend
+    // surface (start → status → logs → stop), so this proves WorkloadRunner AS the
+    // workload backend, not just its start helper.
     let policy = NetworkPolicy::allow_list(vec![HostPort::new(lan.to_string(), addr.port())]);
     let config = VmStartConfig {
         name: name.into(),
         kernel_path: Some(kernel),
         initrd_path: Some(initramfs),
-        network_policy: policy.clone(),
+        network_policy: policy,
         ..Default::default()
     };
-    let redaction = RedactionPolicy::default();
 
-    let runner = WorkloadRunner::new(InHouseDriver::new(), RealEndpointSpawner);
-    let vm = runner
-        .start_workload(&WorkloadLaunchInputs {
-            config: &config,
-            tenant: "local",
-            secrets: &[],
-            redaction: &redaction,
-            network_policy: &policy,
-            cmdline: String::new(),
-        })
-        .expect("WorkloadRunner boots the in-house VM");
+    let backend = WorkloadRunner::new(InHouseDriver::new(), RealEndpointSpawner);
+    let id = backend
+        .start(&config)
+        .expect("WorkloadRunner starts the in-house VM");
 
     for _ in 0..150 {
-        if vm.status().unwrap() == VmStatus::Stopped {
+        if backend.status(&id).unwrap() == VmStatus::Stopped {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     let _ = echo.join();
-    let _ = vm.kill();
 
-    let console =
-        std::fs::read_to_string(vm_state_dir(name).join("console.log")).unwrap_or_default();
+    let console = backend.logs(&id, 0, false).unwrap_or_default();
+    let _ = backend.stop(&id);
     let reachable = console.contains("egress reply over vsock: ping");
     println!("WorkloadRunner: admitted destination reachable: {reachable}");
     if reachable {
