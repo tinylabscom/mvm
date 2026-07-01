@@ -179,10 +179,10 @@ fn handle_raw_conn_blocking(
     gate: &EgressGate,
     timeout: Duration,
 ) -> std::io::Result<()> {
-    use std::io::{Read, Write};
     use std::os::fd::{FromRawFd, OwnedFd};
 
-    // Adopt the fd; a File over a socket fd gives blocking Read+Write.
+    // Adopt the fd; a File over a socket fd gives blocking Read+Write, pumped
+    // below via `std::io::copy` (no trait import needed at this scope).
     let owned = unsafe { OwnedFd::from_raw_fd(conn_fd) };
     let mut guest = std::fs::File::from(owned);
 
