@@ -8,9 +8,10 @@
 //! in-house gateway makes), and on admit pumps bytes both ways to a fresh host TCP
 //! connection. A refused target never reaches the network.
 //!
-//! Unlike HVF's poll-based `EgressProxy` (single-threaded run loop), this is an
-//! async per-connection pump — the natural shape for the supervisor's tokio
-//! runtime. The *decision* (`EgressGate`) is the shared core; the pump is per-VMM.
+//! Unlike the in-house VMM's poll-based egress relay (single-threaded run loop),
+//! this is an async per-connection pump — the natural shape for the supervisor's
+//! tokio runtime. The *decision* (`EgressGate`) is the shared core; the pump is
+//! per-VMM.
 //!
 //! Why a newline delimiter: the UDS is a raw byte stream with no packet boundary
 //! (unlike vsock on the in-house VMM), so the target needs an explicit terminator.

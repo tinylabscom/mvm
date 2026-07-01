@@ -117,37 +117,6 @@ extern "C" fn on_stop_signal(_: libc::c_int) {
     STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Resolve a network policy's host-allowlist entries to IPs (the admission-time
-/// DNS pin) so `host:port` rules gate at L4 — mirrors mvm-hostd's gateway-bridge
-/// `resolve_bare_dns_pins`. Literal IPs need no lookup; an unresolvable host pins
-/// an empty IP set so the projection fails CLOSED (deny) rather than widening.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn resolve_dns_pins(
-    np: &mvm_core::policy::network_policy::NetworkPolicy,
-) -> mvm_core::policy::dns_pin::DnsPinRegistry {
-    use std::net::{IpAddr, ToSocketAddrs};
-    let mut reg = mvm_core::policy::dns_pin::DnsPinRegistry::new();
-    let Some(rules) = np.resolve_rules() else {
-        return reg; // unrestricted: no L4 pin set
-    };
-    for hp in rules {
-        let ips: Vec<IpAddr> = if let Ok(ip) = hp.host.parse::<IpAddr>() {
-            vec![ip]
-        } else {
-            (hp.host.as_str(), 0u16)
-                .to_socket_addrs()
-                .map(|addrs| addrs.map(|sa| sa.ip()).collect())
-                .unwrap_or_default()
-        };
-        reg.add(mvm_core::policy::dns_pin::DnsPin::new(
-            hp.host,
-            ips,
-            chrono::Duration::hours(24),
-        ));
-    }
-    reg
-}
-
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn main() -> anyhow::Result<()> {
     use std::io::{Read, Write};
@@ -202,17 +171,9 @@ fn main() -> anyhow::Result<()> {
         Duration::from_secs(cfg.timeout_secs)
     };
 
-    // Project the VM's network policy into the vsock egress gateway (claim-10,
-    // vsock-only egress): resolve any host-allowlist entries to IPs once (the admission-time
-    // DNS pin), then project. deny-all / unrestricted need no pins; a host that
-    // fails to resolve pins an empty set so the projection fails CLOSED.
-    let pins = resolve_dns_pins(&cfg.network_policy);
-    let now = chrono::Utc::now().to_rfc3339();
-    let egress = mvm_backend::vmm::egress_gate::EgressGate::from_network_policy(
-        &cfg.network_policy,
-        &pins,
-        &now,
-    );
+    // Egress over vsock is a pure relay to the per-VM endpoint, which owns the
+    // whole egress decision (claim-10 default-deny + secret substitution). The
+    // supervisor only wires the relay socket paths through.
     let result = mvm_backend::hvf::boot_kernel_until(
         &image,
         initramfs.as_deref(),
@@ -221,7 +182,6 @@ fn main() -> anyhow::Result<()> {
         timeout,
         &STOP,
         mvm_backend::hvf::HostChannels {
-            egress,
             agent_socket: cfg.agent_socket.clone(),
             substitution_socket: cfg.substitution_socket.clone(),
             egress_relay: cfg.egress_relay_socket.clone(),

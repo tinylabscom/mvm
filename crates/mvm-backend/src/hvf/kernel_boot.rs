@@ -81,10 +81,6 @@ pub struct KernelBootResult {
     /// port (the transient run-to-exit signal). `None` for a run that ended by
     /// timeout/stop without a workload-exit report.
     pub workload_exit_code: Option<i32>,
-    /// Egress targets the vsock gateway refused (claim-10 default-deny).
-    pub egress_denied: Vec<String>,
-    /// Egress targets the vsock gateway admitted + connected.
-    pub egress_allowed: Vec<String>,
 }
 
 /// Kernel cmdline used when `MVM_HVF_BOOTARGS` is unset. Always wires the PL011
@@ -103,17 +99,17 @@ fn default_bootargs(has_disk: bool) -> String {
 }
 
 /// Host-side channels the supervisor wires into the guest's vsock device: the
-/// claim-10 egress gateway policy, the per-VM host→guest agent RPC
-/// socket, and the per-VM substitution-endpoint socket. Bundled so the
-/// boot entry stays under the argument-count lint. The two socket paths fall back
-/// to the `MVM_HVF_{AGENT,SUBSTITUTION}_SOCKET` env hooks when `None` (dev/live
-/// drivers); the productionized path threads them through the supervisor config.
+/// per-VM host→guest agent RPC socket, the per-VM substitution-endpoint socket,
+/// and the per-VM egress relay UDS. Bundled so the boot entry stays under the
+/// argument-count lint. The two socket paths fall back to the
+/// `MVM_HVF_{AGENT,SUBSTITUTION}_SOCKET` env hooks when `None` (dev/live drivers);
+/// the productionized path threads them through the supervisor config.
 pub struct HostChannels {
-    pub egress: crate::vmm::egress_gate::EgressGate,
     pub agent_socket: Option<PathBuf>,
     pub substitution_socket: Option<PathBuf>,
-    /// Per-VM unified egress bridge UDS. When set, `EGRESS_PORT` relays here with
-    /// no in-loop gate — the endpoint gates (claim-10) and substitutes secrets.
+    /// Per-VM egress bridge UDS. When set, `EGRESS_PORT` relays here — the
+    /// endpoint gates (claim-10) and substitutes secrets. `None` ⇒ egress fails
+    /// closed at the bridge (an in-house VM must always carry a relay socket).
     pub egress_relay: Option<PathBuf>,
 }
 
@@ -135,7 +131,6 @@ pub fn boot_kernel(
         timeout,
         &NEVER_STOP,
         HostChannels {
-            egress: egress_gate_from_env(),
             agent_socket: None,
             substitution_socket: None,
             egress_relay: None,
@@ -261,7 +256,6 @@ fn boot_kernel_impl(
                 disk,
                 vsock,
                 timeout,
-                egress: channels.egress,
                 agent_socket: channels.agent_socket,
                 substitution_socket: channels.substitution_socket,
                 egress_relay: channels.egress_relay,
@@ -276,36 +270,6 @@ fn boot_kernel_impl(
     result
 }
 
-/// Build the egress gateway policy. Until the admitted plan's network policy is
-/// threaded through (the productionized path), a dev hook
-/// `MVM_HVF_EGRESS_ALLOW=<ip>:<port>` admits one TCP destination; otherwise the
-/// gate is claim-10 default-deny.
-fn egress_gate_from_env() -> crate::vmm::egress_gate::EgressGate {
-    use crate::vmm::egress_gate::EgressGate;
-    use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
-
-    let Ok(spec) = std::env::var("MVM_HVF_EGRESS_ALLOW") else {
-        return EgressGate::default_deny();
-    };
-    match spec.parse::<std::net::SocketAddr>() {
-        Ok(addr) => {
-            let cidr = if addr.is_ipv4() {
-                format!("{}/32", addr.ip())
-            } else {
-                format!("{}/128", addr.ip())
-            };
-            let rule = CanonicalRule {
-                proto: Proto::Tcp,
-                net: cidr.parse().expect("host cidr"),
-                port_lo: addr.port(),
-                port_hi: addr.port(),
-            };
-            EgressGate::new(CanonicalEgress::Rules(vec![rule]))
-        }
-        Err(_) => EgressGate::default_deny(),
-    }
-}
-
 /// # Safety
 /// Between `hv_vm_create`/`hv_vm_destroy`; `ram` holds RAM_SIZE bytes with the
 /// kernel + DTB loaded.
@@ -314,15 +278,13 @@ struct RunInputs<'a> {
     disk: Option<&'a [u8]>,
     vsock: bool,
     timeout: Duration,
-    /// Host egress gateway policy.
-    egress: crate::vmm::egress_gate::EgressGate,
     /// Per-VM agent RPC socket (productionized off `MVM_HVF_AGENT_SOCKET`).
     agent_socket: Option<PathBuf>,
     /// Per-VM substitution-endpoint socket (productionized off
     /// `MVM_HVF_SUBSTITUTION_SOCKET`).
     substitution_socket: Option<PathBuf>,
-    /// Per-VM unified egress bridge UDS. When set, `EGRESS_PORT` relays here with
-    /// no in-loop gate — the endpoint is the sole gate + substituter.
+    /// Per-VM egress bridge UDS. When set, `EGRESS_PORT` relays here — the
+    /// endpoint is the sole gate + substituter.
     egress_relay: Option<PathBuf>,
 }
 
@@ -337,7 +299,6 @@ unsafe fn run(
         disk,
         vsock,
         timeout,
-        egress,
         agent_socket,
         substitution_socket,
         egress_relay,
@@ -461,11 +422,9 @@ unsafe fn run(
         let mut vsock_dev =
             vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, RAM_SIZE));
         // Transient run-to-exit: a guest write of the exit code to the workload
-        // exit port stops the run (and is captured below). Egress over vsock is
-        // claim-10 default-deny until the plan's policy is threaded in.
+        // exit port stops the run (and is captured below).
         if let Some(v) = vsock_dev.as_mut() {
             v.capture_workload_exit(stop);
-            v.set_egress_activity(egress_active.clone());
             // Host→guest agent RPC (GUEST_AGENT_PORT): expose the listener so host
             // clients (`machine invoke`) reach the guest agent over vsock.
             if let Some(path) = &agent_socket {
@@ -477,30 +436,16 @@ unsafe fn run(
                     );
                 }
             }
-            // Egress routing for EGRESS_PORT. Relay mode takes precedence: when a
-            // per-VM unified egress bridge UDS is set, the device is a pure relay to
-            // it and the endpoint owns the whole egress decision (claim-10 +
-            // substitution). The in-loop `egress` gate is then unused and dropped.
-            // Otherwise the legacy in-loop-gated paths run exactly as before.
-            if let Some(relay) = &egress_relay {
+            // Egress routing for EGRESS_PORT: a pure relay to the per-VM endpoint,
+            // which owns the whole egress decision (claim-10 default-deny + secret
+            // substitution). The relay UDS comes from the supervisor config; fall
+            // back to the dev/live `MVM_HVF_SUBSTITUTION_SOCKET` hook. Shares the
+            // heartbeat counter so an in-flight request awaiting its reply keeps the
+            // loop polling. With no relay wired, EGRESS_PORT fails closed at the
+            // bridge (an in-house VM must always carry a relay socket).
+            if let Some(relay) = egress_relay.as_ref().or(substitution_socket.as_ref()) {
                 v.set_substitution_activity(egress_active.clone());
                 v.set_substitution_endpoint(relay);
-                v.set_substitution_relay_only();
-            } else {
-                // Substitution gateway: route EGRESS_PORT to the per-VM endpoint.
-                // The bridge makes the claim-10 decision on the first frame using
-                // the same gate the raw-egress path uses (hence a clone), then
-                // relays admitted streams to the secrets endpoint. Shares the egress
-                // heartbeat counter so an in-flight WireRequest awaiting its reply
-                // keeps the loop polling.
-                if let Some(path) = &substitution_socket {
-                    v.set_substitution_activity(egress_active.clone());
-                    v.set_substitution_gate(egress.clone());
-                    v.set_substitution_endpoint(path);
-                }
-                // The raw-egress gate takes ownership last (the substitution path
-                // only needs a clone above).
-                v.set_egress_gate(egress);
             }
         }
 
@@ -588,8 +533,6 @@ unsafe fn run(
         if let Some(vs) = &vsock_dev {
             r.vsock_received = vs.received.clone();
             r.workload_exit_code = vs.workload_exit_code;
-            r.egress_denied = vs.egress_denied().to_vec();
-            r.egress_allowed = vs.egress_allowed().to_vec();
         }
         Ok(r)
     }

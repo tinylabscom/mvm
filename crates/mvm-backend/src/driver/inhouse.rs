@@ -15,7 +15,6 @@ use std::time::Instant;
 use anyhow::{Result, anyhow, bail};
 use mvm_build::hvf_supervisor::HvfSupervisorConfig;
 use mvm_core::config::vm_state_dir;
-use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::{
     SnapshotCapability, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
@@ -114,9 +113,6 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         console_log: paths.console_log.clone(),
         pid_file: paths.pid_file.clone(),
         workload_exit: paths.workload_exit.clone(),
-        // Unused in relay mode — the host endpoint gates — but the field is
-        // non-optional, so deny-all is the fail-closed value.
-        network_policy: NetworkPolicy::deny_all(),
         timeout_secs: paths.timeout_secs,
         agent_socket: vsock_socket(spec, GUEST_AGENT_PORT),
         substitution_socket: None,
@@ -354,7 +350,6 @@ mod tests {
         );
         assert_eq!(cfg.agent_socket, Some(PathBuf::from("/run/agent.sock")));
         assert_eq!(cfg.substitution_socket, None);
-        assert_eq!(cfg.network_policy, NetworkPolicy::deny_all());
         assert!(cfg.vsock);
         // No blocks → no disk.
         assert_eq!(cfg.disk, None);

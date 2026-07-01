@@ -71,18 +71,6 @@ fn main() {
                     "diag: psci_fns={:#x?} other_ecs={:#x?}",
                     r.psci_fns, r.other_ecs
                 );
-                if !r.egress_denied.is_empty() {
-                    println!(
-                        "egress DENIED (claim-10 default-deny over vsock): {:?}",
-                        r.egress_denied
-                    );
-                }
-                if !r.egress_allowed.is_empty() {
-                    println!(
-                        "egress ALLOWED (policy-admitted over vsock): {:?}",
-                        r.egress_allowed
-                    );
-                }
                 if let Some(code) = r.workload_exit_code {
                     println!("workload exited: code={code}");
                 }

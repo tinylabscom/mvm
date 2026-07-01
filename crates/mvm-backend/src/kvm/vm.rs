@@ -20,7 +20,6 @@ use kvm_ioctls::{Kvm, VcpuExit as KvmExit, VcpuFd, VmFd};
 
 use super::serial::Serial16550;
 use super::x86_boot;
-use crate::vmm::egress_gate::EgressGate;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, HypervisorVm, SysReg, VcpuExit, VcpuHandle};
 use crate::vmm::run::{self, RunControl, RunDevice};
 use crate::vmm::vsock::VirtioVsock;
@@ -47,10 +46,6 @@ pub struct KvmEgressResult {
     /// Workload exit code, if the guest reported one over the vsock workload-exit
     /// port (the transient run-to-exit signal).
     pub workload_exit_code: Option<i32>,
-    /// Egress targets the vsock gateway refused (claim-10 default-deny).
-    pub egress_denied: Vec<String>,
-    /// Egress targets the vsock gateway admitted + connected.
-    pub egress_allowed: Vec<String>,
 }
 
 /// Backend-native error.
@@ -158,34 +153,16 @@ impl KvmVm {
         Ok(serial.output)
     }
 
-    /// Boot an x86_64 bzImage (loaded in `mem`) with the **vsock egress gateway**
-    ///  — no guest NIC. The guest reaches the network only by opening a
-    /// vsock stream to [`VSOCK_MMIO_BASE`]'s device on the egress port; the host
-    /// decides each target against `gate` (claim-10) and proxies admitted flows.
-    /// This is the same run loop + `EgressProxy` HVF uses; the KVM specifics are the
-    /// virtio-mmio window + the SIGUSR1 heartbeat that breaks the in-kernel HLT so
-    /// host→guest replies reach an idle guest. `stop` ends the run (timeout or a
-    /// caller signal). The caller must append [`vsock_mmio_cmdline_arg`] to the
-    /// kernel cmdline.
-    pub fn boot_with_egress(
-        &self,
-        mem: &mut [u8],
-        cfg: &x86_boot::BootConfig,
-        timeout: Duration,
-        gate: EgressGate,
-        stop: &'static AtomicBool,
-    ) -> Result<KvmEgressResult, KvmError> {
-        self.run_with_vsock_egress(mem, cfg, timeout, stop, |vsock, active| {
-            vsock.set_egress_gate(gate);
-            vsock.set_egress_activity(active.clone());
-        })
-    }
-
-    /// Like [`boot_with_egress`], but the guest's egress port is a **pure relay**
-    /// to the host-side gating endpoint bound at `endpoint_uds` — no in-loop gate.
-    /// The endpoint owns the claim-10 decision (and substitution); the run loop
-    /// only pipes bytes. The vsock-only egress end state: one host bridge, no
-    /// in-VMM gate. The caller spawns the endpoint with the admitted policy.
+    /// Boot an x86_64 bzImage (loaded in `mem`) with **vsock-only egress** — no
+    /// guest NIC. The guest reaches the network only by opening a vsock stream to
+    /// [`VSOCK_MMIO_BASE`]'s device on the egress port, which the run loop relays
+    /// byte-for-byte to the host-side gating endpoint bound at `endpoint_uds`. The
+    /// endpoint owns the whole egress decision (claim-10 + substitution); the run
+    /// loop only pipes bytes. The KVM specifics are the virtio-mmio window + the
+    /// SIGUSR1 heartbeat that breaks the in-kernel HLT so host→guest replies reach
+    /// an idle guest. `stop` ends the run (timeout or a caller signal). The caller
+    /// spawns the endpoint with the admitted policy and appends
+    /// [`vsock_mmio_cmdline_arg`] to the kernel cmdline.
     pub fn boot_with_relay(
         &self,
         mem: &mut [u8],
@@ -197,13 +174,11 @@ impl KvmVm {
         self.run_with_vsock_egress(mem, cfg, timeout, stop, |vsock, active| {
             vsock.set_substitution_activity(active.clone());
             vsock.set_substitution_endpoint(endpoint_uds);
-            vsock.set_substitution_relay_only();
         })
     }
 
-    /// Shared boot + run-loop body for the two egress modes. `wire` installs the
-    /// egress handling on the vsock device — the in-loop gate, or the relay to the
-    /// host endpoint.
+    /// Shared boot + run-loop body for the relay egress mode. `wire` installs the
+    /// egress relay to the host endpoint on the vsock device.
     fn run_with_vsock_egress(
         &self,
         mem: &mut [u8],
@@ -274,8 +249,6 @@ impl KvmVm {
         Ok(KvmEgressResult {
             console: serial.output,
             workload_exit_code: vsock.workload_exit_code,
-            egress_denied: vsock.egress_denied().to_vec(),
-            egress_allowed: vsock.egress_allowed().to_vec(),
         })
     }
 }

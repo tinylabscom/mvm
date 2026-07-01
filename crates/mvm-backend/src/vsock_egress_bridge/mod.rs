@@ -4,5 +4,4 @@
 //! serves all backends.
 
 pub mod egress_gate;
-pub(crate) mod egress_proxy;
 pub(crate) mod substitution_bridge;

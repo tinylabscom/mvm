@@ -15,7 +15,7 @@ pub mod device;
 // Promoted to the top-level backend-agnostic bridge module; re-exported at the
 // old paths so the in-house run loop and cross-crate consumers keep working.
 pub use crate::vsock_egress_bridge::egress_gate;
-pub(crate) use crate::vsock_egress_bridge::{egress_proxy, substitution_bridge};
+pub(crate) use crate::vsock_egress_bridge::substitution_bridge;
 pub mod fdt;
 pub mod guest_mem;
 pub mod hv;

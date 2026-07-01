@@ -1,5 +1,5 @@
-//! The host-side vsock agent bridge — the host→guest counterpart of
-//! [`EgressProxy`](super::egress_proxy::EgressProxy).
+//! The host-side vsock agent bridge — the host→guest counterpart of the egress
+//! relay ([`SubstitutionBridge`](super::substitution_bridge::SubstitutionBridge)).
 //!
 //! The guest agent listens on the guest's vsock [`GUEST_AGENT_PORT`] (5252); the
 //! host is the client. A host process (the `machine invoke` / agent-RPC client)
@@ -8,7 +8,7 @@
 //! `OP_REQUEST` to the guest, relays host→guest bytes once the guest accepts, and
 //! writes the guest's replies back to the host socket.
 //!
-//! Like [`EgressProxy`] it is **transport-agnostic**: keyed by an opaque
+//! Like the egress relay it is **transport-agnostic**: keyed by an opaque
 //! connection id (the in-house VMM uses the host-assigned vsock `src_port`), it
 //! speaks raw bytes, never a virtqueue or vsock header — the device owns the
 //! framing. Each connection is read only once the guest has accepted it

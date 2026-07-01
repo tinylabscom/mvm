@@ -226,13 +226,12 @@ impl RunDevice for super::vsock::VirtioVsock {
         self.write(offset, value).then(|| self.irq())
     }
     fn poll(&mut self) -> Option<u32> {
-        // Host→guest work each timer tick: drain admitted egress sockets, relay
-        // host-initiated agent streams, and drain substitution-endpoint replies.
-        // Any may deliver an rx packet and need an interrupt.
-        let egress = self.drain_egress();
+        // Host→guest work each timer tick: relay host-initiated agent streams and
+        // drain egress-endpoint replies. Either may deliver an rx packet and need
+        // an interrupt.
         let agent = self.drain_agent();
         let subst = self.drain_substitution();
-        egress.or(agent).or(subst)
+        agent.or(subst)
     }
 }
 

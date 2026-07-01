@@ -233,7 +233,6 @@ impl VmBackend for HvfBackend {
             console_log: console_log.clone(),
             pid_file: pid_file.clone(),
             workload_exit,
-            network_policy: config.network_policy.clone(),
             timeout_secs,
             agent_socket: Some(agent_socket),
             substitution_socket: None,
