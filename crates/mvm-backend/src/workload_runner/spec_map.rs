@@ -2,12 +2,12 @@
 //! small, driver-independent unit so the workload role's translation of an
 //! admitted launch config into a physical `VmmSpec` is testable without a VM.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use mvm_core::vm_backend::VmStartConfig;
 use mvm_guest::vsock::{EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT};
 
-use crate::driver::{BlockDev, VsockDirection, VsockPort};
+use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
 
 /// The ordered virtio-blk list for a sealed workload: the read-only rootfs at
 /// `/dev/vda` (slot 0), its dm-verity Merkle sidecar at `/dev/vdb` (slot 1) when
@@ -78,6 +78,44 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
             direction: VsockDirection::GuestDials,
         },
     ]
+}
+
+/// Everything the workload role resolves before it can build a `VmmSpec`: the
+/// admitted config, the host sockets its vsock channels bind to, the assembled
+/// kernel cmdline, and the write-only console capture path.
+pub struct WorkloadSpecInputs<'a> {
+    pub config: &'a VmStartConfig,
+    pub sockets: WorkloadSockets<'a>,
+    /// The kernel cmdline the role assembled (roothash, overlay args, console).
+    pub cmdline: String,
+    /// Write-only host capture of the guest console.
+    pub console_log: PathBuf,
+}
+
+/// Compose a `VmmSpec` from an admitted `VmStartConfig` and the runtime paths the
+/// role resolved. The driver-agnostic translation: sealed rootfs + verity/overlay
+/// disks, the three standing vsock channels, the kernel, and the write-only
+/// console — no NIC, no policy (those live in the role above and the bridge it
+/// spawns, never in the spec the driver boots).
+pub fn workload_spec(inputs: &WorkloadSpecInputs) -> VmmSpec {
+    let config = inputs.config;
+    let kernel = match &config.kernel_path {
+        Some(path) if !path.is_empty() => KernelImage::Path(path.into()),
+        _ => KernelImage::Bundled,
+    };
+    VmmSpec {
+        name: config.name.clone(),
+        kernel,
+        cmdline: inputs.cmdline.clone(),
+        vcpus: config.cpus,
+        memory_mib: config.memory_mib,
+        mem_initial_mib: config.mem_initial_mib,
+        blocks: workload_blocks(config),
+        vsock: workload_vsock_ports(&inputs.sockets),
+        console: ConsoleCapture {
+            log_path: inputs.console_log.clone(),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -170,5 +208,48 @@ mod tests {
         let exit = by_port[&WORKLOAD_EXIT_PORT];
         assert_eq!(exit.direction, VsockDirection::GuestDials);
         assert_eq!(exit.host_uds, PathBuf::from("/run/workload.exit"));
+    }
+
+    fn sample_sockets() -> WorkloadSockets<'static> {
+        WorkloadSockets {
+            agent: Path::new("/run/agent.sock"),
+            egress_gateway: Path::new("/run/egress.sock"),
+            exit: Path::new("/run/workload.exit"),
+        }
+    }
+
+    #[test]
+    fn workload_spec_composes_kernel_blocks_vsock_and_console() {
+        let cfg = VmStartConfig {
+            kernel_path: Some("/img/Image".into()),
+            verity_path: Some("/img/rootfs.verity".into()),
+            cpus: 2,
+            memory_mib: 512,
+            ..base()
+        };
+        let spec = workload_spec(&WorkloadSpecInputs {
+            config: &cfg,
+            sockets: sample_sockets(),
+            cmdline: "console=ttyAMA0 root=/dev/vda".into(),
+            console_log: PathBuf::from("/run/console.log"),
+        });
+        assert_eq!(spec.name, "w");
+        assert_eq!(spec.kernel, KernelImage::Path(PathBuf::from("/img/Image")));
+        assert_eq!(spec.vcpus, 2);
+        assert_eq!(spec.memory_mib, 512);
+        assert_eq!(nodes(&spec.blocks), vec!["/dev/vda", "/dev/vdb"]);
+        assert_eq!(spec.vsock.len(), 3);
+        assert_eq!(spec.console.log_path, PathBuf::from("/run/console.log"));
+    }
+
+    #[test]
+    fn workload_spec_falls_back_to_bundled_kernel_without_a_path() {
+        let spec = workload_spec(&WorkloadSpecInputs {
+            config: &base(),
+            sockets: sample_sockets(),
+            cmdline: String::new(),
+            console_log: PathBuf::from("/run/console.log"),
+        });
+        assert_eq!(spec.kernel, KernelImage::Bundled);
     }
 }

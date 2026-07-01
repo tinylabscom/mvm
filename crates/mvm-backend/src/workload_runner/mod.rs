@@ -6,4 +6,6 @@
 
 pub mod spec_map;
 
-pub use spec_map::{WorkloadSockets, workload_blocks, workload_vsock_ports};
+pub use spec_map::{
+    WorkloadSockets, WorkloadSpecInputs, workload_blocks, workload_spec, workload_vsock_ports,
+};
