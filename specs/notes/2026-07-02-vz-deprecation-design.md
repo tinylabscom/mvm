@@ -33,17 +33,41 @@ macOS-26 Apple Silicon host:
    boots a real OCI/mkGuest workload (e.g. alpine) to a **reachable agent**:
    `vm wait` / doctor reports `ready`, and an `invoke` / agent-ping round-trip
    succeeds.
-2. **Production I/O round-trip (channel 1, below)** — a *production* run
-   (`machine run --image X --stdin <payload> -- <cmd>`) delivers the stdin
-   payload to the workload and returns stdout/stderr/exit over the in-house
-   `agent.sock`. This proves the production host↔guest I/O channel works,
-   independent of any dev shell.
+2. **Production host→guest input round-trip (channel 1 inbound).** NOTE: the
+   surface is `--entrypoint --stdin` against a **`--manifest`/`--flake`**
+   workload (or the SDK `invoke --input` path) — NOT `machine run --image X
+   --stdin`. `--stdin` is entrypoint-only (`requires = "entrypoint"`), and
+   `--entrypoint` is unavailable for OCI `--image` (an OCI image runs its baked
+   CMD via inline argv with no host→guest stdin wiring). The proof: a flake
+   entrypoint that reads stdin and echoes it, run under `--hypervisor inhouse`,
+   returns the payload — establishing inbound delivery over the in-house
+   `agent.sock`.
 3. **Builder reachability** — the in-house builder (`InHouseBuilderVm`) boots
    and runs a `nix build` (Stage 0 → workload kernel) to a usable artifact.
 
-Prior verification (this investigation) only proved the *builder chain runs and
-the workload console-attach fails*; it did **not** prove agent reachability or
-the production I/O round-trip. Those are the gate.
+### Step-0 results (2026-07-02, macOS 26 Apple Silicon)
+
+- **Reachability + channel-1 outbound: PROVEN.** `machine run --image alpine
+  --hypervisor inhouse --json -- /bin/echo step0-inhouse-ok` returned
+  `exit_code: 0, success: true, stdout_bytes: 17`, and the reported
+  `stdout_sha256` matched `sha256("step0-inhouse-ok\n")` exactly. The run
+  reported `network_posture: deny-all, egress_enforcement: flow-drop`, so
+  claim-10 is enforced on the in-house path. This is the load-bearing fact:
+  the in-house VMM boots a real OCI workload to a reachable agent that runs a
+  command and returns stdout/exit. **The plan's "flip + delete" shape is
+  therefore valid** (the alternative "finish boot first" shape is ruled out).
+- **Channel-1 inbound: NOT YET PROVEN (correctly).** The first attempt used the
+  invalid `--image … --stdin` combination and (as expected) delivered no stdin;
+  this is CLI behavior, not an in-house defect. Inbound rides the same
+  backend-agnostic runner path (`runner/mod.rs`: "pipes the captured stdin to
+  the child's stdin") over the same `agent.sock` that outbound proved alive, so
+  the residual risk is low. It is deferred to Step-1 implementation testing,
+  where a flake build is already in scope — proven via `--entrypoint --stdin`
+  on a flake entrypoint. A separate minor finding: clap does not reject
+  `--stdin` given without `--entrypoint`; it silently ignores it (small CLI
+  bug, tracked independently).
+- **Builder reachability: deferred** (does not affect the plan's shape; part of
+  the builder-flip proof).
 
 ## The three host↔guest channels (the security boundary we must not blur)
 
