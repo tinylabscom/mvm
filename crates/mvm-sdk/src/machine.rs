@@ -163,9 +163,24 @@ impl Machine {
         MachineShellBuilder::new(self.name.clone())
     }
 
-    /// Build a `mvmctl machine stop --name <name>` invocation.
+    /// Build a `mvmctl machine stop <name>` invocation.
     pub fn stop(&self) -> MachineStopBuilder {
         MachineStopBuilder::new(self.name.clone())
+    }
+
+    /// Build a `mvmctl machine logs <name>` invocation.
+    pub fn logs(&self) -> MachineLogsBuilder {
+        MachineLogsBuilder::new(self.name.clone())
+    }
+
+    /// Build a `mvmctl machine inspect <name>` invocation.
+    pub fn inspect(&self) -> MachineInspectBuilder {
+        MachineInspectBuilder::new(self.name.clone())
+    }
+
+    /// Build a `mvmctl machine rm <name>` invocation for this machine.
+    pub fn rm(&self) -> MachineRmBuilder {
+        MachineRmBuilder::default().name(self.name.clone())
     }
 }
 
@@ -750,7 +765,257 @@ impl MachineStopBuilder {
     /// Return the `machine` subcommand argv, excluding the `mvmctl` program.
     pub fn machine_args(&self) -> Result<Vec<String>, MachineError> {
         let name = require_non_empty(self.name.clone(), "name")?;
-        Ok(vec!["stop".to_string(), "--name".to_string(), name])
+        // `machine stop` takes a positional name, not `--name` (the CLI parser
+        // rejects the flag form). See the shared `stop.argv` fixture.
+        Ok(vec!["stop".to_string(), name])
+    }
+
+    /// Execute this builder with the default [`MachineClient`].
+    pub fn run(&self) -> Result<MachineResult, MachineError> {
+        self.run_with(&MachineClient::default())
+    }
+
+    /// Execute this builder with `client`.
+    pub fn run_with(&self, client: &MachineClient) -> Result<MachineResult, MachineError> {
+        client.run_machine(self.machine_args()?)
+    }
+}
+
+/// Entry point for `machine ls` builders.
+pub struct MachineLs;
+
+impl MachineLs {
+    /// Start building a `mvmctl machine ls` invocation.
+    pub fn builder() -> MachineLsBuilder {
+        MachineLsBuilder::default()
+    }
+}
+
+/// Builder for `mvmctl machine ls`.
+#[derive(Debug, Clone, Default)]
+pub struct MachineLsBuilder {
+    json: bool,
+}
+
+impl MachineLsBuilder {
+    /// Request JSON output from the CLI.
+    pub fn json(mut self, enabled: bool) -> Self {
+        self.json = enabled;
+        self
+    }
+
+    /// Return the `machine` subcommand argv, excluding the `mvmctl` program.
+    pub fn machine_args(&self) -> Result<Vec<String>, MachineError> {
+        let mut args = vec!["ls".to_string()];
+        if self.json {
+            args.push("--json".to_string());
+        }
+        Ok(args)
+    }
+
+    /// Execute this builder with the default [`MachineClient`].
+    pub fn run(&self) -> Result<MachineResult, MachineError> {
+        self.run_with(&MachineClient::default())
+    }
+
+    /// Execute this builder with `client`.
+    pub fn run_with(&self, client: &MachineClient) -> Result<MachineResult, MachineError> {
+        client.run_machine(self.machine_args()?)
+    }
+}
+
+/// Entry point for `machine logs` builders.
+pub struct MachineLogs;
+
+impl MachineLogs {
+    /// Start building a `mvmctl machine logs <name>` invocation.
+    pub fn builder(name: impl Into<String>) -> MachineLogsBuilder {
+        MachineLogsBuilder::new(name.into())
+    }
+}
+
+/// Builder for `mvmctl machine logs`.
+#[derive(Debug, Clone)]
+pub struct MachineLogsBuilder {
+    name: String,
+    follow: bool,
+    lines: Option<u32>,
+}
+
+impl MachineLogsBuilder {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            follow: false,
+            lines: None,
+        }
+    }
+
+    /// Follow log output (`tail -f`).
+    pub fn follow(mut self, enabled: bool) -> Self {
+        self.follow = enabled;
+        self
+    }
+
+    /// Number of trailing lines to show.
+    pub fn lines(mut self, lines: u32) -> Self {
+        self.lines = Some(lines);
+        self
+    }
+
+    /// Return the `machine` subcommand argv, excluding the `mvmctl` program.
+    pub fn machine_args(&self) -> Result<Vec<String>, MachineError> {
+        let name = require_non_empty(self.name.clone(), "name")?;
+        // `machine logs` takes a positional name, matching the CLI parser.
+        let mut args = vec!["logs".to_string(), name];
+        if self.follow {
+            args.push("--follow".to_string());
+        }
+        if let Some(lines) = self.lines {
+            args.extend(["--lines".to_string(), lines.to_string()]);
+        }
+        Ok(args)
+    }
+
+    /// Execute this builder with the default [`MachineClient`].
+    pub fn run(&self) -> Result<MachineResult, MachineError> {
+        self.run_with(&MachineClient::default())
+    }
+
+    /// Execute this builder with `client`.
+    pub fn run_with(&self, client: &MachineClient) -> Result<MachineResult, MachineError> {
+        client.run_machine(self.machine_args()?)
+    }
+}
+
+/// Entry point for `machine inspect` builders.
+pub struct MachineInspect;
+
+impl MachineInspect {
+    /// Start building a `mvmctl machine inspect <name>` invocation.
+    pub fn builder(name: impl Into<String>) -> MachineInspectBuilder {
+        MachineInspectBuilder::new(name.into())
+    }
+}
+
+/// Builder for `mvmctl machine inspect`.
+#[derive(Debug, Clone)]
+pub struct MachineInspectBuilder {
+    name: String,
+    json: bool,
+}
+
+impl MachineInspectBuilder {
+    fn new(name: String) -> Self {
+        Self { name, json: false }
+    }
+
+    /// Request JSON output from the CLI.
+    pub fn json(mut self, enabled: bool) -> Self {
+        self.json = enabled;
+        self
+    }
+
+    /// Return the `machine` subcommand argv, excluding the `mvmctl` program.
+    pub fn machine_args(&self) -> Result<Vec<String>, MachineError> {
+        let name = require_non_empty(self.name.clone(), "name")?;
+        // `machine inspect` takes a positional name, matching the CLI parser.
+        let mut args = vec!["inspect".to_string(), name];
+        if self.json {
+            args.push("--json".to_string());
+        }
+        Ok(args)
+    }
+
+    /// Execute this builder with the default [`MachineClient`].
+    pub fn run(&self) -> Result<MachineResult, MachineError> {
+        self.run_with(&MachineClient::default())
+    }
+
+    /// Execute this builder with `client`.
+    pub fn run_with(&self, client: &MachineClient) -> Result<MachineResult, MachineError> {
+        client.run_machine(self.machine_args()?)
+    }
+}
+
+/// Entry point for `machine rm` builders.
+pub struct MachineRm;
+
+impl MachineRm {
+    /// Start building a `mvmctl machine rm` invocation. Add targets with
+    /// [`MachineRmBuilder::name`] or select every spec with
+    /// [`MachineRmBuilder::all`] — exactly one is required.
+    pub fn builder() -> MachineRmBuilder {
+        MachineRmBuilder::default()
+    }
+}
+
+/// Builder for `mvmctl machine rm`.
+#[derive(Debug, Clone, Default)]
+pub struct MachineRmBuilder {
+    names: Vec<String>,
+    all: bool,
+    yes: bool,
+    json: bool,
+}
+
+impl MachineRmBuilder {
+    /// Add one machine name to remove.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.names.push(name.into());
+        self
+    }
+
+    /// Add multiple machine names to remove.
+    pub fn names<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.names.extend(collect_strings(names));
+        self
+    }
+
+    /// Remove every persistent machine spec (mutually exclusive with names).
+    pub fn all(mut self, enabled: bool) -> Self {
+        self.all = enabled;
+        self
+    }
+
+    /// Confirm deletion (`--yes`).
+    pub fn yes(mut self, enabled: bool) -> Self {
+        self.yes = enabled;
+        self
+    }
+
+    /// Request a JSON deletion summary.
+    pub fn json(mut self, enabled: bool) -> Self {
+        self.json = enabled;
+        self
+    }
+
+    /// Return the `machine` subcommand argv, excluding the `mvmctl` program.
+    pub fn machine_args(&self) -> Result<Vec<String>, MachineError> {
+        // The CLI requires exactly one of names / --all (a clap ArgGroup).
+        if self.all != self.names.is_empty() {
+            return Err(MachineError::InvalidInput(
+                "MachineRm requires exactly one of a name or --all".to_string(),
+            ));
+        }
+        validate_strings(&self.names, "name")?;
+        let mut args = vec!["rm".to_string()];
+        if self.all {
+            args.push("--all".to_string());
+        } else {
+            args.extend(self.names.iter().cloned());
+        }
+        if self.yes {
+            args.push("--yes".to_string());
+        }
+        if self.json {
+            args.push("--json".to_string());
+        }
+        Ok(args)
     }
 
     /// Execute this builder with the default [`MachineClient`].

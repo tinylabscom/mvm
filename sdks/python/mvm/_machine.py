@@ -210,6 +210,103 @@ def _machine_check_artifact_argv(
     return argv
 
 
+def _machine_start_argv(
+    *,
+    name: str,
+    receipt: str | None = None,
+    json: bool = False,
+    dry_run: bool = False,
+) -> list[str]:
+    argv = ["start", "--name", _require_non_empty_str(name, "name")]
+    if receipt is not None:
+        argv.extend(["--receipt", _require_non_empty_str(receipt, "receipt")])
+    if json:
+        argv.append("--json")
+    if dry_run:
+        argv.append("--dry-run")
+    return argv
+
+
+def _machine_exec_argv(
+    *,
+    name: str,
+    command: list[str],
+    force: bool = False,
+) -> list[str]:
+    command = _string_list(command, "command")
+    if not command:
+        raise ValueError("command must be non-empty")
+    argv = ["exec", "--name", _require_non_empty_str(name, "name")]
+    if force:
+        argv.append("--force")
+    argv.extend(["--", *command])
+    return argv
+
+
+def _machine_shell_argv(*, name: str, force: bool = False) -> list[str]:
+    argv = ["shell", "--name", _require_non_empty_str(name, "name")]
+    if force:
+        argv.append("--force")
+    return argv
+
+
+def _machine_stop_argv(*, name: str) -> list[str]:
+    # `machine stop` takes a positional name, not `--name` (the CLI rejects the
+    # flag form). See the shared `stop.argv` fixture.
+    return ["stop", _require_non_empty_str(name, "name")]
+
+
+def _machine_ls_argv(*, json: bool = False) -> list[str]:
+    argv = ["ls"]
+    if json:
+        argv.append("--json")
+    return argv
+
+
+def _machine_logs_argv(
+    *,
+    name: str,
+    follow: bool = False,
+    lines: int | None = None,
+) -> list[str]:
+    argv = ["logs", _require_non_empty_str(name, "name")]
+    if follow:
+        argv.append("--follow")
+    if lines is not None:
+        argv.extend(["--lines", str(lines)])
+    return argv
+
+
+def _machine_inspect_argv(*, name: str, json: bool = False) -> list[str]:
+    argv = ["inspect", _require_non_empty_str(name, "name")]
+    if json:
+        argv.append("--json")
+    return argv
+
+
+def _machine_rm_argv(
+    *,
+    names: Iterable[str] | None = None,
+    all: bool = False,
+    yes: bool = False,
+    json: bool = False,
+) -> list[str]:
+    name_list = _string_list(names, "names")
+    # The CLI requires exactly one of names / --all (a clap ArgGroup).
+    if all == bool(name_list):
+        raise ValueError("Machine.rm requires exactly one of names or all=True")
+    argv = ["rm"]
+    if all:
+        argv.append("--all")
+    else:
+        argv.extend(name_list)
+    if yes:
+        argv.append("--yes")
+    if json:
+        argv.append("--json")
+    return argv
+
+
 class Machine:
     """Persistent machine handle plus ephemeral ``machine run`` helpers."""
 
@@ -292,6 +389,10 @@ class Machine:
     ) -> MachineResult:
         return _run_machine(_machine_check_artifact_argv(path=path, key=key, json=json))
 
+    @staticmethod
+    def ls(*, json: bool = False) -> MachineResult:
+        return _run_machine(_machine_ls_argv(json=json))
+
     def start(
         self,
         *,
@@ -299,33 +400,27 @@ class Machine:
         json: bool = False,
         dry_run: bool = False,
     ) -> MachineResult:
-        argv = ["start", "--name", self.name]
-        if receipt is not None:
-            argv.extend(["--receipt", _require_non_empty_str(receipt, "receipt")])
-        if json:
-            argv.append("--json")
-        if dry_run:
-            argv.append("--dry-run")
-        return _run_machine(argv)
+        return _run_machine(
+            _machine_start_argv(name=self.name, receipt=receipt, json=json, dry_run=dry_run)
+        )
 
     def exec(self, command: list[str], *, force: bool = False) -> MachineResult:
-        command = _string_list(command, "command")
-        if not command:
-            raise ValueError("command must be non-empty")
-        argv = ["exec", "--name", self.name]
-        if force:
-            argv.append("--force")
-        argv.extend(["--", *command])
-        return _run_machine(argv)
+        return _run_machine(_machine_exec_argv(name=self.name, command=command, force=force))
 
     def shell(self, *, force: bool = False) -> MachineResult:
-        argv = ["shell", "--name", self.name]
-        if force:
-            argv.append("--force")
-        return _run_machine(argv)
+        return _run_machine(_machine_shell_argv(name=self.name, force=force))
 
     def stop(self) -> MachineResult:
-        return _run_machine(["stop", "--name", self.name])
+        return _run_machine(_machine_stop_argv(name=self.name))
+
+    def logs(self, *, follow: bool = False, lines: int | None = None) -> MachineResult:
+        return _run_machine(_machine_logs_argv(name=self.name, follow=follow, lines=lines))
+
+    def inspect(self, *, json: bool = False) -> MachineResult:
+        return _run_machine(_machine_inspect_argv(name=self.name, json=json))
+
+    def rm(self, *, yes: bool = False, json: bool = False) -> MachineResult:
+        return _run_machine(_machine_rm_argv(names=[self.name], yes=yes, json=json))
 
 
 __all__ = [

@@ -9,7 +9,15 @@ import mvm
 from mvm._machine import (
     _machine_check_artifact_argv,
     _machine_create_argv,
+    _machine_exec_argv,
+    _machine_inspect_argv,
+    _machine_logs_argv,
+    _machine_ls_argv,
+    _machine_rm_argv,
     _machine_run_argv,
+    _machine_shell_argv,
+    _machine_start_argv,
+    _machine_stop_argv,
 )
 
 
@@ -97,6 +105,52 @@ def test_machine_check_artifact_argv_matches_cli_fixture() -> None:
         key="/tmp/app.pub",
         json=True,
     ) == _fixture("check-artifact")
+
+
+def test_machine_start_argv_matches_shared_fixture() -> None:
+    assert _machine_start_argv(
+        name="web",
+        receipt="/tmp/mvm-sdk-machine.receipt.json",
+        json=True,
+        dry_run=True,
+    ) == _fixture("start")
+
+
+def test_machine_exec_argv_matches_shared_fixture() -> None:
+    assert _machine_exec_argv(
+        name="web",
+        command=["sh", "-lc", "echo ok"],
+        force=True,
+    ) == _fixture("exec")
+
+
+def test_machine_shell_argv_matches_shared_fixture() -> None:
+    assert _machine_shell_argv(name="web", force=True) == _fixture("shell")
+
+
+def test_machine_stop_argv_matches_shared_fixture() -> None:
+    # Regression guard: `stop` takes a positional name, not `--name`.
+    assert _machine_stop_argv(name="web") == _fixture("stop")
+
+
+def test_machine_ls_argv_matches_shared_fixture() -> None:
+    assert _machine_ls_argv(json=True) == _fixture("ls")
+
+
+def test_machine_logs_argv_matches_shared_fixture() -> None:
+    assert _machine_logs_argv(name="web", follow=True, lines=100) == _fixture("logs")
+
+
+def test_machine_inspect_argv_matches_shared_fixture() -> None:
+    assert _machine_inspect_argv(name="web", json=True) == _fixture("inspect")
+
+
+def test_machine_rm_argv_matches_shared_fixture() -> None:
+    assert _machine_rm_argv(names=["web"], yes=True, json=True) == _fixture("rm")
+
+
+def test_machine_rm_all_argv_matches_shared_fixture() -> None:
+    assert _machine_rm_argv(all=True, yes=True, json=True) == _fixture("rm-all")
 
 
 def test_machine_run_shells_to_cli_machine_run(tmp_path: Path) -> None:

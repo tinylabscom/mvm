@@ -3,7 +3,19 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as mvm from "../src/index.js";
-import { machineCheckArtifactArgv, machineCreateArgv, machineRunArgv } from "../src/_machine.js";
+import {
+  machineCheckArtifactArgv,
+  machineCreateArgv,
+  machineExecArgv,
+  machineInspectArgv,
+  machineLogsArgv,
+  machineLsArgv,
+  machineRmArgv,
+  machineRunArgv,
+  machineShellArgv,
+  machineStartArgv,
+  machineStopArgv,
+} from "../src/_machine.js";
 
 let tmpDir: string;
 
@@ -184,7 +196,28 @@ describe("Machine persistent lifecycle", () => {
     expect(text).toContain("machine:start --name devbox --dry-run");
     expect(text).toContain("machine:exec --name devbox --force -- echo hi");
     expect(text).toContain("machine:shell --name devbox --force");
-    expect(text).toContain("machine:stop --name devbox");
+    expect(text).toContain("machine:stop devbox");
+  });
+
+  it("emits the shared start/exec/shell/stop argv fixtures", () => {
+    expect(machineStartArgv("web", {
+      receipt: "/tmp/mvm-sdk-machine.receipt.json",
+      json: true,
+      dryRun: true,
+    })).toEqual(readArgvFixture("start"));
+    expect(machineExecArgv("web", ["sh", "-lc", "echo ok"], { force: true }))
+      .toEqual(readArgvFixture("exec"));
+    expect(machineShellArgv("web", { force: true })).toEqual(readArgvFixture("shell"));
+    // Regression guard: `stop` takes a positional name, not `--name`.
+    expect(machineStopArgv("web")).toEqual(readArgvFixture("stop"));
+  });
+
+  it("emits the shared ls/logs/inspect/rm argv fixtures", () => {
+    expect(machineLsArgv({ json: true })).toEqual(readArgvFixture("ls"));
+    expect(machineLogsArgv("web", { follow: true, lines: 100 })).toEqual(readArgvFixture("logs"));
+    expect(machineInspectArgv("web", { json: true })).toEqual(readArgvFixture("inspect"));
+    expect(machineRmArgv({ names: ["web"], yes: true, json: true })).toEqual(readArgvFixture("rm"));
+    expect(machineRmArgv({ all: true, yes: true, json: true })).toEqual(readArgvFixture("rm-all"));
   });
 
   it("rejects image and manifest together", () => {

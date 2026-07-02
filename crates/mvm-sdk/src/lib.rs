@@ -105,8 +105,10 @@ pub use emit::{emit, emit_json};
 pub use error::{BuildError, EmitError};
 pub use machine::{
     MVM_CLI_BIN_ENV, Machine, MachineCheckArtifact, MachineCheckArtifactBuilder, MachineClient,
-    MachineCreate, MachineCreateBuilder, MachineError, MachineExecBuilder, MachineResult,
-    MachineRun, MachineRunBuilder, MachineShellBuilder, MachineStartBuilder, MachineStopBuilder,
+    MachineCreate, MachineCreateBuilder, MachineError, MachineExecBuilder, MachineInspect,
+    MachineInspectBuilder, MachineLogs, MachineLogsBuilder, MachineLs, MachineLsBuilder,
+    MachineResult, MachineRm, MachineRmBuilder, MachineRun, MachineRunBuilder, MachineShellBuilder,
+    MachineStartBuilder, MachineStopBuilder,
 };
 
 // Runtime record-mode lowering. The CLI's

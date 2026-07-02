@@ -1,0 +1,8 @@
+exec
+--name
+web
+--force
+--
+sh
+-lc
+echo ok
