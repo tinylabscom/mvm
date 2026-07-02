@@ -25,10 +25,13 @@ Detailed tasks below cover **P1** only. Each later slice gets its own section ap
 
 | Slice | Deliverable | Status |
 |---|---|---|
-| **P1** | `mvm-sdk` depends on `mvm-client` (default); subprocess `impl MvmClient` for `list`/`stop`/`logs` shelling `mvmctl machine`; cycle-guard test | **this plan** |
+| **P0** | **Extract `LocalBackend` into `mvm-client-local`** so `mvm-client`'s manifest carries no `mvm-*` dep — the manifest-level cycle otherwise blocks P1 (see ADR-105 §"The unlock"). | **DONE** |
+| **P1** | `mvm-sdk` depends on `mvm-client`; `SubprocessBackend` (`impl MvmClient`) for `list`/`stop`/`logs` shelling `mvmctl machine`; `cargo tree` cycle-guard test | **DONE** |
 | P2 | `Workload`/`App` → `MachineSpec` lowering; the SDK run builder produces a `MachineSpec` | next |
 | P3 | Migrate SDK live/invoke call sites to `MvmClient`; retire the duplicated lifecycle surface in `machine.rs` | later |
 | P4 | When the admitted-boot seam lands (issue #1388 / Plan 214), route `LocalBackend::run` **and** the SDK subprocess `run` through the one admitted-boot library fn | later, dependency-gated |
+
+> **P0/P1 landed** (impl PR alongside this doc): `mvm-client-local` extracted; `mvm-client` manifest is `mvm-*`-free; `SubprocessBackend` does stop/logs and parses `machine ls --json` for list (status reported `Stopped` — that CLI output carries no live state; noted below); `run` refuses pending the admitted-boot seam; cycle-guard green. The detailed task steps below are the record of how P1 was built.
 
 ---
 

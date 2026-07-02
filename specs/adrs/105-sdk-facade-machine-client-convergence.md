@@ -26,13 +26,21 @@ mvm-client (local feature) → mvm-backend → mvm-build → mvm-sdk → mvm-cor
 
 ### The unlock
 
-`mvm-client` with **default features carries no `mvm-*` dependencies** — only `async-trait` / `serde` / `thiserror`; `mvm-backend` and `mvm-core` are optional, pulled only by the `local` feature. So the **trait + DTOs are cycle-safe**: `mvm-sdk` can depend on `mvm-client` (`default-features = false`) to get `MvmClient` + `MachineSpec` etc. without pulling the runtime, and provide its own subprocess-backed impl.
+The trait + DTOs must live in a crate whose **manifest declares no `mvm-*` dependency at all**. A first attempt — `mvm-client` with `default-features = false` — **fails**: Cargo detects cycles on the *manifest* graph, **optional dependencies included**. Because `mvm-client`'s manifest declares `mvm-backend` (for the `local` feature), it forms a cycle regardless of features:
+
+```
+mvm-sdk → mvm-client → mvm-backend → mvm-build → mvm-network → mvm-sdk
+```
+
+(verified live: `cargo` refuses with `cyclic package dependency: mvm-backend depends on itself`). Turning the feature off does not help — the edge is in the manifest.
+
+The real fix is structural: **extract `LocalBackend` (the only `mvm-backend`-linking piece) into a separate `mvm-client-local` crate.** Then `mvm-client` holds the trait + DTOs + `GatewayBackend` + `connect` and its manifest carries **zero `mvm-*` deps**, so `mvm-sdk` can depend on it freely. `mvm-client-local` sits *above* the runtime (it links `mvm-backend`) and is used by the CLI. `connect(Target::Local)` — which can no longer reach `LocalBackend` — directs callers to construct `mvm_client_local::LocalBackend` directly.
 
 ## Decision
 
 Keep the two crates and their **distinct responsibilities** — `mvm-sdk` is *authoring* (the `Workload` IR: image, entrypoints, deps, resources, network, hooks), `mvm-client` is *operating* (drive machine lifecycle). Converge only the overlapping *"drive a machine"* mechanism onto the shared trait:
 
-1. **One interface: `MvmClient`.** The trait + DTOs are the single machine-driving contract. Both layers depend on the cycle-safe light surface (`mvm-client` with `default-features = false` where the runtime must not be linked).
+1. **One interface: `MvmClient`.** The trait + DTOs are the single machine-driving contract, in `mvm-client` — whose manifest carries no `mvm-*` dependency (`LocalBackend` moved to `mvm-client-local`). Every layer depends on that cycle-free crate for the contract.
 2. **Three impls, one per layer's constraint:**
    - `LocalBackend` (in-process) — CLI. Needs the runtime; lives above it.
    - `GatewayBackend` (REST) — studio / remote. No runtime dep.
