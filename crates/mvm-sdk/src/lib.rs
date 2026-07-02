@@ -45,12 +45,15 @@
 //! [`MachineCreate`], [`MachineCheckArtifact`], and [`Machine`]. They shell to
 //! `mvmctl machine ...` so OCI pull, admission, artifact verification,
 //! networking, receipts, audit, and persistent machine state remain owned by
-//! the CLI path.
+//! the CLI path. The optional `client-facade` feature also exposes a
+//! subprocess-backed `MvmClient` implementation.
 
 mod builder;
 mod ctor;
 mod emit;
 mod error;
+#[cfg(feature = "client-facade")]
+pub mod facade;
 pub mod machine;
 
 /// The canonical `Workload` IR — validate, canonicalize, hash, hooks,

@@ -9,6 +9,12 @@ authors.workspace = true
 
 [dependencies]
 mvm-core = { workspace = true }
+# Optional subprocess-backed MvmClient facade. Keep it off by default so the
+# mvmctl default closure does not gain client-facade crates through mvm-sdk.
+# Never enable mvm-client's `local` feature here; that would form
+# sdk -> client[local] -> backend -> build -> sdk.
+mvm-client = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "1"
@@ -36,6 +42,10 @@ tree-sitter-python = { workspace = true }
 tree-sitter-javascript = { workspace = true }
 tree-sitter-typescript = { workspace = true }
 
+[features]
+default = []
+client-facade = ["dep:async-trait", "dep:mvm-client"]
+
 [[bin]]
 name = "emit_addon_schema"
 path = "src/bin/emit_addon_schema.rs"
@@ -50,6 +60,8 @@ path = "src/bin/emit_schema.rs"
 # IR's emitted runtime.json shapes match mvm-guest's runtime_config
 # parser.
 mvm-guest = { workspace = true }
+# Async tests for the subprocess MvmClient impl.
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true

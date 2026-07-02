@@ -29,10 +29,17 @@ impl std::fmt::Debug for Target {
 
 /// Construct the backend for `target`. The returned trait object hides which
 /// transport is underneath.
+///
+/// `Target::Local` is refused here: `LocalBackend` links the runtime and lives
+/// in the `mvm-client-local` crate (to keep this crate's manifest cycle-free),
+/// which sits *above* this one — so a local caller constructs
+/// `mvm_client_local::LocalBackend` directly rather than through `connect`.
 pub fn connect(target: Target) -> Result<Box<dyn MvmClient>> {
     match target {
         Target::Gateway { base_url, token } => gateway_backend(base_url, token),
-        Target::Local => local_backend(),
+        Target::Local => Err(crate::error::MvmError::Backend {
+            reason: "local target: construct mvm_client_local::LocalBackend directly".into(),
+        }),
     }
 }
 
@@ -50,32 +57,13 @@ fn gateway_backend(_base_url: String, _token: String) -> Result<Box<dyn MvmClien
     })
 }
 
-#[cfg(feature = "local")]
-fn local_backend() -> Result<Box<dyn MvmClient>> {
-    Ok(Box::new(crate::local::LocalBackend::new()))
-}
-
-#[cfg(not(feature = "local"))]
-fn local_backend() -> Result<Box<dyn MvmClient>> {
-    Err(crate::error::MvmError::Backend {
-        reason: "local target requires the 'local' feature".into(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(not(feature = "local"))]
     #[test]
-    fn connect_local_reports_not_available() {
+    fn connect_local_directs_to_mvm_client_local() {
         assert!(connect(Target::Local).is_err());
-    }
-
-    #[cfg(feature = "local")]
-    #[test]
-    fn connect_local_builds_when_feature_on() {
-        assert!(connect(Target::Local).is_ok());
     }
 
     #[test]

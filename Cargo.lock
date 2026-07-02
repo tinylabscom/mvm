@@ -2606,12 +2606,21 @@ name = "mvm-client"
 version = "0.16.1"
 dependencies = [
  "async-trait",
- "mvm-backend",
- "mvm-core",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "mvm-client-local"
+version = "0.16.1"
+dependencies = [
+ "async-trait",
+ "mvm-backend",
+ "mvm-client",
+ "mvm-core",
  "tokio",
 ]
 
@@ -2793,11 +2802,13 @@ dependencies = [
 name = "mvm-sdk"
 version = "0.16.1"
 dependencies = [
+ "async-trait",
  "base64",
  "flate2",
  "globset",
  "hex",
  "hmac",
+ "mvm-client",
  "mvm-core",
  "mvm-guest",
  "schemars",
@@ -2807,6 +2818,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 1.0.69",
+ "tokio",
  "toml",
  "tree-sitter",
  "tree-sitter-javascript",

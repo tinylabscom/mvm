@@ -62,6 +62,17 @@ pub struct LogOpts {
     pub tail_lines: Option<u32>,
 }
 
+/// The result of a non-interactive `exec_machine`: the process's exit code and
+/// captured output. (Interactive shells are not a facade operation — they need
+/// a duplex PTY the request/response trait can't model, and stay a CLI concern.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecResult {
+    pub exit_code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

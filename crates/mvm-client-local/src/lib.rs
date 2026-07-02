@@ -1,5 +1,8 @@
 //! `LocalBackend` — the `MvmClient` over this host's microVMs, in-process.
 //!
+//! Split out of `mvm-client` so that crate's manifest carries no `mvm-*`
+//! dependency (see this crate's `Cargo.toml` for the cycle it avoids).
+//!
 //! `list`/`stop`/`logs` go straight to the backend dispatch (they act on VMs
 //! that already exist, so they carry no admission concern). `run` deliberately
 //! does not boot here yet: the local start path admits a signed plan (the
@@ -11,9 +14,10 @@ use async_trait::async_trait;
 use mvm_backend::AnyBackend;
 use mvm_core::protocol::vm_backend::{VmId, VmInfo, VmStatus};
 
-use crate::client::MvmClient;
-use crate::dto::{LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus};
-use crate::error::{MvmError, Result};
+use mvm_client::dto::{
+    ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
+};
+use mvm_client::{MvmClient, MvmError, Result};
 
 /// Drives the host's VM backend directly. Construct with [`LocalBackend::new`]
 /// (auto-selected backend) or [`LocalBackend::with_hypervisor`].
@@ -52,13 +56,11 @@ fn map_status(s: &VmStatus) -> MachineStatus {
     }
 }
 
-impl From<VmInfo> for MachineState {
-    fn from(v: VmInfo) -> Self {
-        MachineState {
-            id: MachineId(v.id.0),
-            name: v.name,
-            status: map_status(&v.status),
-        }
+fn to_state(v: VmInfo) -> MachineState {
+    MachineState {
+        id: MachineId(v.id.0),
+        name: v.name,
+        status: map_status(&v.status),
     }
 }
 
@@ -74,7 +76,7 @@ impl MvmClient for LocalBackend {
         let infos = self.backend.list().map_err(backend_err)?;
         Ok(infos
             .into_iter()
-            .map(MachineState::from)
+            .map(to_state)
             .filter(|m| filter.matches(m))
             .collect())
     }
@@ -100,6 +102,14 @@ impl MvmClient for LocalBackend {
             .map_err(backend_err)?;
         Ok(text.into_bytes())
     }
+
+    async fn exec_machine(&self, _id: &MachineId, _command: Vec<String>) -> Result<ExecResult> {
+        // The backend dispatch (`AnyBackend`) exposes no exec seam; in-guest exec
+        // goes through the agent RPC path, which is not wired here.
+        Err(MvmError::Backend {
+            reason: "local exec requires the guest-agent exec seam (not wired)".into(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -122,12 +132,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_over_mock_backend_succeeds() {
-        // The mock backend needs no real VMM, so this exercises the full
-        // list -> map -> filter path without a host VM.
         let be = LocalBackend::with_hypervisor("mock");
         let machines = be.list_machines(MachineFilter::all()).await.unwrap();
-        // Filtering to an impossible status yields an empty set, proving the
-        // filter is applied.
         let none = be
             .list_machines(MachineFilter {
                 name: Some("definitely-not-present-xyz".into()),
