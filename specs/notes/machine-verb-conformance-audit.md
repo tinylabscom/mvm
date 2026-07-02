@@ -76,12 +76,18 @@ Only `build` and `console` remain CLI-only, both by design.
    now proves every fixture is argv the CLI actually accepts, so this class of
    drift fails CI going forward.
 
-6. **Two divergent Rust surfaces remain** — `machine.rs` (bespoke builder
-   driver, now the full verb set) and the facade `SubprocessBackend`
-   (`MvmClient`: list/run/stop/logs/exec). Convergence onto the `MvmClient`
-   trait is **Plan 218's** scope, not this change; local `run` there is
-   genuinely gated on the admitted-boot library seam (issue #1388). This audit
-   quantifies the delta the plan closes.
+6. **Two Rust surfaces, now single-source for argv.** `machine.rs` (bespoke
+   builder driver, full verb set) and the facade `SubprocessBackend`
+   (`MvmClient`: list/run/stop/logs/exec) used to build argv independently.
+   Plan 218 P0/P1 (#1394) converged the SDK onto the `MvmClient` trait, and the
+   facade dedup makes `SubprocessBackend` **delegate to `machine.rs`'s conformed
+   builders** — so there is exactly one place argv is constructed, pinned to the
+   shared fixtures (facade conformance tests in `facade.rs`). Full retirement of
+   the bespoke `machine.rs` (P3) stays gated. Local `run` is genuinely gated on
+   the admitted-boot library seam (issue #1388): the admission pipeline still
+   lives in `mvm-cli` and exposing it to `mvm-client`/`mvm-sdk` is a large lift
+   tracked in Plan 214; until then both `run` paths fail closed to preserve
+   claim 8.
 
 ## The harness (approach 1, across all languages)
 
