@@ -62,6 +62,23 @@ impl MvmClient for MockBackend {
             Err(MvmError::NotFound { id: id.0.clone() })
         }
     }
+
+    async fn exec_machine(
+        &self,
+        id: &MachineId,
+        _command: Vec<String>,
+    ) -> Result<crate::dto::ExecResult> {
+        let all = self.machines.lock().unwrap();
+        if all.iter().any(|m| m.id == *id) {
+            Ok(crate::dto::ExecResult {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        } else {
+            Err(MvmError::NotFound { id: id.0.clone() })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -100,5 +117,30 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, MvmError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn exec_on_known_machine_returns_result_else_not_found() {
+        let mock = MockBackend::default();
+        let started = mock
+            .run_machine(MachineSpec {
+                name: "web".into(),
+                image: "i".into(),
+                cpus: 1,
+                memory_mib: 64,
+                env: vec![],
+            })
+            .await
+            .unwrap();
+        let res = mock
+            .exec_machine(&started.id, vec!["echo".into(), "hi".into()])
+            .await
+            .unwrap();
+        assert_eq!(res.exit_code, 0);
+        assert!(
+            mock.exec_machine(&MachineId("nope".into()), vec![])
+                .await
+                .is_err()
+        );
     }
 }

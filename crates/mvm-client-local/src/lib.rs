@@ -15,7 +15,7 @@ use mvm_backend::AnyBackend;
 use mvm_core::protocol::vm_backend::{VmId, VmInfo, VmStatus};
 
 use mvm_client::dto::{
-    LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
+    ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
 };
 use mvm_client::{MvmClient, MvmError, Result};
 
@@ -101,6 +101,14 @@ impl MvmClient for LocalBackend {
             .logs(&VmId(id.0.clone()), lines, false)
             .map_err(backend_err)?;
         Ok(text.into_bytes())
+    }
+
+    async fn exec_machine(&self, _id: &MachineId, _command: Vec<String>) -> Result<ExecResult> {
+        // The backend dispatch (`AnyBackend`) exposes no exec seam; in-guest exec
+        // goes through the agent RPC path, which is not wired here.
+        Err(MvmError::Backend {
+            reason: "local exec requires the guest-agent exec seam (not wired)".into(),
+        })
     }
 }
 

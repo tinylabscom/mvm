@@ -261,6 +261,18 @@ impl MvmClient for GatewayBackend {
         })?;
         Ok(bytes.to_vec())
     }
+
+    async fn exec_machine(
+        &self,
+        _id: &MachineId,
+        _command: Vec<String>,
+    ) -> Result<crate::dto::ExecResult> {
+        // The gateway's exec is a streaming endpoint; buffering it into a single
+        // ExecResult is a separate slice, so this is deferred rather than guessed.
+        Err(MvmError::Backend {
+            reason: "gateway exec is streaming; buffered exec not yet wired".into(),
+        })
+    }
 }
 
 #[cfg(test)]

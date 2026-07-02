@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 
-use crate::dto::{LogOpts, MachineFilter, MachineId, MachineSpec, MachineState};
+use crate::dto::{ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState};
 use crate::error::Result;
 
 #[async_trait]
@@ -20,6 +20,10 @@ pub trait MvmClient: Send + Sync {
 
     /// Fetch a machine's captured console/log bytes.
     async fn machine_logs(&self, id: &MachineId, opts: LogOpts) -> Result<Vec<u8>>;
+
+    /// Run a non-interactive command in a machine and capture its result.
+    /// (Interactive shells are not a facade operation — see [`ExecResult`].)
+    async fn exec_machine(&self, id: &MachineId, command: Vec<String>) -> Result<ExecResult>;
 }
 
 #[cfg(test)]

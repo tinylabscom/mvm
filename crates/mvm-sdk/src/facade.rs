@@ -11,7 +11,7 @@ use std::process::Command;
 
 use async_trait::async_trait;
 use mvm_client::dto::{
-    LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
+    ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
 };
 use mvm_client::{MvmClient, MvmError, Result};
 
@@ -128,6 +128,26 @@ impl MvmClient for SubprocessBackend {
             args.push(n.as_str());
         }
         self.run_cli(&args)
+    }
+
+    async fn exec_machine(&self, id: &MachineId, command: Vec<String>) -> Result<ExecResult> {
+        // `mvmctl machine exec --name <id> -- <command...>`. A non-zero exit is a
+        // valid result (the command failed), not a spawn error, so this captures
+        // the full Output rather than going through `run_cli`.
+        let mut args: Vec<String> = vec!["exec".into(), "--name".into(), id.0.clone(), "--".into()];
+        args.extend(command);
+        let out = std::process::Command::new(self.bin())
+            .arg("machine")
+            .args(&args)
+            .output()
+            .map_err(|e| MvmError::Backend {
+                reason: format!("spawn mvmctl: {e}"),
+            })?;
+        Ok(ExecResult {
+            exit_code: out.status.code().unwrap_or(-1),
+            stdout: out.stdout,
+            stderr: out.stderr,
+        })
     }
 }
 
