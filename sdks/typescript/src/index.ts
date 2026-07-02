@@ -91,8 +91,14 @@ export { Machine, MachineError } from "./_machine.js";
 export type {
   MachineCheckArtifactOptions,
   MachineCreateOptions,
+  MachineExecOptions,
+  MachineInspectOptions,
+  MachineLogsOptions,
+  MachineLsOptions,
   MachineResult,
+  MachineRmOptions,
   MachineRunOptions,
+  MachineShellOptions,
   MachineStartOptions,
 } from "./_machine.js";
 

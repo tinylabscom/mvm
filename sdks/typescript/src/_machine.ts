@@ -56,6 +56,34 @@ export interface MachineStartOptions {
   dryRun?: boolean;
 }
 
+export interface MachineExecOptions {
+  force?: boolean;
+}
+
+export interface MachineShellOptions {
+  force?: boolean;
+}
+
+export interface MachineLsOptions {
+  json?: boolean;
+}
+
+export interface MachineLogsOptions {
+  follow?: boolean;
+  lines?: number;
+}
+
+export interface MachineInspectOptions {
+  json?: boolean;
+}
+
+export interface MachineRmOptions {
+  names?: string[];
+  all?: boolean;
+  yes?: boolean;
+  json?: boolean;
+}
+
 export class MachineError extends Error {
   readonly argv: string[];
   readonly exitCode: number | null;
@@ -179,6 +207,72 @@ export function machineCheckArtifactArgv(options: MachineCheckArtifactOptions): 
   return argv;
 }
 
+export function machineStartArgv(name: string, options: MachineStartOptions = {}): string[] {
+  const argv = ["start", "--name", requireString(name, "name")];
+  if (options.receipt !== undefined) argv.push("--receipt", requireString(options.receipt, "receipt"));
+  if (options.json) argv.push("--json");
+  if (options.dryRun) argv.push("--dry-run");
+  return argv;
+}
+
+export function machineExecArgv(
+  name: string,
+  command: string[],
+  options: MachineExecOptions = {},
+): string[] {
+  command = requireStringArray(command, "command");
+  if (command.length === 0) throw new RangeError("command must be non-empty");
+  const argv = ["exec", "--name", requireString(name, "name")];
+  if (options.force) argv.push("--force");
+  argv.push("--", ...command);
+  return argv;
+}
+
+export function machineShellArgv(name: string, options: MachineShellOptions = {}): string[] {
+  const argv = ["shell", "--name", requireString(name, "name")];
+  if (options.force) argv.push("--force");
+  return argv;
+}
+
+export function machineStopArgv(name: string): string[] {
+  // `machine stop` takes a positional name, not `--name` (the CLI rejects the
+  // flag form). See the shared `stop.argv` fixture.
+  return ["stop", requireString(name, "name")];
+}
+
+export function machineLsArgv(options: MachineLsOptions = {}): string[] {
+  const argv = ["ls"];
+  if (options.json) argv.push("--json");
+  return argv;
+}
+
+export function machineLogsArgv(name: string, options: MachineLogsOptions = {}): string[] {
+  const argv = ["logs", requireString(name, "name")];
+  if (options.follow) argv.push("--follow");
+  if (options.lines !== undefined) argv.push("--lines", String(options.lines));
+  return argv;
+}
+
+export function machineInspectArgv(name: string, options: MachineInspectOptions = {}): string[] {
+  const argv = ["inspect", requireString(name, "name")];
+  if (options.json) argv.push("--json");
+  return argv;
+}
+
+export function machineRmArgv(options: MachineRmOptions = {}): string[] {
+  const names = options.names ? requireStringArray(options.names, "names") : [];
+  // The CLI requires exactly one of names / --all (a clap ArgGroup).
+  if (Boolean(options.all) === names.length > 0) {
+    throw new TypeError("Machine.rm requires exactly one of names or all: true");
+  }
+  const argv = ["rm"];
+  if (options.all) argv.push("--all");
+  else argv.push(...names);
+  if (options.yes) argv.push("--yes");
+  if (options.json) argv.push("--json");
+  return argv;
+}
+
 export class Machine {
   readonly name: string;
 
@@ -199,30 +293,35 @@ export class Machine {
     return runMachine(machineCheckArtifactArgv(options));
   }
 
+  static ls(options: MachineLsOptions = {}): MachineResult {
+    return runMachine(machineLsArgv(options));
+  }
+
   start(options: MachineStartOptions = {}): MachineResult {
-    const argv = ["start", "--name", this.name];
-    if (options.receipt !== undefined) argv.push("--receipt", requireString(options.receipt, "receipt"));
-    if (options.json) argv.push("--json");
-    if (options.dryRun) argv.push("--dry-run");
-    return runMachine(argv);
+    return runMachine(machineStartArgv(this.name, options));
   }
 
-  exec(command: string[], options: { force?: boolean } = {}): MachineResult {
-    command = requireStringArray(command, "command");
-    if (command.length === 0) throw new RangeError("command must be non-empty");
-    const argv = ["exec", "--name", this.name];
-    if (options.force) argv.push("--force");
-    argv.push("--", ...command);
-    return runMachine(argv);
+  exec(command: string[], options: MachineExecOptions = {}): MachineResult {
+    return runMachine(machineExecArgv(this.name, command, options));
   }
 
-  shell(options: { force?: boolean } = {}): MachineResult {
-    const argv = ["shell", "--name", this.name];
-    if (options.force) argv.push("--force");
-    return runMachine(argv);
+  shell(options: MachineShellOptions = {}): MachineResult {
+    return runMachine(machineShellArgv(this.name, options));
   }
 
   stop(): MachineResult {
-    return runMachine(["stop", "--name", this.name]);
+    return runMachine(machineStopArgv(this.name));
+  }
+
+  logs(options: MachineLogsOptions = {}): MachineResult {
+    return runMachine(machineLogsArgv(this.name, options));
+  }
+
+  inspect(options: MachineInspectOptions = {}): MachineResult {
+    return runMachine(machineInspectArgv(this.name, options));
+  }
+
+  rm(options: { yes?: boolean; json?: boolean } = {}): MachineResult {
+    return runMachine(machineRmArgv({ names: [this.name], yes: options.yes, json: options.json }));
   }
 }

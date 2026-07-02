@@ -2585,6 +2585,68 @@ mod tests {
         .collect()
     }
 
+    /// The `machine` subcommand token a parsed action was built from — used to
+    /// assert a shared SDK fixture parses to the verb its first line names.
+    fn machine_subcommand(action: &MachineAction) -> &'static str {
+        match action {
+            MachineAction::Run(_) => "run",
+            MachineAction::Build(_) => "build",
+            MachineAction::Create(_) => "create",
+            MachineAction::Start(_) => "start",
+            MachineAction::Stop(_) => "stop",
+            MachineAction::Rm(_) => "rm",
+            MachineAction::Ls(_) => "ls",
+            MachineAction::Inspect(_) => "inspect",
+            MachineAction::Shell(_) => "shell",
+            MachineAction::Exec(_) => "exec",
+            MachineAction::Logs(_) => "logs",
+            MachineAction::Console(_) => "console",
+            MachineAction::CheckArtifact(_) => "check-artifact",
+            MachineAction::Vm(_) => "vm",
+        }
+    }
+
+    /// Source-of-truth anchor for the cross-language conformance harness: every
+    /// `sdks/machine-fixtures/*.argv` the SDKs assert against must be argv the
+    /// CLI parser actually accepts, and must map to the verb its first line
+    /// names. This is what catches an SDK emitting a flag the CLI rejects (e.g.
+    /// `stop --name X` when `stop` takes a positional name).
+    #[test]
+    fn every_shared_machine_fixture_parses_to_its_verb() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdks/machine-fixtures");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).expect("read machine-fixtures dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("argv") {
+                continue;
+            }
+            let argv: Vec<String> = std::fs::read_to_string(&path)
+                .expect("read fixture")
+                .lines()
+                .map(std::string::ToString::to_string)
+                .collect();
+            let action = parse_owned(&argv).unwrap_or_else(|e| {
+                panic!(
+                    "fixture {} must parse as a machine subcommand: {e}",
+                    path.display()
+                )
+            });
+            let expected = argv.first().expect("non-empty fixture");
+            assert_eq!(
+                machine_subcommand(&action),
+                expected,
+                "fixture {} parsed to the wrong subcommand",
+                path.display()
+            );
+            seen += 1;
+        }
+        assert!(
+            seen >= 14,
+            "expected the full machine fixture set, found {seen}"
+        );
+    }
+
     fn assert_sdk_run_admission_inputs(summary: super::super::vm::exec::RunSecuritySummary) {
         assert!(summary.dry_run);
         assert!(!summary.will_execute);

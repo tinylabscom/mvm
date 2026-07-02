@@ -12,7 +12,10 @@
 //! Python/TS conformance tests) — a fixture with no Rust assertion is a silent
 //! coverage hole, exactly the drift this harness exists to catch.
 
-use mvm_sdk::{MachineCheckArtifact, MachineCreate, MachineRun};
+use mvm_sdk::{
+    Machine, MachineCheckArtifact, MachineCreate, MachineInspect, MachineLogs, MachineLs,
+    MachineRm, MachineRun,
+};
 
 /// Read a shared SDK argv fixture, one argument per line. Mirrors the CLI's
 /// `sdk_machine_fixture` and Python/TS `_fixture`/`readArgvFixture` helpers so
@@ -99,6 +102,103 @@ fn check_artifact_matches_shared_fixture() {
     assert_eq!(argv, fixture("check-artifact"));
 }
 
+#[test]
+fn start_matches_shared_fixture() {
+    let argv = Machine::named("web")
+        .unwrap()
+        .start()
+        .receipt("/tmp/mvm-sdk-machine.receipt.json")
+        .json(true)
+        .dry_run(true)
+        .machine_args()
+        .expect("start argv");
+    assert_eq!(argv, fixture("start"));
+}
+
+#[test]
+fn exec_matches_shared_fixture() {
+    let argv = Machine::named("web")
+        .unwrap()
+        .exec(["sh", "-lc", "echo ok"])
+        .force(true)
+        .machine_args()
+        .expect("exec argv");
+    assert_eq!(argv, fixture("exec"));
+}
+
+#[test]
+fn shell_matches_shared_fixture() {
+    let argv = Machine::named("web")
+        .unwrap()
+        .shell()
+        .force(true)
+        .machine_args()
+        .expect("shell argv");
+    assert_eq!(argv, fixture("shell"));
+}
+
+#[test]
+fn stop_matches_shared_fixture() {
+    // Regression guard: `stop` takes a positional name, not `--name`. Before
+    // this harness all three SDKs emitted the flag form, which the CLI rejects.
+    let argv = Machine::named("web")
+        .unwrap()
+        .stop()
+        .machine_args()
+        .expect("stop argv");
+    assert_eq!(argv, fixture("stop"));
+}
+
+#[test]
+fn ls_matches_shared_fixture() {
+    let argv = MachineLs::builder()
+        .json(true)
+        .machine_args()
+        .expect("ls argv");
+    assert_eq!(argv, fixture("ls"));
+}
+
+#[test]
+fn logs_matches_shared_fixture() {
+    let argv = MachineLogs::builder("web")
+        .follow(true)
+        .lines(100)
+        .machine_args()
+        .expect("logs argv");
+    assert_eq!(argv, fixture("logs"));
+}
+
+#[test]
+fn inspect_matches_shared_fixture() {
+    let argv = MachineInspect::builder("web")
+        .json(true)
+        .machine_args()
+        .expect("inspect argv");
+    assert_eq!(argv, fixture("inspect"));
+}
+
+#[test]
+fn rm_matches_shared_fixture() {
+    let argv = MachineRm::builder()
+        .name("web")
+        .yes(true)
+        .json(true)
+        .machine_args()
+        .expect("rm argv");
+    assert_eq!(argv, fixture("rm"));
+}
+
+#[test]
+fn rm_all_matches_shared_fixture() {
+    let argv = MachineRm::builder()
+        .all(true)
+        .yes(true)
+        .json(true)
+        .machine_args()
+        .expect("rm-all argv");
+    assert_eq!(argv, fixture("rm-all"));
+}
+
 /// Coverage manifest: the shared fixture directory and the Rust builder set are
 /// audited against each other so neither drifts silently. Every `*.argv`
 /// fixture must have a Rust assertion above (else the fixture is unenforced in
@@ -122,19 +222,27 @@ fn fixture_coverage_is_accounted_for() {
     let asserted = [
         "check-artifact",
         "create-manifest",
+        "exec",
+        "inspect",
+        "logs",
+        "ls",
+        "rm",
+        "rm-all",
         "run-admission",
         "run-allow-host-receipt",
         "run-default",
+        "shell",
+        "start",
+        "stop",
     ];
     assert_eq!(
         fixtures, asserted,
         "shared machine fixtures changed; add/remove the matching Rust assertion above"
     );
 
-    // Rust builders with a pure `machine_args()` but no shared fixture yet.
-    // These verbs' argv are NOT cross-language conformance-checked — closing
-    // this gap means adding CLI-anchored fixtures for them (start/exec/shell/
-    // stop) and matching assertions in every SDK.
-    let uncovered_builders = ["start", "exec", "shell", "stop"];
-    assert_eq!(uncovered_builders.len(), 4);
+    // Every machine verb the Rust SDK builds argv for is now conformance-checked
+    // against a shared fixture. CLI-only verbs with no SDK surface by design:
+    // `build` (image pipeline), `console` (dev-only interactive PTY).
+    let cli_only_by_design = ["build", "console"];
+    assert_eq!(cli_only_by_design.len(), 2);
 }

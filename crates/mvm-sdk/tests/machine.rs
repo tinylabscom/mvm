@@ -243,7 +243,8 @@ fn persistent_machine_lifecycle_builders_reuse_machine_cli() {
     );
 
     machine.stop().run_with(&client).expect("stop");
-    assert_eq!(fake.argv(), ["machine", "stop", "--name", "devbox"]);
+    // `machine stop` takes a positional name, not `--name`.
+    assert_eq!(fake.argv(), ["machine", "stop", "devbox"]);
 }
 
 #[test]
