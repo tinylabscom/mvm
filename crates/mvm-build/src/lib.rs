@@ -47,6 +47,9 @@ pub mod packed_artifact;
 /// libkrun creates; spawning the libkrun VM itself lives in
 /// `LibkrunPersistentHostVm`.
 pub mod persistent_builder;
+/// Build-provenance recorder: content-addresses produced artifacts into the
+/// signed plan's `BuildProvenance`.
+pub mod provenance;
 /// OCI-unpacked tree to ext4 rootfs image. The host only allocates the
 /// sparse file; formatting and copying happen inside the builder VM.
 pub mod rootfs;
