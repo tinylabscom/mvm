@@ -1,0 +1,20 @@
+[package]
+name = "mvm-client-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `LocalBackend` lives here, not in `mvm-client`, because it links the runtime
+# backend (`mvm-backend`). Keeping that dependency out of `mvm-client`'s manifest
+# is what lets `mvm-sdk` depend on the `mvm-client` trait without forming the
+# cycle sdk -> mvm-client -> mvm-backend -> mvm-build -> mvm-network -> mvm-sdk
+# (cargo detects cycles on the manifest graph, optional deps included).
+
+[dependencies]
+mvm-client = { workspace = true }
+mvm-backend = { workspace = true, default-features = false }
+mvm-core = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
