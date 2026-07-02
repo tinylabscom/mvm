@@ -130,7 +130,7 @@ guest with the host-signer verifying key (or a delegation chain to it) and verif
 grant against it — separately from the per-session frame-signing key. This invariant is
 load-bearing; a Plan that collapses the two keys silently defeats the ADR.
 
-**Delivered status (Plan 216 — honest limitation).** The follow-on delivers the grant to
+**Delivered status (Plan 219 — honest limitation).** The follow-on delivers the grant to
 the guest over the kernel cmdline (`mvm.verb_grant=`), and the host-signer public key
 rides *in the same envelope* as the grant. This means the delivered mechanism does **not**
 yet provide cryptographic key separation: the Ed25519 signature is an integrity check over
