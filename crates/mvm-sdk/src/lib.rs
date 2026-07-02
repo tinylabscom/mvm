@@ -51,6 +51,7 @@ mod builder;
 mod ctor;
 mod emit;
 mod error;
+pub mod facade;
 pub mod machine;
 
 /// The canonical `Workload` IR — validate, canonicalize, hash, hooks,

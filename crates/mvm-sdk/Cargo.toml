@@ -9,6 +9,12 @@ authors.workspace = true
 
 [dependencies]
 mvm-core = { workspace = true }
+# The machine-driving trait + DTOs only — the workspace dep is
+# `default-features = false`, carrying no mvm-* deps, so this stays cycle-safe
+# (the `local` feature's mvm-backend would form sdk -> backend -> build -> sdk).
+# Never add the `local` feature here.
+mvm-client = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "1"
@@ -50,6 +56,8 @@ path = "src/bin/emit_schema.rs"
 # IR's emitted runtime.json shapes match mvm-guest's runtime_config
 # parser.
 mvm-guest = { workspace = true }
+# Async tests for the subprocess MvmClient impl.
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true
