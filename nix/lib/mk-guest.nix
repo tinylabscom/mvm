@@ -568,6 +568,23 @@ let
       echo "mvm-init: injected per-run secret placeholder env"
     fi
 
+    # Stage 2.475 — decode the per-run verb-grant token.
+    #
+    # The launcher writes `mvm.verb_grant=<hex(JSON)>` onto the kernel cmdline
+    # using the same hex encoding as stages 2.46/2.47. We decode the JSON blob
+    # to `/run/mvm/verb-grant.json` (tmpfs, mode 0644). The agent derives the
+    # host-signer key directly from the envelope's `pubkey_hex` field in Rust.
+    # Absent token ⇒ whole block is a no-op (byte-identical boot; agent starts
+    # with no grant pinned, class gate only).
+    MVM_VERB_GRANT_HEX=$(/bin/busybox sed -n 's/.*\bmvm\.verb_grant=\([^ ]*\).*/\1/p' /proc/cmdline)
+    if [ -n "$MVM_VERB_GRANT_HEX" ]; then
+      /bin/busybox mkdir -p /run/mvm
+      printf '%b' "$(echo "$MVM_VERB_GRANT_HEX" | /bin/busybox sed 's/../\\x&/g')" \
+        > /run/mvm/verb-grant.json
+      /bin/busybox chmod 0644 /run/mvm/verb-grant.json
+      echo "mvm-init: provisioned verb-grant"
+    fi
+
     # Stage 2.48 — local addon DNS bootstrap.
     #
     # The "always-install + no-op when zone empty" pattern from

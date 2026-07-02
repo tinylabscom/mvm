@@ -1857,6 +1857,10 @@ fn vz_cmdline_with_user_volumes(config: &VmStartConfig) -> String {
         cmdline.push(' ');
         cmdline.push_str(&uvols);
     }
+    if let Some(token) = crate::microvm::verb_grant_cmdline_token(&config.name) {
+        cmdline.push(' ');
+        cmdline.push_str(&token);
+    }
     cmdline
 }
 
