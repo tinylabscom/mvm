@@ -40,9 +40,10 @@ pub(in crate::commands) struct EntrypointCall {
     /// as `machine exec --manifest`. With `attach`, this is the running VM's
     /// name instead.
     pub source: String,
-    /// Path to stdin payload, or `-` for mvmctl's own stdin. `None` ⇒ the
-    /// no-argument call payload.
-    pub stdin: Option<String>,
+    /// Bytes to pipe into the baked entrypoint's stdin. Empty ⇒ the default
+    /// no-argument payload (`[[], {}]`). Populated from host stdin at the
+    /// dispatch site when the host is not a TTY.
+    pub stdin: Vec<u8>,
     /// Wall-clock timeout for the call, in seconds.
     pub timeout: u64,
     /// vCPU count for the booted VM.
@@ -84,7 +85,11 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         // substitution env (HTTP_PROXY + placeholders) via `substitution_env`,
         // so a secret-declaring entrypoint runs with live egress substitution.
         // No transient boot, no teardown — the VM is the user's to reap.
-        let stdin_bytes = read_stdin_payload(call.stdin.as_deref())?;
+        let stdin_bytes = if call.stdin.is_empty() {
+            b"[[], {}]".to_vec()
+        } else {
+            call.stdin
+        };
         ui::info(&format!(
             "entrypoint: dispatching into running workload '{}'",
             call.source
@@ -125,7 +130,11 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
     };
 
-    let stdin_bytes = read_stdin_payload(call.stdin.as_deref())?;
+    let stdin_bytes = if call.stdin.is_empty() {
+        b"[[], {}]".to_vec()
+    } else {
+        call.stdin
+    };
 
     let lifecycle_label = if call.keep_alive {
         "warm session"

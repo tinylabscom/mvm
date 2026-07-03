@@ -252,10 +252,6 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Conflicts with a trailing `-- <argv>` and with the interactive shell.
     #[arg(long, conflicts_with_all = ["argv", "tty", "interactive"])]
     pub entrypoint: bool,
-    /// Entrypoint stdin payload: a file path, or `-` for mvmctl's own stdin.
-    /// Omit for the no-argument call. Requires `--entrypoint`.
-    #[arg(long, value_name = "PATH", requires = "entrypoint")]
-    pub stdin: Option<String>,
     /// Boot a fresh transient VM for the entrypoint call (the current default;
     /// wired so a future warm-session default can be opted out of). Requires
     /// `--entrypoint`.
@@ -2389,9 +2385,11 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         );
     };
     let (memory_mib, _) = validate_machine_memory(&args.memory, None)?;
+    use std::io::IsTerminal as _;
+    let stdin = super::vm::invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
     super::vm::invoke::run_entrypoint(super::vm::invoke::EntrypointCall {
         source,
-        stdin: args.stdin.clone(),
+        stdin,
         timeout: args.timeout.unwrap_or(30),
         cpus: args.cpus,
         memory_mib,
@@ -2449,6 +2447,8 @@ fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<
             // Only unnamed throwaway transient runs are warm-claim eligible.
             let mut run_args = args.into_run_args();
             run_args.warm_pool_size = warm_pool_size;
+            use std::io::IsTerminal as _;
+            run_args.stdin = super::vm::invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
             run_secure(cli, run_args, cfg)
         }
         MachineRunMode::Persistent => {
@@ -2463,6 +2463,8 @@ fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<
             let mut run_args = args.into_run_args();
             run_args.pty = true;
             run_args.warm_pool_size = warm_pool_size;
+            // Interactive mode has a TTY; read_auto_stdin returns empty for TTY.
+            run_args.stdin = super::vm::invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
             run_secure(cli, run_args, cfg)
         }
     }
@@ -2515,7 +2517,6 @@ pub(in crate::commands) fn boot_persistent_by_name(
             up_json: false,
             ttl: None,
             entrypoint: false,
-            stdin: None,
             fresh: false,
             reset: false,
             from_workload_ir: None,

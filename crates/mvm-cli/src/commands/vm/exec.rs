@@ -80,7 +80,6 @@ pub(in crate::commands) struct Args {
     /// frame. Empty ⇒ no stdin (`Exec.stdin = None`). Populated at the
     /// dispatch site when the host stdin pipe is non-empty.
     #[arg(skip)]
-    #[allow(dead_code)]
     pub stdin: Vec<u8>,
 }
 
@@ -704,6 +703,7 @@ fn build_exec_request(
         pty: args.pty,
         network_policy,
         warm_pool_size: args.warm_pool_size,
+        stdin: args.stdin,
     })
 }
 
