@@ -440,13 +440,25 @@ printf '%s\n' "$NIX_OUT" > /job/store-path
 # below spares the kernel + runtime base it carries. That GC deletes every
 # unrooted path regardless of age, and a fresh build's kernel/base are
 # reachable only through the transient build root — so without this the next
-# build recompiles the kernel and re-pulls the base closure. A FIXED root
-# name (overwritten each build) keeps only
-# the latest closure warm, so an unchanged kernel derivation is a store hit
-# next build while the store stays bounded. Best-effort; never fails the build.
+# build recompiles the kernel and re-pulls the base closure.
+#
+# Key the root by build kind so alternating builder-vm-image (dev up / stage0)
+# and workload (machine run) builds don't evict each other's closure. Two
+# bounded fixed names keep the store bounded — the cap GC still frees a
+# superseded closure within a kind, and an unchanged derivation is a store hit
+# next build. The builder-vm image derivation name (mvm-builder-vm-image-* /
+# mvm-builder-vm-dev-*) is set in nix/images/builder-vm/flake.nix; everything
+# else (workload rootfs/images) is the workload kind. Best-effort; never fails
+# the build.
+case "$(basename "$NIX_OUT")" in
+  *-mvm-builder-vm-*) warm=builder ;;
+  *)                  warm=workload ;;
+esac
 mkdir -p /nix/var/nix/gcroots 2>/dev/null || true
-nix-store --add-root /nix/var/nix/gcroots/mvm-warm-latest --indirect -r "$NIX_OUT" >/dev/null 2>&1 \
-  || ln -sfn "$NIX_OUT" /nix/var/nix/gcroots/mvm-warm-latest 2>/dev/null || true
+nix-store --add-root "/nix/var/nix/gcroots/mvm-warm-$warm" --indirect -r "$NIX_OUT" >/dev/null 2>&1 \
+  || ln -sfn "$NIX_OUT" "/nix/var/nix/gcroots/mvm-warm-$warm" 2>/dev/null || true
+# Retire the pre-fix single root so it stops protecting a stale closure.
+rm -f /nix/var/nix/gcroots/mvm-warm-latest 2>/dev/null || true
 
 # Copy the artifacts the host expects into /out. A plain mkGuest
 # workload image is a *bare ext4 file* ($NIX_OUT is the rootfs
@@ -2020,19 +2032,40 @@ mod tests {
         let gc_idx = body.find("nix-collect-garbage").expect("gc present");
         assert!(gc_idx > meta_idx, "GC tail must follow output emission");
 
-        // A fixed-name warm gcroot must pin the just-built closure so the
-        // cap-triggered GC spares the kernel + base it contains. It must root
-        // $NIX_OUT, use the bounded fixed name, and be registered BEFORE the GC.
+        // The warm gcroot must be keyed by build kind so alternating
+        // builder-vm-image (dev up / stage0) and workload (machine run) builds
+        // don't evict each other's closure. Two bounded roots
+        // (mvm-warm-builder / mvm-warm-workload), classified from $NIX_OUT's
+        // derivation name, registered BEFORE the GC; the pre-fix single
+        // mvm-warm-latest root is retired.
         let warm_idx = body
-            .find("/nix/var/nix/gcroots/mvm-warm-latest")
-            .expect("warm gcroot present");
+            .find("case \"$(basename \"$NIX_OUT\")\" in")
+            .expect("per-kind warm gcroot classifier present");
         assert!(
-            body.contains("--add-root /nix/var/nix/gcroots/mvm-warm-latest"),
-            "warm gcroot must use nix-store --add-root in:\n{body}"
+            body.contains("*-mvm-builder-vm-*) warm=builder"),
+            "builder-vm image name must classify as the builder warm root in:\n{body}"
         );
         assert!(
-            body.contains("ln -sfn \"$NIX_OUT\" /nix/var/nix/gcroots/mvm-warm-latest"),
+            body.contains("warm=workload"),
+            "non-builder builds must classify as the workload warm root in:\n{body}"
+        );
+        assert!(
+            body.contains("--add-root \"/nix/var/nix/gcroots/mvm-warm-$warm\""),
+            "warm gcroot must add-root the per-kind name in:\n{body}"
+        );
+        assert!(
+            body.contains("ln -sfn \"$NIX_OUT\" \"/nix/var/nix/gcroots/mvm-warm-$warm\""),
             "warm gcroot must fall back to an ln symlink of $NIX_OUT in:\n{body}"
+        );
+        assert!(
+            body.contains("rm -f /nix/var/nix/gcroots/mvm-warm-latest"),
+            "the pre-fix single mvm-warm-latest root must be retired in:\n{body}"
+        );
+        // The pin itself must no longer target the single overwritten root.
+        assert!(
+            !body.contains("--add-root /nix/var/nix/gcroots/mvm-warm-latest")
+                && !body.contains("--add-root \"/nix/var/nix/gcroots/mvm-warm-latest\""),
+            "must not pin the single fixed-name mvm-warm-latest root in:\n{body}"
         );
         assert!(
             warm_idx < gc_idx,
