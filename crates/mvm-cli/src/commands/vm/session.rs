@@ -556,12 +556,90 @@ fn dispatch_update_idle_timeout(vm_name: &str, secs: u64) -> Result<(u64, u64)> 
     let req = mvm_guest::vsock::GuestRequest::UpdateIdleTimeout { secs };
     // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(vm_name, &req);
-    match mvm_guest::vsock::call_unary(&mut stream, &req)? {
-        mvm_guest::vsock::GuestResponse::UpdateIdleTimeoutAck {
+    match classify_update_idle_response(mvm_guest::vsock::call_unary(&mut stream, &req)?) {
+        UpdateIdleOutcome::Applied {
             previous_secs,
             applied_secs,
         } => Ok((previous_secs, applied_secs)),
-        other => anyhow::bail!("unexpected response to UpdateIdleTimeout: {other:?}"),
+        UpdateIdleOutcome::Denied { verb } => {
+            // The agent refused a verb the admitted plan didn't grant. Record the
+            // chain-signed `verb_denied` entry (claim-12 parity) before surfacing
+            // the error, so the refusal is observable and tamper-evident.
+            emit_verb_denied_audit(vm_name, &verb);
+            anyhow::bail!("guest agent denied verb {verb:?}: not in the plan's agent_verbs grant")
+        }
+        UpdateIdleOutcome::Unexpected { detail } => {
+            anyhow::bail!("unexpected response to UpdateIdleTimeout: {detail}")
+        }
+    }
+}
+
+/// The classified outcome of an `UpdateIdleTimeout` RPC. Splitting the response
+/// mapping out of [`dispatch_update_idle_timeout`] keeps the side effect (the
+/// chain-signed refusal audit) thin and makes the mapping unit-testable without
+/// a live guest agent.
+enum UpdateIdleOutcome {
+    /// The agent applied the timeout: `(previous_secs, applied_secs)`.
+    Applied {
+        previous_secs: u64,
+        applied_secs: u64,
+    },
+    /// The agent refused — the verb is not in the plan's `agent_verbs` grant.
+    Denied { verb: String },
+    /// Any other response: a protocol/transport surprise.
+    Unexpected { detail: String },
+}
+
+/// Map a guest response to an [`UpdateIdleOutcome`]. Pure (no I/O) so every arm
+/// is exercised in tests.
+fn classify_update_idle_response(resp: mvm_guest::vsock::GuestResponse) -> UpdateIdleOutcome {
+    use mvm_guest::vsock::GuestResponse;
+    match resp {
+        GuestResponse::UpdateIdleTimeoutAck {
+            previous_secs,
+            applied_secs,
+        } => UpdateIdleOutcome::Applied {
+            previous_secs,
+            applied_secs,
+        },
+        GuestResponse::VerbNotAuthorized { verb } => UpdateIdleOutcome::Denied { verb },
+        other => UpdateIdleOutcome::Unexpected {
+            detail: format!("{other:?}"),
+        },
+    }
+}
+
+/// Best-effort chain-signed `verb_denied` audit (claim-12 parity): fired when the
+/// guest agent refuses a verb the admitted plan did not grant. Loads the VM's
+/// persisted plan + host signer; a missing plan/signer or a flaky audit fs warns
+/// and skips — it never fails the caller, because the refusal already surfaces as
+/// an error and the audit is an observability record, not load-bearing.
+fn emit_verb_denied_audit(vm_name: &str, verb: &str) {
+    let plan = match super::plan_persist::read_plan(vm_name) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, vm = vm_name, verb = verb,
+                "no persisted plan; verb_denied not chain-bound");
+            return;
+        }
+    };
+    let signer = match super::host_signer::load_or_init() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "host signer unavailable; verb_denied entry skipped");
+            return;
+        }
+    };
+    let emitter = match super::audit_chain::AuditEmitter::new(signer.signing) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(error = %e, "audit emitter unavailable; verb_denied entry skipped");
+            return;
+        }
+    };
+    if let Err(e) = emitter.emit_verb_denied(&plan, verb) {
+        tracing::warn!(error = %e, vm = vm_name, verb = verb,
+            "audit emit_verb_denied failed (non-fatal)");
     }
 }
 
@@ -1017,6 +1095,55 @@ mod tests {
     use super::*;
 
     use mvm_core::util::test_env::TestEnv;
+
+    #[test]
+    fn classify_update_idle_applied_carries_prev_and_applied() {
+        let out =
+            classify_update_idle_response(mvm_guest::vsock::GuestResponse::UpdateIdleTimeoutAck {
+                previous_secs: 10,
+                applied_secs: 20,
+            });
+        match out {
+            UpdateIdleOutcome::Applied {
+                previous_secs,
+                applied_secs,
+            } => assert_eq!((previous_secs, applied_secs), (10, 20)),
+            _ => panic!("expected Applied"),
+        }
+    }
+
+    #[test]
+    fn classify_update_idle_verb_not_authorized_is_denied_with_verb() {
+        let out =
+            classify_update_idle_response(mvm_guest::vsock::GuestResponse::VerbNotAuthorized {
+                verb: "update-idle-timeout".into(),
+            });
+        match out {
+            UpdateIdleOutcome::Denied { verb } => assert_eq!(verb, "update-idle-timeout"),
+            _ => panic!("expected Denied"),
+        }
+    }
+
+    #[test]
+    fn classify_update_idle_other_response_is_unexpected() {
+        let out = classify_update_idle_response(mvm_guest::vsock::GuestResponse::Pong);
+        match out {
+            UpdateIdleOutcome::Unexpected { detail } => {
+                assert!(
+                    detail.contains("Pong"),
+                    "detail should name the variant: {detail}"
+                )
+            }
+            _ => panic!("expected Unexpected"),
+        }
+    }
+
+    #[test]
+    fn emit_verb_denied_audit_is_best_effort_when_no_plan() {
+        // A VM with no persisted plan ⇒ the helper warns and returns without
+        // panicking (mirrors the best-effort posture of the dispatch path).
+        emit_verb_denied_audit("nonexistent-vm-for-verb-denied-test", "update-idle-timeout");
+    }
 
     struct RuntimeDirGuard {
         _temp: tempfile::TempDir,
