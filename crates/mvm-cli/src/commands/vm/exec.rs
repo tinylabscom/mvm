@@ -365,7 +365,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: admit_network_policy.clone(),
             agent_verb_override: admit_agent_verb.clone(),
-            is_sealed_prod: crate::commands::vm::agent_verbs::grant_eligible(
+            restrict_agent_verbs: crate::commands::vm::agent_verbs::grant_eligible(
                 admit_pty,
                 admit_has_argv,
                 admit_is_dev,

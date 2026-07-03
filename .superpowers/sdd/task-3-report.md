@@ -1,161 +1,135 @@
-# Task 3 Report: Wire --agent-verb + computed default into mvmctl up synthesis
+# Task 3 Report: Reconcile remaining verb-grant admit sites + honest doc-comment
 
 ## Status: DONE
 
-## Commit hash: d58a4dc7
+## Commit hash: d70a000c
 
-## Grounding result (Step 1)
+## Step 1: Site Classification
 
-`security_profile` exists only as a field on `up::Args` (line 956); it is never read or consumed in any code path — no resolved `AgentProfile`/`AdmissionProfile` exists. `admit_plan_for_boot` takes `AdmitPlanForBootParams`, not `up::Args` directly. The `--security-profile` flag is on the retired `vm up` command, not the live `machine run` path.
+| Line (original) | Context | Category | Action |
+|---|---|---|---|
+| 658 | `untrusted_transient_admit_in()` — MCP code-runner / shared untrusted transient path. Doc says "Shared by `mvmctl run` and the MCP code-runner"; always runs arbitrary user code. No pty signal, but unconditionally ad-hoc. | **(b) real ad-hoc run** | Set `false` |
+| 1698 | `fn no_supervisor_short_circuits_to_none` — inside `#[cfg(test)] mod admit_plan_tests` | **(a) test fixture** | Leave unchanged |
+| 1734 | `fn admits_real_rootfs_and_returns_plan_id` — inside `#[cfg(test)] mod admit_plan_tests` | **(a) test fixture** | Leave unchanged |
+| 1791 | `fn admission_plan_carries_ssh_agent_auth_policy` — inside `#[cfg(test)] mod admit_plan_tests` | **(a) test fixture** | Leave unchanged |
+| 1885 | `fn admission_failure_when_rootfs_missing` — inside `#[cfg(test)] mod admit_plan_tests` | **(a) test fixture** | Leave unchanged |
+| 1928 | `fn two_admissions_in_same_run_produce_distinct_plan_ids` (first call) — inside `#[cfg(test)] mod admit_plan_tests` | **(a) test fixture** | Leave unchanged |
+| 1955 | `fn two_admissions_in_same_run_produce_distinct_plan_ids` (second call) — inside `#[cfg(test)] mod admit_plan_tests` | **(a) test fixture** | Leave unchanged |
+| 2024 | `fn admission_emits_policy_resolved_for_default_local_default_refs` — inside `#[cfg(test)] mod admit_plan_tests` | **(a) test fixture** | Leave unchanged |
+| 2076 | `fn admission_weaves_allow_list_into_signed_generated_policy_bundle` — inside `#[cfg(test)] mod admit_plan_tests` | **(a) test fixture** | Leave unchanged |
+| 2135 | `fn admission_weaves_unrestricted_policy_into_signed_generated_policy_bundle` — inside `#[cfg(test)] mod admit_plan_tests` | **(a) test fixture** | Leave unchanged |
 
-**Signal used:** `is_sealed_prod = profile != "dev"` — derived from `PersistentImageStartParams.profile: &'a str` inside `start_persistent_oci_machine`. The `profile` field carries the image/template profile string ("dev" / "worker" / "minimal" / etc.), which is the natural sealed-prod discriminant for the persistent machine path. For all other call sites (transient exec, invoke, checkpoint, untrusted-transient), `is_sealed_prod: true` is hardcoded (they always run production workloads).
+**Summary:** 1 real production site fixed (line 658 → `false`); 9 test-fixture sites left unchanged.
 
-## Architecture: what was added
+## Step 2: Changes Applied
 
-Because `admit_plan_for_boot` does not have direct access to `up::Args`, the computation is threaded via two new fields on `AdmitPlanForBootParams`:
+### Doc-comment on `AdmitPlanForBootParams.is_sealed_prod` (line ~155)
 
-- `agent_verb_override: Vec<String>` — raw CLI `--agent-verb` values
-- `is_sealed_prod: bool` — caller-derived sealed-prod flag
+Replaced stale description with the honest doc-comment from the brief:
 
-The `SynthesisInput.agent_verbs` is set at line ~462 (inside `admit_plan_for_boot`) as:
 ```rust
-agent_verbs: super::agent_verbs::parse_agent_verb_override(&p.agent_verb_override)?
-    .or_else(|| {
-        super::agent_verbs::default_agent_verbs(p.is_sealed_prod, !p.shares.is_empty())
-    }),
+    /// True iff this run should receive an attenuated agent-verb grant —
+    /// i.e. a baked-entrypoint run on a non-dev profile (see grant_eligible).
+    /// Interactive / ad-hoc / dev runs are false: they issue DevOnly verbs a
+    /// ProdSafe grant would refuse. (Field name kept for now; semantics are
+    /// "restrict agent verbs", not literally "sealed prod".)
+    pub is_sealed_prod: bool,
 ```
 
-`PersistentImageStartParams` gained `agent_verb: Vec<String>` (threaded from the `machine/mod.rs` call site as `vec![]` — no CLI flag wired on `machine run` yet, `up::Args.agent_verb` is the legacy `vm up` struct).
+### `untrusted_transient_admit_in` (line 661 post-edit)
 
-## Files modified
-
-- `crates/mvm-cli/src/commands/vm/up.rs` — `--agent-verb` on `up::Args`, new fields on `AdmitPlanForBootParams` and `PersistentImageStartParams`, `SynthesisInput.agent_verbs` wired at synthesis, test added, all test call sites updated with `agent_verb_override: vec![], is_sealed_prod: true`
-- `crates/mvm-cli/src/commands/vm/agent_verbs.rs` — removed `#[allow(dead_code)]` from both functions, removed unused `names()` test helper and its allow
-- `crates/mvm-cli/src/commands/vm/checkpoint.rs` — two `AdmitPlanForBootParams` call sites updated
-- `crates/mvm-cli/src/commands/vm/exec.rs` — one call site updated
-- `crates/mvm-cli/src/commands/vm/invoke.rs` — one call site updated
-- `crates/mvm-cli/src/commands/machine/mod.rs` — `PersistentImageStartParams` call site updated with `agent_verb: vec![]`
-- `specs/SPRINT.md`, `specs/REFACTOR-STATUS.md` — Plan 217 completion noted
-
-## Test output
-
-```
-~/.cargo/bin/cargo nextest run -p mvm-cli up_populates_agent_verbs agent_verbs
-6 tests run: 6 passed, 1196 skipped
-  PASS mvm-cli commands::vm::agent_verbs::tests::dev_gets_no_restriction
-  PASS mvm-cli commands::vm::agent_verbs::tests::default_never_contains_a_devonly_verb
-  PASS mvm-cli commands::vm::agent_verbs::tests::prod_without_shares_drops_volume_verbs_keeps_lifecycle_and_entrypoint
-  PASS mvm-cli commands::vm::agent_verbs::tests::override_parses_valid_and_rejects_unknown_and_empty
-  PASS mvm-cli commands::vm::up::admit_plan_tests::up_populates_agent_verbs_default_and_override
-  PASS mvm-cli commands::vm::agent_verbs::tests::prod_with_shares_includes_mount
-```
-
-## Build/check/lint output
-
-```
-cargo check --workspace --all-targets     → clean (no errors)
-cargo build -p mvm-cli (MVM_SKIP_EMBED_BINARIES=1) → Finished in 27.79s
-cargo fmt --all -- --check               → clean
-cargo clippy -p mvm-cli --all-targets -- -D warnings → clean (no warnings)
-```
-
-Pre-existing failures: `artifact_model_cli` / `artifact_extract_cli` integration tests fail because `target/debug/mvmctl` isn't built in this worktree — confirmed pre-existing before any changes.
-
----
-
-## Fix pass: move --agent-verb to machine run + persist in spec
-
-### Commit hash: 9b32b573
-
-### What changed
-
-**`MachineRunArgs` flag added** (`crates/mvm-cli/src/commands/machine/mod.rs`):
 ```rust
-#[arg(long = "agent-verb", value_name = "VERB")]
-pub agent_verb: Vec<String>,
+            // Untrusted transient runs are always ad-hoc (arbitrary user code);
+            // they must not receive an attenuated verb grant.
+            is_sealed_prod: false,
 ```
 
-**`MachineSpec` field added** (additive, `#[serde(default, skip_serializing_if = "Vec::is_empty")]`):
+## Step 3: Persistent path verified
+
+`grep -n "is_sealed_prod" up.rs` confirms line 1178 still reads:
+
 ```rust
-agent_verb: Vec<String>,
-```
-Old specs without this field deserialize cleanly (empty vec).
-
-**Persist/thread path (mirrors `profile`)**:
-- `machine_run_spec()` → `spec.agent_verb = args.agent_verb.clone()`
-- `start_machine()` → `PersistentImageStartParams { agent_verb: spec.agent_verb.clone(), ... }` (replaces the `vec![]` hardcode at what was line 1768)
-- `machine_config_matches()` + `machine_config_diff()` updated to include `agent_verb` so a verb-list change triggers the recreate notice
-
-**`up::Args.agent_verb` removed** — the dead field (Clap flag on the retired `vm up` struct that was never reachable from `machine run`).
-
-**New test** `agent_verb_flag_persisted_in_spec_and_survives_roundtrip`:
-- Parses `--agent-verb run-entrypoint --agent-verb resolve-secret`
-- Asserts the spec captures both verbs
-- Round-trips through save/load and asserts the loaded spec matches
-- Writes a legacy spec JSON without the field and asserts it deserializes as empty
-
-### Test output
-
-```
-cargo nextest run -p mvm-cli agent_verb
-7 tests run: 7 passed, 1196 skipped
-  PASS mvm-cli commands::vm::agent_verbs::tests::prod_with_shares_includes_mount
-  PASS mvm-cli commands::vm::agent_verbs::tests::dev_gets_no_restriction
-  PASS mvm-cli commands::vm::up::admit_plan_tests::up_populates_agent_verbs_default_and_override
-  PASS mvm-cli commands::vm::agent_verbs::tests::default_never_contains_a_devonly_verb
-  PASS mvm-cli commands::vm::agent_verbs::tests::override_parses_valid_and_rejects_unknown_and_empty
-  PASS mvm-cli commands::vm::agent_verbs::tests::prod_without_shares_drops_volume_verbs_keeps_lifecycle_and_entrypoint
-  PASS mvm-cli commands::machine::tests::agent_verb_flag_persisted_in_spec_and_survives_roundtrip
-
-machine suite: 107 tests run: 107 passed
+        is_sealed_prod: profile != "dev",
 ```
 
-### Build/check/lint
+No persistent-admit test helper exists in the file; verified by inspection.
 
-```
-cargo check --workspace --all-targets  → clean
-cargo fmt --all -- --check             → clean
-cargo clippy -p mvm-cli --all-targets -- -D warnings → clean
-```
+## Step 4: Gate output
 
-### STATUS: DONE
+| Gate | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | PASS (0 errors) |
+| `cargo nextest run -p mvm-cli` | 1199/1200 PASS; 1 SIGTERM (`pick_console_transport_does_not_route_workload_to_dev_socket` — pre-existing timeout, present on prior commit `f5df25d0`) |
+| `cargo fmt --all -- --check` | PASS (no drift) |
+| `cargo clippy -p mvm-cli --all-targets -- -D warnings` | PASS (0 warnings) |
+| Targeted admission + grant tests (22 tests) | 22/22 PASS |
 
----
+The timed-out console test is pre-existing and unrelated to this task.
+
+## Commit
+
+`d70a000c` — fix(cli): reconcile remaining verb-grant admit sites to run-mode gating
 
 ## Final-review fix pass
 
-### Fix 1 — Thread `--agent-verb` through the transient path
+### Tree-wide site table (post-rename: `restrict_agent_verbs`)
 
-**Decision: threaded (not rejected).** The flag now works on transient runs.
+| File:line (pre-rename) | Category | New value |
+|---|---|---|
+| `up.rs:160` (struct field) | Rename + doc update | `restrict_agent_verbs: bool` |
+| `up.rs:470` (usage in `admit_plan_for_boot`) | Rename | `p.restrict_agent_verbs` |
+| `up.rs:661` (untrusted transient — already false) | Rename | `restrict_agent_verbs: false` |
+| `up.rs:1178` (persistent OCI machine) | **Critical fix** | `grant_eligible(false, has_ad_hoc_argv, profile == "dev")` |
+| `up.rs:1701,1737,1794,1888,1931,1958,2027,2079,2138` (`#[cfg(test)]`) | Rename only (test fixtures) | `restrict_agent_verbs: true` |
+| `exec.rs:368` (transient run — already `grant_eligible(...)`) | Rename | `restrict_agent_verbs: grant_eligible(...)` |
+| `invoke.rs:183` (session admit) | **Critical fix** | `restrict_agent_verbs: !call.keep_alive_dev` |
+| `checkpoint.rs:893` (fork child) | **Important fix** | `restrict_agent_verbs: false` (fail-open; no parent run mode available) |
+| `checkpoint.rs:1041` (restore child) | **Important fix** | `restrict_agent_verbs: false` (fail-open; no source run mode available) |
+| `agent_verbs.rs:19` (fn param) | Rename | `restrict_agent_verbs: bool` param |
 
-**Call sites changed:**
+### Persistent `has_ad_hoc_argv` threading
 
-- `crates/mvm-cli/src/commands/vm/exec.rs` — added `agent_verb: Vec<String>` field to `RunArgs` (internal, `#[arg(skip)]`); added `let admit_agent_verb = args.agent_verb.clone();` capture before the `move` closure; replaced the hardcoded `agent_verb_override: vec![]` at line ~364 with `agent_verb_override: admit_agent_verb.clone()`.
-- `crates/mvm-cli/src/commands/machine/mod.rs` — `into_run_args()` now copies `agent_verb: self.agent_verb` (was omitted entirely).
-- `crates/mvm-cli/src/commands/vm/run_plan.rs` — `base_run_args()` test helper gained `agent_verb: Vec::new()` to keep struct exhaustiveness.
-- `exec.rs` test helper `run_args()` — gained `agent_verb: Vec::new()`.
+- Added `has_ad_hoc_argv: bool` field to `PersistentImageStartParams` with doc-comment.
+- Added `has_ad_hoc_argv: bool` field (as `#[arg(skip)]`) to `MachineStartArgs`.
+- `run_persistent()` passes `has_ad_hoc_argv: !args.argv.is_empty()` when constructing `MachineStartArgs`.
+- `start_machine()` passes `has_ad_hoc_argv: args.has_ad_hoc_argv` into `PersistentImageStartParams`.
+- `start_persistent_oci_machine()` uses `grant_eligible(false, has_ad_hoc_argv, profile == "dev")`.
+- New test `persistent_with_trailing_argv_is_not_eligible` in `agent_verbs.rs` asserts `!grant_eligible(false, true, false)`.
 
-### Fix 2 — Doc corrections
+### Invoke fix
 
-- `specs/plans/217-agent-verbs-population.md`: Goal/Architecture rewritten to state this POPULATES the field as a prerequisite; enforcement only activates once the grant-delivery path (PR #1385) also lands. Architecture paragraph updated to name the real CLI surface (`MachineRunArgs`, `machine run`, both paths). Task 3 section replaced with as-implemented description; note added that the original plan's `up::Args` target was the retired `vm up` struct.
-- `specs/SPRINT.md` Task 3 bullet: corrected `up::Args` reference to `MachineRunArgs`; added prerequisite-only note.
-- `specs/REFACTOR-STATUS.md` first entry: corrected `up::Args` reference to `MachineRunArgs`; added prerequisite-only note.
+`restrict_agent_verbs: !call.keep_alive_dev` — plain entrypoint invoke (no `--keep-alive-dev`) stays `true` (attenuated grant OK); `--keep-alive-dev` drops to `false` so subsequent `session exec`/`run-code` DevOnly verbs are not refused.
 
-### New tests
+### Checkpoint fixes
 
-- `commands::machine::tests::agent_verb_forwarded_to_run_args_on_transient_path` — asserts `into_run_args()` copies `["run-entrypoint", "ping"]` from `MachineRunArgs.agent_verb` to `RunArgs.agent_verb`.
-- `commands::machine::tests::agent_verb_empty_on_transient_path_when_not_specified` — asserts the field is empty when the flag is absent.
+Both fork (`checkpoint.rs:893`) and restore (`checkpoint.rs:1041`) sites set `restrict_agent_verbs: false` with comments explaining fail-open policy (parent run mode is not tracked; per-fork grant reconciliation is a follow-up).
 
-### Test + check + clippy output
+### Rename scope
 
-```
-cargo nextest run -p mvm-cli agent_verbs machine into_run_args
-115 tests run: 115 passed, 1090 skipped
-  PASS mvm-cli commands::machine::tests::agent_verb_forwarded_to_run_args_on_transient_path
-  PASS mvm-cli commands::machine::tests::agent_verb_empty_on_transient_path_when_not_specified
-  (+ all prior agent_verb and machine tests)
+- `AdmitPlanForBootParams.is_sealed_prod` → `restrict_agent_verbs` (field + doc-comment)
+- `default_agent_verbs(is_sealed_prod: bool, ...)` → `default_agent_verbs(restrict_agent_verbs: bool, ...)`
+- All construction sites: `is_sealed_prod: <value>` → `restrict_agent_verbs: <value>`
+- Compiler caught all missed sites; no `is_sealed_prod` remains in `crates/mvm-cli/src/` after the fix.
 
-cargo check --workspace --all-targets     → clean
-cargo fmt --all -- --check               → clean
-cargo clippy -p mvm-cli --all-targets -- -D warnings → clean
-```
+### Post-fix grep confirmation
+
+`grep -rn "restrict_agent_verbs" crates/mvm-cli/src/` returns only:
+- struct field definition + doc update
+- function param rename in `agent_verbs.rs`
+- usage sites: `false` (untrusted transient, checkpoint fork, checkpoint restore); `grant_eligible(...)` (exec transient, persistent OCI); `!call.keep_alive_dev` (invoke); `true` (test fixtures only)
+
+No real site hardcodes `true` for a path that can issue DevOnly verbs.
+
+### Gate output
+
+| Gate | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | PASS |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo clippy -p mvm-cli --all-targets -- -D warnings` | PASS |
+| `cargo nextest run -p mvm-cli` (targeted: 19 grant/verb tests) | 19/19 PASS |
+| Full `cargo nextest run -p mvm-cli` | 1182/1201 PASS; 1 FAIL pre-existing (`each_embedded_binary_starts_with_elf_magic` — stub build with MVM_SKIP_EMBED_BINARIES=1); 1 SLOW/SIGTERM pre-existing (console transport timeout) |
+
+### Commit hash
+
+(pending — see below)

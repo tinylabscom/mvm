@@ -784,6 +784,10 @@ pub(in crate::commands) struct MachineStartArgs {
     /// (Hidden — primarily threaded by `vm rekernel`.)
     #[arg(long = "kernel-pin", value_name = "PIN", hide = true)]
     pub kernel_pin: Option<String>,
+    /// True when the caller will exec a trailing argv command after the machine
+    /// is up. Not a CLI flag — set programmatically by `run_persistent`.
+    #[arg(skip)]
+    pub has_ad_hoc_argv: bool,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -1871,6 +1875,7 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         no_supervisor: args.no_supervisor,
         kernel_path,
         agent_verb: spec.agent_verb.clone(),
+        has_ad_hoc_argv: args.has_ad_hoc_argv,
     })?;
     if let Some(host_sock) = ssh_auth_sock.as_deref()
         && let Err(err) =
@@ -2208,6 +2213,7 @@ fn run_persistent(
             hypervisor: args.hypervisor.clone(),
             no_supervisor: args.no_supervisor,
             kernel_pin: args.kernel_pin.clone(),
+            has_ad_hoc_argv: !args.argv.is_empty(),
         },
     )?;
     if !booted && !args.json && !args.up_json {
