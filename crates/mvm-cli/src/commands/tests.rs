@@ -750,22 +750,12 @@ fn parse_machine_run(argv: &[&str]) -> Result<machine::MachineRunArgs, clap::Err
 #[test]
 fn machine_run_entrypoint_flag_parses() {
     // `--manifest m --entrypoint` selects the entrypoint action; the source +
-    // entrypoint flags round-trip.
-    let args = parse_machine_run(&[
-        "--manifest",
-        "tmpl",
-        "--entrypoint",
-        "--stdin",
-        "/w/in.json",
-    ])
-    .unwrap();
+    // entrypoint flags round-trip. Stdin is now auto-read from a piped host
+    // stdin at dispatch — there is no `--stdin` flag.
+    let args = parse_machine_run(&["--manifest", "tmpl", "--entrypoint"]).unwrap();
     assert!(args.entrypoint);
     assert_eq!(args.manifest.as_deref(), Some("tmpl"));
-    assert_eq!(args.stdin.as_deref(), Some("/w/in.json"));
     assert!(args.argv.is_empty());
-    // Bare `--entrypoint` (no stdin) is the no-argument call.
-    let bare = parse_machine_run(&["--manifest", "tmpl", "--entrypoint"]).unwrap();
-    assert!(bare.entrypoint && bare.stdin.is_none());
 }
 
 #[test]
@@ -781,10 +771,10 @@ fn machine_run_entrypoint_conflicts_with_argv() {
 
 #[test]
 fn machine_run_entrypoint_flags_require_entrypoint() {
-    // `--stdin`/`--from-workload-ir`/`--attach` only make sense for the
-    // entrypoint action — clap refuses them without `--entrypoint`.
+    // `--from-workload-ir`/`--attach` only make sense for the entrypoint
+    // action — clap refuses them without `--entrypoint`. (`--stdin` was
+    // removed; stdin is auto-detected from the host pipe at dispatch.)
     for flag in [
-        &["--manifest", "tmpl", "--stdin", "/w/in.json"][..],
         &[
             "--manifest",
             "tmpl",
