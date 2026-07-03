@@ -392,7 +392,26 @@ pub fn resolve_inhouse_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmEr
 }
 ```
 
-Fill the `// ...` using `mvm_build::rootfs_inject` (grep `build_inject_initramfs` usage in `examples/hvf-rootfs-inject.rs` for the exact call shape) and a byte copy of the kernel. Add `locate_host_vm_init` by grepping how `LibkrunBuilderVm`/`BuilderMounts.host_bin_dir` resolves the embedded `mvm-host-vm-init`.
+**Bake mechanism (corrected):** applying the inject requires booting a VM (macOS can't mount ext4 host-side), but the patcher VM is **vsock-less** and therefore NOT gated on #1401. Use the ready-made primitive `mvm_backend::builder_runner::inject_host_binaries(&InjectRequest { kernel, base_rootfs, out_rootfs, work_dir, patcher, binaries })` (see `crates/mvm-backend/src/builder_runner/inject.rs`). It copies `base_rootfs → out_rootfs`, builds the patcher initramfs, boots the HVF supervisor with `vsock: false` on the writable rootfs disk, and blocks until poweroff. So the resolver's `// ...` step is:
+
+```rust
+use mvm_backend::builder_runner::inject::{inject_host_binaries, InjectRequest};
+use mvm_build::rootfs_inject::InjectBinary;
+// kernel: byte-copy the base HVF Image into out_dir/Image (or symlink if the base is already a raw arm64 Image)
+std::fs::copy(&base_image, &kernel)?;
+let patcher = std::fs::read(&patcher_bin)?;      // the mvm-rootfs-patcher static musl bin
+let host_init = std::fs::read(&host_init_bin)?;  // the mvm-host-vm-init static musl bin
+inject_host_binaries(&InjectRequest {
+    kernel: &kernel,
+    base_rootfs: &base_rootfs,
+    out_rootfs: &injected_rootfs,
+    work_dir: &out_dir.join("work"),
+    patcher: &patcher,
+    binaries: &[InjectBinary { name: "mvm-host-vm-init", install_path: "/sbin/mvm-host-vm-init", mode: 0o755, data: &host_init }],
+}).map_err(|e| BuilderVmError::InHouseVmmFailed { detail: format!("bake in-house builder rootfs: {e}") })?;
+```
+
+(Confirm `InjectBinary`'s exact field names in `rootfs_inject.rs` — adapt if they differ.) Locate the `mvm-rootfs-patcher` + `mvm-host-vm-init` static bins at runtime via the embedded-host-binary extractor — grep `host_binaries::extract::ensure_extracted_for_boot` (used in `dev_vz.rs`), which returns a `host_bin_dir`; confirm both bins are embedded (grep `mvm-rootfs-patcher` in `crates/mvm-cli/build.rs`). If `mvm-rootfs-patcher` is NOT embedded, report DONE_WITH_CONCERNS naming that gap — the resolver's bake needs it. On any bake failure return `BuilderVmError::InHouseVmmFailed { detail }` so the auto-detect fallback (built in Dispatch 1/2) retries libkrun. The `HVF Image` kernel: the cached `builder-vm/<arch>/vmlinux` is already a raw arm64 boot Image on this arch (per libkrun's resolver); use it directly and only error if `file(1)`-style detection shows ELF.
 
 - [ ] **Step 4: Run, verify pass** — `cargo test -p mvm-cli cache_key_is_stable`. Expected: PASS. (The full resolve path is exercised in Task 8.)
 
