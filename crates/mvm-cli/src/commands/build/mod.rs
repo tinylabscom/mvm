@@ -6,6 +6,7 @@
 pub(in crate::commands) mod build;
 pub(super) mod compile;
 pub(super) mod group;
+#[cfg(feature = "builder-vm")]
 pub mod inhouse_builder_image;
 pub(super) mod kernel;
 /// `mvmctl persistent-builder` user-facing verb. Wires the

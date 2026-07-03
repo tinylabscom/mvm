@@ -11,8 +11,14 @@
 //! On a cache hit the existing pair is returned directly. On a miss the
 //! rootfs is re-baked via the vsock-less HVF patcher VM and the result is
 //! stored under `builder_vm_cache_dir()/inhouse/<key>/`.
+//!
+//! Baking uses a `<key>.partial` staging directory that is promoted
+//! atomically via `fs::rename` only on full success. A failed bake
+//! therefore cannot poison the cache: the partial dir is cleaned up on
+//! error and the key dir never appears until the image pair is complete.
 
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use mvm_build::builder_vm::{BuilderVmError, builder_vm_cache_dir};
 use mvm_build::rootfs_inject::InjectBinary;
@@ -85,58 +91,96 @@ pub fn resolve_inhouse_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmEr
     let key = inhouse_image_cache_key(&vmlinux, &base_rootfs, &host_init);
     let out_dir = builder_vm_cache_dir().join("inhouse").join(&key);
 
-    let kernel = out_dir.join("Image");
-    let injected_rootfs = out_dir.join("rootfs.ext4");
-
     if is_cached(&out_dir) {
-        return Ok((kernel, injected_rootfs));
+        return Ok((out_dir.join("Image"), out_dir.join("rootfs.ext4")));
     }
 
-    std::fs::create_dir_all(&out_dir).map_err(|e| BuilderVmError::InHouseVmmFailed {
-        detail: format!("create cache dir {}: {e}", out_dir.display()),
+    // Bake into a staging directory; promote atomically so a partial bake
+    // can never be mistaken for a complete cache entry.
+    let partial = builder_vm_cache_dir()
+        .join("inhouse")
+        .join(format!("{key}.partial"));
+    let _ = fs::remove_dir_all(&partial);
+    // Remove any incomplete out_dir from a previous failed rename step.
+    let _ = fs::remove_dir_all(&out_dir);
+
+    fs::create_dir_all(&partial).map_err(|e| BuilderVmError::InHouseVmmFailed {
+        detail: format!("create staging dir {}: {e}", partial.display()),
     })?;
 
-    // Copy the base kernel — it is already a raw arm64 boot Image on aarch64.
-    std::fs::copy(&vmlinux, &kernel).map_err(|e| BuilderVmError::InHouseVmmFailed {
-        detail: format!(
-            "copy base kernel {} -> {}: {e}",
-            vmlinux.display(),
-            kernel.display()
-        ),
-    })?;
+    let partial_kernel = partial.join("Image");
+    let partial_rootfs = partial.join("rootfs.ext4");
 
-    let patcher_path = host_bin_dir.join("mvm-rootfs-patcher");
-    let patcher = std::fs::read(&patcher_path).map_err(|e| BuilderVmError::InHouseVmmFailed {
-        detail: format!("read embedded patcher at {}: {e}", patcher_path.display()),
-    })?;
-    let host_init_bytes =
-        std::fs::read(&host_init).map_err(|e| BuilderVmError::InHouseVmmFailed {
+    let bake_result = (|| {
+        // Copy the base kernel — already a raw arm64 boot Image on aarch64.
+        fs::copy(&vmlinux, &partial_kernel).map_err(|e| BuilderVmError::InHouseVmmFailed {
             detail: format!(
-                "read embedded mvm-host-vm-init at {}: {e}",
-                host_init.display()
+                "copy base kernel {} -> {}: {e}",
+                vmlinux.display(),
+                partial_kernel.display()
             ),
         })?;
 
-    let work_dir = out_dir.join("work");
-    mvm_backend::builder_runner::inject::inject_host_binaries(
-        &mvm_backend::builder_runner::inject::InjectRequest {
-            kernel: &kernel,
-            base_rootfs: &base_rootfs,
-            out_rootfs: &injected_rootfs,
-            work_dir: &work_dir,
-            patcher: &patcher,
-            binaries: &[InjectBinary {
-                name: "mvm-host-vm-init",
-                install_path: "/sbin/mvm-host-vm-init",
-                bytes: host_init_bytes,
-            }],
-        },
-    )
-    .map_err(|e| BuilderVmError::InHouseVmmFailed {
-        detail: format!("bake in-house builder rootfs: {e}"),
-    })?;
+        let patcher_path = host_bin_dir.join("mvm-rootfs-patcher");
+        let patcher = fs::read(&patcher_path).map_err(|e| BuilderVmError::InHouseVmmFailed {
+            detail: format!("read embedded patcher at {}: {e}", patcher_path.display()),
+        })?;
+        let host_init_bytes =
+            fs::read(&host_init).map_err(|e| BuilderVmError::InHouseVmmFailed {
+                detail: format!(
+                    "read embedded mvm-host-vm-init at {}: {e}",
+                    host_init.display()
+                ),
+            })?;
 
-    Ok((kernel, injected_rootfs))
+        let work_dir = partial.join("work");
+        mvm_backend::builder_runner::inject::inject_host_binaries(
+            &mvm_backend::builder_runner::inject::InjectRequest {
+                kernel: &partial_kernel,
+                base_rootfs: &base_rootfs,
+                out_rootfs: &partial_rootfs,
+                work_dir: &work_dir,
+                patcher: &patcher,
+                binaries: &[InjectBinary {
+                    name: "mvm-host-vm-init",
+                    install_path: "/sbin/mvm-host-vm-init",
+                    bytes: host_init_bytes,
+                }],
+            },
+        )
+        .map_err(|e| BuilderVmError::InHouseVmmFailed {
+            detail: format!("bake in-house builder rootfs: {e}"),
+        })
+    })();
+
+    if let Err(e) = bake_result {
+        let _ = fs::remove_dir_all(&partial);
+        return Err(e);
+    }
+
+    // Promote atomically. A concurrent process may have won the race and
+    // already placed the final dir; treat that as a cache hit rather than
+    // an error.
+    match fs::rename(&partial, &out_dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists || out_dir.is_dir() => {
+            // Another process completed the bake concurrently; clean up our
+            // staging copy and use theirs.
+            let _ = fs::remove_dir_all(&partial);
+        }
+        Err(e) => {
+            let _ = fs::remove_dir_all(&partial);
+            return Err(BuilderVmError::InHouseVmmFailed {
+                detail: format!(
+                    "promote staged image {} -> {}: {e}",
+                    partial.display(),
+                    out_dir.display()
+                ),
+            });
+        }
+    }
+
+    Ok((out_dir.join("Image"), out_dir.join("rootfs.ext4")))
 }
 
 #[cfg(test)]
@@ -205,5 +249,23 @@ mod tests {
         std::fs::write(dir.path().join("Image"), b"kernel").unwrap();
         std::fs::write(dir.path().join("rootfs.ext4"), b"rootfs").unwrap();
         assert!(is_cached(dir.path()));
+    }
+
+    #[test]
+    fn partial_dir_does_not_count_as_cached() {
+        // A leftover `<key>.partial` staging directory must never be treated
+        // as a complete cache entry; `is_cached` only checks the final key dir.
+        let dir = tempfile::tempdir().unwrap();
+        let partial = dir.path().join("abc123.partial");
+        std::fs::create_dir_all(&partial).unwrap();
+        std::fs::write(partial.join("Image"), b"kernel").unwrap();
+        std::fs::write(partial.join("rootfs.ext4"), b"rootfs").unwrap();
+        // The partial dir itself has both files — but `is_cached` is only
+        // called with the final key dir path (never the `.partial` sibling).
+        let final_dir = dir.path().join("abc123");
+        assert!(
+            !is_cached(&final_dir),
+            "partial dir must not satisfy is_cached on the final path"
+        );
     }
 }

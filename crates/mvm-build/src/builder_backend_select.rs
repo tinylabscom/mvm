@@ -224,12 +224,12 @@ pub fn try_resolve_builder_backend_with_override(
 
 /// Builder driver for the Stage 0 bootstrap.
 ///
-/// Stage 0 is implemented for libkrun and QEMU; Vz and Firecracker
+/// Stage 0 is implemented for libkrun and QEMU; in-house, Vz, and Firecracker
 /// Stage 0 are still fail-closed gaps. So this dispatch deliberately differs
 /// from [`resolve_builder_backend`]: an explicit `qemu` choice uses QEMU, but
-/// everything else — including the Vz auto-detect default on macOS-26+ — falls
-/// back to libkrun, preserving the long-standing "Stage 0 is libkrun even
-/// on Vz-default hosts" invariant rather than hitting the Vz gap.
+/// everything else — including the in-house auto-detect default on macOS-26+ —
+/// falls back to libkrun, preserving the "Stage 0 is libkrun even on
+/// in-house-default hosts" invariant rather than hitting the gap.
 /// `verbose` streams the libkrun console; the QEMU path always logs to
 /// `console.log`.
 pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
@@ -238,9 +238,9 @@ pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
 
 /// Stage 0 driver for an explicit `choice` — used by the auto-fallback loop to
 /// construct the next backend to try. QEMU when chosen; libkrun for everything
-/// else (Vz Stage 0 is a gap, and the "Stage 0 is libkrun even on Vz-default
-/// hosts" invariant holds — and the Linux fallback order only ever yields
-/// libkrun→qemu, never Vz).
+/// else (in-house and Vz Stage 0 are gaps, and the "Stage 0 is libkrun even on
+/// in-house-default hosts" invariant holds — the Linux fallback order only ever
+/// yields libkrun→qemu, never in-house or Vz).
 pub fn resolve_stage0_backend_for_choice(
     choice: BuilderBackendChoice,
     verbose: bool,
