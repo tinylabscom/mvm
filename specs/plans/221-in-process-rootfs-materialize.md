@@ -84,6 +84,23 @@ model unchanged (virtio-blk ext4 + verity sidecar).
     (Firecracker/microVM ecosystems have done it); or (b) keep the builder-VM
     path as an ADR-093-style auto-fallback. B0/ADR-106 records which.
 
+  - **B1 initial probe (2026-07-03) — candidate selected: `am-fs-ext4` v0.4.0.**
+    - `ext4_rs` v1.3.3: **rejected** — requires **nightly** (`#![feature(error_in_core)]`);
+      non-starter for a stable-toolchain production dep. Also can't mkfs from scratch.
+    - `tpdenk/mkfs`: **rejected** — library API "not implemented" (CLI-only).
+    - **`am-fs-ext4` v0.4.0: viable, single-crate, builds on stable, fully
+      userspace.** It's a complete R/W ext4: `mkfs::format_filesystem` to format,
+      then `fs.apply_mkdir` / `apply_create` / `apply_pwrite` / `apply_symlink` /
+      `apply_mknod` / `apply_link` + ACL/xattr support to populate a full tree,
+      plus a `fsck` module and a read path for round-trip self-validation. No
+      journal by default (fine for a read-only rootfs; verity-friendly). So the
+      combo is unnecessary — **B2 targets `am-fs-ext4` alone.**
+    - Still to validate before selection is final (gates 2–6): Linux read-only
+      mount, dm-verity roothash (+ pure-Rust Merkle-tree gen to drop
+      `veritysetup`), byte-determinism, faithful perms/symlinks/xattrs,
+      `cargo-audit`/`deny.toml` + maintenance. `fsck` + the read path make gate 1
+      (userspace round-trip) provable on macOS without a mount.
+
 - **B2 — `materialize_ext4_pure`.** New fn in `mvm-build` mirroring
   `materialize_ext4`'s API (`MaterializeExt4Input → MaterializedExt4`), behind a
   `pure-mkfs` feature. Pure-Rust ext4 build + pure-Rust dm-verity roothash.
