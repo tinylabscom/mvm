@@ -10,7 +10,7 @@ use crate::commands::env::dev_vz::ensure_default_microvm_image;
 use crate::commands::vm::plan_admission::{
     AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run,
 };
-use crate::commands::vm::plan_builder::SynthesisInput;
+use mvm_core::plan::SynthesisInput;
 
 /// Keep the live probe above the current default-image kernel load floor. Smaller
 /// values can fail before readiness on Linux/libkrun, which makes the benchmark

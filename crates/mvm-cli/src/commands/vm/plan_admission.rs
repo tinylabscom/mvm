@@ -51,7 +51,7 @@ use mvm_core::policy::PolicyBundle;
 use std::sync::Mutex;
 
 use super::host_signer::host_signer_id;
-use super::plan_builder::{SynthesisInput, synthesize_plan};
+use mvm_core::plan::{SynthesisInput, synthesize_plan};
 
 pub use mvm_core::time::{Clock, SystemClock};
 

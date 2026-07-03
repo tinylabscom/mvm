@@ -1,8 +1,14 @@
-//! `ExecutionPlan` synthesis from `mvmctl up` CLI args.
+//! `ExecutionPlan` synthesis from a resolved [`SynthesisInput`].
 //!
-//! Turns the surface-level CLI shape (flake ref, name, cpus, memory,
-//! volumes, ports, secrets, etc.) into a typed `mvm_core::plan::ExecutionPlan`
-//! the supervisor can verify, audit, and gate on.
+//! Turns an already-resolved launch shape (name, backend, image digest,
+//! cpus, memory, volumes, secrets, policy refs, etc.) into a typed
+//! [`crate::plan::ExecutionPlan`] the supervisor can verify, audit, and gate
+//! on. This is the pure, side-effect-free core of signed-plan admission
+//! (claim 8): the caller resolves CLI/API args into a `SynthesisInput`, this
+//! builds the unsigned plan, and the caller signs + admits it. Living in
+//! `mvm-core` (beside the plan types) lets every driver — the CLI, and the
+//! `mvm-client` local backend once the boot seam lands — synthesize through
+//! one contract.
 //!
 //! ## What lives here
 //!
@@ -35,15 +41,15 @@
 //! | `nonce` | fresh 128 bits from `OsRng` per invocation |
 //! | everything else | conservative defaults (no attestation, destroy-on-exit, etc.) |
 
-use anyhow::Result;
-use chrono::{Duration, Utc};
-use mvm_core::plan::{
+use crate::plan::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
     AuditTaxonomy, AuthPolicy, DepsVolumeBinding, ExecutionPlan, FsPolicyRef, KeyRotationSpec,
     Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources, RuntimeProfileRef,
     SCHEMA_VERSION, SecretBinding, SecretReleasePolicy, SignedImageRef, TenantId, TimeoutSpec,
     WorkloadId, WorkloadIntent,
 };
+use anyhow::Result;
+use chrono::{Duration, Utc};
 use rand::RngCore;
 use std::collections::BTreeMap;
 
@@ -132,7 +138,7 @@ pub struct SynthesisInput<'a> {
     /// admit path re-verifies the archive against this triple before
     /// backend dispatch. Populating it from `mvmctl up` flags is the
     /// next step.
-    pub bundle_pin: Option<mvm_core::plan::bundle::PlanArtifact>,
+    pub bundle_pin: Option<crate::plan::bundle::PlanArtifact>,
     /// Optional pin to an application-dependencies volume sealed by
     /// `mvm_sdk::compile::deps_audit::seal_volume`. Populated by
     /// `mvmctl up`'s deps-install path when the workload declares
@@ -145,10 +151,10 @@ pub struct SynthesisInput<'a> {
     /// User-supplied host-fs grants (`--volume` / `MVM_VOLUMES`) to bake
     /// into the signed plan + audit log (claim 1 / claim 8). Empty for
     /// the common no-volume case.
-    pub shares: Vec<mvm_core::plan::HostShareGrant>,
+    pub shares: Vec<crate::plan::HostShareGrant>,
     /// Per-destination egress redaction authored by `--redact HOST[=audit]`.
     /// Default (all-off) preserves the curated-only baseline.
-    pub redaction: mvm_core::policy::RedactionPolicy,
+    pub redaction: crate::policy::RedactionPolicy,
     /// Caller-supplied audit labels merged into the synthesized plan's
     /// `audit_labels`. They serialize inside the signed payload and are
     /// inherited by every chain-signed audit entry. The profile-derived keys
@@ -159,7 +165,7 @@ pub struct SynthesisInput<'a> {
     pub audit_labels: AuditLabels,
     /// Per-workload agent verb allow-list threaded verbatim into the plan.
     /// `None` preserves the current class/profile-gate-only behavior.
-    pub agent_verbs: Option<Vec<mvm_core::plan::VerbId>>,
+    pub agent_verbs: Option<Vec<crate::plan::VerbId>>,
 }
 
 /// Build an unsigned `ExecutionPlan` from CLI-shaped input.
@@ -167,7 +173,7 @@ pub struct SynthesisInput<'a> {
 /// Generates a fresh `plan_id` (UUIDv4) and `nonce` (128 random bits)
 /// per invocation; the validity window starts at the call site's
 /// `now()` and lasts `VALIDITY_WINDOW_MINUTES`. The caller signs the
-/// returned plan via [`mvm_core::plan::sign_plan`] before passing it to the
+/// returned plan via [`crate::plan::sign_plan`] before passing it to the
 /// supervisor.
 pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     let plan_id = PlanId(uuid::Uuid::new_v4().to_string());
@@ -284,7 +290,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     })
 }
 
-/// Generate a fresh 128-bit nonce from `OsRng`. `mvm_core::plan::Nonce`
+/// Generate a fresh 128-bit nonce from `OsRng`. `crate::plan::Nonce`
 /// wraps a 32-character lowercase hex string (i.e., 16 bytes = 128
 /// bits) — match that here so the wire format roundtrips.
 fn fresh_nonce() -> Nonce {
@@ -383,7 +389,7 @@ mod tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
+            redaction: crate::policy::RedactionPolicy::default(),
             audit_labels: Default::default(),
             agent_verbs: None,
         }
@@ -586,7 +592,7 @@ mod tests {
         inp.secret_release = SecretReleasePolicy::PlanBound;
         inp.secrets = vec![SecretBinding {
             name: "API_KEY".into(),
-            source: mvm_core::plan::SecretSource::Keystore {
+            source: crate::plan::SecretSource::Keystore {
                 address: "api-key".into(),
             },
         }];
@@ -596,7 +602,7 @@ mod tests {
 
     #[test]
     fn synthesized_plan_carries_redaction_profiles() {
-        use mvm_core::policy::{
+        use crate::policy::{
             EntropyMode, NameMode, RedactionAction, RedactionPolicy, RedactionProfile,
         };
         let mut inp = input("myvm");
@@ -676,9 +682,9 @@ mod tests {
 
         // The label survives the sign -> verify round-trip inside the signed bytes.
         let key = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
-        let signed = mvm_core::plan::sign_plan(&plan, &key, "host:test");
+        let signed = crate::plan::sign_plan(&plan, &key, "host:test");
         let recovered =
-            mvm_core::plan::verify_plan(&signed, &[("host:test", &key.verifying_key())]).unwrap();
+            crate::plan::verify_plan(&signed, &[("host:test", &key.verifying_key())]).unwrap();
         assert_eq!(recovered.audit_labels["origin.descriptor"], "blake3:abc");
     }
 }

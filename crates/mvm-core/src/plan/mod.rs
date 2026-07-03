@@ -27,6 +27,7 @@
 pub mod bundle;
 pub mod execution_plan;
 pub mod signing;
+pub mod synthesis;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod types;
@@ -45,6 +46,10 @@ pub use execution_plan::{ExecutionPlan, SCHEMA_VERSION};
 pub use signing::{
     PlanVerifyError, SignedExecutionPlan, plan_from_admitted_json, redaction_from_signed_json,
     secrets_from_signed_json, sign_plan, tenant_from_signed_json, verify_plan,
+};
+pub use synthesis::{
+    DEFAULT_AUDIT_EVENT_PREFIX, DEFAULT_INTENT, DEFAULT_POLICY_REF, DEFAULT_TENANT, SynthesisInput,
+    VALIDITY_WINDOW_MINUTES, synthesize_plan,
 };
 pub use types::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
