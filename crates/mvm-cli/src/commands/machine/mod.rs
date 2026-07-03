@@ -322,6 +322,7 @@ impl MachineRunArgs {
             dev: false,
             ack_divergence: Vec::new(),
             argv: self.argv,
+            stdin: Vec::new(),
         }
     }
 

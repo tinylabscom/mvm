@@ -46,6 +46,7 @@ pub struct ExecBuilder<'a> {
     stages: Vec<StagedFile>,
     commands: Vec<Vec<String>>,
     timeout: Option<Duration>,
+    stdin: Vec<u8>,
 }
 
 impl<'a> ExecBuilder<'a> {
@@ -55,7 +56,15 @@ impl<'a> ExecBuilder<'a> {
             stages: Vec::new(),
             commands: Vec::new(),
             timeout: None,
+            stdin: Vec::new(),
         }
+    }
+
+    /// Bytes to supply as stdin for the `Exec` command(s). Empty ⇒ no stdin
+    /// (`Exec.stdin = None`); non-empty bytes are utf8-lossy-decoded.
+    pub fn stdin_bytes(mut self, bytes: Vec<u8>) -> Self {
+        self.stdin = bytes;
+        self
     }
 
     /// Stage a file into the guest before running (mode 0644).
@@ -111,7 +120,7 @@ impl<'a> ExecBuilder<'a> {
             peak_rss_kib: None,
         };
         for argv in &self.commands {
-            last = run_exec(&mut stream, argv, self.timeout)?;
+            last = run_exec(&mut stream, argv, self.stdin.clone(), self.timeout)?;
             if last.status != 0 {
                 break;
             }
@@ -209,9 +218,31 @@ fn shell_join(argv: &[String]) -> String {
         .join(" ")
 }
 
+/// Build a `GuestRequest::Exec` from argv and optional stdin bytes.
+///
+/// Empty bytes ⇒ `stdin: None`; non-empty bytes are decoded lossy so the
+/// existing `String` wire field carries the payload without a format change.
+fn make_exec_request(
+    argv: &[String],
+    stdin_bytes: Vec<u8>,
+    timeout: Option<Duration>,
+) -> GuestRequest {
+    let stdin = if stdin_bytes.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&stdin_bytes).into_owned())
+    };
+    GuestRequest::Exec {
+        command: shell_join(argv),
+        stdin,
+        timeout_secs: timeout.map(|d| d.as_secs()),
+    }
+}
+
 fn run_exec(
     stream: &mut UnixStream,
     argv: &[String],
+    stdin_bytes: Vec<u8>,
     timeout: Option<Duration>,
 ) -> Result<ExecOutcome> {
     let start = Instant::now();
@@ -220,11 +251,7 @@ fn run_exec(
     let mut status = 0;
     call_streaming(
         stream,
-        &GuestRequest::Exec {
-            command: shell_join(argv),
-            stdin: None,
-            timeout_secs: timeout.map(|d| d.as_secs()),
-        },
+        &make_exec_request(argv, stdin_bytes, timeout),
         |ev| {
             if let GuestResponse::ExecEvent(e) = ev {
                 match e {
@@ -283,6 +310,13 @@ fn run_entrypoint(
     })
 }
 
+/// Build an `Exec` request for testing: takes argv + stdin bytes and returns
+/// the `GuestRequest` the builder would send, without opening a connection.
+#[cfg(test)]
+pub(crate) fn build_exec_request_for_test(argv: Vec<String>, stdin_bytes: Vec<u8>) -> GuestRequest {
+    make_exec_request(&argv, stdin_bytes, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +330,26 @@ mod tests {
         let stream =
             connect_to_port(&agent.socket_path().to_string_lossy(), GUEST_AGENT_PORT, 5).unwrap();
         (dir, agent, stream)
+    }
+
+    #[test]
+    fn exec_frame_carries_stdin_payload() {
+        let req = build_exec_request_for_test(vec!["/bin/cat".into()], b"STDIN-RT-42".to_vec());
+        match req {
+            mvm_guest::vsock::GuestRequest::Exec { stdin, .. } => {
+                assert_eq!(stdin.as_deref(), Some("STDIN-RT-42"));
+            }
+            other => panic!("expected Exec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_frame_empty_stdin_is_none() {
+        let req = build_exec_request_for_test(vec!["/bin/true".into()], Vec::new());
+        match req {
+            mvm_guest::vsock::GuestRequest::Exec { stdin, .. } => assert_eq!(stdin, None),
+            other => panic!("expected Exec, got {other:?}"),
+        }
     }
 
     #[test]
@@ -314,7 +368,7 @@ mod tests {
         }];
         // Stage + run on the SAME stream (Tier 1 pipelining).
         stage_files(&mut stream, &stages).unwrap();
-        let out = run_exec(&mut stream, &["echo".into(), "hi".into()], None).unwrap();
+        let out = run_exec(&mut stream, &["echo".into(), "hi".into()], Vec::new(), None).unwrap();
         assert_eq!(out.status, 0);
         assert!(out.duration >= Duration::ZERO);
     }
@@ -362,7 +416,7 @@ mod tests {
             },
         ];
         stage_files(&mut stream, &stages).unwrap();
-        let out = run_exec(&mut stream, &["true".into()], None).unwrap();
+        let out = run_exec(&mut stream, &["true".into()], Vec::new(), None).unwrap();
         assert_eq!(out.status, 0);
     }
 }

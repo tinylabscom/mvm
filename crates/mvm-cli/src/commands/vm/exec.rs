@@ -76,6 +76,12 @@ pub(in crate::commands) struct Args {
         required_unless_present = "launch_plan"
     )]
     pub argv: Vec<String>,
+    /// Internal (not a CLI flag): stdin bytes to forward into the guest `Exec`
+    /// frame. Empty ⇒ no stdin (`Exec.stdin = None`). Populated at the
+    /// dispatch site when the host stdin pipe is non-empty.
+    #[arg(skip)]
+    #[allow(dead_code)]
+    pub stdin: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -206,6 +212,11 @@ pub(in crate::commands) struct RunArgs {
     /// the admit site.
     #[arg(skip)]
     pub agent_verb: Vec<String>,
+    /// Internal (not a CLI flag): stdin bytes to forward into the guest `Exec`
+    /// frame. Empty ⇒ no stdin (`Exec.stdin = None`). Populated at the
+    /// dispatch site when the host stdin pipe is non-empty.
+    #[arg(skip)]
+    pub stdin: Vec<u8>,
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
@@ -260,6 +271,7 @@ impl RunArgs {
             timeout: self.timeout,
             launch_plan: self.launch_plan,
             argv: self.argv,
+            stdin: self.stdin,
         }
     }
 }
@@ -1382,6 +1394,7 @@ mod tests {
             prod: false,
             argv: vec!["/bin/true".to_string()],
             ack_divergence: Vec::new(),
+            stdin: Vec::new(),
         }
     }
 

@@ -551,6 +551,7 @@ mod tests {
             dry_run: false,
             argv: Vec::new(),
             ack_divergence: Vec::new(),
+            stdin: Vec::new(),
         }
     }
 
