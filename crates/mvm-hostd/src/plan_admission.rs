@@ -1,6 +1,10 @@
-//! Plan-admission pipeline used by `mvmctl up`.
+//! Host-side plan-admission pipeline (claim 8).
 //!
-//! Threads `synthesize_plan` + `host_signer` into the
+//! Lives in `mvm-hostd` beside the host signing key it uses, so every driver
+//! reaches one admission contract: `mvmctl up`/`run` today, and the
+//! `mvm-client` local backend once the boot seam wires local `run`.
+//!
+//! Threads `synthesize_plan` + the host keypair into the
 //! supervisor-equivalent admission flow:
 //!
 //! ```text
@@ -50,8 +54,10 @@ use mvm_core::plan::{
 use mvm_core::policy::PolicyBundle;
 use std::sync::Mutex;
 
-use super::host_signer::host_signer_id;
+use crate::audit::host_keypair::host_signer_id;
+use mvm_backend::AnyBackend;
 use mvm_core::plan::{SynthesisInput, synthesize_plan};
+use mvm_core::vm_backend::{VmId, VmStartConfig};
 
 pub use mvm_core::time::{Clock, SystemClock};
 
@@ -79,22 +85,15 @@ impl Default for InMemoryNonceLedger {
 
 /// Result of a successful admission. Carries everything the caller
 /// needs to hand to the backend (the plan + its id), to the audit
-/// chain (the plan again, for `AuditEntry::for_plan`), and — for
-/// downstream consumers that want the canonical envelope — the
-/// `SignedExecutionPlan` itself.
-///
-/// `signed` carries a `#[allow(dead_code)]` because the only current
-/// consumer is in-module tests proving the envelope round-trips
-/// through `verify_plan`. Cross-process consumers (a future
-/// `mvm-hostd` lift, or `mvmctl plan show` once it lands) will read
-/// the envelope verbatim. Keeping the field on the struct stabilises
-/// the surface for those callers.
+/// chain (the plan again, for `AuditEntry::for_plan`), and — for the
+/// bridge audit substrate and any cross-process consumer — the canonical
+/// `SignedExecutionPlan` envelope, which [`populate_audit_substrate`]
+/// serializes verbatim onto `VmStartConfig.plan_json`.
 #[derive(Debug)]
 pub struct AdmittedPlan {
     pub plan: ExecutionPlan,
     pub plan_id: PlanId,
     pub signer_id: String,
-    #[allow(dead_code)]
     pub signed: SignedExecutionPlan,
 }
 
@@ -143,8 +142,8 @@ pub fn admit_for_run(
     // Load or generate the host signer. load_or_init refuses
     // loose perms; that error propagates verbatim.
     let signer = match host_signer_keys_dir {
-        Some(dir) => super::host_signer::load_or_init_at(dir)?,
-        None => super::host_signer::load_or_init()?,
+        Some(dir) => crate::audit::host_keypair::load_or_init_at(dir)?,
+        None => crate::audit::host_keypair::load_or_init()?,
     };
     let signer_id = host_signer_id();
 
@@ -345,7 +344,7 @@ pub(crate) fn write_secret_file(path: &std::path::Path, body: &[u8]) -> Result<(
 /// because the producer is the only place that has the signed envelope
 /// in scope; `microvm` reads it back from disk inside the
 /// `target_os = "linux"` bridge-spawn block.
-pub(crate) fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -> Result<()> {
+pub fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -> Result<()> {
     let Some(plan_json) = cfg.plan_json.as_deref() else {
         return Ok(());
     };
@@ -393,12 +392,12 @@ fn mint_verb_grant_sidecar(
     };
 
     let keys_dir = mvm_core::config::mvm_keys_dir();
-    let signer = super::host_signer::load_or_init_at(&keys_dir)
+    let signer = crate::audit::host_keypair::load_or_init_at(&keys_dir)
         .context("load host signer for verb-grant mint")?;
-    let keystore = mvm_hostd::host_signer::keystore::Keystore::load_from_file(&signer.secret_path)
+    let keystore = crate::host_signer::keystore::Keystore::load_from_file(&signer.secret_path)
         .context("load Keystore from host-signer key file")?;
 
-    let grant = mvm_hostd::host_signer::mint_verb_grant(
+    let grant = crate::host_signer::mint_verb_grant(
         &keystore,
         vm_name,
         &plan.nonce,
@@ -435,7 +434,7 @@ fn mint_verb_grant_sidecar(
 /// It's the trust-boundary hook: no host-fs grant reaches a guest unless
 /// the signed plan admitted it (claim 1 / claim 8). The supervisor +
 /// mvmd enforcement mirror this check against the same `plan.shares`.
-pub(crate) fn enforce_admitted_shares(
+pub fn enforce_admitted_shares(
     volumes: &[mvm_core::vm_backend::VmVolume],
     plan: &ExecutionPlan,
 ) -> Result<()> {
@@ -463,6 +462,63 @@ pub(crate) fn enforce_admitted_shares(
         }
     }
     Ok(())
+}
+
+/// Inputs for [`admit_and_start`]. The `synthesis` describes the plan to admit
+/// (the signed authority) and `config` is the launch shape to boot; they come
+/// from one source in a well-formed caller, and [`enforce_admitted_shares`]
+/// fails closed if they ever disagree on volumes.
+pub struct AdmitAndStartParams<'a> {
+    pub synthesis: &'a SynthesisInput<'a>,
+    pub config: VmStartConfig,
+    pub clock: &'a dyn Clock,
+    pub ledger: &'a InMemoryNonceLedger,
+    pub host_signer_keys_dir: Option<&'a std::path::Path>,
+    pub bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
+    pub policy_bundle: Option<&'a PolicyBundle>,
+}
+
+/// Outcome of a successful admitted boot: the backend's VM id plus the
+/// `AdmittedPlan` (for the caller's audit chain / typed result).
+#[derive(Debug)]
+pub struct StartedMachine {
+    pub vm_id: VmId,
+    pub admitted: AdmittedPlan,
+}
+
+/// The single admitted-boot entrypoint every driver shares — the CLI's
+/// `mvmctl up`/`run` and the `mvm-client` local backend both reach it, so a
+/// workload can never boot on a path that skipped admission.
+///
+/// Order matters and is fail-closed: synthesize + sign + verify + validity +
+/// replay (+ bundle re-verify) run first; only then is the signed plan threaded
+/// onto the launch config and every volume checked against the admitted shares
+/// (claim 1); only then does the backend start the VM. Any earlier failure
+/// returns with **no VM created** — admission is a gate, not a formality.
+///
+/// The caller resolves the image to a `config.rootfs_path` beforehand; this
+/// function is backend-agnostic (it drives whatever `AnyBackend` it is handed,
+/// including the in-memory mock in tests).
+pub fn admit_and_start(
+    backend: &AnyBackend,
+    params: AdmitAndStartParams<'_>,
+) -> Result<StartedMachine> {
+    let admitted = admit_for_run(
+        params.synthesis,
+        params.clock,
+        params.ledger,
+        params.host_signer_keys_dir,
+        params.bundle_ctx,
+    )?;
+
+    let mut config = params.config;
+    populate_audit_substrate(&mut config, &admitted, params.policy_bundle)?;
+    enforce_admitted_shares(&config.volumes, &admitted.plan)?;
+
+    let vm_id = backend
+        .start(&config)
+        .context("backend start after signed-plan admission")?;
+    Ok(StartedMachine { vm_id, admitted })
 }
 
 #[cfg(test)]
@@ -577,7 +633,7 @@ mod tests {
         assert!(admitted.signer_id.starts_with("host:"));
         // The signed envelope must be re-verifiable with the public
         // half of the host signer.
-        let signer = super::super::host_signer::load_or_init_at(dir.path()).unwrap();
+        let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         let trusted: [(&str, &ed25519_dalek::VerifyingKey); 1] =
             [(&admitted.signer_id, &signer.verifying)];
         let recovered = mvm_core::plan::verify_plan(&admitted.signed, &trusted).unwrap();
@@ -592,7 +648,7 @@ mod tests {
         // then ask the ledger to admit twice. The second call must
         // refuse with nonce-replay.
         let plan = synthesize_plan(&fixture_input("vm1")).unwrap();
-        let signer = super::super::host_signer::load_or_init_at(dir.path()).unwrap();
+        let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         let signer_id = host_signer_id();
         let signed = sign_plan(&plan, &signer.signing, &signer_id);
         let verified =
@@ -624,7 +680,7 @@ mod tests {
         let mut plan = synthesize_plan(&fixture_input("vm1")).unwrap();
         plan.valid_from = Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap();
         plan.valid_until = Utc.with_ymd_and_hms(2000, 1, 1, 0, 10, 0).unwrap();
-        let signer = super::super::host_signer::load_or_init_at(dir.path()).unwrap();
+        let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         let signed = sign_plan(&plan, &signer.signing, &host_signer_id());
         let verified = verify_plan(&signed, &[(&host_signer_id(), &signer.verifying)]).unwrap();
         let _clock = FixedClock(now_plus_30);
@@ -646,7 +702,7 @@ mod tests {
         .unwrap();
         // The signed field is what the audit signer will hash;
         // proving it round-trips here closes the contract.
-        let signer = super::super::host_signer::load_or_init_at(dir.path()).unwrap();
+        let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         let trusted: [(&str, &ed25519_dalek::VerifyingKey); 1] =
             [(&admitted.signer_id, &signer.verifying)];
         assert!(verify_plan(&admitted.signed, &trusted).is_ok());
@@ -962,7 +1018,7 @@ mod tests {
             serde_json::from_str(&plan_json).expect("roundtrip");
         // Re-verify the envelope to get the inner ExecutionPlan and
         // confirm the plan_id matches what the producer admitted.
-        let signer = super::super::host_signer::load_or_init_at(dir.path()).unwrap();
+        let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         let trusted: [(&str, &ed25519_dalek::VerifyingKey); 1] =
             [(&admitted.signer_id, &signer.verifying)];
         let recovered =
@@ -1248,5 +1304,89 @@ mod tests {
             !dir.path().join("vms/vm-no-verbs/verb-grant.json").exists(),
             "verb-grant.json must NOT be written when agent_verbs is None"
         );
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // admit_and_start: the shared admitted-boot entrypoint
+    // ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn admit_and_start_admits_then_boots_on_mock() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = mvm_backend::AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-boot".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        };
+        let started = admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &fixture_input("vm-boot"),
+                config,
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                policy_bundle: None,
+            },
+        )
+        .expect("admit + boot");
+
+        // Admission ran (claim 8): a signed plan id under the host signer.
+        assert!(!started.admitted.plan_id.0.is_empty());
+        assert!(started.admitted.signer_id.starts_with("host:"));
+        // The backend actually started the VM and reports it running.
+        assert_eq!(started.vm_id.0, "vm-boot");
+        assert!(matches!(
+            backend.status(&started.vm_id).unwrap(),
+            mvm_core::vm_backend::VmStatus::Running
+        ));
+    }
+
+    #[test]
+    fn admit_and_start_refuses_unadmitted_volume_before_boot() {
+        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        let dir = tempfile::tempdir().unwrap();
+        let backend = mvm_backend::AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        // The synthesized plan admits no shares, but the launch config carries a
+        // volume — claim 1 must refuse before the backend ever starts.
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-badvol".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            volumes: vec![VmVolume {
+                host: "/etc".into(),
+                guest: "/data".into(),
+                read_only: true,
+                kind: VmVolumeKind::DirShare,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let err = admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &fixture_input("vm-badvol"),
+                config,
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                policy_bundle: None,
+            },
+        )
+        .expect_err("unadmitted volume must refuse");
+        assert!(
+            err.chain()
+                .any(|e| e.to_string().contains("not named in the signed")),
+            "expected admitted-shares refusal; got: {err:#}"
+        );
+        // Crucially: no VM was started (the gate fired before backend.start).
+        assert!(matches!(
+            backend.status(&VmId("vm-badvol".into())),
+            Ok(mvm_core::vm_backend::VmStatus::Stopped)
+        ));
     }
 }

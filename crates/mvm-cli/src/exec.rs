@@ -189,6 +189,10 @@ pub struct ExecRequest {
     /// `MachineRunMode::warm_pool_size` — nonzero only for throwaway auto-named
     /// transient/interactive-transient runs.
     pub warm_pool_size: u32,
+    /// Bytes to forward to the guest `Exec` frame's stdin field. Empty ⇒ no
+    /// stdin (`GuestRequest::Exec.stdin = None`). Set from piped host stdin
+    /// when the host is not a TTY; always empty for PTY / interactive modes.
+    pub stdin: Vec<u8>,
 }
 
 impl ExecRequest {
@@ -903,10 +907,15 @@ fn run_in_guest(
 
     let mut out = Vec::<u8>::new();
     let mut err = Vec::<u8>::new();
+    let stdin_str = if req.stdin.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&req.stdin).into_owned())
+    };
     let terminal = mvm_guest::vsock::send_exec_streaming(
         &mut stream,
         &wrapper,
-        None,
+        stdin_str,
         req.timeout_secs,
         |event| match event {
             mvm_guest::vsock::ExecEvent::Stdout { chunk } => {
@@ -1133,6 +1142,7 @@ pub fn dispatch_in_session(
         // Wrapper-string construction only — the session VM is already
         // running, so this never reaches a backend boot.
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+        stdin: Vec::new(),
     };
     let wrapper = build_guest_wrapper(&req, &[]);
     let transport = vsock_transport::for_vm(&vm.vm_name)?;
@@ -1330,6 +1340,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
         };
         assert_eq!(req.target_command(), "exec 'uname' '-a'");
     }
@@ -1351,6 +1362,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(script.starts_with("set -e\n"));
@@ -1380,6 +1392,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
         assert!(script.contains("mkdir -p '/g'"));
@@ -1409,6 +1422,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
         // RW mount is unqualified — no `-o ro`.
@@ -1643,6 +1657,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
         };
         assert_eq!(req.target_command(), "exec 'python' '-m' 'x'");
     }
@@ -1671,6 +1686,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
         };
         let script = build_guest_wrapper(&req, &[]);
         // Env from entrypoint exported.
@@ -1710,6 +1726,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(!script.contains("cd "));

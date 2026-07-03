@@ -866,7 +866,7 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
         .find(|b| b.name == "rootfs.ext4")
         .map(|b| b.sha256.clone());
     let tenant = super::tenant_resolution::resolve_tenant(None);
-    let ledger = super::plan_admission::InMemoryNonceLedger::new();
+    let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
         tenant: &tenant,
         vm_name: &child_vm_name,
@@ -1017,7 +1017,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         &effective_hypervisor,
     )?;
 
-    let ledger = super::plan_admission::InMemoryNonceLedger::new();
+    let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
         tenant: &tenant,
         vm_name: p.child_vm_name,
@@ -1059,7 +1059,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     };
 
     if let Some(ctx) = admission.as_ref() {
-        super::plan_admission::populate_audit_substrate(
+        mvm_hostd::plan_admission::populate_audit_substrate(
             &mut start_config,
             &ctx.admitted,
             ctx.policy_bundle.as_ref(),
