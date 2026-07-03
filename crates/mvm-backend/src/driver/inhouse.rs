@@ -133,12 +133,12 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
     };
 
     // Collect dev-only console data sockets: the spec carries one HostDials entry
-    // per pre-opened console data port (guest_port > CONSOLE_PORT_BASE). Sealed
-    // prod specs carry none (claim 15), so this vec is empty in production.
+    // per pre-opened console data port (exact members of dev_console_data_ports()).
+    // Sealed prod specs carry none, so this vec is empty in production.
     let console_data_sockets = spec
         .vsock
         .iter()
-        .filter(|p| p.guest_port > CONSOLE_PORT_BASE)
+        .filter(|p| dev_console_data_ports().any(|cp| cp == p.guest_port))
         .map(|p| ConsoleDataSocket {
             guest_port: p.guest_port,
             host_socket: p.host_uds.clone(),
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(&got, b"x");
         server.join().unwrap();
 
-        // Any other guest port is not host-dialable on this backend.
+        // Ports outside the agent port and the console data range are not host-dialable.
         assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
     }
 
