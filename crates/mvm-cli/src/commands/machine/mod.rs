@@ -1597,20 +1597,52 @@ fn create_machine(args: MachineCreateArgs) -> Result<()> {
     Ok(())
 }
 
+/// `machine ls` row: the persisted spec plus its live run status. `status` is
+/// `running` when the backend reports the VM up, else `stopped`. SDK facades
+/// read this field so `MvmClient::list_machines` reports real status instead of
+/// assuming every persisted machine is stopped.
+#[derive(serde::Serialize)]
+struct MachineListEntry<'a> {
+    #[serde(flatten)]
+    spec: &'a MachineSpec,
+    status: &'static str,
+}
+
+/// Live status label for a persisted machine, resolved through the backend.
+fn machine_status_label(name: &str) -> &'static str {
+    if machine_is_running(name) {
+        "running"
+    } else {
+        "stopped"
+    }
+}
+
 fn list_machines(args: MachineListArgs) -> Result<()> {
     let specs = list_machine_specs()?;
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&specs)?);
+        let entries: Vec<MachineListEntry<'_>> = specs
+            .iter()
+            .map(|spec| MachineListEntry {
+                spec,
+                status: machine_status_label(&spec.name),
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
     } else if specs.is_empty() {
         println!("no machines");
     } else {
-        for spec in specs {
+        for spec in &specs {
             let source = spec
                 .image
                 .as_deref()
                 .or(spec.manifest.as_deref())
                 .unwrap_or("<no source>");
-            println!("{}\t{}", spec.name, source);
+            println!(
+                "{}\t{}\t{}",
+                spec.name,
+                machine_status_label(&spec.name),
+                source
+            );
         }
     }
     Ok(())
@@ -4250,6 +4282,21 @@ ssh_agent = true
             .map(|spec| spec.name)
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn machine_list_entry_flattens_spec_and_adds_status() {
+        let spec = spec_fixture("web");
+        let entry = MachineListEntry {
+            spec: &spec,
+            status: "running",
+        };
+        let v: serde_json::Value = serde_json::to_value(&entry).expect("serialize");
+        // Spec fields are flattened to the top level (not nested under `spec`),
+        // and the live `status` label rides alongside — the shape SDK facades read.
+        assert_eq!(v["name"], "web");
+        assert_eq!(v["status"], "running");
+        assert!(v.get("spec").is_none());
     }
 
     #[test]
