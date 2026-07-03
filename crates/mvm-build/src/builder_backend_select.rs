@@ -1103,7 +1103,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "live: needs macOS-26 + working in-house builder (gated on #1401 vsock fix landing)"]
+    #[ignore = "live: needs macOS-26 + working in-house builder (gated on the in-house vsock io-thread fix landing)"]
     fn live_inhouse_builds_sleeper_flake() {
         // Manual: `mvmctl machine run --flake examples/sleeper` on macOS-26 with no
         // flags must auto-detect the in-house builder and produce artifacts.
