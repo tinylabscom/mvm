@@ -565,7 +565,7 @@ fn dispatch_update_idle_timeout(vm_name: &str, secs: u64) -> Result<(u64, u64)> 
             // The agent refused a verb the admitted plan didn't grant. Record the
             // chain-signed `verb_denied` entry (claim-12 parity) before surfacing
             // the error, so the refusal is observable and tamper-evident.
-            emit_verb_denied_audit(vm_name, &verb);
+            super::verb_audit::emit_verb_denied(vm_name, &verb);
             anyhow::bail!("guest agent denied verb {verb:?}: not in the plan's agent_verbs grant")
         }
         UpdateIdleOutcome::Unexpected { detail } => {
@@ -606,40 +606,6 @@ fn classify_update_idle_response(resp: mvm_guest::vsock::GuestResponse) -> Updat
         other => UpdateIdleOutcome::Unexpected {
             detail: format!("{other:?}"),
         },
-    }
-}
-
-/// Best-effort chain-signed `verb_denied` audit (claim-12 parity): fired when the
-/// guest agent refuses a verb the admitted plan did not grant. Loads the VM's
-/// persisted plan + host signer; a missing plan/signer or a flaky audit fs warns
-/// and skips — it never fails the caller, because the refusal already surfaces as
-/// an error and the audit is an observability record, not load-bearing.
-fn emit_verb_denied_audit(vm_name: &str, verb: &str) {
-    let plan = match super::plan_persist::read_plan(vm_name) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, vm = vm_name, verb = verb,
-                "no persisted plan; verb_denied not chain-bound");
-            return;
-        }
-    };
-    let signer = match super::host_signer::load_or_init() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "host signer unavailable; verb_denied entry skipped");
-            return;
-        }
-    };
-    let emitter = match super::audit_chain::AuditEmitter::new(signer.signing) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(error = %e, "audit emitter unavailable; verb_denied entry skipped");
-            return;
-        }
-    };
-    if let Err(e) = emitter.emit_verb_denied(&plan, verb) {
-        tracing::warn!(error = %e, vm = vm_name, verb = verb,
-            "audit emit_verb_denied failed (non-fatal)");
     }
 }
 
@@ -729,7 +695,10 @@ fn cmd_attach(args: AttachArgs) -> Result<()> {
         args.timeout.unwrap_or(30),
         Some(&id),
     )
-    .with_context(|| format!("dispatching into session {id}"))?;
+    .with_context(|| format!("dispatching into session {id}"))
+    .inspect_err(|e| {
+        super::verb_audit::audit_verb_refusal(&record.vm_name, e);
+    })?;
 
     // Bump the session's invoke counter / last-used timestamp so
     // observers (`mvmctl session info`) see the activity.
@@ -788,7 +757,9 @@ fn cmd_exec(args: ExecArgs) -> Result<()> {
         .map(|a| shell_quote(a))
         .collect::<Vec<_>>()
         .join(" ");
-    run_in_session(&id, &record, cmd_line, args.timeout)
+    run_in_session(&id, &record, cmd_line, args.timeout).inspect_err(|e| {
+        super::verb_audit::audit_verb_refusal(&record.vm_name, e);
+    })
 }
 
 fn cmd_run_code(args: RunCodeArgs) -> Result<()> {
@@ -811,7 +782,9 @@ fn cmd_run_code(args: RunCodeArgs) -> Result<()> {
     // `from foo import bar` in call 1 isn't visible in call 2. v2
     // routes through the warm-process pool's wrapper for stateful
     // eval; the wire shape stays identical.
-    dispatch_run_code(&id, &record, args.code, args.timeout)
+    dispatch_run_code(&id, &record, args.code, args.timeout).inspect_err(|e| {
+        super::verb_audit::audit_verb_refusal(&record.vm_name, e);
+    })
 }
 
 /// Send a `RunCode` request to the session's guest agent and stream
@@ -1136,13 +1109,6 @@ mod tests {
             }
             _ => panic!("expected Unexpected"),
         }
-    }
-
-    #[test]
-    fn emit_verb_denied_audit_is_best_effort_when_no_plan() {
-        // A VM with no persisted plan ⇒ the helper warns and returns without
-        // panicking (mirrors the best-effort posture of the dispatch path).
-        emit_verb_denied_audit("nonexistent-vm-for-verb-denied-test", "update-idle-timeout");
     }
 
     struct RuntimeDirGuard {

@@ -2950,6 +2950,11 @@ where
         let event = match resp {
             GuestResponse::ExecEvent(e) => e,
             GuestResponse::Error { message } => bail!("guest exec error: {message}"),
+            // Surface a grant refusal as the typed RpcError (not a stringified
+            // "unexpected variant") so the host can audit it as `verb_denied`.
+            GuestResponse::VerbNotAuthorized { verb } => {
+                return Err(RpcError::VerbNotAuthorized { verb }.into());
+            }
             other => bail!("expected ExecEvent during exec stream, got {other:?}"),
         };
         if event.is_terminal() {
@@ -6541,6 +6546,30 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert!(matches!(got[0], ExecEvent::Stderr { ref chunk } if chunk == b"e"));
         assert!(matches!(term, ExecEvent::Exit { code: 2 }));
+    }
+
+    #[test]
+    fn read_exec_stream_surfaces_verb_denied_as_typed_rpc_error() {
+        // A grant refusal arriving on the exec stream must surface as the typed
+        // RpcError::VerbNotAuthorized (downcastable) so the host can audit it as
+        // `verb_denied` — not a stringified "unexpected variant".
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let guest_handle = std::thread::spawn(move || {
+            write_frame(
+                &mut guest,
+                &GuestResponse::VerbNotAuthorized {
+                    verb: "run-code".to_string(),
+                },
+            )
+            .unwrap();
+        });
+        let err = read_exec_stream(&mut host, |_| {}).unwrap_err();
+        guest_handle.join().unwrap();
+        match err.downcast_ref::<RpcError>() {
+            Some(RpcError::VerbNotAuthorized { verb }) => assert_eq!(verb, "run-code"),
+            other => panic!("expected typed RpcError::VerbNotAuthorized, got {other:?}"),
+        }
     }
 }
 

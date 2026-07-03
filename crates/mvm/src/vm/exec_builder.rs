@@ -196,6 +196,11 @@ fn run_batch(
                 peak_rss_kib: o.peak_rss_kib,
             })
             .collect()),
+        // Surface a grant refusal as the typed RpcError so the host audits it as
+        // `verb_denied` rather than losing the verb in a stringified error.
+        GuestResponse::VerbNotAuthorized { verb } => {
+            Err(mvm_guest::vsock::RpcError::VerbNotAuthorized { verb }.into())
+        }
         other => bail!("unexpected response to ExecBatch: {:?}", other.variant()),
     }
 }
