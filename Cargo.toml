@@ -38,6 +38,7 @@ members = [
     # contract from ADR-049. mvmd consumes this crate as a library per
     # ADR-048 §"Runtime Ownership" — keep its dep closure small.
     "crates/mvm-oci",
+    "crates/mvm-ext4",
     # Plan 72 W3 — PID-1 for the libkrun builder VM. Linux-only at
     # runtime; the crate compiles on macOS / Windows as an inert
     # binary so workspace builds stay green for non-Linux contributors.
