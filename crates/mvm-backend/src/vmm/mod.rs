@@ -24,3 +24,4 @@ pub mod run;
 
 pub mod virtio;
 pub mod vsock;
+mod vsock_io;

@@ -40,9 +40,10 @@ pub(in crate::commands) struct EntrypointCall {
     /// as `machine exec --manifest`. With `attach`, this is the running VM's
     /// name instead.
     pub source: String,
-    /// Path to stdin payload, or `-` for mvmctl's own stdin. `None` ⇒ the
-    /// no-argument call payload.
-    pub stdin: Option<String>,
+    /// Bytes to pipe into the baked entrypoint's stdin. Empty ⇒ the default
+    /// no-argument payload (`[[], {}]`). Populated from host stdin at the
+    /// dispatch site when the host is not a TTY.
+    pub stdin: Vec<u8>,
     /// Wall-clock timeout for the call, in seconds.
     pub timeout: u64,
     /// vCPU count for the booted VM.
@@ -84,7 +85,11 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         // substitution env (HTTP_PROXY + placeholders) via `substitution_env`,
         // so a secret-declaring entrypoint runs with live egress substitution.
         // No transient boot, no teardown — the VM is the user's to reap.
-        let stdin_bytes = read_stdin_payload(call.stdin.as_deref())?;
+        let stdin_bytes = if call.stdin.is_empty() {
+            b"[[], {}]".to_vec()
+        } else {
+            call.stdin
+        };
         ui::info(&format!(
             "entrypoint: dispatching into running workload '{}'",
             call.source
@@ -125,7 +130,11 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
     };
 
-    let stdin_bytes = read_stdin_payload(call.stdin.as_deref())?;
+    let stdin_bytes = if call.stdin.is_empty() {
+        b"[[], {}]".to_vec()
+    } else {
+        call.stdin
+    };
 
     let lifecycle_label = if call.keep_alive {
         "warm session"
@@ -156,7 +165,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
                     move |rootfs: &std::path::Path,
                           vm_name: &str|
                           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
-                        let ledger = super::plan_admission::InMemoryNonceLedger::default();
+                        let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
                         let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
                             tenant: "local",
                             vm_name,
@@ -351,6 +360,57 @@ pub(in crate::commands) fn read_stdin_payload(spec: Option<&str>) -> Result<Vec<
     }
 }
 
+/// Host-side cap on a buffered stdin payload. Mirrors the guest runner's v1
+/// inbound cap; over-cap fails closed rather than silently truncating.
+const MAX_STDIN_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug)]
+pub(in crate::commands) enum AutoStdinError {
+    TooLarge { cap: usize },
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for AutoStdinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge { cap } => {
+                write!(f, "stdin payload exceeds the {cap}-byte limit")
+            }
+            Self::Io(e) => write!(f, "reading stdin: {e}"),
+        }
+    }
+}
+impl std::error::Error for AutoStdinError {}
+
+/// Read one buffered stdin payload, capped. A TTY on stdin is interactive input
+/// for the terminal, not a workload payload, so it yields empty and never blocks.
+fn read_auto_stdin_from<R: std::io::Read>(
+    mut reader: R,
+    is_tty: bool,
+    cap: usize,
+) -> Result<Vec<u8>, AutoStdinError> {
+    if is_tty {
+        return Ok(Vec::new());
+    }
+    // Read cap+1 so an exactly-cap payload passes and the first over-cap byte trips.
+    let mut buf = Vec::new();
+    reader
+        .by_ref()
+        .take(cap as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(AutoStdinError::Io)?;
+    if buf.len() > cap {
+        return Err(AutoStdinError::TooLarge { cap });
+    }
+    Ok(buf)
+}
+
+/// Public entry: acquire the caller's stdin payload from the real stdin fd.
+pub(in crate::commands) fn read_auto_stdin(is_tty: bool) -> anyhow::Result<Vec<u8>> {
+    read_auto_stdin_from(std::io::stdin().lock(), is_tty, MAX_STDIN_BYTES)
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
 /// Send the `RunEntrypoint` request and stream output back. Returns
 /// the wrapper's exit code, or a non-zero placeholder on agent-side
 /// errors. The placeholders reuse standard Unix conventions:
@@ -515,6 +575,39 @@ fn exit_code_for(event: &mvm_guest::vsock::EntrypointEvent) -> i32 {
             ui::warn("invoke: dispatcher returned non-terminal event");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod auto_stdin_tests {
+    use super::{AutoStdinError, read_auto_stdin_from};
+    use std::io::Cursor;
+
+    #[test]
+    fn tty_stdin_yields_empty_payload() {
+        // A terminal on stdin is interactive, not input: never block reading it.
+        let got = read_auto_stdin_from(Cursor::new(b"ignored" as &[u8]), true, 1024).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn piped_stdin_under_cap_is_read_whole() {
+        let got = read_auto_stdin_from(Cursor::new(b"STDIN-RT-42" as &[u8]), false, 1024).unwrap();
+        assert_eq!(got, b"STDIN-RT-42");
+    }
+
+    #[test]
+    fn piped_stdin_over_cap_fails_closed() {
+        let payload = vec![b'x'; 2048];
+        let err = read_auto_stdin_from(Cursor::new(&payload[..]), false, 1024).unwrap_err();
+        assert!(matches!(err, AutoStdinError::TooLarge { cap: 1024 }));
+    }
+
+    #[test]
+    fn piped_stdin_exactly_at_cap_passes() {
+        let payload = vec![b'x'; 1024];
+        let got = read_auto_stdin_from(Cursor::new(&payload[..]), false, 1024).unwrap();
+        assert_eq!(got.len(), 1024);
     }
 }
 

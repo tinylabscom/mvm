@@ -36,4 +36,5 @@ pub mod keyholder;
 /// instant its supervisor dies, closing the macOS / abnormal-death gap the
 /// spawn-side `PR_SET_PDEATHSIG` attach leaves open.
 pub mod parent_death;
+pub mod plan_admission;
 pub mod supervisor;

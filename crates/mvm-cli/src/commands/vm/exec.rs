@@ -20,9 +20,9 @@ use super::super::env::dev_vz::{ensure_default_microvm_image, ensure_workload_ke
 use super::Cli;
 use super::audit_chain::AuditEmitter;
 use super::host_signer::{PUBLIC_FILENAME, host_signer_id, load_or_init};
-use super::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
 use crate::ui;
 use mvm_core::plan::SynthesisInput;
+use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -76,6 +76,11 @@ pub(in crate::commands) struct Args {
         required_unless_present = "launch_plan"
     )]
     pub argv: Vec<String>,
+    /// Internal (not a CLI flag): stdin bytes to forward into the guest `Exec`
+    /// frame. Empty ⇒ no stdin (`Exec.stdin = None`). Populated at the
+    /// dispatch site when the host stdin pipe is non-empty.
+    #[arg(skip)]
+    pub stdin: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -206,6 +211,11 @@ pub(in crate::commands) struct RunArgs {
     /// the admit site.
     #[arg(skip)]
     pub agent_verb: Vec<String>,
+    /// Internal (not a CLI flag): stdin bytes to forward into the guest `Exec`
+    /// frame. Empty ⇒ no stdin (`Exec.stdin = None`). Populated at the
+    /// dispatch site when the host stdin pipe is non-empty.
+    #[arg(skip)]
+    pub stdin: Vec<u8>,
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
@@ -260,6 +270,7 @@ impl RunArgs {
             timeout: self.timeout,
             launch_plan: self.launch_plan,
             argv: self.argv,
+            stdin: self.stdin,
         }
     }
 }
@@ -337,7 +348,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     let admit = move |rootfs: &std::path::Path,
                       vm_name: &str|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
-        let ledger = super::plan_admission::InMemoryNonceLedger::default();
+        let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
             tenant: "local",
             vm_name,
@@ -692,6 +703,7 @@ fn build_exec_request(
         pty: args.pty,
         network_policy,
         warm_pool_size: args.warm_pool_size,
+        stdin: args.stdin,
     })
 }
 
@@ -1382,6 +1394,7 @@ mod tests {
             prod: false,
             argv: vec!["/bin/true".to_string()],
             ack_divergence: Vec::new(),
+            stdin: Vec::new(),
         }
     }
 

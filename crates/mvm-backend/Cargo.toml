@@ -57,6 +57,7 @@ mvm-guest.workspace = true
 # which this crate already depends on non-optionally — so no new dep.
 mvm-build = { workspace = true, features = ["builder-vm"] }
 libkrun-sys.workspace = true
+mio.workspace = true
 # Vz backend foundation crate (SupervisorConfig types, supervisor-binary
 # path resolution). Pure data + helpers; no Swift dep.
 # Folded in with the former mvm-base crate: the base substrate's ui
