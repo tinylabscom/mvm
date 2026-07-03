@@ -47,8 +47,8 @@ pub(in crate::commands) struct Cli {
     /// Override which hypervisor drives the builder VM.
     /// Highest priority — beats `MVM_BUILDER_BACKEND`
     /// env and the platform-default auto-detect (macOS 26+ Apple
-    /// Silicon → vz; everywhere else → libkrun).
-    #[arg(long, global = true, value_parser = ["libkrun", "vz", "qemu"])]
+    /// Silicon → inhouse; everywhere else → libkrun).
+    #[arg(long, global = true, value_parser = ["libkrun", "vz", "qemu", "inhouse"])]
     pub builder: Option<String>,
 
     /// Where the builder VM's kernel comes from when its image is
@@ -196,6 +196,21 @@ pub fn run() -> Result<()> {
     if let Some(ref backend) = cli.builder {
         unsafe { std::env::set_var("MVM_BUILDER_BACKEND", backend) };
     }
+
+    // Wire the in-house HVF builder constructor so that
+    // `mvm_build::builder_backend_select` can create it when the
+    // resolved choice is `BuilderBackendChoice::InHouse`. This is a
+    // one-time registration at startup; `mvm-build` cannot reach
+    // `mvm-backend` or `mvm-cli` directly (dependency direction), so
+    // the CLI bridges the gap here.
+    #[cfg(feature = "builder-vm")]
+    mvm_build::builder_backend_select::register_inhouse_builder(Box::new(|| {
+        let (kernel, rootfs) =
+            crate::commands::build::inhouse_builder_image::resolve_inhouse_builder_image()?;
+        Ok(Box::new(
+            mvm_backend::builder_runner::inhouse_builder::InHouseBuilderVm::new(kernel, rootfs),
+        ) as Box<dyn mvm_build::builder_vm::BuilderVm>)
+    }));
 
     // Kernel-acquisition override for the builder VM image bootstrap.
     // Read by `resolve_kernel_source()` in the Stage 0 path. Same

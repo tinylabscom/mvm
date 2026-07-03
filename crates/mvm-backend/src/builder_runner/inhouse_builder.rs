@@ -79,6 +79,13 @@ fn unique_job_id() -> String {
     format!("{}-{nanos}", std::process::id())
 }
 
+/// Boot / disk-transport / power-off failures are VMM-level (the builder VM
+/// could not run the build), so the auto-detect fallback retries the next
+/// backend rather than surfacing a false build error.
+fn map_runner_failure(detail: String) -> BuilderVmError {
+    BuilderVmError::InHouseVmmFailed { detail }
+}
+
 impl BuilderVm for InHouseBuilderVm {
     fn run_build(
         &self,
@@ -128,9 +135,9 @@ impl BuilderVm for InHouseBuilderVm {
                 vcpus: self.vcpus,
                 memory_mib: self.memory_mib,
             })
-            .map_err(|e| BuilderVmError::ExtractionFailed(format!("in-house builder run: {e}")))?;
+            .map_err(|e| map_runner_failure(format!("in-house builder run: {e}")))?;
         if !outcome.stopped {
-            return Err(BuilderVmError::ExtractionFailed(
+            return Err(map_runner_failure(
                 "in-house builder VM did not power off within the deadline".into(),
             ));
         }
@@ -176,5 +183,11 @@ mod tests {
         let b = InHouseBuilderVm::new("/k".into(), "/r".into()).with_resources(2, 2048);
         assert_eq!(b.vcpus, 2);
         assert_eq!(b.memory_mib, 2048);
+    }
+
+    #[test]
+    fn runner_failure_maps_to_vmm_level_error() {
+        let e = map_runner_failure("in-house builder VM did not power off".into());
+        assert!(matches!(e, BuilderVmError::InHouseVmmFailed { .. }));
     }
 }

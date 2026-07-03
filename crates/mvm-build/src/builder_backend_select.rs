@@ -1,32 +1,28 @@
 //! Builder-runtime backend selection.
 //!
-//! Picks between [`libkrun_builder::LibkrunBuilderVm`] and
-//! [`vz_builder::VzBuilderVm`]. Returns `Box<dyn BuilderVm>` so
-//! callers do not need to switch on the concrete type — both drivers
-//! implement [`builder_vm::BuilderVm`] with byte-identical artifact
-//! contracts (`finalize_flake_job` / `finalize_install_job` produce the
-//! same [`builder_vm::BuilderArtifacts`] shape regardless of which
-//! hypervisor booted the guest).
+//! Picks the right [`BuilderVm`](crate::builder_vm::BuilderVm) implementation
+//! for the current host. Returns `Box<dyn BuilderVm>` so callers do not need
+//! to switch on the concrete type — all drivers implement the trait with
+//! byte-identical artifact contracts (`finalize_flake_job` /
+//! `finalize_install_job` produce the same
+//! [`BuilderArtifacts`](crate::builder_vm::BuilderArtifacts) shape).
 //!
 //! ## Selection priority
 //!
-//! 1. **CLI flag** (`--builder <libkrun|vz>`, plumbed in by callers as
-//!    a typed `Option<BuilderBackendChoice>`) — highest priority.
-//! 2. **Env var** `MVM_BUILDER_BACKEND` — `vz` / `libkrun`,
-//!    case-insensitive, surrounding whitespace trimmed.
+//! 1. **CLI flag** (`--builder <libkrun|vz|inhouse|qemu>`, plumbed in by
+//!    callers as a typed `Option<BuilderBackendChoice>`) — highest priority.
+//! 2. **Env var** `MVM_BUILDER_BACKEND` — `libkrun` / `vz` / `inhouse` /
+//!    `qemu`, case-insensitive, surrounding whitespace trimmed.
 //! 3. **Auto-detect** by host platform when neither override is set:
-//!    macOS 26+ Apple Silicon → Vz; everywhere else → libkrun.
+//!    macOS 26+ Apple Silicon → in-house HVF builder; everywhere else →
+//!    libkrun.
 //!
 //! An unrecognised env value (typo, removed backend) falls through to
 //! auto-detect with a `tracing::warn!` so the operator sees the
 //! problem without aborting the build. Empty / unset env is treated
 //! the same as "no override."
-//!
-//! Auto-detect mirrors the runtime backend selection's Apple Container
-//! tier: macOS 26+ on Apple Silicon is the deployment target Apple
-//! ships first-class virtualization for, so the *builder* defaults
-//! match the *runtime* default there. Older macOS and Linux contributors
-//! keep libkrun as the cross-platform path they were already using.
+
+use std::sync::OnceLock;
 
 use crate::builder_health;
 use crate::builder_vm::{BuilderVm, BuilderVmError};
@@ -34,6 +30,19 @@ use crate::libkrun_builder::LibkrunBuilderVm;
 use crate::qemu_builder::QemuBuilderVm;
 use crate::vz_builder::VzBuilderVm;
 use mvm_core::platform::{Platform, current};
+
+/// Constructor for the in-house builder, registered by the CLI (which can name
+/// `InHouseBuilderVm` and resolve its image). `mvm-build` sits below
+/// `mvm-backend`, so it cannot construct the in-house builder itself.
+pub type InHouseBuilderCtor =
+    Box<dyn Fn() -> Result<Box<dyn BuilderVm>, BuilderVmError> + Send + Sync>;
+
+static INHOUSE_CTOR: OnceLock<InHouseBuilderCtor> = OnceLock::new();
+
+/// Register the in-house builder constructor (first registration wins).
+pub fn register_inhouse_builder(ctor: InHouseBuilderCtor) {
+    let _ = INHOUSE_CTOR.set(ctor);
+}
 
 /// Env-var name the dispatch consults. Surfaced as a constant so
 /// `mvmctl doctor` can reference it without re-deriving the string.
@@ -66,6 +75,10 @@ pub enum BuilderBackendChoice {
     /// `MVM_BUILDER_BACKEND=qemu` / `--builder qemu`;
     /// auto-detect never picks it (the default-flip is evidence-gated).
     Qemu,
+    /// In-house HVF builder VM (the destination macOS backend). The
+    /// auto-detected default on macOS-26 Apple Silicon; opt-in elsewhere via
+    /// `MVM_BUILDER_BACKEND=inhouse` / `--builder inhouse`.
+    InHouse,
 }
 
 impl BuilderBackendChoice {
@@ -75,6 +88,7 @@ impl BuilderBackendChoice {
             BuilderBackendChoice::Libkrun => "libkrun",
             BuilderBackendChoice::Vz => "vz",
             BuilderBackendChoice::Qemu => "qemu",
+            BuilderBackendChoice::InHouse => "inhouse",
         }
     }
 }
@@ -84,13 +98,10 @@ impl BuilderBackendChoice {
 /// — they don't have to spoof the live OS version or the
 /// compile-time `cfg!(target_arch)` macro.
 ///
-/// Decision: macOS 26+ Apple Silicon → Vz; everything else → libkrun.
-/// This mirrors the runtime backend tier — Apple ships first-class
-/// virtualization for that target, and the *builder* defaults match
-/// the *runtime* default there.
+/// Decision: macOS 26+ Apple Silicon → in-house HVF builder; everything else → libkrun.
 pub fn auto_detect_default_for(is_macos_26_apple_silicon: bool) -> BuilderBackendChoice {
     if is_macos_26_apple_silicon {
-        BuilderBackendChoice::Vz
+        BuilderBackendChoice::InHouse
     } else {
         BuilderBackendChoice::Libkrun
     }
@@ -122,6 +133,7 @@ pub fn resolve_env_override() -> Option<BuilderBackendChoice> {
         "libkrun" => Some(BuilderBackendChoice::Libkrun),
         "vz" => Some(BuilderBackendChoice::Vz),
         "qemu" => Some(BuilderBackendChoice::Qemu),
+        "inhouse" => Some(BuilderBackendChoice::InHouse),
         other => {
             tracing::warn!(
                 value = %other,
@@ -165,6 +177,10 @@ pub fn resolve_builder_backend() -> Box<dyn BuilderVm> {
 
 /// As [`resolve_builder_backend`] but accepts an explicit CLI flag
 /// override at the highest priority. Used by CLI dispatch.
+///
+/// Returns the concrete builder for all backends except `InHouse`, which
+/// requires a registered constructor. Callers that may receive `InHouse`
+/// should use [`try_resolve_builder_backend_with_override`] instead.
 pub fn resolve_builder_backend_with_override(
     flag: Option<BuilderBackendChoice>,
 ) -> Box<dyn BuilderVm> {
@@ -172,17 +188,48 @@ pub fn resolve_builder_backend_with_override(
         BuilderBackendChoice::Libkrun => Box::new(LibkrunBuilderVm::default()),
         BuilderBackendChoice::Vz => Box::new(VzBuilderVm::new()),
         BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
+        BuilderBackendChoice::InHouse => {
+            // Delegate to the registered constructor; panic if not registered
+            // (only reachable when the CLI has not called register_inhouse_builder,
+            // which is a programming error at startup).
+            INHOUSE_CTOR.get().expect(
+                "in-house builder constructor not registered — \
+                     call register_inhouse_builder at CLI startup before \
+                     resolving an InHouse backend via the infallible path",
+            )()
+            .expect("registered in-house builder constructor failed")
+        }
+    }
+}
+
+/// As [`resolve_builder_backend_with_override`] but fallible — the in-house arm
+/// depends on a registered constructor.
+pub fn try_resolve_builder_backend_with_override(
+    flag: Option<BuilderBackendChoice>,
+) -> Result<Box<dyn BuilderVm>, BuilderVmError> {
+    match resolve_choice_with_override(flag) {
+        BuilderBackendChoice::Libkrun => Ok(Box::new(LibkrunBuilderVm::default())),
+        BuilderBackendChoice::Vz => Ok(Box::new(VzBuilderVm::new())),
+        BuilderBackendChoice::Qemu => Ok(Box::new(QemuBuilderVm::new())),
+        BuilderBackendChoice::InHouse => match INHOUSE_CTOR.get() {
+            Some(ctor) => ctor(),
+            None => Err(BuilderVmError::VmmUnavailable {
+                requested: "inhouse".into(),
+                reason: "in-house builder constructor not registered (CLI startup did not run)"
+                    .into(),
+            }),
+        },
     }
 }
 
 /// Builder driver for the Stage 0 bootstrap.
 ///
-/// Stage 0 is implemented for libkrun and QEMU; Vz and Firecracker
+/// Stage 0 is implemented for libkrun and QEMU; in-house, Vz, and Firecracker
 /// Stage 0 are still fail-closed gaps. So this dispatch deliberately differs
 /// from [`resolve_builder_backend`]: an explicit `qemu` choice uses QEMU, but
-/// everything else — including the Vz auto-detect default on macOS-26+ — falls
-/// back to libkrun, preserving the long-standing "Stage 0 is libkrun even
-/// on Vz-default hosts" invariant rather than hitting the Vz gap.
+/// everything else — including the in-house auto-detect default on macOS-26+ —
+/// falls back to libkrun, preserving the "Stage 0 is libkrun even on
+/// in-house-default hosts" invariant rather than hitting the gap.
 /// `verbose` streams the libkrun console; the QEMU path always logs to
 /// `console.log`.
 pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
@@ -191,9 +238,9 @@ pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
 
 /// Stage 0 driver for an explicit `choice` — used by the auto-fallback loop to
 /// construct the next backend to try. QEMU when chosen; libkrun for everything
-/// else (Vz Stage 0 is a gap, and the "Stage 0 is libkrun even on Vz-default
-/// hosts" invariant holds — and the Linux fallback order only ever yields
-/// libkrun→qemu, never Vz).
+/// else (in-house and Vz Stage 0 are gaps, and the "Stage 0 is libkrun even on
+/// in-house-default hosts" invariant holds — the Linux fallback order only ever
+/// yields libkrun→qemu, never in-house or Vz).
 pub fn resolve_stage0_backend_for_choice(
     choice: BuilderBackendChoice,
     verbose: bool,
@@ -216,7 +263,9 @@ pub fn resolve_stage0_backend_for_choice(
 pub fn is_builder_vm_level_failure(e: &BuilderVmError) -> bool {
     matches!(
         e,
-        BuilderVmError::SupervisorExited { .. } | BuilderVmError::LibkrunUnavailable(_)
+        BuilderVmError::SupervisorExited { .. }
+            | BuilderVmError::LibkrunUnavailable(_)
+            | BuilderVmError::InHouseVmmFailed { .. }
     )
 }
 
@@ -254,6 +303,9 @@ pub fn builder_attempt_order(
     }
     match selected {
         BuilderBackendChoice::Vz => vec![BuilderBackendChoice::Vz, BuilderBackendChoice::Libkrun],
+        BuilderBackendChoice::InHouse => {
+            vec![BuilderBackendChoice::InHouse, BuilderBackendChoice::Libkrun]
+        }
         BuilderBackendChoice::Libkrun if is_linux_native => {
             if libkrun_unhealthy {
                 vec![BuilderBackendChoice::Qemu]
@@ -478,8 +530,8 @@ mod tests {
     // ── Auto-detect (pure, hermetic — no env / OS / arch sensitivity) ──
 
     #[test]
-    fn auto_detect_default_for_macos_26_apple_silicon_picks_vz() {
-        assert_eq!(auto_detect_default_for(true), BuilderBackendChoice::Vz);
+    fn auto_detect_default_for_macos_26_apple_silicon_picks_inhouse() {
+        assert_eq!(auto_detect_default_for(true), BuilderBackendChoice::InHouse);
     }
 
     #[test]
@@ -954,5 +1006,106 @@ mod tests {
         // single visible test failure rather than a silent doctor
         // / dispatch divergence.
         assert_eq!(MVM_LINUX_BUILDER_VM_ENV, "MVM_LINUX_BUILDER_VM");
+    }
+
+    // ── InHouse variant ──────────────────────────────────────────
+
+    #[test]
+    fn resolve_env_override_inhouse() {
+        with_env(Some("inhouse"), || {
+            assert_eq!(resolve_env_override(), Some(BuilderBackendChoice::InHouse));
+        });
+    }
+
+    #[test]
+    fn resolve_env_override_inhouse_case_insensitive_trimmed() {
+        with_env(Some("  InHouse  "), || {
+            assert_eq!(resolve_env_override(), Some(BuilderBackendChoice::InHouse));
+        });
+    }
+
+    #[test]
+    fn backend_choice_name_inhouse() {
+        assert_eq!(BuilderBackendChoice::InHouse.name(), "inhouse");
+    }
+
+    // ── InHouse attempt order ─────────────────────────────────────
+
+    #[test]
+    fn attempt_order_inhouse_auto_falls_back_to_libkrun_no_vz() {
+        use BuilderBackendChoice::*;
+        assert_eq!(
+            builder_attempt_order(InHouse, false, false, false),
+            vec![InHouse, Libkrun]
+        );
+        assert_eq!(
+            builder_attempt_order(InHouse, false, true, false),
+            vec![InHouse, Libkrun]
+        );
+        // Explicit → single attempt, no fallback.
+        assert_eq!(
+            builder_attempt_order(InHouse, true, false, false),
+            vec![InHouse]
+        );
+    }
+
+    #[test]
+    fn inhouse_boot_failure_is_vmm_level_so_fallback_fires() {
+        // The variant InHouseBuilderVm::run_build returns for a boot/power-off
+        // failure must be classified VMM-level so the auto path retries libkrun.
+        assert!(is_builder_vm_level_failure(
+            &BuilderVmError::InHouseVmmFailed {
+                detail: "boot failed".into(),
+            }
+        ));
+    }
+
+    // ── Registration hook ─────────────────────────────────────────
+
+    #[test]
+    fn inhouse_uses_registered_ctor() {
+        // Registered ctor returns a stub; resolution routes InHouse to it.
+        register_inhouse_builder(Box::new(|| Ok(Box::new(crate::builder_vm::StubBuilderVm))));
+        let _b = try_resolve_builder_backend_with_override(Some(BuilderBackendChoice::InHouse))
+            .expect("registered ctor constructs a builder");
+    }
+
+    // ── Fallback safety: in-house fails → libkrun succeeds ─────────
+
+    #[test]
+    fn auto_inhouse_failure_falls_back_to_libkrun_and_succeeds() {
+        use std::cell::RefCell;
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
+        let calls = RefCell::new(Vec::new());
+        // Drive the order directly (host-agnostic): inhouse fails VMM-level, libkrun ok.
+        let order = builder_attempt_order(BuilderBackendChoice::InHouse, false, false, false);
+        assert_eq!(
+            order,
+            vec![BuilderBackendChoice::InHouse, BuilderBackendChoice::Libkrun]
+        );
+        let result = run_with_builder_fallback(BuilderBackendChoice::InHouse, false, |c| {
+            calls.borrow_mut().push(c);
+            match c {
+                BuilderBackendChoice::Libkrun => Ok(()),
+                _ => Err(BuilderVmError::SupervisorExited {
+                    exit_code: 1,
+                    vm_state_dir: "/x".into(),
+                }),
+            }
+        });
+        assert!(result.is_ok());
+        assert_eq!(
+            *calls.borrow(),
+            vec![BuilderBackendChoice::InHouse, BuilderBackendChoice::Libkrun]
+        );
+    }
+
+    #[test]
+    #[ignore = "live: needs macOS-26 + working in-house builder (gated on the in-house vsock io-thread fix landing)"]
+    fn live_inhouse_builds_sleeper_flake() {
+        // Manual: `mvmctl machine run --flake examples/sleeper` on macOS-26 with no
+        // flags must auto-detect the in-house builder and produce artifacts.
     }
 }
