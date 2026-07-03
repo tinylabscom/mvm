@@ -1,9 +1,12 @@
 //! A subprocess-backed `MvmClient`: the SDK drives machine lifecycle through the
 //! `mvmctl machine` CLI, behind the shared facade trait. The process boundary is
 //! deliberate — linking the in-process backend here would form a dependency
-//! cycle (sdk -> mvm-client[local] -> mvm-backend -> mvm-build -> sdk). `run`
-//! waits on the admitted-boot library seam so it never boots a workload that
-//! skipped signed-plan admission.
+//! cycle (sdk -> mvm-client[local] -> mvm-backend -> mvm-build -> sdk).
+//!
+//! `run` shells `mvmctl machine run --up-json`, which performs the full OCI
+//! pull + rootfs materialize + signed-plan admission (claim 8) + boot and prints
+//! the vm_id envelope this facade parses. The facade never re-implements (or
+//! bypasses) admission — the CLI is the one admitted-boot path.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -62,6 +65,64 @@ fn exec_args(id: &MachineId, command: Vec<String>) -> Result<Vec<String>> {
         .exec(command)
         .machine_args()
         .map_err(machine_err)
+}
+
+/// Build the argv for a persistent, admitted boot: `machine run --image … --name …
+/// --up-json`. `--up-json` makes the run detached + persistent (so the machine is
+/// afterward listable/stoppable) and prints the vm_id envelope. This is a
+/// facade-internal invocation — not one of the cross-language `machine` verbs the
+/// conformance harness pins — so it is built here rather than via a shared builder.
+fn run_args(spec: &MachineSpec) -> Result<Vec<String>> {
+    if spec.name.is_empty() {
+        return Err(MvmError::InvalidSpec {
+            reason: "name must not be empty".into(),
+        });
+    }
+    if spec.image.is_empty() {
+        return Err(MvmError::InvalidSpec {
+            reason: "image must not be empty".into(),
+        });
+    }
+    let mut args = vec![
+        "run".to_string(),
+        "--image".to_string(),
+        spec.image.clone(),
+        "--name".to_string(),
+        spec.name.clone(),
+        "--cpus".to_string(),
+        spec.cpus.to_string(),
+        "--memory".to_string(),
+        format!("{}M", spec.memory_mib),
+    ];
+    for (k, v) in &spec.env {
+        args.push("--env".to_string());
+        args.push(format!("{k}={v}"));
+    }
+    args.push("--up-json".to_string());
+    Ok(args)
+}
+
+/// The `machine run --up-json` boot envelope. The CLI prints it as the sole
+/// stdout line once the machine has booted; only `vm_id` is load-bearing here.
+#[derive(serde::Deserialize)]
+struct UpJsonEnvelope {
+    vm_id: String,
+}
+
+fn parse_up_json(bytes: &[u8]) -> Result<MachineId> {
+    // Defensive: take the last non-empty stdout line, so any leading chatter a
+    // future CLI build might emit doesn't break the parse.
+    let text = String::from_utf8_lossy(bytes);
+    let line = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let envelope: UpJsonEnvelope = serde_json::from_str(line).map_err(|e| MvmError::Backend {
+        reason: format!("parsing `machine run --up-json` envelope: {e}"),
+    })?;
+    Ok(MachineId(envelope.vm_id))
 }
 
 /// Drives machine lifecycle by shelling `mvmctl machine`. Construct with
@@ -172,10 +233,16 @@ impl MvmClient for SubprocessBackend {
         Ok(machines.into_iter().filter(|m| filter.matches(m)).collect())
     }
 
-    async fn run_machine(&self, _spec: MachineSpec) -> Result<MachineState> {
-        Err(MvmError::Backend {
-            reason: "local run requires the admitted-boot library seam (signed-plan admission)"
-                .into(),
+    async fn run_machine(&self, spec: MachineSpec) -> Result<MachineState> {
+        // `machine run` does the full OCI pull + rootfs materialize + signed-plan
+        // admission (claim 8) + boot; `--up-json` boots it detached and prints the
+        // vm_id envelope. Shelling it keeps the CLI as the one admitted-boot path.
+        let stdout = self.run_cli(&run_args(&spec)?)?;
+        let id = parse_up_json(&stdout)?;
+        Ok(MachineState {
+            name: id.0.clone(),
+            id,
+            status: MachineStatus::Running,
         })
     }
 
@@ -239,20 +306,105 @@ mod tests {
         assert_eq!(status_from_label(None), MachineStatus::Stopped);
     }
 
-    #[tokio::test]
-    async fn run_refuses_pending_admitted_boot() {
-        let be = SubprocessBackend::new("mvmctl");
+    #[test]
+    fn run_args_builds_persistent_up_json_invocation() {
         let spec = MachineSpec {
-            name: "w".into(),
-            image: "i".into(),
+            name: "web".into(),
+            image: "alpine:latest".into(),
+            cpus: 2,
+            memory_mib: 512,
+            env: vec![("MODE".into(), "test".into())],
+        };
+        assert_eq!(
+            run_args(&spec).unwrap(),
+            vec![
+                "run",
+                "--image",
+                "alpine:latest",
+                "--name",
+                "web",
+                "--cpus",
+                "2",
+                "--memory",
+                "512M",
+                "--env",
+                "MODE=test",
+                "--up-json",
+            ]
+        );
+    }
+
+    #[test]
+    fn run_args_rejects_empty_name_and_image() {
+        let base = MachineSpec {
+            name: "web".into(),
+            image: "alpine".into(),
             cpus: 1,
             memory_mib: 64,
             env: vec![],
         };
         assert!(matches!(
-            be.run_machine(spec).await,
+            run_args(&MachineSpec {
+                name: String::new(),
+                ..base.clone()
+            }),
+            Err(MvmError::InvalidSpec { .. })
+        ));
+        assert!(matches!(
+            run_args(&MachineSpec {
+                image: String::new(),
+                ..base
+            }),
+            Err(MvmError::InvalidSpec { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_up_json_extracts_vm_id_ignoring_leading_lines() {
+        let out = b"some progress chatter\n{\"schema_version\":1,\"vm_id\":\"web\",\"build_mode\":\"prod\"}\n";
+        assert_eq!(parse_up_json(out).unwrap(), MachineId("web".into()));
+    }
+
+    #[test]
+    fn parse_up_json_surfaces_malformed_envelope() {
+        assert!(matches!(
+            parse_up_json(b"not json"),
             Err(MvmError::Backend { .. })
         ));
+    }
+
+    /// End-to-end shell path: a fake `mvmctl` that prints the boot envelope makes
+    /// `run_machine` return a Running machine — proving the argv + parse + state
+    /// mapping wire together (the real boot is the CLI's own tested concern).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_boots_via_fake_mvmctl_and_returns_running() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-mvmctl");
+        let mut f = std::fs::File::create(&script).unwrap();
+        writeln!(
+            f,
+            "#!/bin/sh\necho '{{\"schema_version\":1,\"vm_id\":\"web\",\"build_mode\":\"prod\"}}'"
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let be = SubprocessBackend::new(&script);
+        let state = be
+            .run_machine(MachineSpec {
+                name: "web".into(),
+                image: "alpine:latest".into(),
+                cpus: 1,
+                memory_mib: 128,
+                env: vec![],
+            })
+            .await
+            .expect("run boots");
+        assert_eq!(state.id, MachineId("web".into()));
+        assert_eq!(state.name, "web");
+        assert_eq!(state.status, MachineStatus::Running);
     }
 
     /// Read a shared machine-verb fixture (mirrors the conformance harness).
