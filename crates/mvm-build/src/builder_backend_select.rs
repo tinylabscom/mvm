@@ -1069,4 +1069,43 @@ mod tests {
         let _b = try_resolve_builder_backend_with_override(Some(BuilderBackendChoice::InHouse))
             .expect("registered ctor constructs a builder");
     }
+
+    // ── Fallback safety: in-house fails → libkrun succeeds ─────────
+
+    #[test]
+    fn auto_inhouse_failure_falls_back_to_libkrun_and_succeeds() {
+        use std::cell::RefCell;
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
+        let calls = RefCell::new(Vec::new());
+        // Drive the order directly (host-agnostic): inhouse fails VMM-level, libkrun ok.
+        let order = builder_attempt_order(BuilderBackendChoice::InHouse, false, false, false);
+        assert_eq!(
+            order,
+            vec![BuilderBackendChoice::InHouse, BuilderBackendChoice::Libkrun]
+        );
+        let result = run_with_builder_fallback(BuilderBackendChoice::InHouse, false, |c| {
+            calls.borrow_mut().push(c);
+            match c {
+                BuilderBackendChoice::Libkrun => Ok(()),
+                _ => Err(BuilderVmError::SupervisorExited {
+                    exit_code: 1,
+                    vm_state_dir: "/x".into(),
+                }),
+            }
+        });
+        assert!(result.is_ok());
+        assert_eq!(
+            *calls.borrow(),
+            vec![BuilderBackendChoice::InHouse, BuilderBackendChoice::Libkrun]
+        );
+    }
+
+    #[test]
+    #[ignore = "live: needs macOS-26 + working in-house builder (gated on #1401 vsock fix landing)"]
+    fn live_inhouse_builds_sleeper_flake() {
+        // Manual: `mvmctl machine run --flake examples/sleeper` on macOS-26 with no
+        // flags must auto-detect the in-house builder and produce artifacts.
+    }
 }
