@@ -24,10 +24,6 @@ use crate::host_binaries::extract::ensure_extracted_for_boot;
 /// Derive a deterministic cache key from the SHA-256 digests of the three
 /// inputs that determine the baked image's content. Pure: reads files, never
 /// boots a VM.
-///
-/// `allow(dead_code)`: called from `resolve_inhouse_builder_image` and its
-/// unit tests; the outer function's call site is wired in Dispatch 4.
-#[allow(dead_code)]
 fn inhouse_image_cache_key(vmlinux: &Path, rootfs: &Path, host_init: &Path) -> String {
     let mut h = Sha256::new();
     for p in [vmlinux, rootfs, host_init] {
@@ -37,10 +33,6 @@ fn inhouse_image_cache_key(vmlinux: &Path, rootfs: &Path, host_init: &Path) -> S
 }
 
 /// Return `true` when a previously baked image pair is present in `out_dir`.
-///
-/// `allow(dead_code)`: called from `resolve_inhouse_builder_image`; the outer
-/// function's call site lands in Dispatch 4.
-#[allow(dead_code)]
 fn is_cached(out_dir: &Path) -> bool {
     out_dir.join("Image").is_file() && out_dir.join("rootfs.ext4").is_file()
 }
@@ -56,10 +48,6 @@ fn is_cached(out_dir: &Path) -> bool {
 /// On cache hit the existing pair is returned without rebaking.
 /// On any VMM-level failure returns `BuilderVmError::InHouseVmmFailed` so the
 /// builder auto-detect fallback can retry libkrun.
-///
-/// `allow(dead_code)`: the call site (registering the in-house builder hook)
-/// lands in Dispatch 4; this function is the stable public surface it targets.
-#[allow(dead_code)]
 pub fn resolve_inhouse_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmError> {
     let arch = std::env::consts::ARCH;
     let arch_dir = builder_vm_cache_dir().join(arch);

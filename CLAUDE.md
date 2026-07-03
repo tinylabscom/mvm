@@ -44,28 +44,29 @@ cargo install cargo-zigbuild
 End-users running a downloaded mvmctl don't need either tool — the
 binaries are already embedded.
 
-**macOS 26+ Apple Silicon** users can skip the `slp/krun/*` Homebrew trio when running with the Vz builder backend (the auto-detect default on that tier — see "Builder backend selection" below). Apple Virtualization.framework ships with the OS and needs no separate library install. The Homebrew trio is still required if you explicitly opt back into libkrun via `--builder libkrun` or `MVM_BUILDER_BACKEND=libkrun`.
+**macOS 26+ Apple Silicon** users need no Homebrew prerequisites for the in-house HVF builder (the auto-detect default on that tier — see "Builder backend selection" below). The `slp/krun/*` Homebrew trio is only required if you explicitly opt into libkrun via `--builder libkrun` or `MVM_BUILDER_BACKEND=libkrun`.
 
 ## Builder backend selection (Plan 98)
 
-The builder VM (the Linux guest that runs `nix build` inside `mvmctl build image` / `mvmctl up` / `mvmctl dev`) picks between two host VMMs:
+The builder VM (the Linux guest that runs `nix build` inside `mvmctl build image` / `mvmctl up` / `mvmctl dev`) picks between three host VMMs:
 
-- **libkrun** — third-party in-process VMM via the Homebrew trio above. Default on Linux + macOS 13-25. Works everywhere mvm runs.
-- **Vz** — Apple Virtualization.framework. Default on macOS 26+ Apple Silicon; the single AVF backend (the in-process `apple_container` path was folded into it in Plan 177 Phase 2). macOS-only.
+- **inhouse** — in-house HVF builder (Hypervisor.framework, no Homebrew deps). Default on macOS 26+ Apple Silicon. macOS-only.
+- **libkrun** — third-party in-process VMM via the `slp/krun/*` Homebrew trio. Default on Linux and macOS 13-25. Works everywhere mvm runs.
+- **Vz** — Apple Virtualization.framework. Deprecated; opt-in only via `--builder vz`. macOS-only.
 
 Selection priority (highest first):
 
-1. `--builder <libkrun|vz>` global CLI flag.
-2. `MVM_BUILDER_BACKEND=libkrun|vz` env var (case-insensitive, whitespace-trimmed; unrecognised values log a warning and fall through to auto-detect).
-3. Auto-detect: macOS 26+ Apple Silicon → Vz; everywhere else → libkrun.
+1. `--builder <libkrun|vz|qemu|inhouse>` global CLI flag.
+2. `MVM_BUILDER_BACKEND=libkrun|vz|qemu|inhouse` env var (case-insensitive, whitespace-trimmed; unrecognised values log a warning and fall through to auto-detect).
+3. Auto-detect: macOS 26+ Apple Silicon → inhouse; everywhere else → libkrun.
 
 `mvmctl doctor` reports the resolved choice on the `builder backend` line with format `<backend> — <source> — <availability>` so the override path is observable.
 
-**Auto-fallback (ADR-093).** When the *auto-detected* builder fails to **create its VM** — a VMM-level failure distinct from a `nix build` error, e.g. libkrun's `KVM_SET_USER_MEMORY_REGION` returning `EINVAL` (`rc -22`) for a >4 GiB guest on some Linux hosts — mvm transparently retries the next backend: libkrun → the QEMU/microvm_nix builder (Plan 166) on Linux, and Vz → libkrun on macOS. One policy (`builder_attempt_order` + `run_with_builder_fallback`) drives every builder entry point (OCI materialize, the `dev_build` flake path, Stage 0, the dev-image / default-microvm loops). A genuine build error surfaces unchanged with no retry, and an explicit `--builder` / `MVM_BUILDER_BACKEND` disables the fallback. The Linux auto-detect default is unchanged (libkrun-first); ADR-093 records why we did not flip it to qemu.
+**Auto-fallback (ADR-093).** When the *auto-detected* builder fails to **create its VM** — a VMM-level failure distinct from a `nix build` error — mvm transparently retries the next backend: inhouse → libkrun on macOS 26+, libkrun → the QEMU/microvm_nix builder (Plan 166) on Linux. One policy (`builder_attempt_order` + `run_with_builder_fallback`) drives every builder entry point. A genuine build error surfaces unchanged with no retry, and an explicit `--builder` / `MVM_BUILDER_BACKEND` disables the fallback. The Linux auto-detect default is unchanged (libkrun-first).
 
-Vz on macOS 13-25 is opt-in only via the flag/env override — auto-detect won't pick it because the deployment baseline is macOS 26+. The two backends produce byte-identical `BuilderArtifacts` (kernel + rootfs from the same `nix/images/builder-vm/` flake), so switching backends mid-development is supported.
+Vz is opt-in only via the flag/env override — auto-detect will not pick it. The backends produce byte-identical `BuilderArtifacts` (kernel + rootfs from the same `nix/images/builder-vm/` flake), so switching backends mid-development is supported.
 
-Persistent builder state dirs live under `~/.cache/mvm/builder-vm/vms/`, distinguished by name prefix (`mvm-persistent-builder-vm-*` for libkrun, `mvm-persistent-builder-vz-*` for Vz). The Stage 0 reaper (Plan 99 PR-1) is prefix-agnostic so both backends participate in `mvmctl cache prune` without code changes.
+Persistent builder state dirs live under `~/.cache/mvm/builder-vm/vms/`, distinguished by name prefix (`mvm-persistent-builder-vm-*` for libkrun, `mvm-persistent-builder-vz-*` for Vz, `mvm-persistent-builder-inhouse-*` for in-house). The Stage 0 reaper (Plan 99 PR-1) is prefix-agnostic so all backends participate in `mvmctl cache prune` without code changes.
 
 ## Architecture
 
@@ -128,9 +129,9 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 
 ### Key Design Decisions
 
-- **Firecracker-only on Linux; libkrun (macOS 13-25) / vz (macOS 26+) on macOS**: no Docker/containers on the runtime path. Builds run Nix inside the builder VM (libkrun on macOS 13-25 / vz on macOS 26+ / libkrun on Linux, with an auto-fallback to the QEMU builder where libkrun can't create its VM — ADR-093; note the *builder* VMM is not Firecracker even on Linux). The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately not wired into its start path (it's Tier 2 dev/test, not a workload-bearing tier — see ADR-002 §"Per-backend tier matrix" claim-10 egress-enforcement note). Egress default-deny is enforced on the two workload backends: Firecracker (nftables `install_default_deny`) and libkrun (gateway-bridge `PlanFlowPolicy` + scans).
+- **Firecracker-only on Linux; libkrun (macOS 13-25) / in-house HVF (macOS 26+) on macOS**: no Docker/containers on the runtime path. Builds run Nix inside the builder VM (libkrun on macOS 13-25 / in-house HVF on macOS 26+ / libkrun on Linux, with an auto-fallback to the QEMU builder where libkrun can't create its VM — ADR-093; note the *builder* VMM is not Firecracker even on Linux). The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately not wired into its start path (it's Tier 2 dev/test, not a workload-bearing tier — see ADR-002 §"Per-backend tier matrix" claim-10 egress-enforcement note). Egress default-deny is enforced on the two workload backends: Firecracker (nftables `install_default_deny`) and libkrun (gateway-bridge `PlanFlowPolicy` + scans).
 - **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The dev environment is the builder VM (`mvmctl dev` / `mvmctl dev shell`), not the microVM. See **Security model** below for the full posture.
-- **Dev mode**: `mvmctl dev` (or `mvmctl dev up`) auto-bootstraps then drops into a dev shell. On macOS 26+ Apple Silicon: boots a long-lived vz builder VM (the detached `mvm-vz-supervisor` outlives the CLI; `dev down` reaps it by PID file) with Nix + build tools via PTY-over-vsock console. On other macOS: libkrun builder VM. On Linux with KVM: Firecracker directly. `mvmctl dev down` stops it. `mvmctl dev shell` opens a shell. `mvmctl dev status` shows environment info. It does NOT start or SSH into a Firecracker microVM.
+- **Dev mode**: `mvmctl dev` (or `mvmctl dev up`) auto-bootstraps then drops into a dev shell. On macOS 26+ Apple Silicon: boots a long-lived in-house HVF builder VM with Nix + build tools via PTY-over-vsock console. On other macOS: libkrun builder VM. On Linux with KVM: Firecracker directly. `mvmctl dev down` stops it. `mvmctl dev shell` opens a shell. `mvmctl dev status` shows environment info. It does NOT start or SSH into a Firecracker microVM.
 - **Headless microVMs**: `mvmctl start` and `mvmctl run` boot Firecracker as a daemon. Interactive access via `mvmctl console` (PTY-over-vsock, dev-mode only).
 - **Dev mode isolation**: `mvmctl start/stop/dev` use a completely separate code path from orchestration.
 - **Shell scripts inside run_in_vm**: complex ops are bash scripts handed to the active `LinuxEnv` backend (libkrun / vz / Firecracker). Deliberate — they run inside the Linux VM, not on the macOS/Linux host.
@@ -473,7 +474,7 @@ cargo run -- cache prune             # clean stale temp files
 MicroVM (172.16.0.2, eth0)
     | TAP interface
 Builder VM (172.16.0.1, tap0) -- iptables NAT -- internet
-    | libkrun (macOS 13-25) / vz (macOS 26+) / direct (Linux KVM)
+    | libkrun (macOS 13-25) / inhouse HVF (macOS 26+) / direct (Linux KVM)
 macOS / Linux Host
 ```
 

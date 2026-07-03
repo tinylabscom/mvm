@@ -3682,6 +3682,22 @@ fn builder_flag_unset_by_default() {
     assert_eq!(cli.builder, None);
 }
 
+#[test]
+fn builder_flag_lists_inhouse() {
+    let cmd = cli_command();
+    let help = cmd.clone().render_help().to_string();
+    assert!(
+        help.contains("inhouse"),
+        "expected --builder to accept inhouse; help text was:\n{help}"
+    );
+}
+
+#[test]
+fn builder_flag_accepts_inhouse() {
+    let cli = Cli::try_parse_from(["mvmctl", "--builder", "inhouse", "doctor"]).expect("parse");
+    assert_eq!(cli.builder.as_deref(), Some("inhouse"));
+}
+
 // --- Session start --ephemeral tests ---
 
 #[test]
