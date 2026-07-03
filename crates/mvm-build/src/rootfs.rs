@@ -217,9 +217,11 @@ fn materialize_ext4_in_builder_vm(
     let explicit = crate::builder_backend_select::resolve_env_override().is_some();
     crate::builder_backend_select::run_with_builder_fallback(selected, explicit, |choice| {
         match choice {
-            BuilderBackendChoice::Libkrun => LibkrunBuilderVm::default()
-                .run_shell_script(&shell_job)
-                .map(|_| ()),
+            BuilderBackendChoice::Libkrun | BuilderBackendChoice::InHouse => {
+                LibkrunBuilderVm::default()
+                    .run_shell_script(&shell_job)
+                    .map(|_| ())
+            }
             BuilderBackendChoice::Qemu => QemuBuilderVm::new()
                 .run_shell_script(&shell_job)
                 .map(|_| ()),

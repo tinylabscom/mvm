@@ -642,7 +642,8 @@ fn dev_build_via_builder_vm_uncached(
     let selected = bbs::resolve_choice();
     let explicit = bbs::resolve_env_override().is_some();
     bbs::run_with_builder_fallback_anyhow(selected, explicit, |choice| {
-        let builder = bbs::resolve_builder_backend_with_override(Some(choice));
+        let builder = bbs::try_resolve_builder_backend_with_override(Some(choice))
+            .map_err(anyhow::Error::new)?;
         dev_build_with_builder_vm(env, flake_ref, profile, mode, builder.as_ref())
     })
 }

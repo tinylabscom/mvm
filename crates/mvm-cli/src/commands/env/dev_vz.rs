@@ -4595,7 +4595,7 @@ fn builder_vm_artifact_names(arch: &str) -> BuilderVmArtifactNames {
 #[cfg(feature = "builder-vm")]
 fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
     use mvm_build::builder_backend_select::{
-        resolve_builder_backend_with_override, resolve_choice, resolve_env_override,
+        resolve_choice, resolve_env_override, try_resolve_builder_backend_with_override,
     };
     use mvm_build::builder_vm::{BuilderJob, BuilderMounts, host_system_linux};
 
@@ -4669,8 +4669,9 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
     let mut used_backend = selected;
     let mut last_error = None;
     for (idx, choice) in attempt_order.iter().copied().enumerate() {
-        let backend = resolve_builder_backend_with_override(Some(choice));
-        match backend.run_build(&job, &mounts) {
+        let backend = try_resolve_builder_backend_with_override(Some(choice));
+        let run_result = backend.and_then(|b| b.run_build(&job, &mounts));
+        match run_result {
             Ok(_) => {
                 mvm_build::builder_health::note_attempt_outcome(choice, true);
                 used_backend = choice;
@@ -5044,7 +5045,7 @@ fn build_default_microvm_via_libkrun(
     variant: DefaultMicrovmVariant,
 ) -> Result<(String, String)> {
     use mvm_build::builder_backend_select::{
-        resolve_builder_backend_with_override, resolve_choice, resolve_env_override,
+        resolve_choice, resolve_env_override, try_resolve_builder_backend_with_override,
     };
     use mvm_build::builder_vm::{BuilderJob, BuilderMounts, host_system_linux};
 
@@ -5088,8 +5089,9 @@ fn build_default_microvm_via_libkrun(
     let attempt_order = builder_backend_attempt_order(selected, explicit_override);
     let mut last_error = None;
     for (idx, choice) in attempt_order.iter().copied().enumerate() {
-        let backend = resolve_builder_backend_with_override(Some(choice));
-        match backend.run_build(&job, &mounts) {
+        let backend = try_resolve_builder_backend_with_override(Some(choice));
+        let run_result = backend.and_then(|b| b.run_build(&job, &mounts));
+        match run_result {
             Ok(_) => {
                 mvm_build::builder_health::note_attempt_outcome(choice, true);
                 last_error = None;

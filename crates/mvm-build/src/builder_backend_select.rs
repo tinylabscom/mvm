@@ -28,12 +28,27 @@
 //! match the *runtime* default there. Older macOS and Linux contributors
 //! keep libkrun as the cross-platform path they were already using.
 
+use std::sync::OnceLock;
+
 use crate::builder_health;
 use crate::builder_vm::{BuilderVm, BuilderVmError};
 use crate::libkrun_builder::LibkrunBuilderVm;
 use crate::qemu_builder::QemuBuilderVm;
 use crate::vz_builder::VzBuilderVm;
 use mvm_core::platform::{Platform, current};
+
+/// Constructor for the in-house builder, registered by the CLI (which can name
+/// `InHouseBuilderVm` and resolve its image). `mvm-build` sits below
+/// `mvm-backend`, so it cannot construct the in-house builder itself.
+pub type InHouseBuilderCtor =
+    Box<dyn Fn() -> Result<Box<dyn BuilderVm>, BuilderVmError> + Send + Sync>;
+
+static INHOUSE_CTOR: OnceLock<InHouseBuilderCtor> = OnceLock::new();
+
+/// Register the in-house builder constructor (first registration wins).
+pub fn register_inhouse_builder(ctor: InHouseBuilderCtor) {
+    let _ = INHOUSE_CTOR.set(ctor);
+}
 
 /// Env-var name the dispatch consults. Surfaced as a constant so
 /// `mvmctl doctor` can reference it without re-deriving the string.
@@ -66,6 +81,10 @@ pub enum BuilderBackendChoice {
     /// `MVM_BUILDER_BACKEND=qemu` / `--builder qemu`;
     /// auto-detect never picks it (the default-flip is evidence-gated).
     Qemu,
+    /// In-house HVF builder VM (the destination macOS backend). The
+    /// auto-detected default on macOS-26 Apple Silicon; opt-in elsewhere via
+    /// `MVM_BUILDER_BACKEND=inhouse` / `--builder inhouse`.
+    InHouse,
 }
 
 impl BuilderBackendChoice {
@@ -75,6 +94,7 @@ impl BuilderBackendChoice {
             BuilderBackendChoice::Libkrun => "libkrun",
             BuilderBackendChoice::Vz => "vz",
             BuilderBackendChoice::Qemu => "qemu",
+            BuilderBackendChoice::InHouse => "inhouse",
         }
     }
 }
@@ -84,13 +104,10 @@ impl BuilderBackendChoice {
 /// — they don't have to spoof the live OS version or the
 /// compile-time `cfg!(target_arch)` macro.
 ///
-/// Decision: macOS 26+ Apple Silicon → Vz; everything else → libkrun.
-/// This mirrors the runtime backend tier — Apple ships first-class
-/// virtualization for that target, and the *builder* defaults match
-/// the *runtime* default there.
+/// Decision: macOS 26+ Apple Silicon → in-house HVF builder; everything else → libkrun.
 pub fn auto_detect_default_for(is_macos_26_apple_silicon: bool) -> BuilderBackendChoice {
     if is_macos_26_apple_silicon {
-        BuilderBackendChoice::Vz
+        BuilderBackendChoice::InHouse
     } else {
         BuilderBackendChoice::Libkrun
     }
@@ -122,6 +139,7 @@ pub fn resolve_env_override() -> Option<BuilderBackendChoice> {
         "libkrun" => Some(BuilderBackendChoice::Libkrun),
         "vz" => Some(BuilderBackendChoice::Vz),
         "qemu" => Some(BuilderBackendChoice::Qemu),
+        "inhouse" => Some(BuilderBackendChoice::InHouse),
         other => {
             tracing::warn!(
                 value = %other,
@@ -165,6 +183,10 @@ pub fn resolve_builder_backend() -> Box<dyn BuilderVm> {
 
 /// As [`resolve_builder_backend`] but accepts an explicit CLI flag
 /// override at the highest priority. Used by CLI dispatch.
+///
+/// Returns the concrete builder for all backends except `InHouse`, which
+/// requires a registered constructor. Callers that may receive `InHouse`
+/// should use [`try_resolve_builder_backend_with_override`] instead.
 pub fn resolve_builder_backend_with_override(
     flag: Option<BuilderBackendChoice>,
 ) -> Box<dyn BuilderVm> {
@@ -172,6 +194,37 @@ pub fn resolve_builder_backend_with_override(
         BuilderBackendChoice::Libkrun => Box::new(LibkrunBuilderVm::default()),
         BuilderBackendChoice::Vz => Box::new(VzBuilderVm::new()),
         BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
+        BuilderBackendChoice::InHouse => {
+            // Delegate to the registered constructor; panic if not registered
+            // (only reachable when the CLI has not called register_inhouse_builder,
+            // which is a programming error at startup).
+            INHOUSE_CTOR.get().expect(
+                "in-house builder constructor not registered — \
+                     call register_inhouse_builder at CLI startup before \
+                     resolving an InHouse backend via the infallible path",
+            )()
+            .expect("registered in-house builder constructor failed")
+        }
+    }
+}
+
+/// As [`resolve_builder_backend_with_override`] but fallible — the in-house arm
+/// depends on a registered constructor.
+pub fn try_resolve_builder_backend_with_override(
+    flag: Option<BuilderBackendChoice>,
+) -> Result<Box<dyn BuilderVm>, BuilderVmError> {
+    match resolve_choice_with_override(flag) {
+        BuilderBackendChoice::Libkrun => Ok(Box::new(LibkrunBuilderVm::default())),
+        BuilderBackendChoice::Vz => Ok(Box::new(VzBuilderVm::new())),
+        BuilderBackendChoice::Qemu => Ok(Box::new(QemuBuilderVm::new())),
+        BuilderBackendChoice::InHouse => match INHOUSE_CTOR.get() {
+            Some(ctor) => ctor(),
+            None => Err(BuilderVmError::VmmUnavailable {
+                requested: "inhouse".into(),
+                reason: "in-house builder constructor not registered (CLI startup did not run)"
+                    .into(),
+            }),
+        },
     }
 }
 
@@ -254,6 +307,9 @@ pub fn builder_attempt_order(
     }
     match selected {
         BuilderBackendChoice::Vz => vec![BuilderBackendChoice::Vz, BuilderBackendChoice::Libkrun],
+        BuilderBackendChoice::InHouse => {
+            vec![BuilderBackendChoice::InHouse, BuilderBackendChoice::Libkrun]
+        }
         BuilderBackendChoice::Libkrun if is_linux_native => {
             if libkrun_unhealthy {
                 vec![BuilderBackendChoice::Qemu]
@@ -478,8 +534,8 @@ mod tests {
     // ── Auto-detect (pure, hermetic — no env / OS / arch sensitivity) ──
 
     #[test]
-    fn auto_detect_default_for_macos_26_apple_silicon_picks_vz() {
-        assert_eq!(auto_detect_default_for(true), BuilderBackendChoice::Vz);
+    fn auto_detect_default_for_macos_26_apple_silicon_picks_inhouse() {
+        assert_eq!(auto_detect_default_for(true), BuilderBackendChoice::InHouse);
     }
 
     #[test]
@@ -954,5 +1010,56 @@ mod tests {
         // single visible test failure rather than a silent doctor
         // / dispatch divergence.
         assert_eq!(MVM_LINUX_BUILDER_VM_ENV, "MVM_LINUX_BUILDER_VM");
+    }
+
+    // ── InHouse variant ──────────────────────────────────────────
+
+    #[test]
+    fn resolve_env_override_inhouse() {
+        with_env(Some("inhouse"), || {
+            assert_eq!(resolve_env_override(), Some(BuilderBackendChoice::InHouse));
+        });
+    }
+
+    #[test]
+    fn resolve_env_override_inhouse_case_insensitive_trimmed() {
+        with_env(Some("  InHouse  "), || {
+            assert_eq!(resolve_env_override(), Some(BuilderBackendChoice::InHouse));
+        });
+    }
+
+    #[test]
+    fn backend_choice_name_inhouse() {
+        assert_eq!(BuilderBackendChoice::InHouse.name(), "inhouse");
+    }
+
+    // ── InHouse attempt order ─────────────────────────────────────
+
+    #[test]
+    fn attempt_order_inhouse_auto_falls_back_to_libkrun_no_vz() {
+        use BuilderBackendChoice::*;
+        assert_eq!(
+            builder_attempt_order(InHouse, false, false, false),
+            vec![InHouse, Libkrun]
+        );
+        assert_eq!(
+            builder_attempt_order(InHouse, false, true, false),
+            vec![InHouse, Libkrun]
+        );
+        // Explicit → single attempt, no fallback.
+        assert_eq!(
+            builder_attempt_order(InHouse, true, false, false),
+            vec![InHouse]
+        );
+    }
+
+    // ── Registration hook ─────────────────────────────────────────
+
+    #[test]
+    fn inhouse_uses_registered_ctor() {
+        // Registered ctor returns a stub; resolution routes InHouse to it.
+        register_inhouse_builder(Box::new(|| Ok(Box::new(crate::builder_vm::StubBuilderVm))));
+        let _b = try_resolve_builder_backend_with_override(Some(BuilderBackendChoice::InHouse))
+            .expect("registered ctor constructs a builder");
     }
 }

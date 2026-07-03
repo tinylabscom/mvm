@@ -94,7 +94,7 @@ In `resolve_env_override`'s match, add before `other =>`:
         "inhouse" => Some(BuilderBackendChoice::InHouse),
 ```
 
-- [ ] **Step 4: Run, verify pass** — `cargo test -p mvm-build resolve_env_override_inhouse backend_choice_name_inhouse`. Expected: PASS. Note: `resolve_builder_backend_with_override` and `resolve_stage0_backend_for_choice` now fail to compile (non-exhaustive match) — that is expected and fixed in Tasks 2 and 5. To keep this task compiling in isolation, add a temporary `BuilderBackendChoice::InHouse => unreachable!("wired in Task 2/5")` arm to each of those two `match` blocks; Tasks 2 and 5 replace them.
+- [ ] **Step 4: Run, verify pass** — `cargo test -p mvm-build resolve_env_override_inhouse backend_choice_name_inhouse`. Expected: PASS. Adding the variant makes `resolve_builder_backend_with_override` and `resolve_stage0_backend_for_choice` non-exhaustive; add their real `InHouse` arms now (Stage-0 arm per §1b, factory arm per §1d) — **no temporary `unreachable!`**. Tasks 1a–1d are one dispatch and must leave the crate compiling with all tests passing.
 
 - [ ] **Step 5: Commit** — `git add -A && git commit -m "feat(build): BuilderBackendChoice::InHouse variant" ...`
 
