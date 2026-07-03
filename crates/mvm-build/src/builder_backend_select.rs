@@ -1,32 +1,26 @@
 //! Builder-runtime backend selection.
 //!
-//! Picks between [`libkrun_builder::LibkrunBuilderVm`] and
-//! [`vz_builder::VzBuilderVm`]. Returns `Box<dyn BuilderVm>` so
-//! callers do not need to switch on the concrete type — both drivers
-//! implement [`builder_vm::BuilderVm`] with byte-identical artifact
-//! contracts (`finalize_flake_job` / `finalize_install_job` produce the
-//! same [`builder_vm::BuilderArtifacts`] shape regardless of which
-//! hypervisor booted the guest).
+//! Picks the right [`BuilderVm`](crate::builder_vm::BuilderVm) implementation
+//! for the current host. Returns `Box<dyn BuilderVm>` so callers do not need
+//! to switch on the concrete type — all drivers implement the trait with
+//! byte-identical artifact contracts (`finalize_flake_job` /
+//! `finalize_install_job` produce the same
+//! [`BuilderArtifacts`](crate::builder_vm::BuilderArtifacts) shape).
 //!
 //! ## Selection priority
 //!
-//! 1. **CLI flag** (`--builder <libkrun|vz>`, plumbed in by callers as
-//!    a typed `Option<BuilderBackendChoice>`) — highest priority.
-//! 2. **Env var** `MVM_BUILDER_BACKEND` — `vz` / `libkrun`,
-//!    case-insensitive, surrounding whitespace trimmed.
+//! 1. **CLI flag** (`--builder <libkrun|vz|inhouse|qemu>`, plumbed in by
+//!    callers as a typed `Option<BuilderBackendChoice>`) — highest priority.
+//! 2. **Env var** `MVM_BUILDER_BACKEND` — `libkrun` / `vz` / `inhouse` /
+//!    `qemu`, case-insensitive, surrounding whitespace trimmed.
 //! 3. **Auto-detect** by host platform when neither override is set:
-//!    macOS 26+ Apple Silicon → Vz; everywhere else → libkrun.
+//!    macOS 26+ Apple Silicon → in-house HVF builder; everywhere else →
+//!    libkrun.
 //!
 //! An unrecognised env value (typo, removed backend) falls through to
 //! auto-detect with a `tracing::warn!` so the operator sees the
 //! problem without aborting the build. Empty / unset env is treated
 //! the same as "no override."
-//!
-//! Auto-detect mirrors the runtime backend selection's Apple Container
-//! tier: macOS 26+ on Apple Silicon is the deployment target Apple
-//! ships first-class virtualization for, so the *builder* defaults
-//! match the *runtime* default there. Older macOS and Linux contributors
-//! keep libkrun as the cross-platform path they were already using.
 
 use std::sync::OnceLock;
 
