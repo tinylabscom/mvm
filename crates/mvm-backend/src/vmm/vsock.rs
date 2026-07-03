@@ -8,7 +8,21 @@
 //! in the guest's `QueueNotify` MMIO exit and completed by the backend raising
 //! the device's SPI line.
 
+use std::os::fd::RawFd;
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use super::guest_mem::GuestMem;
+
+/// A guest interrupt line the host-I/O thread can assert on its own — the seam
+/// that lets host→guest vsock delivery raise the device's IRQ **off** the vCPU
+/// exit path (the fix for the poll-starvation reachability bug). The backend
+/// injects an impl wrapping its interrupt primitive (HVF's process-global GIC SPI
+/// today). `Send + Sync` because the I/O thread holds it.
+pub trait IrqLine: Send + Sync {
+    /// Assert the device's SPI to the guest (level-high; the guest acks via
+    /// `INTERRUPT_ACK`). Called after the I/O thread delivers an rx packet.
+    fn signal(&self, spi: u32);
+}
 
 const VIRTIO_MAGIC: u32 = 0x7472_6976;
 const VIRTIO_VERSION: u32 = 2;
@@ -122,10 +136,12 @@ impl Hdr {
     }
 }
 
-/// virtio-vsock device: host-side listener that accepts any connection and
-/// records the stream bytes the guest sends.
-pub struct VirtioVsock {
-    base: u64,
+/// The lockable inner state of the virtio-vsock device: host-side listener that
+/// accepts any connection and records the stream bytes the guest sends. Shared
+/// (behind `Mutex`) between the vCPU thread (MMIO dispatch) and the host-I/O
+/// thread ([`super::vsock_io`]); every field is touched only while the lock is
+/// held, so guest RAM and the virtqueues are never accessed concurrently.
+pub(super) struct VsockShared {
     irq: u32,
     mem: GuestMem,
     device_features_sel: u32,
@@ -135,7 +151,12 @@ pub struct VirtioVsock {
     interrupt_status: u32,
     /// Bytes received from the guest over an accepted stream (for the host).
     pub received: Vec<u8>,
-    fwd_cnt: u32,
+    /// Per-connection receive credit: bytes the host has consumed from the guest,
+    /// keyed by `(host_port, guest_port)`. Advertised back to the guest as a
+    /// packet's `fwd_cnt` so its tx-credit accounting stays valid. Must be
+    /// per-connection — a global counter mixes one stream's bytes into another's
+    /// credit and breaks the handshake (the guest resets or can't reply).
+    recv_cnt: std::collections::HashMap<(u32, u32), u32>,
     /// Pending packets to deliver to the guest on its rx queue.
     pending_rx: Vec<(Hdr, Vec<u8>)>,
     /// Workload exit code captured from a guest write to
@@ -161,12 +182,11 @@ pub struct VirtioVsock {
     substitution_hdrs: std::collections::HashMap<u32, Hdr>,
 }
 
-impl VirtioVsock {
+impl VsockShared {
     /// # Safety
     /// `ram` must point to `ram_size` bytes mapped as guest RAM at `ram_base`.
-    pub unsafe fn new(base: u64, irq: u32, ram: *mut u8, ram_base: u64, ram_size: usize) -> Self {
+    unsafe fn new(irq: u32, ram: *mut u8, ram_base: u64, ram_size: usize) -> Self {
         Self {
-            base,
             irq,
             // SAFETY: forwarded from this fn's contract.
             mem: unsafe { GuestMem::new(ram, ram_base, ram_size) },
@@ -176,7 +196,7 @@ impl VirtioVsock {
             queues: [Queue::default(); NUM_QUEUES],
             interrupt_status: 0,
             received: Vec::new(),
-            fwd_cnt: 0,
+            recv_cnt: std::collections::HashMap::new(),
             pending_rx: Vec::new(),
             workload_exit_code: None,
             exit_stop: None,
@@ -223,13 +243,6 @@ impl VirtioVsock {
     /// code and sets `stop` so the run loop ends (VM life = workload life).
     pub fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
         self.exit_stop = Some(stop);
-    }
-
-    pub fn base(&self) -> u64 {
-        self.base
-    }
-    pub fn contains(&self, addr: u64) -> bool {
-        addr >= self.base && addr < self.base + MMIO_LEN
     }
 
     pub fn read(&self, offset: u64) -> u64 {
@@ -351,11 +364,12 @@ impl VirtioVsock {
                 OP_RW => {
                     let n = (hdr.len as usize).min(payload.len());
                     self.agent.write_to_host(hdr.dst_port, &payload[..n]);
-                    self.fwd_cnt = self.fwd_cnt.wrapping_add(n as u32);
+                    self.add_recv(&hdr, n as u32);
                     self.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
                 }
                 OP_SHUTDOWN | OP_RST => {
                     self.agent.close(hdr.dst_port);
+                    self.recv_cnt.remove(&(hdr.dst_port, hdr.src_port));
                     self.queue_reply(&hdr, OP_RST, &[]);
                 }
                 _ => {}
@@ -388,12 +402,12 @@ impl VirtioVsock {
                     // it only relays the stream both ways. With no endpoint wired
                     // the bridge fails closed (resets the stream).
                     self.handle_substitution_request(&hdr, &payload[..n]);
-                    self.fwd_cnt = self.fwd_cnt.wrapping_add(n as u32);
+                    self.add_recv(&hdr, n as u32);
                     return;
                 } else {
                     self.received.extend_from_slice(&payload[..n]);
                 }
-                self.fwd_cnt = self.fwd_cnt.wrapping_add(n as u32);
+                self.add_recv(&hdr, n as u32);
                 // Acknowledge consumed bytes so the guest's credit recovers.
                 self.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
             }
@@ -404,6 +418,7 @@ impl VirtioVsock {
                 if self.substitution_hdrs.remove(&hdr.src_port).is_some() {
                     self.substitution.close(hdr.src_port);
                 }
+                self.recv_cnt.remove(&(hdr.dst_port, hdr.src_port));
                 self.queue_reply(&hdr, OP_RST, &[]);
             }
             _ => {}
@@ -487,6 +502,27 @@ impl VirtioVsock {
         }
     }
 
+    /// Count `n` bytes consumed from the guest on the connection an inbound
+    /// (guest→host) packet belongs to. The connection is keyed `(host_port,
+    /// guest_port)` = `(inbound.dst_port, inbound.src_port)`.
+    fn add_recv(&mut self, inbound: &Hdr, n: u32) {
+        let e = self
+            .recv_cnt
+            .entry((inbound.dst_port, inbound.src_port))
+            .or_default();
+        *e = e.wrapping_add(n);
+    }
+
+    /// The `fwd_cnt` to advertise on a host→guest packet for the stream
+    /// `(host_port, guest_port)` — bytes the host has consumed from the guest on
+    /// that stream (0 for a stream with no guest data yet).
+    fn fwd_cnt_for(&self, host_port: u32, guest_port: u32) -> u32 {
+        self.recv_cnt
+            .get(&(host_port, guest_port))
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Frame a host-*initiated* host→guest packet for an agent stream. Unlike
     /// [`queue_reply`](Self::queue_reply) (which swaps an inbound header), this
     /// builds a fresh header for a stream the host opened: `src_port` is the
@@ -502,7 +538,12 @@ impl VirtioVsock {
             op,
             flags: 0,
             buf_alloc: HOST_BUF_ALLOC,
-            fwd_cnt: self.fwd_cnt,
+            // Per-connection credit: bytes the host has consumed from the guest on
+            // THIS stream (host is `src_port`, guest is `dst_port`). A global
+            // counter here would advertise `peer_fwd_cnt > tx_cnt` to the guest,
+            // underflowing its tx-credit accounting so it can't reply (or resets
+            // the stream).
+            fwd_cnt: self.fwd_cnt_for(src_port, dst_port),
         };
         self.pending_rx.push((hdr, payload.to_vec()));
     }
@@ -519,7 +560,10 @@ impl VirtioVsock {
             op,
             flags: 0,
             buf_alloc: HOST_BUF_ALLOC,
-            fwd_cnt: self.fwd_cnt,
+            // Inbound is guest→host, so the host side of this stream is
+            // `inbound.dst_port` and the guest side is `inbound.src_port` — the same
+            // key the receive path counts under.
+            fwd_cnt: self.fwd_cnt_for(inbound.dst_port, inbound.src_port),
         };
         self.pending_rx.push((reply, payload.to_vec()));
     }
@@ -573,9 +617,174 @@ impl VirtioVsock {
         self.interrupt_status |= 1;
     }
 
-    /// The device's SPI INTID — raised by the platform run loop on completion.
+    /// Do one non-blocking pass of host→guest servicing: accept new agent
+    /// connections + frame their `OP_REQUEST`/`OP_RW`, and drain egress-endpoint
+    /// replies. Returns `true` if anything was delivered into the guest's rx queue
+    /// (so the caller raises the device IRQ). This is the body both the run loop's
+    /// [`RunDevice::poll`](super::run::RunDevice::poll) and the dedicated host-I/O
+    /// thread ([`super::vsock_io`]) run — the I/O thread is what makes it happen
+    /// reliably, independent of vCPU exits.
+    pub(super) fn service_host_io(&mut self) -> bool {
+        let agent = self.drain_agent();
+        let subst = self.drain_substitution();
+        agent.is_some() || subst.is_some()
+    }
+
+    /// Raw fd of the bound host agent listener, for the I/O thread to register
+    /// with its `mio::Poll` (readiness-driven accept). `None` until an agent
+    /// socket is bound. The listener lives inside the lock for the whole run, so
+    /// the fd stays valid while registered (the I/O thread is joined before the
+    /// device drops).
+    pub(super) fn agent_listener_fd(&self) -> Option<RawFd> {
+        self.agent.listener_fd()
+    }
+}
+
+/// The virtio-vsock device the run loop drives (a [`RunDevice`](super::run::RunDevice)).
+///
+/// A thin handle over the lockable [`VsockShared`] plus the dedicated host-I/O
+/// thread. The vCPU thread reaches guest→host work through the MMIO delegators
+/// ([`Self::read`]/[`Self::write`]); the host→guest direction (accepting the agent
+/// socket, draining sockets, framing rx packets, raising the IRQ) runs on the I/O
+/// thread so it is never starved by the vCPU's MMIO cadence. `base`/`irq` are
+/// immutable and kept out of the lock so address matching needs no lock.
+pub struct VirtioVsock {
+    base: u64,
+    irq: u32,
+    shared: Arc<Mutex<VsockShared>>,
+    io: Option<super::vsock_io::IoHandle>,
+}
+
+impl VirtioVsock {
+    /// # Safety
+    /// `ram` must point to `ram_size` bytes mapped as guest RAM at `ram_base`,
+    /// valid until the device (and its joined I/O thread) are dropped.
+    pub unsafe fn new(base: u64, irq: u32, ram: *mut u8, ram_base: u64, ram_size: usize) -> Self {
+        // SAFETY: forwarded from this fn's contract.
+        let shared = unsafe { VsockShared::new(irq, ram, ram_base, ram_size) };
+        Self {
+            base,
+            irq,
+            shared: Arc::new(Mutex::new(shared)),
+            io: None,
+        }
+    }
+
+    /// Lock the shared state, recovering the guard if a peer thread panicked while
+    /// holding it (a poisoned lock is not itself a reason to abort teardown).
+    fn lock(&self) -> MutexGuard<'_, VsockShared> {
+        self.shared.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Expose the host-side agent listener at `path` (host→guest). Host RPC
+    /// clients connect here; the bridge opens a vsock stream to the guest agent on
+    /// [`GUEST_AGENT_PORT`](mvm_guest::vsock::GUEST_AGENT_PORT).
+    pub fn set_agent_socket(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        self.lock().set_agent_socket(path)
+    }
+
+    /// Share the heartbeat activity counter with the agent bridge.
+    pub fn set_agent_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+        self.lock().set_agent_activity(counter);
+    }
+
+    /// Point the egress relay at this VM's `mvm-substitution-endpoint` Unix socket.
+    pub fn set_substitution_endpoint(&mut self, path: &std::path::Path) {
+        self.lock().set_substitution_endpoint(path);
+    }
+
+    /// Share the heartbeat activity counter with the egress relay.
+    pub fn set_substitution_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+        self.lock().set_substitution_activity(counter);
+    }
+
+    /// Capture the transient workload-exit code (guest write to the exit port).
+    pub fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
+        self.lock().capture_workload_exit(stop);
+    }
+
+    /// Spawn the dedicated host-I/O thread: it owns a `mio::Poll` over the agent
+    /// listener (readiness-driven accept) with a short backstop tick, runs
+    /// [`VsockShared::service_host_io`] on each wake, and raises `irq_line` when it
+    /// delivers — so host→guest reachability no longer depends on vCPU exits.
+    /// Idempotent-ish: a second call replaces the handle (the old thread is
+    /// joined). Call after the agent/egress sockets are wired.
+    pub fn start_io(&mut self, irq_line: Arc<dyn IrqLine>) {
+        self.shutdown();
+        self.io = Some(super::vsock_io::spawn(
+            Arc::clone(&self.shared),
+            irq_line,
+            self.irq,
+        ));
+    }
+
+    /// Stop and join the host-I/O thread (if running). Must run before the guest
+    /// RAM the device points into is unmapped/freed — the join guarantees the I/O
+    /// thread has stopped touching guest memory.
+    pub fn shutdown(&mut self) {
+        if let Some(io) = self.io.take() {
+            io.stop();
+        }
+    }
+
+    /// Bytes the guest sent to the host over the capture path. Read after the run
+    /// ends (post-[`Self::shutdown`]).
+    pub fn received(&self) -> Vec<u8> {
+        self.lock().received.clone()
+    }
+
+    /// Workload exit code, if the guest reported one over the workload-exit port.
+    pub fn workload_exit_code(&self) -> Option<i32> {
+        self.lock().workload_exit_code
+    }
+
+    /// Count of host→guest packets queued but not yet delivered into the guest rx
+    /// queue — used by tests to observe that the I/O thread serviced a host
+    /// connection (framed an `OP_REQUEST`) without any rx buffers posted.
+    #[cfg(test)]
+    pub(crate) fn queued_host_packets(&self) -> usize {
+        self.lock().pending_rx.len()
+    }
+
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+    pub fn contains(&self, addr: u64) -> bool {
+        addr >= self.base && addr < self.base + MMIO_LEN
+    }
     pub fn irq(&self) -> u32 {
         self.irq
+    }
+
+    /// Service a guest MMIO load (vCPU thread).
+    pub fn read(&self, offset: u64) -> u64 {
+        self.lock().read(offset)
+    }
+
+    /// Service a guest MMIO store (vCPU thread); `true` ⇒ the guest needs an IRQ.
+    pub fn write(&self, offset: u64, value: u64) -> bool {
+        self.lock().write(offset, value)
+    }
+
+    /// Run loop fallback host→guest servicing (used by backends without the I/O
+    /// thread, e.g. KVM). Returns `Some(irq)` if a packet was delivered. On HVF the
+    /// I/O thread does this reliably; this path is harmless there (both run under
+    /// the lock).
+    pub fn poll(&self) -> Option<u32> {
+        if self.lock().service_host_io() {
+            Some(self.irq)
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for VirtioVsock {
+    fn drop(&mut self) {
+        // Safety net: guarantee the I/O thread is joined before the shared state
+        // (and the guest-RAM pointer it holds) is torn down. `kernel_boot` also
+        // calls `shutdown()` explicitly before freeing RAM.
+        self.shutdown();
     }
 }
 
@@ -605,10 +814,10 @@ fn set_hi(v: &mut u64, hi: u32) {
 mod tests {
     use super::*;
 
-    fn dev() -> VirtioVsock {
+    fn dev() -> VsockShared {
         let mut ram = vec![0u8; 0x1000];
         // SAFETY: leaked for the test.
-        unsafe { VirtioVsock::new(0x0a00_0200, 49, ram.as_mut_ptr(), 0x4000_0000, ram.len()) }
+        unsafe { VsockShared::new(49, ram.as_mut_ptr(), 0x4000_0000, ram.len()) }
     }
 
     #[test]
@@ -757,6 +966,152 @@ mod tests {
         assert!(
             d.pending_rx.iter().any(|(h, _)| h.op == OP_RST),
             "egress with no endpoint must fail closed (reset)"
+        );
+    }
+
+    /// A host-initiated agent `OP_REQUEST` to port 5252 must carry valid credit —
+    /// a non-zero `buf_alloc` and, crucially, `fwd_cnt == 0` for a fresh stream.
+    /// Advertising another stream's cumulative `fwd_cnt` (the global-counter bug)
+    /// makes the guest's tx-credit accounting underflow, so it resets the stream or
+    /// never replies. This is the device side of the reachability handshake.
+    #[test]
+    fn host_agent_request_advertises_zero_credit_so_guest_does_not_reset() {
+        let mut d = dev();
+        // Pollute a *different* stream's receive credit first: a guest→host capture
+        // stream that sends 5 bytes bumps that connection's consumed count.
+        let cap = Hdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 7000,
+            dst_port: 9000,
+            len: 5,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(cap, b"hello");
+        let credit = d
+            .pending_rx
+            .iter()
+            .find(|(h, _)| h.op == OP_CREDIT_UPDATE && h.dst_port == 7000)
+            .expect("capture stream acked");
+        assert_eq!(credit.0.fwd_cnt, 5, "the capture stream's own credit is 5");
+        d.pending_rx.clear();
+
+        // A host-initiated agent stream (host src_port, guest listener 5252) must
+        // advertise fwd_cnt=0 — NOT the 5 bytes from the unrelated capture stream.
+        d.queue_host_packet(1 << 20, mvm_guest::vsock::GUEST_AGENT_PORT, OP_REQUEST, &[]);
+        let req = &d.pending_rx[0].0;
+        assert_eq!(req.op, OP_REQUEST);
+        assert_eq!(req.dst_port, mvm_guest::vsock::GUEST_AGENT_PORT);
+        assert_eq!(
+            req.fwd_cnt, 0,
+            "a fresh stream must advertise fwd_cnt=0, not another stream's credit"
+        );
+        assert_eq!(
+            req.buf_alloc, HOST_BUF_ALLOC,
+            "non-zero rx credit advertised"
+        );
+    }
+
+    /// Per-connection credit tracks each stream independently: two streams that
+    /// send different amounts each get their own `fwd_cnt` in their credit updates —
+    /// one stream's bytes never leak into another's accounting.
+    #[test]
+    fn receive_credit_is_tracked_per_connection() {
+        let mut d = dev();
+        // Stream A: guest sends 3 bytes.
+        let a = Hdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 7000,
+            dst_port: 9000,
+            len: 3,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(a, b"abc");
+        // Stream B: guest sends 10 bytes on a different ephemeral port.
+        let b = Hdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 8000,
+            dst_port: 9000,
+            len: 10,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(b, b"0123456789");
+        // Each stream's CREDIT_UPDATE reflects only its own consumed bytes.
+        let ca = d
+            .pending_rx
+            .iter()
+            .find(|(h, _)| h.op == OP_CREDIT_UPDATE && h.dst_port == 7000)
+            .expect("stream A credit");
+        let cb = d
+            .pending_rx
+            .iter()
+            .find(|(h, _)| h.op == OP_CREDIT_UPDATE && h.dst_port == 8000)
+            .expect("stream B credit");
+        assert_eq!(ca.0.fwd_cnt, 3, "stream A consumed 3 bytes");
+        assert_eq!(
+            cb.0.fwd_cnt, 10,
+            "stream B consumed 10 bytes, independent of A"
+        );
+    }
+
+    /// The egress/substitution host→guest reply path is driven by the same
+    /// `service_host_io` the I/O thread runs — so a `WireResponse` from the endpoint
+    /// reaches the guest via that path, not only the vCPU `poll()`.
+    #[test]
+    fn service_host_io_drains_egress_replies() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("subst.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 64];
+            let n = c.read(&mut buf).unwrap();
+            c.write_all(b"OK").unwrap();
+            buf[..n].to_vec()
+        });
+
+        let mut d = dev();
+        d.set_substitution_endpoint(&sock);
+        let rw = Hdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 1500,
+            dst_port: mvm_guest::vsock::EGRESS_PORT,
+            len: 5,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(rw, b"1.2.3");
+        server.join().unwrap();
+        d.pending_rx.clear();
+
+        // `service_host_io` (the I/O-thread body) must drain the endpoint reply and
+        // frame it back to the guest as OP_RW on the same stream.
+        let mut framed = false;
+        for _ in 0..200 {
+            let _ = d.service_host_io();
+            if d.pending_rx
+                .iter()
+                .any(|(h, _)| h.op == OP_RW && h.dst_port == 1500)
+            {
+                framed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            framed,
+            "service_host_io must relay the endpoint reply to the guest"
         );
     }
 

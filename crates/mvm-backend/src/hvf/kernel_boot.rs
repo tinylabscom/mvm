@@ -86,6 +86,22 @@ const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
 const PSCI_SYSTEM_RESET: u64 = 0x8400_0009;
 const PSCI_NOT_SUPPORTED: u64 = (-1i64) as u64;
 
+/// Raises a device SPI on the process-global in-kernel GIC — the [`IrqLine`] the
+/// vsock host-I/O thread uses to interrupt the guest off the vCPU exit path
+/// (mirrors the vCPU-path `set_irq` closure below). Zero-sized: the GIC is a
+/// process-global HVF resource, so no per-VM handle is needed.
+struct GicSpi;
+
+impl crate::vmm::vsock::IrqLine for GicSpi {
+    fn signal(&self, spi: u32) {
+        // SAFETY: FFI to the process-global in-kernel GIC created for this VM; it
+        // is thread-safe, so the host-I/O thread may assert an SPI directly.
+        unsafe {
+            hv_gic_set_spi(spi, true);
+        }
+    }
+}
+
 /// Outcome of a kernel boot attempt (with boot diagnostics).
 #[derive(Debug, Clone, Default)]
 pub struct KernelBootResult {
@@ -476,10 +492,19 @@ unsafe fn run(
             .collect();
         let mut vsock_dev =
             vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, ram_size));
-        // Transient run-to-exit: a guest write of the exit code to the workload
-        // exit port stops the run (and is captured below).
         if let Some(v) = vsock_dev.as_mut() {
-            v.capture_workload_exit(stop);
+            // Transient run-to-exit: a guest write of the exit code to the workload
+            // exit port stops the run (VM life = workload life) — but ONLY when this
+            // is not an agent-serving VM. An agent VM binds the agent socket; its
+            // baked `/init` reports a workload-exit the instant it finds no
+            // per-call entrypoint, yet the agent keeps serving. Tearing the VM down
+            // on that early signal would kill the agent before a host RPC (e.g.
+            // `machine invoke`) can reach it. Persistent agent VMs are ended by the
+            // supervisor's SIGTERM/timeout instead. The exit code is still recorded
+            // for reporting either way.
+            if !agent_bound {
+                v.capture_workload_exit(stop);
+            }
             // Host→guest agent RPC (GUEST_AGENT_PORT): expose the listener so host
             // clients (`machine invoke`) reach the guest agent over vsock.
             if let Some(path) = &agent_socket {
@@ -502,6 +527,12 @@ unsafe fn run(
                 v.set_substitution_activity(egress_active.clone());
                 v.set_substitution_endpoint(relay);
             }
+            // Start the dedicated host-I/O thread now that the agent/egress sockets
+            // are wired: it services host→guest delivery on wall-clock time and
+            // raises the guest IRQ itself, so reachability no longer depends on the
+            // starved vCPU `poll()` path. Joined in `shutdown()` below before RAM
+            // is freed.
+            v.start_io(Arc::new(GicSpi));
         }
 
         // Diagnostics gathered by the exception hook (HVC/PSCI + other traps).
@@ -568,6 +599,11 @@ unsafe fn run(
 
         done.store(true, Ordering::Relaxed);
         let _ = watchdog.join();
+        // Join the vsock host-I/O thread before touching device state or freeing
+        // the guest RAM it points into — the join is the memory-safety barrier.
+        if let Some(v) = vsock_dev.as_mut() {
+            v.shutdown();
+        }
         let final_pc = vcpu.get_core(CoreReg::Pc).unwrap_or(0);
         hv_vcpu_destroy(vcpu_id);
 
@@ -586,8 +622,8 @@ unsafe fn run(
             ..Default::default()
         };
         if let Some(vs) = &vsock_dev {
-            r.vsock_received = vs.received.clone();
-            r.workload_exit_code = vs.workload_exit_code;
+            r.vsock_received = vs.received();
+            r.workload_exit_code = vs.workload_exit_code();
         }
         Ok(r)
     }

@@ -75,6 +75,13 @@ impl AgentBridge {
         self.active = Some(counter);
     }
 
+    /// Raw fd of the bound listener, for the host-I/O thread to register with its
+    /// `mio::Poll` (readiness-driven accept). `None` until [`Self::bind`].
+    pub fn listener_fd(&self) -> Option<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd as _;
+        self.listener.as_ref().map(|l| l.as_raw_fd())
+    }
+
     /// Is `conn_id` a host-initiated agent stream (so guest packets addressed to it
     /// route here, not to the workload-exit / egress / capture paths)?
     pub fn is_agent_stream(&self, conn_id: u32) -> bool {
