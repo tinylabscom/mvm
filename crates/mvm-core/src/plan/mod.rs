@@ -48,8 +48,8 @@ pub use signing::{
     secrets_from_signed_json, sign_plan, tenant_from_signed_json, verify_plan,
 };
 pub use synthesis::{
-    DEFAULT_AUDIT_EVENT_PREFIX, DEFAULT_INTENT, DEFAULT_POLICY_REF, DEFAULT_TENANT,
-    SynthesisInput, VALIDITY_WINDOW_MINUTES, synthesize_plan,
+    DEFAULT_AUDIT_EVENT_PREFIX, DEFAULT_INTENT, DEFAULT_POLICY_REF, DEFAULT_TENANT, SynthesisInput,
+    VALIDITY_WINDOW_MINUTES, synthesize_plan,
 };
 pub use types::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,

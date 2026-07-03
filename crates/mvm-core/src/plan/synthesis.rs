@@ -41,8 +41,6 @@
 //! | `nonce` | fresh 128 bits from `OsRng` per invocation |
 //! | everything else | conservative defaults (no attestation, destroy-on-exit, etc.) |
 
-use anyhow::Result;
-use chrono::{Duration, Utc};
 use crate::plan::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
     AuditTaxonomy, AuthPolicy, DepsVolumeBinding, ExecutionPlan, FsPolicyRef, KeyRotationSpec,
@@ -50,6 +48,8 @@ use crate::plan::{
     SCHEMA_VERSION, SecretBinding, SecretReleasePolicy, SignedImageRef, TenantId, TimeoutSpec,
     WorkloadId, WorkloadIntent,
 };
+use anyhow::Result;
+use chrono::{Duration, Utc};
 use rand::RngCore;
 use std::collections::BTreeMap;
 

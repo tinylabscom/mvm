@@ -19,7 +19,6 @@ use super::plan_admission::{
     AdmittedPlan, BundleAdmissionContext, InMemoryNonceLedger, SystemClock, admit_for_run,
     populate_audit_substrate, stash_plan_for_bridge, thread_tenant_id,
 };
-use mvm_core::plan::SynthesisInput;
 use super::policy_resolver::{
     LOCAL_DEFAULT, ResolveError, resolve_policy_bundle, resolve_policy_bundle_with_dir,
     resolve_supervisor_components, resolve_supervisor_components_with_dir,
@@ -27,6 +26,7 @@ use super::policy_resolver::{
 use super::shared::{
     VmStartParams, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
 };
+use mvm_core::plan::SynthesisInput;
 use mvm_core::policy::PolicyBundle;
 
 /// Inputs for [`admit_plan_for_boot`]. Grouped so the helper avoids
