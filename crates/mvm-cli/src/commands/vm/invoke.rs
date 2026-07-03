@@ -597,6 +597,13 @@ mod auto_stdin_tests {
         let err = read_auto_stdin_from(Cursor::new(&payload[..]), false, 1024).unwrap_err();
         assert!(matches!(err, AutoStdinError::TooLarge { cap: 1024 }));
     }
+
+    #[test]
+    fn piped_stdin_exactly_at_cap_passes() {
+        let payload = vec![b'x'; 1024];
+        let got = read_auto_stdin_from(Cursor::new(&payload[..]), false, 1024).unwrap();
+        assert_eq!(got.len(), 1024);
+    }
 }
 
 #[cfg(test)]
