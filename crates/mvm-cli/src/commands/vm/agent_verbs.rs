@@ -7,7 +7,6 @@ use mvm_guest::vsock::GuestRequest;
 /// ProdSafe verbs. An interactive PTY (ConsoleOpen) or an ad-hoc command
 /// (Exec) needs DevOnly verbs and must NOT be grant-restricted; dev profile
 /// stays permissive by contract.
-#[allow(dead_code)]
 pub(crate) fn grant_eligible(pty: bool, has_ad_hoc_argv: bool, is_dev_profile: bool) -> bool {
     !pty && !has_ad_hoc_argv && !is_dev_profile
 }
