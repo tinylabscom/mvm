@@ -56,7 +56,8 @@ macOS-26 Apple Silicon host:
   the in-house VMM boots a real OCI workload to a reachable agent that runs a
   command and returns stdout/exit. **The plan's "flip + delete" shape is
   therefore valid** (the alternative "finish boot first" shape is ruled out).
-- **Channel-1 inbound: NOT YET PROVEN (correctly).** The first attempt used the
+- **Channel-1 inbound: PROVEN (2026-07-02, worktree bins).** `echo STDIN-RT-42 | machine run --image alpine --hypervisor inhouse --json -- /bin/cat` returned stdout 11 bytes, sha256 81fce04b... == sha256("STDIN-RT-42"), via Plan 220 (drop --stdin, auto-detect non-TTY stdin). Prior note retained for history:
+- **(historical) Channel-1 inbound was NOT YET PROVEN via the invalid --image --stdin combo.** The first attempt used the
   invalid `--image … --stdin` combination and (as expected) delivered no stdin;
   this is CLI behavior, not an in-house defect. Inbound rides the same
   backend-agnostic runner path (`runner/mod.rs`: "pipes the captured stdin to
