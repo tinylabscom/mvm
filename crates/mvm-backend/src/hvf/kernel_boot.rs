@@ -157,6 +157,10 @@ pub struct HostChannels {
     /// endpoint gates (claim-10) and substitutes secrets. `None` ⇒ egress fails
     /// closed at the bridge (an in-house VM must always carry a relay socket).
     pub egress_relay: Option<PathBuf>,
+    /// Dev-only host console listeners: one `(guest_port, host_socket)` per console
+    /// data port the interactive PTY may reach. Populated only for a `dev_console`
+    /// machine; empty for a sealed prod config, so nothing is bound (claim 15).
+    pub console_data_sockets: Vec<(u32, PathBuf)>,
     /// Full kernel cmdline. `None` ⇒ the built-in [`default_bootargs`] (workload
     /// default: `init=/init`). A caller that boots an image expecting a different
     /// PID 1 — e.g. the builder rootfs, whose init is the static
@@ -189,6 +193,7 @@ pub fn boot_kernel(
             agent_socket: None,
             substitution_socket: None,
             egress_relay: None,
+            console_data_sockets: Vec::new(),
             cmdline: None,
             mem_mib: 0,
         },
@@ -326,6 +331,7 @@ fn boot_kernel_impl(
                 agent_socket: channels.agent_socket,
                 substitution_socket: channels.substitution_socket,
                 egress_relay: channels.egress_relay,
+                console_data_sockets: channels.console_data_sockets,
             },
             stop,
         );
@@ -355,6 +361,9 @@ struct RunInputs {
     /// Per-VM egress bridge UDS. When set, `EGRESS_PORT` relays here — the
     /// endpoint is the sole gate + substituter.
     egress_relay: Option<PathBuf>,
+    /// Dev-only host console listeners (one `(guest_port, host_socket)` per console
+    /// data port). Empty for a sealed prod config — nothing bound (claim 15).
+    console_data_sockets: Vec<(u32, PathBuf)>,
 }
 
 unsafe fn run(
@@ -372,6 +381,7 @@ unsafe fn run(
         agent_socket,
         substitution_socket,
         egress_relay,
+        console_data_sockets,
     } = inputs;
     unsafe {
         // In-kernel GICv3 — created after the VM, before any vCPU. Base
@@ -527,10 +537,25 @@ unsafe fn run(
                 v.set_substitution_activity(egress_active.clone());
                 v.set_substitution_endpoint(relay);
             }
-            // Start the dedicated host-I/O thread now that the agent/egress sockets
-            // are wired: it services host→guest delivery on wall-clock time and
-            // raises the guest IRQ itself, so reachability no longer depends on the
-            // starved vCPU `poll()` path. Joined in `shutdown()` below before RAM
+            // Dev-only interactive console (`machine run -it`): bind one host
+            // listener per guest console data port so the console driver can reach
+            // the agent-allocated PTY channel. The list is populated only for a
+            // `dev_console` machine; a sealed prod config carries none, so nothing
+            // is bound (claim 15). Shares the heartbeat counter so an open console
+            // stream keeps the loop waking an idle guest.
+            if !console_data_sockets.is_empty() {
+                v.set_console_activity(egress_active.clone());
+                let ports = console_data_sockets
+                    .iter()
+                    .map(|(port, path)| (*port, path.as_path()));
+                if let Err(e) = v.set_console_sockets(ports) {
+                    eprintln!("mvm-hvf: console socket bind failed: {e}");
+                }
+            }
+            // Start the dedicated host-I/O thread now that the agent/egress/console
+            // sockets are wired: it services host→guest delivery on wall-clock time
+            // and raises the guest IRQ itself, so reachability no longer depends on
+            // the starved vCPU `poll()` path. Joined in `shutdown()` below before RAM
             // is freed.
             v.start_io(Arc::new(GicSpi));
         }
