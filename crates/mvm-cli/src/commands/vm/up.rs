@@ -15,10 +15,6 @@ use mvm_core::naming::validate_vm_name;
 use super::super::env::dev_vz::ensure_default_microvm_image;
 use super::audit_chain::{AuditEmitter, default_audit_dir};
 use super::host_signer::load_or_init_at;
-use super::plan_admission::{
-    AdmittedPlan, BundleAdmissionContext, InMemoryNonceLedger, SystemClock, admit_for_run,
-    populate_audit_substrate, stash_plan_for_bridge, thread_tenant_id,
-};
 use super::policy_resolver::{
     LOCAL_DEFAULT, ResolveError, resolve_policy_bundle, resolve_policy_bundle_with_dir,
     resolve_supervisor_components, resolve_supervisor_components_with_dir,
@@ -28,6 +24,10 @@ use super::shared::{
 };
 use mvm_core::plan::SynthesisInput;
 use mvm_core::policy::PolicyBundle;
+use mvm_hostd::plan_admission::{
+    AdmittedPlan, BundleAdmissionContext, InMemoryNonceLedger, SystemClock, admit_for_run,
+    populate_audit_substrate, stash_plan_for_bridge, thread_tenant_id,
+};
 
 /// Inputs for [`admit_plan_for_boot`]. Grouped so the helper avoids
 /// the workspace `clippy::too_many_arguments = "deny"` ceiling and so
@@ -830,7 +830,7 @@ fn enforce_shares_if(
     volumes: &[mvm_core::vm_backend::VmVolume],
 ) -> Result<()> {
     if let Some(ctx) = ctx {
-        super::plan_admission::enforce_admitted_shares(volumes, &ctx.admitted.plan)
+        mvm_hostd::plan_admission::enforce_admitted_shares(volumes, &ctx.admitted.plan)
             .context("admission share check")?;
     }
     Ok(())

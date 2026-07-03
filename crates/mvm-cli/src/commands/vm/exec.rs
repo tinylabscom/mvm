@@ -20,9 +20,9 @@ use super::super::env::dev_vz::{ensure_default_microvm_image, ensure_workload_ke
 use super::Cli;
 use super::audit_chain::AuditEmitter;
 use super::host_signer::{PUBLIC_FILENAME, host_signer_id, load_or_init};
-use super::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
 use crate::ui;
 use mvm_core::plan::SynthesisInput;
+use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -348,7 +348,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     let admit = move |rootfs: &std::path::Path,
                       vm_name: &str|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
-        let ledger = super::plan_admission::InMemoryNonceLedger::default();
+        let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
             tenant: "local",
             vm_name,

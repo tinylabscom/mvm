@@ -107,6 +107,10 @@ landlock = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+# plan_admission bundle re-verify tests build/read `.mvmpkg` archives; verb-grant
+# test decodes the signer pubkey hex.
+tar.workspace = true
+hex.workspace = true
 # `TestEnv` env-var guard for env-mutating tests (reaper / substitution_endpoint).
 mvm-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "sync", "test-util"] }

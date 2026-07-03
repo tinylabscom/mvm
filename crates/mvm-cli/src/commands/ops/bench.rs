@@ -945,7 +945,7 @@ fn boot_vz_hold_once(vm_name: &str) -> Result<HeldVzVm> {
     use mvm_core::vm_backend::VmStartConfig;
     use std::time::Instant;
 
-    use crate::commands::vm::plan_admission::populate_audit_substrate;
+    use mvm_hostd::plan_admission::populate_audit_substrate;
 
     let img = super::bench_probe::resolve_probe_image()?;
     let admitted = super::bench_probe::admit_probe_plan(
@@ -1138,7 +1138,7 @@ fn boot_firecracker_hold_once(vm_name: &str, warm_pool_size: u32) -> Result<Held
     use mvm_core::vm_backend::VmStartConfig;
     use std::time::Instant;
 
-    use crate::commands::vm::plan_admission::populate_audit_substrate;
+    use mvm_hostd::plan_admission::populate_audit_substrate;
 
     let img = super::bench_probe::resolve_probe_image()?;
     let admitted = super::bench_probe::admit_probe_plan(

@@ -7,10 +7,8 @@ use anyhow::{Context, Result};
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy};
 
 use crate::commands::env::dev_vz::ensure_default_microvm_image;
-use crate::commands::vm::plan_admission::{
-    AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run,
-};
 use mvm_core::plan::SynthesisInput;
+use mvm_hostd::plan_admission::{AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run};
 
 /// Keep the live probe above the current default-image kernel load floor. Smaller
 /// values can fail before readiness on Linux/libkrun, which makes the benchmark
@@ -164,7 +162,7 @@ pub fn boot_hold_once(vm_name: &str) -> Result<HeldProbeVm> {
     use mvm_core::vm_backend::{VmBackend, VmStartConfig};
     use std::time::Instant;
 
-    use crate::commands::vm::plan_admission::populate_audit_substrate;
+    use mvm_hostd::plan_admission::populate_audit_substrate;
 
     let img = resolve_probe_image()?;
     // `None` keys_dir → the real ~/.mvm/keys host signer, so the

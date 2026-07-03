@@ -1,6 +1,10 @@
-//! Plan-admission pipeline used by `mvmctl up`.
+//! Host-side plan-admission pipeline (claim 8).
 //!
-//! Threads `synthesize_plan` + `host_signer` into the
+//! Lives in `mvm-hostd` beside the host signing key it uses, so every driver
+//! reaches one admission contract: `mvmctl up`/`run` today, and the
+//! `mvm-client` local backend once the boot seam wires local `run`.
+//!
+//! Threads `synthesize_plan` + the host keypair into the
 //! supervisor-equivalent admission flow:
 //!
 //! ```text
@@ -50,7 +54,7 @@ use mvm_core::plan::{
 use mvm_core::policy::PolicyBundle;
 use std::sync::Mutex;
 
-use super::host_signer::host_signer_id;
+use crate::audit::host_keypair::host_signer_id;
 use mvm_core::plan::{SynthesisInput, synthesize_plan};
 
 pub use mvm_core::time::{Clock, SystemClock};
@@ -79,22 +83,15 @@ impl Default for InMemoryNonceLedger {
 
 /// Result of a successful admission. Carries everything the caller
 /// needs to hand to the backend (the plan + its id), to the audit
-/// chain (the plan again, for `AuditEntry::for_plan`), and — for
-/// downstream consumers that want the canonical envelope — the
-/// `SignedExecutionPlan` itself.
-///
-/// `signed` carries a `#[allow(dead_code)]` because the only current
-/// consumer is in-module tests proving the envelope round-trips
-/// through `verify_plan`. Cross-process consumers (a future
-/// `mvm-hostd` lift, or `mvmctl plan show` once it lands) will read
-/// the envelope verbatim. Keeping the field on the struct stabilises
-/// the surface for those callers.
+/// chain (the plan again, for `AuditEntry::for_plan`), and — for the
+/// bridge audit substrate and any cross-process consumer — the canonical
+/// `SignedExecutionPlan` envelope, which [`populate_audit_substrate`]
+/// serializes verbatim onto `VmStartConfig.plan_json`.
 #[derive(Debug)]
 pub struct AdmittedPlan {
     pub plan: ExecutionPlan,
     pub plan_id: PlanId,
     pub signer_id: String,
-    #[allow(dead_code)]
     pub signed: SignedExecutionPlan,
 }
 
@@ -143,8 +140,8 @@ pub fn admit_for_run(
     // Load or generate the host signer. load_or_init refuses
     // loose perms; that error propagates verbatim.
     let signer = match host_signer_keys_dir {
-        Some(dir) => super::host_signer::load_or_init_at(dir)?,
-        None => super::host_signer::load_or_init()?,
+        Some(dir) => crate::audit::host_keypair::load_or_init_at(dir)?,
+        None => crate::audit::host_keypair::load_or_init()?,
     };
     let signer_id = host_signer_id();
 
@@ -345,7 +342,7 @@ pub(crate) fn write_secret_file(path: &std::path::Path, body: &[u8]) -> Result<(
 /// because the producer is the only place that has the signed envelope
 /// in scope; `microvm` reads it back from disk inside the
 /// `target_os = "linux"` bridge-spawn block.
-pub(crate) fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -> Result<()> {
+pub fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -> Result<()> {
     let Some(plan_json) = cfg.plan_json.as_deref() else {
         return Ok(());
     };
@@ -393,12 +390,12 @@ fn mint_verb_grant_sidecar(
     };
 
     let keys_dir = mvm_core::config::mvm_keys_dir();
-    let signer = super::host_signer::load_or_init_at(&keys_dir)
+    let signer = crate::audit::host_keypair::load_or_init_at(&keys_dir)
         .context("load host signer for verb-grant mint")?;
-    let keystore = mvm_hostd::host_signer::keystore::Keystore::load_from_file(&signer.secret_path)
+    let keystore = crate::host_signer::keystore::Keystore::load_from_file(&signer.secret_path)
         .context("load Keystore from host-signer key file")?;
 
-    let grant = mvm_hostd::host_signer::mint_verb_grant(
+    let grant = crate::host_signer::mint_verb_grant(
         &keystore,
         vm_name,
         &plan.nonce,
@@ -435,7 +432,7 @@ fn mint_verb_grant_sidecar(
 /// It's the trust-boundary hook: no host-fs grant reaches a guest unless
 /// the signed plan admitted it (claim 1 / claim 8). The supervisor +
 /// mvmd enforcement mirror this check against the same `plan.shares`.
-pub(crate) fn enforce_admitted_shares(
+pub fn enforce_admitted_shares(
     volumes: &[mvm_core::vm_backend::VmVolume],
     plan: &ExecutionPlan,
 ) -> Result<()> {
@@ -577,7 +574,7 @@ mod tests {
         assert!(admitted.signer_id.starts_with("host:"));
         // The signed envelope must be re-verifiable with the public
         // half of the host signer.
-        let signer = super::super::host_signer::load_or_init_at(dir.path()).unwrap();
+        let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         let trusted: [(&str, &ed25519_dalek::VerifyingKey); 1] =
             [(&admitted.signer_id, &signer.verifying)];
         let recovered = mvm_core::plan::verify_plan(&admitted.signed, &trusted).unwrap();
@@ -592,7 +589,7 @@ mod tests {
         // then ask the ledger to admit twice. The second call must
         // refuse with nonce-replay.
         let plan = synthesize_plan(&fixture_input("vm1")).unwrap();
-        let signer = super::super::host_signer::load_or_init_at(dir.path()).unwrap();
+        let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         let signer_id = host_signer_id();
         let signed = sign_plan(&plan, &signer.signing, &signer_id);
         let verified =
@@ -624,7 +621,7 @@ mod tests {
         let mut plan = synthesize_plan(&fixture_input("vm1")).unwrap();
         plan.valid_from = Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap();
         plan.valid_until = Utc.with_ymd_and_hms(2000, 1, 1, 0, 10, 0).unwrap();
-        let signer = super::super::host_signer::load_or_init_at(dir.path()).unwrap();
+        let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         let signed = sign_plan(&plan, &signer.signing, &host_signer_id());
         let verified = verify_plan(&signed, &[(&host_signer_id(), &signer.verifying)]).unwrap();
         let _clock = FixedClock(now_plus_30);
@@ -646,7 +643,7 @@ mod tests {
         .unwrap();
         // The signed field is what the audit signer will hash;
         // proving it round-trips here closes the contract.
-        let signer = super::super::host_signer::load_or_init_at(dir.path()).unwrap();
+        let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         let trusted: [(&str, &ed25519_dalek::VerifyingKey); 1] =
             [(&admitted.signer_id, &signer.verifying)];
         assert!(verify_plan(&admitted.signed, &trusted).is_ok());
@@ -962,7 +959,7 @@ mod tests {
             serde_json::from_str(&plan_json).expect("roundtrip");
         // Re-verify the envelope to get the inner ExecutionPlan and
         // confirm the plan_id matches what the producer admitted.
-        let signer = super::super::host_signer::load_or_init_at(dir.path()).unwrap();
+        let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         let trusted: [(&str, &ed25519_dalek::VerifyingKey); 1] =
             [(&admitted.signer_id, &signer.verifying)];
         let recovered =

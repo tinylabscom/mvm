@@ -18,7 +18,6 @@ pub(super) mod logs;
 pub(super) mod managed_secrets;
 pub(super) mod pause;
 pub(crate) mod phase_timing;
-pub(super) mod plan_admission;
 pub(super) mod plan_persist;
 pub(super) mod policy_resolver;
 pub(super) mod proc;
