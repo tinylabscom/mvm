@@ -88,18 +88,32 @@ model unchanged (virtio-blk ext4 + verity sidecar).
     - `ext4_rs` v1.3.3: **rejected** — requires **nightly** (`#![feature(error_in_core)]`);
       non-starter for a stable-toolchain production dep. Also can't mkfs from scratch.
     - `tpdenk/mkfs`: **rejected** — library API "not implemented" (CLI-only).
-    - **`am-fs-ext4` v0.4.0: viable, single-crate, builds on stable, fully
-      userspace.** It's a complete R/W ext4: `mkfs::format_filesystem` to format,
-      then `fs.apply_mkdir` / `apply_create` / `apply_pwrite` / `apply_symlink` /
-      `apply_mknod` / `apply_link` + ACL/xattr support to populate a full tree,
-      plus a `fsck` module and a read path for round-trip self-validation. No
-      journal by default (fine for a read-only rootfs; verity-friendly). So the
-      combo is unnecessary — **B2 targets `am-fs-ext4` alone.**
-    - Still to validate before selection is final (gates 2–6): Linux read-only
-      mount, dm-verity roothash (+ pure-Rust Merkle-tree gen to drop
-      `veritysetup`), byte-determinism, faithful perms/symlinks/xattrs,
-      `cargo-audit`/`deny.toml` + maintenance. `fsck` + the read path make gate 1
-      (userspace round-trip) provable on macOS without a mount.
+    - **`am-fs-ext4` v0.4.0: functionally viable** — stable, single-crate,
+      userspace, complete R/W ext4 (`mkfs::format_filesystem` + `apply_mkdir` /
+      `apply_create` / `apply_pwrite` / `apply_symlink` + xattr/ACL + `fsck` +
+      read path). **But rejected as a runtime dependency on security grounds** (below).
+
+  - **B1 decision (2026-07-03) — OWN a minimal writer; `am-fs-ext4` is a
+    dev-only test oracle, never a runtime dep.** Security review of `am-fs-ext4`:
+    - **~105 `unsafe` blocks** (60 + 45 in `am-fs-core`); not `#![forbid(unsafe_code)]`.
+      Its input is attacker-influenced (arbitrary OCI trees) and its output feeds
+      dm-verity (**claim 3**), so a bug is potential **host** memory corruption —
+      and Option B *removes the builder-VM sandbox* that currently isolates `mkfs`.
+    - **~80% is unused attack surface** for a read-only rootfs: full journaling
+      (jbd2/transaction), htree, **casefold (pulls `unicode-normalization`/`caseless`)**,
+      ACL, inline-data, fsck — all linked + trusted but never exercised.
+    - Early-stage (v0.4.0, no RUSTSEC history); determinism unverified.
+    - **Therefore B2 owns a `#![forbid(unsafe_code)]`, no-journal, read-only ext4
+      writer** — memory-safe (worst case = caught panic, never corruption),
+      deterministic by construction (fixed inode order, zeroed timestamps, fixed
+      allocation), minimal surface (create-dir/create-file/extents/symlink/perms/
+      xattr only). `am-fs-ext4` + real `mkfs.ext4` become **differential-test
+      oracles** (dev-deps / CI): our writer's bytes must mount + read identically.
+      This keeps the 105-`unsafe` crate out of the production trust base while
+      still proving our writer correct.
+    - Remaining validation gates unchanged (Linux mount, pure-Rust dm-verity
+      Merkle roothash to drop `veritysetup`, byte-determinism, faithful
+      perms/symlinks/xattrs, fuzz).
 
 - **B2 — `materialize_ext4_pure`.** New fn in `mvm-build` mirroring
   `materialize_ext4`'s API (`MaterializeExt4Input → MaterializedExt4`), behind a
