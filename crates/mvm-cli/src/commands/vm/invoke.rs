@@ -156,7 +156,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
                     move |rootfs: &std::path::Path,
                           vm_name: &str|
                           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
-                        let ledger = super::plan_admission::InMemoryNonceLedger::default();
+                        let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
                         let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
                             tenant: "local",
                             vm_name,

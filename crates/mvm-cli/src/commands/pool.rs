@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 use super::Cli;
 use super::env::dev_vz::ensure_default_microvm_image;
 use super::vm::host_signer;
-use super::vm::plan_admission::stash_plan_for_bridge;
+use mvm_hostd::plan_admission::stash_plan_for_bridge;
 
 /// Lowercase-hex sha256 of a kernel image — part of the base-compat key.
 pub fn kernel_sha256_hex(kernel: &Path) -> Result<String> {
