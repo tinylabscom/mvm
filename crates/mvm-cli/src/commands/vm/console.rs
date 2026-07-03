@@ -23,8 +23,9 @@ use crate::ui;
 ///    different path than `VzTransport::for_vm` resolves).
 /// 2. libkrun per-port Unix socket.
 /// 3. In-house runner (`WorkloadRunner` / HVF) agent socket at
-///    `<vm_state_dir>/agent.sock`, only when `is_dev_mode()` (claim 15:
-///    console sockets are pre-opened only for dev boots).
+///    `<vm_state_dir>/agent.sock`, only when `is_dev_mode()` — the
+///    pre-opened console sockets exist only when the dev console was
+///    enabled at boot.
 /// 4. Vz per-port Unix socket (`<vm_state_dir>/vsock/vsock-<port>.sock`) —
 ///    the macOS AVF path.
 /// 5. Firecracker UDS multiplexer (fleet/production path).
@@ -61,7 +62,7 @@ fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
     // `<vm_state_dir>/agent.sock` and console data ports at
     // `<vm_state_dir>/vsock/vsock-<port>.sock`. Dev-only: the pre-opened
     // console sockets are only present when `dev_console` was set at boot,
-    // and this arm is gated on `is_dev_mode()` (claim 15).
+    // and this arm is gated on `is_dev_mode()`.
     if mvm_core::config::is_dev_mode() {
         let inhouse = DevConsoleTransport::for_vm(name);
         if inhouse.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {

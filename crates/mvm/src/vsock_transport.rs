@@ -151,24 +151,33 @@ impl VsockTransport for VzTransport {
 ///   standing bridge the supervisor opens at boot.
 /// - Console data (ports in `dev_console_data_ports()`): `<state_dir>/vsock/vsock-<port>.sock`
 ///   — same `vsock/` subdir convention the Vz supervisor uses, populated
-///   only when `VmStartConfig.dev_console` is true (claim 15).
+///   only when `VmStartConfig.dev_console` is true.
 ///
 /// This transport is DEV-ONLY: `pick_console_transport` selects it only
 /// when `is_dev_mode()` is set, so a sealed production runner cannot
 /// receive an interactive attach over this path.
 pub struct DevConsoleTransport {
     state_dir: PathBuf,
+    vsock_dir: PathBuf,
 }
 
 impl DevConsoleTransport {
     pub fn new(state_dir: impl Into<PathBuf>) -> Self {
+        let state_dir = state_dir.into();
+        let vsock_dir = state_dir.join("vsock");
         Self {
-            state_dir: state_dir.into(),
+            state_dir,
+            vsock_dir,
         }
     }
 
     pub fn for_vm(vm_name: &str) -> Self {
-        Self::new(mvm_core::config::vm_state_dir(vm_name))
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        let vsock_dir = mvm_core::config::vm_vz_vsock_dir(vm_name);
+        Self {
+            state_dir,
+            vsock_dir,
+        }
     }
 
     /// Resolve the host UDS for a port.
@@ -180,8 +189,7 @@ impl DevConsoleTransport {
         if port == mvm_guest::vsock::GUEST_AGENT_PORT {
             self.state_dir.join("agent.sock")
         } else {
-            self.state_dir
-                .join("vsock")
+            self.vsock_dir
                 .join(mvm_core::config::vsock_socket_filename(port))
         }
     }
