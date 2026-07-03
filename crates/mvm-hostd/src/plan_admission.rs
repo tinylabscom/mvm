@@ -2,7 +2,7 @@
 //!
 //! Lives in `mvm-hostd` beside the host signing key it uses, so every driver
 //! reaches one admission contract: `mvmctl up`/`run` today, and the
-//! `mvm-client` local backend once the boot seam wires `run` (issue #1388).
+//! `mvm-client` local backend once the boot seam wires local `run`.
 //!
 //! Threads `synthesize_plan` + the host keypair into the
 //! supervisor-equivalent admission flow:
