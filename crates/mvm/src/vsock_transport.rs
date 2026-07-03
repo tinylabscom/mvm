@@ -143,6 +143,58 @@ impl VsockTransport for VzTransport {
     }
 }
 
+/// Connects to an in-house (`WorkloadRunner` / HVF) VM's vsock channels.
+///
+/// The in-house runner binds two distinct socket layouts under the per-VM
+/// state dir:
+/// - Agent RPC (`GUEST_AGENT_PORT`): `<state_dir>/agent.sock` — the
+///   standing bridge the supervisor opens at boot.
+/// - Console data (ports in `dev_console_data_ports()`): `<state_dir>/vsock/vsock-<port>.sock`
+///   — same `vsock/` subdir convention the Vz supervisor uses, populated
+///   only when `VmStartConfig.dev_console` is true (claim 15).
+///
+/// This transport is DEV-ONLY: `pick_console_transport` selects it only
+/// when `is_dev_mode()` is set, so a sealed production runner cannot
+/// receive an interactive attach over this path.
+pub struct DevConsoleTransport {
+    state_dir: PathBuf,
+}
+
+impl DevConsoleTransport {
+    pub fn new(state_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            state_dir: state_dir.into(),
+        }
+    }
+
+    pub fn for_vm(vm_name: &str) -> Self {
+        Self::new(mvm_core::config::vm_state_dir(vm_name))
+    }
+
+    /// Resolve the host UDS for a port.
+    ///
+    /// - `GUEST_AGENT_PORT` → `<state_dir>/agent.sock` (the standing bridge).
+    /// - Any other port → `<state_dir>/vsock/vsock-<port>.sock` (the
+    ///   pre-opened console data socket, same convention as Vz).
+    pub(crate) fn socket_path(&self, port: u32) -> PathBuf {
+        if port == mvm_guest::vsock::GUEST_AGENT_PORT {
+            self.state_dir.join("agent.sock")
+        } else {
+            self.state_dir
+                .join("vsock")
+                .join(mvm_core::config::vsock_socket_filename(port))
+        }
+    }
+}
+
+impl VsockTransport for DevConsoleTransport {
+    fn connect(&self, port: u32) -> Result<UnixStream> {
+        let path = self.socket_path(port);
+        UnixStream::connect(&path)
+            .with_context(|| format!("Failed to connect to in-house vsock at {}", path.display()))
+    }
+}
+
 /// Connects through the nesting hop: the outer host
 /// reaches a workload microVM's vsock *via* the long-lived libkrun
 /// host VM. The hop socket is the host VM's libkrun UDS for
@@ -362,5 +414,77 @@ mod tests {
         assert_eq!(len, expected, "length prefix mismatch");
         assert_eq!(body, expected_body, "handshake body mismatch");
         assert_eq!(String::from_utf8(body).unwrap(), "wl-abc 5252");
+    }
+
+    // --- DevConsoleTransport ---
+
+    #[test]
+    fn dev_console_transport_agent_port_resolves_to_agent_sock() {
+        // GUEST_AGENT_PORT → `<state_dir>/agent.sock`, not the vsock/ subdir.
+        let t = DevConsoleTransport::new("/tmp/no-such-inhouse-vm");
+        let path = t.socket_path(mvm_guest::vsock::GUEST_AGENT_PORT);
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/no-such-inhouse-vm/agent.sock"),
+            "agent port must resolve to agent.sock at state-dir root"
+        );
+    }
+
+    #[test]
+    fn dev_console_transport_console_port_resolves_to_vsock_subdir() {
+        // Console data ports → `<state_dir>/vsock/vsock-<port>.sock`.
+        let t = DevConsoleTransport::new("/tmp/no-such-inhouse-vm");
+        let port = *mvm_guest::vsock::dev_console_data_ports()
+            .collect::<Vec<_>>()
+            .first()
+            .expect("at least one console data port");
+        let path = t.socket_path(port);
+        let expected = PathBuf::from(format!("/tmp/no-such-inhouse-vm/vsock/vsock-{port}.sock"));
+        assert_eq!(
+            path, expected,
+            "console data port must resolve to vsock/ subdir"
+        );
+    }
+
+    #[test]
+    fn dev_console_transport_for_vm_error_mentions_backend() {
+        // Error text must identify the backend so console failures are diagnosable.
+        let t = DevConsoleTransport::for_vm("no-such-inhouse-vm");
+        let err = t
+            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .expect_err("should fail — no real socket")
+            .to_string();
+        assert!(
+            err.contains("in-house vsock"),
+            "error must name the backend: {err}"
+        );
+    }
+
+    #[test]
+    fn dev_console_transport_connects_via_agent_sock() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent.sock");
+        let _listener = UnixListener::bind(&agent).unwrap();
+        let t = DevConsoleTransport::new(dir.path());
+        t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .expect("should connect to agent.sock");
+    }
+
+    #[test]
+    fn dev_console_transport_connects_via_console_data_sock() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let vsock_dir = dir.path().join("vsock");
+        std::fs::create_dir_all(&vsock_dir).unwrap();
+        let port = *mvm_guest::vsock::dev_console_data_ports()
+            .collect::<Vec<_>>()
+            .first()
+            .expect("at least one console data port");
+        let sock = vsock_dir.join(mvm_core::config::vsock_socket_filename(port));
+        let _listener = UnixListener::bind(&sock).unwrap();
+        let t = DevConsoleTransport::new(dir.path());
+        t.connect(port)
+            .expect("should connect to console data sock");
     }
 }
