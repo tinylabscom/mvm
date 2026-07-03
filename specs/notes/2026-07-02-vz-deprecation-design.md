@@ -141,6 +141,43 @@ arbitrary guest ports on demand or needs the port set fixed at boot. Settle
 with a short spike in Step 0; it only affects how the pre-open is wired, not
 the boundary.
 
+## Companion: drop `--stdin`, auto-detect non-TTY stdin (channel-1 inbound DX)
+
+`--stdin` is bad *nix DX. The guest protocol already carries stdin in both run
+verbs (`crates/mvm-guest/src/vsock.rs`): `RunEntrypoint { stdin: Vec<u8> }`
+(production-safe baked program) and `Exec { stdin: Option<String> }` (inline
+argv, `dev-shell`-gated, claim 4). The flag was an entrypoint-only wrapper over
+plumbing that already exists.
+
+**Change:** delete the `--stdin` flag (and its file-path form; `< file` covers
+it). When mvmctl's own stdin is **not a TTY** (`!stdin.is_terminal()`), read it
+— buffered, capped via the runner's existing `read_stdin_capped` (1 MiB in v1)
+— and route the bytes into whichever verb the run resolves to:
+
+- `--entrypoint` / production → `RunEntrypoint.stdin`.
+- inline argv (`-- <cmd>`, dev) → `Exec.stdin`.
+
+TTY stdin → no payload (or, with `-t`, the interactive PTY path). This is a
+CLI-side change: the protocol and guest agent already handle `stdin` in both
+verbs, so no new guest surface and no fuzzed-type change.
+
+**Why it's safe by construction:** piping to inline argv only works in dev
+(`Exec` is `dev-shell`-gated, and inline argv is already the dev surface).
+Production stdin flows to the sealed `RunEntrypoint`, unchanged. So this adds no
+production capability — it only removes a flag.
+
+**v1 bound:** buffered + 1 MiB cap (the runner's existing contract); a larger
+pipe fails closed with the existing `StdinTooLarge` error. Unbounded/live
+streaming stdin is an explicit Level-2 follow-up, out of scope here.
+
+**Side benefit:** it makes the channel-1 inbound Step-0 proof idiomatic —
+`echo STDIN-RT-42 | machine run --image alpine --hypervisor inhouse -- /bin/cat`
+must echo the payload back (dev `Exec` path). This lands as the first
+workstream so it also serves as the inbound proof for the flip.
+
+**Also fixes:** the noticed clap nit (today `--stdin` given without
+`--entrypoint` is silently ignored) disappears with the flag.
+
 ## Two flips, not one
 
 `mvm-vz-supervisor` serves **both** the workload VMM and the builder VMM, so
@@ -168,16 +205,20 @@ separate `start()` copy so we do not ship two in-house code paths. `hvf`/
 
 ## Sequenced plan (refined "B")
 
-- **Step 0 — gate, no default flip.** Prove workload reachability, the
-  production I/O round-trip, and builder reachability on macOS-26 (see gate
-  above). Spike the vsock pre-open question.
-- **Step 1 — flip + wire.** Flip both defaults (workload `auto_select` +
+- **Step 0 — gate (mostly done).** Workload reachability + channel-1 outbound:
+  PROVEN (see Step-0 results). Spike the vsock pre-open question. Builder
+  reachability proof and the idiomatic inbound-stdin proof land with Steps 1–2.
+- **Step 1 — stdin DX companion.** Drop `--stdin`; auto-detect non-TTY stdin
+  (see companion section). Independent of the backend, ships DX value alone,
+  and its acceptance test IS the channel-1 inbound proof
+  (`echo … | machine run --hypervisor inhouse -- /bin/cat`). Lands first.
+- **Step 2 — flip + wire.** Flip both defaults (workload `auto_select` +
   builder `auto_detect`) to the in-house runner / builder. Keep Vz reachable
   via explicit `--hypervisor vz` / `MVM_BUILDER_BACKEND=vz` for this step. Wire
   the dev-only interactive PTY shell (the console design above). Collapse
   `hvf` → runner as the default. After this, no non-interactive `machine run`
   or `dev` command touches Vz; `-it` works over the in-house runner in dev.
-- **Step 2 — delete Vz.** Remove `vz.rs`, `vz_control.rs`, `VzTransport`
+- **Step 3 — delete Vz.** Remove `vz.rs`, `vz_control.rs`, `VzTransport`
   (now `DevConsoleTransport`, kept), `mvm-vz-supervisor` (Rust bin + Swift),
   `is_vz_default_tier`, the Vz builder path (`vz_builder.rs`,
   `BuilderBackendChoice::Vz`), and Vz cases across `catalog` / `console` /
