@@ -460,6 +460,11 @@ fn clone_builder_err(e: &BuilderVmError) -> BuilderVmError {
             exit_code: *exit_code,
             vm_state_dir: vm_state_dir.clone(),
         },
+        BuilderVmError::InHouseVmmFailed { detail } => {
+            BuilderVmError::InHouseVmmFailed {
+                detail: detail.clone(),
+            }
+        }
     }
 }
 

@@ -83,10 +83,7 @@ fn unique_job_id() -> String {
 /// could not run the build), so the auto-detect fallback retries the next
 /// backend rather than surfacing a false build error.
 fn map_runner_failure(detail: String) -> BuilderVmError {
-    BuilderVmError::SupervisorExited {
-        exit_code: 1,
-        vm_state_dir: detail,
-    }
+    BuilderVmError::InHouseVmmFailed { detail }
 }
 
 impl BuilderVm for InHouseBuilderVm {
@@ -191,6 +188,6 @@ mod tests {
     #[test]
     fn runner_failure_maps_to_vmm_level_error() {
         let e = map_runner_failure("in-house builder VM did not power off".into());
-        assert!(matches!(e, BuilderVmError::SupervisorExited { .. }));
+        assert!(matches!(e, BuilderVmError::InHouseVmmFailed { .. }));
     }
 }

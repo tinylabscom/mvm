@@ -263,7 +263,9 @@ pub fn resolve_stage0_backend_for_choice(
 pub fn is_builder_vm_level_failure(e: &BuilderVmError) -> bool {
     matches!(
         e,
-        BuilderVmError::SupervisorExited { .. } | BuilderVmError::LibkrunUnavailable(_)
+        BuilderVmError::SupervisorExited { .. }
+            | BuilderVmError::LibkrunUnavailable(_)
+            | BuilderVmError::InHouseVmmFailed { .. }
     )
 }
 
@@ -1052,9 +1054,8 @@ mod tests {
         // The variant InHouseBuilderVm::run_build returns for a boot/power-off
         // failure must be classified VMM-level so the auto path retries libkrun.
         assert!(is_builder_vm_level_failure(
-            &BuilderVmError::SupervisorExited {
-                exit_code: 1,
-                vm_state_dir: "/x".into(),
+            &BuilderVmError::InHouseVmmFailed {
+                detail: "boot failed".into(),
             }
         ));
     }
