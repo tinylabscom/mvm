@@ -1,0 +1,20 @@
+[package]
+name = "mvm-ext4"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Minimal, memory-safe (#![forbid(unsafe_code)]), deterministic ext4 image writer for read-only microVM rootfs materialization. No journal, no metadata_csum, extents-only. Zero mvm-* deps; builds an image from a node list in pure userspace — no mkfs, no builder VM, no subprocess."
+
+[dependencies]
+
+[dev-dependencies]
+# Read-only ext4 oracle: our writer's output must read back identically through
+# a real, independent ext4 reader. Dev-only — never a runtime dependency (it
+# carries ~105 unsafe blocks + a journaling/casefold surface we do not ship).
+am-fs-ext4 = "0.4"
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
