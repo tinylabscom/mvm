@@ -24,4 +24,8 @@ fn machine_run_help_has_no_stdin_flag() {
         !help.contains("--stdin"),
         "help still advertises --stdin:\n{help}"
     );
+    assert!(
+        help.contains("--entrypoint"),
+        "help is missing --entrypoint (truncated or empty render):\n{help}"
+    );
 }

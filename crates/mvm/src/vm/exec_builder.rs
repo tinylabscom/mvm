@@ -62,6 +62,10 @@ impl<'a> ExecBuilder<'a> {
 
     /// Bytes to supply as stdin for the `Exec` command(s). Empty ⇒ no stdin
     /// (`Exec.stdin = None`); non-empty bytes are utf8-lossy-decoded.
+    ///
+    /// Note: this setter is wired into warm-lease callers only. The live
+    /// transient `machine run` path delivers stdin through `exec.rs::run_in_guest`
+    /// directly, not through ExecBuilder.
     pub fn stdin_bytes(mut self, bytes: Vec<u8>) -> Self {
         self.stdin = bytes;
         self

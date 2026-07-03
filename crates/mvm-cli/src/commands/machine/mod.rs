@@ -2177,6 +2177,13 @@ fn run_persistent(
     cfg: &MvmConfig,
     resolved_flake_slot: Option<&str>,
 ) -> Result<()> {
+    use std::io::IsTerminal as _;
+    if !std::io::stdin().is_terminal() {
+        eprintln!(
+            "warning: piped stdin is ignored for a persistent (-d/--name) machine; \
+             use a transient run or --entrypoint to deliver stdin"
+        );
+    }
     let name = resolve_machine_run_name(&args)?;
     let existing = load_machine_spec(&name).ok();
     let (spec, action) = resolve_persistent_spec(&args, &name, existing, resolved_flake_slot)?;

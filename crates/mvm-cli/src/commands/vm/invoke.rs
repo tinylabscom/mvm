@@ -362,11 +362,9 @@ pub(in crate::commands) fn read_stdin_payload(spec: Option<&str>) -> Result<Vec<
 
 /// Host-side cap on a buffered stdin payload. Mirrors the guest runner's v1
 /// inbound cap; over-cap fails closed rather than silently truncating.
-#[allow(dead_code)]
 const MAX_STDIN_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(in crate::commands) enum AutoStdinError {
     TooLarge { cap: usize },
     Io(std::io::Error),
@@ -386,7 +384,6 @@ impl std::error::Error for AutoStdinError {}
 
 /// Read one buffered stdin payload, capped. A TTY on stdin is interactive input
 /// for the terminal, not a workload payload, so it yields empty and never blocks.
-#[allow(dead_code)]
 fn read_auto_stdin_from<R: std::io::Read>(
     mut reader: R,
     is_tty: bool,
@@ -409,7 +406,6 @@ fn read_auto_stdin_from<R: std::io::Read>(
 }
 
 /// Public entry: acquire the caller's stdin payload from the real stdin fd.
-#[allow(dead_code)]
 pub(in crate::commands) fn read_auto_stdin(is_tty: bool) -> anyhow::Result<Vec<u8>> {
     read_auto_stdin_from(std::io::stdin().lock(), is_tty, MAX_STDIN_BYTES)
         .map_err(|e| anyhow::anyhow!(e))
