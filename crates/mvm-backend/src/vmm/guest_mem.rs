@@ -9,6 +9,14 @@ pub(super) struct GuestMem {
     size: usize,
 }
 
+// SAFETY: `GuestMem` is a raw view onto the single mapped guest-RAM region, which
+// outlives every thread that touches it. The vsock device shares it between the
+// vCPU thread and the dedicated host-I/O thread, but all access is serialized
+// under the device's `Mutex<VsockShared>`, and the I/O thread is joined before the
+// RAM is unmapped/freed (`VirtioVsock::shutdown` runs before `dealloc`). So the
+// pointer is only ever dereferenced by one thread at a time and never dangles.
+unsafe impl Send for GuestMem {}
+
 impl GuestMem {
     /// # Safety
     /// `ram` must point to `size` bytes mapped as guest RAM at `base`, valid for

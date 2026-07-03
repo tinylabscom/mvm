@@ -223,15 +223,15 @@ impl RunDevice for super::vsock::VirtioVsock {
         (*self).read(offset)
     }
     fn write(&mut self, offset: u64, value: u64, _size: u8) -> Option<u32> {
-        self.write(offset, value).then(|| self.irq())
+        super::vsock::VirtioVsock::write(self, offset, value).then(|| self.irq())
     }
     fn poll(&mut self) -> Option<u32> {
-        // Host→guest work each timer tick: relay host-initiated agent streams and
-        // drain egress-endpoint replies. Either may deliver an rx packet and need
-        // an interrupt.
-        let agent = self.drain_agent();
-        let subst = self.drain_substitution();
-        agent.or(subst)
+        // Host→guest work: relay host-initiated agent streams and drain
+        // egress-endpoint replies. On HVF the dedicated host-I/O thread
+        // ([`super::vsock_io`]) drives this reliably off the vCPU exit path; this
+        // run-loop path remains a fallback (e.g. KVM) and is a harmless no-op when
+        // the I/O thread already serviced everything (both run under the lock).
+        super::vsock::VirtioVsock::poll(self)
     }
 }
 
@@ -568,5 +568,77 @@ mod tests {
         let mut devs: Vec<&mut dyn RunDevice> = vec![];
         let out = run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions, || true).unwrap();
         assert_eq!(out, RunOutcome::Halt);
+    }
+
+    /// Regression for the host→guest poll-starvation bug: the dedicated vsock I/O
+    /// thread must service a host connection even when the guest produces ONLY
+    /// `Mmio` exits (no `VTimer`/`Canceled`, so the run loop's `poll()` fallback is
+    /// never invoked). Before the fix, host servicing rode on `poll()` and was
+    /// starved under MMIO load, so the agent connection was never accepted.
+    #[test]
+    fn vsock_io_thread_services_host_under_sustained_mmio() {
+        use super::super::vsock::{IrqLine, VirtioVsock};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct CountIrq(AtomicU32);
+        impl IrqLine for CountIrq {
+            fn signal(&self, _spi: u32) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // Guest RAM for the device (freed only after the device — and its joined I/O
+        // thread — drop at end of the test).
+        let mut ram = vec![0u8; 0x10000];
+        let base = 0x0a00_0200u64;
+        // SAFETY: `ram` outlives `dev`; the device joins its I/O thread on drop
+        // before `ram` is freed.
+        let mut dev =
+            unsafe { VirtioVsock::new(base, 49, ram.as_mut_ptr(), 0x4000_0000, ram.len()) };
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("agent.sock");
+        dev.set_agent_socket(&sock).unwrap();
+        dev.start_io(Arc::new(CountIrq(AtomicU32::new(0))));
+
+        // A host RPC client connects. No rx buffers are posted, so the framed
+        // OP_REQUEST stays queued — observable via `queued_host_packets`.
+        let _client = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+
+        // Drive the run loop with ONLY `Mmio` exits (reads of the vsock magic
+        // register) then `Halt`. The `poll()` fallback fires only on
+        // `VTimer`/`Canceled`, neither of which appears here.
+        let mut script = Vec::new();
+        for _ in 0..50 {
+            script.push(VcpuExit::Mmio {
+                phys_addr: base,
+                write: false,
+                len: 4,
+                data: 0,
+            });
+        }
+        script.push(VcpuExit::Halt);
+        let vcpu = ScriptVcpu::new(script);
+        {
+            let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
+            let out = run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions, || true).unwrap();
+            assert_eq!(out, RunOutcome::Halt);
+        }
+
+        // The I/O thread (readiness + 5 ms backstop) accepts the connection and
+        // frames its OP_REQUEST entirely off the vCPU exit path.
+        let mut serviced = false;
+        for _ in 0..400 {
+            if dev.queued_host_packets() > 0 {
+                serviced = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            serviced,
+            "the I/O thread must accept the host connection under pure-MMIO activity"
+        );
     }
 }

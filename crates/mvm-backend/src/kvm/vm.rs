@@ -248,7 +248,7 @@ impl KvmVm {
 
         Ok(KvmEgressResult {
             console: serial.output,
-            workload_exit_code: vsock.workload_exit_code,
+            workload_exit_code: vsock.workload_exit_code(),
         })
     }
 }
