@@ -15,8 +15,54 @@ use mvm_client::dto::{
 };
 use mvm_client::{MvmClient, MvmError, Result};
 
+use crate::machine::{Machine, MachineError, MachineLs};
+
 /// Env var overriding the `mvmctl` binary path (shared with `machine.rs`).
 const MVM_CLI_BIN_ENV: &str = "MVM_CLI_BIN";
+
+/// Surface a `machine.rs` builder error (empty name, etc.) as a backend error.
+fn machine_err(e: MachineError) -> MvmError {
+    MvmError::Backend {
+        reason: e.to_string(),
+    }
+}
+
+// The `machine` subcommand argv is built in exactly one place — the pure
+// `machine.rs` builders, which the cross-language conformance harness pins to
+// `sdks/machine-fixtures/*.argv`. The facade delegates to them rather than
+// hand-rolling a second copy, so it can never drift from the CLI contract.
+
+fn list_args() -> Result<Vec<String>> {
+    MachineLs::builder()
+        .json(true)
+        .machine_args()
+        .map_err(machine_err)
+}
+
+fn stop_args(id: &MachineId) -> Result<Vec<String>> {
+    Machine::named(&id.0)
+        .and_then(|m| m.stop().machine_args())
+        .map_err(machine_err)
+}
+
+fn logs_args(id: &MachineId, opts: &LogOpts) -> Result<Vec<String>> {
+    let mut builder = Machine::named(&id.0).map_err(machine_err)?.logs();
+    if opts.follow {
+        builder = builder.follow(true);
+    }
+    if let Some(lines) = opts.tail_lines {
+        builder = builder.lines(lines);
+    }
+    builder.machine_args().map_err(machine_err)
+}
+
+fn exec_args(id: &MachineId, command: Vec<String>) -> Result<Vec<String>> {
+    Machine::named(&id.0)
+        .map_err(machine_err)?
+        .exec(command)
+        .machine_args()
+        .map_err(machine_err)
+}
 
 /// Drives machine lifecycle by shelling `mvmctl machine`. Construct with
 /// [`SubprocessBackend::from_env`] (respects `MVM_CLI_BIN`) or
@@ -44,14 +90,8 @@ impl SubprocessBackend {
     /// Run `mvmctl machine <args>` and return stdout, or a `Backend` error
     /// carrying stderr on non-zero exit. Synchronous `Command` (a short-lived
     /// CLI call), mirroring the sibling `machine.rs`.
-    fn run_cli(&self, args: &[&str]) -> Result<Vec<u8>> {
-        let out = Command::new(self.bin())
-            .arg("machine")
-            .args(args)
-            .output()
-            .map_err(|e| MvmError::Backend {
-                reason: format!("spawn mvmctl: {e}"),
-            })?;
+    fn run_cli(&self, args: &[String]) -> Result<Vec<u8>> {
+        let out = self.capture(args)?;
         if out.status.success() {
             Ok(out.stdout)
         } else {
@@ -60,6 +100,18 @@ impl SubprocessBackend {
                 &String::from_utf8_lossy(&out.stderr),
             ))
         }
+    }
+
+    /// Spawn `mvmctl machine <args>` and return the raw `Output` (caller decides
+    /// how to interpret the exit code).
+    fn capture(&self, args: &[String]) -> Result<std::process::Output> {
+        Command::new(self.bin())
+            .arg("machine")
+            .args(args)
+            .output()
+            .map_err(|e| MvmError::Backend {
+                reason: format!("spawn mvmctl: {e}"),
+            })
     }
 }
 
@@ -104,7 +156,7 @@ fn parse_machine_list(bytes: &[u8]) -> Result<Vec<MachineState>> {
 #[async_trait]
 impl MvmClient for SubprocessBackend {
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>> {
-        let stdout = self.run_cli(&["ls", "--json"])?;
+        let stdout = self.run_cli(&list_args()?)?;
         let machines = parse_machine_list(&stdout)?;
         Ok(machines.into_iter().filter(|m| filter.matches(m)).collect())
     }
@@ -117,32 +169,18 @@ impl MvmClient for SubprocessBackend {
     }
 
     async fn stop_machine(&self, id: &MachineId) -> Result<()> {
-        self.run_cli(&["stop", id.0.as_str()]).map(|_| ())
+        self.run_cli(&stop_args(id)?).map(|_| ())
     }
 
     async fn machine_logs(&self, id: &MachineId, opts: LogOpts) -> Result<Vec<u8>> {
-        let lines = opts.tail_lines.map(|n| n.to_string());
-        let mut args: Vec<&str> = vec!["logs", id.0.as_str()];
-        if let Some(ref n) = lines {
-            args.push("--lines");
-            args.push(n.as_str());
-        }
-        self.run_cli(&args)
+        self.run_cli(&logs_args(id, &opts)?)
     }
 
     async fn exec_machine(&self, id: &MachineId, command: Vec<String>) -> Result<ExecResult> {
-        // `mvmctl machine exec --name <id> -- <command...>`. A non-zero exit is a
-        // valid result (the command failed), not a spawn error, so this captures
-        // the full Output rather than going through `run_cli`.
-        let mut args: Vec<String> = vec!["exec".into(), "--name".into(), id.0.clone(), "--".into()];
-        args.extend(command);
-        let out = std::process::Command::new(self.bin())
-            .arg("machine")
-            .args(&args)
-            .output()
-            .map_err(|e| MvmError::Backend {
-                reason: format!("spawn mvmctl: {e}"),
-            })?;
+        // A non-zero exit is a valid result (the command failed), not a spawn
+        // error, so this captures the full Output rather than going through
+        // `run_cli`.
+        let out = self.capture(&exec_args(id, command)?)?;
         Ok(ExecResult {
             exit_code: out.status.code().unwrap_or(-1),
             stdout: out.stdout,
@@ -184,5 +222,61 @@ mod tests {
             be.run_machine(spec).await,
             Err(MvmError::Backend { .. })
         ));
+    }
+
+    /// Read a shared machine-verb fixture (mirrors the conformance harness).
+    fn fixture(name: &str) -> Vec<String> {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../sdks/machine-fixtures")
+                .join(format!("{name}.argv")),
+        )
+        .expect("read shared machine fixture")
+        .lines()
+        .map(str::to_string)
+        .collect()
+    }
+
+    // The facade builds argv only through the conformed `machine.rs` builders,
+    // so its argv is pinned to the same shared fixtures the CLI/Python/TS/Rust
+    // harness enforces.
+
+    #[test]
+    fn list_argv_matches_shared_fixture() {
+        assert_eq!(list_args().unwrap(), fixture("ls"));
+    }
+
+    #[test]
+    fn stop_argv_matches_shared_fixture() {
+        // Positional name — the bug the harness caught, now inherited-correct.
+        assert_eq!(
+            stop_args(&MachineId("web".into())).unwrap(),
+            fixture("stop")
+        );
+    }
+
+    #[test]
+    fn logs_argv_matches_shared_fixture() {
+        let opts = LogOpts {
+            follow: true,
+            tail_lines: Some(100),
+        };
+        assert_eq!(
+            logs_args(&MachineId("web".into()), &opts).unwrap(),
+            fixture("logs")
+        );
+    }
+
+    #[test]
+    fn exec_argv_delegates_to_the_conformed_builder() {
+        // The facade's exec carries no `--force` (the trait exposes none), so it
+        // maps to the fixture minus that flag — proving it is the same conformed
+        // builder, not a hand-rolled second copy.
+        let id = MachineId("web".into());
+        let cmd = vec!["sh".to_string(), "-lc".to_string(), "echo ok".to_string()];
+        assert_eq!(
+            exec_args(&id, cmd).unwrap(),
+            vec!["exec", "--name", "web", "--", "sh", "-lc", "echo ok"]
+        );
     }
 }
