@@ -47,7 +47,7 @@ pub(in crate::commands) struct Cli {
     /// Override which hypervisor drives the builder VM.
     /// Highest priority — beats `MVM_BUILDER_BACKEND`
     /// env and the platform-default auto-detect (macOS 26+ Apple
-    /// Silicon → vz; everywhere else → libkrun).
+    /// Silicon → inhouse; everywhere else → libkrun).
     #[arg(long, global = true, value_parser = ["libkrun", "vz", "qemu", "inhouse"])]
     pub builder: Option<String>,
 
