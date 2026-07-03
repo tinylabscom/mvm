@@ -19,7 +19,7 @@ use super::plan_admission::{
     AdmittedPlan, BundleAdmissionContext, InMemoryNonceLedger, SystemClock, admit_for_run,
     populate_audit_substrate, stash_plan_for_bridge, thread_tenant_id,
 };
-use super::plan_builder::SynthesisInput;
+use mvm_core::plan::SynthesisInput;
 use super::policy_resolver::{
     LOCAL_DEFAULT, ResolveError, resolve_policy_bundle, resolve_policy_bundle_with_dir,
     resolve_supervisor_components, resolve_supervisor_components_with_dir,
@@ -2147,7 +2147,7 @@ mod admit_plan_tests {
     fn admission_emits_policy_resolved_live_when_bundle_parses() {
         // Manually stage a bundle whose tenant matches the synthesized
         // plan's tenant. We can't trivially make the synthesizer emit
-        // `<tenant>:<workload>` refs (the plan_builder hard-codes
+        // `<tenant>:<workload>` refs (synthesis hard-codes
         // `local-default`), so this test exercises the audit-mode
         // branch via `resolve_policy_for_admission` directly with an
         // ExecutionPlan we mutate post-synthesis.

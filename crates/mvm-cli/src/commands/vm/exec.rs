@@ -21,7 +21,7 @@ use super::Cli;
 use super::audit_chain::AuditEmitter;
 use super::host_signer::{PUBLIC_FILENAME, host_signer_id, load_or_init};
 use super::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
-use super::plan_builder::SynthesisInput;
+use mvm_core::plan::SynthesisInput;
 use crate::ui;
 
 #[derive(ClapArgs, Debug, Clone)]
