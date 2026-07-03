@@ -75,11 +75,26 @@ fn exit_to_error(code: i32, stderr: &str) -> MvmError {
     }
 }
 
-/// One item of `mvmctl machine ls --json`. That output is the persisted spec;
-/// only `name` is load-bearing here, and it carries no runtime status.
+/// One item of `mvmctl machine ls --json`: the persisted spec, of which `name`
+/// and the live `status` label are load-bearing here (other fields ignored).
+/// `status` is `#[serde(default)]` so an older CLI without the field degrades
+/// to `Stopped` rather than failing the parse.
 #[derive(serde::Deserialize)]
 struct MachineListItem {
     name: String,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+/// Map the CLI's `ls --json` status label to a facade [`MachineStatus`].
+fn status_from_label(label: Option<&str>) -> MachineStatus {
+    match label {
+        Some("running") => MachineStatus::Running,
+        Some("starting") => MachineStatus::Starting,
+        Some("failed") => MachineStatus::Failed,
+        // `stopped`, absent (older CLI), or anything unrecognized → stopped.
+        _ => MachineStatus::Stopped,
+    }
 }
 
 fn parse_machine_list(bytes: &[u8]) -> Result<Vec<MachineState>> {
@@ -91,12 +106,8 @@ fn parse_machine_list(bytes: &[u8]) -> Result<Vec<MachineState>> {
         .into_iter()
         .map(|it| MachineState {
             id: MachineId(it.name.clone()),
+            status: status_from_label(it.status.as_deref()),
             name: it.name,
-            // `machine ls --json` lists persisted specs and carries no runtime
-            // status, so this reports Stopped. That is the documented gap vs
-            // LocalBackend (which queries live state); a status-aware listing
-            // closes it.
-            status: MachineStatus::Stopped,
         })
         .collect())
 }
@@ -161,13 +172,33 @@ mod tests {
     }
 
     #[test]
-    fn parses_machine_ls_json_into_states() {
-        // Extra fields (image/status) are ignored; only `name` is needed.
-        let json = br#"[{"name":"web","image":"x"},{"name":"api"}]"#;
+    fn parses_machine_ls_json_with_live_status() {
+        // Unknown fields (image) ignored; `status` maps to the facade status.
+        let json =
+            br#"[{"name":"web","image":"x","status":"running"},{"name":"api","status":"stopped"}]"#;
         let states = parse_machine_list(json).unwrap();
         assert_eq!(states.len(), 2);
         assert_eq!(states[0].id, MachineId("web".into()));
-        assert_eq!(states[0].name, "web");
+        assert_eq!(states[0].status, MachineStatus::Running);
+        assert_eq!(states[1].status, MachineStatus::Stopped);
+    }
+
+    #[test]
+    fn missing_status_degrades_to_stopped() {
+        // An older CLI without the `status` field must not fail the parse.
+        let json = br#"[{"name":"web"}]"#;
+        let states = parse_machine_list(json).unwrap();
+        assert_eq!(states[0].status, MachineStatus::Stopped);
+    }
+
+    #[test]
+    fn status_label_mapping_is_total() {
+        assert_eq!(status_from_label(Some("running")), MachineStatus::Running);
+        assert_eq!(status_from_label(Some("starting")), MachineStatus::Starting);
+        assert_eq!(status_from_label(Some("failed")), MachineStatus::Failed);
+        assert_eq!(status_from_label(Some("stopped")), MachineStatus::Stopped);
+        assert_eq!(status_from_label(Some("weird")), MachineStatus::Stopped);
+        assert_eq!(status_from_label(None), MachineStatus::Stopped);
     }
 
     #[tokio::test]
