@@ -338,6 +338,9 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
     let admit_network_policy = network_policy.clone();
     let admit_agent_verb = args.agent_verb.clone();
+    let admit_pty = args.pty;
+    let admit_has_argv = !args.argv.is_empty();
+    let admit_is_dev = matches!(args.profile, RunProfile::Dev);
     // The audit substrate carries no emitter, so stash the AdmissionContext here
     // as the closure runs (during boot) and emit launched/failed after `run`
     // returns — mirroring `up.rs`, so the claim-8 admitted/launched/failed
@@ -373,7 +376,11 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: admit_network_policy.clone(),
             agent_verb_override: admit_agent_verb.clone(),
-            is_sealed_prod: true,
+            restrict_agent_verbs: crate::commands::vm::agent_verbs::grant_eligible(
+                admit_pty,
+                admit_has_argv,
+                admit_is_dev,
+            ),
         })?;
         let Some(c) = ctx else { return Ok(None) };
         // Persist the bare plan so the pre-start moat / endpoint can read it
@@ -1681,5 +1688,16 @@ mod tests {
         let err = verify_run_receipt(&receipt_path, Some(&pubkey_path))
             .expect_err("tampered receipt rejected");
         assert!(err.to_string().contains("signature verification failed"));
+    }
+
+    #[test]
+    fn transient_grant_eligibility_matches_run_mode() {
+        use crate::commands::vm::agent_verbs::grant_eligible;
+        // Interactive transient (pty) → not eligible.
+        assert!(!grant_eligible(true, false, false));
+        // Ad-hoc transient (argv) → not eligible.
+        assert!(!grant_eligible(false, true, false));
+        // Transient baked-entrypoint (no pty, no argv, prod) → eligible.
+        assert!(grant_eligible(false, false, false));
     }
 }

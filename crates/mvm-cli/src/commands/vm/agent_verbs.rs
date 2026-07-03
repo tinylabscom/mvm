@@ -2,13 +2,25 @@ use anyhow::{Context, Result, bail};
 use mvm_core::plan::VerbId;
 use mvm_guest::vsock::GuestRequest;
 
+/// Whether a run should receive an attenuated agent-verb grant. Only a
+/// baked-entrypoint run on a non-dev profile qualifies: those issue only
+/// ProdSafe verbs. An interactive PTY (ConsoleOpen) or an ad-hoc command
+/// (Exec) needs DevOnly verbs and must NOT be grant-restricted; dev profile
+/// stays permissive by contract.
+pub(crate) fn grant_eligible(pty: bool, has_ad_hoc_argv: bool, is_dev_profile: bool) -> bool {
+    !pty && !has_ad_hoc_argv && !is_dev_profile
+}
+
 /// Compute the default agent-verb set for a workload.
-/// - Non-sealed-prod (dev) → `None` (class-gate-only; unchanged behavior).
-/// - Sealed-prod → all ProdSafe verbs, minus the volume verbs when the
+/// - `restrict_agent_verbs = false` → `None` (class-gate-only; unchanged behavior).
+/// - `restrict_agent_verbs = true` → all ProdSafe verbs, minus the volume verbs when the
 ///   workload declares no shares (the only safe per-workload attenuation;
 ///   host-lifecycle verbs stay so pause/resume/snapshot/pooling never break).
-pub(crate) fn default_agent_verbs(is_sealed_prod: bool, has_shares: bool) -> Option<Vec<VerbId>> {
-    if !is_sealed_prod {
+pub(crate) fn default_agent_verbs(
+    restrict_agent_verbs: bool,
+    has_shares: bool,
+) -> Option<Vec<VerbId>> {
+    if !restrict_agent_verbs {
         return None;
     }
     let set = GuestRequest::prod_safe_verb_names()
@@ -81,6 +93,36 @@ mod tests {
                 "{banned} leaked into default"
             );
         }
+    }
+
+    #[test]
+    fn grant_eligible_only_for_nonpty_noargv_nondev() {
+        // Baked-entrypoint run on a prod profile → eligible.
+        assert!(grant_eligible(false, false, false));
+        // Interactive (pty) → NOT eligible (needs ConsoleOpen, DevOnly).
+        assert!(!grant_eligible(true, false, false));
+        // Ad-hoc command (argv present) → NOT eligible (needs Exec, DevOnly).
+        assert!(!grant_eligible(false, true, false));
+        // Dev profile → NOT eligible (dev stays permissive).
+        assert!(!grant_eligible(false, false, true));
+        // Any combination with a disqualifier → NOT eligible.
+        assert!(!grant_eligible(true, true, true));
+    }
+
+    #[test]
+    fn persistent_with_trailing_argv_is_not_eligible() {
+        // `machine run -d --image X -- cmd` boots the machine AND then runs an
+        // ad-hoc command via GuestRequest::Exec (a DevOnly verb). The admitted
+        // plan must NOT carry an attenuated ProdSafe grant.
+        assert!(
+            !grant_eligible(false, true, false),
+            "persistent + ad-hoc argv must not receive a ProdSafe-only grant"
+        );
+        // Without trailing argv, a non-dev persistent boot IS eligible.
+        assert!(
+            grant_eligible(false, false, false),
+            "persistent baked-entrypoint on non-dev profile must be eligible"
+        );
     }
 
     #[test]

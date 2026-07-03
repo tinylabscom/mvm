@@ -890,7 +890,10 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         agent_verb_override: vec![],
-        is_sealed_prod: true,
+        // Forked children run class-gate-only; the parent's real run mode is not
+        // tracked here and the safe direction is permissive (fail-open).
+        // Per-fork grant reconciliation is a follow-up.
+        restrict_agent_verbs: false,
     })?;
 
     // Serialize the admitted plan envelope so the backend can inject it into
@@ -1038,7 +1041,10 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         agent_verb_override: vec![],
-        is_sealed_prod: true,
+        // Restored children run class-gate-only; the source's real run mode is not
+        // tracked here and the safe direction is permissive (fail-open).
+        // Per-restore grant reconciliation is a follow-up.
+        restrict_agent_verbs: false,
     })?;
 
     let mut start_config = mvm_core::vm_backend::VmStartConfig {
