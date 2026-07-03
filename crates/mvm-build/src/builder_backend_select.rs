@@ -1047,6 +1047,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inhouse_boot_failure_is_vmm_level_so_fallback_fires() {
+        // The variant InHouseBuilderVm::run_build returns for a boot/power-off
+        // failure must be classified VMM-level so the auto path retries libkrun.
+        assert!(is_builder_vm_level_failure(
+            &BuilderVmError::SupervisorExited {
+                exit_code: 1,
+                vm_state_dir: "/x".into(),
+            }
+        ));
+    }
+
     // ── Registration hook ─────────────────────────────────────────
 
     #[test]
