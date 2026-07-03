@@ -152,10 +152,11 @@ pub(super) struct AdmitPlanForBootParams<'a> {
     /// default. Validated inside `admit_plan_for_boot` via
     /// `parse_agent_verb_override`; any unknown/DevOnly verb is an error.
     pub agent_verb_override: Vec<String>,
-    /// Whether the workload runs under the sealed-prod posture (`true`) or
-    /// the dev posture (`false`). Controls `default_agent_verbs`: dev gets
-    /// `None` (class-gate only), prod gets the full ProdSafe set minus
-    /// volume verbs when there are no host shares.
+    /// True iff this run should receive an attenuated agent-verb grant —
+    /// i.e. a baked-entrypoint run on a non-dev profile (see grant_eligible).
+    /// Interactive / ad-hoc / dev runs are false: they issue DevOnly verbs a
+    /// ProdSafe grant would refuse. (Field name kept for now; semantics are
+    /// "restrict agent verbs", not literally "sealed prod".)
     pub is_sealed_prod: bool,
 }
 
@@ -655,7 +656,9 @@ fn untrusted_transient_admit_in(
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
-            is_sealed_prod: true,
+            // Untrusted transient runs are always ad-hoc (arbitrary user code);
+            // they must not receive an attenuated verb grant.
+            is_sealed_prod: false,
         })?;
         let Some(c) = ctx else { return Ok(None) };
         // Persist the bare plan so the pre-start moat / endpoint can read it on
