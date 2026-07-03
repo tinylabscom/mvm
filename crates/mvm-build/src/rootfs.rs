@@ -234,13 +234,9 @@ fn materialize_ext4_in_builder_vm(
 #[cfg(feature = "builder-vm")]
 fn ext4_materializer_choice() -> crate::builder_backend_select::BuilderBackendChoice {
     // Use the resolved builder backend (override → env → auto-detect: macOS 26+
-    // Apple Silicon → Vz, everywhere else → libkrun). Vz now has a shell-job
-    // materializer (`vz_builder::run_shell_script`), so a Vz-default Mac
-    // materializes through its primary builder. Forcing libkrun here was wrong on
-    // macOS 26: the libkrun `aarch64` builder image is never built on a Vz host
-    // (`dev up` builds only the Vz image), so OCI materialize errored "builder VM
-    // image not found". libkrun/QEMU hosts are unaffected — `resolve_choice`
-    // still picks libkrun there.
+    // Apple Silicon → in-house builder, everywhere else → libkrun). Delegates to
+    // `resolve_choice()` so the materializer always uses the same backend as
+    // every other build entry point.
     crate::builder_backend_select::resolve_choice()
 }
 
