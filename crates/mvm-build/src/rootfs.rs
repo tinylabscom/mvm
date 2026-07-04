@@ -72,6 +72,11 @@ impl Default for MaterializeExt4Options {
 pub struct MaterializedExt4 {
     pub path: PathBuf,
     pub size_bytes: u64,
+    /// 64-char lowercase-hex dm-verity root hash, when the materializer computed
+    /// it in-process (the `pure-mkfs` path writes `rootfs.verity` +
+    /// `rootfs.roothash` beside the image). `None` for the builder-VM path, which
+    /// generates verity separately.
+    pub verity_root_hash: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -177,6 +182,7 @@ pub fn materialize_ext4(
         Ok(MaterializedExt4 {
             path: input.output.clone(),
             size_bytes,
+            verity_root_hash: None,
         })
     }
 }
@@ -344,9 +350,37 @@ pub fn materialize_ext4_pure(
         path: input.output.clone(),
         source,
     })?;
+
+    // dm-verity, computed in-process (no `veritysetup`). v1, sha256, 4 KiB
+    // data+hash blocks, zero salt — the params the boot path expects. Write the
+    // hash tree + 64-hex root hash beside the image under the fixed names
+    // `probe_verity_sidecar` reads (`rootfs.verity` / `rootfs.roothash`).
+    let salt = [0u8; 32];
+    let verity = mvm_ext4::verity::format(&image, &salt, 4096, 4096);
+    let dir = input
+        .output
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let root_hex = mvm_ext4::verity::to_hex(&verity.root_hash);
+    write_sidecar(&dir.join("rootfs.verity"), &verity.hash_tree)?;
+    write_sidecar(
+        &dir.join("rootfs.roothash"),
+        format!("{root_hex}\n").as_bytes(),
+    )?;
+
     Ok(MaterializedExt4 {
         path: input.output.clone(),
         size_bytes,
+        verity_root_hash: Some(root_hex),
+    })
+}
+
+#[cfg(feature = "pure-mkfs")]
+fn write_sidecar(path: &std::path::Path, body: &[u8]) -> Result<(), RootfsError> {
+    std::fs::write(path, body).map_err(|source| RootfsError::WriteOutput {
+        path: path.to_path_buf(),
+        source,
     })
 }
 
@@ -474,6 +508,16 @@ mod tests {
         let input2 = MaterializeExt4Input::new(src.path().to_path_buf(), out2.clone(), 0);
         materialize_ext4_pure(&input2).unwrap();
         assert_eq!(std::fs::read(&out2).unwrap(), img);
+
+        // Verity: the returned root hash is 64-hex and the two sidecars land
+        // beside the image under the fixed names the boot path probes for.
+        let root_hex = mat.verity_root_hash.expect("verity root hash");
+        assert_eq!(root_hex.len(), 64);
+        assert!(root_hex.chars().all(|c| c.is_ascii_hexdigit()));
+        let verity = std::fs::read(out.path().join("rootfs.verity")).expect("hash tree sidecar");
+        assert!(!verity.is_empty());
+        let roothash = std::fs::read_to_string(out.path().join("rootfs.roothash")).unwrap();
+        assert_eq!(roothash, format!("{root_hex}\n"));
     }
 
     #[cfg(feature = "pure-mkfs")]
