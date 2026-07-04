@@ -2,6 +2,24 @@ use anyhow::{Context, Result, bail};
 use mvm_core::plan::VerbId;
 use mvm_guest::vsock::GuestRequest;
 
+/// Whether the image at `rootfs_path` is a sealed prod image, read from the
+/// `mvm-meta.json` sidecar the build/materialize pipeline writes next to the
+/// rootfs. Absent or unreadable sidecar => `false` (treat as not sealed => no
+/// default grant), matching the `accessible: true` fallback convention for
+/// pre-sidecar artifacts.
+#[allow(dead_code)] // wired up by the verb-grant call-site in the machine-run path
+pub(crate) fn image_is_sealed(rootfs_path: &std::path::Path) -> bool {
+    rootfs_path
+        .parent()
+        .and_then(|dir| {
+            mvm_build::builder_vm::GuestSidecar::read_from_dir(dir)
+                .ok()
+                .flatten()
+        })
+        .map(|s| s.sealed)
+        .unwrap_or(false)
+}
+
 /// Whether a run should receive an attenuated agent-verb grant. Only a
 /// baked-entrypoint run on a non-dev profile qualifies: those issue only
 /// ProdSafe verbs. An interactive PTY (ConsoleOpen) or an ad-hoc command
@@ -123,6 +141,38 @@ mod tests {
             grant_eligible(false, false, false),
             "persistent baked-entrypoint on non-dev profile must be eligible"
         );
+    }
+
+    #[test]
+    fn image_is_sealed_reads_sidecar_sealed_field() {
+        use mvm_build::builder_vm::GuestSidecar;
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"x").unwrap();
+
+        // A sealed prod sidecar => sealed.
+        let mut sc = GuestSidecar::for_oci_run("t"); // accessible:true, sealed:false baseline
+        sc.accessible = false;
+        sc.sealed = true;
+        sc.write_to_dir(dir.path()).unwrap();
+        assert!(image_is_sealed(&rootfs));
+    }
+
+    #[test]
+    fn image_is_sealed_false_for_accessible_and_oci_and_absent() {
+        use mvm_build::builder_vm::GuestSidecar;
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"x").unwrap();
+
+        // Absent sidecar => not sealed.
+        assert!(!image_is_sealed(&rootfs));
+
+        // OCI sidecar (accessible:true, sealed:false) => not sealed.
+        GuestSidecar::for_oci_run("t")
+            .write_to_dir(dir.path())
+            .unwrap();
+        assert!(!image_is_sealed(&rootfs));
     }
 
     #[test]
