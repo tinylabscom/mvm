@@ -40,4 +40,11 @@ fn main() {
     let image = build_image(&nodes).expect("build ext4 image");
     std::fs::write(&out, &image).expect("write image file");
     eprintln!("wrote {} bytes to {out}", image.len());
+
+    // Print our dm-verity root hash (v1, sha256, 4 KiB data+hash blocks, zero
+    // salt) so the CI lane can diff it against real `veritysetup` on the same
+    // image. Single stdout line: `ROOTHASH <64-hex>`.
+    let salt = [0u8; 32];
+    let root = mvm_ext4::verity::root_hash(&image, &salt, 4096, 4096);
+    println!("ROOTHASH {}", mvm_ext4::verity::to_hex(&root));
 }

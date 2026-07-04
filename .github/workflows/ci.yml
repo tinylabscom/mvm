@@ -287,7 +287,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Write a sample image with the pure-Rust ext4 writer
-        run: cargo run -p mvm-ext4 --example write_sample -- /tmp/sample.ext4
+        run: cargo run -p mvm-ext4 --example write_sample -- /tmp/sample.ext4 | tee /tmp/sample.out
       - name: Loop-mount read-only and verify the tree on the real kernel
         run: |
           set -euo pipefail
@@ -305,3 +305,19 @@ jobs:
           [ "$(stat -c '%a' "$mnt/hello")" = "755" ]
           [ "$(stat -c '%a' "$mnt/etc/hosts")" = "644" ]
           echo "pure-Rust ext4 mounted + verified on the real Linux kernel"
+      - name: dm-verity root hash matches real veritysetup
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y cryptsetup-bin
+          # Our writer printed `ROOTHASH <hex>`; extract it.
+          ours=$(grep '^ROOTHASH ' /tmp/sample.out | awk '{print $2}')
+          # Real veritysetup on the same image, same params (v1, sha256, 4 KiB
+          # data+hash blocks, 32-byte zero salt).
+          theirs=$(veritysetup format \
+              --data-block-size=4096 --hash-block-size=4096 \
+              --salt=0000000000000000000000000000000000000000000000000000000000000000 \
+              /tmp/sample.ext4 /tmp/sample.verity \
+            | awk '/^Root hash:/ {print $3}')
+          echo "ours=$ours theirs=$theirs"
+          [ -n "$ours" ] && [ "$ours" = "$theirs" ]
+          echo "pure-Rust dm-verity root hash == veritysetup"
