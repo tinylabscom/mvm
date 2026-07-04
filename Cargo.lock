@@ -2571,6 +2571,7 @@ dependencies = [
  "libkrun-sys",
  "lzma-rs",
  "mvm-core",
+ "mvm-ext4",
  "mvm-guest",
  "mvm-network",
  "mvm-sdk",

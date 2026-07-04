@@ -65,6 +65,7 @@ tar.workspace = true
 lzma-rs = "0.3"
 
 mvm-core.workspace = true
+mvm-ext4.workspace = true
 mvm-guest.workspace = true
 # `LibkrunNetworkProvider` impls the `NetworkProvider`
 # seam. mvm-network deps only mvm-core + mvm-sdk, so this edge is acyclic.

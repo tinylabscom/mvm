@@ -339,6 +339,7 @@ mvm-guest = { path = "crates/mvm-guest", version = "0.16.1" }
 mvm-build = { path = "crates/mvm-build", version = "0.16.1", default-features = false }
 mvm = { path = "crates/mvm", version = "0.16.1", default-features = false }
 mvm-oci = { path = "crates/mvm-oci", version = "0.16.1" }
+mvm-ext4 = { path = "crates/mvm-ext4", version = "0.16.1" }
 mvm-storage = { path = "crates/mvm-storage", version = "0.16.1" }
 mvm-network = { path = "crates/mvm-network", version = "0.16.1" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.16.1", default-features = false }

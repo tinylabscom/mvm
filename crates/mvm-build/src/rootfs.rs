@@ -95,6 +95,23 @@ pub enum RootfsError {
     #[cfg(feature = "builder-vm")]
     #[error("builder VM ext4 materialization failed: {0}")]
     BuilderVm(#[from] crate::builder_vm::BuilderVmError),
+
+    #[error("walking unpacked tree at {path}: {source}")]
+    PureWalk {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("building ext4 image in-process: {0}")]
+    PureBuild(String),
+
+    #[error("writing rootfs image {path}: {source}")]
+    WriteOutput {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Estimate the sparse image size for an OCI rootfs.
@@ -298,6 +315,117 @@ trap - EXIT
     )
 }
 
+/// Materialize `input.unpacked_root` into `input.output` **in-process** — no
+/// builder VM, no `mkfs`, no subprocess. Walks the unpacked tree and builds a
+/// deterministic read-only ext4 image with the memory-safe `mvm-ext4` writer.
+///
+/// This is the no-shell path the local run uses (Plan 221 Option B). It reads
+/// the whole tree into memory (each file's bytes + the assembled image), which
+/// is fine for small/medium rootfs; large images want the streaming +
+/// multi-block-group follow-ups. The output is a valid ext4 real readers mount;
+/// integrity is provided by dm-verity, added on top (not by in-filesystem
+/// checksums).
+pub fn materialize_ext4_pure(
+    input: &MaterializeExt4Input,
+) -> Result<MaterializedExt4, RootfsError> {
+    if !input.unpacked_root.is_dir() {
+        return Err(RootfsError::UnpackedRootNotDirectory(
+            input.unpacked_root.clone(),
+        ));
+    }
+    let nodes = collect_nodes(&input.unpacked_root)?;
+    let image = mvm_ext4::build_image(&nodes).map_err(|e| RootfsError::PureBuild(e.to_string()))?;
+    let size_bytes = image.len() as u64;
+    std::fs::write(&input.output, &image).map_err(|source| RootfsError::WriteOutput {
+        path: input.output.clone(),
+        source,
+    })?;
+    Ok(MaterializedExt4 {
+        path: input.output.clone(),
+        size_bytes,
+    })
+}
+
+/// Walk `root` into a flat `Node` list (guest-absolute paths), symlink-aware
+/// (never follows). Directories and their descendants, regular files (contents
+/// read in), and symlinks are captured; other inode types (fifo/socket/device)
+/// are skipped — an OCI rootfs mounts devtmpfs for those.
+fn collect_nodes(root: &std::path::Path) -> Result<Vec<mvm_ext4::Node>, RootfsError> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let read = std::fs::read_dir(&dir).map_err(|source| RootfsError::PureWalk {
+            path: dir.clone(),
+            source,
+        })?;
+        for entry in read {
+            let entry = entry.map_err(|source| RootfsError::PureWalk {
+                path: dir.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            let guest_path = guest_path_of(root, &path);
+            let ft = entry.file_type().map_err(|source| RootfsError::PureWalk {
+                path: path.clone(),
+                source,
+            })?;
+            if ft.is_symlink() {
+                let target = std::fs::read_link(&path).map_err(|source| RootfsError::PureWalk {
+                    path: path.clone(),
+                    source,
+                })?;
+                out.push(mvm_ext4::Node::Symlink {
+                    path: guest_path,
+                    target: target.to_string_lossy().into_owned(),
+                });
+            } else if ft.is_dir() {
+                out.push(mvm_ext4::Node::Dir {
+                    path: guest_path,
+                    mode: mode_of(&path, 0o755),
+                });
+                stack.push(path);
+            } else if ft.is_file() {
+                let data = std::fs::read(&path).map_err(|source| RootfsError::PureWalk {
+                    path: path.clone(),
+                    source,
+                })?;
+                out.push(mvm_ext4::Node::File {
+                    path: guest_path,
+                    mode: mode_of(&path, 0o644),
+                    data,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Guest-absolute path for `path` under `root` (e.g. `root/etc/hosts` → `/etc/hosts`).
+fn guest_path_of(root: &std::path::Path, path: &std::path::Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(rel) => format!("/{}", rel.to_string_lossy()),
+        Err(_) => format!("/{}", path.to_string_lossy()),
+    }
+}
+
+/// Unix permission bits of `path` (not following symlinks), or `default` on a
+/// non-unix host.
+fn mode_of(path: &std::path::Path, default: u16) -> u16 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::symlink_metadata(path) {
+            Ok(m) => (m.permissions().mode() & 0o7777) as u16,
+            Err(_) => default,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        default
+    }
+}
+
 #[cfg(any(test, feature = "builder-vm"))]
 fn shell_single_quote_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
@@ -311,6 +439,45 @@ mod tests {
     use crate::builder_backend_select::{BuilderBackendChoice, MVM_BUILDER_BACKEND_ENV};
     #[cfg(feature = "builder-vm")]
     use mvm_core::util::test_env::TestEnv;
+
+    #[test]
+    fn pure_materialize_writes_a_valid_ext4_from_a_dir_tree() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir(src.path().join("etc")).unwrap();
+        std::fs::write(src.path().join("etc/hosts"), b"127.0.0.1 localhost\n").unwrap();
+        std::fs::write(src.path().join("hello"), b"hi\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("hosts", src.path().join("etc/localhost")).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        let out_path = out.path().join("rootfs.ext4");
+        let input = MaterializeExt4Input::new(src.path().to_path_buf(), out_path.clone(), 0);
+
+        let mat = materialize_ext4_pure(&input).expect("pure materialize");
+        assert_eq!(mat.path, out_path);
+        assert!(mat.size_bytes > 0);
+
+        let img = std::fs::read(&out_path).unwrap();
+        assert_eq!(img.len() as u64, mat.size_bytes);
+        // ext4 superblock magic 0xEF53 (LE) at byte 1024 + 0x38.
+        assert_eq!(&img[1024 + 0x38..1024 + 0x3A], &[0x53, 0xEF]);
+        // Deterministic: same tree materializes to byte-identical output.
+        let out2 = out.path().join("rootfs2.ext4");
+        let input2 = MaterializeExt4Input::new(src.path().to_path_buf(), out2.clone(), 0);
+        materialize_ext4_pure(&input2).unwrap();
+        assert_eq!(std::fs::read(&out2).unwrap(), img);
+    }
+
+    #[test]
+    fn pure_materialize_rejects_non_directory() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let input =
+            MaterializeExt4Input::new(f.path().to_path_buf(), f.path().with_extension("ext4"), 0);
+        assert!(matches!(
+            materialize_ext4_pure(&input),
+            Err(RootfsError::UnpackedRootNotDirectory(_))
+        ));
+    }
 
     #[test]
     fn estimate_uses_sixty_four_mib_floor() {
