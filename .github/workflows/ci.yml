@@ -355,3 +355,21 @@ jobs:
           got=$(dd if="$mnt/big" bs=1 skip=$off count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
           [ "$got" = "$((off % 251))" ]
           echo "multi-group pure-Rust ext4 mounted + verified on the real Linux kernel"
+      - name: Write + loop-mount a DEPTH-1 extent-tree image (>512 MiB single file)
+        run: |
+          set -euo pipefail
+          cargo run -p mvm-ext4 --example write_extent_tree -- /tmp/extent_tree.ext4
+          # >4 groups → the single file needs a depth-1 extent tree.
+          [ "$(stat -c '%s' /tmp/extent_tree.ext4)" -gt 536870912 ]
+          mnt=$(mktemp -d)
+          sudo mount -o ro,loop /tmp/extent_tree.ext4 "$mnt"
+          trap 'sudo umount "$mnt" || true; rmdir "$mnt" || true' EXIT
+          [ "$(cat "$mnt/etc/marker")" = "extent-tree marker" ]
+          # The huge file is 520 MiB and must read back through the extent tree.
+          [ "$(stat -c '%s' "$mnt/huge")" = "545259520" ]
+          # A byte well past the 4th group boundary (~513 MiB in) must follow the
+          # i%251 pattern — proves the depth-1 leaf extents resolve correctly.
+          off=537000000
+          got=$(dd if="$mnt/huge" bs=1 skip=$off count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
+          [ "$got" = "$((off % 251))" ]
+          echo "depth-1 extent-tree pure-Rust ext4 mounted + verified on the real Linux kernel"

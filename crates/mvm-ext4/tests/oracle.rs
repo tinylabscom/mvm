@@ -199,3 +199,45 @@ fn multi_group_image_round_trips_through_real_reader() {
         "big file bytes round-trip across the group boundary"
     );
 }
+
+/// A single file past four group-data-regions (~128 MiB each) needs more than
+/// the four extents an inode holds inline, so the writer grows a **depth-1
+/// extent tree** (index entries in the inode → leaf blocks). The independent
+/// reader must follow the tree and read every byte back. Heavy (allocates ~1.5
+/// GiB), so `#[ignore]`d out of the default suite; the CI kernel-mount lane
+/// exercises the same path continuously.
+#[test]
+#[ignore = "allocates ~1.5 GiB (a >512 MiB single file forces a depth-1 extent tree); run explicitly"]
+fn depth1_extent_tree_file_round_trips_through_real_reader() {
+    const N: usize = 520 * 1024 * 1024; // > 4 * ~128 MiB → ≥ 5 extents → depth-1
+    let big: Vec<u8> = (0..N).map(|i| (i % 251) as u8).collect();
+    let nodes = vec![Node::File {
+        path: "/huge".into(),
+        mode: 0o644,
+        data: big,
+    }];
+    let image = build_image(&nodes).unwrap();
+
+    let fs = mount(image);
+    let (ino, ft) = find(&list_dir(&fs, 2), "huge").expect("/huge present");
+    assert_eq!(ft, DirEntryType::RegFile);
+    let got = read_file(&fs, ino);
+    assert_eq!(got.len(), N, "depth-1 file length round-trips");
+    // Spot-check bytes at and past each ~128 MiB group boundary — the extent
+    // seams the depth-1 tree stitches together.
+    for off in [
+        0usize,
+        1,
+        N / 4,
+        200 * 1024 * 1024,
+        400 * 1024 * 1024,
+        512 * 1024 * 1024,
+        N - 1,
+    ] {
+        assert_eq!(
+            got[off],
+            (off % 251) as u8,
+            "byte {off} round-trips across the depth-1 extent tree"
+        );
+    }
+}
