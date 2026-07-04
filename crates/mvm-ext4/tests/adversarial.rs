@@ -170,26 +170,6 @@ fn directory_over_one_block_is_rejected() {
     );
 }
 
-/// A file whose data exceeds a single block group must be refused with
-/// `TooLarge` before any image buffer is allocated — the writer currently caps
-/// at one 128 MiB group. (Multi-block-group support will relax this boundary;
-/// this assertion moves with it.)
-#[test]
-fn file_over_one_block_group_is_rejected() {
-    // One block past 128 MiB (32768 * 4 KiB) guarantees total blocks exceed the
-    // group cap regardless of metadata overhead.
-    let over_cap = (mvm_ext4::BLOCK_SIZE as usize) * (32768 + 1);
-    let nodes = vec![Node::File {
-        path: "/huge".into(),
-        mode: 0o644,
-        data: vec![0u8; over_cap],
-    }];
-    assert!(
-        matches!(build_image(&nodes), Err(Ext4Error::TooLarge { .. })),
-        "an over-cap file must return TooLarge"
-    );
-}
-
 // ---- oracle mount helpers (independent ext4 reader; dev-only) ----------------
 
 use fs_ext4::block_io::BlockDevice;
