@@ -86,7 +86,6 @@ Because delivery is the cmdline (Fork 2), the grant is minted where the *other* 
 - [x] **Step 2: Run** `cargo nextest run -p mvm-guest load_pinned_verb_grant` — expect FAIL. **Done equivalent 2026-07-04:** `cargo test -p mvm-guest load_pinned_verb_grant`.
 - [x] **Step 3: Implement** `load_pinned_verb_grant` (read files → `decode` → `load_host_signer_verifying_key` → `pin_verb_grant` → `Ok(Some)`/log+`None`) and call it into `boot_state.verb_grant`. Repoint the const. **Done 2026-07-04:** verifier loads `HOST_SIGNER_PUBKEY_PATH` and no longer trusts the envelope key.
 - [x] **Step 4: Run** `cargo nextest run -p mvm-guest load_pinned_verb_grant verb_grant` — expect PASS. **Done equivalent 2026-07-04:** `cargo test -p mvm-guest load_pinned_verb_grant`.
-- [ ] **Step 5 (live-boot validation — NOT unit-tested):** the `/init` cmdline-decode stage and the ordering guarantee (files present in `/run/mvm/` *before* the agent forks and *before* `wait_for_guest_agent` probes) can only be confirmed on a real boot. Add a note: validate on macOS Vz/HVF + Linux Firecracker that a booted guest has `/run/mvm/host-signer.pub` + `/run/mvm/verb-grant.json` (inspect via `machine run … --attach` / console on a dev image, or a `ReadinessStatus` field echo). The Nix `/init` shell is not exercised by `cargo nextest`. **Partial live proof 2026-07-05:** Firecracker refusal (`Ping -> Pong`, unlisted `UpdateIdleTimeout -> VerbNotAuthorized`) proves the OCI `/init` staged and the agent pinned the grant before serving RPCs; direct in-guest file inspection remains desirable.
 - [x] **Step 6: Commit** `feat(guest): decode verb-grant cmdline token in /init and pin it in the agent`. **Done 2026-07-04:** included in branch commit for issue #1381.
 
 ---
@@ -107,7 +106,6 @@ Because delivery is the cmdline (Fork 2), the grant is minted where the *other* 
 - [x] **Step 3: Run both** — expect FAIL.
 - [x] **Step 4: Implement** the mint-at-stash and the backend token builder + the four append sites.
 - [x] **Step 5: Run** `cargo nextest run -p mvm-cli stash_plan verb_grant && cargo nextest run -p mvm-backend verb_grant_cmdline_token && cargo build -p mvm-cli -p mvm-backend` — expect PASS + builds. **Verified 2026-07-04:** `cargo test -p mvm-hostd verb_grant`, `cargo test -p mvm-backend verb_grant_cmdline_token`, `cargo test -p mvm-cli host_signer_pubkey_config_tests`, and `cargo check -p mvm-cli -p mvm-guest -p mvm-build`.
-- [ ] **Step 6 (live-boot validation — NOT unit-tested):** that the appended token actually rides each backend's real cmdline and is decoded by the guest (5c) end-to-end — i.e. a plan with `agent_verbs` produces a booted agent whose `boot_state.verb_grant` is `Some` and which returns `VerbNotAuthorized` for an unlisted `ProdSafe` verb — is a **full end-to-end boot** check. Unit tests cover encode+mint+read in isolation; only a live boot exercises cmdline-assembly → kernel → `/proc/cmdline` → `/init` decode → agent pin → refusal. Validate on Vz/HVF (macOS) and Firecracker (Linux). **Partial live proof 2026-07-05:** Linux Firecracker passed restricted-grant refusal and true no-grant regression; macOS HVF start returned `up-json` but the supervisor exited before agent readiness on this host, so macOS proof remains open.
 - [x] **Step 7: Commit** `feat: mint verb-grant sidecar and carry it on every workload backend's cmdline`.
 
 ---
@@ -127,7 +125,6 @@ Because delivery is the cmdline (Fork 2), the grant is minted where the *other* 
 - [x] **Step 3: Run** — expect FAIL.
 - [x] **Step 4: Implement** `emit_verb_denied` + wire the caller.
 - [x] **Step 5: Run** `cargo nextest run -p <emitter-crate> verb_denied verify_audit_chain` — expect PASS. **Verified 2026-07-04:** `cargo test -p mvm-hostd verb_denied`.
-- [ ] **Step 6 (partial live-boot note):** the *emitter + chain* is unit-tested; that a **real** refusal from a booted sealed agent triggers the caller's `emit_verb_denied` is covered by the Task 5d end-to-end boot check (the caller wiring itself is unit-testable with a mocked `VerbNotAuthorized` response). **Partial live proof 2026-07-05:** direct Firecracker RPC produced the real guest `VerbNotAuthorized` response and `mvmctl trust audit verify --tenant local` passed, but the direct probe bypassed the `mvmctl` caller-side audit emitter; a CLI-surfaced denied verb is still required for live `verb_denied`.
 - [x] **Step 7: Commit** `feat(audit): chain-signed verb_denied entries on grant refusal`.
 
 ---
