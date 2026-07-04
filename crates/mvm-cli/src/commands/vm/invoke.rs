@@ -518,11 +518,59 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
 /// plain workload is unaffected.
 fn substitution_env(vm_name: &str) -> Vec<(String, String)> {
     let path = mvm_core::config::vm_substitution_env_path(vm_name);
-    let Ok(bytes) = std::fs::read(&path) else {
-        return Vec::new();
-    };
-    let placeholders: Vec<(String, String)> = serde_json::from_slice(&bytes).unwrap_or_default();
-    build_substitution_env(placeholders)
+    let placeholders: Vec<(String, String)> = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    with_egress_ca_env(
+        build_substitution_env(placeholders),
+        egress_ca_present(vm_name),
+    )
+}
+
+/// Whether the per-VM egress CA sidecar exists — i.e. egress substitution
+/// provisioned a CA whose PEM the launcher put on the guest kernel cmdline
+/// (`mvm.egress_ca=`) and the guest `/init` decoded to `/run/mvm/ca-bundle.crt`.
+fn egress_ca_present(vm_name: &str) -> bool {
+    mvm_core::config::vm_state_dir(vm_name)
+        .join("egress-intermediate.json")
+        .exists()
+}
+
+/// Point the workload's TLS stack at the guest-side egress CA bundle when one
+/// is provisioned. An OCI entrypoint runs under `env_clear()` + the request
+/// env, so — unlike a flake `/init` child that inherits the shell exports —
+/// these must ride the agent request env. Mirrors the mkGuest egress-ca
+/// exports (`SSL_CERT_FILE`/`CURL_CA_BUNDLE`/`REQUESTS_CA_BUNDLE` →
+/// combined bundle, `NODE_EXTRA_CA_CERTS` → the egress cert alone). No CA
+/// provisioned ⇒ env unchanged.
+fn with_egress_ca_env(
+    env: Vec<(String, String)>,
+    egress_ca_present: bool,
+) -> Vec<(String, String)> {
+    if !egress_ca_present {
+        return env;
+    }
+    let mut ca = vec![
+        (
+            "SSL_CERT_FILE".to_string(),
+            "/run/mvm/ca-bundle.crt".to_string(),
+        ),
+        (
+            "CURL_CA_BUNDLE".to_string(),
+            "/run/mvm/ca-bundle.crt".to_string(),
+        ),
+        (
+            "REQUESTS_CA_BUNDLE".to_string(),
+            "/run/mvm/ca-bundle.crt".to_string(),
+        ),
+        (
+            "NODE_EXTRA_CA_CERTS".to_string(),
+            "/run/mvm/egress-ca.crt".to_string(),
+        ),
+    ];
+    ca.extend(env);
+    ca
 }
 
 /// Pure half of [`substitution_env`]: given the endpoint's minted placeholder
@@ -725,5 +773,48 @@ mod tests {
             env.iter()
                 .any(|(k, v)| k == "OPENAI_API_KEY" && v == "mvm-secret-abc123")
         );
+    }
+
+    #[test]
+    fn with_egress_ca_env_noop_when_absent() {
+        let base = vec![("HTTP_PROXY".to_string(), "http://x".to_string())];
+        assert_eq!(super::with_egress_ca_env(base.clone(), false), base);
+    }
+
+    #[test]
+    fn with_egress_ca_env_prepends_ca_vars_before_existing() {
+        let env = super::with_egress_ca_env(
+            vec![("OPENAI_API_KEY".to_string(), "mvm-secret".to_string())],
+            true,
+        );
+        // The TLS-trust vars point the workload at the guest-side bundle the
+        // /init decode wrote (the OCI entrypoint's env_clear means a shell
+        // export would not reach it).
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "SSL_CERT_FILE")
+                .map(|(_, v)| v.as_str()),
+            Some("/run/mvm/ca-bundle.crt")
+        );
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "CURL_CA_BUNDLE" && v == "/run/mvm/ca-bundle.crt")
+        );
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "REQUESTS_CA_BUNDLE" && v == "/run/mvm/ca-bundle.crt")
+        );
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "NODE_EXTRA_CA_CERTS" && v == "/run/mvm/egress-ca.crt")
+        );
+        // Existing substitution vars are preserved after the CA prefix.
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "OPENAI_API_KEY" && v == "mvm-secret")
+        );
+        let ca_at = env.iter().position(|(k, _)| k == "SSL_CERT_FILE").unwrap();
+        let key_at = env.iter().position(|(k, _)| k == "OPENAI_API_KEY").unwrap();
+        assert!(ca_at < key_at, "CA vars must precede the placeholder vars");
     }
 }
