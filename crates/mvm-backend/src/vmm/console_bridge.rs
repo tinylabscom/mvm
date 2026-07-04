@@ -1,0 +1,358 @@
+//! The host-side vsock console bridge — the dev-only interactive-PTY counterpart
+//! of the [`AgentBridge`](super::agent_bridge::AgentBridge).
+//!
+//! A dev-accessible guest pre-opens a range of console **data** ports
+//! (`dev_console_data_ports()` = 20001..=20128); the guest console driver binds a
+//! vsock listener on the port an agent-side `ConsoleOpen` allocated, and the host
+//! console client (`machine run -it`, `machine console`) is the dialer. This
+//! bridge is the device-side half: the supervisor binds one host Unix socket per
+//! console port, this bridge accepts a host connection on any of them, and the
+//! device opens a host→guest vsock stream **to that same console port** (an
+//! `OP_REQUEST`), relays host→guest PTY bytes, and writes the guest's replies back
+//! to the host socket.
+//!
+//! Unlike the agent bridge (one listener at the fixed [`GUEST_AGENT_PORT`]), the
+//! console bridge holds **many** listeners keyed by guest port, and each accepted
+//! connection carries the port it must be dialed on — so the device frames the
+//! real console port, not a hardwired one. Replies route by the opaque
+//! host-assigned connection id (tracked here), never by the agent's
+//! `is_agent_stream`.
+//!
+//! Claim 15: the bridge only ever binds listeners the supervisor handed it, and
+//! the supervisor populates the console-port list **only** for a `dev_console`
+//! machine. A sealed prod config carries none, so [`Self::bind_ports`] binds
+//! nothing and the whole console path is inert.
+
+use std::collections::HashMap;
+use std::io::Read;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use super::agent_bridge::write_nonblocking;
+
+/// Per-drain read budget per host connection.
+const READ_CHUNK: usize = 16 * 1024;
+/// First host-assigned vsock port for console streams. Kept well above both the
+/// guest's well-known listener ports and the agent bridge's host-port space so a
+/// console conn id can never collide with an agent conn id (they share the device's
+/// single `handle_packet` reply-routing keyspace).
+const FIRST_CONSOLE_HOST_PORT: u32 = 2 << 20;
+
+/// One open host console connection: the accepted host socket, the guest console
+/// port it is dialed on, and whether the guest has accepted the stream yet.
+struct ConsoleConn {
+    stream: UnixStream,
+    /// The guest console data port this stream dials (`CONSOLE_PORT_BASE + n`).
+    guest_port: u32,
+    /// The guest accepted (`OP_RESPONSE` seen); only then do we read host bytes.
+    established: bool,
+}
+
+/// Host→guest console stream bridge for one guest: a per-guest-port set of Unix
+/// listeners plus the open host connections, each mapped to a host-assigned vsock
+/// src_port (its connection id).
+pub(crate) struct ConsoleBridge {
+    /// Bound host listeners, keyed by the guest console data port each serves.
+    /// Empty for a sealed prod config (claim 15) — the bridge then does nothing.
+    listeners: HashMap<u32, UnixListener>,
+    /// Open host connections keyed by the host-assigned vsock src_port (conn id).
+    conns: HashMap<u32, ConsoleConn>,
+    /// Next host port to assign.
+    next_port: u32,
+    /// Open-connection count, published for the run loop heartbeat so an active
+    /// console stream keeps the loop waking an idle guest (the same counter the
+    /// agent/substitution paths use).
+    active: Option<Arc<AtomicUsize>>,
+}
+
+impl ConsoleBridge {
+    pub fn new() -> Self {
+        Self {
+            listeners: HashMap::new(),
+            conns: HashMap::new(),
+            next_port: FIRST_CONSOLE_HOST_PORT,
+            active: None,
+        }
+    }
+
+    /// Bind one non-blocking host listener per `(guest_port, path)`, replacing any
+    /// stale socket. Called once at wiring time with the supervisor's console-port
+    /// list. An empty list (sealed prod) binds nothing. A per-port bind failure is
+    /// skipped (that console port is simply unreachable) so one bad path never
+    /// takes down the others.
+    pub fn bind_ports<'a>(
+        &mut self,
+        ports: impl IntoIterator<Item = (u32, &'a Path)>,
+    ) -> std::io::Result<()> {
+        for (guest_port, path) in ports {
+            let _ = std::fs::remove_file(path);
+            match UnixListener::bind(path) {
+                Ok(l) => {
+                    l.set_nonblocking(true)?;
+                    self.listeners.insert(guest_port, l);
+                    dbg_log(&format!(
+                        "bound console port {guest_port} at {}",
+                        path.display()
+                    ));
+                }
+                Err(e) => dbg_log(&format!(
+                    "console port {guest_port} bind failed at {}: {e}",
+                    path.display()
+                )),
+            }
+        }
+        Ok(())
+    }
+
+    /// Share the open-connection counter with the run loop heartbeat.
+    pub fn set_activity(&mut self, counter: Arc<AtomicUsize>) {
+        self.active = Some(counter);
+    }
+
+    /// Is `conn_id` a host-initiated console stream (so guest packets addressed to
+    /// it route here, not to the agent / workload-exit / egress / capture paths)?
+    pub fn is_console_stream(&self, conn_id: u32) -> bool {
+        self.conns.contains_key(&conn_id)
+    }
+
+    /// Accept any pending host connections across every bound console port,
+    /// assigning each a host vsock src_port. Returns `(conn_id, guest_port)` for
+    /// each — the device sends an `OP_REQUEST` to the guest console listener on
+    /// `guest_port`. No-op when no listeners are bound (sealed prod).
+    pub fn accept_new(&mut self) -> Vec<(u32, u32)> {
+        // Two phases: first drain every listener to `WouldBlock` (borrows only
+        // `self.listeners`), then register the accepted streams (borrows
+        // `self.conns` / `self.next_port`) — the split keeps the borrow checker
+        // happy without holding a listener borrow across the `conns` mutation.
+        let mut accepted: Vec<(u32, UnixStream)> = Vec::new();
+        for (&guest_port, listener) in self.listeners.iter() {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if stream.set_nonblocking(true).is_ok() {
+                            accepted.push((guest_port, stream));
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) => break,
+                }
+            }
+        }
+        let mut opened = Vec::with_capacity(accepted.len());
+        for (guest_port, stream) in accepted {
+            let conn_id = self.next_port;
+            self.next_port = self.next_port.wrapping_add(1).max(FIRST_CONSOLE_HOST_PORT);
+            self.conns.insert(
+                conn_id,
+                ConsoleConn {
+                    stream,
+                    guest_port,
+                    established: false,
+                },
+            );
+            self.bump(1);
+            opened.push((conn_id, guest_port));
+        }
+        opened
+    }
+
+    /// Mark a stream established: the guest accepted it (`OP_RESPONSE`). Only after
+    /// this does [`Self::drain_host`] read the host socket, so any PTY bytes the
+    /// client wrote before the handshake completed stay ordered behind it.
+    pub fn on_established(&mut self, conn_id: u32) {
+        if let Some(c) = self.conns.get_mut(&conn_id) {
+            c.established = true;
+        }
+    }
+
+    /// Read each established host connection once (non-blocking). Returns
+    /// `(conn_id, guest_port, bytes)` for the device to `OP_RW` to the guest on the
+    /// right console port. A peer EOF/error closes that stream in place.
+    pub fn drain_host(&mut self) -> Vec<(u32, u32, Vec<u8>)> {
+        let mut ready = Vec::new();
+        let mut closed = Vec::new();
+        for (conn_id, c) in self.conns.iter_mut() {
+            if !c.established {
+                continue;
+            }
+            let mut buf = vec![0u8; READ_CHUNK];
+            match c.stream.read(&mut buf) {
+                Ok(0) => closed.push(*conn_id),
+                Ok(n) => {
+                    buf.truncate(n);
+                    ready.push((*conn_id, c.guest_port, buf));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => closed.push(*conn_id),
+            }
+        }
+        for conn_id in closed {
+            self.close(conn_id);
+        }
+        ready
+    }
+
+    /// Write guest→host data (`OP_RW` the device received) to the host socket.
+    pub fn write_to_host(&mut self, conn_id: u32, payload: &[u8]) {
+        if let Some(c) = self.conns.get_mut(&conn_id) {
+            write_nonblocking(&mut c.stream, payload);
+        }
+    }
+
+    /// Close a stream (guest `OP_SHUTDOWN`/`OP_RST`, or a host EOF/error).
+    pub fn close(&mut self, conn_id: u32) {
+        if self.conns.remove(&conn_id).is_some() {
+            self.bump(-1);
+        }
+    }
+
+    fn bump(&self, delta: i32) {
+        if let Some(c) = &self.active {
+            if delta >= 0 {
+                c.fetch_add(delta as usize, Ordering::Relaxed);
+            } else {
+                c.fetch_sub((-delta) as usize, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// Debug trace gated on `MVM_HVF_AGENT_DEBUG` (a file path), mirroring the agent
+/// bridge's tracer. Silent in normal operation.
+fn dbg_log(msg: &str) {
+    if let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(f, "[console-bridge] {msg}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::time::Duration;
+
+    /// Full host→guest console relay on a specific console port: a host client
+    /// connects to that port's socket, the bridge accepts and assigns a stream that
+    /// remembers the guest console port, and once the guest "accepts"
+    /// (`on_established`) the bridge relays the client's bytes to the guest and the
+    /// guest's reply back to the host.
+    #[test]
+    fn host_connection_opens_stream_on_its_port_and_relays_both_ways() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = 20001u32;
+        let sock = dir.path().join("vsock-20001.sock");
+
+        let mut bridge = ConsoleBridge::new();
+        let active = Arc::new(AtomicUsize::new(0));
+        bridge.set_activity(active.clone());
+        bridge.bind_ports([(port, sock.as_path())]).unwrap();
+
+        // A host console client connects + writes immediately.
+        let mut client = UnixStream::connect(&sock).unwrap();
+        client.write_all(b"stty\n").unwrap();
+        client.set_nonblocking(true).unwrap();
+
+        let opened = bridge.accept_new();
+        assert_eq!(opened.len(), 1, "one host connection accepted");
+        let (conn_id, guest_port) = opened[0];
+        assert_eq!(
+            guest_port, port,
+            "stream carries the console port it was on"
+        );
+        assert!(
+            conn_id >= FIRST_CONSOLE_HOST_PORT,
+            "console host port above the well-known + agent ranges"
+        );
+        assert!(bridge.is_console_stream(conn_id));
+        assert_eq!(active.load(Ordering::Relaxed), 1);
+
+        // Before the guest accepts, request bytes stay buffered (not yet read).
+        assert!(
+            bridge.drain_host().is_empty(),
+            "no host bytes read before the stream is established"
+        );
+
+        // Guest accepts (OP_RESPONSE). Now host bytes relay to the guest port.
+        bridge.on_established(conn_id);
+        let mut got = None;
+        for _ in 0..200 {
+            let ready = bridge.drain_host();
+            if let Some((cid, gp, bytes)) = ready.into_iter().next() {
+                assert_eq!(cid, conn_id);
+                assert_eq!(gp, port);
+                got = Some(bytes);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(got.as_deref(), Some(&b"stty\n"[..]));
+
+        // Guest → host: the device writes the guest's PTY output to the host socket.
+        bridge.write_to_host(conn_id, b"# ");
+        let mut buf = [0u8; 64];
+        let mut n = 0;
+        for _ in 0..200 {
+            match client.read(&mut buf) {
+                Ok(k) if k > 0 => {
+                    n = k;
+                    break;
+                }
+                _ => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        assert_eq!(&buf[..n], b"# ");
+
+        // Close tears the stream down and the active counter drops.
+        bridge.close(conn_id);
+        assert_eq!(active.load(Ordering::Relaxed), 0);
+        assert!(!bridge.is_console_stream(conn_id));
+    }
+
+    /// Two console ports bound: a connection on each is accepted and each carries
+    /// its own guest port, so the device dials the right listener per session.
+    #[test]
+    fn distinct_ports_route_to_distinct_guest_listeners() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("vsock-20001.sock");
+        let b = dir.path().join("vsock-20002.sock");
+        let mut bridge = ConsoleBridge::new();
+        bridge
+            .bind_ports([(20001u32, a.as_path()), (20002u32, b.as_path())])
+            .unwrap();
+
+        let _ca = UnixStream::connect(&a).unwrap();
+        let _cb = UnixStream::connect(&b).unwrap();
+
+        let mut ports = Vec::new();
+        for _ in 0..200 {
+            for (_cid, gp) in bridge.accept_new() {
+                ports.push(gp);
+            }
+            if ports.len() >= 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        ports.sort_unstable();
+        assert_eq!(ports, vec![20001, 20002]);
+    }
+
+    /// Claim 15: an empty console-port list (sealed prod) binds no listeners, so
+    /// `accept_new` is a no-op and there is nothing to reach.
+    #[test]
+    fn empty_port_list_binds_nothing() {
+        let mut bridge = ConsoleBridge::new();
+        bridge.bind_ports([]).unwrap();
+        assert!(bridge.accept_new().is_empty());
+        assert!(!bridge.is_console_stream(FIRST_CONSOLE_HOST_PORT));
+    }
+}

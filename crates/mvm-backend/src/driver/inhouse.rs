@@ -13,12 +13,12 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_build::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
-use mvm_core::config::vm_state_dir;
+use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
+use mvm_core::config::{vm_state_dir, vsock_socket_filename};
 use mvm_core::vm_backend::{
     SnapshotCapability, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
-use mvm_guest::vsock::{EGRESS_PORT, GUEST_AGENT_PORT};
+use mvm_guest::vsock::{CONSOLE_PORT_BASE, EGRESS_PORT, GUEST_AGENT_PORT, dev_console_data_ports};
 
 use crate::driver::spec::KernelImage;
 use crate::driver::{DuplexStream, RunningVm, VmmDriver, VmmSpec};
@@ -132,6 +132,19 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         (!c.is_empty()).then(|| c.to_string())
     };
 
+    // Collect dev-only console data sockets: the spec carries one HostDials entry
+    // per pre-opened console data port (exact members of dev_console_data_ports()).
+    // Sealed prod specs carry none, so this vec is empty in production.
+    let console_data_sockets = spec
+        .vsock
+        .iter()
+        .filter(|p| dev_console_data_ports().any(|cp| cp == p.guest_port))
+        .map(|p| ConsoleDataSocket {
+            guest_port: p.guest_port,
+            host_socket: p.host_uds.clone(),
+        })
+        .collect();
+
     Ok(HvfSupervisorConfig {
         kernel,
         cmdline,
@@ -146,6 +159,7 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         agent_socket: vsock_socket(spec, GUEST_AGENT_PORT),
         substitution_socket: None,
         egress_relay_socket,
+        console_data_sockets,
     })
 }
 
@@ -264,6 +278,21 @@ fn in_house_agent_socket(state_dir: &std::path::Path) -> PathBuf {
     state_dir.join("agent.sock")
 }
 
+/// Resolve the host UDS for a console data port under the per-VM state dir,
+/// following the `<state_dir>/vsock/vsock-<port>.sock` convention. Returns
+/// `None` when the port is outside `dev_console_data_ports()`.
+fn console_socket_for_port(state_dir: &std::path::Path, guest_port: u32) -> Option<PathBuf> {
+    if dev_console_data_ports().any(|p| p == guest_port) {
+        Some(
+            state_dir
+                .join("vsock")
+                .join(vsock_socket_filename(guest_port)),
+        )
+    } else {
+        None
+    }
+}
+
 /// A live in-house VM: the detached `mvm-hvf-supervisor` tracked by its PID file,
 /// with the workload's exit code persisted under its state dir.
 struct InHouseRunningVm {
@@ -309,23 +338,24 @@ impl RunningVm for InHouseRunningVm {
     }
 
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
-        // The in-house VMM bridges exactly one host→guest channel: the agent RPC
-        // port, exposed as the per-VM agent socket the supervisor binds. A connect
-        // to that UDS is a stream to the guest agent (the bridge opens the vsock
-        // leg). Other ports are not host-dialable on this backend.
-        if guest_port != GUEST_AGENT_PORT {
+        let socket_path = if guest_port == GUEST_AGENT_PORT {
+            self.agent_socket.clone()
+        } else if let Some(path) = console_socket_for_port(&self.state_dir, guest_port) {
+            // Dev-only: pre-opened console data port in the CONSOLE_PORT_BASE+1..=+128
+            // range. Claim 15: sealed prod specs carry no console sockets, so this
+            // path is only reachable when the runner pre-bound these UDS at start.
+            path
+        } else {
             bail!(
-                "in-house driver vsock_connect supports only the agent port ({GUEST_AGENT_PORT}); \
-                 got {guest_port}"
+                "in-house driver vsock_connect supports only the agent port \
+                 ({GUEST_AGENT_PORT}) and dev console data ports ({}..={}); got {guest_port}",
+                CONSOLE_PORT_BASE + 1,
+                CONSOLE_PORT_BASE + 128,
             );
-        }
-        let stream =
-            std::os::unix::net::UnixStream::connect(&self.agent_socket).with_context(|| {
-                format!(
-                    "connect to in-house agent socket {}",
-                    self.agent_socket.display()
-                )
-            })?;
+        };
+        let stream = std::os::unix::net::UnixStream::connect(&socket_path).with_context(|| {
+            format!("connect to in-house vsock socket {}", socket_path.display())
+        })?;
         Ok(Box::new(stream))
     }
 }
@@ -552,7 +582,119 @@ mod tests {
         assert_eq!(&got, b"x");
         server.join().unwrap();
 
-        // Any other guest port is not host-dialable on this backend.
+        // Ports outside the agent port and the console data range are not host-dialable.
         assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
+    }
+
+    // --- console_socket_for_port ---
+
+    #[test]
+    fn console_socket_for_port_resolves_first_console_port() {
+        let state = PathBuf::from("/state/vm");
+        let got = console_socket_for_port(&state, 20001).unwrap();
+        assert_eq!(got, PathBuf::from("/state/vm/vsock/vsock-20001.sock"));
+    }
+
+    #[test]
+    fn console_socket_for_port_resolves_last_console_port() {
+        let state = PathBuf::from("/state/vm");
+        let got = console_socket_for_port(&state, 20128).unwrap();
+        assert_eq!(got, PathBuf::from("/state/vm/vsock/vsock-20128.sock"));
+    }
+
+    #[test]
+    fn console_socket_for_port_returns_none_for_out_of_range_ports() {
+        let state = PathBuf::from("/state/vm");
+        // CONSOLE_PORT_BASE itself is not a data port (data ports start at +1).
+        assert!(console_socket_for_port(&state, 20000).is_none());
+        // Beyond the 128-port cap.
+        assert!(console_socket_for_port(&state, 20129).is_none());
+        // Arbitrary unrelated port.
+        assert!(console_socket_for_port(&state, 9999).is_none());
+    }
+
+    #[test]
+    fn vsock_connect_console_port_resolves_to_vsock_subdir() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let vsock_dir = dir.path().join("vsock");
+        std::fs::create_dir_all(&vsock_dir).unwrap();
+        let sock = vsock_dir.join("vsock-20001.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut c, _)) = listener.accept() {
+                let mut b = [0u8; 1];
+                if c.read_exact(&mut b).is_ok() {
+                    let _ = c.write_all(&b);
+                }
+            }
+        });
+
+        let vm = InHouseRunningVm {
+            id: VmId("console-vm".into()),
+            state_dir: dir.path().to_path_buf(),
+            pid_file: dir.path().join(PID_FILE_NAME),
+            agent_socket: dir.path().join("agent.sock"),
+        };
+
+        // Port 20001 (first console data port) connects via the vsock subdir.
+        let mut s = vm.vsock_connect(20001).unwrap();
+        s.write_all(b"y").unwrap();
+        let mut got = [0u8; 1];
+        s.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"y");
+        server.join().unwrap();
+
+        // A port outside both the agent and console ranges still bails.
+        assert!(vm.vsock_connect(9999).is_err());
+    }
+
+    // --- relay_supervisor_config: console_data_sockets ---
+
+    fn console_vsock_port(port: u32, uds: &str) -> VsockPort {
+        VsockPort {
+            guest_port: port,
+            host_uds: uds.into(),
+            direction: VsockDirection::HostDials,
+        }
+    }
+
+    #[test]
+    fn relay_config_copies_console_ports_into_console_data_sockets() {
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                agent_port("/run/agent.sock"),
+                console_vsock_port(20001, "/state/vsock/vsock-20001.sock"),
+                console_vsock_port(20002, "/state/vsock/vsock-20002.sock"),
+            ],
+            vec![],
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(cfg.console_data_sockets.len(), 2);
+        assert_eq!(cfg.console_data_sockets[0].guest_port, 20001);
+        assert_eq!(
+            cfg.console_data_sockets[0].host_socket,
+            PathBuf::from("/state/vsock/vsock-20001.sock")
+        );
+        assert_eq!(cfg.console_data_sockets[1].guest_port, 20002);
+    }
+
+    #[test]
+    fn relay_config_produces_empty_console_data_sockets_when_none_in_spec() {
+        // Sealed prod: spec carries only the three standing ports, no console entries.
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                agent_port("/run/agent.sock"),
+            ],
+            vec![],
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert!(cfg.console_data_sockets.is_empty());
     }
 }

@@ -200,8 +200,8 @@ fn dbg_log(msg: &str) {
 
 /// Write `payload` to a non-blocking socket, briefly spinning past `WouldBlock` so
 /// a small frame goes out without stalling the run loop indefinitely. Mirrors the
-/// egress proxy's writer.
-fn write_nonblocking(stream: &mut UnixStream, payload: &[u8]) {
+/// egress proxy's writer. Shared with the console bridge (same host-socket writer).
+pub(super) fn write_nonblocking(stream: &mut UnixStream, payload: &[u8]) {
     let mut off = 0;
     let mut spins = 0u32;
     while off < payload.len() {

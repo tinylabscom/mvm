@@ -32,6 +32,18 @@ pub struct HvfDisk {
     pub ephemeral: bool,
 }
 
+/// A host UDS that the supervisor binds on behalf of one guest vsock data port,
+/// allowing the console driver to connect and exchange PTY data with the guest.
+/// Populated only when `dev_console` is true; a sealed prod config carries none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsoleDataSocket {
+    /// The vsock port the guest console session is listening on.
+    pub guest_port: u32,
+    /// Host UDS path the supervisor binds so the console driver can connect.
+    pub host_socket: PathBuf,
+}
+
 /// Everything the supervisor needs to boot one guest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -90,6 +102,11 @@ pub struct HvfSupervisorConfig {
     /// VM. `None` ⇒ the in-loop-gated paths (raw egress / gated substitution).
     #[serde(default)]
     pub egress_relay_socket: Option<PathBuf>,
+    /// Dev-only console data sockets: one entry per guest vsock data port the
+    /// console driver may connect to. Empty for sealed prod configs (claim 15).
+    /// Populated by the driver when `VmStartConfig.dev_console` is true.
+    #[serde(default)]
+    pub console_data_sockets: Vec<ConsoleDataSocket>,
 }
 
 #[cfg(test)]
@@ -123,6 +140,7 @@ mod tests {
             agent_socket: Some("/state/hvf-agent.sock".into()),
             substitution_socket: Some("/state/substitution-endpoint.sock".into()),
             egress_relay_socket: Some("/state/egress-bridge.sock".into()),
+            console_data_sockets: vec![],
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert_eq!(
@@ -157,5 +175,52 @@ mod tests {
         // deny_unknown_fields: a typo'd / unexpected field fails closed.
         let json = r#"{"kernel":"/k","console_log":"/c","pid_file":"/p","workload_exit":"/w","timeout_secs":1,"bogus":1}"#;
         assert!(serde_json::from_str::<HvfSupervisorConfig>(json).is_err());
+    }
+
+    #[test]
+    fn hvf_supervisor_console_data_sockets_roundtrip() {
+        let cfg = HvfSupervisorConfig {
+            kernel: "/k/Image".into(),
+            cmdline: None,
+            memory_mib: 0,
+            initramfs: None,
+            disks: vec![],
+            vsock: true,
+            console_log: "/state/console.log".into(),
+            pid_file: "/state/hvf.pid".into(),
+            workload_exit: "/state/workload.exit".into(),
+            timeout_secs: 30,
+            agent_socket: None,
+            substitution_socket: None,
+            egress_relay_socket: None,
+            console_data_sockets: vec![
+                ConsoleDataSocket {
+                    guest_port: 20001,
+                    host_socket: "/state/vsock/vsock-20001.sock".into(),
+                },
+                ConsoleDataSocket {
+                    guest_port: 20002,
+                    host_socket: "/state/vsock/vsock-20002.sock".into(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let decoded: HvfSupervisorConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, cfg);
+        assert_eq!(decoded.console_data_sockets.len(), 2);
+        assert_eq!(decoded.console_data_sockets[0].guest_port, 20001);
+        assert_eq!(
+            decoded.console_data_sockets[0].host_socket,
+            PathBuf::from("/state/vsock/vsock-20001.sock")
+        );
+    }
+
+    #[test]
+    fn hvf_supervisor_console_data_sockets_defaults_to_empty() {
+        // Configs without console_data_sockets (prod or pre-Task-2 configs) parse
+        // to an empty vec — the serde(default) guarantee.
+        let json = r#"{"kernel":"/k/Image","console_log":"/c.log","pid_file":"/p.pid","workload_exit":"/w.exit","timeout_secs":5}"#;
+        let cfg: HvfSupervisorConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.console_data_sockets.is_empty());
     }
 }

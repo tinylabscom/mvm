@@ -11,6 +11,7 @@
 //! This module compiles on every target; it is the "no VMM lock-in" seam.
 
 pub(crate) mod agent_bridge;
+pub(crate) mod console_bridge;
 pub mod device;
 // Promoted to the top-level backend-agnostic bridge module; re-exported at the
 // old paths so the in-house run loop and cross-crate consumers keep working.

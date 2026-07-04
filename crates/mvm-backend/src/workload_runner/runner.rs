@@ -24,7 +24,9 @@ use crate::substitution_spawn::{
     spawn_substitution_endpoint,
 };
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
-use crate::workload_runner::spec_map::{WorkloadSockets, WorkloadSpecInputs, workload_spec};
+use crate::workload_runner::spec_map::{
+    WorkloadSockets, WorkloadSpecInputs, console_data_sockets, workload_spec,
+};
 
 /// What the workload runner needs to stand up the per-VM gating endpoint.
 pub struct EndpointSpawnRequest<'a> {
@@ -87,13 +89,17 @@ struct StandingSockets {
     agent: PathBuf,
     exit: PathBuf,
     console_log: PathBuf,
+    /// Per-port UDS for the interactive console data range. Non-empty only when
+    /// `VmStartConfig.dev_console` is true; empty for all sealed prod boots.
+    console_data: Vec<(u32, PathBuf)>,
 }
 
-fn standing_sockets(state_dir: &Path) -> StandingSockets {
+fn standing_sockets(state_dir: &Path, dev_console: bool) -> StandingSockets {
     StandingSockets {
         agent: state_dir.join("agent.sock"),
         exit: state_dir.join("workload.exit"),
         console_log: state_dir.join("console.log"),
+        console_data: console_data_sockets(state_dir, dev_console),
     }
 }
 
@@ -131,13 +137,14 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
             raw_egress,
         })?;
 
-        let socks = standing_sockets(&state_dir);
+        let socks = standing_sockets(&state_dir, inputs.config.dev_console);
         let spec = workload_spec(&WorkloadSpecInputs {
             config: inputs.config,
             sockets: WorkloadSockets {
                 agent: &socks.agent,
                 egress_gateway: &egress_uds,
                 exit: &socks.exit,
+                console_data: socks.console_data,
             },
             cmdline: inputs.cmdline.clone(),
             console_log: socks.console_log,
@@ -498,5 +505,88 @@ mod tests {
         assert_eq!(runner.name(), want_name);
         assert_eq!(runner.capabilities().vsock, want_caps.vsock);
         assert!(runner.is_available().unwrap());
+    }
+
+    #[test]
+    fn start_workload_with_dev_console_threads_128_console_ports_into_spec() {
+        use mvm_guest::vsock::CONSOLE_PORT_BASE;
+        let policy = NetworkPolicy::deny_all();
+        let redaction = RedactionPolicy::default();
+        let runner =
+            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+
+        let cfg = VmStartConfig {
+            dev_console: true,
+            ..config("w-dev-console")
+        };
+        runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "t",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &policy,
+                cmdline: String::new(),
+            })
+            .expect("start_workload with dev_console succeeds");
+
+        let specs = runner.driver.booted_specs();
+        let spec = &specs[0];
+
+        // 3 standing + 128 console data = 131 vsock entries.
+        assert_eq!(spec.vsock.len(), 131);
+
+        // Every console port is in range and routed as HostDials.
+        let console: Vec<_> = spec
+            .vsock
+            .iter()
+            .filter(|p| p.guest_port > CONSOLE_PORT_BASE)
+            .collect();
+        assert_eq!(console.len(), 128);
+        assert!(
+            console
+                .iter()
+                .all(|p| p.direction == crate::driver::VsockDirection::HostDials),
+            "console ports must be HostDials"
+        );
+
+        // Paths live under <state_dir>/vsock/ — same shape as the Vz convention.
+        let first = &console[0];
+        assert!(
+            first.host_uds.to_string_lossy().contains("/vsock/vsock-"),
+            "path must be under vsock/ subdir: {}",
+            first.host_uds.display()
+        );
+    }
+
+    #[test]
+    fn start_workload_without_dev_console_carries_only_three_vsock_entries() {
+        let policy = NetworkPolicy::deny_all();
+        let redaction = RedactionPolicy::default();
+        let runner =
+            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+
+        let cfg = VmStartConfig {
+            dev_console: false,
+            ..config("w-sealed")
+        };
+        runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "t",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &policy,
+                cmdline: String::new(),
+            })
+            .expect("start_workload without dev_console succeeds");
+
+        let specs = runner.driver.booted_specs();
+        let spec = &specs[0];
+        assert_eq!(
+            spec.vsock.len(),
+            3,
+            "sealed prod boot must carry no console listeners"
+        );
     }
 }

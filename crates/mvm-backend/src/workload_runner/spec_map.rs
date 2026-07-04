@@ -4,8 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
+use mvm_core::config::vsock_socket_filename;
 use mvm_core::vm_backend::VmStartConfig;
-use mvm_guest::vsock::{EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT};
+use mvm_guest::vsock::{EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT, dev_console_data_ports};
 
 use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
 
@@ -63,15 +64,17 @@ pub struct WorkloadSockets<'a> {
     pub egress_gateway: &'a Path,
     /// Workload exit: the guest dials `WORKLOAD_EXIT_PORT` to report its exit code.
     pub exit: &'a Path,
+    /// Dev-only interactive console data ports: one host UDS per port in
+    /// `dev_console_data_ports()`, pre-opened so a PTY can attach. Empty for
+    /// sealed prod boots (`dev_console = false` in `VmStartConfig`).
+    pub console_data: Vec<(u32, PathBuf)>,
 }
 
 /// The standing vsock ports every workload VM carries: the agent RPC channel the
-/// host dials, and the two channels the guest dials — egress (to the host
-/// gateway) and exit (to report its status). Console data ports are dev-only and
-/// attached separately when a session opens, so they are not part of the sealed
-/// workload's fixed set.
+/// host dials, the two channels the guest dials (egress + exit), and — only when
+/// `dev_console` is set — the pre-opened interactive console data ports.
 pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
-    vec![
+    let mut ports = vec![
         VsockPort {
             guest_port: GUEST_AGENT_PORT,
             host_uds: socks.agent.into(),
@@ -87,7 +90,35 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
             host_uds: socks.exit.into(),
             direction: VsockDirection::GuestDials,
         },
-    ]
+    ];
+    // The guest agent allocates `CONSOLE_PORT_BASE + session_id` per ConsoleOpen
+    // and listens there; the host dials in to fetch the PTY stream. Pre-open only
+    // when `dev_console` is true — a sealed prod boot carries none (claim 15).
+    for (port, path) in &socks.console_data {
+        ports.push(VsockPort {
+            guest_port: *port,
+            host_uds: path.clone(),
+            direction: VsockDirection::HostDials,
+        });
+    }
+    ports
+}
+
+/// Build the per-port (port, host-UDS) list for the interactive console data
+/// range, rooted under `<state_dir>/vsock/` to match the Vz socket convention.
+/// Returns an empty vec when `dev_console` is false (claim 15: sealed prod
+/// boots carry no console listeners).
+pub fn console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<(u32, PathBuf)> {
+    if !dev_console {
+        return Vec::new();
+    }
+    let vsock_dir = state_dir.join("vsock");
+    dev_console_data_ports()
+        .map(|port| {
+            let path = vsock_dir.join(vsock_socket_filename(port));
+            (port, path)
+        })
+        .collect()
 }
 
 /// Everything the workload role resolves before it can build a `VmmSpec`: the
@@ -219,6 +250,7 @@ mod tests {
             agent: Path::new("/run/agent.sock"),
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
+            console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
 
@@ -244,6 +276,7 @@ mod tests {
             agent: Path::new("/run/agent.sock"),
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
+            console_data: Vec::new(),
         }
     }
 
@@ -306,5 +339,125 @@ mod tests {
             console_log: PathBuf::from("/run/console.log"),
         });
         assert_eq!(spec.kernel, KernelImage::Bundled);
+    }
+
+    // --- console_data_sockets / dev_console gating ---
+
+    #[test]
+    fn console_data_sockets_returns_empty_when_dev_console_is_false() {
+        let sockets = console_data_sockets(Path::new("/state/w"), false);
+        assert!(
+            sockets.is_empty(),
+            "sealed prod boot must carry no console listeners"
+        );
+    }
+
+    #[test]
+    fn console_data_sockets_returns_128_entries_when_dev_console_is_true() {
+        let sockets = console_data_sockets(Path::new("/state/w"), true);
+        assert_eq!(
+            sockets.len(),
+            128,
+            "pre-open all 128 console data ports when dev_console is set"
+        );
+    }
+
+    #[test]
+    fn console_data_sockets_paths_follow_vz_convention() {
+        use mvm_guest::vsock::CONSOLE_PORT_BASE;
+        let state_dir = Path::new("/state/myvm");
+        let sockets = console_data_sockets(state_dir, true);
+
+        // First port: CONSOLE_PORT_BASE + 1 = 20001
+        let (port, path) = &sockets[0];
+        assert_eq!(*port, CONSOLE_PORT_BASE + 1);
+        assert_eq!(
+            path,
+            &PathBuf::from("/state/myvm/vsock/vsock-20001.sock"),
+            "path must be <state_dir>/vsock/vsock-<port>.sock"
+        );
+
+        // Last port: CONSOLE_PORT_BASE + 128 = 20128
+        let (last_port, last_path) = &sockets[127];
+        assert_eq!(*last_port, CONSOLE_PORT_BASE + 128);
+        assert_eq!(
+            last_path,
+            &PathBuf::from("/state/myvm/vsock/vsock-20128.sock")
+        );
+    }
+
+    #[test]
+    fn workload_vsock_ports_with_dev_console_carries_128_console_ports() {
+        use mvm_guest::vsock::CONSOLE_PORT_BASE;
+        let state_dir = Path::new("/state/w");
+        let console_data = console_data_sockets(state_dir, true);
+        let socks = WorkloadSockets {
+            agent: Path::new("/run/agent.sock"),
+            egress_gateway: Path::new("/run/egress.sock"),
+            exit: Path::new("/run/workload.exit"),
+            console_data,
+        };
+        let ports = workload_vsock_ports(&socks);
+
+        // 3 standing + 128 console = 131
+        assert_eq!(ports.len(), 131);
+
+        // All console ports are HostDials and land in the expected range.
+        let console_ports: Vec<_> = ports
+            .iter()
+            .filter(|p| p.guest_port > CONSOLE_PORT_BASE)
+            .collect();
+        assert_eq!(console_ports.len(), 128);
+        assert!(
+            console_ports
+                .iter()
+                .all(|p| p.direction == VsockDirection::HostDials),
+            "host dials the guest-side console listener"
+        );
+    }
+
+    #[test]
+    fn workload_vsock_ports_without_dev_console_carries_only_three_ports() {
+        let socks = WorkloadSockets {
+            agent: Path::new("/run/agent.sock"),
+            egress_gateway: Path::new("/run/egress.sock"),
+            exit: Path::new("/run/workload.exit"),
+            console_data: Vec::new(),
+        };
+        let ports = workload_vsock_ports(&socks);
+        assert_eq!(ports.len(), 3, "no console ports on a sealed prod boot");
+    }
+
+    #[test]
+    fn workload_spec_with_dev_console_carries_131_vsock_entries() {
+        let state_dir = Path::new("/state/w");
+        let console_data = console_data_sockets(state_dir, true);
+        let cfg = VmStartConfig {
+            dev_console: true,
+            ..base()
+        };
+        let spec = workload_spec(&WorkloadSpecInputs {
+            config: &cfg,
+            sockets: WorkloadSockets {
+                agent: Path::new("/run/agent.sock"),
+                egress_gateway: Path::new("/run/egress.sock"),
+                exit: Path::new("/run/workload.exit"),
+                console_data,
+            },
+            cmdline: String::new(),
+            console_log: PathBuf::from("/run/console.log"),
+        });
+        assert_eq!(spec.vsock.len(), 131);
+    }
+
+    #[test]
+    fn workload_spec_without_dev_console_carries_three_vsock_entries() {
+        let spec = workload_spec(&WorkloadSpecInputs {
+            config: &base(),
+            sockets: sample_sockets(),
+            cmdline: String::new(),
+            console_log: PathBuf::from("/run/console.log"),
+        });
+        assert_eq!(spec.vsock.len(), 3);
     }
 }

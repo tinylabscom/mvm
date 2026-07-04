@@ -75,6 +75,7 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
         agent_socket: None,
         substitution_socket: None,
         egress_relay_socket: None,
+        console_data_sockets: vec![],
     };
     let json = serde_json::to_string(&cfg).context("serialize inject supervisor config")?;
 

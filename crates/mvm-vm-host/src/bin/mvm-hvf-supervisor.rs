@@ -199,6 +199,11 @@ fn main() -> anyhow::Result<()> {
             agent_socket: cfg.agent_socket.clone(),
             substitution_socket: cfg.substitution_socket.clone(),
             egress_relay: cfg.egress_relay_socket.clone(),
+            console_data_sockets: cfg
+                .console_data_sockets
+                .iter()
+                .map(|c| (c.guest_port, c.host_socket.clone()))
+                .collect(),
             cmdline: cfg.cmdline.clone(),
             mem_mib: cfg.memory_mib,
         },

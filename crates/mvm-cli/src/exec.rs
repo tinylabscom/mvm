@@ -413,6 +413,16 @@ pub fn transient_vm_name() -> String {
     mvm_core::naming::generate_machine_name()
 }
 
+/// Whether a transient run should pre-open interactive console data sockets.
+///
+/// `true` only when the caller requested a PTY (`pty`) AND the image is not
+/// verity-sealed (`verity_path.is_none()`). Sealed images carry no dev-shell
+/// agent, so pre-opening the sockets would be wasteful and misleading; the
+/// interactive attach is separately refused at `enforce_accessible_gate`.
+pub fn transient_run_dev_console(pty: bool, verity_path: Option<&str>) -> bool {
+    pty && verity_path.is_none()
+}
+
 /// Decide whether snapshot restore is safe for this request.
 ///
 /// Only enabled for the trivial case: a registered template (so the image
@@ -590,11 +600,10 @@ fn run_inner(
     let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
     let t_drives_ready = timing.then(std::time::Instant::now);
 
-    // Interactive `-it` transient run: pre-open the console data-port sockets so
-    // the backend's PTY console attach can reach the agent-allocated channel.
-    // Gated on `pty` and an unsealed image — a verity sidecar means a sealed
-    // production rootfs, which never serves an interactive console.
-    let dev_console = req.pty && verity_path.is_none();
+    // Pre-open console data sockets for interactive PTY runs against
+    // non-sealed images. Sealed images carry no dev-shell agent; the
+    // enforce_accessible_gate will refuse the attach separately.
+    let dev_console = transient_run_dev_console(req.pty, verity_path.as_deref());
 
     // Template-restore VMs run without plan admission. Leave tenant_id /
     // plan_json / bundle_json at their None defaults (via
@@ -609,6 +618,7 @@ fn run_inner(
         initrd_path: initrd.clone(),
         verity_path,
         roothash,
+        dev_console,
         revision_hash: revision.clone(),
         flake_ref: flake_ref.clone(),
         profile: profile.clone(),
@@ -632,7 +642,6 @@ fn run_inner(
         runner_dir: None,
         network_policy: req.network_policy.clone(),
         warm_pool_size: req.warm_pool_size,
-        dev_console,
         ..Default::default()
     };
 
@@ -1789,5 +1798,32 @@ mod tests {
     fn snapshot_eligible_false_for_prebuilt_image() {
         // The bundled default image isn't a registered template — no snapshot exists.
         assert!(!snapshot_eligible(&prebuilt(), &[], true, true));
+    }
+
+    // --- transient_run_dev_console ---
+
+    #[test]
+    fn interactive_transient_run_sets_dev_console_when_not_sealed() {
+        // PTY-mode run against a non-sealed image must pre-open console sockets
+        // so the in-house backend can host-dial the guest's data port.
+        assert!(transient_run_dev_console(true, None));
+    }
+
+    #[test]
+    fn non_interactive_transient_run_leaves_dev_console_unset() {
+        // A non-PTY run never needs the interactive console data sockets.
+        assert!(!transient_run_dev_console(false, None));
+    }
+
+    #[test]
+    fn interactive_sealed_run_leaves_dev_console_unset() {
+        // A verity-sealed image has no dev-shell agent; pre-opening sockets
+        // is wasteful. enforce_accessible_gate refuses the attach separately.
+        assert!(!transient_run_dev_console(true, Some("/rootfs.verity")));
+    }
+
+    #[test]
+    fn non_interactive_sealed_run_leaves_dev_console_unset() {
+        assert!(!transient_run_dev_console(false, Some("/rootfs.verity")));
     }
 }

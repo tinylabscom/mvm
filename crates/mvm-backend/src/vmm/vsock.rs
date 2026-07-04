@@ -180,6 +180,11 @@ pub(super) struct VsockShared {
     /// Inbound vsock header per substitution stream (keyed by guest `src_port`), so
     /// an endpoint reply can be framed back on the right stream.
     substitution_hdrs: std::collections::HashMap<u32, Hdr>,
+    /// Host→guest console bridge (dev-only). Host console clients connect to a
+    /// per-port Unix socket the supervisor bound and reach the guest console
+    /// listener on that data port. Empty (binds nothing) for a sealed prod config —
+    /// claim 15.
+    console: super::console_bridge::ConsoleBridge,
 }
 
 impl VsockShared {
@@ -203,6 +208,7 @@ impl VsockShared {
             agent: super::agent_bridge::AgentBridge::new(),
             substitution: super::substitution_bridge::SubstitutionBridge::new(),
             substitution_hdrs: std::collections::HashMap::new(),
+            console: super::console_bridge::ConsoleBridge::new(),
         }
     }
 
@@ -243,6 +249,25 @@ impl VsockShared {
     /// code and sets `stop` so the run loop ends (VM life = workload life).
     pub fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
         self.exit_stop = Some(stop);
+    }
+
+    /// Bind the dev-only host console listeners: one Unix socket per guest console
+    /// data port. Populated only for a `dev_console` machine; a sealed prod config
+    /// passes an empty list and nothing is bound (claim 15).
+    pub fn set_console_sockets<'a>(
+        &mut self,
+        ports: impl IntoIterator<Item = (u32, &'a std::path::Path)>,
+    ) -> std::io::Result<()> {
+        self.console.bind_ports(ports)
+    }
+
+    /// Share the heartbeat activity counter with the console bridge so an open
+    /// interactive console stream keeps the run loop waking an idle guest.
+    pub fn set_console_activity(
+        &mut self,
+        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        self.console.set_activity(counter);
     }
 
     pub fn read(&self, offset: u64) -> u64 {
@@ -376,6 +401,29 @@ impl VsockShared {
             }
             return;
         }
+        // Guest→host packet on a host-initiated console stream (dev-only): routed by
+        // the opaque host-assigned conn id (`dst_port` here), never by the agent's
+        // `is_agent_stream`. Same handshake/relay shape as the agent branch: the
+        // host dialed the guest's console data port, so the guest's PTY output is
+        // addressed back to our conn id.
+        if self.console.is_console_stream(hdr.dst_port) {
+            match hdr.op {
+                OP_RESPONSE => self.console.on_established(hdr.dst_port),
+                OP_RW => {
+                    let n = (hdr.len as usize).min(payload.len());
+                    self.console.write_to_host(hdr.dst_port, &payload[..n]);
+                    self.add_recv(&hdr, n as u32);
+                    self.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                }
+                OP_SHUTDOWN | OP_RST => {
+                    self.console.close(hdr.dst_port);
+                    self.recv_cnt.remove(&(hdr.dst_port, hdr.src_port));
+                    self.queue_reply(&hdr, OP_RST, &[]);
+                }
+                _ => {}
+            }
+            return;
+        }
         match hdr.op {
             OP_REQUEST => {
                 // Accept the connection: reply RESPONSE with our credit.
@@ -494,6 +542,28 @@ impl VsockShared {
                 bytes.len()
             ));
             self.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_RW, &bytes);
+        }
+        if self.flush_rx() {
+            Some(self.irq)
+        } else {
+            None
+        }
+    }
+
+    /// Drive the host→guest console bridge each tick (dev-only): open a vsock stream
+    /// for each new host console connection (`OP_REQUEST` to the guest console
+    /// listener on that connection's data port — the *real* console port, not the
+    /// hardwired agent port) and relay host→guest PTY bytes (`OP_RW`). The guest's
+    /// replies route back to the host socket by conn id in
+    /// [`handle_packet`](Self::handle_packet). Returns `Some(irq)` when a packet was
+    /// delivered into a posted rx buffer. A no-op when no console ports are bound
+    /// (sealed prod).
+    pub fn drain_console(&mut self) -> Option<u32> {
+        for (conn_id, guest_port) in self.console.accept_new() {
+            self.queue_host_packet(conn_id, guest_port, OP_REQUEST, &[]);
+        }
+        for (conn_id, guest_port, bytes) in self.console.drain_host() {
+            self.queue_host_packet(conn_id, guest_port, OP_RW, &bytes);
         }
         if self.flush_rx() {
             Some(self.irq)
@@ -627,7 +697,8 @@ impl VsockShared {
     pub(super) fn service_host_io(&mut self) -> bool {
         let agent = self.drain_agent();
         let subst = self.drain_substitution();
-        agent.is_some() || subst.is_some()
+        let console = self.drain_console();
+        agent.is_some() || subst.is_some() || console.is_some()
     }
 
     /// Raw fd of the bound host agent listener, for the I/O thread to register
@@ -701,6 +772,20 @@ impl VirtioVsock {
     /// Capture the transient workload-exit code (guest write to the exit port).
     pub fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
         self.lock().capture_workload_exit(stop);
+    }
+
+    /// Bind the dev-only host console listeners (one per guest console data port).
+    /// Empty for a sealed prod config ⇒ nothing bound (claim 15).
+    pub fn set_console_sockets<'a>(
+        &mut self,
+        ports: impl IntoIterator<Item = (u32, &'a std::path::Path)>,
+    ) -> std::io::Result<()> {
+        self.lock().set_console_sockets(ports)
+    }
+
+    /// Share the heartbeat activity counter with the console bridge.
+    pub fn set_console_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+        self.lock().set_console_activity(counter);
     }
 
     /// Spawn the dedicated host-I/O thread: it owns a `mio::Poll` over the agent
@@ -1161,5 +1246,115 @@ mod tests {
             d.received.is_empty(),
             "agent-stream bytes must not hit the capture path"
         );
+    }
+
+    /// A host connect on a *console* data port opens a guest listener on that same
+    /// port (not the hardwired agent port) and relays bytes both ways: the device
+    /// frames `OP_REQUEST`→console port, routes the guest's reply back to the host
+    /// socket by conn id (not `is_agent_stream`), and does not touch the capture
+    /// path. This is the device-level Task 5 contract.
+    #[test]
+    fn host_console_connection_frames_op_request_on_the_console_port() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let port = 20005u32;
+        let sock = dir.path().join("vsock-20005.sock");
+        let mut d = dev();
+        d.set_console_sockets([(port, sock.as_path())]).unwrap();
+
+        // A host console client connects and immediately writes a keystroke.
+        let mut client = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        client.write_all(b"ls\n").unwrap();
+        client.set_nonblocking(true).unwrap();
+
+        // drain_console accepts it and frames an OP_REQUEST to the CONSOLE port.
+        let mut hdr = None;
+        for _ in 0..200 {
+            let _ = d.drain_console();
+            if let Some((h, _)) = d.pending_rx.first() {
+                hdr = Some(*h);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let hdr = hdr.expect("OP_REQUEST framed for the host console connection");
+        assert_eq!(hdr.op, OP_REQUEST);
+        assert_eq!(
+            hdr.dst_port, port,
+            "console stream dials the real console port, not the agent port"
+        );
+        assert_ne!(hdr.dst_port, mvm_guest::vsock::GUEST_AGENT_PORT);
+        assert_eq!(hdr.src_cid, HOST_CID);
+        assert_eq!(hdr.dst_cid, GUEST_CID);
+        let conn_id = hdr.src_port;
+        // Routed by conn id in the console bridge — NOT via the agent's keyspace.
+        assert!(d.console.is_console_stream(conn_id));
+        assert!(!d.agent.is_agent_stream(conn_id));
+
+        // Guest accepts (OP_RESPONSE) → now host→guest keystrokes relay.
+        let accept = Hdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: port,
+            dst_port: conn_id,
+            op: OP_RESPONSE,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(accept, &[]);
+        d.pending_rx.clear();
+        let mut relayed = false;
+        for _ in 0..200 {
+            let _ = d.drain_console();
+            if d.pending_rx
+                .iter()
+                .any(|(h, p)| h.op == OP_RW && h.dst_port == port && p == b"ls\n")
+            {
+                relayed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(relayed, "host keystrokes relay to the guest console port");
+
+        // Guest → host PTY output: routed to the host socket by conn id, never the
+        // capture path.
+        let out = Hdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: port,
+            dst_port: conn_id,
+            len: 2,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(out, b"# ");
+        assert!(
+            d.received.is_empty(),
+            "console-stream bytes must not hit the capture path"
+        );
+        let mut buf = [0u8; 16];
+        let mut n = 0;
+        for _ in 0..200 {
+            match client.read(&mut buf) {
+                Ok(k) if k > 0 => {
+                    n = k;
+                    break;
+                }
+                _ => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+        assert_eq!(&buf[..n], b"# ", "guest PTY output reaches the host socket");
+    }
+
+    /// Sealed prod: an empty console-socket list binds no listeners, so
+    /// `drain_console` frames nothing — the console path is inert (claim 15).
+    #[test]
+    fn empty_console_sockets_bind_nothing() {
+        let mut d = dev();
+        d.set_console_sockets([]).unwrap();
+        assert!(d.drain_console().is_none());
+        assert!(d.pending_rx.is_empty());
     }
 }
