@@ -1191,6 +1191,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             false,
             has_ad_hoc_argv,
             profile == "dev",
+            super::agent_verbs::image_is_sealed(rootfs_path),
         ),
     })?;
     let mut start_config = VmStartParams {
