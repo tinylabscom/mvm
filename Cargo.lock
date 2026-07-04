@@ -2657,10 +2657,13 @@ name = "mvm-client-local"
 version = "0.16.1"
 dependencies = [
  "async-trait",
+ "flate2",
  "mvm-backend",
+ "mvm-build",
  "mvm-client",
  "mvm-core",
  "mvm-hostd",
+ "mvm-oci",
  "tempfile",
  "tokio",
 ]

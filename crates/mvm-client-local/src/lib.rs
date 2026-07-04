@@ -5,20 +5,27 @@
 //!
 //! `list`/`stop`/`logs` go straight to the backend dispatch (they act on VMs
 //! that already exist, so they carry no admission concern). `run` boots through
-//! the signed-plan admission gate in-process — no subprocess, no CLI — by
-//! resolving the spec's image to a host-materialized rootfs and handing it to
-//! `mvm_hostd::run::admit_and_boot_local`. Image refs that still need a registry
-//! pull or an unpacked-dir materialize step fail honestly (that resolution is
-//! not wired into this backend yet); a workload never boots on a path that
-//! skipped admission.
+//! the signed-plan admission gate in-process — no subprocess, no CLI. It
+//! resolves the spec's image to a host-materialized rootfs — a ready
+//! `rootfs.ext4`, an unpacked OCI directory (inject runtime + pure-materialize),
+//! or a registry ref (pull + unpack + inject + materialize) — reusing the exact
+//! `mvm_build::run_image` orchestration the CLI's `run --image` uses, then hands
+//! it to `mvm_hostd::run::admit_and_boot_local`. A workload never boots on a
+//! path that skipped admission.
 
-use std::path::Path;
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use flate2::read::GzDecoder;
 use mvm_backend::AnyBackend;
 use mvm_core::protocol::vm_backend::{VmId, VmInfo, VmStatus};
 use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock};
 use mvm_hostd::run::{LocalRunContext, LocalRunRequest, admit_and_boot_local};
+use mvm_oci::{
+    ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
+    OciManifestFetcher, UnpackOptions, unpack_layer,
+};
 
 use mvm_client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
@@ -76,27 +83,119 @@ fn backend_err(e: impl std::fmt::Display) -> MvmError {
     }
 }
 
-/// Resolve `image` to a host path pointing at an already-materialized ext4
-/// rootfs. Only a direct path to a materialized image boots in-process today;
-/// an unpacked-dir materialize step and registry pulls are deferred to a later
-/// slice and fail with a clear message rather than a partial boot.
-fn resolve_local_rootfs(image: &str) -> Result<std::path::PathBuf> {
+/// How a `spec.image` string is interpreted.
+#[derive(Debug, PartialEq, Eq)]
+enum ImageSource {
+    /// A path to an already-materialized `rootfs.ext4` — boot it directly.
+    Materialized(PathBuf),
+    /// A path to an unpacked OCI rootfs directory — inject runtime + materialize.
+    UnpackedDir(PathBuf),
+    /// Anything else is treated as an OCI registry reference — pull + unpack +
+    /// inject + materialize.
+    Registry(String),
+}
+
+/// Classify a `spec.image`: an existing file is a materialized rootfs, an
+/// existing directory is an unpacked tree, everything else is a registry ref.
+fn classify_image(image: &str) -> ImageSource {
     let path = Path::new(image);
     if path.is_file() {
-        return Ok(path.to_path_buf());
+        ImageSource::Materialized(path.to_path_buf())
+    } else if path.is_dir() {
+        ImageSource::UnpackedDir(path.to_path_buf())
+    } else {
+        ImageSource::Registry(image.to_string())
     }
-    if path.is_dir() {
+}
+
+/// Resolve `spec.image` to a host `rootfs.ext4` path, materializing in-process
+/// as needed (no subprocess, no CLI). Registry pulls are async; the dir +
+/// pre-materialized cases are synchronous.
+async fn resolve_local_rootfs(image: &str, name: &str) -> Result<PathBuf> {
+    match classify_image(image) {
+        ImageSource::Materialized(path) => Ok(path),
+        ImageSource::UnpackedDir(dir) => materialize_from_dir(&dir, name),
+        ImageSource::Registry(reference) => {
+            let staging = tempfile::tempdir().map_err(backend_err)?;
+            pull_image_to_dir(&reference, staging.path()).await?;
+            materialize_from_dir(staging.path(), name)
+        }
+    }
+}
+
+/// Cache location for a locally-materialized run rootfs, keyed by machine name.
+fn run_rootfs_output(name: &str) -> PathBuf {
+    let key: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    PathBuf::from(mvm_core::config::mvm_cache_dir())
+        .join("local-run")
+        .join(key)
+        .join("rootfs.ext4")
+}
+
+/// Inject the mvm runtime into an unpacked tree and materialize it into the
+/// run-rootfs cache, reusing the CLI's shared `run_image` orchestration.
+fn materialize_from_dir(dir: &Path, name: &str) -> Result<PathBuf> {
+    let output = run_rootfs_output(name);
+    let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
+    mvm_build::run_image::inject_and_materialize(&cache_root, dir, &output, name)
+        .map_err(backend_err)?;
+    Ok(output)
+}
+
+/// Pull a public OCI registry reference and unpack every layer into `dest`,
+/// reusing mvm-oci's fetch + hardened unpacker (gzip is decoded here, at the
+/// crate boundary, keeping mvm-oci decompressor-free by design).
+async fn pull_image_to_dir(reference: &str, dest: &Path) -> Result<()> {
+    let image_ref: ImageReference = reference
+        .parse()
+        .map_err(|e| backend_err(format!("parse image reference {reference:?}: {e}")))?;
+    let manifest_fetcher = OciManifestFetcher::new();
+    let manifest = manifest_fetcher
+        .fetch_linux_platform_manifest(&image_ref, &LinuxPlatform::for_current_arch())
+        .await
+        .map_err(|e| backend_err(format!("fetch manifest for {reference}: {e}")))?;
+    let layers = manifest
+        .layers()
+        .map_err(|e| backend_err(format!("parse layers for {reference}: {e}")))?;
+    if layers.is_empty() {
+        return Err(backend_err(format!("OCI image {reference} has no layers")));
+    }
+    let layer_fetcher =
+        OciLayerFetcher::from_manifest_fetcher(&manifest_fetcher, LayerFetchOptions::default());
+    for layer in &layers {
+        let mut bytes = Vec::new();
+        layer_fetcher
+            .fetch_layer(&image_ref, layer, &mut bytes)
+            .await
+            .map_err(|e| backend_err(format!("fetch layer {}: {e}", layer.digest)))?;
+        unpack_one_layer(layer, &bytes, dest)?;
+    }
+    Ok(())
+}
+
+/// Unpack one layer's bytes into `dest`, decompressing gzip layers first.
+fn unpack_one_layer(layer: &LayerDescriptor, bytes: &[u8], dest: &Path) -> Result<()> {
+    let mt = &layer.media_type;
+    let report = if mt.ends_with("+gzip") || mt.ends_with(".gzip") || mt.contains("tar.gzip") {
+        unpack_layer(
+            GzDecoder::new(Cursor::new(bytes)),
+            dest,
+            &UnpackOptions::default(),
+        )
+    } else {
+        unpack_layer(Cursor::new(bytes), dest, &UnpackOptions::default())
+    }
+    .map_err(|e| backend_err(format!("unpack layer {}: {e}", layer.digest)))?;
+    if !report.refused.is_empty() {
         return Err(backend_err(format!(
-            "'{image}' is an unpacked rootfs directory; in-process materialization \
-             is not wired into the local backend yet — pre-materialize a rootfs.ext4 \
-             or use `mvmctl machine run`"
+            "layer {} unpack refused entries: {:?}",
+            layer.digest, report.refused
         )));
     }
-    Err(backend_err(format!(
-        "in-process local run expects a path to a materialized rootfs.ext4; '{image}' \
-         is neither a file nor a directory (registry pulls are not wired into the local \
-         backend — use `mvmctl machine run`)"
-    )))
+    Ok(())
 }
 
 /// Probe the dm-verity sidecars the pure materializer writes beside the image
@@ -137,7 +236,7 @@ impl MvmClient for LocalBackend {
     }
 
     async fn run_machine(&self, spec: MachineSpec) -> Result<MachineState> {
-        let rootfs = resolve_local_rootfs(&spec.image)?;
+        let rootfs = resolve_local_rootfs(&spec.image, &spec.name).await?;
         let (verity_path, roothash) = host_verity_sidecars(&rootfs);
 
         let req = LocalRunRequest {
@@ -146,7 +245,7 @@ impl MvmClient for LocalBackend {
             // libkrun/Vz/mock carry their own kernel; a Firecracker local run
             // that needs an explicit kernel path is a later slice.
             kernel_path: None,
-            verity_path: verity_path.map(std::path::PathBuf::from),
+            verity_path: verity_path.map(PathBuf::from),
             roothash,
             cpus: spec.cpus,
             mem_mib: spec.memory_mib,
@@ -231,20 +330,37 @@ mod tests {
         assert!(none.len() <= machines.len());
     }
 
-    #[tokio::test]
-    async fn run_refuses_unresolvable_image_ref() {
-        // A registry ref (neither a file nor a dir on this host) fails honestly
-        // — the local backend doesn't pull, and never boots without admission.
-        let be = LocalBackend::with_hypervisor("mock");
-        let spec = MachineSpec {
-            name: "w".into(),
-            image: "registry.example.com/app:latest".into(),
-            cpus: 1,
-            memory_mib: 64,
-            env: vec![],
-        };
-        let err = be.run_machine(spec).await.unwrap_err();
-        assert!(matches!(err, MvmError::Backend { .. }));
+    #[test]
+    fn classify_image_routes_file_dir_and_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("rootfs.ext4");
+        std::fs::write(&file, b"x").unwrap();
+
+        // An existing file → a materialized rootfs.
+        assert_eq!(
+            classify_image(&file.to_string_lossy()),
+            ImageSource::Materialized(file.clone())
+        );
+        // An existing directory → an unpacked tree.
+        assert_eq!(
+            classify_image(&dir.path().to_string_lossy()),
+            ImageSource::UnpackedDir(dir.path().to_path_buf())
+        );
+        // Anything else → a registry reference (no network touched here).
+        assert_eq!(
+            classify_image("docker.io/library/alpine:3.20"),
+            ImageSource::Registry("docker.io/library/alpine:3.20".into())
+        );
+    }
+
+    #[test]
+    fn run_rootfs_output_is_name_sanitized_and_under_cache() {
+        let out = run_rootfs_output("my/app:1.2");
+        assert!(out.ends_with("rootfs.ext4"));
+        let s = out.to_string_lossy();
+        assert!(s.contains("local-run"));
+        // Path-hostile characters in the name are replaced.
+        assert!(s.contains("my_app_1_2"));
     }
 
     #[tokio::test]
