@@ -9,8 +9,6 @@ use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 use flate2::read::GzDecoder;
 use mvm_build::rootfs::MaterializeExt4Input;
-#[cfg(feature = "builder-vm")]
-use mvm_build::rootfs::{MaterializeExt4Options, materialize_ext4};
 use mvm_oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
     OciManifestFetcher, RegistryAuthConfig, UnpackOptions, read_oci_archive, unpack_layer,
@@ -537,27 +535,7 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
 /// path's `verity_path`/`roothash = None` boot config is unchanged — this flips
 /// the materialization *mechanism*, not the boot semantics.
 fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()> {
-    #[cfg(feature = "pure-mkfs")]
-    if std::env::var_os("MVM_MATERIALIZE_BUILDER_VM").is_none() {
-        return mvm_build::rootfs::materialize_ext4_pure(input)
-            .map(|_| ())
-            .with_context(|| format!("materialize {} in-process", input.output.display()));
-    }
-    materialize_run_rootfs_builder_vm(input)
-}
-
-#[cfg(feature = "builder-vm")]
-fn materialize_run_rootfs_builder_vm(input: &MaterializeExt4Input) -> Result<()> {
-    materialize_ext4(input, &MaterializeExt4Options::default())
-        .map(|_| ())
-        .with_context(|| format!("materialize {} via builder VM", input.output.display()))
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn materialize_run_rootfs_builder_vm(_input: &MaterializeExt4Input) -> Result<()> {
-    anyhow::bail!(
-        "no rootfs materializer compiled in: enable the `pure-mkfs` or `builder-vm` feature"
-    )
+    mvm_build::run_image::materialize_run_rootfs(input)
 }
 
 fn inject_runtime_and_materialize(
@@ -566,41 +544,7 @@ fn inject_runtime_and_materialize(
     rootfs_abs: &Path,
     image_label: &str,
 ) -> Result<()> {
-    let arch = mvm_core::arch::GuestArch::host();
-    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .ok_or_else(|| anyhow::anyhow!("cannot locate workspace root for guest-agent build"))?;
-    let bins = mvm_build::guest_agent_build::resolve_or_build_guest_binaries(
-        cache_root,
-        env!("CARGO_PKG_VERSION"),
-        arch,
-        workspace_root,
-    )
-    .context("obtain guest agent binaries for OCI run")?;
-    mvm_build::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins)
-        .context("inject mvm runtime into OCI rootfs")?;
-
-    // Measure AFTER injection so the ext4 sizing covers the baked
-    // agent/netinit (~1.6 MiB).
-    let tree_size = unpacked_tree_size(unpacked_root)
-        .with_context(|| format!("measure unpacked root {}", unpacked_root.display()))?;
-    materialize_run_rootfs(&MaterializeExt4Input::new(
-        unpacked_root.to_path_buf(),
-        rootfs_abs.to_path_buf(),
-        tree_size,
-    ))
-    .context("materialize OCI rootfs.ext4")?;
-
-    // The sidecar lives next to rootfs.ext4 so the backend's
-    // admit_overlay_aware gate reads it at start.
-    let rootfs_dir = rootfs_abs.parent().ok_or_else(|| {
-        anyhow::anyhow!("rootfs path has no parent dir: {}", rootfs_abs.display())
-    })?;
-    mvm_build::builder_vm::GuestSidecar::for_oci_run(image_label)
-        .write_to_dir(rootfs_dir)
-        .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
-    Ok(())
+    mvm_build::run_image::inject_and_materialize(cache_root, unpacked_root, rootfs_abs, image_label)
 }
 
 /// Ingest a local OCI image-layout archive (`oci-archive:<path>`) into a
@@ -758,7 +702,7 @@ fn ingest_rootfs_dir(
 
     let key = canonical_key_for_path(rootfs_dir)
         .with_context(|| format!("canonicalize rootfs dir {}", rootfs_dir.display()))?;
-    let tree_size = unpacked_tree_size(rootfs_dir)
+    let tree_size = mvm_build::run_image::unpacked_tree_size(rootfs_dir)
         .with_context(|| format!("measure rootfs dir {}", rootfs_dir.display()))?;
     let rootfs_rel = format!("rootfs/{key}/rootfs.ext4");
     let rootfs_abs = cache_root.join(&rootfs_rel);
@@ -1361,23 +1305,6 @@ fn sha256_hex(digest: &str) -> Result<String> {
         bail!("malformed sha256 digest: {digest:?}");
     }
     Ok(hex.to_string())
-}
-
-fn unpacked_tree_size(root: &Path) -> Result<u64> {
-    let mut total = 0u64;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("stat unpacked path {}", path.display()))?;
-        if metadata.is_dir() {
-            for entry in fs::read_dir(&path).with_context(|| format!("read {}", path.display()))? {
-                stack.push(entry?.path());
-            }
-        } else if metadata.is_file() {
-            total = total.saturating_add(metadata.len());
-        }
-    }
-    Ok(total)
 }
 
 fn upsert_image(index: &mut OciCacheIndex, image: CachedOciImage) {

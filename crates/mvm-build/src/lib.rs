@@ -56,6 +56,9 @@ pub mod rootfs;
 /// Self-hosting builder-rootfs bootstrap: inject freshly built mvm host binaries
 /// into a rootfs via an initramfs patcher on the in-house VMM (no legacy builder).
 pub mod rootfs_inject;
+/// Shared run-path rootfs orchestration (inject runtime + materialize ext4),
+/// used by the CLI's `run --image` and the `mvm-client` local backend.
+pub mod run_image;
 pub mod stage0;
 pub mod template_reuse;
 /// Type-safe interface to the `mvm-vz-supervisor` binary —
