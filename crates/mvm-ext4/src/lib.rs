@@ -24,10 +24,11 @@
 //! group's 128 MiB (at 4 KiB blocks): the layout is uniform per group (a
 //! superblock + group-descriptor-table backup, then bitmaps and the inode
 //! table, then data), and file data is allocated as extents across each group's
-//! data region. A single file that would fragment into more than the four
-//! inline extents an inode holds is rejected (an extent-tree interior node is a
-//! future addition); the common rootfs — many modest files — needs one or a few
-//! extents each.
+//! data region. A file that fragments past the four extents an inode holds
+//! inline grows a **depth-1 extent tree** (up to four inline index entries, each
+//! pointing to a leaf block of up to 340 extents), so single files up to
+//! ~170 GiB are fine; the common rootfs — many modest files — still needs one or
+//! a few inline extents each.
 //!
 //! Correctness is validated by reading the output back through an independent
 //! ext4 reader (`am-fs-ext4`, a dev-only test oracle) and, in CI, by mounting
@@ -54,8 +55,16 @@ const MIN_INODES_PER_GROUP: u32 = 16;
 // Sanity ceiling on group count: 4096 groups × 128 MiB ≈ 512 GiB, far past any
 // rootfs. Hitting it means a pathologically large input, not a real image.
 const MAX_GROUPS: u32 = 4096;
-// An inode holds four extent entries inline (no extent-tree interior node yet).
+// An inode's 60-byte i_block holds an extent header (12 B) + four 12-byte
+// entries — either data extents (a leaf inode) or index entries (a depth-1
+// tree root).
 const MAX_INLINE_EXTENTS: usize = 4;
+// A 4 KiB leaf block holds a header (12 B) + `(4096 - 12) / 12` = 340 extents.
+const LEAF_MAX_EXTENTS: usize = (BLOCK_SIZE as usize - 12) / 12;
+// Depth-1 ceiling: four inline index entries, each pointing to one leaf of up
+// to LEAF_MAX_EXTENTS extents. Beyond this a depth-2 tree would be needed — a
+// >170 GiB single file, far past any rootfs, so it stays an error.
+const MAX_TREE_EXTENTS: usize = MAX_INLINE_EXTENTS * LEAF_MAX_EXTENTS;
 
 // File-type byte in a directory entry (ext4 filetype feature).
 const FT_FILE: u8 = 1;
@@ -73,8 +82,8 @@ const S_IFLNK: u16 = 0o120000;
 pub enum Ext4Error {
     /// The image would need more block groups than the sanity ceiling allows.
     TooLarge { blocks: u64 },
-    /// A single file fragments into more extents than fit inline in an inode
-    /// (an extent-tree interior node is not yet implemented).
+    /// A single file needs more extents than a depth-1 tree can address
+    /// (> MAX_TREE_EXTENTS ≈ a 170 GiB file); a depth-2 tree is not implemented.
     FileTooFragmented { ino: u32, extents: usize },
     /// A node's parent directory was not present in the input.
     MissingParent(String),
@@ -101,8 +110,8 @@ impl std::fmt::Display for Ext4Error {
             }
             Ext4Error::FileTooFragmented { ino, extents } => write!(
                 f,
-                "inode {ino} needs {extents} extents; only {MAX_INLINE_EXTENTS} fit inline \
-                 (extent-tree interior nodes are not yet supported)"
+                "inode {ino} needs {extents} extents, past the depth-1 tree limit of \
+                 {MAX_TREE_EXTENTS} (a depth-2 extent tree is not implemented)"
             ),
             Ext4Error::MissingParent(p) => {
                 write!(f, "node {p} has no parent directory in the input")
@@ -194,6 +203,10 @@ struct Planned {
     // Physical extents backing this inode's data; empty for fast symlinks and
     // the (never-materialized) empty root. Directories carry exactly one.
     extents: Vec<Extent>,
+    // Physical block numbers of the depth-1 extent-tree leaves, in logical
+    // order. Empty when `extents` fits inline (≤ MAX_INLINE_EXTENTS); otherwise
+    // one per LEAF_MAX_EXTENTS-sized chunk of `extents`.
+    leaf_blocks: Vec<u32>,
     block_count: u32,
     size: u64,
     // File contents / symlink target for the emit pass.
@@ -382,6 +395,7 @@ pub fn build_image(nodes: &[Node]) -> Result<Vec<u8>, Ext4Error> {
         mode: S_IFDIR | 0o755,
         parent: ROOT_INO,
         extents: Vec::new(),
+        leaf_blocks: Vec::new(),
         block_count: 0,
         size: 0,
         data: Vec::new(),
@@ -421,6 +435,7 @@ pub fn build_image(nodes: &[Node]) -> Result<Vec<u8>, Ext4Error> {
             mode,
             parent: parent_ino,
             extents: Vec::new(),
+            leaf_blocks: Vec::new(),
             block_count: 0,
             size,
             data,
@@ -496,22 +511,50 @@ pub fn build_image(nodes: &[Node]) -> Result<Vec<u8>, Ext4Error> {
         data_blocks_total += nblocks as u64;
     }
 
-    // 6. Resolve geometry (possibly many groups) from the inode + data counts.
-    let layout = Layout::plan(inode_high, data_blocks_total)?;
+    // 6. Resolve geometry. A file whose data fragments past the four inline
+    //    extents needs depth-1 extent-tree leaf blocks, which occupy
+    //    data-region blocks of their own and so feed back into the sizing.
+    //    Iterate to a fixpoint: leaves are tiny (one per 340 extents), so this
+    //    converges in one or two passes.
+    let mut meta_blocks: u64 = 0;
+    let layout = loop {
+        let layout = Layout::plan(inode_high, data_blocks_total + meta_blocks)?;
+        let mut alloc = RegionAllocator::new(&layout);
+        let mut needed = 0u64;
+        for p in &planned {
+            if p.block_count > 0 {
+                needed += leaves_for(alloc.take(p.block_count).len()) as u64;
+            }
+        }
+        if needed == meta_blocks {
+            break layout;
+        }
+        meta_blocks = needed;
+    };
 
-    // 7. Allocate data blocks from the per-group regions, in inode order, as
-    //    extents. Reject a file that fragments past the inline-extent limit.
+    // 7. Allocate for real from one shared cursor: every inode's data extents
+    //    first (inode order), then the extent-tree leaf blocks for the files
+    //    that need them. Leaves land right after the data — exactly the
+    //    `data_blocks_total + meta_blocks` the layout was sized for.
     let mut alloc = RegionAllocator::new(&layout);
     for p in planned.iter_mut() {
         if p.block_count > 0 {
-            let extents = alloc.take(p.block_count);
-            if extents.len() > MAX_INLINE_EXTENTS {
-                return Err(Ext4Error::FileTooFragmented {
-                    ino: p.ino,
-                    extents: extents.len(),
-                });
-            }
-            p.extents = extents;
+            p.extents = alloc.take(p.block_count);
+        }
+    }
+    for p in planned.iter_mut() {
+        if p.extents.len() <= MAX_INLINE_EXTENTS {
+            continue;
+        }
+        if p.extents.len() > MAX_TREE_EXTENTS {
+            // Would need a depth-2 tree (>170 GiB single file) — not supported.
+            return Err(Ext4Error::FileTooFragmented {
+                ino: p.ino,
+                extents: p.extents.len(),
+            });
+        }
+        for _ in 0..leaves_for(p.extents.len()) {
+            p.leaf_blocks.push(alloc.take(1)[0].phys);
         }
     }
 
@@ -547,6 +590,17 @@ fn ceil_div_u32(a: u32, b: u32) -> u32 {
 
 fn round_up_8(x: u32) -> u32 {
     (x + 7) & !7
+}
+
+/// Extent-tree leaf blocks needed to hold `num_extents`: zero when they fit
+/// inline in the inode (≤ MAX_INLINE_EXTENTS), else one leaf per
+/// LEAF_MAX_EXTENTS-sized chunk (a depth-1 tree).
+fn leaves_for(num_extents: usize) -> usize {
+    if num_extents <= MAX_INLINE_EXTENTS {
+        0
+    } else {
+        num_extents.div_ceil(LEAF_MAX_EXTENTS)
+    }
 }
 
 fn dir_bytes(children: &[(String, u32, u8)]) -> usize {
@@ -670,7 +724,8 @@ fn write_inode(img: &mut Image, layout: &Layout, p: &Planned) {
     img.put_u32(off + 0x04, (p.size & 0xFFFF_FFFF) as u32); // size_lo
     // atime/ctime/mtime/dtime = 0 (determinism).
     img.put_u16(off + 0x1A, p.links);
-    let sectors = p.block_count * (BLOCK_SIZE / 512);
+    // i_blocks counts data blocks + extent-tree leaf blocks (both occupy disk).
+    let sectors = (p.block_count + p.leaf_blocks.len() as u32) * (BLOCK_SIZE / 512);
     img.put_u32(off + 0x1C, sectors); // i_blocks_lo
     img.put_u16(off + 0x80, 32); // i_extra_isize
 
@@ -681,20 +736,73 @@ fn write_inode(img: &mut Image, layout: &Layout, p: &Planned) {
         return;
     }
 
-    // Extents: header + up to four inline entries (the planner rejects more).
     img.put_u32(off + 0x20, EXTENTS_FL);
     let eh = off + 0x28;
-    img.put_u16(eh, EXTENT_MAGIC);
-    img.put_u16(eh + 0x02, p.extents.len() as u16); // eh_entries
-    img.put_u16(eh + 0x04, MAX_INLINE_EXTENTS as u16); // eh_max
-    img.put_u16(eh + 0x06, 0); // eh_depth (leaf)
-    img.put_u32(eh + 0x08, 0); // eh_generation
-    for (i, ext) in p.extents.iter().enumerate() {
-        let ee = eh + 12 + i * 12;
-        img.put_u32(ee, ext.logical); // ee_block
-        img.put_u16(ee + 0x04, ext.len as u16); // ee_len
-        img.put_u16(ee + 0x06, 0); // ee_start_hi
-        img.put_u32(ee + 0x08, ext.phys); // ee_start_lo
+    if p.leaf_blocks.is_empty() {
+        // Leaf inode: header (depth 0) + up to four inline data extents.
+        write_extent_header(
+            img,
+            eh,
+            p.extents.len() as u16,
+            MAX_INLINE_EXTENTS as u16,
+            0,
+        );
+        for (i, ext) in p.extents.iter().enumerate() {
+            write_extent(img, eh + 12 + i * 12, ext);
+        }
+    } else {
+        // Depth-1 root: header (depth 1) + up to four inline index entries; the
+        // data extents live in the leaf blocks.
+        write_extent_header(
+            img,
+            eh,
+            p.leaf_blocks.len() as u16,
+            MAX_INLINE_EXTENTS as u16,
+            1,
+        );
+        write_extent_leaves(img, eh, p);
+    }
+}
+
+/// Write an `ext4_extent_header` (12 bytes) at `off`.
+fn write_extent_header(img: &mut Image, off: usize, entries: u16, max: u16, depth: u16) {
+    img.put_u16(off, EXTENT_MAGIC); // eh_magic
+    img.put_u16(off + 0x02, entries); // eh_entries
+    img.put_u16(off + 0x04, max); // eh_max
+    img.put_u16(off + 0x06, depth); // eh_depth
+    img.put_u32(off + 0x08, 0); // eh_generation
+}
+
+/// Write an `ext4_extent` (12 bytes) at `off`.
+fn write_extent(img: &mut Image, off: usize, ext: &Extent) {
+    img.put_u32(off, ext.logical); // ee_block
+    img.put_u16(off + 0x04, ext.len as u16); // ee_len (<= 32768, always initialized)
+    img.put_u16(off + 0x06, 0); // ee_start_hi
+    img.put_u32(off + 0x08, ext.phys); // ee_start_lo
+}
+
+/// Fill a depth-1 tree: one `ext4_extent_idx` in the inode per leaf, and each
+/// leaf block's own header + its slice of `p.extents`.
+fn write_extent_leaves(img: &mut Image, inode_header: usize, p: &Planned) {
+    for (li, &leaf_phys) in p.leaf_blocks.iter().enumerate() {
+        let start = li * LEAF_MAX_EXTENTS;
+        let end = ((li + 1) * LEAF_MAX_EXTENTS).min(p.extents.len());
+        let chunk = &p.extents[start..end];
+
+        // Index entry inline in the inode: the leaf's first logical block +
+        // its physical block number.
+        let idx = inode_header + 12 + li * 12;
+        img.put_u32(idx, chunk[0].logical); // ei_block
+        img.put_u32(idx + 0x04, leaf_phys); // ei_leaf_lo
+        img.put_u16(idx + 0x08, 0); // ei_leaf_hi
+        img.put_u16(idx + 0x0A, 0); // ei_unused
+
+        // The leaf block: its own header (depth 0) + the chunk's extents.
+        let lo = img.block_off(leaf_phys);
+        write_extent_header(img, lo, chunk.len() as u16, LEAF_MAX_EXTENTS as u16, 0);
+        for (i, ext) in chunk.iter().enumerate() {
+            write_extent(img, lo + 12 + i * 12, ext);
+        }
     }
 }
 
