@@ -590,6 +590,12 @@ fn run_inner(
     let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
     let t_drives_ready = timing.then(std::time::Instant::now);
 
+    // Interactive `-it` transient run: pre-open the console data-port sockets so
+    // the backend's PTY console attach can reach the agent-allocated channel.
+    // Gated on `pty` and an unsealed image — a verity sidecar means a sealed
+    // production rootfs, which never serves an interactive console.
+    let dev_console = req.pty && verity_path.is_none();
+
     // Template-restore VMs run without plan admission. Leave tenant_id /
     // plan_json / bundle_json at their None defaults (via
     // `..Default::default()`) so the libkrun/Vz backends take the legacy
@@ -626,6 +632,7 @@ fn run_inner(
         runner_dir: None,
         network_policy: req.network_policy.clone(),
         warm_pool_size: req.warm_pool_size,
+        dev_console,
         ..Default::default()
     };
 
