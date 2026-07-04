@@ -147,14 +147,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     );
     for vm in &all_vms {
         // Prefer the VM's actual owning backend (resolved from its
-        // state-dir pid marker — qemu/libkrun/firecracker); fall back to a
-        // platform guess for the marker-less vz supervisor so the column
-        // is accurate for pid-file VMMs.
+        // state-dir pid marker — qemu/libkrun/firecracker/hvf); fall back to a
+        // platform guess for a marker-less VM so the column is accurate. The
+        // macOS-26 default is the in-house VMM (`hvf`), consistent with the
+        // run-path resolver.
         let backend_name: String = AnyBackend::for_started_vm(&vm.name)
             .map(|b| b.name().to_string())
             .unwrap_or_else(|| {
                 if mvm_core::platform::current().is_vz_default_tier() {
-                    "vz".to_string()
+                    "hvf".to_string()
                 } else {
                     "firecracker".to_string()
                 }

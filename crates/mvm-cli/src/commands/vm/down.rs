@@ -18,11 +18,13 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    // Platform default for VMs with no pid-file marker (the vz supervisor
-    // tracks state out-of-band, so `for_started_vm` returns None).
+    // Platform default for VMs with no pid-file marker. In-house/HVF and the
+    // pid-file backends drop a marker `for_started_vm` finds, so this fallback
+    // only fires for a markerless VM on the macOS tier — resolve it to the
+    // in-house VMM (the macOS-26 default), consistent with `auto_select`.
     let platform_default = || {
         if mvm_core::platform::current().is_vz_default_tier() {
-            AnyBackend::from_hypervisor("vz")
+            AnyBackend::from_hypervisor("hvf")
         } else {
             AnyBackend::default_backend()
         }

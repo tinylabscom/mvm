@@ -75,13 +75,16 @@ impl Platform {
         matches!(self, Platform::LinuxNative)
     }
 
-    /// Whether this host is the macOS tier where Vz is the auto-detect
-    /// default backend (macOS 26+ — the Apple Silicon arch half is
-    /// asserted by callers via `cfg!(target_arch = "aarch64")`).
+    /// Whether this host is the macOS 26+ tier that gets an Apple-hypervisor
+    /// microVM backend by default (the Apple Silicon arch half is asserted by
+    /// callers via `cfg!(target_arch = "aarch64")`).
     ///
+    /// Name kept for stability across the many call sites (residency, dev-VM,
+    /// builder selection), but as of the macOS-26 workload flip the default
+    /// backend this tier selects is the **in-house HVF VMM**, not Vz;
+    /// `--hypervisor vz` is the explicit opt-in to Virtualization.framework.
     /// Distinct from [`Self::has_vz`], which reports mere Vz *availability*
-    /// from macOS 13 up. Vz is opt-in on macOS 13-25 and only the
-    /// default from 26 on, so the selection paths gate on this.
+    /// from macOS 13 up.
     pub fn is_vz_default_tier(self) -> bool {
         if !matches!(self, Platform::MacOS) {
             return false;

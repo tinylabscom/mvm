@@ -488,16 +488,16 @@ pub enum AnyBackend {
     Mock(MockBackend),
     /// Raw HVF — Hypervisor.framework on macOS / Apple silicon,
     /// driven by the unified `vmm::run` loop via the detached
-    /// `mvm-hvf-supervisor`. Opt-in via `--hypervisor hvf` / `MVM_BACKEND=hvf`;
-    /// `auto_select` doesn't pick it yet (Vz remains the macOS-26 default until
-    /// HVF reaches workload parity). The destination macOS backend.
+    /// `mvm-hvf-supervisor`. The inline `start()` form of the in-house VMM and
+    /// the **macOS 26+ auto-select default** (reached by `auto_select` and by
+    /// `--hypervisor hvf` / `MVM_HYPERVISOR=hvf`). The destination macOS backend.
     Hvf(HvfBackend),
     /// The in-house VMM driven through the unified `WorkloadRunner` over the
     /// driver seam — the role-runner that will replace the per-backend
     /// Hvf/Libkrun/Vz/FC `start()` copies. Opt-in via `--hypervisor inhouse`;
-    /// the `hvf` selector still resolves to `HvfBackend` until the runner is the
-    /// proven default. Same in-house VMM, tier, and security profile as `Hvf` —
-    /// just reached via the runner role.
+    /// once `inhouse` is wired into every hypervisor-name classifier it becomes
+    /// the macOS-26 default in place of `Hvf`. Same in-house VMM, tier, and
+    /// security profile as `Hvf` — just reached via the runner role.
     InHouse(InHouseRunner),
 }
 
@@ -545,7 +545,7 @@ impl AnyBackend {
     ///
     /// Priority:
     /// 1. **Firecracker** (if native Linux `/dev/kvm` is available — production Tier 1)
-    /// 2. Vz — Apple Virtualization.framework (macOS 13+)
+    /// 2. In-house HVF VMM (macOS 26+ Apple Silicon)
     /// 3. raw libkrun
     ///
     /// If none of the above match, the function returns Firecracker as
@@ -553,22 +553,40 @@ impl AnyBackend {
     /// "Firecracker not available" error pointed at the production path,
     /// which is a clearer failure mode than picking a backend the
     /// caller didn't ask for.
+    ///
+    /// macOS 26+ defaults to the in-house HVF VMM (the destination macOS backend —
+    /// no Homebrew deps, vsock-only egress). `--hypervisor vz` / `MVM_HYPERVISOR=vz`
+    /// remains the explicit escape hatch to Apple Virtualization.framework.
     pub fn auto_select() -> Self {
         let plat = mvm_core::platform::current();
+        Self::auto_select_from(
+            plat.supports_native_runner(),
+            plat.is_vz_default_tier(),
+            plat.has_libkrun(),
+        )
+    }
 
+    /// The platform-default selection ladder as a pure function of the three
+    /// host facts it depends on, so every branch — including the macOS-26 flip —
+    /// is unit-testable without a real platform. See [`Self::auto_select`].
+    fn auto_select_from(native_runner: bool, macos_vmm_tier: bool, has_libkrun: bool) -> Self {
         // 1. Native Linux KVM → Firecracker directly (fastest — dev & production).
         //    WSL2 nested KVM is future/experimental and is not auto-selected today.
-        if plat.supports_native_runner() {
+        if native_runner {
             return Self::Firecracker(FirecrackerBackend);
         }
 
-        // 2. macOS 26+ → Apple Virtualization.framework via the vz supervisor.
-        if plat.is_vz_default_tier() {
-            return Self::Vz(VzBackend);
+        // 2. macOS 26+ Apple Silicon → the in-house HVF VMM (was Vz). Uses the
+        //    `Hvf` variant (the classifier-complete in-house surface — `hvf` is
+        //    wired into every hypervisor-name string match, e.g. plan-persist for
+        //    the claim-10 endpoint); the `InHouse` runner migration is a separate
+        //    slice. `--hypervisor vz` opts back into Virtualization.framework.
+        if macos_vmm_tier {
+            return Self::Hvf(HvfBackend);
         }
 
         // 3. libkrun installed → use the raw libkrun shim.
-        if plat.has_libkrun() {
+        if has_libkrun {
             return Self::Libkrun(LibkrunBackend);
         }
 
@@ -1165,8 +1183,46 @@ mod tests {
         let name = backend.name();
         assert!(
             // The full set of legitimate auto_select returns is:
-            matches!(name, "firecracker" | "vz" | "libkrun"),
+            // firecracker (Linux/KVM + final fallback), hvf (macOS-26 in-house
+            // VMM via the runner), libkrun (macOS 13-25 / KVM opt-in).
+            matches!(name, "firecracker" | "hvf" | "libkrun"),
             "auto_select returned unexpected backend: {name}"
+        );
+    }
+
+    /// The platform-default ladder, branch by branch. Nails the macOS-26 flip:
+    /// that tier now defaults to the in-house HVF VMM (via the runner), not Vz.
+    #[test]
+    fn auto_select_from_ladder_including_macos_26_inhouse_flip() {
+        // Native Linux KVM → Firecracker, regardless of the other facts.
+        assert_eq!(
+            AnyBackend::auto_select_from(true, false, false).kind(),
+            catalog::BackendKind::Firecracker
+        );
+        assert_eq!(
+            AnyBackend::auto_select_from(true, true, true).kind(),
+            catalog::BackendKind::Firecracker
+        );
+
+        // macOS 26+ tier → the in-house HVF VMM (the flip: was Vz).
+        let macos = AnyBackend::auto_select_from(false, true, false);
+        assert!(
+            matches!(macos, AnyBackend::Hvf(_)),
+            "macOS-26 must auto-select the in-house HVF VMM, not Vz"
+        );
+        assert_eq!(macos.kind(), catalog::BackendKind::Hvf);
+        assert_ne!(macos.kind(), catalog::BackendKind::Vz);
+
+        // macOS 13-25 / KVM opt-in with libkrun present → libkrun.
+        assert_eq!(
+            AnyBackend::auto_select_from(false, false, true).kind(),
+            catalog::BackendKind::Libkrun
+        );
+
+        // Nothing available → Firecracker default (start() surfaces a clear error).
+        assert_eq!(
+            AnyBackend::auto_select_from(false, false, false).kind(),
+            catalog::BackendKind::Firecracker
         );
     }
 

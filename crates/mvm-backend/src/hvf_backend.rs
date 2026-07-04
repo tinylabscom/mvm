@@ -23,7 +23,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use mvm_build::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::{mvm_data_dir, vm_state_dir};
 use mvm_core::vm_backend::{
-    VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendSecurityProfile, ClaimStatus, LayerCoverage, VmBackend, VmCapabilities, VmExitStatus,
+    VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
 use crate::base::ui;
@@ -168,6 +169,33 @@ impl VmBackend for HvfBackend {
             host_vsock_proxy: true,
             // pause/snapshot/cow/remap land as they are wired onto the primitive.
             ..Default::default()
+        }
+    }
+
+    fn security_profile(&self) -> BackendSecurityProfile {
+        // The in-house HVF VMM — the macOS-26 default workload backend. Same
+        // Hypervisor.framework primitive and guest-side posture as Vz (Tier 2),
+        // reached through mvm's own supervisor + unified run loop rather than
+        // Apple's Virtualization.framework. The table covers claims 1–7 (8/9 and
+        // the claim-10 egress gate live outside `BackendSecurityProfile`).
+        BackendSecurityProfile {
+            claims: [
+                ClaimStatus::Holds, // 1 — host-fs isolation: ro rootfs attach + host-side admission gate
+                ClaimStatus::Holds, // 2 — uid-0 protections are guest-side (same as FC/Vz)
+                ClaimStatus::DoesNotHold, // 3 — dm-verity verified-boot pipeline targets Firecracker today
+                ClaimStatus::Holds,       // 4 — guest agent has no do_exec in prod
+                ClaimStatus::Holds, // 5 — vsock framing fuzzed (GuestRequest/AuthenticatedFrame)
+                ClaimStatus::Holds, // 6 — dev image hash verified
+                ClaimStatus::Holds, // 7 — cargo deps audited
+            ],
+            layer_coverage: LayerCoverage::all_layers(),
+            tier: "Tier 2",
+            notes: &[
+                "In-house HVF VMM (Hypervisor.framework) — the macOS-26 default; no Homebrew deps.",
+                "vsock-only egress: no guest NIC, all traffic brokered over the host vsock gating endpoint (claim 10).",
+                "Claim 3 (verified boot) partial — dm-verity pipeline targets Firecracker today.",
+                "`--hypervisor vz` opts back into Apple Virtualization.framework.",
+            ],
         }
     }
 
@@ -454,6 +482,29 @@ mod tests {
         assert!(!c.pause_resume);
         assert!(!c.snapshots);
         assert!(!c.tap_networking);
+    }
+
+    /// As the macOS-26 default, the in-house HVF VMM must declare a real tier
+    /// (doctor's security posture reports it) — Tier 2, matching its Vz sibling,
+    /// with claim 3 (verified boot) partial.
+    #[test]
+    fn hvf_security_profile_is_tier_2_with_claim_3_partial() {
+        let profile = HvfBackend.security_profile();
+        assert_eq!(profile.tier, "Tier 2");
+        assert_eq!(
+            profile.claims[2],
+            ClaimStatus::DoesNotHold,
+            "claim 3 partial"
+        );
+        assert!(
+            profile
+                .claims
+                .iter()
+                .filter(|c| **c == ClaimStatus::Holds)
+                .count()
+                >= 6,
+            "claims 1,2,4,5,6,7 hold"
+        );
     }
 
     #[test]

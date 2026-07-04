@@ -238,12 +238,12 @@ fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
 
 /// Resolve the requested hypervisor to the effective one for this host. `firecracker`
 /// (the default `--hypervisor`) auto-detects: KVM → firecracker, macOS 26+ Apple Silicon
-/// → vz, macOS 13-25 + libkrun → libkrun, else firecracker (surfaces a clear
-/// "not available" error). Any explicit value is returned as-is. The `MVM_HYPERVISOR`
-/// env var (alias `MVM_BACKEND`) overrides auto-detect — the workload-VMM override
-/// mirroring `MVM_BUILDER_BACKEND` for the builder, so a Linux/KVM host can opt into
-/// `libkrun` instead of the Firecracker default. Single source of truth, shared by
-/// the run/pool paths so they agree on the backend.
+/// → hvf (the in-house VMM), macOS 13-25 + libkrun → libkrun, else firecracker (surfaces
+/// a clear "not available" error). Any explicit value is returned as-is. The
+/// `MVM_HYPERVISOR` env var (alias `MVM_BACKEND`) overrides auto-detect — the workload-VMM
+/// override mirroring `MVM_BUILDER_BACKEND` for the builder, so a macOS host can opt into
+/// `vz` instead of the in-house default. Single source of truth, shared by the run/pool
+/// paths so they agree on the backend.
 pub fn resolve_effective_hypervisor(requested: &str) -> String {
     if requested != "firecracker" {
         return requested.to_string();
@@ -260,22 +260,59 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
         }
     }
     let plat = mvm_core::platform::current();
-    if plat.has_kvm() {
+    platform_default_hypervisor(
+        plat.has_kvm(),
+        plat.is_vz_default_tier(),
+        plat.has_libkrun(),
+    )
+    .to_string()
+}
+
+/// The platform-default hypervisor as a pure function of the three host facts it
+/// depends on, so the macOS-26 flip is unit-testable without a real platform.
+/// macOS 26+ defaults to the in-house VMM via the `hvf` selector (`vz` is the
+/// explicit opt-in). Kept in lockstep with [`AnyBackend::auto_select`].
+fn platform_default_hypervisor(
+    has_kvm: bool,
+    macos_vmm_tier: bool,
+    has_libkrun: bool,
+) -> &'static str {
+    if has_kvm {
         "firecracker"
-    } else if plat.is_vz_default_tier() {
-        "vz"
-    } else if plat.has_libkrun() {
+    } else if macos_vmm_tier {
+        "hvf"
+    } else if has_libkrun {
         "libkrun"
     } else {
         "firecracker"
     }
-    .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
+
+    /// The platform-default ladder, branch by branch — pins the macOS-26 flip:
+    /// that tier now defaults to the in-house VMM (`hvf`), not `vz`.
+    #[test]
+    fn platform_default_hypervisor_macos_26_is_hvf() {
+        // Linux + KVM → firecracker.
+        assert_eq!(
+            platform_default_hypervisor(true, false, false),
+            "firecracker"
+        );
+        assert_eq!(platform_default_hypervisor(true, true, true), "firecracker");
+        // macOS 26+ tier → the in-house VMM (was "vz").
+        assert_eq!(platform_default_hypervisor(false, true, false), "hvf");
+        // macOS 13-25 / KVM opt-in with libkrun → libkrun.
+        assert_eq!(platform_default_hypervisor(false, false, true), "libkrun");
+        // Nothing → firecracker (start() surfaces a clear "not available").
+        assert_eq!(
+            platform_default_hypervisor(false, false, false),
+            "firecracker"
+        );
+    }
 
     #[test]
     fn run_net_default_is_deny_all() {
