@@ -2707,6 +2707,7 @@ name = "mvm-ext4"
 version = "0.16.1"
 dependencies = [
  "am-fs-ext4",
+ "sha2",
  "tempfile",
 ]
 
