@@ -37,4 +37,5 @@ pub mod keyholder;
 /// spawn-side `PR_SET_PDEATHSIG` attach leaves open.
 pub mod parent_death;
 pub mod plan_admission;
+pub mod run;
 pub mod supervisor;
