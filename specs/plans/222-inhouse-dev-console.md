@@ -1,4 +1,4 @@
-# Plan 221 — dev-only interactive `-it` console on the in-house VMM
+# Plan 222 — dev-only interactive `-it` console on the in-house VMM
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development. Steps use `- [ ]`.
 
@@ -60,5 +60,5 @@ Confirm `machine run -it --hypervisor inhouse` resolves `dev_console=true` and t
 
 ---
 
-## After Plan 221 → Plan 222 (flip + delete)
+## After Plan 222 → Plan 223 (flip + delete)
 Once `-it` in-house is live-proven, flip `auto_select` (`backend.rs:566`) + builder `auto_detect_default_for` (`builder_backend_select.rs:91`) to in-house, collapse `hvf`→runner, then delete Vz (`vz.rs`, `vz_control.rs`, `mvm-vz-supervisor`, `is_vz_default_tier`, `vz_builder.rs`, Vz cases) — coordinating the `mvmctl::runtime::*` deletion with mvmd's build.
