@@ -8,7 +8,9 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 use flate2::read::GzDecoder;
-use mvm_build::rootfs::{MaterializeExt4Input, MaterializeExt4Options, materialize_ext4};
+use mvm_build::rootfs::MaterializeExt4Input;
+#[cfg(feature = "builder-vm")]
+use mvm_build::rootfs::{MaterializeExt4Options, materialize_ext4};
 use mvm_oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
     OciManifestFetcher, RegistryAuthConfig, UnpackOptions, read_oci_archive, unpack_layer,
@@ -526,6 +528,38 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
 /// injected `/init` + baked agent + `/mvm/runtime` mount point make the
 /// rootfs genuinely overlay-aware, so the `for_oci_run` sidecar admits
 /// honestly through `admit_overlay_aware` without weakening the gate.
+/// Materialize the run-path rootfs image from an unpacked tree.
+///
+/// Default: the pure in-process `mvm-ext4` writer — no builder VM, no `mkfs`,
+/// no subprocess. `MVM_MATERIALIZE_BUILDER_VM` (any value) routes back through
+/// the builder-VM `mkfs` path for parity / debugging. Verity is deliberately
+/// left off (no `rootfs.verity` / `rootfs.roothash` sidecars), so the run
+/// path's `verity_path`/`roothash = None` boot config is unchanged — this flips
+/// the materialization *mechanism*, not the boot semantics.
+fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()> {
+    #[cfg(feature = "pure-mkfs")]
+    if std::env::var_os("MVM_MATERIALIZE_BUILDER_VM").is_none() {
+        return mvm_build::rootfs::materialize_ext4_pure(input)
+            .map(|_| ())
+            .with_context(|| format!("materialize {} in-process", input.output.display()));
+    }
+    materialize_run_rootfs_builder_vm(input)
+}
+
+#[cfg(feature = "builder-vm")]
+fn materialize_run_rootfs_builder_vm(input: &MaterializeExt4Input) -> Result<()> {
+    materialize_ext4(input, &MaterializeExt4Options::default())
+        .map(|_| ())
+        .with_context(|| format!("materialize {} via builder VM", input.output.display()))
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn materialize_run_rootfs_builder_vm(_input: &MaterializeExt4Input) -> Result<()> {
+    anyhow::bail!(
+        "no rootfs materializer compiled in: enable the `pure-mkfs` or `builder-vm` feature"
+    )
+}
+
 fn inject_runtime_and_materialize(
     cache_root: &Path,
     unpacked_root: &Path,
@@ -551,14 +585,11 @@ fn inject_runtime_and_materialize(
     // agent/netinit (~1.6 MiB).
     let tree_size = unpacked_tree_size(unpacked_root)
         .with_context(|| format!("measure unpacked root {}", unpacked_root.display()))?;
-    materialize_ext4(
-        &MaterializeExt4Input::new(
-            unpacked_root.to_path_buf(),
-            rootfs_abs.to_path_buf(),
-            tree_size,
-        ),
-        &MaterializeExt4Options::default(),
-    )
+    materialize_run_rootfs(&MaterializeExt4Input::new(
+        unpacked_root.to_path_buf(),
+        rootfs_abs.to_path_buf(),
+        tree_size,
+    ))
     .context("materialize OCI rootfs.ext4")?;
 
     // The sidecar lives next to rootfs.ext4 so the backend's
@@ -731,10 +762,11 @@ fn ingest_rootfs_dir(
         .with_context(|| format!("measure rootfs dir {}", rootfs_dir.display()))?;
     let rootfs_rel = format!("rootfs/{key}/rootfs.ext4");
     let rootfs_abs = cache_root.join(&rootfs_rel);
-    materialize_ext4(
-        &MaterializeExt4Input::new(rootfs_dir.to_path_buf(), rootfs_abs.clone(), tree_size),
-        &MaterializeExt4Options::default(),
-    )
+    materialize_run_rootfs(&MaterializeExt4Input::new(
+        rootfs_dir.to_path_buf(),
+        rootfs_abs.clone(),
+        tree_size,
+    ))
     .context("materialize rootfs.ext4 from directory")?;
 
     let provenance = OciProvenance {
@@ -1586,6 +1618,40 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::cell::RefCell;
     use tar::{Builder, EntryType, Header};
+
+    // The default run-path materialize is the pure in-process writer, and it
+    // must NOT emit dm-verity sidecars — the run path boots these images with
+    // `verity_path`/`roothash = None`, so emitting `rootfs.verity` /
+    // `rootfs.roothash` (which the transient path's probe would pick up) would
+    // silently switch OCI runs to verified boot. This guards the mechanism swap.
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn materialize_run_rootfs_default_is_pure_and_verity_free() {
+        // The builder-VM escape hatch must be unset for the default (pure) path.
+        assert!(
+            std::env::var_os("MVM_MATERIALIZE_BUILDER_VM").is_none(),
+            "test env must not force the builder-VM materializer"
+        );
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir(src.path().join("etc")).unwrap();
+        std::fs::write(src.path().join("etc/hostname"), b"box\n").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let rootfs = out.path().join("rootfs.ext4");
+
+        materialize_run_rootfs(&MaterializeExt4Input::new(
+            src.path().to_path_buf(),
+            rootfs.clone(),
+            0,
+        ))
+        .expect("pure materialize");
+
+        // A real ext4 image was written in-process (superblock magic present)…
+        let img = std::fs::read(&rootfs).unwrap();
+        assert_eq!(&img[1024 + 0x38..1024 + 0x3A], &[0x53, 0xEF]);
+        // …and NO verity sidecars sit beside it (boot semantics unchanged).
+        assert!(!out.path().join("rootfs.verity").exists());
+        assert!(!out.path().join("rootfs.roothash").exists());
+    }
 
     struct MockCosignVerifier {
         results: RefCell<Vec<Result<(), CosignVerifyError>>>,

@@ -78,13 +78,19 @@ libc.workspace = true
 # builder VM with a persistent /nix store. Runtime gating via
 # `libkrun_sys::is_available()` still falls back cleanly when libkrun
 # isn't installed on the host.
-default = ["builder-vm"]
+default = ["builder-vm", "pure-mkfs"]
 contributor-bootstrap = [
     "mvm/contributor-bootstrap",
     "mvm-build/contributor-bootstrap",
     "mvm-backend/contributor-bootstrap",
 ]
 builder-vm = ["mvm-build/builder-vm"]
+# In-process, pure-Rust rootfs materialization (no builder VM / mkfs) for the
+# `run --image` path. Default: the run path builds the ext4 image with the
+# memory-safe `mvm-ext4` writer instead of shelling out to a builder VM. The
+# `builder-vm` feature stays default for `dev up`, and `MVM_MATERIALIZE_BUILDER_VM`
+# routes the run path back through the builder VM when set.
+pure-mkfs = ["mvm-build/pure-mkfs"]
 # Extract libkrunfw's bundled
 # TSI-patched kernel at runtime so Stage 0 boots a kernel where
 # libkrun's AF_INET-over-vsock (TSI) path actually works. The feature
