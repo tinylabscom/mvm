@@ -142,3 +142,60 @@ fn output_is_deterministic() {
     let two = build_image(&nodes).unwrap();
     assert_eq!(one, two, "same input must produce byte-identical images");
 }
+
+/// One group holds 128 MiB of blocks at 4 KiB. A file past that forces a second
+/// block group and a file that spans two groups' data regions as two extents —
+/// the multi-group path the single-group tests never exercise. The independent
+/// reader must still mount it and read every byte back.
+#[test]
+fn multi_group_image_round_trips_through_real_reader() {
+    const ONE_GROUP_BYTES: usize = 32768 * mvm_ext4::BLOCK_SIZE as usize; // 128 MiB
+
+    // 130 MiB deterministic payload → ~33 280 blocks > one group's data region.
+    let big: Vec<u8> = (0..130 * 1024 * 1024usize)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let small = b"i live in a multi-group image\n".to_vec();
+    let nodes = vec![
+        Node::Dir {
+            path: "/etc".into(),
+            mode: 0o755,
+        },
+        Node::File {
+            path: "/etc/marker".into(),
+            mode: 0o644,
+            data: small.clone(),
+        },
+        Node::File {
+            path: "/big".into(),
+            mode: 0o644,
+            data: big.clone(),
+        },
+    ];
+
+    let image = build_image(&nodes).unwrap();
+    assert!(
+        image.len() > ONE_GROUP_BYTES,
+        "image ({} bytes) should span more than one block group",
+        image.len()
+    );
+
+    let fs = mount(image);
+    let root = list_dir(&fs, 2);
+
+    // The small file (in group 0) reads back exactly.
+    let etc = find(&root, "etc").expect("etc").0;
+    let (marker_ino, marker_ft) = find(&list_dir(&fs, etc), "marker").expect("marker");
+    assert_eq!(marker_ft, DirEntryType::RegFile);
+    assert_eq!(read_file(&fs, marker_ino), small);
+
+    // The big file (spanning groups as multiple extents) reads back byte-exact.
+    let (big_ino, big_ft) = find(&root, "big").expect("big");
+    assert_eq!(big_ft, DirEntryType::RegFile);
+    let got = read_file(&fs, big_ino);
+    assert_eq!(got.len(), big.len(), "big file length round-trips");
+    assert_eq!(
+        got, big,
+        "big file bytes round-trip across the group boundary"
+    );
+}
