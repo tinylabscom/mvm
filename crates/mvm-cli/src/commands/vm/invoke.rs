@@ -191,8 +191,11 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
                             agent_verb_override: vec![],
                             // --keep-alive-dev marks the session for subsequent session exec /
                             // run-code (DevOnly verbs); those must not be blocked by an
-                            // attenuated ProdSafe grant.
-                            restrict_agent_verbs: !call.keep_alive_dev,
+                            // attenuated ProdSafe grant. Additionally, the default grant is
+                            // only minted for a sealed image (mvm-meta.json `sealed: true`);
+                            // unsealed dev-shell or OCI images are not restricted.
+                            restrict_agent_verbs: !call.keep_alive_dev
+                                && super::agent_verbs::image_is_sealed(rootfs),
                         })?;
                         let Some(c) = ctx else { return Ok(None) };
                         // Persist the bare admitted plan to the per-VM state dir

@@ -78,13 +78,17 @@ pub(crate) fn image_is_sealed(rootfs_path: &std::path::Path) -> bool {
 }
 ```
 
-### Change 3 — the two production call sites pass `image_sealed`
+### Change 3 — the three production grant-decision sites pass `image_sealed`
 
 - `crates/mvm-cli/src/commands/vm/up.rs` (persistent, ~:1190): the site already
   has `rootfs_path` in scope (used at ~:1198). Compute
   `image_is_sealed(&rootfs_path)` and pass it as the fourth arg.
 - `crates/mvm-cli/src/commands/vm/exec.rs` (transient, ~:379): `rootfs` is in
   scope (used at ~:359). Same.
+- `crates/mvm-cli/src/commands/vm/invoke.rs` (entrypoint invoke / `!keep_alive_dev`,
+  ~:195): `rootfs: &std::path::Path` (closure param declared ~:165). Combines
+  `!call.keep_alive_dev && image_is_sealed(rootfs)` — the dev-relay flag and the
+  sealed-image check are both required for the attenuated grant to apply.
 
 Test fixtures in `up.rs` `admit_plan_tests` (`restrict_agent_verbs: true`,
 ~:1716+) are unchanged — they set a scenario value deliberately.
