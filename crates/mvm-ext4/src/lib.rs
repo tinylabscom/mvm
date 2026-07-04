@@ -82,6 +82,12 @@ pub enum Ext4Error {
     BadPath(String),
     /// A directory's entries did not fit the single-block assumption.
     DirTooLarge(String),
+    /// A node's parent path resolves to a non-directory (e.g. a regular file
+    /// or symlink), so the node could never be reached on a mounted image.
+    NotADirectory(String),
+    /// Two nodes claim the same path (including a node re-claiming the implicit
+    /// root `/`), which would emit duplicate directory entries.
+    DuplicatePath(String),
 }
 
 impl std::fmt::Display for Ext4Error {
@@ -105,6 +111,10 @@ impl std::fmt::Display for Ext4Error {
             Ext4Error::DirTooLarge(p) => {
                 write!(f, "directory {p} has too many entries for one block")
             }
+            Ext4Error::NotADirectory(p) => {
+                write!(f, "parent of {p} is not a directory")
+            }
+            Ext4Error::DuplicatePath(p) => write!(f, "duplicate path {p}"),
         }
     }
 }
@@ -355,7 +365,11 @@ pub fn build_image(nodes: &[Node]) -> Result<Vec<u8>, Ext4Error> {
     let mut next = FIRST_INO;
     for n in &sorted {
         let p = normalize(n.path())?;
-        ino_of.insert(p, next);
+        // `ino_of` already holds "/" → ROOT_INO, so a node re-claiming root or
+        // any repeated path collides here and is refused before layout.
+        if ino_of.insert(p.clone(), next).is_some() {
+            return Err(Ext4Error::DuplicatePath(p));
+        }
         next += 1;
     }
     let inode_high = next;
@@ -430,6 +444,12 @@ pub fn build_image(nodes: &[Node]) -> Result<Vec<u8>, Ext4Error> {
         let p = normalize(n.path())?;
         let ino = ino_of[&p];
         let parent_ino = *ino_of.get(&parent_of(&p)).unwrap();
+        // The parent must be a directory. A file/symlink parent would leave this
+        // node orphaned (no dirent references it), so refuse rather than emit an
+        // unreachable inode. Root (ROOT_INO) is always a directory.
+        if planned[index[&parent_ino]].kind != Kind::Dir {
+            return Err(Ext4Error::NotADirectory(p.clone()));
+        }
         let name = leaf_name(&p);
         let ft = match n {
             Node::Dir { .. } => FT_DIR,
@@ -734,10 +754,17 @@ fn normalize(path: &str) -> Result<String, Ext4Error> {
     }
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
-        Ok("/".to_string())
-    } else {
-        Ok(trimmed.to_string())
+        return Ok("/".to_string());
     }
+    // Every component must be a valid directory-entry name: no empty segment
+    // (`//`), no `.`/`..` (would alias another path or escape), and no NUL
+    // (un-representable in an ext4 dirent). `trimmed[1..]` drops the leading '/'.
+    for seg in trimmed[1..].split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." || seg.contains('\0') {
+            return Err(Ext4Error::BadPath(path.to_string()));
+        }
+    }
+    Ok(trimmed.to_string())
 }
 
 fn parent_of(path: &str) -> String {
