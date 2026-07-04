@@ -96,6 +96,7 @@ pub enum RootfsError {
     #[error("builder VM ext4 materialization failed: {0}")]
     BuilderVm(#[from] crate::builder_vm::BuilderVmError),
 
+    #[cfg(feature = "pure-mkfs")]
     #[error("walking unpacked tree at {path}: {source}")]
     PureWalk {
         path: PathBuf,
@@ -103,9 +104,11 @@ pub enum RootfsError {
         source: std::io::Error,
     },
 
+    #[cfg(feature = "pure-mkfs")]
     #[error("building ext4 image in-process: {0}")]
     PureBuild(String),
 
+    #[cfg(feature = "pure-mkfs")]
     #[error("writing rootfs image {path}: {source}")]
     WriteOutput {
         path: PathBuf,
@@ -315,6 +318,7 @@ trap - EXIT
     )
 }
 
+#[cfg(feature = "pure-mkfs")]
 /// Materialize `input.unpacked_root` into `input.output` **in-process** — no
 /// builder VM, no `mkfs`, no subprocess. Walks the unpacked tree and builds a
 /// deterministic read-only ext4 image with the memory-safe `mvm-ext4` writer.
@@ -346,6 +350,7 @@ pub fn materialize_ext4_pure(
     })
 }
 
+#[cfg(feature = "pure-mkfs")]
 /// Walk `root` into a flat `Node` list (guest-absolute paths), symlink-aware
 /// (never follows). Directories and their descendants, regular files (contents
 /// read in), and symlinks are captured; other inode types (fifo/socket/device)
@@ -400,6 +405,7 @@ fn collect_nodes(root: &std::path::Path) -> Result<Vec<mvm_ext4::Node>, RootfsEr
     Ok(out)
 }
 
+#[cfg(feature = "pure-mkfs")]
 /// Guest-absolute path for `path` under `root` (e.g. `root/etc/hosts` → `/etc/hosts`).
 fn guest_path_of(root: &std::path::Path, path: &std::path::Path) -> String {
     match path.strip_prefix(root) {
@@ -408,6 +414,7 @@ fn guest_path_of(root: &std::path::Path, path: &std::path::Path) -> String {
     }
 }
 
+#[cfg(feature = "pure-mkfs")]
 /// Unix permission bits of `path` (not following symlinks), or `default` on a
 /// non-unix host.
 fn mode_of(path: &std::path::Path, default: u16) -> u16 {
@@ -440,6 +447,7 @@ mod tests {
     #[cfg(feature = "builder-vm")]
     use mvm_core::util::test_env::TestEnv;
 
+    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn pure_materialize_writes_a_valid_ext4_from_a_dir_tree() {
         let src = tempfile::tempdir().unwrap();
@@ -468,6 +476,7 @@ mod tests {
         assert_eq!(std::fs::read(&out2).unwrap(), img);
     }
 
+    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn pure_materialize_rejects_non_directory() {
         let f = tempfile::NamedTempFile::new().unwrap();

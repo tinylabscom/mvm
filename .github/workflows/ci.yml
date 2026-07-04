@@ -169,6 +169,11 @@ jobs:
           cargo test -p mvm-build --features builder-vm --lib \
             builder_backend_select::tests::auto_detect_default_for_everything_else_picks_libkrun
 
+      - name: In-process pure-mkfs materialize tests
+        # `pure-mkfs` is off by default (keeps mvm-ext4 out of the mvmctl default
+        # closure), so the default workspace run skips these. Cover them here.
+        run: cargo test -p mvm-build --features pure-mkfs --lib rootfs::tests::pure
+
   test:
     name: Test
     runs-on: ubuntu-latest
