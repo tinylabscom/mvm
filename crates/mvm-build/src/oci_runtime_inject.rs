@@ -116,6 +116,19 @@ if [ -n "$MVM_UVOLS" ]; then
   done
 fi
 
+# Verb grant (plan-bound agent verb capabilities). The host encoded
+# mvm.verb_grant=<hex(JSON envelope)> onto the kernel cmdline; decode it to
+# the tmpfs so the agent can pin + enforce it before serving RPC. Absent
+# token => no-op (byte-identical boot; the agent starts with no grant).
+# Mirrors the mkGuest init verb-grant stage in nix/lib/mk-guest.nix.
+MVM_VERB_GRANT_HEX=$(sed -n 's/.*\bmvm\.verb_grant=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null)
+if [ -n "$MVM_VERB_GRANT_HEX" ]; then
+  mkdir -p /run/mvm 2>/dev/null || true
+  printf '%b' "$(echo "$MVM_VERB_GRANT_HEX" | sed 's/../\\x&/g')" > /run/mvm/verb-grant.json
+  chmod 0644 /run/mvm/verb-grant.json 2>/dev/null || true
+  echo "mvm-oci-init: provisioned verb-grant"
+fi
+
 # Guest-side network defense — prefer the overlay-resident netinit.
 MVM_NETINIT=
 if [ -x /mvm/runtime/netinit ]; then
@@ -295,6 +308,30 @@ mod tests {
         assert!(
             uvols_at < agent_fork_at,
             "user volumes must mount before the agent fork"
+        );
+    }
+
+    #[test]
+    fn init_script_decodes_verb_grant_before_the_agent() {
+        let s = oci_init_script();
+        // Decodes the host-encoded cmdline token into the tmpfs the agent
+        // reads, so an OCI workload pins + enforces its verb grant (parity
+        // with the mkGuest init).
+        assert!(
+            s.contains("mvm.verb_grant="),
+            "init must parse the verb_grant cmdline token"
+        );
+        assert!(
+            s.contains("/run/mvm/verb-grant.json"),
+            "decoded grant is written where the agent loads it"
+        );
+        // Must be provisioned before the agent forks, or the agent boots
+        // with no grant pinned and enforcement is a no-op.
+        let grant_at = s.find("mvm.verb_grant=").expect("verb_grant parse");
+        let agent_fork_at = s.find("\"$MVM_AGENT\" &").expect("agent fork");
+        assert!(
+            grant_at < agent_fork_at,
+            "verb grant must be decoded before the agent fork"
         );
     }
 
