@@ -4159,3 +4159,12 @@ here so execution doesn't guess:
 > the feature-forwards and the lint's `INTERNAL` allowlist name specific
 > sub-crates, so any P3 crate merge/rename must update both in the same change
 > (mechanical). Net, it de-risks the simplification.
+
+### Plan 219 — Agent verb grant delivery — UNIT DELIVERY LANDED
+
+Issue #1381 follow-on now has the unit-testable path wired:
+
+- [x] Core delivery seams: `VerbGrantEnvelope` cmdline encode/decode, `verb-grant.json` sidecar mint from admitted `ExecutionPlan.agent_verbs`, backend `mvm.verb_grant=` append, and chain-signed `verb_denied` audit entry are implemented and targeted-test green.
+- [x] Config-drive trust anchor: grant-eligible starts attach `host-signer.pub` in `VmStartConfig.config_files`; mkGuest and OCI init stage it at `/run/mvm/host-signer.pub`; the guest pins grants against that file and ignores `VerbGrantEnvelope.pubkey_hex` for trust.
+- [ ] Live proof remains: Vz/macOS and Firecracker/Linux boot validation that `/run/mvm/host-signer.pub` + `/run/mvm/verb-grant.json` exist before agent fork, listed verbs pass, unlisted ProdSafe verbs return `VerbNotAuthorized`, `verb_denied` verifies, and `agent_verbs = None` remains no-token/no-grant.
+- [ ] ADR-103 remains Proposed until maintainer acceptance after live proof.

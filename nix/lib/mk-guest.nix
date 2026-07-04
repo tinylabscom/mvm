@@ -568,17 +568,20 @@ let
       echo "mvm-init: injected per-run secret placeholder env"
     fi
 
-    # Stage 2.475 — decode the per-run verb-grant token.
+    # Stage 2.475 — provision the per-run verb-grant inputs.
     #
     # The launcher writes `mvm.verb_grant=<hex(JSON)>` onto the kernel cmdline
     # using the same hex encoding as stages 2.46/2.47. We decode the JSON blob
-    # to `/run/mvm/verb-grant.json` (tmpfs, mode 0644). The agent derives the
-    # host-signer key directly from the envelope's `pubkey_hex` field in Rust.
-    # Absent token ⇒ whole block is a no-op (byte-identical boot; agent starts
-    # with no grant pinned, class gate only).
+    # to `/run/mvm/verb-grant.json` (tmpfs, mode 0644). The host-signer public
+    # key is copied from the read-only config drive into the same tmpfs so the
+    # agent verifies the grant against an out-of-band key.
     MVM_VERB_GRANT_HEX=$(/bin/busybox sed -n 's/.*\bmvm\.verb_grant=\([^ ]*\).*/\1/p' /proc/cmdline)
     if [ -n "$MVM_VERB_GRANT_HEX" ]; then
       /bin/busybox mkdir -p /run/mvm
+      if [ -r /mnt/config/host-signer.pub ]; then
+        /bin/busybox cp /mnt/config/host-signer.pub /run/mvm/host-signer.pub
+        /bin/busybox chmod 0644 /run/mvm/host-signer.pub
+      fi
       printf '%b' "$(echo "$MVM_VERB_GRANT_HEX" | /bin/busybox sed 's/../\\x&/g')" \
         > /run/mvm/verb-grant.json
       /bin/busybox chmod 0644 /run/mvm/verb-grant.json

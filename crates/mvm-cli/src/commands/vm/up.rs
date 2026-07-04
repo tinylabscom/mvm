@@ -14,7 +14,7 @@ use mvm_core::naming::validate_vm_name;
 
 use super::super::env::dev_vz::ensure_workload_kernel;
 use super::audit_chain::{AuditEmitter, default_audit_dir};
-use super::host_signer::load_or_init_at;
+use super::host_signer::{PUBLIC_FILENAME, load_or_init_at};
 use super::policy_resolver::{
     LOCAL_DEFAULT, ResolveError, resolve_policy_bundle, resolve_policy_bundle_with_dir,
     resolve_supervisor_components, resolve_supervisor_components_with_dir,
@@ -338,6 +338,7 @@ pub(super) struct AdmissionContext {
     /// The resolved tenant `PolicyBundle` (Slice 3 (b)) the bridge enforces
     /// per-tenant L4 egress against; `None` for a local-default plan.
     pub(super) policy_bundle: Option<PolicyBundle>,
+    pub(super) host_signer_public_path: std::path::PathBuf,
 }
 
 // allow(secret-debug): hand-written Debug elides the AuditEmitter's
@@ -603,7 +604,46 @@ pub(super) fn admit_plan_for_boot(
         admitted,
         emitter,
         policy_bundle,
+        host_signer_public_path: signer.public_path,
     }))
+}
+
+fn attach_host_signer_pubkey_config(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    admission: &AdmissionContext,
+) -> Result<()> {
+    attach_host_signer_pubkey_config_for_plan(
+        start_config,
+        &admission.admitted.plan,
+        &admission.host_signer_public_path,
+    )
+}
+
+fn attach_host_signer_pubkey_config_for_plan(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    plan: &mvm_core::plan::ExecutionPlan,
+    host_signer_public_path: &std::path::Path,
+) -> Result<()> {
+    if plan.agent_verbs.is_none() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(host_signer_public_path).with_context(|| {
+        format!(
+            "reading host-signer public key for config drive at {}",
+            host_signer_public_path.display()
+        )
+    })?;
+    start_config
+        .config_files
+        .retain(|f| f.name != PUBLIC_FILENAME);
+    start_config
+        .config_files
+        .push(mvm_core::vm_backend::VmFile {
+            name: PUBLIC_FILENAME.to_string(),
+            content,
+            mode: 0o444,
+        });
+    Ok(())
 }
 
 /// Build the boot-time admission hook for an **untrusted transient run** —
@@ -1267,6 +1307,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     if let Some(ctx) = admission.as_ref() {
         thread_tenant_id(&mut start_config, &ctx.admitted);
         populate_audit_substrate(&mut start_config, &ctx.admitted, ctx.policy_bundle.as_ref())?;
+        attach_host_signer_pubkey_config(&mut start_config, ctx)?;
         if persists_plan_before_start(backend_name) {
             stash_plan_for_bridge(&start_config)?;
         }
@@ -1490,6 +1531,45 @@ mod runtime_overlay_attach_tests {
             sc.runtime_overlay_path.is_none(),
             "cold cache must not attach (legacy boot)"
         );
+    }
+}
+
+#[cfg(test)]
+mod host_signer_pubkey_config_tests {
+    use super::*;
+    use mvm_core::plan::{VerbId, test_support::PlanFixture};
+    use mvm_core::vm_backend::VmStartConfig;
+
+    #[test]
+    fn attaches_pubkey_when_plan_has_agent_verbs() {
+        let dir = tempfile::tempdir().unwrap();
+        let pubkey_path = dir.path().join(PUBLIC_FILENAME);
+        let pubkey = format!("{}\n", "a".repeat(64));
+        std::fs::write(&pubkey_path, &pubkey).unwrap();
+        let mut plan = PlanFixture::new().build();
+        plan.agent_verbs = Some(vec![VerbId::new("ping").unwrap()]);
+        let mut start_config = VmStartConfig::default();
+
+        attach_host_signer_pubkey_config_for_plan(&mut start_config, &plan, &pubkey_path).unwrap();
+
+        assert_eq!(start_config.config_files.len(), 1);
+        let file = &start_config.config_files[0];
+        assert_eq!(file.name, PUBLIC_FILENAME);
+        assert_eq!(file.content, pubkey);
+        assert_eq!(file.mode, 0o444);
+    }
+
+    #[test]
+    fn skips_pubkey_when_plan_has_no_agent_verbs() {
+        let dir = tempfile::tempdir().unwrap();
+        let pubkey_path = dir.path().join(PUBLIC_FILENAME);
+        let mut plan = PlanFixture::new().build();
+        plan.agent_verbs = None;
+        let mut start_config = VmStartConfig::default();
+
+        attach_host_signer_pubkey_config_for_plan(&mut start_config, &plan, &pubkey_path).unwrap();
+
+        assert!(start_config.config_files.is_empty());
     }
 }
 
