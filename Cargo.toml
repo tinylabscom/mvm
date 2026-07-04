@@ -134,6 +134,11 @@ exclude = [
     # Same libfuzzer-sys linker-flag constraints as the other fuzz crates;
     # CI gate at `.github/workflows/security.yml::fuzz`.
     "crates/mvm-sdk/fuzz",
+    # Pure-Rust ext4 writer `build_image` fuzz harness (never-panic +
+    # structural invariants on the emitted image). Same libfuzzer-sys
+    # linker-flag constraints; CI gate at
+    # `.github/workflows/security.yml::fuzz`.
+    "crates/mvm-ext4/fuzz",
     # ADR-070 — browser audit-log verifier. Excluded so wasm-bindgen +
     # the wasm32 target stay out of `cargo build --workspace` and CI;
     # it depends on the in-workspace `mvm-verify` crate by path and is

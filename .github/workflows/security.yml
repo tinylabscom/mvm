@@ -442,6 +442,19 @@ jobs:
         # the other config-parser targets.
         run: cargo fuzz run fuzz_runtime_recording -- -max_total_time="$DURATION"
 
+      - name: Fuzz ext4 build_image (rootfs writer)
+        working-directory: crates/mvm-ext4
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # The pure-Rust ext4 writer turns an OCI-derived node set into the
+        # rootfs image the run path boots. It is forbid(unsafe), so no input
+        # can corrupt memory; this target asserts the next guarantee — no node
+        # set panics build_image (a run-path DoS), and every image it emits is
+        # block-aligned and carries the ext4 superblock magic. Impossible trees
+        # must return Err, never abort.
+        run: cargo fuzz run fuzz_build_image -- -max_total_time="$DURATION"
+
       - name: Upload corpus on failure
         if: failure()
         uses: actions/upload-artifact@v7
