@@ -1,5 +1,4 @@
-//! Adversarial-input regression suite for the pure-Rust ext4 writer
-//! (Plan 221 B3 / ADR-106).
+//! Adversarial-input regression suite for the pure-Rust ext4 writer.
 //!
 //! The cargo-fuzz `fuzz_build_image` target proves "no panic on well-shaped
 //! node sets," but it deliberately restricts its inputs: a safe path alphabet
@@ -172,8 +171,9 @@ fn directory_over_one_block_is_rejected() {
 }
 
 /// A file whose data exceeds a single block group must be refused with
-/// `TooLarge` before any image buffer is allocated — the writer caps at one
-/// 128 MiB group on `main` (multi-group is PR #1427, which will relax this).
+/// `TooLarge` before any image buffer is allocated — the writer currently caps
+/// at one 128 MiB group. (Multi-block-group support will relax this boundary;
+/// this assertion moves with it.)
 #[test]
 fn file_over_one_block_group_is_rejected() {
     // One block past 128 MiB (32768 * 4 KiB) guarantees total blocks exceed the
