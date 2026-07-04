@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+use mvm_core::arch::GuestArch;
 use mvm_core::naming::validate_template_name;
 use mvm_core::template::{
     SnapshotInfo, TemplateSpec, template_dir, template_revision_dir, template_snapshot_dir,
@@ -29,6 +30,28 @@ fn build_mode_label(mode: mvm_build::pipeline::BuildMode) -> &'static str {
         mvm_build::pipeline::BuildMode::Dev => "dev",
         mvm_build::pipeline::BuildMode::Prod => "prod",
     }
+}
+
+fn slot_kernel_source(
+    built_vmlinux: &std::path::Path,
+    cache_root: &std::path::Path,
+    arch: GuestArch,
+) -> Result<std::path::PathBuf> {
+    if built_vmlinux.is_file() {
+        return Ok(built_vmlinux.to_path_buf());
+    }
+    let fallback = cache_root
+        .join("builder-vm")
+        .join(arch.to_string())
+        .join("vmlinux");
+    if fallback.is_file() {
+        return Ok(fallback);
+    }
+    anyhow::bail!(
+        "flake build produced no vmlinux at {} and the cached builder kernel fallback is absent at {}",
+        built_vmlinux.display(),
+        fallback.display()
+    )
 }
 
 use super::registry::TemplateRegistry;
@@ -734,7 +757,12 @@ pub fn template_build_from_manifest(
     let rev_dst = slot_revision_dir(slot_hash, rev);
     ui::info("Storing artifacts in slot revision directory...");
     shell::run_in_vm(&format!("mkdir -p {rev_dst}"))?;
-    shell::run_in_vm(&format!("cp -a {} {rev_dst}/vmlinux", result.vmlinux_path))?;
+    let kernel_src = slot_kernel_source(
+        std::path::Path::new(&result.vmlinux_path),
+        std::path::Path::new(&mvm_core::config::mvm_cache_dir()),
+        GuestArch::host(),
+    )?;
+    shell::run_in_vm(&format!("cp -a {} {rev_dst}/vmlinux", kernel_src.display()))?;
     if let Some(initrd) = &result.initrd_path {
         shell::run_in_vm(&format!("cp -a {} {rev_dst}/initrd", initrd))?;
     }
@@ -1723,6 +1751,50 @@ mod tests {
         let parsed: Checksums = serde_json::from_str(&json).unwrap();
         let parsed_keys: Vec<&str> = parsed.files.keys().map(|s| s.as_str()).collect();
         assert_eq!(parsed_keys, vec!["a-file", "m-file", "z-file"]);
+    }
+
+    #[test]
+    fn slot_kernel_source_prefers_built_kernel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("build").join("vmlinux");
+        std::fs::create_dir_all(built.parent().unwrap()).unwrap();
+        std::fs::write(&built, b"built-kernel").unwrap();
+        let cache = tmp.path().join("cache");
+
+        let selected = slot_kernel_source(&built, &cache, GuestArch::X86_64).unwrap();
+
+        assert_eq!(selected, built);
+    }
+
+    #[test]
+    fn slot_kernel_source_uses_builder_kernel_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("build").join("vmlinux");
+        let fallback = tmp
+            .path()
+            .join("cache")
+            .join("builder-vm")
+            .join("x86_64")
+            .join("vmlinux");
+        std::fs::create_dir_all(fallback.parent().unwrap()).unwrap();
+        std::fs::write(&fallback, b"fallback-kernel").unwrap();
+
+        let selected =
+            slot_kernel_source(&built, &tmp.path().join("cache"), GuestArch::X86_64).unwrap();
+
+        assert_eq!(selected, fallback);
+    }
+
+    #[test]
+    fn slot_kernel_source_errors_without_built_or_fallback_kernel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("build").join("vmlinux");
+        let err = slot_kernel_source(&built, &tmp.path().join("cache"), GuestArch::X86_64)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("flake build produced no vmlinux"));
+        assert!(err.contains("builder-vm/x86_64/vmlinux"));
     }
 
     // -----------------------------------------------------------------
