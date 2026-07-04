@@ -738,9 +738,9 @@ fn run_inner(
     let _ = backend.stop_transient(&VmId(vm_name.clone()));
 
     // Top the warm pool back toward target after the run (best-effort,
-    // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; on Vz it
-    // hands a detached `pool warm` subprocess the boot+capture so teardown isn't
-    // blocked. `start_config` still carries this run's rootfs + warm size.
+    // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; Vz
+    // boot+capture rewarm stays explicit via `pool warm` so teardown does not
+    // spawn background work that can contend with foreground launches.
     if let Err(e) = crate::commands::pool::replenish_after_launch(&backend, &start_config) {
         tracing::debug!(error = %e, "pool replenish skipped (best-effort)");
     }
