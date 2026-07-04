@@ -275,3 +275,33 @@ jobs:
             echo "=== $d ==="
             nix flake check --no-build "./$d"
           done
+
+  # The pure-Rust `mvm-ext4` writer (Plan 221) must produce an image the real
+  # Linux kernel mounts — the strongest correctness oracle, beyond the in-process
+  # `am-fs-ext4` read oracle. Write a fixed sample image and loop-mount it.
+  ext4-real-mount:
+    name: mvm-ext4 output mounts on the real kernel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Write a sample image with the pure-Rust ext4 writer
+        run: cargo run -p mvm-ext4 --example write_sample -- /tmp/sample.ext4
+      - name: Loop-mount read-only and verify the tree on the real kernel
+        run: |
+          set -euo pipefail
+          mnt=$(mktemp -d)
+          sudo mount -o ro,loop /tmp/sample.ext4 "$mnt"
+          trap 'sudo umount "$mnt" || true; rmdir "$mnt" || true' EXIT
+          # File contents ($() strips the trailing newline).
+          [ "$(cat "$mnt/etc/hosts")" = "127.0.0.1 localhost" ]
+          diff <(printf 'hi from pure-rust ext4\n') "$mnt/hello"
+          # Symlink resolves to its target.
+          [ "$(readlink "$mnt/etc/localhost")" = "hosts" ]
+          # Directories present.
+          [ -d "$mnt/bin" ] && [ -d "$mnt/etc" ]
+          # Permissions preserved.
+          [ "$(stat -c '%a' "$mnt/hello")" = "755" ]
+          [ "$(stat -c '%a' "$mnt/etc/hosts")" = "644" ]
+          echo "pure-Rust ext4 mounted + verified on the real Linux kernel"
