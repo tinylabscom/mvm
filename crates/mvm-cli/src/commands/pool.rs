@@ -394,6 +394,14 @@ pub fn reap_stale_standbys_best_effort() {
     }
 }
 
+fn should_replenish_inline(
+    backend_kind: BackendKind,
+    supports_standby_pool: bool,
+    warm_pool_size: u32,
+) -> bool {
+    warm_pool_size > 0 && supports_standby_pool && backend_kind != BackendKind::Vz
+}
+
 /// Top the pool back up toward `cfg.warm_pool_size` after a launch (the no-daemon
 /// replenish-on-use maintainer). Best-effort — failures are logged, never propagated.
 ///
@@ -403,20 +411,15 @@ pub fn reap_stale_standbys_best_effort() {
 /// is skipped for Vz (pool warm is manual); `supports_standby_pool()` stays true so
 /// `try_warm_claim` still fires.
 pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Result<u32> {
-    if cfg.warm_pool_size == 0 || !backend.supports_standby_pool() {
-        return Ok(0);
-    }
-    // Vz replenish boots a seed VM + captures its memory (~seconds) — far too
-    // slow to run inline on the post-launch path. Hand the whole job to a
-    // DETACHED `mvmctl pool warm` subprocess so `up` returns immediately. The
-    // child does the idle-count check + rootfs hash itself (off the hot path,
-    // so `up` doesn't re-hash a multi-hundred-MB rootfs `try_warm_claim`
-    // already hashed) and re-warms only the deficit toward `target` — a spawn
-    // against an already-full pool is a cheap no-op, not an over-warm. Two
-    // races against the same image can still transiently overshoot target by
-    // one per concurrent launch; the surplus ages out via the standby TTL.
-    if backend.kind() == BackendKind::Vz {
-        spawn_detached_rewarm(&cfg.rootfs_path, cfg.warm_pool_size)?;
+    // Vz replenish boots a seed VM + captures its memory, and may need the
+    // builder VM to resolve default image artifacts. Keep that work explicit
+    // via `pool warm` so a foreground launch never races a detached rewarm for
+    // the same builder resources.
+    if !should_replenish_inline(
+        backend.kind(),
+        backend.supports_standby_pool(),
+        cfg.warm_pool_size,
+    ) {
         return Ok(0);
     }
     let Some(kernel) = cfg.kernel_path.as_ref() else {
@@ -438,29 +441,6 @@ pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Resu
         },
     )?;
     Ok(result.spawned)
-}
-
-/// Hand a Vz pool re-warm to a detached `mvmctl pool warm` subprocess so it
-/// outlives the `up` that triggered it. The child inherits our environment
-/// (MVM_DATA_DIR / cache / supervisor path), runs with no stdio, and is moved
-/// into its own process group so a Ctrl-C on `up` doesn't take it down.
-/// `pool warm` is idempotent toward the target, so a spurious spawn is a cheap
-/// no-op rather than an over-warm.
-fn spawn_detached_rewarm(rootfs_path: &str, target: u32) -> Result<()> {
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-
-    let exe =
-        std::env::current_exe().context("resolve mvmctl path for background pool replenish")?;
-    Command::new(exe)
-        .args(["pool", "warm", &target.to_string(), "--rootfs", rootfs_path])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .context("spawn detached pool warm for background replenish")?;
-    Ok(())
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -559,6 +539,14 @@ mod tests {
             warm_claim_plan_json(libkrun.as_vm_backend(), &cfg),
             Some("{\"signed\":\"plan\"}".into())
         );
+    }
+
+    #[test]
+    fn inline_replenish_skips_zero_unsupported_and_vz() {
+        assert!(!should_replenish_inline(BackendKind::Libkrun, true, 0));
+        assert!(!should_replenish_inline(BackendKind::Libkrun, false, 1));
+        assert!(!should_replenish_inline(BackendKind::Vz, true, 1));
+        assert!(should_replenish_inline(BackendKind::Libkrun, true, 1));
     }
 
     #[test]
