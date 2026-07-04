@@ -304,20 +304,30 @@ jobs:
           # Permissions preserved.
           [ "$(stat -c '%a' "$mnt/hello")" = "755" ]
           [ "$(stat -c '%a' "$mnt/etc/hosts")" = "644" ]
+          [ "$(stat -c '%s' "$mnt/big")" = "716800" ]
           echo "pure-Rust ext4 mounted + verified on the real Linux kernel"
-      - name: dm-verity root hash matches real veritysetup
+      - name: dm-verity root hash + hash tree match real veritysetup
         run: |
           set -euo pipefail
           sudo apt-get update && sudo apt-get install -y cryptsetup-bin
-          # Our writer printed `ROOTHASH <hex>`; extract it.
+          # Our writer printed `ROOTHASH <hex>` and wrote the no-superblock hash
+          # tree to `<image>.verity`.
           ours=$(grep '^ROOTHASH ' /tmp/sample.out | awk '{print $2}')
-          # Real veritysetup on the same image, same params (v1, sha256, 4 KiB
-          # data+hash blocks, 32-byte zero salt).
-          theirs=$(veritysetup format \
+          # Real veritysetup, same params (v1, sha256, 4 KiB data+hash blocks,
+          # 32-byte zero salt). --no-superblock keeps the tree deterministic (no
+          # random UUID) and matches our `format()` layout.
+          theirs=$(veritysetup format --no-superblock \
               --data-block-size=4096 --hash-block-size=4096 \
               --salt=0000000000000000000000000000000000000000000000000000000000000000 \
-              /tmp/sample.ext4 /tmp/sample.verity \
+              /tmp/sample.ext4 /tmp/vs.verity \
             | awk '/^Root hash:/ {print $3}')
           echo "ours=$ours theirs=$theirs"
           [ -n "$ours" ] && [ "$ours" = "$theirs" ]
-          echo "pure-Rust dm-verity root hash == veritysetup"
+          # Hash-tree bytes must match byte-for-byte.
+          if ! cmp -s /tmp/sample.ext4.verity /tmp/vs.verity; then
+            echo "::error::hash tree differs from veritysetup"
+            ls -l /tmp/sample.ext4.verity /tmp/vs.verity
+            cmp -l /tmp/sample.ext4.verity /tmp/vs.verity | head -20 || true
+            exit 1
+          fi
+          echo "pure-Rust dm-verity root hash + hash tree == veritysetup"
