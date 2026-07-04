@@ -116,6 +116,30 @@ if [ -n "$MVM_UVOLS" ]; then
   done
 fi
 
+# Egress CA (TLS-substitution trust). The host encoded mvm.egress_ca=<hex(PEM)>
+# onto the kernel cmdline (only when egress substitution is configured); decode
+# it to /run/mvm/ca-bundle.crt so the workload trusts the per-VM egress CA
+# alongside the image's baked roots. The env vars that point a TLS stack here
+# are injected into the entrypoint's env host-side (the agent execs it under
+# env_clear, so a shell export would not reach it). Absent token => no-op.
+# Mirrors the mkGuest egress-ca stage in nix/lib/mk-guest.nix.
+MVM_EGRESS_CA_HEX=$(sed -n 's/.*\bmvm\.egress_ca=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null)
+if [ -n "$MVM_EGRESS_CA_HEX" ]; then
+  mkdir -p /run/mvm 2>/dev/null || true
+  printf '%b' "$(echo "$MVM_EGRESS_CA_HEX" | sed 's/../\\x&/g')" > /run/mvm/egress-ca.crt
+  mvm_baked=
+  for mvm_c in /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem /etc/ssl/certs/ca-bundle.crt; do
+    [ -f "$mvm_c" ] && { mvm_baked="$mvm_c"; break; }
+  done
+  if [ -n "$mvm_baked" ] && cat "$mvm_baked" /run/mvm/egress-ca.crt > /run/mvm/ca-bundle.crt 2>/dev/null; then
+    :
+  else
+    cp /run/mvm/egress-ca.crt /run/mvm/ca-bundle.crt 2>/dev/null || true
+  fi
+  chmod 0644 /run/mvm/egress-ca.crt /run/mvm/ca-bundle.crt 2>/dev/null || true
+  echo "mvm-oci-init: installed per-VM egress CA"
+fi
+
 # Verb grant (plan-bound agent verb capabilities). The host encoded
 # mvm.verb_grant=<hex(JSON envelope)> onto the kernel cmdline; decode it to
 # the tmpfs so the agent can pin + enforce it before serving RPC. Absent
@@ -332,6 +356,29 @@ mod tests {
         assert!(
             grant_at < agent_fork_at,
             "verb grant must be decoded before the agent fork"
+        );
+    }
+
+    #[test]
+    fn init_script_decodes_egress_ca_before_the_agent() {
+        let s = oci_init_script();
+        // Decodes the per-VM egress CA into the tmpfs bundle the workload's TLS
+        // stack trusts (the env vars pointing here are injected host-side).
+        assert!(
+            s.contains("mvm.egress_ca="),
+            "init must parse the egress_ca cmdline token"
+        );
+        assert!(
+            s.contains("/run/mvm/ca-bundle.crt"),
+            "combined CA bundle is written where the workload's SSL_CERT_FILE points"
+        );
+        // Written before the agent forks, so the file exists when the agent
+        // execs the entrypoint (which the host points at the bundle via env).
+        let ca_at = s.find("mvm.egress_ca=").expect("egress_ca parse");
+        let agent_fork_at = s.find("\"$MVM_AGENT\" &").expect("agent fork");
+        assert!(
+            ca_at < agent_fork_at,
+            "egress CA must be decoded before the agent fork"
         );
     }
 

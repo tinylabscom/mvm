@@ -2660,6 +2660,8 @@ dependencies = [
  "mvm-backend",
  "mvm-client",
  "mvm-core",
+ "mvm-hostd",
+ "tempfile",
  "tokio",
 ]
 
