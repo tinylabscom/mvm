@@ -319,7 +319,7 @@ trap - EXIT
 /// builder VM, no `mkfs`, no subprocess. Walks the unpacked tree and builds a
 /// deterministic read-only ext4 image with the memory-safe `mvm-ext4` writer.
 ///
-/// This is the no-shell path the local run uses (Plan 221 Option B). It reads
+/// This is the no-shell path the local run uses. It reads
 /// the whole tree into memory (each file's bytes + the assembled image), which
 /// is fine for small/medium rootfs; large images want the streaming +
 /// multi-block-group follow-ups. The output is a valid ext4 real readers mount;
