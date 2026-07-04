@@ -14,7 +14,13 @@ license.workspace = true
 mvm-client = { workspace = true }
 mvm-backend = { workspace = true, default-features = false }
 mvm-core = { workspace = true }
+# The in-process admitted-boot seam (`run::admit_and_boot_local`). mvm-hostd is
+# already in the mvmctl closure (the CLI links it), so this edge adds no crates
+# to the default build; it does not form a cycle because mvm-sdk — which
+# mvm-hostd pulls in — carries no dependency back on this crate.
+mvm-hostd = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile = { workspace = true }
