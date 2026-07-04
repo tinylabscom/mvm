@@ -336,3 +336,22 @@ jobs:
             exit 1
           fi
           echo "pure-Rust dm-verity root hash + hash tree == veritysetup"
+      - name: Write + loop-mount a MULTI-block-group image (> 128 MiB)
+        run: |
+          set -euo pipefail
+          cargo run -p mvm-ext4 --example write_multigroup -- /tmp/multigroup.ext4
+          # Sanity: bigger than one group's 128 MiB.
+          [ "$(stat -c '%s' /tmp/multigroup.ext4)" -gt 134217728 ]
+          mnt=$(mktemp -d)
+          sudo mount -o ro,loop /tmp/multigroup.ext4 "$mnt"
+          trap 'sudo umount "$mnt" || true; rmdir "$mnt" || true' EXIT
+          [ "$(cat "$mnt/etc/marker")" = "multi-group marker" ]
+          # The big file spans two block groups as two extents — size + a byte
+          # past the group boundary must read back correctly.
+          [ "$(stat -c '%s' "$mnt/big")" = "136314880" ]
+          # Byte at offset 130 MiB-ish (well past the first group) follows the
+          # i%251 pattern the example wrote.
+          off=134000000
+          got=$(dd if="$mnt/big" bs=1 skip=$off count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
+          [ "$got" = "$((off % 251))" ]
+          echo "multi-group pure-Rust ext4 mounted + verified on the real Linux kernel"
