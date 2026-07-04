@@ -142,6 +142,13 @@ Boot the guest with the unpacked OCI dir as a **virtiofs root**. No ext4, no
 `mkfs`, no verity-of-a-block-device. This is supermachine's model and the
 Plan-214 in-house-HVF end state.
 
+> **Scoped out into its own docs.** The integrity decision is drafted as
+> **ADR-107** (`specs/adrs/107-virtiofs-root-integrity.md`, Proposed — tiered:
+> virtiofs-root is dev/local-tier, **prod stays on Option B**, claim 3 scoped to
+> block+ext4), and the phased implementation is **Plan 223**
+> (`specs/plans/223-virtiofs-root.md`), which is the live tracker and is gated on
+> ADR-107 being accepted. The A0–A5 sketch below is retained for context.
+
 - **A0 — ADR-107 (the hard part).** Integrity model for a virtiofs root:
   dm-verity is block-device-specific and does **not** apply to a virtiofs dir, so
   **claim 3 needs a new mechanism**. Candidates: (i) trusted immutable host dir +
