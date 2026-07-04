@@ -590,7 +590,11 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         std::fs::write(src.path().join("f"), b"x").unwrap();
         let out = tempfile::tempdir().unwrap();
-        let nested = out.path().join("rootfs").join("deadbeef").join("rootfs.ext4");
+        let nested = out
+            .path()
+            .join("rootfs")
+            .join("deadbeef")
+            .join("rootfs.ext4");
         assert!(!nested.parent().unwrap().exists());
 
         let input = MaterializeExt4Input::new(src.path().to_path_buf(), nested.clone(), 0);
