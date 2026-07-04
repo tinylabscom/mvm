@@ -472,7 +472,7 @@ which.workspace = true
 # libkrun isn't installed on the host, so a default-features binary works
 # everywhere. Library consumers (mvmd) that want a lean closure build with
 # `default-features = false`.
-default = ["builder-vm"]
+default = ["builder-vm", "pure-mkfs"]
 contributor-bootstrap = [
     "mvm/contributor-bootstrap",
     "mvm-backend/contributor-bootstrap",
@@ -486,6 +486,12 @@ builder-vm = [
     "mvm-build/builder-vm",
     "mvm-cli/builder-vm",
 ]
+# In-process, pure-Rust rootfs materialization for `run --image` (no builder
+# VM / mkfs). Must be forwarded here: the root `mvmctl` binary builds mvm-cli
+# with `default-features = false`, so mvm-cli's own `pure-mkfs` default never
+# reaches the shipped binary without this. Default-on so the run path
+# materializes in-process; `MVM_MATERIALIZE_BUILDER_VM` is the runtime opt-out.
+pure-mkfs = ["mvm-cli/pure-mkfs"]
 custom-dns = ["mvm-cli/custom-dns"]
 dev-watch = ["mvm-cli/dev-watch"]
 libkrun-live = ["mvm-cli/libkrun-live"]

@@ -360,6 +360,15 @@ pub fn materialize_ext4_pure(
     let nodes = collect_nodes(&input.unpacked_root)?;
     let image = mvm_ext4::build_image(&nodes).map_err(|e| RootfsError::PureBuild(e.to_string()))?;
     let size_bytes = image.len() as u64;
+    // The run path's cache dir (`.../rootfs/<key>/`) may not exist yet — the
+    // builder-VM path created it via `allocate_sparse_image`, so the pure path
+    // must create it too before writing the image + its sidecars.
+    if let Some(parent) = input.output.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| RootfsError::WriteOutput {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
     std::fs::write(&input.output, &image).map_err(|source| RootfsError::WriteOutput {
         path: input.output.clone(),
         source,
@@ -571,6 +580,26 @@ mod tests {
             materialize_ext4_pure(&input),
             Err(RootfsError::UnpackedRootNotDirectory(_))
         ));
+    }
+
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn pure_materialize_creates_missing_output_parent() {
+        // The run path's cache dir may not exist yet; the pure writer must
+        // create it rather than fail with ENOENT.
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("f"), b"x").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let nested = out
+            .path()
+            .join("rootfs")
+            .join("deadbeef")
+            .join("rootfs.ext4");
+        assert!(!nested.parent().unwrap().exists());
+
+        let input = MaterializeExt4Input::new(src.path().to_path_buf(), nested.clone(), 0);
+        materialize_ext4_pure(&input).expect("pure materialize into a missing parent dir");
+        assert!(nested.is_file());
     }
 
     #[test]
