@@ -28,6 +28,13 @@ pub struct MaterializeExt4Input {
     pub output: PathBuf,
     /// Sum of OCI layer uncompressed sizes for this image.
     pub uncompressed_size_bytes: u64,
+    /// When true, the pure path also computes dm-verity and writes the
+    /// `rootfs.verity` + `rootfs.roothash` sidecars beside the image. Off by
+    /// default so materializing a rootfs is a pure mechanism swap: the run path
+    /// today boots these images without rootfs verity (the boot config sets
+    /// `verity_path`/`roothash` to `None`), and emitting sidecars a probe would
+    /// pick up would silently change that. The builder-VM path ignores this.
+    pub emit_verity: bool,
 }
 
 impl MaterializeExt4Input {
@@ -36,7 +43,14 @@ impl MaterializeExt4Input {
             unpacked_root,
             output,
             uncompressed_size_bytes,
+            emit_verity: false,
         }
+    }
+
+    /// Opt into dm-verity sidecar emission on the pure path.
+    pub fn with_verity(mut self) -> Self {
+        self.emit_verity = true;
+        self
     }
 }
 
@@ -351,6 +365,14 @@ pub fn materialize_ext4_pure(
         source,
     })?;
 
+    if !input.emit_verity {
+        return Ok(MaterializedExt4 {
+            path: input.output.clone(),
+            size_bytes,
+            verity_root_hash: None,
+        });
+    }
+
     // dm-verity, computed in-process (no `veritysetup`). v1, sha256, 4 KiB
     // data+hash blocks, zero salt — the params the boot path expects. Write the
     // hash tree + 64-hex root hash beside the image under the fixed names
@@ -509,8 +531,27 @@ mod tests {
         materialize_ext4_pure(&input2).unwrap();
         assert_eq!(std::fs::read(&out2).unwrap(), img);
 
-        // Verity: the returned root hash is 64-hex and the two sidecars land
-        // beside the image under the fixed names the boot path probes for.
+        // Default (no `with_verity`): no root hash, no sidecars — the run path
+        // boots these images without rootfs verity, so a probe must find nothing.
+        assert!(mat.verity_root_hash.is_none());
+        assert!(!out.path().join("rootfs.verity").exists());
+        assert!(!out.path().join("rootfs.roothash").exists());
+    }
+
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn pure_materialize_with_verity_writes_sidecars() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("hello"), b"hi\n").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let out_path = out.path().join("rootfs.ext4");
+        let input =
+            MaterializeExt4Input::new(src.path().to_path_buf(), out_path.clone(), 0).with_verity();
+
+        let mat = materialize_ext4_pure(&input).expect("pure materialize with verity");
+
+        // The returned root hash is 64-hex and both sidecars land beside the
+        // image under the fixed names the boot path probes for.
         let root_hex = mat.verity_root_hash.expect("verity root hash");
         assert_eq!(root_hex.len(), 64);
         assert!(root_hex.chars().all(|c| c.is_ascii_hexdigit()));
