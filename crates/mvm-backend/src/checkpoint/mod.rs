@@ -461,7 +461,7 @@ pub fn capture_vm_full(
         )
     })?;
 
-    let content = vec![
+    let mut content = vec![
         ContentBlob {
             name: "rootfs.ext4".into(),
             sha256: sha256_file_hex(&rootfs_dst)?,
@@ -479,6 +479,20 @@ pub fn capture_vm_full(
             sha256: sha256_file_hex(&config_dst)?,
         },
     ];
+
+    // Mirror the fs_quick path: when the source rootfs directory carries a
+    // mvm-meta.json sidecar, include it so that forks of this vm_full checkpoint
+    // can read the sidecar from their content dir and boot through the
+    // runtime-meta gate (image_is_sealed / fork grant reconciliation).
+    // The sidecar read is from the static source dir — outside the pause window
+    // is fine.
+    let live_rootfs_for_sidecar = control.rootfs_path()?;
+    if let Some(sidecar_blob) =
+        copy_guest_sidecar_if_present(&live_rootfs_for_sidecar, &content_dir)?
+    {
+        content.push(sidecar_blob);
+    }
+
     let meta = CheckpointMeta::builder(params.id, CheckpointClass::VmFull, params.vm_name)
         .tag(params.tag)
         .created_unix(params.created_unix)
@@ -576,6 +590,36 @@ pub fn restore_checkpoint(
 fn sha256_file_hex(path: &Path) -> Result<String> {
     mvm_core::crypto::image_verify::sha256_file(path)
         .with_context(|| format!("hashing {}", path.display()))
+}
+
+/// Copy the `mvm-meta.json` guest sidecar from the directory that contains
+/// `src_rootfs` into `content_dir`, and return a `ContentBlob` for it.
+///
+/// Returns `None` (no-op) when the sidecar is absent — unsealed/dev images
+/// have no sidecar and must not error. Call from both `capture_fs_quick` and
+/// `capture_vm_full` so that the sidecar propagation stays DRY.
+fn copy_guest_sidecar_if_present(
+    src_rootfs: &Path,
+    content_dir: &Path,
+) -> Result<Option<ContentBlob>> {
+    let src_dir = src_rootfs
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let src_sidecar = src_dir.join(mvm_build::builder_vm::SIDECAR_FILENAME);
+    if !src_sidecar.exists() {
+        return Ok(None);
+    }
+    let dst_sidecar = content_dir.join(mvm_build::builder_vm::SIDECAR_FILENAME);
+    std::fs::copy(&src_sidecar, &dst_sidecar).with_context(|| {
+        format!(
+            "copying mvm-meta.json sidecar into checkpoint content dir {}",
+            content_dir.display()
+        )
+    })?;
+    Ok(Some(ContentBlob {
+        name: mvm_build::builder_vm::SIDECAR_FILENAME.into(),
+        sha256: sha256_file_hex(&dst_sidecar)?,
+    }))
 }
 
 /// How blob `name` differs between two checkpoints (B relative to A).
@@ -724,23 +768,8 @@ pub fn capture_fs_quick(
     // When the source rootfs directory carries a mvm-meta.json sidecar, include it
     // as a second blob so that any fork materialised from this checkpoint can boot
     // through the runtime-meta gate (which reads the sidecar from the rootfs dir).
-    let src_dir = params
-        .rootfs
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let src_sidecar = src_dir.join(mvm_build::builder_vm::SIDECAR_FILENAME);
-    if src_sidecar.exists() {
-        let dst_sidecar = content_dir.join(mvm_build::builder_vm::SIDECAR_FILENAME);
-        std::fs::copy(&src_sidecar, &dst_sidecar).with_context(|| {
-            format!(
-                "copying mvm-meta.json sidecar into checkpoint content dir {}",
-                content_dir.display()
-            )
-        })?;
-        content.push(ContentBlob {
-            name: mvm_build::builder_vm::SIDECAR_FILENAME.into(),
-            sha256: sha256_file_hex(&dst_sidecar)?,
-        });
+    if let Some(sidecar_blob) = copy_guest_sidecar_if_present(&params.rootfs, &content_dir)? {
+        content.push(sidecar_blob);
     }
 
     let meta = CheckpointMeta::builder(params.id, CheckpointClass::FsQuick, params.vm_name)
@@ -1114,6 +1143,99 @@ mod tests {
                 && names.contains(&"supervisor-config.json")
         );
         verify_content(&store, &meta).unwrap();
+    }
+
+    #[test]
+    fn capture_vm_full_includes_sidecar_blob_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        // Place the rootfs and the sidecar in the same directory so that the
+        // parent-dir lookup finds the sidecar alongside the rootfs.
+        let rootfs_dir = tmp.path().join("vm-state");
+        std::fs::create_dir_all(&rootfs_dir).unwrap();
+        let rootfs = rootfs_dir.join("rootfs.ext4");
+        std::fs::write(&rootfs, b"disk").unwrap();
+        std::fs::write(
+            rootfs_dir.join(mvm_build::builder_vm::SIDECAR_FILENAME),
+            br#"{"accessible":true,"overlay_aware":false}"#,
+        )
+        .unwrap();
+        let ctl = MockControl {
+            rootfs,
+            events: RefCell::new(vec![]),
+        };
+        let config = tmp.path().join("supervisor-config.json");
+        std::fs::write(&config, b"{\"cfg\":true}").unwrap();
+        let meta = capture_vm_full(
+            &store,
+            CaptureVmFullParams {
+                id: CheckpointId::new("v2"),
+                vm_name: "vm".into(),
+                supervisor_config_digest: "d".into(),
+                supervisor_config_src: config,
+                tag: None,
+                created_unix: 10,
+            },
+            &ctl,
+        )
+        .unwrap();
+        let names: Vec<&str> = meta.content.iter().map(|b| b.name.as_str()).collect();
+        assert!(
+            names.contains(&mvm_build::builder_vm::SIDECAR_FILENAME),
+            "expected sidecar blob in vm_full content; got {names:?}"
+        );
+        let sidecar_blob = meta
+            .content
+            .iter()
+            .find(|b| b.name == mvm_build::builder_vm::SIDECAR_FILENAME)
+            .unwrap();
+        assert!(
+            !sidecar_blob.sha256.is_empty(),
+            "sidecar sha256 must be non-empty"
+        );
+        // integrity check must pass (blob is on disk at the right hash)
+        verify_content(&store, &meta).unwrap();
+        // The sidecar file must actually be present in the content dir.
+        assert!(
+            store
+                .content_dir(&meta.id)
+                .join(mvm_build::builder_vm::SIDECAR_FILENAME)
+                .exists(),
+            "sidecar must be on disk in the checkpoint content dir"
+        );
+    }
+
+    #[test]
+    fn capture_vm_full_no_sidecar_blob_without_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let rootfs = tmp.path().join("live-rootfs.ext4");
+        std::fs::write(&rootfs, b"disk").unwrap();
+        // No sidecar in tmp.path() — the rootfs parent dir is clean.
+        let ctl = MockControl {
+            rootfs,
+            events: RefCell::new(vec![]),
+        };
+        let config = tmp.path().join("supervisor-config.json");
+        std::fs::write(&config, b"{\"cfg\":true}").unwrap();
+        let meta = capture_vm_full(
+            &store,
+            CaptureVmFullParams {
+                id: CheckpointId::new("v3"),
+                vm_name: "vm".into(),
+                supervisor_config_digest: "d".into(),
+                supervisor_config_src: config,
+                tag: None,
+                created_unix: 11,
+            },
+            &ctl,
+        )
+        .unwrap();
+        let names: Vec<&str> = meta.content.iter().map(|b| b.name.as_str()).collect();
+        assert!(
+            !names.contains(&mvm_build::builder_vm::SIDECAR_FILENAME),
+            "no sidecar expected when source dir has none; got {names:?}"
+        );
     }
 
     struct MockRestore {
