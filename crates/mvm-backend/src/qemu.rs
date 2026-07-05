@@ -149,6 +149,10 @@ impl VmBackend for QemuBackend {
             cmdline.push(' ');
             cmdline.push_str(&token);
         }
+        if let Some(token) = crate::microvm::require_grant_cmdline_token(&config.name) {
+            cmdline.push(' ');
+            cmdline.push_str(&token);
+        }
         if let Some(roothash) = config.runtime_overlay_roothash.as_deref() {
             cmdline.push_str(" mvm.runtime_roothash=");
             cmdline.push_str(roothash);

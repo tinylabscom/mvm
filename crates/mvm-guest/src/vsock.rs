@@ -1633,24 +1633,47 @@ pub fn is_verb_trust_baseline(verb: &str) -> bool {
     mvm_core::plan::VERB_GRANT_BASELINE.contains(&verb)
 }
 
-/// Pure trust decision. `Attested` key source is unimplemented and treated
-/// as fail-closed whenever the grant is not present, never a silent downgrade.
+/// Pure trust decision. `Attested` key source is treated as fail-closed
+/// whenever the grant is not present, never a silent downgrade.
+/// `launch_requires_grant` is derived from the `mvm.require_grant=1`
+/// kernel-cmdline token set by the host when it delivered a verb grant.
 pub fn trust_decision(
     policy: Option<&mvm_core::plan::VerbTrustPolicy>,
     grant_present: bool,
+    launch_requires_grant: bool,
 ) -> TrustDecision {
     use mvm_core::plan::GrantKeySource;
-    match policy {
-        None => TrustDecision::Serve,
-        Some(_) if grant_present => TrustDecision::Serve,
-        Some(p) => {
-            if p.require_grant || matches!(p.grant_key_source, GrantKeySource::Attested) {
-                TrustDecision::FailClosed
-            } else {
-                TrustDecision::ObserveGap
-            }
-        }
+    if grant_present {
+        return TrustDecision::Serve;
     }
+    let policy_requires = policy.map(|p| p.require_grant).unwrap_or(false);
+    let attested = policy
+        .map(|p| matches!(p.grant_key_source, GrantKeySource::Attested))
+        .unwrap_or(false);
+    if launch_requires_grant || policy_requires || attested {
+        return TrustDecision::FailClosed;
+    }
+    if policy.is_some() {
+        TrustDecision::ObserveGap
+    } else {
+        TrustDecision::Serve
+    }
+}
+
+/// Whether the kernel cmdline carries the launcher's `mvm.require_grant=1`
+/// enforcement assertion. Pure over the cmdline string for testability.
+pub fn parse_require_grant_cmdline(cmdline: &str) -> bool {
+    cmdline
+        .split_whitespace()
+        .any(|tok| tok == "mvm.require_grant=1")
+}
+
+/// Read `/proc/cmdline` and return whether enforcement is launch-asserted.
+/// Absent/unreadable cmdline implies no assertion, so no launch-gated fail-close.
+pub fn launch_requires_grant() -> bool {
+    std::fs::read_to_string("/proc/cmdline")
+        .map(|s| parse_require_grant_cmdline(&s))
+        .unwrap_or(false)
 }
 
 /// Guest-agent control protocol capability. Closed enum so host and
@@ -7308,34 +7331,74 @@ mod rpc_client_tests {
             require_grant: req,
             grant_key_source: GrantKeySource::LaunchProvisioned,
         };
-        // No policy (dev/OCI): always serve.
-        assert_eq!(trust_decision(None, false), TrustDecision::Serve);
-        assert_eq!(trust_decision(None, true), TrustDecision::Serve);
-        // Policy + grant present: serve.
+        // No policy (dev/OCI): always serve regardless of launch flag.
+        assert_eq!(trust_decision(None, false, false), TrustDecision::Serve);
+        assert_eq!(trust_decision(None, false, true), TrustDecision::FailClosed);
+        assert_eq!(trust_decision(None, true, false), TrustDecision::Serve);
+        assert_eq!(trust_decision(None, true, true), TrustDecision::Serve);
+        // Policy + grant present: serve regardless of launch flag.
         assert_eq!(
-            trust_decision(Some(&require(true)), true),
+            trust_decision(Some(&require(true)), true, false),
             TrustDecision::Serve
         );
-        // Policy present, grant absent, require=false: observe (serve, but flag the gap).
         assert_eq!(
-            trust_decision(Some(&require(false)), false),
+            trust_decision(Some(&require(true)), true, true),
+            TrustDecision::Serve
+        );
+        // Policy present, grant absent, require=false, launch=false: observe (mvmd-safe case).
+        assert_eq!(
+            trust_decision(Some(&require(false)), false, false),
             TrustDecision::ObserveGap
         );
-        // Policy present, grant absent, require=true: fail closed.
+        // Policy present, grant absent, require=false, launch=true: fail closed (mvmctl grant-delivering launch).
         assert_eq!(
-            trust_decision(Some(&require(true)), false),
+            trust_decision(Some(&require(false)), false, true),
             TrustDecision::FailClosed
         );
-        // Future Attested source with no grant is treated as fail-closed (never a silent downgrade).
+        // Policy present, grant absent, require=true: fail closed regardless of launch.
+        assert_eq!(
+            trust_decision(Some(&require(true)), false, false),
+            TrustDecision::FailClosed
+        );
+        assert_eq!(
+            trust_decision(Some(&require(true)), false, true),
+            TrustDecision::FailClosed
+        );
+        // No policy, no grant, launch=true: fail closed.
+        assert_eq!(trust_decision(None, false, true), TrustDecision::FailClosed);
+        // No policy, no grant, launch=false: serve.
+        assert_eq!(trust_decision(None, false, false), TrustDecision::Serve);
+        // Attested + no grant is treated as fail-closed regardless of launch.
         let attested = VerbTrustPolicy {
             version: 1,
             require_grant: false,
             grant_key_source: GrantKeySource::Attested,
         };
         assert_eq!(
-            trust_decision(Some(&attested), false),
+            trust_decision(Some(&attested), false, false),
             TrustDecision::FailClosed
         );
+        assert_eq!(
+            trust_decision(Some(&attested), false, true),
+            TrustDecision::FailClosed
+        );
+    }
+
+    #[test]
+    fn parse_require_grant_cmdline_exact_match() {
+        // Token present: true.
+        assert!(parse_require_grant_cmdline(
+            "console=hvc0 mvm.require_grant=1 quiet"
+        ));
+        assert!(parse_require_grant_cmdline("mvm.require_grant=1"));
+        // Token absent: false.
+        assert!(!parse_require_grant_cmdline("console=hvc0 quiet"));
+        assert!(!parse_require_grant_cmdline(""));
+        // mvm.require_grant=0 is not the exact token: false.
+        assert!(!parse_require_grant_cmdline("mvm.require_grant=0"));
+        // Substring of another token does not match: false.
+        assert!(!parse_require_grant_cmdline("foo=mvm.require_grant=1bar"));
+        assert!(!parse_require_grant_cmdline("xmvm.require_grant=1"));
     }
 
     #[test]
