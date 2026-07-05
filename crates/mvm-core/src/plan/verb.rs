@@ -5,6 +5,7 @@ use std::fmt;
 /// (non-empty kebab-case). Validated at construction so an `agent_verbs`
 /// grant can never carry an unparseable verb.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VerbId(String);
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

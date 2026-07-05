@@ -13,6 +13,7 @@ pub const VERB_GRANT_BASELINE: [&str; 3] = ["protocol-hello", "ping", "readiness
 /// authority, verified by the guest — deliberately a different key from
 /// the per-session frame-signing key.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct VerbGrant {
     pub session_id: String,
