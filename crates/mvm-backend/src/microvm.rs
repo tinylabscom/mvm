@@ -2274,6 +2274,10 @@ pub fn configure_flake_microvm_with_drives_dir(
         Some(token) => format!("{boot_args} {token}"),
         None => boot_args,
     };
+    let boot_args = match require_grant_cmdline_token(&config.slot.name) {
+        Some(token) => format!("{boot_args} {token}"),
+        None => boot_args,
+    };
 
     // FC's x86_64 loader needs an uncompressed ELF `vmlinux`, but the
     // published default-microvm x86_64 kernel is a bzImage (named `vmlinux`),
@@ -2928,6 +2932,18 @@ pub(crate) fn verb_grant_cmdline_token(vm_name: &str) -> Option<String> {
     let envelope: mvm_core::protocol::vm_backend::VerbGrantEnvelope =
         serde_json::from_slice(&bytes).ok()?;
     mvm_core::vm_backend::encode_verb_grant_cmdline(&envelope)
+}
+
+/// The `mvm.require_grant=1` cmdline token for `vm_name`, or `None` when no
+/// verb-grant sidecar was minted. Keyed on the sidecar file EXISTING (not a
+/// successful decode): a launcher that minted a grant asserts enforcement even
+/// if the grant token fails to encode (corrupt sidecar), so the guest fails
+/// closed rather than running grant-less. Bypassed entirely by direct-launch
+/// paths that never build this cmdline (e.g. the fleet orchestrator), so those
+/// instances never assert enforcement.
+pub(crate) fn require_grant_cmdline_token(vm_name: &str) -> Option<String> {
+    let path = mvm_core::config::vm_state_dir(vm_name).join("verb-grant.json");
+    path.exists().then(|| "mvm.require_grant=1".to_string())
 }
 
 /// Spawn the `mvm-bridge` sibling. Creates a UNIX
@@ -4153,6 +4169,46 @@ mod tests {
 
         assert!(
             verb_grant_cmdline_token(vm_name).is_none(),
+            "absent sidecar must yield None"
+        );
+    }
+
+    // ---- require_grant_cmdline_token ----
+
+    #[test]
+    fn require_grant_cmdline_token_some_when_sidecar_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+
+        let vm_name = "require-grant-present-test";
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Write garbage content: the function is keyed on file existence,
+        // not on successful JSON decode.
+        std::fs::write(state_dir.join("verb-grant.json"), b"not-valid-json").unwrap();
+
+        let token =
+            require_grant_cmdline_token(vm_name).expect("token must be Some when sidecar exists");
+        assert_eq!(
+            token, "mvm.require_grant=1",
+            "token must be mvm.require_grant=1"
+        );
+    }
+
+    #[test]
+    fn require_grant_cmdline_token_none_when_no_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+
+        let vm_name = "require-grant-absent-test";
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        assert!(
+            require_grant_cmdline_token(vm_name).is_none(),
             "absent sidecar must yield None"
         );
     }
