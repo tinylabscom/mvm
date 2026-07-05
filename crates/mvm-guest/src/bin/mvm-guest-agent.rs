@@ -304,13 +304,6 @@ struct AgentBootState {
     inner: Mutex<BootStateInner>,
     profile: AgentProfile,
     boot_at: std::time::Instant,
-    /// Pinned agent-verb grant from the admission handshake; `None` means
-    /// no grant is pinned — the class gate (`allowed_in`) is the only
-    /// verb filter.
-    verb_grant: Option<mvm_core::plan::VerbGrant>,
-    /// `true` when the measured verb-trust policy required a grant but none
-    /// was validly pinned; control RPCs are refused while this is set.
-    trust_denied: bool,
 }
 
 #[derive(Default)]
@@ -322,6 +315,14 @@ struct BootStateInner {
     probes: ComponentState,
     volumes: ComponentState,
     timing: BootTimingReport,
+    /// Pinned agent-verb grant from the admission handshake; `None` means
+    /// no grant is pinned — the class gate (`allowed_in`) is the only
+    /// verb filter. Mutable so `PostRestore` can re-pin after restore.
+    verb_grant: Option<mvm_core::plan::VerbGrant>,
+    /// `true` when the measured verb-trust policy required a grant but none
+    /// was validly pinned; control RPCs are refused while this is set.
+    /// Cleared when a valid grant is re-pinned via `PostRestore`.
+    trust_denied: bool,
 }
 
 impl AgentBootState {
@@ -343,8 +344,6 @@ impl AgentBootState {
             }),
             profile,
             boot_at,
-            verb_grant: None,
-            trust_denied: false,
         }
     }
 
@@ -476,6 +475,24 @@ impl AgentBootState {
             volumes,
             profile: self.profile,
             boot_millis: timing,
+        }
+    }
+
+    /// Read `(trust_denied, verb_grant)` atomically under the inner lock.
+    /// Used by the enforcement gate in the request handler.
+    fn grant_state(&self) -> (bool, Option<mvm_core::plan::VerbGrant>) {
+        match self.inner.lock() {
+            Ok(s) => (s.trust_denied, s.verb_grant.clone()),
+            Err(_) => (true, None), // poisoned lock → fail closed
+        }
+    }
+
+    /// Re-pin a newly verified grant, clearing `trust_denied`. Called from
+    /// the `PostRestore` handler after `re_pin_verb_grant` succeeds.
+    fn set_verb_grant(&self, grant: mvm_core::plan::VerbGrant) {
+        if let Ok(mut s) = self.inner.lock() {
+            s.verb_grant = Some(grant);
+            s.trust_denied = false;
         }
     }
 }
@@ -2143,7 +2160,8 @@ fn handle_client(
     // not validly pinned. Baseline verbs (protocol-hello, ping, readiness-status)
     // pass through so the host can still observe liveness; all other control RPCs
     // are refused with the same VerbNotAuthorized shape as the verb-grant gate.
-    if boot_state.trust_denied && !is_verb_trust_baseline(req.kind_name()) {
+    let (trust_denied, verb_grant) = boot_state.grant_state();
+    if trust_denied && !is_verb_trust_baseline(req.kind_name()) {
         let resp = GuestResponse::VerbNotAuthorized {
             verb: req.kind_name().to_string(),
         };
@@ -2151,7 +2169,7 @@ fn handle_client(
         return;
     }
 
-    if let Some(resp) = enforce_verb_grant(&req, boot_state.verb_grant.as_ref()) {
+    if let Some(resp) = enforce_verb_grant(&req, verb_grant.as_ref()) {
         write_response(&mut file, &resp);
         return;
     }
@@ -2219,7 +2237,10 @@ fn handle_client(
             )),
         },
 
-        GuestRequest::PostRestore { token } => {
+        GuestRequest::PostRestore {
+            token,
+            grant_envelope,
+        } => {
             // First, rotate the VMGenID: feed the host-minted token to the
             // process-resident reseeder. Its state is captured in the snapshot,
             // so two clones of one snapshot both diverge from the captured
@@ -2229,6 +2250,14 @@ fn handle_client(
                 reseed_on_post_restore(token),
                 mvm_guest::genid::GenIdAction::Reseeded
             );
+            // Re-pin the verb grant if the host sent a fresh envelope. This
+            // covers restore across a plan change where the granted verbs or
+            // expiry differ from the snapshot-captured grant.
+            if let Some(env) = grant_envelope.as_ref()
+                && let Some(g) = mvm_guest::vsock::re_pin_verb_grant(env, chrono::Utc::now())
+            {
+                boot_state.set_verb_grant(g);
+            }
             // Then send SIGUSR1 to PID 1 to trigger drive remount + service restart.
             let result = std::process::Command::new("kill")
                 .args(["-USR1", "1"])
@@ -3006,10 +3035,16 @@ fn main() {
         std::path::Path::new("/run/mvm/verb-grant.json"),
         chrono::Utc::now(),
     );
-    let mut boot_state_val = AgentBootState::new(active_profile, boot_at);
-    boot_state_val.verb_grant = pinned_verb_grant;
+    let boot_state_val = AgentBootState::new(active_profile, boot_at);
+    // Initialise verb_grant + trust_denied under the inner lock so the
+    // same path is used by both boot-time init and PostRestore re-pin.
+    {
+        if let Ok(mut s) = boot_state_val.inner.lock() {
+            s.verb_grant = pinned_verb_grant.clone();
+        }
+    }
     let policy = load_verb_trust_policy(std::path::Path::new(VERB_TRUST_POLICY_PATH));
-    match trust_decision(policy.as_ref(), boot_state_val.verb_grant.is_some()) {
+    match trust_decision(policy.as_ref(), pinned_verb_grant.is_some()) {
         TrustDecision::Serve => {}
         TrustDecision::ObserveGap => {
             eprintln!(
@@ -3020,7 +3055,9 @@ fn main() {
             eprintln!(
                 "mvm-guest-agent: verb-trust policy requires a grant but none pinned — refusing control RPCs"
             );
-            boot_state_val.trust_denied = true;
+            if let Ok(mut s) = boot_state_val.inner.lock() {
+                s.trust_denied = true;
+            }
         }
     }
     let boot_state = Arc::new(boot_state_val);

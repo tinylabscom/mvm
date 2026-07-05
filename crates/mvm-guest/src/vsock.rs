@@ -258,6 +258,12 @@ pub enum GuestRequest {
     PostRestore {
         #[serde(default)]
         token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+        /// Host-minted verb-grant envelope to re-pin after restore. When
+        /// the plan changes across a snapshot boundary the host delivers a
+        /// fresh envelope here so the guest updates its pinned grant without
+        /// a reboot. Absent on callers that do not rotate grants.
+        #[serde(default)]
+        grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
     },
     /// Request filesystem diff (changes since boot, from overlay or snapshot).
     FsDiff,
@@ -1509,6 +1515,52 @@ pub fn pin_verb_grant(
     }
 }
 
+/// Verify a `VerbGrantEnvelope` and return the pinned grant, or `None` on
+/// any failure.
+///
+/// Shared verification core used by both boot-time `load_pinned_verb_grant`
+/// (reads from disk) and restore-time `re_pin_verb_grant` (receives the
+/// envelope over vsock). Logs a warning and returns `None` on any error so
+/// callers never crash on a bad envelope.
+///
+/// # Trust note
+/// The verifying key rides in the same launcher-provisioned envelope as the
+/// grant, so this is an integrity check over a launcher-controlled blob — not
+/// proof of an independent issuer. Trust derives from the delivery channel
+/// (kernel-cmdline for boot, vsock for restore).
+pub fn re_pin_verb_grant(
+    envelope: &mvm_core::protocol::vm_backend::VerbGrantEnvelope,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<mvm_core::plan::VerbGrant> {
+    let plan_nonce = match mvm_core::plan::Nonce::from_hex(&envelope.plan_nonce_hex) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("mvm-guest-agent: verb-grant plan_nonce_hex invalid, skipping grant: {e}");
+            return None;
+        }
+    };
+    let host_key = match verifying_key_from_hex(&envelope.pubkey_hex) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("mvm-guest-agent: verb-grant pubkey_hex malformed, skipping grant: {e}");
+            return None;
+        }
+    };
+    match pin_verb_grant(
+        Some(&envelope.grant),
+        Some(&host_key),
+        &envelope.grant.session_id,
+        &plan_nonce,
+        now,
+    ) {
+        Ok(pinned) => pinned,
+        Err(e) => {
+            eprintln!("mvm-guest-agent: verb-grant verification failed, skipping grant: {e}");
+            None
+        }
+    }
+}
+
 /// Read the pinned verb grant written by `/init` and verify it before use.
 ///
 /// The grant's trust derives from the host-signer pubkey embedded in the
@@ -1542,45 +1594,7 @@ pub fn load_pinned_verb_grant(
                 return None;
             }
         };
-    let plan_nonce = match mvm_core::plan::Nonce::from_hex(&envelope.plan_nonce_hex) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!(
-                "mvm-guest-agent: verb-grant plan_nonce_hex invalid, booting without grant: {e}"
-            );
-            return None;
-        }
-    };
-    // The verifying key rides in the same launcher-provisioned envelope as the grant,
-    // so this signature is an integrity check over a cmdline-provisioned blob — NOT proof
-    // of an independent issuer. Trust here derives entirely from kernel-cmdline provenance
-    // (only the launcher sets the cmdline that /init decodes into /run/mvm); a workload or a
-    // separate caller cannot forge it, but this does not provide cryptographic key
-    // separation from an independent anchor. A build-time-provisioned anchor is tracked.
-    let host_key = match verifying_key_from_hex(&envelope.pubkey_hex) {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!(
-                "mvm-guest-agent: verb-grant pubkey_hex malformed, booting without grant: {e}"
-            );
-            return None;
-        }
-    };
-    match pin_verb_grant(
-        Some(&envelope.grant),
-        Some(&host_key),
-        &envelope.grant.session_id,
-        &plan_nonce,
-        now,
-    ) {
-        Ok(pinned) => pinned,
-        Err(e) => {
-            eprintln!(
-                "mvm-guest-agent: verb-grant verification failed, booting without grant: {e}"
-            );
-            None
-        }
-    }
+    re_pin_verb_grant(&envelope, now)
 }
 
 /// Well-known guest path for the dm-verity-measured verb-trust policy baked
@@ -3214,7 +3228,13 @@ pub fn post_restore_at(
     token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
 ) -> Result<PostRestoreReply> {
     let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
-    let resp = send_request(&mut stream, &GuestRequest::PostRestore { token })?;
+    let resp = send_request(
+        &mut stream,
+        &GuestRequest::PostRestore {
+            token,
+            grant_envelope: None,
+        },
+    )?;
     interpret_post_restore(resp)
 }
 
@@ -3531,6 +3551,7 @@ mod tests {
             },
             GuestRequest::PostRestore {
                 token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                grant_envelope: None,
             },
             GuestRequest::FsDiff,
             GuestRequest::StartPortForward { guest_port: 8080 },
@@ -3648,17 +3669,18 @@ mod tests {
         // A non-zero generation token survives the JSON round-trip intact.
         let req = GuestRequest::PostRestore {
             token: [9u8; GENID_BYTES],
+            grant_envelope: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         match serde_json::from_str::<GuestRequest>(&json).unwrap() {
-            GuestRequest::PostRestore { token } => assert_eq!(token, [9u8; GENID_BYTES]),
+            GuestRequest::PostRestore { token, .. } => assert_eq!(token, [9u8; GENID_BYTES]),
             other => panic!("expected PostRestore, got {other:?}"),
         }
 
         // An omitted token (no-rotation caller / template restore) defaults to
         // the all-zero "no rotation" token rather than failing to parse.
         match serde_json::from_str::<GuestRequest>(r#"{"PostRestore":{}}"#).unwrap() {
-            GuestRequest::PostRestore { token } => assert_eq!(token, [0u8; GENID_BYTES]),
+            GuestRequest::PostRestore { token, .. } => assert_eq!(token, [0u8; GENID_BYTES]),
             other => panic!("expected PostRestore, got {other:?}"),
         }
 
@@ -5733,6 +5755,7 @@ mod tests {
             },
             GuestRequest::PostRestore {
                 token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                grant_envelope: None,
             },
             GuestRequest::FsDiff,
             GuestRequest::StartPortForward { guest_port: 1 },
@@ -6004,6 +6027,7 @@ mod tests {
             GuestRequest::Wake,
             GuestRequest::PostRestore {
                 token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                grant_envelope: None,
             },
             GuestRequest::UpdateIdleTimeout { secs: 600 },
             GuestRequest::MountVolume {
@@ -6289,6 +6313,7 @@ mod tests {
             (
                 GuestRequest::PostRestore {
                     token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                    grant_envelope: None,
                 },
                 "post-restore",
             ),
@@ -7153,6 +7178,105 @@ mod rpc_client_tests {
             result.is_none(),
             "absent grant file must return None (no-op boot)"
         );
+    }
+
+    // ---- re_pin_verb_grant ----
+
+    #[test]
+    fn re_pin_verb_grant_valid_returns_some() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[20u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([21u8; 16]);
+        let grant_path = write_grant_fixture(dir.path(), &signer, "sess-repin", &nonce, 10);
+        let now = chrono::Utc::now();
+        // Load the envelope from the fixture file and call re_pin_verb_grant directly.
+        let raw = std::fs::read(&grant_path).unwrap();
+        let envelope: mvm_core::protocol::vm_backend::VerbGrantEnvelope =
+            serde_json::from_slice(&raw).unwrap();
+        let result = re_pin_verb_grant(&envelope, now);
+        assert!(
+            result.is_some(),
+            "valid envelope must yield Some from re_pin_verb_grant"
+        );
+        assert_eq!(result.unwrap().session_id, "sess-repin");
+    }
+
+    #[test]
+    fn re_pin_verb_grant_wrong_key_returns_none() {
+        use mvm_core::plan::{VerbGrant, VerbId};
+        use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[22u8; 32]);
+        let attacker = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([24u8; 16]);
+        let now = chrono::Utc::now();
+        let mut grant = VerbGrant {
+            session_id: "sess-wrong".into(),
+            plan_nonce: nonce.clone(),
+            not_after: now + chrono::Duration::minutes(10),
+            verbs: vec![VerbId::new("ping").unwrap()],
+            sig: vec![],
+        };
+        grant.sig = {
+            use ed25519_dalek::Signer;
+            signer.sign(&grant.signing_bytes()).to_bytes().to_vec()
+        };
+        // Envelope carries the attacker's pubkey but the grant is signed by `signer`.
+        let attacker_pubkey_hex: String = attacker
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: attacker_pubkey_hex,
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            grant,
+        };
+        let result = re_pin_verb_grant(&envelope, now);
+        assert!(
+            result.is_none(),
+            "grant signed by different key than envelope.pubkey_hex must return None"
+        );
+    }
+
+    // ---- PostRestore back-compat + grant_envelope roundtrip ----
+
+    #[test]
+    fn post_restore_grant_envelope_defaults_absent_and_roundtrips() {
+        use mvm_core::crypto::vmgenid::GENID_BYTES;
+
+        // Back-compat: an old PostRestore frame without the grant_envelope field
+        // still deserializes successfully with grant_envelope defaulting to None.
+        let old = r#"{"token":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"#;
+        let g: GuestRequest =
+            serde_json::from_str(&format!(r#"{{"PostRestore":{}}}"#, old)).unwrap();
+        match g {
+            GuestRequest::PostRestore { grant_envelope, .. } => assert!(
+                grant_envelope.is_none(),
+                "absent grant_envelope must default to None"
+            ),
+            _ => panic!("expected PostRestore"),
+        }
+
+        // A frame with an explicit null also deserializes correctly.
+        let with_null =
+            r#"{"PostRestore":{"token":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"grant_envelope":null}}"#;
+        match serde_json::from_str::<GuestRequest>(with_null).unwrap() {
+            GuestRequest::PostRestore { grant_envelope, .. } => assert!(grant_envelope.is_none()),
+            _ => panic!("expected PostRestore"),
+        }
+
+        // A frame without both token and grant_envelope defaults both.
+        match serde_json::from_str::<GuestRequest>(r#"{"PostRestore":{}}"#).unwrap() {
+            GuestRequest::PostRestore {
+                token,
+                grant_envelope,
+            } => {
+                assert_eq!(token, [0u8; GENID_BYTES]);
+                assert!(grant_envelope.is_none());
+            }
+            _ => panic!("expected PostRestore"),
+        }
     }
 
     // ---- trust_decision + load_verb_trust_policy ----
