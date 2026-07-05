@@ -4,7 +4,8 @@
 **Status:** Design approved; implementation plan pending.
 **Scope:** Add a `machine reconfigure` verb that changes a narrow set of
 config fields on a named machine and relaunches it under a fresh signed
-`ExecutionPlan`, preserving the machine's identity.
+`ExecutionPlan`, preserving the machine's identity — exposed both as a
+CLI verb and as an operation on the `MvmClient` facade (local + remote).
 
 ## Problem
 
@@ -93,6 +94,59 @@ genuinely tune between runs (network + resources).
    relaunch (durable data lives in host shares, not guest memory), so
    "same machine" holds across the reconfigure.
 
+## Client facade (`MvmClient`)
+
+The operation must also land on the `MvmClient` facade
+(`crates/mvm-client/src/client.rs`) so programmatic and remote/cloud
+callers can reconfigure a machine, not only the CLI.
+
+Honest context: the facade is a real but **secondary** surface — the CLI
+machine verbs call the backend directly today and do **not** route
+through `MvmClient` (parallel paths). "Lands in the client" therefore
+means adding the operation to the facade surface and both its impls; it
+does not mean rewiring the CLI onto the facade (out of scope).
+
+The facade carries its own thin intent DTOs (`memory_mib: u32`, `cpus`,
+`env` — no host paths), distinct from the CLI's `MachineSpec`. The
+reconfigure op follows that convention.
+
+1. **Trait method** (`client.rs`):
+   ```rust
+   async fn reconfigure_machine(
+       &self, id: &MachineId, cfg: ReconfigureRequest,
+   ) -> Result<MachineState>;
+   ```
+2. **DTO** (`dto.rs`, `#[serde(deny_unknown_fields)]`) — all-optional =
+   patch semantics:
+   ```rust
+   pub struct ReconfigureRequest {
+       pub net: Option<bool>,
+       pub allow_host: Option<Vec<String>>,
+       pub cpus: Option<u32>,
+       pub memory_mib: Option<u32>,
+   }
+   ```
+   **Facade scope is the common four.** `mem_initial` is deliberately
+   **not** on the facade DTO: the facade doesn't model it at launch
+   either (its `MachineSpec` has no `mem_initial`), so exposing it only
+   on reconfigure would be lopsided. It stays a CLI-only field. Adding
+   it later is a non-breaking `Option` field behind the same DTO if a
+   facade caller ever needs it.
+3. **`LocalBackend`** (`mvm-client-local`): **delegating shell-out** — it
+   invokes `mvmctl machine reconfigure <name> …`, exactly as it already
+   does for the other verbs. The CLI verb stays the single source of
+   truth for the patch/relaunch logic; the facade does not duplicate it.
+4. **`GatewayBackend`** (`gateway.rs`): client-side
+   `POST /api/v1/sandboxes/{id}/reconfigure` carrying the
+   `ReconfigureRequest` body, using the existing `endpoint()` /
+   `authed()` helpers and fail-closed transport rules.
+
+**Repo boundary.** The *client side* of the remote path lands in this
+repo (the `GatewayBackend` method). The matching **server handler lives
+in mvmd** (separate repo). This plan delivers the client method plus a
+coordination note for the mvmd `POST …/reconfigure` endpoint; it does
+not implement the server handler.
+
 ## Testing
 
 - **Patch merge (unit):** each in-scope field overrides in isolation
@@ -104,6 +158,12 @@ genuinely tune between runs (network + resources).
   stop/start call.
 - **Error path:** reconfigure of an unknown machine name fails cleanly.
 - **CLI:** arg-parse / help-text coverage in `tests/cli.rs`.
+- **Facade DTO:** `ReconfigureRequest` serde round-trip +
+  `deny_unknown_fields` rejection of unexpected fields.
+- **Facade impls:** `LocalBackend::reconfigure_machine` builds the
+  correct `mvmctl machine reconfigure` argv from a request (only set
+  fields become flags); `GatewayBackend::reconfigure_machine` targets
+  the `…/reconfigure` endpoint with the serialized body (mockable HTTP).
 
 ## Rejected alternatives
 
@@ -164,4 +224,8 @@ Can be added later behind the same spec seam if wanted.
 
 State-preserving/warm reconfigure; network presets; changing
 volumes/flake/image (those remain a full `machine run` — at some point
-changing the image is *replacing* the workload, not reconfiguring it).
+changing the image is *replacing* the workload, not reconfiguring it);
+`mem_initial` on the facade DTO (CLI-only); rewiring the CLI machine
+verbs to route through `MvmClient` (they stay direct-to-backend); the
+mvmd server-side `POST …/reconfigure` handler (separate repo — this plan
+lands only the client side + a coordination note).
