@@ -925,8 +925,9 @@ pub(in crate::commands) struct MachineExecArgs {
     /// Accepted as an alias for `-t` so `-it` parses.
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
-    /// Argv to run inside the guest (use `--` to separate).
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+    /// Argv to run inside the guest (use `--` to separate). Omit to drop into
+    /// an interactive shell, like `machine shell`.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub argv: Vec<String>,
 }
 
@@ -2340,21 +2341,28 @@ fn stop_failed_machine_start(name: &str) {
 
 fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) -> Result<()> {
     let spec = ensure_machine_spec_exists(&args.name)?;
+    // No argv: `machine exec <name>` drops into an interactive shell, matching
+    // `machine shell <name>` (command: None launches the guest's default shell).
+    let command = if args.argv.is_empty() {
+        None
+    } else {
+        Some(machine_exec_command(&args.argv))
+    };
     if args.tty || args.interactive {
         use std::io::IsTerminal as _;
         require_tty(std::io::stdin().is_terminal())?;
         super::vm::console::enforce_accessible_gate(&args.name, args.force)?;
-        return console::console_pty_command(
-            &args.name,
-            machine_exec_command(&args.argv),
-            machine_console_env(spec.ssh_agent),
-        );
+        let env = machine_console_env(spec.ssh_agent);
+        return match command {
+            Some(cmd) => console::console_pty_command(&args.name, cmd, env),
+            None => console::console_interactive_with_env_and_argv(&args.name, env, Vec::new()),
+        };
     }
     console::run(
         cli,
         console::Args {
             name: args.name,
-            command: Some(machine_exec_command(&args.argv)),
+            command,
             force: args.force,
             env: machine_console_env(spec.ssh_agent),
             pty_argv: Vec::new(),
@@ -4119,9 +4127,16 @@ mod tests {
     }
 
     #[test]
-    fn exec_requires_argv() {
-        let err = parse(&["exec", "web"]).expect_err("argv is required");
-        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    fn exec_argv_is_optional_for_interactive_shell() {
+        // `machine exec <name>` with no argv parses and yields an empty argv,
+        // which the handler turns into an interactive shell (like `machine shell`).
+        match parse(&["exec", "web"]).expect("parse") {
+            MachineAction::Exec(args) => {
+                assert_eq!(args.name, "web");
+                assert!(args.argv.is_empty());
+            }
+            other => panic!("expected exec action, got {other:?}"),
+        }
     }
 
     #[test]

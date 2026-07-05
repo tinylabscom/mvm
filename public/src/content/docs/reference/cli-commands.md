@@ -420,6 +420,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine rm <name>... --yes --json` | Print a JSON array deletion summary |
 | `mvmctl machine exec <name> -- <cmd>...` | Run a command in an already-started named machine |
 | `mvmctl machine exec <name> -it -- <cmd>...` | Run a command in an already-started named machine attached to a PTY |
+| `mvmctl machine exec <name>` | Omit the command to drop into an interactive shell (same as `machine shell`) |
 | `mvmctl machine shell <name>` | Attach an interactive shell/console to an already-started named machine |
 | `mvmctl machine stop <name>...` | Stop one or more already-started named machines (prompts for confirmation; pass `--yes` to skip) |
 | `mvmctl machine check-artifact <artifact.mvm>` | Verify a portable artifact and preview its admission posture without extracting or booting |
@@ -467,8 +468,8 @@ mvmctl machine stop  blue-fox-3f2a --yes      # tear it down when done
 **Interactive is dev-only.** `-t`/`--tty` attaches the foreground command to a
 PTY and is refused for a sealed/production image (claim 15 — no interactive
 access to a sealed microVM) and when stdin is not a terminal. `machine run -it`
-requires an argv after `--`; use `machine shell <name>` for the default
-shell on an already-running machine.
+requires an argv after `--`; use `machine shell <name>` (or `machine exec
+<name>` with no argv) for the default shell on an already-running machine.
 
 `machine create` accepts either `--image <ref>` or an image-backed manifest, not
 both. When `--image` is omitted, it searches the current directory for
