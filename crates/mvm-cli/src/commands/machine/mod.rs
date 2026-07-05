@@ -2866,6 +2866,11 @@ fn run_reconfigure(args: MachineReconfigureArgs) -> Result<()> {
 
     let was_running = machine_is_running(&args.name);
     overwrite_machine_spec(&desired)?;
+    mvm_core::audit_emit!(
+        ConfigChange,
+        vm: &args.name,
+        "action=machine.reconfigure changed={changed}"
+    );
 
     if was_running {
         eprintln!(
