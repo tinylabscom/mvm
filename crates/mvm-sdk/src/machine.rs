@@ -643,7 +643,8 @@ impl MachineStartBuilder {
     /// Return the `machine` subcommand argv, excluding the `mvmctl` program.
     pub fn machine_args(&self) -> Result<Vec<String>, MachineError> {
         let name = require_non_empty(self.name.clone(), "name")?;
-        let mut args = vec!["start".to_string(), "--name".to_string(), name];
+        // `machine start` takes a positional name, not `--name`.
+        let mut args = vec!["start".to_string(), name];
         append_optional(&mut args, "--receipt", self.receipt.as_deref())?;
         if self.json {
             args.push("--json".to_string());
@@ -766,8 +767,10 @@ impl MachineStopBuilder {
     pub fn machine_args(&self) -> Result<Vec<String>, MachineError> {
         let name = require_non_empty(self.name.clone(), "name")?;
         // `machine stop` takes a positional name, not `--name` (the CLI parser
-        // rejects the flag form). See the shared `stop.argv` fixture.
-        Ok(vec!["stop".to_string(), name])
+        // rejects the flag form). See the shared `stop.argv` fixture. Pass
+        // `--yes` because the SDK runs the CLI non-interactively — without it
+        // `machine stop` prompts for y/n confirmation and aborts on no TTY.
+        Ok(vec!["stop".to_string(), name, "--yes".to_string()])
     }
 
     /// Execute this builder with the default [`MachineClient`].

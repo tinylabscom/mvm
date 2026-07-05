@@ -750,7 +750,7 @@ pub(in crate::commands) struct MachineRemoveArgs {
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct MachineStartArgs {
     /// Persistent machine name.
-    #[arg(long)]
+    #[arg(value_name = "NAME")]
     pub name: String,
     /// Write a signed machine-start receipt to this path.
     #[arg(long, value_name = "PATH")]
@@ -828,6 +828,9 @@ pub(in crate::commands) struct MachineStopArgs {
     /// Stop all running VMs.
     #[arg(long, conflicts_with = "name")]
     pub all: bool,
+    /// Skip the interactive confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2110,6 +2113,16 @@ fn shell_machine(cli: &Cli, args: MachineShellArgs, cfg: &MvmConfig) -> Result<(
 }
 
 fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) -> Result<()> {
+    if !args.yes {
+        let prompt = match args.name.as_deref() {
+            Some(name) => format!("Stop machine {name:?}?"),
+            None => "Stop all running machines?".to_string(),
+        };
+        if !crate::ui::confirm(&prompt) {
+            println!("aborted");
+            return Ok(());
+        }
+    }
     if let Some(ref name) = args.name {
         reap_proxy(name);
     }
@@ -3567,7 +3580,6 @@ mod tests {
         }
         match parse(&[
             "start",
-            "--name",
             "web",
             "--receipt",
             "/tmp/web.receipt.json",
@@ -3639,12 +3651,12 @@ mod tests {
     fn start_quiet_is_internal_only_and_defaults_off() {
         // `quiet` is not a user-facing flag — the standalone `machine start`
         // and the detached path must keep printing the boot banner.
-        match parse(&["start", "--name", "web"]).expect("parse") {
+        match parse(&["start", "web"]).expect("parse") {
             MachineAction::Start(args) => assert!(!args.quiet),
             other => panic!("expected start action, got {other:?}"),
         }
         assert!(
-            parse(&["start", "--name", "web", "--quiet"]).is_err(),
+            parse(&["start", "web", "--quiet"]).is_err(),
             "--quiet must not be exposed as a CLI flag"
         );
     }
@@ -4524,7 +4536,6 @@ ssh_agent = true
             "mvmctl",
             "machine",
             "start",
-            "--name",
             "web",
             "--receipt",
             "/tmp/web.receipt.json",
@@ -4573,6 +4584,7 @@ ssh_agent = true
             MachineAction::Stop(args) => {
                 assert_eq!(args.name.as_deref(), Some("web"));
                 assert!(!args.all);
+                assert!(!args.yes, "confirmation is required by default");
             }
             other => panic!("expected stop action, got {other:?}"),
         }
@@ -4580,6 +4592,25 @@ ssh_agent = true
             MachineAction::Stop(args) => {
                 assert!(args.name.is_none());
                 assert!(args.all);
+                assert!(!args.yes);
+            }
+            other => panic!("expected stop action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn machine_stop_yes_skips_confirmation() {
+        match parse(&["stop", "web", "--yes"]).expect("parse named --yes") {
+            MachineAction::Stop(args) => {
+                assert_eq!(args.name.as_deref(), Some("web"));
+                assert!(args.yes);
+            }
+            other => panic!("expected stop action, got {other:?}"),
+        }
+        match parse(&["stop", "--all", "--yes"]).expect("parse --all --yes") {
+            MachineAction::Stop(args) => {
+                assert!(args.all);
+                assert!(args.yes);
             }
             other => panic!("expected stop action, got {other:?}"),
         }

@@ -193,10 +193,10 @@ describe("Machine persistent lifecycle", () => {
 
     const text = readFixtureLog().join("\n");
     expect(text).toContain("machine:create --name devbox --manifest mvm.toml --profile dev --force");
-    expect(text).toContain("machine:start --name devbox --dry-run");
+    expect(text).toContain("machine:start devbox --dry-run");
     expect(text).toContain("machine:exec --name devbox --force -- echo hi");
     expect(text).toContain("machine:shell --name devbox --force");
-    expect(text).toContain("machine:stop devbox");
+    expect(text).toContain("machine:stop devbox --yes");
   });
 
   it("emits the shared start/exec/shell/stop argv fixtures", () => {

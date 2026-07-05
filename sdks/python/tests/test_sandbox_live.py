@@ -323,7 +323,7 @@ def test_kill_shells_to_mvmctl_down(tmp_path: Path) -> None:
     sb.kill()
 
     calls = _read_fixture_log(tmp_path)
-    assert any(c == "machine stop sb-kill-vm" for c in calls)
+    assert any(c == "machine stop sb-kill-vm --yes" for c in calls)
 
 
 def test_context_manager_kills_on_exit(tmp_path: Path) -> None:

@@ -697,7 +697,9 @@ export class LiveTransport {
       }
     }
     this.forwards = [];
-    const shell = [this.mvmCliBin, "machine", "stop", this.vmId];
+    // `--yes` skips the interactive confirmation prompt; the sandbox tears down
+    // non-interactively.
+    const shell = [this.mvmCliBin, "machine", "stop", this.vmId, "--yes"];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const child = require("node:child_process") as typeof import("node:child_process");
     try {

@@ -311,7 +311,7 @@ describe("Sandbox.kill (live mode)", () => {
     sb.kill();
 
     const calls = readFixtureLog();
-    expect(calls).toContain("machine stop sb-kill-vm");
+    expect(calls).toContain("machine stop sb-kill-vm --yes");
   });
 
   it("[Symbol.dispose] kills once", () => {

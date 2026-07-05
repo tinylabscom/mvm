@@ -840,7 +840,9 @@ class _LiveTransport:
             if proc.poll() is None:
                 proc.terminate()
         self._forwards.clear()
-        shell = [self.mvm_cli_bin, "machine", "stop", self.vm_id]
+        # `--yes` skips the interactive confirmation prompt; the sandbox tears
+        # down non-interactively.
+        shell = [self.mvm_cli_bin, "machine", "stop", self.vm_id, "--yes"]
         try:
             result = subprocess.run(
                 shell,

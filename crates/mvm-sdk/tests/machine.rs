@@ -211,7 +211,6 @@ fn persistent_machine_lifecycle_builders_reuse_machine_cli() {
         [
             "machine",
             "start",
-            "--name",
             "devbox",
             "--receipt",
             "/tmp/start.json",
@@ -243,8 +242,9 @@ fn persistent_machine_lifecycle_builders_reuse_machine_cli() {
     );
 
     machine.stop().run_with(&client).expect("stop");
-    // `machine stop` takes a positional name, not `--name`.
-    assert_eq!(fake.argv(), ["machine", "stop", "devbox"]);
+    // `machine stop` takes a positional name, not `--name`, plus `--yes` to
+    // skip the interactive confirmation prompt when the SDK shells out.
+    assert_eq!(fake.argv(), ["machine", "stop", "devbox", "--yes"]);
 }
 
 #[test]

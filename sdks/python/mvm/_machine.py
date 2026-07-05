@@ -217,7 +217,8 @@ def _machine_start_argv(
     json: bool = False,
     dry_run: bool = False,
 ) -> list[str]:
-    argv = ["start", "--name", _require_non_empty_str(name, "name")]
+    # `machine start` takes a positional name, not `--name`.
+    argv = ["start", _require_non_empty_str(name, "name")]
     if receipt is not None:
         argv.extend(["--receipt", _require_non_empty_str(receipt, "receipt")])
     if json:
@@ -252,8 +253,10 @@ def _machine_shell_argv(*, name: str, force: bool = False) -> list[str]:
 
 def _machine_stop_argv(*, name: str) -> list[str]:
     # `machine stop` takes a positional name, not `--name` (the CLI rejects the
-    # flag form). See the shared `stop.argv` fixture.
-    return ["stop", _require_non_empty_str(name, "name")]
+    # flag form). See the shared `stop.argv` fixture. Pass `--yes` because the
+    # SDK runs the CLI non-interactively — without it `machine stop` prompts for
+    # y/n confirmation and aborts on no TTY.
+    return ["stop", _require_non_empty_str(name, "name"), "--yes"]
 
 
 def _machine_ls_argv(*, json: bool = False) -> list[str]:

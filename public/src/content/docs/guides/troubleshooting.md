@@ -246,7 +246,7 @@ with no other config flags — a matching config reuses the running machine.
 mvmctl machine ls                 # list persisted machines
 mvmctl machine shell --name <N>   # interactive shell (dev)
 mvmctl machine exec  --name <N> -- <cmd>   # one-shot command
-mvmctl machine stop  --name <N>   # tear it down
+mvmctl machine stop  <N>          # tear it down (prompts; add --yes to skip)
 ```
 
 ## Network Issues

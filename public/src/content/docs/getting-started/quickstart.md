@@ -36,9 +36,9 @@ For a named machine that survives across starts:
 
 ```bash
 mvmctl machine create --name alpine-dev --image alpine
-mvmctl machine start --name alpine-dev
+mvmctl machine start alpine-dev
 mvmctl machine exec --name alpine-dev -- uname -a
-mvmctl machine stop --name alpine-dev
+mvmctl machine stop alpine-dev
 ```
 
 ## 2. Launch the Dev Environment

@@ -1,5 +1,4 @@
 start
---name
 web
 --receipt
 /tmp/mvm-sdk-machine.receipt.json
