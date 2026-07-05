@@ -56,10 +56,10 @@ Use named machines when you want state across starts:
 
 ```bash
 mvmctl machine create --name alpine-dev --image alpine:3.20 --net
-mvmctl machine start --name alpine-dev
+mvmctl machine start alpine-dev
 mvmctl machine exec --name alpine-dev -- apk add jq
 mvmctl machine shell --name alpine-dev
-mvmctl machine stop --name alpine-dev
+mvmctl machine stop alpine-dev
 ```
 
 The durable spec is stored under the mvm data directory, not in your source tree.
@@ -84,7 +84,7 @@ ssh_agent = true
 
 ```bash
 mvmctl machine create --name js-dev --manifest ./mvm.toml
-mvmctl machine start --name js-dev
+mvmctl machine start js-dev
 ```
 
 Unknown manifest keys are rejected. That is intentional: typos should not

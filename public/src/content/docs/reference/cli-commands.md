@@ -405,11 +405,11 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine create --name <name> --image <ref> --net --allow-host <host[:port]>` | Persist a named spec with opt-in egress settings for future lifecycle starts |
 | `mvmctl machine create --name <name> --manifest <path>` | Persist an image-backed `mvm.toml` / `Mvmfile.toml` as a named machine spec |
 | `mvmctl machine create --name <name> --image <ref> --force` | Overwrite an existing named machine spec |
-| `mvmctl machine start --name <name>` | Boot a persisted named machine through the admitted OCI-backed start path |
-| `mvmctl machine start --name <name> --dry-run` | Validate and explain the effective machine-start policy without booting a VM |
-| `mvmctl machine start --name <name> --dry-run --json` | Print the machine-start preflight summary as redacted JSON |
-| `mvmctl machine start --name <name> --json` | Print a redacted JSON start summary instead of plain text |
-| `mvmctl machine start --name <name> --receipt <path>` | Write a signed machine-start receipt with effective policy plus the resolved digest and start timestamp |
+| `mvmctl machine start <name>` | Boot a persisted named machine through the admitted OCI-backed start path |
+| `mvmctl machine start <name> --dry-run` | Validate and explain the effective machine-start policy without booting a VM |
+| `mvmctl machine start <name> --dry-run --json` | Print the machine-start preflight summary as redacted JSON |
+| `mvmctl machine start <name> --json` | Print a redacted JSON start summary instead of plain text |
+| `mvmctl machine start <name> --receipt <path>` | Write a signed machine-start receipt with effective policy plus the resolved digest and start timestamp |
 | `mvmctl machine ls` | List persisted named machine specs |
 | `mvmctl machine ls --json` | Print persisted named machine specs as JSON |
 | `mvmctl machine inspect <name>` | Show one persisted named machine spec |
@@ -420,7 +420,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine exec --name <name> -- <cmd>...` | Run a command in an already-started named machine |
 | `mvmctl machine exec --name <name> -it -- <cmd>...` | Run a command in an already-started named machine attached to a PTY |
 | `mvmctl machine shell --name <name>` | Attach an interactive shell/console to an already-started named machine |
-| `mvmctl machine stop --name <name>` | Stop an already-started named machine |
+| `mvmctl machine stop <name>` | Stop an already-started named machine (prompts for confirmation; pass `--yes` to skip) |
 | `mvmctl machine check-artifact <artifact.mvm>` | Verify a portable artifact and preview its admission posture without extracting or booting |
 | `mvmctl machine check-artifact <artifact.mvm> --key <pubkey>` | Verify with an explicit raw Ed25519 public key |
 | `mvmctl machine check-artifact <artifact.mvm> --json` | Print the verified artifact/admission preview as JSON |
@@ -458,7 +458,7 @@ mvmctl machine run -d --image alpine          # boots, prints e.g. "blue-fox-3f2
 mvmctl machine shell --name blue-fox-3f2a     # reconnect (dev PTY)
 mvmctl machine exec  --name blue-fox-3f2a -- ps   # one-shot command in the running machine
 mvmctl machine exec  --name blue-fox-3f2a -it -- /bin/sh   # PTY command in the running machine
-mvmctl machine stop  --name blue-fox-3f2a     # tear it down when done
+mvmctl machine stop  blue-fox-3f2a --yes      # tear it down when done
 ```
 
 `-d --name <N>` does the same with a name you choose.

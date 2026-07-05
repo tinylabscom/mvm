@@ -208,7 +208,8 @@ export function machineCheckArtifactArgv(options: MachineCheckArtifactOptions): 
 }
 
 export function machineStartArgv(name: string, options: MachineStartOptions = {}): string[] {
-  const argv = ["start", "--name", requireString(name, "name")];
+  // `machine start` takes a positional name, not `--name`.
+  const argv = ["start", requireString(name, "name")];
   if (options.receipt !== undefined) argv.push("--receipt", requireString(options.receipt, "receipt"));
   if (options.json) argv.push("--json");
   if (options.dryRun) argv.push("--dry-run");
@@ -236,8 +237,10 @@ export function machineShellArgv(name: string, options: MachineShellOptions = {}
 
 export function machineStopArgv(name: string): string[] {
   // `machine stop` takes a positional name, not `--name` (the CLI rejects the
-  // flag form). See the shared `stop.argv` fixture.
-  return ["stop", requireString(name, "name")];
+  // flag form). See the shared `stop.argv` fixture. Pass `--yes` because the
+  // SDK runs the CLI non-interactively — without it `machine stop` prompts for
+  // y/n confirmation and aborts on no TTY.
+  return ["stop", requireString(name, "name"), "--yes"];
 }
 
 export function machineLsArgv(options: MachineLsOptions = {}): string[] {

@@ -331,7 +331,7 @@ fn core_demo_dev_compile_up_ping() {
 
     // 4) tear down the workload and builder (best-effort, still bounded).
     let _ = mvmctl(
-        &["machine", "stop", WORKLOAD_NAME],
+        &["machine", "stop", WORKLOAD_NAME, "--yes"],
         &scratch,
         "machine-stop",
         DOWN_BUDGET,
