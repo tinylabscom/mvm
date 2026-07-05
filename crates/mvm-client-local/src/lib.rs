@@ -237,6 +237,26 @@ impl MvmClient for LocalBackend {
             .collect())
     }
 
+    async fn inspect_machine(&self, id: &MachineId) -> Result<MachineState> {
+        self.backend
+            .list()
+            .map_err(backend_err)?
+            .into_iter()
+            .map(to_state)
+            .find(|m| m.id == *id)
+            .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })
+    }
+
+    async fn create_machine(&self, _spec: MachineSpec) -> Result<MachineState> {
+        // Create-without-boot needs the machine registry (spec persistence),
+        // which is a CLI-side path not wired into the in-process backend.
+        Err(MvmError::Backend {
+            reason: "local create (persist without boot) is not wired in the in-process backend; \
+                     use run_machine, or the CLI's `machine create`"
+                .into(),
+        })
+    }
+
     async fn run_machine(&self, spec: MachineSpec) -> Result<MachineState> {
         let rootfs = resolve_local_rootfs(&spec.image, &spec.name).await?;
         let (verity_path, roothash) = host_verity_sidecars(&rootfs);
@@ -278,8 +298,28 @@ impl MvmClient for LocalBackend {
         })
     }
 
+    async fn start_machine(&self, _id: &MachineId) -> Result<MachineState> {
+        // Starting a created/stopped machine needs the machine registry (spec
+        // persistence) to know what to boot — a CLI-side path not wired here.
+        Err(MvmError::Backend {
+            reason: "local start of a created machine is not wired in the in-process backend; \
+                     use run_machine, or the CLI's `machine start`"
+                .into(),
+        })
+    }
+
     async fn stop_machine(&self, id: &MachineId) -> Result<()> {
         self.backend.stop(&VmId(id.0.clone())).map_err(backend_err)
+    }
+
+    async fn remove_machine(&self, _id: &MachineId) -> Result<()> {
+        // The backend dispatch (`AnyBackend`) exposes stop/list/status but no
+        // destroy seam, so a full remove (delete the machine record) isn't
+        // wired; that lifecycle lives on the CLI's `machine rm`.
+        Err(MvmError::Backend {
+            reason: "local remove requires a backend destroy seam (not wired); use `machine rm`"
+                .into(),
+        })
     }
 
     async fn machine_logs(&self, id: &MachineId, opts: LogOpts) -> Result<Vec<u8>> {
