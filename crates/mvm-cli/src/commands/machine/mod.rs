@@ -2431,6 +2431,7 @@ fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<
     // below treat it as a manifest-backed source.
     let resolved_flake_slot = if let Some(flake_ref) = args.flake.take() {
         let slot_hash = build::build_flake_to_slot(&flake_ref, args.flake_profile.as_deref())?;
+        args.manifest = Some(slot_hash.clone());
         Some(slot_hash)
     } else {
         None
@@ -2972,6 +2973,18 @@ mod tests {
             let mode = args.resolve_mode().expect("resolve");
             assert_eq!(mode, *expected, "argv {argv:?}");
         }
+    }
+
+    #[test]
+    fn resolve_mode_accepts_materialized_flake_slot_after_build() {
+        let mut args = parse_run(&["run", "--flake", ".", "--", "cmd"]).expect("parse");
+        let flake = args.flake.take().expect("flake source present");
+        assert_eq!(flake, ".");
+        args.manifest = Some("materialized-slot".to_string());
+
+        let mode = args.resolve_mode().expect("materialized flake is a source");
+
+        assert_eq!(mode, MachineRunMode::Transient);
     }
 
     #[test]
