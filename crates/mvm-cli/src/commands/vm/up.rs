@@ -627,12 +627,26 @@ fn attach_host_signer_pubkey_config_for_plan(
     if plan.agent_verbs.is_none() {
         return Ok(());
     }
-    let content = std::fs::read_to_string(host_signer_public_path).with_context(|| {
+    let public_bytes = std::fs::read(host_signer_public_path).with_context(|| {
         format!(
             "reading host-signer public key for config drive at {}",
             host_signer_public_path.display()
         )
     })?;
+    let public_array: [u8; 32] = public_bytes.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "host-signer public key at {} must be 32 bytes, got {}",
+            host_signer_public_path.display(),
+            public_bytes.len()
+        )
+    })?;
+    ed25519_dalek::VerifyingKey::from_bytes(&public_array).with_context(|| {
+        format!(
+            "parsing host-signer public key at {}",
+            host_signer_public_path.display()
+        )
+    })?;
+    let content = format!("{}\n", hex::encode(public_bytes));
     start_config
         .config_files
         .retain(|f| f.name != PUBLIC_FILENAME);
@@ -1544,8 +1558,9 @@ mod host_signer_pubkey_config_tests {
     fn attaches_pubkey_when_plan_has_agent_verbs() {
         let dir = tempfile::tempdir().unwrap();
         let pubkey_path = dir.path().join(PUBLIC_FILENAME);
-        let pubkey = format!("{}\n", "a".repeat(64));
-        std::fs::write(&pubkey_path, &pubkey).unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let pubkey = signer.verifying_key().to_bytes();
+        std::fs::write(&pubkey_path, pubkey).unwrap();
         let mut plan = PlanFixture::new().build();
         plan.agent_verbs = Some(vec![VerbId::new("ping").unwrap()]);
         let mut start_config = VmStartConfig::default();
@@ -1555,7 +1570,7 @@ mod host_signer_pubkey_config_tests {
         assert_eq!(start_config.config_files.len(), 1);
         let file = &start_config.config_files[0];
         assert_eq!(file.name, PUBLIC_FILENAME);
-        assert_eq!(file.content, pubkey);
+        assert_eq!(file.content, format!("{}\n", hex::encode(pubkey)));
         assert_eq!(file.mode, 0o444);
     }
 

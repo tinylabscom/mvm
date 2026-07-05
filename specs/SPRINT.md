@@ -426,6 +426,20 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 ## Planning updates
 
+- [x] Advanced
+      [`plans/219-agent-verb-grant-delivery.md`](plans/219-agent-verb-grant-delivery.md)
+      live validation on the Linux/KVM host. The Firecracker restricted-grant
+      proof booted `mvm219-fc-grant` with `--agent-verb ping --agent-verb
+      run-entrypoint`; direct agent RPC over `runtime/v.sock` returned
+      `ProtocolHelloAck`, `Ping -> Pong`, and unlisted `UpdateIdleTimeout ->
+      VerbNotAuthorized`. The true grant-less regression proof used a
+      dev-profile boot (`mvm219-fc-devnone`) with no serialized
+      `agent_verbs`, no `verb-grant.json`, and `UpdateIdleTimeoutAck`.
+      `mvmctl trust audit verify --tenant local` passed. The pass found and
+      fixed the host-signer public-key format mismatch (raw 32-byte file vs
+      string config-drive content). Remaining Plan 219 gates: macOS HVF/Vz
+      live proof, manifest/flake `RunEntrypoint` success, live caller-side
+      `verb_denied` emission, full-suite checks, and ADR-103 acceptance.
 - [x] Started
       [`plans/238-streamed-ext4-materialization-and-oracles.md`](plans/238-streamed-ext4-materialization-and-oracles.md)
       to turn the post-Plan-221 rootfs follow-up into an execution plan. It

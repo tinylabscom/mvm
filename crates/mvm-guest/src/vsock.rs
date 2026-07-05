@@ -1497,16 +1497,29 @@ pub fn verifying_key_from_hex(hex: &str) -> anyhow::Result<ed25519_dalek::Verify
 /// Load the host-signer verifying key from `path`.
 ///
 /// - File absent  -> `Ok(None)`   (grant-less boot; no key to verify against)
+/// - File present, valid raw 32-byte Ed25519 key -> `Ok(Some(key))`
 /// - File present, valid 64-char hex of a 32-byte Ed25519 key -> `Ok(Some(key))`
 /// - File present but malformed -> `Err`  (fail closed; do not silently ignore)
 pub fn load_host_signer_verifying_key(
     path: &std::path::Path,
 ) -> anyhow::Result<Option<ed25519_dalek::VerifyingKey>> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(s) => s,
+    let raw = match std::fs::read(path) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(anyhow::anyhow!("failed to read host-signer pubkey: {e}")),
     };
+    if raw.len() == 32 {
+        let key_bytes: [u8; 32] = raw
+            .as_slice()
+            .try_into()
+            .expect("length checked before converting host-signer pubkey");
+        return ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!("host-signer pubkey is not a valid Ed25519 key: {e}"));
+    }
+    let raw = std::str::from_utf8(&raw).map_err(|e| {
+        anyhow::anyhow!("host-signer pubkey is neither raw bytes nor UTF-8 hex: {e}")
+    })?;
     verifying_key_from_hex(raw.trim_ascii()).map(Some)
 }
 
@@ -7349,6 +7362,12 @@ mod rpc_client_tests {
         );
         // valid -> Ok(Some)
         let k = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let rawpath = dir.path().join("ok.raw.pub");
+        std::fs::write(&rawpath, k.verifying_key().to_bytes()).unwrap();
+        let loaded = load_host_signer_verifying_key(&rawpath).unwrap().unwrap();
+        assert_eq!(loaded.to_bytes(), k.verifying_key().to_bytes());
+
+        // valid hex -> Ok(Some)
         let hexpath = dir.path().join("ok.pub");
         let hex: String = k
             .verifying_key()
