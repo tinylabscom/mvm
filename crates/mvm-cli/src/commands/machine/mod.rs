@@ -821,13 +821,14 @@ pub(in crate::commands) struct MachineShellArgs {
 #[command(group(
     clap::ArgGroup::new("target")
         .required(true)
-        .args(["name", "all"])
+        .args(["names", "all"])
 ))]
 pub(in crate::commands) struct MachineStopArgs {
-    /// VM name to stop.
-    pub name: Option<String>,
+    /// VM name(s) to stop.
+    #[arg(value_name = "NAME")]
+    pub names: Vec<String>,
     /// Stop all running VMs.
-    #[arg(long, conflicts_with = "name")]
+    #[arg(long, conflicts_with = "names")]
     pub all: bool,
     /// Skip the interactive confirmation prompt.
     #[arg(long)]
@@ -2151,19 +2152,50 @@ fn shell_machine(cli: &Cli, args: MachineShellArgs, cfg: &MvmConfig) -> Result<(
 
 fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) -> Result<()> {
     if !args.yes {
-        let prompt = match args.name.as_deref() {
-            Some(name) => format!("Stop machine {name:?}?"),
-            None => "Stop all running machines?".to_string(),
+        use std::io::IsTerminal as _;
+        let prompt = if args.all {
+            "Stop all running machines?".to_string()
+        } else if args.names.len() == 1 {
+            format!("Stop machine {:?}?", args.names[0])
+        } else {
+            format!(
+                "Stop {} machines ({})?",
+                args.names.len(),
+                args.names.join(", ")
+            )
         };
-        if !crate::ui::confirm(&prompt) {
+        // Only prompt on an interactive terminal; a non-interactive caller that
+        // didn't pass `--yes` declines rather than blocking on `/dev/tty`.
+        let confirmed = std::io::stdin().is_terminal() && crate::ui::confirm(&prompt);
+        if !confirmed {
             println!("aborted");
             return Ok(());
         }
     }
-    if let Some(ref name) = args.name {
-        reap_proxy(name);
+    // `--all` stops every running VM in one backend call.
+    if args.all {
+        return down::run(cli, down::Args { name: None }, cfg);
     }
-    down::run(cli, down::Args { name: args.name }, cfg)
+    // Otherwise stop each named machine, continuing past a failure so one bad
+    // name doesn't strand the rest, then fail if any failed.
+    let mut had_err = false;
+    for name in &args.names {
+        reap_proxy(name);
+        if let Err(err) = down::run(
+            cli,
+            down::Args {
+                name: Some(name.clone()),
+            },
+            cfg,
+        ) {
+            eprintln!("failed to stop {name}: {err:#}");
+            had_err = true;
+        }
+    }
+    if had_err {
+        bail!("one or more machines failed to stop");
+    }
+    Ok(())
 }
 
 /// Resolve the spec a persistent run should boot, reconciling the desired
@@ -3737,7 +3769,7 @@ mod tests {
         }
         match parse(&["stop", "web"]).expect("parse") {
             MachineAction::Stop(args) => {
-                assert_eq!(args.name.as_deref(), Some("web"));
+                assert_eq!(args.names, vec!["web"]);
                 assert!(!args.all);
             }
             other => panic!("expected stop action, got {other:?}"),
@@ -4661,15 +4693,23 @@ ssh_agent = true
     fn machine_stop_named_and_all_parse() {
         match parse(&["stop", "web"]).expect("parse named") {
             MachineAction::Stop(args) => {
-                assert_eq!(args.name.as_deref(), Some("web"));
+                assert_eq!(args.names, vec!["web"]);
                 assert!(!args.all);
                 assert!(!args.yes, "confirmation is required by default");
             }
             other => panic!("expected stop action, got {other:?}"),
         }
+        // Multiple names stop as a batch.
+        match parse(&["stop", "web", "db", "cache"]).expect("parse batch") {
+            MachineAction::Stop(args) => {
+                assert_eq!(args.names, vec!["web", "db", "cache"]);
+                assert!(!args.all);
+            }
+            other => panic!("expected stop action, got {other:?}"),
+        }
         match parse(&["stop", "--all"]).expect("parse --all") {
             MachineAction::Stop(args) => {
-                assert!(args.name.is_none());
+                assert!(args.names.is_empty());
                 assert!(args.all);
                 assert!(!args.yes);
             }
@@ -4681,7 +4721,7 @@ ssh_agent = true
     fn machine_stop_yes_skips_confirmation() {
         match parse(&["stop", "web", "--yes"]).expect("parse named --yes") {
             MachineAction::Stop(args) => {
-                assert_eq!(args.name.as_deref(), Some("web"));
+                assert_eq!(args.names, vec!["web"]);
                 assert!(args.yes);
             }
             other => panic!("expected stop action, got {other:?}"),

@@ -63,7 +63,7 @@ templates, the guest-RPC surface, fleet-shaped workflows).
 | `mvmctl up --network-allow host:port` | Allow egress to specific host:port (repeatable, mutually exclusive with preset) |
 | `mvmctl up --seccomp <tier>` | Seccomp profile: `essential`, `minimal`, `standard` (default), `network`, `unrestricted`. The selected tier is enforced through the guest `seccomp.json` manifest and recorded in the signed admission profile for audit. |
 | `mvmctl up --network <name>` | Named dev network to attach VM to (default: "default") |
-| `mvmctl machine stop [name]` | Stop VMs by name, or all if omitted |
+| `mvmctl machine stop [name...]` | Stop one or more VMs by name, or `--all` |
 | `mvmctl ls` | List running VMs (aliases: `ps`, `status`) |
 | `mvmctl ls -a` | Show all VMs including stopped |
 | `mvmctl ls --json` | Output as JSON |
@@ -420,7 +420,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine exec <name> -- <cmd>...` | Run a command in an already-started named machine |
 | `mvmctl machine exec <name> -it -- <cmd>...` | Run a command in an already-started named machine attached to a PTY |
 | `mvmctl machine shell <name>` | Attach an interactive shell/console to an already-started named machine |
-| `mvmctl machine stop <name>` | Stop an already-started named machine (prompts for confirmation; pass `--yes` to skip) |
+| `mvmctl machine stop <name>...` | Stop one or more already-started named machines (prompts for confirmation; pass `--yes` to skip) |
 | `mvmctl machine check-artifact <artifact.mvm>` | Verify a portable artifact and preview its admission posture without extracting or booting |
 | `mvmctl machine check-artifact <artifact.mvm> --key <pubkey>` | Verify with an explicit raw Ed25519 public key |
 | `mvmctl machine check-artifact <artifact.mvm> --json` | Print the verified artifact/admission preview as JSON |

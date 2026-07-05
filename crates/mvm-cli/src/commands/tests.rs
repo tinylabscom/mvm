@@ -1066,7 +1066,7 @@ fn machine_stop_named_and_all_parse() {
     };
     match mg.action {
         machine::MachineAction::Stop(args) => {
-            assert_eq!(args.name.as_deref(), Some("web"));
+            assert_eq!(args.names, vec!["web"]);
             assert!(!args.all);
         }
         _ => panic!("expected stop action"),
@@ -1078,7 +1078,7 @@ fn machine_stop_named_and_all_parse() {
     };
     match mg.action {
         machine::MachineAction::Stop(args) => {
-            assert!(args.name.is_none());
+            assert!(args.names.is_empty());
             assert!(args.all);
         }
         _ => panic!("expected stop action"),
