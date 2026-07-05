@@ -1533,7 +1533,19 @@ fn overwrite_machine_spec(spec: &MachineSpec) -> Result<()> {
 
 fn load_machine_spec(name: &str) -> Result<MachineSpec> {
     validate_machine_name(name)?;
-    load_machine_spec_from_path(&config::machine_spec_path(name))
+    let path = config::machine_spec_path(name);
+    if !path.exists() {
+        // A missing spec is the common beginner error (typo'd name, or the
+        // machine was never created). Give an actionable message with the two
+        // recovery verbs instead of leaking the internal `machine.json` path
+        // through a raw `No such file or directory`.
+        bail!(
+            "machine {name:?} does not exist. \
+             Run `mvmctl machine ls` to list machines, \
+             or `mvmctl machine create --name {name} --image <ref>` to create one."
+        );
+    }
+    load_machine_spec_from_path(&path)
 }
 
 fn load_machine_spec_from_path(path: &Path) -> Result<MachineSpec> {
@@ -1735,7 +1747,7 @@ fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
     for name in &targets {
         validate_machine_name(name)?;
         if !config::machine_state_dir(name).exists() {
-            bail!("machine {:?} does not exist", name);
+            bail!("machine {name:?} does not exist. Run `mvmctl machine ls` to list machines.");
         }
     }
     let mut summaries = Vec::with_capacity(targets.len());
@@ -1754,7 +1766,9 @@ fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
 }
 
 fn ensure_machine_spec_exists(name: &str) -> Result<MachineSpec> {
-    load_machine_spec(name).with_context(|| format!("loading machine spec for {name:?}"))
+    // `load_machine_spec` already emits an actionable "does not exist" message
+    // for a missing spec, so no extra context wrapper is needed here.
+    load_machine_spec(name)
 }
 
 fn mark_machine_started(spec: &mut MachineSpec, resolved_digest: String) {
@@ -4504,7 +4518,10 @@ ssh_agent = true
         let _state = IsolatedMachineState::new();
         let err = ensure_machine_spec_exists("web").expect_err("missing spec rejected");
         let msg = format!("{err:#}");
-        assert!(msg.contains("loading machine spec for \"web\""));
+        // Actionable not-found: names the machine and points at the recovery verbs.
+        assert!(msg.contains("machine \"web\" does not exist"), "msg: {msg}");
+        assert!(msg.contains("machine ls"), "msg: {msg}");
+        assert!(msg.contains("machine create"), "msg: {msg}");
     }
 
     #[test]
