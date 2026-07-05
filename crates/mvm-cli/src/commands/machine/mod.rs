@@ -1881,6 +1881,17 @@ fn mark_machine_started(spec: &mut MachineSpec, resolved_digest: String) {
     spec.last_started_at = Some(mvm_core::time::utc_now());
 }
 
+/// Human/JSON notice printed when `machine start` targets a machine that is
+/// already running. Pure so the wording is unit-testable; the liveness probe
+/// itself lives in [`machine_is_running`].
+fn already_running_notice(name: &str, json: bool) -> String {
+    if json {
+        serde_json::json!({ "machine": name, "already_running": true }).to_string()
+    } else {
+        format!("machine {name} is already running")
+    }
+}
+
 fn start_machine(args: MachineStartArgs) -> Result<()> {
     let mut spec = ensure_machine_spec_exists(&args.name)?;
     if args.dry_run {
@@ -1890,6 +1901,12 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         } else {
             print_machine_start_preflight_human(&summary);
         }
+        return Ok(());
+    }
+    // Starting an already-running machine is a no-op, not a second boot: say so
+    // and return, matching the persistent (`run -d`) path's behaviour.
+    if machine_is_running(&args.name) {
+        println!("{}", already_running_notice(&args.name, args.json));
         return Ok(());
     }
     enforce_dev_init_profile(&spec.profile, &spec.init)?;
@@ -3850,6 +3867,18 @@ mod tests {
     fn start_requires_at_least_one_name() {
         let err = parse(&["start"]).expect_err("a machine name is required");
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn already_running_notice_wording() {
+        assert_eq!(
+            already_running_notice("web", false),
+            "machine web is already running"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&already_running_notice("web", true)).expect("valid json");
+        assert_eq!(json["machine"], "web");
+        assert_eq!(json["already_running"], true);
     }
 
     #[test]
