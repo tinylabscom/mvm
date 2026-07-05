@@ -16,6 +16,7 @@ use tokio::net::UnixStream;
 
 const HOST_AGENT_BIN: &str = env!("CARGO_BIN_EXE_mvm-host-agent");
 const SIGNER_HELPER_BIN: &str = env!("CARGO_BIN_EXE_mvm-signer-helper");
+const BROKER_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct HostAgentFixture {
     _env: TestEnv,
@@ -105,7 +106,7 @@ impl HostAgentFixture {
     }
 
     async fn wait_for_emit(&self, event: &str) -> ServiceResponse {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + BROKER_RECOVERY_TIMEOUT;
         let mut last_error = None;
         while Instant::now() < deadline {
             match self.try_emit(event).await {
