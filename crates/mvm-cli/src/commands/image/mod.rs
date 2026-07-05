@@ -544,7 +544,30 @@ fn inject_runtime_and_materialize(
     rootfs_abs: &Path,
     image_label: &str,
 ) -> Result<()> {
-    mvm_build::run_image::inject_and_materialize(cache_root, unpacked_root, rootfs_abs, image_label)
+    mvm_build::run_image::inject_and_materialize(
+        cache_root,
+        unpacked_root,
+        rootfs_abs,
+        image_label,
+        embedded_guest_binaries(),
+    )
+}
+
+/// The guest-agent binaries embedded in this mvmctl at build time (build.rs).
+/// `None` when this build baked zero-byte stubs (`MVM_SKIP_EMBED_BINARIES`), in
+/// which case the run path falls back to a source-checkout cross-compile.
+fn embedded_guest_binaries() -> Option<mvm_build::run_image::PrebuiltGuestBinaries<'static>> {
+    let find = |name: &str| {
+        crate::host_binaries::embedded::EMBEDDED
+            .iter()
+            .find(|b| b.name == name)
+            .map(|b| b.bytes)
+            .filter(|b| !b.is_empty())
+    };
+    Some(mvm_build::run_image::PrebuiltGuestBinaries {
+        agent: find("mvm-guest-agent")?,
+        netinit: find("mvm-guest-netinit")?,
+    })
 }
 
 /// Ingest a local OCI image-layout archive (`oci-archive:<path>`) into a

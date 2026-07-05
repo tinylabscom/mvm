@@ -11,36 +11,34 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::oci_runtime_inject::MvmRuntimeBinaries;
 use crate::rootfs::MaterializeExt4Input;
+
+/// Guest-agent binaries (`mvm-guest-agent` + `mvm-guest-netinit`) embedded in
+/// the host binary at build time — the end-user fallback for a shipped mvmctl
+/// with no source checkout to cross-compile from.
+pub struct PrebuiltGuestBinaries<'a> {
+    pub agent: &'a [u8],
+    pub netinit: &'a [u8],
+}
 
 /// Inject the mvm runtime into `unpacked_root`, materialize it into `output` (a
 /// `rootfs.ext4` path), and write the overlay-aware guest sidecar beside it.
 /// `cache_root` holds the guest-agent binary cache; `label` names the image in
 /// the sidecar.
 ///
-/// The guest binaries are resolved via `guest_agent_build`, which cross-compiles
-/// them from a source checkout — the same path the CLI uses (an end-user
-/// binary that ships the runtime overlay is a separate, not-yet-wired path).
+/// Guest binaries resolve in order: a cache hit, then a source-checkout
+/// cross-compile (contributors get their local edits), then the `prebuilt`
+/// bytes embedded in the host binary (the shipped-mvmctl end-user path). A
+/// caller with no embedded binaries passes `None`.
 pub fn inject_and_materialize(
     cache_root: &Path,
     unpacked_root: &Path,
     output: &Path,
     label: &str,
+    prebuilt: Option<PrebuiltGuestBinaries<'_>>,
 ) -> Result<()> {
-    let arch = mvm_core::arch::GuestArch::host();
-    // `CARGO_MANIFEST_DIR` is bound at this crate's compile time, so it always
-    // points at `crates/mvm-build`; its grandparent is the workspace root.
-    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .ok_or_else(|| anyhow::anyhow!("cannot locate workspace root for guest-agent build"))?;
-    let bins = crate::guest_agent_build::resolve_or_build_guest_binaries(
-        cache_root,
-        env!("CARGO_PKG_VERSION"),
-        arch,
-        workspace_root,
-    )
-    .context("obtain guest agent binaries for OCI run")?;
+    let bins = resolve_guest_binaries(cache_root, prebuilt)?;
     crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins)
         .context("inject mvm runtime into OCI rootfs")?;
 
@@ -62,6 +60,50 @@ pub fn inject_and_materialize(
         .write_to_dir(rootfs_dir)
         .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
     Ok(())
+}
+
+/// Resolve the guest-agent binaries: cache hit → source-checkout cross-compile
+/// → embedded prebuilt bytes.
+fn resolve_guest_binaries(
+    cache_root: &Path,
+    prebuilt: Option<PrebuiltGuestBinaries<'_>>,
+) -> Result<MvmRuntimeBinaries> {
+    let arch = mvm_core::arch::GuestArch::host();
+    let version = env!("CARGO_PKG_VERSION");
+
+    if let Some(cached) = crate::guest_agent_build::cached_guest_binaries(cache_root, version, arch)
+    {
+        return Ok(cached);
+    }
+
+    // A source checkout cross-compiles fresh, so contributors editing `mvm-guest`
+    // get their local changes. `CARGO_MANIFEST_DIR` is baked at this crate's
+    // compile time and points at `crates/mvm-build`; on a shipped binary that
+    // path doesn't exist on the end-user's host — which is exactly how we detect
+    // "not a source checkout" and fall through to the embedded bytes.
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent());
+    if let Some(ws) = workspace_root
+        && ws.join("crates/mvm-guest").is_dir()
+    {
+        return crate::guest_agent_build::resolve_or_build_guest_binaries(
+            cache_root, version, arch, ws,
+        )
+        .context("build guest agent binaries from the source checkout");
+    }
+
+    if let Some(p) = prebuilt {
+        return crate::guest_agent_build::install_prebuilt_guest_binaries(
+            p.agent, p.netinit, cache_root, version, arch,
+        )
+        .context("install the embedded guest agent binaries");
+    }
+
+    anyhow::bail!(
+        "no guest agent binaries available: this build embeds none and there is no source \
+         checkout to cross-compile from"
+    )
 }
 
 /// Materialize a run-path rootfs from an already-complete unpacked tree.
