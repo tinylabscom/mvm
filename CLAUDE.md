@@ -317,10 +317,14 @@ the source gap analysis is at
     + F wire the user-facing OCI image runner to the same audit chain
     that backs claim 8 — see `specs/claims/claim-10-oci-image-provenance.md`.
     `mvmctl image pull` materializes the layer set in `mvm-oci`'s
-    allow-listed unpacker (`mvm_oci::unpack::unpack_layer`), formats an
-    ext4 rootfs in the builder VM (`mvm_build::oci_to_rootfs::
-    materialize_to_ext4`, never on the macOS host — ADR-050), and
-    persists provenance metadata (registry host, repo, supplied
+    allow-listed unpacker (`mvm_oci::unpack::unpack_layer`),
+    materializes an ext4 rootfs — by default in-process on the host
+    via the memory-safe pure-Rust writer (`mvm_build::rootfs::
+    materialize_ext4_pure`; ADR-106 supersedes ADR-050's builder-VM
+    `mkfs` mechanism while preserving its roothash guarantee, and
+    auto-falls-back to the builder VM for trees the writer can't
+    faithfully emit, e.g. ones carrying `security.capability`
+    xattrs) — and persists provenance metadata (registry host, repo, supplied
     reference, resolved manifest digest, layer digest list, trust
     policy, cosign verdict). `mvmctl run --image` admits an
     `ExecutionPlan` (claim 8 path) and then emits a

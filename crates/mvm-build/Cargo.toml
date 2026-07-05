@@ -66,6 +66,10 @@ lzma-rs = "0.3"
 
 mvm-core.workspace = true
 mvm-ext4 = { workspace = true, optional = true }
+# Read xattrs during the pure walk so a tree carrying attrs the writer can't
+# represent (e.g. `security.capability`) routes to the builder-VM fallback
+# instead of silently dropping them. Already in the mvmctl closure via mvm-oci.
+xattr = { workspace = true, optional = true }
 mvm-guest.workspace = true
 # `LibkrunNetworkProvider` impls the `NetworkProvider`
 # seam. mvm-network deps only mvm-core + mvm-sdk, so this edge is acyclic.
@@ -144,7 +148,7 @@ default = []
 # In-process, pure-Rust ext4 materialization (no builder VM / mkfs). Off by
 # default so the mvmctl default closure does not gain `mvm-ext4` until the pure
 # path is the run-path default; enabled where `materialize_ext4_pure` is used.
-pure-mkfs = ["dep:mvm-ext4"]
+pure-mkfs = ["dep:mvm-ext4", "dep:xattr"]
 # Folded in with the mvm-egress-proxy bin. Off by default;
 # tests/dev enable it so the `mvm-egress-proxy` bin honors a
 # `MVM_EGRESS_ALLOWLIST=host1,host2` override. Production binaries (no

@@ -128,6 +128,24 @@ impl std::fmt::Display for Ext4Error {
     }
 }
 
+impl Ext4Error {
+    /// Whether this failure is a *capacity limit* of the pure writer (the image
+    /// is structurally too big / too fragmented for the current single-writer
+    /// design) rather than a *malformed tree*. The run path retries a capacity
+    /// limit via the builder VM (which has no such limits); a malformed-tree
+    /// error is genuine and surfaces unchanged. A real OCI-unpacked FS tree can
+    /// only ever produce capacity limits — the malformed variants require a
+    /// synthetic node list.
+    pub fn is_capacity_limit(&self) -> bool {
+        matches!(
+            self,
+            Ext4Error::TooLarge { .. }
+                | Ext4Error::FileTooFragmented { .. }
+                | Ext4Error::DirTooLarge(_)
+        )
+    }
+}
+
 impl std::error::Error for Ext4Error {}
 
 /// A filesystem node to place in the image. Paths are absolute (`/`-rooted);
