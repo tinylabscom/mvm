@@ -67,6 +67,12 @@ pub struct HvfSupervisorConfig {
     /// (initramfs / freestanding) boot.
     #[serde(default)]
     pub disks: Vec<HvfDisk>,
+    /// When set, serve this host directory (the unpacked+injected OCI tree) to the
+    /// guest as a read-only **virtiofs root** — the Plan-223 dev-tier boot. No
+    /// virtio-blk rootfs is attached; the default cmdline becomes
+    /// `rootfstype=virtiofs root=mvmroot`.
+    #[serde(default)]
+    pub virtiofs_root: Option<PathBuf>,
     /// Attach a virtio-vsock device.
     #[serde(default)]
     pub vsock: bool,

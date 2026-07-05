@@ -28,7 +28,7 @@ use super::vcpu::esr_ec;
 use crate::vmm::device::Pl011;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
 use crate::vmm::run::{self, RunControl, RunDevice, RunOutcome};
-use crate::vmm::virtio::{DiskImage, VirtioBlk};
+use crate::vmm::virtio::{DiskImage, VirtioBlk, VirtioFs};
 use crate::vmm::vsock::VirtioVsock;
 use crate::vmm::{fdt, kernel_image};
 
@@ -62,6 +62,11 @@ const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
 const VIRTIO_IRQ: u32 = 48;
 const VSOCK_MMIO_BASE: u64 = 0x0a00_0200;
 const VSOCK_IRQ: u32 = 49;
+/// virtio-fs **root** window + SPI, above the disk band (MAX_DISKS=4 → up to
+/// base+4*stride) and vsock, so it never collides. Used only on a virtiofs-root
+/// dev boot (there are no virtio-blk disks then).
+const FS_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + 6 * MMIO_STRIDE;
+const FS_IRQ: u32 = 54;
 /// virtio-mmio window stride; each device occupies one 0x200 slot.
 const MMIO_STRIDE: u64 = 0x200;
 /// Max virtio-blk devices (`/dev/vda`..). Bounds the reserved window band.
@@ -144,6 +149,15 @@ fn default_bootargs(has_disk: bool) -> String {
     args
 }
 
+/// Cmdline for a virtiofs-root dev boot: mount the virtio-fs device tagged
+/// `mvmroot` as root and run the baked init. No block rootfs is attached.
+fn default_virtiofs_bootargs() -> String {
+    format!(
+        "earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8 \
+         rootfstype=virtiofs root=mvmroot rw init=/init"
+    )
+}
+
 /// Host-supplied boot inputs the supervisor threads into a guest: the vsock
 /// channels (per-VM host→guest agent RPC socket, substitution-endpoint socket,
 /// egress relay UDS) plus the kernel cmdline. Bundled so the boot entry stays
@@ -170,6 +184,11 @@ pub struct HostChannels {
     /// Guest RAM in MiB. `0` ⇒ the built-in default (512 MiB). A builder sets
     /// several GiB so `nix build` doesn't OOM.
     pub mem_mib: u32,
+    /// When set, serve this host directory (the unpacked+injected OCI tree) to
+    /// the guest as a read-only **virtiofs root** instead of a block rootfs — the
+    /// Plan-223 dev-tier boot. No virtio-blk disk is attached; the default
+    /// cmdline becomes `rootfstype=virtiofs root=mvmroot`.
+    pub virtiofs_root: Option<PathBuf>,
 }
 
 /// Boot `image` (an arm64 `Image`) under HVF, optionally with an `initramfs`
@@ -196,6 +215,7 @@ pub fn boot_kernel(
             console_data_sockets: Vec::new(),
             cmdline: None,
             mem_mib: 0,
+            virtiofs_root: None,
         },
     )
 }
@@ -262,7 +282,13 @@ fn boot_kernel_impl(
     let mut bootargs = std::env::var("MVM_HVF_BOOTARGS")
         .ok()
         .or_else(|| channels.cmdline.clone())
-        .unwrap_or_else(|| default_bootargs(!disks.is_empty()));
+        .unwrap_or_else(|| {
+            if channels.virtiofs_root.is_some() {
+                default_virtiofs_bootargs()
+            } else {
+                default_bootargs(!disks.is_empty())
+            }
+        });
     if let Ok(extra) = std::env::var("MVM_HVF_BOOTARGS_EXTRA") {
         let extra = extra.trim();
         if !extra.is_empty() {
@@ -282,6 +308,9 @@ fn boot_kernel_impl(
     }
     if vsock {
         virtio_nodes.push((VSOCK_MMIO_BASE, VSOCK_IRQ));
+    }
+    if channels.virtiofs_root.is_some() {
+        virtio_nodes.push((FS_MMIO_BASE, FS_IRQ));
     }
     let dtb = fdt::build_dtb(
         &bootargs,
@@ -332,6 +361,7 @@ fn boot_kernel_impl(
                 substitution_socket: channels.substitution_socket,
                 egress_relay: channels.egress_relay,
                 console_data_sockets: channels.console_data_sockets,
+                virtiofs_root: channels.virtiofs_root,
             },
             stop,
         );
@@ -364,6 +394,8 @@ struct RunInputs {
     /// Dev-only host console listeners (one `(guest_port, host_socket)` per console
     /// data port). Empty for a sealed prod config — nothing bound (claim 15).
     console_data_sockets: Vec<(u32, PathBuf)>,
+    /// When set, serve this host dir to the guest as a read-only virtiofs root.
+    virtiofs_root: Option<PathBuf>,
 }
 
 unsafe fn run(
@@ -382,6 +414,7 @@ unsafe fn run(
         substitution_socket,
         egress_relay,
         console_data_sockets,
+        virtiofs_root,
     } = inputs;
     unsafe {
         // In-kernel GICv3 — created after the VM, before any vCPU. Base
@@ -502,6 +535,12 @@ unsafe fn run(
             .collect();
         let mut vsock_dev =
             vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, ram_size));
+        // virtiofs-root dev boot: serve the unpacked+injected tree read-only.
+        let mut fs_dev = virtiofs_root.as_ref().map(|root| {
+            // SAFETY: `ram` is the mapped guest RAM valid for the run (this fn body
+            // is within an `unsafe` block), same contract as the other devices.
+            VirtioFs::new(FS_MMIO_BASE, FS_IRQ, ram, RAM_BASE, ram_size, root.clone())
+        });
         if let Some(v) = vsock_dev.as_mut() {
             // Transient run-to-exit: a guest write of the exit code to the workload
             // exit port stops the run (VM life = workload life) — but ONLY when this
@@ -575,6 +614,9 @@ unsafe fn run(
             }
             if let Some(v) = vsock_dev.as_mut() {
                 devices.push(v);
+            }
+            if let Some(fs) = fs_dev.as_mut() {
+                devices.push(fs);
             }
             let set_irq = |intid: u32, level: bool| -> Result<(), HvfError> {
                 // SAFETY: FFI to the process-global in-kernel GIC (nested in the
