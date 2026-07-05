@@ -739,7 +739,7 @@ pub(in crate::commands) struct MachineRemoveArgs {
     /// Remove all persistent machine specs.
     #[arg(long, conflicts_with = "names")]
     pub all: bool,
-    /// Confirm deletion.
+    /// Skip the interactive confirmation prompt.
     #[arg(long)]
     pub yes: bool,
     /// Print a JSON deletion summary.
@@ -1737,10 +1737,24 @@ fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
         return Ok(());
     }
     if !args.yes {
-        bail!(
-            "refusing to remove {} machine(s) without --yes",
-            targets.len()
-        );
+        use std::io::IsTerminal as _;
+        // Prompt for confirmation like `machine stop`. Only prompt on an
+        // interactive terminal; a non-interactive caller that didn't pass
+        // `--yes` declines (never block a script waiting on `/dev/tty`).
+        let prompt = if targets.len() == 1 {
+            format!("Remove machine {:?}?", targets[0])
+        } else {
+            format!(
+                "Remove {} machines ({})?",
+                targets.len(),
+                targets.join(", ")
+            )
+        };
+        let confirmed = std::io::stdin().is_terminal() && crate::ui::confirm(&prompt);
+        if !confirmed {
+            println!("aborted");
+            return Ok(());
+        }
     }
     // Validate the whole set before deleting anything so a single typo doesn't
     // leave a partially-removed batch behind (all-or-nothing on missing specs).
@@ -4473,15 +4487,14 @@ ssh_agent = true
     }
 
     #[test]
-    fn remove_machine_batch_requires_confirmation_and_keeps_all_specs() {
+    fn remove_machine_batch_declines_without_confirmation_and_keeps_all_specs() {
         let _state = IsolatedMachineState::new();
         for name in ["web", "db"] {
             seed_machine_spec(name);
         }
-        let err = remove_machine(rm_args(&["web", "db"], false, false))
-            .expect_err("confirmation required");
-        assert!(err.to_string().contains("without --yes"));
-        // Nothing removed when confirmation is missing.
+        // No `--yes` on a non-interactive stdin: the prompt is declined, nothing
+        // is removed, and it is not an error (mirrors `machine stop`).
+        remove_machine(rm_args(&["web", "db"], false, false)).expect("declined without error");
         assert!(config::machine_state_dir("web").exists());
         assert!(config::machine_state_dir("db").exists());
     }
