@@ -410,6 +410,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine start <name> --dry-run --json` | Print the machine-start preflight summary as redacted JSON |
 | `mvmctl machine start <name> --json` | Print a redacted JSON start summary instead of plain text |
 | `mvmctl machine start <name> --receipt <path>` | Write a signed machine-start receipt with effective policy plus the resolved digest and start timestamp |
+| `mvmctl machine restart <name>...` | Restart one or more named machines: stop if running, then start (same stop→start as a config-change recreate) |
 | `mvmctl machine ls` (alias `ps`) | List persisted named machine specs |
 | `mvmctl machine ls --json` | Print persisted named machine specs as JSON |
 | `mvmctl machine inspect <name>` | Show one persisted named machine spec |
