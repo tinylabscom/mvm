@@ -820,6 +820,12 @@ let
 
   nameFile = pkgs.writeText "mvm-name" "${name}\n";
 
+  # Verb-trust policy — baked into sealed images only (`isSealed`).
+  # Absent on dev images (withDevShell = true). Content is the
+  # measure-now stage: require_grant:false, grant_key_source from launch.
+  verbTrustFile = pkgs.writeText "mvm-verb-trust"
+    ''{"version":1,"require_grant":false,"grant_key_source":"launch_provisioned"}'';
+
   # ── mvm-guest-agent — production Rust binary
   #
   # Built by `nix/packages/mvm-guest-agent.nix` from the workspace
@@ -986,6 +992,15 @@ let
     chmod 0444 "$out/etc/mvm/variant"
     cp ${nameFile} "$out/etc/mvm/name"
     chmod 0444 "$out/etc/mvm/name"
+
+    # Verb-trust policy — sealed images only. Absent on dev images so the
+    # agent falls back to class-only gating (no file = permissive default
+    # for interactive dev shells). Mode 0444: guest reads it at startup;
+    # the dm-verity seal prevents any runtime modification.
+    ${if isSealed then ''
+      cp ${verbTrustFile} "$out/etc/mvm/verb-trust.json"
+      chmod 0444 "$out/etc/mvm/verb-trust.json"
+    '' else ""}
 
     # /etc/passwd + /etc/group provision root (mandatory for PID 1)
     # plus the agent + entrypoint uids resolved at build time.
