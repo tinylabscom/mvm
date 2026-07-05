@@ -376,6 +376,19 @@ fn mint_verb_grant_sidecar(
     use mvm_core::plan::SignedExecutionPlan;
     use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 
+    // Remove any pre-existing sidecar so that a grant-less re-run of a
+    // reused VM name does not inherit the previous boot's grant.
+    let sidecar_path = state_dir.join("verb-grant.json");
+    match std::fs::remove_file(&sidecar_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(anyhow::Error::from(e)).with_context(|| {
+                format!("remove stale verb-grant sidecar {}", sidecar_path.display())
+            });
+        }
+    }
+
     // Best-effort parse: a missing or malformed plan_json skips the
     // sidecar (grant-less boot), matching the fail-open posture of the
     // other cmdline token producers.
@@ -387,7 +400,7 @@ fn mint_verb_grant_sidecar(
     };
 
     let Some(verbs) = plan.agent_verbs else {
-        // No verb grant requested — grant-less boot.
+        // No verb grant requested — grant-less boot, sidecar already removed.
         return Ok(());
     };
 
@@ -1303,6 +1316,64 @@ mod tests {
         assert!(
             !dir.path().join("vms/vm-no-verbs/verb-grant.json").exists(),
             "verb-grant.json must NOT be written when agent_verbs is None"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stash_plan_for_bridge_removes_stale_verb_grant_on_grant_less_restash() {
+        use mvm_core::plan::VerbId;
+        use mvm_core::vm_backend::VmStartConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+
+        let vm_name = "vm-stale-grant";
+
+        // First boot: plan with agent_verbs — sidecar must be written.
+        let mut input_with = fixture_input(vm_name);
+        input_with.agent_verbs = Some(vec![VerbId::new("run-entrypoint").unwrap()]);
+        let admitted_with = admit_for_run(
+            &input_with,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            None,
+        )
+        .expect("admit with agent_verbs");
+        let mut cfg_with = VmStartConfig {
+            name: vm_name.into(),
+            ..Default::default()
+        };
+        populate_audit_substrate(&mut cfg_with, &admitted_with, None).expect("populate");
+        stash_plan_for_bridge(&cfg_with).expect("first stash succeeds");
+
+        let grant_path = dir.path().join(format!("vms/{vm_name}/verb-grant.json"));
+        assert!(
+            grant_path.exists(),
+            "verb-grant.json must be present after first stash"
+        );
+
+        // Second boot: same VM name, no agent_verbs — stale sidecar must be removed.
+        let admitted_without = admit_for_run(
+            &fixture_input(vm_name),
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            None,
+        )
+        .expect("admit without agent_verbs");
+        let mut cfg_without = VmStartConfig {
+            name: vm_name.into(),
+            ..Default::default()
+        };
+        populate_audit_substrate(&mut cfg_without, &admitted_without, None).expect("populate");
+        stash_plan_for_bridge(&cfg_without).expect("second stash succeeds");
+
+        assert!(
+            !grant_path.exists(),
+            "stale verb-grant.json must be removed on a grant-less re-stash of the same VM name"
         );
     }
 
