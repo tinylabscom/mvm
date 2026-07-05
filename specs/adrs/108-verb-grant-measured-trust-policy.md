@@ -113,10 +113,14 @@ on it with a single code path:
 - **Policy present, valid grant pinned** ⇒ serve.
 - **Policy present, grant absent / malformed / verification-failed** ⇒ emit an
   **audited observability signal** ("verb-trust policy present but no valid grant
-  pinned") *regardless* of `require_grant`, then:
-  - `require_grant: true` ⇒ **fail closed** — refuse to serve control RPCs.
-  - `require_grant: false` ⇒ serve (observe mode; the audited signal is the only
-    effect).
+  pinned"), then fail closed **iff** enforcement is required. As shipped (see
+  Rollout / Stage A), the enforcement trigger is `trust_decision(policy,
+  grant_present, launch_requires_grant)`: fail closed when the launch asserts
+  `mvm.require_grant=1` **OR** the baked `require_grant: true` **OR**
+  `grant_key_source: attested`; otherwise serve (observe mode). Because Stage B/A
+  bake `require_grant: false`, the enforcement in practice comes from the
+  launch-asserted `mvm.require_grant=1` token (emitted only when the host
+  delivered a grant), leaving mvmd / direct-launch instances in observe mode.
 
 The fail-closed behavior is thus fully implemented in the guest from day one;
 whether it *bites* is driven entirely by the measured `require_grant` bit. This
@@ -144,12 +148,38 @@ therefore rolled out in two stages, each a distinct PR:
   `false`), the audited observe signal, restore reconciliation, and the
   `grant_key_source` seam. Live-prove that every *mvmctl* sealed launch + restore
   flavor delivers a valid grant.
-- **Stage A (fast-follow) — enforce.** Flip the baked bit to `require_grant:
-  true` for sealed prod images. Gate the flip on a concrete criterion: every
-  sealed-image launch + restore path in **both** mvmctl (verified in Stage B) and
-  mvmd is confirmed to deliver a grant. This is a one-line policy-value change,
-  not a mechanism change, tracked as an explicit follow-up so observe mode does
-  not become permanent.
+- **Stage A (shipped) — enforce, launcher-gated (Option A).** Investigating the
+  Stage-A precondition established that **mvmd cannot be relied on to deliver a
+  grant**: it boots instances through a *direct* Firecracker launch
+  (`mvmd-runtime` `instance_start_inner`) that synthesizes no `ExecutionPlan`,
+  mints no `VerbGrant`, and **bypasses mvm-backend's cmdline assembly entirely**.
+  So flipping the *baked* bit to `require_grant: true` would fail-close every
+  mvmd instance. Stage A therefore does **not** flip the baked bit (it stays
+  `false`); instead enforcement is **launcher-gated**:
+  - The host emits a `mvm.require_grant=1` kernel-cmdline token **only when it
+    delivered a grant** (`require_grant_cmdline_token`, keyed on the
+    `verb-grant.json` sidecar *existing* — so a corrupt sidecar still asserts
+    enforcement and the guest fails closed rather than running grant-less),
+    appended at the four mvm-backend cmdline builders
+    (`microvm`/`qemu`/`libkrun`/`vz`) — all of which mvmd bypasses.
+  - The guest reads it (`launch_requires_grant()` over `/proc/cmdline`) and
+    `trust_decision(policy, grant_present, launch_requires_grant)` fails closed
+    when enforcement is **launch-asserted OR baked-policy-required OR
+    `grant_key_source: attested`**, and no grant is pinned.
+
+  Net: mvmctl grant-delivering launches enforce; mvmd (and any direct-launch
+  path) asserts nothing → always serves → **no brick, no mvmd change**. The
+  measured `require_grant` field is retained for the observe signal and the
+  `attested` seam; the enforcement *trigger* moved to the launch token. Trade-off
+  vs. the original "flip the baked bit" plan: `require_grant` enforcement is now
+  launcher-asserted rather than rootfs-measured — a slight weakening of the
+  measured-policy property, accepted because a delivered grant is still
+  pinned+enforced and the launcher emits the flag in the same routine that
+  delivers the grant. A stale-sidecar guard unlinks a pre-existing
+  `verb-grant.json` on re-stash so a reused persistent name cannot inherit a
+  spurious enforcement assertion; an `xtask` gate machine-checks that
+  `mvm.require_grant=1` appears only in the four allowlisted builders (guards the
+  no-brick invariant).
 
 ### 3. Restore reconciliation (grant survives every restore flavor)
 
@@ -187,9 +217,12 @@ policy value and the guest's key-source branch. This ADR deliberately leaves the
 ## Consequences
 
 **Positive**
-- A sealed image's grant requirement is dm-verity-measured: no silent downgrade
-  to class-gate-only from a buggy/omitting/tampering launch path.
-- `require_grant` holds across all restore flavors; the "forked children run
+- A grant-delivering launch enforces the grant end-to-end: a launch that mints a
+  grant asserts `mvm.require_grant=1`, so a bug/corruption that drops or mangles
+  the delivered grant fails closed rather than silently downgrading to
+  class-gate-only. (The *policy* is dm-verity-measured; the enforcement *trigger*
+  is the launch token — see Rollout / Stage A for why.)
+- Enforcement holds across all restore flavors; the "forked children run
   class-gate-only" gap is closed with a correct per-child grant.
 - The honest limitation is documented in one place, and the future
   attestation upgrade has a defined, churn-free seam (`grant_key_source`).
@@ -200,11 +233,12 @@ policy value and the guest's key-source branch. This ADR deliberately leaves the
   numbered claim ledger.
 - New surface: one optional `PostRestore` field, a guest re-pin path, and
   mint-at-fork. All reuse existing frames/mechanisms.
-- Once enforced (Stage A), `require_grant: true` makes a sealed image un-bootable
-  if the launch path genuinely cannot deliver a grant — the intended fail-closed,
-  but it raises the bar on the launch path's correctness for sealed images. The
-  staged rollout (measure-now / enforce-fast-follow) bounds this to paths already
-  confirmed to deliver a grant across both mvmctl and mvmd.
+- Under Stage A, a grant-delivering launch that asserts `mvm.require_grant=1` but
+  then cannot pin a valid grant fails closed — the intended catch, but it raises
+  the bar on the correctness of the launch paths that deliver grants. The
+  launcher-gated design (Option A) bounds this to exactly the mvmctl paths that
+  emit the token; mvmd and other direct-launch paths never assert it, so they are
+  never fail-closed.
 
 **Neutral**
 - Dev / OCI images are unaffected (policy file absent ⇒ permissive default),
@@ -226,6 +260,12 @@ policy value and the guest's key-source branch. This ADR deliberately leaves the
 - **Pull hardware attestation into scope.** The only construction that yields
   real key separation, but a deliberate ADR-002 scope expansion beyond this
   work; recorded as the future seam instead.
+- **Stage A as a baked `require_grant: true` flip** (the original Rollout plan).
+  Superseded before implementation: mvmd boots sealed images through a direct
+  Firecracker path that delivers no grant, so a baked flip would brick every
+  mvmd instance. Replaced by the launcher-gated `mvm.require_grant=1` token
+  (Option A, see Rollout / Stage A), which enforces only where a grant was
+  delivered and leaves mvmd untouched with no mvmd-side change.
 
 ## Out of scope
 
