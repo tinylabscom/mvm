@@ -100,23 +100,56 @@ VerbTrustPolicy {
 ```
 
 `mkGuest` bakes `/etc/mvm/verb-trust.json` into the rootfs. For **sealed prod
-images** (`withDevShell = false`): `{ version: 1, require_grant: true,
-grant_key_source: "launch_provisioned" }`. For **dev / OCI images**: the file is
-absent (⇒ no requirement — the permissive default is preserved).
+images** (`withDevShell = false`): `{ version: 1, require_grant: <staged, see
+Rollout>, grant_key_source: "launch_provisioned" }`. For **dev / OCI images**:
+the file is absent (⇒ no requirement — the permissive default is preserved).
 
-### 2. Guest fail-closed on required-but-absent grant
+### 2. Policy-driven guest enforcement (fail-closed code, staged bit)
 
-At boot the agent reads the verity-measured `/etc/mvm/verb-trust.json`. If
-`require_grant` is true and no valid grant is pinned (absent, malformed, or
-verification-failed), the agent **fails closed** — it refuses to serve control
-RPCs — instead of ADR-103's current silent fallback to class-gate-only.
+At boot the agent reads the verity-measured `/etc/mvm/verb-trust.json` and acts
+on it with a single code path:
 
-This is the one genuinely valuable property: a sealed image's assertion *"I must
-run under a grant"* is now **dm-verity-measured** (claim 3). A launch-path bug —
-or tampering — that omits or corrupts the grant can no longer silently downgrade
-a sealed workload to permissive class-gate-only operation; the guest reads its
-own sealed policy and refuses. The *key* is still launch-provisioned and
-honestly labeled `launch_provisioned`; only the *policy* is measured.
+- **No policy file** (dev / OCI) ⇒ no requirement; serve (permissive default).
+- **Policy present, valid grant pinned** ⇒ serve.
+- **Policy present, grant absent / malformed / verification-failed** ⇒ emit an
+  **audited observability signal** ("verb-trust policy present but no valid grant
+  pinned") *regardless* of `require_grant`, then:
+  - `require_grant: true` ⇒ **fail closed** — refuse to serve control RPCs.
+  - `require_grant: false` ⇒ serve (observe mode; the audited signal is the only
+    effect).
+
+The fail-closed behavior is thus fully implemented in the guest from day one;
+whether it *bites* is driven entirely by the measured `require_grant` bit. This
+is the one genuinely valuable property: a sealed image's assertion *"I must run
+under a grant"* is **dm-verity-measured** (claim 3), so a launch-path bug — or
+tampering — that omits or corrupts the grant can no longer silently downgrade a
+sealed workload to permissive class-gate-only operation. The *key* is still
+launch-provisioned and honestly labeled `launch_provisioned`; only the *policy*
+is measured.
+
+An unexpected `grant_key_source: "attested"` (the future arm, not implemented
+here) is treated as fail-closed, never a silent downgrade.
+
+### Rollout (staged, to bound cross-repo risk)
+
+`mkGuest` is shared: the sealed images it builds are also run by **mvmd** (the
+separate fleet orchestrator), whose admission/launch/restore paths are not
+verified by this work. Baking `require_grant: true` unconditionally could brick
+an mvmd sealed workload whose launcher does not deliver a grant. Enforcement is
+therefore rolled out in two stages, each a distinct PR:
+
+- **Stage B (this ADR's implementation) — measure-now.** Ship the full mechanism
+  with `require_grant: false` baked for sealed images: the policy type, the
+  verity-measured file, the guest fail-closed **code path** (dormant at
+  `false`), the audited observe signal, restore reconciliation, and the
+  `grant_key_source` seam. Live-prove that every *mvmctl* sealed launch + restore
+  flavor delivers a valid grant.
+- **Stage A (fast-follow) — enforce.** Flip the baked bit to `require_grant:
+  true` for sealed prod images. Gate the flip on a concrete criterion: every
+  sealed-image launch + restore path in **both** mvmctl (verified in Stage B) and
+  mvmd is confirmed to deliver a grant. This is a one-line policy-value change,
+  not a mechanism change, tracked as an explicit follow-up so observe mode does
+  not become permanent.
 
 ### 3. Restore reconciliation (grant survives every restore flavor)
 
@@ -167,9 +200,11 @@ policy value and the guest's key-source branch. This ADR deliberately leaves the
   numbered claim ledger.
 - New surface: one optional `PostRestore` field, a guest re-pin path, and
   mint-at-fork. All reuse existing frames/mechanisms.
-- `require_grant: true` makes a sealed image un-bootable if the launch path
-  genuinely cannot deliver a grant — this is the intended fail-closed, but it
-  raises the bar on the launch path's correctness for sealed images.
+- Once enforced (Stage A), `require_grant: true` makes a sealed image un-bootable
+  if the launch path genuinely cannot deliver a grant — the intended fail-closed,
+  but it raises the bar on the launch path's correctness for sealed images. The
+  staged rollout (measure-now / enforce-fast-follow) bounds this to paths already
+  confirmed to deliver a grant across both mvmctl and mvmd.
 
 **Neutral**
 - Dev / OCI images are unaffected (policy file absent ⇒ permissive default),
