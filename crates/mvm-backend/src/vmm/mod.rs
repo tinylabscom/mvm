@@ -24,5 +24,6 @@ pub mod kernel_image;
 pub mod run;
 
 pub mod virtio;
+pub mod virtio_fs;
 pub mod vsock;
 mod vsock_io;
