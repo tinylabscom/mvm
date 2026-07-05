@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use reqwest::{StatusCode, Url};
 
 use crate::client::MvmClient;
-use crate::dto::{LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus};
+use crate::dto::{
+    LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus, ReconfigureRequest,
+};
 use crate::error::{MvmError, Result};
 
 /// How to reach a gateway: its base URL and the bearer token to present.
@@ -148,6 +150,20 @@ struct CreateSandboxBody<'a> {
     vcpus: u32,
 }
 
+/// Body for `POST /api/v1/sandboxes/{id}/reconfigure`. Patch semantics:
+/// only set fields are serialized (the gateway leaves the rest unchanged).
+#[derive(serde::Serialize)]
+struct ReconfigureBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    net: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow_host: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpus: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_mib: Option<u32>,
+}
+
 /// Map the gateway's status string onto the facade status. Unknown values fail
 /// safe to `Failed` rather than a misleading `Running`.
 fn map_status(s: &str) -> MachineStatus {
@@ -272,6 +288,35 @@ impl MvmClient for GatewayBackend {
         Err(MvmError::Backend {
             reason: "gateway exec is streaming; buffered exec not yet wired".into(),
         })
+    }
+
+    async fn reconfigure_machine(
+        &self,
+        id: &MachineId,
+        cfg: ReconfigureRequest,
+    ) -> Result<MachineState> {
+        let url = self.endpoint(&format!("/api/v1/sandboxes/{}/reconfigure", id.0))?;
+        let body = ReconfigureBody {
+            net: cfg.net,
+            allow_host: cfg.allow_host,
+            cpus: cfg.cpus,
+            memory_mib: cfg.memory_mib,
+        };
+        let resp = self
+            .authed(self.http.post(url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| MvmError::Backend {
+                reason: format!("reconfigure request failed: {e}"),
+            })?;
+        if let Some(e) = status_error(resp.status(), &id.0) {
+            return Err(e);
+        }
+        let env: SandboxEnvelope = resp.json().await.map_err(|e| MvmError::Backend {
+            reason: format!("parsing reconfigure response: {e}"),
+        })?;
+        Ok(env.data.into())
     }
 }
 
@@ -426,5 +471,31 @@ mod tests {
             status_error(StatusCode::INTERNAL_SERVER_ERROR, "m1"),
             Some(MvmError::Backend { .. })
         ));
+    }
+
+    #[test]
+    fn reconfigure_targets_the_reconfigure_endpoint() {
+        let be = GatewayBackend::new(GatewayConfig {
+            base_url: "https://fleet.example.com".into(),
+            token: "t".into(),
+        })
+        .unwrap();
+        let url = be.endpoint("/api/v1/sandboxes/abc/reconfigure").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://fleet.example.com/api/v1/sandboxes/abc/reconfigure"
+        );
+    }
+
+    #[test]
+    fn reconfigure_body_serializes_only_set_fields() {
+        let body = ReconfigureBody {
+            net: Some(true),
+            allow_host: None,
+            cpus: Some(2),
+            memory_mib: None,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert_eq!(json, r#"{"net":true,"cpus":2}"#);
     }
 }
