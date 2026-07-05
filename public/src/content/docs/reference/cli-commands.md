@@ -405,7 +405,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine create --name <name> --image <ref> --net --allow-host <host[:port]>` | Persist a named spec with opt-in egress settings for future lifecycle starts |
 | `mvmctl machine create --name <name> --manifest <path>` | Persist an image-backed `mvm.toml` / `Mvmfile.toml` as a named machine spec |
 | `mvmctl machine create --name <name> --image <ref> --force` | Overwrite an existing named machine spec |
-| `mvmctl machine start <name>` | Boot a persisted named machine through the admitted OCI-backed start path |
+| `mvmctl machine start <name>...` | Boot one or more persisted named machines through the admitted OCI-backed start path (`--receipt`/`--json`/`--dry-run` are single-machine) |
 | `mvmctl machine start <name> --dry-run` | Validate and explain the effective machine-start policy without booting a VM |
 | `mvmctl machine start <name> --dry-run --json` | Print the machine-start preflight summary as redacted JSON |
 | `mvmctl machine start <name> --json` | Print a redacted JSON start summary instead of plain text |

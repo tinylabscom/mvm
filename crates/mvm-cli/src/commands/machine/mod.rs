@@ -69,9 +69,9 @@ pub(in crate::commands) enum MachineAction {
     /// Create or update a persistent named machine spec without booting it
     #[command(display_order = 3)]
     Create(MachineCreateArgs),
-    /// Boot a persistent named machine without running a one-shot command
+    /// Boot one or more persistent named machines without running a one-shot command
     #[command(display_order = 4)]
-    Start(MachineStartArgs),
+    Start(MachineStartCmd),
     /// Stop a running VM by name, or all running VMs with --all
     #[command(display_order = 5)]
     Stop(MachineStopArgs),
@@ -786,6 +786,87 @@ pub(in crate::commands) struct MachineStartArgs {
     /// is up. Not a CLI flag — set programmatically by `run_persistent`.
     #[arg(skip)]
     pub has_ad_hoc_argv: bool,
+}
+
+/// CLI surface for `machine start`: one or more machine names plus the shared
+/// start flags. Each name is booted through the single-machine
+/// [`MachineStartArgs`] path, so the internal persistent-run caller and
+/// `start_machine` are untouched. `--receipt`/`--json`/`--dry-run` are
+/// single-machine outputs and are refused when more than one name is given.
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineStartCmd {
+    /// Persistent machine name(s) to boot.
+    #[arg(value_name = "NAME", required = true)]
+    pub names: Vec<String>,
+    /// Write a signed machine-start receipt to this path (single machine only).
+    #[arg(long, value_name = "PATH")]
+    pub receipt: Option<PathBuf>,
+    /// Print a machine-readable, redacted start summary as JSON (single machine only).
+    #[arg(long)]
+    pub json: bool,
+    /// Validate and explain the effective start without booting a VM (single machine only).
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Workload VMM backend. Defaults to the host's best supported backend
+    /// (Linux+KVM → firecracker; macOS 26+ → vz; macOS 13-25 → libkrun). On a
+    /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
+    /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
+    /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is
+    /// the env equivalent.
+    #[arg(long, value_name = "HYPERVISOR")]
+    pub hypervisor: Option<String>,
+    /// Skip plan-admission signing (hidden; for testing only).
+    #[arg(long, hide = true)]
+    pub no_supervisor: bool,
+    /// Boot the locally-built workload kernel from the mvm cache instead of the
+    /// image's own kernel. (Hidden — primarily threaded by `vm rekernel`.)
+    #[arg(long = "kernel-pin", value_name = "PIN", hide = true)]
+    pub kernel_pin: Option<String>,
+}
+
+impl MachineStartCmd {
+    /// Build the single-machine [`MachineStartArgs`] for one name, cloning the
+    /// shared flags. Interactive-only fields (`quiet`, `has_ad_hoc_argv`) stay
+    /// off — those are set by the internal persistent-run path, not the CLI.
+    fn start_args_for(&self, name: &str) -> MachineStartArgs {
+        MachineStartArgs {
+            name: name.to_string(),
+            receipt: self.receipt.clone(),
+            json: self.json,
+            dry_run: self.dry_run,
+            quiet: false,
+            hypervisor: self.hypervisor.clone(),
+            no_supervisor: self.no_supervisor,
+            kernel_pin: self.kernel_pin.clone(),
+            has_ad_hoc_argv: false,
+        }
+    }
+}
+
+/// `machine start <name>...`: boot each named machine. A single name returns
+/// its error directly; a batch continues past a failed start so one bad name
+/// doesn't strand the rest, then fails if any failed.
+fn run_start(cmd: MachineStartCmd) -> Result<()> {
+    if cmd.names.len() > 1 && (cmd.receipt.is_some() || cmd.json || cmd.dry_run) {
+        bail!(
+            "--receipt/--json/--dry-run report on a single machine; \
+             start machines individually to use them"
+        );
+    }
+    if cmd.names.len() == 1 {
+        return start_machine(cmd.start_args_for(&cmd.names[0]));
+    }
+    let mut had_err = false;
+    for name in &cmd.names {
+        if let Err(err) = start_machine(cmd.start_args_for(name)) {
+            eprintln!("failed to start {name}: {err:#}");
+            had_err = true;
+        }
+    }
+    if had_err {
+        bail!("one or more machines failed to start");
+    }
+    Ok(())
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -2631,7 +2712,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Ls(list_args) => list_machines(list_args),
         MachineAction::Inspect(inspect_args) => inspect_machine(inspect_args),
         MachineAction::Rm(remove_args) => remove_machine(remove_args),
-        MachineAction::Start(start_args) => start_machine(start_args),
+        MachineAction::Start(start_cmd) => run_start(start_cmd),
         MachineAction::Exec(exec_args) => exec_machine(cli, exec_args, cfg),
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
@@ -3676,7 +3757,7 @@ mod tests {
         .expect("parse")
         {
             MachineAction::Start(args) => {
-                assert_eq!(args.name, "web");
+                assert_eq!(args.names, vec!["web"]);
                 assert_eq!(
                     args.receipt.as_deref(),
                     Some(Path::new("/tmp/web.receipt.json"))
@@ -3736,16 +3817,39 @@ mod tests {
 
     #[test]
     fn start_quiet_is_internal_only_and_defaults_off() {
-        // `quiet` is not a user-facing flag — the standalone `machine start`
-        // and the detached path must keep printing the boot banner.
+        // `quiet` is an internal `MachineStartArgs` field, never a CLI flag —
+        // the standalone `machine start` path keeps printing the boot banner.
         match parse(&["start", "web"]).expect("parse") {
-            MachineAction::Start(args) => assert!(!args.quiet),
+            MachineAction::Start(args) => assert_eq!(args.names, vec!["web"]),
             other => panic!("expected start action, got {other:?}"),
         }
         assert!(
             parse(&["start", "web", "--quiet"]).is_err(),
             "--quiet must not be exposed as a CLI flag"
         );
+    }
+
+    #[test]
+    fn start_parses_multiple_names_and_refuses_single_machine_flags_in_batch() {
+        match parse(&["start", "web", "db", "cache"]).expect("parse batch") {
+            MachineAction::Start(cmd) => assert_eq!(cmd.names, vec!["web", "db", "cache"]),
+            other => panic!("expected start action, got {other:?}"),
+        }
+        // `--receipt`/`--json`/`--dry-run` report on one machine; a batch is
+        // refused before any boot is attempted.
+        let MachineAction::Start(cmd) =
+            parse(&["start", "web", "db", "--receipt", "/tmp/r.json"]).expect("parse")
+        else {
+            panic!("expected start action");
+        };
+        let err = run_start(cmd).expect_err("receipt + batch is refused");
+        assert!(err.to_string().contains("single machine"), "msg: {err}");
+    }
+
+    #[test]
+    fn start_requires_at_least_one_name() {
+        let err = parse(&["start"]).expect_err("a machine name is required");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
@@ -4659,7 +4763,7 @@ ssh_agent = true
         match cli.command {
             Commands::Machine(args) => match args.action {
                 MachineAction::Start(start) => {
-                    assert_eq!(start.name, "web");
+                    assert_eq!(start.names, vec!["web"]);
                     assert_eq!(
                         start.receipt.as_deref(),
                         Some(Path::new("/tmp/web.receipt.json"))
