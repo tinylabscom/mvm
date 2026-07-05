@@ -75,9 +75,26 @@ pub fn inject_and_materialize(
 pub fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()> {
     #[cfg(feature = "pure-mkfs")]
     if std::env::var_os("MVM_MATERIALIZE_BUILDER_VM").is_none() {
-        return crate::rootfs::materialize_ext4_pure(input)
-            .map(|_| ())
-            .with_context(|| format!("materialize {} in-process", input.output.display()));
+        match crate::rootfs::materialize_ext4_pure(input) {
+            Ok(_) => return Ok(()),
+            // Auto-fallback: the in-process writer structurally can't emit a
+            // faithful image — too large / too fragmented / a directory over one
+            // block, or the tree carries an xattr the writer can't represent — so
+            // retry via the builder VM, which has no such limits and whose
+            // `cp -a` preserves xattrs. Logged, never silent.
+            Err(e) if e.pure_should_fall_back() => {
+                tracing::warn!(
+                    error = %e,
+                    "in-process rootfs materialize needs the builder VM; falling back"
+                );
+                // fall through to the builder-VM path below
+            }
+            // A malformed tree or I/O failure is genuine — surface it, no retry.
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("materialize {} in-process", input.output.display()));
+            }
+        }
     }
     materialize_run_rootfs_builder_vm(input)
 }

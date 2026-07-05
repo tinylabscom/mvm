@@ -1,8 +1,15 @@
 # Plan 221 — In-process rootfs materialization (no builder-VM, no subprocess)
 
-**Status:** proposed
+**Status:** Option B shipped (B0–B5 landed: pure-Rust `mvm-ext4` writer +
+in-process dm-verity + multi-block-group + fuzz + adversarial suite; ADR-106
+records the Phase-A/Phase-B boundary; the run path materializes in-process by
+default with an ADR-093-style auto-fallback to the builder VM on a pure-writer
+limit or an xattr-bearing tree). Option A (virtiofs root) remains, gated on
+ADR-107. Native inline-xattr support in the writer is a possible follow-up to
+keep capability-bearing images on the pure path (today they fall back).
 **Owner:** _tbd_
-**Related:** ADR-050 (OCI verity posture — superseded *mechanism*), ADR-046/013
+**Related:** ADR-106 (Phase-A/Phase-B boundary — the in-process materialize
+decision), ADR-050 (OCI verity posture — superseded *mechanism*), ADR-046/013
 (no host tools / no host Nix), ADR-093 (builder auto-fallback), Plan 214
 (in-house HVF VMM), #1388 seam (synthesis→admission→`admit_and_start`).
 

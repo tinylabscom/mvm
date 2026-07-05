@@ -2589,6 +2589,7 @@ dependencies = [
  "tracing",
  "uuid",
  "which 6.0.3",
+ "xattr",
 ]
 
 [[package]]
