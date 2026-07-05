@@ -140,7 +140,9 @@ fn run_rootfs_output(name: &str) -> PathBuf {
 fn materialize_from_dir(dir: &Path, name: &str) -> Result<PathBuf> {
     let output = run_rootfs_output(name);
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
-    mvm_build::run_image::inject_and_materialize(&cache_root, dir, &output, name)
+    // `None`: this library carries no embedded guest binaries (only the mvmctl
+    // binary does), so it resolves them from the cache or a source checkout.
+    mvm_build::run_image::inject_and_materialize(&cache_root, dir, &output, name, None)
         .map_err(backend_err)?;
     Ok(output)
 }

@@ -96,6 +96,29 @@ fn main() {
         );
     }
 
+    // Guest-agent binaries (`mvm-guest-agent` + `mvm-guest-netinit`, dev-shell,
+    // guest arch = host arch). Embedded alongside the host bins so an end-user
+    // mvmctl with no source checkout can inject them into an OCI `run --image`
+    // rootfs. Built in one cargo invocation; they ride the same `EMBEDDED` array
+    // and are looked up by name. Honors MVM_SKIP_EMBED_BINARIES (zero-byte
+    // stubs) — a stub build can't materialize an OCI run, same as the host bins.
+    if !skip_embed {
+        run_guest_zigbuild(&workspace_root, &host_target_dir, &pin.target, &bins_out);
+    }
+    for name in ["mvm-guest-agent", "mvm-guest-netinit"] {
+        let out_file = bins_out.join(name);
+        if skip_embed {
+            std::fs::write(&out_file, b"")
+                .unwrap_or_else(|e| panic!("write stub {}: {e}", out_file.display()));
+        }
+        let sha = sha256_hex(&out_file);
+        entries.push((name.to_string(), out_file, sha));
+    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("crates/mvm-guest/src").display()
+    );
+
     let embedded_rs = render_embedded_rs(&entries);
     std::fs::write(out_dir.join("embedded.rs"), embedded_rs).unwrap();
     println!(
@@ -260,6 +283,52 @@ fn run_cargo_zigbuild(root: &Path, target_dir: &Path, pkg: &str, target: &str, o
         .join(pkg);
     std::fs::copy(&built, out)
         .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), out.display()));
+}
+
+/// Cross-compile the guest agent + netinit (one invocation, dev-shell feature)
+/// to the static musl `target`, copying both into `out_dir`. Same zig/rustup
+/// handling as `run_cargo_zigbuild`; the guest binaries are a single `mvm-guest`
+/// package build with two `--bin`s, not one bin per call.
+fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, out_dir: &Path) {
+    eprintln!(
+        "[build.rs] cargo zigbuild --release --target {target} -p mvm-guest \
+         --bin mvm-guest-agent --bin mvm-guest-netinit --features mvm-guest/dev-shell"
+    );
+    let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
+    let status = Command::new(&cargo)
+        .args([
+            "zigbuild",
+            "--release",
+            "--target",
+            target,
+            "-p",
+            "mvm-guest",
+            "--bin",
+            "mvm-guest-agent",
+            "--bin",
+            "mvm-guest-netinit",
+            "--features",
+            "mvm-guest/dev-shell",
+        ])
+        .env("RUSTC", &rustc)
+        .env("CARGO_TARGET_DIR", target_dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .current_dir(root)
+        .status()
+        .expect("spawn `cargo zigbuild` for the guest agent");
+    assert!(
+        status.success(),
+        "cargo zigbuild failed for the guest agent"
+    );
+    let rel = target_dir.join(strip_glibc(target)).join("release");
+    for name in ["mvm-guest-agent", "mvm-guest-netinit"] {
+        let built = rel.join(name);
+        let dest = out_dir.join(name);
+        std::fs::copy(&built, &dest)
+            .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), dest.display()));
+    }
 }
 
 /// Find a `(cargo, rustc)` pair that has `target` installed in its sysroot.

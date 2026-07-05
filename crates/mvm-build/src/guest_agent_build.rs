@@ -11,10 +11,12 @@
 //!
 //! `cargo-zigbuild` is the single portable cross path: the agent pulls
 //! `ring` (C), so a static musl build needs a musl C cross-compiler, and
-//! zig supplies it without a system `<arch>-linux-musl-gcc`. The build is
-//! only reachable from a source checkout (it needs the workspace + zig);
-//! an end-user mvmctl gets the binaries from the published runtime
-//! overlay instead (a separate path).
+//! zig supplies it without a system `<arch>-linux-musl-gcc`. The
+//! source-checkout build ([`resolve_or_build_guest_binaries`]) is only
+//! reachable with the workspace + zig; a **shipped mvmctl** embeds these two
+//! binaries at build time (`crates/mvm-cli/build.rs`) and installs the embedded
+//! bytes via [`install_prebuilt_guest_binaries`]. The resolution order —
+//! cache → source checkout → embedded — lives in `run_image::inject_and_materialize`.
 
 use mvm_core::arch::GuestArch;
 use std::path::{Path, PathBuf};
@@ -180,6 +182,40 @@ pub fn install_into_cache(
     Ok(layout.binaries())
 }
 
+/// The cached guest binaries if a complete set is already present, else `None`.
+/// Lets a caller check the cache without triggering a source-checkout build.
+pub fn cached_guest_binaries(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+) -> Option<MvmRuntimeBinaries> {
+    let layout = GuestAgentLayout::under(cache_root, version, arch);
+    layout.is_complete().then(|| layout.binaries())
+}
+
+/// Install guest binaries from in-memory bytes (embedded in the host binary at
+/// build time) into the cache. The end-user path: a shipped mvmctl has no
+/// source checkout to cross-compile from, so it writes the embedded bytes here.
+pub fn install_prebuilt_guest_binaries(
+    agent_bytes: &[u8],
+    netinit_bytes: &[u8],
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+) -> Result<MvmRuntimeBinaries, GuestAgentBuildError> {
+    let layout = GuestAgentLayout::under(cache_root, version, arch);
+    std::fs::create_dir_all(&layout.dir)?;
+    write_exec(&layout.agent, agent_bytes)?;
+    write_exec(&layout.netinit, netinit_bytes)?;
+    Ok(layout.binaries())
+}
+
+fn write_exec(dst: &Path, bytes: &[u8]) -> Result<(), GuestAgentBuildError> {
+    let _ = std::fs::remove_file(dst);
+    std::fs::write(dst, bytes)?;
+    set_exec(dst)
+}
+
 fn install_one(src: &Path, dst: &Path) -> Result<(), GuestAgentBuildError> {
     if !src.is_file() {
         return Err(GuestAgentBuildError::OutputMissing(src.to_path_buf()));
@@ -260,6 +296,41 @@ fn set_exec(_path: &Path) -> Result<(), GuestAgentBuildError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_prebuilt_then_cached_round_trips() {
+        let cache = tempfile::tempdir().unwrap();
+        let arch = GuestArch::Aarch64;
+
+        // Nothing cached yet.
+        assert!(cached_guest_binaries(cache.path(), "9.9.9", arch).is_none());
+
+        // Install embedded-style bytes, then the cache lookup finds them.
+        let bins = install_prebuilt_guest_binaries(
+            b"fake-agent-elf",
+            b"fake-netinit-elf",
+            cache.path(),
+            "9.9.9",
+            arch,
+        )
+        .expect("install prebuilt");
+        assert!(bins.agent.is_file());
+        assert!(bins.netinit.is_file());
+        assert_eq!(std::fs::read(&bins.agent).unwrap(), b"fake-agent-elf");
+
+        let cached = cached_guest_binaries(cache.path(), "9.9.9", arch).expect("now cached");
+        assert_eq!(cached.agent, bins.agent);
+        // Executable bit is set on the installed binary.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&cached.agent)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111, "installed agent must be executable");
+        }
+    }
 
     #[test]
     fn musl_triple_per_arch() {
