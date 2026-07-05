@@ -1728,6 +1728,60 @@ fn machine_status_label(name: &str) -> &'static str {
     }
 }
 
+/// One rendered `machine ls` row (already stringified for display).
+struct MachineLsRow {
+    name: String,
+    status: String,
+    source: String,
+    age: String,
+}
+
+/// Coarse, human-friendly age of a machine from its `created_at` timestamp,
+/// relative to `now`. `-` when absent/unparseable. Takes `now` explicitly so
+/// the buckets are unit-testable.
+fn humanize_age(created: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> String {
+    let Some(created) = created else {
+        return "-".to_string();
+    };
+    let Ok(then) = chrono::DateTime::parse_from_rfc3339(created) else {
+        return "-".to_string();
+    };
+    let secs = (now - then.with_timezone(&chrono::Utc)).num_seconds();
+    match secs {
+        s if s < 0 => "-".to_string(),
+        s if s < 60 => "just now".to_string(),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86400),
+    }
+}
+
+/// Render the `machine ls` table: a header plus left-aligned, padded columns
+/// (docker-style). Pure so the alignment is unit-testable.
+fn format_machine_table(rows: &[MachineLsRow]) -> String {
+    let header = MachineLsRow {
+        name: "NAME".to_string(),
+        status: "STATUS".to_string(),
+        source: "SOURCE".to_string(),
+        age: "AGE".to_string(),
+    };
+    let all = std::iter::once(&header).chain(rows);
+    let wn = all.clone().map(|r| r.name.len()).max().unwrap_or(0);
+    let ws = all.clone().map(|r| r.status.len()).max().unwrap_or(0);
+    let wsrc = all.clone().map(|r| r.source.len()).max().unwrap_or(0);
+    std::iter::once(&header)
+        .chain(rows)
+        .map(|r| {
+            // AGE is the last column, so it needs no trailing pad.
+            format!(
+                "{:<wn$}  {:<ws$}  {:<wsrc$}  {}",
+                r.name, r.status, r.source, r.age
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn list_machines(args: MachineListArgs) -> Result<()> {
     let specs = list_machine_specs()?;
     if args.json {
@@ -1742,19 +1796,22 @@ fn list_machines(args: MachineListArgs) -> Result<()> {
     } else if specs.is_empty() {
         println!("no machines");
     } else {
-        for spec in &specs {
-            let source = spec
-                .image
-                .as_deref()
-                .or(spec.manifest.as_deref())
-                .unwrap_or("<no source>");
-            println!(
-                "{}\t{}\t{}",
-                spec.name,
-                machine_status_label(&spec.name),
-                source
-            );
-        }
+        let now = chrono::Utc::now();
+        let rows: Vec<MachineLsRow> = specs
+            .iter()
+            .map(|spec| MachineLsRow {
+                name: spec.name.clone(),
+                status: machine_status_label(&spec.name).to_string(),
+                source: spec
+                    .image
+                    .as_deref()
+                    .or(spec.manifest.as_deref())
+                    .unwrap_or("<no source>")
+                    .to_string(),
+                age: humanize_age(spec.created_at.as_deref(), now),
+            })
+            .collect();
+        println!("{}", format_machine_table(&rows));
     }
     Ok(())
 }
@@ -3922,6 +3979,58 @@ mod tests {
             serde_json::from_str(&already_running_notice("web", true)).expect("valid json");
         assert_eq!(json["machine"], "web");
         assert_eq!(json["already_running"], true);
+    }
+
+    #[test]
+    fn humanize_age_buckets() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let ago = |s: &str| humanize_age(Some(s), now);
+        assert_eq!(ago("2026-01-01T23:59:30Z"), "just now");
+        assert_eq!(ago("2026-01-01T23:30:00Z"), "30m");
+        assert_eq!(ago("2026-01-01T20:00:00Z"), "4h");
+        assert_eq!(ago("2025-12-30T00:00:00Z"), "3d");
+        assert_eq!(humanize_age(None, now), "-");
+        assert_eq!(humanize_age(Some("not-a-date"), now), "-");
+        // A future timestamp (clock skew) degrades to "-" rather than a negative.
+        assert_eq!(ago("2026-01-02T01:00:00Z"), "-");
+    }
+
+    #[test]
+    fn format_machine_table_aligns_columns_under_a_header() {
+        let rows = vec![
+            MachineLsRow {
+                name: "web".to_string(),
+                status: "running".to_string(),
+                source: "alpine".to_string(),
+                age: "3d".to_string(),
+            },
+            MachineLsRow {
+                name: "database-1".to_string(),
+                status: "stopped".to_string(),
+                source: "ghcr.io/acme/db".to_string(),
+                age: "5m".to_string(),
+            },
+        ];
+        let table = format_machine_table(&rows);
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 3, "header + 2 rows");
+        assert!(lines[0].starts_with("NAME"), "header first: {}", lines[0]);
+        assert!(lines[0].contains("STATUS") && lines[0].contains("AGE"));
+        // The NAME column is padded to the widest name ("database-1" = 10),
+        // so every row's STATUS column starts at the same offset.
+        let status_col = lines[0].find("STATUS").expect("header has STATUS");
+        assert!(
+            lines[1][status_col..].starts_with("running"),
+            "row1: {}",
+            lines[1]
+        );
+        assert!(
+            lines[2][status_col..].starts_with("stopped"),
+            "row2: {}",
+            lines[2]
+        );
     }
 
     #[test]
