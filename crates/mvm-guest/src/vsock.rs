@@ -3238,6 +3238,25 @@ pub fn post_restore_at(
     interpret_post_restore(resp)
 }
 
+/// Like [`post_restore_at`] but carries an optional verb-grant envelope so
+/// the guest re-pins its grant without a reboot. `None` degrades to the
+/// same behaviour as [`post_restore_at`].
+pub fn post_restore_with_grant_at(
+    vsock_uds_path: &str,
+    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+    grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+) -> Result<PostRestoreReply> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(
+        &mut stream,
+        &GuestRequest::PostRestore {
+            token,
+            grant_envelope,
+        },
+    )?;
+    interpret_post_restore(resp)
+}
+
 /// Filesystem marker a workload creates to signal it has finished warming
 /// (caches/JITs/model load done). The guest agent reports its presence on a
 /// `PrimedStatus` query; the host's warm-snapshot barrier waits for it before
