@@ -93,6 +93,20 @@ fn create_manifest_matches_shared_fixture() {
 }
 
 #[test]
+fn create_image_matches_shared_fixture() {
+    // The `--image` + resources shape the `MvmClient` facade's `create_machine`
+    // emits (SubprocessBackend::create_args). Pins that exact argv so a CLI, an
+    // SDK, and the client all produce the identical create.
+    let argv = MachineCreate::builder("web")
+        .image("alpine:3.20")
+        .cpus(2)
+        .memory("512M")
+        .machine_args()
+        .expect("create-image argv");
+    assert_eq!(argv, fixture("create-image"));
+}
+
+#[test]
 fn check_artifact_matches_shared_fixture() {
     let argv = MachineCheckArtifact::builder("/tmp/app.mvm")
         .key("/tmp/app.pub")
@@ -221,6 +235,7 @@ fn fixture_coverage_is_accounted_for() {
     // Rust conformance complete.
     let asserted = [
         "check-artifact",
+        "create-image",
         "create-manifest",
         "exec",
         "inspect",

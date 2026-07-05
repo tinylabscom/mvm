@@ -176,6 +176,16 @@ describe("Machine persistent lifecycle", () => {
     })).toEqual(readArgvFixture("create-manifest"));
   });
 
+  it("emits the shared image create argv fixture", () => {
+    // The --image + resources shape the MvmClient facade's create_machine emits.
+    expect(machineCreateArgv({
+      name: "web",
+      image: "alpine:3.20",
+      cpus: 2,
+      memory: "512M",
+    })).toEqual(readArgvFixture("create-image"));
+  });
+
   it("shells create/start/exec/shell/stop through mvmctl machine", () => {
     const script = writeFixtureMvmctl();
     process.env.MVM_CLI_BIN = script;

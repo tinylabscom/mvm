@@ -1,0 +1,9 @@
+create
+--name
+web
+--image
+alpine:3.20
+--cpus
+2
+--memory
+512M
