@@ -73,6 +73,19 @@ pub struct ExecResult {
     pub stderr: Vec<u8>,
 }
 
+/// A patch over a machine's reconfigurable fields — intent only. Every
+/// field is optional: `None` means "leave unchanged" (patch semantics).
+/// `mem_initial` is intentionally absent — it stays a CLI-only field
+/// (the facade doesn't model it at launch either).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReconfigureRequest {
+    pub net: Option<bool>,
+    pub allow_host: Option<Vec<String>>,
+    pub cpus: Option<u32>,
+    pub memory_mib: Option<u32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,5 +126,30 @@ mod tests {
     fn filter_all_matches_nothing_set() {
         let f = MachineFilter::all();
         assert!(f.name.is_none() && f.status.is_none());
+    }
+
+    #[test]
+    fn reconfigure_request_serde_round_trips() {
+        let req = ReconfigureRequest {
+            net: Some(true),
+            allow_host: Some(vec!["api.stripe.com:443".into()]),
+            cpus: Some(4),
+            memory_mib: Some(1024),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: ReconfigureRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, back);
+    }
+
+    #[test]
+    fn reconfigure_request_all_none_is_valid_noop() {
+        let req: ReconfigureRequest = serde_json::from_str("{}").expect("all fields optional");
+        assert_eq!(req, ReconfigureRequest::default());
+    }
+
+    #[test]
+    fn reconfigure_request_rejects_unknown_field_fail_closed() {
+        let err = serde_json::from_str::<ReconfigureRequest>(r#"{"rogue":true}"#);
+        assert!(err.is_err(), "unknown field must be rejected");
     }
 }
