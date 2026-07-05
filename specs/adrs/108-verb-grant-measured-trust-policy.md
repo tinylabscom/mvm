@@ -1,4 +1,4 @@
-# ADR-107: Verb-grant measured trust policy and the key-separation ceiling
+# ADR-108: Verb-grant measured trust policy and the key-separation ceiling
 
 - Status: Proposed
 - Date: 2026-07-04
