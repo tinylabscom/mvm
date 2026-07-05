@@ -35,16 +35,16 @@ Legend: ● driver+pure-argv-builder · ◐ driver only · ○ absent · 🔒 fi
 | CLI verb | Python | TypeScript | Rust `machine.rs` | Rust facade (`MvmClient`) | Shared fixture |
 |---|---|---|---|---|---|
 | run           | ● | ● | ● | ◐ (gated on admitted-boot) | 🔒 ×3 |
-| create        | ● | ● | ● | ○ | 🔒 |
+| create        | ● | ● | ● | ● | 🔒 ×2 |
 | check-artifact| ● | ● | ● | ○ | 🔒 |
-| start         | ● | ● | ● | ○ | 🔒 |
+| start         | ● | ● | ● | ● | 🔒 |
 | exec          | ● | ● | ● | ● | 🔒 |
 | shell         | ● | ● | ● | ○ (excluded: interactive PTY) | 🔒 |
 | stop          | ● | ● | ● | ● | 🔒 |
 | ls / list     | ● | ● | ● | ● | 🔒 |
 | logs          | ● | ● | ● | ● | 🔒 |
-| inspect       | ● | ● | ● | ○ | 🔒 |
-| rm            | ● | ● | ● | ○ | 🔒 ×2 |
+| inspect       | ● | ● | ● | ● | 🔒 |
+| rm            | ● | ● | ● | ● | 🔒 ×2 |
 | build         | ○ | ○ | ○ | ○ | — (image pipeline, no SDK surface by design) |
 | console       | ○ | ○ | ○ | ○ | — (dev-only interactive PTY, out of scope) |
 
@@ -88,6 +88,16 @@ Only `build` and `console` remain CLI-only, both by design.
    lives in `mvm-cli` and exposing it to `mvm-client`/`mvm-sdk` is a large lift
    tracked in Plan 214; until then both `run` paths fail closed to preserve
    claim 8.
+
+7. **The `MvmClient` trait now covers the full machine lifecycle.** The typed
+   facade grew `inspect`/`create`/`start`/`remove` alongside `list`/`run`/`stop`/
+   `logs`/`exec`, so a Rust consumer (mvmd) gets the same lifecycle a language
+   SDK does — no more `○` gaps in the facade column. Where an impl genuinely
+   can't support an op (the cloud `GatewayBackend` boots on create; the
+   in-process `LocalBackend` lacks the CLI-side machine registry / a destroy
+   seam) it returns an honest error, not a fake. The `create-image` shared
+   fixture pins the `--image` + resources shape the facade's `create_machine`
+   emits, so a CLI, an SDK, and the client all produce the identical create argv.
 
 ## The harness (approach 1, across all languages)
 

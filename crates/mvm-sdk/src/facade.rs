@@ -409,18 +409,29 @@ mod tests {
 
     #[test]
     fn create_start_rm_args_build_the_machine_verbs() {
+        // Matches the shared `create-image.argv` conformance fixture, so the
+        // client's create argv is drift-locked against the CLI + every SDK.
         let spec = MachineSpec {
-            name: "db".into(),
+            name: "web".into(),
             image: "alpine:3.20".into(),
-            cpus: 1,
-            memory_mib: 256,
+            cpus: 2,
+            memory_mib: 512,
             env: vec![],
         };
-        // create persists the spec (no boot).
-        let create = create_args(&spec).unwrap();
-        assert_eq!(create[0], "create");
-        assert!(create.iter().any(|a| a == "alpine:3.20"));
-        assert!(create.iter().any(|a| a == "256M"));
+        assert_eq!(
+            create_args(&spec).unwrap(),
+            vec![
+                "create",
+                "--name",
+                "web",
+                "--image",
+                "alpine:3.20",
+                "--cpus",
+                "2",
+                "--memory",
+                "512M",
+            ]
+        );
 
         let id = MachineId("db".into());
         assert_eq!(start_args(&id).unwrap(), vec!["start", "db"]);

@@ -99,6 +99,16 @@ def test_machine_create_manifest_argv_matches_cli_unknown_key_fixture() -> None:
     ) == _fixture("create-manifest")
 
 
+def test_machine_create_image_argv_matches_shared_fixture() -> None:
+    # The --image + resources shape the MvmClient facade's create_machine emits.
+    assert _machine_create_argv(
+        name="web",
+        image="alpine:3.20",
+        cpus=2,
+        memory="512M",
+    ) == _fixture("create-image")
+
+
 def test_machine_check_artifact_argv_matches_cli_fixture() -> None:
     assert _machine_check_artifact_argv(
         path="/tmp/app.mvm",
