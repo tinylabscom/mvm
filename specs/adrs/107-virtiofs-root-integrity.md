@@ -1,6 +1,6 @@
 # ADR-107: Integrity model for a virtiofs root filesystem
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-04
 - Owner: MVM Project
 - Related: ADR-002 (microVM security posture — **claim 3**, threat model, tier

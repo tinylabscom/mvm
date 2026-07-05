@@ -36,11 +36,16 @@ weakened. This plan implements Option A under that decision.
 
 ## Phases
 
-### A0 — Integrity decision (ADR-107) — **done**
+### A0 — Integrity decision (ADR-107) — **done (Accepted)**
 
-`specs/adrs/107-virtiofs-root-integrity.md` (Proposed). Decision: tiered posture,
-prod stays on Option B, claim 3 scoped to block+ext4. Everything below assumes
-that decision; if it is rejected in review, A1–A5 do not ship.
+`specs/adrs/107-virtiofs-root-integrity.md` (**Accepted**). Decision: tiered
+posture, prod stays on Option B, claim 3 scoped to block+ext4. Everything below
+assumes that decision.
+
+**Parked.** A1–A5 are not scheduled: Option B already meets the "no subprocess
+on the run path" goal, so Option A is a dev-loop optimization, and A1 depends on
+Plan 214's in-house-HVF backend exposing a virtiofs **root** device. Pick this up
+when that lands; until then this plan is the accepted design, not active work.
 
 ### A1 — Virtiofs **root** device on virtiofs-capable backends
 
@@ -122,5 +127,6 @@ A1–A2 are backend + guest plumbing (Plan-214-adjacent; the in-house HVF backen
 is where the value concentrates). A3–A4 are the security-relevant gate and are
 where review attention should focus — the one-line risk is a path that reaches
 virtiofs-root for a prod/sealed workload, which A4's gate + A3's fail-closed
-unpack must make unrepresentable. A5 is cleanup once A1–A4 are proven. The whole
-plan is **gated on ADR-107 being accepted**; until then this is design only.
+unpack must make unrepresentable. A5 is cleanup once A1–A4 are proven. ADR-107 is
+accepted, so the design is settled; scheduling waits on Plan 214's in-house-HVF
+virtiofs-root device (see A0 — parked).
