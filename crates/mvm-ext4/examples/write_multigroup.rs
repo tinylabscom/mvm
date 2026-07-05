@@ -24,16 +24,19 @@ fn main() {
         Node::Dir {
             path: "/etc".into(),
             mode: 0o755,
+            xattrs: Vec::new(),
         },
         Node::File {
             path: "/etc/marker".into(),
             mode: 0o644,
             data: b"multi-group marker\n".to_vec(),
+            xattrs: Vec::new(),
         },
         Node::File {
             path: "/big".into(),
             mode: 0o644,
             data: big,
+            xattrs: Vec::new(),
         },
     ];
 

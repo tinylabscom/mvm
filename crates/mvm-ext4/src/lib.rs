@@ -97,6 +97,10 @@ pub enum Ext4Error {
     /// Two nodes claim the same path (including a node re-claiming the implicit
     /// root `/`), which would emit duplicate directory entries.
     DuplicatePath(String),
+    /// An inode's extended attributes don't fit the in-inode xattr area (an
+    /// external xattr block is not implemented). Treated as a capacity limit so
+    /// the run path falls back to the builder VM, which preserves them.
+    XattrTooLarge { ino: u32 },
 }
 
 impl std::fmt::Display for Ext4Error {
@@ -124,6 +128,11 @@ impl std::fmt::Display for Ext4Error {
                 write!(f, "parent of {p} is not a directory")
             }
             Ext4Error::DuplicatePath(p) => write!(f, "duplicate path {p}"),
+            Ext4Error::XattrTooLarge { ino } => write!(
+                f,
+                "inode {ino}'s extended attributes exceed the in-inode xattr area \
+                 (an external xattr block is not implemented)"
+            ),
         }
     }
 }
@@ -142,6 +151,7 @@ impl Ext4Error {
             Ext4Error::TooLarge { .. }
                 | Ext4Error::FileTooFragmented { .. }
                 | Ext4Error::DirTooLarge(_)
+                | Ext4Error::XattrTooLarge { .. }
         )
     }
 }
@@ -155,11 +165,13 @@ pub enum Node {
     Dir {
         path: String,
         mode: u16,
+        xattrs: Vec<Xattr>,
     },
     File {
         path: String,
         mode: u16,
         data: Vec<u8>,
+        xattrs: Vec<Xattr>,
     },
     Symlink {
         path: String,
@@ -167,10 +179,27 @@ pub enum Node {
     },
 }
 
+/// An extended attribute (name + raw value) to store in an inode's inline xattr
+/// area. `name` is fully-qualified (e.g. `security.capability`, `user.foo`);
+/// `value` is preserved verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Xattr {
+    pub name: String,
+    pub value: Vec<u8>,
+}
+
 impl Node {
     fn path(&self) -> &str {
         match self {
             Node::Dir { path, .. } | Node::File { path, .. } | Node::Symlink { path, .. } => path,
+        }
+    }
+
+    /// The node's extended attributes (empty for symlinks).
+    fn xattrs(&self) -> &[Xattr] {
+        match self {
+            Node::Dir { xattrs, .. } | Node::File { xattrs, .. } => xattrs,
+            Node::Symlink { .. } => &[],
         }
     }
 }
@@ -233,6 +262,9 @@ struct Planned {
     // Directory children: (name, child_ino, child_ft). Filled after planning.
     children: Vec<(String, u32, u8)>,
     links: u16,
+    // Pre-encoded in-inode xattr region (magic + entries + values), written
+    // verbatim at inode offset 160. Empty when the inode has no xattrs.
+    xattr_block: Vec<u8>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -420,6 +452,7 @@ pub fn build_image(nodes: &[Node]) -> Result<Vec<u8>, Ext4Error> {
         symlink_target: None,
         children: Vec::new(),
         links: 2,
+        xattr_block: Vec::new(),
     });
     for n in &sorted {
         let p = normalize(n.path())?;
@@ -447,6 +480,10 @@ pub fn build_image(nodes: &[Node]) -> Result<Vec<u8>, Ext4Error> {
                 target.len() as u64,
             ),
         };
+        // Encode the inode's xattrs into its in-inode region now; an oversized
+        // set surfaces as XattrTooLarge (a capacity limit → builder-VM fallback).
+        let xattr_block =
+            encode_inline_xattrs(n.xattrs()).ok_or(Ext4Error::XattrTooLarge { ino })?;
         planned.push(Planned {
             ino,
             kind,
@@ -460,6 +497,7 @@ pub fn build_image(nodes: &[Node]) -> Result<Vec<u8>, Ext4Error> {
             symlink_target,
             children: Vec::new(),
             links: if kind == Kind::Dir { 2 } else { 1 },
+            xattr_block,
         });
     }
 
@@ -734,6 +772,82 @@ fn set_bit(bytes: &mut [u8], base: usize, bit: usize) {
     bytes[base + bit / 8] |= 1u8 << (bit % 8);
 }
 
+// In-inode xattr area: starts at 128 + i_extra_isize(32), runs to the end of
+// the 256-byte inode. First 4 bytes are the magic; the rest holds entries
+// (growing forward) + values (packed backward) + a 4-byte terminator.
+const XATTR_REGION_OFFSET: usize = 128 + 32;
+const XATTR_REGION_LEN: usize = INODE_SIZE as usize - XATTR_REGION_OFFSET; // 96
+const XATTR_MAGIC: u32 = 0xEA02_0000;
+
+/// Split a fully-qualified xattr name into its ext4 `e_name_index` + suffix.
+/// `None` for a namespace the on-disk format doesn't encode.
+fn split_xattr_name(name: &str) -> Option<(u8, &str)> {
+    // Exact ACL names (their suffix is empty; the index implies the full name).
+    match name {
+        "system.posix_acl_access" => return Some((2, "")),
+        "system.posix_acl_default" => return Some((3, "")),
+        _ => {}
+    }
+    for (idx, prefix) in [
+        (1u8, "user."),
+        (4, "trusted."),
+        (6, "security."),
+        (7, "system."),
+    ] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            return Some((idx, rest));
+        }
+    }
+    None
+}
+
+/// Encode `xattrs` into an inode's in-inode xattr region (the bytes written at
+/// [`XATTR_REGION_OFFSET`]: 4-byte magic + entries + values). Returns `None` if
+/// they don't fit or carry an unencodable namespace, so the caller falls back to
+/// the builder VM. Empty input yields an empty region (no xattr area emitted).
+/// Deterministic: entries are sorted by (name_index, suffix).
+fn encode_inline_xattrs(xattrs: &[Xattr]) -> Option<Vec<u8>> {
+    if xattrs.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut items: Vec<(u8, &str, &[u8])> = Vec::with_capacity(xattrs.len());
+    for x in xattrs {
+        let (idx, suffix) = split_xattr_name(&x.name)?;
+        items.push((idx, suffix, x.value.as_slice()));
+    }
+    items.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+
+    // `e_value_offs` is relative to the entry area (region byte 4), matching the
+    // reader. Entries grow from offset 0 of the entry area; values pack backward
+    // from its end. `entry_end + 4-byte terminator` must not cross `value_cursor`.
+    let entry_area = XATTR_REGION_LEN - 4;
+    let mut region = vec![0u8; XATTR_REGION_LEN];
+    region[0..4].copy_from_slice(&XATTR_MAGIC.to_le_bytes());
+    let mut entry_cursor = 0usize;
+    let mut value_cursor = entry_area;
+    for (idx, suffix, value) in items {
+        let name = suffix.as_bytes();
+        let entry_padded = (16 + name.len() + 3) & !3;
+        let value_padded = (value.len() + 3) & !3;
+        value_cursor = value_cursor.checked_sub(value_padded)?;
+        if entry_cursor + entry_padded + 4 > value_cursor {
+            return None;
+        }
+        let e = 4 + entry_cursor;
+        region[e] = name.len() as u8; // e_name_len
+        region[e + 1] = idx; // e_name_index
+        region[e + 2..e + 4].copy_from_slice(&(value_cursor as u16).to_le_bytes()); // e_value_offs
+        // e_value_inum (e+4..e+8) and e_hash (e+12..e+16) stay zero.
+        region[e + 8..e + 12].copy_from_slice(&(value.len() as u32).to_le_bytes()); // e_value_size
+        region[e + 16..e + 16 + name.len()].copy_from_slice(name);
+        let v = 4 + value_cursor;
+        region[v..v + value.len()].copy_from_slice(value);
+        entry_cursor += entry_padded;
+    }
+    // 4-byte zero terminator after the last entry is already zeroed.
+    Some(region)
+}
+
 fn write_inode(img: &mut Image, layout: &Layout, p: &Planned) {
     let (g, local) = layout.locate_inode(p.ino);
     let off = img.block_off(layout.inode_table(g)) + local as usize * INODE_SIZE as usize;
@@ -746,6 +860,14 @@ fn write_inode(img: &mut Image, layout: &Layout, p: &Planned) {
     let sectors = (p.block_count + p.leaf_blocks.len() as u32) * (BLOCK_SIZE / 512);
     img.put_u32(off + 0x1C, sectors); // i_blocks_lo
     img.put_u16(off + 0x80, 32); // i_extra_isize
+
+    // In-inode extended attributes: pre-encoded region (magic + entries +
+    // values) written at offset 160 (128 + i_extra_isize). Empty for symlinks
+    // and inodes without xattrs. Sits above the i_block/extent region, so it
+    // never overlaps file/dir data layout.
+    if !p.xattr_block.is_empty() {
+        img.put_bytes(off + XATTR_REGION_OFFSET, &p.xattr_block);
+    }
 
     if p.kind == Kind::Symlink && p.extents.is_empty() {
         // Fast symlink: raw target in i_block, no extents flag.
