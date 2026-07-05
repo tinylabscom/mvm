@@ -673,9 +673,10 @@ struct MachineSpec {
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct MachineCreateArgs {
-    /// Persistent machine name. Lowercase alphanumeric plus hyphens.
+    /// Persistent machine name (auto-generated and printed if omitted).
+    /// Lowercase alphanumeric plus hyphens.
     #[arg(long)]
-    pub name: String,
+    pub name: Option<String>,
     /// Image-backed machine manifest (`mvm.toml`, its directory, or
     /// `Mvmfile.toml`) to source defaults from. If omitted and `--image` is not
     /// set, the current directory is searched.
@@ -967,7 +968,15 @@ struct MachineStartReceiptSignature {
 
 impl MachineCreateArgs {
     fn into_spec(self) -> Result<MachineSpec> {
-        validate_machine_name(&self.name)?;
+        // Auto-generate a name when `--name` is omitted, mirroring `machine run
+        // -d` (`create_machine` prints the chosen name).
+        let name = match self.name {
+            Some(name) => {
+                validate_machine_name(&name)?;
+                name
+            }
+            None => auto_machine_name(),
+        };
         let manifest_source = match (self.image.is_none(), self.manifest.as_deref()) {
             (_, Some(arg)) => Some(load_machine_manifest_source(Path::new(arg))?),
             (true, None) => Some(load_machine_manifest_source(Path::new(".")).with_context(
@@ -1031,7 +1040,7 @@ impl MachineCreateArgs {
         };
         Ok(MachineSpec {
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
-            name: self.name,
+            name,
             image: Some(image),
             manifest: None,
             resolved_digest: None,
@@ -3599,7 +3608,7 @@ mod tests {
         .expect("parse");
         match action {
             MachineAction::Create(args) => {
-                assert_eq!(args.name, "web");
+                assert_eq!(args.name.as_deref(), Some("web"));
                 assert_eq!(args.image.as_deref(), Some("ghcr.io/acme/web:latest"));
                 assert!(args.net);
                 assert_eq!(args.allow_host, vec!["api.example.com:443"]);
@@ -3804,7 +3813,7 @@ mod tests {
     fn create_persists_machine_spec_under_data_dir() {
         let _state = IsolatedMachineState::new();
         let args = MachineCreateArgs {
-            name: "web".to_string(),
+            name: Some("web".to_string()),
             manifest: None,
             image: Some("alpine:latest".to_string()),
             net: true,
@@ -3826,6 +3835,30 @@ mod tests {
         assert_eq!(loaded.schema_version, MACHINE_SPEC_SCHEMA_VERSION);
         assert!(loaded.created_at.is_some());
         assert!(loaded.last_started_at.is_none());
+    }
+
+    #[test]
+    fn create_auto_generates_a_name_when_omitted() {
+        let _state = IsolatedMachineState::new();
+        let spec = MachineCreateArgs {
+            name: None,
+            manifest: None,
+            image: Some("alpine:latest".to_string()),
+            net: false,
+            allow_host: Vec::new(),
+            cpus: None,
+            memory: None,
+            mem_initial: None,
+            profile: None,
+            force: false,
+            json: false,
+        }
+        .into_spec()
+        .expect("auto-named spec");
+        // A generated name is present and passes the same validation as an
+        // explicit one, so a subsequent `start`/`ls`/`rm` can reference it.
+        assert!(!spec.name.is_empty());
+        validate_machine_name(&spec.name).expect("generated name is valid");
     }
 
     #[test]
@@ -3855,7 +3888,7 @@ ssh_agent = true
         .expect("manifest");
 
         let spec = MachineCreateArgs {
-            name: "web".to_string(),
+            name: Some("web".to_string()),
             manifest: Some(dir.path().join("mvm.toml").display().to_string()),
             image: None,
             net: false,
@@ -3890,7 +3923,7 @@ ssh_agent = true
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("mvm.toml"), "flake = \".\"\n").expect("manifest");
         let err = MachineCreateArgs {
-            name: "web".to_string(),
+            name: Some("web".to_string()),
             manifest: Some(dir.path().join("mvm.toml").display().to_string()),
             image: None,
             net: false,
@@ -3919,7 +3952,7 @@ ssh_agent = true
         )
         .expect("manifest");
         let err = MachineCreateArgs {
-            name: "web".to_string(),
+            name: Some("web".to_string()),
             manifest: Some(dir.path().join("mvm.toml").display().to_string()),
             image: None,
             net: false,
@@ -3948,7 +3981,7 @@ ssh_agent = true
         )
         .expect("manifest");
         let err = MachineCreateArgs {
-            name: "web".to_string(),
+            name: Some("web".to_string()),
             manifest: Some(dir.path().join("mvm.toml").display().to_string()),
             image: None,
             net: false,
@@ -4280,7 +4313,7 @@ ssh_agent = true
     #[test]
     fn create_rejects_unsafe_machine_name() {
         let args = MachineCreateArgs {
-            name: "../web".to_string(),
+            name: Some("../web".to_string()),
             manifest: None,
             image: Some("alpine:latest".to_string()),
             net: false,
@@ -4569,7 +4602,7 @@ ssh_agent = true
         match cli.command {
             Commands::Machine(args) => match args.action {
                 MachineAction::Create(create) => {
-                    assert_eq!(create.name, "web");
+                    assert_eq!(create.name.as_deref(), Some("web"));
                     assert_eq!(create.image.as_deref(), Some("alpine"));
                 }
                 other => panic!("expected create action, got {other:?}"),

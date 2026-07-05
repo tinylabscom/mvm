@@ -475,7 +475,9 @@ both. When `--image` is omitted, it searches the current directory for
 persisted spec carries the manifest's image, CPU/memory sizing, `mem_initial`,
 network defaults, allow-hosts, and volumes. Relative manifest volume host paths
 are resolved relative to the manifest file; volume validation keeps the shared
-default of read-only mounts unless `:rw` is explicit.
+default of read-only mounts unless `:rw` is explicit. `--name` is optional: when
+omitted, `machine create` auto-generates a name and prints it (mirroring
+`machine run -d`).
 
 `machine start`, `machine exec`, `machine shell`, and `machine stop` require the
 named `MachineSpec` to exist first. `machine start` resolves the stored OCI
