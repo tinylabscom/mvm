@@ -2783,8 +2783,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
 
 /// A resolved patch over the reconfigurable `MachineSpec` fields. `None`
 /// means "leave unchanged".
-// Task 5 wires these into run_reconfigure; until then suppress the lint.
-#[allow(dead_code)]
 struct ReconfigurePatch {
     net: Option<bool>,
     allow_host: Option<Vec<String>>,
@@ -2795,7 +2793,6 @@ struct ReconfigurePatch {
 
 /// Resolve CLI flags into a patch, validating memory eagerly so a bad
 /// size fails before we overwrite anything or bounce the VM.
-#[allow(dead_code)]
 fn patch_from_args(args: &MachineReconfigureArgs) -> Result<ReconfigurePatch> {
     let net = if args.net {
         Some(true)
@@ -2827,7 +2824,6 @@ fn patch_from_args(args: &MachineReconfigureArgs) -> Result<ReconfigurePatch> {
 
 /// Apply the patch: each `Some` overrides the corresponding field; the
 /// rest of `spec` is inherited unchanged.
-#[allow(dead_code)]
 fn apply_patch(mut spec: MachineSpec, patch: &ReconfigurePatch) -> MachineSpec {
     if let Some(v) = patch.net {
         spec.net = v;
@@ -2847,8 +2843,54 @@ fn apply_patch(mut spec: MachineSpec, patch: &ReconfigurePatch) -> MachineSpec {
     spec
 }
 
-fn run_reconfigure(_args: MachineReconfigureArgs) -> Result<()> {
-    bail!("machine reconfigure: not yet implemented")
+/// `machine reconfigure <name>`: patch the persisted spec and relaunch.
+/// Patch semantics (only passed flags change), errors if the machine
+/// doesn't exist, and — when running — stops + restarts so a fresh
+/// signed ExecutionPlan reflects the change. When stopped, it persists
+/// only; the change applies on the next `machine start`.
+fn run_reconfigure(args: MachineReconfigureArgs) -> Result<()> {
+    let existing = load_machine_spec(&args.name)?;
+    let patch = patch_from_args(&args)?;
+    let desired = apply_patch(existing.clone(), &patch);
+
+    // Re-validate the final memory pair: patch_from_args only validates when
+    // --memory is passed, so a bare --mem-initial could slip through unchecked.
+    validate_machine_memory(&desired.memory, desired.mem_initial.as_deref())
+        .context("invalid machine memory after reconfigure")?;
+
+    let changed = machine_config_diff(&existing, &desired);
+    if changed.is_empty() {
+        println!("machine {:?}: no changes", args.name);
+        return Ok(());
+    }
+
+    let was_running = machine_is_running(&args.name);
+    overwrite_machine_spec(&desired)?;
+
+    if was_running {
+        eprintln!(
+            "reconfiguring {:?} ({changed}): stopping the old instance and restarting",
+            args.name
+        );
+        stop_running_machine(&args.name);
+        start_machine(MachineStartArgs {
+            name: args.name.clone(),
+            receipt: None,
+            json: false,
+            dry_run: false,
+            quiet: false,
+            hypervisor: args.hypervisor.clone(),
+            no_supervisor: false,
+            kernel_pin: None,
+            has_ad_hoc_argv: false,
+        })?;
+    } else {
+        println!(
+            "machine {:?} reconfigured ({changed}); change applies on next `machine start`",
+            args.name
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5214,5 +5256,40 @@ ssh_agent = true
         let mut args = reconfigure_args_fixture("web");
         args.memory = Some("notasize".into());
         assert!(patch_from_args(&args).is_err());
+    }
+
+    #[test]
+    fn reconfigure_unknown_machine_errors_clearly() {
+        let _state = IsolatedMachineState::new();
+        let mut args = reconfigure_args_fixture("does-not-exist");
+        args.cpus = Some(4);
+        let err = run_reconfigure(args).unwrap_err();
+        assert!(
+            err.to_string().contains("does not exist"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reconfigure_mem_initial_inconsistency_rejected() {
+        // Validate that run_reconfigure rejects an inconsistent mem_initial
+        // even when only --mem-initial is passed (no --memory). This tests the
+        // post-apply re-validation added in Task 5 (Addition 2).
+        let _state = IsolatedMachineState::new();
+        // Persist a valid machine spec directly so the machine "exists".
+        let spec = reconfigure_spec_fixture();
+        save_machine_spec(&spec, false).expect("save fixture spec");
+        // Now try to reconfigure with a mem_initial that exceeds the existing
+        // memory (512M), which must be caught by the post-apply validator.
+        let mut args = reconfigure_args_fixture("web");
+        args.mem_initial = Some("1G".into()); // 1G > 512M → invalid
+        let err = run_reconfigure(args).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid machine memory after reconfigure")
+                || msg.contains("mem_initial")
+                || msg.contains("must be strictly less than"),
+            "unexpected error: {err}"
+        );
     }
 }
