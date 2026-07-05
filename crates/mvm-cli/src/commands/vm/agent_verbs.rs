@@ -2,13 +2,36 @@ use anyhow::{Context, Result, bail};
 use mvm_core::plan::VerbId;
 use mvm_guest::vsock::GuestRequest;
 
-/// Whether a run should receive an attenuated agent-verb grant. Only a
-/// baked-entrypoint run on a non-dev profile qualifies: those issue only
-/// ProdSafe verbs. An interactive PTY (ConsoleOpen) or an ad-hoc command
-/// (Exec) needs DevOnly verbs and must NOT be grant-restricted; dev profile
-/// stays permissive by contract.
-pub(crate) fn grant_eligible(pty: bool, has_ad_hoc_argv: bool, is_dev_profile: bool) -> bool {
-    !pty && !has_ad_hoc_argv && !is_dev_profile
+/// Whether the image at `rootfs_path` is a sealed prod image, read from the
+/// `mvm-meta.json` sidecar the build/materialize pipeline writes next to the
+/// rootfs. Absent or unreadable sidecar => `false` (treat as not sealed => no
+/// default grant), matching the `accessible: true` fallback convention for
+/// pre-sidecar artifacts.
+pub(crate) fn image_is_sealed(rootfs_path: &std::path::Path) -> bool {
+    rootfs_path
+        .parent()
+        .and_then(|dir| {
+            mvm_build::builder_vm::GuestSidecar::read_from_dir(dir)
+                .ok()
+                .flatten()
+        })
+        .map(|s| s.sealed)
+        .unwrap_or(false)
+}
+
+/// Whether a run should receive an attenuated default agent-verb grant. Only a
+/// baked-entrypoint run, on a non-dev profile, of a **sealed** image qualifies:
+/// those issue only ProdSafe verbs and the image's agent has no console/exec
+/// baked in. An interactive PTY (ConsoleOpen) or ad-hoc command (Exec) needs
+/// DevOnly verbs; a dev profile stays permissive by contract; and a dev-shell /
+/// OCI image (not sealed) must stay reachable via `machine exec` / `console`.
+pub(crate) fn grant_eligible(
+    pty: bool,
+    has_ad_hoc_argv: bool,
+    is_dev_profile: bool,
+    image_sealed: bool,
+) -> bool {
+    !pty && !has_ad_hoc_argv && !is_dev_profile && image_sealed
 }
 
 /// Compute the default agent-verb set for a workload.
@@ -96,33 +119,60 @@ mod tests {
     }
 
     #[test]
-    fn grant_eligible_only_for_nonpty_noargv_nondev() {
-        // Baked-entrypoint run on a prod profile → eligible.
-        assert!(grant_eligible(false, false, false));
-        // Interactive (pty) → NOT eligible (needs ConsoleOpen, DevOnly).
-        assert!(!grant_eligible(true, false, false));
-        // Ad-hoc command (argv present) → NOT eligible (needs Exec, DevOnly).
-        assert!(!grant_eligible(false, true, false));
-        // Dev profile → NOT eligible (dev stays permissive).
-        assert!(!grant_eligible(false, false, true));
-        // Any combination with a disqualifier → NOT eligible.
-        assert!(!grant_eligible(true, true, true));
+    fn grant_eligible_only_for_nonpty_noargv_nondev_sealed() {
+        // Baked-entrypoint, prod profile, SEALED image → eligible.
+        assert!(grant_eligible(false, false, false, true));
+        // Same run but the image is NOT sealed (dev-shell / OCI) → NOT eligible.
+        assert!(!grant_eligible(false, false, false, false));
+        // Interactive (pty) → NOT eligible even when sealed.
+        assert!(!grant_eligible(true, false, false, true));
+        // Ad-hoc command (argv) → NOT eligible even when sealed.
+        assert!(!grant_eligible(false, true, false, true));
+        // Dev profile → NOT eligible even when sealed.
+        assert!(!grant_eligible(false, false, true, true));
+        // Every disqualifier at once → NOT eligible.
+        assert!(!grant_eligible(true, true, true, false));
     }
 
     #[test]
     fn persistent_with_trailing_argv_is_not_eligible() {
-        // `machine run -d --image X -- cmd` boots the machine AND then runs an
-        // ad-hoc command via GuestRequest::Exec (a DevOnly verb). The admitted
-        // plan must NOT carry an attenuated ProdSafe grant.
-        assert!(
-            !grant_eligible(false, true, false),
-            "persistent + ad-hoc argv must not receive a ProdSafe-only grant"
-        );
-        // Without trailing argv, a non-dev persistent boot IS eligible.
-        assert!(
-            grant_eligible(false, false, false),
-            "persistent baked-entrypoint on non-dev profile must be eligible"
-        );
+        // `machine run -d --image X -- cmd` runs an ad-hoc Exec (DevOnly): no grant,
+        // regardless of sealed state.
+        assert!(!grant_eligible(false, true, false, true));
+        // Sealed baked-entrypoint on non-dev profile IS eligible.
+        assert!(grant_eligible(false, false, false, true));
+    }
+
+    #[test]
+    fn image_is_sealed_reads_sidecar_sealed_field() {
+        use mvm_build::builder_vm::GuestSidecar;
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"x").unwrap();
+
+        // A sealed prod sidecar => sealed.
+        let mut sc = GuestSidecar::for_oci_run("t"); // accessible:true, sealed:false baseline
+        sc.accessible = false;
+        sc.sealed = true;
+        sc.write_to_dir(dir.path()).unwrap();
+        assert!(image_is_sealed(&rootfs));
+    }
+
+    #[test]
+    fn image_is_sealed_false_for_accessible_and_oci_and_absent() {
+        use mvm_build::builder_vm::GuestSidecar;
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"x").unwrap();
+
+        // Absent sidecar => not sealed.
+        assert!(!image_is_sealed(&rootfs));
+
+        // OCI sidecar (accessible:true, sealed:false) => not sealed.
+        GuestSidecar::for_oci_run("t")
+            .write_to_dir(dir.path())
+            .unwrap();
+        assert!(!image_is_sealed(&rootfs));
     }
 
     #[test]

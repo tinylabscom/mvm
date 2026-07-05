@@ -153,7 +153,7 @@ pub(super) struct AdmitPlanForBootParams<'a> {
     /// `parse_agent_verb_override`; any unknown/DevOnly verb is an error.
     pub agent_verb_override: Vec<String>,
     /// True iff this run should receive an attenuated (ProdSafe-only) agent-verb
-    /// grant. Set this with `grant_eligible(pty, has_ad_hoc_argv, is_dev_profile)`.
+    /// grant. Set this with `grant_eligible(pty, has_ad_hoc_argv, is_dev_profile, image_sealed)`.
     /// Interactive / ad-hoc / dev runs must pass `false`: they issue DevOnly verbs
     /// (ConsoleOpen, Exec) that a ProdSafe grant would refuse.
     pub restrict_agent_verbs: bool,
@@ -1191,6 +1191,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             false,
             has_ad_hoc_argv,
             profile == "dev",
+            super::agent_verbs::image_is_sealed(rootfs_path),
         ),
     })?;
     let mut start_config = VmStartParams {
