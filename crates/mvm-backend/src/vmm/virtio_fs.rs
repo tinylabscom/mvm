@@ -118,11 +118,17 @@ pub struct FuseServer {
     inodes: HashMap<u64, Inode>,
     by_path: HashMap<PathBuf, u64>,
     next_ino: u64,
+    /// Canonical served root. Every real (non-symlink) file/dir access is
+    /// confined beneath it — the served OCI tree is untrusted and the guest is
+    /// the adversary, so a symlink in the tree must never let a lookup/read
+    /// escape the root and disclose host files (claim 1).
+    root_canon: PathBuf,
 }
 
 impl FuseServer {
     pub fn new(root: impl Into<PathBuf>) -> FuseServer {
         let root = root.into();
+        let root_canon = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
         let mut inodes = HashMap::new();
         let mut by_path = HashMap::new();
         inodes.insert(ROOT_INO, Inode { path: root.clone() });
@@ -131,7 +137,17 @@ impl FuseServer {
             inodes,
             by_path,
             next_ino: 2,
+            root_canon,
         }
+    }
+
+    /// Canonicalize `path` (resolving every symlink + `..`) and return it only if
+    /// it stays beneath the canonical served root. `None` means the path escapes
+    /// the root (or can't be resolved) and the operation must be refused — so a
+    /// symlink in the untrusted tree can't disclose host files outside it.
+    fn real_path_under_root(&self, path: &Path) -> Option<PathBuf> {
+        let canon = std::fs::canonicalize(path).ok()?;
+        canon.starts_with(&self.root_canon).then_some(canon)
     }
 
     fn intern(&mut self, path: PathBuf) -> u64 {
@@ -210,8 +226,22 @@ impl FuseServer {
         if name.is_empty() || name == "." || name == ".." || name.contains('/') {
             return reply(unique, -ENOENT, &[]);
         }
-        let child = parent_path.join(name);
-        if std::fs::symlink_metadata(&child).is_err() {
+        // The parent must be a *real directory*. Never join/traverse under a
+        // symlink (a symlink parent would make the OS follow it out of the root).
+        if !std::fs::symlink_metadata(&parent_path)
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+        {
+            return reply(unique, -ENOTDIR, &[]);
+        }
+        let child = parent_path.join(&name);
+        let Ok(md) = std::fs::symlink_metadata(&child) else {
+            return reply(unique, -ENOENT, &[]);
+        };
+        // A real (non-symlink) target must resolve *beneath the served root*. A
+        // symlink entry is fine to expose — the guest resolves it via READLINK in
+        // its own namespace; we never follow it ourselves.
+        if !md.file_type().is_symlink() && self.real_path_under_root(&child).is_none() {
             return reply(unique, -ENOENT, &[]);
         }
         let ino = self.intern(child.clone());
@@ -251,7 +281,13 @@ impl FuseServer {
         }
         let offset = rd_u64(body, 8);
         let size = rd_u32(body, 16) as usize;
-        match read_range(&path, offset, size) {
+        // Confine: the target must be a real file beneath the root — never a
+        // symlink, never a path that resolves outside (a READ on a symlink inode
+        // would otherwise open its target on the host).
+        let Some(real) = self.real_path_under_root(&path) else {
+            return reply(unique, -ENOENT, &[]);
+        };
+        match read_range(&real, offset, size) {
             Ok(data) => reply(unique, 0, &data),
             Err(e) => reply(unique, -e, &[]),
         }
@@ -304,13 +340,19 @@ impl FuseServer {
     fn dir_entries(&self, path: &Path) -> Result<Vec<(String, u64, u32)>, i32> {
         let md = std::fs::symlink_metadata(path).map_err(|_| ENOENT)?;
         if !md.is_dir() {
+            // A symlink (or file) reports non-dir here, so a READDIR on a symlink
+            // inode never gets followed off the root.
             return Err(ENOTDIR);
         }
+        // Confine: the directory must resolve beneath the served root.
+        let Some(real) = self.real_path_under_root(path) else {
+            return Err(ENOENT);
+        };
         let mut out = vec![
             (".".to_string(), ROOT_INO, DT_DIR),
             ("..".to_string(), ROOT_INO, DT_DIR),
         ];
-        let rd = std::fs::read_dir(path).map_err(|_| ENOENT)?;
+        let rd = std::fs::read_dir(&real).map_err(|_| ENOENT)?;
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             let ft = e.file_type().map_err(|_| ENOENT)?;
@@ -344,7 +386,15 @@ fn stable_ino(path: &Path) -> u64 {
 
 fn read_range(path: &Path, offset: u64, size: usize) -> Result<Vec<u8>, i32> {
     use std::io::{Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).map_err(|_| ENOENT)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    // `O_NOFOLLOW` refuses to open a symlink — belt-and-suspenders against a
+    // TOCTOU swap between canonicalize and open (the caller already confined the
+    // canonical path beneath the root).
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| ENOENT)?;
     f.seek(SeekFrom::Start(offset)).map_err(|_| ENOENT)?;
     let mut buf = vec![0u8; size];
     let n = f.read(&mut buf).map_err(|_| ENOENT)?;
@@ -580,5 +630,44 @@ mod tests {
             let (err, _) = parse_reply(&fs.dispatch(&request(op, 1, ROOT_INO, b"x\0")));
             assert_eq!(err, -EROFS, "opcode {op} must be refused read-only");
         }
+    }
+
+    #[test]
+    fn symlink_escaping_the_root_cannot_disclose_host_files() {
+        // A host file OUTSIDE the served tree.
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), b"HOST SECRET\n").unwrap();
+        // The served (untrusted) tree with a malicious absolute symlink escaping
+        // the root — exactly what a hostile OCI image would ship.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("etc")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("etc/evil")).unwrap();
+        let mut fs = FuseServer::new(root.path());
+
+        let (_, etc) = parse_reply(&fs.dispatch(&request(FUSE_LOOKUP, 1, ROOT_INO, b"etc\0")));
+        let etc_ino = rd_u64(&etc, 0);
+        // The symlink entry itself is visible (the guest resolves it via READLINK
+        // inside its own namespace — that's not a host escape).
+        let (err, evil) = parse_reply(&fs.dispatch(&request(FUSE_LOOKUP, 2, etc_ino, b"evil\0")));
+        assert_eq!(err, 0);
+        let evil_ino = rd_u64(&evil, 0);
+        // Traversing *through* the symlink is refused: it is not a directory.
+        let (err, _) = parse_reply(&fs.dispatch(&request(FUSE_LOOKUP, 3, evil_ino, b"secret\0")));
+        assert_eq!(
+            err, -ENOTDIR,
+            "cannot LOOKUP through a symlink out of the root"
+        );
+        // READing the symlink inode must not open its host target.
+        let mut read_in = Vec::new();
+        put_u64(&mut read_in, 0); // fh
+        put_u64(&mut read_in, 0); // offset
+        put_u32(&mut read_in, 4096); // size @16
+        put_u32(&mut read_in, 0); // read_flags
+        let (err, data) = parse_reply(&fs.dispatch(&request(FUSE_READ, 4, evil_ino, &read_in)));
+        assert_ne!(err, 0, "READ through the escaping symlink must be refused");
+        assert!(
+            !data.windows(4).any(|w| w == b"SECR"),
+            "host file bytes must never leak"
+        );
     }
 }
