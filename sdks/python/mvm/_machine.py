@@ -237,7 +237,8 @@ def _machine_exec_argv(
     command = _string_list(command, "command")
     if not command:
         raise ValueError("command must be non-empty")
-    argv = ["exec", "--name", _require_non_empty_str(name, "name")]
+    # `machine exec` takes a positional name, not `--name`.
+    argv = ["exec", _require_non_empty_str(name, "name")]
     if force:
         argv.append("--force")
     argv.extend(["--", *command])
@@ -245,7 +246,8 @@ def _machine_exec_argv(
 
 
 def _machine_shell_argv(*, name: str, force: bool = False) -> list[str]:
-    argv = ["shell", "--name", _require_non_empty_str(name, "name")]
+    # `machine shell` takes a positional name, not `--name`.
+    argv = ["shell", _require_non_empty_str(name, "name")]
     if force:
         argv.append("--force")
     return argv

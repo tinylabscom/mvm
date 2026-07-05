@@ -223,7 +223,7 @@ def test_machine_persistent_lifecycle_shells_to_cli(tmp_path: Path) -> None:
     assert "verb=start" in text
     assert "devbox --dry-run" in text
     assert "verb=exec" in text
-    assert "--name devbox --force -- echo hi" in text
+    assert "devbox --force -- echo hi" in text
     assert "verb=shell" in text
     assert "verb=stop" in text
 

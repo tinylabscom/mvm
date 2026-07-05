@@ -396,7 +396,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine run --image <ref> --json -- <cmd>` | Print a redacted JSON execution summary |
 | `mvmctl machine run --image <ref> --receipt <path> -- <cmd>` | Write a signed execution receipt |
 | `mvmctl machine run -d --image <ref>` | Boot a **persistent** machine, auto-name it (printed), return |
-| `mvmctl machine run -d --name <name> --image <ref>` | Boot a **persistent** named machine, return; reconnect via `machine shell --name <name>` |
+| `mvmctl machine run -d --name <name> --image <ref>` | Boot a **persistent** named machine, return; reconnect via `machine shell <name>` |
 | `mvmctl machine run --name <name> --image <ref> -- <cmd>` | Boot a named foreground transient machine, run `<cmd>`, tear down |
 | `mvmctl machine run -it --image <ref> -- <cmd>` | Run `<cmd>` attached to a PTY, return its exit code, tear down |
 | `mvmctl machine run -it --name <name> --image <ref> -- <cmd>` | Same, with a stable transient VM name while it runs |
@@ -417,9 +417,9 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine rm <name>... --yes` | Remove one or more persisted named machine specs |
 | `mvmctl machine rm --all --yes` | Remove every persisted named machine spec |
 | `mvmctl machine rm <name>... --yes --json` | Print a JSON array deletion summary |
-| `mvmctl machine exec --name <name> -- <cmd>...` | Run a command in an already-started named machine |
-| `mvmctl machine exec --name <name> -it -- <cmd>...` | Run a command in an already-started named machine attached to a PTY |
-| `mvmctl machine shell --name <name>` | Attach an interactive shell/console to an already-started named machine |
+| `mvmctl machine exec <name> -- <cmd>...` | Run a command in an already-started named machine |
+| `mvmctl machine exec <name> -it -- <cmd>...` | Run a command in an already-started named machine attached to a PTY |
+| `mvmctl machine shell <name>` | Attach an interactive shell/console to an already-started named machine |
 | `mvmctl machine stop <name>` | Stop an already-started named machine (prompts for confirmation; pass `--yes` to skip) |
 | `mvmctl machine check-artifact <artifact.mvm>` | Verify a portable artifact and preview its admission posture without extracting or booting |
 | `mvmctl machine check-artifact <artifact.mvm> --key <pubkey>` | Verify with an explicit raw Ed25519 public key |
@@ -455,9 +455,9 @@ Use the explicit persistent lifecycle when you want the VM to survive:
 
 ```bash
 mvmctl machine run -d --image alpine          # boots, prints e.g. "blue-fox-3f2a", returns
-mvmctl machine shell --name blue-fox-3f2a     # reconnect (dev PTY)
-mvmctl machine exec  --name blue-fox-3f2a -- ps   # one-shot command in the running machine
-mvmctl machine exec  --name blue-fox-3f2a -it -- /bin/sh   # PTY command in the running machine
+mvmctl machine shell blue-fox-3f2a            # reconnect (dev PTY)
+mvmctl machine exec  blue-fox-3f2a -- ps          # one-shot command in the running machine
+mvmctl machine exec  blue-fox-3f2a -it -- /bin/sh   # PTY command in the running machine
 mvmctl machine stop  blue-fox-3f2a --yes      # tear it down when done
 ```
 
@@ -466,7 +466,7 @@ mvmctl machine stop  blue-fox-3f2a --yes      # tear it down when done
 **Interactive is dev-only.** `-t`/`--tty` attaches the foreground command to a
 PTY and is refused for a sealed/production image (claim 15 — no interactive
 access to a sealed microVM) and when stdin is not a terminal. `machine run -it`
-requires an argv after `--`; use `machine shell --name <name>` for the default
+requires an argv after `--`; use `machine shell <name>` for the default
 shell on an already-running machine.
 
 `machine create` accepts either `--image <ref>` or an image-backed manifest, not

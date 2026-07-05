@@ -226,9 +226,7 @@ fn persistent_machine_lifecycle_builders_reuse_machine_cli() {
         .expect("exec");
     assert_eq!(
         fake.argv(),
-        [
-            "machine", "exec", "--name", "devbox", "--force", "--", "echo", "hi",
-        ]
+        ["machine", "exec", "devbox", "--force", "--", "echo", "hi",]
     );
 
     machine
@@ -236,10 +234,7 @@ fn persistent_machine_lifecycle_builders_reuse_machine_cli() {
         .force(true)
         .run_with(&client)
         .expect("shell");
-    assert_eq!(
-        fake.argv(),
-        ["machine", "shell", "--name", "devbox", "--force"]
-    );
+    assert_eq!(fake.argv(), ["machine", "shell", "devbox", "--force"]);
 
     machine.stop().run_with(&client).expect("stop");
     // `machine stop` takes a positional name, not `--name`, plus `--yes` to

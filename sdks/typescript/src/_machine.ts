@@ -223,14 +223,16 @@ export function machineExecArgv(
 ): string[] {
   command = requireStringArray(command, "command");
   if (command.length === 0) throw new RangeError("command must be non-empty");
-  const argv = ["exec", "--name", requireString(name, "name")];
+  // `machine exec` takes a positional name, not `--name`.
+  const argv = ["exec", requireString(name, "name")];
   if (options.force) argv.push("--force");
   argv.push("--", ...command);
   return argv;
 }
 
 export function machineShellArgv(name: string, options: MachineShellOptions = {}): string[] {
-  const argv = ["shell", "--name", requireString(name, "name")];
+  // `machine shell` takes a positional name, not `--name`.
+  const argv = ["shell", requireString(name, "name")];
   if (options.force) argv.push("--force");
   return argv;
 }
