@@ -743,6 +743,10 @@ pub(in crate::commands) struct MachineRemoveArgs {
     /// Skip the interactive confirmation prompt.
     #[arg(long)]
     pub yes: bool,
+    /// Stop a running machine before removing it. Without this, removing a
+    /// running machine is refused (its VM would be orphaned).
+    #[arg(long)]
+    pub force: bool,
     /// Print a JSON deletion summary.
     #[arg(long)]
     pub json: bool,
@@ -1814,6 +1818,21 @@ fn resolve_remove_targets(all: bool, names: &[String]) -> Result<Vec<String>> {
     Ok(targets)
 }
 
+/// Refusal message when `machine rm` targets running machines without
+/// `--force`. Returns `None` when nothing is running (so removal proceeds).
+/// Pure so the wording is unit-testable.
+fn rm_running_refusal(running: &[String]) -> Option<String> {
+    if running.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "refusing to remove running machine(s) {}: their VMs would be orphaned. \
+         Stop them first (`mvmctl machine stop {}`), or pass `--force` to stop and remove.",
+        running.join(", "),
+        running.join(" ")
+    ))
+}
+
 fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
     let json = args.json;
     let targets = resolve_remove_targets(args.all, &args.names)?;
@@ -1855,8 +1874,24 @@ fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
             bail!("machine {name:?} does not exist. Run `mvmctl machine ls` to list machines.");
         }
     }
+    // Removing a running machine's spec would orphan its VM (unmanageable by
+    // name afterwards). Refuse up front unless `--force` was passed, in which
+    // case each running machine is stopped just before removal.
+    if !args.force {
+        let running: Vec<String> = targets
+            .iter()
+            .filter(|name| machine_is_running(name))
+            .cloned()
+            .collect();
+        if let Some(msg) = rm_running_refusal(&running) {
+            bail!(msg);
+        }
+    }
     let mut summaries = Vec::with_capacity(targets.len());
     for name in &targets {
+        if args.force && machine_is_running(name) {
+            stop_running_machine(name);
+        }
         let summary = remove_machine_spec(name, true)?;
         mvm_core::audit_emit!(ConfigChange, vm: &summary.name, "action=machine.rm");
         if !json {
@@ -3817,6 +3852,14 @@ mod tests {
                 assert!(args.names.is_empty());
                 assert!(args.all);
                 assert!(args.yes);
+                assert!(!args.force, "force defaults off");
+            }
+            other => panic!("expected rm action, got {other:?}"),
+        }
+        match parse(&["rm", "web", "--yes", "--force"]).expect("parse") {
+            MachineAction::Rm(args) => {
+                assert_eq!(args.names, vec!["web"]);
+                assert!(args.force);
             }
             other => panic!("expected rm action, got {other:?}"),
         }
@@ -4656,8 +4699,19 @@ ssh_agent = true
             names: names.iter().map(|n| n.to_string()).collect(),
             all,
             yes,
+            force: false,
             json: false,
         }
+    }
+
+    #[test]
+    fn rm_running_refusal_wording() {
+        assert!(rm_running_refusal(&[]).is_none());
+        let msg = rm_running_refusal(&["web".to_string(), "db".to_string()])
+            .expect("running machines refuse");
+        assert!(msg.contains("web, db"), "lists the running names: {msg}");
+        assert!(msg.contains("machine stop web db"), "hints stop: {msg}");
+        assert!(msg.contains("--force"), "mentions --force: {msg}");
     }
 
     #[test]
