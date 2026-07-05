@@ -459,7 +459,7 @@ mod tests {
         let cmd = vec!["sh".to_string(), "-lc".to_string(), "echo ok".to_string()];
         assert_eq!(
             exec_args(&id, cmd).unwrap(),
-            vec!["exec", "--name", "web", "--", "sh", "-lc", "echo ok"]
+            vec!["exec", "web", "--", "sh", "-lc", "echo ok"]
         );
     }
 }
