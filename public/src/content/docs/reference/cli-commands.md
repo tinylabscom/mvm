@@ -423,7 +423,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine stop <name>...` | Stop one or more already-started named machines (prompts for confirmation; pass `--yes` to skip) |
 | `mvmctl machine reconfigure <name> [flags]` | Patch a persistent machine's config and relaunch it. Only the flags you pass are changed; everything else (image, volumes, profile) is preserved. When the machine is running, it is stopped and restarted automatically; when stopped, the change is staged for the next `machine start`. |
 | `mvmctl machine reconfigure <name> --net` / `--no-net` | Enable or disable the dev-tier outbound network preset |
-| `mvmctl machine reconfigure <name> --allow-host <host[:port]>` | Replace the egress allowlist (repeatable; clears any previous allow-hosts) |
+| `mvmctl machine reconfigure <name> --allow-host <host[:port]>` | Replace the stored egress allowlist with these hosts (repeatable within one invocation); use `--clear-allow-host` to empty it |
 | `mvmctl machine reconfigure <name> --clear-allow-host` | Remove all per-host egress entries and fall back to the default network posture |
 | `mvmctl machine reconfigure <name> --cpus <n>` | Change the vCPU count |
 | `mvmctl machine reconfigure <name> --memory <size>` | Change the memory limit (accepts `512m`, `1g`, etc.) |
@@ -503,8 +503,7 @@ and redacted volume policy without resolving or booting the image; the signed
 machine-start receipt carries the same policy summary plus the resolved digest
 and start timestamp after a real boot. `exec` / `shell` / `stop` reuse the
 existing console/down paths for the running VM. `machine reconfigure <name>`
-patches a subset of the stored config (`net`, `allow_host`, `cpus`, `memory`,
-`mem_initial`) and relaunches the machine — auto stop + start when running,
+patches a subset of the stored config (`net`, `allow_host`, `cpus`, `memory`, and the CLI-only `mem_initial`) and relaunches the machine — auto stop + start when running,
 persist-only when stopped; identity, image, and volumes are preserved. `machine pack` for portable
 signed artifacts and live `machine run <artifact.mvm>` are still follow-up work.
 `machine check-artifact` is the current read-only portable-artifact gate: it
