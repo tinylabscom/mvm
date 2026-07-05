@@ -78,8 +78,8 @@ pub(in crate::commands) enum MachineAction {
     /// Remove one or more persistent named machine specs (or --all)
     #[command(name = "rm", display_order = 6)]
     Rm(MachineRemoveArgs),
-    /// List persistent named machine specs
-    #[command(name = "ls", display_order = 7)]
+    /// List persistent named machine specs (alias: `ps`)
+    #[command(name = "ls", visible_alias = "ps", display_order = 7)]
     Ls(MachineListArgs),
     /// Show one persistent named machine spec
     #[command(display_order = 8)]
@@ -3618,6 +3618,11 @@ mod tests {
         match parse(&["ls", "--json"]).expect("parse") {
             MachineAction::Ls(args) => assert!(args.json),
             other => panic!("expected ls action, got {other:?}"),
+        }
+        // `ps` is a docker-style visible alias for `ls`.
+        match parse(&["ps", "--json"]).expect("parse ps alias") {
+            MachineAction::Ls(args) => assert!(args.json),
+            other => panic!("expected ls action from `ps`, got {other:?}"),
         }
         match parse(&[
             "start",
