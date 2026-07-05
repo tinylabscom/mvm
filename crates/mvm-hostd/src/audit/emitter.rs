@@ -299,6 +299,24 @@ impl AuditEmitter {
         )
     }
 
+    /// Emit `plan.grant_required` — records that this admission asserted verb-grant
+    /// enforcement (the admitted plan carries `agent_verbs`, so the launcher emits
+    /// `mvm.require_grant=1` and the guest fails closed without a valid grant).
+    /// Binds the granted verb set to the same plan id as the launch decision, so
+    /// `trust audit verify` can attest the enforcement posture. Host-side: the guest
+    /// cannot sign this chain.
+    pub fn emit_grant_required(
+        &self,
+        plan: &ExecutionPlan,
+        verbs: &[mvm_core::plan::VerbId],
+    ) -> Result<()> {
+        let mut labels = vec![("verb_count".to_string(), verbs.len().to_string())];
+        for (i, v) in verbs.iter().enumerate() {
+            labels.push((format!("verb_{i}"), v.as_str().to_string()));
+        }
+        self.emit(plan, "plan.grant_required", labels)
+    }
+
     /// Emit `plan.failed` — fires on any error path between admission
     /// and successful boot. `class` is a short tag (`backend-start`,
     /// `snapshot-restore`, etc.) the operator can grep for; `message`
@@ -431,6 +449,39 @@ mod tests {
         assert!(content.contains("oci_resolved_digest"));
         assert!(content.contains("oci_layer_digests"));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn grant_required_event_is_chain_signed_with_required_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-GR");
+
+        let verbs = vec![
+            mvm_core::plan::VerbId::new("ping").unwrap(),
+            mvm_core::plan::VerbId::new("run-entrypoint").unwrap(),
+        ];
+        emitter.emit_grant_required(&plan, &verbs).unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("audit file exists");
+        assert!(
+            content.contains("plan.grant_required"),
+            "event kind must appear in log"
+        );
+        assert!(content.contains("\"2\""), "verb_count must be 2");
+        assert!(content.contains("ping"), "verb_0 label must contain 'ping'");
+        assert!(
+            content.contains("run-entrypoint"),
+            "verb_1 label must contain 'run-entrypoint'"
+        );
+        assert_eq!(
+            verify_audit_chain(&path, &vk).unwrap(),
+            1,
+            "single-entry chain must verify clean"
+        );
     }
 
     #[test]
