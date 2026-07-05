@@ -1613,15 +1613,10 @@ pub fn load_verb_trust_policy(path: &std::path::Path) -> Option<mvm_core::plan::
     }
 }
 
-/// Verb names that are always allowed regardless of grant or trust-policy state.
-/// Mirrors the BASELINE list in `VerbGrant::permits` so that `trust_denied`
-/// refusals have the same allow-set as the verb-grant gate.
-const TRUST_BASELINE: &[&str] = &["protocol-hello", "ping", "readiness-status"];
-
-/// Returns `true` if `verb` is in the baseline set that is always allowed
-/// regardless of grant or trust-policy state.
+/// Returns `true` if `verb` is in the baseline set (`mvm_core::plan::VERB_GRANT_BASELINE`)
+/// that is always allowed regardless of grant or trust-policy state.
 pub fn is_verb_trust_baseline(verb: &str) -> bool {
-    TRUST_BASELINE.contains(&verb)
+    mvm_core::plan::VERB_GRANT_BASELINE.contains(&verb)
 }
 
 /// Pure trust decision. `Attested` key source is unimplemented and treated
