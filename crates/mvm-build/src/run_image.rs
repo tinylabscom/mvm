@@ -175,3 +175,111 @@ pub fn unpacked_tree_size(root: &Path) -> Result<u64> {
     }
     Ok(total)
 }
+
+/// Which rootfs strategy the run path uses for a workload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootStrategy {
+    /// Serve the unpacked + injected tree directly over a read-only **virtiofs
+    /// root** — the dev/local tier only. No ext4, no materialize. Carries the
+    /// weaker virtiofs-root integrity contract and does **not** witness claim 3.
+    VirtiofsRoot,
+    /// Materialize a block ext4 image (the "Option B" path) — the prod, sealed,
+    /// and Firecracker route. Witnesses claim 3 via dm-verity.
+    BlockExt4,
+}
+
+/// Inputs to the root-strategy tier gate.
+#[derive(Debug, Clone, Copy)]
+pub struct RootStrategySelection {
+    /// The chosen backend can attach a read-only virtiofs **root** device
+    /// (`VmCapabilities::virtiofs_root`). Firecracker is always `false`.
+    pub backend_virtiofs_root: bool,
+    /// The workload is a prod / `--prod` deployment.
+    pub prod: bool,
+    /// The workload boots a sealed (dm-verity-sealed) image.
+    pub sealed: bool,
+}
+
+/// Select the rootfs strategy per the tier gate.
+///
+/// Virtiofs-root is chosen **iff** the backend exposes a virtiofs root device
+/// **and** the workload is neither prod nor sealed. Everything else — a prod or
+/// sealed workload, or a non-virtiofs-capable backend (e.g. Firecracker) — takes
+/// block+ext4, which witnesses claim 3. This makes "prod on virtiofs-root"
+/// structurally unrepresentable: no combination of inputs yields `VirtiofsRoot`
+/// for a prod or sealed workload.
+pub fn select_root_strategy(s: RootStrategySelection) -> RootStrategy {
+    if s.backend_virtiofs_root && !s.prod && !s.sealed {
+        RootStrategy::VirtiofsRoot
+    } else {
+        RootStrategy::BlockExt4
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn virtiofs_root_only_for_capable_non_prod_non_sealed() {
+        // Exhaustive truth table over the three inputs: virtiofs-root is chosen
+        // in exactly one cell (capable & !prod & !sealed); every other cell —
+        // including every prod and every sealed combination — is block+ext4.
+        for cap in [false, true] {
+            for prod in [false, true] {
+                for sealed in [false, true] {
+                    let got = select_root_strategy(RootStrategySelection {
+                        backend_virtiofs_root: cap,
+                        prod,
+                        sealed,
+                    });
+                    let want = if cap && !prod && !sealed {
+                        RootStrategy::VirtiofsRoot
+                    } else {
+                        RootStrategy::BlockExt4
+                    };
+                    assert_eq!(got, want, "cap={cap} prod={prod} sealed={sealed}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prod_and_sealed_never_reach_virtiofs_even_when_capable() {
+        // The load-bearing safety property: claim-3 tiers can never be routed to
+        // the weaker virtiofs path.
+        for prod in [false, true] {
+            for sealed in [false, true] {
+                if !prod && !sealed {
+                    continue;
+                }
+                assert_eq!(
+                    select_root_strategy(RootStrategySelection {
+                        backend_virtiofs_root: true,
+                        prod,
+                        sealed,
+                    }),
+                    RootStrategy::BlockExt4,
+                    "prod={prod} sealed={sealed} must stay on block+ext4"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_virtiofs_backend_always_block() {
+        // Firecracker (and any backend without the device) always materializes.
+        for prod in [false, true] {
+            for sealed in [false, true] {
+                assert_eq!(
+                    select_root_strategy(RootStrategySelection {
+                        backend_virtiofs_root: false,
+                        prod,
+                        sealed,
+                    }),
+                    RootStrategy::BlockExt4,
+                );
+            }
+        }
+    }
+}
