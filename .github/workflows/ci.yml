@@ -113,6 +113,9 @@ jobs:
       - name: vsock-only egress (no guest NIC on the vmm/HVF path, ADR-100)
         run: cargo run -p xtask -- check-vsock-only-egress
 
+      - name: require-grant token confined to allowlist (guards mvmd no-brick invariant)
+        run: cargo run -p xtask -- check-require-grant-token-allowlist
+
       - name: host-binaries manifest parity
         run: cargo run -p xtask -- check-mvm-host-binaries-sync
 
