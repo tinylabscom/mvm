@@ -54,6 +54,17 @@ fn slot_kernel_source(
     )
 }
 
+fn slot_sidecar_source(build_dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    let sidecar = build_dir.join(mvm_build::builder_vm::SIDECAR_FILENAME);
+    if sidecar.is_file() {
+        return Ok(sidecar);
+    }
+    anyhow::bail!(
+        "flake build produced no runtime sidecar at {}",
+        sidecar.display()
+    )
+}
+
 use super::registry::TemplateRegistry;
 
 fn validate_legacy_template_name(id: &str) -> Result<()> {
@@ -769,6 +780,12 @@ pub fn template_build_from_manifest(
     shell::run_in_vm(&format!(
         "cp -a {} {rev_dst}/rootfs.ext4 && chmod u+w {rev_dst}/rootfs.ext4",
         result.rootfs_path
+    ))?;
+    let sidecar_src = slot_sidecar_source(std::path::Path::new(&result.build_dir))?;
+    shell::run_in_vm(&format!(
+        "cp -a {} {rev_dst}/{}",
+        sidecar_src.display(),
+        mvm_build::builder_vm::SIDECAR_FILENAME
     ))?;
 
     // Copy the OCI image tarball (if the flake's `mkGuest` emits one
@@ -1795,6 +1812,26 @@ mod tests {
 
         assert!(err.contains("flake build produced no vmlinux"));
         assert!(err.contains("builder-vm/x86_64/vmlinux"));
+    }
+
+    #[test]
+    fn slot_sidecar_source_selects_builder_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = tmp.path().join(mvm_build::builder_vm::SIDECAR_FILENAME);
+        std::fs::write(&sidecar, b"{\"overlay_aware\":true}").unwrap();
+
+        let selected = slot_sidecar_source(tmp.path()).unwrap();
+
+        assert_eq!(selected, sidecar);
+    }
+
+    #[test]
+    fn slot_sidecar_source_errors_without_builder_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = slot_sidecar_source(tmp.path()).unwrap_err().to_string();
+
+        assert!(err.contains("flake build produced no runtime sidecar"));
+        assert!(err.contains(mvm_build::builder_vm::SIDECAR_FILENAME));
     }
 
     // -----------------------------------------------------------------
