@@ -1,7 +1,8 @@
 # `machine reconfigure` — design
 
 **Date:** 2026-07-05
-**Status:** Design approved; implementation plan pending.
+**Status:** Design approved; two sequenced plans — Plan 224 (Phase 1)
+authored, Plan 225 (Phase 2) to follow after Phase 1 lands.
 **Scope:** Add a `machine reconfigure` verb that changes a narrow set of
 config fields on a named machine and relaunches it under a fresh signed
 `ExecutionPlan`, preserving the machine's identity — exposed both as a
@@ -100,15 +101,35 @@ The operation must also land on the `MvmClient` facade
 (`crates/mvm-client/src/client.rs`) so programmatic and remote/cloud
 callers can reconfigure a machine, not only the CLI.
 
-Honest context: the facade is a real but **secondary** surface — the CLI
-machine verbs call the backend directly today and do **not** route
-through `MvmClient` (parallel paths). "Lands in the client" therefore
-means adding the operation to the facade surface and both its impls; it
-does not mean rewiring the CLI onto the facade (out of scope).
+Honest context (verified against the code, correcting an earlier
+mistaken assumption):
 
-The facade carries its own thin intent DTOs (`memory_mib: u32`, `cpus`,
-`env` — no host paths), distinct from the CLI's `MachineSpec`. The
-reconfigure op follows that convention.
+- The facade is a real but **secondary** surface — the CLI machine verbs
+  call the backend directly and do **not** route through `MvmClient`.
+  Rewiring the CLI onto the facade is out of scope.
+- `LocalBackend` (`crates/mvm-client-local/src/lib.rs`) drives
+  `AnyBackend` **in-process** — its module doc states *"no subprocess,
+  no CLI."* It does **not** shell out to `mvmctl` for any verb (there is
+  no `SubprocessBackend`), and it has **no concept of the persistent
+  `machine.json` spec** — its `run_machine` does a transient in-process
+  image-boot into a local-run cache. So "reconfigure a persistent named
+  machine" is not something `LocalBackend` can express today, and by the
+  dependency graph it cannot call the CLI's reconfigure logic in-process
+  (`mvm-cli` sits above `mvm-client-local` — that would be a cycle).
+- `GatewayBackend` (`crates/mvm-client/src/gateway.rs`) is a clean REST
+  client to the mvmd fleet gateway; reconfiguring a persistent sandbox
+  is meaningful and clean there.
+
+There are three distinct `MachineSpec` notions to keep straight: the
+CLI's on-disk `machine.json` spec (what reconfigure patches; private to
+`mvm-cli`), the facade's thin wire DTO
+(`mvm-client::dto::MachineSpec` — `memory_mib`, `cpus`, `env`, no host
+paths), and the in-memory `mvm::machine::MachineSpec` builder
+abstraction. The facade op uses the wire-DTO convention.
+
+This lands in **two sequenced phases.**
+
+### Phase 1 (ship the surface + remote path)
 
 1. **Trait method** (`client.rs`):
    ```rust
@@ -128,24 +149,53 @@ reconfigure op follows that convention.
    ```
    **Facade scope is the common four.** `mem_initial` is deliberately
    **not** on the facade DTO: the facade doesn't model it at launch
-   either (its `MachineSpec` has no `mem_initial`), so exposing it only
-   on reconfigure would be lopsided. It stays a CLI-only field. Adding
-   it later is a non-breaking `Option` field behind the same DTO if a
-   facade caller ever needs it.
-3. **`LocalBackend`** (`mvm-client-local`): **delegating shell-out** — it
-   invokes `mvmctl machine reconfigure <name> …`, exactly as it already
-   does for the other verbs. The CLI verb stays the single source of
-   truth for the patch/relaunch logic; the facade does not duplicate it.
-4. **`GatewayBackend`** (`gateway.rs`): client-side
+   either, so exposing it only on reconfigure would be lopsided. It
+   stays a CLI-only field, addable later as a non-breaking `Option`.
+3. **`GatewayBackend`** (`gateway.rs`): client-side
    `POST /api/v1/sandboxes/{id}/reconfigure` carrying the
    `ReconfigureRequest` body, using the existing `endpoint()` /
    `authed()` helpers and fail-closed transport rules.
+4. **`LocalBackend`** (`mvm-client-local`): returns a clear
+   **unsupported** error — `MvmError::Backend { reason: "reconfigure is
+   not supported on the in-process local backend (no persistent-machine
+   layer); use the CLI verb or the gateway backend" }` — mirroring how
+   it already reports `exec_machine` as "not wired." No fake capability.
+5. **Mock** (`mock.rs`) gets a trivial impl so the trait stays
+   object-safe and testable.
+
+### Phase 2 (real local reconfigure, via a shared engine)
+
+Lift the persistent-machine engine — the on-disk `MachineSpec`, its
+`load`/`save`/`overwrite` accessors, `machine_config_diff`,
+`reconcile_machine_spec`, and the stop→overwrite→reboot apply step —
+**out of `mvm-cli` into a shared lower crate** so both the CLI verb and
+`LocalBackend` drive one implementation in-process. Candidate home:
+`mvm::machine` (the runtime crate already owns a `machine` module).
+`LocalBackend`'s `reconfigure_machine` then patches the persisted spec
+and relaunches in-process, replacing the Phase-1 unsupported error.
+
+This is a genuine refactor with its own surface (it moves on-disk config
+logic down a crate, must reconcile with the existing `mvm::machine`
+builder abstraction, and adds a `mvm-client-local → mvm` dependency edge
+— acyclic, since `mvm` does not depend on `mvm-client-local`). It
+therefore gets its **own plan** (see "Phasing / plans" below), authored
+against the landed Phase-1 code so the exact seam is visible. It does
+not block Phase 1.
 
 **Repo boundary.** The *client side* of the remote path lands in this
 repo (the `GatewayBackend` method). The matching **server handler lives
-in mvmd** (separate repo). This plan delivers the client method plus a
+in mvmd** (separate repo). This delivers the client method plus a
 coordination note for the mvmd `POST …/reconfigure` endpoint; it does
 not implement the server handler.
+
+## Phasing / plans
+
+- **Plan 224 — Phase 1:** CLI `machine reconfigure` verb + facade
+  surface (trait + DTO + `GatewayBackend` + `LocalBackend` unsupported +
+  mock). Shippable and valuable on its own.
+- **Plan 225 — Phase 2:** lift the persistent-machine engine into a
+  shared crate and wire `LocalBackend` for real in-process reconfigure.
+  Authored after Phase 1 lands.
 
 ## Testing
 
@@ -160,10 +210,10 @@ not implement the server handler.
 - **CLI:** arg-parse / help-text coverage in `tests/cli.rs`.
 - **Facade DTO:** `ReconfigureRequest` serde round-trip +
   `deny_unknown_fields` rejection of unexpected fields.
-- **Facade impls:** `LocalBackend::reconfigure_machine` builds the
-  correct `mvmctl machine reconfigure` argv from a request (only set
-  fields become flags); `GatewayBackend::reconfigure_machine` targets
-  the `…/reconfigure` endpoint with the serialized body (mockable HTTP).
+- **Facade impls (Phase 1):** `GatewayBackend::reconfigure_machine`
+  targets the `…/reconfigure` endpoint with the serialized body
+  (mockable HTTP); `LocalBackend::reconfigure_machine` returns the
+  unsupported error; `MockBackend` returns a canned state.
 
 ## Rejected alternatives
 
