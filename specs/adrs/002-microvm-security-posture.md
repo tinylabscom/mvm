@@ -202,6 +202,19 @@ runtime-overlay build (the standalone bundled prod image it formerly
 built was retired by Plan 115); the live-KVM tamper test exercises the
 boot-time panic on a flipped data block.
 
+Claim 3's witness (dm-verity) is **block-device-specific**: it applies to
+the **block+ext4** backends — Firecracker and the in-process Option B
+materialize path (ADR-106). A **virtiofs root** (Plan 221 Option A) serves
+a host *directory*, not a block device, so it cannot dm-verity a filesystem
+whose blocks it does not own. Per **ADR-107**, virtiofs-root is a
+**dev/local-tier** boot mechanism carrying an explicitly weaker contract —
+unpack-time per-layer sha256 verification (plus cosign on policy-gated
+pulls) then read-only serving from the trusted host, with no guest-enforced,
+plan-bound re-verification of served files. It **does not witness claim 3**,
+and prod / sealed / `--prod` workloads (and Firecracker on every tier) stay
+on Option B, where claim 3 holds unchanged. See ADR-107 for the full
+virtiofs-root integrity posture and the deferred promotion path.
+
 ### Backend symmetry (Plan 98)
 
 Claims 1, 5, 7, 8, and 11 have **backend-symmetric evidence**: the

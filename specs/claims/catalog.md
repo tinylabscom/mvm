@@ -29,7 +29,7 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 |----|-------|-----------|-----------|--------|
 | 1  | No host-fs access from a guest beyond explicit shares | fn:seccomp_allows_listed_denies_unlisted, ci:seccomp-functional, fn:validated_conversion_enforces_mount_allow_list, fn:dir_share_two_part_defaults_ro, fn:vz_rootfs_disk_is_read_only, fn:libkrun_refuses_read_only_virtiofs_share, fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched | seccomp + setpriv (ADR-002 §W2) + user-volume allow-list / ro-default / admission-enforced shares (mvm-cli + mvm-backend) | Shipped |
 | 2  | No guest binary can elevate to uid 0 | fn:set_no_new_privs, fn:virtiofs_mount_flags_keep_workspace_read_only | setpriv --no-new-privs + RO config binds (ADR-002 §W2.2) | Shipped |
-| 3  | A tampered rootfs ext4 fails to boot | ci:verified-boot-artifacts | dm-verity + roothash (ADR-002 §W3) | Shipped |
+| 3  | A tampered rootfs ext4 fails to boot | ci:verified-boot-artifacts | dm-verity + roothash on **block+ext4** backends — Firecracker + Option B (ADR-002 §W3, ADR-106); virtiofs-root is a dev-tier path with a weaker contract that does **not** witness this claim (ADR-107) | Shipped |
 | 4  | The guest agent has no do_exec in production builds | ci:prod-agent-runentry-contract | ELF symbol contract (ADR-002 §W4.3) | Shipped |
 | 5  | Vsock framing + supervisor-config JSON are fuzzed | ci:fuzz | cargo-fuzz (ADR-002 §W4.1/W4.2) | Shipped |
 | 6  | The pre-built dev image is hash-verified | ci:hash-verify-tests, fn:download_runtime_overlay_rejects_checksum_mismatch | SHA-256 manifest (ADR-002 §W5.1) | Shipped |
@@ -51,6 +51,18 @@ numbered claim in ADR-002's source-of-truth table is a separate maintainer
 decision. It does not restate or replace the broker rows 12/13 — those are the
 shipped broker delivery; row 16 backs the same two invariants on the egress
 substitution path.
+
+**Claim 3 backend scoping (ADR-107).** Claim 3's witness, dm-verity, is
+block-device-specific: it ratifies the claim on the **block+ext4** backends
+— Firecracker and the in-process Option B materialize path (ADR-106). A
+**virtiofs root** (Plan 221 Option A) serves a host directory, not a block
+device, so it cannot be dm-verity-sealed. Per ADR-107, virtiofs-root is a
+dev/local-tier boot mechanism carrying an explicitly weaker contract
+(unpack-time per-layer sha256 + read-only serving from the trusted host, no
+guest-enforced plan-bound re-verification); it does **not** witness claim 3.
+Prod / sealed / `--prod` workloads — and Firecracker on every tier — stay on
+Option B, where claim 3 holds unchanged. No numbered claim is weakened; this
+note only scopes which backends the existing witness covers.
 
 ## Maintaining this catalog
 

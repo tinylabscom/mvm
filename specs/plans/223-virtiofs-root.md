@@ -40,7 +40,11 @@ weakened. This plan implements Option A under that decision.
 
 `specs/adrs/107-virtiofs-root-integrity.md` (**Accepted**). Decision: tiered
 posture, prod stays on Option B, claim 3 scoped to block+ext4. Everything below
-assumes that decision.
+assumes that decision. The ADR-107 doc consequence — scoping claim 3 to the
+block+ext4 backends in `specs/claims/catalog.md` and ADR-002's verity-surface
+prose, with a pointer to ADR-107 for the virtiofs-root dev-tier posture — is
+**landed** (the "Claims catalog" validation bullet below); the A1–A5 code work
+remains parked.
 
 **Parked.** A1–A5 are not scheduled: Option B already meets the "no subprocess
 on the run path" goal, so Option A is a dev-loop optimization, and A1 depends on
