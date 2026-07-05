@@ -75,6 +75,9 @@ pub(in crate::commands) enum MachineAction {
     /// Stop a running VM by name, or all running VMs with --all
     #[command(display_order = 5)]
     Stop(MachineStopArgs),
+    /// Patch a persistent machine's config and relaunch it
+    #[command(display_order = 5)]
+    Reconfigure(MachineReconfigureArgs),
     /// Remove one or more persistent named machine specs (or --all)
     #[command(name = "rm", display_order = 6)]
     Rm(MachineRemoveArgs),
@@ -119,6 +122,7 @@ impl MachineAction {
             | MachineAction::Create(_)
             | MachineAction::Start(_)
             | MachineAction::Stop(_)
+            | MachineAction::Reconfigure(_)
             | MachineAction::Rm(_)
             | MachineAction::Ls(_)
             | MachineAction::Inspect(_)
@@ -914,6 +918,40 @@ pub(in crate::commands) struct MachineStopArgs {
     /// Skip the interactive confirmation prompt.
     #[arg(long)]
     pub yes: bool,
+}
+
+/// Patch a persistent machine's config and relaunch it. Only the flags
+/// passed change; every other field is inherited (patch semantics).
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineReconfigureArgs {
+    /// Persistent machine name to reconfigure.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+    /// Enable dev-tier outbound networking (broad egress + DNS).
+    #[arg(long, conflicts_with = "no_net")]
+    pub net: bool,
+    /// Disable outbound networking (deny-all).
+    #[arg(long = "no-net", conflicts_with = "net")]
+    pub no_net: bool,
+    /// Replace the egress allowlist with these hosts: `HOST[:PORT]`
+    /// (repeatable). Omit to inherit the current allowlist.
+    #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
+    pub allow_host: Vec<String>,
+    /// Clear the egress allowlist (remove all entries).
+    #[arg(long = "clear-allow-host", conflicts_with = "allow_host")]
+    pub clear_allow_host: bool,
+    /// New vCPU count.
+    #[arg(long)]
+    pub cpus: Option<u32>,
+    /// New memory (human-readable: 512M, 1G, ...).
+    #[arg(long)]
+    pub memory: Option<String>,
+    /// New initial host memory commitment (human-readable).
+    #[arg(long = "mem-initial")]
+    pub mem_initial: Option<String>,
+    /// Workload VMM backend for the relaunch (defaults to the host's best).
+    #[arg(long, value_name = "HYPERVISOR")]
+    pub hypervisor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2733,6 +2771,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Exec(exec_args) => exec_machine(cli, exec_args, cfg),
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
+        MachineAction::Reconfigure(args) => run_reconfigure(args),
         MachineAction::Logs(log_args) => super::vm::logs::run(cli, log_args, cfg),
         MachineAction::Console(console_args) => super::vm::console::run(cli, console_args, cfg),
         MachineAction::CheckArtifact(a) => portable::run_check_artifact(a),
@@ -2740,6 +2779,10 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
             super::vm::group::run(cli, super::vm::group::Args { action: cmd }, cfg)
         }
     }
+}
+
+fn run_reconfigure(_args: MachineReconfigureArgs) -> Result<()> {
+    bail!("machine reconfigure: not yet implemented")
 }
 
 #[cfg(test)]
@@ -2822,6 +2865,7 @@ mod tests {
             MachineAction::Create(_) => "create",
             MachineAction::Start(_) => "start",
             MachineAction::Stop(_) => "stop",
+            MachineAction::Reconfigure(_) => "reconfigure",
             MachineAction::Rm(_) => "rm",
             MachineAction::Ls(_) => "ls",
             MachineAction::Inspect(_) => "inspect",
