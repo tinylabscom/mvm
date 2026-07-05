@@ -233,7 +233,7 @@ fn run_boot_check(
     }
     let exe = std::env::current_exe().context("locating mvmctl for --boot-check")?;
     let name = "kernel-bootcheck";
-    let _ = run_self(&exe, &["machine", "stop", name]); // clear any stale VM
+    let _ = run_self(&exe, &["machine", "stop", name, "--yes"]); // clear any stale VM
 
     // Force libkrun: it's available wherever `--source compile` ran (it drives
     // Stage 0), so the check is deterministic and doesn't depend on the host's
@@ -256,7 +256,7 @@ fn run_boot_check(
     .context("boot-check: `up` failed to launch the VM")?;
 
     let booted = run_self(&exe, &["machine", "wait", name]);
-    let _ = run_self(&exe, &["machine", "stop", name]);
+    let _ = run_self(&exe, &["machine", "stop", name, "--yes"]);
     booted.context("boot-check: the guest agent never became ready")?;
     ui::success("boot-check: the new kernel boots and the agent answered over vsock");
     Ok(())

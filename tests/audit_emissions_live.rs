@@ -1179,7 +1179,7 @@ fn machine_stop_all_emits_vm_stop_audit_entry() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["machine", "stop", "--all"])
+        .args(["machine", "stop", "--all", "--yes"])
         .output()
         .expect("spawn mvmctl");
     assert!(
@@ -1208,7 +1208,7 @@ fn machine_stop_with_name_emits_vm_stop_for_that_name() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["machine", "stop", "ghost-vm"])
+        .args(["machine", "stop", "ghost-vm", "--yes"])
         .output()
         .expect("spawn mvmctl");
     assert!(
