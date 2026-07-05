@@ -299,7 +299,10 @@ pub(in crate::commands) fn run_resume(
         let token = mvm_core::crypto::vmgenid::fresh_generation_token(&args.name).token;
         crate::commands::shared::emit_vsock_rpc_audit(
             &args.name,
-            &mvm_guest::vsock::GuestRequest::PostRestore { token },
+            &mvm_guest::vsock::GuestRequest::PostRestore {
+                token,
+                grant_envelope: None,
+            },
         );
         let outcome = signal_post_restore(&args.name, &VsockPostRestoreSignal { token })
             .with_context(|| format!("post-restore signal for {:?}", args.name))?;

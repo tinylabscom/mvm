@@ -403,7 +403,10 @@ impl PostRestoreSignal for VsockPostRestoreSignal {
         // only `Ok` variant here is the contracted `PostRestoreAck`.
         match call_unary(
             &mut stream,
-            &GuestRequest::PostRestore { token: self.token },
+            &GuestRequest::PostRestore {
+                token: self.token,
+                grant_envelope: None,
+            },
         )? {
             GuestResponse::PostRestoreAck {
                 success,

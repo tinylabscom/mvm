@@ -890,10 +890,14 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         agent_verb_override: vec![],
-        // Forked children run class-gate-only; the parent's real run mode is not
-        // tracked here and the safe direction is permissive (fail-open).
-        // Per-fork grant reconciliation is a follow-up.
-        restrict_agent_verbs: false,
+        // A sealed baked-entrypoint child qualifies for an attenuated grant.
+        // Forks never carry trailing argv and are always prod-profile.
+        restrict_agent_verbs: super::agent_verbs::grant_eligible(
+            false,
+            false,
+            false,
+            super::agent_verbs::image_is_sealed(&rootfs_blob),
+        ),
     })?;
 
     // Serialize the admitted plan envelope so the backend can inject it into
@@ -904,6 +908,18 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
     let child_tenant_id = admission
         .as_ref()
         .map(|ctx| ctx.admitted.plan.tenant.0.clone());
+
+    // Mint the child's verb-grant sidecar so the child supervisor config
+    // carries the correct grant on restore. The sidecar is also read back
+    // below for the post-restore grant delivery.
+    if let Some(ref plan_json_str) = child_plan_json {
+        let mint_cfg = mvm_core::vm_backend::VmStartConfig {
+            name: child_vm_name.clone(),
+            plan_json: Some(plan_json_str.clone()),
+            ..Default::default()
+        };
+        mvm_hostd::plan_admission::stash_plan_for_bridge(&mint_cfg)?;
+    }
 
     let spawner = mvm_backend::vz::VzChildSupervisorSpawner;
     let fork_result = fork_vm_full(
@@ -927,6 +943,49 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
 
     bind_checkpoint_forked(p.checkpoint, &meta, &child_vm_name, p.store)?;
     super::up::emit_launched_if(&admission, "vz");
+
+    // Best-effort: deliver the freshly-minted grant to the restored child
+    // agent. The agent survives a vm_full restore in memory; delivering the
+    // grant here re-pins it to the child's plan so it doesn't run
+    // class-gate-only. Mirrors warm_restore_instance's post-restore pattern.
+    if let Some(grant_env) = read_grant_envelope_for(&child_vm_name) {
+        let vsock_path = mvm_core::config::vm_vz_vsock_port_socket(
+            &child_vm_name,
+            mvm_guest::vsock::GUEST_AGENT_PORT,
+        );
+        let vsock_path_str = vsock_path.to_string_lossy().into_owned();
+        const POLL_ATTEMPTS: u32 = 40; // 20 seconds max
+        let mut agent_ready = false;
+        for _ in 0..POLL_ATTEMPTS {
+            if mvm_guest::vsock::ping_at(&vsock_path_str).unwrap_or(false) {
+                agent_ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        if agent_ready {
+            let token = mvm_core::crypto::vmgenid::fresh_generation_token(&child_vm_name).token;
+            match mvm_guest::vsock::post_restore_with_grant_at(
+                &vsock_path_str,
+                token,
+                Some(grant_env),
+            ) {
+                Ok(r) if r.acknowledged => {
+                    tracing::info!("fork post-restore grant delivered to '{child_vm_name}'")
+                }
+                Ok(_) => tracing::warn!(
+                    "fork post-restore grant delivery returned failure for '{child_vm_name}'"
+                ),
+                Err(e) => tracing::warn!(
+                    "fork post-restore grant delivery failed for '{child_vm_name}': {e}"
+                ),
+            }
+        } else {
+            tracing::warn!(
+                "fork post-restore: agent not reachable for '{child_vm_name}'; grant not delivered (VM is running)"
+            );
+        }
+    }
 
     if p.json {
         crate::json_out::emit_json(&CheckpointForkJson {
@@ -1041,10 +1100,14 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         agent_verb_override: vec![],
-        // Restored children run class-gate-only; the source's real run mode is not
-        // tracked here and the safe direction is permissive (fail-open).
-        // Per-restore grant reconciliation is a follow-up.
-        restrict_agent_verbs: false,
+        // A sealed baked-entrypoint child qualifies for an attenuated grant.
+        // Forks never carry trailing argv and are always prod-profile.
+        restrict_agent_verbs: super::agent_verbs::grant_eligible(
+            false,
+            false,
+            false,
+            super::agent_verbs::image_is_sealed(p.instance_rootfs),
+        ),
     })?;
 
     let mut start_config = mvm_core::vm_backend::VmStartConfig {
@@ -1066,6 +1129,12 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         )?;
     }
 
+    // Mint the child's verb-grant sidecar. The backend's cmdline builder
+    // reads it via verb_grant_cmdline_token at start time.
+    if super::up::persists_plan_before_start(&effective_hypervisor) {
+        mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)?;
+    }
+
     let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
     if let Err(e) = backend.start(&start_config) {
         super::up::emit_failed_if(&admission, "backend-start", &e);
@@ -1080,6 +1149,18 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Read the minted verb-grant sidecar for `vm_name` from its per-VM state dir.
+/// Returns `Some(envelope)` when the sidecar is present and parses correctly;
+/// `None` on any error (absent file, malformed JSON) — grant-less is the safe
+/// default when the sidecar is missing.
+fn read_grant_envelope_for(
+    vm_name: &str,
+) -> Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope> {
+    let path = mvm_core::config::vm_state_dir(vm_name).join("verb-grant.json");
+    let bytes = std::fs::read(&path).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// Read the parent checkpoint's source VM plan and return (cpus, mem_mib).
@@ -1453,6 +1534,57 @@ mod tests {
             parent_id.as_str(),
             "checkpoint id and vm_name are different; the old heuristic was wrong"
         );
+    }
+
+    // ── read_grant_envelope_for ───────────────────────────────────────────────
+
+    /// A vm name with no state dir returns None without panicking.
+    #[test]
+    fn read_grant_envelope_for_returns_none_when_absent() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+
+        let result = read_grant_envelope_for("no-such-vm-read-grant-test");
+        assert!(result.is_none());
+    }
+
+    /// When a verb-grant.json sidecar is present and valid JSON, the function
+    /// returns Some with the deserialized envelope.
+    #[test]
+    fn read_grant_envelope_for_returns_some_when_sidecar_present() {
+        use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+
+        let vm_name = "test-fork-grant-read-sidecar";
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Build a minimal VerbGrant and wrap it in an envelope. The sig field
+        // is not verified here (we test the file-read path, not crypto).
+        let grant = mvm_core::plan::VerbGrant {
+            session_id: "test-session".into(),
+            plan_nonce: mvm_core::plan::Nonce::from_bytes([1u8; 16]),
+            not_after: chrono::Utc::now() + chrono::Duration::hours(1),
+            verbs: vec![],
+            sig: vec![0u8; 64],
+        };
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: "aa".repeat(32),
+            plan_nonce_hex: "bb".repeat(16),
+            grant,
+        };
+        let json = serde_json::to_vec(&envelope).unwrap();
+        std::fs::write(state_dir.join("verb-grant.json"), &json).unwrap();
+
+        let result = read_grant_envelope_for(vm_name);
+        assert!(result.is_some(), "should read back the written sidecar");
+        let got = result.unwrap();
+        assert_eq!(got.pubkey_hex, envelope.pubkey_hex);
+        assert_eq!(got.plan_nonce_hex, envelope.plan_nonce_hex);
     }
 
     // ── vm_full fork: --cpus/--memory refused ────────────────────────────────

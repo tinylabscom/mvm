@@ -65,7 +65,7 @@ sigstore-trust-root = { version = "0.9", default-features = false, optional = tr
 sigstore-types = { version = "0.9", optional = true }
 # Only under the `schema` feature (protocol-schema codegen);
 # 0.8 matches the version mvm-sdk already pins, so no new lockfile entry.
-schemars = { version = "0.8", optional = true }
+schemars = { version = "0.8", features = ["chrono"], optional = true }
 # The per-VM name-constrained egress CA lives in
 # `crypto::egress_ca`, gated behind `egress-ca` so the foundation crate's default
 # closure doesn't pull `rcgen`/`ring`/`yasna` for non-egress consumers. Sync, no

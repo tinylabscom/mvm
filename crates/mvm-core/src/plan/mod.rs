@@ -34,6 +34,7 @@ pub mod types;
 pub mod validity;
 pub mod verb;
 pub mod verb_grant;
+pub mod verb_trust;
 
 pub use bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleInstallError, BundleManifest,
@@ -63,4 +64,5 @@ pub use validity::{
     CheckedFreshness, Freshness, FreshnessClaims, NonceStore, PlanValidityError, check_window,
 };
 pub use verb::{VerbId, VerbIdError};
-pub use verb_grant::{VerbGrant, VerbGrantError};
+pub use verb_grant::{VERB_GRANT_BASELINE, VerbGrant, VerbGrantError};
+pub use verb_trust::{GrantKeySource, VERB_TRUST_POLICY_VERSION, VerbTrustPolicy};

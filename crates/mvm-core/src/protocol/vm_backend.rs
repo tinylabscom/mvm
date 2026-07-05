@@ -275,6 +275,7 @@ pub fn encode_secret_env_cmdline(pairs: &[(String, String)]) -> Option<String> {
 /// `VerbGrant::verify`. Fixed-field-order struct: `serde_json::to_vec` output
 /// is byte-deterministic with no external canonicalizer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct VerbGrantEnvelope {
     pub pubkey_hex: String,

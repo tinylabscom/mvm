@@ -406,18 +406,6 @@ class GuestRequest12:
 TokenItem = int
 
 
-@dataclass
-class PostRestore:
-    token: Optional[List[TokenItem]] = field(
-        default_factory=lambda: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    )
-
-
-@dataclass
-class GuestRequest13:
-    PostRestore: PostRestore
-
-
 class GuestRequest14(Enum):
     FsDiff = 'FsDiff'
 
@@ -920,6 +908,9 @@ IntegrationStatus = Union[
 ]
 
 
+Nonce = str
+
+
 @dataclass
 class ProbeResult:
     checked_at: str
@@ -1163,6 +1154,9 @@ class StageFile:
     path: str
 
 
+VerbId = str
+
+
 class VolumeMountErrorKind1(Enum):
     BadPath = 'BadPath'
 
@@ -1304,48 +1298,6 @@ class GuestRequest11:
     ExecBatch: ExecBatch
 
 
-GuestRequest = Union[
-    GuestRequest1,
-    GuestRequest2,
-    GuestRequest3,
-    GuestRequest4,
-    GuestRequest5,
-    GuestRequest6,
-    GuestRequest7,
-    GuestRequest8,
-    GuestRequest9,
-    GuestRequest10,
-    GuestRequest11,
-    GuestRequest12,
-    GuestRequest13,
-    GuestRequest14,
-    GuestRequest15,
-    GuestRequest16,
-    GuestRequest17,
-    GuestRequest18,
-    GuestRequest19,
-    GuestRequest20,
-    GuestRequest21,
-    GuestRequest22,
-    GuestRequest23,
-    GuestRequest24,
-    GuestRequest25,
-    GuestRequest26,
-    GuestRequest27,
-    GuestRequest28,
-    GuestRequest29,
-    GuestRequest30,
-    GuestRequest31,
-    GuestRequest32,
-    GuestRequest33,
-    GuestRequest34,
-    GuestRequest35,
-    GuestRequest36,
-    GuestRequest37,
-    GuestRequest38,
-]
-
-
 @dataclass
 class ProtocolMismatch:
     agent_protocol_version: int
@@ -1433,6 +1385,77 @@ class ProcResult2:
 
 ProcResult = Union[
     ProcResult1, ProcResult2, ProcResult3, ProcResult4, ProcResult5, ProcResult6
+]
+
+
+@dataclass
+class VerbGrant:
+    not_after: str
+    plan_nonce: Nonce
+    session_id: str
+    sig: List[int]
+    verbs: List[VerbId]
+
+
+@dataclass
+class VerbGrantEnvelope:
+    grant: VerbGrant
+    plan_nonce_hex: str
+    pubkey_hex: str
+
+
+@dataclass
+class PostRestore:
+    grant_envelope: Optional[VerbGrantEnvelope] = None
+    token: Optional[List[TokenItem]] = field(
+        default_factory=lambda: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    )
+
+
+@dataclass
+class GuestRequest13:
+    PostRestore: PostRestore
+
+
+GuestRequest = Union[
+    GuestRequest1,
+    GuestRequest2,
+    GuestRequest3,
+    GuestRequest4,
+    GuestRequest5,
+    GuestRequest6,
+    GuestRequest7,
+    GuestRequest8,
+    GuestRequest9,
+    GuestRequest10,
+    GuestRequest11,
+    GuestRequest12,
+    GuestRequest13,
+    GuestRequest14,
+    GuestRequest15,
+    GuestRequest16,
+    GuestRequest17,
+    GuestRequest18,
+    GuestRequest19,
+    GuestRequest20,
+    GuestRequest21,
+    GuestRequest22,
+    GuestRequest23,
+    GuestRequest24,
+    GuestRequest25,
+    GuestRequest26,
+    GuestRequest27,
+    GuestRequest28,
+    GuestRequest29,
+    GuestRequest30,
+    GuestRequest31,
+    GuestRequest32,
+    GuestRequest33,
+    GuestRequest34,
+    GuestRequest35,
+    GuestRequest36,
+    GuestRequest37,
+    GuestRequest38,
 ]
 
 

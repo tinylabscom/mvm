@@ -493,6 +493,7 @@ pub type AuditLabels = BTreeMap<String, String>;
 /// string rather than `[u8; 16]` so JSON readers can eyeball it;
 /// the type guarantees length and case via `from_hex` / `from_bytes`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "String", into = "String")]
 pub struct Nonce(String);
 
