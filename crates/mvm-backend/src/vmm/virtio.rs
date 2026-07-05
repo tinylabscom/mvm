@@ -451,9 +451,298 @@ impl VirtioBlk {
     }
 }
 
+// ---- virtio-fs (read-only root) --------------------------------------------
+
+const VIRTIO_ID_FS: u32 = 26;
+const VIRTQ_DESC_F_WRITE: u16 = 2;
+// hiprio (queue 0) + one request queue (queue 1). `num_request_queues` = 1.
+const FS_NUM_QUEUES: usize = 2;
+// The tag the guest mounts: `mount -t virtiofs mvmroot /`.
+const FS_TAG: &str = "mvmroot";
+
+/// Per-queue virtqueue state (virtio-fs has multiple queues, unlike blk).
+#[derive(Default, Clone, Copy)]
+struct FsQueue {
+    num: u32,
+    ready: u32,
+    desc: u64,
+    avail: u64,
+    used: u64,
+    last_avail: u16,
+}
+
+/// virtio-fs MMIO device serving a read-only host directory to the guest as its
+/// root. The virtqueue transport here mirrors [`VirtioBlk`]; the payload is FUSE,
+/// handled by [`super::virtio_fs::FuseServer`].
+pub struct VirtioFs {
+    base: u64,
+    irq: u32,
+    mem: GuestMem,
+    server: super::virtio_fs::FuseServer,
+    device_features_sel: u32,
+    status: u32,
+    queue_sel: u32,
+    queues: [FsQueue; FS_NUM_QUEUES],
+    interrupt_status: u32,
+    config: [u8; 40],
+}
+
+impl VirtioFs {
+    /// # Safety
+    /// `ram`/`ram_base`/`ram_size` must describe the mapped guest RAM region for
+    /// the lifetime of this device (same contract as [`VirtioBlk::new`]).
+    pub unsafe fn new(
+        base: u64,
+        irq: u32,
+        ram: *mut u8,
+        ram_base: u64,
+        ram_size: usize,
+        root: std::path::PathBuf,
+    ) -> Self {
+        let mut config = [0u8; 40];
+        let tag = FS_TAG.as_bytes();
+        config[..tag.len()].copy_from_slice(tag); // tag[36], NUL-padded
+        config[36..40].copy_from_slice(&1u32.to_le_bytes()); // num_request_queues
+        VirtioFs {
+            base,
+            irq,
+            // SAFETY: forwarded from the caller's guest-RAM contract.
+            mem: unsafe { GuestMem::new(ram, ram_base, ram_size) },
+            server: super::virtio_fs::FuseServer::new(root),
+            device_features_sel: 0,
+            status: 0,
+            queue_sel: 0,
+            queues: [FsQueue::default(); FS_NUM_QUEUES],
+            interrupt_status: 0,
+            config,
+        }
+    }
+
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+    pub fn contains(&self, addr: u64) -> bool {
+        addr >= self.base && addr < self.base + MMIO_LEN
+    }
+    pub fn irq(&self) -> u32 {
+        self.irq
+    }
+
+    fn q(&self) -> &FsQueue {
+        &self.queues[(self.queue_sel as usize).min(FS_NUM_QUEUES - 1)]
+    }
+    fn q_mut(&mut self) -> &mut FsQueue {
+        &mut self.queues[(self.queue_sel as usize).min(FS_NUM_QUEUES - 1)]
+    }
+
+    pub fn read(&self, offset: u64) -> u64 {
+        u64::from(match offset {
+            R_MAGIC => VIRTIO_MAGIC,
+            R_VERSION => VIRTIO_VERSION,
+            R_DEVICE_ID => VIRTIO_ID_FS,
+            R_VENDOR_ID => VIRTIO_VENDOR,
+            // Only VIRTIO_F_VERSION_1 (high feature word); no low-word features.
+            R_DEVICE_FEATURES if self.device_features_sel == 1 => 1,
+            R_DEVICE_FEATURES => 0,
+            R_QUEUE_NUM_MAX => QUEUE_SIZE_MAX,
+            R_QUEUE_READY => self.q().ready,
+            R_INTERRUPT_STATUS => self.interrupt_status,
+            R_STATUS => self.status,
+            o if (R_CONFIG..R_CONFIG + 40).contains(&o) => {
+                let i = (o - R_CONFIG) as usize;
+                let mut b = [0u8; 4];
+                let n = (self.config.len() - i).min(4);
+                b[..n].copy_from_slice(&self.config[i..i + n]);
+                u32::from_le_bytes(b)
+            }
+            _ => 0,
+        })
+    }
+
+    /// Handle an MMIO write. Returns `true` if a queue was serviced (interrupt).
+    pub fn write(&mut self, offset: u64, value: u64) -> bool {
+        let v = value as u32;
+        match offset {
+            R_DEVICE_FEATURES_SEL => self.device_features_sel = v,
+            R_DRIVER_FEATURES_SEL | R_DRIVER_FEATURES => {}
+            R_QUEUE_SEL => self.queue_sel = v,
+            R_QUEUE_NUM => self.q_mut().num = v,
+            R_QUEUE_READY => self.q_mut().ready = v,
+            R_STATUS => self.status = v,
+            R_INTERRUPT_ACK => self.interrupt_status &= !v,
+            R_QUEUE_DESC_LO => {
+                let d = self.q().desc;
+                self.q_mut().desc = (d & !0xffff_ffff) | u64::from(v);
+            }
+            R_QUEUE_DESC_HI => {
+                let d = self.q().desc;
+                self.q_mut().desc = (d & 0xffff_ffff) | (u64::from(v) << 32);
+            }
+            R_QUEUE_DRIVER_LO => {
+                let a = self.q().avail;
+                self.q_mut().avail = (a & !0xffff_ffff) | u64::from(v);
+            }
+            R_QUEUE_DRIVER_HI => {
+                let a = self.q().avail;
+                self.q_mut().avail = (a & 0xffff_ffff) | (u64::from(v) << 32);
+            }
+            R_QUEUE_DEVICE_LO => {
+                let u = self.q().used;
+                self.q_mut().used = (u & !0xffff_ffff) | u64::from(v);
+            }
+            R_QUEUE_DEVICE_HI => {
+                let u = self.q().used;
+                self.q_mut().used = (u & 0xffff_ffff) | (u64::from(v) << 32);
+            }
+            R_QUEUE_NOTIFY => return self.process_queue(v as usize),
+            _ => {}
+        }
+        false
+    }
+
+    fn process_queue(&mut self, qidx: usize) -> bool {
+        if qidx >= FS_NUM_QUEUES {
+            return false;
+        }
+        let q = self.queues[qidx];
+        if q.ready == 0 || q.num == 0 {
+            return false;
+        }
+        let qsz = q.num as u16;
+        let avail_idx = self.mem.rd_u16(q.avail + 2);
+        let mut last_avail = q.last_avail;
+        let mut serviced = false;
+        while last_avail != avail_idx {
+            let slot = last_avail % qsz;
+            let head = self.mem.rd_u16(q.avail + 4 + u64::from(slot) * 2);
+            let written = self.service_request(&q, head, qsz);
+            // used ring: {id u32, len u32} at used + 4 + (used_idx % qsz)*8.
+            let used_idx = self.mem.rd_u16(q.used + 2);
+            let uslot = u64::from(used_idx % qsz);
+            self.mem.wr_u16(q.used + 4 + uslot * 8, head);
+            self.mem.wr_u16(q.used + 6 + uslot * 8, 0);
+            self.mem.wr_u16(q.used + 8 + uslot * 8, written as u16);
+            self.mem
+                .wr_u16(q.used + 10 + uslot * 8, (written >> 16) as u16);
+            self.mem.wr_u16(q.used + 2, used_idx.wrapping_add(1));
+            last_avail = last_avail.wrapping_add(1);
+            serviced = true;
+        }
+        self.queues[qidx].last_avail = last_avail;
+        if serviced {
+            self.interrupt_status |= 1;
+        }
+        serviced
+    }
+
+    /// Gather the chain's readable descriptors into the FUSE request, dispatch
+    /// it, then scatter the reply across the writable descriptors. Returns bytes
+    /// written into guest memory (the used-ring `len`).
+    fn service_request(&mut self, q: &FsQueue, head: u16, qsz: u16) -> u32 {
+        let desc_at = |i: u16| q.desc + u64::from(i) * 16;
+        let mut req = Vec::new();
+        let mut writable: Vec<(u64, u32)> = Vec::new();
+        let mut idx = head;
+        let mut guard = 0u32;
+        loop {
+            let da = desc_at(idx);
+            let addr = self.mem.rd_u64(da);
+            let len = self.mem.rd_u32(da + 8);
+            let flags = self.mem.rd_u16(da + 12);
+            if flags & VIRTQ_DESC_F_WRITE != 0 {
+                writable.push((addr, len));
+            } else {
+                req.extend_from_slice(&self.mem.read_bytes(addr, len as usize));
+            }
+            guard += 1;
+            if flags & VIRTQ_DESC_F_NEXT == 0 || guard > qsz as u32 {
+                break;
+            }
+            let next = self.mem.rd_u16(da + 14);
+            if next >= qsz {
+                break;
+            }
+            idx = next;
+        }
+        let reply = self.server.dispatch(&req);
+        // Scatter the reply across the writable descriptors.
+        let mut off = 0usize;
+        let mut written = 0u32;
+        for (addr, len) in writable {
+            if off >= reply.len() {
+                break;
+            }
+            let n = (len as usize).min(reply.len() - off);
+            let wrote = self.mem.write_bytes(addr, &reply[off..off + n]);
+            written += wrote as u32;
+            off += wrote;
+        }
+        written
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Drive one FUSE INIT through the virtio-fs transport: build a virtqueue in
+    /// a RAM buffer with a readable request descriptor + a writable reply
+    /// descriptor, notify the request queue, and assert the reply landed (a
+    /// success `fuse_out_header` with the negotiated major version). This
+    /// exercises the descriptor gather/scatter + used-ring update end to end.
+    #[test]
+    fn fs_transport_drives_the_fuse_server_over_a_virtqueue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ram = vec![0u8; 0x10000];
+        let put16 = |r: &mut [u8], o: usize, v: u16| r[o..o + 2].copy_from_slice(&v.to_le_bytes());
+        let put32 = |r: &mut [u8], o: usize, v: u32| r[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        let put64 = |r: &mut [u8], o: usize, v: u64| r[o..o + 8].copy_from_slice(&v.to_le_bytes());
+
+        // FUSE INIT request: fuse_in_header(40) + fuse_init_in(16).
+        let mut fuse = vec![0u8; 40 + 16];
+        put32(&mut fuse, 0, (40 + 16) as u32); // len
+        put32(&mut fuse, 4, 26); // opcode = FUSE_INIT
+        put64(&mut fuse, 8, 1); // unique
+        put32(&mut fuse, 40, 7); // init_in.major
+        put32(&mut fuse, 44, 31); // init_in.minor
+        ram[0x4000..0x4000 + fuse.len()].copy_from_slice(&fuse);
+
+        // desc[0] readable → request @0x4000; desc[1] writable → reply @0x5000.
+        put64(&mut ram, 0x1000, 0x4000);
+        put32(&mut ram, 0x1008, fuse.len() as u32);
+        put16(&mut ram, 0x100c, VIRTQ_DESC_F_NEXT);
+        put16(&mut ram, 0x100e, 1);
+        put64(&mut ram, 0x1010, 0x5000);
+        put32(&mut ram, 0x1018, 256);
+        put16(&mut ram, 0x101c, VIRTQ_DESC_F_WRITE);
+        // avail ring @0x2000: idx=1, ring[0]=head 0.
+        put16(&mut ram, 0x2002, 1);
+        put16(&mut ram, 0x2004, 0);
+
+        let ptr = ram.as_mut_ptr();
+        // SAFETY: `ram` outlives `fs` and is not reallocated in this scope.
+        let mut fs = unsafe { VirtioFs::new(0, 5, ptr, 0, ram.len(), dir.path().to_path_buf()) };
+        // Program the request queue (index 1) and notify.
+        fs.write(R_QUEUE_SEL, 1);
+        fs.write(R_QUEUE_NUM, 4);
+        fs.write(R_QUEUE_DESC_LO, 0x1000);
+        fs.write(R_QUEUE_DRIVER_LO, 0x2000);
+        fs.write(R_QUEUE_DEVICE_LO, 0x3000);
+        fs.write(R_QUEUE_READY, 1);
+        let irq = fs.write(R_QUEUE_NOTIFY, 1);
+        assert!(irq, "servicing a request must raise an interrupt");
+
+        // used ring idx advanced to 1.
+        assert_eq!(
+            u16::from_le_bytes(ram[0x3002..0x3004].try_into().unwrap()),
+            1
+        );
+        // Reply @0x5000: fuse_out_header len@0, error@4 == 0, major @16.
+        let err = i32::from_le_bytes(ram[0x5004..0x5008].try_into().unwrap());
+        assert_eq!(err, 0, "INIT must succeed");
+        let major = u32::from_le_bytes(ram[0x5010..0x5014].try_into().unwrap());
+        assert_eq!(major, 7, "negotiated FUSE major version");
+    }
 
     fn dev(disk: Vec<u8>) -> VirtioBlk {
         let mut ram = vec![0u8; 0x10000];
