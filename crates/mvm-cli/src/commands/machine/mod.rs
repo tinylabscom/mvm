@@ -72,6 +72,9 @@ pub(in crate::commands) enum MachineAction {
     /// Boot one or more persistent named machines without running a one-shot command
     #[command(display_order = 4)]
     Start(MachineStartCmd),
+    /// Restart one or more named machines (stop if running, then start)
+    #[command(display_order = 5)]
+    Restart(MachineStartCmd),
     /// Stop a running VM by name, or all running VMs with --all
     #[command(display_order = 5)]
     Stop(MachineStopArgs),
@@ -118,6 +121,7 @@ impl MachineAction {
             | MachineAction::Build(_)
             | MachineAction::Create(_)
             | MachineAction::Start(_)
+            | MachineAction::Restart(_)
             | MachineAction::Stop(_)
             | MachineAction::Rm(_)
             | MachineAction::Ls(_)
@@ -869,6 +873,40 @@ fn run_start(cmd: MachineStartCmd) -> Result<()> {
     }
     if had_err {
         bail!("one or more machines failed to start");
+    }
+    Ok(())
+}
+
+/// `machine restart <name>...`: stop each running machine, then start it — the
+/// same stop→start sequence the config-change recreate path uses. Like
+/// `run_start`, `--receipt`/`--json`/`--dry-run` are single-machine; a batch
+/// continues past a failed restart. Dry-run only previews the start plan (it
+/// never stops a running machine).
+fn run_restart(cmd: MachineStartCmd) -> Result<()> {
+    if cmd.names.len() > 1 && (cmd.receipt.is_some() || cmd.json || cmd.dry_run) {
+        bail!(
+            "--receipt/--json/--dry-run report on a single machine; \
+             restart machines individually to use them"
+        );
+    }
+    let restart_one = |name: &str| -> Result<()> {
+        if !cmd.dry_run && machine_is_running(name) {
+            stop_running_machine(name);
+        }
+        start_machine(cmd.start_args_for(name))
+    };
+    if cmd.names.len() == 1 {
+        return restart_one(&cmd.names[0]);
+    }
+    let mut had_err = false;
+    for name in &cmd.names {
+        if let Err(err) = restart_one(name) {
+            eprintln!("failed to restart {name}: {err:#}");
+            had_err = true;
+        }
+    }
+    if had_err {
+        bail!("one or more machines failed to restart");
     }
     Ok(())
 }
@@ -2822,6 +2860,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Inspect(inspect_args) => inspect_machine(inspect_args),
         MachineAction::Rm(remove_args) => remove_machine(remove_args),
         MachineAction::Start(start_cmd) => run_start(start_cmd),
+        MachineAction::Restart(restart_cmd) => run_restart(restart_cmd),
         MachineAction::Exec(exec_args) => exec_machine(cli, exec_args, cfg),
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
@@ -2913,6 +2952,7 @@ mod tests {
             MachineAction::Build(_) => "build",
             MachineAction::Create(_) => "create",
             MachineAction::Start(_) => "start",
+            MachineAction::Restart(_) => "restart",
             MachineAction::Stop(_) => "stop",
             MachineAction::Rm(_) => "rm",
             MachineAction::Ls(_) => "ls",
@@ -3966,6 +4006,23 @@ mod tests {
     #[test]
     fn start_requires_at_least_one_name() {
         let err = parse(&["start"]).expect_err("a machine name is required");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn restart_parses_names_and_flags() {
+        match parse(&["restart", "web", "db"]).expect("parse restart batch") {
+            MachineAction::Restart(cmd) => assert_eq!(cmd.names, vec!["web", "db"]),
+            other => panic!("expected restart action, got {other:?}"),
+        }
+        match parse(&["restart", "web", "--hypervisor", "mock"]).expect("parse restart") {
+            MachineAction::Restart(cmd) => {
+                assert_eq!(cmd.names, vec!["web"]);
+                assert_eq!(cmd.hypervisor.as_deref(), Some("mock"));
+            }
+            other => panic!("expected restart action, got {other:?}"),
+        }
+        let err = parse(&["restart"]).expect_err("a machine name is required");
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
