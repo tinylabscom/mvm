@@ -18,7 +18,7 @@ use mvm_client::dto::{
 };
 use mvm_client::{MvmClient, MvmError, Result};
 
-use crate::machine::{Machine, MachineError, MachineLs};
+use crate::machine::{Machine, MachineCreate, MachineError, MachineLs};
 
 /// Env var overriding the `mvmctl` binary path (shared with `machine.rs`).
 const MVM_CLI_BIN_ENV: &str = "MVM_CLI_BIN";
@@ -100,6 +100,45 @@ fn run_args(spec: &MachineSpec) -> Result<Vec<String>> {
     }
     args.push("--up-json".to_string());
     Ok(args)
+}
+
+/// Build the argv for `machine create --name … --image …` — persists the spec
+/// without booting. Uses the shared builder so it can't drift from the CLI.
+fn create_args(spec: &MachineSpec) -> Result<Vec<String>> {
+    if spec.name.is_empty() {
+        return Err(MvmError::InvalidSpec {
+            reason: "name must not be empty".into(),
+        });
+    }
+    if spec.image.is_empty() {
+        return Err(MvmError::InvalidSpec {
+            reason: "image must not be empty".into(),
+        });
+    }
+    MachineCreate::builder(&spec.name)
+        .image(&spec.image)
+        .cpus(spec.cpus as u16)
+        .memory(format!("{}M", spec.memory_mib))
+        .machine_args()
+        .map_err(machine_err)
+}
+
+fn start_args(id: &MachineId) -> Result<Vec<String>> {
+    Machine::named(&id.0)
+        .map_err(machine_err)?
+        .start()
+        .machine_args()
+        .map_err(machine_err)
+}
+
+fn rm_args(id: &MachineId) -> Result<Vec<String>> {
+    Machine::named(&id.0)
+        .map_err(machine_err)?
+        .rm()
+        // Non-interactive: the facade never prompts.
+        .yes(true)
+        .machine_args()
+        .map_err(machine_err)
 }
 
 /// The `machine run --up-json` boot envelope. The CLI prints it as the sole
@@ -233,6 +272,27 @@ impl MvmClient for SubprocessBackend {
         Ok(machines.into_iter().filter(|m| filter.matches(m)).collect())
     }
 
+    async fn inspect_machine(&self, id: &MachineId) -> Result<MachineState> {
+        // The facade's MachineState is the live runtime state, which
+        // `machine ls` reports; `machine inspect` dumps the persisted spec.
+        let stdout = self.run_cli(&list_args()?)?;
+        parse_machine_list(&stdout)?
+            .into_iter()
+            .find(|m| m.id == *id)
+            .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })
+    }
+
+    async fn create_machine(&self, spec: MachineSpec) -> Result<MachineState> {
+        // `machine create` persists the spec without booting → stopped.
+        let name = spec.name.clone();
+        self.run_cli(&create_args(&spec)?)?;
+        Ok(MachineState {
+            id: MachineId(name.clone()),
+            name,
+            status: MachineStatus::Stopped,
+        })
+    }
+
     async fn run_machine(&self, spec: MachineSpec) -> Result<MachineState> {
         // `machine run` does the full OCI pull + rootfs materialize + signed-plan
         // admission (claim 8) + boot; `--up-json` boots it detached and prints the
@@ -246,8 +306,21 @@ impl MvmClient for SubprocessBackend {
         })
     }
 
+    async fn start_machine(&self, id: &MachineId) -> Result<MachineState> {
+        self.run_cli(&start_args(id)?)?;
+        Ok(MachineState {
+            id: id.clone(),
+            name: id.0.clone(),
+            status: MachineStatus::Running,
+        })
+    }
+
     async fn stop_machine(&self, id: &MachineId) -> Result<()> {
         self.run_cli(&stop_args(id)?).map(|_| ())
+    }
+
+    async fn remove_machine(&self, id: &MachineId) -> Result<()> {
+        self.run_cli(&rm_args(id)?).map(|_| ())
     }
 
     async fn machine_logs(&self, id: &MachineId, opts: LogOpts) -> Result<Vec<u8>> {
@@ -332,6 +405,42 @@ mod tests {
                 "--up-json",
             ]
         );
+    }
+
+    #[test]
+    fn create_start_rm_args_build_the_machine_verbs() {
+        let spec = MachineSpec {
+            name: "db".into(),
+            image: "alpine:3.20".into(),
+            cpus: 1,
+            memory_mib: 256,
+            env: vec![],
+        };
+        // create persists the spec (no boot).
+        let create = create_args(&spec).unwrap();
+        assert_eq!(create[0], "create");
+        assert!(create.iter().any(|a| a == "alpine:3.20"));
+        assert!(create.iter().any(|a| a == "256M"));
+
+        let id = MachineId("db".into());
+        assert_eq!(start_args(&id).unwrap(), vec!["start", "db"]);
+        // rm is non-interactive (--yes) so the facade never blocks on a prompt.
+        let rm = rm_args(&id).unwrap();
+        assert_eq!(rm[0], "rm");
+        assert!(rm.iter().any(|a| a == "db"));
+        assert!(rm.iter().any(|a| a == "--yes"));
+    }
+
+    #[test]
+    fn create_args_reject_empty_name_and_image() {
+        let bad = MachineSpec {
+            name: String::new(),
+            image: "img".into(),
+            cpus: 1,
+            memory_mib: 64,
+            env: vec![],
+        };
+        assert!(create_args(&bad).is_err());
     }
 
     #[test]

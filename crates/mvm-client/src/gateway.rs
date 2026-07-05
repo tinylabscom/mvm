@@ -194,6 +194,32 @@ impl MvmClient for GatewayBackend {
         Ok(filter_machines(machines, &filter))
     }
 
+    async fn inspect_machine(&self, id: &MachineId) -> Result<MachineState> {
+        let url = self.endpoint(&format!("/api/v1/sandboxes/{}", id.0))?;
+        let resp = self
+            .authed(self.http.get(url))
+            .send()
+            .await
+            .map_err(|e| MvmError::Backend {
+                reason: format!("inspect request failed: {e}"),
+            })?;
+        if let Some(e) = status_error(resp.status(), &id.0) {
+            return Err(e);
+        }
+        let env: SandboxEnvelope = resp.json().await.map_err(|e| MvmError::Backend {
+            reason: format!("parsing inspect response: {e}"),
+        })?;
+        Ok(env.data.into())
+    }
+
+    async fn create_machine(&self, _spec: MachineSpec) -> Result<MachineState> {
+        // The cloud sandbox model boots on create; there is no
+        // create-without-start endpoint. Refuse rather than fake a stopped state.
+        Err(MvmError::Backend {
+            reason: "gateway sandboxes boot on create; create-without-start is not supported (use run_machine)".into(),
+        })
+    }
+
     async fn run_machine(&self, spec: MachineSpec) -> Result<MachineState> {
         // The create-sandbox endpoint has no env field; refuse rather than
         // silently drop env the workload would expect.
@@ -226,6 +252,16 @@ impl MvmClient for GatewayBackend {
         Ok(env.data.into())
     }
 
+    async fn start_machine(&self, _id: &MachineId) -> Result<MachineState> {
+        // Sandboxes boot on create; there is no idle "created" state to start
+        // from. Refuse rather than fake a running state.
+        Err(MvmError::Backend {
+            reason:
+                "gateway sandboxes have no separate start; they boot on create (use run_machine)"
+                    .into(),
+        })
+    }
+
     async fn stop_machine(&self, id: &MachineId) -> Result<()> {
         let url = self.endpoint(&format!("/api/v1/sandboxes/{}/stop", id.0))?;
         let resp =
@@ -235,6 +271,25 @@ impl MvmClient for GatewayBackend {
                 .map_err(|e| MvmError::Backend {
                     reason: format!("stop request failed: {e}"),
                 })?;
+        match status_error(resp.status(), &id.0) {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    async fn remove_machine(&self, id: &MachineId) -> Result<()> {
+        let url = self.endpoint(&format!("/api/v1/sandboxes/{}", id.0))?;
+        let resp = self
+            .authed(self.http.delete(url))
+            .send()
+            .await
+            .map_err(|e| MvmError::Backend {
+                reason: format!("remove request failed: {e}"),
+            })?;
+        // A 404 means already gone — remove is idempotent.
+        if resp.status() == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
         match status_error(resp.status(), &id.0) {
             Some(e) => Err(e),
             None => Ok(()),

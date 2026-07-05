@@ -15,6 +15,27 @@ pub struct MockBackend {
     next: Mutex<u64>,
 }
 
+impl MockBackend {
+    /// Insert a new machine with the given initial status (create → Stopped,
+    /// run → Running).
+    fn insert(&self, spec: MachineSpec, status: MachineStatus) -> Result<MachineState> {
+        if spec.name.is_empty() {
+            return Err(MvmError::InvalidSpec {
+                reason: "name must not be empty".into(),
+            });
+        }
+        let mut n = self.next.lock().unwrap();
+        *n += 1;
+        let state = MachineState {
+            id: MachineId(format!("m{n}")),
+            name: spec.name,
+            status,
+        };
+        self.machines.lock().unwrap().push(state.clone());
+        Ok(state)
+    }
+}
+
 #[async_trait]
 impl MvmClient for MockBackend {
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>> {
@@ -27,21 +48,32 @@ impl MvmClient for MockBackend {
             .collect())
     }
 
+    async fn inspect_machine(&self, id: &MachineId) -> Result<MachineState> {
+        self.machines
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|m| m.id == *id)
+            .cloned()
+            .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })
+    }
+
+    async fn create_machine(&self, spec: MachineSpec) -> Result<MachineState> {
+        self.insert(spec, MachineStatus::Stopped)
+    }
+
     async fn run_machine(&self, spec: MachineSpec) -> Result<MachineState> {
-        if spec.name.is_empty() {
-            return Err(MvmError::InvalidSpec {
-                reason: "name must not be empty".into(),
-            });
-        }
-        let mut n = self.next.lock().unwrap();
-        *n += 1;
-        let state = MachineState {
-            id: MachineId(format!("m{n}")),
-            name: spec.name,
-            status: MachineStatus::Running,
-        };
-        self.machines.lock().unwrap().push(state.clone());
-        Ok(state)
+        self.insert(spec, MachineStatus::Running)
+    }
+
+    async fn start_machine(&self, id: &MachineId) -> Result<MachineState> {
+        let mut all = self.machines.lock().unwrap();
+        let m = all
+            .iter_mut()
+            .find(|m| m.id == *id)
+            .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })?;
+        m.status = MachineStatus::Running;
+        Ok(m.clone())
     }
 
     async fn stop_machine(&self, id: &MachineId) -> Result<()> {
@@ -51,6 +83,12 @@ impl MvmClient for MockBackend {
             .find(|m| m.id == *id)
             .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })?;
         m.status = MachineStatus::Stopped;
+        Ok(())
+    }
+
+    async fn remove_machine(&self, id: &MachineId) -> Result<()> {
+        // Idempotent: removing an absent machine is Ok (per the trait contract).
+        self.machines.lock().unwrap().retain(|m| m.id != *id);
         Ok(())
     }
 
@@ -107,6 +145,57 @@ mod tests {
         mock.stop_machine(&started.id).await.unwrap();
         let after = mock.list_machines(MachineFilter::all()).await.unwrap();
         assert_eq!(after[0].status, MachineStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn create_inspect_start_remove_lifecycle() {
+        let mock = MockBackend::default();
+        let spec = MachineSpec {
+            name: "db".into(),
+            image: "img".into(),
+            cpus: 1,
+            memory_mib: 128,
+            env: vec![],
+        };
+
+        // create → stopped (not started).
+        let created = mock.create_machine(spec).await.unwrap();
+        assert_eq!(created.status, MachineStatus::Stopped);
+
+        // inspect returns it.
+        let got = mock.inspect_machine(&created.id).await.unwrap();
+        assert_eq!(got.name, "db");
+        assert_eq!(got.status, MachineStatus::Stopped);
+
+        // start → running.
+        let started = mock.start_machine(&created.id).await.unwrap();
+        assert_eq!(started.status, MachineStatus::Running);
+        assert_eq!(
+            mock.inspect_machine(&created.id).await.unwrap().status,
+            MachineStatus::Running
+        );
+
+        // remove → gone; inspect now NotFound; remove is idempotent.
+        mock.remove_machine(&created.id).await.unwrap();
+        assert!(matches!(
+            mock.inspect_machine(&created.id).await,
+            Err(MvmError::NotFound { .. })
+        ));
+        mock.remove_machine(&created.id).await.unwrap(); // idempotent
+    }
+
+    #[tokio::test]
+    async fn inspect_and_start_unknown_are_not_found() {
+        let mock = MockBackend::default();
+        let missing = MachineId("nope".into());
+        assert!(matches!(
+            mock.inspect_machine(&missing).await,
+            Err(MvmError::NotFound { .. })
+        ));
+        assert!(matches!(
+            mock.start_machine(&missing).await,
+            Err(MvmError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]

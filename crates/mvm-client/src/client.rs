@@ -12,11 +12,25 @@ pub trait MvmClient: Send + Sync {
     /// List machines matching `filter`.
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>>;
 
-    /// Launch a machine from `spec`; returns its initial state.
+    /// Inspect one machine by id; returns its current state.
+    async fn inspect_machine(&self, id: &MachineId) -> Result<MachineState>;
+
+    /// Create a machine from `spec` **without** starting it; returns its initial
+    /// (stopped) state. `run_machine` is the create-and-start shorthand.
+    async fn create_machine(&self, spec: MachineSpec) -> Result<MachineState>;
+
+    /// Launch a machine from `spec` (create + start); returns its initial state.
     async fn run_machine(&self, spec: MachineSpec) -> Result<MachineState>;
+
+    /// Start an already-created (or stopped) machine by id; returns its state.
+    async fn start_machine(&self, id: &MachineId) -> Result<MachineState>;
 
     /// Stop a machine by id. Idempotent: stopping a stopped machine is `Ok`.
     async fn stop_machine(&self, id: &MachineId) -> Result<()>;
+
+    /// Remove a machine by id (stopping it first if needed). Idempotent:
+    /// removing an absent machine is `Ok`.
+    async fn remove_machine(&self, id: &MachineId) -> Result<()>;
 
     /// Fetch a machine's captured console/log bytes.
     async fn machine_logs(&self, id: &MachineId, opts: LogOpts) -> Result<Vec<u8>>;
