@@ -57,8 +57,8 @@ Use named machines when you want state across starts:
 ```bash
 mvmctl machine create --name alpine-dev --image alpine:3.20 --net
 mvmctl machine start alpine-dev
-mvmctl machine exec --name alpine-dev -- apk add jq
-mvmctl machine shell --name alpine-dev
+mvmctl machine exec alpine-dev -- apk add jq
+mvmctl machine shell alpine-dev
 mvmctl machine stop alpine-dev
 ```
 
@@ -100,7 +100,7 @@ Use it only when the host has `SSH_AUTH_SOCK` pointing to a Unix socket:
 
 ```bash
 mvmctl machine create --name dev --image alpine:3.20 --ssh-agent
-mvmctl machine exec --name dev -- env | grep SSH_AUTH_SOCK
+mvmctl machine exec dev -- env | grep SSH_AUTH_SOCK
 ```
 
 The guest sees `/run/mvm/ssh-agent.sock`; the private keys remain controlled by

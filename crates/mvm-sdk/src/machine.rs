@@ -149,7 +149,7 @@ impl Machine {
         MachineStartBuilder::new(self.name.clone())
     }
 
-    /// Build a `mvmctl machine exec --name <name> -- <command...>` invocation.
+    /// Build a `mvmctl machine exec <name> -- <command...>` invocation.
     pub fn exec<I, S>(&self, command: I) -> MachineExecBuilder
     where
         I: IntoIterator<Item = S>,
@@ -158,7 +158,7 @@ impl Machine {
         MachineExecBuilder::new(self.name.clone(), collect_strings(command))
     }
 
-    /// Build a `mvmctl machine shell --name <name>` invocation.
+    /// Build a `mvmctl machine shell <name>` invocation.
     pub fn shell(&self) -> MachineShellBuilder {
         MachineShellBuilder::new(self.name.clone())
     }
@@ -693,7 +693,8 @@ impl MachineExecBuilder {
     pub fn machine_args(&self) -> Result<Vec<String>, MachineError> {
         let name = require_non_empty(self.name.clone(), "name")?;
         require_non_empty_slice(&self.command, "command")?;
-        let mut args = vec!["exec".to_string(), "--name".to_string(), name];
+        // `machine exec` takes a positional name, not `--name`.
+        let mut args = vec!["exec".to_string(), name];
         if self.force {
             args.push("--force".to_string());
         }
@@ -734,7 +735,8 @@ impl MachineShellBuilder {
     /// Return the `machine` subcommand argv, excluding the `mvmctl` program.
     pub fn machine_args(&self) -> Result<Vec<String>, MachineError> {
         let name = require_non_empty(self.name.clone(), "name")?;
-        let mut args = vec!["shell".to_string(), "--name".to_string(), name];
+        // `machine shell` takes a positional name, not `--name`.
+        let mut args = vec!["shell".to_string(), name];
         if self.force {
             args.push("--force".to_string());
         }

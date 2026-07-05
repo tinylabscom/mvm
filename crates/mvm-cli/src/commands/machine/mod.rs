@@ -339,7 +339,7 @@ impl MachineRunArgs {
     fn resolve_mode(&self) -> Result<MachineRunMode> {
         let mode = match (self.interactive(), self.persistent()) {
             (true, true) => bail!(
-                "`machine run -it` is foreground-only; use `machine exec --name <name> -it -- <cmd>` for an interactive command in a long-lived machine"
+                "`machine run -it` is foreground-only; use `machine exec <name> -it -- <cmd>` for an interactive command in a long-lived machine"
             ),
             (false, true) => MachineRunMode::Persistent,
             // Fresh-boot modes always materialize a new VM and need an image.
@@ -790,7 +790,7 @@ pub(in crate::commands) struct MachineStartArgs {
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct MachineExecArgs {
     /// Persistent machine name.
-    #[arg(long)]
+    #[arg(value_name = "NAME")]
     pub name: String,
     /// Bypass the sealed-image accessibility check.
     #[arg(long)]
@@ -809,7 +809,7 @@ pub(in crate::commands) struct MachineExecArgs {
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct MachineShellArgs {
     /// Persistent machine name.
-    #[arg(long)]
+    #[arg(value_name = "NAME")]
     pub name: String,
     /// Bypass the sealed-image accessibility check.
     #[arg(long)]
@@ -3676,7 +3676,7 @@ mod tests {
 
     #[test]
     fn exec_shell_and_stop_parse() {
-        match parse(&["exec", "--name", "web", "--", "echo", "hello world"]).expect("parse") {
+        match parse(&["exec", "web", "--", "echo", "hello world"]).expect("parse") {
             MachineAction::Exec(args) => {
                 assert_eq!(args.name, "web");
                 assert_eq!(args.argv, vec!["echo", "hello world"]);
@@ -3686,7 +3686,7 @@ mod tests {
             }
             other => panic!("expected exec action, got {other:?}"),
         }
-        match parse(&["shell", "--name", "web", "--force"]).expect("parse") {
+        match parse(&["shell", "web", "--force"]).expect("parse") {
             MachineAction::Shell(args) => {
                 assert_eq!(args.name, "web");
                 assert!(args.force);
@@ -3704,13 +3704,13 @@ mod tests {
 
     #[test]
     fn exec_requires_argv() {
-        let err = parse(&["exec", "--name", "web"]).expect_err("argv is required");
+        let err = parse(&["exec", "web"]).expect_err("argv is required");
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
     fn exec_accepts_it_for_pty_command() {
-        match parse(&["exec", "--name", "web", "-it", "--", "/bin/sh"]).expect("parse") {
+        match parse(&["exec", "web", "-it", "--", "/bin/sh"]).expect("parse") {
             MachineAction::Exec(args) => {
                 assert_eq!(args.name, "web");
                 assert!(args.tty);
@@ -4575,10 +4575,8 @@ ssh_agent = true
 
     #[test]
     fn top_level_cli_routes_machine_exec() {
-        let cli = Cli::try_parse_from([
-            "mvmctl", "machine", "exec", "--name", "web", "--", "echo", "hi",
-        ])
-        .expect("top-level parse");
+        let cli = Cli::try_parse_from(["mvmctl", "machine", "exec", "web", "--", "echo", "hi"])
+            .expect("top-level parse");
         match cli.command {
             Commands::Machine(args) => match args.action {
                 MachineAction::Exec(exec) => {

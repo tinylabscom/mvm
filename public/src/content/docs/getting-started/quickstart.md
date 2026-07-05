@@ -37,7 +37,7 @@ For a named machine that survives across starts:
 ```bash
 mvmctl machine create --name alpine-dev --image alpine
 mvmctl machine start alpine-dev
-mvmctl machine exec --name alpine-dev -- uname -a
+mvmctl machine exec alpine-dev -- uname -a
 mvmctl machine stop alpine-dev
 ```
 
