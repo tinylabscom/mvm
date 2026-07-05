@@ -310,6 +310,14 @@ jobs:
           [ "$(stat -c '%a' "$mnt/hello")" = "755" ]
           [ "$(stat -c '%a' "$mnt/etc/hosts")" = "644" ]
           [ "$(stat -c '%s' "$mnt/big")" = "716800" ]
+          # Inline xattr: the real kernel reads back the security.capability the
+          # writer emitted, byte-for-byte (getfattr reads raw bytes — no cap
+          # validation — so an arbitrary fixed blob round-trips deterministically).
+          sudo apt-get update && sudo apt-get install -y attr
+          cap=$(sudo getfattr --absolute-names -n security.capability -e hex "$mnt/bin/ping" \
+            | grep '^security.capability=' | cut -d= -f2)
+          echo "security.capability=$cap"
+          [ "$cap" = "0x0000000200300000000000000000000000000000" ]
           echo "pure-Rust ext4 mounted + verified on the real Linux kernel"
       - name: dm-verity root hash + hash tree match real veritysetup
         run: |

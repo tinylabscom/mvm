@@ -24,11 +24,13 @@ fn parent_that_is_a_file_is_rejected() {
             path: "/a".into(),
             mode: 0o644,
             data: b"x".to_vec(),
+            xattrs: Vec::new(),
         },
         Node::File {
             path: "/a/b".into(),
             mode: 0o644,
             data: b"y".to_vec(),
+            xattrs: Vec::new(),
         },
     ];
     build_image(&nodes).expect_err("a file cannot be a parent directory");
@@ -45,11 +47,13 @@ fn duplicate_paths_are_rejected() {
             path: "/dup".into(),
             mode: 0o644,
             data: b"first".to_vec(),
+            xattrs: Vec::new(),
         },
         Node::File {
             path: "/dup".into(),
             mode: 0o644,
             data: b"second".to_vec(),
+            xattrs: Vec::new(),
         },
     ];
     build_image(&nodes).expect_err("duplicate path must be rejected");
@@ -66,6 +70,7 @@ fn malformed_path_components_are_rejected() {
             path: bad.into(),
             mode: 0o644,
             data: b"x".to_vec(),
+            xattrs: Vec::new(),
         }];
         assert!(
             build_image(&nodes).is_err(),
@@ -86,6 +91,7 @@ fn deep_nesting_round_trips() {
         nodes.push(Node::Dir {
             path: path.clone(),
             mode: 0o755,
+            xattrs: Vec::new(),
         });
     }
     let leaf = format!("{path}/leaf");
@@ -94,6 +100,7 @@ fn deep_nesting_round_trips() {
         path: leaf,
         mode: 0o644,
         data: content.clone(),
+        xattrs: Vec::new(),
     });
 
     let fs = mount(build_image(&nodes).expect("deep valid tree builds"));
@@ -158,11 +165,13 @@ fn directory_over_one_block_is_rejected() {
             path: format!("/big/f{i:04}"),
             mode: 0o644,
             data: Vec::new(),
+            xattrs: Vec::new(),
         });
     }
     nodes.push(Node::Dir {
         path: "/big".into(),
         mode: 0o755,
+        xattrs: Vec::new(),
     });
     assert!(
         matches!(build_image(&nodes), Err(Ext4Error::DirTooLarge(_))),

@@ -134,29 +134,23 @@ pub enum RootfsError {
         #[source]
         source: std::io::Error,
     },
-
-    #[cfg(feature = "pure-mkfs")]
-    #[error("{path} carries an extended attribute ({name}) the in-process writer cannot represent")]
-    PureUnsupportedXattr { path: PathBuf, name: String },
 }
 
 #[cfg(feature = "pure-mkfs")]
 impl RootfsError {
     /// Whether a pure-path failure is a *capacity limit* of the in-process ext4
-    /// writer (the image is too big / too fragmented for the current design),
-    /// meaning the run path can retry via the builder VM. A malformed-tree or
-    /// I/O failure returns `false` and surfaces unchanged.
+    /// writer (the image is too big / too fragmented, or an inode's xattrs
+    /// overflow the in-inode area), meaning the run path can retry via the
+    /// builder VM. A malformed-tree or I/O failure returns `false`.
     pub fn is_pure_capacity_limit(&self) -> bool {
         matches!(self, RootfsError::PureBuild(e) if e.is_capacity_limit())
     }
 
     /// Whether the run path should retry this pure-path failure via the builder
-    /// VM. True when the in-process writer structurally can't emit a faithful
-    /// image — a capacity limit, or a tree carrying an extended attribute the
-    /// writer can't represent (the builder VM's `cp -a` preserves it). A
+    /// VM (which has no such limits and whose `cp -a` preserves xattrs). A
     /// malformed tree or I/O error is genuine and surfaces unchanged.
     pub fn pure_should_fall_back(&self) -> bool {
-        self.is_pure_capacity_limit() || matches!(self, RootfsError::PureUnsupportedXattr { .. })
+        self.is_pure_capacity_limit()
     }
 }
 
@@ -463,18 +457,11 @@ fn collect_nodes(root: &std::path::Path) -> Result<Vec<mvm_ext4::Node>, RootfsEr
                 path: path.clone(),
                 source,
             })?;
-            // The pure writer represents no xattrs. If a real (non-symlink)
-            // entry carries one that matters to the guest — a file capability,
-            // POSIX ACL, or image-authored user/trusted attr — refuse so the run
-            // path falls back to the builder VM (whose `cp -a` preserves it)
-            // rather than silently dropping it. Host-managed labels the guest
-            // re-derives (SELinux/IMA/EVM, macOS `com.apple.*`) are ignored so
-            // they never force a spurious fallback.
-            if !ft.is_symlink()
-                && let Some(name) = blocking_xattr(&path)
-            {
-                return Err(RootfsError::PureUnsupportedXattr { path, name });
-            }
+            // Capture image-semantic xattrs (file capabilities, POSIX ACLs,
+            // user/trusted attrs) so the writer preserves them inline. Attrs too
+            // large for the in-inode area surface later as XattrTooLarge (a
+            // capacity limit → builder-VM fallback). Host-managed labels the
+            // guest re-derives (SELinux/IMA/EVM, macOS `com.apple.*`) are skipped.
             if ft.is_symlink() {
                 let target = std::fs::read_link(&path).map_err(|source| RootfsError::PureWalk {
                     path: path.clone(),
@@ -485,9 +472,11 @@ fn collect_nodes(root: &std::path::Path) -> Result<Vec<mvm_ext4::Node>, RootfsEr
                     target: target.to_string_lossy().into_owned(),
                 });
             } else if ft.is_dir() {
+                let xattrs = collect_guest_xattrs(&path);
                 out.push(mvm_ext4::Node::Dir {
                     path: guest_path,
                     mode: mode_of(&path, 0o755),
+                    xattrs,
                 });
                 stack.push(path);
             } else if ft.is_file() {
@@ -495,10 +484,12 @@ fn collect_nodes(root: &std::path::Path) -> Result<Vec<mvm_ext4::Node>, RootfsEr
                     path: path.clone(),
                     source,
                 })?;
+                let xattrs = collect_guest_xattrs(&path);
                 out.push(mvm_ext4::Node::File {
                     path: guest_path,
                     mode: mode_of(&path, 0o644),
                     data,
+                    xattrs,
                 });
             }
         }
@@ -508,15 +499,26 @@ fn collect_nodes(root: &std::path::Path) -> Result<Vec<mvm_ext4::Node>, RootfsEr
 
 /// The name of the first extended attribute on `path` that the pure writer can't
 /// represent and the guest actually needs, or `None`. Ignores host-managed
-/// labels (SELinux/IMA/EVM, macOS `com.apple.*`) so they never force a fallback.
+/// labels (SELinux/IMA/EVM, macOS `com.apple.*`) so the guest re-derives them.
 #[cfg(feature = "pure-mkfs")]
-fn blocking_xattr(path: &std::path::Path) -> Option<String> {
+fn collect_guest_xattrs(path: &std::path::Path) -> Vec<mvm_ext4::Xattr> {
     // A read failure means the FS doesn't support xattrs (or we lack access):
-    // nothing to preserve, so don't force a fallback.
-    let names = xattr::list(path).ok()?;
-    names
-        .map(|n| n.to_string_lossy().into_owned())
-        .find(|n| xattr_matters_for_guest(n))
+    // nothing to preserve.
+    let Ok(names) = xattr::list(path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for name in names {
+        let name = name.to_string_lossy().into_owned();
+        if xattr_matters_for_guest(&name)
+            && let Ok(Some(value)) = xattr::get(path, &name)
+        {
+            out.push(mvm_ext4::Xattr { name, value });
+        }
+    }
+    // Deterministic order (the writer also sorts, but keep the node stable).
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 /// Whether an xattr name carries guest-relevant image semantics the pure writer
@@ -594,16 +596,16 @@ mod tests {
 
     #[cfg(feature = "pure-mkfs")]
     #[test]
-    fn only_image_semantic_xattrs_force_a_fallback() {
-        // Preserved (image semantics the guest needs and won't re-derive).
+    fn only_image_semantic_xattrs_are_captured() {
+        // Captured (image semantics the guest needs and won't re-derive).
         assert!(xattr_matters_for_guest("security.capability"));
         assert!(xattr_matters_for_guest("system.posix_acl_access"));
         assert!(xattr_matters_for_guest("system.posix_acl_default"));
         assert!(xattr_matters_for_guest("user.mvm.anything"));
         assert!(xattr_matters_for_guest("trusted.foo"));
-        // Ignored: host-managed labels the guest re-derives. Treating SELinux as
-        // blocking would force a builder-VM fallback for *every* image on an
-        // SELinux-labelled host (Fedora/RHEL) — defeating the pure default.
+        // Ignored: host-managed labels the guest re-derives. Capturing SELinux
+        // would attach a host label to *every* file on an SELinux-labelled host
+        // (Fedora/RHEL) and bloat every inode's xattr area for nothing.
         assert!(!xattr_matters_for_guest("security.selinux"));
         assert!(!xattr_matters_for_guest("security.ima"));
         assert!(!xattr_matters_for_guest("security.evm"));
@@ -612,30 +614,49 @@ mod tests {
 
     #[cfg(feature = "pure-mkfs")]
     #[test]
-    fn xattr_bearing_tree_routes_to_builder_vm_fallback() {
+    fn xattr_bearing_tree_materializes_in_process() {
         let src = tempfile::tempdir().unwrap();
         let bin = src.path().join("ping");
         std::fs::write(&bin, b"\x7fELF fake binary").unwrap();
-        // Mirror the OCI unpacker's probe: skip where the host FS can't hold
-        // xattrs (some CI tmpfs). A `user.*` attr is settable on both Linux and
-        // macOS and trips the same "writer can't represent this" branch as a
-        // real `security.capability`.
+        // Skip where the host FS can't hold xattrs (some CI tmpfs). A small
+        // `user.*` attr fits the in-inode area, so the pure writer represents it
+        // and materialize succeeds — no builder-VM fallback.
         if xattr::set(&bin, "user.mvm.test_cap", b"cap").is_err() {
+            return;
+        }
+        assert_eq!(
+            collect_guest_xattrs(&bin),
+            vec![mvm_ext4::Xattr {
+                name: "user.mvm.test_cap".into(),
+                value: b"cap".to_vec(),
+            }],
+            "the walk must capture the image-semantic xattr"
+        );
+        let out = tempfile::tempdir().unwrap();
+        let input =
+            MaterializeExt4Input::new(src.path().to_path_buf(), out.path().join("rootfs.ext4"), 0);
+        materialize_ext4_pure(&input).expect("a small xattr fits inline; materialize succeeds");
+    }
+
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn oversized_xattr_falls_back_to_builder_vm() {
+        let src = tempfile::tempdir().unwrap();
+        let bin = src.path().join("big");
+        std::fs::write(&bin, b"x").unwrap();
+        // A value far larger than the ~90-byte in-inode area can't be written
+        // inline (no external xattr block yet), so the build errors — and that
+        // error must route to the builder-VM fallback, not surface.
+        if xattr::set(&bin, "user.big", &vec![0u8; 512]).is_err() {
             return;
         }
         let out = tempfile::tempdir().unwrap();
         let input =
             MaterializeExt4Input::new(src.path().to_path_buf(), out.path().join("rootfs.ext4"), 0);
-
-        let err = materialize_ext4_pure(&input)
-            .expect_err("an xattr-bearing tree must not be silently materialized without it");
-        assert!(
-            matches!(err, RootfsError::PureUnsupportedXattr { .. }),
-            "got {err:?}"
-        );
+        let err = materialize_ext4_pure(&input).expect_err("an oversized xattr can't be inline");
         assert!(
             err.pure_should_fall_back(),
-            "an unsupported xattr must route to the builder-VM fallback"
+            "an oversized xattr must route to the builder-VM fallback, got {err:?}"
         );
     }
 

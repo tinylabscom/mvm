@@ -85,16 +85,19 @@ fn tree_round_trips_through_real_reader() {
         Node::Dir {
             path: "/etc".into(),
             mode: 0o755,
+            xattrs: Vec::new(),
         },
         Node::File {
             path: "/etc/hosts".into(),
             mode: 0o644,
             data: hosts.clone(),
+            xattrs: Vec::new(),
         },
         Node::File {
             path: "/hello".into(),
             mode: 0o755,
             data: hello.clone(),
+            xattrs: Vec::new(),
         },
         Node::Symlink {
             path: "/etc/localhost".into(),
@@ -131,11 +134,13 @@ fn output_is_deterministic() {
         Node::Dir {
             path: "/a".into(),
             mode: 0o755,
+            xattrs: Vec::new(),
         },
         Node::File {
             path: "/a/f".into(),
             mode: 0o644,
             data: b"xyz".to_vec(),
+            xattrs: Vec::new(),
         },
     ];
     let one = build_image(&nodes).unwrap();
@@ -160,16 +165,19 @@ fn multi_group_image_round_trips_through_real_reader() {
         Node::Dir {
             path: "/etc".into(),
             mode: 0o755,
+            xattrs: Vec::new(),
         },
         Node::File {
             path: "/etc/marker".into(),
             mode: 0o644,
             data: small.clone(),
+            xattrs: Vec::new(),
         },
         Node::File {
             path: "/big".into(),
             mode: 0o644,
             data: big.clone(),
+            xattrs: Vec::new(),
         },
     ];
 
@@ -215,6 +223,7 @@ fn depth1_extent_tree_file_round_trips_through_real_reader() {
         path: "/huge".into(),
         mode: 0o644,
         data: big,
+        xattrs: Vec::new(),
     }];
     let image = build_image(&nodes).unwrap();
 

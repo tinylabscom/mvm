@@ -51,6 +51,7 @@ fn gen_nodes(u: &mut Unstructured) -> arbitrary::Result<Vec<Node>> {
             0 => nodes.push(Node::Dir {
                 path,
                 mode: u16::arbitrary(u)?,
+                            xattrs: Vec::new(),
             }),
             1 => {
                 let want = u.int_in_range(0..=MAX_FILE_BYTES)?;
@@ -60,6 +61,7 @@ fn gen_nodes(u: &mut Unstructured) -> arbitrary::Result<Vec<Node>> {
                     path,
                     mode: u16::arbitrary(u)?,
                     data,
+                                    xattrs: Vec::new(),
                 });
             }
             _ => {
@@ -121,6 +123,7 @@ fn with_ancestor_dirs(nodes: Vec<Node>) -> Vec<Node> {
     }
     let mut out = nodes;
     for path in extra {
+        out.push(Node::Dir { path, mode: 0o755         out.push(Node::Dir { path, mode: 0o755     xattrs: Vec::new(),
         out.push(Node::Dir { path, mode: 0o755 });
     }
     out
@@ -128,6 +131,8 @@ fn with_ancestor_dirs(nodes: Vec<Node>) -> Vec<Node> {
 
 fn node_path(n: &Node) -> String {
     match n {
+        Node::Dir { path, ..         Node::Dir { path, ..     xattrs: Vec::new(),
+        Node::Dir { path, .. } | Node::File { path, ..         Node::Dir { path, .. } | Node::File { path, ..     xattrs: Vec::new(),
         Node::Dir { path, .. } | Node::File { path, .. } | Node::Symlink { path, .. } => {
             path.clone()
         }
