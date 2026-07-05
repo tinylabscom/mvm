@@ -1583,6 +1583,67 @@ pub fn load_pinned_verb_grant(
     }
 }
 
+/// Well-known guest path for the dm-verity-measured verb-trust policy baked
+/// into a sealed image's rootfs. Absent on dev/OCI boots.
+pub const VERB_TRUST_POLICY_PATH: &str = "/etc/mvm/verb-trust.json";
+
+/// The guest's grant-trust decision, derived from the measured policy and
+/// whether a valid grant is pinned. `ObserveGap` serves but flags the gap
+/// (observe mode); `FailClosed` refuses control RPCs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustDecision {
+    Serve,
+    ObserveGap,
+    FailClosed,
+}
+
+/// Read the dm-verity-measured verb-trust policy from `path`. Absent,
+/// unreadable, or malformed returns `None` (no requirement — the dev/OCI
+/// permissive default). A real sealed image carries this file under
+/// dm-verity, so a malformed policy there cannot occur without breaking
+/// the verity seal (claim 3).
+pub fn load_verb_trust_policy(path: &std::path::Path) -> Option<mvm_core::plan::VerbTrustPolicy> {
+    let raw = std::fs::read(path).ok()?;
+    match serde_json::from_slice(&raw) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!("mvm-guest-agent: verb-trust.json malformed, treating as no policy: {e}");
+            None
+        }
+    }
+}
+
+/// Verb names that are always allowed regardless of grant or trust-policy state.
+/// Mirrors the BASELINE list in `VerbGrant::permits` so that `trust_denied`
+/// refusals have the same allow-set as the verb-grant gate.
+const TRUST_BASELINE: &[&str] = &["protocol-hello", "ping", "readiness-status"];
+
+/// Returns `true` if `verb` is in the baseline set that is always allowed
+/// regardless of grant or trust-policy state.
+pub fn is_verb_trust_baseline(verb: &str) -> bool {
+    TRUST_BASELINE.contains(&verb)
+}
+
+/// Pure trust decision. `Attested` key source is unimplemented and treated
+/// as fail-closed whenever the grant is not present, never a silent downgrade.
+pub fn trust_decision(
+    policy: Option<&mvm_core::plan::VerbTrustPolicy>,
+    grant_present: bool,
+) -> TrustDecision {
+    use mvm_core::plan::GrantKeySource;
+    match policy {
+        None => TrustDecision::Serve,
+        Some(_) if grant_present => TrustDecision::Serve,
+        Some(p) => {
+            if p.require_grant || matches!(p.grant_key_source, GrantKeySource::Attested) {
+                TrustDecision::FailClosed
+            } else {
+                TrustDecision::ObserveGap
+            }
+        }
+    }
+}
+
 /// Guest-agent control protocol capability. Closed enum so host and
 /// guest fail loudly on drift instead of accepting arbitrary strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -7097,5 +7158,54 @@ mod rpc_client_tests {
             result.is_none(),
             "absent grant file must return None (no-op boot)"
         );
+    }
+
+    // ---- trust_decision + load_verb_trust_policy ----
+
+    #[test]
+    fn trust_decision_covers_policy_matrix() {
+        use mvm_core::plan::{GrantKeySource, VerbTrustPolicy};
+        let require = |req| VerbTrustPolicy {
+            version: 1,
+            require_grant: req,
+            grant_key_source: GrantKeySource::LaunchProvisioned,
+        };
+        // No policy (dev/OCI): always serve.
+        assert_eq!(trust_decision(None, false), TrustDecision::Serve);
+        assert_eq!(trust_decision(None, true), TrustDecision::Serve);
+        // Policy + grant present: serve.
+        assert_eq!(
+            trust_decision(Some(&require(true)), true),
+            TrustDecision::Serve
+        );
+        // Policy present, grant absent, require=false: observe (serve, but flag the gap).
+        assert_eq!(
+            trust_decision(Some(&require(false)), false),
+            TrustDecision::ObserveGap
+        );
+        // Policy present, grant absent, require=true: fail closed.
+        assert_eq!(
+            trust_decision(Some(&require(true)), false),
+            TrustDecision::FailClosed
+        );
+        // Future Attested source with no grant is treated as fail-closed (never a silent downgrade).
+        let attested = VerbTrustPolicy {
+            version: 1,
+            require_grant: false,
+            grant_key_source: GrantKeySource::Attested,
+        };
+        assert_eq!(
+            trust_decision(Some(&attested), false),
+            TrustDecision::FailClosed
+        );
+    }
+
+    #[test]
+    fn load_verb_trust_policy_absent_is_none_malformed_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("verb-trust.json");
+        assert!(load_verb_trust_policy(&p).is_none()); // absent
+        std::fs::write(&p, b"{ not json").unwrap();
+        assert!(load_verb_trust_policy(&p).is_none()); // malformed => None (dev-default)
     }
 }

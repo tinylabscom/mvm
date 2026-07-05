@@ -37,8 +37,9 @@ use mvm_guest::probes::{self, ProbeEntry, ProbeOutputFormat, ProbeResult};
 use mvm_guest::runtime_config::{self, ConcurrencyConfig};
 use mvm_guest::vsock::{
     BootTimingReport, ComponentState, EntrypointEvent, FsChange, FsChangeKind, GUEST_AGENT_PORT,
-    GuestRequest, GuestResponse, ReadinessReport, RunEntrypointError, enforce_verb_grant,
-    load_pinned_verb_grant,
+    GuestRequest, GuestResponse, ReadinessReport, RunEntrypointError, TrustDecision,
+    VERB_TRUST_POLICY_PATH, enforce_verb_grant, is_verb_trust_baseline, load_pinned_verb_grant,
+    load_verb_trust_policy, trust_decision,
 };
 use mvm_guest::worker_pool::{DispatchError, DispatchOutcome, WorkerPool};
 use mvm_guest::worker_protocol::WorkerOutcome;
@@ -307,6 +308,9 @@ struct AgentBootState {
     /// no grant is pinned — the class gate (`allowed_in`) is the only
     /// verb filter.
     verb_grant: Option<mvm_core::plan::VerbGrant>,
+    /// `true` when the measured verb-trust policy required a grant but none
+    /// was validly pinned; control RPCs are refused while this is set.
+    trust_denied: bool,
 }
 
 #[derive(Default)]
@@ -340,6 +344,7 @@ impl AgentBootState {
             profile,
             boot_at,
             verb_grant: None,
+            trust_denied: false,
         }
     }
 
@@ -2134,6 +2139,18 @@ fn handle_client(
         return;
     }
 
+    // Fail-closed when the measured verb-trust policy required a grant that was
+    // not validly pinned. Baseline verbs (protocol-hello, ping, readiness-status)
+    // pass through so the host can still observe liveness; all other control RPCs
+    // are refused with the same VerbNotAuthorized shape as the verb-grant gate.
+    if boot_state.trust_denied && !is_verb_trust_baseline(req.kind_name()) {
+        let resp = GuestResponse::VerbNotAuthorized {
+            verb: req.kind_name().to_string(),
+        };
+        write_response(&mut file, &resp);
+        return;
+    }
+
     if let Some(resp) = enforce_verb_grant(&req, boot_state.verb_grant.as_ref()) {
         write_response(&mut file, &resp);
         return;
@@ -2991,6 +3008,21 @@ fn main() {
     );
     let mut boot_state_val = AgentBootState::new(active_profile, boot_at);
     boot_state_val.verb_grant = pinned_verb_grant;
+    let policy = load_verb_trust_policy(std::path::Path::new(VERB_TRUST_POLICY_PATH));
+    match trust_decision(policy.as_ref(), boot_state_val.verb_grant.is_some()) {
+        TrustDecision::Serve => {}
+        TrustDecision::ObserveGap => {
+            eprintln!(
+                "mvm-guest-agent: verb-trust policy present but no valid grant pinned (observe mode)"
+            );
+        }
+        TrustDecision::FailClosed => {
+            eprintln!(
+                "mvm-guest-agent: verb-trust policy requires a grant but none pinned — refusing control RPCs"
+            );
+            boot_state_val.trust_denied = true;
+        }
+    }
     let boot_state = Arc::new(boot_state_val);
     boot_state.mark_vsock_bound();
     eprintln!(
