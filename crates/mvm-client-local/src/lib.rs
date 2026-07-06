@@ -338,6 +338,23 @@ impl MvmClient for LocalBackend {
             reason: "local exec requires the guest-agent exec seam (not wired)".into(),
         })
     }
+
+    async fn reconfigure_machine(
+        &self,
+        _id: &MachineId,
+        _cfg: mvm_client::dto::ReconfigureRequest,
+    ) -> Result<MachineState> {
+        // The in-process local backend has no persistent-machine layer to
+        // patch (its run_machine is a transient image-boot). Reconfigure is
+        // the CLI verb's or the gateway backend's job until Phase 2 lifts the
+        // persistent-machine engine into a shared crate.
+        Err(MvmError::Backend {
+            reason: "reconfigure is not supported on the in-process local backend \
+                     (no persistent-machine layer); use `mvmctl machine reconfigure` \
+                     or the gateway backend"
+                .into(),
+        })
+    }
 }
 
 #[cfg(test)]

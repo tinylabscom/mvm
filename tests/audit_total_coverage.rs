@@ -186,6 +186,7 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
     ("inspect", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("ConfigChange")),
+    ("reconfigure", AuditPosture::Emits("ConfigChange")),
     ("start", AuditPosture::InteractiveOrControl),
     ("restart", AuditPosture::InteractiveOrControl),
     ("exec", AuditPosture::InteractiveOrControl),

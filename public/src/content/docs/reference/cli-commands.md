@@ -423,6 +423,13 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine exec <name>` | Omit the command to drop into an interactive shell (same as `machine shell`) |
 | `mvmctl machine shell <name>` | Attach an interactive shell/console to an already-started named machine |
 | `mvmctl machine stop <name>...` | Stop one or more already-started named machines (prompts for confirmation; pass `--yes` to skip) |
+| `mvmctl machine reconfigure <name> [flags]` | Patch a persistent machine's config and relaunch it. Only the flags you pass are changed; everything else (image, volumes, profile) is preserved. When the machine is running, it is stopped and restarted automatically; when stopped, the change is staged for the next `machine start`. |
+| `mvmctl machine reconfigure <name> --net` / `--no-net` | Enable or disable the dev-tier outbound network preset |
+| `mvmctl machine reconfigure <name> --allow-host <host[:port]>` | Replace the stored egress allowlist with these hosts (repeatable within one invocation); use `--clear-allow-host` to empty it |
+| `mvmctl machine reconfigure <name> --clear-allow-host` | Remove all per-host egress entries and fall back to the default network posture |
+| `mvmctl machine reconfigure <name> --cpus <n>` | Change the vCPU count |
+| `mvmctl machine reconfigure <name> --memory <size>` | Change the memory limit (accepts `512m`, `1g`, etc.) |
+| `mvmctl machine reconfigure <name> --mem-initial <size>` | Change the initial balloon memory target (CLI-only; not exposed on the remote facade) |
 | `mvmctl machine check-artifact <artifact.mvm>` | Verify a portable artifact and preview its admission posture without extracting or booting |
 | `mvmctl machine check-artifact <artifact.mvm> --key <pubkey>` | Verify with an explicit raw Ed25519 public key |
 | `mvmctl machine check-artifact <artifact.mvm> --json` | Print the verified artifact/admission preview as JSON |
@@ -497,7 +504,9 @@ effective network posture, enforcement tier, auth mode, dev-init hash/count,
 and redacted volume policy without resolving or booting the image; the signed
 machine-start receipt carries the same policy summary plus the resolved digest
 and start timestamp after a real boot. `exec` / `shell` / `stop` reuse the
-existing console/down paths for the running VM. `machine pack` for portable
+existing console/down paths for the running VM. `machine reconfigure <name>`
+patches a subset of the stored config (`net`, `allow_host`, `cpus`, `memory`, and the CLI-only `mem_initial`) and relaunches the machine — auto stop + start when running,
+persist-only when stopped; identity, image, and volumes are preserved. `machine pack` for portable
 signed artifacts and live `machine run <artifact.mvm>` are still follow-up work.
 `machine check-artifact` is the current read-only portable-artifact gate: it
 verifies the signed manifest, file hashes, format version, sealed-prod verity

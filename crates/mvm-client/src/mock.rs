@@ -6,7 +6,9 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 
 use crate::client::MvmClient;
-use crate::dto::{LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus};
+use crate::dto::{
+    LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus, ReconfigureRequest,
+};
 use crate::error::{MvmError, Result};
 
 #[derive(Default)]
@@ -116,6 +118,18 @@ impl MvmClient for MockBackend {
         } else {
             Err(MvmError::NotFound { id: id.0.clone() })
         }
+    }
+
+    async fn reconfigure_machine(
+        &self,
+        id: &MachineId,
+        _cfg: ReconfigureRequest,
+    ) -> Result<MachineState> {
+        let all = self.machines.lock().unwrap();
+        all.iter()
+            .find(|m| m.id == *id)
+            .cloned()
+            .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })
     }
 }
 
@@ -228,6 +242,37 @@ mod tests {
         assert_eq!(res.exit_code, 0);
         assert!(
             mock.exec_machine(&MachineId("nope".into()), vec![])
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn reconfigure_known_returns_state_unknown_is_not_found() {
+        let mock = MockBackend::default();
+        let started = mock
+            .run_machine(MachineSpec {
+                name: "web".into(),
+                image: "i".into(),
+                cpus: 1,
+                memory_mib: 64,
+                env: vec![],
+            })
+            .await
+            .unwrap();
+        let out = mock
+            .reconfigure_machine(
+                &started.id,
+                ReconfigureRequest {
+                    cpus: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.name, "web");
+        assert!(
+            mock.reconfigure_machine(&MachineId("nope".into()), ReconfigureRequest::default())
                 .await
                 .is_err()
         );

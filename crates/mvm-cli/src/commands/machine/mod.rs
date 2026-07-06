@@ -78,6 +78,9 @@ pub(in crate::commands) enum MachineAction {
     /// Stop a running VM by name, or all running VMs with --all
     #[command(display_order = 5)]
     Stop(MachineStopArgs),
+    /// Patch a persistent machine's config and relaunch it
+    #[command(display_order = 5)]
+    Reconfigure(MachineReconfigureArgs),
     /// Remove one or more persistent named machine specs (or --all)
     #[command(name = "rm", display_order = 6)]
     Rm(MachineRemoveArgs),
@@ -123,6 +126,7 @@ impl MachineAction {
             | MachineAction::Start(_)
             | MachineAction::Restart(_)
             | MachineAction::Stop(_)
+            | MachineAction::Reconfigure(_)
             | MachineAction::Rm(_)
             | MachineAction::Ls(_)
             | MachineAction::Inspect(_)
@@ -957,6 +961,40 @@ pub(in crate::commands) struct MachineStopArgs {
     /// Skip the interactive confirmation prompt.
     #[arg(long)]
     pub yes: bool,
+}
+
+/// Patch a persistent machine's config and relaunch it. Only the flags
+/// passed change; every other field is inherited (patch semantics).
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineReconfigureArgs {
+    /// Persistent machine name to reconfigure.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+    /// Enable dev-tier outbound networking (broad egress + DNS).
+    #[arg(long, conflicts_with = "no_net")]
+    pub net: bool,
+    /// Disable outbound networking (deny-all).
+    #[arg(long = "no-net", conflicts_with = "net")]
+    pub no_net: bool,
+    /// Replace the egress allowlist with these hosts: `HOST[:PORT]`
+    /// (repeatable). Omit to inherit the current allowlist.
+    #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
+    pub allow_host: Vec<String>,
+    /// Clear the egress allowlist (remove all entries).
+    #[arg(long = "clear-allow-host", conflicts_with = "allow_host")]
+    pub clear_allow_host: bool,
+    /// New vCPU count.
+    #[arg(long)]
+    pub cpus: Option<u32>,
+    /// New memory (human-readable: 512M, 1G, ...).
+    #[arg(long)]
+    pub memory: Option<String>,
+    /// New initial host memory commitment (human-readable).
+    #[arg(long = "mem-initial")]
+    pub mem_initial: Option<String>,
+    /// Workload VMM backend for the relaunch (defaults to the host's best).
+    #[arg(long, value_name = "HYPERVISOR")]
+    pub hypervisor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2872,6 +2910,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Exec(exec_args) => exec_machine(cli, exec_args, cfg),
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
+        MachineAction::Reconfigure(args) => run_reconfigure(args),
         MachineAction::Logs(log_args) => super::vm::logs::run(cli, log_args, cfg),
         MachineAction::Console(console_args) => super::vm::console::run(cli, console_args, cfg),
         MachineAction::CheckArtifact(a) => portable::run_check_artifact(a),
@@ -2879,6 +2918,123 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
             super::vm::group::run(cli, super::vm::group::Args { action: cmd }, cfg)
         }
     }
+}
+
+/// A resolved patch over the reconfigurable `MachineSpec` fields. `None`
+/// means "leave unchanged".
+struct ReconfigurePatch {
+    net: Option<bool>,
+    allow_host: Option<Vec<String>>,
+    cpus: Option<u32>,
+    memory: Option<String>,
+    mem_initial: Option<String>,
+}
+
+/// Resolve CLI flags into a patch, validating memory eagerly so a bad
+/// size fails before we overwrite anything or bounce the VM.
+fn patch_from_args(args: &MachineReconfigureArgs) -> Result<ReconfigurePatch> {
+    let net = if args.net {
+        Some(true)
+    } else if args.no_net {
+        Some(false)
+    } else {
+        None
+    };
+    let allow_host = if args.clear_allow_host {
+        Some(Vec::new())
+    } else if !args.allow_host.is_empty() {
+        Some(args.allow_host.clone())
+    } else {
+        None
+    };
+    // Validate memory (and mem_initial) against the same parser the run
+    // path uses; store the human string, not the parsed MiB.
+    if let Some(mem) = args.memory.as_deref() {
+        validate_machine_memory(mem, args.mem_initial.as_deref())?;
+    }
+    Ok(ReconfigurePatch {
+        net,
+        allow_host,
+        cpus: args.cpus,
+        memory: args.memory.clone(),
+        mem_initial: args.mem_initial.clone(),
+    })
+}
+
+/// Apply the patch: each `Some` overrides the corresponding field; the
+/// rest of `spec` is inherited unchanged.
+fn apply_patch(mut spec: MachineSpec, patch: &ReconfigurePatch) -> MachineSpec {
+    if let Some(v) = patch.net {
+        spec.net = v;
+    }
+    if let Some(v) = &patch.allow_host {
+        spec.allow_host = v.clone();
+    }
+    if let Some(v) = patch.cpus {
+        spec.cpus = v;
+    }
+    if let Some(v) = &patch.memory {
+        spec.memory = v.clone();
+    }
+    if let Some(v) = &patch.mem_initial {
+        spec.mem_initial = Some(v.clone());
+    }
+    spec
+}
+
+/// `machine reconfigure <name>`: patch the persisted spec and relaunch.
+/// Patch semantics (only passed flags change), errors if the machine
+/// doesn't exist, and — when running — stops + restarts so a fresh
+/// signed ExecutionPlan reflects the change. When stopped, it persists
+/// only; the change applies on the next `machine start`.
+fn run_reconfigure(args: MachineReconfigureArgs) -> Result<()> {
+    let existing = load_machine_spec(&args.name)?;
+    let patch = patch_from_args(&args)?;
+    let desired = apply_patch(existing.clone(), &patch);
+
+    // Re-validate the final memory pair: patch_from_args only validates when
+    // --memory is passed, so a bare --mem-initial could slip through unchecked.
+    validate_machine_memory(&desired.memory, desired.mem_initial.as_deref())
+        .context("invalid machine memory after reconfigure")?;
+
+    let changed = machine_config_diff(&existing, &desired);
+    if changed.is_empty() {
+        println!("machine {:?}: no changes", args.name);
+        return Ok(());
+    }
+
+    let was_running = machine_is_running(&args.name);
+    overwrite_machine_spec(&desired)?;
+    mvm_core::audit_emit!(
+        ConfigChange,
+        vm: &args.name,
+        "action=machine.reconfigure changed={changed}"
+    );
+
+    if was_running {
+        eprintln!(
+            "reconfiguring {:?} ({changed}): stopping the old instance and restarting",
+            args.name
+        );
+        stop_running_machine(&args.name);
+        start_machine(MachineStartArgs {
+            name: args.name.clone(),
+            receipt: None,
+            json: false,
+            dry_run: false,
+            quiet: false,
+            hypervisor: args.hypervisor.clone(),
+            no_supervisor: false,
+            kernel_pin: None,
+            has_ad_hoc_argv: false,
+        })?;
+    } else {
+        println!(
+            "machine {:?} reconfigured ({changed}); change applies on next `machine start`",
+            args.name
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2962,6 +3118,7 @@ mod tests {
             MachineAction::Start(_) => "start",
             MachineAction::Restart(_) => "restart",
             MachineAction::Stop(_) => "stop",
+            MachineAction::Reconfigure(_) => "reconfigure",
             MachineAction::Rm(_) => "rm",
             MachineAction::Ls(_) => "ls",
             MachineAction::Inspect(_) => "inspect",
@@ -5237,6 +5394,142 @@ ssh_agent = true
         assert!(
             r.is_ok(),
             "`machine snapshot ls` must parse even when hidden from help: {r:?}"
+        );
+    }
+
+    fn reconfigure_spec_fixture() -> MachineSpec {
+        MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".into(),
+            image: Some("img:1".into()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: vec![],
+            cpus: 2,
+            memory: "512M".into(),
+            mem_initial: None,
+            profile: "standard".into(),
+            volumes: vec!["/data:/data:ro".into()],
+            init: vec![],
+            ssh_agent: false,
+            agent_verb: vec![],
+            created_at: None,
+            last_started_at: None,
+        }
+    }
+
+    fn reconfigure_args_fixture(name: &str) -> MachineReconfigureArgs {
+        MachineReconfigureArgs {
+            name: name.into(),
+            net: false,
+            no_net: false,
+            allow_host: vec![],
+            clear_allow_host: false,
+            cpus: None,
+            memory: None,
+            mem_initial: None,
+            hypervisor: None,
+        }
+    }
+
+    #[test]
+    fn apply_patch_overrides_only_set_fields_and_preserves_rest() {
+        let mut args = reconfigure_args_fixture("web");
+        args.cpus = Some(8);
+        let patch = patch_from_args(&args).unwrap();
+        let out = apply_patch(reconfigure_spec_fixture(), &patch);
+        assert_eq!(out.cpus, 8);
+        // Everything else preserved.
+        assert_eq!(out.memory, "512M");
+        assert_eq!(out.volumes, vec!["/data:/data:ro".to_string()]);
+        assert!(!out.net);
+    }
+
+    #[test]
+    fn apply_patch_no_flags_is_noop() {
+        let patch = patch_from_args(&reconfigure_args_fixture("web")).unwrap();
+        assert_eq!(
+            apply_patch(reconfigure_spec_fixture(), &patch),
+            reconfigure_spec_fixture()
+        );
+    }
+
+    #[test]
+    fn patch_net_is_tri_state() {
+        let mut on = reconfigure_args_fixture("web");
+        on.net = true;
+        assert_eq!(patch_from_args(&on).unwrap().net, Some(true));
+        let mut off = reconfigure_args_fixture("web");
+        off.no_net = true;
+        assert_eq!(patch_from_args(&off).unwrap().net, Some(false));
+        assert_eq!(
+            patch_from_args(&reconfigure_args_fixture("web"))
+                .unwrap()
+                .net,
+            None
+        );
+    }
+
+    #[test]
+    fn patch_allow_host_replace_and_clear() {
+        let mut replace = reconfigure_args_fixture("web");
+        replace.allow_host = vec!["a:443".into()];
+        let out = apply_patch(
+            reconfigure_spec_fixture(),
+            &patch_from_args(&replace).unwrap(),
+        );
+        assert_eq!(out.allow_host, vec!["a:443".to_string()]);
+
+        let base = MachineSpec {
+            allow_host: vec!["old:443".into()],
+            ..reconfigure_spec_fixture()
+        };
+        let mut clear = reconfigure_args_fixture("web");
+        clear.clear_allow_host = true;
+        let out = apply_patch(base, &patch_from_args(&clear).unwrap());
+        assert!(out.allow_host.is_empty());
+    }
+
+    #[test]
+    fn patch_rejects_invalid_memory() {
+        let mut args = reconfigure_args_fixture("web");
+        args.memory = Some("notasize".into());
+        assert!(patch_from_args(&args).is_err());
+    }
+
+    #[test]
+    fn reconfigure_unknown_machine_errors_clearly() {
+        let _state = IsolatedMachineState::new();
+        let mut args = reconfigure_args_fixture("does-not-exist");
+        args.cpus = Some(4);
+        let err = run_reconfigure(args).unwrap_err();
+        assert!(
+            err.to_string().contains("does not exist"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reconfigure_mem_initial_inconsistency_rejected() {
+        // Validate that run_reconfigure rejects an inconsistent mem_initial
+        // even when only --mem-initial is passed (no --memory). This tests the
+        // post-apply re-validation added in Task 5 (Addition 2).
+        let _state = IsolatedMachineState::new();
+        // Persist a valid machine spec directly so the machine "exists".
+        let spec = reconfigure_spec_fixture();
+        save_machine_spec(&spec, false).expect("save fixture spec");
+        // Now try to reconfigure with a mem_initial that exceeds the existing
+        // memory (512M), which must be caught by the post-apply validator.
+        let mut args = reconfigure_args_fixture("web");
+        args.mem_initial = Some("1G".into()); // 1G > 512M → invalid
+        let err = run_reconfigure(args).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid machine memory after reconfigure")
+                || msg.contains("mem_initial")
+                || msg.contains("must be strictly less than"),
+            "unexpected error: {err}"
         );
     }
 }

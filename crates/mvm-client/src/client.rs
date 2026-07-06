@@ -4,7 +4,9 @@
 
 use async_trait::async_trait;
 
-use crate::dto::{ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState};
+use crate::dto::{
+    ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, ReconfigureRequest,
+};
 use crate::error::Result;
 
 #[async_trait]
@@ -38,6 +40,14 @@ pub trait MvmClient: Send + Sync {
     /// Run a non-interactive command in a machine and capture its result.
     /// (Interactive shells are not a facade operation — see [`ExecResult`].)
     async fn exec_machine(&self, id: &MachineId, command: Vec<String>) -> Result<ExecResult>;
+
+    /// Patch a machine's config and relaunch it. Patch semantics: only
+    /// the `Some` fields of `cfg` change; the rest are inherited.
+    async fn reconfigure_machine(
+        &self,
+        id: &MachineId,
+        cfg: ReconfigureRequest,
+    ) -> Result<MachineState>;
 }
 
 #[cfg(test)]
