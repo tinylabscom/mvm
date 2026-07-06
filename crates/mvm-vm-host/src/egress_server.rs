@@ -96,9 +96,7 @@ pub fn should_serve_vsock_egress(
     opt_in: bool,
     has_bound_secrets: bool,
 ) -> bool {
-    opt_in
-        && !has_bound_secrets
-        && host_listen_ports.contains(&mvm_guest::vsock::EGRESS_PORT)
+    opt_in && !has_bound_secrets && host_listen_ports.contains(&mvm_guest::vsock::EGRESS_PORT)
 }
 
 /// Accept egress connections on `listener` (the host-bound UDS libkrun forwards the

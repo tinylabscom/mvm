@@ -208,8 +208,7 @@ fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
                 .clone()
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_else(mvm_core::network_policy::NetworkPolicy::deny_all);
-            let gate =
-                mvm_hostd::supervisor::substitution_endpoint::build_egress_gate(&policy);
+            let gate = mvm_hostd::supervisor::substitution_endpoint::build_egress_gate(&policy);
             let egress_sock = cfg.krun.vsock_socket_path(mvm_guest::vsock::EGRESS_PORT);
             let _ = std::fs::remove_file(&egress_sock);
             match tokio::net::UnixListener::bind(&egress_sock) {
@@ -222,8 +221,7 @@ fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
                                 return;
                             }
                         };
-                        if let Err(e) =
-                            rt.block_on(mvm_vm_host::egress_server::run(listener, gate))
+                        if let Err(e) = rt.block_on(mvm_vm_host::egress_server::run(listener, gate))
                         {
                             eprintln!("mvm-libkrun-supervisor: egress server: {e}");
                         }
