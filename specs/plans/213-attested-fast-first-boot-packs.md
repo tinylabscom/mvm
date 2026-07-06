@@ -392,3 +392,14 @@ If the measured hvf cold-boot-with-warm-store is too slow to feel "warm," slice 
 adds a resident hvf warm-standby (an `HvfPersistentHostVm` lifecycle + warm
 claim, analogous to the libkrun resident builder), reusing the backend-agnostic
 `mvm_core::residency` policy layer. Otherwise slice 1 already delivered warm.
+
+### Deferred follow-ups (surfaced during Unit 1 review)
+
+- **Typed output hashes are attested, not cross-checked.** The verifier validates
+  that per-file hashes match content, but the typed `kernel_hash` / `rootfs_hash`
+  / `builder_image_hash` etc. are caller-asserted and never re-derived from the
+  named files by either the producer or `verify_pack_at`. A pack could therefore
+  carry a typed output hash that disagrees with the file it names and still
+  verify. Low risk for slice 1 (the file-level hash still pins every byte), but
+  the producer should eventually derive the typed hashes from the file set, or
+  the verifier should cross-check them. Tracked here, not fixed in slice 1.
