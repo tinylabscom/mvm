@@ -1,8 +1,8 @@
 //! Environment lifecycle commands — bootstrap, setup, dev, and friends.
 //!
 //! These commands provision, inspect, and tear down the host-side
-//! development environment (Vz dev VM, Firecracker binary, shell init,
-//! default network).
+//! development environment (in-house HVF / libkrun dev VM, Firecracker
+//! binary, shell init, default network).
 
 pub(super) mod artifact_verify;
 pub(super) mod bootstrap;
