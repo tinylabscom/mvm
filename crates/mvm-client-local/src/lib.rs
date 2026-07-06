@@ -372,6 +372,14 @@ impl MvmClient for LocalBackend {
             });
         }
 
+        // A microVM with 0 vCPUs is invalid; the CLI create path already
+        // rejects it — don't apply/persist/relaunch a 0-cpu spec here either.
+        if cfg.cpus == Some(0) {
+            return Err(MvmError::InvalidSpec {
+                reason: "cpus must be >= 1".into(),
+            });
+        }
+
         let existing = mp::load_machine_spec(&id.0).map_err(backend_err)?;
 
         let patch = mp::ReconfigurePatch {
@@ -388,10 +396,17 @@ impl MvmClient for LocalBackend {
 
         let changed = mp::machine_config_diff(&existing, &desired);
         if changed.is_empty() {
+            // Report the machine's actual status rather than assuming
+            // Stopped — a no-op reconfigure on a running machine should
+            // still say Running.
+            let status = match self.backend.status(&VmId(id.0.clone())) {
+                Ok(s) => map_status(&s),
+                Err(_) => MachineStatus::Stopped,
+            };
             return Ok(MachineState {
                 id: id.clone(),
                 name: existing.name,
-                status: MachineStatus::Stopped,
+                status,
             });
         }
 
@@ -731,6 +746,37 @@ mod tests {
         let loaded = mvm::machine::persist::load_machine_spec("myapp").expect("load patched spec");
         assert_eq!(loaded.cpus, 4, "persisted cpus should be 4");
         assert_eq!(loaded.memory, "512M", "memory should be unchanged");
+    }
+
+    #[tokio::test]
+    async fn reconfigure_rejects_zero_cpus() {
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test process.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
+        persist_test_spec("zero-cpu-machine");
+        let be = LocalBackend::with_hypervisor("mock");
+        let err = be
+            .reconfigure_machine(
+                &MachineId("zero-cpu-machine".into()),
+                mvm_client::dto::ReconfigureRequest {
+                    cpus: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("cpus"),
+            "must refuse cpus=0 with a message mentioning cpus; got: {msg}"
+        );
+
+        // The spec must not have been overwritten.
+        let loaded =
+            mvm::machine::persist::load_machine_spec("zero-cpu-machine").expect("load spec");
+        assert_eq!(loaded.cpus, 2, "cpus must remain unchanged after refusal");
     }
 
     #[tokio::test]
