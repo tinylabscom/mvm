@@ -288,78 +288,100 @@ git commit -m "feat(egress): run egress_server on EGRESS_PORT in libkrun supervi
 
 ---
 
-### Task 5: Inject `MVM_VSOCK_EGRESS=1` into the guest entrypoint env
+### Task 5: Turn on the in-guest egress client via a kernel cmdline token
 
-So the baked-but-inert `mvm-egress-client` actually starts (mkGuest Stage 2.6 keys on the guest env var `MVM_VSOCK_EGRESS`). Build the env list in a pure, tested helper, then apply it via `KrunContext::with_guest_envp`.
+**CORRECTED MECHANISM (2026-07-05).** A libkrun **workload** boots a full rootfs
+image with `init=/init` — it does *not* use `KrunContext::with_guest_envp`/`root_dir`
+(that is the libkrun *builder/command* path, and it appears nowhere in `libkrun.rs`).
+The workload guest env is carried on the **kernel cmdline**: `build_supervisor_config`
+(`libkrun.rs:286`) appends `mvm.uvols=…`, `mvm.egress_ca=…`, `mvm.secret_env=…`,
+`mvm.verb_grant=…` tokens, and mkGuest `/init` parses each with
+`sed -n 's/.*\bmvm\.KEY=…/\1/p' /proc/cmdline`. mkGuest Stage 2.6 (`mk-guest.nix:661`)
+keys on the env var `MVM_VSOCK_EGRESS`, but **nothing sets it** — a gap on both sides.
+This task mirrors the existing token pattern: host appends `mvm.vsock_egress=1`; `/init`
+parses it into `MVM_VSOCK_EGRESS`.
 
 **Files:**
-- Modify: `crates/mvm-backend/src/libkrun.rs` (the guest-entrypoint construction — `krun_context_base`, lines 147–195, where `with_guest_envp` is/should be called)
-- Test: `crates/mvm-backend/src/libkrun.rs` inline
+- Modify: `crates/mvm-backend/src/libkrun.rs` — add `vsock_egress_cmdline_token` helper + append it in `build_supervisor_config` after the verb-grant token (~line 297), mirroring `crate::microvm::verb_grant_cmdline_token`.
+- Modify: `nix/lib/mk-guest.nix` — add a `/proc/cmdline` parse setting `MVM_VSOCK_EGRESS` immediately before the Stage 2.6 `if [ -n "$MVM_VSOCK_EGRESS" ]` check (`mk-guest.nix:661`), mirroring the `mvm.secret_env` parser at `mk-guest.nix:551`.
+- Test: `crates/mvm-backend/src/libkrun.rs` inline (host helper).
 
 **Interfaces:**
-- Consumes: `mvm_build::libkrun_network_provider::vsock_egress_opt_in`, `mvm_backend::egress_shared::state_has_bound_secrets`
-- Produces: `fn workload_guest_envp(base: &[String], opt_in: bool, has_bound_secrets: bool) -> Vec<String>`
+- Consumes: `mvm_build::libkrun_network_provider::vsock_egress_opt_in`, `crate::egress_shared::state_has_bound_secrets` (both reachable — `mvm-backend` already enables `mvm-build`'s `builder-vm` feature, `Cargo.toml:58`).
+- Produces: `fn vsock_egress_cmdline_token(opt_in: bool, has_bound_secrets: bool) -> Option<String>` returning `Some("mvm.vsock_egress=1")` only when eligible.
 
 - [ ] **Step 1: Write the failing test**
 
 ```rust
 #[test]
-fn workload_guest_envp_adds_flag_only_when_eligible() {
-    let base = vec!["PATH=/usr/bin".to_string()];
-    // Eligible: opted in, no secrets → flag appended.
-    let got = workload_guest_envp(&base, true, false);
-    assert!(got.contains(&"MVM_VSOCK_EGRESS=1".to_string()));
-    assert!(got.contains(&"PATH=/usr/bin".to_string()));
-    // Not eligible → base returned unchanged (no flag).
-    assert_eq!(workload_guest_envp(&base, false, false), base);
-    assert_eq!(workload_guest_envp(&base, true, true), base);
+fn vsock_egress_cmdline_token_only_when_eligible() {
+    // Eligible: opted in, no secrets → token present.
+    assert_eq!(
+        vsock_egress_cmdline_token(true, false).as_deref(),
+        Some("mvm.vsock_egress=1")
+    );
+    // Any disqualifier → no token (legacy NIC path, byte-identical cmdline).
+    assert_eq!(vsock_egress_cmdline_token(false, false), None);
+    assert_eq!(vsock_egress_cmdline_token(true, true), None);
 }
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo nextest run -p mvm-backend workload_guest_envp_adds_flag_only_when_eligible`
-Expected: FAIL — `workload_guest_envp` not found.
+Run: `cargo nextest run -p mvm-backend vsock_egress_cmdline_token_only_when_eligible`
+Expected: FAIL — `vsock_egress_cmdline_token` not found.
 
-- [ ] **Step 3: Implement the helper** (add near `krun_context_base` in `libkrun.rs`)
+- [ ] **Step 3: Implement the helper** (add near `build_supervisor_config` in `libkrun.rs`)
 
 ```rust
-/// Append `MVM_VSOCK_EGRESS=1` to the guest entrypoint env when the host opted
-/// in AND the workload carries no bound secrets. That flag is what mkGuest's
-/// Stage 2.6 keys on to start the in-guest `mvm-egress-client` and point the
-/// workload's proxy env at the loopback SOCKS5 listener. Otherwise the base env
-/// is returned unchanged (legacy NIC path, no in-guest egress client).
-fn workload_guest_envp(base: &[String], opt_in: bool, has_bound_secrets: bool) -> Vec<String> {
-    let mut envp = base.to_vec();
-    if opt_in && !has_bound_secrets {
-        envp.push("MVM_VSOCK_EGRESS=1".to_string());
-    }
-    envp
+/// Kernel cmdline token that turns on the in-guest vsock egress client. Emitted
+/// only when the host opted in AND the workload carries no bound secrets (Phase A
+/// scope — a secrets workload still uses the substitution endpoint on the NIC).
+/// mkGuest's `/init` parses `mvm.vsock_egress=1` and exports `MVM_VSOCK_EGRESS`,
+/// which starts `mvm-egress-client` and points the workload's proxy env at it.
+fn vsock_egress_cmdline_token(opt_in: bool, has_bound_secrets: bool) -> Option<String> {
+    (opt_in && !has_bound_secrets).then(|| "mvm.vsock_egress=1".to_string())
 }
 ```
 
-- [ ] **Step 4: Apply it at the guest-entrypoint construction site**
+- [ ] **Step 4: Append the token in `build_supervisor_config`**
 
-In `krun_context_base` (or wherever the workload's `with_guest_envp(...)` is called — confirm via the Step-1 read of Task 4's file is different; here read `libkrun.rs:147–195`), route the env list through the helper. Concretely, where the guest envp is built for a **workload** (root_dir set), replace the direct `.with_guest_envp(base_env)` with:
+Immediately after the `require_grant_cmdline_token` block (`libkrun.rs:295–298`), add:
 
 ```rust
-let opt_in = mvm_build::libkrun_network_provider::vsock_egress_opt_in();
-let has_secrets = crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false);
-krun.with_guest_envp(workload_guest_envp(&base_env, opt_in, has_secrets))
+if let Some(token) = vsock_egress_cmdline_token(
+    mvm_build::libkrun_network_provider::vsock_egress_opt_in(),
+    crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false),
+) {
+    cmdline.push(' ');
+    cmdline.push_str(&token);
+}
 ```
 
-(If `krun_context_base` does not currently set `with_guest_envp`, add the call on the workload branch only — it is a no-op unless `root_dir` is set, per the libkrun-sys doc at `lib.rs:503`.)
+- [ ] **Step 5: Parse the token in mkGuest `/init`**
 
-- [ ] **Step 5: Run tests + build**
-
-Run: `cargo nextest run -p mvm-backend workload_guest_envp_adds_flag_only_when_eligible && cargo build -p mvm-backend`
-Expected: PASS + clean build.
-
-- [ ] **Step 6: Commit**
+In `nix/lib/mk-guest.nix`, immediately before the Stage 2.6 line `if [ -n "$MVM_VSOCK_EGRESS" ] && [ -x /usr/local/bin/mvm-egress-client ]; then` (`mk-guest.nix:661`), insert (mirroring the `mvm.secret_env` parser style, and note the double-single-quote `''` escaping that this nix heredoc uses for shell `$`):
 
 ```bash
-git add crates/mvm-backend/src/libkrun.rs
-git commit -m "feat(egress): inject MVM_VSOCK_EGRESS=1 into eligible workload guest env (Phase A)"
+    # Stage 2.55 — decode the vsock-egress opt-in. The libkrun/vsock-gateway
+    # workload path sets `mvm.vsock_egress=1` on the kernel cmdline; export the
+    # env var Stage 2.6 keys on. Mirrors the mvm.secret_env / mvm.verb_grant
+    # cmdline parsers above. Absent token ⇒ no-op (NIC guests boot unchanged).
+    if /bin/busybox grep -q ' mvm\.vsock_egress=1\( \|$\)' /proc/cmdline 2>/dev/null; then
+      export MVM_VSOCK_EGRESS=1
+    fi
+```
+
+- [ ] **Step 6: Run tests + build**
+
+Run: `cargo nextest run -p mvm-backend vsock_egress_cmdline_token_only_when_eligible && cargo build -p mvm-backend`
+Expected: PASS + clean build. (The nix `/init` change has no Rust test; it is exercised by the Task 6 live boot.)
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/mvm-backend/src/libkrun.rs nix/lib/mk-guest.nix
+git commit -m "feat(egress): mvm.vsock_egress cmdline token turns on in-guest egress client (Phase A)"
 ```
 
 ---
