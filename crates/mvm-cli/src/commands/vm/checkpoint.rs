@@ -893,6 +893,18 @@ struct ForkVmFullArmParams<'a> {
 /// fresh claim-8 plan for the child (using the parent's saved cpu/mem — the
 /// restore shape is fixed), rewrite the supervisor config, and boot the child
 /// in restore mode. The child's admitted plan is distinct from the parent's.
+/// Whether the experimental Firecracker vm_full fork restore is opted into.
+///
+/// Off by default: a forked child restores the parent's saved guest memory,
+/// which carries the parent's IP/MAC, and there is no per-child guest
+/// re-addressing yet — so a booted child collides with its parent on the
+/// shared bridge. The opt-in exercises the (proven-sound) restore mechanism
+/// on an isolated single-child network while that per-child network model is
+/// still being settled.
+fn fc_vm_full_fork_experimental_enabled() -> bool {
+    std::env::var_os("MVM_FORK_VMFULL_FC_EXPERIMENTAL").is_some()
+}
+
 fn fork_vm_full_arm(
     store: &CheckpointStore,
     checkpoint: &CheckpointId,
@@ -942,6 +954,24 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
     // (FC checkpoints have {rootfs.ext4, memory.bin, vmstate.bin}; Vz checkpoints
     // additionally carry supervisor-config.json).
     if !checkpoint_is_vz(&parent_meta) {
+        // A forked child restores the parent's saved guest memory verbatim,
+        // which carries the parent's IP/MAC. VMGenID reseeds the guest RNG on
+        // restore but does not re-address the network, so a booted child would
+        // collide with its parent on the shared 172.16.0.x bridge. The host-tap
+        // side is remappable, but re-IP'ing the guest is a per-child network-model
+        // decision that is not yet settled — refuse cleanly rather than boot a
+        // colliding child. The restore mechanism stays reachable behind an
+        // explicit opt-in for isolated single-child testing on that model.
+        if !fc_vm_full_fork_experimental_enabled() {
+            anyhow::bail!(
+                "forking a vm_full checkpoint on Firecracker is not yet supported: the \
+                 forked child inherits the parent's guest IP/MAC from the saved memory \
+                 image and has no per-child network reconfiguration, so it would collide \
+                 with the parent on the shared bridge. Use an fs_quick fork, or set \
+                 MVM_FORK_VMFULL_FC_EXPERIMENTAL=1 to exercise the restore on an isolated \
+                 single-child network."
+            );
+        }
         return fork_vm_full_arm_fc(ForkVmFullArmFcParams {
             store: p.store,
             checkpoint: p.checkpoint,
@@ -1527,6 +1557,25 @@ mod tests {
         assert!(validated_checkpoint_id("").is_err());
         assert!(validated_checkpoint_id("a\0b").is_err());
         assert!(validated_checkpoint_id("a\nb").is_err());
+    }
+
+    // ── FC vm_full fork gate ─────────────────────────────────────────────
+
+    /// The FC vm_full fork is refused by default (guest re-IP unsettled) and
+    /// only reachable behind the explicit experimental opt-in.
+    #[test]
+    fn fc_vm_full_fork_gated_off_without_optin() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove("MVM_FORK_VMFULL_FC_EXPERIMENTAL");
+        assert!(
+            !fc_vm_full_fork_experimental_enabled(),
+            "FC vm_full fork must be gated off unless explicitly opted in"
+        );
+        env.set("MVM_FORK_VMFULL_FC_EXPERIMENTAL", "1");
+        assert!(
+            fc_vm_full_fork_experimental_enabled(),
+            "opt-in must enable the experimental FC vm_full fork restore"
+        );
     }
 
     // ── vm_is_quiesced / vz_pause_marker_matches_live_pid ────────────────
