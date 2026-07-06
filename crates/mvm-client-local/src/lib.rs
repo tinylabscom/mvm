@@ -355,18 +355,89 @@ impl MvmClient for LocalBackend {
 
     async fn reconfigure_machine(
         &self,
-        _id: &MachineId,
-        _cfg: mvm_client::dto::ReconfigureRequest,
+        id: &MachineId,
+        cfg: mvm_client::dto::ReconfigureRequest,
     ) -> Result<MachineState> {
-        // The in-process local backend has no persistent-machine layer to
-        // patch (its run_machine is a transient image-boot). Reconfigure is
-        // the CLI verb's or the gateway backend's job until Phase 2 lifts the
-        // persistent-machine engine into a shared crate.
-        Err(MvmError::Backend {
-            reason: "reconfigure is not supported on the in-process local backend \
-                     (no persistent-machine layer); use `mvmctl machine reconfigure` \
-                     or the gateway backend"
-                .into(),
+        use mvm::machine::persist as mp;
+
+        // Claim-10: this backend's in-process boot does not enforce network
+        // policy, so a net/allow_host change would persist-but-not-enforce.
+        // Refuse rather than silently fail open.
+        if cfg.net.is_some() || cfg.allow_host.is_some() {
+            return Err(MvmError::InvalidSpec {
+                reason: "changing network policy (net/allow_host) via reconfigure is not \
+                         supported on the in-process local backend (its boot path does not \
+                         enforce egress policy); use the CLI verb or the gateway backend"
+                    .into(),
+            });
+        }
+
+        // A microVM with 0 vCPUs is invalid; the CLI create path already
+        // rejects it — don't apply/persist/relaunch a 0-cpu spec here either.
+        if cfg.cpus == Some(0) {
+            return Err(MvmError::InvalidSpec {
+                reason: "cpus must be >= 1".into(),
+            });
+        }
+
+        let existing = mp::load_machine_spec(&id.0).map_err(backend_err)?;
+
+        let patch = mp::ReconfigurePatch {
+            net: None,
+            allow_host: None,
+            cpus: cfg.cpus,
+            memory: cfg.memory_mib.map(|m| format!("{m}M")),
+            mem_initial: None,
+        };
+        let desired = mp::apply_patch(existing.clone(), &patch);
+
+        mp::validate_machine_memory(&desired.memory, desired.mem_initial.as_deref())
+            .map_err(backend_err)?;
+
+        let changed = mp::machine_config_diff(&existing, &desired);
+        if changed.is_empty() {
+            // Report the machine's actual status rather than assuming
+            // Stopped — a no-op reconfigure on a running machine should
+            // still say Running.
+            let status = match self.backend.status(&VmId(id.0.clone())) {
+                Ok(s) => map_status(&s),
+                Err(_) => MachineStatus::Stopped,
+            };
+            return Ok(MachineState {
+                id: id.clone(),
+                name: existing.name,
+                status,
+            });
+        }
+
+        mp::overwrite_machine_spec(&desired).map_err(backend_err)?;
+
+        // Relaunch if running: stop then in-process admitted boot with the new resources.
+        let vid = VmId(id.0.clone());
+        let was_running = matches!(self.backend.status(&vid), Ok(VmStatus::Running));
+        if was_running {
+            self.backend.stop(&vid).map_err(backend_err)?;
+            // LocalBackend's run path requires an image reference.
+            let image = desired.image.clone().ok_or_else(|| MvmError::InvalidSpec {
+                reason: "the local backend cannot relaunch a manifest-backed machine \
+                         (no image reference); use the CLI verb"
+                    .into(),
+            })?;
+            let spec = MachineSpec {
+                name: desired.name.clone(),
+                image,
+                cpus: desired.cpus,
+                memory_mib: mvm_core::util::parse_human_size(&desired.memory)
+                    .map_err(backend_err)?,
+                env: vec![],
+            };
+            return self.run_machine(spec).await;
+        }
+
+        Ok(MachineState {
+            id: id.clone(),
+            name: desired.name,
+            status: MachineStatus::Stopped,
         })
     }
 }
@@ -537,5 +608,194 @@ mod tests {
         // A malformed (non-hex / wrong-length) roothash is rejected.
         std::fs::write(dir.path().join("rootfs.roothash"), "nothex\n").unwrap();
         assert_eq!(host_verity_sidecars(&rootfs), (None, None));
+    }
+
+    // ---------------------------------------------------------------------------
+    // reconfigure_machine tests
+    // ---------------------------------------------------------------------------
+
+    /// Persist a minimal image-backed spec named `name` into the current
+    /// `MVM_DATA_DIR`-derived machine state dir.
+    fn persist_test_spec(name: &str) {
+        use mvm::machine::persist::{
+            MACHINE_SPEC_SCHEMA_VERSION, MachineSpec as PersistSpec, save_machine_spec,
+        };
+        let spec = PersistSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: name.to_string(),
+            image: Some("alpine:latest".to_string()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: vec![],
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "standard".to_string(),
+            volumes: vec![],
+            init: vec![],
+            ssh_agent: false,
+            agent_verb: vec![],
+            created_at: None,
+            last_started_at: None,
+        };
+        save_machine_spec(&spec, false).expect("persist_test_spec: save failed");
+    }
+
+    #[tokio::test]
+    async fn reconfigure_refuses_network_changes_on_local_backend() {
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test process (nextest runs each test in its own process).
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
+        persist_test_spec("web");
+        let be = LocalBackend::with_hypervisor("mock");
+        let err = be
+            .reconfigure_machine(
+                &MachineId("web".into()),
+                mvm_client::dto::ReconfigureRequest {
+                    net: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("network"),
+            "must refuse net on local backend; got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconfigure_refuses_allow_host_changes_on_local_backend() {
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test process.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
+        persist_test_spec("web2");
+        let be = LocalBackend::with_hypervisor("mock");
+        let err = be
+            .reconfigure_machine(
+                &MachineId("web2".into()),
+                mvm_client::dto::ReconfigureRequest {
+                    allow_host: Some(vec!["api.example.com:443".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("network"),
+            "must refuse allow_host on local backend; got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconfigure_unknown_machine_is_error() {
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test process.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
+        let be = LocalBackend::with_hypervisor("mock");
+        let err = be
+            .reconfigure_machine(
+                &MachineId("nope".into()),
+                mvm_client::dto::ReconfigureRequest {
+                    cpus: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        let msg = format!("{err}").to_lowercase();
+        assert!(
+            msg.contains("does not exist") || msg.contains("not found"),
+            "expected 'does not exist' or 'not found'; got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconfigure_stopped_machine_updates_spec_and_returns_stopped() {
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test process.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
+        persist_test_spec("myapp");
+        let be = LocalBackend::with_hypervisor("mock");
+        // Machine is not running in the mock backend — just patching the spec.
+        let state = be
+            .reconfigure_machine(
+                &MachineId("myapp".into()),
+                mvm_client::dto::ReconfigureRequest {
+                    cpus: Some(4),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("reconfigure stopped machine");
+        assert_eq!(state.name, "myapp");
+        assert_eq!(state.status, MachineStatus::Stopped);
+
+        // The spec was actually persisted: load it back and confirm cpus updated.
+        let loaded = mvm::machine::persist::load_machine_spec("myapp").expect("load patched spec");
+        assert_eq!(loaded.cpus, 4, "persisted cpus should be 4");
+        assert_eq!(loaded.memory, "512M", "memory should be unchanged");
+    }
+
+    #[tokio::test]
+    async fn reconfigure_rejects_zero_cpus() {
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test process.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
+        persist_test_spec("zero-cpu-machine");
+        let be = LocalBackend::with_hypervisor("mock");
+        let err = be
+            .reconfigure_machine(
+                &MachineId("zero-cpu-machine".into()),
+                mvm_client::dto::ReconfigureRequest {
+                    cpus: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("cpus"),
+            "must refuse cpus=0 with a message mentioning cpus; got: {msg}"
+        );
+
+        // The spec must not have been overwritten.
+        let loaded =
+            mvm::machine::persist::load_machine_spec("zero-cpu-machine").expect("load spec");
+        assert_eq!(loaded.cpus, 2, "cpus must remain unchanged after refusal");
+    }
+
+    #[tokio::test]
+    async fn reconfigure_noop_returns_stopped_without_overwriting_spec() {
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test process.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
+        persist_test_spec("noop-machine");
+        let be = LocalBackend::with_hypervisor("mock");
+        // No fields changed → should short-circuit, not error.
+        let state = be
+            .reconfigure_machine(
+                &MachineId("noop-machine".into()),
+                mvm_client::dto::ReconfigureRequest::default(),
+            )
+            .await
+            .expect("noop reconfigure should succeed");
+        assert_eq!(state.status, MachineStatus::Stopped);
     }
 }

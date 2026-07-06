@@ -8,6 +8,11 @@
 //!
 //! Boot / exec / shell wiring lands on top of this seam in later work; this
 //! module is the construction + capability-gate backbone.
+//!
+//! The on-disk persistent spec and its accessors live in [`persist`], distinct
+//! from the in-memory builder [`MachineSpec`] here.
+
+pub mod persist;
 
 use mvm_backend::AnyBackend;
 use mvm_backend::selection::SelectionError;
