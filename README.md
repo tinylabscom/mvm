@@ -53,30 +53,75 @@ host and prints exact install hints for anything missing.
 
 ## Quick start
 
+### Transient machines
+
+A transient machine boots, runs one command, and is torn down on exit — nothing
+is registered, nothing persists. This is the default shape of `machine run`
+(no `--name`):
+
 ```bash
-# One-shot: boot an OCI image, run a command, tear the VM down.
+# Boot an OCI image, run a command, tear the VM down.
 # Networking is OFF by default (default-deny egress).
 mvmctl machine run --image alpine -- sh -c "echo hello from a microVM && uname -a"
 
-# Interactive dev shell
+# Multiple args after `--` are the argv; the VM lives only for this command.
+mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
+
+# Interactive dev shell (dev-tier images) — still transient
 mvmctl machine run --image alpine -it -- /bin/sh
 
-# Admit specific egress only (audited; TCP/22 is always refused)
-mvmctl machine run --image alpine --allow-host api.example.com:443 -- ./fetch
+# Give it resources; admit specific egress only (audited; TCP/22 always refused)
+mvmctl machine run --image alpine --cpus 2 --memory 512M \
+  --allow-host api.example.com:443 -- ./fetch
 
-# Persistent named machines
+# Build a Nix flake and run it transiently in one step
+mvmctl machine run --flake . -- ./app
+```
+
+### Persistent machines
+
+A persistent machine has a name and an on-disk spec: create once, start/stop/exec
+against it, reconfigure it, remove it when done.
+
+```bash
 mvmctl machine create web --image nginx --cpus 2 --memory 512M
 mvmctl machine start web
 mvmctl machine exec  web -- nginx -v
 mvmctl machine logs  web
+mvmctl machine reconfigure web --memory 1G     # patch + relaunch
 mvmctl machine stop  web && mvmctl machine rm web
-mvmctl machine ls                       # list (alias: ps)
 
-# The dev environment is the builder VM (not a workload VM)
+mvmctl machine ls                              # list (alias: ps)
+mvmctl machine inspect web
+```
+
+### Dev environment
+
+The dev environment is the **builder VM**, not a workload VM:
+
+```bash
 mvmctl dev            # boot + drop into a dev shell
 mvmctl dev status
 mvmctl dev down
 ```
+
+### Examples
+
+Working example workloads live in [`examples/`](examples/) — build any of them
+with `mvmctl machine run --flake examples/<name>` (Nix) or `mvmctl compile`
+(SDK):
+
+| Example | Kind | What it shows |
+|---|---|---|
+| [`examples/python/hello-app`](examples/python/hello-app) | Python decorator | Minimal `@mvm.app` function-entrypoint workload |
+| [`examples/python/hello-app-with-deps`](examples/python/hello-app-with-deps) | Python decorator | `@mvm.app` with a locked `python_deps` (uv) dependency → sealed deps volume |
+| [`examples/python/secret-egress`](examples/python/secret-egress) | Python decorator | Secret substitution over egress — the workload sees a placeholder, never the raw secret |
+| [`examples/typescript/hello-app`](examples/typescript/hello-app) | TS decorator | Minimal `mvm.app({...})(fn)` workload |
+| [`examples/typescript/hello-app-with-deps`](examples/typescript/hello-app-with-deps) | TS decorator | `mvm.app` with locked `node_deps` |
+| [`examples/exit_code`](examples/exit_code) | Nix flake | One-shot sealed workload (exits a chosen code) |
+| [`examples/sleeper`](examples/sleeper) | Nix flake | Long-lived sealed workload fixture |
+| [`examples/egress-probe`](examples/egress-probe) | Nix flake | One-shot workload that TCP-probes targets and exits a verdict — exercises egress policy |
+| [`examples/audit-probe`](examples/audit-probe) | Nix flake | In-guest `host.audit.v1` round-trip fixture |
 
 ---
 
