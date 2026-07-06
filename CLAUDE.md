@@ -11,7 +11,7 @@ macOS Host (this CLI) -> libkrun Linux VM -> Firecracker microVM (/dev/kvm)
 Linux Host (this CLI) -> Firecracker microVM (/dev/kvm)
 ```
 
-Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Plan 72 W0–W6 + Plan 75 W0). libkrun is the default macOS backend; Vz (Apple Virtualization.framework) is the macOS 26+ Apple Silicon backend; Firecracker is the Linux KVM path. There is no `--lima` flag and no Lima fallback. Plan 177 Phase 2 folded the former in-process `apple_container` backend into the supervisor-model `vz` backend — there is one AVF code path now, and `--hypervisor apple-container` is gone (use `vz`).
+Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Plan 72 W0–W6 + Plan 75 W0). libkrun is the default macOS backend on macOS 13–25; the in-house HVF VMM is the macOS 26+ Apple Silicon default; Firecracker is the Linux KVM path. There is no `--lima` flag and no Lima fallback. **Vz (Apple Virtualization.framework) is no longer a selectable workload, dev, or builder backend as of Plan 226 R1P1** — `--hypervisor vz` / `--builder vz` are gone. Vz code is retained only as the macOS-26 persistent *builder* ShellEnvironment substrate (`create_linux_env`→`VzDevEnv`) pending Plan 226-R1P1b, which flips it onto the retained libkrun persistent builder and then deletes it. (`--hypervisor apple-container` was already removed by Plan 177 Phase 2, which folded that former in-process backend into the one AVF code path.)
 
 ## Host dependencies (macOS)
 
@@ -52,19 +52,19 @@ The builder VM (the Linux guest that runs `nix build` inside `mvmctl build image
 
 - **inhouse** — in-house HVF builder (Hypervisor.framework, no Homebrew deps). Default on macOS 26+ Apple Silicon. macOS-only.
 - **libkrun** — third-party in-process VMM via the `slp/krun/*` Homebrew trio. Default on Linux and macOS 13-25. Works everywhere mvm runs.
-- **Vz** — Apple Virtualization.framework. Deprecated; opt-in only via `--builder vz`. macOS-only.
+- **Vz** — Apple Virtualization.framework. **Removed as a selectable builder in Plan 226 R1P1** (`--builder vz` / `MVM_BUILDER_BACKEND=vz` are gone). The persistent Vz builder VM remains the macOS-26 build ShellEnvironment substrate internally (`create_linux_env`→`VzDevEnv`) pending Plan 226-R1P1b. macOS-only.
 
 Selection priority (highest first):
 
-1. `--builder <libkrun|vz|qemu|inhouse>` global CLI flag.
-2. `MVM_BUILDER_BACKEND=libkrun|vz|qemu|inhouse` env var (case-insensitive, whitespace-trimmed; unrecognised values log a warning and fall through to auto-detect).
+1. `--builder <libkrun|qemu|inhouse>` global CLI flag.
+2. `MVM_BUILDER_BACKEND=libkrun|qemu|inhouse` env var (case-insensitive, whitespace-trimmed; unrecognised values — including the retired `vz` — log a warning and fall through to auto-detect).
 3. Auto-detect: macOS 26+ Apple Silicon → inhouse; everywhere else → libkrun.
 
 `mvmctl doctor` reports the resolved choice on the `builder backend` line with format `<backend> — <source> — <availability>` so the override path is observable.
 
 **Auto-fallback (ADR-093).** When the *auto-detected* builder fails to **create its VM** — a VMM-level failure distinct from a `nix build` error — mvm transparently retries the next backend: inhouse → libkrun on macOS 26+, libkrun → the QEMU/microvm_nix builder (Plan 166) on Linux. One policy (`builder_attempt_order` + `run_with_builder_fallback`) drives every builder entry point. A genuine build error surfaces unchanged with no retry, and an explicit `--builder` / `MVM_BUILDER_BACKEND` disables the fallback. The Linux auto-detect default is unchanged (libkrun-first).
 
-Vz is opt-in only via the flag/env override — auto-detect will not pick it. The backends produce byte-identical `BuilderArtifacts` (kernel + rootfs from the same `nix/images/builder-vm/` flake), so switching backends mid-development is supported.
+Vz is no longer a selectable builder (Plan 226 R1P1); it remains the macOS-26 build ShellEnvironment substrate internally pending Plan 226-R1P1b. The backends produce byte-identical `BuilderArtifacts` (kernel + rootfs from the same `nix/images/builder-vm/` flake), so switching backends mid-development is supported.
 
 Persistent builder state dirs live under `~/.cache/mvm/builder-vm/vms/`, distinguished by name prefix (`mvm-persistent-builder-vm-*` for libkrun, `mvm-persistent-builder-vz-*` for Vz, `mvm-persistent-builder-inhouse-*` for in-house). The Stage 0 reaper (Plan 99 PR-1) is prefix-agnostic so all backends participate in `mvmctl cache prune` without code changes.
 

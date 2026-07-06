@@ -1,6 +1,6 @@
 # ADR-098 — Raw hypervisor as the macOS performance backend
 
-**Status:** Proposed
+**Status:** Accepted (2026-07-06, workload-scoped — see "Ratification (Plan 226 R1P1)" below)
 **Date:** 2026-06-27
 **Relates to:** [ADR-002](002-microvm-security-posture.md),
 [ADR-073](073-warm-snapshot-prior-art-adoption-boundary.md),
@@ -89,6 +89,27 @@ Silicon tier:
 
 Until all four hold, Vz stays as the transitional fallback. After they hold, the Vz
 backend, its supervisor, and its selection branch are deleted.
+
+### Ratification (Plan 226 R1P1)
+
+Accepted 2026-07-06, **workload-scoped**. Plan 226 R1P1 makes the in-house HVF VMM
+the default and sole *selectable* macOS backend for workloads, dev, and one-shot
+builds, and removes Vz from all three selection paths (`AnyBackend::Vz`,
+`DevBackend::Vz`, `BuilderBackendChoice::Vz`). Representative-workload HVF boot is
+proven (memory: HVF boots real mkGuest workloads live). Two criteria remain open,
+so this ratification is **partial, not the full sunset**:
+
+- **warm-restore / save-restore** (criterion 1) is not yet on HVF — `machine
+  checkpoint/fork` full-VM mode is temporarily unsupported, tracked in Plan 226 WS-E.
+- **build substrate** — `create_linux_env()` still returns `VzDevEnv` on the
+  macOS-26 tier, so the *persistent Vz builder VM* remains the live build
+  ShellEnvironment substrate. The Vz backend, its supervisor, `vz_builder.rs`, and
+  their objc2 deps are therefore **retained** until Plan 226-R1P1b flips
+  `create_linux_env` onto the retained libkrun persistent builder (validated with a
+  real build) and then deletes them.
+
+So the "Vz is deleted" step in this ADR's staged plan is executed in two stages:
+selection removal (R1P1, done) → substrate flip + file deletion (R1P1b).
 
 ### What this ADR explicitly states
 
