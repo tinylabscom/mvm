@@ -22,7 +22,7 @@ name = "mvm-egress-proxy"
 path = "src/bin/mvm-egress-proxy.rs"
 
 # Self-hosting builder-rootfs bootstrap patcher: PID 1 from an initramfs on the
-# in-house VMM. Mounts the target rootfs read-write and injects the freshly built
+# hvf VMM. Mounts the target rootfs read-write and injects the freshly built
 # mvm host binaries per /payload/manifest, then powers off. Cross-compiled to
 # static aarch64-musl; never installed in a VM rootfs (initramfs-only, absent
 # from the host-binaries sync gate).

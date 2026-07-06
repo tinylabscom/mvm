@@ -1,4 +1,4 @@
-# Vz deprecation — flip the macOS-26 default to the in-house VMM and delete Vz
+# Vz deprecation — flip the macOS-26 default to the hvf VMM and delete Vz
 
 Date: 2026-07-02
 Umbrella: Plan 214 (clean-replacement architecture). This is the "flip default
@@ -11,25 +11,25 @@ On macOS 26 Apple Silicon a bare `mvmctl machine run` still lands on the Vz
 backend. `AnyBackend::auto_select` (`crates/mvm-backend/src/backend.rs:566`,
 `is_vz_default_tier`) hard-returns `Self::Vz(VzBackend)`, and the builder VMM
 auto-detect (`crates/mvm-build/src/builder_backend_select.rs:91`,
-`auto_detect_default_for`) returns `Vz` on the same tier. The in-house VMM
+`auto_detect_default_for`) returns `Vz` on the same tier. The hvf VMM
 (driven through `WorkloadRunner` over the `VmmDriver` seam, and
 `InHouseBuilderVm` for the builder) is reachable only via explicit
-`--hypervisor inhouse` / `MVM_BUILDER_BACKEND`. The additive comment in
+`--hypervisor hvf` / `MVM_BUILDER_BACKEND`. The additive comment in
 `backend.rs` states the intent outright: "Vz remains the macOS-26 default until
 HVF reaches workload parity."
 
-Vz is the transitional macOS backend; the in-house Hypervisor.framework VMM is
+Vz is the transitional macOS backend; the hvf Hypervisor.framework VMM is
 the destination (ADR-098, ADR-100). We are removing Vz entirely: the backend,
 its supervisor (Rust + Swift), its transport, its selection tiers, and every
 Vz case.
 
-## Non-negotiable gate (Step 0): the in-house path must be a proven replacement
+## Non-negotiable gate (Step 0): the hvf path must be a proven replacement
 
 The flip and the deletions are cheap and low-risk. The only real risk is
-whether the in-house VMM is a *proven* replacement. Nothing flips until, on a
+whether the hvf VMM is a *proven* replacement. Nothing flips until, on a
 macOS-26 Apple Silicon host:
 
-1. **Workload reachability** — `machine run --name X --hypervisor inhouse -d`
+1. **Workload reachability** — `machine run --name X --hypervisor hvf -d`
    boots a real OCI/mkGuest workload (e.g. alpine) to a **reachable agent**:
    `vm wait` / doctor reports `ready`, and an `invoke` / agent-ping round-trip
    succeeds.
@@ -39,27 +39,27 @@ macOS-26 Apple Silicon host:
    --stdin`. `--stdin` is entrypoint-only (`requires = "entrypoint"`), and
    `--entrypoint` is unavailable for OCI `--image` (an OCI image runs its baked
    CMD via inline argv with no host→guest stdin wiring). The proof: a flake
-   entrypoint that reads stdin and echoes it, run under `--hypervisor inhouse`,
-   returns the payload — establishing inbound delivery over the in-house
+   entrypoint that reads stdin and echoes it, run under `--hypervisor hvf`,
+   returns the payload — establishing inbound delivery over the hvf
    `agent.sock`.
-3. **Builder reachability** — the in-house builder (`InHouseBuilderVm`) boots
+3. **Builder reachability** — the hvf builder (`InHouseBuilderVm`) boots
    and runs a `nix build` (Stage 0 → workload kernel) to a usable artifact.
 
 ### Step-0 results (2026-07-02, macOS 26 Apple Silicon)
 
 - **Reachability + channel-1 outbound: PROVEN.** `machine run --image alpine
-  --hypervisor inhouse --json -- /bin/echo step0-inhouse-ok` returned
+  --hypervisor hvf --json -- /bin/echo step0-hvf-ok` returned
   `exit_code: 0, success: true, stdout_bytes: 17`, and the reported
-  `stdout_sha256` matched `sha256("step0-inhouse-ok\n")` exactly. The run
+  `stdout_sha256` matched `sha256("step0-hvf-ok\n")` exactly. The run
   reported `network_posture: deny-all, egress_enforcement: flow-drop`, so
-  claim-10 is enforced on the in-house path. This is the load-bearing fact:
-  the in-house VMM boots a real OCI workload to a reachable agent that runs a
+  claim-10 is enforced on the hvf path. This is the load-bearing fact:
+  the hvf VMM boots a real OCI workload to a reachable agent that runs a
   command and returns stdout/exit. **The plan's "flip + delete" shape is
   therefore valid** (the alternative "finish boot first" shape is ruled out).
-- **Channel-1 inbound: PROVEN (2026-07-02, worktree bins).** `echo STDIN-RT-42 | machine run --image alpine --hypervisor inhouse --json -- /bin/cat` returned stdout 11 bytes, sha256 81fce04b... == sha256("STDIN-RT-42"), via Plan 220 (drop --stdin, auto-detect non-TTY stdin). Prior note retained for history:
+- **Channel-1 inbound: PROVEN (2026-07-02, worktree bins).** `echo STDIN-RT-42 | machine run --image alpine --hypervisor hvf --json -- /bin/cat` returned stdout 11 bytes, sha256 81fce04b... == sha256("STDIN-RT-42"), via Plan 220 (drop --stdin, auto-detect non-TTY stdin). Prior note retained for history:
 - **(historical) Channel-1 inbound was NOT YET PROVEN via the invalid --image --stdin combo.** The first attempt used the
   invalid `--image … --stdin` combination and (as expected) delivered no stdin;
-  this is CLI behavior, not an in-house defect. Inbound rides the same
+  this is CLI behavior, not an hvf defect. Inbound rides the same
   backend-agnostic runner path (`runner/mod.rs`: "pipes the captured stdin to
   the child's stdin") over the same `agent.sock` that outbound proved alive, so
   the residual risk is low. It is deferred to Step-1 implementation testing,
@@ -81,7 +81,7 @@ third.
    hard-capped at 1 MiB in v1), the workload runs, and the child writes
    stdout/stderr back. Prod-hardened (`PR_SET_DUMPABLE=0` before the first
    stdin byte, `runner/hardening.rs`). This is how a production workload
-   receives input and returns output. On the in-house runner it flows over the
+   receives input and returns output. On the hvf runner it flows over the
    `agent.sock` the runner already stands up unconditionally
    (`workload_runner/runner.rs:92-98`). **Unchanged by this work.**
 
@@ -89,7 +89,7 @@ third.
    `open_console_capture` (`crates/mvm-backend/src/libkrun.rs:119`) opens
    `console.log` write-only; `prod_console_attachment_has_no_input`
    (`libkrun.rs:1137`) asserts there is no guest console input path in prod.
-   Guest→host only. The in-house runner already stands up write-only
+   Guest→host only. The hvf runner already stands up write-only
    `console.log`. **Unchanged by this work.**
 
 3. **Interactive PTY shell — dev-only (claim 15).** The live, bidirectional
@@ -97,20 +97,20 @@ third.
    (`crates/mvm-guest/src/console.rs`, `run_console_relay`) plus `do_exec`.
    Feature-gated behind `dev-shell`; a sealed prod agent links no console
    symbol. This is the *only* channel that is dev-only, and the only one this
-   work adds to the in-house backend.
+   work adds to the hvf backend.
 
 Naming rule for the whole effort: the gate is on **serving an interactive
 shell**, never on "the console" as a concept, and never on channels 1–2. A
 production microVM keeps full non-interactive host↔guest I/O.
 
-## Design: dev-only interactive PTY shell on the in-house runner
+## Design: dev-only interactive PTY shell on the hvf runner
 
 **Guest side:** unchanged. The agent's PTY console and `do_exec` are already
 `dev-shell`-gated (claims 4, 15).
 
 **Host side — runner gains a dev-gated `dev_console` pre-open.** When
 `VmStartConfig` requests a dev console (the same signal libkrun/vz already
-consume) *and* the image is not sealed, the in-house `WorkloadRunner` pre-opens
+consume) *and* the image is not sealed, the hvf `WorkloadRunner` pre-opens
 the console data-port range as host Unix sockets under
 `<vm_state_dir>/vsock/vsock-<port>.sock` — the Vz path *shape* (one subdir
 deep), but backend-neutral. This mirrors the existing `dev_console` pre-open
@@ -122,8 +122,8 @@ only in dev.
 **Transport:** rename `VzTransport` → `DevConsoleTransport` (identical
 behavior — dial `<dir>/vsock-<port>.sock`; the rename drops the name of the
 backend we are deleting). `pick_console_transport`
-(`crates/mvm-cli/src/commands/vm/console.rs:31`) gets an in-house probe gated
-on `is_dev_mode()` + the state-dir carrying the in-house marker, slotted where
+(`crates/mvm-cli/src/commands/vm/console.rs:31`) gets an hvf probe gated
+on `is_dev_mode()` + the state-dir carrying the hvf marker, slotted where
 the Vz probe is today. It **extends** the two existing boundary tests
 (`pick_console_transport_does_not_route_workload_to_dev_socket`,
 `pick_console_transport_selects_dev_socket_for_dev_vm`) rather than inventing
@@ -136,7 +136,7 @@ more faithful to "one socket," but it modifies the guest agent wire protocol
 (fuzzed; claim 5) for a dev-only affordance. Not worth it — mirror the existing
 `dev_console` pre-open instead, keeping the change host-side.
 
-**Open question for the plan, not the design:** whether the in-house runner's
+**Open question for the plan, not the design:** whether the hvf runner's
 host-side vsock bridge (`crates/mvm-backend/src/vmm/vsock.rs`) can pre-open
 arbitrary guest ports on demand or needs the port set fixed at boot. Settle
 with a short spike in Step 0; it only affects how the pre-open is wired, not
@@ -172,7 +172,7 @@ pipe fails closed with the existing `StdinTooLarge` error. Unbounded/live
 streaming stdin is an explicit Level-2 follow-up, out of scope here.
 
 **Side benefit:** it makes the channel-1 inbound Step-0 proof idiomatic —
-`echo STDIN-RT-42 | machine run --image alpine --hypervisor inhouse -- /bin/cat`
+`echo STDIN-RT-42 | machine run --image alpine --hypervisor hvf -- /bin/cat`
 must echo the payload back (dev `Exec` path). This lands as the first
 workstream so it also serves as the inbound proof for the flip.
 
@@ -185,24 +185,24 @@ workstream so it also serves as the inbound proof for the flip.
 both defaults must flip (and both be proven) before the supervisor can be
 deleted.
 
-- **Workload VMM:** `AnyBackend::auto_select` macOS-26 tier → in-house runner
+- **Workload VMM:** `AnyBackend::auto_select` macOS-26 tier → hvf runner
   (`backend.rs:566`).
 - **Builder VMM:** `builder_backend_select::auto_detect_default_for(macos_26)`
-  → in-house builder (`builder_backend_select.rs:91`). Note
+  → hvf builder (`builder_backend_select.rs:91`). Note
   `builder_backend_select.rs:180-185`: Stage 0 is implemented for libkrun/QEMU;
-  the Vz builder has a Stage-0 fallback quirk today. The in-house builder must
+  the Vz builder has a Stage-0 fallback quirk today. The hvf builder must
   carry Stage 0 to parity (part of Step-0 builder reachability).
 - **`mvmctl dev` interactive shell** runs on the *builder* VM, not the
   workload — so the builder flip must preserve the dev shell.
 
-## Collapse `hvf` → `inhouse`
+## Collapse `hvf` → `hvf`
 
 Today `--hypervisor hvf` resolves to `HvfBackend` (its own `start()` at
-`crates/mvm-backend/src/hvf_backend.rs:174`) and `--hypervisor inhouse`
+`crates/mvm-backend/src/hvf_backend.rs:174`) and `--hypervisor hvf`
 resolves to the `WorkloadRunner` path — same VMM, two entrypoints. As part of
 the tail, make the runner the macOS-26 default and delete `HvfBackend`'s
-separate `start()` copy so we do not ship two in-house code paths. `hvf`/
-`inhouse` selectors converge on the runner.
+separate `start()` copy so we do not ship two hvf code paths. `hvf`/
+`hvf` selectors converge on the runner.
 
 ## Sequenced plan (refined "B")
 
@@ -212,13 +212,13 @@ separate `start()` copy so we do not ship two in-house code paths. `hvf`/
 - **Step 1 — stdin DX companion.** Drop `--stdin`; auto-detect non-TTY stdin
   (see companion section). Independent of the backend, ships DX value alone,
   and its acceptance test IS the channel-1 inbound proof
-  (`echo … | machine run --hypervisor inhouse -- /bin/cat`). Lands first.
+  (`echo … | machine run --hypervisor hvf -- /bin/cat`). Lands first.
 - **Step 2 — flip + wire.** Flip both defaults (workload `auto_select` +
-  builder `auto_detect`) to the in-house runner / builder. Keep Vz reachable
+  builder `auto_detect`) to the hvf runner / builder. Keep Vz reachable
   via explicit `--hypervisor vz` / `MVM_BUILDER_BACKEND=vz` for this step. Wire
   the dev-only interactive PTY shell (the console design above). Collapse
   `hvf` → runner as the default. After this, no non-interactive `machine run`
-  or `dev` command touches Vz; `-it` works over the in-house runner in dev.
+  or `dev` command touches Vz; `-it` works over the hvf runner in dev.
 - **Step 3 — delete Vz.** Remove `vz.rs`, `vz_control.rs`, `VzTransport`
   (now `DevConsoleTransport`, kept), `mvm-vz-supervisor` (Rust bin + Swift),
   `is_vz_default_tier`, the Vz builder path (`vz_builder.rs`,
@@ -235,8 +235,8 @@ with mvmd's build. A single-pass delete (approach A) has no such checkpoint.
 
 ## Out of scope
 
-- Interactive-shell-over-in-house in **production** (forbidden by claim 15 —
+- Interactive-shell-over-hvf in **production** (forbidden by claim 15 —
   channel 3 stays dev-only).
 - KVM/WHP backends and the broader multi-backend seam (ADR-099) beyond what the
-  `hvf`→`inhouse` collapse requires.
+  `hvf`→`hvf` collapse requires.
 - Changing channels 1–2 (production I/O and boot-console capture).

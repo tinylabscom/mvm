@@ -28,7 +28,7 @@ The user's hard constraints:
 - **Security is the top priority** — encryption everywhere with key rotation; mounted volumes encrypted; secrets encrypted; runtime microVMs have **no open egress** unless a policy explicitly enables it; all VM↔host traffic on vsock or an inspectable TUN/TAP; **every action auditable** (commands, state changes, secret reads, flow attempts).
 - **Cross-platform**: Linux (primary deploy + dev + native CLI), macOS (dev + native CLI + `mvm-studio` Tauri host), **Windows (Tauri-only)** — Windows users go through the `mvm-studio` Tauri build; native Windows CLI is best-effort. `mvm-studio` at `../mvm-studio` packages `mvmd` as a local coordinator.
 - **Speed-to-boot and DX** tied for second.
-- **OSS-first** — prefer high-quality MIT/Apache crates over hand-rolled. Exception: **the vsock protocol is rolled in-house** — we keep the `AuthenticatedFrame` framing from the previous iteration. `tokio-vsock` stays only as the raw-socket layer.
+- **OSS-first** — prefer high-quality MIT/Apache crates over hand-rolled. Exception: **the vsock protocol is rolled hvf** — we keep the `AuthenticatedFrame` framing from the previous iteration. `tokio-vsock` stays only as the raw-socket layer.
 - **microvm.nix** (https://microvm-nix.github.io/microvm.nix/intro.html, **MIT-licensed, confirmed**) is the foundation for microVM image generation — it already supports Firecracker, Cloud Hypervisor, QEMU, crosvm, kvmtool, stratovirt as a NixOS module, and dramatically shrinks our own Nix maintenance.
 - **Update model**: there is no in-VM updater. **Update = rebuild**. The CVE-roller agent (future) generates a new flake input set, rebuilds, and rolls instances. This means the build pipeline must be reproducible byte-for-byte and image diffs must be inspectable.
 - **mvmd networking is iroh QUIC** (already TLS 1.3 by default with NAT traversal + relay). We do *not* duplicate TLS at the mvmd↔mvm-agent network hop — iroh handles it. We *do* still need mTLS at the mvmd-agent↔mvm-hostd Unix-socket hop (different process boundary, different threat).
@@ -195,10 +195,10 @@ Codes A/B/C: A = copy verbatim; B = adapt; C = rewrite. `mvm-libkrun` and `mvm-a
 | XDG paths | `directories` 5 | Apache-2.0/MIT | Replaces hand-rolled `~/.mvm` config code |
 | Async event bus | `tokio::sync::broadcast` (in stdlib of tokio) | MIT | No new dep |
 | Vsock raw socket | `tokio-vsock` 0.5 (raw socket only) | Apache-2.0/MIT | tokio-vsock is the only mature async vsock crate; we wrap it but layer our own protocol |
-| Vsock framing/protocol (auth, multiplex, replay protection) | **rolled in-house** — port `AuthenticatedFrame` from `../mvm/crates/mvm-guest/src/vsock.rs`; fuzz harnesses in `mvm-guest/fuzz/` | — | No OSS crate covers our auth + replay + multiplexing requirements; the existing fuzz coverage is the safety net |
+| Vsock framing/protocol (auth, multiplex, replay protection) | **rolled hvf** — port `AuthenticatedFrame` from `../mvm/crates/mvm-guest/src/vsock.rs`; fuzz harnesses in `mvm-guest/fuzz/` | — | No OSS crate covers our auth + replay + multiplexing requirements; the existing fuzz coverage is the safety net |
 | Builder-pattern derive (avoid hand-typed builders) | `bon` 3 | Apache-2.0/MIT | Generates type-state builders; eliminates `clippy::too_many_arguments` cleanly |
 
-Everything we *don't* delegate is glue (≤200 LOC) or domain-specific protocol code that has no OSS equivalent (the vsock protocol being the largest in-house piece).
+Everything we *don't* delegate is glue (≤200 LOC) or domain-specific protocol code that has no OSS equivalent (the vsock protocol being the largest hvf piece).
 
 ## Cargo feature flags (kept narrow and orthogonal)
 
@@ -1447,7 +1447,7 @@ Every architecturally-significant decision in this plan **must** be reflected in
 | 023 | Long-running session model (tmux-backed) | Phase 7 | NEW |
 | 024 | Computer-use RPC surface | Phase 7b | NEW |
 | 025 | Transparent install/rebuild flow | Phase 7a | NEW |
-| 026 | Vsock protocol rolled in-house | Phase 1 | NEW |
+| 026 | Vsock protocol rolled hvf | Phase 1 | NEW |
 | 027 | Iroh-aware encryption layering | Phase 0 | NEW |
 | 028 | Tenant destruction certificate | Phase 7a | NEW |
 | 029 | Compliance posture (SOC 2 / PCI / HIPAA / GDPR / FedRAMP) | Phase 9 | NEW |
@@ -1687,7 +1687,7 @@ If any check fails, the phase is **not done**; we don't move on. Half-finished w
 - Stand up `mvm/src/vm/backend.rs` exposing `BackendKind::{Firecracker, Libkrun}`. Detection: `cfg!(target_os = "linux") && /dev/kvm exists` → Firecracker; otherwise Libkrun.
 - Implement `LibkrunBackend: VmBackend` (replace the `todo!()` in the user's existing `SandboxBackend` with a real `boot()`/`teardown()` aligned to the trait). Verify Windows-on-libkrun status; if missing, document WSL2 fallback in ADR.
 - Port `FirecrackerBackend` from `../mvm/crates/mvm/src/vm/firecracker.rs`.
-- Port the guest-agent vsock console from `../mvm/crates/mvm-guest/src/{console.rs,vsock.rs}`. Vsock framing protocol stays in-house; the raw socket uses `tokio-vsock`.
+- Port the guest-agent vsock console from `../mvm/crates/mvm-guest/src/{console.rs,vsock.rs}`. Vsock framing protocol stays hvf; the raw socket uses `tokio-vsock`.
 - Wire CLI commands `build`, `up`, `down`, `console`, `exec`, `builder ls/keep/evict` in `mvm-cli/src/commands/`.
 - All commands accept structured config via `bon`-derived builders — enforce `clippy::too_many_arguments` ban repo-wide via `[workspace.lints]`.
 - Cross-platform: CI runs the build on Linux, macOS, Windows; the smoke test runs at minimum on Linux + macOS (Windows path may rely on WSL2 initially).

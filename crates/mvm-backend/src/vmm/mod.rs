@@ -14,7 +14,7 @@ pub(crate) mod agent_bridge;
 pub(crate) mod console_bridge;
 pub mod device;
 // Promoted to the top-level backend-agnostic bridge module; re-exported at the
-// old paths so the in-house run loop and cross-crate consumers keep working.
+// old paths so the hvf run loop and cross-crate consumers keep working.
 pub use crate::vsock_egress_bridge::egress_gate;
 pub(crate) use crate::vsock_egress_bridge::substitution_bridge;
 pub mod fdt;

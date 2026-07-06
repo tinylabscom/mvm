@@ -143,9 +143,9 @@ impl VsockTransport for VzTransport {
     }
 }
 
-/// Connects to an in-house (`WorkloadRunner` / HVF) VM's vsock channels.
+/// Connects to an hvf (`WorkloadRunner` / HVF) VM's vsock channels.
 ///
-/// The in-house runner binds two distinct socket layouts under the per-VM
+/// The hvf runner binds two distinct socket layouts under the per-VM
 /// state dir:
 /// - Agent RPC (`GUEST_AGENT_PORT`): `<state_dir>/hvf-agent.sock` — the
 ///   standing agent bridge the device binds at boot (see
@@ -187,7 +187,7 @@ impl DevConsoleTransport {
     /// Resolve the host UDS for a port.
     ///
     /// - `GUEST_AGENT_PORT` → `<state_dir>/hvf-agent.sock` (the standing agent
-    ///   bridge the in-house device binds — see
+    ///   bridge the hvf device binds — see
     ///   [`mvm_core::config::vm_hvf_agent_socket`]).
     /// - Any other port → `<state_dir>/vsock/vsock-<port>.sock` (the
     ///   pre-opened console data socket, same convention as Vz).
@@ -205,7 +205,7 @@ impl VsockTransport for DevConsoleTransport {
     fn connect(&self, port: u32) -> Result<UnixStream> {
         let path = self.socket_path(port);
         UnixStream::connect(&path)
-            .with_context(|| format!("Failed to connect to in-house vsock at {}", path.display()))
+            .with_context(|| format!("Failed to connect to hvf vsock at {}", path.display()))
     }
 }
 
@@ -274,15 +274,15 @@ impl VsockTransport for NestingHopTransport {
 /// `connect()`. This matches the legacy ladder it replaces, which
 /// already did one throwaway probe before the real call.
 pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
-    // In-house (HVF / WorkloadRunner) VMs bind the agent bridge at
+    // (HVF / WorkloadRunner) VMs bind the agent bridge at
     // `<state_dir>/hvf-agent.sock`. Probe it first — it's the macOS-26 default
     // backend, and the socket name is distinct from the libkrun/vz layouts so a
     // hit here is unambiguous. Without this branch the agent-RPC path (every
     // non-interactive `machine run -- <cmd>`, `machine exec`, `invoke`) could
-    // never reach an in-house guest and timed out after 30s.
-    let inhouse = DevConsoleTransport::for_vm(vm_name);
-    if inhouse.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
-        return Ok(Box::new(inhouse));
+    // never reach an hvf guest and timed out after 30s.
+    let hvf = DevConsoleTransport::for_vm(vm_name);
+    if hvf.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+        return Ok(Box::new(hvf));
     }
     let libkrun = LibkrunTransport::for_vm(vm_name);
     if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
@@ -385,11 +385,11 @@ mod tests {
     }
 
     #[test]
-    fn for_vm_selects_inhouse_when_hvf_agent_socket_present() {
+    fn for_vm_selects_hvf_when_hvf_agent_socket_present() {
         use std::os::unix::net::UnixListener;
-        // The in-house (HVF / WorkloadRunner) agent bridge binds
+        // The hvf (HVF / WorkloadRunner) agent bridge binds
         // `<state_dir>/hvf-agent.sock`. With only that socket present the picker
-        // must select the in-house transport — the regression for the
+        // must select the hvf transport — the regression for the
         // non-interactive `machine run` reachability gap (the picker previously
         // knew only libkrun/vz/firecracker, so it fell through to the
         // firecracker error and the agent-RPC path timed out after 30s).
@@ -398,12 +398,12 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
-        let name = "inhouse-picker-probe";
+        let name = "hvf-picker-probe";
         let sock = mvm_core::config::vm_hvf_agent_socket(name);
         std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
         let _listener = UnixListener::bind(&sock).unwrap();
 
-        let t = for_vm(name).expect("picker should find the in-house transport");
+        let t = for_vm(name).expect("picker should find the hvf transport");
         t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect("selected transport should connect to the hvf-agent socket");
 
@@ -470,15 +470,15 @@ mod tests {
 
     #[test]
     fn dev_console_transport_agent_port_resolves_to_hvf_agent_sock() {
-        // GUEST_AGENT_PORT → `<state_dir>/hvf-agent.sock` (what the in-house
+        // GUEST_AGENT_PORT → `<state_dir>/hvf-agent.sock` (what the hvf
         // device's AgentBridge actually binds), not the vsock/ subdir. The old
         // `agent.sock` name never matched the backend, so the host agent-RPC
-        // path could not reach an in-house guest.
-        let t = DevConsoleTransport::new("/tmp/no-such-inhouse-vm");
+        // path could not reach an hvf guest.
+        let t = DevConsoleTransport::new("/tmp/no-such-hvf-vm");
         let path = t.socket_path(mvm_guest::vsock::GUEST_AGENT_PORT);
         assert_eq!(
             path,
-            PathBuf::from("/tmp/no-such-inhouse-vm/hvf-agent.sock"),
+            PathBuf::from("/tmp/no-such-hvf-vm/hvf-agent.sock"),
             "agent port must resolve to hvf-agent.sock at state-dir root"
         );
     }
@@ -486,13 +486,13 @@ mod tests {
     #[test]
     fn dev_console_transport_console_port_resolves_to_vsock_subdir() {
         // Console data ports → `<state_dir>/vsock/vsock-<port>.sock`.
-        let t = DevConsoleTransport::new("/tmp/no-such-inhouse-vm");
+        let t = DevConsoleTransport::new("/tmp/no-such-hvf-vm");
         let port = *mvm_guest::vsock::dev_console_data_ports()
             .collect::<Vec<_>>()
             .first()
             .expect("at least one console data port");
         let path = t.socket_path(port);
-        let expected = PathBuf::from(format!("/tmp/no-such-inhouse-vm/vsock/vsock-{port}.sock"));
+        let expected = PathBuf::from(format!("/tmp/no-such-hvf-vm/vsock/vsock-{port}.sock"));
         assert_eq!(
             path, expected,
             "console data port must resolve to vsock/ subdir"
@@ -502,13 +502,13 @@ mod tests {
     #[test]
     fn dev_console_transport_for_vm_error_mentions_backend() {
         // Error text must identify the backend so console failures are diagnosable.
-        let t = DevConsoleTransport::for_vm("no-such-inhouse-vm");
+        let t = DevConsoleTransport::for_vm("no-such-hvf-vm");
         let err = t
             .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect_err("should fail — no real socket")
             .to_string();
         assert!(
-            err.contains("in-house vsock"),
+            err.contains("hvf vsock"),
             "error must name the backend: {err}"
         );
     }

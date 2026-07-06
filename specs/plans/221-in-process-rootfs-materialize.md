@@ -11,7 +11,7 @@ keep capability-bearing images on the pure path (today they fall back).
 **Related:** ADR-106 (Phase-A/Phase-B boundary — the in-process materialize
 decision), ADR-050 (OCI verity posture — superseded *mechanism*), ADR-046/013
 (no host tools / no host Nix), ADR-093 (builder auto-fallback), Plan 214
-(in-house HVF VMM), #1388 seam (synthesis→admission→`admit_and_start`).
+(HVF VMM), #1388 seam (synthesis→admission→`admit_and_start`).
 
 ## Why
 
@@ -147,14 +147,14 @@ model unchanged (virtio-blk ext4 + verity sidecar).
 
 Boot the guest with the unpacked OCI dir as a **virtiofs root**. No ext4, no
 `mkfs`, no verity-of-a-block-device. This is supermachine's model and the
-Plan-214 in-house-HVF end state.
+Plan-214 hvf-HVF end state.
 
 > **Scoped out into its own docs.** The integrity decision is **ADR-107**
 > (`specs/adrs/107-virtiofs-root-integrity.md`, **Accepted** — tiered:
 > virtiofs-root is dev/local-tier, **prod stays on Option B**, claim 3 scoped to
 > block+ext4), and the phased implementation is **Plan 223**
 > (`specs/plans/223-virtiofs-root.md`), the live tracker. Option A is
-> **deliberately parked** behind Plan 214's in-house-HVF virtiofs-root device:
+> **deliberately parked** behind Plan 214's hvf-HVF virtiofs-root device:
 > Option B already meets the "no subprocess on the run path" goal, so Option A is
 > a later dev-loop optimization, not a gap. The A0–A5 sketch below is retained
 > for context.
@@ -167,14 +167,14 @@ Plan-214 in-house-HVF end state.
   Option B's block+verity). This is a **numbered-claim decision** and blocks A
   shipping. _[deliverable: `specs/adrs/107-virtiofs-root-integrity.md`]_
 
-- **A1 — virtiofs device in the in-house HVF backend** (Plan 214). libkrun/vz
+- **A1 — virtiofs device in the HVF backend** (Plan 214). libkrun/vz
   already expose virtiofs *shares* (`vz_objc.rs`, `krun_add_*`); extend to a
   **root** device.
 - **A2 — guest boot model:** `root=virtiofs` kernel cmdline + init mounts the
   virtiofs root; `mvm-guest` agent + `/init` work on a virtiofs root.
 - **A3 — integrity impl** per A0.
 - **A4 — wire run path** to virtiofs-root for virtiofs-capable backends
-  (in-house HVF, libkrun, vz). **Firecracker stays block+ext4** via Option B.
+  (HVF, libkrun, vz). **Firecracker stays block+ext4** via Option B.
 - **A5 — retire ext4 materialize** for virtiofs-capable backends (Option B path
   remains for Firecracker + as the B4 fallback).
 

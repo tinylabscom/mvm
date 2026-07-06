@@ -32,7 +32,7 @@ use crate::base::ui;
 /// backends' markers so HVF VMs coexist under the same `~/.mvm/vms/` root.
 pub(crate) const PID_FILE_NAME: &str = "hvf.pid";
 /// How long `start` waits for the supervisor to confirm boot (PID file). Shared
-/// with the in-house driver, which spawns the same supervisor binary.
+/// with the hvf driver, which spawns the same supervisor binary.
 pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Raw HVF (`Hypervisor.framework`) backend. macOS / Apple-silicon only.
@@ -50,7 +50,7 @@ pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
 /// SIGTERM a recorded pid, then SIGKILL if it lingers past a short grace. The
 /// supervisor installs no SIGTERM handler, so the default action terminates it
 /// and the HVF VM dies with it. Shared by the `VmBackend` stop path and the
-/// in-house driver's `kill`.
+/// hvf driver's `kill`.
 pub(crate) fn terminate_pid(pid: libc::pid_t) {
     // SAFETY: signalling a pid we recorded from our own supervisor.
     unsafe {
@@ -142,7 +142,7 @@ fn spawn_hvf_gating_endpoint(
         transport: EndpointTransport::Uds {
             path: socket.clone(),
         },
-        // The in-house VMM has no transparent :80/:443 terminator — all egress is
+        // The hvf VMM has no transparent :80/:443 terminator — all egress is
         // the proxy-aware WireRequest path, so no terminator + no per-VM TLS.
         terminator_listen: None,
         tls_intermediate: None,
@@ -162,11 +162,11 @@ impl VmBackend for HvfBackend {
         // pause/snapshot/networking are wired onto the primitive.
         VmCapabilities {
             vsock: true,
-            // The in-house VMM is vsock-only by design: no guest NIC, and egress
+            // The hvf VMM is vsock-only by design: no guest NIC, and egress
             // rides the host vsock proxy (the gating endpoint), not a guest NIC.
             no_guest_nic: true,
             host_vsock_proxy: true,
-            // The in-house VMM can serve the unpacked OCI tree as a read-only
+            // The hvf VMM can serve the unpacked OCI tree as a read-only
             // virtiofs root (dev tier); the run-path tier gate selects it only for
             // non-prod, non-sealed workloads.
             virtiofs_root: true,

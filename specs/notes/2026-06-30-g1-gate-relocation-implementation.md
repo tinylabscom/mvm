@@ -98,7 +98,7 @@ no backend flipped, no legacy path deleted — all additive):
   `EndpointConfig.egress_mode: {Wire(default), Raw}`; `raw_egress::serve_raw_egress`
   reads `host:port\n`, gates via the same `EgressGate`, connects + splices. The
   endpoint is now the unified bridge for BOTH protocols.
-- **P1.3** `feat(backend): in-house VMM run loop gains a pure-relay egress mode` —
+- **P1.3** `feat(backend): hvf VMM run loop gains a pure-relay egress mode` —
   `HostChannels.egress_relay` / `HvfSupervisorConfig.egress_relay_socket`;
   `SubstitutionBridge::set_relay_only` skips the in-loop gate + parse and pipes
   bytes to the endpoint. Relay mode drops the in-loop `EgressGate` entirely.

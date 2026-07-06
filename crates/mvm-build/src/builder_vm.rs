@@ -446,11 +446,11 @@ pub enum BuilderVmError {
         vm_state_dir: String,
     },
 
-    /// The in-house builder VM could not run the build (boot / disk-transport /
+    /// The hvf builder VM could not run the build (boot / disk-transport /
     /// power-off-timeout failure) — a VMM-level failure that triggers the
     /// builder-backend fallback, distinct from a genuine `nix build` error.
-    #[error("in-house builder VMM-level failure: {detail}")]
-    InHouseVmmFailed { detail: String },
+    #[error("hvf builder VMM-level failure: {detail}")]
+    HvfVmmFailed { detail: String },
 
     /// The persistent builder Nix store has a dangling/GC'd path — every build
     /// re-evals to the same missing path and fails identically, so `dev up`

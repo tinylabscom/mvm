@@ -6,7 +6,7 @@
 sole guest↔world channel), [ADR-002](../adrs/002-microvm-security-posture.md) (claim 10),
 [ADR-049](../adrs/049-secret-substitution-mechanism.md) / [ADR-059](../adrs/059-host-services-broker.md)
 (claims 12/13 substitution + broker), [ADR-082](../adrs/082-rust-native-egress-gateway.md)
-(in-house gateway), [ADR-083](../adrs/083-workload-backend-type-bar.md) (`WorkloadBackend`),
+(hvf gateway), [ADR-083](../adrs/083-workload-backend-type-bar.md) (`WorkloadBackend`),
 [Plan 214](../plans/214-clean-replacement-architecture.md),
 [Step 2.3 libkrun cutover note](2026-06-29-adr100-step2.3-libkrun-cutover-plan.md).
 
@@ -14,7 +14,7 @@ sole guest↔world channel), [ADR-002](../adrs/002-microvm-security-posture.md) 
 
 Make **vsock the sole egress transport for every workload guest** across all
 backends, and **retire the virtio-net / userspace-gateway machinery** on the
-workload path: gvproxy, passt, the in-house rvproxy, the redirect/TLS terminator,
+workload path: gvproxy, passt, the hvf rvproxy, the redirect/TLS terminator,
 and the FC nftables install. Egress becomes one host seam — `EgressGate` — fed by
 guest→vsock streams, enforcing claim-10 default-deny and folding the claims-12/13
 credential substitution onto the same path.
@@ -62,7 +62,7 @@ that is the deferred builder-over-vsock project, taken on with eyes open.
 
 ## Current-state map (where the machinery lives)
 
-- **HVF / in-house `vmm`** — already vsock-only, NIC-free; guarded by
+- **HVF / hvf `vmm`** — already vsock-only, NIC-free; guarded by
   `xtask check-vsock-only-egress` (`crates/mvm-backend/src/{vmm,hvf,vsock_egress_bridge}`).
   This is the reference implementation; the shared core is `EgressGate`
   (`decide_request("ip:port") -> Allow/Deny/Malformed`, wraps `CanonicalEgress`).

@@ -3673,19 +3673,19 @@ fn builder_flag_unset_by_default() {
 }
 
 #[test]
-fn builder_flag_lists_inhouse() {
+fn builder_flag_lists_hvf() {
     let cmd = cli_command();
     let help = cmd.clone().render_help().to_string();
     assert!(
-        help.contains("inhouse"),
-        "expected --builder to accept inhouse; help text was:\n{help}"
+        help.contains("hvf"),
+        "expected --builder to accept hvf; help text was:\n{help}"
     );
 }
 
 #[test]
-fn builder_flag_accepts_inhouse() {
-    let cli = Cli::try_parse_from(["mvmctl", "--builder", "inhouse", "doctor"]).expect("parse");
-    assert_eq!(cli.builder.as_deref(), Some("inhouse"));
+fn builder_flag_accepts_hvf() {
+    let cli = Cli::try_parse_from(["mvmctl", "--builder", "hvf", "doctor"]).expect("parse");
+    assert_eq!(cli.builder.as_deref(), Some("hvf"));
 }
 
 // --- Session start --ephemeral tests ---

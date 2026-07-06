@@ -369,9 +369,9 @@ Run: `cargo build -p mvmctl -p mvm-vm-host --bin mvmctl --bin mvm-hvf-supervisor
 
 Run:
 ```bash
-printf 'STDIN-RT-42' | ./target/debug/mvmctl machine run --image alpine --hypervisor inhouse --json -- /bin/cat
+printf 'STDIN-RT-42' | ./target/debug/mvmctl machine run --image alpine --hypervisor hvf --json -- /bin/cat
 ```
-Expected: JSON `outcome.stdout_bytes == 11` and `outcome.stdout_sha256 == 81fce04b8b9ba4c6d54dfd19eea070fbaeef1d94120c9d403e6f45c916600cb3` (`sha256("STDIN-RT-42")`). This proves host→guest stdin delivery over the in-house `agent.sock` end-to-end.
+Expected: JSON `outcome.stdout_bytes == 11` and `outcome.stdout_sha256 == 81fce04b8b9ba4c6d54dfd19eea070fbaeef1d94120c9d403e6f45c916600cb3` (`sha256("STDIN-RT-42")`). This proves host→guest stdin delivery over the hvf `agent.sock` end-to-end.
 
 - [ ] **Step 3: Record the result** in `specs/notes/2026-07-02-vz-deprecation-design.md` (flip the Step-0 "channel-1 inbound" bullet from "NOT YET PROVEN" to PROVEN with the hash), and commit.
 
@@ -381,5 +381,5 @@ Expected: JSON `outcome.stdout_bytes == 11` and `outcome.stdout_sha256 == 81fce0
 
 This spec decomposes into three shippable plans; this is Phase 1. The next two are authored separately because Phase 2's console slice depends on an unresolved spike:
 
-- **Plan 222 — Phase 0 spike + Phase 2 (flip + wire).** First task: spike whether the in-house `vmm/vsock.rs` bridge can pre-open guest console data ports on demand or needs them fixed at boot. Then: flip `AnyBackend::auto_select` (macOS-26 → in-house) and `builder_backend_select::auto_detect_default_for` (→ in-house builder); add the dev-gated `dev_console` pre-open + `DevConsoleTransport` (rename of `VzTransport`) + the `pick_console_transport` in-house probe (extend the two claim-15 boundary tests); collapse `hvf` → the runner and delete `HvfBackend::start`'s duplicate. Keep Vz reachable via explicit `--hypervisor vz` / `MVM_BUILDER_BACKEND=vz`.
+- **Plan 222 — Phase 0 spike + Phase 2 (flip + wire).** First task: spike whether the hvf `vmm/vsock.rs` bridge can pre-open guest console data ports on demand or needs them fixed at boot. Then: flip `AnyBackend::auto_select` (macOS-26 → hvf) and `builder_backend_select::auto_detect_default_for` (→ hvf builder); add the dev-gated `dev_console` pre-open + `DevConsoleTransport` (rename of `VzTransport`) + the `pick_console_transport` hvf probe (extend the two claim-15 boundary tests); collapse `hvf` → the runner and delete `HvfBackend::start`'s duplicate. Keep Vz reachable via explicit `--hypervisor vz` / `MVM_BUILDER_BACKEND=vz`.
 - **Plan 223 — Phase 3 (delete Vz).** Remove `vz.rs`, `vz_control.rs`, the (renamed) transport's Vz naming, `mvm-vz-supervisor` (Rust bin + Swift), `is_vz_default_tier`, `vz_builder.rs` / `BuilderBackendChoice::Vz`, and Vz cases across `catalog` / `console` / `for_started_vm` / doctor. Gated on Plan 222 proven live AND mvmd confirming its `mvmctl::runtime::*` consumption still builds.

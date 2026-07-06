@@ -141,7 +141,7 @@ pub fn install_hint() -> &'static str {
 ///
 /// `MVM_GATEWAY_BIN`, when set to a non-empty value, overrides the
 /// default — the seam for running an alternate gateway that speaks the
-/// same `-listen-vfkit` unixgram protocol gvproxy does (the in-house
+/// same `-listen-vfkit` unixgram protocol gvproxy does (the hvf
 /// native gateway, selected via `MVM_NETWORKING=native`). The path is
 /// used verbatim; a bad path surfaces as a clear spawn error rather
 /// than silently falling back to `gvproxy`. Unset → probe `$PATH` for

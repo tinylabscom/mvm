@@ -1327,7 +1327,7 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
             && {
                 // Bound each probe: a transport whose socket is bound but whose
                 // guest agent hasn't replied yet (e.g. still booting, or an
-                // in-house VMM whose relay isn't answering) must not block the
+                // hvf VMM whose relay isn't answering) must not block the
                 // whole hello read forever — otherwise this loop never gets back
                 // to the deadline check and hangs instead of timing out. A short
                 // per-attempt read timeout lets `negotiate_protocol` fail fast so
@@ -1954,7 +1954,7 @@ mod tests {
     #[test]
     fn interactive_transient_run_sets_dev_console_when_not_sealed() {
         // PTY-mode run against a non-sealed image must pre-open console sockets
-        // so the in-house backend can host-dial the guest's data port.
+        // so the hvf backend can host-dial the guest's data port.
         assert!(transient_run_dev_console(true, None));
     }
 

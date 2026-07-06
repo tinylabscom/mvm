@@ -1,10 +1,10 @@
 //! Self-hosting builder-rootfs bootstrap: inject freshly built mvm host binaries
-//! (`/sbin/mvm-host-vm-init`, …) into a builder rootfs using ONLY the in-house
+//! (`/sbin/mvm-host-vm-init`, …) into a builder rootfs using ONLY the hvf
 //! VMM — no legacy (vz/libkrun) builder.
 //!
 //! The mechanism is an initramfs boot: this module builds a newc cpio carrying a
 //! tiny patcher init (`mvm-rootfs-patcher`) plus a payload of binaries + a
-//! manifest naming their install paths. The in-house VMM boots `kernel +
+//! manifest naming their install paths. The hvf VMM boots `kernel +
 //! initramfs + the target rootfs as a writable disk`; the patcher mounts the
 //! rootfs read-write, copies each payload binary to its install path, and powers
 //! off. The result is a rootfs with the current init baked in, produced without a

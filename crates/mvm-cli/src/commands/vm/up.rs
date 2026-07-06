@@ -2783,7 +2783,7 @@ port_hi  = 443
     fn persists_plan_before_start_covers_the_substitution_backends() {
         // The substitution endpoint reads <state_dir>/plan.json inside start() to
         // decide whether to spawn, so every backend that spawns it must persist the
-        // plan first — including the in-house hvf backend. QEMU must not (it would
+        // plan first — including the hvf backend. QEMU must not (it would
         // overwrite the in-memory config).
         for hv in ["firecracker", "vz", "libkrun", "hvf"] {
             assert!(

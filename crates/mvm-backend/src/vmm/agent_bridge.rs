@@ -9,7 +9,7 @@
 //! writes the guest's replies back to the host socket.
 //!
 //! Like the egress relay it is **transport-agnostic**: keyed by an opaque
-//! connection id (the in-house VMM uses the host-assigned vsock `src_port`), it
+//! connection id (the hvf VMM uses the host-assigned vsock `src_port`), it
 //! speaks raw bytes, never a virtqueue or vsock header — the device owns the
 //! framing. Each connection is read only once the guest has accepted it
 //! (`on_established`), so a client that writes its request immediately leaves

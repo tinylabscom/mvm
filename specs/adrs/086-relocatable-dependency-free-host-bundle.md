@@ -121,7 +121,7 @@ pain is worst there and gateway interop is proven (ADR-085 / ADR-082
   with bundle-size growth under [Plan 156](../plans/156-binary-size-reduction.md).
 - One more C codebase falls under our review + signing umbrella. This does not
   widen the runtime trust boundary (the VMM is already load-bearing in-process);
-  it moves supply-chain origin in-house and pins it.
+  it moves supply-chain origin hvf and pins it.
 - The bundle is the **end-user** path only; source-checkout builds are unchanged
   (Plan 199 non-goal preserved).
 - `mvmctl doctor` reports bundle provenance (signed, pinned-VMM rev) so the

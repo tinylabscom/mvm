@@ -1,6 +1,6 @@
 # ADR-100 Step 2 — converge Firecracker / libkrun / vz onto vsock-only egress
 
-Step 1 is done: the in-house VMM (HVF reference) carries a workload guest with **no
+Step 1 is done: the hvf VMM (HVF reference) carries a workload guest with **no
 NIC** — control, the transient workload-exit signal, and egress all ride vsock,
 with the host gateway enforcing the claim-10 decision (deny-default, allow + TCP
 proxy, admitted-policy gate, DNS pins, async streaming). This note sequences Step 2:
@@ -33,7 +33,7 @@ Two reusable pieces, one per side of the vsock:
    external VMMs (FC/libkrun/vz) this logic belongs in the shared bridge
    (`mvm-vm-host` `mvm-bridge`), which already terminates their host-side vsock and
    already holds the `PlanFlowPolicy`. Extract the decision+proxy core into a
-   backend-agnostic module both the in-house VMM and the bridge call, so there is
+   backend-agnostic module both the hvf VMM and the bridge call, so there is
    exactly one egress server implementation.
 
 2. **Guest-side egress client** — a tiny in-guest shim that turns an outbound
@@ -75,7 +75,7 @@ Two reusable pieces, one per side of the vsock:
 - **DNS.** The NIC path resolves names in-guest; vsock-only resolves host-side via
   the pin registry (as HVF does). Workloads that resolve names themselves need the
   guest client to proxy DNS too, or a host resolver over vsock — scope before vz/FC.
-- **Performance.** The proxy adds a host hop + (on the in-house VMM) the heartbeat;
+- **Performance.** The proxy adds a host hop + (on the hvf VMM) the heartbeat;
   the external VMMs already hop through the bridge, so the delta is small. Measure
   per backend before deleting the NIC.
 - **Guest image size / boot.** Option (a) adds one small bin to the rootfs; no IP

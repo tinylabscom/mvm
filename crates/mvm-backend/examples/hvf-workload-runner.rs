@@ -1,7 +1,7 @@
 //! Live proof that `WorkloadRunner` — the driver-generic workload start over the
 //! `VmmDriver` seam — boots a real guest with claim-10 egress enforced by the
 //! host endpoint. This exercises the core path (spawn the gating endpoint
-//! → map the config to a `VmmSpec` → `InHouseDriver::boot`), which is distinct
+//! → map the config to a `VmmSpec` → `HvfDriver::boot`), which is distinct
 //! from `HvfBackend`'s inline start and is what will replace it.
 //!
 //! Boots the initramfs echo guest with an allow-list policy that admits a
@@ -45,7 +45,7 @@ fn main() {
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
 
-    use mvm_backend::driver::InHouseDriver;
+    use mvm_backend::driver::HvfDriver;
     use mvm_backend::workload_runner::{RealEndpointSpawner, WorkloadRunner};
     use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
     use mvm_core::vm_backend::{VmBackend, VmStartConfig, VmStatus};
@@ -106,10 +106,10 @@ fn main() {
         ..Default::default()
     };
 
-    let backend = WorkloadRunner::new(InHouseDriver::new(), RealEndpointSpawner);
+    let backend = WorkloadRunner::new(HvfDriver::new(), RealEndpointSpawner);
     let id = backend
         .start(&config)
-        .expect("WorkloadRunner starts the in-house VM");
+        .expect("WorkloadRunner starts the hvf VM");
 
     for _ in 0..150 {
         if backend.status(&id).unwrap() == VmStatus::Stopped {

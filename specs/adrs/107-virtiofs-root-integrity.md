@@ -7,7 +7,7 @@
   matrix), ADR-106 (in-process rootfs materialization — Option B, block+verity),
   ADR-050 (materialize + verity; ADR-106 supersedes its mechanism, preserves its
   guarantee), ADR-051 (runtime overlay sealed like the rootfs), Plan 214
-  (in-house HVF VMM), Plan 221 (this is its Option A / A0 deliverable),
+  (HVF VMM), Plan 221 (this is its Option A / A0 deliverable),
   Plan 223 (virtiofs-root implementation, gated on this ADR).
 
 ## Context
@@ -15,7 +15,7 @@
 Plan 221 Option A proposes booting a guest with the **unpacked OCI directory as
 a virtiofs root** — no ext4, no `mkfs`, no image at all. The host serves files
 to the guest on demand over virtiofs. This is the supermachine model and the
-Plan-214 in-house-HVF end state, and it deletes the last piece of
+Plan-214 hvf-HVF end state, and it deletes the last piece of
 image-materialization on the virtiofs-capable run path (Option B's in-process
 ext4 + dm-verity, ADR-106).
 
@@ -108,7 +108,7 @@ Option B.** Concretely:
 2. **Prod refuses virtiofs-root.** A sealed / `--prod` workload continues to
    require Option B: in-process (or builder-VM) ext4 + dm-verity + roothash on
    the signed cmdline. The run path selects virtiofs-root **only** for the
-   dev/local tier on virtiofs-capable backends (in-house HVF, libkrun, Vz);
+   dev/local tier on virtiofs-capable backends (HVF, libkrun, Vz);
    `--prod` and any sealed-image admission path fall back to Option B, on every
    backend. **Firecracker always uses Option B** (it has no virtiofs root
    device; ADR-106).

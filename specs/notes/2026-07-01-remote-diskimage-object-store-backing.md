@@ -4,7 +4,7 @@ Status: idea / future-ADR seed. Not scheduled.
 
 ## Why it fits
 
-The in-house VMM's virtio-blk device depends only on a narrow backing surface
+The hvf VMM's virtio-blk device depends only on a narrow backing surface
 — `read_at(off, buf)`, `write_at(off, buf)`, `len`, `read_only`. `DiskImage`
 today has two variants (`Mem`, `File`); the device never looks past that seam.
 A remote backing (object store, HTTP range server, NBD) is a new variant behind

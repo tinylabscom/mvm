@@ -1,4 +1,4 @@
-//! Prove claim-10 egress on the Linux/KVM in-house path with the gate in the
+//! Prove claim-10 egress on the Linux/KVM hvf path with the gate in the
 //! **host endpoint**, not the run loop. The guest's vsock egress port is a pure
 //! relay to a per-VM `mvm-substitution-endpoint` carrying the resolved
 //! `NetworkPolicy`; the endpoint gates + proxies, the run loop only pipes bytes.

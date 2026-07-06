@@ -11,7 +11,7 @@ use std::path::PathBuf;
 /// Where a VM's kernel comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelImage {
-    /// An explicit kernel file on the host (Firecracker, qemu, the in-house VMM).
+    /// An explicit kernel file on the host (Firecracker, qemu, the hvf VMM).
     Path(PathBuf),
     /// The backend supplies its own bundled kernel (libkrun's libkrunfw).
     Bundled,

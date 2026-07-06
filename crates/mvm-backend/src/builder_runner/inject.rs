@@ -1,5 +1,5 @@
 //! Self-hosting rootfs bootstrap primitive: inject mvm host binaries into a
-//! builder rootfs using ONLY the in-house VMM (no vz / no legacy builder).
+//! builder rootfs using ONLY the hvf VMM (no vz / no legacy builder).
 //!
 //! Boots `kernel + an inject initramfs + a writable copy of the base rootfs`; the
 //! `mvm-rootfs-patcher` init (carried in the initramfs) mounts the rootfs

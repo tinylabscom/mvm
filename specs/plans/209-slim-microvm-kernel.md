@@ -659,7 +659,7 @@ devices and idle rescuer workqueue kthreads with nothing behind them:
 | Post-PCI-re-add ceiling | 1420 | — |
 | Batch 6 | **1374** | 17.13 MB (-140 KB) |
 
-**Live-validated** on macOS 26 (in-house→libkrun builder fallback): the default-microvm dev
+**Live-validated** on macOS 26 (hvf→libkrun builder fallback): the default-microvm dev
 image was rebuilt from the stripped config and `machine run --image alpine` booted it with
 `BLOCK_DEVS=vda` only (all of nbd/nvme/loop gone), rescuer kworkers 40 → 19, and the full
 `create/start/exec/shell/stop/rm` lifecycle passing. `BUDGET_AARCH64` ratcheted 1420 → 1374

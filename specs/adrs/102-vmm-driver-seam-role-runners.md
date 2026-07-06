@@ -3,8 +3,8 @@
 **Status:** Accepted (2026-06-30)
 **Relates to:** [ADR-100](100-vsock-sole-guest-world-channel.md) (vsock is the sole
 guest↔world channel — this ADR makes its "single host gateway" the only egress
-mechanism for *every* backend), [ADR-101](101-in-house-vmm-unified-egress-substitution-gateway.md)
-(the in-house VMM's unified vsock gateway — the reference shape this ADR generalizes
+mechanism for *every* backend), [ADR-101](101-hvf-vmm-unified-egress-substitution-gateway.md)
+(the hvf VMM's unified vsock gateway — the reference shape this ADR generalizes
 outward), [ADR-083](083-workload-backend-type-bar.md) (`WorkloadBackend` permission —
 preserved unchanged), [ADR-093](093-linux-builder-libkrun-fallback.md) (builder auto-fallback —
 preserved), [ADR-002](002-microvm-security-posture.md) (claims 10/12/13 + per-backend
@@ -24,7 +24,7 @@ VMM-driving code:
 | vz | `vz.rs` (4.3k) | `vz_builder.rs` (3.5k) |
 | qemu | `qemu.rs` | `qemu_builder.rs` |
 | firecracker | `firecracker.rs` + `microvm.rs` (4.3k) | *(builder is never FC)* |
-| in-house HVF/KVM | `hvf_backend.rs` + `vmm/` | *(none — the gap)* |
+| HVF/KVM | `hvf_backend.rs` + `vmm/` | *(none — the gap)* |
 
 The word "backend" conflates two separable things: **VMM mechanics** (create a VM,
 load a kernel, attach disks, wire vsock, boot, wait, kill) and **role policy** (a
@@ -39,10 +39,10 @@ the policy is the exact shape of past egress-enforcement gaps.
 
 Two prior decisions converge to make a clean cut possible now. ADR-100 fixed that a
 guest's only channel off the box is vsock, through one host gateway — there is no
-guest NIC. ADR-101 realized that concretely for the in-house VMM: `vmm/` is the
+guest NIC. ADR-101 realized that concretely for the hvf VMM: `vmm/` is the
 mechanics, `hvf_backend.rs` is a thin (~456-line) role adapter over a single
 host-side vsock egress gateway that carries claims 10/12/13 in one endpoint. The
-in-house VMM already has the shape every backend should have. This ADR generalizes
+hvf VMM already has the shape every backend should have. This ADR generalizes
 it.
 
 A vsock-only production reference design (linked in the originating discussion)
@@ -56,7 +56,7 @@ single vsock chokepoint is the entire egress surface.
 `wait`/`kill`/`pause`/`resume`/`status`/`vsock_connect`/`balloon`/`snapshot`. The
 existing `vmm/hv.rs` `HypervisorVm`/`HypervisorVcpu` traits are a *lower* seam (vCPU
 registers, the run loop, HVF-vs-KVM-vs-WHP) that stays *inside* `InHouseDriver`. The
-two seams do not merge: the in-house VMM is one `VmmDriver` impl that uses the low
+two seams do not merge: the hvf VMM is one `VmmDriver` impl that uses the low
 seam internally.
 
 **2. `VmmSpec` has no NIC.** A guest VM has exactly three I/O channel kinds:
@@ -78,7 +78,7 @@ a `dyn VmmDriver`:
   deleted.
 - **`BuilderRunner`** — the sole `impl BuilderVm`. Stage job → `VmmSpec` → boot →
   build session over vsock → collect artifacts → finalize → stage0.
-  `libkrun_builder`/`vz_builder`/`qemu_builder` dissolve into it; the in-house
+  `libkrun_builder`/`vz_builder`/`qemu_builder` dissolve into it; the hvf
   builder falls out for free.
 
 The per-VMM quirks must live in the driver, not the runner — they do: snapshot
@@ -137,10 +137,10 @@ parity, then deletes the old type. Order: **S0** define the seam + promote the b
 · **S2** libkrun · **S3** vz · **S4** Firecracker (the careful one — egress
 nftables→vsock, old path retained until proven on live KVM) · **S5** delete the five
 old workload types + the transport enum · **S6** `BuilderRunner` + migrate the three
-builders (in-house builder falls out) · **S7** builder vsock-egress cutover; delete
+builders (hvf builder falls out) · **S7** builder vsock-egress cutover; delete
 `BuilderNet` + all NICs. The risky migrations are sequenced last within each phase;
 rollback is per-slice (don't swap the constructor until parity passes). This subsumes
-the in-house HVF-workload and in-house-builder goals — they arrive as products of the
+the HVF-workload and hvf-builder goals — they arrive as products of the
 seam rather than a bespoke spike.
 
 **Testing.** A `MockDriver` (sibling to `mock.rs`/`mock_guest_agent.rs`) records the
@@ -179,13 +179,13 @@ with zero NICs.
 **Do nothing / share more helpers ad hoc.** Rejected: the partial sharing
 (`substitution_spawn`, `egress_shared`, `audit_substrate`) already exists yet is
 called separately from four backend `start()` sites; without the seam the duplication
-and per-backend egress divergence persist, and the in-house VMM remains a one-off
+and per-backend egress divergence persist, and the hvf VMM remains a one-off
 rather than the general shape.
 
 ## Out of scope
 
 A malicious host (the host holds the hypervisor and build keys — unchanged from
-ADR-002). The in-house VMM's *lower* `hv.rs` seam and its HVF/KVM/WHP coverage —
+ADR-002). The hvf VMM's *lower* `hv.rs` seam and its HVF/KVM/WHP coverage —
 that is ADR-101's territory and is consumed unchanged here. Multi-tenant guests (one
-guest = one workload, unchanged). The auto-detect default flips toward the in-house
+guest = one workload, unchanged). The auto-detect default flips toward the hvf
 VMM remain gated on live verification and are not decided by this ADR.

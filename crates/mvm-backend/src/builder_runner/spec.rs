@@ -9,7 +9,7 @@ use mvm_guest::vsock::GUEST_AGENT_PORT;
 
 use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
 
-/// Kernel cmdline for the disk-transport builder on the in-house HVF VMM. Mirrors
+/// Kernel cmdline for the disk-transport builder on the HVF VMM. Mirrors
 /// the console args the workload default uses (PL011 earlycon + `ttyAMA0`), but
 /// boots the builder's PID 1 (`/sbin/mvm-host-vm-init`, not the workload
 /// `/init`), mounts the rootfs read-only, and selects the disk transport with its
