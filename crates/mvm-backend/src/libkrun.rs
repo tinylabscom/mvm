@@ -305,9 +305,12 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
+    let vsock_egress_opt_in = mvm_build::libkrun_network_provider::vsock_egress_opt_in();
     if let Some(token) = vsock_egress_cmdline_token(
-        mvm_build::libkrun_network_provider::vsock_egress_opt_in(),
-        crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false),
+        vsock_egress_opt_in,
+        // Only read plan.json for secrets when the flag is on (short-circuit).
+        vsock_egress_opt_in
+            && crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false),
     ) {
         cmdline.push(' ');
         cmdline.push_str(&token);

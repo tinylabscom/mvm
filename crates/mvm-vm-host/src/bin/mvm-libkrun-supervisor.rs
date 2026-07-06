@@ -194,10 +194,14 @@ fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
     // vsock path used to live-prove egress before the NIC is removed in Phase B.
     {
         let opt_in = mvm_build::libkrun_network_provider::vsock_egress_opt_in();
-        let has_secrets = mvm_backend::egress_shared::state_has_bound_secrets(
-            std::path::Path::new(&cfg.vm_state_dir),
-        )
-        .unwrap_or(false);
+        // Short-circuit on the opt-in flag so the default (flag-off) path does no
+        // extra plan.json read. `should_serve_vsock_egress` also requires `opt_in`,
+        // so passing `has_secrets = false` when opted out changes nothing.
+        let has_secrets = opt_in
+            && mvm_backend::egress_shared::state_has_bound_secrets(std::path::Path::new(
+                &cfg.vm_state_dir,
+            ))
+            .unwrap_or(false);
         if mvm_vm_host::egress_server::should_serve_vsock_egress(
             &cfg.krun.host_listen_ports,
             opt_in,
@@ -210,25 +214,33 @@ fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
                 .unwrap_or_else(mvm_core::network_policy::NetworkPolicy::deny_all);
             let gate = mvm_hostd::supervisor::substitution_endpoint::build_egress_gate(&policy);
             let egress_sock = cfg.krun.vsock_socket_path(mvm_guest::vsock::EGRESS_PORT);
-            let _ = std::fs::remove_file(&egress_sock);
-            match tokio::net::UnixListener::bind(&egress_sock) {
-                Ok(listener) => {
-                    std::thread::spawn(move || {
-                        let rt = match tokio::runtime::Runtime::new() {
-                            Ok(rt) => rt,
-                            Err(e) => {
-                                eprintln!("mvm-libkrun-supervisor: egress runtime: {e}");
-                                return;
-                            }
-                        };
-                        if let Err(e) = rt.block_on(mvm_vm_host::egress_server::run(listener, gate))
-                        {
-                            eprintln!("mvm-libkrun-supervisor: egress server: {e}");
-                        }
-                    });
+            // Bind INSIDE the runtime context: `tokio::net::UnixListener::bind`
+            // registers the fd with the reactor via `Handle::current()` and panics if
+            // no runtime is entered. `dispatch_config` runs on a plain (non-tokio)
+            // thread, so create + enter the runtime first, then remove_file + bind,
+            // then serve — mirroring the runtime-first pattern in
+            // `mvm_hostd::supervisor::gateway_bridge`.
+            std::thread::spawn(move || {
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        eprintln!("mvm-libkrun-supervisor: egress runtime: {e}");
+                        return;
+                    }
+                };
+                let _guard = rt.enter();
+                let _ = std::fs::remove_file(&egress_sock);
+                let listener = match tokio::net::UnixListener::bind(&egress_sock) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        eprintln!("mvm-libkrun-supervisor: bind egress socket: {e}");
+                        return;
+                    }
+                };
+                if let Err(e) = rt.block_on(mvm_vm_host::egress_server::run(listener, gate)) {
+                    eprintln!("mvm-libkrun-supervisor: egress server: {e}");
                 }
-                Err(e) => eprintln!("mvm-libkrun-supervisor: bind egress socket: {e}"),
-            }
+            });
         }
     }
 
