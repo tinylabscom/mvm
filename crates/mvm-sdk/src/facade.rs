@@ -15,6 +15,7 @@ use std::process::Command;
 use async_trait::async_trait;
 use mvm_client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
+    ReconfigureRequest,
 };
 use mvm_client::{MvmClient, MvmError, Result};
 
@@ -321,6 +322,23 @@ impl MvmClient for SubprocessBackend {
 
     async fn remove_machine(&self, id: &MachineId) -> Result<()> {
         self.run_cli(&rm_args(id)?).map(|_| ())
+    }
+
+    async fn reconfigure_machine(
+        &self,
+        _id: &MachineId,
+        _cfg: ReconfigureRequest,
+    ) -> Result<MachineState> {
+        // Pre-existing gap (unrelated to Plan 226): the subprocess transport
+        // predates the `reconfigure_machine` method that Plan 224/225 added to
+        // `MvmClient`, so this impl was never wired. Shelling `mvmctl machine
+        // reconfigure` here is tracked for the Plan 224/225 owner; until then
+        // this transport reports the operation as unsupported rather than
+        // guessing the CLI flag mapping. Added here only to unblock the
+        // `check-linux` (`--all-features`) build.
+        Err(MvmError::Backend {
+            reason: "reconfigure_machine is not yet wired for the subprocess backend".into(),
+        })
     }
 
     async fn machine_logs(&self, id: &MachineId, opts: LogOpts) -> Result<Vec<u8>> {
