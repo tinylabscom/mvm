@@ -138,7 +138,7 @@ Example:
 ```sh
 mvmctl volume create coding-agent-work
 mvmctl volume unlock coding-agent-work
-mvmctl up ./agent-image --name coding-agent
+mvmctl machine run --flake ./agent-image --name coding-agent -d
 mvmctl volume mount coding-agent --volume coding-agent-work --guest /workspace --rw
 mvmctl cp ./task.json coding-agent:/work/task.json
 mvmctl exec coding-agent --timeout 120 -- python /work/run_task.py

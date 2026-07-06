@@ -21,7 +21,7 @@ mvmctl exec --launch-plan ./launch.json
 > compiled in only when the `dev-shell` Cargo feature is enabled. Production
 > guest builds omit the feature, so the handler is not present in the binary
 > at all and `exec` is physically unavailable. It is not meant for production
-> workloads; use `mvmctl up` (or `mvmd`) for those.
+> workloads; use `mvmctl machine run` (or `mvmd`) for those.
 
 ## When to use it
 
@@ -29,7 +29,7 @@ mvmctl exec --launch-plan ./launch.json
   a build script, an LLM-generated command, or any one-shot task that
   benefits from a strong isolation boundary but doesn't justify standing
   up a long-running VM.
-- **Reach for `mvmctl up`** when you want a long-running VM you can
+- **Reach for `mvmctl machine run`** when you want a long-running VM you can
   re-enter, share state with, or expose ports from.
 - **Reach for `mvmctl machine console <vm> --command "..."`** when you already
   have a VM running and want to run something inside it without a fresh
@@ -168,10 +168,10 @@ Workload IR manifest (top-level `apps[]`) — and auto-detects which
 one it is given. Both shapes were historically produced by the
 `mvmforge` toolchain
 ([see the migration guide](/guides/mvmforge-migration/));
-the canonical producer today is `mvmctl compile` in the mvm SDK.
+the canonical producer today is `mvmctl build compile` in the mvm SDK.
 
 ```bash
-mvmctl compile manifest.json --out ./build
+mvmctl build compile manifest.json --out ./build
 mvmctl exec --launch-plan ./build/launch.json
 ```
 
@@ -211,7 +211,7 @@ Only the entrypoint is consumed in v1; image selection still comes from
 }
 ```
 
-For long-running workloads, prefer `mvmctl up --flake <artifact-dir>`:
+For long-running workloads, prefer `mvmctl machine run --flake <artifact-dir>`:
 the SDK bakes the entrypoint into the generated flake's
 `services.<id>.command`, and mvm's PID-1 init supervises it across
 reboots.
@@ -253,7 +253,7 @@ highest):
   improvement.
 - **Persistent state** doesn't survive teardown beyond what `:rw`
   `--add-dir` rsyncs back. For larger or longer-lived state, use
-  `mvmctl up` with a persistent volume.
+  `mvmctl machine run` with a persistent volume.
 
 ## See also
 

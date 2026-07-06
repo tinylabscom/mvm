@@ -103,7 +103,7 @@ caught before a workload starts.
 Named VM launches expose a separate seccomp tier:
 
 ```sh
-mvmctl up ./my-app --name agent-sandbox --seccomp standard
+mvmctl machine run --flake ./my-app --name agent-sandbox -d --profile standard
 ```
 
 Supported tiers are:
@@ -126,7 +126,7 @@ The selected tier is recorded in the signed admission profile for audit.
 | Code interpreter | `mvmctl run --profile restrictive` | A bounded work directory or receipt output. |
 | CI validation | `mvmctl run --profile standard` | Read-only source share and explicit non-secret env. |
 | Local development | `mvmctl run --profile dev` | Writable project share. |
-| Long-running local service | `mvmctl up --seccomp standard` | Explicit ports, volumes, and readiness checks. |
+| Long-running local service | `mvmctl machine run --profile standard` | Explicit ports, volumes, and readiness checks. |
 
 Security-first defaults should feel slightly strict. A denied `--env` or
 writable share is a useful signal that the run is crossing a boundary.

@@ -13,7 +13,7 @@ Current:
 - `sandbox.commands.start(argv, env=...)`
 - `sandbox.files.write(path, content)`
 - context-manager cleanup with `with`
-- record mode for `mvmctl compile` and `mvmctl run --mode plan`
+- record mode for `mvmctl build compile` and `mvmctl run --mode plan`
 - live mode for `mvmctl run --mode live`
 
 Planned:

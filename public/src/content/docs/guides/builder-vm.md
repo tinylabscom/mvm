@@ -22,7 +22,7 @@ builder VM
   v
 host artifact cache
   |
-  | mvmctl up --hypervisor apple-container
+  | mvmctl machine run --hypervisor vz
   v
 runtime microVM
 ```
@@ -67,7 +67,7 @@ Examples of things that should not require a dev shell:
 
 - `mvmctl build --flake .`;
 - `mvmctl run`;
-- `mvmctl up --flake .`;
+- `mvmctl machine run --flake .`;
 - building a registered template;
 - booting a prebuilt runtime image.
 
@@ -80,10 +80,10 @@ For an explicit two-step flow:
 mvmctl build --flake .
 
 # 2. Boot the already-built image.
-mvmctl up --flake . --hypervisor apple-container
+mvmctl machine run --flake . --hypervisor vz
 ```
 
-On macOS, `--hypervisor apple-container` selects the Apple Virtualization runtime backend when available. The builder VM remains a build-time implementation detail. It is not the same VM as your workload VM.
+On macOS, `--hypervisor vz` selects the Apple Virtualization runtime backend when available. The builder VM remains a build-time implementation detail. It is not the same VM as your workload VM.
 
 For development convenience, `mvmctl run` combines the two phases:
 
@@ -100,7 +100,7 @@ The builder VM and runtime microVM have different jobs:
 | VM | Purpose | Lifetime | State |
 |---|---|---|---|
 | Builder VM | Runs Linux Nix builds and image assembly. | Reused or launched as needed by the build pipeline. | Has a warm Nix store/cache. |
-| Runtime microVM | Runs your workload from a finished image. | Created by `mvmctl up`, `run`, `exec`, or tests. | Uses the built rootfs/kernel artifacts. |
+| Runtime microVM | Runs your workload from a finished image. | Created by `mvmctl machine run`, `run`, `exec`, or tests. | Uses the built rootfs/kernel artifacts. |
 
 Do not benchmark the builder VM when you want runtime boot time. The builder VM exists so that the host can ask for Linux builds without becoming a Linux build machine itself.
 

@@ -108,7 +108,7 @@ mvmctl dev down
 ### Examples
 
 Working example workloads live in [`examples/`](examples/) — build any of them
-with `mvmctl machine run --flake examples/<name>` (Nix) or `mvmctl compile`
+with `mvmctl machine run --flake examples/<name>` (Nix) or `mvmctl build compile`
 (SDK):
 
 | Example | Kind | What it shows |
@@ -192,7 +192,7 @@ form keeps a console. See the
 ### 3. From a decorated function (SDK)
 
 Write an ordinary function; the decorator declares the image, resources, deps,
-and env around it. `mvmctl compile` reads the file **statically** (it is never
+and env around it. `mvmctl build compile` reads the file **statically** (it is never
 executed on the host) and emits the flake + launch plan:
 
 ```python
@@ -211,9 +211,12 @@ def greet(name: str) -> str:
 ```
 
 ```bash
-mvmctl compile app.py          # static parse (no execution) → flake.nix + launch plan
-mvmctl machine run --flake .   # build + boot
-mvmctl invoke greet --input name=ari    # dispatch greet(name="ari") over vsock → "hello ari"
+mvmctl build compile app.py --out ./out   # static parse (no execution) → ./out (flake.nix + launch plan)
+mvmctl machine build --flake ./out        # build the image inside the builder VM
+
+# Dispatch greet(name="ari"): the entrypoint payload is [args, kwargs] JSON on stdin
+# (empty stdin ⇒ the default no-arg payload `[[], {}]`).
+echo '[[], {"name": "ari"}]' | mvmctl machine run --entrypoint --flake ./out   # → "hello ari"
 ```
 
 At build time the `@mvm.app` decorator and the `mvm` import are **stripped** from
@@ -234,7 +237,7 @@ fixtures so no SDK can drift from `mvmctl`.
 Declare a workload where it lives. `@mvm.app(...)` (Python) / `mvm.app({...})`
 (TypeScript) is higher-order: it records the declaration and returns your
 function unchanged, so the same file still runs normally under `python` / `tsx`
-and is *also* read statically by `mvmctl compile`.
+and is *also* read statically by `mvmctl build compile`.
 
 <table>
 <tr><th>Python</th><th>TypeScript</th></tr>

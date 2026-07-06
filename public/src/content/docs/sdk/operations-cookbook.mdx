@@ -19,8 +19,8 @@ language SDK tests prove them.
 
 | Operation | Python today | TypeScript today | Secure fallback today |
 | --- | --- | --- | --- |
-| Create sandbox recording | `mvm.Sandbox.create(...)` | `Sandbox.create(...)` | `mvmctl compile` or `mvmctl run --mode plan` |
-| Create live sandbox | `mvmctl run --mode live ./script.py` | `mvmctl run --mode live ./script.ts` | `mvmctl up` |
+| Create sandbox recording | `mvm.Sandbox.create(...)` | `Sandbox.create(...)` | `mvmctl build compile` or `mvmctl run --mode plan` |
+| Create live sandbox | `mvmctl run --mode live ./script.py` | `mvmctl run --mode live ./script.ts` | `mvmctl machine run` |
 | Start command | `sandbox.commands.start([...])` | `sandbox.commands.start([...])` | `mvmctl proc start` or `mvmctl exec` |
 | Capture command result | Target `commands.run(...)` | Target `commands.run(...)` | CLI command result and receipt paths |
 | Write file | `sandbox.files.write(path, data)` | `sandbox.files.write(path, data)` | `mvmctl machine fs write` |
@@ -64,7 +64,7 @@ Security notes:
 Run modes:
 
 ```sh
-mvmctl compile ./sandbox.py --out /tmp/sandbox-ir
+mvmctl build compile ./sandbox.py --out /tmp/sandbox-ir
 mvmctl run --mode plan ./sandbox.py
 mvmctl run --mode live ./sandbox.py
 ```
@@ -100,7 +100,7 @@ Security notes:
 Run modes:
 
 ```sh
-mvmctl compile ./sandbox.ts --out /tmp/sandbox-ir
+mvmctl build compile ./sandbox.ts --out /tmp/sandbox-ir
 mvmctl run --mode plan ./sandbox.ts
 mvmctl run --mode live ./sandbox.ts
 ```

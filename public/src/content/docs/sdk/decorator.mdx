@@ -5,7 +5,7 @@ description: Declare reproducible mvm workloads in Python or TypeScript and comp
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
-The decorator SDK is the build-time authoring surface. It lets a developer describe a workload next to the function or service it runs, then compile that declaration into the same Workload IR consumed by `mvmctl build` and `mvmctl up`.
+The decorator SDK is the build-time authoring surface. It lets a developer describe a workload next to the function or service it runs, then compile that declaration into the same Workload IR consumed by `mvmctl machine build` and `mvmctl machine run`.
 
 This is the declarative side of the product: code-first workload declaration, resource selection, image selection, and deploy metadata. The security difference is intentional: the static compiler reads source and extracts literal declarations without importing the module.
 
@@ -71,14 +71,14 @@ export const run = mvm.app({
 Compile and inspect:
 
 ```sh
-mvmctl compile tool.py --out /tmp/agent-tool
-mvmctl build /tmp/agent-tool
-mvmctl up agent-tool
+mvmctl build compile tool.py --out /tmp/agent-tool
+mvmctl machine build --flake /tmp/agent-tool
+mvmctl machine run --flake /tmp/agent-tool
 ```
 
 ## Why static compile matters
 
-The safe path is static analysis: `mvmctl compile` reads the declaration and emits IR without importing and executing the user's source file. That keeps untrusted or side-effecting module import code out of the host process.
+The safe path is static analysis: `mvmctl build compile` reads the declaration and emits IR without importing and executing the user's source file. That keeps untrusted or side-effecting module import code out of the host process.
 
 Record-mode and live-mode runtime scripts exist for the imperative `Sandbox.create(...)` workflow, but they have a different trust posture because the user's script runs on the host process invoking the SDK. Prefer the static declaration form for security-sensitive deployable workloads.
 

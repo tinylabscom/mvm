@@ -43,7 +43,7 @@ L1 (host + hypervisor) doesn't carry its own claim — the host is **trusted** b
 
 ## Intent-bound admission profiles
 
-Every workload also goes through a signed admission step before boot. `mvmctl up` synthesizes an `ExecutionPlan`, signs it with the host key, checks its validity window and replay nonce, then emits a chain-signed audit entry.
+Every workload also goes through a signed admission step before boot. `mvmctl machine run` synthesizes an `ExecutionPlan`, signs it with the host key, checks its validity window and replay nonce, then emits a chain-signed audit entry.
 
 The plan now carries an `admission_profile`: a compact record of the workload's declared intent and the controls selected for that intent:
 

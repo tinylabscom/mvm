@@ -108,7 +108,7 @@ Snapshot may be corrupted after a Firecracker version change.
 **Fix**: Delete the snapshot and cold boot:
 ```bash
 mvmctl build <project-dir> --force
-mvmctl up <project-dir> --name <name>
+mvmctl machine run --flake <project-dir> --name <name> -d
 ```
 
 ## Build Issues
@@ -172,7 +172,7 @@ error: hash mismatch in fixed-output derivation
 **Fix**: Update the hash to the value shown after `got:` in the error message, or use `--update-hash`:
 
 ```bash
-mvmctl build ./my-service --update-hash
+mvmctl machine build --flake ./my-service --update-hash
 ```
 
 ### Manifest not found
@@ -279,16 +279,16 @@ mvmctl dev up --cpus 8 --memory 16
 
 Force a specific backend:
 ```bash
-mvmctl up --flake . --hypervisor firecracker
-mvmctl up --flake . --hypervisor apple-container
-mvmctl up --flake . --hypervisor docker
-mvmctl up --flake . --hypervisor qemu    # microvm.nix
+mvmctl machine run --flake . --hypervisor firecracker
+mvmctl machine run --flake . --hypervisor vz
+mvmctl machine run --flake . --hypervisor docker
+mvmctl machine run --flake . --hypervisor qemu    # microvm.nix
 mvmctl doctor   # check available backends
 ```
 
 ### macOS: first-run codesigning for `apple-container` and `libkrun`
 
-Both `mvmctl up --hypervisor apple-container` and (once plan 57 W3 wires guest boot) `mvmctl up --hypervisor libkrun` need ad-hoc codesigning before the macOS kernel will let the binary touch the hypervisor APIs:
+Both `mvmctl machine run --hypervisor vz` and (once plan 57 W3 wires guest boot) `mvmctl machine run --hypervisor libkrun` need ad-hoc codesigning before the macOS kernel will let the binary touch the hypervisor APIs:
 
 - `com.apple.security.virtualization` — required by `Virtualization.framework` (the `apple-container` backend).
 - `com.apple.security.hypervisor` — required by direct `Hypervisor.framework` callers (the `libkrun` backend).
@@ -298,7 +298,7 @@ On the **first** run of either backend, `mvmctl` ad-hoc signs itself with both e
 What you'll see on the first run:
 
 ```
-$ mvmctl up --flake . --hypervisor apple-container
+$ mvmctl machine run --flake . --hypervisor vz
 INFO Signing binary with virtualization + hypervisor entitlements...
 …starts the VM…
 ```
@@ -329,7 +329,7 @@ Hitting `KVM not available` on a cloud instance? Three options, in order of reco
 **Option 2 — Use the Tier 3 Docker fallback.** Works in any environment with Docker Engine. **Reduced security tier** — see the [Matryoshka model](/security/matryoshka). The L1–L3 layers collapse to the host kernel, so claims 1, 2, and 3 do not hold. Use only for non-security-sensitive workloads (CI scratch, local experiments).
 
 ```bash
-mvmctl up --flake . --hypervisor docker
+mvmctl machine run --flake . --hypervisor docker
 # Suppress the per-run banner once you've acknowledged the tier:
 export MVM_ACK_DOCKER_TIER=1
 ```

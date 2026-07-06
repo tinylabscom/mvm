@@ -21,12 +21,12 @@ runtime sizing.
 ## Build and boot
 
 ```sh
-mvmctl build ./my-dev-vm
-mvmctl up ./my-dev-vm --name my-dev-vm
+mvmctl machine build --flake ./my-dev-vm
+mvmctl machine run --flake ./my-dev-vm --name my-dev-vm -d
 mvmctl machine console my-dev-vm
 ```
 
-Use `mvmctl exec` for scripted commands and `mvmctl machine console` for interactive
+Use `mvmctl machine exec` for scripted commands and `mvmctl machine console` for interactive
 debugging.
 
 ## Iterate
@@ -34,9 +34,9 @@ debugging.
 ```sh
 $EDITOR flake.nix
 nix flake update
-mvmctl build ./my-dev-vm
+mvmctl machine build --flake ./my-dev-vm
 mvmctl machine stop my-dev-vm
-mvmctl up ./my-dev-vm --name my-dev-vm
+mvmctl machine run --flake ./my-dev-vm --name my-dev-vm -d
 ```
 
 Only update `flake.lock` when you intend to change inputs. Review that diff.

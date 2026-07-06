@@ -89,20 +89,21 @@ mvmctl machine console vm # Interactive shell into a running VM (PTY-over-vsock)
 Build a microVM image and run it in one command:
 
 ```bash
-mvmctl up --flake . --cpus 2 --memory 1024
+mvmctl machine run --flake . --cpus 2 --memory 1024
 ```
 
 Run in background with port forwarding:
 
 ```bash
-mvmctl up --flake . -d -p 8080:8080
+mvmctl machine run --flake . --name my-vm -d
+mvmctl machine forward my-vm -p 8080:8080
 ```
 
 Or build separately:
 
 ```bash
 mvmctl build --flake . --profile minimal
-mvmctl up --flake .
+mvmctl machine run --flake .
 ```
 
 ## 5. Manifests
@@ -115,7 +116,7 @@ mvmctl init base-worker --preset worker
 cd base-worker
 $EDITOR mvm.toml
 mvmctl build
-mvmctl up
+mvmctl machine run --manifest .
 ```
 
 Use `mvmctl manifest ls` and `mvmctl manifest info` to inspect built
@@ -141,7 +142,7 @@ Browse the bundled catalog and scaffold from a curated entry:
 mvmctl catalog list                       # Browse available entries
 mvmctl init my-app --catalog minimal      # Scaffold from a catalog entry
 mvmctl build my-app                       # Build the manifest
-mvmctl up my-app                          # Boot the VM
+mvmctl machine run --manifest my-app                          # Boot the VM
 ```
 
 ## 7. Interactive Console
@@ -178,7 +179,7 @@ Create isolated networks for different projects:
 
 ```bash
 mvmctl network create myproject
-mvmctl up --flake . --network myproject
+mvmctl machine run --flake .
 mvmctl network list
 ```
 
