@@ -386,6 +386,46 @@ impl crate::checkpoint::VmFullControl for FcVmFullControl {
     }
 }
 
+/// Boots a forked child from a Firecracker checkpoint triple cloned into
+/// `child_dir`. Implements [`crate::checkpoint::ForkVmFullRestorer`] for the
+/// FC path.
+///
+/// On `restore_fork`:
+/// 1. Renames `memory.bin` → `mem.bin` inside `child_dir` so
+///    `warm_restore_instance_from_path` finds the right filename.
+/// 2. Calls `warm_restore_instance_from_path(child_vm_name, child_dir_str, [0u8; GENID_BYTES])`.
+///    The VMGenID token is zeroed — the fork caller delivers the real grant/token
+///    over vsock after `restore_fork` returns (mirrors the Vz fork path).
+pub struct FcForkRestorer;
+
+impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {
+    fn restore_fork(&self, child_vm_name: &str, child_dir: &std::path::Path) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        // FC saves memory as `memory.bin` but `warm_restore_instance_from_path`
+        // expects `mem.bin` (the canonical FC snapshot name).
+        let memory_bin = child_dir.join("memory.bin");
+        let mem_bin = child_dir.join("mem.bin");
+        if memory_bin.exists() && !mem_bin.exists() {
+            std::fs::rename(&memory_bin, &mem_bin).with_context(|| {
+                format!(
+                    "renaming memory.bin → mem.bin for FC fork of '{}'",
+                    child_vm_name
+                )
+            })?;
+        }
+        let child_dir_str = child_dir.to_string_lossy().into_owned();
+        // Deliver a zero token; the CLI fork path delivers the real grant/VMGenID
+        // token over vsock after restore_fork returns.
+        crate::microvm::warm_restore_instance_from_path(
+            child_vm_name,
+            &child_dir_str,
+            [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+        )
+        .map(|_| ())
+        .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -208,7 +208,13 @@ pub fn fc_pid_path(name: &str) -> Option<std::path::PathBuf> {
     )
 }
 
-fn firecracker_vsock_uds_path(dir: &str) -> String {
+/// Path to the host-side UDS that proxies the guest agent's vsock port for a
+/// Firecracker VM whose per-VM directory is `dir` (as returned by
+/// [`resolve_running_vm_dir`]). `pub` so CLI-layer callers — e.g. the FC fork
+/// path delivering a post-restore grant to a forked child — can locate the
+/// same socket `warm_restore_instance_from_path` talks to, without
+/// reimplementing the layout.
+pub fn firecracker_vsock_uds_path(dir: &str) -> String {
     format!("{dir}/runtime/v.sock")
 }
 
@@ -1254,6 +1260,29 @@ pub fn warm_restore_instance(
     // which is shell- and JSON-safe.
     mvm_core::naming::validate_vm_name(name)
         .with_context(|| format!("warm-start refused invalid VM name {name:?}"))?;
+
+    let snapshot_dir = mvm_core::config::instance_snapshot_dir(name);
+    let snapshot_dir = snapshot_dir.to_string_lossy().into_owned();
+    warm_restore_instance_from_path(name, &snapshot_dir, token)
+}
+
+/// Warm-restore an instance from a caller-supplied snapshot directory.
+///
+/// Factored out from [`warm_restore_instance`] so that
+/// [`crate::firecracker::FcForkRestorer`] can direct the load to the fork's
+/// checkpoint content directory instead of the canonical
+/// `instance_snapshot_dir(name)` path.
+///
+/// `snapshot_dir` must contain `vmstate.bin` and `mem.bin`. Name validation
+/// and `require_linux_env()` are performed here so every caller gets the same
+/// guards.
+pub fn warm_restore_instance_from_path(
+    name: &str,
+    snapshot_dir: &str,
+    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+) -> Result<mvm_core::vm_backend::ReseedStatus> {
+    mvm_core::naming::validate_vm_name(name)
+        .with_context(|| format!("warm-start refused invalid VM name {name:?}"))?;
     require_linux_env()?;
 
     let vm_dir = resolve_running_vm_dir(name)?;
@@ -1263,8 +1292,6 @@ pub fn warm_restore_instance(
     let socket = format!("{vm_dir}/fc.socket");
     let pid_file = format!("{vm_dir}/fc.pid");
 
-    let snapshot_dir = mvm_core::config::instance_snapshot_dir(name);
-    let snapshot_dir = snapshot_dir.to_string_lossy().into_owned();
     if !std::path::Path::new(&format!("{snapshot_dir}/vmstate.bin")).exists() {
         anyhow::bail!(
             "no sealed snapshot at {snapshot_dir} for VM '{name}' — `mvmctl vm pause {name}` \
@@ -1272,7 +1299,7 @@ pub fn warm_restore_instance(
         );
     }
     // Refuse a tampered snapshot before any VMM interaction.
-    crate::base::snapshot_integrity::verify_snapshot_artifacts(&snapshot_dir)?;
+    crate::base::snapshot_integrity::verify_snapshot_artifacts(snapshot_dir)?;
 
     let vmstate = format!("{snapshot_dir}/vmstate.bin");
     let mem = format!("{snapshot_dir}/mem.bin");

@@ -17,7 +17,8 @@ use serde::Serialize;
 
 use mvm_backend::checkpoint::{
     CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, RestoreParams,
-    capture_fs_quick, capture_vm_full, fork_checkpoint, fork_vm_full, restore_checkpoint,
+    capture_fs_quick, capture_vm_full, checkpoint_is_vz, fork_checkpoint, fork_vm_full,
+    fork_vm_full_fc, restore_checkpoint,
 };
 use mvm_backend::vz::supervisor_config_path;
 use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
@@ -935,9 +936,26 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
     let dest_dir = vm_state_dir(&child_vm_name);
     let child_id = CheckpointId::new(format!("fork-{child_vm_name}-{now}"));
 
-    // Read the parent supervisor config to extract the saved machine shape
-    // (cpu_count / memory_mib). The restore must match these exactly.
     let parent_meta = p.store.read_meta(p.checkpoint)?;
+
+    // Dispatch to the FC path when the checkpoint carries no supervisor-config.json
+    // (FC checkpoints have {rootfs.ext4, memory.bin, vmstate.bin}; Vz checkpoints
+    // additionally carry supervisor-config.json).
+    if !checkpoint_is_vz(&parent_meta) {
+        return fork_vm_full_arm_fc(ForkVmFullArmFcParams {
+            store: p.store,
+            checkpoint: p.checkpoint,
+            parent_meta,
+            child_vm_name,
+            dest_dir,
+            child_id,
+            now,
+            json: p.json,
+        });
+    }
+
+    // Vz path: read the parent supervisor config to extract the saved machine shape
+    // (cpu_count / memory_mib). The restore must match these exactly.
     let parent_cfg_path =
         supervisor_config_path(&mvm_core::config::vm_state_dir(&parent_meta.vm_name));
     let parent_cfg_bytes = std::fs::read(&parent_cfg_path).with_context(|| {
@@ -1106,6 +1124,186 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
             p.checkpoint.as_str(),
             meta.id.as_str(),
             child_vm_name
+        ));
+    }
+    Ok(())
+}
+
+/// Inputs for [`fork_vm_full_arm_fc`]. Grouped to stay under the
+/// `clippy::too_many_arguments` workspace ceiling.
+struct ForkVmFullArmFcParams<'a> {
+    store: &'a CheckpointStore,
+    checkpoint: &'a CheckpointId,
+    parent_meta: mvm_core::checkpoint::CheckpointMeta,
+    child_vm_name: String,
+    dest_dir: std::path::PathBuf,
+    child_id: CheckpointId,
+    now: u64,
+    json: bool,
+}
+
+/// FC vm_full fork: clone the captured triple, admit a fresh claim-8 plan for
+/// the child, rename `memory.bin` → `mem.bin`, and boot the child via a fresh
+/// Firecracker VMM loaded from the checkpoint snapshot.
+fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
+    // Use safe defaults for FC cpu/mem plan admission. The actual cpu/mem are
+    // baked into the snapshot and enforced by FC at load time; the plan values
+    // are used for claim-8 admission metadata only.
+    let user_cfg = mvm_core::user_config::load(None);
+    let cpus = user_cfg.default_cpus;
+    let mem_mib = user_cfg.default_memory_mib as u64;
+
+    // Admit a fresh plan for the child using the checkpoint's RECORDED rootfs sha.
+    let rootfs_blob = p.store.content_dir(p.checkpoint).join("rootfs.ext4");
+    let recorded_sha = p
+        .parent_meta
+        .content
+        .iter()
+        .find(|b| b.name == "rootfs.ext4")
+        .map(|b| b.sha256.clone());
+    let tenant = super::tenant_resolution::resolve_tenant(None);
+    let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
+    let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+        tenant: &tenant,
+        vm_name: &p.child_vm_name,
+        backend_name: "firecracker",
+        rootfs_path: &rootfs_blob,
+        precomputed_image_sha256: recorded_sha,
+        cpus,
+        mem_mib,
+        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+        secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+        secrets: Vec::new(),
+        auth: mvm_core::plan::AuthPolicy::none(),
+        no_supervisor: false,
+        ledger: &ledger,
+        keys_dir: None,
+        audit_dir: None,
+        policy_dir: None,
+        bundle_pin: None,
+        deps_volume: None,
+        shares: Vec::new(),
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+        agent_verb_override: vec![],
+        restrict_agent_verbs: super::agent_verbs::grant_eligible(
+            false,
+            false,
+            false,
+            super::agent_verbs::image_is_sealed(&rootfs_blob),
+        ),
+    })?;
+
+    let child_plan_json = admission.as_ref().map(|ctx| {
+        serde_json::to_string(&ctx.admitted.signed).expect("admitted plan is always serializable")
+    });
+    let child_tenant_id = admission
+        .as_ref()
+        .map(|ctx| ctx.admitted.plan.tenant.0.clone());
+
+    // Mint the child's verb-grant sidecar up front so it's readable below for
+    // post-restore delivery. Mirrors the Vz fork path.
+    if let Some(ref plan_json_str) = child_plan_json {
+        let mint_cfg = mvm_core::vm_backend::VmStartConfig {
+            name: p.child_vm_name.clone(),
+            plan_json: Some(plan_json_str.clone()),
+            ..Default::default()
+        };
+        mvm_hostd::plan_admission::stash_plan_for_bridge(&mint_cfg)?;
+    }
+
+    let restorer = mvm_backend::firecracker::FcForkRestorer;
+    let fork_result = fork_vm_full_fc(
+        p.store,
+        ForkParams {
+            checkpoint: p.checkpoint.clone(),
+            child_id: p.child_id,
+            child_vm_name: p.child_vm_name.clone(),
+            dest_dir: p.dest_dir,
+            created_unix: p.now,
+            child_plan_json,
+            child_tenant_id,
+        },
+        &restorer,
+    );
+    if let Err(ref e) = fork_result {
+        super::up::emit_failed_if(&admission, "fork-vm-full-fc", e);
+    }
+    let meta = fork_result
+        .with_context(|| format!("forking FC vm_full checkpoint {:?}", p.checkpoint.as_str()))?;
+
+    bind_checkpoint_forked(p.checkpoint, &meta, &p.child_vm_name, p.store)?;
+    super::up::emit_launched_if(&admission, "firecracker");
+
+    // Best-effort: deliver the freshly-minted grant to the restored child
+    // agent over the FC vsock UDS, re-pinning it to the child's plan instead
+    // of running class-gate-only. `FcForkRestorer::restore_fork` already
+    // resumed the VMM with a zero VMGenID token before returning; this is the
+    // real token + grant delivery, mirroring the Vz fork path and
+    // `warm_restore_instance_from_path`'s own post-restore signal.
+    if let Some(grant_env) = read_grant_envelope_for(&p.child_vm_name) {
+        match mvm_backend::microvm::resolve_running_vm_dir(&p.child_vm_name) {
+            Ok(vm_dir) => {
+                let vsock_path_str = mvm_backend::microvm::firecracker_vsock_uds_path(&vm_dir);
+                const POLL_ATTEMPTS: u32 = 40; // 20 seconds max
+                let mut agent_ready = false;
+                for _ in 0..POLL_ATTEMPTS {
+                    if mvm_guest::vsock::ping_at(&vsock_path_str).unwrap_or(false) {
+                        agent_ready = true;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                if agent_ready {
+                    let token =
+                        mvm_core::crypto::vmgenid::fresh_generation_token(&p.child_vm_name).token;
+                    match mvm_guest::vsock::post_restore_with_grant_at(
+                        &vsock_path_str,
+                        token,
+                        Some(grant_env),
+                    ) {
+                        Ok(r) if r.acknowledged => tracing::info!(
+                            "FC fork post-restore grant delivered to '{}'",
+                            p.child_vm_name
+                        ),
+                        Ok(_) => tracing::warn!(
+                            "FC fork post-restore grant delivery returned failure for '{}'",
+                            p.child_vm_name
+                        ),
+                        Err(e) => tracing::warn!(
+                            "FC fork post-restore grant delivery failed for '{}': {e}",
+                            p.child_vm_name
+                        ),
+                    }
+                } else {
+                    tracing::warn!(
+                        "FC fork post-restore: agent not reachable for '{}'; grant not delivered (VM is running)",
+                        p.child_vm_name
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                "FC fork post-restore: could not resolve VM dir for '{}' to deliver grant: {e}",
+                p.child_vm_name
+            ),
+        }
+    }
+
+    if p.json {
+        crate::json_out::emit_json(&CheckpointForkJson {
+            schema_version: 1,
+            action: "fork",
+            parent_id: p.checkpoint,
+            child_vm_name: &p.child_vm_name,
+            booted: true,
+            checkpoint: &meta,
+        })?;
+    } else {
+        ui::success(&format!(
+            "forked {} -> checkpoint {} (vm '{}', auto-booted on firecracker)",
+            p.checkpoint.as_str(),
+            meta.id.as_str(),
+            p.child_vm_name
         ));
     }
     Ok(())

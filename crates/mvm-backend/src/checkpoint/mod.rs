@@ -184,6 +184,25 @@ pub trait ChildSupervisorSpawner {
     fn spawn(&self, config: &mvm_build::vz::SupervisorConfig) -> Result<()>;
 }
 
+/// Boots a forked child from its staged snapshot files. Abstracted so
+/// `fork_vm_full_fc` is testable without a live hypervisor; the FC impl
+/// (`FcForkRestorer`) lives in `crate::firecracker` and is the only current
+/// non-Vz implementation.
+pub trait ForkVmFullRestorer {
+    /// Stage the child's snapshot into position and start the VM. `child_dir`
+    /// is the child's state dir with all checkpoint blobs already cloned there.
+    fn restore_fork(&self, child_vm_name: &str, child_dir: &std::path::Path) -> Result<()>;
+}
+
+/// Returns `true` when the checkpoint was captured from a Vz VM (its content
+/// manifest carries a `supervisor-config.json` blob). FC checkpoints do not
+/// include that blob — use this to dispatch fork to the right path.
+pub fn checkpoint_is_vz(meta: &mvm_core::checkpoint::CheckpointMeta) -> bool {
+    meta.content
+        .iter()
+        .any(|b| b.name == crate::vz::SUPERVISOR_CONFIG_FILE_NAME)
+}
+
 /// Branch a new sandbox lineage from a checkpoint: verify the source content's
 /// integrity, CoW-clone it into `dest_dir`, and record a child checkpoint whose
 /// `parent` points back to the source. Boot of the child is the caller's job.
@@ -361,6 +380,66 @@ pub fn fork_vm_full(
     }
 
     spawner.spawn(&child_cfg)?;
+
+    let child = CheckpointMeta::builder(
+        params.child_id,
+        CheckpointClass::VmFull,
+        params.child_vm_name,
+    )
+    .parent(Some(parent.id))
+    .created_unix(params.created_unix)
+    .content(parent.content.clone())
+    .supervisor_config_digest(parent.supervisor_config_digest)
+    .build();
+    store.write_meta(&child)?;
+    Ok(child)
+}
+
+/// Branch a new FC VM identity from a Firecracker vm_full checkpoint and boot
+/// it via a fresh Firecracker VMM loaded from the checkpoint snapshot.
+///
+/// Like [`fork_vm_full`] but for Firecracker backends: FC checkpoints carry
+/// `{rootfs.ext4, memory.bin, vmstate.bin}` instead of a supervisor config.
+/// The child's blobs are cloned into `dest_dir`; `memory.bin` is renamed to
+/// `mem.bin` (Firecracker's canonical load name); a fresh FC VMM is started and
+/// `PUT /snapshot/load` restores the child's state; then the lineage checkpoint
+/// record is written.
+pub fn fork_vm_full_fc(
+    store: &CheckpointStore,
+    params: ForkParams,
+    restorer: &dyn ForkVmFullRestorer,
+) -> Result<CheckpointMeta> {
+    let parent = store.read_meta(&params.checkpoint)?;
+    if parent.class != CheckpointClass::VmFull {
+        anyhow::bail!(
+            "cannot fork_vm_full_fc checkpoint '{}' (class fs_quick); use fork_checkpoint",
+            parent.id
+        );
+    }
+    verify_content(store, &parent)?;
+
+    if !FORK_ALLOW_PARENT_RUNNING && vm_is_running(&parent.vm_name) {
+        anyhow::bail!(
+            "cannot fork checkpoint '{}': parent VM '{}' is still running; stop it first",
+            parent.id,
+            parent.vm_name
+        );
+    }
+
+    // Clone the captured triple into the child's state dir, then boot the child
+    // from its OWN copies — never the parent's live blobs.
+    std::fs::create_dir_all(&params.dest_dir)
+        .with_context(|| format!("creating {}", params.dest_dir.display()))?;
+    let content_dir = store.content_dir(&parent.id);
+    for blob in &parent.content {
+        crate::base::cow::clone_rootfs_for_instance(
+            &content_dir.join(&blob.name),
+            &params.dest_dir.join(&blob.name),
+        )
+        .with_context(|| format!("cloning checkpoint blob {}", blob.name))?;
+    }
+
+    restorer.restore_fork(&params.child_vm_name, &params.dest_dir)?;
 
     let child = CheckpointMeta::builder(
         params.child_id,
@@ -2085,6 +2164,148 @@ mod tests {
             vmstate_blob.sha256, sha256,
             "vmstate.bin sha256 must match the extra_content blob"
         );
+    }
+
+    // ── checkpoint_is_vz ────────────────────────────────────────────────────
+
+    #[test]
+    fn checkpoint_is_vz_true_when_supervisor_config_blob_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let meta = seed_vm_full_checkpoint(&store, tmp.path(), "vz1");
+        assert!(
+            checkpoint_is_vz(&meta),
+            "Vz checkpoint carries the supervisor-config.json blob"
+        );
+    }
+
+    #[test]
+    fn checkpoint_is_vz_false_for_fc_checkpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let meta = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fc1");
+        assert!(
+            !checkpoint_is_vz(&meta),
+            "FC checkpoint has no supervisor-config.json blob"
+        );
+    }
+
+    // ── fork_vm_full_fc ─────────────────────────────────────────────────────
+
+    /// Seeds an FC-shaped vm_full checkpoint: {rootfs.ext4, memory.bin,
+    /// vmstate.bin}, no supervisor-config.json, no machine-id.
+    fn seed_fc_vm_full_checkpoint(store: &CheckpointStore, tmp: &Path, id: &str) -> CheckpointMeta {
+        let rootfs = tmp.join(format!("{id}-live.ext4"));
+        std::fs::write(&rootfs, b"disk").unwrap();
+        let checkpoint_id = CheckpointId::new(id);
+        let content_dir = store.content_dir(&checkpoint_id);
+        std::fs::create_dir_all(&content_dir).unwrap();
+        let vmstate = content_dir.join("vmstate.bin");
+        std::fs::write(&vmstate, b"fake-vmstate").unwrap();
+        let sha256 = mvm_core::crypto::image_verify::sha256_file(&vmstate).unwrap();
+        let ctl = NoMachineIdControl {
+            rootfs,
+            extra: vec![ContentBlob {
+                name: "vmstate.bin".into(),
+                sha256,
+            }],
+        };
+        capture_vm_full(
+            store,
+            CaptureVmFullParams {
+                id: checkpoint_id,
+                vm_name: "fc-origin".into(),
+                supervisor_config_digest: "d".into(),
+                supervisor_config_src: None,
+                tag: None,
+                created_unix: 1,
+            },
+            &ctl,
+        )
+        .unwrap()
+    }
+
+    struct MockRestorer {
+        seen: RefCell<Option<(String, PathBuf)>>,
+    }
+    impl ForkVmFullRestorer for MockRestorer {
+        fn restore_fork(&self, child_vm_name: &str, child_dir: &Path) -> Result<()> {
+            *self.seen.borrow_mut() = Some((child_vm_name.to_string(), child_dir.to_path_buf()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn fork_vm_full_fc_clones_triple_and_records_lineage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fcv1");
+
+        let dest = tmp.path().join("childvm-state");
+        let restorer = MockRestorer {
+            seen: RefCell::new(None),
+        };
+        let child = fork_vm_full_fc(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id: CheckpointId::new("fcf1"),
+                child_vm_name: "fc-childvm".into(),
+                dest_dir: dest.clone(),
+                created_unix: 2,
+                child_plan_json: None,
+                child_tenant_id: None,
+            },
+            &restorer,
+        )
+        .unwrap();
+
+        // The FC triple is cloned into the child's state dir; no Vz supervisor
+        // config or machine-id ever existed for this checkpoint.
+        for name in ["rootfs.ext4", "memory.bin", "vmstate.bin"] {
+            assert!(dest.join(name).exists(), "{name} not cloned");
+        }
+        assert!(!dest.join(crate::vz::SUPERVISOR_CONFIG_FILE_NAME).exists());
+        assert!(!dest.join("machine-id").exists());
+
+        assert_eq!(child.class, CheckpointClass::VmFull);
+        assert_eq!(child.parent.as_ref().unwrap(), &parent.id);
+        assert_eq!(child.vm_name, "fc-childvm");
+        assert_eq!(child.content, parent.content);
+
+        // The restorer was invoked with the child's name and staged dir.
+        let (seen_name, seen_dir) = restorer.seen.borrow().clone().unwrap();
+        assert_eq!(seen_name, "fc-childvm");
+        assert_eq!(seen_dir, dest);
+    }
+
+    #[test]
+    fn fork_vm_full_fc_refuses_fs_quick() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let fsq = seed_fs_quick_checkpoint(&store, tmp.path(), "fcp1");
+        let restorer = MockRestorer {
+            seen: RefCell::new(None),
+        };
+        let err = fork_vm_full_fc(
+            &store,
+            ForkParams {
+                checkpoint: fsq.id.clone(),
+                child_id: CheckpointId::new("fcf2"),
+                child_vm_name: "fc-childvm2".into(),
+                dest_dir: tmp.path().join("childvm2-state"),
+                created_unix: 2,
+                child_plan_json: None,
+                child_tenant_id: None,
+            },
+            &restorer,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("fs_quick"),
+            "unexpected error: {err}"
+        );
+        assert!(restorer.seen.borrow().is_none());
     }
 
     // SAFETY: serialized by HOME_TEST_LOCK.
