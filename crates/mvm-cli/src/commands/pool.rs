@@ -15,7 +15,6 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use mvm_backend::backend::AnyBackend;
-use mvm_backend::catalog::BackendKind;
 use mvm_backend::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool, now_unix_secs};
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
@@ -394,32 +393,20 @@ pub fn reap_stale_standbys_best_effort() {
     }
 }
 
-fn should_replenish_inline(
-    backend_kind: BackendKind,
-    supports_standby_pool: bool,
-    warm_pool_size: u32,
-) -> bool {
-    warm_pool_size > 0 && supports_standby_pool && backend_kind != BackendKind::Vz
+fn should_replenish_inline(supports_standby_pool: bool, warm_pool_size: u32) -> bool {
+    warm_pool_size > 0 && supports_standby_pool
 }
 
 /// Top the pool back up toward `cfg.warm_pool_size` after a launch (the no-daemon
 /// replenish-on-use maintainer). Best-effort — failures are logged, never propagated.
 ///
 /// For libkrun standbys this path fires automatically after each claimed launch.
-/// For Vz saved-standbys the replenish path requires a boot + capture cycle that is
-/// expensive and may require the builder VM to resolve the kernel. Automatic replenish
-/// is skipped for Vz (pool warm is manual); `supports_standby_pool()` stays true so
-/// `try_warm_claim` still fires.
+/// (The historical Vz saved-standby carve-out — a boot + capture cycle expensive
+/// enough to require the builder VM and a manual `pool warm` — no longer applies:
+/// Vz was removed as a workload-dispatch `AnyBackend` variant in Plan 226 R1P1
+/// WS-A, so `supports_standby_pool()` is only ever true for libkrun today.)
 pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Result<u32> {
-    // Vz replenish boots a seed VM + captures its memory, and may need the
-    // builder VM to resolve default image artifacts. Keep that work explicit
-    // via `pool warm` so a foreground launch never races a detached rewarm for
-    // the same builder resources.
-    if !should_replenish_inline(
-        backend.kind(),
-        backend.supports_standby_pool(),
-        cfg.warm_pool_size,
-    ) {
+    if !should_replenish_inline(backend.supports_standby_pool(), cfg.warm_pool_size) {
         return Ok(0);
     }
     let Some(kernel) = cfg.kernel_path.as_ref() else {
@@ -542,11 +529,10 @@ mod tests {
     }
 
     #[test]
-    fn inline_replenish_skips_zero_unsupported_and_vz() {
-        assert!(!should_replenish_inline(BackendKind::Libkrun, true, 0));
-        assert!(!should_replenish_inline(BackendKind::Libkrun, false, 1));
-        assert!(!should_replenish_inline(BackendKind::Vz, true, 1));
-        assert!(should_replenish_inline(BackendKind::Libkrun, true, 1));
+    fn inline_replenish_skips_zero_and_unsupported() {
+        assert!(!should_replenish_inline(true, 0));
+        assert!(!should_replenish_inline(false, 1));
+        assert!(should_replenish_inline(true, 1));
     }
 
     #[test]
@@ -1001,23 +987,19 @@ struct WarmShape {
     mem_mib: u32,
 }
 
-fn resolve_warm_shape(cfg: &MvmConfig, rootfs_override: Option<&str>) -> Result<WarmShape> {
+fn resolve_warm_shape(cfg: &MvmConfig, _rootfs_override: Option<&str>) -> Result<WarmShape> {
     let backend_name = super::shared::resolve_effective_hypervisor("firecracker");
     let backend = AnyBackend::from_hypervisor(&backend_name);
-    let (default_kernel, default_rootfs) =
+    let (default_kernel, _default_rootfs) =
         ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Prod)
             .context("resolve default-microvm kernel for the warm pool")?;
     let vcpus = u8::try_from(cfg.default_cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
-    // Vz needs an image; libkrun does not. Resolve: explicit --rootfs > env var > default.
-    let image = if backend.kind() == BackendKind::Vz {
-        let path = rootfs_override
-            .map(str::to_string)
-            .or_else(|| std::env::var("MVM_POOL_ROOTFS").ok())
-            .unwrap_or(default_rootfs);
-        Some(std::path::PathBuf::from(path))
-    } else {
-        None
-    };
+    // The image-keyed branch here used to resolve a Vz saved-standby's source
+    // rootfs (explicit --rootfs > MVM_POOL_ROOTFS > default). Vz was removed
+    // as a workload-dispatch `AnyBackend` variant (Plan 226 R1P1 WS-A), so no
+    // backend reaching this function can need a non-libkrun, image-keyed
+    // standby anymore — the warm pool is libkrun-only (image-agnostic) today.
+    let image: Option<std::path::PathBuf> = None;
     // A Vz saved-standby must boot the kernel that pairs with ITS rootfs variant
     // — the `vmlinux` shipped beside the rootfs (dev rootfs ↔ dev kernel, prod ↔
     // prod). The claiming launch computes its compat `kernel_sha256` from that

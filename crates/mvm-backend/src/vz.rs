@@ -882,8 +882,8 @@ impl VzBackend {
     ///
     /// Not on the `VmBackend` trait yet — adding snapshot verbs there
     /// would ripple across every backend. Callers reach this through
-    /// the concrete `VzBackend` type or by downcasting from
-    /// `AnyBackend::Vz(_)`.
+    /// the concrete `VzBackend` type directly — `Vz` was removed as an
+    /// `AnyBackend` workload-dispatch variant (Plan 226 R1P1 WS-A).
     pub fn snapshot_save(&self, id: &VmId, snapshot_path: &Path) -> Result<()> {
         let abs = if snapshot_path.is_absolute() {
             snapshot_path.to_path_buf()

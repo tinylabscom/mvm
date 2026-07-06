@@ -3214,18 +3214,13 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_per_backend_tier() {
         let r = collect_warm_start_support();
-        // The honest per-backend warm-start matrix.
+        // The honest per-backend warm-start matrix. Vz was removed as a
+        // workload-dispatch `AnyBackend` variant (Plan 226 R1P1 WS-A) and no
+        // longer has a catalog descriptor, so it is absent from this table.
         assert_eq!(r.backends.get("firecracker"), Some(&"live-memory"));
         assert_eq!(r.backends.get("libkrun"), Some(&"disk-only"));
         assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
-        // Vz carries the macOS save/restore warm-start tier; it must be
-        // surfaced. The exact tier is host-gated (save-restore on a Vz
-        // host, unsupported elsewhere), so assert presence + honesty
-        // rather than a fixed value.
-        assert!(matches!(
-            r.backends.get("vz"),
-            Some(&"save-restore") | Some(&"unsupported")
-        ));
+        assert_eq!(r.backends.get("vz"), None);
     }
 
     #[test]
@@ -3233,9 +3228,6 @@ mod tests {
         let r = collect_warm_start_support();
         let ordered_backends: Vec<_> = r.backends.into_iter().collect();
         let ordered_standby_pool: Vec<_> = r.standby_pool.into_iter().collect();
-        let vz_warm_start = AnyBackend::from_hypervisor("vz")
-            .snapshot_capability()
-            .label();
 
         assert_eq!(
             ordered_backends,
@@ -3243,17 +3235,14 @@ mod tests {
                 ("firecracker".to_string(), "live-memory"),
                 ("libkrun".to_string(), "disk-only"),
                 ("qemu".to_string(), "disk-only"),
-                ("vz".to_string(), vz_warm_start),
             ]
         );
-        let vz_standby = AnyBackend::from_hypervisor("vz").supports_standby_pool();
         assert_eq!(
             ordered_standby_pool,
             vec![
                 ("firecracker".to_string(), true),
                 ("libkrun".to_string(), true),
                 ("qemu".to_string(), false),
-                ("vz".to_string(), vz_standby),
             ]
         );
     }
@@ -3261,12 +3250,13 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_standby_pool_per_backend() {
         let r = collect_warm_start_support();
-        // Firecracker, libkrun, and Vz (on macOS 14+) implement the standby pool;
-        // QEMU does not. Report honest values for every backend; none may be silently dropped.
+        // Firecracker and libkrun implement the standby pool; QEMU does not.
+        // Vz was removed as a workload-dispatch `AnyBackend` variant (Plan 226
+        // R1P1 WS-A) and no longer has a catalog descriptor. Report honest
+        // values for every remaining backend; none may be silently dropped.
         assert_eq!(r.standby_pool.get("firecracker"), Some(&true));
         assert_eq!(r.standby_pool.get("libkrun"), Some(&true));
-        let vz_standby = AnyBackend::from_hypervisor("vz").supports_standby_pool();
-        assert_eq!(r.standby_pool.get("vz"), Some(&vz_standby));
+        assert_eq!(r.standby_pool.get("vz"), None);
         assert_eq!(r.standby_pool.get("qemu"), Some(&false));
     }
 
@@ -3275,10 +3265,12 @@ mod tests {
         let rows = collect_capability_table();
         let by = |name: &str| rows.iter().find(|r| r.backend == name).cloned();
 
-        // The Tier 3 `mock` test double is excluded; the four real
-        // backends are present, in stable name order.
+        // The Tier 3 `mock` test double is excluded; the three real
+        // backends are present, in stable name order. Vz was removed as a
+        // workload-dispatch `AnyBackend` variant (Plan 226 R1P1 WS-A) and no
+        // longer has a catalog descriptor.
         let names: Vec<_> = rows.iter().map(|r| r.backend.as_str()).collect();
-        assert_eq!(names, vec!["firecracker", "libkrun", "qemu", "vz"]);
+        assert_eq!(names, vec!["firecracker", "libkrun", "qemu"]);
 
         let fc = by("firecracker").unwrap();
         assert_eq!(fc.snapshot_tier, "live-memory");
@@ -3309,11 +3301,6 @@ mod tests {
             "qemu uses user-mode slirp, not a host TAP"
         );
         assert!(qemu.vsock);
-
-        // Vz dispositions are host-gated (macOS version); assert only the
-        // platform-stable invariant — the vsock control channel is always present.
-        let vz = by("vz").unwrap();
-        assert!(vz.vsock);
     }
 
     #[test]

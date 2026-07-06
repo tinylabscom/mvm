@@ -26,7 +26,7 @@ use mvm_backend::backend::AnyBackend;
 use mvm_core::config::vm_state_dir;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
-use mvm_core::vm_backend::VmId;
+use mvm_core::vm_backend::{VmBackend, VmId};
 
 use super::Cli;
 use super::shared::clap_vm_name;
@@ -73,8 +73,13 @@ pub(in crate::commands) struct ResumeArgs {
 
 /// A running VM whose state dir carries a `vz.pid` marker is a Vz VM — it gets
 /// native vCPU pause/resume rather than the Firecracker snapshot-seal path.
+///
+/// `Vz` is no longer a workload-dispatch `AnyBackend` variant (Plan 226 R1P1
+/// WS-A removed it from the catalog, so `AnyBackend::for_started_vm` can never
+/// resolve a `vz.pid` marker anymore), so this checks the marker file
+/// directly rather than routing through the enum.
 fn is_vz_vm(name: &str) -> bool {
-    matches!(AnyBackend::for_started_vm(name), Some(AnyBackend::Vz(_)))
+    vm_state_dir(name).join("vz.pid").is_file()
 }
 
 /// Pick the `SnapshotIO` impl matching the hypervisor selector.
@@ -134,7 +139,7 @@ pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConf
             .with_context(|| format!("primed barrier for VM {:?}", args.name))?;
     }
     if is_vz_vm(&args.name) {
-        AnyBackend::Vz(mvm_backend::vz::VzBackend)
+        mvm_backend::vz::VzBackend
             .pause(&VmId::from(args.name.as_str()))
             .with_context(|| format!("pausing Vz VM {:?}", args.name))?;
         // Stamp the live supervisor pid into a marker so the fs_quick gate
@@ -233,7 +238,7 @@ pub(in crate::commands) fn run_resume(
 ) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
     if is_vz_vm(&args.name) {
-        AnyBackend::Vz(mvm_backend::vz::VzBackend)
+        mvm_backend::vz::VzBackend
             .resume(&VmId::from(args.name.as_str()))
             .with_context(|| format!("resuming Vz VM {:?}", args.name))?;
         // Remove the pause marker now that vCPUs are running again.
