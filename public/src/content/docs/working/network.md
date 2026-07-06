@@ -51,7 +51,7 @@ Host control does not require SSH. Guest communication uses the mvm control plan
 ```sh
 mvmctl machine console api-dev
 mvmctl machine logs api-dev
-mvmctl exec api-dev -- sh -lc 'id && pwd'
+mvmctl machine exec api-dev -- sh -lc 'id && pwd'
 ```
 
 ## Security notes

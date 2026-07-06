@@ -10,7 +10,7 @@ description: Local sandbox management with mvmctl.
 ```sh
 mvmctl machine build --flake ./my-app
 mvmctl machine run --flake ./my-app --name agent-sandbox -d
-mvmctl exec agent-sandbox -- python /work/task.py
+mvmctl machine exec agent-sandbox -- python /work/task.py
 mvmctl machine logs agent-sandbox -f
 mvmctl machine stop agent-sandbox
 ```

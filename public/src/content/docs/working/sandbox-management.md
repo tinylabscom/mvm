@@ -28,7 +28,7 @@ Use JSON output where commands support it when integrating with tooling.
 ## Operate
 
 ```sh
-mvmctl exec agent-sandbox -- python /work/task.py
+mvmctl machine exec agent-sandbox -- python /work/task.py
 mvmctl machine fs ls agent-sandbox /work
 mvmctl machine forward agent-sandbox -p 8080:8080
 ```

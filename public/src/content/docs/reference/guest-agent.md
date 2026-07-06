@@ -19,7 +19,7 @@ Every microVM built with `mkGuest` includes **mvm-guest-agent**, a lightweight R
 
 ## Protocol
 
-The agent communicates using **length-prefixed JSON frames** over vsock (Firecracker, Apple Container, microvm.nix) or a unix socket (Docker):
+The agent communicates using **length-prefixed JSON frames** over vsock (Firecracker, Vz, microvm.nix):
 
 1. Host writes `CONNECT 5252\n` to the socket
 2. Agent responds with `OK 5252\n`

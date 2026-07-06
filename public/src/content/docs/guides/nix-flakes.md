@@ -266,7 +266,7 @@ When you run `mvmctl build --flake .`:
 4. Kernel and rootfs artifacts are copied back to the host cache.
 5. Runtime commands boot those already-built artifacts on the selected backend.
 
-The same rootfs works on all backends (Firecracker, Apple Container, microvm.nix, Docker).
+The same rootfs works on all backends (Firecracker, Vz, microvm.nix).
 
 ## Profiles
 
