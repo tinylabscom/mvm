@@ -636,6 +636,38 @@ builder kernel (which needs iptables for its egress lockdown). The enable-stick 
 it in CI; fixed by moving the drop to `workload.nix` (workload-only). This is exactly the
 "requested enables must stick" guard requested during the machine-run-volume coordination.
 
+### Batch 6 (2026-07-05) — block-device clients
+
+After Batches 1-5, PCI + PCI_MSI + VIRTIO_PCI were re-added for vz (Apple
+Virtualization.framework presents virtio over PCI, not MMIO), moving the aarch64 ceiling to
+**1420** (see `check_kernel_config_budget.rs`). Batch 6 subtracts the block-device *clients*
+that `defconfig` compiles in but no mvm backend can ever drive — each registered phantom
+devices and idle rescuer workqueue kthreads with nothing behind them:
+
+- **base.nix** (universally dead — no host-side device exists on any backend, so a workload
+  *cannot* reach them): `BLK_DEV_NBD` (nbd0-15 + 16× `kworker/R-nbd*`), `BLK_DEV_NVME` +
+  `NVME_CORE` (3× `kworker/R-nvme`).
+- **workload.nix** (workload-only, to leave the builder kernel untouched): `BLK_DEV_LOOP`
+  (loop0-7 — the builder may loop-mount while assembling images, so this stays a
+  workload-only drop) and `BLK_DEV_MD` (software-RAID core `md_mod` + `kworker/R-md*`; the
+  `CONFIG_MD` umbrella + `BLK_DEV_DM` + `DM_VERITY` are kept, so Claim 3 verified boot is
+  unaffected — asserted by the base.nix olddefconfig enable-stick guard and confirmed live:
+  `dm_verity` built-in, device-mapper control device registered, `md_mod` gone).
+
+| | workload `=y` (aarch64) | vmlinux |
+|---|---|---|
+| Post-PCI-re-add ceiling | 1420 | — |
+| Batch 6 | **1374** | 17.13 MB (-140 KB) |
+
+**Live-validated** on macOS 26 (in-house→libkrun builder fallback): the default-microvm dev
+image was rebuilt from the stripped config and `machine run --image alpine` booted it with
+`BLOCK_DEVS=vda` only (all of nbd/nvme/loop gone), rescuer kworkers 40 → 19, and the full
+`create/start/exec/shell/stop/rm` lifecycle passing. `BUDGET_AARCH64` ratcheted 1420 → 1374
+(measured from the built kernel's embedded ikconfig). x86_64 drops by a comparable
+arch-independent delta but was not re-measured (macOS cannot cross-compile the kernel); its
+ceiling stays 1203 pending CI's x86_64 config-build count. The authoritative dm-verity tamper
+regression remains the live-KVM lane in `security.yml`.
+
 ### Deferred follow-ups (shrink)
 
 - [ ] **Push toward the ~1005 reference floor.** The remaining ~320 `=y` gap is *entangled*,

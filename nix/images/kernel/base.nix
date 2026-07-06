@@ -204,6 +204,24 @@ let
     "IOMMU_SUPPORT"        # virtio-mmio uses direct DMA; no SMMU present
     "SERIAL_XILINX_PS_UART" "SERIAL_FSL_LPUART" "SERIAL_FSL_LINFLEXUART"
     "SERIAL_MCTRL_GPIO" "SERIAL_DEV_BUS"  # SoC/serdev UARTs — console is PL011
+
+    # Shrink batch 6 — block-device *clients* defconfig builds in that no mvm
+    # backend can ever drive. Every guest boots one virtio-blk disk (`vda`,
+    # kept via VIRTIO_BLK above); libkrun / vz / Firecracker present no NBD
+    # server and no NVMe controller, so these drivers register phantom devices
+    # (nbd0–15) and idle rescuer workqueue threads (16× kworker/R-nbd*, 3×
+    # kworker/R-nvme) with nothing behind them. A workload *cannot* reach them —
+    # there is no host-side device — so dropping them is pure attack-surface +
+    # thread-count reduction with zero functional loss on any boot path.
+    # Only NBD/NVMe live here (shared base): they are universally dead — no
+    # host-side device exists on any backend, so neither the builder nor a
+    # workload can reach them. The sibling block-driver drops BLK_DEV_LOOP and
+    # BLK_DEV_MD are scoped to workload.nix instead: the builder kernel may
+    # loop-mount while assembling images, and BLK_DEV_MD only materialises where
+    # the CONFIG_MD umbrella is enabled (workload's dm-verity delta). See
+    # workload.nix.
+    "BLK_DEV_NBD"          # network block device — no NBD server on any backend
+    "BLK_DEV_NVME" "NVME_CORE"  # NVMe — no NVMe controller behind virtio
   ] ++ pkgs.lib.optionals (kernelArch == "arm64") [
     # arm64 boots from the FDT libkrun / Firecracker hand us; ACPI is
     # never consulted, so drop the ACPICA interpreter and the whole
