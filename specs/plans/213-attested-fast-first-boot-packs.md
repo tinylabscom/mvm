@@ -403,3 +403,9 @@ claim, analogous to the libkrun resident builder), reusing the backend-agnostic
   verify. Low risk for slice 1 (the file-level hash still pins every byte), but
   the producer should eventually derive the typed hashes from the file set, or
   the verifier should cross-check them. Tracked here, not fixed in slice 1.
+- **Quarantine orphans have no reaper.** The pack-cache promote path stages into
+  a `.incoming/<unique>` quarantine dir and cleans it on the error path, but a
+  panic or process kill between the copy and the atomic rename leaves the
+  quarantine dir behind. Readers skip `.incoming`, so this is disk-usage only, not
+  a correctness or safety issue. A sweep of stale quarantine dirs belongs with the
+  existing prefix-agnostic cache reaper rather than in this slice.

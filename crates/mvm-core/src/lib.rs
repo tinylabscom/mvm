@@ -46,6 +46,7 @@ pub mod metering;
 pub mod migration;
 pub mod naming;
 pub mod observability;
+pub mod pack_cache;
 pub mod packs;
 pub mod user_config;
 
