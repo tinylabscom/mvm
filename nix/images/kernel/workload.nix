@@ -27,9 +27,29 @@
 
 base.mkKernel {
   extraEnables = [ "MD" "BLK_DEV_DM" "DM_VERITY" "VIRTIO_FS" "FUSE_FS" ];
-  # Workload-only: the guest enforces egress host-side (egress proxy) + via
-  # blackhole routes (mvm-guest-netinit, rtnetlink), never in-guest iptables —
-  # so it needs no netfilter tables. The builder kernel keeps netfilter for its
-  # OUTPUT-chain egress lockdown, so this drop lives here, not in shared base.
-  extraDisables = [ "NETFILTER" ];
+  # Workload-only disables. Each drop lives here (not in shared base.nix)
+  # because it depends on a workload-specific enable or would be unsafe for
+  # the builder kernel:
+  #
+  #   NETFILTER   — the guest enforces egress host-side (egress proxy) + via
+  #                 blackhole routes (mvm-guest-netinit, rtnetlink), never
+  #                 in-guest iptables. The builder kernel KEEPS netfilter for
+  #                 its OUTPUT-chain egress lockdown, so this cannot go in base.
+  #   BLK_DEV_MD  — the software-RAID personality (md_mod + kworker/R-md*). We
+  #                 enable the CONFIG_MD *umbrella* above only so device-mapper
+  #                 (BLK_DEV_DM) and dm-verity (Claim 3 verified boot) build; the
+  #                 RAID arrays themselves are never assembled in a single-disk
+  #                 (vda) guest. Dropping BLK_DEV_MD keeps MD + BLK_DEV_DM +
+  #                 DM_VERITY (asserted by base.nix's olddefconfig guard) while
+  #                 deleting the unused RAID core. Workload-only because base
+  #                 never enables the MD menu, so it has no effect there.
+  #   BLK_DEV_LOOP — loopback block devices (loop0–7). No mvm path loop-mounts
+  #                 in-guest (the OCI rootfs is virtio-blk `vda`, volumes are
+  #                 virtio-fs, dm-verity is dm). Kept OUT of base so the builder
+  #                 kernel — which may loop-mount while assembling images — is
+  #                 unaffected. TRADEOFF: a user workload that loop-mounts a
+  #                 squashfs / disk image in-guest would need this re-enabled;
+  #                 unlike NBD/NVMe (no host-side device exists) loop is
+  #                 guest-internal, so this is a policy choice, not a free cut.
+  extraDisables = [ "NETFILTER" "BLK_DEV_MD" "BLK_DEV_LOOP" ];
 }
