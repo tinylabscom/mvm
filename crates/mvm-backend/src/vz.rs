@@ -1445,7 +1445,7 @@ fn vz_spawn_standby(
         supervisor_config_digest: cfg_digest,
         // The seed's own state dir is torn down at stop, so capture from the
         // durable copy just persisted into the pool dir.
-        supervisor_config_src: pool_seed_config_path(&pool_root, &spec.id),
+        supervisor_config_src: Some(pool_seed_config_path(&pool_root, &spec.id)),
         tag: None,
         created_unix: crate::standby_pool::now_unix_secs(),
     };

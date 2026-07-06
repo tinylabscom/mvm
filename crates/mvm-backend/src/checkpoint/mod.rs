@@ -396,12 +396,24 @@ pub trait VmFullControl {
     /// Pause vCPUs (idempotent if already paused).
     fn pause(&self) -> Result<()>;
     /// Save machine memory state to `memory_path` while paused; also writes a
-    /// `<memory_path>.machine-id` sidecar.
+    /// `<memory_path>.machine-id` sidecar when the backend has a machine
+    /// identifier (e.g. Vz). Backends that do not have a separate machine-id
+    /// concept (e.g. Firecracker) may skip the sidecar — the caller only
+    /// promotes it to a content blob when the file exists.
     fn save_memory(&self, memory_path: &Path) -> Result<()>;
     /// Resume vCPUs.
     fn resume(&self) -> Result<()>;
     /// Absolute path to the VM's live rootfs image.
     fn rootfs_path(&self) -> Result<PathBuf>;
+    /// Optional extra content blobs written alongside `save_memory` that this
+    /// backend's capture produces. The default returns nothing; backends that
+    /// write additional files (e.g. Firecracker's `vmstate.bin`) override this
+    /// to hash and return them so they are included in the checkpoint manifest.
+    /// Called after `save_memory` has been called and the files are on disk.
+    fn extra_content(&self, content_dir: &Path) -> Result<Vec<mvm_core::checkpoint::ContentBlob>> {
+        let _ = content_dir;
+        Ok(vec![])
+    }
 }
 
 pub struct CaptureVmFullParams {
@@ -410,7 +422,10 @@ pub struct CaptureVmFullParams {
     pub supervisor_config_digest: String,
     /// The live VM's persisted supervisor config, copied into the checkpoint so
     /// restore can rebuild the state dir (every stop reaps the live one).
-    pub supervisor_config_src: PathBuf,
+    /// `None` for backends that do not use a Vz-style supervisor config (the
+    /// blob is omitted from the checkpoint manifest and restore is handled
+    /// differently by those backends).
+    pub supervisor_config_src: Option<PathBuf>,
     pub tag: Option<String>,
     pub created_unix: u64,
 }
@@ -439,27 +454,21 @@ pub fn capture_vm_full(
         let live_rootfs = control.rootfs_path()?;
         crate::base::cow::clone_rootfs_for_instance(&live_rootfs, &rootfs_dst)
             .context("cloning rootfs in the pause window")?;
+        // Collect the machine-id sidecar when the backend wrote one (e.g. Vz).
+        // Backends that do not have a machine-id concept (e.g. Firecracker) skip
+        // this step — the blob is absent from the manifest and restore does not
+        // require it.
         let sidecar = PathBuf::from(format!("{}.machine-id", memory.display()));
-        std::fs::rename(&sidecar, &machine_id)
-            .or_else(|_| std::fs::copy(&sidecar, &machine_id).map(|_| ()))
-            .with_context(|| format!("collecting machine-id sidecar {}", sidecar.display()))?;
+        if sidecar.exists() {
+            std::fs::rename(&sidecar, &machine_id)
+                .or_else(|_| std::fs::copy(&sidecar, &machine_id).map(|_| ()))
+                .with_context(|| format!("collecting machine-id sidecar {}", sidecar.display()))?;
+        }
         Ok::<(), anyhow::Error>(())
     })();
     let resumed = control.resume();
     captured?;
     resumed.context("resuming VM after vm_full capture")?;
-
-    // Persist the launch config into the checkpoint. Restore needs it to resolve
-    // the target rootfs path and to spawn the supervisor, but every stop reaps
-    // the VM's state dir — so without storing it here the round-trip is
-    // unreachable. (Static during the pause window; copied after resume.)
-    let config_dst = content_dir.join(crate::vz::SUPERVISOR_CONFIG_FILE_NAME);
-    std::fs::copy(&params.supervisor_config_src, &config_dst).with_context(|| {
-        format!(
-            "copying supervisor config {} into checkpoint",
-            params.supervisor_config_src.display()
-        )
-    })?;
 
     let mut content = vec![
         ContentBlob {
@@ -470,15 +479,38 @@ pub fn capture_vm_full(
             name: "memory.bin".into(),
             sha256: sha256_file_hex(&memory)?,
         },
-        ContentBlob {
+    ];
+
+    // Include the machine-id blob when the backend wrote one.
+    if machine_id.exists() {
+        content.push(ContentBlob {
             name: "machine-id".into(),
             sha256: sha256_file_hex(&machine_id)?,
-        },
-        ContentBlob {
+        });
+    }
+
+    // Include any extra blobs the backend wrote alongside save_memory
+    // (e.g. Firecracker's vmstate.bin).
+    for blob in control.extra_content(&content_dir)? {
+        content.push(blob);
+    }
+
+    // Persist the launch config into the checkpoint when the backend provides one.
+    // Restore needs it to rebuild the state dir the stop reaped. Backends that do
+    // not use a Vz-style supervisor config omit this blob.
+    if let Some(ref src) = params.supervisor_config_src {
+        let config_dst = content_dir.join(crate::vz::SUPERVISOR_CONFIG_FILE_NAME);
+        std::fs::copy(src, &config_dst).with_context(|| {
+            format!(
+                "copying supervisor config {} into checkpoint",
+                src.display()
+            )
+        })?;
+        content.push(ContentBlob {
             name: crate::vz::SUPERVISOR_CONFIG_FILE_NAME.into(),
             sha256: sha256_file_hex(&config_dst)?,
-        },
-    ];
+        });
+    }
 
     // Mirror the fs_quick path: when the source rootfs directory carries a
     // mvm-meta.json sidecar, include it so that forks of this vm_full checkpoint
@@ -1124,7 +1156,7 @@ mod tests {
                 id: CheckpointId::new("v1"),
                 vm_name: "vm".into(),
                 supervisor_config_digest: "d".into(),
-                supervisor_config_src: config,
+                supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 9,
             },
@@ -1172,7 +1204,7 @@ mod tests {
                 id: CheckpointId::new("v2"),
                 vm_name: "vm".into(),
                 supervisor_config_digest: "d".into(),
-                supervisor_config_src: config,
+                supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 10,
             },
@@ -1224,7 +1256,7 @@ mod tests {
                 id: CheckpointId::new("v3"),
                 vm_name: "vm".into(),
                 supervisor_config_digest: "d".into(),
-                supervisor_config_src: config,
+                supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 11,
             },
@@ -1277,7 +1309,7 @@ mod tests {
                 id: CheckpointId::new(id),
                 vm_name: "origin".into(),
                 supervisor_config_digest: "d".into(),
-                supervisor_config_src: config,
+                supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 1,
             },
@@ -1928,4 +1960,134 @@ mod tests {
             std::env::remove_var("MVM_DATA_DIR");
         }
     }
+
+    // ── capture_vm_full: no machine-id sidecar + extra_content ────────────────
+
+    /// A backend that does NOT write a machine-id sidecar (e.g. Firecracker)
+    /// should produce a vm_full checkpoint WITHOUT a machine-id blob but WITH
+    /// any blobs returned by `extra_content`.
+    struct NoMachineIdControl {
+        rootfs: PathBuf,
+        extra: Vec<ContentBlob>,
+    }
+    impl VmFullControl for NoMachineIdControl {
+        fn pause(&self) -> Result<()> {
+            Ok(())
+        }
+        fn resume(&self) -> Result<()> {
+            Ok(())
+        }
+        fn save_memory(&self, memory_path: &Path) -> Result<()> {
+            std::fs::write(memory_path, b"mem").unwrap();
+            // Intentionally does NOT write a .machine-id sidecar.
+            Ok(())
+        }
+        fn rootfs_path(&self) -> Result<PathBuf> {
+            Ok(self.rootfs.clone())
+        }
+        fn extra_content(&self, _content_dir: &Path) -> Result<Vec<ContentBlob>> {
+            Ok(self.extra.clone())
+        }
+    }
+
+    #[test]
+    fn capture_vm_full_no_machine_id_blob_when_no_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let rootfs = tmp.path().join("live.ext4");
+        std::fs::write(&rootfs, b"disk").unwrap();
+        let ctl = NoMachineIdControl {
+            rootfs,
+            extra: vec![],
+        };
+        let meta = capture_vm_full(
+            &store,
+            CaptureVmFullParams {
+                id: CheckpointId::new("fc1"),
+                vm_name: "fc-vm".into(),
+                supervisor_config_digest: "d".into(),
+                supervisor_config_src: None,
+                tag: None,
+                created_unix: 1,
+            },
+            &ctl,
+        )
+        .unwrap();
+        let names: Vec<&str> = meta.content.iter().map(|b| b.name.as_str()).collect();
+        assert!(
+            !names.contains(&"machine-id"),
+            "no machine-id blob expected when backend writes no sidecar: {names:?}"
+        );
+        assert!(
+            names.contains(&"rootfs.ext4"),
+            "rootfs.ext4 must be present: {names:?}"
+        );
+        assert!(
+            names.contains(&"memory.bin"),
+            "memory.bin must be present: {names:?}"
+        );
+        // No supervisor-config.json when src is None.
+        assert!(
+            !names.contains(&crate::vz::SUPERVISOR_CONFIG_FILE_NAME),
+            "no supervisor-config.json expected when src is None: {names:?}"
+        );
+        verify_content(&store, &meta).unwrap();
+    }
+
+    #[test]
+    fn capture_vm_full_includes_extra_content_blobs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let rootfs = tmp.path().join("live.ext4");
+        std::fs::write(&rootfs, b"disk").unwrap();
+        // Write a fake vmstate.bin that extra_content will return as a blob.
+        let vmstate = tmp.path().join("vmstate.bin");
+        std::fs::write(&vmstate, b"fake-vmstate").unwrap();
+        let sha256 = mvm_core::crypto::image_verify::sha256_file(&vmstate).unwrap();
+        let ctl = NoMachineIdControl {
+            rootfs,
+            extra: vec![ContentBlob {
+                name: "vmstate.bin".into(),
+                sha256: sha256.clone(),
+            }],
+        };
+        // The extra content blob references a file in the content dir — write
+        // the file there so verify_content passes.
+        let id = CheckpointId::new("fc2");
+        let content_dir = store.content_dir(&id);
+        std::fs::create_dir_all(&content_dir).unwrap();
+        std::fs::write(content_dir.join("vmstate.bin"), b"fake-vmstate").unwrap();
+
+        let meta = capture_vm_full(
+            &store,
+            CaptureVmFullParams {
+                id: id.clone(),
+                vm_name: "fc-vm".into(),
+                supervisor_config_digest: "d".into(),
+                supervisor_config_src: None,
+                tag: None,
+                created_unix: 2,
+            },
+            &ctl,
+        )
+        .unwrap();
+        let names: Vec<&str> = meta.content.iter().map(|b| b.name.as_str()).collect();
+        assert!(
+            names.contains(&"vmstate.bin"),
+            "vmstate.bin extra blob must be in manifest: {names:?}"
+        );
+        let vmstate_blob = meta
+            .content
+            .iter()
+            .find(|b| b.name == "vmstate.bin")
+            .unwrap();
+        assert_eq!(
+            vmstate_blob.sha256, sha256,
+            "vmstate.bin sha256 must match the extra_content blob"
+        );
+    }
+
+    // SAFETY: serialized by HOME_TEST_LOCK.
+    #[allow(unused)]
+    fn placeholder_for_trailing_env_remove() {}
 }

@@ -1400,6 +1400,59 @@ pub fn resume_vm(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Write a full Firecracker snapshot to `vmstate_path` (VM state) and
+/// `mem_path` (guest memory) while the VM is paused.
+///
+/// Sends `PUT /snapshot/create` to the per-VM control socket. The VM must
+/// already be paused (call [`pause_vm`] first). The caller is responsible for
+/// resuming the VM after capture with [`resume_vm`].
+///
+/// Both paths must be absolute — Firecracker resolves them on the host rather
+/// than inside the VM, so a relative path would be interpreted from an
+/// uncontrolled working directory.
+#[instrument(skip_all, fields(name))]
+pub fn create_snapshot_files(
+    name: &str,
+    vmstate_path: &std::path::Path,
+    mem_path: &std::path::Path,
+) -> Result<()> {
+    require_linux_env()?;
+    anyhow::ensure!(
+        vmstate_path.is_absolute(),
+        "vmstate_path must be absolute, got {}",
+        vmstate_path.display()
+    );
+    anyhow::ensure!(
+        mem_path.is_absolute(),
+        "mem_path must be absolute, got {}",
+        mem_path.display()
+    );
+
+    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+    let abs_dir = format!("{}/{}", abs_vms.trim(), name);
+    let socket = format!("{}/fc.socket", abs_dir);
+    let q_socket = shell_quote(&socket);
+
+    let vmstate_str = vmstate_path.to_string_lossy();
+    let mem_str = mem_path.to_string_lossy();
+
+    // PUT /snapshot/create with snapshot_type=Full writes vmstate + guest memory.
+    // The VM must be paused before this call; Firecracker refuses the request
+    // with an error if vCPUs are still running.
+    let payload = format!(
+        r#"{{"snapshot_type":"Full","snapshot_path":"{vmstate}","mem_file_path":"{mem}"}}"#,
+        vmstate = vmstate_str,
+        mem = mem_str,
+    );
+    api_put_socket(&socket, "/snapshot/create", &payload).with_context(|| {
+        format!(
+            "PUT /snapshot/create for VM '{}' (socket {})",
+            name, q_socket
+        )
+    })?;
+    Ok(())
+}
+
 /// Stop a specific named VM.
 #[instrument(skip_all, fields(name))]
 /// Adjust the virtio-balloon inflation target for a running FC VM.

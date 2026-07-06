@@ -1,4 +1,7 @@
-use anyhow::Result;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use mvm_core::checkpoint::ContentBlob;
 
 use crate::base::config::*;
 use crate::base::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible};
@@ -279,4 +282,152 @@ pub fn is_vm_running(pid_file: &str) -> Result<bool> {
         pid = pid_file,
     ))?;
     Ok(result.trim() == "yes")
+}
+
+/// Name of the Firecracker VM-state file produced by `PUT /snapshot/create`.
+pub const FC_VMSTATE_FILENAME: &str = "vmstate.bin";
+
+/// Bridges the checkpoint `VmFullControl` trait to a running Firecracker VM.
+///
+/// `save_memory(memory_path)` pauses the VM (via `PATCH /vm`), creates a full
+/// snapshot (`PUT /snapshot/create`) that writes:
+///   - `vmstate.bin` alongside `memory_path` (i.e. `parent(memory_path)/vmstate.bin`)
+///   - `memory_path` itself (the guest memory image)
+///
+/// `extra_content(content_dir)` returns a [`ContentBlob`] for `vmstate.bin` so
+/// the checkpoint manifest captures it.
+///
+/// The machine-id sidecar (`<memory_path>.machine-id`) is NOT written — FC has
+/// no notion of a persistent machine identifier; `capture_vm_full` skips the
+/// blob when the sidecar file is absent.
+///
+/// `rootfs_path()` is read from the `mode.json` sidecar that `record_from_rootfs`
+/// writes at FC start time.
+pub struct FcVmFullControl {
+    vm_name: String,
+}
+
+impl FcVmFullControl {
+    pub fn new(vm_name: impl Into<String>) -> Self {
+        Self {
+            vm_name: vm_name.into(),
+        }
+    }
+}
+
+impl crate::checkpoint::VmFullControl for FcVmFullControl {
+    fn pause(&self) -> Result<()> {
+        crate::microvm::pause_vm(&self.vm_name)
+            .with_context(|| format!("pausing Firecracker VM '{}'", self.vm_name))
+    }
+
+    fn resume(&self) -> Result<()> {
+        crate::microvm::resume_vm(&self.vm_name)
+            .with_context(|| format!("resuming Firecracker VM '{}'", self.vm_name))
+    }
+
+    fn save_memory(&self, memory_path: &Path) -> Result<()> {
+        anyhow::ensure!(
+            memory_path.is_absolute(),
+            "save_memory requires an absolute path, got {}",
+            memory_path.display()
+        );
+        let vmstate_path = memory_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("memory_path has no parent dir"))?
+            .join(FC_VMSTATE_FILENAME);
+        crate::microvm::create_snapshot_files(&self.vm_name, &vmstate_path, memory_path)
+            .with_context(|| {
+                format!(
+                    "creating Firecracker snapshot for VM '{}' (vmstate={}, mem={})",
+                    self.vm_name,
+                    vmstate_path.display(),
+                    memory_path.display(),
+                )
+            })
+    }
+
+    fn rootfs_path(&self) -> Result<PathBuf> {
+        let meta = crate::base::runtime_meta::read(&self.vm_name)
+            .with_context(|| {
+                format!(
+                    "reading mode.json for Firecracker VM '{}' to resolve rootfs path",
+                    self.vm_name
+                )
+            })?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no mode.json found for VM '{}'; was it started with `mvmctl machine run`?",
+                    self.vm_name
+                )
+            })?;
+        let rootfs_str = meta.rootfs_path.ok_or_else(|| {
+            anyhow::anyhow!(
+                "mode.json for VM '{}' has no rootfs_path field (started before rootfs tracking?)",
+                self.vm_name
+            )
+        })?;
+        Ok(PathBuf::from(rootfs_str))
+    }
+
+    fn extra_content(&self, content_dir: &Path) -> Result<Vec<ContentBlob>> {
+        let vmstate = content_dir.join(FC_VMSTATE_FILENAME);
+        if !vmstate.exists() {
+            // save_memory was not yet called or failed; return empty so capture
+            // fails on the missing memory.bin rather than here.
+            return Ok(vec![]);
+        }
+        let sha256 = mvm_core::crypto::image_verify::sha256_file(&vmstate)
+            .with_context(|| format!("hashing {}", vmstate.display()))?;
+        Ok(vec![ContentBlob {
+            name: FC_VMSTATE_FILENAME.into(),
+            sha256,
+        }])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checkpoint::VmFullControl as _;
+
+    /// `save_memory` requires an absolute path — a relative path would be
+    /// misinterpreted by the Firecracker API.
+    #[test]
+    fn fc_vm_full_control_save_memory_requires_absolute_path() {
+        let ctl = FcVmFullControl::new("any");
+        let err = ctl
+            .save_memory(std::path::Path::new("relative/mem.bin"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("absolute"),
+            "error must mention absolute path requirement: {err}"
+        );
+    }
+
+    /// `extra_content` returns an empty vec when `vmstate.bin` is absent
+    /// (before `save_memory` is called, or after a failed capture).
+    #[test]
+    fn fc_vm_full_control_extra_content_empty_when_no_vmstate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctl = FcVmFullControl::new("any");
+        let blobs = ctl.extra_content(tmp.path()).unwrap();
+        assert!(
+            blobs.is_empty(),
+            "extra_content must return empty vec when vmstate.bin is absent"
+        );
+    }
+
+    /// `extra_content` returns a single blob for `vmstate.bin` when the file
+    /// exists, with a non-empty sha256.
+    #[test]
+    fn fc_vm_full_control_extra_content_returns_vmstate_blob_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(FC_VMSTATE_FILENAME), b"fake-vmstate").unwrap();
+        let ctl = FcVmFullControl::new("any");
+        let blobs = ctl.extra_content(tmp.path()).unwrap();
+        assert_eq!(blobs.len(), 1, "exactly one blob expected for vmstate.bin");
+        assert_eq!(blobs[0].name, FC_VMSTATE_FILENAME);
+        assert!(!blobs[0].sha256.is_empty(), "sha256 must be non-empty");
+    }
 }
