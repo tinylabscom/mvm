@@ -187,7 +187,34 @@ pub fn resolve_running_vm_dir(name: &str) -> Result<String> {
     Ok(format!("{}/{}", abs_vms, name))
 }
 
-fn firecracker_vsock_uds_path(dir: &str) -> String {
+/// Return the host-side path to Firecracker's PID file for VM `name`.
+///
+/// Firecracker writes `fc.pid` into the VMS_DIR-based per-VM directory
+/// (`~/microvm/vms/<name>/fc.pid`), NOT into `vm_state_dir(name)` which is
+/// `~/.mvm/vms/<name>`. These are two separate trees: VMS_DIR is the in-VM
+/// (or native-Linux host) Firecracker workspace; vm_state_dir is the host
+/// metadata store shared by all backends.
+///
+/// Returns `None` when `$HOME` is not set (e.g. hermetic test environments
+/// that intentionally omit it).
+pub fn fc_pid_path(name: &str) -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join("microvm")
+            .join("vms")
+            .join(name)
+            .join("fc.pid"),
+    )
+}
+
+/// Path to the host-side UDS that proxies the guest agent's vsock port for a
+/// Firecracker VM whose per-VM directory is `dir` (as returned by
+/// [`resolve_running_vm_dir`]). `pub` so CLI-layer callers — e.g. the FC fork
+/// path delivering a post-restore grant to a forked child — can locate the
+/// same socket `warm_restore_instance_from_path` talks to, without
+/// reimplementing the layout.
+pub fn firecracker_vsock_uds_path(dir: &str) -> String {
     format!("{dir}/runtime/v.sock")
 }
 
@@ -1233,6 +1260,29 @@ pub fn warm_restore_instance(
     // which is shell- and JSON-safe.
     mvm_core::naming::validate_vm_name(name)
         .with_context(|| format!("warm-start refused invalid VM name {name:?}"))?;
+
+    let snapshot_dir = mvm_core::config::instance_snapshot_dir(name);
+    let snapshot_dir = snapshot_dir.to_string_lossy().into_owned();
+    warm_restore_instance_from_path(name, &snapshot_dir, token)
+}
+
+/// Warm-restore an instance from a caller-supplied snapshot directory.
+///
+/// Factored out from [`warm_restore_instance`] so that
+/// [`crate::firecracker::FcForkRestorer`] can direct the load to the fork's
+/// checkpoint content directory instead of the canonical
+/// `instance_snapshot_dir(name)` path.
+///
+/// `snapshot_dir` must contain `vmstate.bin` and `mem.bin`. Name validation
+/// and `require_linux_env()` are performed here so every caller gets the same
+/// guards.
+pub fn warm_restore_instance_from_path(
+    name: &str,
+    snapshot_dir: &str,
+    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+) -> Result<mvm_core::vm_backend::ReseedStatus> {
+    mvm_core::naming::validate_vm_name(name)
+        .with_context(|| format!("warm-start refused invalid VM name {name:?}"))?;
     require_linux_env()?;
 
     let vm_dir = resolve_running_vm_dir(name)?;
@@ -1242,8 +1292,6 @@ pub fn warm_restore_instance(
     let socket = format!("{vm_dir}/fc.socket");
     let pid_file = format!("{vm_dir}/fc.pid");
 
-    let snapshot_dir = mvm_core::config::instance_snapshot_dir(name);
-    let snapshot_dir = snapshot_dir.to_string_lossy().into_owned();
     if !std::path::Path::new(&format!("{snapshot_dir}/vmstate.bin")).exists() {
         anyhow::bail!(
             "no sealed snapshot at {snapshot_dir} for VM '{name}' — `mvmctl vm pause {name}` \
@@ -1251,7 +1299,7 @@ pub fn warm_restore_instance(
         );
     }
     // Refuse a tampered snapshot before any VMM interaction.
-    crate::base::snapshot_integrity::verify_snapshot_artifacts(&snapshot_dir)?;
+    crate::base::snapshot_integrity::verify_snapshot_artifacts(snapshot_dir)?;
 
     let vmstate = format!("{snapshot_dir}/vmstate.bin");
     let mem = format!("{snapshot_dir}/mem.bin");
@@ -1376,6 +1424,59 @@ pub fn resume_vm(name: &str) -> Result<()> {
             'http://localhost/vm'"#,
     ))
     .with_context(|| format!("PATCH /vm Resumed for VM '{}'", name))?;
+    Ok(())
+}
+
+/// Write a full Firecracker snapshot to `vmstate_path` (VM state) and
+/// `mem_path` (guest memory) while the VM is paused.
+///
+/// Sends `PUT /snapshot/create` to the per-VM control socket. The VM must
+/// already be paused (call [`pause_vm`] first). The caller is responsible for
+/// resuming the VM after capture with [`resume_vm`].
+///
+/// Both paths must be absolute — Firecracker resolves them on the host rather
+/// than inside the VM, so a relative path would be interpreted from an
+/// uncontrolled working directory.
+#[instrument(skip_all, fields(name))]
+pub fn create_snapshot_files(
+    name: &str,
+    vmstate_path: &std::path::Path,
+    mem_path: &std::path::Path,
+) -> Result<()> {
+    require_linux_env()?;
+    anyhow::ensure!(
+        vmstate_path.is_absolute(),
+        "vmstate_path must be absolute, got {}",
+        vmstate_path.display()
+    );
+    anyhow::ensure!(
+        mem_path.is_absolute(),
+        "mem_path must be absolute, got {}",
+        mem_path.display()
+    );
+
+    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+    let abs_dir = format!("{}/{}", abs_vms.trim(), name);
+    let socket = format!("{}/fc.socket", abs_dir);
+    let q_socket = shell_quote(&socket);
+
+    let vmstate_str = vmstate_path.to_string_lossy();
+    let mem_str = mem_path.to_string_lossy();
+
+    // PUT /snapshot/create with snapshot_type=Full writes vmstate + guest memory.
+    // The VM must be paused before this call; Firecracker refuses the request
+    // with an error if vCPUs are still running.
+    let payload = format!(
+        r#"{{"snapshot_type":"Full","snapshot_path":"{vmstate}","mem_file_path":"{mem}"}}"#,
+        vmstate = vmstate_str,
+        mem = mem_str,
+    );
+    api_put_socket(&socket, "/snapshot/create", &payload).with_context(|| {
+        format!(
+            "PUT /snapshot/create for VM '{}' (socket {})",
+            name, q_socket
+        )
+    })?;
     Ok(())
 }
 

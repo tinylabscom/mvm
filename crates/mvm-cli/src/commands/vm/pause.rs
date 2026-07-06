@@ -168,6 +168,17 @@ pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConf
     let sidecar =
         pause_and_seal(&args.name, &*io).with_context(|| format!("pausing VM {:?}", args.name))?;
 
+    // Stamp the live fc pid into a marker so the fs_quick gate can confirm
+    // the VM is quiesced. FC's snapshot-seal leaves the fc process alive, so
+    // pid-liveness alone cannot distinguish paused from running.
+    // Guard on fc.pid existing so only Firecracker VMs get this marker.
+    if let Some(fc_pid_path) = mvm_backend::microvm::fc_pid_path(&args.name)
+        && let Ok(pid) = std::fs::read_to_string(&fc_pid_path)
+        && let Err(e) = std::fs::write(vm_state_dir(&args.name).join("fc.paused"), pid.trim())
+    {
+        tracing::warn!(error = %e, vm = %args.name, "could not write fc.paused marker (pause succeeded)");
+    }
+
     let registry_path = mvm::vm::name_registry::registry_path();
     if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
         let _ = registry.set_paused(&args.name, true);
@@ -208,6 +219,10 @@ fn run_warm_start(name: &str, hypervisor: &str) -> Result<()> {
     };
     match backend.warm_start(&config, SnapshotCapability::LiveMemory) {
         Ok(outcome) => {
+            // Remove the FC pause marker on a successful warm resume. Same
+            // rationale as the plain resume path: FC keeps its pid alive
+            // across pause/resume, so the marker must be cleared explicitly.
+            let _ = std::fs::remove_file(vm_state_dir(name).join("fc.paused"));
             let registry_path = mvm::vm::name_registry::registry_path();
             if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
                 let _ = registry.set_paused(name, false);
@@ -274,6 +289,11 @@ pub(in crate::commands) fn run_resume(
 
     let sidecar = verify_and_resume(&args.name, &*io)
         .with_context(|| format!("resuming VM {:?}", args.name))?;
+
+    // Remove the FC pause marker now that vCPUs are running again. FC keeps
+    // the same fc pid across pause/resume (no restart), so a stale fc.paused
+    // would keep matching the live pid — explicit removal is required.
+    let _ = std::fs::remove_file(vm_state_dir(&args.name).join("fc.paused"));
 
     // The VM is now running at the hypervisor level — mark it resumed before
     // signaling the guest, so a post-restore failure below leaves the registry
