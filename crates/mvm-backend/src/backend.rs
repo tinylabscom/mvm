@@ -470,8 +470,9 @@ pub enum AnyBackend {
     Libkrun(LibkrunBackend),
     /// Vz — the one Apple Virtualization.framework backend (per-VM Rust
     /// objc2 supervisor: snapshot/restore, pause/resume, flow-audited
-    /// networking). The macOS-26 auto-default; opt-in elsewhere via
-    /// `--hypervisor vz` / `MVM_BACKEND=vz`.
+    /// networking). Opt-in via `--hypervisor vz` / `MVM_BACKEND=vz`; the
+    /// macOS-26 auto-default is now the in-house VMM (`InHouse`), and Vz
+    /// is on the sunset path.
     Vz(VzBackend),
     /// QEMU workload runtime — Linux dev/test substrate (KVM where
     /// present, TCG fallback). Opt-in via `--hypervisor qemu` /
@@ -488,16 +489,16 @@ pub enum AnyBackend {
     Mock(MockBackend),
     /// Raw HVF — Hypervisor.framework on macOS / Apple silicon,
     /// driven by the unified `vmm::run` loop via the detached
-    /// `mvm-hvf-supervisor`. Opt-in via `--hypervisor hvf` / `MVM_BACKEND=hvf`;
-    /// `auto_select` doesn't pick it yet (Vz remains the macOS-26 default until
-    /// HVF reaches workload parity). The destination macOS backend.
+    /// `mvm-hvf-supervisor`. Opt-in via `--hypervisor hvf` / `MVM_BACKEND=hvf`.
+    /// The macOS-26 auto-default reaches the same in-house VMM through the
+    /// `InHouse` runner role; this raw variant is the direct-backend selector.
     Hvf(HvfBackend),
     /// The in-house VMM driven through the unified `WorkloadRunner` over the
-    /// driver seam — the role-runner that will replace the per-backend
-    /// Hvf/Libkrun/Vz/FC `start()` copies. Opt-in via `--hypervisor inhouse`;
-    /// the `hvf` selector still resolves to `HvfBackend` until the runner is the
-    /// proven default. Same in-house VMM, tier, and security profile as `Hvf` —
-    /// just reached via the runner role.
+    /// driver seam — the role-runner that replaces the per-backend
+    /// Hvf/Libkrun/Vz/FC `start()` copies. The macOS-26 Apple Silicon
+    /// auto-default (also selectable via `--hypervisor inhouse`); the `hvf`
+    /// selector still resolves to the raw `HvfBackend`. Same in-house VMM,
+    /// tier, and security profile as `Hvf` — just reached via the runner role.
     InHouse(InHouseRunner),
 }
 
@@ -545,7 +546,7 @@ impl AnyBackend {
     ///
     /// Priority:
     /// 1. **Firecracker** (if native Linux `/dev/kvm` is available — production Tier 1)
-    /// 2. Vz — Apple Virtualization.framework (macOS 13+)
+    /// 2. In-house HVF VMM via the WorkloadRunner (macOS 26+ Apple Silicon)
     /// 3. raw libkrun
     ///
     /// If none of the above match, the function returns Firecracker as
@@ -562,9 +563,14 @@ impl AnyBackend {
             return Self::Firecracker(FirecrackerBackend);
         }
 
-        // 2. macOS 26+ → Apple Virtualization.framework via the vz supervisor.
+        // 2. macOS 26+ Apple Silicon → the in-house HVF VMM via the unified
+        //    WorkloadRunner (vsock-only egress; no Vz supervisor, no
+        //    gvproxy/passt NIC). Vz is opt-in via `--hypervisor vz`.
         if plat.is_vz_default_tier() {
-            return Self::Vz(VzBackend);
+            return Self::InHouse(WorkloadRunner::new(
+                InHouseDriver::new(),
+                RealEndpointSpawner,
+            ));
         }
 
         // 3. libkrun installed → use the raw libkrun shim.
@@ -981,10 +987,8 @@ mod tests {
     #[test]
     fn test_any_backend_from_hypervisor_vz() {
         // `--backend vz` and the longer `--backend virtualization`
-        // both route to the new Vz backend.
-        // `auto_select()` itself stays unchanged on macOS (libkrun
-        // remains the default per the user's "don't replace libkrun"
-        // instruction).
+        // both route to the Vz backend. Vz is opt-in only now — the
+        // macOS-26 `auto_select()` default is the in-house VMM.
         for alias in ["vz", "virtualization"] {
             let backend = AnyBackend::from_hypervisor(alias);
             assert!(matches!(backend, AnyBackend::Vz(_)), "alias {alias}");
@@ -1165,7 +1169,8 @@ mod tests {
         let name = backend.name();
         assert!(
             // The full set of legitimate auto_select returns is:
-            matches!(name, "firecracker" | "vz" | "libkrun"),
+            // firecracker (KVM), hvf (macOS-26 in-house runner), libkrun.
+            matches!(name, "firecracker" | "hvf" | "libkrun"),
             "auto_select returned unexpected backend: {name}"
         );
     }

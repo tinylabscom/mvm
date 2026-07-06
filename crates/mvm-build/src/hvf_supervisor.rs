@@ -144,7 +144,7 @@ mod tests {
             pid_file: "/state/hvf.pid".into(),
             workload_exit: "/state/workload.exit".into(),
             timeout_secs: 30,
-            agent_socket: Some("/state/hvf-agent.sock".into()),
+            agent_socket: Some("/state/agent.sock".into()),
             substitution_socket: Some("/state/substitution-endpoint.sock".into()),
             egress_relay_socket: Some("/state/egress-bridge.sock".into()),
             console_data_sockets: vec![],

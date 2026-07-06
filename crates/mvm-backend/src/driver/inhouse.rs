@@ -274,9 +274,10 @@ impl VmmDriver for InHouseDriver {
 }
 
 /// The per-VM agent RPC socket path (host→guest agent bridge). Matches the
-/// standing socket a `WorkloadRunner` binds so `attach` re-derives it.
+/// standing socket a `WorkloadRunner` binds so `attach` re-derives it — via
+/// the single source of truth shared with the host-side resolver.
 fn in_house_agent_socket(state_dir: &std::path::Path) -> PathBuf {
-    state_dir.join("agent.sock")
+    mvm_core::config::vm_inhouse_agent_socket_at(state_dir)
 }
 
 /// Resolve the host UDS for a console data port under the per-VM state dir,

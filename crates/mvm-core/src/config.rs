@@ -448,6 +448,37 @@ pub fn vm_vsock_proxy_socket(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("vsock.sock")
 }
 
+/// Filename of the in-house runner's guest-agent RPC bridge socket:
+/// `agent.sock`. Single source of truth for the name; callers that hold the
+/// per-VM dir join this via [`vm_inhouse_agent_socket_at`], callers that hold
+/// the VM name use [`vm_inhouse_agent_socket`].
+pub fn inhouse_agent_socket_filename() -> &'static str {
+    "agent.sock"
+}
+
+/// The in-house (`WorkloadRunner` / HVF) runner's standing guest-agent RPC
+/// bridge under an explicit per-VM state dir. The supervisor / in-process VMM
+/// binds it at boot and forwards to the guest's `GUEST_AGENT_PORT` vsock.
+/// Single source of truth so **both** in-house execution models — the
+/// in-process `WorkloadRunner`/`InHouseDriver` (the `--hypervisor inhouse`
+/// auto-default) and the detached `HvfBackend` supervisor — and the host-side
+/// resolvers (`DevConsoleTransport`, the `for_vm` agent ladder) cannot drift.
+/// A mismatch here silently makes the guest agent unreachable and every RPC
+/// time out.
+///
+/// The `MVM_HVF_AGENT_SOCKET` dev hook overrides this for live drivers; it is
+/// honored on the backend side only, so the override path must set the same
+/// value both sides use.
+pub fn vm_inhouse_agent_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir.join(inhouse_agent_socket_filename())
+}
+
+/// The in-house runner's guest-agent RPC bridge for a VM by name:
+/// `<vm_state_dir>/hvf-agent.sock`. See [`vm_inhouse_agent_socket_at`].
+pub fn vm_inhouse_agent_socket(name: &str) -> std::path::PathBuf {
+    vm_inhouse_agent_socket_at(&vm_state_dir(name))
+}
+
 /// The directory the Vz supervisor nests its per-port vsock listener
 /// sockets under: `<vm_state_dir>/vsock`. Unlike libkrun (which binds
 /// `<vm_state_dir>/vsock-<port>.sock` directly), the Vz `VsockProxy`
