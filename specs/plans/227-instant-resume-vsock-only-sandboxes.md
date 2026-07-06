@@ -12,6 +12,7 @@ A machine (OCI-built **or** nix-built) that can be:
 1. **Snapshotted while running** (memory + disk) and **restored near-instantly** (sub-second target on warm paths), including **fork** (N clones from one snapshot);
 2. Driven identically from **every frontend** — CLI, studio, mvmd, SDKs — through the **`MvmClient` facade**, never through frontend-private code paths;
 3. Booted with **one slim kernel** shared by builder and workload tiers on every backend;
+3a. **Uniform across backends**: every workload backend exposes the same lifecycle capability set (run/pause/resume/snapshot/restore/fork/warm) — capability lives in shared, platform-neutral cores behind the driver seam, never in one backend's private feature set;
 4. Run with **networking never enabled**: no NIC on any mvm-launched VM. **All data in and out crosses vsock** through the per-VM gating endpoint, making every flow *auditable and reviewable*, letting us **substitute secrets** (the workload never sees raw secret bytes — claims 12/13) and **mask PII** in flows.
 
 The vsock endpoint is not an implementation detail; it is the product seam. Everything in this plan either moves data onto it or builds capability on top of it.
@@ -89,14 +90,26 @@ Blocked on WS-B completion (last NIC user gone):
 - [ ] Merge builder and workload overlays into **one config**: base + DM_VERITY + VIRTIO_FS/FUSE + namespaces (nix sandbox) + VSOCKETS + VIRTIO_PCI/MMIO; keep INET for loopback proxy only.
 - [ ] Re-run the Plan 209 boot-time/kworker measurements; document deltas. Acceptance: one kernel artifact boots builder + workload on hvf, firecracker, libkrun, qemu; claim 3 (verity) unaffected.
 
-### WS-E — Snapshot / instant-resume capability
+### WS-E — Snapshot / instant-resume capability (uniform across backends)
 
-- [ ] **E1 (hvf pause/resume):** vCPU stop/start + device quiesce in the in-house VMM; `machine pause/resume` verbs (aliased from `vm`).
-- [ ] **E2 (hvf memory snapshot/restore):** guest RAM + vCPU + device state serialization behind the existing `checkpoint::vm_full` envelope (HMAC, same crypto as FC); restore into a fresh supervisor (the Plan 175 fresh-VMM shape).
-- [ ] **E3 (fork):** restore-to-new-identity on hvf via `fork_vm_full` + CoW rootfs clone (O(1) on APFS). Target: N sandboxes from one snapshot without re-boot.
-- [ ] **E4 (Linux tail):** land Plan 206 T1 (UFFD lazy-restore) so FC warm resume drops its ~1 s tail; live-KVM proofs.
-- [ ] **E5 (warm pools by default):** extend warm-pool claim (Plans 118/211) to `machine run` on both platforms once E1–E3 exist; snapshot-backed pools preferred over boot-backed where supported.
-- [ ] Acceptance: p50 restore-to-ready < 1 s on both platforms (measured via `BootTimingReport`); snapshot tamper → refused (envelope verify negative tests); fork lineage recorded in the audit chain.
+**Parity principle (owner directive 2026-07-06):** all backends expose the same lifecycle set. The checkpoint core is written once, platform-neutral (it operates on the guest-memory mapping + `std::io`, like our pure-Rust ext4 writer precedent), and per-VMM drivers supply exactly three hooks: *pause+drain*, *vCPU state save/restore*, *device persist*. Firecracker adapts its native snapshot behind the same seam; libkrun reaches parity by being replaced with the in-house VMM (Plan 214 — we cannot add snapshots to a Homebrew dylib we don't own); vz is sunset; qemu stays dev-tier.
+
+**Mechanism (validated against a reviewed external reference implementation — named nowhere, per convention — which demonstrates sub-100 ms cold-restore and O(1) fork on HVF with this exact design):**
+
+- **File-backed guest RAM from boot** (Linux `memfd`; macOS filesystem-backed mapping, path-recoverable via `F_GETPATH`). This is the enabling decision: snapshots and forks become CoW re-mappings instead of byte copies.
+- **Checkpoint** = pause vCPUs + drain device workers, then three parts under one versioned manifest: guest-RAM region descriptors + bytes, vCPU register state, virtio device state. Sealed with the existing `checkpoint::vm_full` HMAC envelope (same crypto as FC).
+- **Restore** = same-config VM, map the memory image **`MAP_PRIVATE` (CoW)** — page-cache-warm restores touch no bytes up front — restore vCPU state, resume. This is also the eager-CoW spike Plan 214 already names, ahead of UFFD.
+- **Fork** = the golden VM freezes and *stays frozen* as the shared CoW base; each clone `MAP_PRIVATE`-maps the golden's RAM file (macOS via file path; Linux via memfd) + CoW disk overlay (APFS/FICLONE, already O(1)). Fork latency independent of RAM size; N clones share clean pages (pool density).
+- **Resident checkpoints**: an in-process (RAM-held) checkpoint variant for warm pools — claim a clone from a resident golden without touching disk.
+- **Our edge:** the vsock-only device model (no NIC) makes the device-persist surface *smaller* than the reference's; in-flight vsock streams get defined semantics on restore (drop + guest retry), and snapshot/fork lineage is recorded in the chain-signed audit log (theirs has no audit story — ours is the differentiator).
+
+- [ ] **E0 (RAM substrate):** switch in-house guest RAM allocation to file-backed from boot; assert `F_GETPATH` recoverability; benchmark no-regression on cold boot.
+- [ ] **E1 (pause/resume):** vCPU stop/start + device-worker drain in the in-house VMM; supervisor control verbs; `machine pause/resume` (aliased from `vm`), dispatched per backend through the same seam.
+- [ ] **E2 (checkpoint/restore):** platform-neutral checkpoint core + the three driver hooks; manifest versioned; HMAC envelope; restore via CoW mapping into a fresh supervisor (Plan 175 fresh-VMM shape).
+- [ ] **E3 (fork):** frozen-golden + CoW RAM/disk clones on hvf via `fork_vm_full`; N sandboxes from one snapshot without re-boot.
+- [ ] **E4 (Linux tail):** land Plan 206 T1 (UFFD lazy-restore) so FC warm resume drops its ~1 s tail; live-KVM proofs; FC adapted behind the shared seam for verb parity.
+- [ ] **E5 (warm pools by default):** extend warm-pool claim (Plans 118/211) to `machine run` on both platforms; snapshot/resident-checkpoint-backed pools preferred over boot-backed.
+- [ ] Acceptance: **p50 restore-to-ready < 100 ms warm / < 1 s cold** on both platforms (measured via `BootTimingReport`); identical verb surface green on hvf + firecracker; snapshot tamper → refused (envelope negative tests); fork lineage in the audit chain.
 
 ### WS-F — Facade completeness (every frontend, one surface)
 
