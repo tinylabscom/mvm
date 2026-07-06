@@ -1,24 +1,21 @@
-//! The `MvmClient` facade users touch. One import surface fronts every piece:
-//! the trait + DTOs + `MockBackend` (re-exported from `mvm-core`'s `client`
-//! module), the in-process [`LocalBackend`], and the [`connect`] selector. A
-//! remote fleet is reached with the `remote` feature (the `GatewayBackend`).
-//!
-//! The contract itself lives in `mvm-core` (behind its `client` feature) so this
-//! crate and `mvm-sdk` share one trait without a dependency cycle — but callers
-//! depend only on `mvm-client` and never name `mvm-core` directly.
+//! The `MvmClient` facade: one trait fronting local microVM operations
+//! (in-process) and a remote `mvmd` fleet (REST), so a caller drives either
+//! target through the same calls. The remote implementation is a courier with
+//! no enforcement authority — every security decision is made by the authority
+//! that owns the path (the local host, or mvmd), never by this client.
 
+pub mod client;
 pub mod connect;
-pub mod local;
-
-pub use mvm_core::client::dto;
-pub use mvm_core::client::dto::{
-    ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
-    ReconfigureRequest,
-};
+pub mod dto;
+pub mod error;
 #[cfg(feature = "remote")]
-pub use mvm_core::client::gateway;
-pub use mvm_core::client::mock::{self, MockBackend};
-pub use mvm_core::client::{MvmClient, MvmError, Result};
+pub mod gateway;
+pub mod mock;
 
+pub use client::MvmClient;
 pub use connect::{Target, connect};
-pub use local::LocalBackend;
+pub use dto::{
+    ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineSpecBuilder, MachineState,
+    MachineStatus, ReconfigureRequest,
+};
+pub use error::{MvmError, Result};
