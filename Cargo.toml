@@ -493,6 +493,15 @@ builder-vm = [
 # reaches the shipped binary without this. Default-on so the run path
 # materializes in-process; `MVM_MATERIALIZE_BUILDER_VM` is the runtime opt-out.
 pure-mkfs = ["mvm-cli/pure-mkfs"]
+# Let an installed binary download mvm-published prebuilt builder VM images
+# from GitHub releases on a cache miss. Forwarded here for the same reason as
+# `pure-mkfs`: the root `mvmctl` binary builds mvm-cli with
+# `default-features = false`, so mvm-cli's gate never reaches the shipped
+# binary without this line. Off by default — contributor builds must build the
+# builder VM locally from the in-repo flake — and turned on only by the release
+# workflow, so an installed binary fetches the prebuilt instead of failing
+# closed on a cache miss.
+release-artifact-bootstrap = ["mvm-cli/release-artifact-bootstrap"]
 custom-dns = ["mvm-cli/custom-dns"]
 dev-watch = ["mvm-cli/dev-watch"]
 libkrun-live = ["mvm-cli/libkrun-live"]
