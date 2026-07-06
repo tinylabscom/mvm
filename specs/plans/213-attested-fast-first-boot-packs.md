@@ -294,3 +294,101 @@ The target user-visible shape is:
 - Live evidence records prepared warm-claim, prepared snapshot-restore,
   prepared cold-direct-boot, builder warm-claim, and builder snapshot-restore
   timings.
+
+## Slice 1 — tracer bullet: seed the persistent builder store from a verified pack
+
+**Status: designed 2026-07-06; not yet built.**
+
+The first vertical proves the whole pack path end-to-end while landing
+independently of the two unmerged mega-stacks (Plan 214 backend unification and
+Plan 227 hvf snapshot/restore). It slices WS-B, WS-C, and WS-F thin and defers
+E/G/H/I/J/K.
+
+### Framing decisions (settled in brainstorm)
+
+- **Backend-agnostic artifacts, hvf lands first.** Pack artifacts (builder base
+  disk, builder kernel, seeded store image) come from the shared
+  `nix/images/builder-vm/` flake and are byte-identical across backends, so the
+  manifest lists every compatible backend in `backend_compatibility`. The local
+  fast-boot/seed path is wired for the hvf backend first (macOS-26 default, no
+  Homebrew prerequisites, and the strategic destination); libkrun/Linux wiring is
+  a later additive slice.
+- **`PackBackend` gains an `hvf` variant.** `verify_pack_at` matches
+  `backend_compatibility` against `LocalPackPolicy.backend`, so the enum must be
+  able to name the in-house/HVF backend regardless of the agnostic framing. This
+  is the one schema change slice 1 makes.
+- **Value comes from the seeded store, not a memory snapshot.** hvf has no
+  snapshot primitive yet (Plan 227 WS-E). With the Stage 0 store now persistent
+  on macOS, the cost a pack eliminates is the multi-minute Stage 0 store
+  population, not VM boot. Slice 1 therefore ships no memory snapshot and no
+  resident warm-standby.
+- **Warm is measured, not assumed.** After the seeded store lands, slice 1 boots
+  the hvf builder cold with the warm store and measures it live on available
+  hardware. Resident warm-standby (a full hvf resident host-VM lifecycle) becomes
+  slice 2, gated on that measurement showing cold-boot is insufficient.
+- **Seed format: ready-to-mount ext4 Nix-store image.** The pack ships a
+  materialized store image, not a NAR closure. The fast path is then verify +
+  place + write the persistent-store reuse marker — zero seed-boot — reusing the
+  reuse machinery already on main. A NAR-import variant is a later refinement if
+  ADR-097 ratification demands strict NARs-only publishing.
+- **Seed scope: the default `dev up` / `build image` dev-shell closure.** The
+  first-hit path for a fresh install. Private flakes and OCI still route through
+  the normal builder path; OCI `run --image` is already builder-VM-free
+  (materialized in-process host-side) and needs no pack.
+- **Rollout: opt-in `MVM_BUILDER_PACK=1`.** Default path stays byte-identical
+  until the live measurement proves the pack path, then a later slice flips the
+  default. Source-checkout builds never take the pack path (they build from
+  in-repo flakes); the flag is a no-op wherever `find_builder_vm_flake()` returns
+  a local flake, enforced the same way release-artifact download is gated today.
+
+### ADR-097 amendments this slice requires
+
+ADR-097 is Proposed; slice 1 ratifies it with two edits (a separate docs change):
+
+1. Add the in-house/HVF backend to the backend set packs may target.
+2. Clarify §5 so a content-addressed, deterministically-rebuildable store image
+   is a publishable Nix output, not host-derived local-only state. Memory
+   snapshots remain local-only. `pack-hash-as-identity` is unchanged.
+
+### Units (each independently testable)
+
+**Unit 1 — pack producer (WS-B thin).** A CI/release step plus a local
+example/xtask tool that takes the builder-VM flake outputs (base disk + builder
+kernel) and a materialized seeded store image for the dev-shell closure, and
+emits a signed `Builder` `PackManifest` + file set. Consumes the existing
+`mvm_core::packs` types unchanged except the new `PackBackend::Hvf`. Output: one
+`aarch64-darwin` builder pack.
+Tests: produced pack round-trips through `verify_pack_at` green; tamper on each
+file + manifest field goes red.
+
+**Unit 2 — content-addressed pack cache (WS-C thin).** `place → quarantine dir →
+verify_pack_at → atomic rename-promote` under `mvm_core::config` cache helpers
+(`mvm_cache_dir`), permission-hardened (0700). Interface:
+`resolve_pack(kind, arch, backend) -> Result<VerifiedPackDir>`.
+Tests: interrupted download, partial extraction, atomic promotion, permission
+hardening, poisoned-entry rejection — all with a locally-produced pack, no
+network.
+
+**Unit 3 — seed materializer + flag-gated hvf boot (WS-F thin).** Given a
+`VerifiedPackDir`, lay the seeded store image + base disk into the
+`~/.cache/mvm/builder-vm/` layout the persistent-store reuse path recognizes,
+write the reuse marker, then boot the hvf builder with the warm store behind
+`MVM_BUILDER_PACK=1`. Emit phase timing to capture the live measurement.
+Tests: materialize lands the exact layout + marker the reuse path expects;
+flag-off = byte-identical default path; source-checkout = no-op. Live: one
+measured `dev up` with the pack vs. cold Stage 0 on this Mac.
+
+### Data flow
+
+```
+release CI -> signed builder pack -> download -> quarantine -> verify_pack_at
+  -> atomic promote -> materialize seeded store + reuse marker
+  -> hvf boot (warm store, MVM_BUILDER_PACK=1) -> measured first build
+```
+
+### Slice-2 trigger
+
+If the measured hvf cold-boot-with-warm-store is too slow to feel "warm," slice 2
+adds a resident hvf warm-standby (an `HvfPersistentHostVm` lifecycle + warm
+claim, analogous to the libkrun resident builder), reusing the backend-agnostic
+`mvm_core::residency` policy layer. Otherwise slice 1 already delivered warm.
