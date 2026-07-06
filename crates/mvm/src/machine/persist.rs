@@ -15,6 +15,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use mvm_core::atomic_io::atomic_write;
+use mvm_core::util::parse_human_size;
 use mvm_core::{config, naming};
 
 /// Schema version stored in every `machine.json`.  Bump only if a breaking
@@ -144,6 +145,163 @@ pub fn list_machine_specs() -> Result<Vec<MachineSpec>> {
     }
     specs.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(specs)
+}
+
+// ---------------------------------------------------------------------------
+// Config comparison, reconciliation, patch, and memory validation
+// ---------------------------------------------------------------------------
+
+/// Two specs share a launch config when every boot-affecting field matches.
+/// Runtime metadata (resolved digest, timestamps) is deliberately excluded —
+/// it changes on every start and must not trigger a collision.
+pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
+    a.image == b.image
+        && a.manifest == b.manifest
+        && a.net == b.net
+        && a.allow_host == b.allow_host
+        && a.cpus == b.cpus
+        && a.memory == b.memory
+        && a.mem_initial == b.mem_initial
+        && a.profile == b.profile
+        && a.volumes == b.volumes
+        && a.init == b.init
+        && a.ssh_agent == b.ssh_agent
+        && a.agent_verb == b.agent_verb
+}
+
+/// Human summary of which boot-affecting fields differ, for the loud
+/// "config changed, recreating" notice. Mirrors [`machine_config_matches`].
+pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> String {
+    let mut changed = Vec::new();
+    // `image` and `manifest` are mutually-exclusive sources; report either as a
+    // single "source" change. `machine_config_matches` already compares both, so
+    // without this a manifest-only swap recreates with an empty `changed` list.
+    if current.image != desired.image || current.manifest != desired.manifest {
+        changed.push("source");
+    }
+    if current.net != desired.net {
+        changed.push("net");
+    }
+    if current.allow_host != desired.allow_host {
+        changed.push("allow-host");
+    }
+    if current.cpus != desired.cpus {
+        changed.push("cpus");
+    }
+    if current.memory != desired.memory || current.mem_initial != desired.mem_initial {
+        changed.push("memory");
+    }
+    if current.profile != desired.profile {
+        changed.push("profile");
+    }
+    if current.volumes != desired.volumes {
+        changed.push("volumes");
+    }
+    if current.init != desired.init {
+        changed.push("init");
+    }
+    if current.ssh_agent != desired.ssh_agent {
+        changed.push("ssh-agent");
+    }
+    if current.agent_verb != desired.agent_verb {
+        changed.push("agent-verb");
+    }
+    changed.join(", ")
+}
+
+/// What the persistent path should do with the on-disk spec for the target name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpecReconcile {
+    /// No spec on disk — write `desired` and boot.
+    Create,
+    /// A spec with the same launch config already exists — keep it.
+    Reuse,
+    /// A spec with a different config exists — stop the old instance, overwrite,
+    /// and reboot. `changed` is a human summary of the differing fields for the
+    /// loud notice.
+    Recreate { changed: String },
+}
+
+/// Decide how to reconcile a desired spec against what's on disk. A
+/// same-config spec is reused; a different-config spec **auto-recreates**
+/// (the caller stops the old instance, overwrites the spec, and reboots) so a
+/// config change converges like `compose up`. The machine is cattle —
+/// durable data belongs in `--volume` host shares, which live on the host and
+/// survive the recreate. The recreate is announced loudly by the caller (never
+/// silent) so an unintended clobber (e.g. a typo'd `--image`) is observable.
+pub fn reconcile_machine_spec(
+    existing: Option<&MachineSpec>,
+    desired: &MachineSpec,
+    force: bool,
+) -> Result<SpecReconcile> {
+    match existing {
+        None => Ok(SpecReconcile::Create),
+        Some(current) if machine_config_matches(current, desired) => Ok(SpecReconcile::Reuse),
+        Some(current) if force => Ok(SpecReconcile::Recreate {
+            changed: machine_config_diff(current, desired),
+        }),
+        Some(_) => bail!(
+            "machine {:?} exists with a different config; pass --force to recreate, \
+             or use a different name",
+            desired.name
+        ),
+    }
+}
+
+/// A resolved patch over the reconfigurable `MachineSpec` fields. `None`
+/// means "leave unchanged".
+pub struct ReconfigurePatch {
+    pub net: Option<bool>,
+    pub allow_host: Option<Vec<String>>,
+    pub cpus: Option<u32>,
+    pub memory: Option<String>,
+    pub mem_initial: Option<String>,
+}
+
+/// Apply the patch: each `Some` overrides the corresponding field; the
+/// rest of `spec` is inherited unchanged.
+pub fn apply_patch(mut spec: MachineSpec, patch: &ReconfigurePatch) -> MachineSpec {
+    if let Some(v) = patch.net {
+        spec.net = v;
+    }
+    if let Some(v) = &patch.allow_host {
+        spec.allow_host = v.clone();
+    }
+    if let Some(v) = patch.cpus {
+        spec.cpus = v;
+    }
+    if let Some(v) = &patch.memory {
+        spec.memory = v.clone();
+    }
+    if let Some(v) = &patch.mem_initial {
+        spec.mem_initial = Some(v.clone());
+    }
+    spec
+}
+
+/// Validate the `--memory` / `--mem-initial` pair using the same parser as
+/// the run path. Returns `(memory_mib, mem_initial_mib)`.
+pub fn validate_machine_memory(
+    memory: &str,
+    mem_initial: Option<&str>,
+) -> Result<(u32, Option<u32>)> {
+    let memory_mib = parse_human_size(memory).context("invalid machine memory")?;
+    let mem_initial_mib = match mem_initial {
+        Some(value) => {
+            let parsed = parse_human_size(value).context("invalid machine mem_initial")?;
+            if parsed == 0 {
+                bail!("machine mem_initial must be > 0 when set");
+            }
+            if parsed >= memory_mib {
+                bail!(
+                    "machine mem_initial ({parsed} MiB) must be strictly less than memory ({memory_mib} MiB)"
+                );
+            }
+            Some(parsed)
+        }
+        None => None,
+    };
+    Ok((memory_mib, mem_initial_mib))
 }
 
 #[cfg(test)]
@@ -313,5 +471,183 @@ mod tests {
         // Root dir doesn't exist yet — must return empty, not error.
         let specs = list_machine_specs().expect("list empty");
         assert!(specs.is_empty());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Tests for config-diff / reconcile / patch / memory-validation
+    // ---------------------------------------------------------------------------
+
+    /// A fixture with a volume so patch tests can confirm it is preserved.
+    fn reconfigure_spec_fixture() -> MachineSpec {
+        MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".into(),
+            image: Some("img:1".into()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: vec![],
+            cpus: 2,
+            memory: "512M".into(),
+            mem_initial: None,
+            profile: "standard".into(),
+            volumes: vec!["/data:/data:ro".into()],
+            init: vec![],
+            ssh_agent: false,
+            agent_verb: vec![],
+            created_at: None,
+            last_started_at: None,
+        }
+    }
+
+    #[test]
+    fn config_match_ignores_runtime_metadata_but_not_launch_config() {
+        let mut a = spec_fixture("web");
+        let mut b = spec_fixture("web");
+        // Runtime metadata differs — still the same launch config.
+        a.resolved_digest = Some("sha256:aaa".to_string());
+        a.created_at = Some("t0".to_string());
+        b.last_started_at = Some("t1".to_string());
+        assert!(machine_config_matches(&a, &b));
+        // A launch-config field differs — no longer a match.
+        b.cpus = 4;
+        assert!(!machine_config_matches(&a, &b));
+    }
+
+    #[test]
+    fn reconcile_creates_reuses_and_force_recreates_on_config_change() {
+        let desired = spec_fixture("web");
+
+        assert_eq!(
+            reconcile_machine_spec(None, &desired, false).expect("create"),
+            SpecReconcile::Create
+        );
+
+        let same = spec_fixture("web");
+        assert_eq!(
+            reconcile_machine_spec(Some(&same), &desired, false).expect("reuse"),
+            SpecReconcile::Reuse
+        );
+
+        // A different config is force-gated: error without --force, recreate with.
+        let mut different = spec_fixture("web");
+        different.image = Some("ubuntu:24.04".to_string());
+        different.cpus += 1;
+        // A different config errors without --force, and recreates (reporting
+        // what changed) with it.
+        let err = reconcile_machine_spec(Some(&different), &desired, false)
+            .expect_err("different config errors without --force");
+        assert!(err.to_string().contains("different config"), "msg: {err}");
+        match reconcile_machine_spec(Some(&different), &desired, true).expect("recreate") {
+            SpecReconcile::Recreate { changed } => {
+                assert!(changed.contains("source"), "changed: {changed}");
+                assert!(changed.contains("cpus"), "changed: {changed}");
+            }
+            other => panic!("expected Recreate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_diff_names_a_manifest_only_source_change() {
+        // A manifest-only swap (no image) must be named — `machine_config_matches`
+        // compares `manifest`, so without this the recreate notice would be empty.
+        let mut current = spec_fixture("web");
+        current.image = None;
+        current.manifest = Some("slot-aaaa".to_string());
+        let mut desired = spec_fixture("web");
+        desired.image = None;
+        desired.manifest = Some("slot-bbbb".to_string());
+        let changed = machine_config_diff(&current, &desired);
+        assert!(changed.contains("source"), "changed: {changed}");
+    }
+
+    #[test]
+    fn apply_patch_overrides_only_set_fields_and_preserves_rest() {
+        // Construct patch directly (patch_from_args stays in mvm-cli; ported
+        // here as a direct struct construction so the apply_patch logic is
+        // exercised without the clap layer).
+        let patch = ReconfigurePatch {
+            net: None,
+            allow_host: None,
+            cpus: Some(8),
+            memory: None,
+            mem_initial: None,
+        };
+        let out = apply_patch(reconfigure_spec_fixture(), &patch);
+        assert_eq!(out.cpus, 8);
+        // Everything else preserved.
+        assert_eq!(out.memory, "512M");
+        assert_eq!(out.volumes, vec!["/data:/data:ro".to_string()]);
+        assert!(!out.net);
+    }
+
+    #[test]
+    fn apply_patch_no_flags_is_noop() {
+        let patch = ReconfigurePatch {
+            net: None,
+            allow_host: None,
+            cpus: None,
+            memory: None,
+            mem_initial: None,
+        };
+        assert_eq!(
+            apply_patch(reconfigure_spec_fixture(), &patch),
+            reconfigure_spec_fixture()
+        );
+    }
+
+    #[test]
+    fn apply_patch_allow_host_replace_and_clear() {
+        // Replace: Some(vec) overrides the allow_host field.
+        let patch = ReconfigurePatch {
+            net: None,
+            allow_host: Some(vec!["a:443".into()]),
+            cpus: None,
+            memory: None,
+            mem_initial: None,
+        };
+        let out = apply_patch(reconfigure_spec_fixture(), &patch);
+        assert_eq!(out.allow_host, vec!["a:443".to_string()]);
+
+        // Clear: Some(vec![]) empties the list.
+        let base = MachineSpec {
+            allow_host: vec!["old:443".into()],
+            ..reconfigure_spec_fixture()
+        };
+        let clear_patch = ReconfigurePatch {
+            net: None,
+            allow_host: Some(vec![]),
+            cpus: None,
+            memory: None,
+            mem_initial: None,
+        };
+        let out = apply_patch(base, &clear_patch);
+        assert!(out.allow_host.is_empty());
+    }
+
+    #[test]
+    fn validate_machine_memory_rejects_invalid_size() {
+        assert!(validate_machine_memory("notasize", None).is_err());
+    }
+
+    #[test]
+    fn validate_machine_memory_rejects_mem_initial_ge_memory() {
+        // mem_initial must be strictly less than memory.
+        assert!(validate_machine_memory("512M", Some("1G")).is_err());
+        assert!(validate_machine_memory("512M", Some("512M")).is_err());
+    }
+
+    #[test]
+    fn validate_machine_memory_accepts_valid_pair() {
+        let (mem, mem_initial) = validate_machine_memory("1G", Some("256M")).expect("valid pair");
+        assert_eq!(mem, 1024);
+        assert_eq!(mem_initial, Some(256));
+    }
+
+    #[test]
+    fn validate_machine_memory_none_initial_is_ok() {
+        let (mem, mem_initial) = validate_machine_memory("512M", None).expect("no initial");
+        assert_eq!(mem, 512);
+        assert!(mem_initial.is_none());
     }
 }
