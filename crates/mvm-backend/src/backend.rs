@@ -517,9 +517,8 @@ impl AnyBackend {
     ///
     /// Supported: `"firecracker"` (default), `"qemu"` (Linux dev/test),
     /// `"libkrun"` (Linux KVM / macOS HVF). `"vz"` (Apple Virtualization.framework)
-    /// was removed as a workload-dispatch selector (Plan 226 R1P1 WS-A) — it now
-    /// falls through like any other unknown name. Unknown names fall back to
-    /// Firecracker.
+    /// was removed as a workload-dispatch selector — it now falls through like
+    /// any other unknown name. Unknown names fall back to Firecracker.
     pub fn from_hypervisor(name: &str) -> Self {
         // The runner isn't const-constructible, so it can't live in the catalog
         // table; special-case its opt-in selector before the descriptor lookup.
@@ -987,9 +986,9 @@ mod tests {
     #[test]
     fn test_any_backend_from_hypervisor_vz_falls_back_to_default() {
         // The `vz` / `virtualization` selectors were removed from the
-        // catalog (Plan 226 R1P1 WS-A) — Vz is no longer a workload-dispatch
-        // backend. Both aliases now fall through to the default backend
-        // (Firecracker) rather than resolving to a Vz instance.
+        // catalog — Vz is no longer a workload-dispatch backend. Both
+        // aliases now fall through to the default backend (Firecracker)
+        // rather than resolving to a Vz instance.
         for alias in ["vz", "virtualization"] {
             let backend = AnyBackend::from_hypervisor(alias);
             assert_eq!(
@@ -1153,8 +1152,8 @@ mod tests {
     #[test]
     fn for_started_vm_no_longer_resolves_vz_by_marker() {
         // The `vz.pid` marker was dropped from the descriptor registry along
-        // with the `Vz` variant (Plan 226 R1P1 WS-A) — a leftover marker from
-        // a pre-removal VM no longer resolves to any backend.
+        // with the `Vz` variant — a leftover marker from a pre-removal VM
+        // no longer resolves to any backend.
         let _legacy_guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

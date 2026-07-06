@@ -74,8 +74,8 @@ pub(in crate::commands) struct ResumeArgs {
 /// A running VM whose state dir carries a `vz.pid` marker is a Vz VM — it gets
 /// native vCPU pause/resume rather than the Firecracker snapshot-seal path.
 ///
-/// `Vz` is no longer a workload-dispatch `AnyBackend` variant (Plan 226 R1P1
-/// WS-A removed it from the catalog, so `AnyBackend::for_started_vm` can never
+/// `Vz` is no longer a workload-dispatch `AnyBackend` variant (it was
+/// removed from the catalog, so `AnyBackend::for_started_vm` can never
 /// resolve a `vz.pid` marker anymore), so this checks the marker file
 /// directly rather than routing through the enum.
 fn is_vz_vm(name: &str) -> bool {

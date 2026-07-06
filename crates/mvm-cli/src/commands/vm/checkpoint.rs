@@ -9,9 +9,9 @@
 //! per-instance CoW clone).
 //!
 //! `vm_full` (full-VM live save/restore/fork) was implemented only on top of
-//! the Vz backend. Plan 226 R1P1 WS-D descopes it from this CLI surface —
-//! every `vm_full`/`--class vm-full` entry point now refuses with
-//! [`full_vm_checkpoint_unsupported_error`], naming the Plan 226 WS-E re-home
+//! the Vz backend. That has been descoped from this CLI surface — every
+//! `vm_full`/`--class vm-full` entry point now refuses with
+//! [`full_vm_checkpoint_unsupported_error`], naming the planned re-home
 //! onto the in-house HVF VMM. `fs_quick` is unaffected.
 
 use std::path::PathBuf;
@@ -41,7 +41,7 @@ pub(in crate::commands) struct CheckpointArgs {
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct SaveArgs {
     /// Name of the running VM to save. vm_full save is unsupported (Vz-only,
-    /// descoped by Plan 226 R1P1 WS-D); this always refuses.
+    /// descoped); this always refuses.
     #[arg(value_parser = clap_vm_name)]
     pub name: String,
     /// Optional human label recorded on the checkpoint.
@@ -352,10 +352,10 @@ fn supervisor_config_digest(state_dir: &std::path::Path) -> String {
 
 /// vm_full (full-VM live save/restore/fork) was implemented only on top of
 /// the Vz backend, which mvm no longer ships as a runtime backend. The
-/// capability is tracked for a re-home onto the in-house HVF VMM (Plan 226
-/// WS-E) rather than reimplemented here — every vm_full entry point
-/// (`checkpoint create --class vm-full`, `save`, `restore`, forking a
-/// vm_full checkpoint) refuses with this message until then.
+/// capability is tracked for a re-home onto the in-house HVF VMM rather
+/// than reimplemented here — every vm_full entry point (`checkpoint
+/// create --class vm-full`, `save`, `restore`, forking a vm_full
+/// checkpoint) refuses with this message until then.
 fn full_vm_checkpoint_unsupported_error(action: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "vm_full {action} is not supported: full-VM live save/restore/fork was built on \
@@ -531,8 +531,8 @@ fn rm(id: &str, json: bool) -> Result<()> {
 }
 
 /// `mvmctl vm checkpoint restore <id>`: same-identity resume of a vm_full
-/// checkpoint. vm_full was Vz-only and is descoped (Plan 226 R1P1 WS-D); this
-/// always refuses with the tracked-unsupported message.
+/// checkpoint. vm_full was Vz-only and is descoped; this always refuses
+/// with the tracked-unsupported message.
 fn restore(_id: &str, _json: bool) -> Result<()> {
     Err(full_vm_checkpoint_unsupported_error("restore"))
 }
@@ -548,9 +548,9 @@ fn fork(
 ) -> Result<()> {
     let checkpoint = validated_checkpoint_id(id)?;
     let store = CheckpointStore::open();
-    // Pick the fork arm by the parent's class: vm_full forking was Vz-only and
-    // is descoped (Plan 226 R1P1 WS-D); fs_quick is a rootfs-only clone that
-    // the operator can optionally boot with `--boot`.
+    // Pick the fork arm by the parent's class: vm_full forking was Vz-only
+    // and is descoped; fs_quick is a rootfs-only clone that the operator
+    // can optionally boot with `--boot`.
     let parent = store.read_meta(&checkpoint)?;
     match parent.class {
         CheckpointClass::VmFull => Err(full_vm_checkpoint_unsupported_error("fork")),

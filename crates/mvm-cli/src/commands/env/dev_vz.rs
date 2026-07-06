@@ -2,9 +2,9 @@
 //!
 //! Historically this module also carried the long-lived Vz persistent
 //! builder VM's boot/park/status lifecycle (`/dev/vdb` nix-store
-//! overlay + `/work` share) — that lifecycle has been removed (Plan 226
-//! R1P1; the macOS dev VM now defaults to the in-house HVF backend, see
-//! `super::dev`). What remains here is backend-agnostic: dev-image
+//! overlay + `/work` share) — that lifecycle has been removed; the
+//! macOS dev VM now defaults to the in-house HVF backend, see
+//! `super::dev`. What remains here is backend-agnostic: dev-image
 //! fetch/verify/build (`ensure_dev_image`), builder-VM bootstrap
 //! (Stage 0), cache status/inspection, and a handful of legacy
 //! Vz-specific probes (`is_vz_dev_running`, `dev_vsock_proxy_path`,
@@ -189,8 +189,8 @@ fn dev_vm_guest_agent_connect() -> Result<std::os::unix::net::UnixStream> {
 /// cross-process.
 ///
 /// No code path creates a new persistent Vz dev VM anymore (the Vz dev
-/// lifecycle was removed — Plan 226 R1P1); this probe survives only to
-/// detect one left over from before the upgrade, so `cleanup`/`cache
+/// lifecycle was removed); this probe survives only to detect one left
+/// over from before the upgrade, so `cleanup`/`cache
 /// clear` guards don't silently ignore or clobber it.
 ///
 /// A live supervisor PID alone isn't enough — the guest may still be
@@ -256,7 +256,7 @@ pub(in crate::commands) fn dev_vsock_proxy_path() -> String {
 /// VM was reaped. Prints the human result line only when `!json`.
 ///
 /// No `mvmctl dev` verb dispatches here anymore — the Vz dev lifecycle
-/// has been removed (Plan 226 R1P1). The sole remaining caller is
+/// has been removed. The sole remaining caller is
 /// `ops::cache`'s cache-clear safety guard, which must still stop a
 /// leftover persistent Vz dev VM before clearing the builder store (it
 /// holds the store's flock for its lifetime).
@@ -6985,8 +6985,8 @@ mod heartbeat_tests {
 #[cfg(all(test, feature = "builder-vm"))]
 mod autopark_gating_tests {
     // `should_resume` (and the residency/activity-tracking machinery it
-    // supported) was removed along with the Vz dev boot path — Plan 226
-    // R1P1. `should_park` survives because `cmd_dev_vz_down` (kept for
+    // supported) was removed along with the Vz dev boot path.
+    // `should_park` survives because `cmd_dev_vz_down` (kept for
     // `ops::cache`'s stale-VM cleanup guard) still calls it.
     use super::should_park;
 

@@ -568,10 +568,10 @@ mod tests {
     fn resolve_env_override_returns_none_for_unrecognised() {
         // Typo / removed backend / accidental value: log a warning
         // and fall through to auto-detect (the caller's job). `vz` is
-        // included here — the Vz builder backend was removed (Plan 226
-        // R1P1 WS-C), so a leftover `MVM_BUILDER_BACKEND=vz` in an
-        // operator's shell rc must fall through cleanly rather than
-        // resolve to a backend that no longer exists.
+        // included here — the Vz builder backend was removed, so a
+        // leftover `MVM_BUILDER_BACKEND=vz` in an operator's shell rc
+        // must fall through cleanly rather than resolve to a backend
+        // that no longer exists.
         for value in ["firecracker", "vz", "VZ", "  vz  "] {
             with_env(Some(value), || {
                 assert_eq!(resolve_env_override(), None, "value: {value:?}");
@@ -1017,9 +1017,9 @@ mod tests {
         );
     }
 
-    /// Regression guard (Plan 226 R1P1 WS-C): after removing the Vz builder
-    /// backend, the auto-detected in-house path must fall back to libkrun
-    /// only — there is no Vz arm left to fall through.
+    /// Regression guard: after removing the Vz builder backend, the
+    /// auto-detected in-house path must fall back to libkrun only —
+    /// there is no Vz arm left to fall through.
     #[test]
     fn macos_inhouse_auto_falls_back_to_libkrun_only() {
         let order = builder_attempt_order(BuilderBackendChoice::InHouse, false, false, false);

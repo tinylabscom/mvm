@@ -403,8 +403,8 @@ fn should_replenish_inline(supports_standby_pool: bool, warm_pool_size: u32) -> 
 /// For libkrun standbys this path fires automatically after each claimed launch.
 /// (The historical Vz saved-standby carve-out — a boot + capture cycle expensive
 /// enough to require the builder VM and a manual `pool warm` — no longer applies:
-/// Vz was removed as a workload-dispatch `AnyBackend` variant in Plan 226 R1P1
-/// WS-A, so `supports_standby_pool()` is only ever true for libkrun today.)
+/// Vz was removed as a workload-dispatch `AnyBackend` variant, so
+/// `supports_standby_pool()` is only ever true for libkrun today.)
 pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Result<u32> {
     if !should_replenish_inline(backend.supports_standby_pool(), cfg.warm_pool_size) {
         return Ok(0);
@@ -996,9 +996,9 @@ fn resolve_warm_shape(cfg: &MvmConfig, _rootfs_override: Option<&str>) -> Result
     let vcpus = u8::try_from(cfg.default_cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
     // The image-keyed branch here used to resolve a Vz saved-standby's source
     // rootfs (explicit --rootfs > MVM_POOL_ROOTFS > default). Vz was removed
-    // as a workload-dispatch `AnyBackend` variant (Plan 226 R1P1 WS-A), so no
-    // backend reaching this function can need a non-libkrun, image-keyed
-    // standby anymore — the warm pool is libkrun-only (image-agnostic) today.
+    // as a workload-dispatch `AnyBackend` variant, so no backend reaching
+    // this function can need a non-libkrun, image-keyed standby anymore —
+    // the warm pool is libkrun-only (image-agnostic) today.
     let image: Option<std::path::PathBuf> = None;
     // A Vz saved-standby must boot the kernel that pairs with ITS rootfs variant
     // — the `vmlinux` shipped beside the rootfs (dev rootfs ↔ dev kernel, prod ↔

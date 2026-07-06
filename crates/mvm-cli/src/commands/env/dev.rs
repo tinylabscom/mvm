@@ -9,7 +9,7 @@
 //!   boots the dev VM via the in-house HVF backend
 //!   (`mvm_backend::hvf_backend::HvfBackend`, Hypervisor.framework) and
 //!   exposes a PTY-over-vsock console. This is the destination macOS
-//!   backend; the former Vz dev path has been removed (Plan 226 R1P1).
+//!   backend; the former Vz dev path has been removed.
 //! - **native Linux + KVM** → `super::linux_native` treats the host shell as
 //!   the dev environment, installs Firecracker + downloads kernel/
 //!   rootfs assets, and optionally spawns an interactive subshell.
@@ -49,7 +49,7 @@ enum DevBackend {
     /// The canonical macOS dev path. Selected by macOS 26+ Apple Silicon
     /// auto-detect and by an explicit `--builder inhouse` /
     /// `MVM_BUILDER_BACKEND=inhouse` override. Supersedes the former
-    /// Vz dev path, which has been removed (Plan 226 R1P1).
+    /// Vz dev path, which has been removed.
     InHouse,
     /// Native Linux with `/dev/kvm` — host shell is the dev environment;
     /// Firecracker runs natively.
@@ -129,8 +129,8 @@ fn select_dev_backend(
 /// True only when the operator *explicitly* asked for the in-house
 /// builder: the `--builder inhouse` flag (folded into the env at
 /// startup) or a bare `MVM_BUILDER_BACKEND=inhouse`. Mirrors the
-/// deleted `builder_prefers_vz()` (Vz dev path removed, Plan 226 R1P1)
-/// — same mechanism, retargeted at `BuilderBackendChoice::InHouse`.
+/// deleted `builder_prefers_vz()` (Vz dev path removed) — same
+/// mechanism, retargeted at `BuilderBackendChoice::InHouse`.
 #[cfg(feature = "builder-vm")]
 fn builder_prefers_inhouse() -> bool {
     use mvm_build::builder_backend_select::{BuilderBackendChoice, resolve_choice};
@@ -701,8 +701,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             let dev_volumes = resolve_dev_volumes(&volume)?;
             let dev_base = base.as_deref().map(dev_vz::DevBaseRef::parse).transpose()?;
             // `--base` (boot from a pinned template/slot/bundle revision)
-            // was Vz-only; the Vz dev path has been removed (Plan 226
-            // R1P1) and no other backend has picked up the feature yet.
+            // was Vz-only; the Vz dev path has been removed and no other
+            // backend has picked up the feature yet.
             if dev_base.is_some() {
                 anyhow::bail!(
                     "`mvmctl dev up --base` is not supported by any dev backend right now \
@@ -762,9 +762,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         }
         DevAction::Park { json: _ } => {
             // No dev backend currently supports a persistent memory
-            // snapshot (the Vz dev backend did; it has been removed —
-            // Plan 226 R1P1), so every host refuses unconditionally
-            // (the `--json` flag has nothing left to report).
+            // snapshot (the Vz dev backend did; it has been removed), so
+            // every host refuses unconditionally (the `--json` flag has
+            // nothing left to report).
             match backend {
                 DevBackend::Libkrun => anyhow::bail!(
                     "`mvmctl dev park` requires a persistent-snapshot-capable dev backend; \
@@ -943,8 +943,7 @@ mod tests {
         // Regression test: `MVM_BUILDER_BACKEND=inhouse` (or
         // `--builder inhouse`) must actually route the dev VM through
         // `HvfBackend` when the host supports it — mirrors the deleted
-        // Vz-override regression test (Plan 226 R1P1: Vz dev path
-        // removed).
+        // Vz-override regression test (Vz dev path removed).
         assert_eq!(
             select_dev_backend(
                 Platform::MacOS,

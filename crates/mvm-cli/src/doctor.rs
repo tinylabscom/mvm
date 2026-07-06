@@ -3215,8 +3215,8 @@ mod tests {
     fn collect_warm_start_support_reports_per_backend_tier() {
         let r = collect_warm_start_support();
         // The honest per-backend warm-start matrix. Vz was removed as a
-        // workload-dispatch `AnyBackend` variant (Plan 226 R1P1 WS-A) and no
-        // longer has a catalog descriptor, so it is absent from this table.
+        // workload-dispatch `AnyBackend` variant and no longer has a
+        // catalog descriptor, so it is absent from this table.
         assert_eq!(r.backends.get("firecracker"), Some(&"live-memory"));
         assert_eq!(r.backends.get("libkrun"), Some(&"disk-only"));
         assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
@@ -3251,9 +3251,9 @@ mod tests {
     fn collect_warm_start_support_reports_standby_pool_per_backend() {
         let r = collect_warm_start_support();
         // Firecracker and libkrun implement the standby pool; QEMU does not.
-        // Vz was removed as a workload-dispatch `AnyBackend` variant (Plan 226
-        // R1P1 WS-A) and no longer has a catalog descriptor. Report honest
-        // values for every remaining backend; none may be silently dropped.
+        // Vz was removed as a workload-dispatch `AnyBackend` variant and no
+        // longer has a catalog descriptor. Report honest values for every
+        // remaining backend; none may be silently dropped.
         assert_eq!(r.standby_pool.get("firecracker"), Some(&true));
         assert_eq!(r.standby_pool.get("libkrun"), Some(&true));
         assert_eq!(r.standby_pool.get("vz"), None);
@@ -3267,8 +3267,8 @@ mod tests {
 
         // The Tier 3 `mock` test double is excluded; the three real
         // backends are present, in stable name order. Vz was removed as a
-        // workload-dispatch `AnyBackend` variant (Plan 226 R1P1 WS-A) and no
-        // longer has a catalog descriptor.
+        // workload-dispatch `AnyBackend` variant and no longer has a
+        // catalog descriptor.
         let names: Vec<_> = rows.iter().map(|r| r.backend.as_str()).collect();
         assert_eq!(names, vec!["firecracker", "libkrun", "qemu"]);
 

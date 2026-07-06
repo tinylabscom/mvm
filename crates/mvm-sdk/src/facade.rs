@@ -329,13 +329,13 @@ impl MvmClient for SubprocessBackend {
         _id: &MachineId,
         _cfg: ReconfigureRequest,
     ) -> Result<MachineState> {
-        // Pre-existing gap (unrelated to Plan 226): the subprocess transport
-        // predates the `reconfigure_machine` method that Plan 224/225 added to
-        // `MvmClient`, so this impl was never wired. Shelling `mvmctl machine
-        // reconfigure` here is tracked for the Plan 224/225 owner; until then
-        // this transport reports the operation as unsupported rather than
-        // guessing the CLI flag mapping. Added here only to unblock the
-        // `check-linux` (`--all-features`) build.
+        // Pre-existing gap: the subprocess transport predates the
+        // `reconfigure_machine` method later added to `MvmClient`, so this
+        // impl was never wired. Shelling `mvmctl machine reconfigure` here is
+        // tracked separately; until then this transport reports the
+        // operation as unsupported rather than guessing the CLI flag
+        // mapping. Added here only to unblock the `check-linux`
+        // (`--all-features`) build.
         Err(MvmError::Backend {
             reason: "reconfigure_machine is not yet wired for the subprocess backend".into(),
         })

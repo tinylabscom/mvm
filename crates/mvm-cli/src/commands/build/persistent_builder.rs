@@ -186,7 +186,7 @@ pub fn run(_cli: &Cli, args: Args) -> Result<()> {
 /// Which persistent builder backend `start` brings up. Libkrun exposes a
 /// persistent host VM with a stable dispatch contract (`HostVmRequest` over
 /// the per-VM dispatch socket); this is the only persistent backend today (the
-/// Vz persistent builder was removed — Plan 226 R1P1 WS-C).
+/// Vz persistent builder was removed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PersistentBackend {
     Libkrun,

@@ -159,9 +159,9 @@ pub fn verify_content(store: &CheckpointStore, meta: &CheckpointMeta) -> Result<
 
 /// Spawns a forked child's supervisor in restore mode from its rewritten
 /// `SupervisorConfig`. The CLI-facing `vm_full` fork orchestration (which used
-/// to live in this module as `fork_vm_full`) was Vz-only and is descoped as of
-/// Plan 226 R1P1 WS-D — `mvmctl vm checkpoint fork` now refuses vm_full
-/// parents outright (see `full_vm_checkpoint_unsupported_error` in
+/// to live in this module as `fork_vm_full`) was Vz-only and is descoped —
+/// `mvmctl vm checkpoint fork` now refuses vm_full parents outright (see
+/// `full_vm_checkpoint_unsupported_error` in
 /// `mvm-cli`'s `checkpoint.rs`). This trait itself stays: the warm-pool
 /// standby-claim path (`vz::vz_claim_standby`) still spawns a claimant
 /// supervisor through it directly, independent of the descoped CLI engine.
@@ -174,7 +174,7 @@ pub trait ChildSupervisorSpawner {
 /// `parent` points back to the source. Boot of the child is the caller's job.
 ///
 /// fs_quick only — a vm_full checkpoint carries saved memory and forking it
-/// was Vz-only CLI-facing behavior descoped by Plan 226 R1P1 WS-D (see
+/// was Vz-only CLI-facing behavior that has been descoped (see
 /// `full_vm_checkpoint_unsupported_error` in `mvm-cli`'s `checkpoint.rs`).
 pub fn fork_checkpoint(store: &CheckpointStore, params: ForkParams) -> Result<CheckpointMeta> {
     let parent = store.read_meta(&params.checkpoint)?;
@@ -370,8 +370,8 @@ pub(crate) fn reconstruct_state_config(config_src: &Path, target_config: &Path) 
 }
 
 // `RestoreParams` + the CLI-facing `restore_checkpoint` orchestration (same-
-// identity vm_full resume) were Vz-only and are descoped by Plan 226 R1P1
-// WS-D — `mvmctl vm checkpoint restore` now always refuses (see
+// identity vm_full resume) were Vz-only and have been descoped —
+// `mvmctl vm checkpoint restore` now always refuses (see
 // `full_vm_checkpoint_unsupported_error` in `mvm-cli`'s `checkpoint.rs`).
 // `VmFullRestore` itself stays defined: the vz module's backend type still
 // implements it for the warm-pool claim path's own restore helper,
