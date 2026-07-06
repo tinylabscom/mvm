@@ -301,7 +301,7 @@ impl AuditEmitter {
 
     /// Emit `plan.grant_required` — records that this admission asserted verb-grant
     /// enforcement (the admitted plan carries `agent_verbs`, so the launcher emits
-    /// `mvm.require_grant=1` and the guest fails closed without a valid grant).
+    /// the grant-required boot marker and the guest fails closed without a valid grant).
     /// Binds the granted verb set to the same plan id as the launch decision, so
     /// `trust audit verify` can attest the enforcement posture. Host-side: the guest
     /// cannot sign this chain.
