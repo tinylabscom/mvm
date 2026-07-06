@@ -380,15 +380,16 @@ fn vm_is_running(name: &str) -> bool {
 
 /// fs_quick clones the instance rootfs, so the guest must not be writing:
 /// either the VM is stopped, or it is paused (vCPUs and virtio queues quiesced
-/// — the Vz pause verb stamps the supervisor pid into `vz.paused`; resume and
-/// any path that replaces the supervisor removes or invalidates it). A
-/// running-but-paused Vz supervisor keeps its pid alive, so `vm_is_running`
-/// alone would incorrectly refuse the checkpoint without this marker check.
+/// — the Vz pause verb stamps the supervisor pid into `vz.paused`; the FC
+/// pause verb stamps the fc pid into `fc.paused`; resume and any path that
+/// replaces the process removes or invalidates the marker). A
+/// running-but-paused VM keeps its pid alive, so `vm_is_running` alone would
+/// incorrectly refuse the checkpoint without these marker checks.
 fn vm_is_quiesced(name: &str) -> bool {
     if !vm_is_running(name) {
         return true;
     }
-    vz_pause_marker_matches_live_pid(name)
+    vz_pause_marker_matches_live_pid(name) || fc_pause_marker_matches_live_pid(name)
 }
 
 /// A paused Vz VM keeps its supervisor pid alive, so pid-liveness
@@ -405,6 +406,18 @@ fn vz_pause_marker_matches_live_pid(name: &str) -> bool {
         return false;
     };
     !marker.trim().is_empty() && marker.trim() == pid.trim()
+}
+
+/// Firecracker analog of `vz_pause_marker_matches_live_pid`: `machine pause`
+/// snapshot-seals FC but leaves the fc process running, so a live pid cannot
+/// distinguish paused from running. The pause verb stamps the fc pid into
+/// `fc.paused` (under `vm_state_dir`); resume removes it. Quiesced iff the
+/// marker matches the live fc pid at its native location (`~/microvm/vms/<name>/fc.pid`).
+fn fc_pause_marker_matches_live_pid(name: &str) -> bool {
+    let marker = std::fs::read_to_string(vm_state_dir(name).join("fc.paused")).ok();
+    let live =
+        mvm_backend::microvm::fc_pid_path(name).and_then(|p| std::fs::read_to_string(p).ok());
+    matches!((marker, live), (Some(m), Some(l)) if !m.trim().is_empty() && m.trim() == l.trim())
 }
 
 /// Hash the VM's persisted supervisor config so the checkpoint pins the launch
@@ -1357,6 +1370,101 @@ mod tests {
         assert!(
             !vm_is_quiesced("relaunchedvm"),
             "running VM with a stale pause marker (pid mismatch) must not be quiesced"
+        );
+    }
+
+    // ── fc_pause_marker_matches_live_pid ─────────────────────────────────
+
+    /// A paused FC VM: `fc.paused` in vm_state_dir matches the live fc pid at
+    /// `$HOME/microvm/vms/<name>/fc.pid` → quiesced (checkpoint allowed).
+    #[test]
+    fn fc_paused_vm_with_matching_marker_is_quiesced() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+        // fc_pid_path resolves under $HOME, so redirect HOME to the tmp tree.
+        env.set("HOME", tmp.path());
+
+        let pid = unsafe { libc::getpid() };
+        let pid_str = pid.to_string();
+
+        // Write fc.pid at the location fc_pid_path() resolves to.
+        let fc_dir = tmp.path().join("microvm").join("vms").join("fcpausedvm");
+        std::fs::create_dir_all(&fc_dir).unwrap();
+        std::fs::write(fc_dir.join("fc.pid"), &pid_str).unwrap();
+
+        // Write fc.paused in vm_state_dir with the same pid.
+        let state_dir = mvm_core::config::vm_state_dir("fcpausedvm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("fc.paused"), &pid_str).unwrap();
+
+        assert!(
+            fc_pause_marker_matches_live_pid("fcpausedvm"),
+            "fc.paused matching live fc pid must report quiesced"
+        );
+        assert!(
+            vm_is_quiesced("fcpausedvm"),
+            "paused FC VM must be considered quiesced"
+        );
+    }
+
+    /// A running FC VM: live fc.pid exists but NO fc.paused marker → not quiesced
+    /// (checkpoint refused — vm is writing).
+    #[test]
+    fn fc_running_without_marker_is_not_quiesced() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("HOME", tmp.path());
+
+        let pid = unsafe { libc::getpid() };
+
+        // Write fc.pid (vm is running) but no fc.paused marker.
+        let fc_dir = tmp.path().join("microvm").join("vms").join("fcrunningvm");
+        std::fs::create_dir_all(&fc_dir).unwrap();
+        std::fs::write(fc_dir.join("fc.pid"), pid.to_string()).unwrap();
+
+        let state_dir = mvm_core::config::vm_state_dir("fcrunningvm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        // No fc.paused written.
+
+        assert!(
+            !fc_pause_marker_matches_live_pid("fcrunningvm"),
+            "running FC VM with no pause marker must not match"
+        );
+        assert!(
+            !vm_is_quiesced("fcrunningvm"),
+            "running FC VM with no pause marker must not be quiesced"
+        );
+    }
+
+    /// Stale fc.paused: the marker's pid differs from the live fc pid → not quiesced.
+    #[test]
+    fn fc_stale_marker_is_not_quiesced() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("HOME", tmp.path());
+
+        let live_pid = unsafe { libc::getpid() };
+        let stale_pid = live_pid.saturating_add(1);
+
+        let fc_dir = tmp.path().join("microvm").join("vms").join("fcstalevm");
+        std::fs::create_dir_all(&fc_dir).unwrap();
+        std::fs::write(fc_dir.join("fc.pid"), live_pid.to_string()).unwrap();
+
+        let state_dir = mvm_core::config::vm_state_dir("fcstalevm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        // Marker has an old (stale) pid.
+        std::fs::write(state_dir.join("fc.paused"), stale_pid.to_string()).unwrap();
+
+        assert!(
+            !fc_pause_marker_matches_live_pid("fcstalevm"),
+            "stale fc.paused (pid mismatch) must not match"
+        );
+        assert!(
+            !vm_is_quiesced("fcstalevm"),
+            "running FC VM with stale pause marker must not be quiesced"
         );
     }
 
