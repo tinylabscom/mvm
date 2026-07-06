@@ -87,6 +87,18 @@ where
     Ok(out.len())
 }
 
+/// Phase A guard: serve transparent-TCP vsock egress only when the host opted in,
+/// the workload carries NO bound secrets (else the substitution endpoint owns
+/// `EGRESS_PORT`), and `EGRESS_PORT` is actually forwarded. All three required —
+/// fail closed on any missing.
+pub fn should_serve_vsock_egress(
+    host_listen_ports: &[u32],
+    opt_in: bool,
+    has_bound_secrets: bool,
+) -> bool {
+    opt_in && !has_bound_secrets && host_listen_ports.contains(&mvm_guest::vsock::EGRESS_PORT)
+}
+
 /// Accept egress connections on `listener` (the host-bound UDS libkrun forwards the
 /// guest egress vsock stream to) and serve each against `gate`, dialing real host
 /// TCP connections. Runs until the listener errors.
@@ -202,5 +214,16 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn serves_only_when_opted_in_no_secrets_and_port_present() {
+        let egress = mvm_guest::vsock::EGRESS_PORT;
+        // Happy path: opted in, no secrets, port listed.
+        assert!(should_serve_vsock_egress(&[egress], true, false));
+        // Any single disqualifier fails closed.
+        assert!(!should_serve_vsock_egress(&[egress], false, false)); // not opted in
+        assert!(!should_serve_vsock_egress(&[egress], true, true)); // has secrets
+        assert!(!should_serve_vsock_egress(&[], true, false)); // port absent
     }
 }

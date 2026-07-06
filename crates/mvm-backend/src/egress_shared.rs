@@ -13,7 +13,7 @@ use std::path::Path;
 /// secrets, else `None` (legacy / non-admitted / no-secret boot — nothing to
 /// wire). A missing `plan.json` or an undecodable placeholder plan is the no-op
 /// path, not an error.
-pub(crate) fn decode_plan_secrets_from_state(
+pub fn decode_plan_secrets_from_state(
     state_dir: &Path,
 ) -> Result<
     Option<(
@@ -49,6 +49,16 @@ pub(crate) fn decode_plan_secrets_from_state(
     Ok(Some((plan.secrets, plan.redaction, plan.tenant.0)))
 }
 
+/// True when the workload's persisted plan carries at least one bound secret
+/// (i.e. the credential-substitution endpoint will own `EGRESS_PORT`). The
+/// transparent-TCP vsock egress path (Phase A) is scoped to the `false` case so
+/// the two never contend for the port.
+pub fn state_has_bound_secrets(state_dir: &Path) -> Result<bool> {
+    Ok(decode_plan_secrets_from_state(state_dir)?
+        .map(|(secrets, _, _)| !secrets.is_empty())
+        .unwrap_or(false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,5 +82,17 @@ mod tests {
         let out = decode_plan_secrets_from_state(&dir).unwrap();
         assert!(out.is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod phase_a_tests {
+    use super::state_has_bound_secrets;
+
+    #[test]
+    fn state_has_bound_secrets_is_false_for_empty_state() {
+        let dir = tempfile::tempdir().unwrap();
+        // No plan file written → no secrets.
+        assert!(!state_has_bound_secrets(dir.path()).unwrap());
     }
 }

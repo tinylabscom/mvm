@@ -27,6 +27,15 @@ use mvm_network::{NetHandle, NetworkError, NetworkProvider, NetworkSpec};
 
 use crate::libkrun_builder::{NetworkingPreference, resolve_networking_mode};
 
+/// Host opt-in for the transparent-TCP vsock egress path on libkrun (Phase A).
+/// Unset ⇒ the legacy gvproxy/passt NIC path is used unchanged. Mirrors the
+/// `MVM_NETWORKING` selector convention (present-and-non-empty ⇒ on).
+pub fn vsock_egress_opt_in() -> bool {
+    std::env::var("MVM_VSOCK_EGRESS")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
 /// libkrun gvproxy/passt network provider (a config producer; owns no host
 /// state — see the module docs).
 pub struct LibkrunNetworkProvider {
@@ -137,5 +146,14 @@ mod tests {
         // libkrun's chokepoint is the supervisor's in-process gateway-bridge
         // FlowPolicy, not a separate EgressEnforcer object → None (default).
         assert!(provider.egress_enforcer().is_none());
+    }
+
+    #[test]
+    fn vsock_egress_opt_in_reads_env() {
+        // Guard: this test mutates process env; keep it serial-safe by scoping.
+        unsafe { std::env::set_var("MVM_VSOCK_EGRESS", "1") };
+        assert!(vsock_egress_opt_in());
+        unsafe { std::env::remove_var("MVM_VSOCK_EGRESS") };
+        assert!(!vsock_egress_opt_in());
     }
 }

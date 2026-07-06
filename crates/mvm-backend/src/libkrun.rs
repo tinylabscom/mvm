@@ -273,6 +273,15 @@ fn libkrun_kernel_for_host(kernel: &str) -> Result<(String, KernelFormat)> {
     Ok((kernel.to_string(), KernelFormat::Raw))
 }
 
+/// Kernel cmdline token that turns on the in-guest vsock egress client. Emitted
+/// only when the host opted in AND the workload carries no bound secrets (Phase A
+/// scope — a secrets workload still uses the substitution endpoint on the NIC).
+/// mkGuest's `/init` parses `mvm.vsock_egress=1` and exports `MVM_VSOCK_EGRESS`,
+/// which starts `mvm-egress-client` and points the workload's proxy env at it.
+fn vsock_egress_cmdline_token(opt_in: bool, has_bound_secrets: bool) -> Option<String> {
+    (opt_in && !has_bound_secrets).then(|| "mvm.vsock_egress=1".to_string())
+}
+
 fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<SupervisorConfig> {
     let kernel = config
         .kernel_path
@@ -293,6 +302,16 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         cmdline.push_str(&token);
     }
     if let Some(token) = crate::microvm::require_grant_cmdline_token(&config.name) {
+        cmdline.push(' ');
+        cmdline.push_str(&token);
+    }
+    let vsock_egress_opt_in = mvm_build::libkrun_network_provider::vsock_egress_opt_in();
+    if let Some(token) = vsock_egress_cmdline_token(
+        vsock_egress_opt_in,
+        // Only read plan.json for secrets when the flag is on (short-circuit).
+        vsock_egress_opt_in
+            && crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false),
+    ) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
@@ -1626,5 +1645,17 @@ mod tests {
                 .join(crate::substitution_spawn::SUBST_PID_FILE)
                 .exists()
         );
+    }
+
+    #[test]
+    fn vsock_egress_cmdline_token_only_when_eligible() {
+        // Eligible: opted in, no secrets → token present.
+        assert_eq!(
+            vsock_egress_cmdline_token(true, false).as_deref(),
+            Some("mvm.vsock_egress=1")
+        );
+        // Any disqualifier → no token (legacy NIC path, byte-identical cmdline).
+        assert_eq!(vsock_egress_cmdline_token(false, false), None);
+        assert_eq!(vsock_egress_cmdline_token(true, true), None);
     }
 }
