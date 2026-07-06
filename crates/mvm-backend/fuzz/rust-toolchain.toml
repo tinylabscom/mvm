@@ -1,0 +1,12 @@
+[toolchain]
+# cargo-fuzz emits `-Z sanitizer=address` flags that only work on
+# nightly. The repo root pins stable via `rust-toolchain.toml`, which
+# would otherwise win for `cargo build` invoked under
+# `crates/mvm-oci/fuzz/` (cargo walks up for `rust-toolchain.toml`
+# independent of workspace boundaries). This local pin keeps the fuzz
+# lane on nightly without affecting the rest of the workspace.
+#
+# Mirrors `crates/mvm-guest/fuzz/rust-toolchain.toml` — keep them in
+# sync so a contributor doesn't have to remember which fuzz crate
+# uses which toolchain channel.
+channel = "nightly"
