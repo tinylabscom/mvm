@@ -6,6 +6,23 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 
 ## [Unreleased]
 
+### Changed
+
+- **Vz (Apple Virtualization.framework) is no longer a selectable backend
+  (Plan 226 R1P1).** The in-house HVF VMM is the default and sole selectable
+  macOS backend for workloads, dev, and one-shot builds; `--hypervisor vz`
+  and `--builder vz` are gone (they fall back / warn). Vz code is retained
+  internally as the macOS-26 persistent *builder* substrate pending Plan
+  226-R1P1b, which flips it onto the libkrun persistent builder and then
+  deletes the Vz backend, supervisor, and objc2 bindings.
+
+### Removed
+
+- `machine checkpoint/fork` **full-VM** mode on macOS is temporarily
+  unsupported (it was Vz-only); it returns a clear tracked error pending
+  HVF save/restore (Plan 226 WS-E / R1E). Filesystem-level (`fs_quick`)
+  checkpoints are unaffected.
+
 ## [0.15.1] — 2026-06-03
 
 ### Added
