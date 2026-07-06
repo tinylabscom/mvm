@@ -565,6 +565,11 @@ pub(super) fn admit_plan_for_boot(
     if let Err(e) = emitter.emit_admitted(&admitted.plan, &admitted.signer_id) {
         tracing::warn!(error = %e, "audit emit_admitted failed (non-fatal)");
     }
+    if let Some(verbs) = admitted.plan.agent_verbs.as_ref()
+        && let Err(e) = emitter.emit_grant_required(&admitted.plan, verbs)
+    {
+        tracing::warn!(error = %e, "audit emit_grant_required failed (non-fatal)");
+    }
     // Claim 1 / claim 8 — record the admitted host-fs grants in the
     // chain-signed log (no-op when there are none).
     if let Err(e) = emitter.emit_shares_admitted(&admitted.plan) {
