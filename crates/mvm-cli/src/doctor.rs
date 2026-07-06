@@ -1625,13 +1625,6 @@ fn builder_backend_check(plat: Platform) -> Check {
                 format!("libkrun NOT available ({})", libkrun_sys::install_hint())
             }
         }
-        BuilderBackendChoice::Vz => {
-            if plat.has_vz() {
-                "Vz available".to_string()
-            } else {
-                "Vz NOT available (requires macOS 13+)".to_string()
-            }
-        }
         BuilderBackendChoice::Qemu => {
             // Linux dev/builder backend. KVM-accelerated
             // where /dev/kvm is present, TCG fallback otherwise.
@@ -3930,7 +3923,7 @@ mod tests {
     fn builder_backend_check_linux_honors_env_override() {
         let prev = std::env::var_os("MVM_BUILDER_BACKEND");
         unsafe {
-            std::env::set_var("MVM_BUILDER_BACKEND", "vz");
+            std::env::set_var("MVM_BUILDER_BACKEND", "qemu");
         }
 
         let c = builder_backend_check(Platform::LinuxNative);
@@ -3946,8 +3939,8 @@ mod tests {
         // Env override flips the resolved backend even when
         // `auto_detect_default()` would have picked libkrun.
         assert!(
-            c.info.starts_with("vz — "),
-            "expected vz-resolved line under env override; got: {}",
+            c.info.starts_with("qemu — "),
+            "expected qemu-resolved line under env override; got: {}",
             c.info
         );
         assert!(
@@ -3955,10 +3948,9 @@ mod tests {
             "expected `override via` source label; got: {}",
             c.info
         );
-        // On Linux Vz is never available; line must communicate that.
         assert!(
-            c.info.contains("Vz NOT available"),
-            "expected `Vz NOT available` segment on Linux; got: {}",
+            c.info.contains("QEMU"),
+            "expected a QEMU availability segment; got: {}",
             c.info
         );
     }

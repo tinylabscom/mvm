@@ -9,9 +9,9 @@
 //!
 //! ## Selection priority
 //!
-//! 1. **CLI flag** (`--builder <libkrun|vz|inhouse|qemu>`, plumbed in by
+//! 1. **CLI flag** (`--builder <libkrun|inhouse|qemu>`, plumbed in by
 //!    callers as a typed `Option<BuilderBackendChoice>`) — highest priority.
-//! 2. **Env var** `MVM_BUILDER_BACKEND` — `libkrun` / `vz` / `inhouse` /
+//! 2. **Env var** `MVM_BUILDER_BACKEND` — `libkrun` / `inhouse` /
 //!    `qemu`, case-insensitive, surrounding whitespace trimmed.
 //! 3. **Auto-detect** by host platform when neither override is set:
 //!    macOS 26+ Apple Silicon → in-house HVF builder; everywhere else →
@@ -28,7 +28,6 @@ use crate::builder_health;
 use crate::builder_vm::{BuilderVm, BuilderVmError};
 use crate::libkrun_builder::LibkrunBuilderVm;
 use crate::qemu_builder::QemuBuilderVm;
-use crate::vz_builder::VzBuilderVm;
 use mvm_core::platform::{Platform, current};
 
 /// Constructor for the in-house builder, registered by the CLI (which can name
@@ -69,8 +68,6 @@ pub enum BuilderBackendChoice {
     /// libkrun-backed builder VM. Default when the env var is unset
     /// or holds a value we don't recognise.
     Libkrun,
-    /// Vz-backed builder VM. Opt-in via `MVM_BUILDER_BACKEND=vz`.
-    Vz,
     /// QEMU-backed builder VM (Linux dev/builder substrate). Opt-in via
     /// `MVM_BUILDER_BACKEND=qemu` / `--builder qemu`;
     /// auto-detect never picks it (the default-flip is evidence-gated).
@@ -86,7 +83,6 @@ impl BuilderBackendChoice {
     pub fn name(self) -> &'static str {
         match self {
             BuilderBackendChoice::Libkrun => "libkrun",
-            BuilderBackendChoice::Vz => "vz",
             BuilderBackendChoice::Qemu => "qemu",
             BuilderBackendChoice::InHouse => "inhouse",
         }
@@ -131,7 +127,6 @@ pub fn resolve_env_override() -> Option<BuilderBackendChoice> {
     match trimmed.to_ascii_lowercase().as_str() {
         "" => None,
         "libkrun" => Some(BuilderBackendChoice::Libkrun),
-        "vz" => Some(BuilderBackendChoice::Vz),
         "qemu" => Some(BuilderBackendChoice::Qemu),
         "inhouse" => Some(BuilderBackendChoice::InHouse),
         other => {
@@ -186,7 +181,6 @@ pub fn resolve_builder_backend_with_override(
 ) -> Box<dyn BuilderVm> {
     match resolve_choice_with_override(flag) {
         BuilderBackendChoice::Libkrun => Box::new(LibkrunBuilderVm::default()),
-        BuilderBackendChoice::Vz => Box::new(VzBuilderVm::new()),
         BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
         BuilderBackendChoice::InHouse => {
             // Delegate to the registered constructor; panic if not registered
@@ -209,7 +203,6 @@ pub fn try_resolve_builder_backend_with_override(
 ) -> Result<Box<dyn BuilderVm>, BuilderVmError> {
     match resolve_choice_with_override(flag) {
         BuilderBackendChoice::Libkrun => Ok(Box::new(LibkrunBuilderVm::default())),
-        BuilderBackendChoice::Vz => Ok(Box::new(VzBuilderVm::new())),
         BuilderBackendChoice::Qemu => Ok(Box::new(QemuBuilderVm::new())),
         BuilderBackendChoice::InHouse => match INHOUSE_CTOR.get() {
             Some(ctor) => ctor(),
@@ -224,7 +217,7 @@ pub fn try_resolve_builder_backend_with_override(
 
 /// Builder driver for the Stage 0 bootstrap.
 ///
-/// Stage 0 is implemented for libkrun and QEMU; in-house, Vz, and Firecracker
+/// Stage 0 is implemented for libkrun and QEMU; in-house and Firecracker
 /// Stage 0 are still fail-closed gaps. So this dispatch deliberately differs
 /// from [`resolve_builder_backend`]: an explicit `qemu` choice uses QEMU, but
 /// everything else — including the in-house auto-detect default on macOS-26+ —
@@ -238,9 +231,9 @@ pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
 
 /// Stage 0 driver for an explicit `choice` — used by the auto-fallback loop to
 /// construct the next backend to try. QEMU when chosen; libkrun for everything
-/// else (in-house and Vz Stage 0 are gaps, and the "Stage 0 is libkrun even on
+/// else (in-house Stage 0 is a gap, and the "Stage 0 is libkrun even on
 /// in-house-default hosts" invariant holds — the Linux fallback order only ever
-/// yields libkrun→qemu, never in-house or Vz).
+/// yields libkrun→qemu, never in-house).
 pub fn resolve_stage0_backend_for_choice(
     choice: BuilderBackendChoice,
     verbose: bool,
@@ -282,16 +275,17 @@ fn is_linux_native_host() -> bool {
 ///
 /// - An **explicit** choice (CLI flag / `MVM_BUILDER_BACKEND`) is honoured with
 ///   no fallback — the operator asked for that backend specifically.
-/// - Auto-detected **Vz** falls back to **libkrun** (the long-standing macOS
-///   behaviour: Vz probe passes but the backend trips a runtime issue).
+/// - Auto-detected **in-house** falls back to **libkrun** (the macOS-26+
+///   Apple Silicon default: in-house probe passes but the backend trips a
+///   runtime issue).
 /// - Auto-detected **libkrun on Linux** falls back to **qemu** — libkrun-on-KVM
 ///   can fail at VM creation on hosts the qemu/microvm_nix builder handles fine.
 ///   When `libkrun_unhealthy` (a fresh per-host marker from a prior failed
 ///   attempt — see [`crate::builder_health`]) the doomed libkrun attempt is
 ///   skipped entirely and qemu is tried first, so a reliably-broken host
 ///   doesn't re-pay the failure on every build. The marker only reorders the
-///   Linux-libkrun auto path; explicit choices and the macOS Vz→libkrun path
-///   ignore it.
+///   Linux-libkrun auto path; explicit choices and the macOS in-house→libkrun
+///   path ignore it.
 pub fn builder_attempt_order(
     selected: BuilderBackendChoice,
     explicit: bool,
@@ -302,7 +296,6 @@ pub fn builder_attempt_order(
         return vec![selected];
     }
     match selected {
-        BuilderBackendChoice::Vz => vec![BuilderBackendChoice::Vz, BuilderBackendChoice::Libkrun],
         BuilderBackendChoice::InHouse => {
             vec![BuilderBackendChoice::InHouse, BuilderBackendChoice::Libkrun]
         }
@@ -572,37 +565,18 @@ mod tests {
     }
 
     #[test]
-    fn resolve_env_override_vz_lowercase() {
-        with_env(Some("vz"), || {
-            assert_eq!(resolve_env_override(), Some(BuilderBackendChoice::Vz));
-        });
-    }
-
-    #[test]
-    fn resolve_env_override_vz_uppercase() {
-        // Case-insensitive matters because operators set this in
-        // shell rc files and the convention varies. `Vz` is the
-        // crate name; `VZ` is the entitlement string. Both should
-        // work.
-        with_env(Some("VZ"), || {
-            assert_eq!(resolve_env_override(), Some(BuilderBackendChoice::Vz));
-        });
-    }
-
-    #[test]
-    fn resolve_env_override_strips_whitespace() {
-        with_env(Some("  vz  "), || {
-            assert_eq!(resolve_env_override(), Some(BuilderBackendChoice::Vz));
-        });
-    }
-
-    #[test]
     fn resolve_env_override_returns_none_for_unrecognised() {
         // Typo / removed backend / accidental value: log a warning
-        // and fall through to auto-detect (the caller's job).
-        with_env(Some("firecracker"), || {
-            assert_eq!(resolve_env_override(), None);
-        });
+        // and fall through to auto-detect (the caller's job). `vz` is
+        // included here — the Vz builder backend was removed (Plan 226
+        // R1P1 WS-C), so a leftover `MVM_BUILDER_BACKEND=vz` in an
+        // operator's shell rc must fall through cleanly rather than
+        // resolve to a backend that no longer exists.
+        for value in ["firecracker", "vz", "VZ", "  vz  "] {
+            with_env(Some(value), || {
+                assert_eq!(resolve_env_override(), None, "value: {value:?}");
+            });
+        }
     }
 
     // ── Priority: flag > env > auto-detect ──
@@ -623,8 +597,8 @@ mod tests {
         // No env, flag explicit → flag wins regardless of host.
         with_env(None, || {
             assert_eq!(
-                resolve_choice_with_override(Some(BuilderBackendChoice::Vz)),
-                BuilderBackendChoice::Vz,
+                resolve_choice_with_override(Some(BuilderBackendChoice::Qemu)),
+                BuilderBackendChoice::Qemu,
             );
             assert_eq!(
                 resolve_choice_with_override(Some(BuilderBackendChoice::Libkrun)),
@@ -635,8 +609,11 @@ mod tests {
 
     #[test]
     fn env_var_beats_auto_detect_when_no_flag() {
-        with_env(Some("vz"), || {
-            assert_eq!(resolve_choice_with_override(None), BuilderBackendChoice::Vz,);
+        with_env(Some("inhouse"), || {
+            assert_eq!(
+                resolve_choice_with_override(None),
+                BuilderBackendChoice::InHouse,
+            );
         });
         with_env(Some("libkrun"), || {
             assert_eq!(
@@ -662,7 +639,7 @@ mod tests {
     #[test]
     fn backend_choice_name_round_trips() {
         assert_eq!(BuilderBackendChoice::Libkrun.name(), "libkrun");
-        assert_eq!(BuilderBackendChoice::Vz.name(), "vz");
+        assert_eq!(BuilderBackendChoice::Qemu.name(), "qemu");
     }
 
     #[test]
@@ -670,18 +647,20 @@ mod tests {
         // The factory doesn't expose the concrete type. This test
         // pins the wiring: env override path constructs successfully
         // without panicking. The choice-mapping is covered above.
+        // (Not `inhouse` here: that arm requires a registered
+        // constructor which this unit test doesn't provide.)
         with_env(Some("libkrun"), || {
             let _backend = resolve_builder_backend();
         });
-        with_env(Some("vz"), || {
+        with_env(Some("qemu"), || {
             let _backend = resolve_builder_backend();
         });
     }
 
     #[test]
     fn resolve_builder_backend_with_override_honours_flag() {
-        with_env(Some("vz"), || {
-            // Flag forces libkrun even though env says vz.
+        with_env(Some("qemu"), || {
+            // Flag forces libkrun even though env says qemu.
             let _backend =
                 resolve_builder_backend_with_override(Some(BuilderBackendChoice::Libkrun));
         });
@@ -758,20 +737,9 @@ mod tests {
     }
 
     #[test]
-    fn attempt_order_preserves_vz_to_libkrun_and_explicit_qemu() {
+    fn attempt_order_explicit_qemu_is_single_attempt() {
         use BuilderBackendChoice::*;
-        // Existing macOS behaviour unchanged (and the libkrun marker never
-        // reorders the Vz→libkrun auto path).
-        assert_eq!(
-            builder_attempt_order(Vz, false, false, false),
-            vec![Vz, Libkrun]
-        );
-        assert_eq!(
-            builder_attempt_order(Vz, false, false, true),
-            vec![Vz, Libkrun]
-        );
-        assert_eq!(builder_attempt_order(Vz, true, false, false), vec![Vz]);
-        // Explicit qemu is a single attempt.
+        // Explicit qemu is a single attempt (no fallback for an operator choice).
         assert_eq!(builder_attempt_order(Qemu, false, true, false), vec![Qemu]);
     }
 
@@ -1046,6 +1014,18 @@ mod tests {
         assert_eq!(
             builder_attempt_order(InHouse, true, false, false),
             vec![InHouse]
+        );
+    }
+
+    /// Regression guard (Plan 226 R1P1 WS-C): after removing the Vz builder
+    /// backend, the auto-detected in-house path must fall back to libkrun
+    /// only — there is no Vz arm left to fall through.
+    #[test]
+    fn macos_inhouse_auto_falls_back_to_libkrun_only() {
+        let order = builder_attempt_order(BuilderBackendChoice::InHouse, false, false, false);
+        assert_eq!(
+            order,
+            vec![BuilderBackendChoice::InHouse, BuilderBackendChoice::Libkrun]
         );
     }
 
