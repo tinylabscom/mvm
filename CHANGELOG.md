@@ -10,8 +10,9 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 
 - **Vz (Apple Virtualization.framework) is no longer a selectable backend
   (Plan 226 R1P1).** The in-house HVF VMM is the default and sole selectable
-  macOS backend for workloads, dev, and one-shot builds; `--hypervisor vz`
-  and `--builder vz` are gone (they fall back / warn). Vz code is retained
+  macOS backend for workloads, dev, and one-shot builds; `--builder vz` warns
+  and falls back to auto-detect, and `--hypervisor vz` falls back to the default
+  backend. Vz code is retained
   internally as the macOS-26 persistent *builder* substrate pending Plan
   226-R1P1b, which flips it onto the libkrun persistent builder and then
   deletes the Vz backend, supervisor, and objc2 bindings.

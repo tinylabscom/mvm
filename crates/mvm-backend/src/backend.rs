@@ -558,9 +558,10 @@ impl AnyBackend {
             return Self::Firecracker(FirecrackerBackend);
         }
 
-        // 2. macOS 26+ Apple Silicon → the in-house HVF VMM (`hvf`). Vz is sunset
-        //    (opt-in only via `--hypervisor vz`); the hvf path enforces claim-10
-        //    egress via its per-VM gating endpoint over vsock — no gvproxy sidecar.
+        // 2. macOS 26+ Apple Silicon → the in-house HVF VMM (`hvf`). Vz is no
+        //    longer a selectable backend (`--hypervisor vz` falls back to the
+        //    default); the hvf path enforces claim-10 egress via its per-VM
+        //    gating endpoint over vsock — no gvproxy sidecar.
         if plat.is_vz_default_tier() {
             return Self::Hvf(HvfBackend);
         }
