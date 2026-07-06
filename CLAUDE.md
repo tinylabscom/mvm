@@ -11,7 +11,7 @@ macOS Host (this CLI) -> libkrun Linux VM -> Firecracker microVM (/dev/kvm)
 Linux Host (this CLI) -> Firecracker microVM (/dev/kvm)
 ```
 
-Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Plan 72 W0–W6 + Plan 75 W0). libkrun is the default macOS backend; Vz (Apple Virtualization.framework) is the macOS 26+ Apple Silicon backend; Firecracker is the Linux KVM path. There is no `--lima` flag and no Lima fallback. Plan 177 Phase 2 folded the former in-process `apple_container` backend into the supervisor-model `vz` backend — there is one AVF code path now, and `--hypervisor apple-container` is gone (use `vz`).
+Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Plan 72 W0–W6 + Plan 75 W0). libkrun is the default macOS 13-25 backend; HVF (the in-house Hypervisor.framework VMM, vsock-only) is the macOS 26+ Apple Silicon default, with Vz (Apple Virtualization.framework) as an opt-in, sunsetting alternative; Firecracker is the Linux KVM path. There is no `--lima` flag and no Lima fallback. Plan 177 Phase 2 folded the former in-process `apple_container` backend into the supervisor-model `vz` backend — there is one AVF code path now, and `--hypervisor apple-container` is gone (use `vz`).
 
 ## Host dependencies (macOS)
 
