@@ -830,6 +830,26 @@ pub(super) fn emit_launched_if(ctx: &Option<AdmissionContext>, backend: &str) {
     }
 }
 
+/// Record the resolved boot posture (which rootfs strategy the run-path tier
+/// gate actually selected) on the chain-signed admission log. Fires alongside
+/// `plan.launched`, reflecting the decision `run_inner` made — never a
+/// re-derivation — so a virtiofs-root dev boot and an Option-B block boot are
+/// distinguishable in the tamper-evident chain. No-op when admission was
+/// skipped (no plan to bind to).
+pub(super) fn emit_boot_posture_if(
+    ctx: &Option<AdmissionContext>,
+    strategy: mvm_build::run_image::RootStrategy,
+) {
+    let Some(ctx) = ctx else { return };
+    let label = match strategy {
+        mvm_build::run_image::RootStrategy::VirtiofsRoot => "virtiofs-root",
+        mvm_build::run_image::RootStrategy::BlockExt4 => "block-ext4",
+    };
+    if let Err(e) = ctx.emitter.emit_boot_posture(&ctx.admitted.plan, label) {
+        tracing::warn!(error = %e, "audit emit_boot_posture failed (non-fatal)");
+    }
+}
+
 /// Tier A.1 admission enforcement: refuse to boot if any volume about to
 /// be attached isn't named in the verified `ExecutionPlan.shares`. No-op
 /// when admission was skipped (no plan to enforce against). Called right

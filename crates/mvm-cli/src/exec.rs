@@ -510,7 +510,18 @@ pub struct ExecOutput {
 /// CLI's interactive `mvmctl exec` keeps using [`run`] (streaming) so
 /// human ergonomics don't regress.
 pub fn run_captured(req: ExecRequest, admit: Option<&SessionAdmit<'_>>) -> Result<ExecOutput> {
-    run_inner(req, /* capture = */ true, admit)
+    run_inner(req, /* capture = */ true, admit, None)
+        .map(|either| either.right().expect("capture mode returns ExecOutput"))
+}
+
+/// Like [`run_captured`], but also reports the resolved boot posture into
+/// `posture` so the command layer can chain-audit it (`plan.boot_posture`).
+pub fn run_captured_with_posture(
+    req: ExecRequest,
+    admit: Option<&SessionAdmit<'_>>,
+    posture: &PostureSink,
+) -> Result<ExecOutput> {
+    run_inner(req, /* capture = */ true, admit, Some(posture))
         .map(|either| either.right().expect("capture mode returns ExecOutput"))
 }
 
@@ -520,7 +531,18 @@ pub fn run_captured(req: ExecRequest, admit: Option<&SessionAdmit<'_>>) -> Resul
 /// agent unreachable, vsock error), returns an error; the VM is torn down
 /// best-effort before returning.
 pub fn run(req: ExecRequest, admit: Option<&SessionAdmit<'_>>) -> Result<i32> {
-    run_inner(req, /* capture = */ false, admit)
+    run_inner(req, /* capture = */ false, admit, None)
+        .map(|either| either.left().expect("streaming mode returns exit code"))
+}
+
+/// Like [`run`], but also reports the resolved boot posture into `posture` so
+/// the command layer can chain-audit it (`plan.boot_posture`).
+pub fn run_with_posture(
+    req: ExecRequest,
+    admit: Option<&SessionAdmit<'_>>,
+    posture: &PostureSink,
+) -> Result<i32> {
+    run_inner(req, /* capture = */ false, admit, Some(posture))
         .map(|either| either.left().expect("streaming mode returns exit code"))
 }
 
@@ -545,10 +567,18 @@ impl<L, R> Either<L, R> {
     }
 }
 
+/// Side channel by which [`run_inner`] reports the resolved boot posture (which
+/// rootfs strategy the run-path tier gate selected) back to the command layer,
+/// which records it on the chain-signed admission log (`plan.boot_posture`).
+/// The command layer reads it after the run returns. `None` means the caller
+/// does not audit posture (MCP / session boots, which never reach virtiofs).
+pub type PostureSink = std::cell::Cell<mvm_build::run_image::RootStrategy>;
+
 fn run_inner(
     req: ExecRequest,
     capture: bool,
     admit: Option<&SessionAdmit<'_>>,
+    posture: Option<&PostureSink>,
 ) -> Result<Either<i32, ExecOutput>> {
     let backend = AnyBackend::auto_select();
 
@@ -652,6 +682,18 @@ fn run_inner(
         backend.capabilities().virtiofs_root,
         verity_path.is_some(),
     );
+
+    // Report the resolved strategy to the command layer for chain-audit. This is
+    // the single source of truth — the same value that drives the boot below —
+    // so the `plan.boot_posture` entry can never diverge from what actually
+    // booted.
+    if let Some(sink) = posture {
+        sink.set(if virtiofs_root.is_some() {
+            mvm_build::run_image::RootStrategy::VirtiofsRoot
+        } else {
+            mvm_build::run_image::RootStrategy::BlockExt4
+        });
+    }
 
     let t_drives_ready = timing.then(std::time::Instant::now);
 
