@@ -1,4 +1,4 @@
-//! `InHouseBuilderVm` — the in-house HVF builder as a `mvm_build::builder_vm::
+//! `HvfBuilderVm` — the HVF builder as a `mvm_build::builder_vm::
 //! BuilderVm`, so it plugs into the existing builder dispatch (approach A). It
 //! reuses the backend-agnostic runtime helpers (`stage_job_dir` renders the
 //! flake `cmd.sh`, `acquire_nix_store_image_lock` allocates the persistent Nix
@@ -7,7 +7,7 @@
 //!
 //! The adapter lives here (not in mvm-build) because `BuilderRunner`/`VmmDriver`
 //! sit above mvm-build; mvm-cli — which sees both crates — selects it for
-//! `--builder inhouse`.
+//! `--builder hvf`.
 //!
 //! Image resolution (an HVF-bootable kernel + a rootfs whose baked
 //! `mvm-host-vm-init` speaks the disk transport) is supplied by the caller. The
@@ -25,7 +25,7 @@ use mvm_build::builder_vm_runtime::{
 };
 
 use super::runner::{BuilderBuild, BuilderRunner};
-use crate::driver::InHouseDriver;
+use crate::driver::HvfDriver;
 
 /// Default persistent nix-store disk size (GiB → MiB). Matches the other
 /// builders' generous sparse allocation; the guest formats + seeds it.
@@ -36,8 +36,8 @@ const DEFAULT_OUTPUT_MIB: u32 = 4 * 1024;
 const DEFAULT_VCPUS: u32 = 4;
 const DEFAULT_MEMORY_MIB: u32 = 8 * 1024;
 
-/// The in-house HVF builder VM, exposed through the `BuilderVm` seam.
-pub struct InHouseBuilderVm {
+/// The HVF builder VM, exposed through the `BuilderVm` seam.
+pub struct HvfBuilderVm {
     /// arm64 boot `Image` for the builder VM (HVF-bootable).
     kernel: PathBuf,
     /// Builder rootfs whose baked `mvm-host-vm-init` speaks the disk transport.
@@ -48,7 +48,7 @@ pub struct InHouseBuilderVm {
     memory_mib: u32,
 }
 
-impl InHouseBuilderVm {
+impl HvfBuilderVm {
     /// Build against a resolved HVF builder image (kernel + disk-transport rootfs).
     pub fn new(kernel: PathBuf, rootfs: PathBuf) -> Self {
         Self {
@@ -83,10 +83,10 @@ fn unique_job_id() -> String {
 /// could not run the build), so the auto-detect fallback retries the next
 /// backend rather than surfacing a false build error.
 fn map_runner_failure(detail: String) -> BuilderVmError {
-    BuilderVmError::InHouseVmmFailed { detail }
+    BuilderVmError::HvfVmmFailed { detail }
 }
 
-impl BuilderVm for InHouseBuilderVm {
+impl BuilderVm for HvfBuilderVm {
     fn run_build(
         &self,
         job: &BuilderJob,
@@ -119,10 +119,10 @@ impl BuilderVm for InHouseBuilderVm {
                 .map(|_| mounts.flake_src.as_path()),
         )?;
 
-        // Boot the builder VM over the in-house VMM + disk transport; the guest
+        // Boot the builder VM over the hvf VMM + disk transport; the guest
         // runs cmd.sh and tars its artifacts back onto the output disk.
-        let name = format!("mvm-inhouse-builder-{job_id}");
-        let outcome = BuilderRunner::new(InHouseDriver::new())
+        let name = format!("mvm-hvf-builder-{job_id}");
+        let outcome = BuilderRunner::new(HvfDriver::new())
             .build(&BuilderBuild {
                 name: &name,
                 kernel: &self.kernel,
@@ -135,10 +135,10 @@ impl BuilderVm for InHouseBuilderVm {
                 vcpus: self.vcpus,
                 memory_mib: self.memory_mib,
             })
-            .map_err(|e| map_runner_failure(format!("in-house builder run: {e}")))?;
+            .map_err(|e| map_runner_failure(format!("hvf builder run: {e}")))?;
         if !outcome.stopped {
             return Err(map_runner_failure(
-                "in-house builder VM did not power off within the deadline".into(),
+                "hvf builder VM did not power off within the deadline".into(),
             ));
         }
 
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn install_jobs_are_not_yet_implemented() {
-        let b = InHouseBuilderVm::new("/img/Image".into(), "/img/rootfs.ext4".into());
+        let b = HvfBuilderVm::new("/img/Image".into(), "/img/rootfs.ext4".into());
         let job = BuilderJob::Install {
             spec_path: "/tmp/spec.json".into(),
         };
@@ -180,14 +180,14 @@ mod tests {
 
     #[test]
     fn with_resources_overrides_vcpus_and_memory() {
-        let b = InHouseBuilderVm::new("/k".into(), "/r".into()).with_resources(2, 2048);
+        let b = HvfBuilderVm::new("/k".into(), "/r".into()).with_resources(2, 2048);
         assert_eq!(b.vcpus, 2);
         assert_eq!(b.memory_mib, 2048);
     }
 
     #[test]
     fn runner_failure_maps_to_vmm_level_error() {
-        let e = map_runner_failure("in-house builder VM did not power off".into());
-        assert!(matches!(e, BuilderVmError::InHouseVmmFailed { .. }));
+        let e = map_runner_failure("hvf builder VM did not power off".into());
+        assert!(matches!(e, BuilderVmError::HvfVmmFailed { .. }));
     }
 }

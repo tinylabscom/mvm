@@ -169,7 +169,7 @@ pub struct HostChannels {
     pub substitution_socket: Option<PathBuf>,
     /// Per-VM egress bridge UDS. When set, `EGRESS_PORT` relays here — the
     /// endpoint gates (claim-10) and substitutes secrets. `None` ⇒ egress fails
-    /// closed at the bridge (an in-house VM must always carry a relay socket).
+    /// closed at the bridge (an hvf VM must always carry a relay socket).
     pub egress_relay: Option<PathBuf>,
     /// Dev-only host console listeners: one `(guest_port, host_socket)` per console
     /// data port the interactive PTY may reach. Populated only for a `dev_console`
@@ -571,7 +571,7 @@ unsafe fn run(
             // back to the dev/live `MVM_HVF_SUBSTITUTION_SOCKET` hook. Shares the
             // heartbeat counter so an in-flight request awaiting its reply keeps the
             // loop polling. With no relay wired, EGRESS_PORT fails closed at the
-            // bridge (an in-house VM must always carry a relay socket).
+            // bridge (an hvf VM must always carry a relay socket).
             if let Some(relay) = egress_relay.as_ref().or(substitution_socket.as_ref()) {
                 v.set_substitution_activity(egress_active.clone());
                 v.set_substitution_endpoint(relay);

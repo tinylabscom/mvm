@@ -4,7 +4,7 @@
 **Relates to:** [ADR-002](002-microvm-security-posture.md) (claim 10 — default-deny
 egress), [ADR-049](049-vsock-substitution-service.md) (vsock substitution),
 [ADR-059](059-host-services-broker.md) (host-services broker over vsock),
-[ADR-082](082-rust-native-egress-gateway.md) (in-house egress gateway),
+[ADR-082](082-rust-native-egress-gateway.md) (hvf egress gateway),
 [ADR-083](083-workload-backend-type-bar.md) (`WorkloadBackend`),
 [ADR-099](099-multi-backend-hypervisor-abstraction.md) (the backend seam),
 [Plan 214](../plans/214-clean-replacement-architecture.md).
@@ -24,7 +24,7 @@ A guest can reach the host/outside world over two planes:
   is host-enforced (claim 10 holds), but each is a *different* mechanism, and each
   puts a NIC + IP stack inside the guest.
 
-An in-house vsock-mediated egress path already exists (the substitution service —
+An hvf vsock-mediated egress path already exists (the substitution service —
 ADR-049 — and the `WorkloadBackend` seam, ADR-083), but it is parity-gated, not
 the universal default.
 
@@ -72,7 +72,7 @@ The guest therefore has exactly one device class for talking to anything: vsock.
 
 ## Cost / consequences
 
-- The host gateway is an **L4/L7 proxy** (the in-house gateway, ADR-082; fed by
+- The host gateway is an **L4/L7 proxy** (the hvf gateway, ADR-082; fed by
   the substitution service, ADR-049), not transparent IP routing. Every protocol
   flows through it; protocols it doesn't model don't get out (which is the point —
   fail-closed — but it must cover what workloads need: TCP connect, DNS, TLS
@@ -109,7 +109,7 @@ Every outbound flow is the guest opening a **vsock** stream to a single host-sid
 - **Claims 12/13** — for a bound-secret destination, the credential substitution
   (the placeholder→real-credential rewrite) the terminator does today.
 
-This deletes the entire userspace network plane — **passt, gvproxy, the in-house
+This deletes the entire userspace network plane — **passt, gvproxy, the hvf
 rvproxy, and the nft/redirect terminator all go away**. They exist only to gateway
 a guest NIC's IP traffic; with no NIC there is nothing for them to do.
 
@@ -263,7 +263,7 @@ to safely run untrusted multi-tenant workloads.
 
 ## Status
 
-Both **in-house VMM** paths now prove vsock-only egress live, reusing one
+Both **hvf VMM** paths now prove vsock-only egress live, reusing one
 `EgressProxy` + run loop + heartbeat:
 
 - **HVF / macOS / Apple silicon** — the reference (details below).
@@ -275,7 +275,7 @@ Both **in-house VMM** paths now prove vsock-only egress live, reusing one
   (`reply n=4 data=ping`). KVM specifics vs HVF: the SIGUSR1 heartbeat breaks the
   in-kernel HLT, and the device IRQ is **pulsed** (x86 IOAPIC edge delivery) so async
   replies reach an idle guest. The third-party VMMs (libkrun/vz/Firecracker) are the
-  remaining convergence (Step 2 below); the in-house path is the destination runtime.
+  remaining convergence (Step 2 below); the hvf path is the destination runtime.
 
 ### HVF reference (Apple silicon)
 

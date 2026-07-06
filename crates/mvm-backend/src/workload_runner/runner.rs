@@ -278,7 +278,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> VmBackend for Workloa
     }
 
     fn install(&self) -> Result<()> {
-        // The in-house VMM needs no host install.
+        // The hvf VMM needs no host install.
         Ok(())
     }
 }

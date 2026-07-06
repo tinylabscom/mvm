@@ -490,7 +490,7 @@ gateway holds the raw secrets (claim 13) and the name-constrained CA
 key, so moving that logic into nginx+LuaJIT would enlarge the highest-
 value TCB with a large C/JIT surface that cannot be `zeroize`d, cannot
 share the typed `PlanFlowPolicy` lowering, and is not covered by
-`cargo deny`/fuzz — and it reverses ADR-082 (the in-house Rust
+`cargo deny`/fuzz — and it reverses ADR-082 (the hvf Rust
 gateway). Part C, by contrast, adds **zero** attack surface.
 
 ### No new blast radius — by construction

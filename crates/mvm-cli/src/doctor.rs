@@ -1648,8 +1648,8 @@ fn builder_backend_check(plat: Platform) -> Check {
                 "QEMU NOT available (apt install qemu-system-x86 qemu-utils)".to_string()
             }
         }
-        BuilderBackendChoice::InHouse => {
-            "in-house HVF builder (constructor registered at CLI startup)".to_string()
+        BuilderBackendChoice::Hvf => {
+            "HVF builder (constructor registered at CLI startup)".to_string()
         }
     };
 

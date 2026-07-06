@@ -1,4 +1,4 @@
-//! The dedicated host-I/O thread for the in-house VMM's virtio-vsock device.
+//! The dedicated host-I/O thread for the hvf VMM's virtio-vsock device.
 //!
 //! Host→guest vsock delivery used to run only from the vCPU run loop's
 //! `poll()` — serviced on `VTimer`/`Canceled` exits. On HVF a busy guest produces

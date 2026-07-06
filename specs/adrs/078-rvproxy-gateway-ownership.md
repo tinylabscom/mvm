@@ -120,7 +120,7 @@ What does not change:
 - Linux `passt` remains a separate external dependency until deliberately
   revisited;
 - upstream parser/runtime bugs are replaced by first-party parser/runtime bugs,
-  so the maintenance burden moves in-house.
+  so the maintenance burden moves hvf.
 
 ## Consequences
 

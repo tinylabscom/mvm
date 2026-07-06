@@ -490,7 +490,7 @@ half (2a) and an rvproxy-gated half (2b).** Findings:
   in-process bridge only sees post-gateway L2 frames — so the terminator
   cannot live mvm-side.** It must live in the userspace gateway's TCP/IP
   stack. gvproxy is vendored Go being retired, so the terminator belongs in
-  **rvproxy** (the in-house Rust gateway — ADR-082 / Plan 193), where it also
+  **rvproxy** (the hvf Rust gateway — ADR-082 / Plan 193), where it also
   composes with rvproxy's native flow API. This is Phase 2b and is gated on
   rvproxy + a cross-repo requirement.
 

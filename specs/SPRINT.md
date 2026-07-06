@@ -529,7 +529,7 @@ project only uses a narrow slice of functionality.
       in isolation) and `libclang` coupling during normal builds.
 
 - [ ] Evaluate replacing `hickory-proto` in `mvm-addon-dns` with a
-      minimal in-house DNS codec for the exact record types and packet
+      minimal hvf DNS codec for the exact record types and packet
       shapes the addon resolver supports.
       Current surface: `crates/mvm-addon-dns/src/lib.rs`.
       Expected impact: moderate package-count reduction (`~71` unique

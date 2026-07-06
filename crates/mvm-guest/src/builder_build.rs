@@ -1,11 +1,11 @@
-//! The in-house-VMM builder's guest-side nix build.
+//! The hvf-VMM builder's guest-side nix build.
 //!
 //! Runs `nix build` against the vsock-staged `/work` tree (with `/mvm-bins`
 //! exposed as `MVM_HOST_BIN_DIR`) and stages the kernel + rootfs into a local dir
 //! the [build session](crate::builder_session) streams back to the host. It is
 //! the transport-free build core the builder server's `serve_build` closure runs.
 //! Mirrors the legacy builder agent's nix invocation, but stages to a plain
-//! directory instead of a `/dev/vdb` disk mount — the in-house VMM has no writable
+//! directory instead of a `/dev/vdb` disk mount — the hvf VMM has no writable
 //! host-shared disk, so artifacts go back over vsock.
 
 use std::io::{Read, Write};

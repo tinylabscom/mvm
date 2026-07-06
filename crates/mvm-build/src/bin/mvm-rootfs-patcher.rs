@@ -1,6 +1,6 @@
 //! `mvm-rootfs-patcher` — PID 1 of the self-hosting builder-rootfs bootstrap.
 //!
-//! Booted from an initramfs on the in-house VMM (`kernel + initramfs + the
+//! Booted from an initramfs on the hvf VMM (`kernel + initramfs + the
 //! target rootfs as a writable virtio-blk disk`). It mounts the rootfs
 //! read-write and copies each binary in `/payload` to its install path per
 //! `/payload/manifest` (built by `mvm_build::rootfs_inject`), then powers off.
@@ -64,7 +64,7 @@ fn main() {
     log!("mvm-rootfs-patcher: starting");
 
     let poweroff = || -> ! {
-        // SAFETY: sync + power off; the in-house VMM services the PSCI SYSTEM_OFF
+        // SAFETY: sync + power off; the hvf VMM services the PSCI SYSTEM_OFF
         // this reboot syscall lowers to.
         unsafe {
             libc::sync();

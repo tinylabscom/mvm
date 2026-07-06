@@ -133,7 +133,7 @@ where
 
 /// Serve raw-TCP egress over a host **AF_VSOCK** listener — the QEMU path,
 /// mirroring how `SubstitutionService::serve_vsock` structures its accept loop.
-/// The in-house VMM relay uses the UDS path above; this is the thin vsock sibling
+/// The hvf VMM relay uses the UDS path above; this is the thin vsock sibling
 /// for backends that route guest→host over `vhost-vsock`.
 ///
 /// Both `accept(2)` and the per-connection target-read + splice run with blocking

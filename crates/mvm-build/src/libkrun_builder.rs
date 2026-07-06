@@ -148,7 +148,7 @@ pub enum NetworkingPreference {
     /// supervisor spawns gvproxy with `-listen-vfkit unixgram://…`
     /// and libkrun connects to the listener path.
     Gvproxy,
-    /// virtio-net via the in-house native gateway. The native gateway speaks
+    /// virtio-net via the hvf native gateway. The native gateway speaks
     /// the same `-listen-vfkit` unixgram protocol as gvproxy, so it reuses the
     /// gvproxy vfkit backend wholesale — the only difference is the binary,
     /// located via `MVM_GATEWAY_BIN`. macOS selects native by default once

@@ -1,5 +1,5 @@
 //! Self-hosting builder-rootfs bootstrap: inject the freshly
-//! cross-compiled `mvm-host-vm-init` into a builder rootfs using ONLY the in-house
+//! cross-compiled `mvm-host-vm-init` into a builder rootfs using ONLY the hvf
 //! VMM — no vz, no legacy builder. Thin driver over
 //! `mvm_backend::builder_runner::inject_host_binaries`. Output: a patched rootfs
 //! at `$OUT` (default `/tmp/mvm-patched-rootfs.ext4`).
@@ -46,7 +46,7 @@ fn main() {
         std::env::var("OUT").unwrap_or_else(|_| "/tmp/mvm-patched-rootfs.ext4".into()),
     );
     let new_init_bytes = std::fs::read(&new_init).unwrap();
-    println!("injecting the current mvm-host-vm-init into a rootfs copy via the in-house VMM…");
+    println!("injecting the current mvm-host-vm-init into a rootfs copy via the hvf VMM…");
     inject_host_binaries(&InjectRequest {
         kernel: &kernel,
         base_rootfs: &src_rootfs,
@@ -62,7 +62,7 @@ fn main() {
     .expect("inject");
 
     println!(
-        "PROOF: the in-house VMM patched a builder rootfs with the current \
+        "PROOF: the hvf VMM patched a builder rootfs with the current \
          mvm-host-vm-init — no vz, no legacy builder. Patched rootfs: {}",
         out.display()
     );

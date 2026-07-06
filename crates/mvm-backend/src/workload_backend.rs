@@ -71,7 +71,7 @@ impl WorkloadBackend for VzBackend {
 impl WorkloadBackend for HvfBackend {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
         // Proxy-aware substitution over the vsock gateway: the guest dials the
-        // egress port, the in-house VMM's bridge enforces claim-10 then relays to
+        // egress port, the hvf VMM's bridge enforces claim-10 then relays to
         // the per-VM endpoint (claims 12/13). No transparent :80/:443 terminator.
         EgressSubstitutionTransport::VsockUdsChannel
     }

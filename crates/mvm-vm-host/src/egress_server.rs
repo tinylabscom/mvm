@@ -5,16 +5,16 @@
 //! bytes. libkrun forwards that guest vsock stream to a host-bound UDS
 //! (`add_host_listen_port`). This server terminates that UDS: it reads the target
 //! line, decides it against the claim-10 [`EgressGate`] (the same decision HVF's
-//! in-house gateway makes), and on admit pumps bytes both ways to a fresh host TCP
+//! hvf gateway makes), and on admit pumps bytes both ways to a fresh host TCP
 //! connection. A refused target never reaches the network.
 //!
-//! Unlike the in-house VMM's poll-based egress relay (single-threaded run loop),
+//! Unlike the hvf VMM's poll-based egress relay (single-threaded run loop),
 //! this is an async per-connection pump — the natural shape for the supervisor's
 //! tokio runtime. The *decision* (`EgressGate`) is the shared core; the pump is
 //! per-VMM.
 //!
 //! Why a newline delimiter: the UDS is a raw byte stream with no packet boundary
-//! (unlike vsock on the in-house VMM), so the target needs an explicit terminator.
+//! (unlike vsock on the hvf VMM), so the target needs an explicit terminator.
 //! `BufReader` absorbs any workload bytes that arrive in the same read after the
 //! newline and replays them into the proxy, so none are lost.
 

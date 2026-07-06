@@ -238,7 +238,7 @@ fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
 
 /// Resolve the requested hypervisor to the effective one for this host. `firecracker`
 /// (the default `--hypervisor`) auto-detects: KVM → firecracker, macOS 26+ Apple Silicon
-/// → hvf (the in-house HVF VMM with vsock-only egress — no Vz supervisor, no
+/// → hvf (the HVF VMM with vsock-only egress — no Vz supervisor, no
 /// gvproxy), macOS 13-25 + libkrun → libkrun, else firecracker (surfaces a clear
 /// "not available" error). Any explicit value is returned as-is. The `MVM_HYPERVISOR`
 /// env var (alias `MVM_BACKEND`) overrides auto-detect — the workload-VMM override
@@ -264,7 +264,7 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
     if plat.has_kvm() {
         "firecracker"
     } else if plat.is_vz_default_tier() {
-        // macOS 26+ Apple Silicon: the in-house HVF VMM (`hvf`) is the workload
+        // macOS 26+ Apple Silicon: the HVF VMM (`hvf`) is the workload
         // default. Vz is sunset (opt-in only via `--hypervisor vz`); the hvf path
         // carries claim-10 egress over vsock via its per-VM gating endpoint — no
         // gvproxy sidecar.
@@ -425,7 +425,7 @@ mod tests {
     }
 
     /// On the macOS-26 Apple Silicon tier the auto-detect default is the
-    /// in-house HVF VMM (`hvf`) — never `vz`. Vz is sunset and reachable
+    /// HVF VMM (`hvf`) — never `vz`. Vz is sunset and reachable
     /// only via an explicit `--hypervisor vz`. Host-conditioned: the assertion
     /// only fires on a host that actually reports the tier.
     #[cfg(target_os = "macos")]

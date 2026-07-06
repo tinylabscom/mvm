@@ -1,5 +1,5 @@
 //! Live proof (macOS / Apple-silicon): a host process reaches the guest agent
-//! over the in-house HVF vsock bridge. Boots a real mkGuest workload, then pings
+//! over the HVF vsock bridge. Boots a real mkGuest workload, then pings
 //! the guest agent on `GUEST_AGENT_PORT` through the host agent socket the
 //! `AgentBridge` exposes (`MVM_HVF_AGENT_SOCKET`). Exit 0 iff the agent answered.
 //!

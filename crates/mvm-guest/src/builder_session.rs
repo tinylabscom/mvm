@@ -1,6 +1,6 @@
-//! The in-house-VMM builder's host↔guest build session, over one vsock stream.
+//! The hvf-VMM builder's host↔guest build session, over one vsock stream.
 //!
-//! A builder VM booted by the in-house VMM (HVF/KVM) has no host-mounted share, so
+//! A builder VM booted by the hvf VMM (HVF/KVM) has no host-mounted share, so
 //! a whole build is driven over a single vsock connection using the
 //! [`builder_transfer`](crate::builder_transfer) file primitive plus a few control
 //! messages. The sequence on one stream, in order (no interleaving, so each side

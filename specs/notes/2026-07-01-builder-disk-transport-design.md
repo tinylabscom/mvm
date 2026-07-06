@@ -1,4 +1,4 @@
-# Disk-only builder transport for the in-house VMM (Plan 214 S6.3)
+# Disk-only builder transport for the hvf VMM (Plan 214 S6.3)
 
 Status: design + in progress. Path B (disk-only) was chosen over virtio-fs
 parity — see the fork decision (virtio-fs is not needed for microVMs; sealed/RO
@@ -8,7 +8,7 @@ bind-mounts the posture discourages).
 ## The constraint that shapes everything
 
 The libkrun/vz builder moves job + artifacts over **virtio-fs shares**
-(`/work`, `/out`, `/job`, `/mvm-bins` = host directories). The in-house VMM has
+(`/work`, `/out`, `/job`, `/mvm-bins` = host directories). The hvf VMM has
 no virtio-fs, so those move over disks. But the **host is macOS** and cannot
 format or read ext4 — so the transport must never require host-side
 guest-filesystem access. That rules out "host mkfs.ext4 an input image" and
@@ -48,7 +48,7 @@ Disk slots (within `MAX_DISKS = 4`): `vda` = builder rootfs (RO, file-served),
    + nix-store disks, compose a `VmmSpec` (disks + builder cmdline
    `init=/sbin/mvm-host-vm-init`), boot via the driver, wait, read the output
    disk, finalize (reuse `finalize_flake_job`). Wire into
-   `builder_backend_select` so `--builder inhouse` (and eventually the macOS
+   `builder_backend_select` so `--builder hvf` (and eventually the macOS
    auto-default) uses it. Removes vz from the builder path.
 4. **Builder egress on HVF:** the builder is trusted (no claim-10 gate); it needs
    a path out for substituters. Separate wiring slice.

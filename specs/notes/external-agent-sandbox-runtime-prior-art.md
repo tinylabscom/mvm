@@ -57,7 +57,7 @@ attack surface. See `specs/plans/118-supervisor-standby-pool-and-live-bench.md`
   (a) cannot `zeroize` secret bytes, (b) cannot share our typed
   `PlanFlowPolicy` lowering (Plan 193), (c) is not covered by `cargo
   deny`/`audit` (claim 7) or our fuzz harnesses, and (d) reverses
-  ADR-082 (the in-house Rust gateway whose whole point is to own this
+  ADR-082 (the hvf Rust gateway whose whole point is to own this
   seam in Rust). It fails the "no new blast radius" bar outright. The
   only place an off-the-shelf proxy is defensible is **secrets-free
   ingress routing** — which is mvmd's control plane, not this repo.
@@ -88,6 +88,6 @@ which PR-10c exists to close.
 ## Pointers
 
 - Bench / warm-pool home: `specs/plans/118-supervisor-standby-pool-and-live-bench.md`
-- Egress credential substitution: `specs/plans/129-*`, ADR-082 (in-house Rust gateway), ADR-049/059
+- Egress credential substitution: `specs/plans/129-*`, ADR-082 (hvf Rust gateway), ADR-049/059
 - Default-deny egress + claims: ADR-002 (claims 10, 13), `specs/claims/catalog.md`
 - Fork/snapshot prior-art audit: Plans 148/157/175

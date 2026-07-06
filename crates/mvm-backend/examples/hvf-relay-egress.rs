@@ -1,7 +1,7 @@
 //! Live proof that claim-10 egress is enforced by the host-side endpoint — not the
-//! guest run loop — on the in-house VMM.
+//! guest run loop — on the hvf VMM.
 //!
-//! Boots the echo guest through `InHouseDriver` with its `EGRESS_PORT` relayed to a
+//! Boots the echo guest through `HvfDriver` with its `EGRESS_PORT` relayed to a
 //! per-VM `mvm-substitution-endpoint` that carries the resolved `NetworkPolicy`.
 //! The run loop is a pure relay (no in-loop gate); the endpoint gates. Runs twice
 //! against a discovered LAN echo server: once with a policy that admits it (reply
@@ -60,7 +60,7 @@ fn main() {
     use std::time::{Duration, Instant};
 
     use mvm_backend::driver::{
-        ConsoleCapture, InHouseDriver, KernelImage, VmmDriver, VmmSpec, VsockDirection, VsockPort,
+        ConsoleCapture, HvfDriver, KernelImage, VmmDriver, VmmSpec, VsockDirection, VsockPort,
     };
     use mvm_core::config::vm_state_dir;
     use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
@@ -181,8 +181,8 @@ fn main() {
             trusted_builder: false,
         };
 
-        let driver = InHouseDriver::new();
-        let vm = driver.boot(&spec).expect("boot in-house VM");
+        let driver = HvfDriver::new();
+        let vm = driver.boot(&spec).expect("boot hvf VM");
         for _ in 0..150 {
             if vm.status().unwrap() == VmStatus::Stopped {
                 break;
@@ -226,7 +226,7 @@ fn main() {
     if admit_ok && !deny_reachable {
         println!(
             "PROOF: with the claim-10 gate now in the host endpoint (the run loop is a pure \
-             relay), the in-house VMM guest reached the admitted LAN destination over vsock and \
+             relay), the hvf VMM guest reached the admitted LAN destination over vsock and \
              was refused the non-admitted one — enforcement preserved, no guest NIC."
         );
     } else {

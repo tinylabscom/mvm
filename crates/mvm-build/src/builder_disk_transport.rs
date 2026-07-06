@@ -1,7 +1,7 @@
-//! Disk-only job/artifact transport for the in-house-VMM builder.
+//! Disk-only job/artifact transport for the hvf-VMM builder.
 //!
 //! The libkrun/vz builder moves the job in and the artifacts out over virtio-fs
-//! shares (host directories). The in-house VMM has no virtio-fs, and the host is
+//! shares (host directories). The hvf VMM has no virtio-fs, and the host is
 //! macOS — which can neither format nor read an ext4 — so the transport must
 //! never require host-side access to a guest filesystem.
 //!

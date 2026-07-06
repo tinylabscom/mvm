@@ -40,11 +40,11 @@ The vsock endpoint is not an implementation detail; it is the product seam. Ever
 ### F3. Cold start budget (per platform, warm caches)
 
 - Dominant cost everywhere: **guest kernel boot + agent-up ≈ 1.0–1.5 s**; CoW clone is O(1) on APFS/FICLONE-capable hosts; hvf adds supervisor spawn + PID poll (50 ms cadence); FC adds a 15 ms pre-start sleep + API handshake. Totals ≈ 1.6–4 s cold; warm-start paths (claim / snapshot-restore) reduce to ~0.2–0.5 s.
-- **Blocker on macOS:** the in-house guest agent receives the host's `ProtocolHello` (delivered into the RX queue — instrumented) but never replies, so non-interactive `machine run` fails at the 30 s gate. FC round-trip with the same agent works, isolating the defect to the in-house vsock device↔guest-driver interaction.
+- **Blocker on macOS:** the hvf guest agent receives the host's `ProtocolHello` (delivered into the RX queue — instrumented) but never replies, so non-interactive `machine run` fails at the 30 s gate. FC round-trip with the same agent works, isolating the defect to the hvf vsock device↔guest-driver interaction.
 
 ### F4. Network surfaces today
 
-- **hvf workload path is already vsock-pure** — no virtio-net device exists in the in-house VMM; egress rides `egress_relay_socket` → gating endpoint (sole claim-10 gate).
+- **hvf workload path is already vsock-pure** — no virtio-net device exists in the hvf VMM; egress rides `egress_relay_socket` → gating endpoint (sole claim-10 gate).
 - Violations of the no-network invariant: **libkrun workload NIC** (gvproxy/passt; vsock egress flag-gated `MVM_VSOCK_EGRESS`, inert), **firecracker workload TAP+nftables**, and **every builder VM** (vz/libkrun/FC Stage 0 + persistent) fetching over gvproxy/passt/TAP. Plan 214 S4/S6/S7 designs the cutover; none merged.
 - Host-side listeners are localhost/UDS/vsock only. Guest `netinit` degrades gracefully with no NIC.
 
@@ -59,7 +59,7 @@ Ordering: **WS-A unblocks macOS. WS-B → WS-C → WS-D is the data-plane chain.
 
 ### WS-A — In-house vsock agent data path (prerequisite)
 
-The hvf guest agent must answer host RPC. Root-cause the guest-no-reply (host delivery proven correct; suspect in-house virtio-vsock device ↔ guest driver semantics around host-initiated streams, e.g. rx-buffer/credit or `OP_RW`-before-driver-poll ordering).
+The hvf guest agent must answer host RPC. Root-cause the guest-no-reply (host delivery proven correct; suspect hvf virtio-vsock device ↔ guest driver semantics around host-initiated streams, e.g. rx-buffer/credit or `OP_RW`-before-driver-poll ordering).
 
 - [ ] Live device+guest trace comparing `OP_REQUEST` (works) vs `OP_RW` (payload never reaches the agent socket).
 - [ ] Fix + regression test at the device level (loopback guest-driver harness in `crates/mvm-backend/src/vmm/`).
@@ -92,7 +92,7 @@ Blocked on WS-B completion (last NIC user gone):
 
 ### WS-E — Snapshot / instant-resume capability (uniform across backends)
 
-**Parity principle (owner directive 2026-07-06):** all backends expose the same lifecycle set. The checkpoint core is written once, platform-neutral (it operates on the guest-memory mapping + `std::io`, like our pure-Rust ext4 writer precedent), and per-VMM drivers supply exactly three hooks: *pause+drain*, *vCPU state save/restore*, *device persist*. Firecracker adapts its native snapshot behind the same seam; libkrun reaches parity by being replaced with the in-house VMM (Plan 214 — we cannot add snapshots to a Homebrew dylib we don't own); vz is sunset; qemu stays dev-tier.
+**Parity principle (owner directive 2026-07-06):** all backends expose the same lifecycle set. The checkpoint core is written once, platform-neutral (it operates on the guest-memory mapping + `std::io`, like our pure-Rust ext4 writer precedent), and per-VMM drivers supply exactly three hooks: *pause+drain*, *vCPU state save/restore*, *device persist*. Firecracker adapts its native snapshot behind the same seam; libkrun reaches parity by being replaced with the hvf VMM (Plan 214 — we cannot add snapshots to a Homebrew dylib we don't own); vz is sunset; qemu stays dev-tier.
 
 **Mechanism (validated against a reviewed external reference implementation — named nowhere, per convention — which demonstrates sub-100 ms cold-restore and O(1) fork on HVF with this exact design):**
 
@@ -103,8 +103,8 @@ Blocked on WS-B completion (last NIC user gone):
 - **Resident checkpoints**: an in-process (RAM-held) checkpoint variant for warm pools — claim a clone from a resident golden without touching disk.
 - **Our edge:** the vsock-only device model (no NIC) makes the device-persist surface *smaller* than the reference's; in-flight vsock streams get defined semantics on restore (drop + guest retry), and snapshot/fork lineage is recorded in the chain-signed audit log (theirs has no audit story — ours is the differentiator).
 
-- [ ] **E0 (RAM substrate):** switch in-house guest RAM allocation to file-backed from boot; assert `F_GETPATH` recoverability; benchmark no-regression on cold boot.
-- [ ] **E1 (pause/resume):** vCPU stop/start + device-worker drain in the in-house VMM; supervisor control verbs; `machine pause/resume` (aliased from `vm`), dispatched per backend through the same seam.
+- [ ] **E0 (RAM substrate):** switch hvf guest RAM allocation to file-backed from boot; assert `F_GETPATH` recoverability; benchmark no-regression on cold boot.
+- [ ] **E1 (pause/resume):** vCPU stop/start + device-worker drain in the hvf VMM; supervisor control verbs; `machine pause/resume` (aliased from `vm`), dispatched per backend through the same seam.
 - [ ] **E2 (checkpoint/restore):** platform-neutral checkpoint core + the three driver hooks; manifest versioned; HMAC envelope; restore via CoW mapping into a fresh supervisor (Plan 175 fresh-VMM shape).
 - [ ] **E3 (fork):** frozen-golden + CoW RAM/disk clones on hvf via `fork_vm_full`; N sandboxes from one snapshot without re-boot.
 - [ ] **E4 (Linux tail):** land Plan 206 T1 (UFFD lazy-restore) so FC warm resume drops its ~1 s tail; live-KVM proofs; FC adapted behind the shared seam for verb parity.

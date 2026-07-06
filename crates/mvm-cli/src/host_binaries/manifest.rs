@@ -48,5 +48,5 @@ pub const HOST_BINARIES: &[HostBinary] = &[
 /// `stage0-init` becomes the Stage 0 nix-seed's `/init`;
 /// `mvm-rootfs-patcher` becomes the self-hosting bootstrap's inject-initramfs
 /// `/init` (re-bakes a builder rootfs with the current host binaries on the
-/// in-house VMM — no legacy builder).
+/// hvf VMM — no legacy builder).
 pub const SEED_BINARIES: &[&str] = &["stage0-init", "mvm-rootfs-patcher"];
