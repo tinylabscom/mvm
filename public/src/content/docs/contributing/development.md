@@ -6,7 +6,7 @@ description: Getting started as a contributor to mvm.
 ## Prerequisites
 
 - **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)
-- **macOS Apple Silicon or Linux** — macOS for development via Apple Container (26+) or libkrun (pre-26); Linux for native `/dev/kvm`. Intel Macs are not a supported local microVM host.
+- **macOS Apple Silicon or Linux** — macOS for development via Vz (26+) or libkrun (pre-26); Linux for native `/dev/kvm`. Intel Macs are not a supported local microVM host.
 - **`zig` + `cargo-zigbuild`** — source-checkout contributors only; `crates/mvm-cli/build.rs` uses them to cross-compile the embedded host-VM binaries (`mvm-host-vm-init`, `mvm-egress-proxy`) as static `aarch64-unknown-linux-musl`. End-users running a downloaded `mvmctl` don't need them.
 - **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
 
@@ -18,7 +18,7 @@ VMM:
 
 | Host | libkrun (`slp/krun/*`) needed? |
 |---|---|
-| macOS 26+ Apple Silicon | **No** — auto-detect picks the **Vz** backend (Apple Virtualization.framework, ships with the OS). `mvmctl dev up` only retries libkrun if the Vz path fails. |
+| macOS 26+ Apple Silicon | **No** — auto-detect picks the **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps). `mvmctl dev up` only retries libkrun if the HVF path fails. |
 | macOS 13–25 Apple Silicon | **Yes** — `brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy`. |
 | Linux + `/dev/kvm` | **No** — Firecracker runs directly. Swap `gvproxy` for `passt` from your distro package manager. |
 
@@ -99,7 +99,7 @@ Notes:
   which builds both on native runners — fetch it with `--source
   download` once a release ships it.
 - On macOS the compile arm needs the libkrun trio (`slp/krun/*`), since
-  Stage 0 is libkrun-backed even on Vz-default hosts.
+  Stage 0 is libkrun-backed even on HVF-default hosts.
 - Editing `base.nix` or a variant delta? Just re-run the command — a
   custom config always compiles locally; downloads only ever return the
   kernel that shipped with that exact `mvmctl` release. See ADR-046
@@ -205,7 +205,7 @@ just lint         # Both format check + clippy
 
 ### Multi-Backend
 
-mvmctl's supported local microVM hosts are native Linux with `/dev/kvm` and macOS Apple Silicon. Firecracker is the Linux baseline; Apple Container and libkrun-backed components cover Apple Silicon macOS. Docker remains a Tier 3 convenience fallback, not a microVM isolation boundary. WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work.
+mvmctl's supported local microVM hosts are native Linux with `/dev/kvm` and macOS Apple Silicon. Firecracker is the Linux baseline; Vz and libkrun-backed components cover Apple Silicon macOS. WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work.
 
 ### Host vs. VM
 
@@ -270,7 +270,7 @@ microVMs have no SSH. Interactive access is via `mvmctl machine console` which u
 - Authenticated via the existing Ed25519 vsock protocol
 - Dev-mode only (`access.console` must be `true` in the guest security policy)
 - Single session per VM, 15-minute idle timeout
-- Supports both Firecracker and Apple Container backends
+- Supports both Firecracker and Vz backends
 
 ### XDG Directory Layout
 

@@ -98,7 +98,7 @@ prefer copy-in/copy-out:
 
 ```sh
 mvmctl cp ./input.json agent-sandbox:/work/input.json
-mvmctl exec agent-sandbox -- python /work/task.py
+mvmctl machine exec agent-sandbox -- python /work/task.py
 mvmctl cp --max-bytes 16777216 agent-sandbox:/work/output.json ./output.json
 ```
 
@@ -141,7 +141,7 @@ mvmctl volume unlock coding-agent-work
 mvmctl machine run --flake ./agent-image --name coding-agent -d
 mvmctl volume mount coding-agent --volume coding-agent-work --guest /workspace --rw
 mvmctl cp ./task.json coding-agent:/work/task.json
-mvmctl exec coding-agent --timeout 120 -- python /work/run_task.py
+mvmctl machine exec coding-agent --timeout 120 -- python /work/run_task.py
 mvmctl cp --max-bytes 16777216 coding-agent:/work/result.json ./result.json
 mvmctl volume unmount coding-agent /workspace
 mvmctl machine stop coding-agent

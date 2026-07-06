@@ -199,7 +199,7 @@ For running VMs (separate concern), continue to use `mvmctl ls` / `mvmctl machin
 ```bash
 mvmctl machine run --manifest .                            # boot from slot keyed by manifest at cwd
 mvmctl machine run --manifest /path/to/project           # explicit
-mvmctl exec /path/to/project -- uname -a   # ephemeral one-shot
+mvmctl machine run --manifest /path/to/project -- uname -a   # ephemeral one-shot
 ```
 
 If no current revision exists, you get an error with a hint to run `mvmctl build`. If the manifest's `vcpus`/`mem` differ from what the slot's snapshot was taken at, the snapshot is ignored and a cold-boot from the rootfs proceeds (with a warning).

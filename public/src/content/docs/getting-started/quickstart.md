@@ -156,16 +156,16 @@ mvmctl machine console myvm --command "ls -la" # One-shot command
 
 ## 8. Sandboxed One-Shot Commands
 
-`mvmctl exec` boots a fresh transient microVM, runs a single command, and tears
-it down on exit -- like `docker run --rm`, but with a Firecracker microVM as
-the sandbox. No `--flake` or `--manifest` needed; the bundled default image
-boots automatically the first time.
+`mvmctl machine run -- <cmd>` boots a fresh transient microVM, runs a single
+command, and tears it down on exit -- like `docker run --rm`, but with a
+Firecracker microVM as the sandbox. Name a source with `--image`, `--flake`,
+or `--manifest`.
 
 ```bash
-mvmctl exec -- uname -a                            # bundled default image
-mvmctl exec --add-dir .:/work -- ls /work          # share host dir, read-only
-mvmctl exec --env DEBUG=1 -- env | grep DEBUG      # inject env vars
-mvmctl exec --manifest my-tpl -- /bin/true         # registered template
+mvmctl machine run --image alpine -- uname -a                    # OCI image, one-shot
+mvmctl machine run --flake . --volume .:/work -- ls /work        # share host dir, read-only
+mvmctl machine run --image alpine -e DEBUG=1 -- env | grep DEBUG # inject env vars
+mvmctl machine run --manifest my-tpl -- /bin/true                # registered template
 ```
 
 When you reuse a registered template that has a captured snapshot, exec

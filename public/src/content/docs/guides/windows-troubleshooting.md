@@ -100,28 +100,6 @@ You're working from a `/mnt/c/...` path. NTFS-via-9p is many times slower than e
 
 `HOME` inside the distro should be `/home/<your-user>`. If you accidentally launched the distro with `HOME=/mnt/c/Users/<you>`, NTFS permissions may not allow the `0700` chmod that `mvmctl` does for `~/.mvm` (W1.5). Fix: `unset HOME` and re-run, or set `HOME=/home/<user>` explicitly.
 
-## Tier 3 Docker fallback
-
-### Banner nagging on every `mvmctl run`
-
-When the auto-selected backend is Tier 3 Docker, mvm prints a security warning. Once you've read [the Matryoshka model](/security/matryoshka) and accept the reduced isolation:
-
-```powershell
-$env:MVM_ACK_DOCKER_TIER = "1"
-```
-
-(or persist it in your shell profile / Windows env settings).
-
-Equivalently: `~/.mvm/config.toml`:
-```toml
-[security]
-ack_docker_tier = true
-```
-
-### Docker Desktop says "WSL2 backend required"
-
-Docker Desktop on Windows 10/11 uses WSL2 by default. If you've manually switched to Hyper-V backend, switch back via *Docker Desktop → Settings → General → Use the WSL 2 based engine*.
-
 ## Anything else
 
 [Open a GitHub issue](https://github.com/tinylabscom/mvm/issues) with the output of:

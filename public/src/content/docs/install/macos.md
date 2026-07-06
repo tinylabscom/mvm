@@ -3,7 +3,7 @@ title: "Install mvm on macOS"
 description: "mvm on macOS supports Apple Silicon through Hypervisor.framework-backed local builder/runtime paths. Intel Macs are not a supported local microVM host."
 ---
 
-mvm on macOS is supported on **Apple Silicon (M-series)**. The local builder/runtime path uses Apple's Hypervisor.framework via Apple Container and libkrun-backed components. No Docker Desktop is required for the supported path.
+mvm on macOS is supported on **Apple Silicon (M-series)**. The local builder/runtime path uses Apple's Hypervisor.framework via the HVF backend and libkrun-backed components. No Docker Desktop is required for the supported path.
 
 For the full host/backend matrix, see [Platform support](/reference/platform-support/).
 
@@ -12,7 +12,7 @@ Intel Macs are not a supported local microVM host. Use a Linux machine with `/de
 ## Prerequisites
 
 - Apple Silicon Mac.
-- macOS 26+ for the Apple Container dev VM path.
+- macOS 26+ for the HVF dev VM path.
 - libkrun installed for libkrun-backed builder/runtime components.
 
 You **do not need Nix on your Mac**. You run `mvmctl build` from macOS, and mvm runs Nix evaluation and `nix build` inside the Linux builder VM, then extracts the resulting rootfs back to the host. See [§"Linux builds on macOS"](#linux-builds-on-macos--zero-config-by-default) below for the design.
@@ -52,7 +52,7 @@ cargo install mvmctl
 
 macOS Nix can't build Linux derivations natively, and most Mac users don't have Nix installed at all. mvm handles both cases **without requiring host-side configuration**: on `mvmctl build`, the host CLI stages the selected flake as a builder job, the Linux builder VM runs `nix build`, and mvm copies the resulting kernel/rootfs artifacts back to the host cache. See [Builder VM](/guides/builder-vm/) for the full control-plane flow.
 
-The builder VM is separate from the runtime VM. After the build completes, `mvmctl machine run --hypervisor vz` boots the already-built runtime image with Apple Virtualization. The build phase and boot phase can be benchmarked separately.
+The builder VM is separate from the runtime VM. After the build completes, `mvmctl machine run` boots the already-built runtime image on the HVF backend (the macOS 26+ default). The build phase and boot phase can be benchmarked separately.
 
 ### Optional: host-side Nix for power users
 
@@ -72,7 +72,7 @@ If you configure [`nix-darwin`'s `linux-builder`](https://nix.dev/manual/nix/sta
 mvmctl doctor
 ```
 
-`doctor` reports the active backend and libkrun availability. On an Apple Silicon Mac with macOS 26+, the dev path uses Apple Container and source image builds auto-detect the builder backend: Vz is preferred, and `mvmctl dev up` retries with libkrun when that auto-selected Vz builder path fails. Explicit `--builder` / `MVM_BUILDER_BACKEND` overrides still win.
+`doctor` reports the active backend and libkrun availability. On an Apple Silicon Mac with macOS 26+, the dev path uses the HVF builder; source image builds auto-detect the builder backend (HVF on macOS 26+ Apple Silicon), and `mvmctl dev up` retries with libkrun when the HVF builder path fails. Explicit `--builder` / `MVM_BUILDER_BACKEND` overrides still win.
 
 ## First microVM
 
@@ -100,7 +100,7 @@ brew install libkrun
 
 ## Apple Silicon vs Intel notes
 
-- **Apple Silicon (M1/M2/M3/M4 and newer)** — supported local path. Apple Container covers the dev VM, and libkrun backs builder/runtime components that need Hypervisor.framework directly.
+- **Apple Silicon (M1/M2/M3/M4 and newer)** — supported local path. HVF covers the dev VM, and libkrun backs builder/runtime components that need Hypervisor.framework directly.
 - **Intel Macs** — unsupported for the local microVM path. Run mvm on a Linux KVM host, or use future remote/Windows-style builder work when it lands.
 
-The Apple Container backend requires Apple Silicon and macOS 26+. libkrun is also treated as an Apple Silicon macOS path for mvm support purposes.
+The HVF backend is the macOS 26+ Apple Silicon default (Hypervisor.framework, vsock-only egress); Vz is an opt-in, sunsetting alternative (`--hypervisor vz`). libkrun is also treated as an Apple Silicon macOS path for mvm support purposes.

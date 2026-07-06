@@ -21,7 +21,7 @@ language SDK tests prove them.
 | --- | --- | --- | --- |
 | Create sandbox recording | `mvm.Sandbox.create(...)` | `Sandbox.create(...)` | `mvmctl build compile` or `mvmctl run --mode plan` |
 | Create live sandbox | `mvmctl run --mode live ./script.py` | `mvmctl run --mode live ./script.ts` | `mvmctl machine run` |
-| Start command | `sandbox.commands.start([...])` | `sandbox.commands.start([...])` | `mvmctl proc start` or `mvmctl exec` |
+| Start command | `sandbox.commands.start([...])` | `sandbox.commands.start([...])` | `mvmctl proc start` or `mvmctl machine exec` |
 | Capture command result | Target `commands.run(...)` | Target `commands.run(...)` | CLI command result and receipt paths |
 | Write file | `sandbox.files.write(path, data)` | `sandbox.files.write(path, data)` | `mvmctl machine fs write` |
 | Read/list/remove file | Target helpers | Target helpers | `mvmctl machine fs read`, `mvmctl machine fs ls`, `mvmctl machine fs rm` |
