@@ -127,6 +127,10 @@ pub(in crate::commands) struct ResolvedOciRunImage {
     pub reference: String,
     pub resolved_digest: String,
     pub rootfs_path: PathBuf,
+    /// The unpacked+injected OCI tree (`<cache>/unpacked/<hash>`), when it is
+    /// present on disk — the source a virtiofs-root dev boot serves directly.
+    /// `None` when only the cached ext4 is available (booted as block rootfs).
+    pub unpacked_root: Option<PathBuf>,
     pub pulled: bool,
     pub provenance: OciProvenance,
     pub auth_source: Option<String>,
@@ -507,11 +511,13 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
         Some(trust) => trust,
         None => trust_decision_for_cached_image(&image_ref, &image, prod, &CosignCommandVerifier)?,
     };
+    let unpacked_root = unpacked_dir_if_present(cache_root, &image.resolved_digest);
     Ok(ResolvedOciRunImage {
         provenance: image.provenance("run_image", reference, &trust),
         reference: image.reference,
         resolved_digest: image.resolved_digest,
         rootfs_path,
+        unpacked_root,
         pulled,
         auth_source: auth_source_from_pull,
     })
@@ -682,6 +688,7 @@ fn ingest_archive_from_reader<R: Read>(
         reference: image.manifest_digest.clone(),
         resolved_digest: image.manifest_digest,
         rootfs_path: rootfs_abs,
+        unpacked_root: Some(unpacked_root.clone()),
         pulled: true,
         provenance,
         auth_source: None,
@@ -753,6 +760,8 @@ fn ingest_rootfs_dir(
         reference: supplied_reference.to_string(),
         resolved_digest: String::new(),
         rootfs_path: rootfs_abs,
+        // rootfs-dir is a niche dev path (no digest); boot it as block ext4.
+        unpacked_root: None,
         pulled: true,
         provenance,
         auth_source: None,
@@ -1314,6 +1323,18 @@ fn write_cache_file(cache_root: &Path, relative: &str, bytes: &[u8]) -> Result<(
 
 fn layer_blob_path(digest: &str) -> Result<String> {
     Ok(format!("blobs/sha256/{}", sha256_hex(digest)?))
+}
+
+/// The unpacked+injected OCI tree for `resolved_digest`, iff present on disk.
+/// Its location is deterministic (`<cache>/unpacked/<sha256_hex(digest)>`); a
+/// virtiofs-root dev boot serves it directly, so gate on existence.
+fn unpacked_dir_if_present(cache_root: &Path, resolved_digest: &str) -> Option<PathBuf> {
+    if resolved_digest.is_empty() {
+        return None;
+    }
+    let hex = sha256_hex(resolved_digest).ok()?;
+    let dir = cache_root.join("unpacked").join(hex);
+    dir.is_dir().then_some(dir)
 }
 
 fn sha256_hex(digest: &str) -> Result<String> {

@@ -111,6 +111,9 @@ exclude = [
     # `Fuzz OCI unpack_layer` step). Release-tag + nightly + manual
     # dispatch only; not run on per-PR pushes.
     "crates/mvm-oci/fuzz",
+    # virtio-fs FUSE-server request-parser fuzz harness. Same libfuzzer-sys
+    # linker constraints; CI gate at `.github/workflows/security.yml::fuzz`.
+    "crates/mvm-backend/fuzz",
     # Plan 88 W6 / ADR-055 §"New untrusted-input surfaces" —
     # supervisor-config JSON fuzz harness. CI gate at
     # `.github/workflows/security.yml::fuzz`.

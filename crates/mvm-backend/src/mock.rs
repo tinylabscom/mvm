@@ -383,6 +383,7 @@ mod tests {
             kernel_path: None,
             initrd_path: None,
             rootfs_path: "/tmp/stub.ext4".to_string(),
+            virtiofs_root: None,
             verity_path: None,
             roothash: None,
             runtime_overlay_path: None,

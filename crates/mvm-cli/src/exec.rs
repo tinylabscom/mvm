@@ -150,7 +150,51 @@ pub enum ImageSource {
         initrd_path: Option<String>,
         /// Display label used in messages and `flake_ref` (no functional effect).
         label: String,
+        /// When set, a candidate to boot from a read-only **virtiofs root**
+        /// serving the unpacked+injected OCI tree instead of `rootfs_path`. Only
+        /// the OCI `run --image` path sets it; the run-path tier gate
+        /// ([`mvm_build::run_image::select_root_strategy`]) makes the final call
+        /// from this candidate + the backend capability + sealed state.
+        virtiofs_oci_root: Option<VirtiofsOciRoot>,
     },
+}
+
+/// A candidate unpacked OCI tree to boot as a virtiofs root, carried from OCI
+/// resolution to the run-path tier gate.
+#[derive(Debug, Clone)]
+pub struct VirtiofsOciRoot {
+    /// Host path of the unpacked+injected OCI tree to serve read-only.
+    pub tree_dir: String,
+    /// Whether this is a `--prod` run — a hard disqualifier for the dev-tier
+    /// virtiofs path (the gate keeps prod on Option B / block+ext4).
+    pub prod: bool,
+}
+
+/// The run-path tier gate: return the tree to boot as a virtiofs root, or `None`
+/// to use the block rootfs. `select_root_strategy` is the single authority — it
+/// can never yield virtiofs for a prod or sealed workload, nor on a
+/// non-virtiofs-capable backend. Only an OCI `Prebuilt` carrying a candidate can
+/// reach virtiofs at all; every other image source is `None`.
+fn resolve_virtiofs_root(
+    image: &ImageSource,
+    backend_virtiofs_root: bool,
+    sealed: bool,
+) -> Option<String> {
+    let ImageSource::Prebuilt {
+        virtiofs_oci_root: Some(candidate),
+        ..
+    } = image
+    else {
+        return None;
+    };
+    match mvm_build::run_image::select_root_strategy(mvm_build::run_image::RootStrategySelection {
+        backend_virtiofs_root,
+        prod: candidate.prod,
+        sealed,
+    }) {
+        mvm_build::run_image::RootStrategy::VirtiofsRoot => Some(candidate.tree_dir.clone()),
+        mvm_build::run_image::RootStrategy::BlockExt4 => None,
+    }
 }
 
 /// All inputs to the orchestrator.
@@ -542,6 +586,7 @@ fn run_inner(
                 rootfs_path,
                 initrd_path,
                 label,
+                ..
             } => (
                 kernel_path.clone(),
                 initrd_path.clone(),
@@ -598,6 +643,16 @@ fn run_inner(
     // inside the VM, so we can't `Path::exists()` them from the host —
     // shell out into the VM instead.
     let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
+
+    // Run-path tier gate: a virtiofs-capable backend + a non-prod, non-sealed OCI
+    // dev run boots from the unpacked tree over virtio-fs (no ext4 materialize);
+    // prod, sealed, and block backends stay on the materialized rootfs (claim 3).
+    let virtiofs_root = resolve_virtiofs_root(
+        &req.image,
+        backend.capabilities().virtiofs_root,
+        verity_path.is_some(),
+    );
+
     let t_drives_ready = timing.then(std::time::Instant::now);
 
     // Pre-open console data sockets for interactive PTY runs against
@@ -614,6 +669,7 @@ fn run_inner(
     let mut start_config = VmStartConfig {
         name: vm_name.clone(),
         rootfs_path: rootfs.clone(),
+        virtiofs_root,
         kernel_path: Some(vmlinux.clone()),
         initrd_path: initrd.clone(),
         verity_path,
@@ -1762,7 +1818,46 @@ mod tests {
             rootfs_path: "/r".into(),
             initrd_path: None,
             label: "lbl".into(),
+            virtiofs_oci_root: None,
         }
+    }
+
+    #[test]
+    fn virtiofs_gate_only_dev_capable_nonsealed_reaches_virtiofs() {
+        let with = |prod| ImageSource::Prebuilt {
+            kernel_path: "/k".into(),
+            rootfs_path: "/r".into(),
+            initrd_path: None,
+            label: "l".into(),
+            virtiofs_oci_root: Some(VirtiofsOciRoot {
+                tree_dir: "/tree".into(),
+                prod,
+            }),
+        };
+        // The one cell that reaches virtiofs: OCI candidate, capable backend,
+        // non-prod, non-sealed.
+        assert_eq!(
+            resolve_virtiofs_root(&with(false), true, false).as_deref(),
+            Some("/tree")
+        );
+        // Every disqualifier keeps it on the block rootfs (claim 3):
+        assert_eq!(
+            resolve_virtiofs_root(&with(true), true, false),
+            None,
+            "prod"
+        );
+        assert_eq!(
+            resolve_virtiofs_root(&with(false), true, true),
+            None,
+            "sealed"
+        );
+        assert_eq!(
+            resolve_virtiofs_root(&with(false), false, false),
+            None,
+            "non-virtiofs backend (e.g. Firecracker)"
+        );
+        // A non-OCI image (flake/template/default) never reaches virtiofs.
+        assert_eq!(resolve_virtiofs_root(&prebuilt(), true, false), None);
     }
 
     fn add_dir() -> AddDir {
