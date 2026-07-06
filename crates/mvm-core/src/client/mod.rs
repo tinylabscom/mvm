@@ -1,14 +1,32 @@
-//! The facade trait. `async_trait` boxes the futures so `dyn MvmClient` stays
-//! object-safe — callers hold one backend behind a trait object and never see
-//! which transport is underneath.
+//! The `MvmClient` facade: one trait fronting local microVM operations and a
+//! remote fleet, so a caller drives either target through the same calls. The
+//! remote implementation is a courier with no enforcement authority — every
+//! security decision is made by the authority that owns the path (the local
+//! host, or the fleet), never by this client.
+//!
+//! Feature-gated behind `client` so the runtime-free default build of this
+//! crate is unaffected: the trait pulls `async-trait` (a proc-macro that
+//! desugars async methods to boxed futures — no async runtime), and the remote
+//! gateway (`client-remote`) pulls `reqwest`. `LocalBackend` lives one crate
+//! up in `mvm-client`, where it can link the runtime backend.
 
 use async_trait::async_trait;
 
-use crate::dto::{
+pub mod dto;
+pub mod error;
+#[cfg(feature = "client-remote")]
+pub mod gateway;
+pub mod mock;
+
+pub use error::{MvmError, Result};
+
+use dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, ReconfigureRequest,
 };
-use crate::error::Result;
 
+/// The single machine-driving contract. `async_trait` boxes the futures so
+/// `dyn MvmClient` stays object-safe — callers hold one backend behind a trait
+/// object and never see which transport is underneath.
 #[async_trait]
 pub trait MvmClient: Send + Sync {
     /// List machines matching `filter`.

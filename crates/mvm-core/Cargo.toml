@@ -71,6 +71,11 @@ schemars = { version = "0.8", features = ["chrono"], optional = true }
 # closure doesn't pull `rcgen`/`ring`/`yasna` for non-egress consumers. Sync, no
 # tokio (runtime-free invariant unaffected).
 rcgen = { workspace = true, optional = true }
+# The `client` module's `MvmClient` facade. `async-trait` is a proc-macro (no
+# async runtime — the runtime-free gate only forbids tokio); `reqwest` backs the
+# remote gateway. Both optional so a default/guest build pulls neither.
+async-trait = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 
 # `default` is empty: the default `mvm-core` build is runtime-free.
 # The hostd IPC transport pulls tokio only behind
@@ -85,6 +90,14 @@ default = []
 # runtime-free default build is unaffected. Enabled by mvm-backend (cert
 # delivery) and mvm-hostd (the TLS terminator).
 egress-ca = ["dep:rcgen"]
+# The `client` module (`MvmClient` trait + DTOs + `MockBackend`). Pulls
+# `async-trait` only — a proc-macro, no async runtime — so the runtime-free
+# invariant holds. `mvm-client` enables this to add the in-process
+# `LocalBackend`; `mvm-sdk`'s `client-facade` enables it for the subprocess impl.
+client = ["dep:async-trait"]
+# The remote REST `GatewayBackend`. Adds `reqwest` (which pulls tokio), so it is
+# a distinct feature from `client`: only a fleet/studio consumer opts in.
+client-remote = ["client", "dep:reqwest"]
 # Expose `plan::signing::test_support` (shared `ExecutionPlan` fixtures) to
 # other crates' test builds without shipping the fixtures in a release build.
 test-support = []

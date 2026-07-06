@@ -161,6 +161,13 @@ jobs:
         # workspace run skips the protocol transport tests. Cover them here.
         run: cargo nextest run -p mvm-core --features hostd-transport
 
+      - name: client facade tests (mvm-core)
+        # The `client` module (MvmClient trait + DTOs + MockBackend + remote
+        # GatewayBackend) is off by default so the runtime-free closure pulls no
+        # async-trait. `client-remote` implies `client`, so this one lane covers
+        # every moved unit test.
+        run: cargo nextest run -p mvm-core --features client-remote
+
       - name: xtask man-page tests
         # gen-man lives behind xtask's off-by-default `man` feature (it pulls
         # mvm-cli + its heavy build.rs out of the default xtask graph), so the

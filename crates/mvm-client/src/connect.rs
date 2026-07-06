@@ -2,8 +2,10 @@
 //! (CLI, studio) asks for "local" or "a gateway" and gets a backend without
 //! knowing — or being able to pick apart — the transport underneath.
 
-use crate::client::MvmClient;
-use crate::error::Result;
+use mvm_core::client::MvmClient;
+use mvm_core::client::error::Result;
+
+use crate::local::LocalBackend;
 
 /// Which backend to talk to.
 pub enum Target {
@@ -28,31 +30,26 @@ impl std::fmt::Debug for Target {
 }
 
 /// Construct the backend for `target`. The returned trait object hides which
-/// transport is underneath.
-///
-/// `Target::Local` is refused here: `LocalBackend` links the runtime and lives
-/// in the `mvm-client-local` crate (to keep this crate's manifest cycle-free),
-/// which sits *above* this one — so a local caller constructs
-/// `mvm_client_local::LocalBackend` directly rather than through `connect`.
+/// transport is underneath. `Target::Local` builds the in-process
+/// [`LocalBackend`] (auto-selected VMM); `Target::Gateway` needs the `remote`
+/// feature.
 pub fn connect(target: Target) -> Result<Box<dyn MvmClient>> {
     match target {
+        Target::Local => Ok(Box::new(LocalBackend::new())),
         Target::Gateway { base_url, token } => gateway_backend(base_url, token),
-        Target::Local => Err(crate::error::MvmError::Backend {
-            reason: "local target: construct mvm_client_local::LocalBackend directly".into(),
-        }),
     }
 }
 
 #[cfg(feature = "remote")]
 fn gateway_backend(base_url: String, token: String) -> Result<Box<dyn MvmClient>> {
-    let backend =
-        crate::gateway::GatewayBackend::new(crate::gateway::GatewayConfig { base_url, token })?;
+    use mvm_core::client::gateway::{GatewayBackend, GatewayConfig};
+    let backend = GatewayBackend::new(GatewayConfig { base_url, token })?;
     Ok(Box::new(backend))
 }
 
 #[cfg(not(feature = "remote"))]
 fn gateway_backend(_base_url: String, _token: String) -> Result<Box<dyn MvmClient>> {
-    Err(crate::error::MvmError::Backend {
+    Err(mvm_core::client::MvmError::Backend {
         reason: "gateway target requires the 'remote' feature".into(),
     })
 }
@@ -62,8 +59,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn connect_local_directs_to_mvm_client_local() {
-        assert!(connect(Target::Local).is_err());
+    fn connect_local_builds_a_local_backend() {
+        // Construction only (auto-selects the VMM); no VM boots here.
+        assert!(connect(Target::Local).is_ok());
     }
 
     #[test]

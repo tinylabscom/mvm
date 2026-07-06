@@ -9,10 +9,10 @@ use async_trait::async_trait;
 use reqwest::{StatusCode, Url};
 
 use crate::client::MvmClient;
-use crate::dto::{
+use crate::client::dto::{
     LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus, ReconfigureRequest,
 };
-use crate::error::{MvmError, Result};
+use crate::client::error::{MvmError, Result};
 
 /// How to reach a gateway: its base URL and the bearer token to present.
 pub struct GatewayConfig {
@@ -337,7 +337,7 @@ impl MvmClient for GatewayBackend {
         &self,
         _id: &MachineId,
         _command: Vec<String>,
-    ) -> Result<crate::dto::ExecResult> {
+    ) -> Result<crate::client::dto::ExecResult> {
         // The gateway's exec is a streaming endpoint; buffering it into a single
         // ExecResult is a separate slice, so this is deferred rather than guessed.
         Err(MvmError::Backend {
