@@ -78,15 +78,24 @@ backed by the unpacked-tree host directory, read-only.
 
 ### A3 — Integrity enforcement per ADR-107 (dev tier)
 
-- [ ] unpack-time verification is **load-bearing and un-bypassable** on the
-  virtiofs path: per-layer sha256 (mvm-oci) + cosign when policy demands, run
-  **before** the tree is exposed to the guest, failing closed.
-- [ ] the served directory is mounted **read-only** in the guest and is not
-  mutated by the host after unpack (no writable overlay on the root; writable
-  state goes to a separate tmpfs/volume, as today).
-- [ ] audit: the admission log records that the boot used the virtiofs-root
-  dev-tier posture (so a reader can tell a dev virtiofs boot from an Option-B
-  claim-3 boot).
+- [x] unpack-time verification is **load-bearing and un-bypassable** on the
+  virtiofs path: per-layer sha256 (mvm-oci `OciLayerFetcher::fetch_layer` streams
+  the hash and fails closed) runs **before** the tree is unpacked/served; the
+  virtiofs candidate (`unpacked_dir_if_present`) only ever names a tree whose
+  layers all passed digest verification. Cosign gates the resolved digest on
+  `--prod` (which stays Option B). Witnessed by the `oci-digest-mismatch-reject`
+  lane.
+- [x] the served directory is mounted **read-only** in the guest and is not
+  mutated by the host after unpack: the FUSE server refuses every mutating
+  opcode (`EROFS`) and the tree is written once at pull, never after
+  (`vmm::virtio_fs`, symlink-confinement fix + regression test already merged).
+- [x] audit: the admission log records the boot posture — `run_inner` (the sole
+  tier-gate authority) reports its resolved `RootStrategy` out to the command
+  layer, which emits a chain-signed `plan.boot_posture` entry
+  (`AuditEmitter::emit_boot_posture`, `root_strategy=virtiofs-root|block-ext4`)
+  alongside `plan.launched`. A reader distinguishes a dev virtiofs boot from an
+  Option-B claim-3 boot in the tamper-evident chain
+  (`boot_posture_event_is_chain_signed_and_distinguishes_root_strategy`).
 
 ### A4 — Run-path tier gate + wiring
 
