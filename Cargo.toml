@@ -29,7 +29,6 @@ members = [
     # shim, so adding a language carries no new Rust binding code.
     "crates/mvm-host-services-ffi",
     "crates/mvm-client",
-    "crates/mvm-client-local",
     "crates/mvm-mcp",
     # plan 74 W1 — OCI image distribution client (registry resolution,
     # manifest fetch, digest verification; layer fetch + ext4 unpack +
@@ -341,8 +340,7 @@ tree-sitter-typescript = "0.23.2"
 # dependency unless the workspace entry already carries it. The root binary
 # opts back into user-facing defaults through its own `[features]` block.
 mvm-core = { path = "crates/mvm-core", version = "0.16.1" }
-mvm-client = { path = "crates/mvm-client", version = "0.16.1", default-features = false }
-mvm-client-local = { path = "crates/mvm-client-local", version = "0.16.1" }
+mvm-client = { path = "crates/mvm-client", version = "0.16.1" }
 mvm-guest = { path = "crates/mvm-guest", version = "0.16.1" }
 mvm-build = { path = "crates/mvm-build", version = "0.16.1", default-features = false }
 mvm = { path = "crates/mvm", version = "0.16.1", default-features = false }

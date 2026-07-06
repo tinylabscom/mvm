@@ -1,7 +1,7 @@
 //! A subprocess-backed `MvmClient`: the SDK drives machine lifecycle through the
 //! `mvmctl machine` CLI, behind the shared facade trait. The process boundary is
 //! deliberate — linking the in-process backend here would form a dependency
-//! cycle (sdk -> mvm-client[local] -> mvm-backend -> mvm-build -> sdk).
+//! cycle (sdk -> mvm-client::LocalBackend -> mvm-backend -> mvm-build -> sdk).
 //!
 //! `run` shells `mvmctl machine run --up-json`, which performs the full OCI
 //! pull + rootfs materialize + signed-plan admission (claim 8) + boot and prints
@@ -13,10 +13,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use async_trait::async_trait;
-use mvm_client::dto::{
+use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
+    ReconfigureRequest,
 };
-use mvm_client::{MvmClient, MvmError, Result};
+use mvm_core::client::{MvmClient, MvmError, Result};
 
 use crate::machine::{Machine, MachineCreate, MachineError, MachineLs};
 
@@ -336,6 +337,21 @@ impl MvmClient for SubprocessBackend {
             exit_code: out.status.code().unwrap_or(-1),
             stdout: out.stdout,
             stderr: out.stderr,
+        })
+    }
+
+    async fn reconfigure_machine(
+        &self,
+        _id: &MachineId,
+        _cfg: ReconfigureRequest,
+    ) -> Result<MachineState> {
+        // Reconfigure patches a persisted machine record and relaunches it —
+        // state this subprocess courier doesn't own. Drive it through the CLI
+        // (`mvmctl machine reconfigure`) or `LocalBackend` directly.
+        Err(MvmError::Backend {
+            reason: "reconfigure is not supported via the subprocess facade; \
+                     use `mvmctl machine reconfigure` or LocalBackend"
+                .into(),
         })
     }
 }

@@ -1,7 +1,8 @@
 //! `LocalBackend` — the `MvmClient` over this host's microVMs, in-process.
 //!
-//! Split out of `mvm-client` so that crate's manifest carries no `mvm-*`
-//! dependency (see this crate's `Cargo.toml` for the cycle it avoids).
+//! Lives here rather than in `mvm-core` because it links the runtime backend
+//! (`mvm-backend`); keeping that edge above the foundation crate is what lets
+//! `mvm-sdk` enable `mvm-core/client` for the trait without a dependency cycle.
 //!
 //! `list`/`stop`/`logs` go straight to the backend dispatch (they act on VMs
 //! that already exist, so they carry no admission concern). `run` boots through
@@ -27,10 +28,10 @@ use mvm_oci::{
     OciManifestFetcher, UnpackOptions, unpack_layer,
 };
 
-use mvm_client::dto::{
+use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
 };
-use mvm_client::{MvmClient, MvmError, Result};
+use mvm_core::client::{MvmClient, MvmError, Result};
 
 /// Drives the host's VM backend directly. Construct with [`LocalBackend::new`]
 /// (auto-selected backend) or [`LocalBackend::with_hypervisor`].
@@ -356,7 +357,7 @@ impl MvmClient for LocalBackend {
     async fn reconfigure_machine(
         &self,
         id: &MachineId,
-        cfg: mvm_client::dto::ReconfigureRequest,
+        cfg: mvm_core::client::dto::ReconfigureRequest,
     ) -> Result<MachineState> {
         use mvm::machine::persist as mp;
 
@@ -654,7 +655,7 @@ mod tests {
         let err = be
             .reconfigure_machine(
                 &MachineId("web".into()),
-                mvm_client::dto::ReconfigureRequest {
+                mvm_core::client::dto::ReconfigureRequest {
                     net: Some(true),
                     ..Default::default()
                 },
@@ -680,7 +681,7 @@ mod tests {
         let err = be
             .reconfigure_machine(
                 &MachineId("web2".into()),
-                mvm_client::dto::ReconfigureRequest {
+                mvm_core::client::dto::ReconfigureRequest {
                     allow_host: Some(vec!["api.example.com:443".into()]),
                     ..Default::default()
                 },
@@ -705,7 +706,7 @@ mod tests {
         let err = be
             .reconfigure_machine(
                 &MachineId("nope".into()),
-                mvm_client::dto::ReconfigureRequest {
+                mvm_core::client::dto::ReconfigureRequest {
                     cpus: Some(2),
                     ..Default::default()
                 },
@@ -732,7 +733,7 @@ mod tests {
         let state = be
             .reconfigure_machine(
                 &MachineId("myapp".into()),
-                mvm_client::dto::ReconfigureRequest {
+                mvm_core::client::dto::ReconfigureRequest {
                     cpus: Some(4),
                     ..Default::default()
                 },
@@ -760,7 +761,7 @@ mod tests {
         let err = be
             .reconfigure_machine(
                 &MachineId("zero-cpu-machine".into()),
-                mvm_client::dto::ReconfigureRequest {
+                mvm_core::client::dto::ReconfigureRequest {
                     cpus: Some(0),
                     ..Default::default()
                 },
@@ -792,7 +793,7 @@ mod tests {
         let state = be
             .reconfigure_machine(
                 &MachineId("noop-machine".into()),
-                mvm_client::dto::ReconfigureRequest::default(),
+                mvm_core::client::dto::ReconfigureRequest::default(),
             )
             .await
             .expect("noop reconfigure should succeed");

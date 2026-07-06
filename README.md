@@ -326,12 +326,11 @@ function-entrypoint `invoke`.
 
 **Rust** — the runtime SDK is the `MvmClient` facade (`crates/mvm-client`), an
 `async` trait with a `LocalBackend` (in-process, drives the host directly) and a
-`GatewayBackend` (REST, for remote/hosted control). Embed it to run machines
-from your own Rust service:
+`GatewayBackend` (REST, for remote/hosted control — behind the `remote` feature).
+Everything is one import; embed it to run machines from your own Rust service:
 
 ```rust
-use mvm_client::{MvmClient, MachineSpec};
-use mvm_client_local::LocalBackend;
+use mvm_client::{MvmClient, MachineSpec, LocalBackend};
 
 let client = LocalBackend::new();
 let spec = MachineSpec {
