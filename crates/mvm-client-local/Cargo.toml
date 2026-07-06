@@ -14,6 +14,9 @@ license.workspace = true
 mvm-client = { workspace = true }
 mvm-backend = { workspace = true, default-features = false }
 mvm-core = { workspace = true }
+# Persistent machine spec engine (`machine::persist::{load,overwrite,apply_patch,…}`).
+# mvm does NOT depend on mvm-client-local, so this edge is acyclic.
+mvm = { workspace = true }
 # The in-process admitted-boot seam (`run::admit_and_boot_local`). mvm-hostd is
 # already in the mvmctl closure (the CLI links it), so this edge adds no crates
 # to the default build; it does not form a cycle because mvm-sdk — which
