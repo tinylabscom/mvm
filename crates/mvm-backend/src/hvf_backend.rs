@@ -218,18 +218,26 @@ impl VmBackend for HvfBackend {
             .map(PathBuf::from)
             .unwrap_or_else(|| state_dir.join("hvf-agent.sock"));
 
+        // virtiofs-root dev boot (Plan-223 tier gate): serve the unpacked+injected
+        // tree read-only over virtio-fs; no block rootfs is attached.
+        let virtiofs_root = config.virtiofs_root.clone().map(PathBuf::from);
         // Single workload rootfs → one ephemeral (RAM-backed) writable disk: the
         // guest mounts it `rw` but its writes must not persist to the base image.
-        let disks = Some(config.rootfs_path.clone())
-            .filter(|p| !p.is_empty())
-            .map(|p| {
-                vec![HvfDisk {
-                    path: PathBuf::from(p),
-                    read_only: false,
-                    ephemeral: true,
-                }]
-            })
-            .unwrap_or_default();
+        // Skipped entirely on the virtiofs-root path.
+        let disks = if virtiofs_root.is_some() {
+            Vec::new()
+        } else {
+            Some(config.rootfs_path.clone())
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    vec![HvfDisk {
+                        path: PathBuf::from(p),
+                        read_only: false,
+                        ephemeral: true,
+                    }]
+                })
+                .unwrap_or_default()
+        };
         // A transient workload ends the VM by reporting its exit code over the
         // vsock exit port (the default — VM life = workload life); a persistent
         // (`-d`) VM ends on `stop`. MVM_HVF_TIMEOUT is only a backstop cap
@@ -247,9 +255,7 @@ impl VmBackend for HvfBackend {
             memory_mib: config.memory_mib,
             initramfs: config.initrd_path.clone().map(PathBuf::from),
             disks,
-            // Block-rootfs path today; the virtiofs-root strategy sets this
-            // instead (via the run-path tier gate) on a dev-tier boot.
-            virtiofs_root: None,
+            virtiofs_root,
             vsock: true,
             console_log: console_log.clone(),
             pid_file: pid_file.clone(),
