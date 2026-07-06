@@ -47,6 +47,11 @@ pub(crate) struct AgentBridge {
     /// Open-connection count, published for the run loop heartbeat (it must keep
     /// waking an idle guest while there is an agent stream to service).
     active: Option<Arc<AtomicUsize>>,
+    /// Conn ids the *host* closed (EOF/error on our side) since the last drain.
+    /// The device drains this to send the guest an `OP_RST` so it tears its side
+    /// down instead of leaking a half-open connection per host-dropped stream
+    /// (the `for_vm` reachability poll drops a probe stream every iteration).
+    host_closed: Vec<u32>,
 }
 
 impl AgentBridge {
@@ -56,7 +61,14 @@ impl AgentBridge {
             conns: HashMap::new(),
             next_port: FIRST_HOST_PORT,
             active: None,
+            host_closed: Vec::new(),
         }
+    }
+
+    /// Drain the conn ids the host closed since the last call. The device sends
+    /// each an `OP_RST` to the guest so the guest frees its half of the stream.
+    pub fn take_host_closed(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.host_closed)
     }
 
     /// Create the host agent listener at `path` (replacing any stale socket).
@@ -154,6 +166,8 @@ impl AgentBridge {
         }
         for conn_id in closed {
             self.close(conn_id);
+            // Record for the device to RST the guest side (see `host_closed`).
+            self.host_closed.push(conn_id);
         }
         ready
     }
@@ -297,5 +311,34 @@ mod tests {
     fn accept_without_listener_is_noop() {
         let mut bridge = AgentBridge::new();
         assert!(bridge.accept_new().is_empty());
+    }
+
+    /// When the host drops an established stream, `drain_host` surfaces its conn
+    /// id via `take_host_closed` so the device can RST the guest side (instead of
+    /// leaking a half-open guest connection per dropped `for_vm` probe).
+    #[test]
+    fn host_close_is_surfaced_for_guest_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("agent.sock");
+        let mut bridge = AgentBridge::new();
+        bridge.set_activity(Arc::new(AtomicUsize::new(0)));
+        bridge.bind(&sock).unwrap();
+
+        let client = UnixStream::connect(&sock).unwrap();
+        let conn_id = bridge.accept_new()[0];
+        bridge.on_established(conn_id);
+
+        // Host drops its side.
+        drop(client);
+        // The next drain observes EOF, closes the stream, and records it.
+        let _ = bridge.drain_host();
+        assert_eq!(
+            bridge.take_host_closed(),
+            vec![conn_id],
+            "host-closed conn id must be surfaced once"
+        );
+        // Drained: a second take is empty (not re-reported).
+        assert!(bridge.take_host_closed().is_empty());
+        assert!(!bridge.is_agent_stream(conn_id), "conn removed on close");
     }
 }

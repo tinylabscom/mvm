@@ -543,6 +543,14 @@ impl VsockShared {
             ));
             self.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_RW, &bytes);
         }
+        // The host closed its side of these streams — tell the guest with an
+        // OP_RST so it frees its half instead of leaking a half-open connection
+        // (drain_host recorded them; the `for_vm` reachability poll drops a probe
+        // stream every iteration, so without this the guest accrues dead conns).
+        for conn_id in self.agent.take_host_closed() {
+            agent_dbg(&format!("host closed stream {conn_id} → OP_RST to guest"));
+            self.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_RST, &[]);
+        }
         if self.flush_rx() {
             Some(self.irq)
         } else {
