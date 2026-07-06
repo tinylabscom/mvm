@@ -352,6 +352,9 @@ ADR-097 is Proposed; slice 1 ratifies it with two edits (a separate docs change)
 
 ### Units (each independently testable)
 
+**Progress:** Unit 1 landed (`PackBuilder` producer + `PackBackend::Hvf`). Unit 2
+landed (content-addressed `pack_cache` — verify + atomic promote). Unit 3 pending.
+
 **Unit 1 — pack producer (WS-B thin).** A CI/release step plus a local
 example/xtask tool that takes the builder-VM flake outputs (base disk + builder
 kernel) and a materialized seeded store image for the dev-shell closure, and
