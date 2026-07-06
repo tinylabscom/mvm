@@ -9,9 +9,9 @@
   #   3. Call mvm-exit-report "$MVM_CODE" over the control vsock port.
   #   4. Sync + poweroff -f.
   #
-  # The host (mvmctl up --wait) reads the reported code and exits with it.
+  # The host (mvmctl machine run --flake .) reads the reported code and exits with it.
   # This fixture bakes `sh -c 'exit 7'` as the sealed workload so a clean
-  # E2E run of `mvmctl up --flake ./examples/exit_code --wait` must exit 7.
+  # E2E run of `mvmctl machine run --flake ./examples/exit_code --wait` must exit 7.
   #
   # ── Canonical user-flake form (matches `mvmctl compile`'s output) ──
   #
@@ -19,7 +19,7 @@
   # (crates/mvm-sdk/src/compile/flake.rs): it declares `inputs.mvm`
   # pinned to GitHub, follows `mvm/nixpkgs`, and builds the image via
   # `mvm.lib.<system>.mkGuest`. The literal `github:tinylabscom/mvm`
-  # string is load-bearing: from a source checkout, `mvmctl up`'s
+  # string is load-bearing: from a source checkout, `mvmctl machine run`'s
   # source-checkout override mode (dev_build.rs `local_mvm_workspace`)
   # only triggers when the user flake pins `mvm` to GitHub — it then
   # rewrites it to the in-repo `path:/work/nix` via

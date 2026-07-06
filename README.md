@@ -331,13 +331,14 @@ use mvm_client::{MvmClient, MachineSpec};
 use mvm_client_local::LocalBackend;
 
 let client = LocalBackend::new();
-let spec = MachineSpec {
-    name: "web".into(),
-    image: "alpine".into(),
-    cpus: 1,
-    memory_mib: 256,
-    env: vec![],
-};
+
+// Fluent builder — name + image are required; cpus/memory/env default + override.
+let spec = MachineSpec::builder("web", "alpine")
+    .cpus(2)
+    .memory_mib(512)
+    .env("PORT", "8080")
+    .build();
+
 let machine = client.run_machine(spec).await?;
 let out = client.exec_machine(&machine.id, vec!["uname".into(), "-sr".into()]).await?;
 println!("{}", String::from_utf8_lossy(&out.stdout));
