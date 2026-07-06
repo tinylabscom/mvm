@@ -308,7 +308,7 @@ with a Firecracker microVM as the sandbox. Plan 178 merged the former bare
 security `--profile`, OCI `--image`, signed `--receipt`, `--json`/`--dry-run`,
 and the SDK `--mode`/`--dev`/`--prod` transport. Arbitrary command dispatch
 requires a dev-feature guest agent (the `do_exec` handler is `dev-shell`-gated,
-claim 4); production guests should use `mvmctl invoke` (no shell).
+claim 4); production guests run their baked entrypoint via `mvmctl machine run --entrypoint` (no shell).
 
 | Command | Description |
 |---------|-------------|
@@ -634,7 +634,7 @@ The snapshot path activates only when *all* of the following hold:
   snapshot's recorded drive layout);
 - the active backend reports snapshot support.
 
-On macOS backends without Firecracker (Apple Container, libkrun), vsock
+On macOS backends without Firecracker (Vz, libkrun), vsock
 snapshots return `os error 95` (EOPNOTSUPP); restore failures fall back
 to cold boot with a warning rather than aborting the exec. See the
 [Sandboxed Exec](/guides/exec/) guide for the full background.

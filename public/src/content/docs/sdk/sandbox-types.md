@@ -11,7 +11,7 @@ can layer specialized helpers over that substrate.
 
 | Type | Best for | Current path | SDK status |
 | --- | --- | --- | --- |
-| General sandbox | Commands, files, services, long-running work. | `mvmctl build`, `mvmctl machine run`, `mvmctl exec`, `mvmctl machine fs`, `mvmctl machine logs`. | Partial Python/TypeScript runtime surface. |
+| General sandbox | Commands, files, services, long-running work. | `mvmctl build`, `mvmctl machine run`, `mvmctl machine exec`, `mvmctl machine fs`, `mvmctl machine logs`. | Partial Python/TypeScript runtime surface. |
 | Code sandbox | Short code execution and interpreter-style tools. | `mvmctl run -- <cmd>` or a named Python manifest. | Planned convenience helper. |
 | Browser sandbox | Browser automation with Playwright/Puppeteer-like tooling. | Build a browser-capable Nix image, run automation inside the guest, forward explicit ports if needed. | Planned high-level helper. |
 | Desktop sandbox | GUI or computer-use workflows. | Backend- and image-specific today; use explicit images and port/console access. | Planned high-level helper. |
@@ -25,7 +25,7 @@ Use this for the broad lifecycle:
 mvmctl init ./worker --preset python
 mvmctl machine build --flake ./worker
 mvmctl machine run --flake ./worker --name worker -d
-mvmctl exec worker -- python /work/task.py
+mvmctl machine exec worker -- python /work/task.py
 ```
 
 Security properties:
@@ -47,7 +47,7 @@ Use a named sandbox when state is intentional:
 
 ```sh
 mvmctl machine run --flake ./python-tool --name pytool -d
-mvmctl exec pytool -- python /work/cell.py
+mvmctl machine exec pytool -- python /work/cell.py
 ```
 
 Security requirements for SDK helpers:

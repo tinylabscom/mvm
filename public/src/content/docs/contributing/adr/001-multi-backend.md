@@ -24,7 +24,7 @@ Use Firecracker as the primary production backend. Support multiple backends: Ap
 ## Rationale
 
 - **Firecracker**: Minimalist design (<50K LOC), ~125ms cold boot, snapshot support, hardware isolation via KVM
-- **Apple Container**: Sub-second startup on macOS 26+, native Hypervisor.framework, native vsock -- ideal for dev workflows
+- **Vz**: Sub-second startup on macOS 26+, native Hypervisor.framework, native vsock -- ideal for dev workflows
 - **Auto-selection**: Developers get the best experience on their platform without manual configuration
 - **Docker**: Universal fallback when no hypervisor is available -- pause/resume via container lifecycle, unix socket guest channel
 - **microvm.nix**: NixOS-native QEMU runner with vsock and TAP networking support
@@ -41,7 +41,7 @@ Override with `--hypervisor firecracker`, `--hypervisor vz`, `--hypervisor qemu`
 
 ## Consequences
 
-- Requires native Linux with `/dev/kvm` for Firecracker, or macOS 26+ Apple Silicon for Apple Container
+- Requires native Linux with `/dev/kvm` for Firecracker, or macOS 26+ Apple Silicon for Vz
 - libkrun support is scoped to Linux KVM and macOS Apple Silicon; macOS Intel is not a supported local host
 - WSL2 nested KVM and Hyper-V managed Linux builders are future backend work, not current support
 - Guests must use a Linux kernel (no Windows/macOS guests)

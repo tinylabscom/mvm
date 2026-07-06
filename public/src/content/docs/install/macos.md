@@ -3,7 +3,7 @@ title: "Install mvm on macOS"
 description: "mvm on macOS supports Apple Silicon through Hypervisor.framework-backed local builder/runtime paths. Intel Macs are not a supported local microVM host."
 ---
 
-mvm on macOS is supported on **Apple Silicon (M-series)**. The local builder/runtime path uses Apple's Hypervisor.framework via Apple Container and libkrun-backed components. No Docker Desktop is required for the supported path.
+mvm on macOS is supported on **Apple Silicon (M-series)**. The local builder/runtime path uses Apple's Hypervisor.framework via Vz and libkrun-backed components. No Docker Desktop is required for the supported path.
 
 For the full host/backend matrix, see [Platform support](/reference/platform-support/).
 
@@ -12,7 +12,7 @@ Intel Macs are not a supported local microVM host. Use a Linux machine with `/de
 ## Prerequisites
 
 - Apple Silicon Mac.
-- macOS 26+ for the Apple Container dev VM path.
+- macOS 26+ for the Vz dev VM path.
 - libkrun installed for libkrun-backed builder/runtime components.
 
 You **do not need Nix on your Mac**. You run `mvmctl build` from macOS, and mvm runs Nix evaluation and `nix build` inside the Linux builder VM, then extracts the resulting rootfs back to the host. See [§"Linux builds on macOS"](#linux-builds-on-macos--zero-config-by-default) below for the design.
@@ -72,7 +72,7 @@ If you configure [`nix-darwin`'s `linux-builder`](https://nix.dev/manual/nix/sta
 mvmctl doctor
 ```
 
-`doctor` reports the active backend and libkrun availability. On an Apple Silicon Mac with macOS 26+, the dev path uses Apple Container and source image builds auto-detect the builder backend: Vz is preferred, and `mvmctl dev up` retries with libkrun when that auto-selected Vz builder path fails. Explicit `--builder` / `MVM_BUILDER_BACKEND` overrides still win.
+`doctor` reports the active backend and libkrun availability. On an Apple Silicon Mac with macOS 26+, the dev path uses Vz and source image builds auto-detect the builder backend: Vz is preferred, and `mvmctl dev up` retries with libkrun when that auto-selected Vz builder path fails. Explicit `--builder` / `MVM_BUILDER_BACKEND` overrides still win.
 
 ## First microVM
 
@@ -100,7 +100,7 @@ brew install libkrun
 
 ## Apple Silicon vs Intel notes
 
-- **Apple Silicon (M1/M2/M3/M4 and newer)** — supported local path. Apple Container covers the dev VM, and libkrun backs builder/runtime components that need Hypervisor.framework directly.
+- **Apple Silicon (M1/M2/M3/M4 and newer)** — supported local path. Vz covers the dev VM, and libkrun backs builder/runtime components that need Hypervisor.framework directly.
 - **Intel Macs** — unsupported for the local microVM path. Run mvm on a Linux KVM host, or use future remote/Windows-style builder work when it lands.
 
-The Apple Container backend requires Apple Silicon and macOS 26+. libkrun is also treated as an Apple Silicon macOS path for mvm support purposes.
+The Vz backend requires Apple Silicon and macOS 26+. libkrun is also treated as an Apple Silicon macOS path for mvm support purposes.

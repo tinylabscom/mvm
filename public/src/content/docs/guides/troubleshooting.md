@@ -286,14 +286,14 @@ mvmctl machine run --flake . --hypervisor qemu    # microvm.nix
 mvmctl doctor   # check available backends
 ```
 
-### macOS: first-run codesigning for `apple-container` and `libkrun`
+### macOS: first-run codesigning for `vz` and `libkrun`
 
 Both `mvmctl machine run --hypervisor vz` and (once plan 57 W3 wires guest boot) `mvmctl machine run --hypervisor libkrun` need ad-hoc codesigning before the macOS kernel will let the binary touch the hypervisor APIs:
 
-- `com.apple.security.virtualization` — required by `Virtualization.framework` (the `apple-container` backend).
+- `com.apple.security.virtualization` — required by `Virtualization.framework` (the `vz` backend).
 - `com.apple.security.hypervisor` — required by direct `Hypervisor.framework` callers (the `libkrun` backend).
 
-On the **first** run of either backend, `mvmctl` ad-hoc signs itself with both entitlements and re-spawns the current invocation. The same signed binary covers both backends, so swapping `--hypervisor` between `apple-container` and `libkrun` does not re-sign.
+On the **first** run of either backend, `mvmctl` ad-hoc signs itself with both entitlements and re-spawns the current invocation. The same signed binary covers both backends, so swapping `--hypervisor` between `vz` and `libkrun` does not re-sign.
 
 What you'll see on the first run:
 

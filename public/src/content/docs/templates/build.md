@@ -50,7 +50,7 @@ VMs. Use `mvmctl manifest *` for build slots and registry state.
 
 ```sh
 mvmctl machine run --manifest .
-mvmctl exec ./my-worker -- uname -a
+mvmctl machine run --manifest ./my-worker -- uname -a
 ```
 
 If there is no built revision for the manifest, `mvmctl machine run` should fail with a
