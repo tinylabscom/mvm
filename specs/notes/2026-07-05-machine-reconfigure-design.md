@@ -1,8 +1,8 @@
 # `machine reconfigure` — design
 
 **Date:** 2026-07-05
-**Status:** Design approved; two sequenced plans — Plan 224 (Phase 1)
-authored, Plan 225 (Phase 2) to follow after Phase 1 lands.
+**Status:** Plans 224 (Phase 1) and 225 (Phase 2) both landed. Plan 226
+(local net-parity) is the deferred follow-up.
 **Scope:** Add a `machine reconfigure` verb that changes a narrow set of
 config fields on a named machine and relaunches it under a fresh signed
 `ExecutionPlan`, preserving the machine's identity — exposed both as a
@@ -163,24 +163,22 @@ This lands in **two sequenced phases.**
 5. **Mock** (`mock.rs`) gets a trivial impl so the trait stays
    object-safe and testable.
 
-### Phase 2 (real local reconfigure, via a shared engine)
+### Phase 2 (real local reconfigure, via a shared engine) — LANDED (Plan 225)
 
-Lift the persistent-machine engine — the on-disk `MachineSpec`, its
+The persistent-machine engine — the on-disk `MachineSpec`, its
 `load`/`save`/`overwrite` accessors, `machine_config_diff`,
-`reconcile_machine_spec`, and the stop→overwrite→reboot apply step —
-**out of `mvm-cli` into a shared lower crate** so both the CLI verb and
-`LocalBackend` drive one implementation in-process. Candidate home:
-`mvm::machine` (the runtime crate already owns a `machine` module).
-`LocalBackend`'s `reconfigure_machine` then patches the persisted spec
-and relaunches in-process, replacing the Phase-1 unsupported error.
+`reconcile_machine_spec`, `ReconfigurePatch`/`apply_patch`, and
+`validate_machine_memory` — was lifted out of `mvm-cli` into a new shared
+module `mvm::machine::persist`. `mvm-cli` now consumes it via `use`
+imports (call sites identical, pure refactor with no behavior change).
+`LocalBackend`'s `reconfigure_machine` drives the lifted engine in-process
+for **cpus/memory** changes, replacing the Phase-1 unsupported error.
 
-This is a genuine refactor with its own surface (it moves on-disk config
-logic down a crate, must reconcile with the existing `mvm::machine`
-builder abstraction, and adds a `mvm-client-local → mvm` dependency edge
-— acyclic, since `mvm` does not depend on `mvm-client-local`). It
-therefore gets its **own plan** (see "Phasing / plans" below), authored
-against the landed Phase-1 code so the exact seam is visible. It does
-not block Phase 1.
+**Security bound (claim 10):** `LocalBackend`'s in-process boot does not
+enforce network policy, so `reconfigure_machine` **refuses** `net` and
+`allow_host` changes with a clear error — no silent fail-open. Full local
+net/allow_host support is deferred to **Plan 226** (see "Phasing / plans"
+below).
 
 **Repo boundary.** The *client side* of the remote path lands in this
 repo (the `GatewayBackend` method). The matching **server handler lives
@@ -190,12 +188,18 @@ not implement the server handler.
 
 ## Phasing / plans
 
-- **Plan 224 — Phase 1:** CLI `machine reconfigure` verb + facade
+- **Plan 224 — Phase 1 (landed):** CLI `machine reconfigure` verb + facade
   surface (trait + DTO + `GatewayBackend` + `LocalBackend` unsupported +
-  mock). Shippable and valuable on its own.
-- **Plan 225 — Phase 2:** lift the persistent-machine engine into a
-  shared crate and wire `LocalBackend` for real in-process reconfigure.
-  Authored after Phase 1 lands.
+  mock). Shipped as PR #1473.
+- **Plan 225 — Phase 2 (landed):** lifted the persistent-machine engine
+  into `mvm::machine::persist`; `mvm-cli` consumes it (pure refactor);
+  wired `LocalBackend` for real in-process reconfigure of cpus/memory.
+  `net`/`allow_host` refused there per claim 10.
+- **Plan 226 — local net-parity (deferred):** give `LocalBackend`'s
+  in-process boot network-policy + volume enforcement so reconfigure can
+  change `net`/`allow_host` locally (currently refused); add a behavioral
+  test for the `LocalBackend` running-path (stop+relaunch), which needs a
+  materialized-rootfs boot.
 
 ## Testing
 
