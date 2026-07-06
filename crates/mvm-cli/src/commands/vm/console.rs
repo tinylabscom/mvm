@@ -775,7 +775,7 @@ mod picker_inhouse_tests {
         env.set("MVM_ENV", "dev");
         let state = mvm_core::config::vm_state_dir(name);
         std::fs::create_dir_all(&state).unwrap();
-        let agent = state.join("agent.sock");
+        let agent = mvm_core::config::vm_hvf_agent_socket(name);
         let listener = UnixListener::bind(&agent).unwrap();
         (tmp, env, listener)
     }
@@ -807,7 +807,7 @@ mod picker_inhouse_tests {
         let name = "inhouse-prod-workload";
         let state = mvm_core::config::vm_state_dir(name);
         std::fs::create_dir_all(&state).unwrap();
-        let agent = state.join("agent.sock");
+        let agent = mvm_core::config::vm_hvf_agent_socket(name);
         let _listener = UnixListener::bind(&agent).unwrap();
 
         // Non-dev: inhouse arm must not fire. The picker falls through; the Vz
@@ -858,7 +858,7 @@ mod picker_inhouse_tests {
         let name = "inhouse-with-dev-present";
         let state = mvm_core::config::vm_state_dir(name);
         std::fs::create_dir_all(&state).unwrap();
-        let workload_agent = state.join("agent.sock");
+        let workload_agent = mvm_core::config::vm_hvf_agent_socket(name);
         let _workload_listener = UnixListener::bind(&workload_agent).unwrap();
 
         // The picker must select the workload's own inhouse socket, not the
