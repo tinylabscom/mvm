@@ -52,6 +52,16 @@ pub struct VmRuntimeMeta {
     /// (VMs predating the flag were all accessible).
     #[serde(default = "default_accessible")]
     pub accessible: bool,
+
+    /// Absolute path to the rootfs image the VM was started from.
+    ///
+    /// Written at start time by every backend that calls
+    /// `record_from_rootfs`. Absent in older mode.json files (reads
+    /// as `None`). Used by the fs_quick checkpoint path to resolve the
+    /// rootfs backend-neutrally without requiring a backend-specific
+    /// supervisor config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs_path: Option<String>,
 }
 
 fn default_accessible() -> bool {
@@ -152,6 +162,7 @@ pub fn dev_attached(mode: StartMode) -> VmRuntimeMeta {
     VmRuntimeMeta {
         mode: mode.into(),
         accessible: true,
+        rootfs_path: None,
     }
 }
 
@@ -168,6 +179,7 @@ pub fn from_sidecar(mode: StartMode, rootfs_dir: &std::path::Path) -> Result<VmR
     Ok(VmRuntimeMeta {
         mode: mode.into(),
         accessible,
+        rootfs_path: None,
     })
 }
 
@@ -185,7 +197,8 @@ pub fn from_sidecar(mode: StartMode, rootfs_dir: &std::path::Path) -> Result<VmR
 /// step is best-effort and only logs warnings.
 pub fn record_from_rootfs(name: &str, mode: StartMode, rootfs: &std::path::Path) -> Result<()> {
     let dir = rootfs.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let meta = from_sidecar(mode, dir)?;
+    let mut meta = from_sidecar(mode, dir)?;
+    meta.rootfs_path = Some(rootfs.to_string_lossy().into_owned());
     write(name, &meta)
 }
 
@@ -229,6 +242,7 @@ mod tests {
             let meta = VmRuntimeMeta {
                 mode: StartModeKind::Attached,
                 accessible: true,
+                rootfs_path: None,
             };
             write("rt-test-1", &meta).expect("write");
             let read_back = read("rt-test-1").expect("read").expect("present");
@@ -242,6 +256,7 @@ mod tests {
             let meta = VmRuntimeMeta {
                 mode: StartModeKind::Detached,
                 accessible: false,
+                rootfs_path: None,
             };
             write("rt-test-2", &meta).expect("write");
             let read_back = read("rt-test-2").expect("read").expect("present");
@@ -319,5 +334,73 @@ mod tests {
         .expect("write malformed");
         let result = from_sidecar(StartMode::Attached, tmp.path());
         assert!(result.is_err(), "malformed sidecar should error");
+    }
+
+    // ── rootfs_path field ────────────────────────────────────────────────
+
+    /// `record_from_rootfs` stores the absolute rootfs path and round-trips it.
+    #[test]
+    fn rootfs_path_round_trips_via_record_from_rootfs() {
+        with_home_temp(|_home| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let rootfs = tmp.path().join("rootfs.ext4");
+            std::fs::write(&rootfs, b"fake").expect("write rootfs");
+
+            record_from_rootfs("rt-rootfs-test", StartMode::Detached, &rootfs).expect("record");
+
+            let meta = read("rt-rootfs-test")
+                .expect("read ok")
+                .expect("file present");
+            assert_eq!(
+                meta.rootfs_path.as_deref(),
+                Some(rootfs.to_str().unwrap()),
+                "rootfs_path must match the path passed to record_from_rootfs"
+            );
+        });
+    }
+
+    /// Older mode.json files that lack the `rootfs_path` field parse as `None`.
+    #[test]
+    fn rootfs_path_absent_in_old_file_reads_as_none() {
+        with_home_temp(|home| {
+            let dir = home.join(".mvm").join("vms").join("oldvm");
+            std::fs::create_dir_all(&dir).unwrap();
+            // Old shape: no rootfs_path field.
+            std::fs::write(
+                dir.join("mode.json"),
+                "{\"mode\":\"detached\",\"accessible\":false}\n",
+            )
+            .unwrap();
+            let meta = read("oldvm").expect("read").expect("present");
+            assert!(
+                meta.rootfs_path.is_none(),
+                "missing rootfs_path field must parse as None"
+            );
+        });
+    }
+
+    /// A meta with `rootfs_path: Some(...)` serializes it; `None` omits it
+    /// (skip_serializing_if).
+    #[test]
+    fn rootfs_path_serialization_round_trip() {
+        with_home_temp(|_home| {
+            let with_path = VmRuntimeMeta {
+                mode: StartModeKind::Detached,
+                accessible: false,
+                rootfs_path: Some("/abs/path/rootfs.ext4".to_string()),
+            };
+            write("rp-with", &with_path).expect("write");
+            let back = read("rp-with").expect("read").expect("present");
+            assert_eq!(back.rootfs_path.as_deref(), Some("/abs/path/rootfs.ext4"));
+
+            let without_path = VmRuntimeMeta {
+                mode: StartModeKind::Attached,
+                accessible: true,
+                rootfs_path: None,
+            };
+            write("rp-without", &without_path).expect("write");
+            let back2 = read("rp-without").expect("read").expect("present");
+            assert!(back2.rootfs_path.is_none());
+        });
     }
 }

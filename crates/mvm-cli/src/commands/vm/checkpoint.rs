@@ -3,8 +3,10 @@
 //! lineage from one. With `--boot` the fork arm also admits and launches the
 //! child as a fresh VM, adopting the materialized rootfs without clobbering it.
 //!
-//! Only the macOS Vz workload backend materializes a host-side rootfs image,
-//! so checkpointing is gated to a VM that has one.
+//! Rootfs resolution is backend-neutral: every backend that calls
+//! `record_from_rootfs` at start time writes the rootfs path into mode.json,
+//! which `resolve_quiesced_vm_rootfs` reads as its primary source.  The Vz
+//! supervisor-config fallback remains for VMs started before this was wired in.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -254,11 +256,11 @@ fn now_unix() -> u64 {
 /// queues quiesced). A live, unpaused VM is refused: an fs_quick checkpoint has
 /// no memory, so the rootfs must be in a clean, deterministic state.
 ///
-/// Rootfs location is backend-specific but the macOS Vz workload backend keeps
-/// the image under `vm_state_dir(name)`:
-///   - a per-instance `rootfs.ext4` CoW clone lands there;
-///   - Vz boots from a supplied path but persists the launch config, whose
-///     `rootfs` disk records that path.
+/// Resolution order (first match wins):
+/// 1. Per-instance `rootfs.ext4` CoW clone in `vm_state_dir(name)`.
+/// 2. `mode.json` `rootfs_path` field (backend-neutral; written by every
+///    backend that calls `record_from_rootfs` at start time).
+/// 3. Vz supervisor-config fallback (for VMs predating the mode.json field).
 fn resolve_quiesced_vm_rootfs(name: &str) -> Result<PathBuf> {
     if !vm_is_quiesced(name) {
         bail!("stop or pause VM '{name}' before checkpointing");
@@ -271,8 +273,24 @@ fn resolve_quiesced_vm_rootfs(name: &str) -> Result<PathBuf> {
         return Ok(instance_rootfs);
     }
 
+    // Backend-neutral: every backend that calls `record_from_rootfs` at start
+    // time writes the rootfs path into mode.json.
+    if let Some(path) = rootfs_from_mode_json(&state_dir)? {
+        if !path.exists() {
+            bail!(
+                "fs_quick checkpoint needs the VM's rootfs ({}), which is no longer \
+                 on disk. Pause instead of stopping: `mvmctl vm pause {name}`, \
+                 checkpoint, then `mvmctl vm resume {name}` — or use \
+                 `--class vm-full` on a running VM.",
+                path.display()
+            );
+        }
+        return Ok(path);
+    }
+
     // Vz persists its full supervisor config at launch; the rootfs disk's
-    // path points at the bootable image.
+    // path points at the bootable image.  Kept for VMs started before the
+    // mode.json rootfs_path field was added.
     if let Some(path) = vz_rootfs_from_supervisor_config(&state_dir)? {
         if !path.exists() {
             bail!(
@@ -287,6 +305,20 @@ fn resolve_quiesced_vm_rootfs(name: &str) -> Result<PathBuf> {
     }
 
     bail!("fs_quick checkpoint is not supported for this VM's backend");
+}
+
+/// Read `mode.json` and return the recorded `rootfs_path` field, if present.
+/// Absent file or absent field → `Ok(None)`. Malformed JSON propagates.
+fn rootfs_from_mode_json(state_dir: &std::path::Path) -> Result<Option<PathBuf>> {
+    let path = state_dir.join("mode.json");
+    let body = match std::fs::read_to_string(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let meta: mvm_backend::base::runtime_meta::VmRuntimeMeta =
+        serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(meta.rootfs_path.map(PathBuf::from))
 }
 
 /// Read the persisted Vz supervisor config and return the `rootfs` disk path,
@@ -313,7 +345,7 @@ fn vz_rootfs_from_supervisor_config(state_dir: &std::path::Path) -> Result<Optio
 /// files names a live process. Mirrors the per-backend `kill(pid, 0)` probe.
 fn vm_is_running(name: &str) -> bool {
     let state_dir = vm_state_dir(name);
-    ["vz.pid", "libkrun.pid"]
+    ["vz.pid", "libkrun.pid", "fc.pid"]
         .iter()
         .filter_map(|f| std::fs::read_to_string(state_dir.join(f)).ok())
         .filter_map(|s| s.trim().parse::<libc::pid_t>().ok())
@@ -1036,20 +1068,6 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
 
     let effective_hypervisor = super::super::shared::resolve_effective_hypervisor(p.hypervisor);
 
-    // The fork was captured from a VZ-family VM and the no-clobber rootfs
-    // adoption relies on the VZ backend's instance-path early-return; other
-    // backends would mutate the forked copy in place or mismatch the kernel.
-    if !matches!(
-        effective_hypervisor.as_str(),
-        "vz" | "virtualization" | "apple-container"
-    ) {
-        anyhow::bail!(
-            "checkpoint fork --boot supports the VZ-family backends only \
-             (resolved hypervisor: {effective_hypervisor}); omit --hypervisor \
-             to use the platform default"
-        );
-    }
-
     // Resource shape: flag > parent plan > global defaults.
     let (parent_cpus, parent_mem) = parent_plan_resources(p.parent_checkpoint, p.store);
     let user_cfg = mvm_core::user_config::load(None);
@@ -1385,6 +1403,70 @@ mod tests {
         assert!(
             msg.contains("vm-full") || msg.contains("vm_full"),
             "error should mention vm-full alternative: {msg}"
+        );
+    }
+
+    // ── resolve_quiesced_vm_rootfs: mode.json rootfs_path resolution ─────
+
+    /// A stopped VM whose mode.json carries `rootfs_path` pointing at an
+    /// existing file resolves that path without needing a supervisor config.
+    #[test]
+    fn resolve_rootfs_from_mode_json_when_present() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+
+        let vm_name = "mode-json-rootfs-vm";
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Write a stub rootfs file.
+        let rootfs_file = tmp.path().join("images").join("rootfs.ext4");
+        std::fs::create_dir_all(rootfs_file.parent().unwrap()).unwrap();
+        std::fs::write(&rootfs_file, b"fake rootfs").unwrap();
+
+        // Write mode.json carrying the rootfs_path (as record_from_rootfs would).
+        let meta = mvm_backend::base::runtime_meta::VmRuntimeMeta {
+            mode: mvm_backend::base::runtime_meta::StartModeKind::Detached,
+            accessible: false,
+            rootfs_path: Some(rootfs_file.to_string_lossy().into_owned()),
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        std::fs::write(state_dir.join("mode.json"), json).unwrap();
+
+        // VM is stopped (no pid file) — quiesced.
+        let resolved = resolve_quiesced_vm_rootfs(vm_name).expect("must resolve");
+        assert_eq!(resolved, rootfs_file);
+    }
+
+    /// When mode.json carries `rootfs_path` but the file no longer exists on
+    /// disk, the error mentions the pause workflow (same user-visible guidance
+    /// as the Vz supervisor-config path).
+    #[test]
+    fn mode_json_rootfs_path_missing_on_disk_produces_actionable_error() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+
+        let vm_name = "mode-json-gone-vm";
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Write mode.json pointing at a rootfs that does NOT exist.
+        let gone_path = tmp.path().join("gone").join("rootfs.ext4");
+        let meta = mvm_backend::base::runtime_meta::VmRuntimeMeta {
+            mode: mvm_backend::base::runtime_meta::StartModeKind::Detached,
+            accessible: false,
+            rootfs_path: Some(gone_path.to_string_lossy().into_owned()),
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        std::fs::write(state_dir.join("mode.json"), json).unwrap();
+
+        let err = resolve_quiesced_vm_rootfs(vm_name).expect_err("must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pause") || msg.contains("vm-full") || msg.contains("vm_full"),
+            "error must guide the user: {msg}"
         );
     }
 
