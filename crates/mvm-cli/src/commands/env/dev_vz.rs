@@ -34,6 +34,13 @@ const DEV_VM_SESSION_ID: &str = mvm_build::vz_builder::DEV_SESSION_ID;
 #[cfg(feature = "builder-vm")]
 const DEV_VZ_ACTIVITY_FILE: &str = "last-activity-unix-secs";
 const BUILDER_VM_SOURCE_FINGERPRINT_FILE: &str = ".mvm-source.sha256";
+/// Sidecar written next to a cached workload `vmlinux` recording the SHA-256 of
+/// its kernel-config nix source (`nix/images/kernel/`). A source-checkout boot
+/// treats a cached kernel as stale when this fingerprint no longer matches the
+/// on-disk config, so an edit to `base.nix`/`workload.nix` rebuilds on the very
+/// next `machine run` instead of silently reusing the old vmlinux (the cache is
+/// otherwise keyed by path-existence, which cannot see a config change).
+const KERNEL_SOURCE_FINGERPRINT_FILE: &str = ".mvm-kernel-source.sha256";
 const BUILDER_VM_ARTIFACT_DIGEST_FILE: &str = ".mvm-artifacts.sha256";
 const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
 #[cfg(feature = "builder-vm")]
@@ -4857,11 +4864,18 @@ pub(crate) fn ensure_default_microvm_image(
 pub(crate) fn ensure_workload_kernel() -> Result<String> {
     let arch = builder_vm_host_arch();
     let cache = mvm_core::config::mvm_cache_dir();
-    if let Some(cached) = find_cached_workload_kernel(&cache, arch) {
+    // Source-checkout: fingerprint `nix/images/kernel/` so a stale cached vmlinux
+    // from since-edited config is rejected and rebuilt (path-existence alone
+    // can't see a config change). End-user prebuilt → None → prior behavior.
+    let source_fingerprint = workload_kernel_source_fingerprint_opt();
+    if let Some(cached) = find_cached_workload_kernel(&cache, arch, source_fingerprint.as_deref()) {
         return Ok(cached);
     }
     let dest = format!("{cache}/builder-vm/{arch}/kernels/workload/vmlinux");
     if let Some(built) = try_build_workload_kernel_locally()? {
+        if let Some(fp) = &source_fingerprint {
+            write_kernel_source_fingerprint(std::path::Path::new(&built), fp);
+        }
         return Ok(built);
     }
     download_workload_kernel(arch, &dest)?;
@@ -4895,18 +4909,90 @@ fn download_workload_kernel(arch: &str, dest: &str) -> Result<()> {
     Ok(())
 }
 
-/// First existing workload-kernel `vmlinux` on disk among the dedicated kernel
-/// cache and the default-microvm images — all the identical `mkWorkloadKernel`
-/// derivation, so any one is a valid workload kernel. `None` ⇒ build/download.
-/// Path-injectable (no global state) so it's hermetically testable.
-fn find_cached_workload_kernel(cache_dir: &str, arch: &str) -> Option<String> {
+/// SHA-256 fingerprint of the workload kernel's nix-config source
+/// (`nix/images/kernel/` — base.nix, workload.nix, builder.nix, flake.nix,
+/// flake.lock). `None` when not in a source checkout (no in-repo flake to
+/// locate the workspace): an end-user mvmctl boots the published, hash-verified
+/// `vmlinux-<arch>-workload` prebuilt, which carries no local source to compare,
+/// so the cache stays keyed by path-existence as before. On a source checkout
+/// this fingerprint gates the cache so a `base.nix`/`workload.nix` edit rebuilds
+/// on the next boot — the same "your change appears in the very next run"
+/// contract the builder-VM image already honors via its own source fingerprint.
+fn workload_kernel_source_fingerprint_opt() -> Option<String> {
+    let flake = find_builder_vm_flake().ok()?;
+    let workspace_root = workspace_root_for_builder_flake(std::path::Path::new(&flake)).ok()?;
+    workload_kernel_source_fingerprint(&workspace_root).ok()
+}
+
+/// Hash `nix/images/kernel/` recursively (the complete workload-kernel config
+/// source). Separated from the flake lookup so it is hermetically testable
+/// against a fixture workspace.
+fn workload_kernel_source_fingerprint(workspace_root: &std::path::Path) -> Result<String> {
+    let kernel_dir = workspace_root.join("nix").join("images").join("kernel");
+    if !kernel_dir.is_dir() {
+        anyhow::bail!(
+            "workload kernel source dir missing at {}",
+            kernel_dir.display()
+        );
+    }
+    let mut hasher = Sha256::new();
+    hash_dir_recursive(&mut hasher, "nix/images/kernel", &kernel_dir)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Does the `KERNEL_SOURCE_FINGERPRINT_FILE` sidecar in `dir` match `expected`?
+/// A missing/unreadable sidecar is a miss (treated as stale → rebuild), so a
+/// kernel cached before this gate existed is refreshed once.
+fn kernel_source_fingerprint_matches(dir: &std::path::Path, expected: &str) -> bool {
+    std::fs::read_to_string(dir.join(KERNEL_SOURCE_FINGERPRINT_FILE))
+        .map(|actual| actual.trim() == expected)
+        .unwrap_or(false)
+}
+
+/// Record the kernel-config source fingerprint next to a freshly-built
+/// `vmlinux` so subsequent boots recognise it as current. Best-effort — a write
+/// failure only costs a redundant rebuild next time, never a stale boot.
+fn write_kernel_source_fingerprint(vmlinux_path: &std::path::Path, fingerprint: &str) {
+    if let Some(dir) = vmlinux_path.parent() {
+        let _ = std::fs::write(
+            dir.join(KERNEL_SOURCE_FINGERPRINT_FILE),
+            format!("{fingerprint}\n"),
+        );
+    }
+}
+
+/// First workload-kernel `vmlinux` on disk among the dedicated kernel cache and
+/// the default-microvm images — all the identical `mkWorkloadKernel` derivation,
+/// so any one is a valid workload kernel. `None` ⇒ build/download.
+///
+/// `expected_fingerprint` gates a source-checkout boot: a candidate is accepted
+/// only when its `KERNEL_SOURCE_FINGERPRINT_FILE` sidecar matches, so a stale
+/// vmlinux from a since-edited `nix/images/kernel/` is rejected and rebuilt.
+/// `None` (end-user prebuilt, no local source) keeps the prior path-existence
+/// behavior. Path-injectable (no global state) so it's hermetically testable.
+fn find_cached_workload_kernel(
+    cache_dir: &str,
+    arch: &str,
+    expected_fingerprint: Option<&str>,
+) -> Option<String> {
     [
         format!("{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux"),
         format!("{cache_dir}/default-microvm/prod/vmlinux"),
         format!("{cache_dir}/default-microvm/dev/vmlinux"),
     ]
     .into_iter()
-    .find(|p| std::path::Path::new(p).is_file())
+    .find(|p| {
+        let path = std::path::Path::new(p);
+        if !path.is_file() {
+            return false;
+        }
+        match expected_fingerprint {
+            None => true,
+            Some(fp) => path
+                .parent()
+                .is_some_and(|dir| kernel_source_fingerprint_matches(dir, fp)),
+        }
+    })
 }
 
 /// Source-checkout local build of just the workload kernel. `Some` when the
@@ -5127,6 +5213,13 @@ fn build_default_microvm_via_libkrun(
     }
     let kernel = format!("{out_dir}/vmlinux");
     let rootfs = format!("{out_dir}/rootfs.ext4");
+    // Stamp the kernel-config fingerprint next to this image's bundled vmlinux so
+    // the OCI `ensure_workload_kernel` path recognises it as a current workload
+    // kernel (same mkWorkloadKernel derivation) rather than building a separate
+    // copy, and so a later config edit invalidates it here too.
+    if let Some(fp) = workload_kernel_source_fingerprint_opt() {
+        write_kernel_source_fingerprint(std::path::Path::new(&kernel), &fp);
+    }
     Ok((kernel, rootfs))
 }
 
@@ -6304,7 +6397,7 @@ mod builder_vm_bootstrap_tests {
         let cache = tmp.path().to_str().unwrap();
         let arch = "x86_64";
         // Nothing on disk → None (caller will build/download).
-        assert_eq!(find_cached_workload_kernel(cache, arch), None);
+        assert_eq!(find_cached_workload_kernel(cache, arch, None), None);
 
         let mk = |rel: &str| {
             let p = tmp.path().join(rel);
@@ -6315,21 +6408,73 @@ mod builder_vm_bootstrap_tests {
         // The dev default image's kernel is a valid reuse source.
         let dev = mk("default-microvm/dev/vmlinux");
         assert_eq!(
-            find_cached_workload_kernel(cache, arch).as_deref(),
+            find_cached_workload_kernel(cache, arch, None).as_deref(),
             Some(dev.as_str())
         );
         // Prod wins over dev (checked first).
         let prod = mk("default-microvm/prod/vmlinux");
         assert_eq!(
-            find_cached_workload_kernel(cache, arch).as_deref(),
+            find_cached_workload_kernel(cache, arch, None).as_deref(),
             Some(prod.as_str())
         );
         // The dedicated kernel cache wins over everything.
         let dedicated = mk(&format!("builder-vm/{arch}/kernels/workload/vmlinux"));
         assert_eq!(
-            find_cached_workload_kernel(cache, arch).as_deref(),
+            find_cached_workload_kernel(cache, arch, None).as_deref(),
             Some(dedicated.as_str())
         );
+    }
+
+    #[test]
+    fn find_cached_workload_kernel_rejects_stale_fingerprint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().to_str().unwrap();
+        let arch = "x86_64";
+        let dir = tmp
+            .path()
+            .join(format!("builder-vm/{arch}/kernels/workload"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vmlinux = dir.join("vmlinux");
+        std::fs::write(&vmlinux, b"vmlinux").unwrap();
+
+        // No sidecar yet: with a fingerprint expectation the candidate is a miss
+        // (treated as stale → rebuild), but None (end-user prebuilt) accepts it.
+        assert_eq!(find_cached_workload_kernel(cache, arch, Some("abc")), None);
+        assert_eq!(
+            find_cached_workload_kernel(cache, arch, None).as_deref(),
+            Some(vmlinux.to_str().unwrap())
+        );
+
+        // Stamp fingerprint "abc": matching expectation hits, a changed config
+        // ("xyz") misses.
+        write_kernel_source_fingerprint(&vmlinux, "abc");
+        assert_eq!(
+            find_cached_workload_kernel(cache, arch, Some("abc")).as_deref(),
+            Some(vmlinux.to_str().unwrap())
+        );
+        assert_eq!(find_cached_workload_kernel(cache, arch, Some("xyz")), None);
+    }
+
+    #[test]
+    fn workload_kernel_source_fingerprint_changes_with_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel_dir = tmp.path().join("nix/images/kernel");
+        std::fs::create_dir_all(&kernel_dir).unwrap();
+        std::fs::write(kernel_dir.join("base.nix"), b"baseEnables = [ ];\n").unwrap();
+        std::fs::write(kernel_dir.join("workload.nix"), b"extraDisables = [ ];\n").unwrap();
+
+        let before = workload_kernel_source_fingerprint(tmp.path()).unwrap();
+        // Editing the config (a new disable) changes the fingerprint.
+        std::fs::write(
+            kernel_dir.join("workload.nix"),
+            b"extraDisables = [ \"BLK_DEV_NBD\" ];\n",
+        )
+        .unwrap();
+        let after = workload_kernel_source_fingerprint(tmp.path()).unwrap();
+        assert_ne!(before, after, "a config edit must change the fingerprint");
+
+        // Missing source dir → Err (caller maps to None → path-existence mode).
+        assert!(workload_kernel_source_fingerprint(&tmp.path().join("nope")).is_err());
     }
 
     #[test]
