@@ -12,15 +12,18 @@ Demonstrates:
 - `env={"KEY": mvm.literal("value")}` — env var.
 - `before_start="..."` — lifecycle hook (string ⇒ Shell command).
 
-## Build, run, invoke
+## Build and run
 
 ```sh
-mvmctl compile examples/python/hello-app/app.py --out /tmp/hello-app
-mvmctl build /tmp/hello-app
-mvmctl up hello-app
-mvmctl invoke hello-app --input name='ari'
-# expect: "hello ari"
+# Compile the decorated function into build artifacts (static parse; no execution).
+mvmctl build compile examples/python/hello-app/app.py --out /tmp/hello-app
+
+# Build the image and call its function entrypoint (RunEntrypoint over vsock).
+mvmctl machine run --flake /tmp/hello-app --entrypoint
 ```
+
+`--entrypoint` is the production-safe call surface — no shell, no argv override.
+
 
 ## What gets emitted
 

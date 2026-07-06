@@ -108,7 +108,7 @@ mvmctl dev down
 ### Examples
 
 Working example workloads live in [`examples/`](examples/) — build any of them
-with `mvmctl machine run --flake examples/<name>` (Nix) or `mvmctl compile`
+with `mvmctl machine run --flake examples/<name>` (Nix) or `mvmctl build compile`
 (SDK):
 
 | Example | Kind | What it shows |
@@ -192,7 +192,7 @@ form keeps a console. See the
 ### 3. From a decorated function (SDK)
 
 Write an ordinary function; the decorator declares the image, resources, deps,
-and env around it. `mvmctl compile` reads the file **statically** (it is never
+and env around it. `mvmctl build compile` reads the file **statically** (it is never
 executed on the host) and emits the flake + launch plan:
 
 ```python
@@ -211,9 +211,8 @@ def greet(name: str) -> str:
 ```
 
 ```bash
-mvmctl compile app.py          # static parse (no execution) → flake.nix + launch plan
-mvmctl machine run --flake .   # build + boot
-mvmctl invoke greet --input name=ari    # dispatch greet(name="ari") over vsock → "hello ari"
+mvmctl build compile app.py            # static parse (no execution) → flake.nix + launch plan
+mvmctl machine run --flake . --entrypoint  # build + boot + dispatch greet over vsock (RunEntrypoint)
 ```
 
 At build time the `@mvm.app` decorator and the `mvm` import are **stripped** from
@@ -234,7 +233,7 @@ fixtures so no SDK can drift from `mvmctl`.
 Declare a workload where it lives. `@mvm.app(...)` (Python) / `mvm.app({...})`
 (TypeScript) is higher-order: it records the declaration and returns your
 function unchanged, so the same file still runs normally under `python` / `tsx`
-and is *also* read statically by `mvmctl compile`.
+and is *also* read statically by `mvmctl build compile`.
 
 <table>
 <tr><th>Python</th><th>TypeScript</th></tr>
@@ -331,13 +330,14 @@ use mvm_client::{MvmClient, MachineSpec};
 use mvm_client_local::LocalBackend;
 
 let client = LocalBackend::new();
-let spec = MachineSpec {
-    name: "web".into(),
-    image: "alpine".into(),
-    cpus: 1,
-    memory_mib: 256,
-    env: vec![],
-};
+
+// Fluent builder — name + image are required; cpus/memory/env default + override.
+let spec = MachineSpec::builder("web", "alpine")
+    .cpus(2)
+    .memory_mib(512)
+    .env("PORT", "8080")
+    .build();
+
 let machine = client.run_machine(spec).await?;
 let out = client.exec_machine(&machine.id, vec!["uname".into(), "-sr".into()]).await?;
 println!("{}", String::from_utf8_lossy(&out.stdout));

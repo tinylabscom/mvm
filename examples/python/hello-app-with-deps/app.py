@@ -10,7 +10,7 @@ The lockfile pins `requests==2.32.3` — a recent release with hashes,
 known to scan clean under pip-audit at the time this example was added.
 The Followup D CI lane uses this example as the positive-path fixture.
 
-  - `mvmctl compile examples/python/hello-app-with-deps/app.py` walks
+  - `mvmctl build compile examples/python/hello-app-with-deps/app.py` walks
     the AST statically (no network, no VM) and emits flake.nix +
     launch.json + bundled src/.
   - `mvmctl build --deps examples/python/hello-app-with-deps/` would

@@ -18,6 +18,19 @@ pub enum MachineStatus {
 }
 
 /// What to run — intent only. No host paths, no signing material.
+///
+/// Build one fluently with [`MachineSpec::builder`]:
+///
+/// ```
+/// use mvm_client::MachineSpec;
+///
+/// let spec = MachineSpec::builder("web", "nginx")
+///     .cpus(2)
+///     .memory_mib(512)
+///     .env("PORT", "8080")
+///     .build();
+/// assert_eq!(spec.name, "web");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineSpec {
@@ -26,6 +39,79 @@ pub struct MachineSpec {
     pub cpus: u32,
     pub memory_mib: u32,
     pub env: Vec<(String, String)>,
+}
+
+impl MachineSpec {
+    /// Start building a spec. `name` and `image` are the two required fields;
+    /// everything else defaults (1 vCPU, 512 MiB, no env) and is overridable on
+    /// the returned [`MachineSpecBuilder`].
+    pub fn builder(name: impl Into<String>, image: impl Into<String>) -> MachineSpecBuilder {
+        MachineSpecBuilder {
+            name: name.into(),
+            image: image.into(),
+            cpus: 1,
+            memory_mib: 512,
+            env: Vec::new(),
+        }
+    }
+}
+
+/// Fluent builder for [`MachineSpec`]. Obtain one from [`MachineSpec::builder`].
+///
+/// `name` and `image` are required (supplied up front), so [`build`] is
+/// infallible; `cpus`/`memory_mib` default to 1 vCPU / 512 MiB and `env`
+/// accumulates across calls.
+///
+/// [`build`]: MachineSpecBuilder::build
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineSpecBuilder {
+    name: String,
+    image: String,
+    cpus: u32,
+    memory_mib: u32,
+    env: Vec<(String, String)>,
+}
+
+impl MachineSpecBuilder {
+    /// Set the vCPU count (default 1).
+    #[must_use]
+    pub fn cpus(mut self, cpus: u32) -> Self {
+        self.cpus = cpus;
+        self
+    }
+
+    /// Set the guest memory in MiB (default 512).
+    #[must_use]
+    pub fn memory_mib(mut self, memory_mib: u32) -> Self {
+        self.memory_mib = memory_mib;
+        self
+    }
+
+    /// Append one environment variable. Repeatable.
+    #[must_use]
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
+    }
+
+    /// Append many environment variables at once.
+    #[must_use]
+    pub fn envs(mut self, vars: impl IntoIterator<Item = (String, String)>) -> Self {
+        self.env.extend(vars);
+        self
+    }
+
+    /// Finish building. Infallible — `name` and `image` were required up front.
+    #[must_use]
+    pub fn build(self) -> MachineSpec {
+        MachineSpec {
+            name: self.name,
+            image: self.image,
+            cpus: self.cpus,
+            memory_mib: self.memory_mib,
+            env: self.env,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +188,58 @@ mod tests {
         let json = serde_json::to_string(&spec).unwrap();
         let back: MachineSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(spec, back);
+    }
+
+    #[test]
+    fn builder_applies_defaults_and_overrides() {
+        // Only name + image supplied → documented defaults (1 vCPU, 512 MiB, no env).
+        let spec = MachineSpec::builder("web", "nginx").build();
+        assert_eq!(
+            spec,
+            MachineSpec {
+                name: "web".into(),
+                image: "nginx".into(),
+                cpus: 1,
+                memory_mib: 512,
+                env: vec![],
+            }
+        );
+
+        // Overrides + accumulating env (single + bulk, order preserved).
+        let spec = MachineSpec::builder("web", "nginx")
+            .cpus(4)
+            .memory_mib(1024)
+            .env("A", "1")
+            .envs([("B".to_string(), "2".to_string())])
+            .env("C", "3")
+            .build();
+        assert_eq!(spec.cpus, 4);
+        assert_eq!(spec.memory_mib, 1024);
+        assert_eq!(
+            spec.env,
+            vec![
+                ("A".into(), "1".into()),
+                ("B".into(), "2".into()),
+                ("C".into(), "3".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn builder_equals_struct_literal() {
+        let built = MachineSpec::builder("web", "docker.io/lib/nginx:1")
+            .cpus(2)
+            .memory_mib(512)
+            .env("PORT", "8080")
+            .build();
+        let literal = MachineSpec {
+            name: "web".into(),
+            image: "docker.io/lib/nginx:1".into(),
+            cpus: 2,
+            memory_mib: 512,
+            env: vec![("PORT".into(), "8080".into())],
+        };
+        assert_eq!(built, literal);
     }
 
     #[test]

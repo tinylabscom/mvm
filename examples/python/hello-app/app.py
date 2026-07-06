@@ -2,18 +2,17 @@
 
 Two routes from this file produce the same Workload IR:
 
-  - `mvmctl compile examples/python/hello-app/app.py` walks the AST
-    statically and emits flake.nix + launch.json + bundled src/. The
-    host never imports or executes this script.
+  - `mvmctl build compile examples/python/hello-app/app.py` walks the
+    AST statically and emits flake.nix + launch.json + bundled src/.
+    The host never imports or executes this script.
 
   - `python app.py` (after `pip install ./sdks/python`) imports `mvm`,
     the decorator records the declaration, and the user can pipe
     `mvm.emit_json()` to disk for the same IR. This route runs the
     script and is useful for IDE introspection.
 
-`mvmctl invoke hello-app --input name='ari'` (after a full build +
-boot cycle) dispatches `greet(name="ari")` over the function-entrypoint
-protocol and returns the encoded string.
+`mvmctl machine run --flake . --entrypoint` (after a build) dispatches
+`greet` over the function-entrypoint protocol (RunEntrypoint over vsock).
 """
 
 import mvm

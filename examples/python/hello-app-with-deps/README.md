@@ -23,7 +23,7 @@ mount layout.
 ## Compile (no VM needed)
 
 ```sh
-mvmctl compile examples/python/hello-app-with-deps/app.py --out /tmp/hello-with-deps
+mvmctl build compile examples/python/hello-app-with-deps/app.py --out /tmp/hello-with-deps
 ls /tmp/hello-with-deps
 # flake.nix  launch.json  src/
 jq '.dependencies' /tmp/hello-with-deps/launch.json
@@ -37,18 +37,15 @@ jq '.dependencies' /tmp/hello-with-deps/launch.json
 ## Build + run (needs a working builder VM)
 
 ```sh
-mvmctl build examples/python/hello-app-with-deps/
-# … installs deps inside the builder VM, seals the volume …
-mvmctl up examples/python/hello-app-with-deps/ --prod
-# claim 9 gate: the supervisor verifies the sealed volume before launching
-mvmctl invoke hello-app-with-deps --input name='ari'
-# expect: "hello ari"
+# Build + boot + call the entrypoint. The install pipeline seals the deps
+# volume inside the builder VM; --prod enforces the strict CVE/attestation gate.
+mvmctl machine run --flake examples/python/hello-app-with-deps/ --profile prod --entrypoint
+# claim 11 gate: the supervisor verifies the sealed volume before launching
 ```
 
-The `--prod` flag exercises the strict ADR-047 gate semantics: missing
-attestations or any high/critical CVE finding fails admission closed
-(see `crates/mvm-build/src/app_deps_gate.rs::apply_install_gate`).
-`--dev` warn-and-continues for fast iteration.
+The prod profile exercises the strict app-deps gate: missing attestations or
+any high/critical CVE finding fails admission closed. The dev profile
+warn-and-continues for fast iteration.
 
 ## Inspect a sealed volume
 

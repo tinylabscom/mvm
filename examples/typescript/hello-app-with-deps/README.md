@@ -19,10 +19,10 @@ npm install            # writes package-lock.json; node_modules is rebuilt by ni
 rm -rf node_modules    # never committed — the build produces it
 ```
 
-## Build, run, invoke
+## Build and run
 
 ```sh
-mvmctl compile examples/typescript/hello-app-with-deps/app.ts --out /tmp/hello-ts-deps
-mvmctl up --flake /tmp/hello-ts-deps
-# invoke greet → uses is-number from the baked node_modules
+mvmctl build compile examples/typescript/hello-app-with-deps/app.ts --out /tmp/hello-ts-deps
+mvmctl machine run --flake /tmp/hello-ts-deps --entrypoint
+# greet → uses is-number from the baked node_modules
 ```

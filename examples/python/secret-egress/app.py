@@ -15,7 +15,7 @@ Set the secret on the host first (the value is piped, never on argv):
 Run it locally on a /dev/kvm host:
 
     mvmctl build compile examples/python/secret-egress/app.py --out /tmp/secret-egress
-    mvmctl up --flake /tmp/secret-egress
+    mvmctl machine run --flake /tmp/secret-egress
 
 `compile` strips the managed `SecretRef` out of the baked image (secret-free
 rootfs) and records it in `workload.json`; `up` lowers that into a signed

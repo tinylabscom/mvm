@@ -4,13 +4,11 @@ Minimum-viable `mvm.app({...})(fn)` example. Mirrors
 `examples/python/hello-app/` — the parser produces the same IR from
 either source language.
 
-## Build
+## Build and run
 
 ```sh
-mvmctl compile examples/typescript/hello-app/app.ts --out /tmp/hello-app
-mvmctl build /tmp/hello-app
-mvmctl up hello-app
-mvmctl invoke hello-app --input name='ari'
+mvmctl build compile examples/typescript/hello-app/app.ts --out /tmp/hello-app
+mvmctl machine run --flake /tmp/hello-app --entrypoint
 ```
 
 The decorator + bootscript hook behavior is identical to the Python

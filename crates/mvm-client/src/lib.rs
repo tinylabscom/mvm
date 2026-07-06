@@ -14,4 +14,8 @@ pub mod mock;
 
 pub use client::MvmClient;
 pub use connect::{Target, connect};
+pub use dto::{
+    ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineSpecBuilder, MachineState,
+    MachineStatus, ReconfigureRequest,
+};
 pub use error::{MvmError, Result};
