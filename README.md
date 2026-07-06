@@ -1,361 +1,259 @@
 # mvm
 
-> **mvm** is a Rust CLI (`mvmctl`) for building and running microVMs from
-> Nix flakes. It targets Firecracker on Linux+KVM, Apple Container on
-> macOS 26+ Apple Silicon, and direct libkrun on macOS Apple Silicon
-> and Intel, with a vsock-only guest contract.
->
-> **v0.14.0 is a rewrite.** v1's final tip is preserved as the `legacy/v1`
-> branch and the `v1-final` tag. See
-> [`MIGRATING-FROM-V1.md`](MIGRATING-FROM-V1.md) and
-> [`CHANGELOG.md`](CHANGELOG.md) for the upgrade path and what changed.
+**mvm** is a Rust CLI (`mvmctl`) that runs workloads in fast, hardware-isolated
+microVMs — from **OCI images** or **Nix flakes** — on macOS and Linux, with a
+security posture that is enforced by CI, not by documentation.
 
-## Quick start
+Every machine boots its own Linux kernel under a real hypervisor. There is no
+Docker on the runtime path, no SSH in any guest, and (on the in-house macOS
+backend) no guest network device at all: guest I/O crosses **vsock**, where the
+host can audit flows, substitute secrets so the workload never sees raw
+credentials, and enforce default-deny egress from a signed execution plan.
 
-Boot a transient dev-tier microVM, run a command, get its output back — five
-lines with the Python SDK:
-
-```python
-import mvm
-
-with mvm.Sandbox.create(image="python-3.12") as sb:
-    result = sb.exec("python", "-c", "print(2 + 2)")
-    print(result.stdout.strip())   # -> 4
+```
+macOS 26+ (Apple Silicon)  →  in-house HVF VMM (Hypervisor.framework, zero extra deps)
+macOS 13–25                →  libkrun (Homebrew)
+Linux + /dev/kvm           →  Firecracker
 ```
 
-Run it against a real local microVM with `mvmctl run --mode live ./quickstart.py`.
-`exec` is dev-tier (live mode); it refuses prod templates with `SandboxDevOnly`.
-See the [Python quickstart](public/src/content/docs/getting-started/python-quickstart.md)
-for the imperative-lifecycle and static-declaration paths, and the build/derive
-flow (`mvmctl compile` / `up --flake`) below.
+## Highlights
 
-## Backends
-
-`mvmctl` picks a backend per `AnyBackend::auto_select()` (see ADR-013).
-Override with `--hypervisor`:
-
-| Backend | Host | Tier | Notes |
-|---|---|---|---|
-| [Firecracker](https://firecracker-microvm.github.io/) | Linux + `/dev/kvm`, WSL2 | 1 | Default on KVM hosts; snapshots, dm-verity, full security posture |
-| [Apple Container](https://developer.apple.com/documentation/virtualization) | macOS 26+ Apple Silicon | 2 | Native Virtualization.framework |
-| [libkrun](https://github.com/containers/libkrun) | macOS Apple Silicon / Intel, Linux + KVM | 2 | Direct Hypervisor.framework/KVM backend; macOS Intel path |
-| [Cloud Hypervisor](https://www.cloudhypervisor.org/) | Linux + KVM | 1 (opt-in) | Wider device model than Firecracker — VFIO, virtio-fs, larger guests |
-
-All backends consume the same Nix-built ext4 rootfs produced by
-`mkGuest`. The runtime differs; the image doesn't.
-
-## Transparent Egress
-
-On the native libkrun path, mvm can now render rvproxy's transparent
-interception config and forward guest TCP `:80` / `:443` to a host-side
-terminator. That keeps secret substitution in the host path instead of
-requiring the guest to opt into an explicit proxy. The guest still uses the
-proxy-aware channel for placeholder substitution; transparent interception is
-an additional native gateway contract, not a guest-facing API.
-
-Vz is not wired to this contract yet. The backend remains guarded until its
-launch path emits the same native rvproxy config.
+- **One command from OCI image to isolated VM** — `mvmctl machine run --image alpine -- uname -a`
+- **Nix-native image builds** — reproducible guests via `mkGuest`, built inside a
+  builder VM (host Nix is never used, or required)
+- **Security claims, CI-enforced** — 15+ numbered claims (signed execution
+  plans, chain-signed audit log, dm-verity boot, default-deny egress, sealed
+  prod images with no interactive access, secret substitution over vsock); see
+  the [security model](#security-model)
+- **Persistent or transient machines** — one-shot runs, or named machines with
+  `create` / `start` / `exec` / `stop`, plus interactive dev shells
+- **SDKs as thin wrappers** — Python and TypeScript SDKs drive the same
+  conformance-pinned surface as the CLI; decorator-based workload authoring
+  compiles to a typed IR
 
 ## Install
 
 ```bash
-# Pre-built release
+# Pre-built release (macOS Apple Silicon, Linux x86_64/aarch64)
 curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm/main/install.sh | sh
 
 # From source
 git clone https://github.com/tinylabscom/mvm.git && cd mvm
 cargo build --release
 cp target/release/mvmctl ~/.local/bin/
-
-# Via Cargo (after first crates.io release of 0.14.0)
-cargo install mvmctl
 ```
+
+Host prerequisites:
+
+- **macOS 26+ Apple Silicon** — none. The in-house HVF backend and builder need
+  no Homebrew packages.
+- **macOS 13–25** — the libkrun trio:
+  `brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy`
+- **Linux** — `/dev/kvm` access (Firecracker is fetched and managed for you);
+  `passt` from your distro for builder networking.
+
+`mvmctl doctor` diagnoses your host and prints exact install hints for anything
+missing.
 
 ## Quick start
 
-```bash
-# Beginner path: run a command in a microVM from an OCI image (no flake, no host Nix).
-# Networking is off by default; the VM is torn down on exit.
-mvmctl machine run --image alpine -- sh -c "echo 'hello from a microVM' && uname -a"
-
-# Build and run a VM from a Nix flake
-mvmctl up --flake .
-
-# Run in background with port forwarding
-mvmctl up --flake . -d -p 8080:8080
-
-# Run a debug build (accessible image; console works without --force)
-mvmctl up --dev --flake .
-
-# List running VMs
-mvmctl ls
-
-# Stop one VM, or all
-mvmctl machine stop app1
-mvmctl machine stop --all
-# Force a specific backend
-mvmctl up --flake . --hypervisor cloud-hypervisor
-
-# One-shot invoke against a function-entrypoint VM
-mvmctl invoke <vm> --stdin '{"name": "world"}'
-```
-
-`mvmctl up <flake>` produces a **sealed** image by default —
-`mvmctl machine console <vm>` will refuse on it unless you pass `--force`.
-Pass `--dev` to `up` for the accessible posture. This is the
-runtime enforcement of security claim 4 (CLAUDE.md "Security model").
-
-## Architecture
-
-```
-Layer 1: Host (Linux, macOS, Windows-via-WSL2 in progress)
-  mvmctl runs natively. Direct host shell on Linux+KVM.
-
-Layer 2: VM backend (auto-selected per ADR-013)
-  Firecracker  ─── KVM microVMs (Tier 1; default on Linux+KVM)
-  Cloud Hypervisor ─ KVM, wider device model (Tier 1; opt-in)
-  Apple Container ─ Virtualization.framework (macOS 26+ AS)
-  libkrun ─────── Hypervisor.framework / KVM (macOS AS + Intel, Linux)
-
-Layer 3: Guest
-  Busybox PID 1 (built by mkGuest, ext4 rootfs)
-  Real mvm-guest-agent on vsock — NO SSH ever
-  Drives: /dev/vda rootfs, /dev/vdb verity sidecar (when claim 3 active)
-  Service-level isolation: setpriv, seccomp, RO /etc/passwd
-```
-
-## Workspace
-
-13 crates plus the root `mvmctl` facade and `xtask`:
-
-| Crate | Purpose |
-|---|---|
-| **mvm-core** | Pure types, IDs, config, protocol, signing — no runtime deps |
-| **mvm-security** | AES-GCM + KeyProvider + snapshot HMAC + command/threat gates |
-| **mvm-storage** | Volume backend trait (sister-crate with mvmd) |
-| **mvm-plan** | `ExecutionPlan` typed plan substrate (plan 60 Wave 1) |
-| **mvm-policy** | Tenant policy types (plan 60 Wave 1) |
-| **mvm-supervisor** | Supervisor process surface (plan 60 Wave 1, in progress) |
-| **mvm-providers** | FFI/SDK shim — Apple Container + libkrun + ... |
-| **mvm-backend** | Concrete `VmBackend` impls — Firecracker, CH, libkrun, Apple Container, Docker |
-| **mvm-base** | Shell, linux_env, runtime_meta, cow, snapshot_integrity substrate |
-| **mvm** | VM lifecycle, template management, runtime UI |
-| **mvm-build** | Nix builder pipeline + builder VM support |
-| **mvm-guest** | Vsock protocol, guest agent binary, integration manifest |
-| **mvm-cli** | Clap CLI, bootstrap, doctor, command surface |
-| **mvm-mcp** | MCP (Model Context Protocol) sandbox server |
-
-Plus `mvmctl` (root facade, re-exports everything via `mvmctl::core`,
-`mvmctl::runtime`, etc.) and `xtask` (build helpers,
-`check-adr-coverage`).
-
-## Building images
-
-`mkGuest` is the authoring surface. Three entrypoint forms — pick the
-one that matches your workload:
-
-```nix
-{
-  inputs = {
-    mvm.url = "github:tinylabscom/mvm?dir=nix";
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
-  };
-
-  outputs = { mvm, nixpkgs, ... }:
-    let
-      system = "aarch64-linux";
-      pkgs = import nixpkgs { inherit system; };
-    in {
-      packages.${system}.default = mvm.lib.${system}.mkGuest {
-        inherit pkgs;
-        name = "my-app";
-
-        # Form 1 — shell entrypoint (accessible; console drops to a shell)
-        # entrypoint.shell = "bash";
-
-        # Form 2 — command entrypoint (sealed; one-shot)
-        # entrypoint.command = [ "${pkgs.python3}/bin/python3" "-m" "http.server" "8080" ];
-
-        # Form 3 — services (sealed; supervised long-running)
-        entrypoint.services = {
-          my-app = {
-            exec = "${pkgs.python3}/bin/python3 -m http.server 8080";
-          };
-        };
-      };
-    };
-}
-```
-
-Build and run:
+### Run a command in a microVM
 
 ```bash
-mvmctl build --flake .
-mvmctl up --flake . --cpus 2 --memory 1024
+# One-shot: boot an OCI image, run a command, tear the VM down.
+# Networking is OFF by default (default-deny egress).
+mvmctl machine run --image alpine -- sh -c "echo hello from a microVM && uname -a"
+
+# Interactive shell (dev-tier images)
+mvmctl machine run --image alpine -it -- /bin/sh
+
+# Admit specific egress only (still audited; TCP/22 is always refused)
+mvmctl machine run --image alpine --allow-host api.example.com:443 -- ./fetch-thing
 ```
 
-See `nix/lib/default.nix` for the full `mkGuest` API and
-`nix/images/examples/` for working flakes.
+### Persistent machines
 
-## CLI reference
+```bash
+mvmctl machine create web --image nginx --cpus 2 --memory 512M
+mvmctl machine start web
+mvmctl machine exec web -- nginx -v
+mvmctl machine logs web
+mvmctl machine stop web && mvmctl machine rm web
 
-### VM lifecycle
+mvmctl machine ls            # list machines (alias: ps)
+mvmctl machine inspect web
+```
 
-| Command | Description |
-|---|---|
-| `mvmctl up --flake <ref>` | Build and run a VM (aliases: `run`, `start`) |
-| `mvmctl up --dev --flake <ref>` | Dev posture (accessible image; console works without `--force`) |
-| `mvmctl up --manifest <path>` | Boot from a built manifest (`mvm.toml`) |
-| `mvmctl up -d` | Detached background mode |
-| `mvmctl up -p HOST:GUEST` | Port mapping (repeatable) |
-| `mvmctl up --hypervisor <backend>` | Force backend selection |
-| `mvmctl machine stop [name]` | Stop a VM by name, or all if omitted |
-| `mvmctl ls` / `mvmctl ls -a` | List running / all VMs |
-| `mvmctl machine logs <name>` | Console logs (`-f` to follow) |
-| `mvmctl invoke <vm>` | Function-entrypoint call (production-safe) |
-| `mvmctl exec <vm>` | One-shot exec (dev-only — sealed images refuse) |
-| `mvmctl machine console <vm>` | Attach console (refuses on sealed VMs; `--force` overrides) |
-| `mvmctl forward <name> -p PORT` | Forward a guest port to localhost |
+### Build and run from a Nix flake
 
-### Building
+```bash
+mvmctl machine build --flake .          # build a guest image from flake.nix
+mvmctl machine run   --flake . -- ./app # build + boot + run
+```
 
-| Command | Description |
-|---|---|
-| `mvmctl build --flake <ref>` | Build from a Nix flake |
-| `mvmctl build --flake <ref> --dev` | Dev-posture build |
-| `mvmctl build --flake <ref> --watch` | Rebuild on flake.lock changes |
-| `mvmctl validate <flake>` | Static-validate a flake without building |
-| `mvmctl manifest ls/info/verify` | Inspect built manifests |
-| `mvmctl manifest prune` | GC stale build outputs |
+Guests are declared with `mkGuest` (see the
+[Nix flake guide](public/src/content/docs/guides/nix-flakes.md)); builds run
+inside a builder VM, so results are identical on every host regardless of what
+the host has installed.
 
-### Environment
+### Dev environment
 
-| Command | Description |
-|---|---|
-| `mvmctl dev up` | Start dev environment (host shell on Linux+KVM, Apple Container on macOS 26+) |
-| `mvmctl dev down` | Stop the dev environment |
-| `mvmctl dev shell` | Open a shell |
-| `mvmctl dev status` | Show env state + `/dev/kvm` / Firecracker / assets |
-| `mvmctl doctor` | Full diagnostics — backends, security posture, snapshot HMAC, FDE |
-| `mvmctl config show/edit/set` | Global config at `~/.mvm/config.toml` |
+```bash
+mvmctl dev            # boot the builder VM and drop into a dev shell
+mvmctl dev status     # show environment info
+mvmctl dev down       # stop it
+```
 
-### Utilities
+The dev environment is the builder VM. Workload microVMs stay headless — the
+only interactive path into a guest is the dev-tier console (`machine console`,
+claim-15 gated). Sealed production images have **no** interactive access, ever.
 
-| Command | Description |
-|---|---|
-| `mvmctl update` | Self-update (`--check` for dry run) |
-| `mvmctl uninstall` | Clean uninstall |
-| `mvmctl audit tail` | View audit log |
-| `mvmctl metrics` | Runtime metrics (Prometheus or JSON) |
-| `mvmctl shell-init` | Print shell config + completions |
+### Python SDK
+
+```python
+from mvm import Machine
+
+# One-shot run (same semantics as `mvmctl machine run`)
+result = Machine.run(image="alpine", command=["sh", "-c", "echo 4"])
+print(result.stdout)
+
+# Persistent machine handle
+web = Machine.create(name="web", image="nginx", cpus=2, memory="512M")
+web.start()
+print(web.exec(["nginx", "-v"]).stdout)
+web.stop()
+```
+
+The SDKs (Python, TypeScript) are deliberately thin: they drive the exact same
+argv surface as the CLI, pinned by shared conformance fixtures, so no SDK can
+drift from `mvmctl`. Decorator-based workload authoring (functions compiled into
+guest images) is documented in the [SDK docs](public/src/content/docs/sdk/).
+
+## How it works
+
+```
+Host (macOS / Linux)
+  mvmctl ──► signed ExecutionPlan ──► admission (validity window, nonce, audit)
+                                          │
+                              VM backend (auto-selected)
+                 Firecracker (KVM) · in-house HVF · libkrun · QEMU (dev/test)
+                                          │
+Guest (its own Linux kernel)
+  /init ──► mvm-guest-agent on vsock :5252  — exec, files, processes, code-run
+  no sshd · no SSH keys · setpriv + seccomp service isolation
+  rootfs: ext4 (dm-verity sealed in prod) or read-only virtio-fs
+```
+
+- **Backend selection** is automatic per host (`--hypervisor` overrides). All
+  backends consume the same image artifacts; switching backends does not change
+  the image.
+- **Builds** run `nix build` inside a builder VM (in-house HVF on macOS 26+,
+  libkrun elsewhere, with automatic fallback). Host Nix is never consulted.
+- **Egress** is default-deny. Where policy admits flows they are enforced and
+  audited host-side; on the in-house backend all guest I/O rides vsock through a
+  per-VM gating endpoint (there is no guest NIC).
 
 ## Security model
 
-mvm makes seven CI-enforced claims. Each is backed by a test or a
-workflow gate; the canonical statement lives in
-[`CLAUDE.md`](CLAUDE.md) §"Security model"; the threat model is
-[ADR-002](specs/adrs/002-microvm-security-posture.md).
+mvm makes **fifteen numbered, CI-enforced security claims** (plus preview
+claims), each backed by a named test or workflow gate — from "a tampered rootfs
+fails to boot" (dm-verity) to "no raw secret value ever crosses to the guest"
+(vsock substitution: the workload sees placeholders; real credentials are
+injected host-side, destination-bound and time-bound) to "no interactive access
+to a sealed production microVM."
 
-1. No host-fs access from a guest beyond explicit shares
-2. No guest binary can elevate to uid 0
-3. Tampered rootfs ext4 fails to boot (dm-verity)
-4. Guest agent has no `do_exec` in production builds
-5. Vsock framing is fuzzed
-6. Pre-built dev image is hash-verified
-7. Cargo deps are audited on every PR
+- The claim ledger: [`specs/claims/catalog.md`](specs/claims/catalog.md)
+- The source of truth: [ADR-002](specs/adrs/002-microvm-security-posture.md)
+- Live posture on your host: `mvmctl doctor`
+- Audit chain verification: `mvmctl trust audit verify` (chain-signed JSONL;
+  tampering breaks verification and exits nonzero)
 
-Out of scope (named in ADR-002):
+Every workload boots from a **signed ExecutionPlan**; every admission, launch,
+and OCI provenance record lands in a **chain-signed audit log**; egress is
+**default-deny**; production images are **sealed** (verity rootfs, no console,
+no `do_exec`, entrypoint-only); application-dependency volumes are hash-locked,
+SBOM-enumerated, and CVE-gated.
 
-- Malicious *host*. mvmctl trusts the host with the hypervisor and
-  private build keys.
-- Multi-tenant guests. One guest = one workload.
-- Hardware-backed attestation (TPM2 / SEV-SNP / TDX) — deferred to
-  plan 60 Phase 3.
-
-## Development
-
-### Contributor host setup
-
-Whether you need to install libkrun depends on your machine — the
-builder VM (the Linux guest that runs `nix build`) picks its host VMM
-per [Plan 98](specs/plans/98-vz-builder-vm.md):
-
-| Host | libkrun (`slp/krun/*`) needed? |
-|---|---|
-| macOS 26+ Apple Silicon | **No** — auto-selects the **Vz** builder backend (Apple Virtualization.framework, ships with the OS). `mvmctl dev up` only retries libkrun if the Vz path fails. |
-| macOS 13–25 Apple Silicon | **Yes** — `brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy`. |
-| Linux + `/dev/kvm` | **No** — Firecracker runs directly; swap `gvproxy` for `passt` from your distro. |
-
-Source-checkout contributors also need `zig` + `cargo-zigbuild` so
-`crates/mvm-cli/build.rs` can cross-compile the embedded host-VM
-binaries as static `aarch64-unknown-linux-musl` (the builder rootfs has
-no dynamic loader):
-
-```bash
-brew install zig            # or your distro's zig
-cargo install cargo-zigbuild
-```
-
-You do **not** need host Nix — Nix evaluation and `nix build` run inside
-the builder VM. After building, run `mvmctl doctor`: it reports the
-resolved builder backend on the `builder backend` line and emits install
-hints for anything missing.
-
-```bash
-cargo build                              # Debug
-cargo test --workspace                   # All tests (1937+ passing)
-cargo clippy --workspace -- -D warnings  # Lint (0 warnings required)
-cargo +nightly fmt                       # Format (CI uses nightly)
-```
-
-See [`public/src/content/docs/contributing/development.md`](public/src/content/docs/contributing/development.md)
-for contributor guidelines, CI/CD lanes, and release process.
-
-### Running the suite on real Linux+KVM (Hetzner)
-
-macOS can't run live Firecracker microVMs natively. For the full
-suite — workspace clippy on x86_64-linux, the seccomp functional
-probes, longer `cargo fuzz` runs, and live-KVM smokes — spin up a
-Hetzner Cloud test box with the cloud-init scaffolding in
-[`ops/hetzner/`](ops/hetzner/):
-
-```bash
-hcloud server create \
-  --name mvm-test-1 \
-  --type ccx23 \
-  --image ubuntu-24.04 \
-  --location nbg1 \
-  --ssh-key <your-key-name> \
-  --user-data-from-file ops/hetzner/cloud-init.yaml
-
-ssh root@<server-ip> 'cloud-init status --wait'
-ssh root@<server-ip>
-su - mvm
-bash ~/warm-cache.sh        # one-time: cargo fetch + workspace build
-bash ~/run-tests.sh         # full suite, stops at first failure
-```
-
-CCX (x86_64) or CAX (ARM) Hetzner instances expose `/dev/kvm`;
-CPX/CX (shared CPU) don't.
+Out of scope (named in ADR-002): a malicious *host* (mvmctl trusts the host with
+the hypervisor and private keys), multi-tenant guests (one guest = one
+workload), and hardware-backed key attestation.
 
 ## Documentation
 
-- [`CHANGELOG.md`](CHANGELOG.md) — release notes
-- [`MIGRATING-FROM-V1.md`](MIGRATING-FROM-V1.md) — v1→v2 upgrade guide + feature parity ledger
-- [`CLAUDE.md`](CLAUDE.md) — project conventions, security model
-- [`specs/plans/60-mvm-libkrun-migration.md`](specs/plans/60-mvm-libkrun-migration.md) — full migration plan (Phases 0–10)
-- [`specs/SPRINT.md`](specs/SPRINT.md) — current sprint
-- [`public/src/content/docs/`](public/src/content/docs/) — docs site sources (rendered at <https://gomicrovm.com>)
+- [Getting started](public/src/content/docs/getting-started/)
+- [CLI reference](public/src/content/docs/reference/cli-commands.md)
+- [Writing Nix flakes for guests (mkGuest)](public/src/content/docs/guides/nix-flakes.md)
+- [Troubleshooting](public/src/content/docs/guides/troubleshooting.md)
+- [Architecture & ADRs](specs/adrs/)
+- [Security](public/src/content/docs/security/)
 
-## v1 history
+## Contributing
 
-v1's final state is preserved on this repo:
+Contributions are welcome. The short version:
 
-- Branch: [`legacy/v1`](https://github.com/tinylabscom/mvm/tree/legacy/v1)
-- Tag: [`v1-final`](https://github.com/tinylabscom/mvm/tree/v1-final)
-- Releases: `v0.7.1` through `v0.13.0` continue to resolve
+### Setup
 
-Every v1 commit URL, PR URL, and release tag URL still works.
+```bash
+git clone https://github.com/tinylabscom/mvm.git && cd mvm
+just install-hooks        # pre-commit hook: auto-runs cargo fmt --all
+
+# Source-checkout builds cross-compile embedded guest binaries; you need:
+brew install zig          # or your distro's zig
+cargo install cargo-zigbuild cargo-nextest
+```
+
+End users of released binaries need none of that — the guest binaries ship
+embedded. You do **not** need host Nix: every Nix evaluation runs inside the
+builder VM. After building, run `mvmctl doctor` — it reports the resolved
+builder backend and emits install hints for anything missing.
+
+### Build, test, lint
+
+```bash
+just build           # cargo build
+just test            # cargo nextest run --workspace   (the named test gate)
+just test-fast       # skips the embedded-binary cross-compile (fast inner loop)
+just lint            # cargo fmt --all -- --check  +  clippy -D warnings
+just ci              # lint + tests + doctests — run this before every PR
+```
+
+Ground rules (enforced by CI — see [AGENTS.md](AGENTS.md) for the full set):
+
+- **Zero clippy warnings.** `#[allow(clippy::too_many_arguments)]` is banned in
+  hand-written code — introduce a builder struct instead.
+- **Always `cargo fmt --all`** — without `--all`, other workspace members are
+  silently skipped and CI will fail.
+- **No task is done without tests.** Types get serde round-trips; wire/protocol
+  code gets tampered-input rejection tests; security paths get positive *and*
+  negative cases.
+- **Reuse first.** Search the workspace before adding a helper — duplicated
+  logic is this repo's most common bug source. All `~/.mvm` and `~/.cache/mvm`
+  paths go through `mvm-core::config` helpers, never inline `$HOME` joins.
+- **Specs discipline.** Design docs live in `specs/` (ADRs in `specs/adrs/`,
+  plans in `specs/plans/`). If your change lands a plan workstream, tick the
+  matching boxes in the plan and `specs/REFACTOR-STATUS.md` in the same PR. If
+  it touches a security claim, keep
+  [`specs/claims/catalog.md`](specs/claims/catalog.md) in sync — the
+  claim→witness mapping is machine-checked.
+
+Keep PRs focused (one concern each) and write commit messages that explain
+*why*. PRs merge through the GitHub **merge queue** once CI is green.
+
+Running the full live suite (workspace clippy on x86_64-linux, seccomp probes,
+longer fuzz runs, live-KVM smokes) needs real `/dev/kvm`; the cloud-init
+scaffolding for a throwaway KVM box lives in [`ops/hetzner/`](ops/hetzner/), and
+the contributor guide has the details:
+[development.md](public/src/content/docs/contributing/development.md).
+
+### Repository layout
+
+15-crate Cargo workspace; the full map is in [CLAUDE.md](CLAUDE.md). The short
+version: `mvm-core` (types / plans / policy / crypto — no runtime deps) →
+`mvm-build` (Nix builder pipeline) → `mvm-backend` (every `VmBackend` impl) →
+`mvm` (runtime) → `mvm-cli` (the `mvmctl` surface), plus `mvm-guest` (vsock
+protocol + agent), `mvm-hostd` (host daemons: broker / signers / supervisor),
+`mvm-vm-host` (per-VM supervisor binaries), `mvm-sdk` (authoring + IR),
+`mvm-client*` (the local/remote client facade), and `xtask` (lint gates).
 
 ## License
 
