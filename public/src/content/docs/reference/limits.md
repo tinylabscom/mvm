@@ -30,7 +30,7 @@ Commit the manifest values once the sizing is intentional.
 | --- | --- | --- |
 | Firecracker on Linux/KVM | Strongest local microVM isolation. | Requires `/dev/kvm` and Linux host support. |
 | Apple Virtualization / libkrun | macOS development and supported non-Linux paths. | Feature parity differs by macOS version and backend. |
-| Docker fallback | Convenience on hosts without microVM support. | Not a microVM isolation tier. |
+| QEMU (TCG) | Linux dev/test without `/dev/kvm` (`--hypervisor qemu`). | Tier 2 dev/test; larger TCB, partial verified boot — not for production. |
 
 Always verify the active posture with:
 

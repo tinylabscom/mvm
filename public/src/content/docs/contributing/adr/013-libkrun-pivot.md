@@ -7,6 +7,8 @@ description: Architecture Decision Record for the cross-platform microVM pivot �
 
 Proposed. Implementation tracked in [Plan 60](https://github.com/tinylabscom/mvm/blob/main/specs/plans/60-mvm-libkrun-migration.md). Phase 0 + Phase 1 deliver the build/exec pivot; subsequent phases compose on top.
 
+> **Note (superseded in part):** `DockerBackend` (item 5 below) was not adopted — Docker was removed as a backend; the no-`/dev/kvm` path is the dev/test QEMU backend (`--hypervisor qemu`).
+
 ## Invariant — host does not need Nix
 
 `mvmctl` runs on a stock host. **Nix is not a prerequisite.** On first build, mvm bootstraps a small Linux builder microVM (libkrun-backed), runs `nix build` inside it, and extracts the resulting rootfs to the host. The runtime path stays Nix-free; the builder path keeps Nix inside the sandbox where it belongs.

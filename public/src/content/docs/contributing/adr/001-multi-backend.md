@@ -7,6 +7,8 @@ description: Architecture Decision Record for supporting multiple VM backends wi
 
 Accepted (updated Sprint 38 -- expanded from Firecracker-only to multi-backend)
 
+> **Note (superseded in part):** the Docker and Cloud Hypervisor backends described below were later removed — mvm has no container fallback and no Tier 3 (see the [Matryoshka model](/security/matryoshka/)). The no-`/dev/kvm` Linux path is now the dev/test QEMU/TCG backend (`--hypervisor qemu`).
+
 ## Context
 
 mvmctl needs VM backends for running isolated workloads across different platforms. Options considered:
