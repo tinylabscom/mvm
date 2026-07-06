@@ -20,7 +20,7 @@ with its limits.
 | --- | --- |
 | Firecracker on Linux/KVM | Strongest target for dm-verity/root hash enforcement. |
 | Apple Virtualization / libkrun | Useful microVM isolation, but verified-boot evidence differs by backend support. |
-| Docker fallback | Not a verified microVM boot path. |
+| QEMU (Linux, dev/test) | Partial verified-boot support; Tier 2 dev/test, not a production target. |
 
 Use [Matryoshka model](/security/matryoshka/) for the tier matrix before making
 a user-facing claim.

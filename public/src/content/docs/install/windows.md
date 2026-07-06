@@ -18,7 +18,6 @@ Use one of these paths today:
 
 - Run mvm on a Linux host with `/dev/kvm`.
 - Run mvm on an Apple Silicon Mac.
-- Use Docker only for non-security-sensitive experimentation, understanding that it is Tier 3 and not a microVM isolation boundary.
 
 ## Experimental: WSL2 With Nested KVM
 
@@ -41,23 +40,6 @@ sh <(curl -L https://nixos.org/nix/install) --daemon
 ```
 
 Installing host-side Nix is optional. The normal `mvmctl build` path still treats the CLI as the host control plane and the builder VM as the image build boundary. See [Builder VM](/guides/builder-vm/).
-
-## Alternative: Tier 3 Docker fallback
-
-Docker Desktop on Windows can run mvm at Tier 3. **You give up microVM isolation** — see the [Matryoshka model](/security/matryoshka) — so this path is for *non-security-sensitive* workloads only.
-
-```powershell
-# Inside a Docker Desktop linux container or WSL2 distro:
-mvmctl run --hypervisor docker --flake .
-```
-
-`mvmctl run` will print a loud warning banner naming the seven CVEs and the dropped claims. Suppress it once you've acknowledged the tier:
-
-```powershell
-$env:MVM_ACK_DOCKER_TIER = "1"
-```
-
-The Docker tier exists as a convenience, not a sandbox. If your workload involves untrusted code, AI-generated scripts, or anything you wouldn't run as your own user, switch to a supported Apple Silicon or Linux KVM host.
 
 ## What about native Windows microVMs?
 
