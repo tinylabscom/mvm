@@ -52,7 +52,7 @@ cargo install mvmctl
 
 macOS Nix can't build Linux derivations natively, and most Mac users don't have Nix installed at all. mvm handles both cases **without requiring host-side configuration**: on `mvmctl build`, the host CLI stages the selected flake as a builder job, the Linux builder VM runs `nix build`, and mvm copies the resulting kernel/rootfs artifacts back to the host cache. See [Builder VM](/guides/builder-vm/) for the full control-plane flow.
 
-The builder VM is separate from the runtime VM. After the build completes, `mvmctl up --hypervisor apple-container` boots the already-built runtime image with Apple Virtualization. The build phase and boot phase can be benchmarked separately.
+The builder VM is separate from the runtime VM. After the build completes, `mvmctl machine run --hypervisor vz` boots the already-built runtime image with Apple Virtualization. The build phase and boot phase can be benchmarked separately.
 
 ### Optional: host-side Nix for power users
 

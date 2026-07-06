@@ -33,9 +33,9 @@ cover an operation.
 Use `mvmctl` for the full local lifecycle:
 
 ```sh
-mvmctl build ./agent
-mvmctl up ./agent --name agent-dev
-mvmctl exec agent-dev -- python /work/task.py
+mvmctl machine build --flake ./agent
+mvmctl machine run --flake ./agent --name agent-dev -d
+mvmctl machine exec agent-dev -- python /work/task.py
 mvmctl machine logs agent-dev
 mvmctl machine stop agent-dev
 ```

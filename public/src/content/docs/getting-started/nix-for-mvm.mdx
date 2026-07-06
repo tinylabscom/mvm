@@ -7,7 +7,7 @@ You don't need to be a Nix expert to use mvm. This guide teaches you exactly wha
 
 ## What you're building
 
-By the end of this guide, you'll have a `flake.nix` file that tells mvm how to build a VM image containing your app. Running `mvmctl build --flake .` will produce a bootable microVM from that file.
+By the end of this guide, you'll have a `flake.nix` file that tells mvm how to build a VM image containing your app. Running `mvmctl machine build --flake .` will produce a bootable microVM from that file.
 
 Here's the end result — don't worry about understanding it yet:
 
@@ -169,7 +169,7 @@ packages.${system}.default = mvm.lib.${system}.mkGuest {
 
 `mkGuest` is the mvm function that builds a complete microVM image. It handles the kernel, init system, guest agent, networking, and drive mounting — you just describe what you want inside the VM.
 
-**`packages.${system}.default`** — this is the standard Nix way to declare a build output. `mvmctl build --flake .` looks for this by default.
+**`packages.${system}.default`** — this is the standard Nix way to declare a build output. `mvmctl machine build --flake .` looks for this by default.
 
 ## Step 5: Add packages
 
@@ -255,13 +255,14 @@ You now have a complete flake. Build and boot it with port forwarding so you can
 
 ```bash
 # Build the VM image
-mvmctl build --flake .
+mvmctl machine build --flake .
 
-# Boot with port forwarding — map host port 8080 to guest port 8080
-mvmctl up --flake . --cpus 2 --memory 1024 -p 8080:8080
+# Boot a named machine in the background, then forward host port 8080 → guest 8080
+mvmctl machine run --flake . --name hello --cpus 2 --memory 1024 -d
+mvmctl machine forward hello -p 8080:8080
 ```
 
-The `-p 8080:8080` flag forwards port 8080 on your host to port 8080 inside the microVM. Without it, the service runs but isn't accessible from outside the VM.
+`machine forward` maps port 8080 on your host to port 8080 inside the microVM. Without it, the service runs but isn't reachable from outside the VM.
 
 Once it's running, open your browser to [http://localhost:8080](http://localhost:8080). You should see:
 
@@ -277,7 +278,7 @@ mvmctl ls
 mvmctl machine logs hello -f
 
 # Forward additional ports from a running VM
-mvmctl forward hello -p 9090:9090
+mvmctl machine forward hello -p 9090:9090
 
 # Stop it
 mvmctl machine stop hello
@@ -286,9 +287,10 @@ mvmctl machine stop hello
 The first build downloads dependencies and takes a few minutes. Subsequent builds with the same `flake.lock` can be much faster because Nix reuses cached inputs and build outputs.
 
 :::tip[Run in the background]
-Add `-d` to run detached (like `docker run -d`):
+`-d` runs the machine detached (like `docker run -d`); forward ports separately:
 ```bash
-mvmctl up --flake . -d -p 8080:8080
+mvmctl machine run --flake . --name hello -d
+mvmctl machine forward hello -p 8080:8080
 ```
 :::
 
@@ -296,12 +298,13 @@ mvmctl up --flake . -d -p 8080:8080
 
 Volumes let you pass files from your host into the microVM at boot — config files, secrets, or persistent data:
 
-```bash "-v"
+```bash
 # Mount host directories into the VM
-mvmctl up --flake . -p 8080:8080 \
-    -v ./config:/mnt/config \
-    -v ./secrets:/mnt/secrets \
-    -v ./data:/mnt/data:1024
+mvmctl machine run --flake . --name hello -d \
+    --volume ./config:/mnt/config \
+    --volume ./secrets:/mnt/secrets \
+    --volume ./data:/mnt/data:1024
+mvmctl machine forward hello -p 8080:8080
 ```
 
 Inside the guest, the files appear at the mount paths:
@@ -316,9 +319,10 @@ Config and secrets are read-only by design — you don't want your app accidenta
 
 ```bash
 # Read-only config + read-write 1GB data volume
-mvmctl up --flake . -p 8080:8080 \
-    -v ./config:/mnt/config \
-    -v ./data:/mnt/data:1024
+mvmctl machine run --flake . --name hello -d \
+    --volume ./config:/mnt/config \
+    --volume ./data:/mnt/data:1024
+mvmctl machine forward hello -p 8080:8080
 ```
 
 Your service can read config and write data at runtime — no rebuild needed:
@@ -370,7 +374,7 @@ services.my-api = {
 The `env` block above is for values you're comfortable baking into the image. For secrets or per-environment config, mount a `.env` file at boot instead:
 
 ```bash
-mvmctl up --flake . -v ./secrets:/mnt/secrets
+mvmctl machine run --flake . -v ./secrets:/mnt/secrets
 ```
 
 Then source it in `preStart`:
@@ -446,7 +450,7 @@ mvm.lib.${system}.mkGuest {
 
 ## What happens when you build
 
-When `mvmctl build --flake .` runs:
+When `mvmctl machine build --flake .` runs:
 
 1. Nix reads your `flake.nix` and resolves all inputs
 2. It builds your packages and services into a root filesystem (ext4 image)

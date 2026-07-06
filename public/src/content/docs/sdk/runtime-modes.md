@@ -84,7 +84,7 @@ mvmctl run --mode live ./sandbox.py
 The CLI sets `MVM_SDK_MODE=live` and `MVM_CLI_BIN` for the child process. The SDK
 then uses the local CLI for operations such as:
 
-- `mvmctl up --up-json --detach --name <generated-id> --manifest <template>`
+- `mvmctl machine run --up-json --detach --name <generated-id> --manifest <template>`
 - `mvmctl machine fs write <vm> <path>`
 - `mvmctl proc start <vm> -- <argv>`
 - `mvmctl machine stop <vm>`

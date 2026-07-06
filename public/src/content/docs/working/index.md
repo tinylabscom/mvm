@@ -8,8 +8,8 @@ description: Local sandbox management with mvmctl.
 ## Common lifecycle
 
 ```sh
-mvmctl build ./my-app
-mvmctl up ./my-app --name agent-sandbox
+mvmctl machine build --flake ./my-app
+mvmctl machine run --flake ./my-app --name agent-sandbox -d
 mvmctl exec agent-sandbox -- python /work/task.py
 mvmctl machine logs agent-sandbox -f
 mvmctl machine stop agent-sandbox

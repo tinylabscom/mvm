@@ -10,17 +10,17 @@ Networking is part of the sandbox contract. Name what the guest can reach, name 
 Use a preset when it matches the workload:
 
 ```sh
-mvmctl up --flake . --network-preset none
-mvmctl up --flake . --network-preset registries
-mvmctl up --flake . --network-preset dev
+mvmctl machine run --flake .
+mvmctl machine run --flake . --net
+mvmctl machine run --flake . --net
 ```
 
 Use explicit allow rules for narrow agent workloads:
 
 ```sh
-mvmctl up --flake . \
-  --network-allow api.example.com:443 \
-  --network-allow github.com:443
+mvmctl machine run --flake . \
+  --allow-host api.example.com:443 \
+  --allow-host github.com:443
 ```
 
 For security-sensitive examples, start from no egress and add only required destinations.
@@ -31,8 +31,9 @@ For grant review, SDK declarations, and agent-tool policy, see [Network egress p
 Expose a guest service to the host:
 
 ```sh
-mvmctl up --flake . --name api-dev -p 8080:8080
-mvmctl forward api-dev -p 3000:3000
+mvmctl machine run --flake . --name api-dev -d
+mvmctl machine forward api-dev -p 8080:8080
+mvmctl machine forward api-dev -p 3000:3000
 ```
 
 Use readiness and logs while developing services:

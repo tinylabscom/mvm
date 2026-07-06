@@ -20,9 +20,9 @@ Use this shape for stateless calls where every invocation should start clean.
 
 ```sh
 mvmctl init ./interpreter --preset python
-mvmctl build ./interpreter
-mvmctl up ./interpreter --name interpreter
-mvmctl exec interpreter -- python /work/run_cell.py
+mvmctl machine build --flake ./interpreter
+mvmctl machine run --flake ./interpreter --name interpreter -d
+mvmctl machine exec interpreter -- python /work/run_cell.py
 ```
 
 Use a named VM when you intentionally want cached packages, files, or session

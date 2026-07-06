@@ -29,7 +29,7 @@ mvmctl run --dry-run --json -- python task.py
 ## Named VM commands
 
 ```sh
-mvmctl up ./my-app --name agent-sandbox
+mvmctl machine run --flake ./my-app --name agent-sandbox -d
 mvmctl exec agent-sandbox -- python /work/task.py
 mvmctl machine logs agent-sandbox -f
 ```

@@ -85,7 +85,7 @@ Three commands. That's the user model.
 mvmctl init                # scaffold mvm.toml + flake.nix in cwd
 $EDITOR mvm.toml           # tweak sizing / profile to taste
 mvmctl build               # discover manifest, run nix build, persist artifacts
-mvmctl up                  # boot the built microVM
+mvmctl machine run --manifest .                  # boot the built microVM
 ```
 
 Repeated edits are just edits. The next `mvmctl build` re-reads `mvm.toml` and re-runs the build. Resource changes (`vcpus`, `mem`, `data_disk`) update silently; identity changes (`flake`, `profile`) trip a drift refusal that asks you to `--force` or rename — see [Drift detection](#drift-detection) below.
@@ -114,7 +114,7 @@ until their runtime transports are implemented.
 
 ### Manifest discovery
 
-`mvmctl build`, `mvmctl up`, `mvmctl run`, `mvmctl exec`, `mvmctl info`, `mvmctl rm` all accept an optional `[PATH]` argument:
+`mvmctl build`, `mvmctl machine run`, `mvmctl run`, `mvmctl exec`, `mvmctl info`, `mvmctl rm` all accept an optional `[PATH]` argument:
 
 ```bash
 mvmctl build                              # walks up from cwd looking for mvm.toml
@@ -197,8 +197,8 @@ For running VMs (separate concern), continue to use `mvmctl ls` / `mvmctl machin
 ## Booting
 
 ```bash
-mvmctl up                            # boot from slot keyed by manifest at cwd
-mvmctl up /path/to/project           # explicit
+mvmctl machine run --manifest .                            # boot from slot keyed by manifest at cwd
+mvmctl machine run --manifest /path/to/project           # explicit
 mvmctl exec /path/to/project -- uname -a   # ephemeral one-shot
 ```
 
@@ -206,7 +206,7 @@ If no current revision exists, you get an error with a hint to run `mvmctl build
 
 ### Backend mismatch
 
-If the slot was built on Firecracker but you boot on Apple Virtualization (or vice versa), `mvmctl up` warns and proceeds when artifacts are compatible (cold-boot from rootfs); hard-errors only when the artifact shape can't be loaded.
+If the slot was built on Firecracker but you boot on Apple Virtualization (or vice versa), `mvmctl machine run` warns and proceeds when artifacts are compatible (cold-boot from rootfs); hard-errors only when the artifact shape can't be loaded.
 
 ## Local registry inspection / cleanup
 
@@ -265,8 +265,8 @@ To keep the schema small and the boundaries crisp, the following are explicitly 
 - **Build-time deps on other flakes** → flake `inputs` + `flake.lock`.
 - **Runtime deps on other VMs (lifecycle ordering, health gates)** → `mvmd` (separate repo).
 - **Per-tenant network bridges, tap names, IP allocation** → `mvmd`.
-- **Per-tenant network policy bundles** → `mvmctl up` flags or `~/.mvm/config.toml` defaults; eventually `mvmd` tenant config. The manifest only carries simple machine defaults (`net`, `allow_hosts`).
-- **Secrets / env vars at boot** → `mvmctl up`-time injection or `mvmd` instance config.
+- **Per-tenant network policy bundles** → `mvmctl machine run` flags or `~/.mvm/config.toml` defaults; eventually `mvmd` tenant config. The manifest only carries simple machine defaults (`net`, `allow_hosts`).
+- **Secrets / env vars at boot** → `mvmctl machine run`-time injection or `mvmd` instance config.
 
 ## See also
 

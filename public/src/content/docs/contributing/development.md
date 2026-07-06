@@ -251,7 +251,7 @@ just run -- image fetch minimal     # build from catalog entry
 # Named dev networks
 just run -- network create isolated # create a named network
 just run -- network list            # list all networks
-just run -- up --flake . --network isolated  # attach VM to a network
+just run -- up --flake .  # attach VM to a network
 
 # Interactive console (PTY-over-vsock, no SSH)
 just run -- console myvm            # interactive shell

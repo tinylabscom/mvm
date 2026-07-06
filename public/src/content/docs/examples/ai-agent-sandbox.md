@@ -22,8 +22,8 @@ Keep the flake pinned. Add only the packages the tool needs.
 ## Run a tool call
 
 ```sh
-mvmctl up . --name agent-tool
-mvmctl exec agent-tool -- python /work/tool.py
+mvmctl machine run --flake . --name agent-tool -d
+mvmctl machine exec agent-tool -- python /work/tool.py
 ```
 
 For one-off calls:

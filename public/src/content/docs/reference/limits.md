@@ -18,8 +18,8 @@ data_disk = "0"
 Use CLI overrides for local experimentation:
 
 ```sh
-mvmctl build ./my-app --vcpus 4 --mem 2G --data-disk 8G
-mvmctl up ./my-app --cpus 4 --memory 2G
+mvmctl machine build --flake ./my-app --vcpus 4 --mem 2G --data-disk 8G
+mvmctl machine run --flake ./my-app --cpus 4 --memory 2G
 ```
 
 Commit the manifest values once the sizing is intentional.
@@ -52,7 +52,7 @@ Network policy should start narrow and open only required destinations or
 ports. Port forwarding is explicit:
 
 ```sh
-mvmctl forward devbox -p 8080:8080
+mvmctl machine forward devbox -p 8080:8080
 ```
 
 Prefer loopback host binds for local development unless public exposure is an

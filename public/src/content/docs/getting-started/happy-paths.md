@@ -61,7 +61,7 @@ booted from it.
 
 ```bash
 mvmctl doctor --workflow cli-run                # preflight
-mvmctl up --flake . --cpus 2 --memory 1024      # build + boot
+mvmctl machine run --flake . --cpus 2 --memory 1024      # build + boot
 mvmctl machine stop --all                                     # tear down
 ```
 
@@ -76,7 +76,7 @@ source checkout); subsequent runs reuse the warm builder. Skip the
   owns Nix; the host doesn't need it.
 - `dev VM not running — run mvmctl dev up to verify` → that's just
   doctor telling you tool checks were skipped because the builder
-  VM is asleep. It's not a failure; `mvmctl up` boots it on
+  VM is asleep. It's not a failure; `mvmctl machine run` boots it on
   demand.
 - `disk space < N GiB` → free space on `~/.mvm/` (default cache
   location); `mvmctl cache info` shows what's there.
@@ -136,7 +136,7 @@ to launch.
 
 ```bash
 mvmctl doctor --workflow bundle-run             # preflight (no host rust needed)
-mvmctl up --bundle ./my-app.mvmpkg              # boot
+mvmctl machine check-artifact ./my-app.mvm   # verify the signed artifact before launch
 mvmctl machine stop --all                                     # tear down
 ```
 

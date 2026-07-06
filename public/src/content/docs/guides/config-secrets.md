@@ -18,7 +18,7 @@ mkdir -p /tmp/my-config /tmp/my-secrets
 echo '{"gateway": {"port": 8080}}' > /tmp/my-config/app.json
 echo 'API_KEY_REF=openai-api-key' > /tmp/my-secrets/app.env
 
-mvmctl up --manifest my-app \
+mvmctl machine run --manifest my-app \
     --volume /tmp/my-config:/mnt/config \
     --volume /tmp/my-secrets:/mnt/secrets
 ```
@@ -56,7 +56,7 @@ let config = FlakeRunConfig {
 
 ## Managed Secrets
 
-`mvmctl up --secret` has been removed.
+`mvmctl machine run` has no `--secret` flag (removed).
 
 Use `mvmctl secret put` to store local secret refs, then bind those refs
 through `mvm.toml` or the SDKs. That is the supported path for managed
@@ -92,12 +92,11 @@ worked LLM-agent example showing the pattern end-to-end.
 ### Running with host-mounted config and secrets
 
 ```bash
-mvmctl build ./openclaw
-mvmctl up ./openclaw --name oc \
-    -v nix/examples/openclaw/config:/mnt/config \
-    -v nix/examples/openclaw/secrets:/mnt/secrets \
-    -p 3000:3000
-mvmctl forward my-vm 3000:3000
+mvmctl machine build --flake ./openclaw
+mvmctl machine run --flake ./openclaw --name oc -d \
+    --volume nix/examples/openclaw/config:/mnt/config \
+    --volume nix/examples/openclaw/secrets:/mnt/secrets
+mvmctl machine forward oc -p 3000:3000
 ```
 
 Each `-v` flag mounts a host directory as an ext4 drive read-only by
@@ -121,10 +120,10 @@ cat > /tmp/my-secrets/secret-refs.env << 'EOF'
 ANTHROPIC_API_KEY_REF=anthropic-api-key
 EOF
 
-mvmctl up ./openclaw --name oc \
-    -v /tmp/oc-config:/mnt/config \
-    -v /tmp/oc-secrets:/mnt/secrets \
-    -p 3000:3000
+mvmctl machine run --flake ./openclaw --name oc -d \
+    --volume /tmp/oc-config:/mnt/config \
+    --volume /tmp/oc-secrets:/mnt/secrets
+mvmctl machine forward oc -p 3000:3000
 ```
 
 A typical `mkGuest` service uses `preStart` to check for
@@ -140,11 +139,11 @@ cold-booting. Published latency numbers must name the backend, host, artifact,
 and readiness boundary.
 
 ```bash
-mvmctl build ./openclaw --snapshot
-mvmctl up ./openclaw --name oc \
-    -v nix/examples/openclaw/config:/mnt/config \
-    -v nix/examples/openclaw/secrets:/mnt/secrets \
-    -p 3000:3000
+mvmctl machine build --flake ./openclaw --snapshot
+mvmctl machine run --flake ./openclaw --name oc -d \
+    --volume nix/examples/openclaw/config:/mnt/config \
+    --volume nix/examples/openclaw/secrets:/mnt/secrets
+mvmctl machine forward oc -p 3000:3000
 ```
 
 When restoring from a snapshot with `-v` mounts, the guest agent
@@ -170,21 +169,21 @@ keys:
 
 ```bash
 # Production gateway with prod Anthropic key
-mvmctl up --manifest openclaw --name oc-prod \
-    -v ./prod/config:/mnt/config \
-    -v ./prod/secrets:/mnt/secrets \
-    -p 3000:3000
+mvmctl machine run --manifest openclaw --name oc-prod \
+    --volume ./prod/config:/mnt/config \
+    --volume ./prod/secrets:/mnt/secrets
+mvmctl machine forward oc-prod -p 3000:3000
 
 # Staging gateway with test key
-mvmctl up --manifest openclaw --name oc-staging \
-    -v ./staging/config:/mnt/config \
-    -v ./staging/secrets:/mnt/secrets \
-    -p 3001:3000
+mvmctl machine run --manifest openclaw --name oc-staging \
+    --volume ./staging/config:/mnt/config \
+    --volume ./staging/secrets:/mnt/secrets
+mvmctl machine forward oc-staging -p 3001:3000
 
 # Dev gateway with no key (localhost-only testing)
-mvmctl up --manifest openclaw --name oc-dev \
-    -v ./dev/config:/mnt/config \
-    -p 3002:3000
+mvmctl machine run --manifest openclaw --name oc-dev \
+    --volume ./dev/config:/mnt/config
+mvmctl machine forward oc-dev -p 3002:3000
 ```
 
 All three restore from the same snapshot (1-2 second boot) but get

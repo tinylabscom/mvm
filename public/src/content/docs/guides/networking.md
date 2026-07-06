@@ -27,14 +27,13 @@ On Linux with `/dev/kvm`, Firecracker boots directly on the host — no VM hop. 
 
 ## Port Forwarding
 
-Forward guest ports to the host with `-p`:
+`machine run` does not publish ports directly. Boot a named machine, then map
+guest ports to the host with `machine forward`:
 
 ```bash
-mvmctl up --flake . -p 8080:8080
-mvmctl up --flake . -p 3000:3000 -p 8080:8080   # multiple ports
-
-# Or forward after boot
-mvmctl forward my-vm -p 3000:3000
+mvmctl machine run --flake . --name my-vm -d
+mvmctl machine forward my-vm -p 8080:8080
+mvmctl machine forward my-vm -p 3000:3000 -p 8080:8080   # multiple ports
 ```
 
 ## vsock Communication
@@ -48,7 +47,7 @@ MicroVMs don't use networking for host communication -- they use **vsock**:
 The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, Apple Container, and microvm.nix backends. Docker uses a unix socket instead.
 
 For Firecracker, the host-side vsock UDS is scoped to the running VM directory:
-`<vm-dir>/runtime/v.sock`. It is not a global or master socket. `mvmctl up`
+`<vm-dir>/runtime/v.sock`. It is not a global or master socket. `mvmctl machine run`
 reserves the VM name before launch and rejects duplicate active/reserved names,
 because that name is the identity used to resolve the per-VM communication
 channel.
@@ -65,53 +64,42 @@ For debugging dev builds, use `mvmctl machine logs <name>` to view guest console
 
 ## Network Policies
 
-By default, microVMs have unrestricted internet access via NAT. Use `--network-preset` or `--network-allow` to restrict outbound traffic:
-For a deny-first review workflow, see [Network egress policy](/guides/network-egress-policy/).
+By default, a workload gets **no outbound network** (deny-all egress). Opt in
+with `--net` (broad dev egress) or narrow to specific hosts with `--allow-host
+HOST[:PORT]` (repeatable; `--allow-host` wins over `--net`). For a deny-first
+review workflow, see [Network egress policy](/guides/network-egress-policy/).
 
 ```bash
-# Built-in presets
-mvmctl up --flake . --network-preset dev          # GitHub, npm, PyPI, crates.io, OpenAI, Anthropic
-mvmctl up --flake . --network-preset registries    # Package registries only
-mvmctl up --flake . --network-preset none          # No outbound (DNS only)
+# Broad dev egress (DNS + general outbound)
+mvmctl machine run --flake . --net
 
-# Explicit allowlist
-mvmctl up --flake . \
-    --network-allow github.com:443 \
-    --network-allow api.openai.com:443
+# Narrow allowlist — only these hosts (PORT defaults to 443)
+mvmctl machine run --flake . \
+    --allow-host github.com:443 \
+    --allow-host api.openai.com:443
 ```
 
-Network policies are enforced via iptables FORWARD rules on the bridge interface (Firecracker backend on Linux). DNS (port 53) is always allowed so domain resolution works. Rules are automatically cleaned up when the VM stops. On macOS backends, policies are enforced at the host-side TSI/vmnet layer rather than via iptables.
+Network policies are enforced via iptables FORWARD rules on the bridge interface (Firecracker backend on Linux). DNS (port 53) is always allowed so domain resolution works. Rules are automatically cleaned up when the VM stops. On macOS backends, policies are enforced at the host-side layer rather than via iptables.
 
-**Built-in presets:**
+## Security Profiles
 
-| Preset | Allowed Domains |
-|--------|----------------|
-| `unrestricted` | All traffic (default) |
-| `dev` | github.com, api.github.com, registry.npmjs.org, crates.io, static.crates.io, index.crates.io, pypi.org, files.pythonhosted.org, api.openai.com, api.anthropic.com |
-| `registries` | registry.npmjs.org, crates.io, static.crates.io, index.crates.io, pypi.org, files.pythonhosted.org |
-| `none` | No outbound traffic (DNS only) |
-
-## Seccomp Profiles
-
-Restrict the syscalls available inside the microVM with `--seccomp`:
+Pick the guest's security posture with `--profile`. It governs env injection and
+host-share permissions, and selects the seccomp posture applied inside the guest:
 
 ```bash
-mvmctl up --flake . --seccomp standard    # File ops + process control (no sockets)
-mvmctl up --flake . --seccomp network     # Standard + socket syscalls
-mvmctl up --flake . --seccomp minimal     # Signals, pipes, timers only
+mvmctl machine run --flake . --profile restrictive   # no env injection, no host shares
+mvmctl machine run --flake . --profile standard      # explicit env; read-only host shares (default)
+mvmctl machine run --flake . --profile dev           # dev ergonomics: explicit env + writable host shares
 ```
 
-The seccomp manifest is written to the config drive as `seccomp.json` for the guest init to apply via `prctl(PR_SET_SECCOMP)`. Tiers are cumulative — each includes all syscalls from lower tiers.
+The resolved profile is copied into the signed `ExecutionPlan` admission record — audit/provenance data binding the declared workload intent to the chosen posture, policy refs, secret-release posture, and audit labels — so `mvmctl trust audit verify` can prove which posture was admitted.
 
-The same tier is also copied into the signed `ExecutionPlan` admission profile. That profile is audit/provenance data: it binds the declared workload intent to the chosen seccomp tier, policy refs, secret-release posture, and audit labels. The actual syscall enforcement remains the guest seccomp manifest generated from `mvm-security`; the plan-side tier exists so `mvmctl audit verify` can prove which posture was admitted.
-
-| Tier | Syscalls | Use Case |
-|------|----------|----------|
-| `essential` | ~40 | Process bootstrap only (linker, glibc init) |
-| `minimal` | ~110 | + signals, pipes, timers, process control |
-| `standard` | ~140 | + file manipulation, fs operations |
-| `network` | ~160 | + sockets, connect, bind (for networked agents) |
-| `unrestricted` | all | No restrictions (default) |
+| Profile | Env injection | Host shares |
+|---------|---------------|-------------|
+| `restrictive` | none | none |
+| `standard` (default) | explicit `-e KEY=VALUE` | read-only |
+| `dev` | explicit `-e KEY=VALUE` | read-write allowed |
+| `permissive` | explicit | read-write (requires `MVM_ACK_PERMISSIVE_RUN=1`) |
 
 ## DNS
 

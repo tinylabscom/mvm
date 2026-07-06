@@ -20,7 +20,7 @@ mvmctl init my-worker --preset worker
 cd my-worker
 $EDITOR mvm.toml
 mvmctl build
-mvmctl up
+mvmctl machine run --manifest .
 ```
 
 The build produces a manifest-keyed slot in the local registry. Subsequent

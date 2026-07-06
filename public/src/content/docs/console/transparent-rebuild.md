@@ -16,9 +16,9 @@ workspace state remains available.
 
 ```sh
 $EDITOR flake.nix
-mvmctl build ./my-app
+mvmctl machine build --flake ./my-app
 mvmctl machine stop devbox
-mvmctl up ./my-app --name devbox
+mvmctl machine run --flake ./my-app --name devbox -d
 mvmctl machine console devbox
 ```
 

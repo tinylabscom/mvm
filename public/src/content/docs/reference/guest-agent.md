@@ -104,7 +104,7 @@ payload bytes. The list is the authoritative one:
   unit tests pin this.
 - `BackpressureReason::ServiceHealthPending { pending }` — service
   names only.
-- Receipts written by `mvmctl run` / `mvmctl up` / `mvmctl build`
+- Receipts written by `mvmctl run` / `mvmctl machine run` / `mvmctl build`
   (plan 74 W6) store hashes and metadata. Raw stdout / stderr /
   stdin / env / argv values are never written.
 - `mvmctl ls --json` rows — the `readiness` and
@@ -230,7 +230,7 @@ once a background init thread actually ran.
 
 - `mvmctl boot-report <vm> [--json]` — Single round-trip; prints
   the same `ReadinessReport` `mvmctl wait` polls, including the
-  per-phase timing table. Useful right after `mvmctl up` to
+  per-phase timing table. Useful right after `mvmctl machine run` to
   inspect cold-path latency.
 
 Both verbs require `GuestCapability::Readiness` from the

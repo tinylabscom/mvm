@@ -138,10 +138,10 @@ Running `mvmctl dev` or `mvmctl bootstrap` also handles setup automatically -- t
 You can force a specific backend with `--hypervisor`:
 
 ```bash
-mvmctl up --flake . --hypervisor firecracker  # Linux KVM
-mvmctl up --flake . --hypervisor vz           # macOS 26+ Apple Silicon
-mvmctl up --flake . --hypervisor libkrun      # macOS 13–25 Apple Silicon
-mvmctl up --flake . --hypervisor qemu         # microvm.nix — dev/test only
+mvmctl machine run --flake . --hypervisor firecracker  # Linux KVM
+mvmctl machine run --flake . --hypervisor vz           # macOS 26+ Apple Silicon
+mvmctl machine run --flake . --hypervisor libkrun      # macOS 13–25 Apple Silicon
+mvmctl machine run --flake . --hypervisor qemu         # microvm.nix — dev/test only
 ```
 
 Use `mvmctl doctor` to check which backends are available on your system.
