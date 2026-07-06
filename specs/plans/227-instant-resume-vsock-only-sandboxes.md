@@ -114,6 +114,7 @@ Blocked on WS-B completion (last NIC user gone):
 ### WS-F — Facade completeness (every frontend, one surface)
 
 - [ ] **F1 (trait):** add to `MvmClient`: `pause_machine`, `resume_machine`, `snapshot_machine(SnapshotSpec) -> SnapshotId`, `restore_machine(SnapshotId, RestoreOpts)`, `fork_machine(SnapshotId, n)`, `wait_machine_ready`, plus fix `exec_machine` (buffered exec) on Local + Gateway; `create/start` land on Local via the machine-spec registry.
+- [ ] **F1a (snapshot as a first-class noun):** snapshots are durable, listable artifacts, not just verb side-effects: `list_snapshots(MachineFilter) -> Vec<SnapshotState>`, `inspect_snapshot(SnapshotId)`, `delete_snapshot(SnapshotId)` on the trait, with a typed `SnapshotState` DTO (id, source machine, created-at, size, backend kind, envelope digest, lineage/parent). Every frontend needs this (studio lists them, mvmd GCs them, CLI grows `machine snapshot ls/rm`); retention/GC policy is enforced host-side, surfaced through the same ops.
 - [ ] **F2 (impls):** LocalBackend delegates to `mvm_backend::checkpoint`/backend verbs; GatewayBackend maps to mvmd-gateway REST (`/snapshots`, `/pause`, `/resume`, …) — coordinate DTOs (Plan 216 S5).
 - [ ] **F3 (CLI through facade):** revive Plan 216 S2 — `mvmctl machine` verbs consume LocalBackend, so CLI/SDK/studio/mvmd can no longer drift; the `vm pause/resume/checkpoint` family folds into `machine` verbs routed through the trait.
 - [ ] **F4 (conformance):** extend `sdks/machine-fixtures/*.argv` + facade conformance tests to the new ops so all surfaces stay pinned.
