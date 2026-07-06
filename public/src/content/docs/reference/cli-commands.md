@@ -193,6 +193,7 @@ fail honestly instead of emitting fake numbers.
 | `mvmctl ops bench microvm-launch --baseline <path> --max-regression-pct <pct>` | Compare serial median `total_ready_ms` against a comparable baseline and fail if it regresses beyond the threshold. |
 | `mvmctl ops bench microvm-density --count K --max-count M` | Boot and hold `K` admitted libkrun probe VMs, sample each supervisor/VMM process footprint, and report total plus per-instance bytes. `--max-count` is a safety cap (default 16). |
 | `mvmctl ops bench microvm-density --out <path> --json` | Write the density JSON report and optionally print it to stdout. Linux samples PSS from `/proc/<pid>/smaps_rollup`; macOS samples `phys_footprint` through `proc_pid_rusage`. |
+| `mvmctl ops bench overall --hypervisor <backend>` | Holistic benchmark: cold boot + snapshot save + snapshot restore + live migration + shutdown. The report prints per-phase milliseconds and total latency. See the [Performance](/reference/performance/) page for target numbers and automation hooks. |
 
 ## Audit
 
