@@ -4,6 +4,7 @@ mod bundle;
 mod catalog;
 mod cmd_audit;
 mod deps;
+mod dispatch;
 mod env;
 mod image;
 mod machine;
@@ -30,6 +31,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use std::sync::Arc;
 
 use crate::logging::{self, LogFormat};
+use dispatch::TopLevelCommand;
 
 use shared::{CHILD_PIDS, IN_CONSOLE_MODE, with_hints};
 
@@ -179,24 +181,46 @@ pub fn cli_command() -> clap::Command {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    apply_startup_env(&cli);
+    register_inhouse_builder();
+    configure_runtime_logging(&cli);
 
-    // Apply FC version override before anything reads it.
-    // SAFETY: called once at startup before any threads are spawned.
+    if let Some(result) = cli.command.try_run_early() {
+        return result;
+    }
+
+    if cli.command.emits_machine_readable_stdout() {
+        mvm::ui::set_chrome_to_stderr(true);
+    }
+
+    install_signal_handler();
+    maybe_converge_on_entry(&cli.command);
+
+    let cfg = mvm_core::user_config::load(None);
+    let cmd_recorder = cmd_audit::build_cmd_recorder();
+    let verb = cli.command.verb_name();
+    cmd_audit::emit_cmd_invoked(cmd_recorder.as_ref(), verb);
+
+    let result = cli.command.clone().run(&cli, &cfg);
+
+    cmd_audit::emit_cmd_outcome(cmd_recorder.as_ref(), verb, &result);
+
+    with_hints(result)
+}
+
+fn apply_startup_env(cli: &Cli) {
     if let Some(ref version) = cli.fc_version {
         unsafe { std::env::set_var("MVM_FC_VERSION", version) };
     }
-
-    // Apply builder-backend override before any subcommand reads it.
-    // Plumbing the flag through every call site that consults
-    // `resolve_builder_backend()` would touch a lot of files for
-    // little value; setting the env here makes the existing env-var
-    // dispatch in `mvm_build::builder_backend_select` honour the
-    // flag transparently. Same single-threaded-startup invariant as
-    // the `fc_version` block above.
     if let Some(ref backend) = cli.builder {
         unsafe { std::env::set_var("MVM_BUILDER_BACKEND", backend) };
     }
+    if let Some(ref source) = cli.kernel_source {
+        unsafe { std::env::set_var("MVM_KERNEL_SOURCE", source) };
+    }
+}
 
+fn register_inhouse_builder() {
     // Wire the HVF builder constructor so that
     // `mvm_build::builder_backend_select` can create it when the
     // resolved choice is `BuilderBackendChoice::Hvf`. This is a
@@ -213,35 +237,16 @@ pub fn run() -> Result<()> {
             )) as Box<dyn mvm_build::builder_vm::BuilderVm>,
         )
     }));
+}
 
-    // Kernel-acquisition override for the builder VM image bootstrap.
-    // Read by `resolve_kernel_source()` in the Stage 0 path. Same
-    // single-threaded-startup invariant as the blocks above.
-    if let Some(ref source) = cli.kernel_source {
-        unsafe { std::env::set_var("MVM_KERNEL_SOURCE", source) };
-    }
-
-    // Verbose `[mvm]` chatter: explicit flag, or any RUST_LOG set.
+fn configure_runtime_logging(cli: &Cli) {
     let verbose = cli.verbose > 0 || std::env::var_os("RUST_LOG").is_some();
     mvm::ui::set_verbose(verbose);
-
-    // Propagate the chosen verbosity to spawned child processes (drainer,
-    // supervisor, …) which read RUST_LOG. Only when the user asked for more
-    // than the quiet default and hasn't set RUST_LOG themselves.
-    // SAFETY: set at startup before any worker threads are spawned.
     if cli.verbose > 0 && std::env::var_os("RUST_LOG").is_none() {
         unsafe {
             std::env::set_var("RUST_LOG", logging::filter_for_verbosity(cli.verbose));
         }
     }
-
-    // Initialize logging.
-    //
-    // The MCP stdio subcommand needs *exclusive* control of stdout so
-    // JSON-RPC framing isn't corrupted by stray log lines (stdout-only
-    // JSON-RPC discipline). Skip the default `logging::init` (which installs
-    // a stdout-writing subscriber) for `mvmctl mcp` and let
-    // `mvm_mcp::init_stderr_tracing` install its own stderr-only one.
     let log_format = match cli.log_format.as_deref() {
         Some("json") => LogFormat::Json,
         Some("human") => LogFormat::Human,
@@ -254,45 +259,20 @@ pub fn run() -> Result<()> {
         }
         None => LogFormat::Human,
     };
-    // `mvmctl ops mcp` needs stdout reserved for JSON-RPC framing — skip the
-    // default stdout subscriber and let `mvm_mcp` install its stderr-only one.
     let is_mcp = matches!(&cli.command, Commands::Ops(a) if a.action.is_mcp());
     if !is_mcp {
         logging::init(log_format, cli.verbose);
     }
+}
 
-    // The internal QEMU vsock bridge is a detached, long-running helper
-    // (spawned by `mvm_backend::qemu`), not a user command.
-    // Short-circuit before the ctrl-c handler, operator-config
-    // load, and the cmd-audit envelope — none of which apply to it.
-    if let Commands::QemuVsockBridge(a) = &cli.command {
-        return qemu_bridge::run(a);
-    }
-    if let Commands::SshAgentProxy(a) = &cli.command {
-        return ssh_agent_proxy::run(a);
-    }
-
-    // Commands that promise a machine-readable stdout payload must reserve
-    // stdout before any pre-dispatch side effects (notably reconcile-on-entry
-    // and dev-VM hints) can emit friendly `[mvm]` chrome.
-    if cli.command.emits_machine_readable_stdout() {
-        mvm::ui::set_chrome_to_stderr(true);
-    }
-
-    // Install Ctrl-C / SIGTERM handler for graceful shutdown.
+fn install_signal_handler() {
     let pids = Arc::clone(&CHILD_PIDS);
     if let Err(e) = ctrlc::set_handler(move || {
-        // In console mode, Ctrl-C is forwarded as a raw byte to the guest.
         if IN_CONSOLE_MODE.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
         eprintln!("\nInterrupted, cleaning up...");
-        // Handle registry: walk Attached-mode libkrun VMs and
-        // gracefully stop each. Best-effort; failures get logged. Runs
-        // before the child-pid sweep so SIGTERM-on-children doesn't
-        // race the sandbox's own teardown ordering.
         let _ = mvm_backend::handle_registry::stop_all_attached();
-        // Kill any tracked child processes (e.g., socat port-forwarders).
         if let Ok(pids) = pids.lock() {
             for &pid in pids.iter() {
                 unsafe {
@@ -304,63 +284,6 @@ pub fn run() -> Result<()> {
     }) {
         tracing::warn!("failed to install signal handler: {e}");
     }
-
-    // Reconcile-on-entry convergence. For any
-    // state-touching command, cheaply (registry read + pid-liveness stat
-    // only) heal registry/runtime drift before dispatch, so stale records
-    // self-heal instead of surfacing as a confusing failure three layers
-    // down. Fail-open: `converge` never returns an error and we drop the
-    // report — `mvmctl reconcile` is the observable entry point.
-    // `MVM_SKIP_RECONCILE=1` opts out (never set in CI).
-    maybe_converge_on_entry(&cli.command);
-
-    // Load operator config once; used as fallback for dev_vm_cpus, dev_vm_mem_gib, cpus, memory.
-    let cfg = mvm_core::user_config::load(None);
-
-    // Wrap dispatch in cmd.<verb>.{invoked,completed,failed}
-    // audit envelope. Best-effort: a recorder failure logs a warning and the
-    // command runs without cmd-level audit.
-    let cmd_recorder = cmd_audit::build_cmd_recorder();
-    let verb = cli.command.verb_name();
-    cmd_audit::emit_cmd_invoked(cmd_recorder.as_ref(), verb);
-
-    let result = match cli.command.clone() {
-        Commands::Env(a) => env::group::run(&cli, a, &cfg),
-        Commands::Bootstrap(a) => bootstrap::run(&cli, a, &cfg),
-        Commands::Dev(a) => env::dev::run(&cli, a, &cfg),
-        Commands::Ls(a) => vm::ps::run(&cli, a, &cfg),
-        Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),
-        Commands::SdkNoVm(a) => vm::sdk_no_vm::run(&a),
-        Commands::Doctor(a) => env::doctor::run(&cli, a, &cfg),
-        Commands::Build(a) => build::group::run(&cli, a, &cfg),
-        Commands::Manifest(a) => manifest::run(&cli, a, &cfg),
-        Commands::Image(a) => image::run(&cli, a, &cfg),
-        Commands::Machine(a) => machine::run(&cli, a, &cfg),
-        Commands::Storage(a) => storage::run(&cli, a, &cfg),
-        Commands::ShellInit(a) => env::shell_init::run(&cli, a, &cfg),
-        Commands::Ops(a) => ops::group::run(&cli, a, &cfg),
-        Commands::Network(a) => ops::network::run(&cli, a, &cfg),
-        Commands::Catalog(a) => catalog::run(&cli, a, &cfg),
-        Commands::Cache(a) => ops::cache::run(&cli, a, &cfg),
-        Commands::Pool(a) => pool::run(&cli, a, &cfg),
-        Commands::Reconcile(a) => ops::reconcile::run(&cli, a, &cfg),
-        Commands::Init(a) => env::init::run(&cli, a, &cfg),
-        Commands::Secret(a) => ops::secret::run(&cli, a, &cfg),
-        Commands::Bundle(a) => bundle::run(&cli, a, &cfg),
-        Commands::Trust(a) => trust::run(&cli, a, &cfg),
-        Commands::Deps(a) => deps::run(&cli, a, &cfg),
-        Commands::Artifact(a) => vm::artifact::run(&cli, a, &cfg),
-        #[cfg(feature = "builder-vm")]
-        Commands::PersistentBuilder(a) => build::persistent_builder::run(&cli, a),
-        // Handled by the early return above (before ctrl-c / config /
-        // cmd-audit setup); this arm only satisfies match exhaustiveness.
-        Commands::QemuVsockBridge(_) => unreachable!("qemu vsock bridge short-circuits in run()"),
-        Commands::SshAgentProxy(_) => unreachable!("ssh-agent proxy short-circuits in run()"),
-    };
-
-    cmd_audit::emit_cmd_outcome(cmd_recorder.as_ref(), verb, &result);
-
-    with_hints(result)
 }
 
 /// Run the cheap reconcile-on-entry convergence for state-touching

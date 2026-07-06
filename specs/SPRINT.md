@@ -32,6 +32,8 @@ plan 25 sequences the work into six independently-shippable workstreams.
 > given sprint's own section for its live status; the table below is the current
 > workspace snapshot, not Sprint 42's.
 
+- [x] 2026-07-06 internal `mvm-cli` modularity cleanup: `commands::run()` now delegates startup sequencing to small helpers and command execution to a trait-backed dispatcher in `crates/mvm-cli/src/commands/dispatch.rs`, and `crates/mvm-cli/src/commands/image/trust.rs` now owns the OCI registry-auth / cosign trust helpers previously in `image/mod.rs`. Validation used `MVM_SKIP_EMBED_BINARIES=1` for local dev-only build-script bypass: `cargo fmt --all`, targeted `cargo test -p mvm-cli --lib commands::tests::internal_helper_commands_short_circuit_before_startup_side_effects`, and `cargo clippy -p mvm-cli --all-targets -- -D warnings` green.
+
 | Metric           | Value                                  |
 | ---------------- | -------------------------------------- |
 | Version          | v0.16.1                                |
