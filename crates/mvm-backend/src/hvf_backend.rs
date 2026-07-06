@@ -216,7 +216,7 @@ impl VmBackend for HvfBackend {
         // config; the `MVM_HVF_AGENT_SOCKET` dev hook still wins for live drivers.
         let agent_socket = std::env::var_os("MVM_HVF_AGENT_SOCKET")
             .map(PathBuf::from)
-            .unwrap_or_else(|| state_dir.join("hvf-agent.sock"));
+            .unwrap_or_else(|| mvm_core::config::vm_hvf_agent_socket(&config.name));
 
         // virtiofs-root dev boot (Plan-223 tier gate): serve the unpacked+injected
         // tree read-only over virtio-fs; no block rootfs is attached.
