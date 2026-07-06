@@ -286,19 +286,19 @@ mvmctl machine run --flake . --hypervisor qemu    # dev/test, no /dev/kvm
 mvmctl doctor   # check available backends
 ```
 
-### macOS: first-run codesigning for `vz` and `libkrun`
+### macOS: first-run codesigning for `hvf`, `vz`, and `libkrun`
 
-Both `mvmctl machine run --hypervisor vz` and (once plan 57 W3 wires guest boot) `mvmctl machine run --hypervisor libkrun` need ad-hoc codesigning before the macOS kernel will let the binary touch the hypervisor APIs:
+The macOS backends — `hvf` (the default), `vz`, and `libkrun` — need ad-hoc codesigning before the macOS kernel will let the binary touch the hypervisor APIs:
 
 - `com.apple.security.virtualization` — required by `Virtualization.framework` (the `vz` backend).
-- `com.apple.security.hypervisor` — required by direct `Hypervisor.framework` callers (the `libkrun` backend).
+- `com.apple.security.hypervisor` — required by direct `Hypervisor.framework` callers (the `hvf` and `libkrun` backends).
 
-On the **first** run of either backend, `mvmctl` ad-hoc signs itself with both entitlements and re-spawns the current invocation. The same signed binary covers both backends, so swapping `--hypervisor` between `vz` and `libkrun` does not re-sign.
+On the **first** run of either backend, `mvmctl` ad-hoc signs itself with both entitlements and re-spawns the current invocation. The same signed binary covers both backends, so swapping `--hypervisor` between `hvf`, `vz`, and `libkrun` does not re-sign.
 
 What you'll see on the first run:
 
 ```
-$ mvmctl machine run --flake . --hypervisor vz
+$ mvmctl machine run --flake . --hypervisor hvf
 INFO Signing binary with virtualization + hypervisor entitlements...
 …starts the VM…
 ```

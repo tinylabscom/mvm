@@ -32,7 +32,7 @@ genuinely backend-specific:
 | Backend | Selection mode | Notes |
 |---------|----------------|-------|
 | Firecracker | Auto on Linux with native KVM | Production Tier 1 backend |
-| Vz | Auto on supported macOS 26+ hosts | Preferred macOS local backend when available |
+| HVF | Auto on supported macOS 26+ hosts | Preferred macOS local backend (Hypervisor.framework, vsock-only) |
 | libkrun | Auto fallback on supported hosts | Fast local Tier 2 backend |
 | Vz | Explicit opt-in (`--hypervisor vz`) | Supported, but not auto-selected |
 | QEMU | Explicit opt-in (`--hypervisor qemu`) | Linux dev/test backend |
@@ -202,7 +202,7 @@ operations. It is not the same thing as the selected workload runtime backend.
 | Host platform | Default runtime path |
 |---------------|----------------------|
 | Linux with native KVM | Firecracker |
-| Supported macOS 26+ host | Vz |
+| Supported macOS 26+ host | HVF |
 | Supported host with libkrun available | libkrun |
 
 Other backends such as Vz and QEMU exist, but they are selected explicitly rather than by

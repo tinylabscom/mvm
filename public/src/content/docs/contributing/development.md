@@ -18,7 +18,7 @@ VMM:
 
 | Host | libkrun (`slp/krun/*`) needed? |
 |---|---|
-| macOS 26+ Apple Silicon | **No** — auto-detect picks the **Vz** backend (Apple Virtualization.framework, ships with the OS). `mvmctl dev up` only retries libkrun if the Vz path fails. |
+| macOS 26+ Apple Silicon | **No** — auto-detect picks the **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps). `mvmctl dev up` only retries libkrun if the HVF path fails. |
 | macOS 13–25 Apple Silicon | **Yes** — `brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy`. |
 | Linux + `/dev/kvm` | **No** — Firecracker runs directly. Swap `gvproxy` for `passt` from your distro package manager. |
 
@@ -99,7 +99,7 @@ Notes:
   which builds both on native runners — fetch it with `--source
   download` once a release ships it.
 - On macOS the compile arm needs the libkrun trio (`slp/krun/*`), since
-  Stage 0 is libkrun-backed even on Vz-default hosts.
+  Stage 0 is libkrun-backed even on HVF-default hosts.
 - Editing `base.nix` or a variant delta? Just re-run the command — a
   custom config always compiles locally; downloads only ever return the
   kernel that shipped with that exact `mvmctl` release. See ADR-046

@@ -10,7 +10,8 @@ Networking differs by backend:
 | Backend | Network Type | Guest IP | Host Access |
 |---------|-------------|----------|-------------|
 | Firecracker (Linux native) | TAP device | 172.16.0.2/30 | Direct via TAP |
-| Vz | vmnet | DHCP-assigned | Via vmnet bridge |
+| HVF (macOS 26+, default) | vsock-only | — | Guest I/O over vsock; no guest NIC |
+| Vz (macOS 26+, opt-in) | vmnet | DHCP-assigned | Via vmnet bridge |
 | libkrun (macOS) | TSI (transparent socket impl) | host-loopback | Via per-port vsock listeners |
 | microvm.nix | TAP device | 172.16.0.2/30 | Direct via TAP |
 
@@ -22,7 +23,7 @@ Firecracker microVM (172.16.0.2/30, eth0)
 Linux host (172.16.0.1/30, tap0)  --  iptables NAT  --  internet
 ```
 
-On Linux with `/dev/kvm`, Firecracker boots directly on the host — no VM hop. The TAP device connects the microVM to the host network namespace and gets NAT'd to the internet. On macOS hosts, networking is backend-specific: Vz uses vmnet bridge mode; libkrun uses TSI (transparent socket impl) where outbound TCP/UDP appears as host-side socket calls.
+On Linux with `/dev/kvm`, Firecracker boots directly on the host — no VM hop. The TAP device connects the microVM to the host network namespace and gets NAT'd to the internet. On macOS hosts, networking is backend-specific: the default HVF backend is vsock-only (guest I/O crosses vsock, no guest NIC); Vz (opt-in) uses vmnet bridge mode; libkrun uses TSI (transparent socket impl) where outbound TCP/UDP appears as host-side socket calls.
 
 ## Port Forwarding
 
@@ -43,7 +44,7 @@ MicroVMs don't use networking for host communication -- they use **vsock**:
 |------|----------|---------|
 | 5252 | Length-prefixed JSON | Guest agent (health checks, status, snapshot lifecycle) |
 
-The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, Vz, and microvm.nix backends.
+The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, HVF, Vz, and microvm.nix backends.
 
 For Firecracker, the host-side vsock UDS is scoped to the running VM directory:
 `<vm-dir>/runtime/v.sock`. It is not a global or master socket. `mvmctl machine run`

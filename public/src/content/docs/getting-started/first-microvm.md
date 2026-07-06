@@ -11,7 +11,7 @@ mvmctl auto-selects the best backend for your platform:
 
 ```
 Linux (KVM):       mvmctl machine run  -->  Firecracker microVM (direct)
-macOS 26+ (AS):    mvmctl machine run  -->  Vz microVM (Apple Virtualization.framework)
+macOS 26+ (AS):    mvmctl machine run  -->  HVF microVM (Hypervisor.framework, vsock-only)
 macOS 13-25 (AS):  mvmctl machine run  -->  libkrun microVM
 ```
 

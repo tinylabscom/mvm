@@ -56,7 +56,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run --profile <p>` | Security posture: `restrictive`, `standard` (default), `dev`, `permissive` |
 | `mvmctl machine run --net` | Enable broad dev-tier outbound egress (default is deny-all) |
 | `mvmctl machine run --allow-host HOST[:PORT]` | Allow egress only to these hosts (repeatable; PORT defaults to 443; wins over `--net`) |
-| `mvmctl machine run --hypervisor <backend>` | Backend: `firecracker` (Linux/KVM), `vz` (macOS 26+), `libkrun` (macOS 13–25), `qemu` (dev/test) |
+| `mvmctl machine run --hypervisor <backend>` | Backend: `firecracker` (Linux/KVM), `hvf` (macOS 26+ default, vsock-only), `vz` (macOS 26+ opt-in, sunsetting), `libkrun` (macOS 13–25 & Linux), `qemu` (dev/test) |
 | `mvmctl machine run --flake <ref> --flake-profile <variant>` | Flake package variant (e.g. worker, gateway) |
 | `mvmctl machine build --flake <ref> --watch` | Watch the flake and rebuild on change |
 | `mvmctl machine stop [name...]` | Stop one or more VMs by name, or `--all` |
@@ -80,8 +80,8 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl bootstrap` | Prepare the environment: host tooling **and pre-fetch the builder VM image** so the first `dev up` is fast (no first-run download/build on the hot path). `install.sh` runs this automatically unless `MVM_SKIP_BUILDER_PREFETCH=1`. Idempotent — safe to re-run |
 | `mvmctl bootstrap --production` | Production mode (skip Homebrew, assume Linux with apt) |
 | `mvmctl env bootstrap` | Same as `mvmctl bootstrap` (the `env`-grouped form) |
-| `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects Vz on macOS 26+ Apple Silicon and retries with libkrun when that auto-selected Vz builder path fails; native KVM is used on Linux. |
-| `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects Vz on macOS 26+ Apple Silicon and retries with libkrun when that auto-selected Vz builder path fails; native KVM is used on Linux. |
+| `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects the HVF builder on macOS 26+ Apple Silicon and retries with libkrun when the HVF builder path fails; native KVM is used on Linux. |
+| `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects the HVF builder on macOS 26+ Apple Silicon and retries with libkrun when the HVF builder path fails; native KVM is used on Linux. |
 | `mvmctl dev up --project ~/dir` | Auto-bootstrap then cd into a project directory |
 | `mvmctl dev up --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |
 | `mvmctl dev up --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
@@ -634,7 +634,7 @@ The snapshot path activates only when *all* of the following hold:
   snapshot's recorded drive layout);
 - the active backend reports snapshot support.
 
-On macOS backends without Firecracker (Vz, libkrun), vsock
+On macOS backends without Firecracker (HVF, Vz, libkrun), vsock
 snapshots return `os error 95` (EOPNOTSUPP); restore failures fall back
 to cold boot with a warning rather than aborting the exec. See the
 [Sandboxed Exec](/guides/exec/) guide for the full background.

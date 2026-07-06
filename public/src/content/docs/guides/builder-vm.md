@@ -22,7 +22,7 @@ builder VM
   v
 host artifact cache
   |
-  | mvmctl machine run --hypervisor vz
+  | mvmctl machine run --hypervisor hvf
   v
 runtime microVM
 ```
@@ -80,10 +80,10 @@ For an explicit two-step flow:
 mvmctl build --flake .
 
 # 2. Boot the already-built image.
-mvmctl machine run --flake . --hypervisor vz
+mvmctl machine run --flake . --hypervisor hvf
 ```
 
-On macOS, `--hypervisor vz` selects the Apple Virtualization runtime backend when available. The builder VM remains a build-time implementation detail. It is not the same VM as your workload VM.
+On macOS 26+ the default runtime backend is HVF (Hypervisor.framework, vsock-only); `--hypervisor vz` opts into Apple Virtualization instead. The builder VM remains a build-time implementation detail. It is not the same VM as your workload VM.
 
 For development convenience, `mvmctl run` combines the two phases:
 

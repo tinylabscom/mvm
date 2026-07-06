@@ -56,7 +56,7 @@ mvmctl run                # builds (if needed) + boots
 `mvmctl` selects the runtime backend automatically when you boot the finished image. Use `--hypervisor` on runtime commands when you want to force a specific runtime backend:
 
 ```sh
-mvmctl machine run --flake . --hypervisor vz
+mvmctl machine run --flake . --hypervisor hvf
 mvmctl machine run --flake . --hypervisor firecracker
 ```
 
@@ -202,7 +202,7 @@ nix flake check --no-build
 mvm runs Nix builds inside the project builder VM and copies the finished kernel/rootfs artifacts back to the host cache. You don't need host-side Nix, and you don't need to enter a dev shell before building.
 
 - **Linux**: the builder VM provides the Linux build boundary and cache policy. Firecracker is the default runtime backend when `/dev/kvm` is available.
-- **macOS**: the host `mvmctl build` command orchestrates a Linux builder VM. The resulting runtime image can then boot with Apple Virtualization (`--hypervisor vz`) or another available macOS runtime backend.
+- **macOS**: the host `mvmctl build` command orchestrates a Linux builder VM. The resulting runtime image boots on the HVF backend by default on macOS 26+; `--hypervisor vz` opts into Apple Virtualization instead.
 - **Windows**: Tauri-only (the `mvm-studio` desktop app packages a WSL2-backed builder + runtime). See [ADR-031](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/031-cross-platform-strategy.md).
 
 ## Rootless workloads
