@@ -312,14 +312,28 @@ impl MvmClient for LocalBackend {
         self.backend.stop(&VmId(id.0.clone())).map_err(backend_err)
     }
 
-    async fn remove_machine(&self, _id: &MachineId) -> Result<()> {
-        // The backend dispatch (`AnyBackend`) exposes stop/list/status but no
-        // destroy seam, so a full remove (delete the machine record) isn't
-        // wired; that lifecycle lives on the CLI's `machine rm`.
-        Err(MvmError::Backend {
-            reason: "local remove requires a backend destroy seam (not wired); use `machine rm`"
-                .into(),
-        })
+    async fn remove_machine(&self, id: &MachineId) -> Result<()> {
+        let vid = VmId(id.0.clone());
+        // Idempotent: removing an absent machine is `Ok` (trait contract).
+        // `list` is the source of truth for what this backend can see, so an
+        // id it doesn't know is already "removed".
+        let present = self
+            .backend
+            .list()
+            .map_err(backend_err)?
+            .iter()
+            .any(|v| v.id == vid);
+        if !present {
+            return Ok(());
+        }
+        // This backend is registry-less — it drives live VMs the VMM tracks,
+        // with no persisted spec to delete (which is why `create`/`start`
+        // fail closed above). For that model `stop` *is* the removal: it tears
+        // the VM down and clears the run-state marker the VMM lists on, so the
+        // machine drops out of `list`. Idempotent on an already-stopped VM.
+        // (The CLI's `machine rm` additionally deletes a persisted machine
+        // record — a spec store this in-process backend doesn't own.)
+        self.backend.stop(&vid).map_err(backend_err)
     }
 
     async fn machine_logs(&self, id: &MachineId, opts: LogOpts) -> Result<Vec<u8>> {
@@ -437,6 +451,55 @@ mod tests {
                 .iter()
                 .any(|m| m.name == "local-boot-from-image-path")
         );
+    }
+
+    #[tokio::test]
+    async fn remove_drops_the_machine_from_list_and_is_idempotent() {
+        // Isolate the host signer + mock VM dirs under a tempdir (nextest runs
+        // each test in its own process, so the env var can't race a sibling).
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test; no other thread reads these vars.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
+        let rootfs = data.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"hashable-rootfs-bytes\n").unwrap();
+
+        let be = LocalBackend::with_hypervisor("mock");
+        let spec = MachineSpec {
+            name: "local-remove-target".into(),
+            image: rootfs.to_string_lossy().into_owned(),
+            cpus: 1,
+            memory_mib: 128,
+            env: vec![],
+        };
+        let state = be.run_machine(spec).await.expect("boot");
+        assert!(
+            be.list_machines(MachineFilter::all())
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.id == state.id),
+            "the booted machine should list before removal"
+        );
+
+        // Remove drops it from the backend's view.
+        be.remove_machine(&state.id).await.expect("remove");
+        assert!(
+            !be.list_machines(MachineFilter::all())
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.id == state.id),
+            "removed machine must not list"
+        );
+
+        // Idempotent: removing the now-absent machine, and a never-existed id,
+        // both succeed rather than erroring.
+        be.remove_machine(&state.id).await.expect("re-remove is Ok");
+        be.remove_machine(&MachineId("never-existed-xyz".into()))
+            .await
+            .expect("removing an absent machine is Ok");
     }
 
     #[test]
