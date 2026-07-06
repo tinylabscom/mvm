@@ -187,6 +187,53 @@ fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
         }
     }
 
+    // Phase A: transparent-TCP vsock egress. When the host opted in and the
+    // workload carries no bound secrets (so the substitution endpoint is NOT
+    // binding EGRESS_PORT), bind the EGRESS_PORT UDS and run the claim-10 egress
+    // server. The NIC is still attached (Phase A retains it); this is the opt-in
+    // vsock path used to live-prove egress before the NIC is removed in Phase B.
+    {
+        let opt_in = mvm_build::libkrun_network_provider::vsock_egress_opt_in();
+        let has_secrets = mvm_backend::egress_shared::state_has_bound_secrets(
+            std::path::Path::new(&cfg.vm_state_dir),
+        )
+        .unwrap_or(false);
+        if mvm_vm_host::egress_server::should_serve_vsock_egress(
+            &cfg.krun.host_listen_ports,
+            opt_in,
+            has_secrets,
+        ) {
+            let policy: mvm_core::network_policy::NetworkPolicy = cfg
+                .network_policy
+                .clone()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_else(mvm_core::network_policy::NetworkPolicy::deny_all);
+            let gate =
+                mvm_hostd::supervisor::substitution_endpoint::build_egress_gate(&policy);
+            let egress_sock = cfg.krun.vsock_socket_path(mvm_guest::vsock::EGRESS_PORT);
+            let _ = std::fs::remove_file(&egress_sock);
+            match tokio::net::UnixListener::bind(&egress_sock) {
+                Ok(listener) => {
+                    std::thread::spawn(move || {
+                        let rt = match tokio::runtime::Runtime::new() {
+                            Ok(rt) => rt,
+                            Err(e) => {
+                                eprintln!("mvm-libkrun-supervisor: egress runtime: {e}");
+                                return;
+                            }
+                        };
+                        if let Err(e) =
+                            rt.block_on(mvm_vm_host::egress_server::run(listener, gate))
+                        {
+                            eprintln!("mvm-libkrun-supervisor: egress server: {e}");
+                        }
+                    });
+                }
+                Err(e) => eprintln!("mvm-libkrun-supervisor: bind egress socket: {e}"),
+            }
+        }
+    }
+
     // Route to the bridge path when the producer
     // populated the audit substrate, otherwise fall back to the
     // legacy direct-libkrun path (Stage 0 builder VMs, smoke tests,

@@ -60,7 +60,10 @@ mvm-backend = { workspace = true }
 # vsock port constants (WORKLOAD_EXIT_PORT) for the exit-capture thread.
 mvm-guest = { workspace = true }
 # SupervisorConfig — the stdin JSON contract the Vz supervisor decodes.
-mvm-build = { workspace = true }
+# builder-vm: pulls libkrun_network_provider::vsock_egress_opt_in (Phase A egress
+# server wiring in mvm-libkrun-supervisor); gated here so it only activates in the
+# per-VM supervisor process, not in library users.
+mvm-build = { workspace = true, features = ["builder-vm"] }
 # libkrun bindings/wrapper; FFI linkage gated by the libkrun-sys feature.
 libkrun-sys = { workspace = true }
 anyhow = { workspace = true }
