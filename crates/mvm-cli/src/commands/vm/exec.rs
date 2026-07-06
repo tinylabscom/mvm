@@ -681,6 +681,14 @@ fn build_exec_request(
                 rootfs_path: cached.rootfs_path.display().to_string(),
                 initrd_path: None,
                 label: format!("oci:{}", cached.resolved_digest),
+                // Offer the unpacked+injected tree as a virtiofs-root candidate;
+                // the run-path tier gate (backend cap × prod × sealed) decides.
+                virtiofs_oci_root: cached.unpacked_root.as_ref().map(|tree| {
+                    crate::exec::VirtiofsOciRoot {
+                        tree_dir: tree.display().to_string(),
+                        prod,
+                    }
+                }),
             }
         }
         (None, None) => {
@@ -692,6 +700,7 @@ fn build_exec_request(
                 rootfs_path,
                 initrd_path: None,
                 label: "default-microvm".to_string(),
+                virtiofs_oci_root: None,
             }
         }
     };
