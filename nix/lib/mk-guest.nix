@@ -651,6 +651,14 @@ let
         -- /usr/local/bin/mvm-addon-dns &
     fi
 
+    # Stage 2.55 — decode the vsock-egress opt-in. The libkrun/vsock-gateway
+    # workload path sets `mvm.vsock_egress=1` on the kernel cmdline; export the
+    # env var Stage 2.6 keys on. Mirrors the mvm.secret_env / mvm.verb_grant
+    # cmdline parsers above. Absent token ⇒ no-op (NIC guests boot unchanged).
+    if /bin/busybox grep -q ' mvm\.vsock_egress=1\( \|$\)' /proc/cmdline 2>/dev/null; then
+      export MVM_VSOCK_EGRESS=1
+    fi
+
     # Stage 2.6 — vsock egress shim. When the boot env requests vsock-only
     # egress (the backend sets MVM_VSOCK_EGRESS for a vsock-gateway backend — HVF/KVM
     # today), bring up loopback, start the SOCKS5→vsock shim under the agent uid, and
