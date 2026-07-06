@@ -1,4 +1,4 @@
-# Release 1 Phase 1 — Vz Deletion — Implementation Plan (refreshed against origin/main 53badc19)
+# Release 1 Phase 1 — Vz Deletion — Implementation Plan (filed as plan 228; implements the "R1P1" phase of the Plan 226 clean-replacement roadmap; refreshed against origin/main 53badc19)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax. Execute in the isolated worktree `worktree-plan-226-r1p1-vz-deletion`.
 
@@ -24,12 +24,12 @@
 
 ### Task 0: Land the plan docs on the branch
 
-**Files:** `specs/plans/226-clean-replacement-release-roadmap.md`, `specs/plans/226-r1p1-vz-deletion-implementation.md` (both already copied into the worktree, untracked).
+**Files:** `specs/plans/226-clean-replacement-release-roadmap.md`, `specs/plans/228-r1p1-vz-deletion-implementation.md` (both already copied into the worktree, untracked).
 
 - [ ] **Step 1: Commit the plan docs**
 
 ```bash
-git add specs/plans/226-clean-replacement-release-roadmap.md specs/plans/226-r1p1-vz-deletion-implementation.md
+git add specs/plans/226-clean-replacement-release-roadmap.md specs/plans/228-r1p1-vz-deletion-implementation.md
 git commit -m "docs(plan): Plan 226 clean-replacement roadmap + R1P1 Vz-deletion plan"
 ```
 
