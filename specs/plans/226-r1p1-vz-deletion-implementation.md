@@ -233,180 +233,127 @@ git commit -m "refactor(backend)!: remove Vz variant from AnyBackend/selection/c
 
 ---
 
-### Task 5: Delete the Vz implementation modules + supervisor bin (WS-A)
+> **SCOPE REVISION (Option B, decided mid-run 2026-07-06).** During Task 3 we
+> confirmed `crates/mvm-backend/src/base/linux_env.rs::create_linux_env()`
+> returns `VzDevEnv` on `is_vz_default_tier()` (macOS-26), so the **persistent
+> Vz builder VM is still the live macOS build ShellEnvironment substrate**.
+> Physically deleting `vz.rs`/`vz_control.rs`/`vz_objc.rs`/`mvm-vz-supervisor`/
+> `vz_builder.rs` therefore CANNOT happen in R1P1 — it must wait until that
+> substrate is flipped onto the retained **libkrun** persistent builder, with a
+> real build validated. That deletion + flip is deferred to a dedicated plan
+> **226-R1P1b**. R1P1 (Tasks 1–4, done) makes Vz **unselectable** as a workload,
+> dev, and one-shot-builder backend; the Vz code files are retained and still
+> compile. Tasks 5–8 below are the cleanup/docs tail for that unselectable
+> state — **no file deletion, no fuzz/witness removal** (those witnesses cover
+> retained code).
 
-With the variant and runtime consumers gone, delete the impl files. `host_gvproxy.rs` is Vz-only ("Host-side gvproxy lifecycle for the Vz backend") — it goes with Vz; libkrun's gvproxy in `crates/deps/libkrun-sys` stays.
+### Task 5: Light residual sweep of the now-unselectable Vz *workload* wiring
 
-**Files (delete):** `crates/mvm-backend/src/vz.rs`, `crates/mvm-backend/src/vz_control.rs`, `crates/mvm-build/src/vz.rs`, `crates/mvm-build/src/host_gvproxy.rs`, `crates/mvm-vm-host/src/vz_objc.rs`, `crates/mvm-vm-host/src/bin/mvm-vz-supervisor.rs`
-**Files (modify):** the `mod vz;`/`mod vz_control;`/`pub mod vz;`/`mod host_gvproxy;`/`mod vz_objc;` decls in each crate's `lib.rs`; the `[[bin]] mvm-vz-supervisor` block + objc2/Virtualization deps in `crates/mvm-vm-host/Cargo.toml`; `crates/mvm-backend/Cargo.toml` + `crates/mvm-build/Cargo.toml` Vz deps.
+After Task 4, the tree compiles (the compiler guarantees no dangling refs). This task removes only the small, provably-safe leftovers of the *workload* Vz path and the stale test assertions — WITHOUT touching the retained persistent-builder substrate (`vz.rs`, `vz_builder.rs`, `mvm-vz-supervisor`, `vz_objc.rs`, `host_gvproxy.rs`, `create_linux_env`/`VzDevEnv`, `doctor.rs`/`cache.rs` Vz-builder state-dir handling — all KEPT).
 
-- [ ] **Step 1: Delete files + module declarations + bin/deps**
+**Files:** `crates/mvm-cli/src/commands/shared/resolve.rs` (the `vz` test assertions only), plus any test/match arm the compiler flagged as unreachable after Task 4 that is unambiguously workload-only.
 
-```bash
-git rm crates/mvm-backend/src/vz.rs crates/mvm-backend/src/vz_control.rs \
-       crates/mvm-build/src/vz.rs crates/mvm-build/src/host_gvproxy.rs \
-       crates/mvm-vm-host/src/vz_objc.rs crates/mvm-vm-host/src/bin/mvm-vz-supervisor.rs
-```
+- [ ] **Step 1: Enumerate what Task 4 left**
 
-Remove the matching `mod` lines (grep each `lib.rs`), the `[[bin]]` block in `crates/mvm-vm-host/Cargo.toml`, and any now-unused `objc2*`/`block2` deps.
+Run: `rg -n "AnyBackend::Vz|BackendKind::Vz" crates/ src/` (expect zero — Task 4's bar) and `rg -n "egress_enforcement_label\(\"vz\"|resolve_effective_hypervisor\(\"vz\"" crates/mvm-cli/src/commands/shared/resolve.rs`.
 
-- [ ] **Step 2: Build workspace + remove dead deps**
+- [ ] **Step 2: Remove the stale `vz` test assertions in resolve.rs**
 
-Run: `cargo build --workspace`
-Expected: compiler flags remaining `crate::vz::`/`mvm_build::vz::`/`host_gvproxy` references. Delete the dead arms. If `objc2*` is now unreferenced, drop it from the manifests and `cargo update -w`.
+Drop `"vz"` from the `["firecracker","libkrun","vz"]` array (`enforcement_tier_uniform_for_deny_all_and_unrestricted`), remove the `egress_enforcement_label("vz", …)` assertion, and remove the `resolve_effective_hypervisor("vz")` assertions. The `egress_enforcement_label` function itself is backend-agnostic — KEEP it. Do NOT touch `doctor.rs`/`cache.rs`/`platform.rs` Vz-builder handling (retained).
 
-- [ ] **Step 3: Confirm the facade contract is intact**
+- [ ] **Step 3: Gate + commit**
 
-Run: `rg -n "pub use|pub mod" src/lib.rs crates/mvm/src/lib.rs crates/mvm-backend/src/base/mod.rs | rg -i "runtime|base|shell|ui"`
-Expected: no `mvmctl::runtime::*` re-export removed.
-
-- [ ] **Step 4: Full gate**
-
-Run: `just ci && just check-linux`
-Expected: green.
-
-- [ ] **Step 5: Commit**
+Run: `cargo nextest run -p mvm-cli -- resolve && cargo fmt --all -- --check`
 
 ```bash
-git add -A
-git commit -m "feat(backend)!: delete Vz modules, supervisor bin, Vz-only gvproxy lifecycle (Plan 226 R1P1 WS-A)"
-```
-
----
-
-### Task 6: Sweep residual Vz references across CLI/diagnostics/core (WS-A tail)
-
-After Task 5, ~15 files still reference Vz in diagnostics, cache-prune, pool/up/pause/exec/console, and core. Remove or neutralize each.
-
-**Files:** `crates/mvm-cli/src/doctor.rs` (21), `crates/mvm-cli/src/commands/ops/cache.rs` (8 — Vz builder state-dir prune; keep prefix-agnostic reaping), `crates/mvm-cli/src/commands/pool.rs` (4), `crates/mvm-cli/src/commands/vm/up.rs` (2), `crates/mvm-cli/src/commands/vm/pause.rs` (2), `crates/mvm-cli/src/commands/vm/exec.rs` (1), `crates/mvm-cli/src/commands/vm/console.rs` (1), `crates/mvm-cli/src/commands/shared/resolve.rs` (`vz` test assertions `:353,379,388,407`), `crates/mvm-backend/src/workload_backend.rs` (5), `crates/mvm-backend/src/base/linux_env.rs` (3), `crates/mvm-backend/src/compat.rs` (1), `crates/mvm-backend/src/codesign.rs` (1), `crates/mvm-core/src/platform/platform.rs` (2 — `has_vz`/`is_vz_default_tier`: keep `is_vz_default_tier` name if it drives HVF selection, else rename; do NOT change selection behavior), `crates/mvm-core/src/observability/metrics.rs` (1), `crates/mvm/src/vsock_transport.rs` (1), `crates/mvm/src/vm/reconcile.rs` (1), `crates/mvm-vm-host/src/lib.rs` (3), `crates/mvm-vm-host/src/bridge/parse.rs` (2), `crates/mvm-vm-host/src/bin/mvm-hvf-supervisor.rs` (1).
-
-- [ ] **Step 1: Enumerate**
-
-Run: `rg -n "VzBackend|BackendKind::Vz|DevBackend::Vz|::vz::|mvm-vz-supervisor|vz_objc|vz_builder|host_gvproxy|dev_vz|builder-vz|persistent-builder-vz" crates/ src/`
-Record every remaining hit (excluding `specs/`, `CHANGELOG`, and this plan).
-
-- [ ] **Step 2: Fix each hit**
-
-For diagnostics (`doctor.rs`, `metrics.rs`), remove the Vz backend line/probe. For `cache.rs`, delete the Vz-specific `mvm-persistent-builder-vz-*` handling but keep the prefix-agnostic reaper. For `pool/up/pause/exec/console`, remove `Vz` match arms (compiler will flag exhaustiveness). For `platform.rs`, if `is_vz_default_tier()` still names the HVF-default tier, leave its behavior but update its doc; only remove `has_vz()` if unused. For `resolve.rs`, delete the `vz` test assertions (drop `"vz"` from the `["firecracker","libkrun","vz"]` array `:353`, remove `egress_enforcement_label("vz",…)` `:379`, remove the two `resolve_effective_hypervisor("vz")` assertions `:388,407`). For `mvm-vm-host` and `bridge/parse.rs`, remove Vz-drainer/config arms.
-
-- [ ] **Step 3: Build + gate**
-
-Run: `just ci && just check-linux`
-Expected: green.
-
-- [ ] **Step 4: Confirm zero live Vz references**
-
-Run: `rg -n "VzBackend|BackendKind::Vz|DevBackend::Vz|::vz::|mvm-vz-supervisor|vz_objc|vz_builder|host_gvproxy|dev_vz" crates/ src/`
-Expected: no matches (doc/comment strings describing the *removal* are acceptable; live types/paths are not).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A
-git commit -m "refactor!: sweep residual Vz references from diagnostics/cli/core (Plan 226 R1P1 WS-A)"
+git add crates/mvm-cli/src/commands/shared/resolve.rs
+git commit -m "test(resolve): drop Vz workload enforcement/tier assertions (Plan 226 R1P1 WS-A)"
 ```
 
 ---
 
-### Task 7: Clean Vz tests, fuzz targets, and CI witnesses (WS-F)
+### Task 6: Verify macOS + Linux build and confirm the retained substrate is intact
 
-**Files:**
-- Delete/modify: `crates/mvm-build/tests/vz_supervisor_parity.rs`, `crates/mvm-cli/tests/core_demo_e2e.rs` (Vz refs), `crates/mvm-build/fuzz/fuzz_targets/fuzz_supervisor_config.rs` + `crates/mvm-build/fuzz/Cargo.toml` entry (the Vz supervisor-config fuzz; the libkrun sibling under `crates/deps/libkrun-sys/fuzz` STAYS), `crates/mvm-cli/src/commands/tests.rs`, `crates/mvm-backend/src/base/linux_env.rs` tests
-- Modify: `.github/workflows/security.yml` (remove the `Fuzz Vz SupervisorConfig` step `:355-365`)
-- Modify: `specs/claims/catalog.md` (remove `fn:vz_rootfs_disk_is_read_only` from claim 1 `:30`)
-
-- [ ] **Step 1: Remove the Vz fuzz step + target**
-
-Delete `security.yml:355-365` (leave the libkrun sibling `:330-341`). `git rm` the `crates/mvm-build/fuzz` `fuzz_supervisor_config` target if it is the Vz one, and its `Cargo.toml` bin entry.
-
-- [ ] **Step 2: Retire the Vz claim witness**
-
-In `specs/claims/catalog.md:30`, remove `fn:vz_rootfs_disk_is_read_only` from claim 1's witness list. Confirm remaining witnesses (libkrun ro-share, seccomp/setpriv, share allow-list) still cover claim 1.
-
-- [ ] **Step 3: Delete Vz test files**
-
-`git rm crates/mvm-build/tests/vz_supervisor_parity.rs`; strip Vz refs from `core_demo_e2e.rs`, `commands/tests.rs`, `linux_env.rs` tests.
-
-- [ ] **Step 4: Run the claim gate + full suite**
-
-Run: `cargo run -p xtask -- check-claim-catalog && just ci`
-Expected: green.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A
-git commit -m "ci(claims): retire Vz fuzz target, tests, and rootfs witness (Plan 226 R1P1 WS-F)"
-```
-
----
-
-### Task 8: Ratify ADR-098 and strip Vz from docs (WS-G + WS-H)
-
-**Files:** `specs/adrs/098-*.md`, `CLAUDE.md`, `public/src/content/docs/**`, `specs/REFACTOR-STATUS.md`
-
-- [ ] **Step 1: Ratify ADR-098**
-
-Set `Status: Accepted (2026-07-06)`. In "Vz sunset criteria": scope to macOS, record representative-workload HVF boot proven; note warm-restore/save-restore tracked in Plan 226 WS-E; Linux convergence in Plan 226 R2.
-
-- [ ] **Step 2: Strip Vz from CLAUDE.md + docs**
-
-In `CLAUDE.md` remove Vz-as-selectable/auto language (the "Vz (Apple Virtualization.framework) is the macOS 26+ backend" line, `--builder vz`, `mvm-persistent-builder-vz-*`), replacing with "Vz removed (Plan 226); HVF is the sole macOS backend." Grep docs: `rg -l -i "\bvz\b|Virtualization.framework|apple-container" public/src/content/docs` and prune runtime-path mentions.
-
-- [ ] **Step 3: Verify + close #1403**
-
-Run `gh issue view 1403`; confirm fixed on main; `gh issue close 1403 --comment "Fixed on main (--builder inhouse selectable + macOS-26 auto-detect); Vz-deletion residue completed by Plan 226 R1P1."`
-
-- [ ] **Step 4: Update rollup**
-
-In `specs/REFACTOR-STATUS.md`, add a Plan 226 R1P1 "landed" entry + bump the date.
-
-- [ ] **Step 5: Gate + commit**
-
-Run: `just ci`
-
-```bash
-git add specs/adrs CLAUDE.md public/src/content/docs specs/REFACTOR-STATUS.md
-git commit -m "docs(adr-098): ratify HVF macOS backend; strip Vz from docs (Plan 226 R1P1 WS-G/H)"
-```
-
----
-
-### Task 9: Final verification + changelog + version bump (WS-H)
-
-**Files:** `CHANGELOG.md`, workspace `Cargo.toml` version.
+Consolidation/verification task — no new deletions. Confirm the split state is coherent: Vz unselectable, persistent-builder substrate live.
 
 - [ ] **Step 1: Full gate on both targets**
 
 Run: `just ci && just check-linux`
-Expected: green.
+Expected: green. (`check-linux` matters — Tasks 3/4 touched `cfg(target_os="linux")`-gated builder code such as `builder_health.rs`.)
 
-- [ ] **Step 2: Zero-residue check**
+- [ ] **Step 2: Confirm Vz is unselectable but the substrate is retained**
 
-Run: `rg -n -i "VzBackend|mvm-vz-supervisor|vz_objc|vz_builder|host_gvproxy|BackendKind::Vz|DevBackend::Vz|dev_vz" crates/ src/`
-Expected: no live-code matches.
+Run and record:
+- `rg -n "AnyBackend::Vz|BackendKind::Vz|DevBackend::Vz|BuilderBackendChoice::Vz" crates/ src/` → expect ZERO (Vz unselectable as workload/dev/builder).
+- `ls crates/mvm-backend/src/vz.rs crates/mvm-vm-host/src/bin/mvm-vz-supervisor.rs crates/mvm-build/src/vz_builder.rs` → expect all PRESENT (retained substrate).
+- `rg -n "VzDevEnv" crates/mvm-backend/src/base/linux_env.rs` → expect PRESENT (the substrate to flip in 226-R1P1b).
 
-- [ ] **Step 3: Changelog + version**
-
-Add `v0.17.0` to `CHANGELOG.md`: "Removed the Vz (Apple Virtualization.framework) backend; HVF is the sole macOS backend. `machine checkpoint/fork` full-VM mode is temporarily unsupported pending HVF save/restore (Plan 226 WS-E); `fs_quick` checkpoints unaffected." Bump workspace version to `0.17.0`.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit (only if fmt/lint fixups were needed)**
 
 ```bash
-git add CHANGELOG.md Cargo.toml
-git commit -m "release: v0.17.0 — Vz backend removed (Plan 226 R1P1)"
+git add -A
+git commit -m "chore: verify Vz-unselectable split builds on macOS+Linux (Plan 226 R1P1)" || echo "nothing to commit"
 ```
 
 ---
 
-## Self-Review
+### Task 7: Ratify ADR-098 (partial, workload-scoped) and update docs
 
-- **Coverage vs Plan 226 §4:** WS-D → Task 1 (now includes the `vm_full` engine in `checkpoint/mod.rs`); WS-B → Task 2 (now includes `dev_vz.rs`); WS-C → Task 3; WS-A → Tasks 4-6 (Task 6 = the residual sweep the first draft lacked); WS-F → Task 7; WS-G/H → Tasks 8-9. WS-N (gvproxy/vsock) and WS-E (HVF SaveRestore) remain separate follow-on plans.
-- **Placeholder scan:** "read first" steps (1.1, 2.1, 6.1) resolve concrete unknowns with named deliverables. No TBD.
-- **Type consistency:** `full_vm_checkpoint_unsupported_error(action)` (Task 1), `DevBackend::InHouse` (Task 2), `capability_candidates() -> [AnyBackend; 3]` (Task 4) used consistently after introduction.
+**Files:** `specs/adrs/098-*.md`, `CLAUDE.md`, `public/src/content/docs/**`, `specs/REFACTOR-STATUS.md`
+
+- [ ] **Step 1: ADR-098 — partial ratification**
+
+Set `Status: Accepted (2026-07-06)`. Record precisely: the Vz **workload** backend is removed and macOS-26 defaults to in-house HVF for workloads, dev, and one-shot builds; the **persistent Vz builder VM remains the build ShellEnvironment substrate pending Plan 226-R1P1b** (flip to the retained libkrun persistent builder, validated). Warm-restore/save-restore tracked in 226-R1E; Linux convergence in 226-R2. Do NOT claim Vz is fully removed.
+
+- [ ] **Step 2: Update CLAUDE.md + docs (accurately)**
+
+In `CLAUDE.md`, change the Vz description to reflect reality: "Vz is no longer a selectable workload/dev backend (Plan 226 R1P1); it survives only as the macOS-26 persistent *builder* substrate pending Plan 226-R1P1b." Do NOT write "Vz removed" — it isn't yet. Prune only docs that claim Vz is a user-selectable workload/dev hypervisor. Keep `--builder`/builder-state-dir docs accurate to the retained substrate.
+
+- [ ] **Step 3: Verify + close #1403**
+
+`gh issue view 1403`; if fixed on main, `gh issue close 1403 --comment "Fixed on main (--builder inhouse selectable + macOS-26 auto-detect). Vz workload/dev/one-shot-builder selection removed in Plan 226 R1P1; persistent-builder substrate flip tracked in 226-R1P1b."`
+
+- [ ] **Step 4: Rollup + gate + commit**
+
+Update `specs/REFACTOR-STATUS.md` (Plan 226 R1P1 landed; note R1P1b pending). Run `just ci`.
+
+```bash
+git add specs/adrs CLAUDE.md public/src/content/docs specs/REFACTOR-STATUS.md
+git commit -m "docs(adr-098): ratify HVF workload backend; Vz builder substrate pending R1P1b (Plan 226 R1P1)"
+```
+
+---
+
+### Task 8: CHANGELOG (Unreleased) — no version bump this round
+
+Under Option B, R1P1 does not fully remove Vz, so it does NOT cut v0.17.0. Record the change under an Unreleased heading; the version bump waits until 226-R1P1b completes the removal.
+
+**Files:** `CHANGELOG.md`
+
+- [ ] **Step 1: Add an Unreleased entry**
+
+Add under `## [Unreleased]`: "Vz (Apple Virtualization.framework) is no longer a selectable workload, dev, or one-shot-builder backend on macOS — the in-house HVF VMM is the default and sole selectable path. `machine checkpoint/fork` full-VM mode is temporarily unsupported pending HVF save/restore (226-R1E); `fs_quick` checkpoints unaffected. The persistent Vz *builder* substrate is retained pending 226-R1P1b."
+
+- [ ] **Step 2: Final gate + commit**
+
+Run: `just ci && just check-linux`
+
+```bash
+git add CHANGELOG.md
+git commit -m "docs(changelog): record Vz workload/dev/builder removal (Plan 226 R1P1)"
+```
+
+---
+
+## Self-Review (Option B)
+
+- **Coverage:** WS-D → Task 1; WS-B → Task 2; WS-C (one-shot builder) → Task 3; WS-A (workload dispatch) → Task 4; residual/verify/docs → Tasks 5–8. The persistent-builder flip + physical file deletion + fuzz/witness retirement are DEFERRED to 226-R1P1b (not this plan) because the substrate is still live.
+- **No premature deletion:** Tasks 5–8 delete no Vz source files and remove no fuzz targets/claim witnesses — those cover retained code.
+- **Honesty:** docs/ADR/CHANGELOG state Vz is *unselectable*, not *removed*.
 
 ## Follow-on plans (write after this lands)
 
-- **226-R1P2 — macOS libkrun→vsock egress + delete gvproxy (WS-N).** Foundation (`MVM_VSOCK_EGRESS`, #1483) already landed flag-gated; this plan flips the default on macOS, resolves builder egress, and deletes gvproxy.
+- **226-R1P1b — persistent-builder substrate flip + full Vz deletion (NEW, highest priority).** Flip `create_linux_env()` (macOS-26) off `VzDevEnv` onto the retained **libkrun** persistent builder; validate with a real `mvmctl build image` / `mvmctl dev up` on macOS-26; then delete `vz.rs`, `vz_control.rs`, `vz_objc.rs`, `host_gvproxy.rs`, `vz_builder.rs`, the `mvm-vz-supervisor` bin + objc2 deps, the Vz fuzz target/CI step, the `fn:vz_rootfs_disk_is_read_only` witness, and the `doctor.rs`/`cache.rs` Vz-builder state-dir handling. This is the task that makes Vz truly gone and cuts **v0.17.0**.
+- **226-R1P2 — macOS libkrun→vsock egress + delete gvproxy (WS-N).** Foundation (`MVM_VSOCK_EGRESS`, #1483) landed flag-gated; flip the default on macOS, resolve builder egress, delete gvproxy.
 - **226-R1E — HVF SaveRestore (WS-E).** Restores `machine checkpoint/fork` full-VM mode on the in-house VMM; Task 1's tracked error is then replaced.
-- **226-R2 — Linux clean-replacement** (Firecracker→vsock + delete passt, validated on the Hetzner KVM box), written after a fresh post-R1 code re-evaluation. Note Plan 227 (instant-resume sandboxes) is adjacent — reconcile during R2 scoping.
+- **226-R2 — Linux clean-replacement** (Firecracker→vsock + delete passt, validated on the Hetzner KVM box), after a fresh post-R1 code re-evaluation. Plan 227 (instant-resume sandboxes) is adjacent — reconcile during R2 scoping.
