@@ -41,6 +41,22 @@ const FUSE_READDIR: u32 = 28;
 const FUSE_RELEASEDIR: u32 = 29;
 const FUSE_FLUSH: u32 = 25;
 const FUSE_STATFS: u32 = 17;
+const FUSE_ACCESS: u32 = 34;
+// Mutating opcodes — refused EROFS on a read-only root (the guest kernel won't
+// send these to a clean RO boot, but a hostile guest might).
+const FUSE_SETATTR: u32 = 4;
+const FUSE_MKNOD: u32 = 8;
+const FUSE_MKDIR: u32 = 9;
+const FUSE_UNLINK: u32 = 10;
+const FUSE_RMDIR: u32 = 11;
+const FUSE_RENAME: u32 = 12;
+const FUSE_LINK: u32 = 13;
+const FUSE_WRITE: u32 = 16;
+const FUSE_SETXATTR: u32 = 21;
+const FUSE_REMOVEXATTR: u32 = 23;
+const FUSE_CREATE: u32 = 35;
+const FUSE_SYMLINK: u32 = 6;
+const FUSE_FALLOCATE: u32 = 43;
 
 // errno (negated in fuse_out_header.error).
 const ENOENT: i32 = 2;
@@ -181,8 +197,17 @@ impl FuseServer {
             FUSE_READDIR => self.op_readdir(h.unique, h.nodeid, body),
             FUSE_RELEASE | FUSE_RELEASEDIR | FUSE_FLUSH | FUSE_FORGET => reply(h.unique, 0, &[]),
             FUSE_STATFS => self.op_statfs(h.unique),
-            // Everything else — every write op — is refused: read-only root.
-            _ => reply(h.unique, -EROFS, &[]),
+            // Access checks pass: the tree is served world-readable/executable and
+            // permission is the guest's own namespace concern. `execve` of /init
+            // sends this, so refusing it (the old catch-all) failed the boot.
+            FUSE_ACCESS => reply(h.unique, 0, &[]),
+            // Mutations are refused on the read-only root.
+            FUSE_SETATTR | FUSE_MKNOD | FUSE_MKDIR | FUSE_UNLINK | FUSE_RMDIR | FUSE_RENAME
+            | FUSE_LINK | FUSE_WRITE | FUSE_SETXATTR | FUSE_REMOVEXATTR | FUSE_CREATE
+            | FUSE_SYMLINK | FUSE_FALLOCATE => reply(h.unique, -EROFS, &[]),
+            // Any other opcode (GETXATTR, POLL, IOCTL, …) is simply unsupported —
+            // ENOSYS lets the kernel fall back gracefully instead of erroring.
+            _ => reply(h.unique, -ENOSYS, &[]),
         }
     }
 
@@ -630,6 +655,24 @@ mod tests {
             let (err, _) = parse_reply(&fs.dispatch(&request(op, 1, ROOT_INO, b"x\0")));
             assert_eq!(err, -EROFS, "opcode {op} must be refused read-only");
         }
+    }
+
+    #[test]
+    fn access_is_granted_and_unknown_ops_are_enosys_not_erofs() {
+        // Regression for the live boot: `execve(/init)` sends FUSE_ACCESS, and the
+        // old catch-all refused it with EROFS, panicking init (error -30). ACCESS
+        // must succeed; a genuinely unknown op must be ENOSYS (graceful fallback),
+        // not EROFS.
+        let d = tree();
+        let mut fs = FuseServer::new(d.path());
+        let (err, _) = parse_reply(&fs.dispatch(&request(FUSE_ACCESS, 1, ROOT_INO, &[])));
+        assert_eq!(err, 0, "ACCESS must be granted so exec can proceed");
+        const FUSE_POLL: u32 = 40; // an op we don't implement
+        let (err, _) = parse_reply(&fs.dispatch(&request(FUSE_POLL, 2, ROOT_INO, &[])));
+        assert_eq!(
+            err, -ENOSYS,
+            "an unknown op is unsupported, not read-only-refused"
+        );
     }
 
     #[test]

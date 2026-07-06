@@ -151,6 +151,7 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         memory_mib: spec.memory_mib,
         initramfs: spec.initramfs.clone(),
         disks,
+        virtiofs_root: None,
         vsock: true,
         console_log: paths.console_log.clone(),
         pid_file: paths.pid_file.clone(),

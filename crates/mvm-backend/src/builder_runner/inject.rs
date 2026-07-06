@@ -67,6 +67,7 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
             read_only: false,
             ephemeral: false,
         }],
+        virtiofs_root: None,
         vsock: false,
         console_log: console_log.clone(),
         pid_file: req.work_dir.join("inject.pid"),

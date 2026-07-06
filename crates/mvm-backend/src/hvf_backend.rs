@@ -166,6 +166,10 @@ impl VmBackend for HvfBackend {
             // rides the host vsock proxy (the gating endpoint), not a guest NIC.
             no_guest_nic: true,
             host_vsock_proxy: true,
+            // The in-house VMM can serve the unpacked OCI tree as a read-only
+            // virtiofs root (dev tier); the run-path tier gate selects it only for
+            // non-prod, non-sealed workloads.
+            virtiofs_root: true,
             // pause/snapshot/cow/remap land as they are wired onto the primitive.
             ..Default::default()
         }
@@ -243,6 +247,9 @@ impl VmBackend for HvfBackend {
             memory_mib: config.memory_mib,
             initramfs: config.initrd_path.clone().map(PathBuf::from),
             disks,
+            // Block-rootfs path today; the virtiofs-root strategy sets this
+            // instead (via the run-path tier gate) on a dev-tier boot.
+            virtiofs_root: None,
             vsock: true,
             console_log: console_log.clone(),
             pid_file: pid_file.clone(),
