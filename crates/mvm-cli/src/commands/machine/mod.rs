@@ -3789,6 +3789,7 @@ mod tests {
             &mvm::vm::runtime_meta::VmRuntimeMeta {
                 mode: mvm::vm::runtime_meta::StartModeKind::Detached,
                 accessible: false,
+                rootfs_path: None,
             },
         )
         .expect("write sealed runtime meta");

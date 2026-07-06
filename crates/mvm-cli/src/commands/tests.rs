@@ -4075,6 +4075,7 @@ fn machine_console_refused_on_sealed_image() {
         &VmRuntimeMeta {
             mode: StartModeKind::Detached,
             accessible: false,
+            rootfs_path: None,
         },
     )
     .expect("write");

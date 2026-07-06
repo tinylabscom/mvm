@@ -660,6 +660,7 @@ mod accessible_gate_tests {
                 &VmRuntimeMeta {
                     mode: StartModeKind::Attached,
                     accessible: true,
+                    rootfs_path: None,
                 },
             )
             .expect("write");
@@ -701,6 +702,7 @@ mod accessible_gate_tests {
                 &VmRuntimeMeta {
                     mode: StartModeKind::Detached,
                     accessible: false,
+                    rootfs_path: None,
                 },
             )
             .expect("write");
@@ -725,6 +727,7 @@ mod accessible_gate_tests {
                 &VmRuntimeMeta {
                     mode: StartModeKind::Detached,
                     accessible: false,
+                    rootfs_path: None,
                 },
             )
             .expect("write");
@@ -742,6 +745,7 @@ mod accessible_gate_tests {
                 &VmRuntimeMeta {
                     mode: StartModeKind::Attached,
                     accessible: false,
+                    rootfs_path: None,
                 },
             )
             .expect("write");
