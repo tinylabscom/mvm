@@ -536,12 +536,20 @@ impl VsockShared {
         for conn_id in opened {
             self.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_REQUEST, &[]);
         }
-        for (conn_id, bytes) in self.agent.drain_host() {
+        let (ready, closed) = self.agent.drain_host();
+        for (conn_id, bytes) in ready {
             agent_dbg(&format!(
                 "host→guest {} bytes on stream {conn_id}",
                 bytes.len()
             ));
             self.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_RW, &bytes);
+        }
+        // A host-dropped agent stream (e.g. the `for_vm` reachability probe) must be
+        // reset on the guest, or a single-threaded guest agent blocks forever
+        // reading the dead probe and never accepts the real request stream.
+        for conn_id in closed {
+            agent_dbg(&format!("host closed stream {conn_id} → OP_RST to guest"));
+            self.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_RST, &[]);
         }
         if self.flush_rx() {
             Some(self.irq)
