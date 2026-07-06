@@ -557,7 +557,7 @@ enum Entrypoint {
 Once the rootfs is booted and the agent is up, a function call is just a vsock RPC. The shape:
 
 ```
-host (mvmctl invoke <id> --input name=Alice)
+host (mvmctl machine run --entrypoint --flake <dir>, stdin=[[], {"name": "Alice"}])
      │
      ▼  vsock: RunEntrypoint { stdin = encoded([args, kwargs]) }
 agent (uid 990, dev_image: do_exec gated by `dev-shell` feature)

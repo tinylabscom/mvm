@@ -168,10 +168,10 @@ Workload IR manifest (top-level `apps[]`) — and auto-detects which
 one it is given. Both shapes were historically produced by the
 `mvmforge` toolchain
 ([see the migration guide](/guides/mvmforge-migration/));
-the canonical producer today is `mvmctl compile` in the mvm SDK.
+the canonical producer today is `mvmctl build compile` in the mvm SDK.
 
 ```bash
-mvmctl compile manifest.json --out ./build
+mvmctl build compile manifest.json --out ./build
 mvmctl exec --launch-plan ./build/launch.json
 ```
 

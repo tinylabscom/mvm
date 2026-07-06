@@ -89,13 +89,15 @@ callable function.
 
 ```bash
 mvmctl doctor --workflow python-sdk                              # preflight
-mvmctl compile my_app.py --out /tmp/my-app && mvmctl up my-app   # compile + boot
-mvmctl invoke my-app --input name='ari'                          # call
+mvmctl build compile my_app.py --out /tmp/my-app                 # compile (static parse)
+echo '[[], {"name":"ari"}]' | \
+  mvmctl machine run --entrypoint --flake /tmp/my-app            # build + boot + call → "hello ari"
 ```
 
-`mvmctl compile` parses the decorator statically; user code does not
-execute on the host (only inside the microVM). `mvmctl invoke` accepts
-function arguments via `--input key=value` (repeatable). See
+`mvmctl build compile` parses the decorator statically; user code does not
+execute on the host (only inside the microVM). `mvmctl machine run --entrypoint`
+invokes the baked function, taking its arguments as an `[args, kwargs]` JSON
+payload on stdin (empty ⇒ `[[], {}]`). See
 [SDK guide](/guides/sdk/) for the decorator surface.
 
 **Failure recovery:**
@@ -113,8 +115,9 @@ Same shape as the Python flow with a `.ts` (or `.js`) entry file.
 
 ```bash
 mvmctl doctor --workflow typescript-sdk                          # preflight
-mvmctl compile my-app.ts --out /tmp/my-app && mvmctl up my-app   # compile + boot
-mvmctl invoke my-app --input name='ari'                          # call
+mvmctl build compile my-app.ts --out /tmp/my-app                 # compile (static parse)
+echo '[[], {"name":"ari"}]' | \
+  mvmctl machine run --entrypoint --flake /tmp/my-app            # build + boot + call → "hello ari"
 ```
 
 The preflight specifically checks the local TypeScript runner

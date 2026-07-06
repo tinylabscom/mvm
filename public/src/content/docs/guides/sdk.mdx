@@ -1,6 +1,6 @@
 ---
 title: SDK — Python and TypeScript
-description: Declare microVM workloads with the mvm Python and TypeScript SDKs. Decorator-style author surface; mvmctl compile / deploy compiles the same source statically without executing it.
+description: Declare microVM workloads with the mvm Python and TypeScript SDKs. Decorator-style author surface; mvmctl build compile / deploy compiles the same source statically without executing it.
 ---
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
@@ -12,7 +12,7 @@ source file produce the same `Workload` IR:
 - **In-process**: `python app.py` or `node app.ts` imports `mvm`, the
   decorator records the declaration, and `mvm.emit_json()` /
   `mvm.emitJson()` writes the canonical IR to stdout.
-- **Static compile**: `mvmctl compile app.py` walks the AST without
+- **Static compile**: `mvmctl build compile app.py` walks the AST without
   importing the script. Same IR; the host never runs user code.
 
 ## Declaration
@@ -47,10 +47,8 @@ def greet(name: str) -> str:
 Build, run, invoke:
 
 ```sh
-mvmctl compile examples/python/hello-app/app.py --out /tmp/hello-app
-mvmctl build /tmp/hello-app
-mvmctl up hello-app
-mvmctl invoke hello-app --input name='ari'
+mvmctl build compile examples/python/hello-app/app.py --out /tmp/hello-app
+echo '[[], {"name":"ari"}]' | mvmctl machine run --entrypoint --flake /tmp/hello-app   # → "hello ari"
 ```
 
 </TabItem>
@@ -76,10 +74,8 @@ export const greet = mvm.app({
 Build, run, invoke:
 
 ```sh
-mvmctl compile examples/node/hello-app/app.ts --out /tmp/hello-app
-mvmctl build /tmp/hello-app
-mvmctl up hello-app
-mvmctl invoke hello-app --input name='ari'
+mvmctl build compile examples/node/hello-app/app.ts --out /tmp/hello-app
+echo '[[], {"name":"ari"}]' | mvmctl machine run --entrypoint --flake /tmp/hello-app   # → "hello ari"
 ```
 
 </TabItem>
@@ -110,7 +106,7 @@ Four phases. Each accepts a string (shell line), a list of strings
 | --------------- | ------------------------------------------------------------------------------- |
 | `before_build`  | Inside the builder VM, after deps install and before the rootfs snapshot.       |
 | `before_start`  | At every microVM boot, before the entrypoint dispatch.                          |
-| `after_start`   | Readiness probe — polled to exit-0 before the agent accepts `mvmctl invoke`.    |
+| `after_start`   | Readiness probe — polled to exit-0 before the agent accepts entrypoint calls.   |
 | `before_stop`   | At shutdown, best-effort.                                                       |
 
 Addons (when attached via `addons=[...]`) contribute their own hooks;
@@ -120,7 +116,7 @@ Nix factory to bake into `/etc/mvm/hooks/<phase>.sh`.
 
 ## Build artifacts
 
-Use `mvmctl compile` to produce local build artifacts that can be reviewed,
+Use `mvmctl build compile` to produce local build artifacts that can be reviewed,
 signed, built, and launched through the normal `mvm` workflow. Treat packaging
 and rollout as a separate admission step, not as part of declaration parsing.
 
@@ -139,7 +135,7 @@ value.
 
 ## TypeScript runner
 
-`mvmctl compile app.ts` walks the AST statically for `mvm.app({...})`
+`mvmctl build compile app.ts` walks the AST statically for `mvm.app({...})`
 calls and does not run user code. When a `.ts` script uses the
 record-mode `Sandbox` API instead (no `mvm.app` decorator), `mvmctl
 compile` falls back to **auto-run**: it spawns the script on the host
@@ -173,7 +169,7 @@ compile` picks it up automatically — see the resolution order below.
 
 ### Resolution order
 
-`mvmctl compile` resolves the runner in this order, picking the
+`mvmctl build compile` resolves the runner in this order, picking the
 first hit:
 
 1. `MVM_TSX=<path>` env override — explicit pin (any binary).
