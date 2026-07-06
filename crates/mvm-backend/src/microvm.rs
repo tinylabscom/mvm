@@ -187,6 +187,27 @@ pub fn resolve_running_vm_dir(name: &str) -> Result<String> {
     Ok(format!("{}/{}", abs_vms, name))
 }
 
+/// Return the host-side path to Firecracker's PID file for VM `name`.
+///
+/// Firecracker writes `fc.pid` into the VMS_DIR-based per-VM directory
+/// (`~/microvm/vms/<name>/fc.pid`), NOT into `vm_state_dir(name)` which is
+/// `~/.mvm/vms/<name>`. These are two separate trees: VMS_DIR is the in-VM
+/// (or native-Linux host) Firecracker workspace; vm_state_dir is the host
+/// metadata store shared by all backends.
+///
+/// Returns `None` when `$HOME` is not set (e.g. hermetic test environments
+/// that intentionally omit it).
+pub fn fc_pid_path(name: &str) -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join("microvm")
+            .join("vms")
+            .join(name)
+            .join("fc.pid"),
+    )
+}
+
 fn firecracker_vsock_uds_path(dir: &str) -> String {
     format!("{dir}/runtime/v.sock")
 }
