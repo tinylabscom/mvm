@@ -350,7 +350,7 @@ mod tests {
     fn enforcement_tier_uniform_for_deny_all_and_unrestricted() {
         // deny-all and unrestricted are enforced the same way on every backend,
         // so the receipt records a backend-independent tier.
-        for backend in ["firecracker", "libkrun", "vz"] {
+        for backend in ["firecracker", "libkrun"] {
             assert_eq!(
                 egress_enforcement_label(backend, &NetworkPolicy::deny_all()),
                 "flow-drop"
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn enforcement_tier_allow_list_is_uniform_l4_host_port() {
         // host:port is now L4-enforced on every backend (Firecracker nftables;
-        // libkrun/Vz via the admission-time DNS pin → L4 scan), so the receipt
+        // libkrun via the admission-time DNS pin → L4 scan), so the receipt
         // records `<backend>:l4-host-port` uniformly — no more `dns-name-only`.
         let p = NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]);
         assert_eq!(
@@ -376,7 +376,6 @@ mod tests {
             egress_enforcement_label("libkrun", &p),
             "libkrun:l4-host-port"
         );
-        assert_eq!(egress_enforcement_label("vz", &p), "vz:l4-host-port");
     }
 
     /// An explicit `--hypervisor <x>` (anything but the `firecracker`
@@ -385,7 +384,6 @@ mod tests {
     #[test]
     fn explicit_hypervisor_is_returned_verbatim() {
         assert_eq!(resolve_effective_hypervisor("libkrun"), "libkrun");
-        assert_eq!(resolve_effective_hypervisor("vz"), "vz");
         assert_eq!(resolve_effective_hypervisor("hvf"), "hvf");
         assert_eq!(resolve_effective_hypervisor("qemu"), "qemu");
     }
@@ -404,7 +402,7 @@ mod tests {
         }
         assert_eq!(resolve_effective_hypervisor("firecracker"), "libkrun");
         // An explicit flag wins over the env override.
-        assert_eq!(resolve_effective_hypervisor("vz"), "vz");
+        assert_eq!(resolve_effective_hypervisor("hvf"), "hvf");
         // The older alias is still honored.
         unsafe {
             std::env::remove_var("MVM_HYPERVISOR");
