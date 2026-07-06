@@ -1282,11 +1282,23 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
         // that is *not* "reachable" from the caller's perspective.
         if let Ok(transport) = vsock_transport::for_vm(vm_name)
             && let Ok(mut stream) = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-            && mvm_guest::vsock::negotiate_protocol(
-                &mut stream,
-                vec![mvm_guest::vsock::GuestCapability::Ping],
-            )
-            .is_ok()
+            && {
+                // Bound each probe: a transport whose socket is bound but whose
+                // guest agent hasn't replied yet (e.g. still booting, or an
+                // in-house VMM whose relay isn't answering) must not block the
+                // whole hello read forever — otherwise this loop never gets back
+                // to the deadline check and hangs instead of timing out. A short
+                // per-attempt read timeout lets `negotiate_protocol` fail fast so
+                // the outer loop retries and ultimately honours `timeout_secs`.
+                // The stream is a throwaway probe (dropped below), so the timeout
+                // never touches a real agent-RPC data stream.
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+                mvm_guest::vsock::negotiate_protocol(
+                    &mut stream,
+                    vec![mvm_guest::vsock::GuestCapability::Ping],
+                )
+                .is_ok()
+            }
         {
             return true;
         }

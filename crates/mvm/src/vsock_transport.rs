@@ -147,15 +147,19 @@ impl VsockTransport for VzTransport {
 ///
 /// The in-house runner binds two distinct socket layouts under the per-VM
 /// state dir:
-/// - Agent RPC (`GUEST_AGENT_PORT`): `<state_dir>/agent.sock` — the
-///   standing bridge the supervisor opens at boot.
+/// - Agent RPC (`GUEST_AGENT_PORT`): `<state_dir>/hvf-agent.sock` — the
+///   standing agent bridge the device binds at boot (see
+///   [`mvm_core::config::vm_hvf_agent_socket`]).
 /// - Console data (ports in `dev_console_data_ports()`): `<state_dir>/vsock/vsock-<port>.sock`
 ///   — same `vsock/` subdir convention the Vz supervisor uses, populated
 ///   only when `VmStartConfig.dev_console` is true.
 ///
-/// This transport is DEV-ONLY: `pick_console_transport` selects it only
-/// when `is_dev_mode()` is set, so a sealed production runner cannot
-/// receive an interactive attach over this path.
+/// The **agent-RPC** use (via [`for_vm`]) is not dev-gated — every
+/// `machine run -- <cmd>` / `machine exec` / `invoke` reaches the agent this
+/// way, on prod runners too. The **console-data** use is dev-only:
+/// `pick_console_transport` selects it for console ports only when
+/// `is_dev_mode()` is set, so a sealed production runner cannot receive an
+/// interactive attach over this path.
 pub struct DevConsoleTransport {
     state_dir: PathBuf,
     vsock_dir: PathBuf,
@@ -182,12 +186,14 @@ impl DevConsoleTransport {
 
     /// Resolve the host UDS for a port.
     ///
-    /// - `GUEST_AGENT_PORT` → `<state_dir>/agent.sock` (the standing bridge).
+    /// - `GUEST_AGENT_PORT` → `<state_dir>/hvf-agent.sock` (the standing agent
+    ///   bridge the in-house device binds — see
+    ///   [`mvm_core::config::vm_hvf_agent_socket`]).
     /// - Any other port → `<state_dir>/vsock/vsock-<port>.sock` (the
     ///   pre-opened console data socket, same convention as Vz).
     pub(crate) fn socket_path(&self, port: u32) -> PathBuf {
         if port == mvm_guest::vsock::GUEST_AGENT_PORT {
-            self.state_dir.join("agent.sock")
+            self.state_dir.join("hvf-agent.sock")
         } else {
             self.vsock_dir
                 .join(mvm_core::config::vsock_socket_filename(port))
@@ -268,6 +274,16 @@ impl VsockTransport for NestingHopTransport {
 /// `connect()`. This matches the legacy ladder it replaces, which
 /// already did one throwaway probe before the real call.
 pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
+    // In-house (HVF / WorkloadRunner) VMs bind the agent bridge at
+    // `<state_dir>/hvf-agent.sock`. Probe it first — it's the macOS-26 default
+    // backend, and the socket name is distinct from the libkrun/vz layouts so a
+    // hit here is unambiguous. Without this branch the agent-RPC path (every
+    // non-interactive `machine run -- <cmd>`, `machine exec`, `invoke`) could
+    // never reach an in-house guest and timed out after 30s.
+    let inhouse = DevConsoleTransport::for_vm(vm_name);
+    if inhouse.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+        return Ok(Box::new(inhouse));
+    }
     let libkrun = LibkrunTransport::for_vm(vm_name);
     if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Box::new(libkrun));
@@ -369,6 +385,32 @@ mod tests {
     }
 
     #[test]
+    fn for_vm_selects_inhouse_when_hvf_agent_socket_present() {
+        use std::os::unix::net::UnixListener;
+        // The in-house (HVF / WorkloadRunner) agent bridge binds
+        // `<state_dir>/hvf-agent.sock`. With only that socket present the picker
+        // must select the in-house transport — the regression for the
+        // non-interactive `machine run` reachability gap (the picker previously
+        // knew only libkrun/vz/firecracker, so it fell through to the
+        // firecracker error and the agent-RPC path timed out after 30s).
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        let name = "inhouse-picker-probe";
+        let sock = mvm_core::config::vm_hvf_agent_socket(name);
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let _listener = UnixListener::bind(&sock).unwrap();
+
+        let t = for_vm(name).expect("picker should find the in-house transport");
+        t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .expect("selected transport should connect to the hvf-agent socket");
+
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    #[test]
     fn nesting_hop_for_host_vm_derives_forward_socket_path() {
         let t = NestingHopTransport::for_host_vm("/tmp/vm-state", "wl-1");
         assert_eq!(
@@ -427,14 +469,17 @@ mod tests {
     // --- DevConsoleTransport ---
 
     #[test]
-    fn dev_console_transport_agent_port_resolves_to_agent_sock() {
-        // GUEST_AGENT_PORT → `<state_dir>/agent.sock`, not the vsock/ subdir.
+    fn dev_console_transport_agent_port_resolves_to_hvf_agent_sock() {
+        // GUEST_AGENT_PORT → `<state_dir>/hvf-agent.sock` (what the in-house
+        // device's AgentBridge actually binds), not the vsock/ subdir. The old
+        // `agent.sock` name never matched the backend, so the host agent-RPC
+        // path could not reach an in-house guest.
         let t = DevConsoleTransport::new("/tmp/no-such-inhouse-vm");
         let path = t.socket_path(mvm_guest::vsock::GUEST_AGENT_PORT);
         assert_eq!(
             path,
-            PathBuf::from("/tmp/no-such-inhouse-vm/agent.sock"),
-            "agent port must resolve to agent.sock at state-dir root"
+            PathBuf::from("/tmp/no-such-inhouse-vm/hvf-agent.sock"),
+            "agent port must resolve to hvf-agent.sock at state-dir root"
         );
     }
 
@@ -469,14 +514,14 @@ mod tests {
     }
 
     #[test]
-    fn dev_console_transport_connects_via_agent_sock() {
+    fn dev_console_transport_connects_via_hvf_agent_sock() {
         use std::os::unix::net::UnixListener;
         let dir = tempfile::tempdir().unwrap();
-        let agent = dir.path().join("agent.sock");
+        let agent = dir.path().join("hvf-agent.sock");
         let _listener = UnixListener::bind(&agent).unwrap();
         let t = DevConsoleTransport::new(dir.path());
         t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-            .expect("should connect to agent.sock");
+            .expect("should connect to hvf-agent.sock");
     }
 
     #[test]

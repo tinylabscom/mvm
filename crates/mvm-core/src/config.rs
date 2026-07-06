@@ -495,6 +495,16 @@ pub fn vm_substitution_endpoint_socket(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("substitution-endpoint.sock")
 }
 
+/// The in-house (HVF / `WorkloadRunner`) VMM's host→guest agent-RPC socket:
+/// `<vm_state_dir>/hvf-agent.sock`. The device's `AgentBridge` binds it and
+/// bridges every host connection to the guest agent on `GUEST_AGENT_PORT`.
+/// Single source of truth so the backend (which binds it) and the host-side
+/// agent-RPC transport (which connects to it) cannot drift — the drift that
+/// silently broke non-interactive `machine run` on the in-house VMM.
+pub fn vm_hvf_agent_socket(name: &str) -> std::path::PathBuf {
+    vm_state_dir(name).join("hvf-agent.sock")
+}
+
 // ============================================================================
 // Sensitive ~/.mvm subdirectories
 // ============================================================================
