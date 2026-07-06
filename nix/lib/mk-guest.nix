@@ -655,7 +655,7 @@ let
     # workload path sets `mvm.vsock_egress=1` on the kernel cmdline; export the
     # env var Stage 2.6 keys on. Mirrors the mvm.secret_env / mvm.verb_grant
     # cmdline parsers above. Absent token ⇒ no-op (NIC guests boot unchanged).
-    if /bin/busybox grep -q ' mvm\.vsock_egress=1\( \|$\)' /proc/cmdline 2>/dev/null; then
+    if /bin/busybox grep -qE ' mvm\.vsock_egress=1( |$)' /proc/cmdline 2>/dev/null; then
       export MVM_VSOCK_EGRESS=1
     fi
 
