@@ -14,6 +14,7 @@
 
 - **No spec references in code comments.** `Plan N`, `ADR-\d+`, `#NNNN`, `W\d.` are CI-banned in code/comments (`xtask check-no-spec-refs-in-comments`). Reword to the concept. (Docs/specs may reference them.)
 - **No schema-version bump.** Nothing is in prod; new IR fields are `#[serde(default = ...)]`, do not bump `schema_version`.
+- **Regenerate SDK stubs after any workload-IR change.** `App` derives `JsonSchema`, so adding a field (Task 1) changes the emitted schema. Run `cargo run -p xtask -- gen-stubs` and commit the regenerated `schema/workload-ir-v0.json`, `sdks/python/mvm/_ir/workload.py`, `sdks/typescript/src/ir/workload.ts`; the CI `check-stubs` job fails on drift. New `HealthCheck` must derive `JsonSchema` (compile-required once `App` references it).
 - **Exec-form check only.** The guest is vsock-only; the healthcheck command is an exec argv the agent runs (no HTTP/TCP probe kinds).
 - **Phase A reads only `.is_some()`.** Timing fields (`interval/timeout/retries/start_period`) are stored, never acted on in this plan.
 - **Test gate:** `cargo nextest run --workspace` (process-parallel; the named gate), `cargo test --workspace --doc`, `cargo clippy --workspace -- -D warnings`, `cargo fmt --all -- --check`. Prefer `just` recipes. On this macOS host, `MVM_SKIP_EMBED_BINARIES=1` skips the host-vm cross-compile for non-boot tests.
@@ -538,10 +539,14 @@ MVM_SKIP_EMBED_BINARIES=1 cargo test --workspace --doc
 ```
 Expected: all green. (Two known pre-existing local failures unrelated to this work: `doctor::collect_security_posture_returns_a_real_tier` — env-specific `tier: Unknown`; and `embedded_binaries::each_embedded_binary_starts_with_elf_magic` — an artifact of `MVM_SKIP_EMBED_BINARIES=1`.)
 
-- [ ] **Step 3: Run the spec-ref-in-comments gate** (catches banned `ADR-`/`Plan`/`#NNNN`/`W\d.` in added code comments)
+- [ ] **Step 3: Run the spec-ref-in-comments and stub-drift gates**
 
-Run: `cargo run -p xtask -- check-no-spec-refs-in-comments`
-Expected: clean.
+Run:
+```bash
+cargo run -p xtask -- check-no-spec-refs-in-comments
+cargo run -p xtask -- check-stubs
+```
+Expected: both clean. (Task 1 already regenerated the stubs via `gen-stubs`; this re-verifies no drift remains.)
 
 - [ ] **Step 4: Commit**
 
