@@ -546,6 +546,17 @@ host = [
 # `user` — everything a user runs to create/drive sandboxes (the client).
 user = ["manifest-verify"]
 
+# `dev` — the local-development meta-feature: a contributor's laptop plays BOTH
+# roles (it hosts sandboxes and is the user), so `dev` is the `host` + `user`
+# union plus the dev conveniences. It is NOT a third product surface — it exists
+# so that `cargo build --features dev` (or `just`/`bin/dev`) produces an `mvmctl`
+# that can execute EVERY example in the README and the website docs on the
+# default (HVF) backend: OCI + flake `machine run`, `machine build`/`build
+# compile`, the persistent-machine verbs, `dev up`/`shell`, and the SDK compile
+# path. If a documented example needs a capability, that capability belongs in
+# `host` or `user` (which `dev` then inherits) — never a new top-level flag.
+dev = ["host", "user", "contributor-bootstrap", "dev-watch"]
+
 [profile.release]
 opt-level = 3
 strip = true
