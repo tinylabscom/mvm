@@ -15,7 +15,7 @@
 //! It then panics mounting the root fs because none is supplied — providing a
 //! root filesystem (initramfs / virtio-blk) is the next slice.
 
-use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::alloc::Layout;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -346,11 +346,24 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     }
 
     let layout = Layout::from_size_align(ram_size, PAGE).map_err(|_| HvfError::Alloc)?;
-    // SAFETY: non-zero layout; null-checked; freed on every return path.
-    let ram = unsafe { alloc_zeroed(layout) };
-    if ram.is_null() {
+    let _ = &layout; // SPIKE: retained for size/align validation only
+    // SPIKE: demand-zero anonymous mapping (untouched) instead of alloc_zeroed,
+    // to measure whether guest RAM residency comes from the allocation memset or
+    // from hv_vm_map faulting/wiring the region.
+    let ram = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            ram_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANON,
+            -1,
+            0,
+        )
+    };
+    if ram == libc::MAP_FAILED {
         return Err(HvfError::Alloc);
     }
+    let ram = ram as *mut u8;
 
     // Base cmdline, plus optional appended args. Precedence: the `MVM_HVF_BOOTARGS`
     // dev override wins, then the caller-supplied cmdline (the builder rootfs needs
@@ -400,7 +413,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     );
     if dtb.len() > FDT_MAX_SIZE as usize {
         // SAFETY: same layout.
-        unsafe { dealloc(ram, layout) };
+        unsafe { libc::munmap(ram.cast(), ram_size); };
         return Err(HvfError::BadKernel);
     }
     if let Ok(path) = std::env::var("MVM_HVF_DUMP_DTB") {
@@ -424,7 +437,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     let result = unsafe {
         let rc = hv_vm_create(core::ptr::null_mut());
         if rc != HV_SUCCESS {
-            dealloc(ram, layout);
+            libc::munmap(ram.cast(), ram_size);
             return Err(HvfError::VmCreate(rc));
         }
         let r = run(
@@ -449,7 +462,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         r
     };
     // SAFETY: same layout.
-    unsafe { dealloc(ram, layout) };
+    unsafe { libc::munmap(ram.cast(), ram_size); };
     result
 }
 
