@@ -2186,34 +2186,34 @@ pub fn create_dev_secrets_drive(abs_dir: &str, secret_files: &[DriveFile]) -> Re
     Ok(path)
 }
 
-/// Probe the directory containing `rootfs_path` (inside the Lima VM)
-/// for the dm-verity sidecar files emitted by mkGuest when
-/// `verifiedBoot = true`. Returns `(Some(verity_path), Some(roothash))`
-/// when both files are present and the roothash decodes to a 64-char
-/// hex string; otherwise `(None, None)` so callers fall back to the
-/// unverified-boot path.
+/// Probe the host-visible directory containing `rootfs_path` for the dm-verity
+/// sidecar files emitted by mkGuest when `verifiedBoot = true`. Returns
+/// `(Some(verity_path), Some(roothash))` when both files are present and the
+/// roothash decodes to a 64-char hex string; otherwise `(None, None)` so
+/// callers fall back to the unverified-boot path.
 pub fn probe_verity_sidecar(rootfs_path: &str) -> (Option<String>, Option<String>) {
-    use crate::base::shell::{run_in_vm, run_in_vm_stdout};
     use std::path::Path;
 
-    let Some(parent) = Path::new(rootfs_path).parent() else {
+    let Some(parent) = Path::new(rootfs_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    else {
         return (None, None);
     };
-    let parent = parent.to_string_lossy();
-    let verity = format!("{parent}/rootfs.verity");
-    let roothash_file = format!("{parent}/rootfs.roothash");
+    let verity = parent.join("rootfs.verity");
+    let roothash_file = parent.join("rootfs.roothash");
 
-    if run_in_vm(&format!("[ -f {verity} ]")).is_err() {
+    if !verity.is_file() {
         return (None, None);
     }
-    let Ok(raw) = run_in_vm_stdout(&format!("cat {roothash_file}")) else {
+    let Ok(raw) = std::fs::read_to_string(&roothash_file) else {
         return (None, None);
     };
     let hash = raw.trim().to_string();
     if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
         return (None, None);
     }
-    (Some(verity), Some(hash))
+    (Some(verity.to_string_lossy().into_owned()), Some(hash))
 }
 
 /// Build the cmdline fragment consumed by `mvm-verity-init`
@@ -3926,20 +3926,63 @@ mod tests {
 
     // ──── Verity ──────────────────────────────────────────────────────
     //
-    // The host-side cmdline shape and DM-table construction now live
-    // in `mvm-verity-init` (initramfs PID 1) — those are exercised by
-    // the live boot regression in `specs/runbooks/w3-verified-boot.md`.
-    // The unit test below covers the only host-side helper still
-    // running on the cold-boot path: the sidecar path probe.
+    // The host-side cmdline shape and DM-table construction now live in
+    // `mvm-verity-init` (initramfs PID 1). The unit tests below cover the
+    // host-side helper still running on the cold-boot path: the sidecar probe.
 
     #[test]
     fn probe_verity_sidecar_returns_none_for_path_without_parent() {
-        // A bare relative path with no parent triggers the early-return
-        // branch — should not shell out, should not panic.
         let (v, h) = probe_verity_sidecar("rootfs.ext4");
-        // Either the parent is "" and the probe falls through to a
-        // shell call that fails, or we return early. Both produce
-        // (None, None); the assertion catches either way.
+        assert!(v.is_none());
+        assert!(h.is_none());
+    }
+
+    #[test]
+    fn probe_verity_sidecar_reads_valid_host_sidecars() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
+        std::fs::write(&verity, b"verity").expect("write verity");
+        std::fs::write(
+            dir.path().join("rootfs.roothash"),
+            format!("{ROOTFS_HASH}\n"),
+        )
+        .expect("write roothash");
+
+        let (v, h) = probe_verity_sidecar(&rootfs.to_string_lossy());
+
+        assert_eq!(v.as_deref(), Some(verity.to_string_lossy().as_ref()));
+        assert_eq!(h.as_deref(), Some(ROOTFS_HASH));
+    }
+
+    #[test]
+    fn probe_verity_sidecar_returns_none_when_sidecar_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
+        std::fs::write(
+            dir.path().join("rootfs.roothash"),
+            format!("{ROOTFS_HASH}\n"),
+        )
+        .expect("write roothash");
+
+        let (v, h) = probe_verity_sidecar(&rootfs.to_string_lossy());
+
+        assert!(v.is_none());
+        assert!(h.is_none());
+    }
+
+    #[test]
+    fn probe_verity_sidecar_returns_none_for_malformed_roothash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
+        std::fs::write(dir.path().join("rootfs.verity"), b"verity").expect("write verity");
+        std::fs::write(dir.path().join("rootfs.roothash"), b"abc\n").expect("write roothash");
+
+        let (v, h) = probe_verity_sidecar(&rootfs.to_string_lossy());
+
         assert!(v.is_none());
         assert!(h.is_none());
     }

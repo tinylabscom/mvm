@@ -467,6 +467,10 @@ pub fn transient_run_dev_console(pty: bool, verity_path: Option<&str>) -> bool {
     pty && verity_path.is_none()
 }
 
+fn transient_run_needs_staging_cleanup(add_dirs: &[AddDir]) -> bool {
+    !add_dirs.is_empty()
+}
+
 /// Decide whether snapshot restore is safe for this request.
 ///
 /// Only enabled for the trivial case: a registered template (so the image
@@ -667,11 +671,10 @@ fn run_inner(
         backend.capabilities().snapshots,
     );
 
-    // Probe for the verity sidecar alongside the rootfs: production
-    // microVMs ship `rootfs.verity` + `rootfs.roothash` next to
-    // `rootfs.ext4`. Their absence is the dev-VM exemption. Files live
-    // inside the VM, so we can't `Path::exists()` them from the host —
-    // shell out into the VM instead.
+    // Probe for the verity sidecar alongside the rootfs: production microVMs
+    // ship `rootfs.verity` + `rootfs.roothash` next to `rootfs.ext4`. Their
+    // absence is the dev-VM exemption. This is host-local and side-effect-free;
+    // foreground OCI launches must never boot the builder/dev VM just to probe.
     let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
 
     // Run-path tier gate: a virtiofs-capable backend + a non-prod, non-sealed OCI
@@ -816,7 +819,9 @@ fn run_inner(
     if !booted {
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
         if let Err(e) = backend.start(&start_config) {
-            let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
+            if transient_run_needs_staging_cleanup(&req.add_dirs) {
+                let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
+            }
             return Err(e).context("starting transient microVM");
         }
     }
@@ -869,7 +874,9 @@ fn run_inner(
         }
     }
 
-    let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
+    if transient_run_needs_staging_cleanup(&req.add_dirs) {
+        let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
+    }
     let t_torn_down = timing.then(std::time::Instant::now);
 
     // Emit the phase breakdown when every seam was marked (i.e. timing was
@@ -1974,5 +1981,20 @@ mod tests {
     #[test]
     fn non_interactive_sealed_run_leaves_dev_console_unset() {
         assert!(!transient_run_dev_console(false, Some("/rootfs.verity")));
+    }
+
+    #[test]
+    fn staging_cleanup_skipped_without_add_dirs() {
+        assert!(!transient_run_needs_staging_cleanup(&[]));
+    }
+
+    #[test]
+    fn staging_cleanup_enabled_with_add_dirs() {
+        let add_dir = AddDir {
+            host_path: "/tmp/host".to_string(),
+            guest_path: "/mnt/host".to_string(),
+            read_only: true,
+        };
+        assert!(transient_run_needs_staging_cleanup(&[add_dir]));
     }
 }
