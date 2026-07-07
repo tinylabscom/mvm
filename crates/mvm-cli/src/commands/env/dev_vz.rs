@@ -2694,20 +2694,53 @@ mod attested_builder_pack {
         }
     }
 
+    /// The local policy a keyless-signed release pack must satisfy: identical
+    /// to the operator's on-disk policy, but with the compiled-in release
+    /// channels unioned into the allowed set. A release pack always declares
+    /// one of [`mvm_core::release_trust::release_channels`], and that trust is
+    /// carried by the embedded identity template, not by anything the operator
+    /// configures — so it must be allowed independent of `pack-trust.json`.
+    #[cfg(feature = "manifest-verify")]
+    pub(super) fn keyless_release_policy(base: &LocalPackPolicy) -> LocalPackPolicy {
+        let mut policy = base.clone();
+        policy
+            .allowed_channels
+            .extend(mvm_core::release_trust::release_channels());
+        policy
+    }
+
     /// Entry point for the download arm: build the host verification context,
     /// resolve a compatible verified builder pack, and place it. `Ok(true)` when
     /// a pack was materialized (caller skips the download); `Ok(false)` when none
     /// is available. Errors are placement failures the caller logs before falling
     /// back — resolution finding nothing is `Ok(false)`, never an error.
+    ///
+    /// Two authorities are tried in order: the embedded keyless root (a stock
+    /// binary's own release packs, no operator config needed) first, then the
+    /// operator's ed25519 `pack-trust.json` (fleet/self-built packs). Both
+    /// resolve against the same on-disk cache and fail open to the caller's
+    /// plain download when neither yields a pack.
     pub(super) fn attempt_attested_builder_pack(arch: &str, out_dir: &str) -> Result<bool> {
         let target_arch: GuestArch = arch
             .parse()
             .with_context(|| format!("unsupported builder pack arch {arch}"))?;
         let inputs = host_pack_verify_inputs(target_arch);
+        let out_dir = Path::new(out_dir);
+
+        #[cfg(feature = "manifest-verify")]
+        {
+            let keyless = mvm_core::release_trust::release_keyless_trust(env!("CARGO_PKG_VERSION"));
+            let policy = keyless_release_policy(&inputs.policy);
+            let ctx = PackVerifyCtx::keyless(&policy, &keyless, &inputs.trust);
+            if resolve_and_materialize_builder_pack(target_arch, out_dir, &ctx)? {
+                return Ok(true);
+            }
+        }
+
         // The config answers both trust and revocation queries, so it is passed
         // as the trust store and the revocation checker.
         let ctx = PackVerifyCtx::ed25519(&inputs.policy, &inputs.trust, &inputs.trust);
-        resolve_and_materialize_builder_pack(target_arch, Path::new(out_dir), &ctx)
+        resolve_and_materialize_builder_pack(target_arch, out_dir, &ctx)
     }
 
     /// Resolve a compatible verified builder pack against `ctx` and materialize
@@ -2834,6 +2867,8 @@ mod attested_builder_pack_tests {
     use mvm_core::util::test_env::TestEnv;
     use tempfile::TempDir;
 
+    #[cfg(feature = "manifest-verify")]
+    use super::attested_builder_pack::keyless_release_policy;
     use super::attested_builder_pack::{
         attempt_attested_builder_pack, attested_builder_pack_selected, builder_pack_requested_for,
         materialize_builder_pack,
@@ -3329,6 +3364,35 @@ mod attested_builder_pack_tests {
 
         assert!(!placed, "disallowed channel ⇒ fall through");
         assert!(!out_dir.exists(), "channel mismatch must not materialize");
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn keyless_release_policy_unions_release_channels_into_allowed_set() {
+        let base = LocalPackPolicy {
+            host_arch: GuestArch::host(),
+            backend: PackBackend::Hvf,
+            host_capabilities: BTreeSet::from([HostCapability("vsock".to_string())]),
+            policy_hash: hash("policy"),
+            allowed_channels: BTreeSet::from(["operator-channel".to_string()]),
+            now: utc(2026, 6, 25),
+        };
+
+        let policy = keyless_release_policy(&base);
+
+        assert!(
+            policy.allowed_channels.contains("stable"),
+            "release channel must be allowed"
+        );
+        assert!(
+            policy.allowed_channels.contains("operator-channel"),
+            "base policy's channels must be preserved"
+        );
+        assert_eq!(
+            policy.allowed_channels.len(),
+            2,
+            "union must not duplicate or drop entries"
+        );
     }
 }
 

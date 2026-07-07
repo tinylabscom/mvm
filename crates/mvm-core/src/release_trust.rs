@@ -8,6 +8,17 @@ pub const RELEASE_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.c
 const RELEASE_IDENTITY_TEMPLATES: &[&str] =
     &["https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/v{version}"];
 
+/// Channel the release pipeline signs builder and runtime packs on. A stock
+/// binary's local policy must allow this channel for its own release packs to
+/// verify, alongside whatever channels the operator's ed25519 trust config
+/// already allows.
+pub const RELEASE_CHANNELS: &[&str] = &["stable"];
+
+/// Owned copy of [`RELEASE_CHANNELS`] for callers building a `BTreeSet`/`Vec`.
+pub fn release_channels() -> Vec<String> {
+    RELEASE_CHANNELS.iter().map(|c| c.to_string()).collect()
+}
+
 /// Interpolate `{version}` into every release identity template.
 pub fn accepted_release_identities(version: &str) -> Vec<String> {
     RELEASE_IDENTITY_TEMPLATES
@@ -28,6 +39,13 @@ pub fn release_keyless_trust(version: &str) -> KeylessTrust {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_channels_non_empty() {
+        let channels = release_channels();
+        assert!(!channels.is_empty());
+        assert!(channels.iter().any(|c| c == "stable"));
+    }
 
     #[test]
     fn templates_interpolate_version_exactly() {
