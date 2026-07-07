@@ -316,6 +316,23 @@ pub fn deps_volume_dir(volume_hash: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_deps_volumes_dir()).join(volume_hash)
 }
 
+/// Root directory for content-addressed attested packs promoted by
+/// `mvm_core::pack_cache`. Each immediate child is a `<pack_hash>/`
+/// directory holding the verified file set plus a serialized manifest;
+/// the `.incoming/` sibling is the same-filesystem quarantine staging
+/// area the atomic rename-promote moves out of.
+pub fn pack_cache_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_cache_dir()).join("packs")
+}
+
+/// Resolve `<pack_cache_dir>/<pack_hash>` for a single promoted pack.
+/// The directory only appears after `verify_pack_at` accepts the staged
+/// pack, so a reader that observes it can trust its content — but every
+/// use re-verifies (`pack_cache::resolve_pack`) to catch later tampering.
+pub fn pack_dir(pack_hash: &str) -> std::path::PathBuf {
+    pack_cache_dir().join(pack_hash)
+}
+
 // ============================================================================
 // Per-VM host-side state paths
 // ============================================================================

@@ -5,6 +5,11 @@ pub mod backend;
 /// Disk-only job/artifact transport for the hvf-VMM builder (tar-over-raw-
 /// disk, so the host never formats or reads a guest filesystem).
 pub mod builder_disk_transport;
+/// Reusable producer that turns real builder artifacts (`vmlinux` + `rootfs.ext4`)
+/// into a signed, cache-promotable Builder pack — the produce half of the
+/// attested-builder-pack path whose verify/materialize half lives in
+/// `mvm_core::packs`.
+pub mod builder_pack;
 /// Vsock dispatch wire types for the persistent builder VM.
 pub mod builder_protocol;
 pub mod builder_route;
