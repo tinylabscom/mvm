@@ -552,6 +552,7 @@ mod tests {
             argv: Vec::new(),
             ack_divergence: Vec::new(),
             stdin: Vec::new(),
+            healthcheck: None,
         }
     }
 

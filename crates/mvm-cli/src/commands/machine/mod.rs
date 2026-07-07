@@ -348,6 +348,13 @@ impl MachineRunArgs {
             ack_divergence: Vec::new(),
             argv: self.argv,
             stdin: Vec::new(),
+            healthcheck: crate::exec::build_healthcheck(
+                self.healthcheck.as_deref(),
+                self.health_interval,
+                self.health_timeout,
+                self.health_retries,
+                self.health_start_period,
+            ),
         }
     }
 

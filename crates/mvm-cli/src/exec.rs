@@ -237,6 +237,29 @@ pub struct ExecRequest {
     /// stdin (`GuestRequest::Exec.stdin = None`). Set from piped host stdin
     /// when the host is not a TTY; always empty for PTY / interactive modes.
     pub stdin: Vec<u8>,
+    /// Recorded liveness declaration (phase A: presence only). Persisted with a
+    /// persistent machine so it survives + is inspectable; not yet probed.
+    pub healthcheck: Option<mvm_sdk::ir::HealthCheck>,
+}
+
+/// Build the IR healthcheck from the CLI flags. A shell command string becomes
+/// an exec argv the guest agent runs (`/bin/sh -lc <cmd>`). `None` command ⇒ no
+/// healthcheck (a plain task).
+pub fn build_healthcheck(
+    cmd: Option<&str>,
+    interval_secs: u32,
+    timeout_secs: u32,
+    retries: u32,
+    start_period_secs: u32,
+) -> Option<mvm_sdk::ir::HealthCheck> {
+    let cmd = cmd?;
+    Some(mvm_sdk::ir::HealthCheck {
+        command: vec!["/bin/sh".into(), "-lc".into(), cmd.to_string()],
+        interval_secs,
+        timeout_secs,
+        retries,
+        start_period_secs,
+    })
 }
 
 impl ExecRequest {
@@ -1264,6 +1287,7 @@ pub fn dispatch_in_session(
         // running, so this never reaches a backend boot.
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         stdin: Vec::new(),
+        healthcheck: None,
     };
     let wrapper = build_guest_wrapper(&req, &[]);
     let transport = vsock_transport::for_vm(&vm.vm_name)?;
@@ -1363,6 +1387,18 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_healthcheck_wraps_shell_command() {
+        let hc = build_healthcheck(Some("curl -fsS localhost/health"), 10, 5, 3, 0)
+            .expect("Some when a command is given");
+        assert_eq!(
+            hc.command,
+            vec!["/bin/sh", "-lc", "curl -fsS localhost/health"]
+        );
+        assert_eq!(hc.interval_secs, 10);
+        assert_eq!(build_healthcheck(None, 30, 5, 3, 0), None);
+    }
 
     #[test]
     fn add_dir_parse_happy_path() {
@@ -1474,6 +1510,7 @@ mod tests {
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
+            healthcheck: None,
         };
         assert_eq!(req.target_command(), "exec 'uname' '-a'");
     }
@@ -1496,6 +1533,7 @@ mod tests {
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
+            healthcheck: None,
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(script.starts_with("set -e\n"));
@@ -1526,6 +1564,7 @@ mod tests {
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
+            healthcheck: None,
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
         assert!(script.contains("mkdir -p '/g'"));
@@ -1556,6 +1595,7 @@ mod tests {
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
+            healthcheck: None,
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
         // RW mount is unqualified — no `-o ro`.
@@ -1791,6 +1831,7 @@ mod tests {
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
+            healthcheck: None,
         };
         assert_eq!(req.target_command(), "exec 'python' '-m' 'x'");
     }
@@ -1820,6 +1861,7 @@ mod tests {
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
+            healthcheck: None,
         };
         let script = build_guest_wrapper(&req, &[]);
         // Env from entrypoint exported.
@@ -1860,6 +1902,7 @@ mod tests {
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
+            healthcheck: None,
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(!script.contains("cd "));
