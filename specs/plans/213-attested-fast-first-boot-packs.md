@@ -493,17 +493,22 @@ it is tracked as a follow-up, not part of this slice.
   installed gate, and either drop the sidecar write on this path or thread a
   distinct attested-origin kind through the shared readiness predicate (which the
   source-checkout path also depends on). Cosmetic-only today (the label never gates
-  the installed readiness decision), so deferred.
+  the installed readiness decision), so deferred. **Revisited: still deferred.** The
+  only atomic stage→rename primitive (`promote_builder_vm_stage0_cache`) hard-requires
+  all three sidecars — it bails when the fingerprint/artifact-digest/provenance
+  markers are missing or mismatched and re-asserts `builder_vm_source_cache_ready`
+  after the rename — and the source-checkout local-build path calls the same
+  function. Dropping the sidecar write on the attested path would require forking that
+  primitive or loosening its shared contract, so it is not cleanly separable and stays
+  deferred until the attested-origin kind is threaded through the shared predicate.
 - **Attested materializer is production-inert until trust keys land.** The verify
   context is built with an empty trust store and empty allowed-channels, so on a
   real binary `resolve_pack` always returns `None` and the flag path falls through
   to the plain checksum download (fail-open, safe). The end-to-end verify→place
   chain is proven under test injection; wiring the real release-channel trust store
   + policy is the release/trust workstream, not this slice.
-- **`policy_hash` convention is duplicated producer↔consumer.** Both the producer
-  (`mvm-build::builder_pack`) and the host consumer
-  (`mvm-cli` `host_pack_verify_inputs`) compute the pack's `policy_hash` as
-  `Sha256Hex::from_bytes(arch.nix_system().as_bytes())`. It is test-guarded (the
-  produce→verify end-to-end tests fail if the two sides drift), but per the
-  reuse-first rule it should be a single shared helper in `mvm-core::packs`. Small
-  follow-up; deferred to avoid a three-crate change here.
+- **`policy_hash` convention is duplicated producer↔consumer.** ✅ Resolved.
+  Extracted `mvm_core::packs::host_pack_policy_hash(arch)` (single owner, unit-tested
+  against a known arch); the producer (`mvm-build::builder_pack`) and the host consumer
+  (`mvm-cli` `host_pack_verify_inputs`) both call it instead of recomputing
+  `Sha256Hex::from_bytes(arch.nix_system().as_bytes())` inline.

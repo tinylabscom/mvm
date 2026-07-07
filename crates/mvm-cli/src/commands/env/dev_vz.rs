@@ -2616,7 +2616,9 @@ mod attested_builder_pack {
     use mvm_core::config::mvm_keys_dir;
     use mvm_core::pack_cache::{PackVerifyCtx, VerifiedPackDir, resolve_pack};
     use mvm_core::pack_trust::{PackTrustConfig, load_pack_trust_config};
-    use mvm_core::packs::{HostCapability, LocalPackPolicy, PackBackend, PackKind, Sha256Hex};
+    use mvm_core::packs::{
+        HostCapability, LocalPackPolicy, PackBackend, PackKind, host_pack_policy_hash,
+    };
 
     use super::{
         promote_builder_vm_stage0_cache, unique_builder_vm_stage0_staging_dir,
@@ -2684,7 +2686,7 @@ mod attested_builder_pack {
                 host_arch: arch,
                 backend: PackBackend::Hvf,
                 host_capabilities: BTreeSet::from([HostCapability("vsock".to_string())]),
-                policy_hash: Sha256Hex::from_bytes(arch.nix_system().as_bytes()),
+                policy_hash: host_pack_policy_hash(arch),
                 allowed_channels: trust.allowed_channels(),
                 now: chrono::Utc::now(),
             },

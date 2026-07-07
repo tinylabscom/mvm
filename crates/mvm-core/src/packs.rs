@@ -171,6 +171,15 @@ pub struct PolicyCompatibility {
     pub allowed_channels: Vec<String>,
 }
 
+/// The `policy_compatibility.policy_hash` convention a host pack (Builder,
+/// Runtime) is pinned to: sha256 of the arch's nix system string. Both the
+/// producer (baked into the manifest) and the host verifier (derived and
+/// compared) MUST call this so the convention has a single owner and cannot
+/// silently drift between the two sides.
+pub fn host_pack_policy_hash(arch: GuestArch) -> Sha256Hex {
+    Sha256Hex::from_bytes(arch.nix_system().as_bytes())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackInputs {
@@ -949,6 +958,20 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn host_pack_policy_hash_matches_sha256_of_nix_system() {
+        // Guards the one convention both producer and verifier share. If this
+        // value changes, every previously produced host pack stops verifying.
+        assert_eq!(
+            host_pack_policy_hash(GuestArch::Aarch64),
+            Sha256Hex::from_bytes(b"aarch64-linux")
+        );
+        assert_eq!(
+            host_pack_policy_hash(GuestArch::X86_64),
+            Sha256Hex::from_bytes(b"x86_64-linux")
+        );
+    }
 
     struct MapTrustStore {
         keys: HashMap<KeyId, VerifyingKey>,

@@ -20,7 +20,7 @@ use mvm_core::packs::{
     HostCapability, PackBackend, PackBuilder, PackInputs, PackKind, PackManifest,
     PackManifestError, PackMetadata, PackOutputHashes, PackProvenanceMeta, PackTrustMeta,
     PolicyCompatibility, ReproducibilityStatus, SbomReference, Sha256Hex, SignatureValidity,
-    TransparencyLogReference,
+    TransparencyLogReference, host_pack_policy_hash,
 };
 use thiserror::Error;
 
@@ -152,9 +152,8 @@ fn builder_metadata(params: &BuildBuilderPackParams) -> PackMetadata {
         backend_compatibility: vec![PackBackend::Hvf],
         required_host_capabilities: vec![HostCapability(VSOCK_CAPABILITY.to_string())],
         policy_compatibility: PolicyCompatibility {
-            // The host derives this same value from its arch and rejects a pack
-            // whose hash differs, so it must be sha256 of the nix system string.
-            policy_hash: Sha256Hex::from_bytes(params.target_arch.nix_system().as_bytes()),
+            // Shared with the host verifier so the two sides cannot drift.
+            policy_hash: host_pack_policy_hash(params.target_arch),
             local_rebuild_required: false,
             allowed_channels: vec![params.channel.clone()],
         },
