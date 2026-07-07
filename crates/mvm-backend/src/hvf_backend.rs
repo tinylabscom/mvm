@@ -278,6 +278,16 @@ impl VmBackend for HvfBackend {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
 
+        // Interactive PTY runs (`machine run -it`) pre-open the console data
+        // ports so the host can attach a shell; the supervisor binds them under
+        // `<state_dir>/vsock/`. Create the dir up front so the bind can't miss.
+        let console_data_sockets = hvf_console_data_sockets(&state_dir, config.dev_console);
+        if !console_data_sockets.is_empty() {
+            let vsock_dir = state_dir.join("vsock");
+            std::fs::create_dir_all(&vsock_dir)
+                .with_context(|| format!("create console vsock dir {}", vsock_dir.display()))?;
+        }
+
         let cfg = HvfSupervisorConfig {
             kernel: PathBuf::from(kernel),
             // Workload path: the supervisor's default cmdline (`init=/init`) is the
@@ -295,7 +305,7 @@ impl VmBackend for HvfBackend {
             agent_socket: Some(agent_socket),
             substitution_socket: None,
             egress_relay_socket,
-            console_data_sockets: hvf_console_data_sockets(&state_dir, config.dev_console),
+            console_data_sockets,
         };
         let json = serde_json::to_string(&cfg)
             .map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
@@ -566,5 +576,35 @@ mod tests {
         let r = resolve_supervisor_path();
         unsafe { std::env::remove_var("MVM_HVF_SUPERVISOR_PATH") };
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn hvf_console_data_sockets_empty_for_sealed_boot() {
+        // A sealed prod boot (dev_console = false) opens no console listeners.
+        assert!(hvf_console_data_sockets(Path::new("/tmp/state"), false).is_empty());
+    }
+
+    #[test]
+    fn hvf_console_data_sockets_match_dev_console_transport_paths() {
+        let state = Path::new("/tmp/state");
+        let socks = hvf_console_data_sockets(state, true);
+        assert!(
+            !socks.is_empty(),
+            "an interactive run pre-opens console ports"
+        );
+        // The guest ports are exactly the dev console data range.
+        let got: Vec<u32> = socks.iter().map(|s| s.guest_port).collect();
+        let want: Vec<u32> = mvm_guest::vsock::dev_console_data_ports().collect();
+        assert_eq!(got, want);
+        // Each host UDS is `<state_dir>/vsock/vsock-<port>.sock`, the exact path
+        // `DevConsoleTransport` dials — a drift here silently breaks PTY attach.
+        for s in &socks {
+            assert_eq!(
+                s.host_socket,
+                state
+                    .join("vsock")
+                    .join(mvm_core::config::vsock_socket_filename(s.guest_port)),
+            );
+        }
     }
 }
