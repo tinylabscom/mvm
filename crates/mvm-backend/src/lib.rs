@@ -94,9 +94,8 @@ pub mod standby_pool;
 /// Shared per-VM substitution-endpoint spawn/reap helpers used by the
 /// QEMU + Firecracker launch paths (one impl, no drift).
 pub(crate) mod substitution_spawn;
-/// Shared "is the per-VM supervisor binary stale?" mtime check, used by every
-/// backend that spawns a separate supervisor bin (vz, hvf) so the `cargo run`
-/// rebuild skew is self-diagnosing instead of failing cryptically.
+/// Vz-specific stale-supervisor hint for early child-exit diagnostics. The
+/// source-checkout helper resolver handles normal freshness before spawn.
 pub(crate) mod supervisor_stale;
 /// Portable, hypervisor-agnostic VMM device model (guest memory, FDT, kernel
 /// loading, virtio-mmio block/vsock). Compiles on every target; the per-platform

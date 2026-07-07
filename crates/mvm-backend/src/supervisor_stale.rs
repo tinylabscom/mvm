@@ -1,13 +1,8 @@
-//! Shared "is the per-VM supervisor binary stale?" detection.
+//! Stale-supervisor hint for Vz early-exit diagnostics.
 //!
-//! Every host VMM that boots its guest in a **separate** per-VM binary
-//! (`mvm-vz-supervisor`, `mvm-hvf-supervisor`, …) hits the same source-checkout
-//! trap: `cargo run -- …` rebuilds only `mvmctl`, never the supervisor bins, so
-//! after a code change the running guest silently executes the old supervisor.
-//! On the vz path that surfaces loudly (a newer `ExecutionPlan`/`SupervisorConfig`
-//! trips `deny_unknown_fields` and the supervisor exits before boot); on the hvf
-//! path a behavioural regression (e.g. an agent-bridge fix) boots fine and only
-//! shows up as an opaque downstream timeout. Both want the same mtime check.
+//! Vz source-checkout launches normally rebuild helpers before spawn. This
+//! module only appends a fallback hint when a supervisor exits early and its
+//! mtime still predates the running `mvmctl`.
 
 use std::path::Path;
 use std::time::SystemTime;

@@ -203,7 +203,6 @@ impl VmmDriver for HvfDriver {
             .map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
 
         let supervisor = resolve_supervisor_path()?;
-        hvf_backend::warn_if_supervisor_stale(&supervisor);
         let mut child = Command::new(&supervisor)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())

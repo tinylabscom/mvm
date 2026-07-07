@@ -100,32 +100,31 @@ pub(crate) fn terminate_pid(pid: libc::pid_t) {
     }
 }
 
-/// Locate the per-VM supervisor binary, building it once on a source checkout if
-/// `cargo run` produced only `mvmctl`. See [`crate::aux_bin`].
+/// Locate the per-VM supervisor binary, rebuilding it on a source checkout if
+/// its source inputs are newer. See [`crate::aux_bin`].
 pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
     crate::aux_bin::resolve_or_build(&crate::aux_bin::AuxBin {
         bin: "mvm-hvf-supervisor",
         package: "mvm-vm-host",
         env_var: "MVM_HVF_SUPERVISOR_PATH",
         features: &[],
+        input_roots: &[
+            "Cargo.toml",
+            "Cargo.lock",
+            "crates/mvm-vm-host/Cargo.toml",
+            "crates/mvm-vm-host/src",
+            "crates/mvm-backend/Cargo.toml",
+            "crates/mvm-backend/src",
+            "crates/mvm-build/Cargo.toml",
+            "crates/mvm-build/src",
+            "crates/mvm-core/Cargo.toml",
+            "crates/mvm-core/src",
+            "crates/mvm-guest/Cargo.toml",
+            "crates/mvm-guest/src",
+            "crates/mvm-hostd/Cargo.toml",
+            "crates/mvm-hostd/src",
+        ],
     })
-}
-
-/// Rebuild command for the hvf per-VM supervisor bin. `cargo run` rebuilds only
-/// `mvmctl`, never this separate `mvm-vm-host` bin.
-const HVF_AUX_REBUILD_CMD: &str = "cargo build -p mvm-vm-host --bin mvm-hvf-supervisor";
-
-/// Warn once, before spawning, when the resolved supervisor predates the running
-/// `mvmctl` — the `cargo run` skew where the supervisor was left unrebuilt. On
-/// this path staleness is a silent behavioural regression (a stale agent bridge
-/// still boots cleanly, then wedges the guest agent), so unlike the vz path there
-/// is no early crash to hang a hint on; this makes it self-diagnosing up front.
-pub(crate) fn warn_if_supervisor_stale(supervisor: &Path) {
-    if let Some(hint) =
-        crate::supervisor_stale::supervisor_stale_hint(supervisor, HVF_AUX_REBUILD_CMD)
-    {
-        ui::warn(&hint);
-    }
 }
 
 fn vms_root() -> PathBuf {
@@ -340,7 +339,6 @@ impl VmBackend for HvfBackend {
             .map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
 
         let supervisor = resolve_supervisor_path()?;
-        warn_if_supervisor_stale(&supervisor);
         ui::info(&format!(
             "Starting HVF VM '{}' via {}...",
             config.name,
@@ -540,20 +538,6 @@ mod tests {
         assert_eq!(profile.tier, "Tier 2");
         assert!(profile.layer_coverage.is_microvm());
         assert_eq!(profile.dropped_claims(), vec![3]);
-    }
-
-    #[test]
-    fn rebuild_hint_names_the_supervisor_bin() {
-        // The whole point of the stale warning is telling the user the exact
-        // command; guard against the bin name drifting out of the hint.
-        assert!(HVF_AUX_REBUILD_CMD.contains("mvm-hvf-supervisor"));
-        assert!(HVF_AUX_REBUILD_CMD.contains("mvm-vm-host"));
-    }
-
-    #[test]
-    fn warn_if_supervisor_stale_is_silent_for_unreadable_path() {
-        // No mtime → no hint → no panic (don't guess on a missing binary).
-        warn_if_supervisor_stale(Path::new("/nonexistent/mvm-hvf-supervisor"));
     }
 
     #[test]

@@ -135,11 +135,12 @@ $SUDO install -m 0755 "$SRC/mvmctl" "$INSTALL_DIR/mvmctl"
 # Per-VM host processes mvmctl spawns at runtime (one process per guest VM).
 # They must sit NEXT TO mvmctl so the backend's adjacent-to-exe resolver finds
 # them — installing only mvmctl strands them. copy-if-exists: the bundled set
-# differs by platform (macOS ships all three; Linux ships mvm-bridge only).
-# No codesigning here: the vz/libkrun supervisors self-sign with the
-# VZ/Hypervisor entitlements on first spawn (ensure_signed); mvm-bridge does
-# networking only and needs no entitlement.
-for hostbin in mvm-bridge mvm-vz-supervisor mvm-libkrun-supervisor; do
+# differs by platform (macOS ships the supervisors + bridge + endpoint; Linux
+# ships the bridge + endpoint).
+# No codesigning here: the vz/hvf/libkrun supervisors self-sign with the
+# required entitlements on first spawn (ensure_signed); mvm-bridge and the
+# substitution endpoint need no entitlement.
+for hostbin in mvm-bridge mvm-vz-supervisor mvm-hvf-supervisor mvm-libkrun-supervisor mvm-substitution-endpoint; do
   if [ -f "$SRC/$hostbin" ]; then
     $SUDO install -m 0755 "$SRC/$hostbin" "$INSTALL_DIR/$hostbin"
     say "Installed: $INSTALL_DIR/$hostbin"

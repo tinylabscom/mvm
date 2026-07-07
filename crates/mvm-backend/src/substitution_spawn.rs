@@ -123,14 +123,22 @@ pub const SUBST_PID_FILE: &str = "substitution.pid";
 /// line before the caller declares the spawn failed.
 pub const SUBST_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Locate the `mvm-substitution-endpoint` binary, building it once on a source
-/// checkout if `cargo run` produced only `mvmctl`. See [`crate::aux_bin`].
+/// Locate the `mvm-substitution-endpoint` binary, rebuilding it on a source
+/// checkout if its source inputs are newer. See [`crate::aux_bin`].
 fn resolve_substitution_endpoint_path() -> Result<PathBuf> {
     crate::aux_bin::resolve_or_build(&crate::aux_bin::AuxBin {
         bin: "mvm-substitution-endpoint",
         package: "mvm-hostd",
         env_var: "MVM_SUBSTITUTION_ENDPOINT_PATH",
         features: &[],
+        input_roots: &[
+            "Cargo.toml",
+            "Cargo.lock",
+            "crates/mvm-hostd/Cargo.toml",
+            "crates/mvm-hostd/src",
+            "crates/mvm-core/Cargo.toml",
+            "crates/mvm-core/src",
+        ],
     })
 }
 
