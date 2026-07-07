@@ -355,8 +355,14 @@ ADR-097 is Proposed; slice 1 ratifies it with two edits (a separate docs change)
 **Progress:** Unit 1 landed (`PackBuilder` producer + `PackBackend::Hvf`). Unit 2
 landed (content-addressed `pack_cache` — verify + atomic promote). Unit 3 landed
 as the corrected **attested builder-image download materializer** (see the "Slice 1
-correction" section) — flag-gated on `MVM_BUILDER_PACK`, offline-tested, inert in
-production until release trust keys land.
+correction" section) — flag-gated on `MVM_BUILDER_PACK`, offline-tested. Follow-up
+F landed the **configurable trust root** (`mvm-core::pack_trust` + a
+`mvm_keys_dir()/pack-trust.json` loaded on the host): the attested path now
+verifies against a real on-disk trust root instead of an empty store, proven
+end-to-end (produce → promote → resolve → verify → materialize), with an absent or
+malformed trust file staying inert and falling through to the plain download. An
+embedded release-key default (so it works with no config) remains for the
+release/trust workstream.
 
 **Unit 1 — pack producer (WS-B thin).** A CI/release step plus a local
 example/xtask tool that takes the builder-VM flake outputs (base disk + builder

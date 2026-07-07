@@ -2611,15 +2611,12 @@ mod attested_builder_pack {
     use std::path::Path;
 
     use anyhow::{Context, Result};
-    use ed25519_dalek::VerifyingKey;
 
     use mvm_core::arch::GuestArch;
+    use mvm_core::config::mvm_keys_dir;
     use mvm_core::pack_cache::{PackVerifyCtx, VerifiedPackDir, resolve_pack};
-    use mvm_core::packs::{
-        HostCapability, LocalPackPolicy, PackBackend, PackKind, PackRevocationChecker,
-        PackTrustStore, RevocationStatus, Sha256Hex,
-    };
-    use mvm_core::plan::bundle::KeyId;
+    use mvm_core::pack_trust::{PackTrustConfig, load_pack_trust_config};
+    use mvm_core::packs::{HostCapability, LocalPackPolicy, PackBackend, PackKind, Sha256Hex};
 
     use super::{
         promote_builder_vm_stage0_cache, unique_builder_vm_stage0_staging_dir,
@@ -2650,45 +2647,48 @@ mod attested_builder_pack {
         builder_pack_requested() && super::find_builder_vm_flake().is_err()
     }
 
-    /// Local verification context for host builder packs. The release-channel
-    /// verifying keys and the local policy hash / allowed-channel set are wired
-    /// by the trust workstream; until then no key is trusted and no channel is
-    /// allowed, so every promoted pack fails verification and the caller falls
-    /// back to the download — fail-open, as an accelerator must.
+    /// Local verification context for host builder packs. `trust` is the
+    /// operator's on-disk [`PackTrustConfig`] (loaded from `pack-trust.json` in
+    /// the keys dir); it answers both "is this signer trusted?" and "is it
+    /// revoked?". An empty config (no publishers) trusts no key and allows no
+    /// channel, so every promoted pack fails verification and the caller falls
+    /// back to the download — fail-open on availability, never on trust.
     struct HostPackVerifyInputs {
         policy: LocalPackPolicy,
-        trust: HostPackTrust,
-        revocations: HostPackRevocations,
+        trust: PackTrustConfig,
     }
 
-    struct HostPackTrust;
-
-    impl PackTrustStore for HostPackTrust {
-        fn verifying_key(&self, _key_id: &KeyId) -> Option<VerifyingKey> {
-            None
-        }
-    }
-
-    struct HostPackRevocations;
-
-    impl PackRevocationChecker for HostPackRevocations {
-        fn status(&self, _key_id: &KeyId, _pack_hash: &Sha256Hex) -> RevocationStatus {
-            RevocationStatus::Good
+    /// Load the on-disk trust config, folding both the absent and the malformed
+    /// case into the inert empty config. A missing file is the expected default;
+    /// a broken file must never brick `dev up`, so we warn and stay inert — the
+    /// pack path then trusts nothing and falls through to the plain download. It
+    /// can never trust an unverified pack, so failing open here is safe.
+    fn load_host_pack_trust() -> PackTrustConfig {
+        match load_pack_trust_config(&mvm_keys_dir().join("pack-trust.json")) {
+            Ok(Some(config)) => config,
+            Ok(None) => PackTrustConfig::default(),
+            Err(error) => {
+                ui::warn(&format!(
+                    "Ignoring malformed pack trust config ({error}); attested builder \
+                     packs stay inert and dev up falls back to the download."
+                ));
+                PackTrustConfig::default()
+            }
         }
     }
 
     fn host_pack_verify_inputs(arch: GuestArch) -> HostPackVerifyInputs {
+        let trust = load_host_pack_trust();
         HostPackVerifyInputs {
             policy: LocalPackPolicy {
                 host_arch: arch,
                 backend: PackBackend::Hvf,
                 host_capabilities: BTreeSet::from([HostCapability("vsock".to_string())]),
                 policy_hash: Sha256Hex::from_bytes(arch.nix_system().as_bytes()),
-                allowed_channels: BTreeSet::new(),
+                allowed_channels: trust.allowed_channels(),
                 now: chrono::Utc::now(),
             },
-            trust: HostPackTrust,
-            revocations: HostPackRevocations,
+            trust,
         }
     }
 
@@ -2702,7 +2702,9 @@ mod attested_builder_pack {
             .parse()
             .with_context(|| format!("unsupported builder pack arch {arch}"))?;
         let inputs = host_pack_verify_inputs(target_arch);
-        let ctx = PackVerifyCtx::new(&inputs.policy, &inputs.trust, &inputs.revocations);
+        // The config answers both trust and revocation queries, so it is passed
+        // as the trust store and the revocation checker.
+        let ctx = PackVerifyCtx::new(&inputs.policy, &inputs.trust, &inputs.trust);
         resolve_and_materialize_builder_pack(target_arch, Path::new(out_dir), &ctx)
     }
 
@@ -2812,11 +2814,14 @@ mod attested_builder_pack {
 mod attested_builder_pack_tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+    use base64::Engine as _;
     use chrono::{DateTime, TimeZone, Utc};
     use ed25519_dalek::{SigningKey, VerifyingKey};
 
     use mvm_core::arch::GuestArch;
+    use mvm_core::config::mvm_keys_dir;
     use mvm_core::pack_cache::{PackVerifyCtx, VerifiedPackDir, promote, resolve_pack};
+    use mvm_core::pack_trust::{PackTrustConfig, TrustedPublisher};
     use mvm_core::packs::{
         HostCapability, LocalPackPolicy, PackBackend, PackBuilder, PackInputs, PackKind,
         PackManifest, PackMetadata, PackOutputHashes, PackProvenanceMeta, PackRevocationChecker,
@@ -3128,6 +3133,200 @@ mod attested_builder_pack_tests {
 
     fn good_revocations() -> AlwaysGood {
         AlwaysGood
+    }
+
+    // ---- on-disk trust config wiring (the F2 de-inert proof) ----
+
+    /// The policy hash `host_pack_verify_inputs` derives for the running host —
+    /// the value a pack's `policy_compatibility.policy_hash` must equal for the
+    /// production verify context to admit it.
+    fn host_policy_hash() -> Sha256Hex {
+        Sha256Hex::from_bytes(GuestArch::host().nix_system().as_bytes())
+    }
+
+    /// Builder-pack metadata whose policy hash matches what the production path
+    /// derives (the shared `builder_metadata` pins an unrelated `"policy"`
+    /// hash), so a pack minted from it is admissible by the on-disk-config ctx.
+    fn attested_builder_metadata() -> PackMetadata {
+        let mut meta = builder_metadata();
+        meta.policy_compatibility.policy_hash = host_policy_hash();
+        meta
+    }
+
+    fn attested_builder_manifest(root: &std::path::Path, key: &SigningKey) -> PackManifest {
+        let kernel = std::fs::read(root.join("vmlinux")).expect("read vmlinux");
+        let image = std::fs::read(root.join("rootfs.ext4")).expect("read rootfs");
+        PackBuilder::new(root, attested_builder_metadata(), key)
+            .files(["vmlinux", "rootfs.ext4"])
+            .output_hashes(PackOutputHashes {
+                kernel_hash: Some(Sha256Hex::from_bytes(&kernel)),
+                builder_image_hash: Some(Sha256Hex::from_bytes(&image)),
+                ..Default::default()
+            })
+            .build()
+            .expect("build pack")
+    }
+
+    /// A host policy matching `host_pack_verify_inputs` but with caller-chosen
+    /// channels — used to promote the pack into the cache with a permissive
+    /// in-test context, so the *on-disk config* is the gate under test.
+    fn attested_host_policy(channels: &[&str]) -> LocalPackPolicy {
+        LocalPackPolicy {
+            host_arch: GuestArch::host(),
+            backend: PackBackend::Hvf,
+            host_capabilities: BTreeSet::from([HostCapability("vsock".to_string())]),
+            policy_hash: host_policy_hash(),
+            allowed_channels: channels.iter().map(|c| c.to_string()).collect(),
+            now: utc(2026, 6, 25),
+        }
+    }
+
+    /// Mint + promote a `"stable"`-channel builder pack signed by `key` into the
+    /// (env-isolated) cache, trusting `key` for the promote step only.
+    fn promote_attested_pack(key: &SigningKey, staged: &std::path::Path) -> PackManifest {
+        let manifest = attested_builder_manifest(staged, key);
+        let trust = trust_store(key);
+        let rev = good_revocations();
+        let policy = attested_host_policy(&["stable"]);
+        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        promote(staged, &manifest, &ctx).expect("promote");
+        manifest
+    }
+
+    fn trust_config(key: &SigningKey, channels: &[&str]) -> PackTrustConfig {
+        PackTrustConfig {
+            publishers: vec![TrustedPublisher {
+                pubkey_base64: base64::engine::general_purpose::STANDARD
+                    .encode(key.verifying_key().to_bytes()),
+                channels: channels.iter().map(|c| c.to_string()).collect(),
+            }],
+            revocations: Vec::new(),
+        }
+    }
+
+    /// Write `config` to `pack-trust.json` under the env-isolated keys dir — the
+    /// exact path `host_pack_verify_inputs` reads.
+    fn write_trust_config(config: &PackTrustConfig) {
+        let path = mvm_keys_dir().join("pack-trust.json");
+        std::fs::create_dir_all(path.parent().expect("keys dir parent")).expect("mkdir keys");
+        std::fs::write(&path, serde_json::to_vec(config).expect("serialize")).expect("write trust");
+    }
+
+    fn host_arch_str() -> String {
+        GuestArch::host().to_string()
+    }
+
+    fn host_out_dir(root: &std::path::Path) -> std::path::PathBuf {
+        root.join("builder-vm").join(host_arch_str())
+    }
+
+    /// The de-inert proof: a pack signed by a key the on-disk `pack-trust.json`
+    /// trusts on the pack's channel is resolved, materialized into `out_dir`,
+    /// and the dir passes the installed-path readiness gate — end to end through
+    /// the real `attempt_attested_builder_pack` entrypoint the flag hook calls.
+    #[test]
+    fn end_to_end_trusted_pack_materializes_and_marks_cache_ready() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let data = TempDir::new().expect("data tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_DATA_DIR", data.path());
+
+        let staged = TempDir::new().expect("staged pack tempdir");
+        write_valid_builder_artifacts(staged.path());
+        let key = signing_key();
+        promote_attested_pack(&key, staged.path());
+        write_trust_config(&trust_config(&key, &["stable"]));
+
+        let out = TempDir::new().expect("out tempdir");
+        let out_dir = host_out_dir(out.path());
+        let placed =
+            attempt_attested_builder_pack(&host_arch_str(), out_dir.to_str().expect("utf-8"))
+                .expect("attempt ok");
+
+        assert!(placed, "trusted pack must materialize");
+        assert!(out_dir.join("vmlinux").exists(), "vmlinux placed");
+        assert!(out_dir.join("rootfs.ext4").exists(), "rootfs placed");
+        assert!(
+            validate_builder_vm_stage0_artifacts(&out_dir).is_ok(),
+            "materialized dir must satisfy the installed-binary readiness gate"
+        );
+    }
+
+    #[test]
+    fn absent_trust_config_stays_inert() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let data = TempDir::new().expect("data tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_DATA_DIR", data.path());
+
+        let staged = TempDir::new().expect("staged pack tempdir");
+        write_valid_builder_artifacts(staged.path());
+        promote_attested_pack(&signing_key(), staged.path());
+        // No pack-trust.json: the empty config trusts nothing.
+
+        let out = TempDir::new().expect("out tempdir");
+        let out_dir = host_out_dir(out.path());
+        let placed =
+            attempt_attested_builder_pack(&host_arch_str(), out_dir.to_str().expect("utf-8"))
+                .expect("attempt is fail-open");
+
+        assert!(!placed, "absent config ⇒ nothing trusted ⇒ fall through");
+        assert!(!out_dir.exists(), "fall-through must not touch out_dir");
+    }
+
+    #[test]
+    fn untrusted_key_is_rejected() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let data = TempDir::new().expect("data tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_DATA_DIR", data.path());
+
+        let staged = TempDir::new().expect("staged pack tempdir");
+        write_valid_builder_artifacts(staged.path());
+        promote_attested_pack(&signing_key(), staged.path());
+        // Trust a different key than the one that signed the pack.
+        let other = SigningKey::from_bytes(&[71u8; 32]);
+        write_trust_config(&trust_config(&other, &["stable"]));
+
+        let out = TempDir::new().expect("out tempdir");
+        let out_dir = host_out_dir(out.path());
+        let placed =
+            attempt_attested_builder_pack(&host_arch_str(), out_dir.to_str().expect("utf-8"))
+                .expect("attempt is fail-open");
+
+        assert!(
+            !placed,
+            "unknown signer ⇒ fail-closed on trust ⇒ fall through"
+        );
+        assert!(!out_dir.exists(), "untrusted signer must not materialize");
+    }
+
+    #[test]
+    fn disallowed_channel_is_rejected() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let data = TempDir::new().expect("data tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_DATA_DIR", data.path());
+
+        let staged = TempDir::new().expect("staged pack tempdir");
+        write_valid_builder_artifacts(staged.path());
+        let key = signing_key();
+        promote_attested_pack(&key, staged.path());
+        // Trust the signer, but only for "beta"; the pack declares "stable".
+        write_trust_config(&trust_config(&key, &["beta"]));
+
+        let out = TempDir::new().expect("out tempdir");
+        let out_dir = host_out_dir(out.path());
+        let placed =
+            attempt_attested_builder_pack(&host_arch_str(), out_dir.to_str().expect("utf-8"))
+                .expect("attempt is fail-open");
+
+        assert!(!placed, "disallowed channel ⇒ fall through");
+        assert!(!out_dir.exists(), "channel mismatch must not materialize");
     }
 }
 

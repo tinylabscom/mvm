@@ -23,8 +23,10 @@ use crate::plan::bundle::KeyId;
 
 /// Trusted publishers plus revocations. Absence of this file means "trust
 /// nothing" — the inert, fail-closed default (`load_pack_trust_config` returns
-/// `Ok(None)`), which leaves the attested path unable to verify any pack.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `Ok(None)`), which leaves the attested path unable to verify any pack. That
+/// same inert state is `Default` (no publishers, no revocations): a verifier
+/// holding it trusts no key and allows no channel, so the caller falls through.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackTrustConfig {
     pub publishers: Vec<TrustedPublisher>,
