@@ -1,7 +1,7 @@
 # ADR-097 — Attested downloadable runtime and builder packs for fast first launch
 
 **Status:** Proposed
-**Date:** 2026-06-24
+**Date:** 2026-06-24 (amended 2026-07-07: §9 release signing custody)
 **Relates to:** [ADR-041](041-signed-audited-execution-plans.md),
 [ADR-046](046-builder-vm-via-libkrun.md),
 [ADR-071](071-stage0-bootstrap-trust-model.md),
@@ -179,6 +179,108 @@ artifact-channel pinning, enterprise mirrors, offline mode, and local rebuild
 verification. A stale but validly signed artifact is not trusted forever unless
 policy explicitly permits that channel and expiry state.
 
+### 9. Release signing custody: keyless public channel, operator-supplied keys for everything else (amendment 2026-07-07)
+
+Sections 2 and 8 leave "signing key id" and "key rotation" abstract. This
+amendment settles the custody model concretely, because whatever trust root ships
+compiled into a released binary is expensive to change and must be the
+destination, not a placeholder. There are two trust authorities, split by who
+produced the pack:
+
+**Public mvm release channel — keyless.** Release packs published by the mvm
+project carry no long-lived signing key. Continuous integration signs each pack
+manifest under its workflow's OpenID Connect identity: the identity token is
+exchanged for a short-lived Fulcio certificate, the manifest bytes are signed
+with the certificate's ephemeral key, and the signature is recorded in the Rekor
+transparency log. The signature travels beside the pack as a detached bundle
+(certificate + signature + inclusion proof). This is the same posture the OCI
+image path already commits to (`crypto::image_verify`), so it adds no new trust
+surface mvm did not already accept.
+
+Verification is offline and pins **both** halves of the identity:
+
+- the certificate must chain to the embedded Fulcio root (from the vendored
+  Sigstore trust root, TUF-managed);
+- the certificate's identity must match an entry in a compiled-in **allow-list**
+  — issuer `https://token.actions.githubusercontent.com` and a subject pattern
+  scoped to the release workflow on a protected tag ref;
+- the Rekor inclusion proof must verify against the embedded log root.
+
+Pinning the subject identity is load-bearing: a verifier that accepts any
+Fulcio-issued certificate is weaker than a fixed key, because any holder of any
+OIDC token could then sign. The allow-list is a list, not a scalar, on purpose —
+it is the rotation mechanism (see below).
+
+What this buys over a long-lived key in CI: there is no key to exfiltrate, and
+every release signature is publicly logged, so a CI compromise that mints a valid
+pack is detectable after the fact rather than silent. What it still trusts: the
+CI provider's OIDC identity, the Sigstore roots, and — critically — a correct
+subject pin. A compromised release workflow can still produce a legitimately
+signed pack; keyless makes that event auditable, it does not prevent it.
+
+**Operator / enterprise / fleet-internal — ed25519, unchanged.** The existing
+`packs::verify_pack_at` path, keyed off an out-of-band `PackTrustConfig`
+(`~/.mvm/keys/pack-trust.json`: publisher ed25519 pubkeys, channels,
+revocations), is the bring-your-own-trust-root lane. It is untouched by this
+amendment. A fleet or air-gapped operator that builds its own packs signs them
+with an operator key and distributes that pubkey through this config. This is
+also the mvmd production lane (see interop below).
+
+**Verification structure.** The keyless check does not replace or complicate the
+ed25519 verifier. It is a separate outer verifier that (1) verifies the detached
+bundle over the exact manifest bytes against the embedded Fulcio/Rekor roots and
+the pinned identity allow-list, then (2) runs the same manifest structural, file
+hash, pack hash, policy compatibility, expiry, and revocation checks the ed25519
+path already performs. Only the signature-key step differs. The shared middle is
+factored into one function both entry points call so they cannot diverge. The
+keyless verifier lives in `mvm-core`, gated behind the `manifest-verify` feature
+(which pulls the Sigstore verify stack and no async runtime), with its trust
+inputs — identity allow-list, local policy, and the operator config — passed as
+parameters.
+
+**Embedded trust root shape.** The mvm-specific embedded material is only the
+identity allow-list, expressed as a compiled-in constant and validated by test;
+the Fulcio and Rekor roots come from the vendored Sigstore trust root. The
+embedded keyless root is always active for the public channel, so a stock install
+verifies release packs with no configuration. `pack-trust.json` is purely
+additive on top of it — it adds ed25519 publishers, channels, and revocations; it
+does not gate or disable the embedded keyless root. A switch to disable the public
+channel or pin to operator-only roots (offline-pinned, mirror-only, enterprise
+modes) is deferred to the revocation/enterprise workstream (§I) and must not be
+foreclosed here.
+
+**Rotation.** The keyless public channel needs no key rotation — certificates are
+ephemeral. Only the *identity* migrates (a repository rename, a subject-pattern
+change, a new channel), and that is handled by carrying more than one entry in the
+allow-list: add the new identity, ship the binary, drop the old identity a release
+or two later. There is no key-overlap window to manage. Operator ed25519 rotation
+already works by listing multiple publishers in `pack-trust.json`.
+
+**Revocation.** This amendment keeps revocation config-driven through
+`PackTrustConfig.revocations`, as shipped. Fetching a live revocation channel
+(the `TrustMetadata.revocation_channel` URL each manifest already records) with
+offline-cache behavior is deferred to §I; the URL is recorded but not yet
+fetched.
+
+**mvmd / fleet interop (explicit).** Multi-tenant fleet orchestration (mvmd)
+consumes these types through the `mvmctl` facade and is a first-class target of
+this design, not an afterthought:
+
+- The pack types and the ed25519 `verify_pack_at` are in `mvm-core`'s default
+  surface, so mvmd has them today. The keyless verifier is `manifest-verify`-
+  gated; mvmd reaches it by enabling that one feature on its `mvmctl` dependency —
+  a feature flip, not an architectural change.
+- The two-authority split maps directly onto the deployment split: keyless is the
+  public mvm project channel; the ed25519 operator lane is the fleet-internal
+  channel, where mvmd builds packs in its builder VM, signs with an operator key,
+  and distributes the pubkey via the `pack-trust.json`-shaped config.
+- The deferred disable/pin switch is the mvmd production knob: a fleet generally
+  should not blind-trust the public release identity. Two constraints on this
+  slice preserve that path: the keyless verifier stays in `mvm-core` with trust
+  inputs as parameters (so mvmd supplies fleet roots without touching `mvm-cli`),
+  and the identity allow-list plus the future pin/disable behavior stay data and
+  policy rather than hardcoded control flow.
+
 ## Consequences
 
 **Positive**
@@ -229,3 +331,8 @@ policy explicitly permits that channel and expiry state.
 Plan 213 implements this decision: pack schema, release publishing, cache
 verification, runtime fast path, builder fast path, audit/explain surfaces, and
 latency/security gates.
+
+The §9 custody amendment is implemented by the Plan 213 release-signing follow-on
+(Slice 2): the `manifest-verify`-gated keyless verifier and embedded identity
+allow-list in `mvm-core`, the release-pipeline signing/publishing step, and the
+mvmd interop constraints above.

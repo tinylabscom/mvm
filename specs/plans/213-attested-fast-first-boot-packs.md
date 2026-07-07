@@ -512,3 +512,118 @@ it is tracked as a follow-up, not part of this slice.
   against a known arch); the producer (`mvm-build::builder_pack`) and the host consumer
   (`mvm-cli` `host_pack_verify_inputs`) both call it instead of recomputing
   `Sha256Hex::from_bytes(arch.nix_system().as_bytes())` inline.
+
+## Slice 2 (2026-07-07): release signing custody — un-inert the installed pack path
+
+Slice 1 shipped the pack chain production-inert: on a real installed binary the
+trust store is empty, so `resolve_pack` always returns `None` and the flag path
+falls through to the plain SHA-256 download. Slice 2 closes the two Slice-1
+deferrals — the **embedded release-trust default** and the **release-pipeline
+wiring** — under the custody model settled in ADR-097 §9 (keyless public channel
+via GitHub OIDC → Fulcio → Rekor; ed25519 `pack-trust.json` unchanged as the
+operator/fleet lane).
+
+The design decisions (settled before this slice; see ADR-097 §9):
+
+- Public release packs are keyless-signed under the CI workflow OIDC identity; the
+  detached Sigstore bundle rides beside the pack as a sidecar over the exact
+  manifest bytes. No long-lived signing key exists.
+- Verification pins **both** the Fulcio issuer and a compiled-in **identity
+  allow-list** (subject pattern scoped to the release workflow on a protected tag),
+  plus the Rekor inclusion proof. A list, not a scalar, so identity migration needs
+  no key-overlap window — just add/drop entries.
+- The keyless verifier is a separate outer verifier that reuses the *same* shared
+  structural/hash/policy/expiry/revocation middle as `verify_pack_at`; only the
+  signature-key step differs. It lives in `mvm-core`, gated behind
+  `manifest-verify`, with trust inputs (identity allow-list, policy, operator
+  config) passed as parameters.
+- Embedded keyless root is always active for the public channel; `pack-trust.json`
+  is purely additive. The disable/pin-to-operator switch is deferred to §I.
+- Revocation stays config-driven (`PackTrustConfig.revocations`) this slice;
+  fetching the live `revocation_channel` is deferred to §I.
+
+### Unit 1 — keyless verifier + manifest authority shape (`mvm-core`, `manifest-verify`-gated)
+
+- [ ] Make a pack self-declare its signing authority so keyless vs ed25519 packs
+      cannot be confused or downgraded into one another (a `SignatureFormat::Sigstore`
+      and/or a signature-authority enum; the exact field reshape is settled in the
+      implementation plan — no backcompat, nothing in prod). Populate
+      `TrustMetadata.transparency_log` from the resolved Rekor entry on keyless packs.
+- [ ] Factor the post-signature checks shared by both verifiers
+      (`validate_manifest` structural/policy/expiry + `verify_files` +
+      `verify_pack_hash` + `verify_revocation`) into one function both entry points
+      call, so they cannot diverge. The ed25519-bundle-specific
+      `validate_signature_bundle` stays on the ed25519 path only.
+- [ ] Add `verify_pack_keyless_at(...)`: verify a detached Sigstore bundle over the
+      manifest bytes against the embedded Fulcio/Rekor roots + a passed identity
+      allow-list (reuse the `crypto::image_verify` / `sigstore-verify` machinery),
+      then run the shared middle. Trust inputs as parameters; no `mvm-cli` dep.
+- [ ] Tests: valid bundle + pinned identity verifies; wrong issuer rejected; wrong
+      subject/SAN rejected; tampered manifest rejected; absent/bad Rekor inclusion
+      proof rejected; expired cert rejected; a keyless pack presented to the ed25519
+      verifier (and vice versa) is rejected — no downgrade; shared-middle rejections
+      still fire (revoked signer, expired trust, arch/backend/policy mismatch, pack
+      hash mismatch).
+
+### Unit 2 — embedded identity allow-list + trust-root wiring
+
+- [ ] Add a compiled-in `ReleaseIdentityAllowList` constant (issuer + subject
+      pattern + channels), validated by test, multi-entry to support identity
+      migration. Fulcio/Rekor roots sourced from the vendored Sigstore trust root.
+- [ ] Build the host keyless verify context: embedded allow-list always active;
+      `pack-trust.json` additive for ed25519 publishers/channels/revocations. Update
+      `host_pack_verify_inputs` (and any runtime consumer) to construct the keyless
+      context when `manifest-verify` is on, ed25519-only otherwise.
+- [ ] Un-inert the installed pack path: with the embedded allow-list present,
+      `resolve_pack` on an installed binary verifies a real release pack instead of
+      always returning `None`; source checkouts stay a no-op.
+- [ ] Tests: allow-list constant is well-formed; a pack signed by the pinned
+      identity verifies against the embedded default with no on-disk config; an
+      off-pattern identity is rejected; an additive `pack-trust.json` still adds
+      ed25519 publishers alongside the embedded keyless root.
+
+### Unit 3 — release pipeline: produce, sign, publish
+
+- [ ] Extend the release workflow so that per supported arch/backend it builds the
+      builder (and runtime) pack via `mvm-builder-pack-tool`, signs the manifest with
+      keyless `cosign sign-blob` under the workflow OIDC identity (official cosign
+      action; `id-token: write`), and publishes the sidecar bundle + SBOM +
+      checksums + manifest alongside the existing `vmlinux`/`rootfs.ext4` assets.
+- [ ] Restrict the signing job to protected tag refs / a protected environment so
+      the pinned subject identity cannot be minted from an arbitrary ref.
+- [ ] Add the release verification gate (plan §B) that fails closed when any pack
+      lacks a manifest, bundle, checksum, SBOM, or expected version metadata.
+- [ ] Validate the workflow off release tags via `gh workflow run --ref <branch>`
+      (the release/security workflows are tag/nightly-gated and PR-invisible).
+
+### Unit 4 — consume the published pack (network leg) — completion step
+
+- [ ] Route the installed `DownloadPublished` arm through an attested fetch: pull
+      the pack (manifest + sidecar + artifacts) from the release channel into
+      quarantine, keyless-verify, promote, materialize — replacing the plain
+      checksum fetch when `manifest-verify` + the embedded allow-list accept it,
+      fail-open to the plain download otherwise. Closes the "network fetch deferred
+      to WS-B/I" note from Slice 1's corrected Unit 3.
+- [ ] Tests: end-to-end fetch→verify→place against a locally-served synthetic
+      release pack; fail-open when no attested pack is available; refuse a
+      tampered/mis-signed pack rather than fall through silently.
+
+> Unit 4 overlaps plan §C/§D and may spill into a Slice 3 if Units 1–3 land large;
+> Units 1–3 alone discharge both Slice-1 deferrals (embedded default + pipeline).
+
+### mvmd / fleet interop (explicit — ADR-097 §9)
+
+- [ ] Keep the keyless verifier in `mvm-core`, `manifest-verify`-gated, with trust
+      inputs as parameters, so mvmd reaches it by enabling one feature on its
+      `mvmctl` dep (the mvmd-side feature flip is tracked in the mvmd repo, not here).
+- [ ] Keep the identity allow-list and the future pin/disable behavior as data and
+      policy, not hardcoded control flow, so a fleet layers its own trust policy on
+      top. The ed25519 operator lane is the fleet-internal signing lane.
+
+### Deferred (named, out of Slice 2)
+
+- Disable-public-channel / pin-to-operator-only, offline-pinned, mirror-only,
+  enterprise policy modes → §I.
+- Live revocation-channel fetch + offline-cache behavior → §I.
+- Runtime-pack keyless launch path (§E) beyond producing/publishing the runtime
+  pack in Unit 3.
