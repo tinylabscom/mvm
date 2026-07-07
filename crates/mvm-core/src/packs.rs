@@ -25,6 +25,10 @@ use crate::plan::bundle::KeyId;
 pub const PACK_SCHEMA_VERSION: u32 = 1;
 pub const EMPTY_PACK_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
+/// Sidecar file name for the detached cosign bundle backing a keyless
+/// (Sigstore-authority) pack. Reserved alongside the manifest file name so a
+/// declared pack file can never collide with it.
+pub const COSIGN_BUNDLE_FILE_NAME: &str = "manifest.cosign.bundle";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -302,6 +306,9 @@ pub struct SignatureBundle {
 #[serde(rename_all = "snake_case")]
 pub enum SignatureFormat {
     Ed25519,
+    /// Keyless authority: the detached cosign bundle sidecar is authoritative and
+    /// the in-manifest `signatures` list is empty.
+    Sigstore,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -354,6 +361,16 @@ pub trait PackTrustStore {
     fn verifying_key(&self, key_id: &KeyId) -> Option<VerifyingKey>;
 }
 
+/// Trust inputs for the keyless (Sigstore) pack verifier: the identities the
+/// bundle's signing certificate must carry (tried in order, exact match) and
+/// the expected OIDC issuer. Carried by the caller rather than looked up from
+/// a key store, since there is no key to look up.
+#[derive(Debug, Clone)]
+pub struct KeylessTrust {
+    pub accepted_identities: Vec<String>,
+    pub issuer: String,
+}
+
 pub trait PackRevocationChecker {
     fn status(&self, key_id: &KeyId, pack_hash: &Sha256Hex) -> RevocationStatus;
 }
@@ -390,7 +407,88 @@ pub fn verify_pack_at(
     })
 }
 
+/// Keyless counterpart to `verify_pack_at`: authority is a detached cosign
+/// bundle over the manifest bytes checked against a compiled-in identity
+/// list, rather than an in-manifest ed25519 signature checked against a key
+/// store. The shape/authority gate runs first so a mis-routed ed25519 pack
+/// fails on `WrongSignatureAuthority` before any signature bytes are touched;
+/// the signature step runs next so a garbage bundle fails closed before the
+/// shared structural/hash/revocation middle ever sees the pack.
+#[cfg(feature = "manifest-verify")]
+pub fn verify_pack_keyless_at(
+    manifest: &PackManifest,
+    root: &Path,
+    policy: &LocalPackPolicy,
+    cosign_bundle: &[u8],
+    keyless: &KeylessTrust,
+    revocations: &dyn PackRevocationChecker,
+) -> Result<VerifiedPack, PackVerifyError> {
+    validate_signature_bundle_keyless(manifest)?;
+    let payload = manifest.signature_payload_bytes()?;
+    let mut failure: Option<String> = None;
+    let verified = keyless.accepted_identities.iter().any(|identity| {
+        match crate::crypto::image_verify::verify_signed_payload(
+            &payload,
+            cosign_bundle,
+            identity,
+            &keyless.issuer,
+        ) {
+            Ok(()) => true,
+            Err(error) => {
+                failure = Some(error.to_string());
+                false
+            }
+        }
+    });
+    if !verified {
+        return Err(PackVerifyError::KeylessSignatureInvalid(
+            failure.unwrap_or_else(|| {
+                "no accepted identities configured for keyless verification".to_string()
+            }),
+        ));
+    }
+    validate_manifest_structural(manifest, policy)?;
+    verify_files(manifest, root)?;
+    verify_pack_hash(manifest)?;
+    verify_revocation(manifest, revocations)?;
+    Ok(VerifiedPack {
+        pack_hash: manifest.outputs.pack_hash.clone(),
+        file_count: manifest.outputs.files.len(),
+        signer_key_id: manifest.trust.signing_key_id.clone(),
+    })
+}
+
+/// No-feature fallback: refuse every keyless pack. Builds without
+/// `manifest-verify` drop the sigstore dependency tree in exchange for
+/// losing keyless verification entirely; the ed25519 `verify_pack_at` path
+/// is unaffected.
+#[cfg(not(feature = "manifest-verify"))]
+pub fn verify_pack_keyless_at(
+    _manifest: &PackManifest,
+    _root: &Path,
+    _policy: &LocalPackPolicy,
+    _cosign_bundle: &[u8],
+    _keyless: &KeylessTrust,
+    _revocations: &dyn PackRevocationChecker,
+) -> Result<VerifiedPack, PackVerifyError> {
+    Err(PackVerifyError::KeylessSignatureInvalid(
+        "manifest-verify feature disabled in this build; rebuild mvmctl with \
+         default features to accept keyless-signed packs"
+            .to_string(),
+    ))
+}
+
 pub fn validate_manifest(
+    manifest: &PackManifest,
+    policy: &LocalPackPolicy,
+) -> Result<(), PackVerifyError> {
+    validate_manifest_structural(manifest, policy)?;
+    validate_signature_bundle(manifest)
+}
+
+/// Everything `validate_manifest` checks except the signature-bundle shape, so
+/// both the keyed and keyless verifiers can share one structural gate.
+pub fn validate_manifest_structural(
     manifest: &PackManifest,
     policy: &LocalPackPolicy,
 ) -> Result<(), PackVerifyError> {
@@ -438,7 +536,6 @@ pub fn validate_manifest(
     validate_required_outputs(manifest)?;
     validate_oci_inputs(manifest)?;
     validate_file_paths(manifest)?;
-    validate_signature_bundle(manifest)?;
     Ok(())
 }
 
@@ -630,6 +727,33 @@ fn validate_signature_bundle(manifest: &PackManifest) -> Result<(), PackVerifyEr
     Ok(())
 }
 
+/// Shape gate for a keyless pack: the authority must be declared `Sigstore`
+/// (an `Ed25519`-declared pack is rejected as the wrong authority, not routed
+/// through the keyed shape rules), the in-manifest signature list must be
+/// empty (the detached cosign bundle sidecar is authoritative), and the
+/// signing key id must still be well-formed even though it names no key.
+#[cfg(feature = "manifest-verify")]
+fn validate_signature_bundle_keyless(manifest: &PackManifest) -> Result<(), PackVerifyError> {
+    if manifest.provenance.signature_bundle.format != SignatureFormat::Sigstore {
+        return Err(PackVerifyError::WrongSignatureAuthority {
+            expected: SignatureFormat::Sigstore,
+            found: manifest.provenance.signature_bundle.format.clone(),
+        });
+    }
+    if manifest.provenance.signature_bundle.payload != SignaturePayload::ManifestV1 {
+        return Err(PackVerifyError::UnsupportedSignatureBundle);
+    }
+    if !manifest.provenance.signature_bundle.signatures.is_empty() {
+        return Err(PackVerifyError::UnsupportedSignatureBundle);
+    }
+    if !manifest.trust.signing_key_id.is_well_formed() {
+        return Err(PackVerifyError::MalformedKeyId(
+            manifest.trust.signing_key_id.clone(),
+        ));
+    }
+    Ok(())
+}
+
 fn decode_signature(encoded: &str) -> Result<[u8; 64], PackVerifyError> {
     let bytes = B64
         .decode(encoded)
@@ -754,6 +878,13 @@ pub enum PackVerifyError {
     SignatureInvalid,
     #[error("pack signer {key_id:?} is revoked: {reason}")]
     Revoked { key_id: KeyId, reason: String },
+    #[error("pack declares signature authority {found:?}, expected {expected:?}")]
+    WrongSignatureAuthority {
+        expected: SignatureFormat,
+        found: SignatureFormat,
+    },
+    #[error("keyless signature verification failed: {0}")]
+    KeylessSignatureInvalid(String),
     #[error(transparent)]
     Manifest(#[from] PackManifestError),
 }
@@ -820,12 +951,15 @@ pub struct PackOutputHashes {
 /// hash, and signs the manifest so `verify_pack_at` accepts the result. Files are
 /// addressed by their in-pack relative path and hashed with the same helper the
 /// verifier uses, so producer and verifier can never drift.
+///
+/// `signing_key` is absent for a keyless (Sigstore-authority) build: construct
+/// with `new_keyless` and finish with `build_sigstore` instead of `build`.
 pub struct PackBuilder<'a> {
     root: PathBuf,
     metadata: PackMetadata,
     output_hashes: PackOutputHashes,
     files: Vec<String>,
-    signing_key: &'a SigningKey,
+    signing_key: Option<&'a SigningKey>,
 }
 
 impl<'a> PackBuilder<'a> {
@@ -839,7 +973,20 @@ impl<'a> PackBuilder<'a> {
             metadata,
             output_hashes: PackOutputHashes::default(),
             files: Vec::new(),
-            signing_key,
+            signing_key: Some(signing_key),
+        }
+    }
+
+    /// Keyless counterpart to `new`: no ed25519 key, since the produced manifest
+    /// carries no in-manifest signature — the detached cosign bundle a release
+    /// pipeline signs separately is authoritative. Finish with `build_sigstore`.
+    pub fn new_keyless(root: impl Into<PathBuf>, metadata: PackMetadata) -> Self {
+        Self {
+            root: root.into(),
+            metadata,
+            output_hashes: PackOutputHashes::default(),
+            files: Vec::new(),
+            signing_key: None,
         }
     }
 
@@ -861,8 +1008,49 @@ impl<'a> PackBuilder<'a> {
     }
 
     pub fn build(self) -> Result<PackManifest, PackManifestError> {
+        let signing_key = self
+            .signing_key
+            .expect("PackBuilder::build requires a signing key; construct via PackBuilder::new, or use build_sigstore for a keyless pack");
+        let signing_key_id = KeyId::from_pubkey(&signing_key.verifying_key());
+        let signature_validity = self.metadata.signature.clone();
+        let mut manifest = self.assemble(signing_key_id.clone(), SignatureFormat::Ed25519)?;
+        let signature = signing_key.sign(&manifest.signature_payload_bytes()?);
+        manifest
+            .provenance
+            .signature_bundle
+            .signatures
+            .push(PackSignature {
+                key_id: signing_key_id,
+                signature_base64: B64.encode(signature.to_bytes()),
+                signed_at: signature_validity.signed_at,
+                expires_at: signature_validity.expires_at,
+            });
+        Ok(manifest)
+    }
+
+    /// Keyless counterpart to `build`: stamps a `Sigstore`-authority manifest
+    /// with an identity-derived `signing_key_id` and an empty in-manifest
+    /// signature list, and leaves it unsigned. The caller (a release pipeline)
+    /// signs `manifest.canonical_bytes()` out of band with `cosign sign-blob`
+    /// and ships the detached bundle as the pack's authority.
+    pub fn build_sigstore(self, identity: &str) -> Result<PackManifest, PackManifestError> {
+        let signing_key_id = KeyId::from_identity(identity);
+        self.assemble(signing_key_id, SignatureFormat::Sigstore)
+    }
+
+    /// Shared assembly for both authority shapes: hash the declared files,
+    /// stamp outputs/provenance/trust from `self.metadata`, validate the
+    /// required-output shape for `kind`, and compute the real pack hash (which
+    /// covers `trust.signing_key_id`, so it must be computed after that field is
+    /// set). Leaves the signature bundle's `signatures` list empty — `build`
+    /// fills it in for the ed25519 authority; the Sigstore authority stays
+    /// empty by design.
+    fn assemble(
+        self,
+        signing_key_id: KeyId,
+        signature_format: SignatureFormat,
+    ) -> Result<PackManifest, PackManifestError> {
         let files = self.hash_files()?;
-        let signing_key_id = KeyId::from_pubkey(&self.signing_key.verifying_key());
         let outputs = PackOutputs {
             pack_hash: Sha256Hex::new(EMPTY_PACK_HASH)?,
             files,
@@ -880,13 +1068,13 @@ impl<'a> PackBuilder<'a> {
             reproducibility: self.metadata.provenance.reproducibility,
             sbom: self.metadata.provenance.sbom,
             signature_bundle: SignatureBundle {
-                format: SignatureFormat::Ed25519,
+                format: signature_format,
                 payload: SignaturePayload::ManifestV1,
                 signatures: Vec::new(),
             },
         };
         let trust = TrustMetadata {
-            signing_key_id: signing_key_id.clone(),
+            signing_key_id,
             expires_at: self.metadata.trust.expires_at,
             revocation_channel: self.metadata.trust.revocation_channel,
             channel_identity: self.metadata.trust.channel_identity,
@@ -905,21 +1093,10 @@ impl<'a> PackBuilder<'a> {
             provenance,
             trust,
         };
-        // Refuse to sign a manifest the verifier would reject for missing the
-        // outputs this kind requires, rather than shipping a dead signed pack.
+        // Refuse to produce a manifest the verifier would reject for missing the
+        // outputs this kind requires, rather than shipping a dead pack.
         validate_required_outputs(&manifest)?;
         manifest.outputs.pack_hash = manifest.computed_pack_hash()?;
-        let signature = self.signing_key.sign(&manifest.signature_payload_bytes()?);
-        manifest
-            .provenance
-            .signature_bundle
-            .signatures
-            .push(PackSignature {
-                key_id: signing_key_id,
-                signature_base64: B64.encode(signature.to_bytes()),
-                signed_at: self.metadata.signature.signed_at,
-                expires_at: self.metadata.signature.expires_at,
-            });
         Ok(manifest)
     }
 
@@ -958,6 +1135,17 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn signature_format_sigstore_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SignatureFormat::Sigstore).expect("serialize"),
+            "\"sigstore\""
+        );
+        let back: SignatureFormat =
+            serde_json::from_str("\"sigstore\"").expect("deserialize sigstore");
+        assert_eq!(back, SignatureFormat::Sigstore);
+    }
 
     #[test]
     fn host_pack_policy_hash_matches_sha256_of_nix_system() {
@@ -1207,6 +1395,18 @@ mod tests {
         let verified = verify(&f).expect("valid pack verifies");
         assert_eq!(verified.pack_hash, f.manifest.outputs.pack_hash);
         assert_eq!(verified.file_count, 4);
+    }
+
+    #[test]
+    fn structural_validation_ignores_signature_bundle_shape() {
+        let mut f = fixture(PackKind::Runtime);
+        f.manifest.provenance.signature_bundle.signatures.clear();
+        // Full validate_manifest would fail on the empty bundle; structural must not.
+        validate_manifest_structural(&f.manifest, &f.policy).expect("structural passes");
+        assert!(matches!(
+            validate_manifest(&f.manifest, &f.policy),
+            Err(PackVerifyError::SignatureBundleEmpty)
+        ));
     }
 
     #[test]
@@ -1559,6 +1759,71 @@ mod tests {
         ));
     }
 
+    const SIGSTORE_IDENTITY: &str =
+        "https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/v0.17.0";
+
+    /// Produce a `Builder` pack via `PackBuilder::new_keyless` +
+    /// `build_sigstore`, exercising the same file set as
+    /// `produced_hvf_builder_pack` but with no ed25519 key.
+    fn produced_keyless_builder_pack(dir: &TempDir) -> PackManifest {
+        fs::write(dir.path().join("kernel"), b"builder-kernel").expect("write kernel");
+        fs::write(dir.path().join("builder.img"), b"builder-image").expect("write builder");
+        PackBuilder::new_keyless(dir.path(), producer_metadata(PackKind::Builder))
+            .files(["kernel", "builder.img"])
+            .output_hashes(PackOutputHashes {
+                kernel_hash: Some(Sha256Hex::from_bytes(b"builder-kernel")),
+                builder_image_hash: Some(Sha256Hex::from_bytes(b"builder-image")),
+                ..Default::default()
+            })
+            .build_sigstore(SIGSTORE_IDENTITY)
+            .expect("produce keyless pack")
+    }
+
+    #[test]
+    fn build_sigstore_produces_sigstore_authority_manifest() {
+        let dir = TempDir::new().expect("tempdir");
+        let manifest = produced_keyless_builder_pack(&dir);
+        assert_eq!(
+            manifest.provenance.signature_bundle.format,
+            SignatureFormat::Sigstore
+        );
+        assert!(manifest.provenance.signature_bundle.signatures.is_empty());
+        assert_eq!(
+            manifest.trust.signing_key_id,
+            KeyId::from_identity(SIGSTORE_IDENTITY)
+        );
+    }
+
+    #[test]
+    fn build_sigstore_canonical_bytes_equal_signature_payload_bytes() {
+        let dir = TempDir::new().expect("tempdir");
+        let manifest = produced_keyless_builder_pack(&dir);
+        // The empty-signatures invariant: for a Sigstore manifest the payload a
+        // release pipeline signs is exactly the manifest's canonical bytes.
+        assert_eq!(
+            manifest.canonical_bytes().expect("canonical bytes"),
+            manifest.signature_payload_bytes().expect("payload bytes")
+        );
+    }
+
+    #[test]
+    fn build_sigstore_pack_hash_is_self_consistent() {
+        let dir = TempDir::new().expect("tempdir");
+        let manifest = produced_keyless_builder_pack(&dir);
+        assert_eq!(
+            manifest.computed_pack_hash().expect("computed hash"),
+            manifest.outputs.pack_hash
+        );
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn build_sigstore_manifest_passes_keyless_shape_gate() {
+        let dir = TempDir::new().expect("tempdir");
+        let manifest = produced_keyless_builder_pack(&dir);
+        assert!(validate_signature_bundle_keyless(&manifest).is_ok());
+    }
+
     fn resign(manifest: &mut PackManifest) {
         manifest.outputs.pack_hash = manifest.computed_pack_hash().expect("pack hash");
         resign_without_recomputing_pack_hash(manifest);
@@ -1579,5 +1844,148 @@ mod tests {
                 signed_at: utc(2026, 6, 24),
                 expires_at: utc(2026, 12, 31),
             });
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    mod keyless {
+        use super::*;
+
+        const IDENTITY: &str =
+            "https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/v0.17.0";
+        const ISSUER: &str = "https://token.actions.githubusercontent.com";
+
+        fn trust() -> KeylessTrust {
+            KeylessTrust {
+                accepted_identities: vec![IDENTITY.to_string()],
+                issuer: ISSUER.to_string(),
+            }
+        }
+
+        /// A produced builder pack rewritten for the keyless authority: format
+        /// flipped to `Sigstore`, the in-manifest signature cleared (the
+        /// detached bundle is authoritative), and `signing_key_id` swapped for
+        /// the identity-derived id. The pack hash is recomputed after editing
+        /// `trust` since `signing_key_id` is covered by the pack-hash payload.
+        fn sigstore_manifest(dir: &TempDir) -> PackManifest {
+            let mut m = produced_hvf_builder_pack(dir);
+            m.provenance.signature_bundle.format = SignatureFormat::Sigstore;
+            m.provenance.signature_bundle.signatures.clear();
+            m.trust.signing_key_id = KeyId::from_identity(IDENTITY);
+            m.outputs.pack_hash = m.computed_pack_hash().expect("pack hash");
+            m
+        }
+
+        #[test]
+        fn ed25519_pack_rejected_by_keyless_verifier() {
+            let dir = TempDir::new().expect("tempdir");
+            let m = produced_hvf_builder_pack(&dir);
+            let err = verify_pack_keyless_at(
+                &m,
+                dir.path(),
+                &hvf_policy(),
+                b"bundle",
+                &trust(),
+                &StaticRevocation {
+                    status: RevocationStatus::Good,
+                },
+            )
+            .expect_err("wrong authority");
+            assert!(matches!(
+                err,
+                PackVerifyError::WrongSignatureAuthority { .. }
+            ));
+        }
+
+        #[test]
+        fn garbage_bundle_is_keyless_signature_invalid() {
+            let dir = TempDir::new().expect("tempdir");
+            let m = sigstore_manifest(&dir);
+            let err = verify_pack_keyless_at(
+                &m,
+                dir.path(),
+                &hvf_policy(),
+                b"not a bundle",
+                &trust(),
+                &StaticRevocation {
+                    status: RevocationStatus::Good,
+                },
+            )
+            .expect_err("bad bundle");
+            assert!(matches!(err, PackVerifyError::KeylessSignatureInvalid(_)));
+        }
+
+        #[test]
+        fn non_empty_signatures_rejected_by_keyless_shape_gate() {
+            let dir = TempDir::new().expect("tempdir");
+            let mut m = sigstore_manifest(&dir);
+            // A Sigstore-declared pack must still carry an empty signature
+            // list; restoring one here exercises the shape gate rather than
+            // the signature step.
+            m.provenance
+                .signature_bundle
+                .signatures
+                .push(PackSignature {
+                    key_id: KeyId::from_identity(IDENTITY),
+                    signature_base64: B64.encode([0u8; 64]),
+                    signed_at: utc(2026, 6, 24),
+                    expires_at: utc(2026, 12, 31),
+                });
+            m.outputs.pack_hash = m.computed_pack_hash().expect("pack hash");
+            let err = verify_pack_keyless_at(
+                &m,
+                dir.path(),
+                &hvf_policy(),
+                b"not a bundle",
+                &trust(),
+                &StaticRevocation {
+                    status: RevocationStatus::Good,
+                },
+            )
+            .expect_err("non-empty signatures rejected");
+            assert!(matches!(err, PackVerifyError::UnsupportedSignatureBundle));
+        }
+
+        #[test]
+        fn malformed_signing_key_id_rejected_by_keyless_shape_gate() {
+            let dir = TempDir::new().expect("tempdir");
+            let mut m = sigstore_manifest(&dir);
+            m.trust.signing_key_id = KeyId("not-well-formed".to_string());
+            m.outputs.pack_hash = m.computed_pack_hash().expect("pack hash");
+            let err = verify_pack_keyless_at(
+                &m,
+                dir.path(),
+                &hvf_policy(),
+                b"not a bundle",
+                &trust(),
+                &StaticRevocation {
+                    status: RevocationStatus::Good,
+                },
+            )
+            .expect_err("malformed key id rejected");
+            assert!(matches!(err, PackVerifyError::MalformedKeyId(_)));
+        }
+    }
+
+    #[cfg(not(feature = "manifest-verify"))]
+    #[test]
+    fn keyless_verifier_fails_closed_without_manifest_verify_feature() {
+        let dir = TempDir::new().expect("tempdir");
+        let m = produced_hvf_builder_pack(&dir);
+        let trust = KeylessTrust {
+            accepted_identities: vec!["irrelevant".to_string()],
+            issuer: "irrelevant".to_string(),
+        };
+        let err = verify_pack_keyless_at(
+            &m,
+            dir.path(),
+            &hvf_policy(),
+            b"bundle",
+            &trust,
+            &StaticRevocation {
+                status: RevocationStatus::Good,
+            },
+        )
+        .expect_err("keyless verifier disabled without feature");
+        assert!(matches!(err, PackVerifyError::KeylessSignatureInvalid(_)));
     }
 }

@@ -49,6 +49,10 @@ pub mod observability;
 pub mod pack_cache;
 pub mod pack_trust;
 pub mod packs;
+/// Compiled-in release-signing identity: the OIDC issuer and identity
+/// templates a stock binary trusts for its own release packs, with
+/// version interpolation.
+pub mod release_trust;
 pub mod user_config;
 
 /// Cryptographic primitives — attestation, key rotation, keystore,

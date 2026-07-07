@@ -1,26 +1,40 @@
-//! Thin CLI wrapper around `mvm_build::builder_pack::build_builder_pack`.
+//! Thin CLI wrapper around `mvm_build::builder_pack::build_builder_pack` /
+//! `build_keyless_builder_pack`.
 //!
 //! Release CI or a maintainer invokes this to turn a freshly built `vmlinux` +
-//! `rootfs.ext4` into a signed, cache-promotable Builder pack. All inputs are
-//! explicit on the command line so the tool never reaches into a real cache or
-//! key store by accident; the producer it calls is pure, so this wrapper owns
-//! the only wall-clock read (`--valid-days` from now).
+//! `rootfs.ext4` into a Builder pack. All inputs are explicit on the command
+//! line so the tool never reaches into a real cache or key store by accident;
+//! the producers it calls are pure, so this wrapper owns the only wall-clock
+//! read (`--valid-days` from now).
 //!
-//! Usage:
+//! Two authority modes:
 //!
 //! ```text
+//! # ed25519: signs the manifest with a local key.
 //! mvm-builder-pack-tool \
 //!   --vmlinux <path> --rootfs <path> --arch <x86_64|aarch64> \
 //!   --channel <name> --signing-key <hex-file> --out-dir <dir> \
 //!   --sbom <path> --revocation-channel <url> \
 //!   [--builder-identity <s>] [--build-env <s>] \
 //!   [--valid-days <n>] [--mirror-identity <s>]
+//!
+//! # keyless: writes an unsigned Sigstore-authority manifest; a release
+//! # pipeline signs it out of band with `cosign sign-blob`.
+//! mvm-builder-pack-tool \
+//!   --vmlinux <path> --rootfs <path> --arch <x86_64|aarch64> \
+//!   --channel <name> --keyless --identity <SAN> --out-dir <dir> \
+//!   --sbom <path> --revocation-channel <url> \
+//!   [--builder-identity <s>] [--build-env <s>] \
+//!   [--valid-days <n>] [--mirror-identity <s>]
 //! ```
 //!
 //! `--signing-key` names a file holding the 32-byte Ed25519 secret key as 64
-//! lowercase hex characters (surrounding whitespace trimmed). `--sbom` names the
-//! SBOM file enumerating the pack's contents; its bytes are hashed into the
-//! manifest's SBOM reference.
+//! lowercase hex characters (surrounding whitespace trimmed); required unless
+//! `--keyless` is given. `--identity` names the OIDC subject the keyless
+//! manifest's `trust.signing_key_id` is derived from; required with
+//! `--keyless`, otherwise ignored. `--sbom` names the SBOM file enumerating
+//! the pack's contents; its bytes are hashed into the manifest's SBOM
+//! reference.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,7 +42,9 @@ use std::process::ExitCode;
 
 use chrono::{Duration, Utc};
 use ed25519_dalek::SigningKey;
-use mvm_build::builder_pack::{BuildBuilderPackParams, build_builder_pack};
+use mvm_build::builder_pack::{
+    BuildBuilderPackParams, build_builder_pack, build_keyless_builder_pack,
+};
 use mvm_core::arch::GuestArch;
 use mvm_core::packs::{
     ReproducibilityStatus, SbomReference, Sha256Hex, SignatureValidity, TransparencyLogReference,
@@ -57,8 +73,9 @@ fn usage() {
     eprintln!(
         "usage: mvm-builder-pack-tool \\\n\
          \x20 --vmlinux <path> --rootfs <path> --arch <x86_64|aarch64> \\\n\
-         \x20 --channel <name> --signing-key <hex-file> --out-dir <dir> \\\n\
+         \x20 --channel <name> --out-dir <dir> \\\n\
          \x20 --sbom <path> --revocation-channel <url> \\\n\
+         \x20 (--signing-key <hex-file> | --keyless --identity <SAN>) \\\n\
          \x20 [--builder-identity <s>] [--build-env <s>] \\\n\
          \x20 [--valid-days <n>] [--mirror-identity <s>]"
     );
@@ -66,10 +83,9 @@ fn usage() {
 
 fn run(rest: &[String]) -> Result<(), String> {
     let parsed = parse_args(rest)?;
-    let signing_key = load_signing_key(&parsed.signing_key)?;
     let sbom = sbom_reference(&parsed.sbom)?;
 
-    // The producer is pure; this wrapper owns the single wall-clock read.
+    // The producers are pure; this wrapper owns the single wall-clock read.
     let now = Utc::now();
     let expires_at = now + Duration::days(parsed.valid_days);
     let params = BuildBuilderPackParams {
@@ -93,25 +109,45 @@ fn run(rest: &[String]) -> Result<(), String> {
         },
     };
 
-    let manifest =
-        build_builder_pack(&params, &signing_key, &parsed.out_dir).map_err(|e| e.to_string())?;
-    println!(
-        "wrote builder pack {} to {}",
-        manifest.outputs.pack_hash.as_str(),
-        parsed.out_dir.display()
-    );
+    if let Some(identity) = parsed.identity {
+        // `parse_args` already refused `--keyless` without `--identity`, so
+        // this branch never signs — it only stamps the Sigstore authority and
+        // writes the bytes a release pipeline will hand to `cosign sign-blob`.
+        let produced = build_keyless_builder_pack(&params, &identity, &parsed.out_dir)
+            .map_err(|e| e.to_string())?;
+        println!(
+            "wrote unsigned keyless builder pack manifest {} to {} (sign {} with cosign)",
+            produced.manifest.outputs.pack_hash.as_str(),
+            parsed.out_dir.display(),
+            produced.manifest_path.display()
+        );
+    } else {
+        let signing_key_path = parsed
+            .signing_key
+            .expect("parse_args guarantees --signing-key when --identity is absent");
+        let signing_key = load_signing_key(&signing_key_path)?;
+        let manifest = build_builder_pack(&params, &signing_key, &parsed.out_dir)
+            .map_err(|e| e.to_string())?;
+        println!(
+            "wrote builder pack {} to {}",
+            manifest.outputs.pack_hash.as_str(),
+            parsed.out_dir.display()
+        );
+    }
     Ok(())
 }
 
 /// Parsed, validated command line — pure and unit-testable, with no wall-clock
-/// or filesystem reads.
+/// or filesystem reads. Exactly one authority is set: `identity` (keyless) or
+/// `signing_key` (ed25519).
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedArgs {
     vmlinux: PathBuf,
     rootfs: PathBuf,
     arch: GuestArch,
     channel: String,
-    signing_key: PathBuf,
+    signing_key: Option<PathBuf>,
+    identity: Option<String>,
     out_dir: PathBuf,
     sbom: PathBuf,
     revocation_channel: String,
@@ -122,6 +158,17 @@ struct ParsedArgs {
 }
 
 fn parse_args(rest: &[String]) -> Result<ParsedArgs, String> {
+    let keyless = flag_present(rest, "keyless");
+    let signing_key = optional(rest, "signing-key").map(PathBuf::from);
+    let identity = optional(rest, "identity").map(str::to_string);
+    if keyless && identity.is_none() {
+        return Err("missing required arg: --identity (required with --keyless)".to_string());
+    }
+    if !keyless && signing_key.is_none() {
+        return Err(
+            "missing required arg: --signing-key (or pass --keyless --identity)".to_string(),
+        );
+    }
     Ok(ParsedArgs {
         vmlinux: PathBuf::from(required(rest, "vmlinux")?),
         rootfs: PathBuf::from(required(rest, "rootfs")?),
@@ -129,7 +176,9 @@ fn parse_args(rest: &[String]) -> Result<ParsedArgs, String> {
             .parse::<GuestArch>()
             .map_err(|e| e.to_string())?,
         channel: required(rest, "channel")?.to_string(),
-        signing_key: PathBuf::from(required(rest, "signing-key")?),
+        // `identity` is `Some` iff the keyless path runs; `run` branches on it.
+        signing_key: if keyless { None } else { signing_key },
+        identity,
         out_dir: PathBuf::from(required(rest, "out-dir")?),
         sbom: PathBuf::from(required(rest, "sbom")?),
         revocation_channel: required(rest, "revocation-channel")?.to_string(),
@@ -165,6 +214,12 @@ fn optional<'a>(rest: &'a [String], key: &str) -> Option<&'a str> {
         .position(|arg| arg == &needle)
         .and_then(|i| rest.get(i + 1))
         .map(String::as_str)
+}
+
+/// Whether a value-less flag like `--keyless` was passed.
+fn flag_present(rest: &[String], key: &str) -> bool {
+    let needle = format!("--{key}");
+    rest.iter().any(|arg| arg == &needle)
 }
 
 /// Read a 64-hex-char (32-byte) Ed25519 secret key from `path`.
@@ -225,10 +280,52 @@ mod tests {
         assert_eq!(parsed.arch, GuestArch::Aarch64);
         assert_eq!(parsed.channel, "stable");
         assert_eq!(parsed.sbom, PathBuf::from("/tmp/sbom.json"));
+        // Ed25519 authority: signing_key set, no identity.
+        assert_eq!(parsed.signing_key, Some(PathBuf::from("/tmp/key.hex")));
+        assert_eq!(parsed.identity, None);
         // Defaults applied when optional flags are absent.
         assert_eq!(parsed.builder_identity, "mvm-builder-pack-tool");
         assert_eq!(parsed.valid_days, 365);
         assert_eq!(parsed.mirror_identity, None);
+    }
+
+    /// `full_args()` minus `--signing-key`, plus `--keyless --identity <SAN>`.
+    fn keyless_args() -> Vec<String> {
+        let mut a = full_args();
+        let idx = a.iter().position(|x| x == "--signing-key").unwrap();
+        a.drain(idx..idx + 2);
+        a.push("--keyless".to_string());
+        a.extend(args(&[("identity", "https://issuer.example/subject")]));
+        a
+    }
+
+    #[test]
+    fn keyless_parses_without_signing_key() {
+        let parsed = parse_args(&keyless_args()).expect("parse keyless");
+        assert_eq!(parsed.signing_key, None);
+        assert_eq!(
+            parsed.identity,
+            Some("https://issuer.example/subject".to_string())
+        );
+    }
+
+    #[test]
+    fn keyless_without_identity_is_error() {
+        let mut a = full_args();
+        let idx = a.iter().position(|x| x == "--signing-key").unwrap();
+        a.drain(idx..idx + 2);
+        a.push("--keyless".to_string());
+        let err = parse_args(&a).expect_err("missing identity");
+        assert!(err.contains("identity"), "got: {err}");
+    }
+
+    #[test]
+    fn neither_signing_key_nor_keyless_is_error() {
+        let mut a = full_args();
+        let idx = a.iter().position(|x| x == "--signing-key").unwrap();
+        a.drain(idx..idx + 2);
+        let err = parse_args(&a).expect_err("no authority given");
+        assert!(err.contains("signing-key"), "got: {err}");
     }
 
     #[test]

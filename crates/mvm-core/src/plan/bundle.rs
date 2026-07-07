@@ -108,6 +108,16 @@ impl KeyId {
         Self(hex[..32].to_string())
     }
 
+    /// Derive a stable, well-formed key_id from a signer *identity* string (a
+    /// keyless OIDC subject). Unlike `from_pubkey` there is no key here, so this
+    /// id is only an identifier for revocation keying and audit — never a lookup
+    /// into a key store.
+    pub fn from_identity(identity: &str) -> Self {
+        let digest = Sha256::digest(identity.as_bytes());
+        let hex = format!("{digest:x}");
+        Self(hex[..32].to_string())
+    }
+
     /// Validation: 32 lowercase hex characters. Anything else
     /// indicates a tampered or malformed manifest.
     pub fn is_well_formed(&self) -> bool {
@@ -1416,6 +1426,21 @@ mod tests {
         assert!(!KeyId("abc".to_string()).is_well_formed());
         assert!(!KeyId("X".repeat(32)).is_well_formed());
         assert!(!KeyId("g".repeat(32)).is_well_formed());
+    }
+
+    #[test]
+    fn key_id_from_identity_is_well_formed_and_stable() {
+        let id =
+            "https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/v0.17.0";
+        let a = KeyId::from_identity(id);
+        let b = KeyId::from_identity(id);
+        assert_eq!(a, b, "same identity yields same id");
+        assert!(a.is_well_formed(), "32 lowercase hex");
+        assert_ne!(
+            a,
+            KeyId::from_identity("other"),
+            "different identity differs"
+        );
     }
 
     #[test]

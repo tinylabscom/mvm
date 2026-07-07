@@ -266,6 +266,12 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
       - name: Build builder VM image
         env:
           ARCH: ${{ matrix.arch }}
@@ -274,6 +280,7 @@ jobs:
           nix build "./nix/images/builder-vm#packages.${SYSTEM}.default" \
             --no-link --print-out-paths > /tmp/store-path.txt
           STORE_PATH=$(head -1 /tmp/store-path.txt)
+          echo "STORE_PATH=${STORE_PATH}" >> "$GITHUB_ENV"
           mkdir -p staging
           cp "$STORE_PATH/vmlinux"       "staging/builder-vm-vmlinux-${ARCH}"
           cp "$STORE_PATH/rootfs.ext4"   "staging/builder-vm-rootfs-${ARCH}.ext4"
@@ -286,12 +293,81 @@ jobs:
           if [ -f "$STORE_PATH/manifest.json" ]; then
             cp -L "$STORE_PATH/manifest.json" "staging/builder-vm-${ARCH}.manifest.json"
           fi
+
+      - name: Generate builder image SBOM
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # Real store-path bill of materials for the builder image closure —
+          # not a stub. The attested pack manifest's SBOM reference hashes
+          # this file's bytes.
+          nix-store --query --requisites "$STORE_PATH" > "staging/builder-vm-${ARCH}.sbom.txt"
+
+      - name: Produce and keyless-sign attested builder pack manifest
+        # The pack is an accelerator, never a hard dependency. A Fulcio/Rekor/OIDC
+        # hiccup must not block the plain vmlinux/rootfs publish below, so a
+        # signing failure here is tolerated: the job continues, no pack ships, and
+        # installed binaries fall back to the plain checksum download.
+        continue-on-error: true
+        env:
+          ARCH: ${{ matrix.arch }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          # On a tag push, REF is refs/tags/vX.Y.Z — exactly the SAN cosign
+          # embeds in the certificate and exactly what a released mvmctl
+          # (version X.Y.Z) reconstructs when verifying the pack. Skip pack
+          # production unless the ref is a version tag whose version equals the
+          # crate version; anything else yields an identity no installed binary
+          # can reconstruct, so it would silently fail-open to the plain download.
+          # Skipping keeps that outcome explicit and still ships the plain image.
+          if [[ "${REF}" != refs/tags/v* ]]; then
+            echo "::notice::${REF} is not a version tag; skipping attested builder pack."
+            exit 0
+          fi
+          TAG_VERSION="${REF#refs/tags/v}"
+          CRATE_VERSION="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name=="mvm-cli") | .version')"
+          if [[ "${TAG_VERSION}" != "${CRATE_VERSION}" ]]; then
+            echo "::warning::tag ${REF} does not match crate version v${CRATE_VERSION}; installed binaries could not verify this pack — skipping attested builder pack."
+            exit 0
+          fi
+          IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/release.yml@${REF}"
+          REVOCATION_CHANNEL="https://github.com/${REPOSITORY}/releases/download/revocations/builder-vm-revocations.json"
+          cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
+            --vmlinux "$STORE_PATH/vmlinux" --rootfs "$STORE_PATH/rootfs.ext4" \
+            --arch "$ARCH" --channel stable --keyless \
+            --identity "$IDENTITY" \
+            --out-dir staging \
+            --sbom "staging/builder-vm-${ARCH}.sbom.txt" \
+            --revocation-channel "$REVOCATION_CHANNEL"
+          mv staging/manifest.json "staging/builder-vm-${ARCH}.pack-manifest.json"
+
+          # Keyless OIDC sign — no secret key needed. The bundle carries the
+          # signature, the short-lived cert, and the transparency-log
+          # inclusion proof; the installed-binary fetch path verifies exactly
+          # this format.
+          cosign sign-blob \
+            --yes \
+            --bundle "staging/builder-vm-${ARCH}.pack-manifest.json.bundle" \
+            "staging/builder-vm-${ARCH}.pack-manifest.json"
+
+      - name: Generate builder VM checksums
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
           cd staging
           # Build the checksums list dynamically — sidecars are
           # optional, so only include what's actually present.
           FILES="builder-vm-vmlinux-${ARCH} builder-vm-rootfs-${ARCH}.ext4"
           [ -f "builder-vm-${ARCH}.cmdline.txt" ]   && FILES="$FILES builder-vm-${ARCH}.cmdline.txt"
           [ -f "builder-vm-${ARCH}.manifest.json" ] && FILES="$FILES builder-vm-${ARCH}.manifest.json"
+          # The attested pack is optional (signing may be skipped or fail); only
+          # checksum its files when they are actually present.
+          if [ -f "builder-vm-${ARCH}.pack-manifest.json.bundle" ]; then
+            FILES="$FILES builder-vm-${ARCH}.pack-manifest.json builder-vm-${ARCH}.pack-manifest.json.bundle builder-vm-${ARCH}.sbom.txt"
+          fi
           sha256sum $FILES > "builder-vm-${ARCH}-checksums-sha256.txt"
 
       - name: Upload builder VM image artifacts
@@ -303,6 +379,9 @@ jobs:
             staging/builder-vm-rootfs-${{ matrix.arch }}.ext4
             staging/builder-vm-${{ matrix.arch }}.cmdline.txt
             staging/builder-vm-${{ matrix.arch }}.manifest.json
+            staging/builder-vm-${{ matrix.arch }}.pack-manifest.json
+            staging/builder-vm-${{ matrix.arch }}.pack-manifest.json.bundle
+            staging/builder-vm-${{ matrix.arch }}.sbom.txt
             staging/builder-vm-${{ matrix.arch }}-checksums-sha256.txt
 
   # Plan 74 W1.4b / ADR-051: the verity-sealed mvm runtime overlay
@@ -535,6 +614,9 @@ jobs:
             artifacts/builder-vm-rootfs-*
             artifacts/builder-vm-*.cmdline.txt
             artifacts/builder-vm-*.manifest.json
+            artifacts/builder-vm-*.pack-manifest.json
+            artifacts/builder-vm-*.pack-manifest.json.bundle
+            artifacts/builder-vm-*.sbom.txt
             artifacts/builder-vm-*-checksums-sha256.txt
             artifacts/runtime-overlay-*.ext4
             artifacts/runtime-overlay-*.verity
