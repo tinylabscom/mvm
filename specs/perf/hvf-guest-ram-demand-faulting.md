@@ -168,7 +168,8 @@ guest RAM is solved, so the next real memory is the per-VM private kernel copy.
   across guests would save on the order of tens of GB at 1000 VMs. It is a
   distinct, larger effort (guest RAM layout + `hv_vm_map` of a shared region
   + boot-protocol placement) and gets its own spec — not folded here — but it
-  is now the priority density lever after Phase 1, not an afterthought.
+  is now the priority density lever after Phase 1, not an afterthought. Tracked
+  as its own follow-on in #1527.
 - **Kernel slimming — FOLD into existing kernel work.** Every megabyte cut
   from the kernel `Image` is a megabyte off the per-VM private copy above, so
   slimming compounds directly with (and partially substitutes for) kernel
