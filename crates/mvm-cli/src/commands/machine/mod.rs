@@ -371,14 +371,6 @@ impl MachineRunArgs {
         self.detach || self.up_json || self.ttl.is_some() || self.healthcheck.is_some()
     }
 
-    /// A persistent run that streams in the foreground instead of detaching:
-    /// a declared service (`--healthcheck`) launched without `-d`/`--up-json`
-    /// and without an interactive PTY. It boots/registers through the persistent
-    /// path but attaches to the guest console until `stop`/Ctrl-C.
-    fn attach_foreground(&self) -> bool {
-        self.persistent() && !self.detach && !self.up_json && !self.interactive()
-    }
-
     /// Resolve the lifecycle mode purely from the flags. Fresh foreground runs
     /// need an image source and an argv; persistent runs just boot and return.
     fn resolve_mode(&self) -> Result<MachineRunMode> {
@@ -3199,12 +3191,29 @@ mod tests {
     }
 
     #[test]
-    fn healthcheck_without_detach_attaches_foreground() {
-        let mut args = parse_run(&["run"]).expect("parse");
-        args.healthcheck = Some("true".into());
-        assert!(args.attach_foreground(), "healthcheck, no -d => foreground");
-        args.detach = true;
-        assert!(!args.attach_foreground(), "-d => detached, not foreground");
+    fn healthcheck_run_routes_persistent_foreground() {
+        // A declared service without `-d`/`-it` boots and registers through the
+        // persistent lifecycle (streamed in the foreground by the argv arm of
+        // `run_persistent_post_start`), not the transient teardown path.
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "nginx",
+            "--healthcheck",
+            "true",
+            "--",
+            "nginx",
+            "-g",
+            "daemon off;",
+        ])
+        .expect("parse");
+        assert!(
+            args.persistent(),
+            "a healthcheck promotes the run to persistent"
+        );
+        assert!(!args.detach, "no -d");
+        assert!(!args.interactive(), "no -it");
+        assert_eq!(args.resolve_mode().unwrap(), MachineRunMode::Persistent);
     }
 
     #[test]
