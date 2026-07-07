@@ -295,12 +295,13 @@ fn compat_for_launch(
 /// shaped, not bridge-admitted, or any error → `None` (the caller cold-boots as normal).
 ///
 /// Eligibility (all required): `warm_pool_size > 0`, the launch is auto-named (no explicit
-/// `--name` — a claimed VM is named by its standby-id), no extra volumes (the attach
-/// threads only the rootfs), the backend supports the pool, and the admitted tenant is
-/// threaded into the config. libkrun/Vz additionally require the signed plan JSON because
-/// their claimed standby enters the gateway-bridge supervisor path; Firecracker can claim
-/// with only the resolved launch config because the default path enforces networking
-/// directly via TAP/nftables and only needs plan JSON when its optional bridge is enabled.
+/// `--name` — a claimed VM is named by its standby-id), no extra volumes or virtio-fs
+/// root (the attach threads only the rootfs), the backend supports the pool, and the
+/// admitted tenant is threaded into the config. libkrun/Vz additionally require the signed
+/// plan JSON because their claimed standby enters the gateway-bridge supervisor path;
+/// Firecracker can claim with only the resolved launch config because the default path
+/// enforces networking directly via TAP/nftables and only needs plan JSON when its optional
+/// bridge is enabled.
 pub fn try_warm_claim(
     backend: &AnyBackend,
     cfg: &VmStartConfig,
@@ -310,6 +311,7 @@ pub fn try_warm_claim(
     if cfg.warm_pool_size == 0
         || user_named
         || !cfg.volumes.is_empty()
+        || cfg.virtiofs_root.is_some()
         || !backend.supports_standby_pool()
     {
         return Ok(None);
@@ -398,8 +400,12 @@ fn should_replenish_inline(
     backend_kind: BackendKind,
     supports_standby_pool: bool,
     warm_pool_size: u32,
+    has_virtiofs_root: bool,
 ) -> bool {
-    warm_pool_size > 0 && supports_standby_pool && backend_kind != BackendKind::Vz
+    warm_pool_size > 0
+        && supports_standby_pool
+        && backend_kind != BackendKind::Vz
+        && !has_virtiofs_root
 }
 
 /// Top the pool back up toward `cfg.warm_pool_size` after a launch (the no-daemon
@@ -419,6 +425,7 @@ pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Resu
         backend.kind(),
         backend.supports_standby_pool(),
         cfg.warm_pool_size,
+        cfg.virtiofs_root.is_some(),
     ) {
         return Ok(0);
     }
@@ -516,6 +523,14 @@ mod tests {
     }
 
     #[test]
+    fn try_warm_claim_cold_with_virtiofs_root() {
+        let b = AnyBackend::from_hypervisor("libkrun");
+        let mut c = eligible_cfg();
+        c.virtiofs_root = Some("/unpacked/root".into());
+        assert_eq!(try_warm_claim(&b, &c, false, None).unwrap(), None);
+    }
+
+    #[test]
     fn try_warm_claim_cold_without_admitted_plan() {
         let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
@@ -543,10 +558,31 @@ mod tests {
 
     #[test]
     fn inline_replenish_skips_zero_unsupported_and_vz() {
-        assert!(!should_replenish_inline(BackendKind::Libkrun, true, 0));
-        assert!(!should_replenish_inline(BackendKind::Libkrun, false, 1));
-        assert!(!should_replenish_inline(BackendKind::Vz, true, 1));
-        assert!(should_replenish_inline(BackendKind::Libkrun, true, 1));
+        assert!(!should_replenish_inline(
+            BackendKind::Libkrun,
+            true,
+            0,
+            false
+        ));
+        assert!(!should_replenish_inline(
+            BackendKind::Libkrun,
+            false,
+            1,
+            false
+        ));
+        assert!(!should_replenish_inline(BackendKind::Vz, true, 1, false));
+        assert!(!should_replenish_inline(
+            BackendKind::Libkrun,
+            true,
+            1,
+            true
+        ));
+        assert!(should_replenish_inline(
+            BackendKind::Libkrun,
+            true,
+            1,
+            false
+        ));
     }
 
     #[test]

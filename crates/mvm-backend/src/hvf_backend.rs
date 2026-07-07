@@ -57,24 +57,45 @@ pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-/// SIGTERM a recorded pid, then SIGKILL if it lingers past a short grace. The
-/// supervisor installs no SIGTERM handler, so the default action terminates it
-/// and the HVF VM dies with it. Shared by the `VmBackend` stop path and the
-/// hvf driver's `kill`.
+fn reap_child_if_exited(pid: libc::pid_t) -> bool {
+    let mut status = 0;
+    // SAFETY: `waitpid` with WNOHANG only reaps this process's child if it has
+    // exited; for non-child PIDs it returns ECHILD and leaves the liveness check
+    // to `kill(pid, 0)`.
+    unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) == pid }
+}
+
+fn wait_for_pid_exit(pid: libc::pid_t, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if reap_child_if_exited(pid) || !pid_alive(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// SIGTERM a recorded pid, then SIGKILL if it lingers past a short grace. When
+/// the supervisor is still this process's child, reap it with `waitpid` so an
+/// already-exited zombie does not look alive for the full grace window.
+/// Shared by the `VmBackend` stop path and the hvf driver's `kill`.
 pub(crate) fn terminate_pid(pid: libc::pid_t) {
     // SAFETY: signalling a pid we recorded from our own supervisor.
     unsafe {
         libc::kill(pid, libc::SIGTERM);
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while pid_alive(pid) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
+    if wait_for_pid_exit(pid, Duration::from_secs(5)) {
+        return;
     }
     if pid_alive(pid) {
         // SAFETY: same pid.
         unsafe {
             libc::kill(pid, libc::SIGKILL);
         }
+        let _ = wait_for_pid_exit(pid, Duration::from_millis(500));
     }
 }
 
@@ -513,6 +534,29 @@ mod tests {
         let id = VmId("hvf-nonexistent-test-vm".into());
         assert_eq!(HvfBackend.status(&id).unwrap(), VmStatus::Stopped);
         assert!(HvfBackend.stop(&id).is_ok());
+    }
+
+    #[test]
+    fn terminate_pid_reaps_child_without_grace_timeout() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+
+        let started = Instant::now();
+        terminate_pid(pid);
+        let elapsed = started.elapsed();
+
+        let _ = child.wait();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "terminate_pid took {elapsed:?}, expected it to reap the child before the grace timeout"
+        );
+        assert!(!pid_alive(pid));
     }
 
     #[test]
