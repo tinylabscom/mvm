@@ -147,6 +147,7 @@ jobs:
           if [[ "${TARGET}" == *apple-darwin ]]; then
             cargo build --release --target "${TARGET}" -p mvm-vm-host \
               --bin mvm-bridge --bin mvm-vz-supervisor \
+              --bin mvm-hvf-supervisor \
               --bin mvm-libkrun-supervisor --features libkrun-sys
           else
             cargo build --release --target "${TARGET}" -p mvm-vm-host \
@@ -203,8 +204,9 @@ jobs:
           # Per-VM host processes (built in the prior step), shipped next to
           # mvmctl so the backend's adjacent-to-exe resolver finds them on a
           # downloaded install. copy-if-exists: the set differs by OS (macOS
-          # gets all three; Linux gets mvm-bridge only).
-          for hostbin in mvm-bridge mvm-vz-supervisor mvm-libkrun-supervisor; do
+          # gets all four incl. the HVF default backend's supervisor; Linux gets
+          # mvm-bridge only).
+          for hostbin in mvm-bridge mvm-vz-supervisor mvm-hvf-supervisor mvm-libkrun-supervisor; do
             src="target/${TARGET}/release/${hostbin}"
             [ -f "$src" ] && cp "$src" "staging/${ARCHIVE_NAME}/" && echo "bundled ${hostbin}"
           done
