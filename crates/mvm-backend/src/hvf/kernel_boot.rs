@@ -164,6 +164,7 @@ fn default_virtiofs_bootargs() -> String {
 /// under the argument-count lint. The two socket paths fall back to the
 /// `MVM_HVF_{AGENT,SUBSTITUTION}_SOCKET` env hooks when `None` (dev/live drivers);
 /// the productionized path threads them through the supervisor config.
+#[derive(Default)]
 pub struct HostChannels {
     pub agent_socket: Option<PathBuf>,
     pub substitution_socket: Option<PathBuf>,
@@ -191,6 +192,98 @@ pub struct HostChannels {
     pub virtiofs_root: Option<PathBuf>,
 }
 
+static NEVER_STOP: AtomicBool = AtomicBool::new(false);
+static NEVER_PAUSE: AtomicBool = AtomicBool::new(false);
+
+/// Inputs for a persistent HVF kernel boot. Grouped so pause/stop/channel
+/// control stays explicit without growing a positional argument list.
+pub struct KernelBootUntilParams<'a> {
+    image: &'a [u8],
+    initramfs: Option<&'a [u8]>,
+    disks: Vec<DiskImage>,
+    vsock: bool,
+    timeout: Duration,
+    stop: &'static AtomicBool,
+    paused: &'static AtomicBool,
+    channels: HostChannels,
+}
+
+impl<'a> KernelBootUntilParams<'a> {
+    pub fn builder(image: &'a [u8], timeout: Duration) -> KernelBootUntilParamsBuilder<'a> {
+        KernelBootUntilParamsBuilder {
+            image,
+            initramfs: None,
+            disks: Vec::new(),
+            vsock: false,
+            timeout,
+            stop: &NEVER_STOP,
+            paused: &NEVER_PAUSE,
+            channels: HostChannels::default(),
+        }
+    }
+}
+
+pub struct KernelBootUntilParamsBuilder<'a> {
+    image: &'a [u8],
+    initramfs: Option<&'a [u8]>,
+    disks: Vec<DiskImage>,
+    vsock: bool,
+    timeout: Duration,
+    stop: &'static AtomicBool,
+    paused: &'static AtomicBool,
+    channels: HostChannels,
+}
+
+impl<'a> KernelBootUntilParamsBuilder<'a> {
+    pub fn initramfs(mut self, initramfs: Option<&'a [u8]>) -> Self {
+        self.initramfs = initramfs;
+        self
+    }
+
+    pub fn disks(mut self, disks: Vec<DiskImage>) -> Self {
+        self.disks = disks;
+        self
+    }
+
+    pub fn vsock(mut self, vsock: bool) -> Self {
+        self.vsock = vsock;
+        self
+    }
+
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn stop(mut self, stop: &'static AtomicBool) -> Self {
+        self.stop = stop;
+        self
+    }
+
+    pub fn paused(mut self, paused: &'static AtomicBool) -> Self {
+        self.paused = paused;
+        self
+    }
+
+    pub fn channels(mut self, channels: HostChannels) -> Self {
+        self.channels = channels;
+        self
+    }
+
+    pub fn build(self) -> KernelBootUntilParams<'a> {
+        KernelBootUntilParams {
+            image: self.image,
+            initramfs: self.initramfs,
+            disks: self.disks,
+            vsock: self.vsock,
+            timeout: self.timeout,
+            stop: self.stop,
+            paused: self.paused,
+            channels: self.channels,
+        }
+    }
+}
+
 /// Boot `image` (an arm64 `Image`) under HVF, optionally with an `initramfs`
 /// (cpio, gzip-or-raw), returning what it printed within `timeout`.
 pub fn boot_kernel(
@@ -200,23 +293,12 @@ pub fn boot_kernel(
     vsock: bool,
     timeout: Duration,
 ) -> Result<KernelBootResult, HvfError> {
-    static NEVER_STOP: AtomicBool = AtomicBool::new(false);
     boot_kernel_impl(
-        image,
-        initramfs,
-        disks,
-        vsock,
-        timeout,
-        &NEVER_STOP,
-        HostChannels {
-            agent_socket: None,
-            substitution_socket: None,
-            egress_relay: None,
-            console_data_sockets: Vec::new(),
-            cmdline: None,
-            mem_mib: 0,
-            virtiofs_root: None,
-        },
+        KernelBootUntilParams::builder(image, timeout)
+            .initramfs(initramfs)
+            .disks(disks)
+            .vsock(vsock)
+            .build(),
     )
 }
 
@@ -224,29 +306,26 @@ pub fn boot_kernel(
 /// persistent-until-stop VM — and drives egress + the agent/substitution channels
 /// through the caller-supplied [`HostChannels`] (the supervisor builds them from
 /// the admitted plan + per-VM socket paths). The supervisor sets `stop` from a
-/// SIGTERM handler so `HvfBackend::stop` ends the guest cleanly. `timeout` still
-/// caps the run.
-pub fn boot_kernel_until(
-    image: &[u8],
-    initramfs: Option<&[u8]>,
-    disks: Vec<DiskImage>,
-    vsock: bool,
-    timeout: Duration,
-    stop: &'static AtomicBool,
-    channels: HostChannels,
-) -> Result<KernelBootResult, HvfError> {
-    boot_kernel_impl(image, initramfs, disks, vsock, timeout, stop, channels)
+/// SIGTERM handler so `HvfBackend::stop` ends the guest cleanly. Setting `paused`
+/// parks the vCPU out of guest execution (RAM + devices intact) until it clears
+/// again — the supervisor drives it from its SIGUSR1/SIGUSR2 handlers so
+/// `HvfBackend::pause`/`resume` freeze and thaw the guest in place. `timeout`
+/// still caps the run.
+pub fn boot_kernel_until(params: KernelBootUntilParams<'_>) -> Result<KernelBootResult, HvfError> {
+    boot_kernel_impl(params)
 }
 
-fn boot_kernel_impl(
-    image: &[u8],
-    initramfs: Option<&[u8]>,
-    disks: Vec<DiskImage>,
-    vsock: bool,
-    timeout: Duration,
-    stop: &'static AtomicBool,
-    channels: HostChannels,
-) -> Result<KernelBootResult, HvfError> {
+fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResult, HvfError> {
+    let KernelBootUntilParams {
+        image,
+        initramfs,
+        disks,
+        vsock,
+        timeout,
+        stop,
+        paused,
+        channels,
+    } = params;
     if disks.len() > MAX_DISKS {
         return Err(HvfError::BadKernel);
     }
@@ -364,6 +443,7 @@ fn boot_kernel_impl(
                 virtiofs_root: channels.virtiofs_root,
             },
             stop,
+            paused,
         );
         hv_vm_destroy();
         r
@@ -404,6 +484,7 @@ unsafe fn run(
     dtb_addr: u64,
     inputs: RunInputs,
     stop: &'static AtomicBool,
+    paused: &'static AtomicBool,
 ) -> Result<KernelBootResult, HvfError> {
     let RunInputs {
         disks,
@@ -512,10 +593,17 @@ unsafe fn run(
                     stop.store(true, Ordering::Relaxed); // timeout → end the run
                     break;
                 }
-                // Heartbeat while an agent listener is bound (accept/serve RPC) or
-                // there's host→guest egress to deliver.
-                if agent_bound || egress_active_w.load(Ordering::Relaxed) > 0 {
-                    HvfHandle::force_exit(&[handle]); // wake the run loop to poll
+                // Break the guest out of `hv_vcpu_run` when: a pause was requested
+                // (so the run loop reaches its pause hold and parks the vCPU), an
+                // agent listener is bound (accept/serve RPC), or there's host→guest
+                // egress to deliver. An idle transient VM gets no heartbeat, so the
+                // explicit paused check is what parks it; while it sits in the hold
+                // the extra nudges are harmless (it is out of guest execution).
+                if paused.load(Ordering::Relaxed)
+                    || agent_bound
+                    || egress_active_w.load(Ordering::Relaxed) > 0
+                {
+                    HvfHandle::force_exit(&[handle]); // wake the run loop
                 }
             }
             HvfHandle::force_exit(&[handle]); // final wake → loop sees stop, returns
@@ -661,6 +749,9 @@ unsafe fn run(
                 // graceful); otherwise it's a heartbeat wake so the run loop can drain
                 // egress sockets into a guest blocked in WFI (vsock-only egress async proxy).
                 move || stop.load(Ordering::Relaxed),
+                // Park the vCPU in the run loop's pause hold while `paused` is set,
+                // freezing guest RAM + device state in place until resume clears it.
+                move || paused.load(Ordering::Relaxed),
             )?
         };
 

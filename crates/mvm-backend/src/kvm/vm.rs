@@ -145,6 +145,8 @@ impl KvmVm {
                 |_: &KvmVcpu, _, _| Ok(RunControl::Stop),
                 // No async host I/O on this path yet → a forced exit always stops.
                 || true,
+                // No pause primitive on this console boot path.
+                || false,
             )
         };
         done.store(true, Ordering::Relaxed);
@@ -240,6 +242,8 @@ impl KvmVm {
                 &mut devices,
                 |_: &KvmVcpu, _, _| Ok(RunControl::Stop),
                 || stop.load(Ordering::Relaxed),
+                // No pause primitive on the KVM egress path.
+                || false,
             )
         };
         done.store(true, Ordering::Relaxed);

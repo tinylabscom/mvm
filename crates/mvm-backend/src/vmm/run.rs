@@ -11,6 +11,8 @@
 //! KVM, this single loop serves both backends with no `cfg` and no per-backend
 //! device dispatch.
 
+use std::time::Duration;
+
 use super::hv::{HypervisorVcpu, VcpuExit};
 
 /// A guest device the run loop dispatches decoded accesses to. Matched by guest
@@ -102,18 +104,25 @@ where
 ///   run (e.g. draining an egress socket into the guest's rx queue while the guest
 ///   is idle in WFI), so the loop polls devices and keeps going. Backends with no
 ///   async host I/O pass `|| true` (a cancel always stops).
-pub fn run<C, S, X, Q>(
+/// - `should_pause()` parks the vCPU without ending the run: when it returns
+///   `true` (and no stop is pending) after a forced exit, the loop holds the vCPU
+///   out of guest execution — polling once first, then sleeping — so guest RAM and
+///   device state freeze in place until the pause clears (resume) or a stop
+///   arrives. Backends with no pause primitive pass `|| false`.
+pub fn run<C, S, X, Q, P>(
     vcpu: &C,
     set_irq: S,
     devices: &mut [&mut dyn RunDevice],
     mut on_exception: X,
     should_stop: Q,
+    should_pause: P,
 ) -> Result<RunOutcome, C::Error>
 where
     C: HypervisorVcpu,
     S: Fn(u32, bool) -> Result<(), C::Error>,
     X: FnMut(&C, u64, u64) -> Result<RunControl, C::Error>,
     Q: Fn() -> bool,
+    P: Fn() -> bool,
 {
     loop {
         match vcpu.step()? {
@@ -139,6 +148,13 @@ where
                 }
                 if should_stop() {
                     return Ok(RunOutcome::Canceled);
+                }
+                // Pause hold: a pause request parks the vCPU here, out of guest
+                // execution, so RAM and device state stay frozen until resume
+                // clears the pause (or a stop arrives). The device poll above
+                // already drained any in-flight host reply before we park.
+                while should_pause() && !should_stop() {
+                    std::thread::sleep(Duration::from_millis(20));
                 }
             }
             VcpuExit::Halt => return Ok(RunOutcome::Halt),
@@ -256,6 +272,8 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Clone, Copy)]
     struct NopHandle;
@@ -391,6 +409,7 @@ mod tests {
             &mut devs,
             no_exceptions,
             || false, // never a real stop → cancels are heartbeat wakes
+            || false, // no pause
         )
         .unwrap();
         assert_eq!(out, RunOutcome::Halt); // ran to the guest halt, not the cancel
@@ -418,11 +437,42 @@ mod tests {
             },
             &mut devs,
             no_exceptions,
-            || true, // real stop
+            || true,  // real stop
+            || false, // no pause
         )
         .unwrap();
         assert_eq!(out, RunOutcome::Canceled);
         assert_eq!(*raised.borrow(), vec![(9u32, true)]); // final drain still delivered
+    }
+
+    #[test]
+    fn canceled_with_pause_holds_until_resume_then_continues() {
+        let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled, VcpuExit::Halt]);
+        let mut devs: Vec<&mut dyn RunDevice> = vec![];
+        let paused = Arc::new(AtomicBool::new(true));
+        let paused_for_resume = Arc::clone(&paused);
+        let resume = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            paused_for_resume.store(false, Ordering::SeqCst);
+        });
+
+        let started = std::time::Instant::now();
+        let out = run(
+            &vcpu,
+            |_, _| Ok(()),
+            &mut devs,
+            no_exceptions,
+            || false,
+            || paused.load(Ordering::SeqCst),
+        )
+        .unwrap();
+        resume.join().unwrap();
+
+        assert_eq!(out, RunOutcome::Halt);
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "pause hold should keep the vCPU out of guest execution until resume"
+        );
     }
 
     #[test]
@@ -443,7 +493,15 @@ mod tests {
             writes: vec![],
         };
         let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
-        let out = run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions, || true).unwrap();
+        let out = run(
+            &vcpu,
+            |_, _| Ok(()),
+            &mut devs,
+            no_exceptions,
+            || true,
+            || false,
+        )
+        .unwrap();
         assert_eq!(out, RunOutcome::Halt);
         assert_eq!(*vcpu.reads.borrow(), vec![0xdead_beef]);
     }
@@ -466,7 +524,15 @@ mod tests {
             writes: vec![],
         };
         let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
-        run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions, || true).unwrap();
+        run(
+            &vcpu,
+            |_, _| Ok(()),
+            &mut devs,
+            no_exceptions,
+            || true,
+            || false,
+        )
+        .unwrap();
         assert_eq!(dev.writes, vec![(0x10, 0x55)]);
         assert!(
             vcpu.reads.borrow().is_empty(),
@@ -502,6 +568,7 @@ mod tests {
             &mut devs,
             no_exceptions,
             || true,
+            || false,
         )
         .unwrap();
         assert_eq!(*raised.borrow(), vec![(42u32, true)]);
@@ -531,7 +598,15 @@ mod tests {
             writes: vec![],
         };
         let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
-        run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions, || true).unwrap();
+        run(
+            &vcpu,
+            |_, _| Ok(()),
+            &mut devs,
+            no_exceptions,
+            || true,
+            || false,
+        )
+        .unwrap();
         assert_eq!(*vcpu.reads.borrow(), vec![0xab, 0]); // device value, then RAZ
     }
 
@@ -539,7 +614,15 @@ mod tests {
     fn canceled_exit_ends_the_run() {
         let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled]);
         let mut devs: Vec<&mut dyn RunDevice> = vec![];
-        let out = run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions, || true).unwrap();
+        let out = run(
+            &vcpu,
+            |_, _| Ok(()),
+            &mut devs,
+            no_exceptions,
+            || true,
+            || false,
+        )
+        .unwrap();
         assert_eq!(out, RunOutcome::Canceled);
     }
 
@@ -571,6 +654,7 @@ mod tests {
                 })
             },
             || true,
+            || false,
         )
         .unwrap();
         assert_eq!(out, RunOutcome::Stopped);
@@ -581,7 +665,15 @@ mod tests {
     fn vtimer_is_ignored_and_the_loop_continues() {
         let vcpu = ScriptVcpu::new(vec![VcpuExit::VTimer, VcpuExit::VTimer, VcpuExit::Halt]);
         let mut devs: Vec<&mut dyn RunDevice> = vec![];
-        let out = run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions, || true).unwrap();
+        let out = run(
+            &vcpu,
+            |_, _| Ok(()),
+            &mut devs,
+            no_exceptions,
+            || true,
+            || false,
+        )
+        .unwrap();
         assert_eq!(out, RunOutcome::Halt);
     }
 
@@ -637,7 +729,15 @@ mod tests {
         let vcpu = ScriptVcpu::new(script);
         {
             let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
-            let out = run(&vcpu, |_, _| Ok(()), &mut devs, no_exceptions, || true).unwrap();
+            let out = run(
+                &vcpu,
+                |_, _| Ok(()),
+                &mut devs,
+                no_exceptions,
+                || true,
+                || false,
+            )
+            .unwrap();
             assert_eq!(out, RunOutcome::Halt);
         }
 
