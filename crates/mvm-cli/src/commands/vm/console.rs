@@ -62,11 +62,16 @@ fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
     }
     // HVF runner (WorkloadRunner / HVF) exposes the agent at
     // `<vm_state_dir>/hvf-agent.sock` and console data ports at
-    // `<vm_state_dir>/vsock/vsock-<port>.sock`. The sockets are workload-local;
-    // global dev mode is not required for a foreground `machine run -it`.
-    let hvf = DevConsoleTransport::for_vm(name);
-    if hvf.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
-        return Ok(Arc::new(hvf));
+    // `<vm_state_dir>/vsock/vsock-<port>.sock`. Gate on the workload being
+    // accessible (non-sealed), not on an ambient
+    // `MVM_ENV=dev`, so `machine run -it` reaches its own console without an
+    // env dance. A sealed prod runner is `accessible = false` here and its
+    // agent carries no Console capability regardless.
+    if hvf_console_arm_enabled(name) {
+        let hvf = DevConsoleTransport::for_vm(name);
+        if hvf.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+            return Ok(Arc::new(hvf));
+        }
     }
     // Vz workloads expose the agent at `<vm_state_dir>/vsock/vsock-<port>.sock`
     // (one subdir deeper than libkrun); without this probe `console` fell
@@ -79,6 +84,16 @@ fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
         return Ok(Arc::new(FirecrackerTransport::for_vm(name)?));
     }
     anyhow::bail!("no host-side console transport found for VM {name:?}")
+}
+
+/// Whether the HVF interactive console-data arm may fire for `name`. Enabled for
+/// an accessible (non-sealed) workload; a sealed prod runner's
+/// `runtime_meta.accessible` is `false` so it never routes to the console
+/// (`enforce_accessible_gate` refuses the attach up front, and the sealed agent
+/// links no Console capability). Missing/legacy metadata reads as accessible —
+/// the same backward-compat default `enforce_accessible_gate` uses.
+fn hvf_console_arm_enabled(name: &str) -> bool {
+    !matches!(mvm::vm::runtime_meta::read(name), Ok(Some(meta)) if !meta.accessible)
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -795,30 +810,76 @@ mod picker_hvf_tests {
             .expect("selected transport must connect to hvf-agent.sock");
     }
 
+    // A sealed workload must not route to the hvf console even with
+    // `hvf-agent.sock` present. It falls through to Vz/Firecracker, so a sealed
+    // prod runner never receives an interactive attach.
     #[test]
-    fn pick_console_transport_selects_hvf_without_global_dev_mode() {
+    fn pick_console_transport_skips_hvf_for_sealed_workload() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir_in("/tmp").expect("state tempdir");
         env.set("MVM_DATA_DIR", tmp.path());
-        env.set("MVM_ENV", "prod");
 
-        let name = "hvf-prod-workload";
+        let name = "hvf-sealed-workload";
         let state = mvm_core::config::vm_state_dir(name);
         std::fs::create_dir_all(&state).unwrap();
         let agent = mvm_core::config::vm_hvf_agent_socket(name);
         let _listener = UnixListener::bind(&agent).unwrap();
 
-        let transport = pick_console_transport(name)
-            .expect("picker must resolve hvf transport without global dev mode");
-        transport
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-            .expect("selected transport must connect to hvf-agent.sock");
+        // Mark the image sealed.
+        mvm::vm::runtime_meta::write(
+            name,
+            &mvm::vm::runtime_meta::VmRuntimeMeta {
+                mode: mvm::vm::runtime_meta::StartModeKind::Attached,
+                accessible: false,
+                rootfs_path: None,
+            },
+        )
+        .unwrap();
+
+        match pick_console_transport(name) {
+            Err(_) => {
+                // Expected: picker fell through to FC which failed — fine.
+            }
+            Ok(transport) => {
+                assert!(
+                    transport
+                        .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+                        .is_err(),
+                    "a sealed workload must not route to the hvf agent socket"
+                );
+            }
+        }
     }
 
-    // Extend the boundary test: the picker selects the workload's OWN hvf
-    // socket — not the dev/builder VM socket — when both are present. The hvf
-    // arm probes `hvf-agent.sock` under the workload's own state dir, which is
-    // disjoint from the builder cache, so it can never cross-route.
+    // The fix: an accessible workload's console is reachable WITHOUT MVM_ENV=dev,
+    // so `machine run -it` attaches its own PTY with no env dance.
+    #[test]
+    fn pick_console_transport_selects_hvf_for_accessible_workload_without_dev_env() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir_in("/tmp").expect("state tempdir");
+        env.set("MVM_DATA_DIR", tmp.path());
+        // Deliberately NOT dev mode.
+        env.set("MVM_ENV", "prod");
+
+        let name = "hvf-accessible-workload";
+        let state = mvm_core::config::vm_state_dir(name);
+        std::fs::create_dir_all(&state).unwrap();
+        let agent = mvm_core::config::vm_hvf_agent_socket(name);
+        let _listener = UnixListener::bind(&agent).unwrap();
+        // No runtime_meta written → accessible by the backward-compat default.
+
+        let transport = pick_console_transport(name)
+            .expect("accessible workload must resolve the hvf transport");
+        transport
+            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .expect("selected transport must connect to the workload agent socket");
+    }
+
+    // Extend the boundary test: even with MVM_ENV=dev (which enables the
+    // hvf arm), the picker selects the workload's OWN hvf socket — not
+    // the dev/builder VM socket — when both are present. The hvf arm probes
+    // `hvf-agent.sock` under the workload's own state dir, which is disjoint
+    // from the builder cache, so it can never cross-route.
     #[cfg(feature = "builder-vm")]
     #[test]
     fn pick_console_transport_hvf_uses_workload_not_dev_socket() {

@@ -382,6 +382,8 @@ claims), each backed by a named test or workflow gate. In summary:
    `no-new-privs` in the launch path.
 3. **A tampered rootfs ext4 fails to boot** — dm-verity + kernel-cmdline roothash
    + verity initramfs; live-KVM tamper regression panics before userspace.
+   Scoped to the block+ext4 backends (Firecracker + Option B); the virtiofs-root
+   dev-tier path carries a weaker contract — see the claim catalog.
 4. **The guest agent has no `do_exec` in production builds** — symbol-absence
    CI gate on the sealed agent.
 5. **Vsock framing + supervisor config are fuzzed** — `cargo-fuzz` targets;

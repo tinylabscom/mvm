@@ -23,7 +23,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::{mvm_data_dir, vm_state_dir};
 use mvm_core::vm_backend::{
-    VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendSecurityProfile, ClaimStatus, LayerCoverage, VmBackend, VmCapabilities, VmExitStatus,
+    VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
 use crate::base::ui;
@@ -99,31 +100,32 @@ pub(crate) fn terminate_pid(pid: libc::pid_t) {
     }
 }
 
-/// Locate the per-VM supervisor binary: `$MVM_HVF_SUPERVISOR_PATH`, else
-/// alongside the current executable (release + `cargo` layouts both put it there).
+/// Locate the per-VM supervisor binary, building it once on a source checkout if
+/// `cargo run` produced only `mvmctl`. See [`crate::aux_bin`].
 pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
-    if let Some(p) = std::env::var_os("MVM_HVF_SUPERVISOR_PATH") {
-        let path = PathBuf::from(p);
-        if path.is_file() {
-            return Ok(path);
-        }
-        bail!(
-            "MVM_HVF_SUPERVISOR_PATH points at {} which is not a file",
-            path.display()
-        );
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
+    crate::aux_bin::resolve_or_build(&crate::aux_bin::AuxBin {
+        bin: "mvm-hvf-supervisor",
+        package: "mvm-vm-host",
+        env_var: "MVM_HVF_SUPERVISOR_PATH",
+        features: &[],
+    })
+}
+
+/// Rebuild command for the hvf per-VM supervisor bin. `cargo run` rebuilds only
+/// `mvmctl`, never this separate `mvm-vm-host` bin.
+const HVF_AUX_REBUILD_CMD: &str = "cargo build -p mvm-vm-host --bin mvm-hvf-supervisor";
+
+/// Warn once, before spawning, when the resolved supervisor predates the running
+/// `mvmctl` — the `cargo run` skew where the supervisor was left unrebuilt. On
+/// this path staleness is a silent behavioural regression (a stale agent bridge
+/// still boots cleanly, then wedges the guest agent), so unlike the vz path there
+/// is no early crash to hang a hint on; this makes it self-diagnosing up front.
+pub(crate) fn warn_if_supervisor_stale(supervisor: &Path) {
+    if let Some(hint) =
+        crate::supervisor_stale::supervisor_stale_hint(supervisor, HVF_AUX_REBUILD_CMD)
     {
-        let candidate = dir.join("mvm-hvf-supervisor");
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
+        ui::warn(&hint);
     }
-    bail!(
-        "mvm-hvf-supervisor binary not found (looked at $MVM_HVF_SUPERVISOR_PATH \
-         and alongside the current exe)"
-    )
 }
 
 fn vms_root() -> PathBuf {
@@ -206,6 +208,33 @@ impl VmBackend for HvfBackend {
         }
     }
 
+    fn security_profile(&self) -> BackendSecurityProfile {
+        // Same Hypervisor.framework microVM tier as Vz (Tier 2), but the in-house
+        // VMM owns the surface and the data plane is vsock-only (no guest NIC;
+        // egress rides the host gating endpoint). Claims 1-2/4-7 hold as on FC;
+        // claim 3 (verified boot) does not hold on the default path — the
+        // virtiofs-root serves a host directory that cannot be dm-verity-sealed.
+        BackendSecurityProfile {
+            claims: [
+                ClaimStatus::Holds,       // 1 — host-fs isolation via the VMM + admitted shares
+                ClaimStatus::Holds,       // 2 — uid-0 protections, guest-side (same as FC)
+                ClaimStatus::DoesNotHold, // 3 — virtiofs-root has no dm-verity; block+ext4 (FC/Option B) only
+                ClaimStatus::Holds,       // 4 — guest agent has no do_exec in prod
+                ClaimStatus::Holds,       // 5 — vsock framing fuzzed
+                ClaimStatus::Holds,       // 6 — dev image hash verified
+                ClaimStatus::Holds,       // 7 — cargo deps audited
+            ],
+            layer_coverage: LayerCoverage::all_layers(),
+            tier: "Tier 2",
+            notes: &[
+                "In-house Hypervisor.framework VMM on macOS 26+ Apple silicon (the default tier).",
+                "vsock-only data plane: no guest NIC; egress rides the host gating endpoint (auditable).",
+                "Claim 3 (verified boot) does not hold on the virtiofs-root path — dm-verity targets the block+ext4 backends (Firecracker + Option B).",
+                "Pause/resume + snapshot land as they are wired onto the primitive.",
+            ],
+        }
+    }
+
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
         // No parent-entitlement gate here: the detached supervisor self-signs the
         // hypervisor entitlement and does the HVF work. The parent (CLI) only
@@ -278,6 +307,16 @@ impl VmBackend for HvfBackend {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
 
+        // Interactive PTY runs (`machine run -it`) pre-open the console data
+        // ports so the host can attach a shell; the supervisor binds them under
+        // `<state_dir>/vsock/`. Create the dir up front so the bind can't miss.
+        let console_data_sockets = hvf_console_data_sockets(&state_dir, config.dev_console);
+        if !console_data_sockets.is_empty() {
+            let vsock_dir = state_dir.join("vsock");
+            std::fs::create_dir_all(&vsock_dir)
+                .with_context(|| format!("create console vsock dir {}", vsock_dir.display()))?;
+        }
+
         let cfg = HvfSupervisorConfig {
             kernel: PathBuf::from(kernel),
             // Workload path: the supervisor's default cmdline (`init=/init`) is the
@@ -295,12 +334,13 @@ impl VmBackend for HvfBackend {
             agent_socket: Some(agent_socket),
             substitution_socket: None,
             egress_relay_socket,
-            console_data_sockets: hvf_console_data_sockets(&state_dir, config.dev_console),
+            console_data_sockets,
         };
         let json = serde_json::to_string(&cfg)
             .map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
 
         let supervisor = resolve_supervisor_path()?;
+        warn_if_supervisor_stale(&supervisor);
         ui::info(&format!(
             "Starting HVF VM '{}' via {}...",
             config.name,
@@ -493,6 +533,30 @@ mod tests {
     }
 
     #[test]
+    fn security_profile_is_tier_2_with_claim_3_partial() {
+        // The macOS-26 default backend must report a real tier — doctor's
+        // security posture derives from this, and the trait default is "Unknown".
+        let profile = HvfBackend.security_profile();
+        assert_eq!(profile.tier, "Tier 2");
+        assert!(profile.layer_coverage.is_microvm());
+        assert_eq!(profile.dropped_claims(), vec![3]);
+    }
+
+    #[test]
+    fn rebuild_hint_names_the_supervisor_bin() {
+        // The whole point of the stale warning is telling the user the exact
+        // command; guard against the bin name drifting out of the hint.
+        assert!(HVF_AUX_REBUILD_CMD.contains("mvm-hvf-supervisor"));
+        assert!(HVF_AUX_REBUILD_CMD.contains("mvm-vm-host"));
+    }
+
+    #[test]
+    fn warn_if_supervisor_stale_is_silent_for_unreadable_path() {
+        // No mtime → no hint → no panic (don't guess on a missing binary).
+        warn_if_supervisor_stale(Path::new("/nonexistent/mvm-hvf-supervisor"));
+    }
+
+    #[test]
     fn vsock_is_capable_pause_snapshot_are_not() {
         let c = HvfBackend.capabilities();
         assert!(c.vsock, "vsock is live-proven");
@@ -566,5 +630,35 @@ mod tests {
         let r = resolve_supervisor_path();
         unsafe { std::env::remove_var("MVM_HVF_SUPERVISOR_PATH") };
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn hvf_console_data_sockets_empty_for_sealed_boot() {
+        // A sealed prod boot (dev_console = false) opens no console listeners.
+        assert!(hvf_console_data_sockets(Path::new("/tmp/state"), false).is_empty());
+    }
+
+    #[test]
+    fn hvf_console_data_sockets_match_dev_console_transport_paths() {
+        let state = Path::new("/tmp/state");
+        let socks = hvf_console_data_sockets(state, true);
+        assert!(
+            !socks.is_empty(),
+            "an interactive run pre-opens console ports"
+        );
+        // The guest ports are exactly the dev console data range.
+        let got: Vec<u32> = socks.iter().map(|s| s.guest_port).collect();
+        let want: Vec<u32> = mvm_guest::vsock::dev_console_data_ports().collect();
+        assert_eq!(got, want);
+        // Each host UDS is `<state_dir>/vsock/vsock-<port>.sock`, the exact path
+        // `DevConsoleTransport` dials — a drift here silently breaks PTY attach.
+        for s in &socks {
+            assert_eq!(
+                s.host_socket,
+                state
+                    .join("vsock")
+                    .join(mvm_core::config::vsock_socket_filename(s.guest_port)),
+            );
+        }
     }
 }

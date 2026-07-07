@@ -211,10 +211,11 @@ pub fn sweep(
 }
 
 /// Supervisor pid-file names a per-VM state dir may carry. `pid` is the
-/// Apple-Container dev-VM owner file; `libkrun.pid` / `vz.pid` are the
-/// workload-supervisor files. The first one that exists and points at a
-/// live process marks the dir as having a live owner.
-const PID_FILE_NAMES: &[&str] = &["libkrun.pid", "vz.pid", "pid"];
+/// Apple-Container dev-VM owner file; `libkrun.pid` / `vz.pid` / `hvf.pid` are
+/// the workload-supervisor files (one per backend). The first one that exists
+/// and points at a live process marks the dir as having a live owner. HVF must
+/// be listed here or convergence reaps every running HVF machine's state dir.
+const PID_FILE_NAMES: &[&str] = &["libkrun.pid", "vz.pid", "hvf.pid", "pid"];
 
 /// `kill(pid, 0)` existence probe — delivers no signal, just checks the
 /// process is alive. The cheap half of the live-vs-orphan discrimination
@@ -729,6 +730,35 @@ mod tests {
         let known: BTreeSet<String> = ["registered".to_string()].into();
         let orphans = view.orphan_dirs(&known);
         assert_eq!(orphans, vec!["orphan".to_string()]);
+    }
+
+    #[test]
+    fn fs_view_recognizes_live_hvf_supervisor_pid() {
+        // Regression: the HVF backend records liveness in `hvf.pid`. The
+        // reconciler must treat that as a live owner — otherwise every CLI
+        // entry (which runs convergence) reaps a running HVF machine's state
+        // dir, so `machine ls` reports it stopped and `machine shell` can't
+        // find its agent socket.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = root.join("hvf-vm");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Only hvf.pid present (no libkrun.pid / vz.pid), pointing at us.
+        std::fs::write(dir.join("hvf.pid"), std::process::id().to_string()).unwrap();
+
+        let view = FsRuntimeView::new(root);
+        let dir_str = dir.to_string_lossy().into_owned();
+        let reg = RegisterParams::minimal("hvf-vm", &dir_str, "default");
+        let mut registry = VmNameRegistry::default();
+        registry.register_with_metadata(reg).unwrap();
+        assert!(
+            view.process_alive(registry.lookup("hvf-vm").unwrap()),
+            "a live hvf.pid must count as a live supervisor"
+        );
+        assert!(
+            view.orphan_dirs(&BTreeSet::new()).is_empty(),
+            "a dir owned by a live hvf supervisor must not be reaped as an orphan"
+        );
     }
 
     #[test]

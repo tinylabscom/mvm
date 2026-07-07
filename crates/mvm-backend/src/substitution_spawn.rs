@@ -123,39 +123,15 @@ pub const SUBST_PID_FILE: &str = "substitution.pid";
 /// line before the caller declares the spawn failed.
 pub const SUBST_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Locate the `mvm-substitution-endpoint` binary: `MVM_SUBSTITUTION_ENDPOINT_PATH`
-/// override → sibling of the current exe → workspace `target/{release,debug}`.
-/// Mirrors `resolve_vz_drainer_path`.
+/// Locate the `mvm-substitution-endpoint` binary, building it once on a source
+/// checkout if `cargo run` produced only `mvmctl`. See [`crate::aux_bin`].
 fn resolve_substitution_endpoint_path() -> Result<PathBuf> {
-    const BIN: &str = "mvm-substitution-endpoint";
-    if let Some(p) = std::env::var_os("MVM_SUBSTITUTION_ENDPOINT_PATH").map(PathBuf::from) {
-        if p.is_file() {
-            return Ok(p);
-        }
-        bail!(
-            "MVM_SUBSTITUTION_ENDPOINT_PATH points at {} which is not a file",
-            p.display()
-        );
-    }
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf))
-    {
-        let candidate = dir.join(BIN);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
-        for variant in ["release", "debug"] {
-            let candidate = workspace_root.join("target").join(variant).join(BIN);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
-    bail!("could not locate the {BIN} binary (set MVM_SUBSTITUTION_ENDPOINT_PATH)")
+    crate::aux_bin::resolve_or_build(&crate::aux_bin::AuxBin {
+        bin: "mvm-substitution-endpoint",
+        package: "mvm-hostd",
+        env_var: "MVM_SUBSTITUTION_ENDPOINT_PATH",
+        features: &[],
+    })
 }
 
 /// Inputs to [`spawn_substitution_endpoint`]. Grouped into a struct (rather

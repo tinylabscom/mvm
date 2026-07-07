@@ -36,7 +36,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install system build deps
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
+        run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
 
       # SDK stub codegen (check-stubs) shells out to `uvx datamodel-codegen`
       # (Python) + `npx json-schema-to-typescript` (TS). The pinned generator
@@ -100,6 +100,9 @@ jobs:
 
       - name: Unique spec numbers
         run: cargo run -p xtask -- check-spec-numbers
+
+      - name: Two product surfaces only (host + user)
+        run: cargo run -p xtask -- check-two-surfaces
 
       - name: No spec refs in source comments
         run: cargo run -p xtask -- check-no-spec-refs-in-comments
@@ -197,7 +200,7 @@ jobs:
 
       - name: Install system build deps
         run: |
-          sudo apt-get update
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
           sudo apt-get install -y libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
@@ -241,7 +244,7 @@ jobs:
       - uses: ./.github/actions/install-zigbuild
 
       - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
+        run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y jq
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -269,7 +272,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install passt
-        run: sudo apt-get update && sudo apt-get install -y passt
+        run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y passt
       - name: Confirm real passt uses the 4-byte-BE qemu-socket framing
         run: python3 scripts/passt-framing-check.py
 
@@ -323,7 +326,7 @@ jobs:
           # Inline xattr: the real kernel reads back the security.capability the
           # writer emitted, byte-for-byte (getfattr reads raw bytes — no cap
           # validation — so an arbitrary fixed blob round-trips deterministically).
-          sudo apt-get update && sudo apt-get install -y attr
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y attr
           cap=$(sudo getfattr --absolute-names -n security.capability -e hex "$mnt/bin/ping" \
             | grep '^security.capability=' | cut -d= -f2)
           echo "security.capability=$cap"
@@ -332,7 +335,7 @@ jobs:
       - name: dm-verity root hash + hash tree match real veritysetup
         run: |
           set -euo pipefail
-          sudo apt-get update && sudo apt-get install -y cryptsetup-bin
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y cryptsetup-bin
           # Our writer printed `ROOTHASH <hex>` and wrote the no-superblock hash
           # tree to `<image>.verity`.
           ours=$(grep '^ROOTHASH ' /tmp/sample.out | awk '{print $2}')
