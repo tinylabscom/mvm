@@ -566,6 +566,13 @@ fn machine_run_spec(
         agent_verb: args.agent_verb.clone(),
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
+        health_check: crate::exec::build_healthcheck(
+            args.healthcheck.as_deref(),
+            args.health_interval,
+            args.health_timeout,
+            args.health_retries,
+            args.health_start_period,
+        ),
     })
 }
 
@@ -1109,6 +1116,7 @@ impl MachineCreateArgs {
             agent_verb: Vec::new(),
             created_at: Some(mvm_core::time::utc_now()),
             last_started_at: None,
+            health_check: None,
         })
     }
 }
@@ -3350,6 +3358,7 @@ mod tests {
             agent_verb: vec![],
             created_at: None,
             last_started_at: None,
+            health_check: None,
         }
     }
 
@@ -4107,6 +4116,7 @@ mod tests {
             agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
+            health_check: None,
         };
         mark_machine_started(&mut spec, "sha256:abc".to_string());
         assert_eq!(spec.resolved_digest.as_deref(), Some("sha256:abc"));
@@ -4325,6 +4335,7 @@ ssh_agent = true
             agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
+            health_check: None,
         };
 
         let summary =
@@ -4366,6 +4377,7 @@ ssh_agent = true
             agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
+            health_check: None,
         };
 
         let summary = machine_start_preflight_summary(&spec, None).expect("preflight summary");
@@ -4438,6 +4450,7 @@ ssh_agent = true
             agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
+            health_check: None,
         };
         let input = machine_start_receipt_input(&spec, "firecracker").expect("receipt input");
         assert_eq!(input.auth.mode, "ssh-agent-socket");
@@ -4600,6 +4613,7 @@ ssh_agent = true
             agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
+            health_check: None,
         };
         let err = machine_start_receipt_input(&spec, "firecracker")
             .expect_err("standard profile must refuse ssh-agent");
@@ -4654,6 +4668,7 @@ ssh_agent = true
             agent_verb: Vec::new(),
             created_at: Some(mvm_core::time::utc_now()),
             last_started_at: None,
+            health_check: None,
         };
         save_machine_spec(&spec, false).expect("first save");
         let err = save_machine_spec(&spec, false).expect_err("overwrite rejected");
@@ -4697,6 +4712,7 @@ ssh_agent = true
             agent_verb: Vec::new(),
             created_at: Some(mvm_core::time::utc_now()),
             last_started_at: None,
+            health_check: None,
         };
         save_machine_spec(&spec, false).expect("save");
         let err = remove_machine_spec("web", false).expect_err("confirmation required");
@@ -4727,6 +4743,7 @@ ssh_agent = true
             agent_verb: Vec::new(),
             created_at: Some(mvm_core::time::utc_now()),
             last_started_at: None,
+            health_check: None,
         };
         save_machine_spec(&spec, false).expect("save");
     }
@@ -5115,6 +5132,7 @@ ssh_agent = true
             agent_verb: vec![],
             created_at: None,
             last_started_at: None,
+            health_check: None,
         }
     }
 

@@ -12,6 +12,7 @@ autobins = false
 [dependencies]
 mvm-core.workspace = true
 mvm-guest.workspace = true
+mvm-sdk.workspace = true
 mvm-build = { workspace = true, default-features = false }
 mvm-backend = { workspace = true, default-features = false }
 anyhow.workspace = true

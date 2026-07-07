@@ -639,6 +639,7 @@ mod tests {
             agent_verb: vec![],
             created_at: None,
             last_started_at: None,
+            health_check: None,
         };
         save_machine_spec(&spec, false).expect("persist_test_spec: save failed");
     }
