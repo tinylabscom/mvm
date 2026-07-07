@@ -182,9 +182,24 @@ pub fn resolve_vm_dir(slot: &VmSlot) -> Result<String> {
 }
 
 /// Resolve the absolute directory path for a running VM by name.
+///
+/// Expands `~/microvm/vms` on the host. This used to `echo` it *inside* the VM
+/// to resolve `~`, but on macOS every `run_in_vm` shells into the dev VM —
+/// auto-starting a heavyweight builder — and this resolver sits on the
+/// agent-reachability poll (`wait_for_agent`), so a Firecracker-fallback probe
+/// for an hvf workload woke the dev VM before the hvf agent bound. The instance
+/// dir is a host path the VMM reads; expand it here. On Linux (Firecracker) the
+/// in-VM env is the host, so this is identical to the old echo.
 pub fn resolve_running_vm_dir(name: &str) -> Result<String> {
-    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
-    Ok(format!("{}/{}", abs_vms, name))
+    let abs_vms = VMS_DIR
+        .strip_prefix("~/")
+        .and_then(|rest| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| format!("{home}/{rest}"))
+        })
+        .unwrap_or_else(|| VMS_DIR.to_string());
+    Ok(format!("{abs_vms}/{name}"))
 }
 
 /// Return the host-side path to Firecracker's PID file for VM `name`.
@@ -3602,6 +3617,19 @@ mod tests {
         std::fs::write(dir.path().join("rootfs.verity"), b"hash-tree").unwrap();
         std::fs::write(dir.path().join("rootfs.roothash"), b"not-a-hex-roothash").unwrap();
         assert_eq!(probe_verity_sidecar(rootfs.to_str().unwrap()), (None, None));
+    }
+
+    #[test]
+    fn resolve_running_vm_dir_expands_host_side() {
+        // Must resolve `~/microvm/vms` on the host, never shelling into the VM:
+        // this sits on the agent-reachability poll, and a `run_in_vm` here wakes
+        // the macOS dev VM. (The old in-VM `echo` returned Err in a test env with
+        // no dev VM reachable.)
+        let home = std::env::var("HOME").expect("HOME set in the test env");
+        assert_eq!(
+            resolve_running_vm_dir("my-vm").unwrap(),
+            format!("{home}/microvm/vms/my-vm"),
+        );
     }
 
     #[test]
