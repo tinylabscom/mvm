@@ -397,6 +397,16 @@ pub fn validate_manifest(
     manifest: &PackManifest,
     policy: &LocalPackPolicy,
 ) -> Result<(), PackVerifyError> {
+    validate_manifest_structural(manifest, policy)?;
+    validate_signature_bundle(manifest)
+}
+
+/// Everything `validate_manifest` checks except the signature-bundle shape, so
+/// both the keyed and keyless verifiers can share one structural gate.
+pub fn validate_manifest_structural(
+    manifest: &PackManifest,
+    policy: &LocalPackPolicy,
+) -> Result<(), PackVerifyError> {
     if manifest.schema_version != PACK_SCHEMA_VERSION {
         return Err(PackVerifyError::UnsupportedSchemaVersion {
             got: manifest.schema_version,
@@ -441,7 +451,6 @@ pub fn validate_manifest(
     validate_required_outputs(manifest)?;
     validate_oci_inputs(manifest)?;
     validate_file_paths(manifest)?;
-    validate_signature_bundle(manifest)?;
     Ok(())
 }
 
@@ -1221,6 +1230,18 @@ mod tests {
         let verified = verify(&f).expect("valid pack verifies");
         assert_eq!(verified.pack_hash, f.manifest.outputs.pack_hash);
         assert_eq!(verified.file_count, 4);
+    }
+
+    #[test]
+    fn structural_validation_ignores_signature_bundle_shape() {
+        let mut f = fixture(PackKind::Runtime);
+        f.manifest.provenance.signature_bundle.signatures.clear();
+        // Full validate_manifest would fail on the empty bundle; structural must not.
+        validate_manifest_structural(&f.manifest, &f.policy).expect("structural passes");
+        assert!(matches!(
+            validate_manifest(&f.manifest, &f.policy),
+            Err(PackVerifyError::SignatureBundleEmpty)
+        ));
     }
 
     #[test]
