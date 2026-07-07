@@ -23,7 +23,7 @@ mount layout.
 ## Compile (no VM needed)
 
 ```sh
-mvmctl compile examples/python/hello-app-with-deps/app.py --out /tmp/hello-with-deps
+mvmctl build compile examples/python/hello-app-with-deps/app.py --out /tmp/hello-with-deps
 ls /tmp/hello-with-deps
 # flake.nix  launch.json  src/
 jq '.dependencies' /tmp/hello-with-deps/launch.json
@@ -39,9 +39,9 @@ jq '.dependencies' /tmp/hello-with-deps/launch.json
 ```sh
 mvmctl build examples/python/hello-app-with-deps/
 # … installs deps inside the builder VM, seals the volume …
-mvmctl up examples/python/hello-app-with-deps/ --prod
+mvmctl machine run examples/python/hello-app-with-deps/ --prod
 # claim 9 gate: the supervisor verifies the sealed volume before launching
-mvmctl invoke hello-app-with-deps --input name='ari'
+mvmctl machine run --flake examples/python/hello-app-with-deps/ --profile prod --entrypoint
 # expect: "hello ari"
 ```
 

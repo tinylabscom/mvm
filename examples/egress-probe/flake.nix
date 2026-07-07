@@ -3,7 +3,7 @@
 
   # A sealed one-shot workload: PID-1 attempts two outbound TCP connections and
   # exits a verdict code encoding both results, captured over the control vsock
-  # and returned by `mvmctl up --wait`. Used to verify a libkrun workload guest
+  # and returned by `mvmctl machine run --flake .`. Used to verify a libkrun workload guest
   # actually gets network (the guest console is not host-readable, so the exit
   # code is the observable). Raw IPs (no DNS) keep the probe independent of name
   # resolution.
@@ -14,7 +14,7 @@
   #   3 = both blocked (deny-all, or — the bug this fixture caught — no network)
   #
   # The `github:tinylabscom/mvm` pin is load-bearing: a source-checkout
-  # `mvmctl up` rewrites it to the in-repo flake, so this builds without a
+  # `mvmctl machine run` rewrites it to the in-repo flake, so this builds without a
   # release round-trip.
 
   inputs.mvm.url = "github:tinylabscom/mvm/main?dir=nix";

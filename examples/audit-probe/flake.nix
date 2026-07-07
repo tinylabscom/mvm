@@ -2,7 +2,7 @@
   description = "audit-probe — in-guest host.audit.v1 round-trip fixture.";
 
   # A sealed workload whose PID-1 command is the baked `audit-probe` binary.
-  # On an admitted `mvmctl up` (tenant defaults to `local`) the backend spawns
+  # On an admitted `mvmctl machine run` (tenant defaults to `local`) the backend spawns
   # the per-VM mvm-broker + mvm-audit-signer, the probe dials BROKER_PORT and
   # emits over `host.audit.v1`, and the entry lands in the per-VM workload
   # chain `~/.mvm/audit/<tenant>.<vm>.workload.jsonl` — verifiable with
@@ -10,7 +10,7 @@
   # bakes the binary; the production guest closure never carries it.
   #
   # The `github:tinylabscom/mvm` pin is load-bearing: a source-checkout
-  # `mvmctl up` rewrites it to the in-repo flake, so this builds without a
+  # `mvmctl machine run` rewrites it to the in-repo flake, so this builds without a
   # release round-trip.
 
   inputs.mvm.url = "github:tinylabscom/mvm/main?dir=nix";

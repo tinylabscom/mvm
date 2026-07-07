@@ -1,7 +1,7 @@
 /**
  * Minimal `mvm.app({...})(fn)` example — port-plan Phase 8 follow-up.
  *
- * `mvmctl compile examples/typescript/hello-app/app.ts` walks this
+ * `mvmctl build compile examples/typescript/hello-app/app.ts` walks this
  * file's AST statically and emits the same Workload IR a `node app.ts`
  * (with `mvm.emitJson()`) would. The host never executes the script —
  * the decorator is read, not run.
