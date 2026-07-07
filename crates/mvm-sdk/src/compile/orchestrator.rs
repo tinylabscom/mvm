@@ -543,6 +543,7 @@ mod tests {
                     rootfs_size_mb: 512,
                 },
                 dependencies: None,
+                health_check: None,
                 threat_tier: Default::default(),
                 addons: vec![],
                 hooks: Default::default(),

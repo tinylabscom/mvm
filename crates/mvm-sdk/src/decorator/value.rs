@@ -243,6 +243,7 @@ pub fn lower_to_workload(
         network,
         resources,
         dependencies,
+        health_check: None,
         threat_tier: Default::default(),
         addons: vec![],
         hooks,

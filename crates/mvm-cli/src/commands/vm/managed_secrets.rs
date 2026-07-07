@@ -109,6 +109,7 @@ mod tests {
             addons: vec![],
             hooks: Default::default(),
             files: vec![],
+            health_check: None,
         }
     }
 

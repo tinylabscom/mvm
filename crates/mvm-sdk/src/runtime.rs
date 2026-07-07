@@ -429,6 +429,7 @@ pub fn compile_recording_with_findings(
         network: rec.create.network.clone(),
         resources,
         dependencies: None,
+        health_check: None,
         threat_tier: Default::default(),
         addons: Vec::new(),
         hooks: Hooks {

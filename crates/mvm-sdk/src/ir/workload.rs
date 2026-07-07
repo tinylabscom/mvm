@@ -96,6 +96,12 @@ pub struct App {
     /// before_start shell hooks).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<MaterializedFile>,
+    /// Liveness declaration. `Some` marks the workload a long-running service
+    /// (drives the persistent lifecycle); `None` is a task that tears down on
+    /// entrypoint exit. Skip-serialized when absent so existing fixtures stay
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check: Option<HealthCheck>,
 }
 
 impl App {
@@ -309,6 +315,39 @@ pub enum Entrypoint {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         concurrency: Option<Concurrency>,
     },
+}
+
+/// A liveness declaration for a long-running workload. Its presence promotes a
+/// run to the persistent lifecycle (the run is a service, not a task). The
+/// command is exec'd in the guest via the agent; exit 0 means healthy — exec
+/// form because the guest is vsock-only. The timing fields are recorded for the
+/// active-probing follow-up and are not consulted while a workload only uses the
+/// presence signal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HealthCheck {
+    pub command: Vec<String>,
+    #[serde(default = "default_health_interval_secs")]
+    pub interval_secs: u32,
+    #[serde(default = "default_health_timeout_secs")]
+    pub timeout_secs: u32,
+    #[serde(default = "default_health_retries")]
+    pub retries: u32,
+    #[serde(default = "default_health_start_period_secs")]
+    pub start_period_secs: u32,
+}
+
+fn default_health_interval_secs() -> u32 {
+    30
+}
+fn default_health_timeout_secs() -> u32 {
+    5
+}
+fn default_health_retries() -> u32 {
+    3
+}
+fn default_health_start_period_secs() -> u32 {
+    0
 }
 
 /// Concurrency model for a function-entrypoint.
@@ -670,6 +709,7 @@ mod tests {
             addons: vec![],
             hooks: Default::default(),
             files: vec![],
+            health_check: None,
         }
     }
 
@@ -770,6 +810,38 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn health_check_serde_roundtrip_and_defaults() {
+        // Only `command` is required on the wire; timing fields default.
+        let json = r#"{"command":["/bin/sh","-lc","curl -fsS localhost/health"]}"#;
+        let hc: HealthCheck = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            hc.command,
+            vec!["/bin/sh", "-lc", "curl -fsS localhost/health"]
+        );
+        assert_eq!(hc.interval_secs, 30);
+        assert_eq!(hc.timeout_secs, 5);
+        assert_eq!(hc.retries, 3);
+        assert_eq!(hc.start_period_secs, 0);
+
+        let back = serde_json::to_string(&hc).unwrap();
+        assert_eq!(hc, serde_json::from_str::<HealthCheck>(&back).unwrap());
+    }
+
+    #[test]
+    fn app_health_check_defaults_absent() {
+        // No standalone JSON `App` fixture literal exists in this module; round-trip
+        // the existing minimal_app() builder through the wire to prove health_check
+        // deserializes to None and skip-serializes when absent.
+        let value = serde_json::to_value(minimal_app()).unwrap();
+        assert!(
+            value.get("health_check").is_none(),
+            "absent health_check must be skipped on the wire"
+        );
+        let app: App = serde_json::from_value(value).unwrap();
+        assert!(app.health_check.is_none());
     }
 
     #[test]
