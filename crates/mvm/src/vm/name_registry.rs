@@ -350,6 +350,31 @@ pub fn acquire_registry_lock(registry_path: &Path) -> Result<VmNameRegistryLock>
     Ok(VmNameRegistryLock { _file: file })
 }
 
+/// Best-effort host-observed readiness update: load the registry, set the
+/// machine's readiness + change timestamp, save. Never gates control flow — a
+/// failure is logged and swallowed. Shared by the CLI lifecycle recorders and
+/// the health-probe daemon.
+pub fn record_readiness(vm_name: &str, readiness: InstanceReadiness) {
+    let path = registry_path();
+    let mut reg = match VmNameRegistry::load(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(err = %e, vm = vm_name, "readiness update: load registry failed");
+            return;
+        }
+    };
+    let now = mvm_core::time::utc_now();
+    match reg.set_readiness(vm_name, readiness, &now) {
+        Ok(true) => {
+            if let Err(e) = reg.save(&path) {
+                tracing::warn!(err = %e, vm = vm_name, "readiness update: save failed");
+            }
+        }
+        Ok(false) => tracing::debug!(vm = vm_name, "readiness update: no entry; skipping"),
+        Err(e) => tracing::warn!(err = %e, vm = vm_name, "readiness update failed"),
+    }
+}
+
 /// Generate a unique VM name with a random suffix.
 pub fn generate_vm_name() -> String {
     let id = mvm_core::naming::generate_instance_id();
@@ -826,5 +851,69 @@ mod tests {
         let _lock = acquire_registry_lock(&path).unwrap();
 
         assert!(registry_lock_path(&path).is_file());
+    }
+
+    // -------- record_readiness (free-fn, disk-backed) --------
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: tests under this block hold DATA_DIR_TEST_LOCK, so no
+            // other thread mutates these vars concurrently.
+            unsafe { std::env::set_var(key, val) };
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn record_readiness_updates_existing_entry() {
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = EnvGuard::set("MVM_SHARE_DIR", tmp.path().to_str().unwrap());
+
+        let name = "hc-test";
+        let mut reg = VmNameRegistry::default();
+        reg.register(name, "/tmp/vms/hc-test", "default", None, 0)
+            .unwrap();
+        reg.save(&registry_path()).unwrap();
+
+        record_readiness(name, InstanceReadiness::ServicesReady);
+
+        let reloaded = VmNameRegistry::load(&registry_path()).unwrap();
+        assert!(matches!(
+            reloaded.lookup(name).and_then(|e| e.readiness.clone()),
+            Some(InstanceReadiness::ServicesReady)
+        ));
+    }
+
+    #[test]
+    fn record_readiness_on_unregistered_vm_is_a_noop() {
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = EnvGuard::set("MVM_SHARE_DIR", tmp.path().to_str().unwrap());
+
+        // No registry file on disk at all yet — must not panic.
+        record_readiness("ghost", InstanceReadiness::ServicesReady);
+
+        let reloaded = VmNameRegistry::load(&registry_path()).unwrap();
+        assert!(reloaded.lookup("ghost").is_none());
     }
 }

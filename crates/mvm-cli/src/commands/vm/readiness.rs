@@ -21,34 +21,5 @@ use mvm_core::domain::instance::InstanceReadiness;
 /// Callers must never rely on this function to gate launch/teardown
 /// — readiness is a downstream display signal, not a control flow.
 pub(super) fn record_vm_readiness(vm_name: &str, readiness: InstanceReadiness) {
-    let path = mvm::vm::name_registry::registry_path();
-    let mut reg = match mvm::vm::name_registry::VmNameRegistry::load(&path) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(
-                err = %e,
-                vm = vm_name,
-                "failed to load VM name registry for readiness update"
-            );
-            return;
-        }
-    };
-    let now = mvm_core::time::utc_now();
-    match reg.set_readiness(vm_name, readiness, &now) {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::debug!(
-                vm = vm_name,
-                "no registry entry for readiness update; skipping"
-            );
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(err = %e, vm = vm_name, "failed to set readiness");
-            return;
-        }
-    }
-    if let Err(e) = reg.save(&path) {
-        tracing::warn!(err = %e, vm = vm_name, "failed to save VM name registry");
-    }
+    mvm::vm::name_registry::record_readiness(vm_name, readiness);
 }
