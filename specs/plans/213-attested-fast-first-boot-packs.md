@@ -353,7 +353,10 @@ ADR-097 is Proposed; slice 1 ratifies it with two edits (a separate docs change)
 ### Units (each independently testable)
 
 **Progress:** Unit 1 landed (`PackBuilder` producer + `PackBackend::Hvf`). Unit 2
-landed (content-addressed `pack_cache` — verify + atomic promote). Unit 3 pending.
+landed (content-addressed `pack_cache` — verify + atomic promote). Unit 3 landed
+as the corrected **attested builder-image download materializer** (see the "Slice 1
+correction" section) — flag-gated on `MVM_BUILDER_PACK`, offline-tested, inert in
+production until release trust keys land.
 
 **Unit 1 — pack producer (WS-B thin).** A CI/release step plus a local
 example/xtask tool that takes the builder-VM flake outputs (base disk + builder
@@ -470,3 +473,24 @@ existing download + the attested pack above), not a runtime store materializer. 
 must be sized by a clean benchmark on a quiet box (the shared dev box was too
 contended, and an isolated harness broke the builder's virtiofs share wiring), so
 it is tracked as a follow-up, not part of this slice.
+
+### Deferred follow-ups (surfaced during Unit 3 review)
+
+- **Attested materializer writes markers the installed path ignores.** The
+  installed-binary readiness gate is `validate_builder_vm_stage0_artifacts`
+  (placed `vmlinux` + `rootfs.ext4`), not the `.mvm-source.sha256` fingerprint
+  marker — that marker is only consulted on the source-checkout path, which the
+  pack path excludes. The materializer currently reuses the shared source-cache
+  sidecar writer, so it emits superfluous markers and, worse, stamps
+  `.mvm-provenance.json` with `source_kind: "source_checkout_stage0"` — wrong for a
+  verified download. Cleanup: place the two artifacts + validate against the
+  installed gate, and either drop the sidecar write on this path or thread a
+  distinct attested-origin kind through the shared readiness predicate (which the
+  source-checkout path also depends on). Cosmetic-only today (the label never gates
+  the installed readiness decision), so deferred.
+- **Attested materializer is production-inert until trust keys land.** The verify
+  context is built with an empty trust store and empty allowed-channels, so on a
+  real binary `resolve_pack` always returns `None` and the flag path falls through
+  to the plain checksum download (fail-open, safe). The end-to-end verify→place
+  chain is proven under test injection; wiring the real release-channel trust store
+  + policy is the release/trust workstream, not this slice.
