@@ -2,7 +2,7 @@
 //!
 //! The project ships exactly two things: what the **host machine runs** to host
 //! sandboxes (`host`), and what a **user runs** to drive them (`user`). Those are
-//! the only two consumer-facing product surfaces (Plan 230).
+//! the only two consumer-facing product surfaces.
 //!
 //! This lint parses the workspace-root `[features]` table and fails if:
 //!   * `host` or `user` is missing, or
