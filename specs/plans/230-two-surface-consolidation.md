@@ -102,9 +102,16 @@ still ship together but the *code* boundary is the facade.
 - [ ] **WS-2 (quarantine scaffolding):** move fuzz + schema-emitter + test-tool
       bins behind a non-default gate / out of default workspace members; a product
       build compiles neither surface's scaffolding.
-- [ ] **WS-3b (retire dead knobs):** delete/fold any genuinely-unused flag once the
-      release pipeline can be re-verified (release.yml/security.yml reference some
-      by name — needs a pipeline run to change safely).
+- [x] **WS-3b (delete the pass-through flags):** the 7 forwarding flags
+      (`builder-vm`, `pure-mkfs`, `custom-dns`, `hostd-transport`, `manifest-verify`,
+      `dev-watch`, `contributor-bootstrap`) are **deleted** — their forwards inlined
+      into `host`/`user`/`dev`. Root features 14 → 8; the 6 non-surface ones
+      (`default`, `dev`, `libkrun-sys`, `libkrun-live`, `release-artifact-bootstrap`,
+      `template-registry-s3`) are the irreducible floor (platform link / release
+      download / heavy opt-in S3 backend — cannot be unconditional). release.yml /
+      security.yml / Justfile updated to build with `host,user[,…]`. Default closure
+      unchanged (`check-closure-budget` 337 @ 337); default/dev/release-set build
+      clean. *(this PR)*
 - [ ] **WS-4 (CLI client/host split):** route every user verb through
       `MvmClient` (Plan 216 S2); move host-op verbs behind the `host` surface;
       the user client is a facade consumer only.

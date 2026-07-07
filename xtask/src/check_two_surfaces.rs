@@ -21,27 +21,18 @@ use std::path::Path;
 /// The two — and only two — consumer-facing product surfaces.
 const SURFACES: [&str; 2] = ["host", "user"];
 
-/// Internal features: platform-backend opt-ins, host/user sub-features that the
-/// two umbrellas aggregate, and dev/build/CI scaffolding. Not product surfaces.
-/// Each entry is deliberate; a new one is a conscious "this is internal, not a
-/// third product" decision.
-const INTERNAL: [&str; 11] = [
+/// The only non-surface root features: unavoidable knobs that cannot be
+/// unconditional. Every capability flag folds into `host`/`user`/`dev` (their
+/// forwards are inlined in the root Cargo.toml); what remains here is `default`
+/// plus platform/storage opt-ins that genuinely cannot always be on. Keep this
+/// list tiny — a new entry is a conscious "this cannot live in a surface".
+const INTERNAL: [&str; 4] = [
     "default",
-    // host sub-features (aggregated by the `host` umbrella)
-    "builder-vm",
-    "pure-mkfs",
-    "custom-dns",
-    "hostd-transport",
-    "template-registry-s3",
-    // platform-backend opt-ins (a host adds these for the libkrun backend)
+    // Platform: link the libkrun C VMM (absent on a macOS-26 HVF host).
     "libkrun-sys",
     "libkrun-live",
-    // user sub-feature (aggregated by the `user` umbrella)
-    "manifest-verify",
-    // dev / build / CI scaffolding (not shipped as product behaviour)
-    "contributor-bootstrap",
-    "dev-watch",
-    // NOTE: keep this list minimal — prefer folding sub-features into `host`/`user`.
+    // Optional heavy S3 storage backend for the template registry (fleet-only).
+    "template-registry-s3",
 ];
 
 /// A couple of release/build-only flags are allowed but explicitly *not* part of
@@ -251,7 +242,15 @@ dev = ["host", "user", "dev-watch"]
             .chain(BUILD_ONLY.iter())
             .copied()
             .collect();
-        for f in ["host", "user", "default", "builder-vm", "manifest-verify"] {
+        for f in [
+            "host",
+            "user",
+            "default",
+            "dev",
+            "libkrun-sys",
+            "template-registry-s3",
+            "release-artifact-bootstrap",
+        ] {
             assert!(allowed.contains(f), "{f} must be classified");
         }
     }

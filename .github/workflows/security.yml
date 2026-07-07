@@ -233,7 +233,7 @@ jobs:
       - uses: ./.github/actions/install-zigbuild
 
       - name: Build A
-        run: cargo build --release --locked --bin mvmctl --features template-registry-s3,dev-watch,custom-dns,manifest-verify
+        run: cargo build --release --locked --bin mvmctl --features host,user,template-registry-s3
 
       - name: Hash A
         run: sha256sum target/release/mvmctl | tee /tmp/hash-a.txt
@@ -242,7 +242,7 @@ jobs:
         run: cargo clean
 
       - name: Build B
-        run: cargo build --release --locked --bin mvmctl --features template-registry-s3,dev-watch,custom-dns,manifest-verify
+        run: cargo build --release --locked --bin mvmctl --features host,user,template-registry-s3
 
       - name: Hash B
         run: sha256sum target/release/mvmctl | tee /tmp/hash-b.txt
