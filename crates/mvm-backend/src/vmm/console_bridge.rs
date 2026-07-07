@@ -87,6 +87,15 @@ impl ConsoleBridge {
         ports: impl IntoIterator<Item = (u32, &'a Path)>,
     ) -> std::io::Result<()> {
         for (guest_port, path) in ports {
+            if let Some(parent) = path.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                dbg_log(&format!(
+                    "console port {guest_port} parent create failed at {}: {e}",
+                    parent.display()
+                ));
+                continue;
+            }
             let _ = std::fs::remove_file(path);
             match UnixListener::bind(path) {
                 Ok(l) => {
@@ -344,6 +353,17 @@ mod tests {
         }
         ports.sort_unstable();
         assert_eq!(ports, vec![20001, 20002]);
+    }
+
+    #[test]
+    fn bind_ports_creates_missing_parent_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("vsock").join("vsock-20001.sock");
+        let mut bridge = ConsoleBridge::new();
+
+        bridge.bind_ports([(20001u32, sock.as_path())]).unwrap();
+
+        UnixStream::connect(&sock).expect("listener should be bound under created parent dir");
     }
 
     /// Claim 15: an empty console-port list (sealed prod) binds no listeners, so

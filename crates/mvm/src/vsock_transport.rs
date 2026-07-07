@@ -20,6 +20,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 use mvm_backend::microvm;
+use mvm_core::platform::Platform;
 
 /// Open a vsock connection to a port on a guest.
 ///
@@ -32,6 +33,14 @@ pub trait VsockTransport: Send + Sync {
     /// is performed inside this call when applicable; on Apple
     /// Container the framework returns a stream directly.
     fn connect(&self, port: u32) -> Result<UnixStream>;
+}
+
+/// Whether unresolved socket probes may fall back to Firecracker's in-Linux
+/// runtime directory lookup. On macOS that lookup shells through the dev Linux
+/// environment, so it must not run while probing a normal host-side HVF/Vz
+/// workload.
+pub fn firecracker_transport_supported(platform: Platform) -> bool {
+    platform.supports_native_runner()
 }
 
 /// Connects through a Firecracker vsock UDS multiplexer.
@@ -264,10 +273,11 @@ impl VsockTransport for NestingHopTransport {
 
 /// Pick a transport for a VM by name.
 ///
-/// Probes libkrun's per-port Unix socket first, then the vz supervisor's
-/// per-port socket, then Firecracker by resolving the running VM's
-/// instance directory — the cheapest probe that doesn't require the
-/// caller to know the backend ahead of time.
+/// Probes host-side sockets first, then Firecracker only on native Linux where
+/// its runtime directory lookup is local and side-effect-free. macOS must not
+/// fall back to Firecracker here: that path shells through the dev Linux
+/// environment and can auto-start the builder/dev VM while waiting for a normal
+/// HVF/Vz workload socket to appear.
 ///
 /// Note: the probe consumes one stream and immediately drops it;
 /// callers get a *fresh* stream from the returned transport's
@@ -292,9 +302,12 @@ pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
     if vz.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Box::new(vz));
     }
-    let fc = FirecrackerTransport::for_vm(vm_name)
-        .with_context(|| format!("no vsock transport found for VM {:?}", vm_name))?;
-    Ok(Box::new(fc))
+    if firecracker_transport_supported(mvm_core::platform::current()) {
+        let fc = FirecrackerTransport::for_vm(vm_name)
+            .with_context(|| format!("no vsock transport found for VM {:?}", vm_name))?;
+        return Ok(Box::new(fc));
+    }
+    anyhow::bail!("no host-side vsock transport found for VM {:?}", vm_name)
 }
 
 #[cfg(test)]
@@ -408,6 +421,25 @@ mod tests {
             .expect("selected transport should connect to the hvf-agent socket");
 
         unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    #[test]
+    fn firecracker_transport_supported_only_for_native_linux() {
+        assert!(firecracker_transport_supported(
+            mvm_core::platform::Platform::LinuxNative
+        ));
+        assert!(!firecracker_transport_supported(
+            mvm_core::platform::Platform::MacOS
+        ));
+        assert!(!firecracker_transport_supported(
+            mvm_core::platform::Platform::LinuxNoKvm
+        ));
+        assert!(!firecracker_transport_supported(
+            mvm_core::platform::Platform::Wsl2
+        ));
+        assert!(!firecracker_transport_supported(
+            mvm_core::platform::Platform::Windows
+        ));
     }
 
     #[test]

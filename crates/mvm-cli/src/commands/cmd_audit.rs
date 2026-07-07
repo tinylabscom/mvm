@@ -171,13 +171,20 @@ impl Commands {
         if let Commands::Ls(a) = self {
             return a.touches_vm_state();
         }
-        // `machine <sub>` — start/stop/run all touch running-VM lifecycle state.
+        // `machine <sub>` — named/persistent lifecycle commands touch
+        // running-VM state. Unnamed foreground `machine run` is throwaway
+        // cattle: running global convergence before it can auto-resume
+        // unrelated machines and turn a plain OCI launch into a hidden
+        // builder/dev-VM boot.
         // For the advanced VmCmd variants folded under `machine`, delegate to
         // VmCmd's own touches_vm_state (pause/resume/snapshot/save/restore
         // converge; registry-record and guest-RPC ops opt out).
         if let Commands::Machine(a) = self {
             if let machine::MachineAction::Vm(ref cmd) = a.action {
                 return cmd.touches_vm_state();
+            }
+            if let machine::MachineAction::Run(ref run) = a.action {
+                return machine_run_touches_vm_state(run);
             }
             return true;
         }
@@ -234,6 +241,10 @@ impl Commands {
             Commands::SshAgentProxy(_) => "__ssh-agent-proxy",
         }
     }
+}
+
+fn machine_run_touches_vm_state(run: &machine::MachineRunArgs) -> bool {
+    run.name.is_some() || run.detach || run.up_json || run.ttl.is_some() || run.attach
 }
 
 #[cfg(test)]

@@ -20,7 +20,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_build::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
+use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::{mvm_data_dir, vm_state_dir};
 use mvm_core::vm_backend::{
     VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
@@ -37,6 +37,16 @@ pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Raw HVF (`Hypervisor.framework`) backend. macOS / Apple-silicon only.
 pub struct HvfBackend;
+
+fn hvf_console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<ConsoleDataSocket> {
+    crate::workload_runner::spec_map::console_data_sockets(state_dir, dev_console)
+        .into_iter()
+        .map(|(guest_port, host_socket)| ConsoleDataSocket {
+            guest_port,
+            host_socket,
+        })
+        .collect()
+}
 
 pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
@@ -264,7 +274,7 @@ impl VmBackend for HvfBackend {
             agent_socket: Some(agent_socket),
             substitution_socket: None,
             egress_relay_socket,
-            console_data_sockets: vec![],
+            console_data_sockets: hvf_console_data_sockets(&state_dir, config.dev_console),
         };
         let json = serde_json::to_string(&cfg)
             .map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
@@ -468,6 +478,27 @@ mod tests {
         assert!(!c.pause_resume);
         assert!(!c.snapshots);
         assert!(!c.tap_networking);
+    }
+
+    #[test]
+    fn console_data_sockets_empty_when_dev_console_disabled() {
+        let sockets = hvf_console_data_sockets(Path::new("/state/hvf"), false);
+        assert!(sockets.is_empty());
+    }
+
+    #[test]
+    fn console_data_sockets_populated_when_dev_console_enabled() {
+        let sockets = hvf_console_data_sockets(Path::new("/state/hvf"), true);
+        assert_eq!(
+            sockets.len(),
+            mvm_guest::vsock::DEV_CONSOLE_DATA_PORT_COUNT as usize
+        );
+        let first = sockets.first().expect("first console socket");
+        assert_eq!(first.guest_port, mvm_guest::vsock::CONSOLE_PORT_BASE + 1);
+        assert_eq!(
+            first.host_socket,
+            PathBuf::from("/state/hvf/vsock/vsock-20001.sock")
+        );
     }
 
     #[test]
