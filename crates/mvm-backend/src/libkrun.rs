@@ -1066,6 +1066,11 @@ pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
     if let Ok(path) = which::which("mvm-libkrun-supervisor") {
         return Ok(path);
     }
+    // Source checkout: `cargo run` built only `mvmctl`, so materialize the helper
+    // (its `target/<profile>/` copy or a fresh build); `None` off a checkout.
+    if let Some(built) = LIBKRUN_SUPERVISOR.build_from_checkout() {
+        return built;
+    }
     bail!(
         "mvm-libkrun-supervisor binary not found. Looked for: \
          $MVM_LIBKRUN_SUPERVISOR_PATH, alongside the current exe, and on $PATH. \
@@ -1073,6 +1078,14 @@ pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
          or set MVM_LIBKRUN_SUPERVISOR_PATH=/abs/path/to/the/binary."
     )
 }
+
+/// The per-VM libkrun supervisor — an `mvm-vm-host` target gated on the
+/// `libkrun-sys` feature; `cargo run` does not build it alongside `mvmctl`.
+const LIBKRUN_SUPERVISOR: crate::supervisor_stale::AuxBin = crate::supervisor_stale::AuxBin {
+    name: "mvm-libkrun-supervisor",
+    package: "mvm-vm-host",
+    extra_build_args: &["--features", "libkrun-sys"],
+};
 
 fn read_pid(path: &Path) -> Option<libc::pid_t> {
     let s = std::fs::read_to_string(path).ok()?;

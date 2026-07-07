@@ -99,8 +99,17 @@ pub(crate) fn terminate_pid(pid: libc::pid_t) {
     }
 }
 
+/// The per-VM supervisor bin — a separate `mvm-vm-host` target that `cargo run`
+/// never rebuilds alongside `mvmctl`.
+const HVF_SUPERVISOR: crate::supervisor_stale::AuxBin = crate::supervisor_stale::AuxBin {
+    name: "mvm-hvf-supervisor",
+    package: "mvm-vm-host",
+    extra_build_args: &[],
+};
+
 /// Locate the per-VM supervisor binary: `$MVM_HVF_SUPERVISOR_PATH`, else
-/// alongside the current executable (release + `cargo` layouts both put it there).
+/// alongside the current executable (release + `cargo` layouts both put it
+/// there), else — in a source checkout — build it on demand.
 pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("MVM_HVF_SUPERVISOR_PATH") {
         let path = PathBuf::from(p);
@@ -112,34 +121,28 @@ pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
             path.display()
         );
     }
+
+    // Alongside the running executable (downloaded install + `cargo` layouts).
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let candidate = dir.join("mvm-hvf-supervisor");
+        let candidate = dir.join(HVF_SUPERVISOR.name);
         if candidate.is_file() {
             return Ok(candidate);
         }
     }
-    // Workspace `target/{release,debug}` fallback, mirroring the substitution
-    // endpoint resolver: a source checkout that builds the root `mvmctl` bin
-    // without also building this per-VM helper still resolves it, instead of
-    // hard-failing on one binary while silently reaching for a stale copy of
-    // the other.
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
-        for variant in ["release", "debug"] {
-            let candidate = workspace_root
-                .join("target")
-                .join(variant)
-                .join("mvm-hvf-supervisor");
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
+
+    // Source checkout: `cargo run` built only `mvmctl`, so materialize the helper
+    // now instead of hard-failing on this one binary. `None` off a checkout, so a
+    // downloaded install falls through to the clear not-found error below.
+    if let Some(built) = HVF_SUPERVISOR.build_from_checkout() {
+        return built;
     }
+
     bail!(
-        "mvm-hvf-supervisor binary not found (looked at $MVM_HVF_SUPERVISOR_PATH, \
-         alongside the current exe, and <workspace>/target/{{release,debug}})"
+        "{} binary not found (looked at $MVM_HVF_SUPERVISOR_PATH and alongside \
+         the current exe)",
+        HVF_SUPERVISOR.name
     )
 }
 

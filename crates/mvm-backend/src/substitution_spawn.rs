@@ -155,8 +155,21 @@ fn resolve_substitution_endpoint_path() -> Result<PathBuf> {
             }
         }
     }
+    // Source checkout: `cargo run` built only `mvmctl`, so materialize the helper
+    // rather than hard-failing on it; `None` off a checkout (installed mvmctl).
+    if let Some(built) = SUBSTITUTION_ENDPOINT.build_from_checkout() {
+        return built;
+    }
     bail!("could not locate the {BIN} binary (set MVM_SUBSTITUTION_ENDPOINT_PATH)")
 }
+
+/// The per-VM substitution endpoint — a separate `mvm-hostd` target `cargo run`
+/// does not build alongside `mvmctl`.
+const SUBSTITUTION_ENDPOINT: crate::supervisor_stale::AuxBin = crate::supervisor_stale::AuxBin {
+    name: "mvm-substitution-endpoint",
+    package: "mvm-hostd",
+    extra_build_args: &[],
+};
 
 /// Inputs to [`spawn_substitution_endpoint`]. Grouped into a struct (rather
 /// than threading bare positional args) so the backend-shaped fields —

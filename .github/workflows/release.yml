@@ -123,6 +123,9 @@ jobs:
       #   - mvm-bridge: cross-platform external-VMM gateway/audit sidecar
       #     (Firecracker passt + vz VzIngest). Builds everywhere, no extra deps.
       #   - mvm-vz-supervisor (macOS only): the vz VMM supervisor.
+      #   - mvm-hvf-supervisor (macOS only): the HVF VMM supervisor. HVF is the
+      #     auto-detect default on macOS-26 Apple Silicon, so without this a
+      #     downloaded install on that tier can't boot any machine.
       #   - mvm-libkrun-supervisor (macOS only, and INTENTIONALLY so — not a
       #     follow-up): it has `required-features = ["libkrun-sys"]`, and the
       #     released Linux mvmctl deliberately does NOT link libkrun — the
@@ -146,7 +149,7 @@ jobs:
         run: |
           if [[ "${TARGET}" == *apple-darwin ]]; then
             cargo build --release --target "${TARGET}" -p mvm-vm-host \
-              --bin mvm-bridge --bin mvm-vz-supervisor \
+              --bin mvm-bridge --bin mvm-vz-supervisor --bin mvm-hvf-supervisor \
               --bin mvm-libkrun-supervisor --features libkrun-sys
           else
             cargo build --release --target "${TARGET}" -p mvm-vm-host \
@@ -204,7 +207,7 @@ jobs:
           # mvmctl so the backend's adjacent-to-exe resolver finds them on a
           # downloaded install. copy-if-exists: the set differs by OS (macOS
           # gets all three; Linux gets mvm-bridge only).
-          for hostbin in mvm-bridge mvm-vz-supervisor mvm-libkrun-supervisor; do
+          for hostbin in mvm-bridge mvm-vz-supervisor mvm-hvf-supervisor mvm-libkrun-supervisor; do
             src="target/${TARGET}/release/${hostbin}"
             [ -f "$src" ] && cp "$src" "staging/${ARCHIVE_NAME}/" && echo "bundled ${hostbin}"
           done
