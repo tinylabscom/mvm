@@ -528,15 +528,21 @@ The design decisions (settled before this slice; see ADR-097 §9):
 - Public release packs are keyless-signed under the CI workflow OIDC identity; the
   detached Sigstore bundle rides beside the pack as a sidecar over the exact
   manifest bytes. No long-lived signing key exists.
-- Verification pins **both** the Fulcio issuer and a compiled-in **identity
-  allow-list** (subject pattern scoped to the release workflow on a protected tag),
-  plus the Rekor inclusion proof. A list, not a scalar, so identity migration needs
-  no key-overlap window — just add/drop entries.
-- The keyless verifier is a separate outer verifier that reuses the *same* shared
-  structural/hash/policy/expiry/revocation middle as `verify_pack_at`; only the
-  signature-key step differs. It lives in `mvm-core`, gated behind
-  `manifest-verify`, with trust inputs (identity allow-list, policy, operator
-  config) passed as parameters.
+- Verification pins **both** the Fulcio issuer and an **exact-match** subject
+  identity (Sigstore has no glob/regex), plus the Rekor inclusion proof. The
+  concrete identity is built at verify time by interpolating the binary's own
+  version into a compiled-in **template**
+  (`…/.github/workflows/<release>.yml@refs/tags/v<version>`), exactly as
+  `crypto::image_verify` already does — so a binary trusts only packs from its own
+  release tag. The compiled-in material is a *list of templates* (not a scalar) so
+  a repo/workflow rename migrates by add-then-drop; the version is never listed.
+- The keyless verifier is a separate outer verifier that reuses the existing
+  `mvm_core::crypto::image_verify::verify_signed_payload(payload, bundle, identity,
+  issuer)` primitive for the signature/cert/Rekor check, then runs the *same*
+  shared structural/hash/policy/expiry/revocation middle as `verify_pack_at`; only
+  the signature step differs. It lives in `mvm-core`, gated behind
+  `manifest-verify`, with trust inputs (the concrete accepted-identity list,
+  issuer, policy, operator config) passed as parameters.
 - Embedded keyless root is always active for the public channel; `pack-trust.json`
   is purely additive. The disable/pin-to-operator switch is deferred to §I.
 - Revocation stays config-driven (`PackTrustConfig.revocations`) this slice;
@@ -544,20 +550,27 @@ The design decisions (settled before this slice; see ADR-097 §9):
 
 ### Unit 1 — keyless verifier + manifest authority shape (`mvm-core`, `manifest-verify`-gated)
 
-- [ ] Make a pack self-declare its signing authority so keyless vs ed25519 packs
-      cannot be confused or downgraded into one another (a `SignatureFormat::Sigstore`
-      and/or a signature-authority enum; the exact field reshape is settled in the
-      implementation plan — no backcompat, nothing in prod). Populate
-      `TrustMetadata.transparency_log` from the resolved Rekor entry on keyless packs.
-- [ ] Factor the post-signature checks shared by both verifiers
-      (`validate_manifest` structural/policy/expiry + `verify_files` +
-      `verify_pack_hash` + `verify_revocation`) into one function both entry points
-      call, so they cannot diverge. The ed25519-bundle-specific
-      `validate_signature_bundle` stays on the ed25519 path only.
-- [ ] Add `verify_pack_keyless_at(...)`: verify a detached Sigstore bundle over the
-      manifest bytes against the embedded Fulcio/Rekor roots + a passed identity
-      allow-list (reuse the `crypto::image_verify` / `sigstore-verify` machinery),
-      then run the shared middle. Trust inputs as parameters; no `mvm-cli` dep.
+- [ ] Make a pack self-declare its signing authority (settled reshape): add
+      `SignatureFormat::Sigstore`; the bundle's `format` is the authority
+      declaration. A `Sigstore` pack carries empty `signatures` (the detached
+      sidecar is authoritative) and a `signing_key_id` set via a new
+      `KeyId::from_identity(&str)` (sha256 of the signing identity, 32 hex — a
+      stable well-formed id for revocation keying and audit, not a pubkey hash), so
+      no fake ed25519 key is invented. Downgrade safety falls out: the ed25519
+      `validate_signature_bundle` already rejects a non-`Ed25519` format, and the
+      keyless path rejects a non-`Sigstore` format.
+- [ ] Factor `validate_manifest` into `validate_manifest_structural` (everything
+      except `validate_signature_bundle`) + the per-authority signature-shape check.
+      Shared middle both verifiers call = `validate_manifest_structural` +
+      `verify_files` + `verify_pack_hash` + `verify_revocation`; the signature-shape
+      and signature-verify steps stay per-authority.
+- [ ] Add `verify_pack_keyless_at(manifest, root, policy, cosign_bundle,
+      keyless_trust, revocations)`: check `format == Sigstore` + empty signatures,
+      call `image_verify::verify_signed_payload(manifest.canonical_bytes, bundle,
+      identity, issuer)` for each accepted identity in `keyless_trust` (exact-match;
+      succeed on any), then run the shared middle. `keyless_trust` (accepted-identity
+      list + issuer) is a parameter; no `mvm-cli` dep. Populate
+      `TrustMetadata.transparency_log` from the verified Rekor entry.
 - [ ] Tests: valid bundle + pinned identity verifies; wrong issuer rejected; wrong
       subject/SAN rejected; tampered manifest rejected; absent/bad Rekor inclusion
       proof rejected; expired cert rejected; a keyless pack presented to the ed25519
@@ -567,9 +580,12 @@ The design decisions (settled before this slice; see ADR-097 §9):
 
 ### Unit 2 — embedded identity allow-list + trust-root wiring
 
-- [ ] Add a compiled-in `ReleaseIdentityAllowList` constant (issuer + subject
-      pattern + channels), validated by test, multi-entry to support identity
-      migration. Fulcio/Rekor roots sourced from the vendored Sigstore trust root.
+- [ ] Add a compiled-in `RELEASE_IDENTITY_TEMPLATES` constant (issuer + a list of
+      subject templates like `https://github.com/<org>/<repo>/.github/workflows/<release>.yml@refs/tags/v{version}`),
+      validated by test, multi-entry for identity migration. A helper interpolates
+      the binary's `CARGO_PKG_VERSION` into each template to build the concrete
+      exact-match accepted-identity list. Fulcio/Rekor roots come from the vendored
+      Sigstore trust root via `verify_signed_payload` (no separate wiring).
 - [ ] Build the host keyless verify context: embedded allow-list always active;
       `pack-trust.json` additive for ed25519 publishers/channels/revocations. Update
       `host_pack_verify_inputs` (and any runtime consumer) to construct the keyless

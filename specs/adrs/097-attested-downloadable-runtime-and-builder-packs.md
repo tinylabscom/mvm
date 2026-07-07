@@ -201,15 +201,22 @@ Verification is offline and pins **both** halves of the identity:
 
 - the certificate must chain to the embedded Fulcio root (from the vendored
   Sigstore trust root, TUF-managed);
-- the certificate's identity must match an entry in a compiled-in **allow-list**
-  — issuer `https://token.actions.githubusercontent.com` and a subject pattern
-  scoped to the release workflow on a protected tag ref;
+- the certificate's identity must **exactly** match one of a small set of
+  accepted identities — issuer `https://token.actions.githubusercontent.com` and
+  a subject equal to the release workflow on the release tag. Sigstore's identity
+  policy is exact-match only (no glob/regex — wildcarding identity would be a
+  trust regression), so the subject is not a pattern: the verifier constructs the
+  concrete accepted identity by interpolating the binary's own version into a
+  compiled-in **template** (`…/.github/workflows/<release>.yml@refs/tags/v<version>`)
+  at verify time, exactly as the OCI image path (`crypto::image_verify`) already
+  does. A binary therefore trusts only packs from its own release tag;
 - the Rekor inclusion proof must verify against the embedded log root.
 
 Pinning the subject identity is load-bearing: a verifier that accepts any
 Fulcio-issued certificate is weaker than a fixed key, because any holder of any
-OIDC token could then sign. The allow-list is a list, not a scalar, on purpose —
-it is the rotation mechanism (see below).
+OIDC token could then sign. The compiled-in material is a **list of templates**,
+not a scalar, on purpose — that list is the identity-migration mechanism (see
+below); the version is always interpolated from the running binary.
 
 What this buys over a long-lived key in CI: there is no key to exfiltrate, and
 every release signature is publicly logged, so a CI compromise that mints a valid
@@ -250,11 +257,13 @@ modes) is deferred to the revocation/enterprise workstream (§I) and must not be
 foreclosed here.
 
 **Rotation.** The keyless public channel needs no key rotation — certificates are
-ephemeral. Only the *identity* migrates (a repository rename, a subject-pattern
-change, a new channel), and that is handled by carrying more than one entry in the
-allow-list: add the new identity, ship the binary, drop the old identity a release
-or two later. There is no key-overlap window to manage. Operator ed25519 rotation
-already works by listing multiple publishers in `pack-trust.json`.
+ephemeral. Only the *identity* migrates (a repository rename, a workflow-file
+rename), and that is handled by carrying more than one template in the compiled-in
+list: add the new template, ship the binary, drop the old one a release or two
+later. The release version is not a migration concern — it is always the running
+binary's own version, interpolated into every template. There is no key-overlap
+window to manage. Operator ed25519 rotation already works by listing multiple
+publishers in `pack-trust.json`.
 
 **Revocation.** This amendment keeps revocation config-driven through
 `PackTrustConfig.revocations`, as shipped. Fetching a live revocation channel
