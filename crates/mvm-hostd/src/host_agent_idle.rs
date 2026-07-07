@@ -134,8 +134,12 @@ pub async fn run_health_watcher(daemon: Arc<Mutex<HostAgentDaemon>>) {
         // blocking pass rather than needing its own task.
         prober = tokio::task::spawn_blocking(move || {
             let now = now_unix();
-            let actions = prober.tick(&vm_ids, now, &AgentExec);
-            prober.act(&actions, now, &MachineRestarter);
+            // Scheduling (per due probe, inside `tick`) is decoupled from firing
+            // (every tick, inside `act`): `tick` schedules a restart into the
+            // future, and `act` fires any gate that has since elapsed. A restart
+            // scheduled this pass therefore fires on a later pass, not this one.
+            prober.tick(&vm_ids, now, &AgentExec);
+            prober.act(now, &MachineRestarter);
             prober
         })
         .await

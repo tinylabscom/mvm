@@ -86,6 +86,8 @@ pub fn fold(
             // Unhealthy transition by re-accumulating consecutive failures.
             if tracker.state == HealthState::Unhealthy {
                 if tracker.restart_attempts >= policy.max_restart_attempts {
+                    // Parked: drop any pending restart so a give-up never fires.
+                    tracker.next_restart_after_unix = None;
                     return HealthAction::GiveUp;
                 }
                 tracker.restart_attempts = tracker.restart_attempts.saturating_add(1);
@@ -100,6 +102,7 @@ pub fn fold(
             }
             tracker.state = HealthState::Unhealthy;
             if tracker.restart_attempts >= policy.max_restart_attempts {
+                tracker.next_restart_after_unix = None;
                 return HealthAction::GiveUp;
             }
             tracker.restart_attempts = tracker.restart_attempts.saturating_add(1);

@@ -234,8 +234,10 @@ fn log_health_transition(vm: &str, new_state: HealthState) {
 /// Per-VM health probing over the daemon's live registration set.
 ///
 /// Holds one [`HealthTracker`] plus its last-probe unix second per healthchecked
-/// VM, so [`tick`](HealthProber::tick) can skip VMs that aren't yet due and drop
-/// trackers for VMs that have gone away or lost their healthcheck.
+/// VM, so [`tick`](HealthProber::tick) can skip VMs that aren't yet due and retire
+/// a tracker once its machine stops being a managed healthchecked machine (spec
+/// gone or healthcheck removed) — a machine merely absent from the live set keeps
+/// its tracker.
 #[derive(Default)]
 pub struct HealthProber {
     trackers: HashMap<String, (HealthTracker, u64)>,
@@ -259,28 +261,43 @@ impl HealthProber {
     /// crashed service is not stopped, so its registration lingers in
     /// `live_vm_ids` and its next probe finds the agent unreachable
     /// (`Unreachable` → `Fail`), flips `Unhealthy`, and restarts. A VM that
-    /// cleanly leaves the live set is treated as possibly-intentional and its
-    /// tracker is simply forgotten — no restart.
+    /// cleanly leaves the live set is treated as possibly-intentional and is not
+    /// probed while absent, so it earns no new restart — but its tracker (and
+    /// restart budget) is preserved until its spec loses the healthcheck, so the
+    /// cap holds across a restart's own stop→start deregistration window.
     pub fn tick(
         &mut self,
         live_vm_ids: &[String],
         now_unix: u64,
         exec: &dyn GuestExec,
     ) -> Vec<(String, HealthAction)> {
-        // Forget trackers for VMs no longer in the live set. A departed
-        // healthchecked VM is logged as an observability signal only — a
-        // deliberate `machine stop` and a crash-that-already-deregistered are
-        // indistinguishable here, so neither is restarted from this path.
-        self.trackers.retain(|vm, _| {
-            let live = live_vm_ids.iter().any(|id| id == vm);
-            if !live {
+        // Retire a tracker only when the machine is genuinely no longer a
+        // managed healthchecked machine — its spec is gone or no longer declares
+        // a healthcheck. A machine that is merely absent from the live set keeps
+        // its tracker (and its restart budget/backoff): a restart stops then
+        // starts the guest, so the machine deregisters for the duration of that
+        // window, and dropping the tracker there would reset `restart_attempts`
+        // and let a persistently-broken service crash-loop past its cap.
+        self.trackers.retain(|vm, _| match load_machine_spec(vm) {
+            Ok(spec) => {
+                let managed = spec.health_check.is_some();
+                if !managed {
+                    tracing::info!(
+                        vm = %vm,
+                        event = "health.healthcheck_removed",
+                        "machine no longer declares a healthcheck; retiring tracker"
+                    );
+                }
+                managed
+            }
+            Err(_) => {
                 tracing::info!(
                     vm = %vm,
-                    event = "health.left_live_set",
-                    "healthchecked machine left the live set; forgetting tracker (no restart)"
+                    event = "health.spec_gone",
+                    "machine spec gone; retiring tracker"
                 );
+                false
             }
-            live
         });
 
         let mut actions = Vec::new();
@@ -346,33 +363,25 @@ impl HealthProber {
         actions
     }
 
-    /// Execute the restart-worthy actions `tick` returned, gated by each
-    /// tracker's backoff schedule.
+    /// Fire every scheduled restart whose backoff gate has elapsed, then consume
+    /// the gate so each scheduled restart fires exactly once.
     ///
-    /// `Restart` only fires `restarter.restart(vm)` once `now_unix` has
-    /// reached the tracker's `next_restart_after_unix`. `fold` sets that gate
-    /// to a future second the moment it returns `Restart`, so a call to `act`
-    /// at the same `now_unix` the action was produced always defers; the
-    /// restart fires once a later call observes the gate has elapsed.
-    /// `GiveUp` never restarts (`tick` already logged the give-up); `None`
-    /// never appears in `actions` in the first place.
-    pub fn act(
-        &self,
-        actions: &[(String, HealthAction)],
-        now_unix: u64,
-        restarter: &dyn Restarter,
-    ) {
-        for (vm, action) in actions {
-            if *action != HealthAction::Restart {
-                continue;
-            }
-            let due = self
-                .trackers
-                .get(vm)
-                .and_then(|(tracker, _)| tracker.next_restart_after_unix)
+    /// Runs on every watcher tick over *all* trackers, independent of the
+    /// actions the current pass produced. `fold` schedules a restart into the
+    /// future (`next_restart_after_unix = now + backoff`, backoff ≥ 1s) the
+    /// moment it decides to restart, so firing must be decoupled from
+    /// scheduling: calling `act` on the same instant `fold` set the gate always
+    /// defers (`now < gate`), and a later tick — past the gate — fires it. A
+    /// give-up clears the gate, so a parked machine is never restarted from
+    /// here.
+    pub fn act(&mut self, now_unix: u64, restarter: &dyn Restarter) {
+        for (vm, (tracker, _)) in self.trackers.iter_mut() {
+            let due = tracker
+                .next_restart_after_unix
                 .is_some_and(|gate| now_unix >= gate);
             if due {
                 restarter.restart(vm);
+                tracker.next_restart_after_unix = None;
             }
         }
     }
@@ -541,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn tick_drops_tracker_when_vm_leaves_live_set() {
+    fn tracker_survives_absence_drops_when_healthcheck_removed() {
         let tmp = tempfile::tempdir().unwrap();
         let _env = data_env(tmp.path());
 
@@ -551,17 +560,27 @@ mod tests {
         prober.tick(&["gone".to_string()], 1000, &Fake(ExecOutcome::Exited(1)));
         assert!(prober.trackers.contains_key("gone"));
 
-        // A VM leaving the live set is possibly-intentional (a `machine stop`
-        // early-deregisters and then erases the registry entry, so the
-        // `Stopping` marker can already be gone by the time the poll lands).
-        // We forget the tracker and never restart from this path — a genuine
-        // crash keeps its lingering registration and is restarted by the
-        // probe path (unreachable agent → unhealthy) instead.
+        // A momentary absence from the live set (e.g. a restart's stop→start
+        // window) must NOT drop the tracker: its restart budget has to survive
+        // the gap, or a broken service crash-loops past its cap. The absent VM
+        // is not probed, so it also earns no new restart.
         let actions = prober.tick(&[], 1100, &Fake(ExecOutcome::Exited(1)));
-        assert!(!prober.trackers.contains_key("gone"));
+        assert!(
+            prober.trackers.contains_key("gone"),
+            "a briefly-absent healthchecked machine keeps its tracker"
+        );
         assert!(
             actions.is_empty(),
-            "a clean disappearance must never request a restart, got {actions:?}"
+            "a disappearance must never request a restart, got {actions:?}"
+        );
+
+        // Once the machine's spec no longer declares a healthcheck it is
+        // genuinely no longer managed, so its tracker is retired.
+        save_machine_spec(&spec_with_hc("gone", None), true).unwrap();
+        prober.tick(&[], 1200, &Fake(ExecOutcome::Exited(1)));
+        assert!(
+            !prober.trackers.contains_key("gone"),
+            "dropping the healthcheck retires the tracker"
         );
     }
 
@@ -613,7 +632,12 @@ mod tests {
     }
 
     #[test]
-    fn restart_gated_by_backoff_not_before_not_missing_after() {
+    fn restart_fires_exactly_once_after_backoff_gate_via_watcher_loop() {
+        // Integration test of the watcher's fold→act loop. The critical
+        // regression: `fold` sets the backoff gate to a *future* second the
+        // instant it returns `Restart`, so `act` on that same instant must
+        // defer, and a later tick must fire the pending restart exactly once —
+        // firing must not depend on this-pass's actions vec.
         let tmp = tempfile::tempdir().unwrap();
         let _env = data_env(tmp.path());
 
@@ -621,23 +645,20 @@ mod tests {
 
         let mut prober = HealthProber::new();
         let exec = Fake(ExecOutcome::Exited(1));
+        let restarter = FakeRestarter::default();
         let vms = vec!["web".to_string()];
 
-        // Same walk as `tick_failing_check_goes_unhealthy_and_restarts`: three
-        // due probes (interval=30) drive consecutive_failures past retries=3,
-        // flipping Unhealthy and returning the first Restart action.
-        let mut actions = Vec::new();
-        let mut last_tick_now = 0u64;
-        for i in 0..3u64 {
-            let now = 1000 + i * 30;
-            last_tick_now = now;
-            actions = prober.tick(&vms, now, &exec);
+        // Three due probes (interval=30) drive consecutive_failures past
+        // retries=3, flipping Unhealthy at t=1060 and scheduling a restart into
+        // the future. Running the full tick→act cycle each pass mirrors the
+        // watcher loop; the restart must NOT fire on the instant it was set.
+        for now in [1000u64, 1030, 1060] {
+            prober.tick(&vms, now, &exec);
+            prober.act(now, &restarter);
         }
         assert!(
-            actions
-                .iter()
-                .any(|(vm, a)| vm == "web" && *a == HealthAction::Restart),
-            "expected a Restart action, got {actions:?}"
+            restarter.calls.lock().unwrap().is_empty(),
+            "restart must not fire on the same instant the backoff gate was set"
         );
 
         let gate = prober
@@ -646,23 +667,129 @@ mod tests {
             .unwrap()
             .0
             .next_restart_after_unix
-            .expect("Restart action must set a backoff gate");
+            .expect("Restart must schedule a backoff gate");
         assert!(
-            gate > last_tick_now,
+            gate > 1060,
             "backoff gate must be strictly in the future of the tick that set it"
         );
 
-        // Before the gate: no restart fires.
-        let restarter = FakeRestarter::default();
-        prober.act(&actions, last_tick_now, &restarter);
+        // A later tick, still before the next probe-due window (t=1090), fires
+        // the pending restart exactly once and consumes the gate. This is the
+        // path the old `act` never reached — the bug left it dead.
+        prober.tick(&vms, gate, &exec);
+        prober.act(gate, &restarter);
+        assert_eq!(*restarter.calls.lock().unwrap(), vec!["web".to_string()]);
         assert!(
-            restarter.calls.lock().unwrap().is_empty(),
-            "restart must not fire before the backoff gate elapses"
+            prober
+                .trackers
+                .get("web")
+                .unwrap()
+                .0
+                .next_restart_after_unix
+                .is_none(),
+            "a fired gate is consumed so the restart fires exactly once"
         );
 
-        // At/after the gate: the restart fires exactly once.
-        prober.act(&actions, gate, &restarter);
-        assert_eq!(*restarter.calls.lock().unwrap(), vec!["web".to_string()]);
+        // Further ticks at/after the gate do not re-fire the consumed restart.
+        prober.tick(&vms, gate + 1, &exec);
+        prober.act(gate + 1, &restarter);
+        assert_eq!(
+            restarter.calls.lock().unwrap().len(),
+            1,
+            "a consumed gate never re-fires"
+        );
+    }
+
+    #[test]
+    fn restart_budget_survives_deregister_and_cap_holds_via_watcher_loop() {
+        // Integration test of the restart window: `machine restart` = stop+start,
+        // which deregisters the VM, so the watcher sees it briefly absent from
+        // the live set. Its restart budget must survive that gap, or a broken
+        // service crash-loops forever past MAX_RESTART_ATTEMPTS.
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = data_env(tmp.path());
+
+        save_machine_spec(&spec_with_hc("web", Some(hc())), true).unwrap();
+
+        let mut prober = HealthProber::new();
+        let exec = Fake(ExecOutcome::Exited(1));
+        let restarter = FakeRestarter::default();
+        let vms = vec!["web".to_string()];
+
+        // Drive to the first restart (Unhealthy, restart_attempts=1 at t=1060).
+        for now in [1000u64, 1030, 1060] {
+            prober.tick(&vms, now, &exec);
+            prober.act(now, &restarter);
+        }
+        assert_eq!(prober.trackers.get("web").unwrap().0.restart_attempts, 1);
+        // The gate fires on a later, non-probe tick.
+        prober.tick(&vms, 1062, &exec);
+        prober.act(1062, &restarter);
+        assert_eq!(
+            restarter.calls.lock().unwrap().len(),
+            1,
+            "exactly one restart fired so far"
+        );
+
+        // Restart window: the machine deregisters (absent from live set) for a
+        // couple of ticks. The tracker — and its restart_attempts — must survive.
+        for now in [1064u64, 1066] {
+            prober.tick(&[], now, &exec);
+            prober.act(now, &restarter);
+        }
+        assert!(
+            prober.trackers.contains_key("web"),
+            "tracker must survive a restart's deregistration window"
+        );
+        assert_eq!(
+            prober.trackers.get("web").unwrap().0.restart_attempts,
+            1,
+            "restart budget must not reset across the restart window"
+        );
+
+        // Machine comes back still-failing. Drive the watcher at its real 2s
+        // cadence until the cap gives up.
+        let mut now = 1068u64;
+        let mut gave_up = false;
+        while now < 1600 && !gave_up {
+            let actions = prober.tick(&vms, now, &exec);
+            prober.act(now, &restarter);
+            if actions
+                .iter()
+                .any(|(vm, a)| vm == "web" && *a == HealthAction::GiveUp)
+            {
+                gave_up = true;
+            }
+            now += 2;
+        }
+
+        assert!(
+            gave_up,
+            "must give up once the restart budget is exhausted across the window"
+        );
+        assert_eq!(
+            prober.trackers.get("web").unwrap().0.state,
+            HealthState::Unhealthy
+        );
+        // Exactly MAX_RESTART_ATTEMPTS restarts total, then parked — the cap held
+        // even though the VM deregistered mid-way.
+        assert_eq!(
+            *restarter.calls.lock().unwrap(),
+            vec!["web".to_string(); MAX_RESTART_ATTEMPTS as usize],
+            "cap enforced across the restart window (no crash-loop)"
+        );
+
+        // Ticking on past give-up spawns no further restarts.
+        for _ in 0..5u64 {
+            prober.tick(&vms, now, &exec);
+            prober.act(now, &restarter);
+            now += 30;
+        }
+        assert_eq!(
+            restarter.calls.lock().unwrap().len(),
+            MAX_RESTART_ATTEMPTS as usize,
+            "a parked machine is never restarted again"
+        );
     }
 
     #[test]
@@ -701,8 +828,9 @@ mod tests {
         );
 
         let restarter = FakeRestarter::default();
-        // Even at a far-future now_unix, GiveUp must never trigger a restart.
-        prober.act(&last_actions, now + 10_000, &restarter);
+        // GiveUp clears the backoff gate, so even at a far-future now_unix `act`
+        // finds no pending restart to fire.
+        prober.act(now + 10_000, &restarter);
         assert!(
             restarter.calls.lock().unwrap().is_empty(),
             "GiveUp must never spawn a restart"
