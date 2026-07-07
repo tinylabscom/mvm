@@ -1182,11 +1182,10 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         // The rootfs is supplied (OCI image / manifest); we need only a kernel.
         // Resolve just the workload kernel — same as the transient OCI path
         // (`exec.rs`) — rather than building/downloading a whole default-microvm
-        // image whose 220 MB rootfs we'd discard. This also routes through the
-        // kernel's source-fingerprint cache, so a `nix/images/kernel/` edit
-        // rebuilds on the next boot instead of reusing a stale default image.
-        // A non-sealed (dev) profile reuses the on-disk builder kernel; a sealed
-        // profile needs the real dm-verity workload kernel, so `prod` is set.
+        // image whose 220 MB rootfs we'd discard. This runtime path never builds
+        // Stage 0 or compiles a workload kernel: dev may reuse an existing
+        // builder kernel, while sealed/prod uses a cached workload kernel or the
+        // published workload-kernel download.
         ensure_workload_kernel(profile != "dev")?
     };
     register_vm_name(name, "default");

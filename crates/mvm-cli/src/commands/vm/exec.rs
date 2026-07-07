@@ -676,13 +676,11 @@ fn build_exec_request(
             }
             // An `--image` run boots the materialized OCI rootfs (with its
             // injected agent), so we need only a workload kernel. Resolve just
-            // the kernel — the published `vmlinux-<arch>-workload` download for
-            // an end-user mvmctl (no Nix), or a local `workload-kernel` build on
-            // a source checkout — rather than building/downloading a whole
-            // default image whose rootfs we'd discard. This keeps the OCI path
-            // free of Nix (end users) and of a ~220 MB unused-rootfs fetch. A
-            // non-prod launch reuses the on-disk builder kernel rather than
-            // building one, so this stays off the builder VM entirely.
+            // the kernel — a cached workload/default-image kernel, the cold-cache
+            // published workload-kernel download, or (for non-prod) an existing
+            // builder kernel already on disk — rather than building/downloading a
+            // whole default image whose rootfs we'd discard. This runtime path
+            // never builds Stage 0 or compiles a workload kernel.
             let kernel_path = ensure_workload_kernel(prod)?;
             crate::exec::ImageSource::Prebuilt {
                 kernel_path,
