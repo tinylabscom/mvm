@@ -24,6 +24,9 @@ pub mod broker;
 /// from `mvm_core::framing` so `mvm-core`'s default build pulls no
 /// async runtime.
 pub mod framing;
+/// Host->guest healthcheck probe: run a workload's healthcheck command via
+/// the guest agent's exec protocol and decide pass/fail.
+pub mod health_probe;
 /// Idle-registration self-termination logic for the `mvm-host-agent` worker.
 pub mod host_agent_idle;
 pub mod host_signer;

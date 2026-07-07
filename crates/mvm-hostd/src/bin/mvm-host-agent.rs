@@ -320,6 +320,9 @@ async fn run_worker_once(cfg: HostAgentConfig) -> Result<()> {
         daemon.clone(),
         mvm_hostd::host_agent_idle::idle_timeout(),
     ));
+    tokio::spawn(mvm_hostd::host_agent_idle::run_health_watcher(
+        daemon.clone(),
+    ));
     HostAgentDaemon::run_shared(daemon, &cfg.control_socket).await?;
 
     Ok(())

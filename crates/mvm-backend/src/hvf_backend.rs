@@ -390,9 +390,43 @@ impl VmBackend for HvfBackend {
         // the stop path now owns reaping the endpoint.
         endpoint_guard.defuse();
 
+        // Register an admitted workload with the per-tenant host-agent daemon,
+        // same as libkrun/vz: the daemon starts tracking this VM and binds its
+        // BROKER_PORT socket. The guest-side BROKER_PORT bridge is not yet wired
+        // on this backend — the supervisor config carries no broker-listen field
+        // and the vsock dispatcher routes only the workload-exit and egress ports
+        // — so `host.audit.v1` is registered here but not yet reachable from the
+        // guest on this backend (host->guest agent RPC over GUEST_AGENT_PORT is
+        // unaffected). Registration keeps daemon-side tracking + lifecycle parity
+        // with the other backends and makes the guest bridge a drop-in follow-up.
+        // Unlike libkrun/vz there is no per-VM broker-fork fallback here, so
+        // MVM_HOST_AGENT_DAEMON=0 selects nothing — this backend is daemon-only.
+        // Best-effort: a registration failure is logged, never a launch rollback
+        // (the workload still runs). The guard reaps the registration if a later
+        // start step fails; defused once the VM is confirmed up (the stop path
+        // then owns teardown).
+        let broker_listen_socket = mvm_core::config::vm_hvf_broker_socket(&config.name);
+        let mut host_agent_guard =
+            match crate::host_agent_spawn::register_host_agent_services_if_admitted(
+                crate::host_agent_spawn::HostAgentServicesParams {
+                    workload_id: &config.name,
+                    tenant_id: config.tenant_id.as_deref(),
+                    vm_name: &config.name,
+                    state_dir: &state_dir,
+                    broker_listen_socket: &broker_listen_socket,
+                },
+            ) {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::warn!(vm = %config.name, error = %e, "host-agent registration failed for this VM");
+                    crate::host_agent_spawn::HostAgentServicesGuard::defused()
+                }
+            };
+
         // Detach: dropping the `Child` does not kill the process, so the
         // supervisor outlives this CLI invocation (reaped via its PID file).
         drop(child);
+        host_agent_guard.defuse();
         ui::success(&format!(
             "HVF VM '{}' started (pid file: {}, console: {}).",
             config.name,
@@ -417,6 +451,10 @@ impl VmBackend for HvfBackend {
         // check), so a crashed VM's decrypted-secret process can't outlive the
         // guest. Idempotent + no-op when the VM spawned none (no secrets).
         crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &id.0);
+        // Deregister from the per-tenant host-agent daemon (no-op if this VM
+        // never registered — an unadmitted dev VM, or a failed registration
+        // that was already logged). The daemon itself stays warm.
+        crate::host_agent_spawn::reap_host_agent_services_from_state(&state_dir, &id.0);
         let pid_path = state_dir.join(PID_FILE_NAME);
         if let Some(pid) = read_pid(&pid_path) {
             terminate_pid(pid);
@@ -582,6 +620,46 @@ mod tests {
         let id = VmId("hvf-nonexistent-test-vm".into());
         assert_eq!(HvfBackend.status(&id).unwrap(), VmStatus::Stopped);
         assert!(HvfBackend.stop(&id).is_ok());
+    }
+
+    /// `start()` registers an admitted VM with the per-tenant host-agent
+    /// daemon (mirrors libkrun/vz); `stop()` must reap that registration.
+    /// This exercises the `stop()` half of the wiring without spawning a real
+    /// supervisor: it plants the tenant-ref marker `register_host_agent_
+    /// services_if_admitted` would have written, then asserts `stop()`
+    /// removes it via `reap_host_agent_services_from_state` — the same call
+    /// libkrun/vz make. The daemon connect itself is best-effort (no daemon
+    /// is running for this fake tenant), so this only verifies the reap path
+    /// is wired, not the network round-trip (covered by `host_agent_spawn`'s
+    /// own tests).
+    #[test]
+    fn stop_reaps_host_agent_tenant_ref_marker() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+        }
+
+        let name = "hvf-host-agent-reap-test-vm";
+        let state_dir = vm_state_dir(name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let tenant_ref = state_dir.join("host-agent.tenant");
+        std::fs::write(&tenant_ref, "local").unwrap();
+
+        let id = VmId(name.to_string());
+        assert!(HvfBackend.stop(&id).is_ok());
+        assert!(
+            !tenant_ref.exists(),
+            "stop() must reap the host-agent tenant-ref marker"
+        );
+
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+        }
     }
 
     #[test]

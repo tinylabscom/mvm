@@ -25,6 +25,9 @@ pub mod entrypoint_policy;
 pub mod exit_capture;
 /// Guest `mvm-netd` helpers (proxy env-var injection for cooperative apps).
 pub mod guest_netd;
+/// Pure health-state reducer: fold probe results into a health state and
+/// decide restart/give-up actions. No I/O.
+pub mod health;
 /// Host ingress-broker decision logic (host listener only by explicit policy).
 pub mod ingress_broker;
 /// Ingress-broker handler: compose decision + trace into an audit record.

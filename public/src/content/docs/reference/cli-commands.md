@@ -50,8 +50,8 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run --image <ref>` | Boot an OCI image (pulled/cached). Mutually exclusive with `--flake`/`--manifest` |
 | `mvmctl machine run --name <name>` | Run under a machine identity (auto-generated if omitted) |
 | `mvmctl machine run -d` | Boot a **persistent** machine detached and return immediately |
-| `mvmctl machine run --healthcheck '<cmd>'` | Declare the workload a long-running service: presence alone promotes the run to the **persistent** lifecycle (registered, shows in `machine ls`, torn down via `machine stop <name>`). Runs in the foreground unless combined with `-d`. `<cmd>` is exec'd in the guest as its liveness check (exit 0 = healthy); recorded on the machine spec now, not yet actively probed. A run whose entrypoint exits still tears down on that exit code — a healthcheck on a run-to-completion task is a no-op |
-| `mvmctl machine run --health-interval <secs> --health-timeout <secs> --health-retries <n> --health-start-period <secs>` | Tune the healthcheck cadence: seconds between checks (default `30`), per-check timeout (default `5`), consecutive failures before unhealthy (default `3`), and grace period after start before checks count (default `0`). Recorded on the machine spec; not yet enforced — active probing is a follow-up |
+| `mvmctl machine run --healthcheck '<cmd>'` | Declare the workload a long-running service: presence alone promotes the run to the **persistent** lifecycle (registered, shows in `machine ls`, torn down via `machine stop <name>`). Runs in the foreground unless combined with `-d`. `<cmd>` is exec'd in the guest by the resident host-agent daemon as its liveness check (exit 0 = healthy), actively probed on `--health-interval`; an unhealthy or crashed service is restarted with bounded exponential backoff. A run whose entrypoint exits still tears down on that exit code — a healthcheck on a run-to-completion task is a no-op |
+| `mvmctl machine run --health-interval <secs> --health-timeout <secs> --health-retries <n> --health-start-period <secs>` | Tune the healthcheck cadence: seconds between checks (default `30`), per-check timeout (default `5`), consecutive failures before unhealthy (default `3`), and grace period after start before checks count (default `0`). Recorded on the machine spec and actively enforced by the host-agent daemon's probe loop |
 | `mvmctl machine run --cpus N --memory SIZE` | vCPU count and memory (supports 512M, 4G, etc.) |
 | `mvmctl machine run -e KEY=VALUE` | Inject an environment variable (repeatable; gated by `--profile`) |
 | `mvmctl machine run --volume host:/guest[:mode]` | Share a host directory (mode defaults to `ro`; `rw` needs `--profile dev`/`permissive`) |
@@ -376,10 +376,35 @@ presence registers the machine (shows in `machine ls`, torn down with `machine
 stop <name>`) and it runs in the **foreground** unless you also pass `-d`. The
 command is exec'd in the guest as a liveness check (exit 0 = healthy); the
 `--health-interval`/`--health-timeout`/`--health-retries`/`--health-start-period`
-tuning flags are recorded on the machine spec but not yet actively enforced
-(phase A is signal-only — active probing and restart-on-unhealthy are a
-follow-up). The entrypoint's own exit code still terminates the machine either
-way, so a healthcheck on a run-to-completion task has no effect.
+tuning flags are recorded on the machine spec and actively enforced. The
+entrypoint's own exit code still terminates the machine either way, so a
+healthcheck on a run-to-completion task has no effect.
+
+The resident host-agent daemon (default-on; opt out with
+`MVM_HOST_AGENT_DAEMON=0`, in which case health always shows `unknown`) probes
+every healthchecked persistent machine every `--health-interval` seconds, once
+`--health-start-period` seconds have elapsed since start (failures during the
+start period are grace-period noise and don't count). `machine ls` shows the
+result in a `HEALTH` column and `machine inspect` shows a `health:` line, one
+of:
+
+- `starting` — still inside the start period, or no probe result yet.
+- `healthy` — the most recent probe exited 0.
+- `unhealthy` — `--health-retries` consecutive probes have failed.
+- `-`/`unknown` — no readiness signal (including when the daemon is disabled).
+
+When a service goes `unhealthy`, the daemon restarts it (the same stop→start
+`mvmctl machine restart` does) under a bounded exponential backoff: 1s base,
+doubling per attempt, capped at 5 minutes, up to 5 attempts. Once the cap is
+hit the service is left `unhealthy` rather than crash-looping forever; a
+sustained-healthy period afterward resets the restart budget back to zero. A
+crashed service — the guest process gone, the agent unreachable — is caught by
+the same probe path (an unreachable agent counts as a failed probe) and
+restarted under the identical policy, so there's no separate crash-detection
+mechanism to reason about.
+
+This is a dev/accessible-tier feature: the check runs inside the guest via the
+host agent, so it only applies to backends where that agent is reachable.
 
 Identity and lifetime are separate: `--name <N>` names a foreground transient
 run but does not make it persistent. `-d`/`--detach`, `--up-json`, or the

@@ -2777,6 +2777,7 @@ dependencies = [
  "mvm",
  "mvm-backend",
  "mvm-core",
+ "mvm-guest",
  "mvm-network",
  "mvm-sdk",
  "mvm-verify",
