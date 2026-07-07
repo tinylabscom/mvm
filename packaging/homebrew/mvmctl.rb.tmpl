@@ -33,6 +33,15 @@ class Mvmctl < Formula
 
   def install
     bin.install "mvmctl"
+    %w[
+      mvm-bridge
+      mvm-vz-supervisor
+      mvm-hvf-supervisor
+      mvm-libkrun-supervisor
+      mvm-substitution-endpoint
+    ].each do |hostbin|
+      bin.install hostbin if File.exist?(hostbin)
+    end
     (prefix/"resources").install Dir["resources/*"] if Dir.exist?("resources")
     # macOS: Hypervisor.framework requires the entitlement; re-sign ad-hoc.
     if OS.mac? && File.exist?("resources/mvmctl.entitlements")

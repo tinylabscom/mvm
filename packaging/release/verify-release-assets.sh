@@ -57,6 +57,17 @@ sha256_of() {
   else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 
+required_bins_for_target() {
+  case "$1" in
+    *apple-darwin)
+      echo "mvmctl mvm-bridge mvm-vz-supervisor mvm-hvf-supervisor mvm-libkrun-supervisor mvm-substitution-endpoint"
+      ;;
+    *)
+      echo "mvmctl mvm-bridge mvm-substitution-endpoint"
+      ;;
+  esac
+}
+
 COMBINED="$ASSETS_DIR/checksums-sha256.txt"
 [ -f "$COMBINED" ] || fail "combined checksums manifest missing: checksums-sha256.txt"
 
@@ -92,18 +103,25 @@ for target in $TARGETS; do
       || fail "[$target] cosign verify-blob failed"
   fi
 
-  if [ -n "$EXPECT_VERSION" ] && [ "$target" = "$HOST_TARGET" ] && [ -f "$tarball" ]; then
+  if [ -f "$tarball" ]; then
     tmp=$(mktemp -d)
     if tar xzf "$tarball" -C "$tmp" 2>/dev/null; then
-      bin="$tmp/mvmctl-${target}/mvmctl"
-      if [ -x "$bin" ]; then
+      package_dir="$tmp/mvmctl-${target}"
+      if [ -d "$package_dir" ]; then
+        for bin_name in $(required_bins_for_target "$target"); do
+          [ -x "$package_dir/$bin_name" ] \
+            || fail "[$target] required packaged binary missing or not executable: $bin_name"
+        done
+      else
+        fail "[$target] archive missing top-level directory mvmctl-${target}"
+      fi
+      bin="$package_dir/mvmctl"
+      if [ -n "$EXPECT_VERSION" ] && [ "$target" = "$HOST_TARGET" ] && [ -x "$bin" ]; then
         ver=$("$bin" --version 2>/dev/null || true)
         case "$ver" in
           *"$EXPECT_VERSION"*) : ;;
           *) fail "[$target] --version mismatch: expected to contain '$EXPECT_VERSION', got '$ver'" ;;
         esac
-      else
-        fail "[$target] packaged mvmctl binary missing or not executable"
       fi
     else
       fail "[$target] tarball failed to extract"

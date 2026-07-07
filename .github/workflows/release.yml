@@ -124,6 +124,7 @@ jobs:
       #   - mvm-bridge: cross-platform external-VMM gateway/audit sidecar
       #     (Firecracker passt + vz VzIngest). Builds everywhere, no extra deps.
       #   - mvm-vz-supervisor (macOS only): the vz VMM supervisor.
+      #   - mvm-hvf-supervisor (macOS only): the raw-HVF VMM supervisor.
       #   - mvm-libkrun-supervisor (macOS only, and INTENTIONALLY so — not a
       #     follow-up): it has `required-features = ["libkrun-sys"]`, and the
       #     released Linux mvmctl deliberately does NOT link libkrun — the

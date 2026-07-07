@@ -7,6 +7,13 @@ use crate::ui;
 use mvm::shell::run_host;
 
 const GITHUB_REPO: &str = "tinylabscom/mvm";
+const RELEASE_HOST_BINS: &[&str] = &[
+    "mvm-bridge",
+    "mvm-vz-supervisor",
+    "mvm-hvf-supervisor",
+    "mvm-libkrun-supervisor",
+    "mvm-substitution-endpoint",
+];
 
 /// Current version compiled into the binary (from Cargo.toml).
 fn current_version() -> &'static str {
@@ -300,7 +307,7 @@ fn smoke_test_binary(bin: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Extract the archive and install the binary + resources, replacing the current installation.
+/// Extract the archive and install the binary, adjacent helpers, and resources.
 fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Result<()> {
     let archive_name = format!("mvmctl-{}.tar.gz", target);
     let archive_path = tmp_dir.join(&archive_name);
@@ -406,6 +413,9 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
         }
     }
 
+    install_release_host_binaries(&extracted_dir, install_dir, needs_sudo)
+        .context("Failed to update adjacent host helper binaries")?;
+
     // --- Replace resources ---
     let new_resources = extracted_dir.join("resources");
     if new_resources.exists() {
@@ -450,6 +460,39 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
         }
     }
 
+    Ok(())
+}
+
+fn install_release_host_binaries(
+    extracted_dir: &Path,
+    install_dir: &Path,
+    needs_sudo: bool,
+) -> Result<()> {
+    for hostbin in RELEASE_HOST_BINS {
+        let src = extracted_dir.join(hostbin);
+        if !src.is_file() {
+            continue;
+        }
+        let dest = install_dir.join(hostbin);
+        if needs_sudo {
+            run_sudo_cp(&src, &dest)?;
+            let output = run_host(
+                "sudo",
+                &[
+                    "chmod",
+                    "+x",
+                    dest.to_str().expect("helper path must be valid UTF-8"),
+                ],
+            )?;
+            if !output.status.success() {
+                anyhow::bail!("sudo chmod failed for {}", dest.display());
+            }
+        } else {
+            std::fs::copy(&src, &dest)
+                .with_context(|| format!("copying {} to {}", src.display(), dest.display()))?;
+            set_executable(&dest)?;
+        }
+    }
     Ok(())
 }
 
@@ -680,6 +723,34 @@ mod tests {
             "smoke test failed (exit 1): "
         );
         assert!(err_msg.contains("New binary failed smoke test; restored previous version."));
+    }
+
+    #[test]
+    fn release_host_bins_include_hvf_and_substitution_endpoint() {
+        assert!(RELEASE_HOST_BINS.contains(&"mvm-hvf-supervisor"));
+        assert!(RELEASE_HOST_BINS.contains(&"mvm-substitution-endpoint"));
+    }
+
+    #[test]
+    fn install_release_host_binaries_copies_present_helpers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let extracted = tmp.path().join("extracted");
+        let install_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&extracted).unwrap();
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::write(extracted.join("mvm-hvf-supervisor"), b"hvf").unwrap();
+        std::fs::write(extracted.join("mvm-substitution-endpoint"), b"endpoint").unwrap();
+
+        install_release_host_binaries(&extracted, &install_dir, false).unwrap();
+
+        assert_eq!(
+            std::fs::read(install_dir.join("mvm-hvf-supervisor")).unwrap(),
+            b"hvf"
+        );
+        assert_eq!(
+            std::fs::read(install_dir.join("mvm-substitution-endpoint")).unwrap(),
+            b"endpoint"
+        );
     }
 
     // --- signature verification ---

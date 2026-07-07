@@ -41,11 +41,21 @@ MVM_VERSION=v0.16.1 curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm
 ```bash
 git clone https://github.com/tinylabscom/mvm.git
 cd mvm
-cargo build --release
-install -m 0755 target/release/mvmctl ~/.local/bin/mvmctl
+cargo build --release --bin mvmctl
+cargo build --release -p mvm-vm-host --bin mvm-bridge
+cargo build --release -p mvm-hostd --bin mvm-substitution-endpoint
+install -m 0755 \
+  target/release/mvmctl \
+  target/release/mvm-bridge \
+  target/release/mvm-substitution-endpoint \
+  ~/.local/bin/
 ```
 
 ### From crates.io
+
+The GitHub release tarball is preferred for runtime use because it includes the
+adjacent host helper binaries. `cargo install` installs only the `mvmctl` CLI and
+is useful for CLI-only inspection or development.
 
 ```bash
 cargo install mvmctl

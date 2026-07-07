@@ -43,7 +43,7 @@ use mvm_build::vz;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 /// Apple Virtualization.framework backend.
 ///
@@ -2219,7 +2219,7 @@ fn ensure_source_checkout_vz_helpers(workspace_root: &Path, helper_dir: &Path) -
         .map(|name| helper_dir.join(name))
         .collect();
     let input_roots = source_checkout_vz_helper_inputs(workspace_root);
-    if !helper_binaries_need_rebuild(&helper_paths, &input_roots)? {
+    if !crate::aux_bin::helper_binaries_need_rebuild(&helper_paths, &input_roots)? {
         return Ok(());
     }
 
@@ -2260,64 +2260,6 @@ fn source_checkout_vz_helper_inputs(workspace_root: &Path) -> Vec<PathBuf> {
         workspace_root.join("crates/mvm-build/src"),
     ]
     .into()
-}
-
-fn helper_binaries_need_rebuild(helper_paths: &[PathBuf], input_roots: &[PathBuf]) -> Result<bool> {
-    let mut oldest_helper: Option<SystemTime> = None;
-    for helper in helper_paths {
-        let Ok(meta) = std::fs::metadata(helper) else {
-            return Ok(true);
-        };
-        let modified = meta
-            .modified()
-            .with_context(|| format!("reading mtime for {}", helper.display()))?;
-        oldest_helper = Some(match oldest_helper {
-            Some(current) => current.min(modified),
-            None => modified,
-        });
-    }
-    let Some(oldest_helper) = oldest_helper else {
-        return Ok(true);
-    };
-    let newest_input = newest_modified_input(input_roots)?;
-    Ok(newest_input.is_some_and(|modified| modified > oldest_helper))
-}
-
-fn newest_modified_input(input_roots: &[PathBuf]) -> Result<Option<SystemTime>> {
-    let mut newest = None;
-    for root in input_roots {
-        newest = max_system_time(newest, newest_modified_under(root)?);
-    }
-    Ok(newest)
-}
-
-fn newest_modified_under(path: &Path) -> Result<Option<SystemTime>> {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return Ok(None);
-    };
-    let mut newest = Some(
-        meta.modified()
-            .with_context(|| format!("reading mtime for {}", path.display()))?,
-    );
-    if meta.is_dir() {
-        for entry in
-            std::fs::read_dir(path).with_context(|| format!("reading dir {}", path.display()))?
-        {
-            let entry =
-                entry.with_context(|| format!("reading dir entry under {}", path.display()))?;
-            newest = max_system_time(newest, newest_modified_under(&entry.path())?);
-        }
-    }
-    Ok(newest)
-}
-
-fn max_system_time(a: Option<SystemTime>, b: Option<SystemTime>) -> Option<SystemTime> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    }
 }
 
 /// Spawn the `mvm-bridge` sibling. Returns an
@@ -2678,6 +2620,7 @@ fn wait_for_supervisor_stability(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aux_bin::helper_binaries_need_rebuild;
 
     #[test]
     fn name_is_vz() {

@@ -8,9 +8,10 @@ GitHub Release:
 
 - **`release.yml`** builds `mvmctl` for all four targets
   (`aarch64`/`x86_64` × macOS/Linux), packages each as
-  `mvmctl-<target>.tar.gz` (binary + `resources/` + man pages), generates
-  `checksums-sha256.txt`, cosign-signs every tarball, and also builds the
-  dev / builder / default-microvm / builder-vm / runtime-overlay images.
+  `mvmctl-<target>.tar.gz` (binary + adjacent host helpers + `resources` +
+  man pages), generates `checksums-sha256.txt`, cosign-signs every tarball,
+  and also builds the dev / builder / default-microvm / builder-vm /
+  runtime-overlay images.
 - **`kernel-build.yml`** builds the slim builder + workload kernels on native
   aarch64 and x86_64 runners and uploads `vmlinux-<arch>-<variant>` +
   `kernel-<arch>-checksums-sha256.txt`.
@@ -21,7 +22,7 @@ GitHub Release:
 |------|---------------|
 | `install.sh` (curl one-liner) | `mvmctl-<target>.tar.gz` + `checksums-sha256.txt` (+ cosign `.bundle` if cosign present) |
 | `brew install tinylabscom/mvm/mvmctl` | the same tarball, via the tap formula |
-| `cargo install mvmctl` | source from crates.io (published by `publish-crates.yml`) |
+| `cargo install mvmctl` | source from crates.io (CLI binary only; no adjacent helper bundle) |
 | `mvmctl update` | the tarball for the latest release, in-place swap |
 | `mvmctl kernel build --source download` | `vmlinux-<arch>-<variant>` + `kernel-<arch>-checksums-sha256.txt`, pinned to the binary's own release tag |
 
