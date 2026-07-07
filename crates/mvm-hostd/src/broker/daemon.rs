@@ -241,6 +241,12 @@ impl HostAgentDaemon {
         self.vms.len()
     }
 
+    /// Snapshot of the currently-registered VM ids (bound + serving). The
+    /// health watcher reads this each pass to decide which guests to probe.
+    pub fn registered_vm_ids(&self) -> Vec<String> {
+        self.vms.keys().cloned().collect()
+    }
+
     /// Apply a verified control request. Must run inside a tokio runtime (it
     /// spawns the per-VM serve task). The control loop calls this after the
     /// signature verifies.

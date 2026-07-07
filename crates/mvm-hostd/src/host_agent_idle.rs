@@ -102,6 +102,43 @@ pub async fn run_idle_watcher(daemon: Arc<Mutex<HostAgentDaemon>>, timeout: Opti
     }
 }
 
+/// Sibling watcher that periodically probes each healthchecked VM and records
+/// its observed health.
+///
+/// Spawn alongside [`run_idle_watcher`] after the daemon is serving. The probe
+/// itself (`AgentExec` over vsock) is **blocking** I/O, so each pass runs inside
+/// `spawn_blocking` to keep the tokio reactor free; the [`HealthProber`] is
+/// moved in and back out so its per-VM tracker state persists across passes.
+///
+/// The lock over `daemon` is held only for the `registered_vm_ids()` read and is
+/// released before the blocking probe pass, so it never serialises against
+/// broker request handling.
+///
+/// [`HealthProber`]: crate::health_probe::HealthProber
+pub async fn run_health_watcher(daemon: Arc<Mutex<HostAgentDaemon>>) {
+    use crate::health_probe::{AgentExec, HealthProber, now_unix};
+
+    const PROBE: Duration = Duration::from_secs(2);
+    let mut ticker = tokio::time::interval(PROBE);
+    let mut prober = HealthProber::new();
+    loop {
+        ticker.tick().await;
+        let vm_ids = daemon.lock().await.registered_vm_ids();
+        if vm_ids.is_empty() {
+            continue;
+        }
+        // Move the prober into the blocking pass and take it back afterwards so
+        // its tracker state survives. A panic in the pass costs the tracker
+        // history but not the watcher loop.
+        prober = tokio::task::spawn_blocking(move || {
+            let _ = prober.tick(&vm_ids, now_unix(), &AgentExec);
+            prober
+        })
+        .await
+        .unwrap_or_else(|_| HealthProber::new());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
