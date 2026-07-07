@@ -600,11 +600,12 @@ The design decisions (settled before this slice; see ADR-097 §9):
 
 ### Unit 3 — release pipeline: produce, sign, publish
 
-- [ ] Extend the release workflow so that per supported arch/backend it builds the
-      builder (and runtime) pack via `mvm-builder-pack-tool`, signs the manifest with
+- [x] Extend the release workflow so that per supported arch/backend it builds the
+      builder pack via `mvm-builder-pack-tool --keyless`, signs the manifest with
       keyless `cosign sign-blob` under the workflow OIDC identity (official cosign
       action; `id-token: write`), and publishes the sidecar bundle + SBOM +
       checksums + manifest alongside the existing `vmlinux`/`rootfs.ext4` assets.
+      (Runtime pack producer/publish deferred — builder pack first.)
 - [ ] Restrict the signing job to protected tag refs / a protected environment so
       the pinned subject identity cannot be minted from an arbitrary ref.
 - [ ] Add the release verification gate (plan §B) that fails closed when any pack
@@ -614,15 +615,16 @@ The design decisions (settled before this slice; see ADR-097 §9):
 
 ### Unit 4 — consume the published pack (network leg) — completion step
 
-- [ ] Route the installed `DownloadPublished` arm through an attested fetch: pull
-      the pack (manifest + sidecar + artifacts) from the release channel into
-      quarantine, keyless-verify, promote, materialize — replacing the plain
-      checksum fetch when `manifest-verify` + the embedded allow-list accept it,
-      fail-open to the plain download otherwise. Closes the "network fetch deferred
-      to WS-B/I" note from Slice 1's corrected Unit 3.
-- [ ] Tests: end-to-end fetch→verify→place against a locally-served synthetic
-      release pack; fail-open when no attested pack is available; refuse a
-      tampered/mis-signed pack rather than fall through silently.
+- [x] Route the installed `DownloadPublished` arm through an attested fetch:
+      `fetch_release_builder_pack_staging` downloads manifest + cosign bundle +
+      artifacts into a temp staging dir, `promote_staged_builder_pack` keyless-
+      verifies + promotes into the pack cache, then the existing resolve
+      materializes — gated on `manifest-verify` + the `MVM_BUILDER_PACK` selection,
+      fail-open to the plain download otherwise.
+- [x] Tests: `promote_staged_builder_pack` fail-closed on garbage/missing cosign
+      bundle (cache untouched) + malformed manifest error; the network GET is thin
+      (`download_file`) and proven in CI, not offline. Positive end-to-end verify
+      needs a real cosign bundle → CI/tag-time.
 
 > Unit 4 overlaps plan §C/§D and may spill into a Slice 3 if Units 1–3 land large;
 > Units 1–3 alone discharge both Slice-1 deferrals (embedded default + pipeline).
@@ -680,3 +682,36 @@ embedded root stays inert.
   the ed25519 attempt before falling through to the plain download. Fail-safe
   (same cache, ends at download); tighten when Unit 4 reworks the attempt
   ordering around the network fetch.
+
+### Units 3–4 status: builder-pack pipeline + fetch LANDED (2026-07-07)
+
+- U3 (`b185523f`): `release.yml` `builder-vm-image` job now installs Rust + cosign,
+  exports `STORE_PATH` to `$GITHUB_ENV`, generates a nix-closure SBOM, runs
+  `mvm-builder-pack-tool --keyless` to emit a Sigstore-authority manifest under the
+  workflow OIDC identity (`--identity …@${github.ref}`), `cosign sign-blob`s it, and
+  publishes `builder-vm-{arch}.pack-manifest.json` + `.bundle` + `.sbom.txt`.
+- U8 producer (`ceb28d14`): `PackBuilder::new_keyless`/`build_sigstore` (mvm-core),
+  `build_keyless_builder_pack` (mvm-build), tool `--keyless` mode.
+- U4 fetch (`d15136e4`): download → keyless-verify → promote into the pack cache,
+  wired fetch-on-miss into `attempt_attested_builder_pack`.
+
+**Validated:** producer smoke-test (exact release CLI invocation → valid Sigstore
+manifest), fetch fail-closed tests, `release.yml` YAML + actionlint clean, published
+asset names == fetch asset names. **NOT validated locally (tag-time only):** cosign
+OIDC signing, the nix image build + SBOM step, and end-to-end publish→download→verify.
+Prove on the next tagged release (or `gh workflow run` against the branch, which the
+release job's dry-run guards partially exercise).
+
+### Units 3–4 follow-ups (not done)
+
+- **Release verification gate (§B):** extend the "Verify release asset set" job to
+  fail closed when a builder pack lacks its manifest / bundle / checksum / SBOM.
+- **Protected environment for the signing job** so the pinned SAN can't be minted
+  from an arbitrary ref (beyond the existing tag-push gate).
+- **Producer SBOM URI is `file://<local path>`** (unverified provenance metadata,
+  harmless) — add a `--sbom-uri` so the published manifest records the release URL.
+- **`PackBuilder::build()` panics on a keyless-constructed builder** — a
+  programmer-error `.expect`, unreachable from current callers; make illegal states
+  unrepresentable (typed authority) when the producer is next touched.
+- **Runtime-pack producer/publish** (only the builder pack is wired).
+- **gh workflow run validation** on the branch before the first real tag.
