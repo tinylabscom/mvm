@@ -1613,8 +1613,23 @@ fn machine_status_label(name: &str) -> &'static str {
 struct MachineLsRow {
     name: String,
     status: String,
+    health: &'static str,
     source: String,
     age: String,
+}
+
+/// Health label for a machine's readiness, as shown in `machine ls`'s HEALTH
+/// column and `machine inspect`'s `health:` line. `None` covers both a
+/// registry entry with no readiness signal yet and a machine absent from the
+/// registry entirely.
+fn health_cell(readiness: Option<&mvm_core::domain::instance::InstanceReadiness>) -> &'static str {
+    use mvm_core::domain::instance::InstanceReadiness;
+    match readiness {
+        Some(InstanceReadiness::ServicesReady) => "healthy",
+        Some(InstanceReadiness::Degraded { .. }) => "unhealthy",
+        Some(InstanceReadiness::ServicesStarting { .. }) => "starting",
+        _ => "-",
+    }
 }
 
 /// Coarse, human-friendly age of a machine from its `created_at` timestamp,
@@ -1643,20 +1658,22 @@ fn format_machine_table(rows: &[MachineLsRow]) -> String {
     let header = MachineLsRow {
         name: "NAME".to_string(),
         status: "STATUS".to_string(),
+        health: "HEALTH",
         source: "SOURCE".to_string(),
         age: "AGE".to_string(),
     };
     let all = std::iter::once(&header).chain(rows);
     let wn = all.clone().map(|r| r.name.len()).max().unwrap_or(0);
     let ws = all.clone().map(|r| r.status.len()).max().unwrap_or(0);
+    let wh = all.clone().map(|r| r.health.len()).max().unwrap_or(0);
     let wsrc = all.clone().map(|r| r.source.len()).max().unwrap_or(0);
     std::iter::once(&header)
         .chain(rows)
         .map(|r| {
             // AGE is the last column, so it needs no trailing pad.
             format!(
-                "{:<wn$}  {:<ws$}  {:<wsrc$}  {}",
-                r.name, r.status, r.source, r.age
+                "{:<wn$}  {:<ws$}  {:<wh$}  {:<wsrc$}  {}",
+                r.name, r.status, r.health, r.source, r.age
             )
         })
         .collect::<Vec<_>>()
@@ -1678,11 +1695,19 @@ fn list_machines(args: MachineListArgs) -> Result<()> {
         println!("no machines");
     } else {
         let now = chrono::Utc::now();
+        let registry_path = mvm::vm::name_registry::registry_path();
+        let registry =
+            mvm::vm::name_registry::VmNameRegistry::load(&registry_path).unwrap_or_default();
         let rows: Vec<MachineLsRow> = specs
             .iter()
             .map(|spec| MachineLsRow {
                 name: spec.name.clone(),
                 status: machine_status_label(&spec.name).to_string(),
+                health: health_cell(
+                    registry
+                        .lookup(&spec.name)
+                        .and_then(|reg| reg.readiness.as_ref()),
+                ),
                 source: spec
                     .image
                     .as_deref()
@@ -1712,6 +1737,13 @@ fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
         if let Some(resolved_digest) = spec.resolved_digest.as_deref() {
             println!("resolved-digest: {resolved_digest}");
         }
+        let registry_path = mvm::vm::name_registry::registry_path();
+        let registry =
+            mvm::vm::name_registry::VmNameRegistry::load(&registry_path).unwrap_or_default();
+        let readiness = registry
+            .lookup(&spec.name)
+            .and_then(|reg| reg.readiness.as_ref());
+        println!("health: {}", health_cell(readiness));
         println!("net: {}", spec.net);
         println!("allow-host: {}", spec.allow_host.join(","));
         println!("cpus: {}", spec.cpus);
@@ -3992,12 +4024,14 @@ mod tests {
             MachineLsRow {
                 name: "web".to_string(),
                 status: "running".to_string(),
+                health: "healthy",
                 source: "alpine".to_string(),
                 age: "3d".to_string(),
             },
             MachineLsRow {
                 name: "database-1".to_string(),
                 status: "stopped".to_string(),
+                health: "-",
                 source: "ghcr.io/acme/db".to_string(),
                 age: "5m".to_string(),
             },
@@ -4006,7 +4040,9 @@ mod tests {
         let lines: Vec<&str> = table.lines().collect();
         assert_eq!(lines.len(), 3, "header + 2 rows");
         assert!(lines[0].starts_with("NAME"), "header first: {}", lines[0]);
-        assert!(lines[0].contains("STATUS") && lines[0].contains("AGE"));
+        assert!(
+            lines[0].contains("STATUS") && lines[0].contains("HEALTH") && lines[0].contains("AGE")
+        );
         // The NAME column is padded to the widest name ("database-1" = 10),
         // so every row's STATUS column starts at the same offset.
         let status_col = lines[0].find("STATUS").expect("header has STATUS");
@@ -4020,6 +4056,21 @@ mod tests {
             "row2: {}",
             lines[2]
         );
+    }
+
+    #[test]
+    fn health_cell_maps_readiness() {
+        use mvm_core::domain::instance::InstanceReadiness::*;
+        assert_eq!(health_cell(Some(&ServicesReady)), "healthy");
+        assert_eq!(
+            health_cell(Some(&Degraded { unhealthy: vec![] })),
+            "unhealthy"
+        );
+        assert_eq!(
+            health_cell(Some(&ServicesStarting { pending: vec![] })),
+            "starting"
+        );
+        assert_eq!(health_cell(None), "-");
     }
 
     #[test]
