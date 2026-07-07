@@ -4861,7 +4861,7 @@ pub(crate) fn ensure_default_microvm_image(
 /// boots on. An end-user mvmctl downloads the published, hash-verified
 /// `vmlinux-<arch>-workload` (~10 MB, no Nix); a source checkout builds just the
 /// `workload-kernel` flake target locally (no rootfs/verity). Cache-hit-fast.
-pub(crate) fn ensure_workload_kernel() -> Result<String> {
+pub(crate) fn ensure_workload_kernel(prod: bool) -> Result<String> {
     let arch = builder_vm_host_arch();
     let cache = mvm_core::config::mvm_cache_dir();
     // Source-checkout: fingerprint `nix/images/kernel/` so a stale cached vmlinux
@@ -4870,6 +4870,16 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
     let source_fingerprint = workload_kernel_source_fingerprint_opt();
     if let Some(cached) = find_cached_workload_kernel(&cache, arch, source_fingerprint.as_deref()) {
         return Ok(cached);
+    }
+    // A non-sealed launch boots on the builder kernel already on disk — the
+    // shared kernel base plus builder extras, lacking only the dm-verity a
+    // sealed guest opens — so an image launch reuses it instead of compiling a
+    // workload kernel via Stage 0. Keeps a plain `machine run --image` off the
+    // builder VM. A sealed/prod guest needs the real dm-verity workload kernel,
+    // so it falls through to build/download below.
+    if !prod && let Some(builder) = find_reusable_builder_kernel(&cache, arch) {
+        ui::info("Reusing the builder kernel for this dev launch (no workload-kernel build).");
+        return Ok(builder);
     }
     let dest = format!("{cache}/builder-vm/{arch}/kernels/workload/vmlinux");
     if let Some(built) = try_build_workload_kernel_locally()? {
@@ -4880,6 +4890,17 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
     }
     download_workload_kernel(arch, &dest)?;
     Ok(dest)
+}
+
+/// The builder VM's own kernel at `builder-vm/<arch>/vmlinux`, present whenever a
+/// source checkout has built the builder image. It shares the workload kernel's
+/// base config and lacks only dm-verity, so it boots a non-sealed workload guest
+/// — a valid reuse source that needs neither a Stage 0 build nor a prebuilt
+/// download. `None` when absent (an end-user mvmctl that never built the image).
+/// Path-injectable (no global state) so it's hermetically testable.
+fn find_reusable_builder_kernel(cache_dir: &str, arch: &str) -> Option<String> {
+    let path = format!("{cache_dir}/builder-vm/{arch}/vmlinux");
+    std::path::Path::new(&path).is_file().then_some(path)
 }
 
 /// End-user download of the published, hash-verified `vmlinux-<arch>-workload`
@@ -6453,6 +6474,30 @@ mod builder_vm_bootstrap_tests {
             Some(vmlinux.to_str().unwrap())
         );
         assert_eq!(find_cached_workload_kernel(cache, arch, Some("xyz")), None);
+    }
+
+    #[test]
+    fn find_reusable_builder_kernel_detects_builder_image_vmlinux() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().to_str().unwrap();
+        let arch = "aarch64";
+        // Absent → None (the builder image was never built).
+        assert_eq!(find_reusable_builder_kernel(cache, arch), None);
+
+        // The builder image's kernel lives at `builder-vm/<arch>/vmlinux`; it is a
+        // valid reuse source for a non-sealed launch (boots a plain rootfs).
+        let dir = tmp.path().join(format!("builder-vm/{arch}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vmlinux = dir.join("vmlinux");
+        std::fs::write(&vmlinux, b"vmlinux").unwrap();
+        assert_eq!(
+            find_reusable_builder_kernel(cache, arch).as_deref(),
+            Some(vmlinux.to_str().unwrap())
+        );
+
+        // The builder kernel is NOT a workload-kernel cache candidate, so reuse is
+        // a deliberate separate step — the cache lookup still misses here.
+        assert!(find_cached_workload_kernel(cache, arch, None).is_none());
     }
 
     #[test]

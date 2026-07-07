@@ -1185,7 +1185,9 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         // image whose 220 MB rootfs we'd discard. This also routes through the
         // kernel's source-fingerprint cache, so a `nix/images/kernel/` edit
         // rebuilds on the next boot instead of reusing a stale default image.
-        ensure_workload_kernel()?
+        // A non-sealed (dev) profile reuses the on-disk builder kernel; a sealed
+        // profile needs the real dm-verity workload kernel, so `prod` is set.
+        ensure_workload_kernel(profile != "dev")?
     };
     register_vm_name(name, "default");
 
