@@ -163,11 +163,11 @@ impl VsockTransport for VzTransport {
 ///   — same `vsock/` subdir convention the Vz supervisor uses, populated
 ///   only when `VmStartConfig.dev_console` is true.
 ///
-/// The **agent-RPC** use (via [`for_vm`]) is not dev-gated — every
+/// The **agent-RPC** use (via [`for_vm`]) is not gated — every
 /// `machine run -- <cmd>` / `machine exec` / `invoke` reaches the agent this
-/// way, on prod runners too. The **console-data** use is dev-only:
-/// `pick_console_transport` selects it for console ports only when
-/// `is_dev_mode()` is set, so a sealed production runner cannot receive an
+/// way, on prod runners too. The **console-data** use is gated:
+/// `pick_console_transport` selects it for console ports only for an accessible
+/// (non-sealed) workload, so a sealed production runner cannot receive an
 /// interactive attach over this path.
 pub struct DevConsoleTransport {
     state_dir: PathBuf,

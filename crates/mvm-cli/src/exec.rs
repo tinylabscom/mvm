@@ -490,8 +490,17 @@ pub fn transient_run_dev_console(pty: bool, verity_path: Option<&str>) -> bool {
     pty && verity_path.is_none()
 }
 
-fn transient_run_needs_staging_cleanup(add_dirs: &[AddDir]) -> bool {
-    !add_dirs.is_empty()
+/// Remove the transient `--add-dir` staging dir, but only when extras were
+/// actually staged. `build_dir_image_ro` builds those ext4 images inside the
+/// builder Linux env (it needs `mkfs`/`mount`), so cleanup routes back through
+/// that env — and a run with no `--add-dir` never created the dir. Skipping the
+/// call there keeps a plain OCI/workload run from waking a builder VM just to
+/// `rm -rf` a path that does not exist.
+fn clean_add_dir_staging(add_dirs: &[AddDir], staging_dir: &str) {
+    if add_dirs.is_empty() {
+        return;
+    }
+    let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
 }
 
 /// Decide whether snapshot restore is safe for this request.
@@ -842,9 +851,7 @@ fn run_inner(
     if !booted {
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
         if let Err(e) = backend.start(&start_config) {
-            if transient_run_needs_staging_cleanup(&req.add_dirs) {
-                let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
-            }
+            clean_add_dir_staging(&req.add_dirs, &staging_dir);
             return Err(e).context("starting transient microVM");
         }
     }
@@ -897,9 +904,7 @@ fn run_inner(
         }
     }
 
-    if transient_run_needs_staging_cleanup(&req.add_dirs) {
-        let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
-    }
+    clean_add_dir_staging(&req.add_dirs, &staging_dir);
     let t_torn_down = timing.then(std::time::Instant::now);
 
     // Emit the phase breakdown when every seam was marked (i.e. timing was
@@ -2028,16 +2033,53 @@ mod tests {
 
     #[test]
     fn staging_cleanup_skipped_without_add_dirs() {
-        assert!(!transient_run_needs_staging_cleanup(&[]));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_handler = calls.clone();
+        let _handler = mvm::shell_mock::install_handler(move |_script: &str| {
+            calls_for_handler.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            mvm::shell_mock::MockResponse {
+                exit_code: 0,
+                stdout: String::new(),
+            }
+        });
+
+        clean_add_dir_staging(&[], "/tmp/mvm-staging");
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no --add-dir means no builder cleanup command"
+        );
     }
 
     #[test]
     fn staging_cleanup_enabled_with_add_dirs() {
+        let scripts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let scripts_for_handler = scripts.clone();
+        let _handler = mvm::shell_mock::install_handler(move |script: &str| {
+            scripts_for_handler
+                .lock()
+                .expect("mutex must not be poisoned")
+                .push(script.to_string());
+            mvm::shell_mock::MockResponse {
+                exit_code: 0,
+                stdout: String::new(),
+            }
+        });
         let add_dir = AddDir {
             host_path: "/tmp/host".to_string(),
             guest_path: "/mnt/host".to_string(),
             read_only: true,
         };
-        assert!(transient_run_needs_staging_cleanup(&[add_dir]));
+
+        clean_add_dir_staging(&[add_dir], "/tmp/mvm-staging");
+
+        let scripts = scripts.lock().expect("mutex must not be poisoned");
+        assert_eq!(scripts.len(), 1, "one cleanup command must be issued");
+        assert!(
+            scripts[0].contains("rm -rf /tmp/mvm-staging"),
+            "cleanup command must remove the staging directory: {}",
+            scripts[0]
+        );
     }
 }

@@ -2609,10 +2609,6 @@ fn refuse_if_running(target_vm: &str) -> anyhow::Result<()> {
 const VZ_AUX_REBUILD_CMD: &str =
     "cargo build -p mvm-vm-host --bin mvm-vz-supervisor --bin mvm-bridge";
 
-fn mtime_of(p: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(p).and_then(|m| m.modified()).ok()
-}
-
 /// A leading-space hint, ready to interpolate into the boot-failure message,
 /// when `supervisor_path` looks stale relative to the running `mvmctl` — else
 /// `""`. In a source checkout `cargo run` rebuilds only `mvmctl`, leaving the
@@ -2622,8 +2618,7 @@ fn mtime_of(p: &Path) -> Option<std::time::SystemTime> {
 /// path, so a false positive merely appends a rebuild suggestion to an already-
 /// failing boot.
 fn stale_supervisor_hint(supervisor_path: &Path) -> String {
-    let self_mtime = std::env::current_exe().ok().as_deref().and_then(mtime_of);
-    match stale_aux_binary_hint(mtime_of(supervisor_path), self_mtime, VZ_AUX_REBUILD_CMD) {
+    match crate::supervisor_stale::supervisor_stale_hint(supervisor_path, VZ_AUX_REBUILD_CMD) {
         Some(h) => format!(" {h}"),
         None => String::new(),
     }
@@ -2680,17 +2675,6 @@ fn wait_for_supervisor_stability(
 /// older than `self_mtime`. `None` when either mtime is unknown or the binary is
 /// at-least-as-new — so an installed release (bins share an install time) never
 /// trips it; only a source checkout's stale aux binary does.
-fn stale_aux_binary_hint(
-    bin_mtime: Option<std::time::SystemTime>,
-    self_mtime: Option<std::time::SystemTime>,
-    rebuild_cmd: &str,
-) -> Option<String> {
-    let (bin, me) = (bin_mtime?, self_mtime?);
-    (bin < me).then(|| {
-        format!("The supervisor binary is older than mvmctl and may be stale — rebuild it: {rebuild_cmd}")
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2698,30 +2682,6 @@ mod tests {
     #[test]
     fn name_is_vz() {
         assert_eq!(VzBackend.name(), "vz");
-    }
-
-    #[test]
-    fn stale_aux_hint_fires_only_when_binary_predates_mvmctl() {
-        use std::time::{Duration, SystemTime};
-        let base = SystemTime::UNIX_EPOCH;
-        let newer = base + Duration::from_secs(100);
-        let cmd = "cargo build -p mvm-vm-host";
-
-        // Binary older than mvmctl → hint naming the rebuild command.
-        let hint = stale_aux_binary_hint(Some(base), Some(newer), cmd).expect("expected a hint");
-        assert!(
-            hint.contains(cmd),
-            "hint must name the rebuild command: {hint}"
-        );
-        assert!(hint.contains("stale"));
-
-        // At-least-as-new binary → no hint (installed release, equal mtimes).
-        assert!(stale_aux_binary_hint(Some(newer), Some(base), cmd).is_none());
-        assert!(stale_aux_binary_hint(Some(base), Some(base), cmd).is_none());
-
-        // Unknown mtime on either side → no hint (don't guess).
-        assert!(stale_aux_binary_hint(None, Some(newer), cmd).is_none());
-        assert!(stale_aux_binary_hint(Some(base), None, cmd).is_none());
     }
 
     #[test]

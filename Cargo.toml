@@ -467,84 +467,88 @@ toml.workspace = true
 which.workspace = true
 
 [features]
-# Plan 72 W5.B cutover: `builder-vm` is default so the root `mvmctl`
-# binary can dispatch to the libkrun-backed builder VM in `ensure_dev_image`.
-# The dispatch falls back at runtime via `mvm_libkrun::is_available()` when
-# libkrun isn't installed on the host, so a default-features binary works
-# everywhere. Library consumers (mvmd) that want a lean closure build with
+# ── The two product surfaces — the only two things this project ships ─────────
+# There are exactly two: what the **host machine runs** to host sandboxes
+# (`host`), and what a **user runs** to drive them (`user`). Every capability
+# folds into one of the two; the individual pass-through flags that used to sit
+# here (builder-vm, pure-mkfs, custom-dns, manifest-verify, dev-watch,
+# contributor-bootstrap) are GONE — inlined below. `dev` is the host+user union
+# (a contributor laptop is both). The only other root features are internal
+# knobs that cannot be unconditional and are NOT consumer-facing product
+# surfaces: the libkrun C-lib link (absent on a macOS-26 HVF host), the
+# release-only prebuilt download, the optional S3 template-registry backend, and
+# `hostd-transport` (a lean library knob a downstream daemon flips through the
+# facade to compile mvm-core's gated hostd IPC transport without pulling all of
+# `host`). `xtask check-two-surfaces` fails CI if a third consumer-facing
+# *product* knob appears; internal knobs live on its allowlist.
+
+# The default binary is the lean host-runtime core (builder VM dispatch +
+# in-process rootfs materialize) — unchanged closure. mvmd builds lean with
 # `default-features = false`.
-default = ["builder-vm", "pure-mkfs"]
-contributor-bootstrap = [
+default = [
+    "mvm-build/builder-vm",
+    "mvm-cli/builder-vm",
+    "mvm-cli/pure-mkfs",
+]
+
+# `host` — everything the host machine runs to boot/manage/secure/build
+# sandboxes. Platform-neutral: backends auto-detect at runtime (the `VmBackend`
+# trait); a libkrun host adds `libkrun-sys`/`libkrun-live`, the macOS-26 HVF host
+# needs neither. Superset of `default` plus the full host networking + hostd IPC.
+host = [
+    "mvm-build/builder-vm",
+    "mvm-cli/builder-vm",
+    "mvm-cli/pure-mkfs",
+    "mvm-cli/custom-dns",
+    "mvm-core/hostd-transport",
+]
+
+# `user` — everything a user runs to create/drive sandboxes: cosign manifest
+# verification for `--prod`, and `build --watch`.
+user = [
+    "mvm/manifest-verify",
+    "mvm-cli/manifest-verify",
+    "mvm-core/manifest-verify",
+    "mvm-cli/dev-watch",
+]
+
+# `dev` — the local-development union. A contributor laptop is BOTH host and
+# user, so `dev` builds an `mvmctl` that runs EVERY README/website-docs example
+# on the default (HVF) backend (OCI + flake `machine run`, `machine build`/`build
+# compile`, persistent-machine verbs, `dev up`/`shell`, the SDK compile path).
+# Not a third surface — host + user + the source-checkout bootstrap. The
+# `check-two-surfaces` lint asserts it always aggregates both surfaces.
+dev = [
+    "host",
+    "user",
     "mvm/contributor-bootstrap",
     "mvm-backend/contributor-bootstrap",
     "mvm-build/contributor-bootstrap",
     "mvm-cli/contributor-bootstrap",
 ]
-# Plan 72 W1: libkrun-backed builder VM. Now default-on (W5.B cutover).
-# Forwards into both `mvm-build` (carries the `LibkrunBuilderVm` impl)
-# and `mvm-cli` (carries the `ensure_dev_image` dispatch swap).
-builder-vm = [
-    "mvm-build/builder-vm",
-    "mvm-cli/builder-vm",
-]
-# In-process, pure-Rust rootfs materialization for `run --image` (no builder
-# VM / mkfs). Must be forwarded here: the root `mvmctl` binary builds mvm-cli
-# with `default-features = false`, so mvm-cli's own `pure-mkfs` default never
-# reaches the shipped binary without this. Default-on so the run path
-# materializes in-process; `MVM_MATERIALIZE_BUILDER_VM` is the runtime opt-out.
-pure-mkfs = ["mvm-cli/pure-mkfs"]
-# Let an installed binary download mvm-published prebuilt builder VM images
-# from GitHub releases on a cache miss. Forwarded here for the same reason as
-# `pure-mkfs`: the root `mvmctl` binary builds mvm-cli with
-# `default-features = false`, so mvm-cli's gate never reaches the shipped
-# binary without this line. Off by default — contributor builds must build the
-# builder VM locally from the in-repo flake — and turned on only by the release
-# workflow, so an installed binary fetches the prebuilt instead of failing
-# closed on a cache miss.
-release-artifact-bootstrap = ["mvm-cli/release-artifact-bootstrap"]
-custom-dns = ["mvm-cli/custom-dns"]
-dev-watch = ["mvm-cli/dev-watch"]
-libkrun-live = ["mvm-cli/libkrun-live"]
+
+# Platform: link the libkrun C VMM. Absent on a macOS-26 HVF host; a libkrun
+# host opts in. Cannot be unconditional (no libkrun to link against on HVF).
 libkrun-sys = ["mvm-cli/libkrun-sys"]
-# Forward `mvm-core`'s gated hostd IPC transport (plan 126 B5). Added
-# here in PR-1 (where it's inert — mvm-core still defaults the feature
-# on) so mvmd — the sole consumer, via `mvmctl::core::protocol` with
-# `default-features = false` — can opt in *before* PR-2 drops the feature
-# from `mvm-core`'s default. Keeping these in separate PRs is what makes
-# the cross-repo rollout acyclic and free of any broken-build window.
+libkrun-live = ["mvm-cli/libkrun-live"]
+
+# Internal library knob (NOT a product surface): compile mvm-core's gated hostd
+# IPC transport. `host` already includes it; exposed standalone so a downstream
+# host-side daemon can flip just the transport through the facade and stay lean
+# (default-features = false), without dragging in the rest of `host`.
 hostd-transport = ["mvm-core/hostd-transport"]
-manifest-verify = [
-    "mvm/manifest-verify",
-    "mvm-cli/manifest-verify",
-    "mvm-core/manifest-verify",
-]
+
+# Release-only: let an installed binary download mvm-published prebuilt builder
+# VM images on a cache miss. Off for source checkouts (they build locally); the
+# release workflow turns it on.
+release-artifact-bootstrap = ["mvm-cli/release-artifact-bootstrap"]
+
+# Optional S3 storage backend for the template registry — a heavy cloud dep kept
+# opt-in (not part of the local host runtime; fleet/deployment use only).
 template-registry-s3 = [
     "mvm/template-registry-s3",
     "mvm-cli/template-registry-s3",
 ]
-
-# ── Two product surfaces (the only two knobs a consumer should touch) ─────────
-# There are exactly two things this project ships: what the host machine runs to
-# host sandboxes, and what a user runs to drive them. Every capability flag above
-# rolls up into one of these. Build the host runtime with `--features host`; the
-# user client is `default`. Individual flags above remain only as internal
-# implementation detail (they gate real per-OS/platform code) — they are not the
-# consumer-facing surface. New consumer-facing behaviour joins `host` or `user`;
-# a third top-level product knob is a design error.
-#
-# `host` — everything the host machine runs to boot/manage/secure/build sandboxes.
-# Platform-neutral: backends auto-detect at runtime (the `VmBackend` trait). A
-# host that uses the libkrun backend adds `libkrun-sys`/`libkrun-live` on top;
-# the macOS-26 HVF host needs neither, so they are not in the base umbrella.
-host = [
-    "builder-vm",
-    "pure-mkfs",
-    "custom-dns",
-    "hostd-transport",
-    "template-registry-s3",
-]
-# `user` — everything a user runs to create/drive sandboxes (the client).
-user = ["manifest-verify"]
 
 [profile.release]
 opt-level = 3
