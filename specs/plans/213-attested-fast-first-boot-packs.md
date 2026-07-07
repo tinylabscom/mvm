@@ -500,3 +500,10 @@ it is tracked as a follow-up, not part of this slice.
   to the plain checksum download (fail-open, safe). The end-to-end verify→place
   chain is proven under test injection; wiring the real release-channel trust store
   + policy is the release/trust workstream, not this slice.
+- **`policy_hash` convention is duplicated producer↔consumer.** Both the producer
+  (`mvm-build::builder_pack`) and the host consumer
+  (`mvm-cli` `host_pack_verify_inputs`) compute the pack's `policy_hash` as
+  `Sha256Hex::from_bytes(arch.nix_system().as_bytes())`. It is test-guarded (the
+  produce→verify end-to-end tests fail if the two sides drift), but per the
+  reuse-first rule it should be a single shared helper in `mvm-core::packs`. Small
+  follow-up; deferred to avoid a three-crate change here.

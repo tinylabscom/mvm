@@ -132,8 +132,19 @@ which = "6"
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.29", features = ["mount", "reboot", "signal", "ioctl"] }
 
+# Thin CLI wrapper for the reusable Builder-pack producer. Release CI / a
+# maintainer invokes it to turn built artifacts into a signed pack.
+[[example]]
+name = "mvm-builder-pack-tool"
+path = "examples/mvm-builder-pack-tool.rs"
+
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+# Test-only: `PackTrustConfig` (the operator trust config the producer's output
+# must verify against) stores publisher pubkeys base64-encoded, and there is no
+# constructor from a raw key. Already in the build graph via mvm-core; workspace-
+# pinned. Not used by any non-test code here.
+base64.workspace = true
 # `packed_artifact::tests` generate Ed25519
 # keypairs for round-trip tests. ed25519-dalek's
 # `SigningKey::generate` takes any `CryptoRng + RngCore`; the

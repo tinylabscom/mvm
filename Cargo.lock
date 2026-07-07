@@ -2562,6 +2562,7 @@ name = "mvm-build"
 version = "0.16.1"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "ed25519-dalek",
  "flate2",
