@@ -68,6 +68,8 @@ git add -A && git commit -m "fix(hvf): register the host-agent daemon for admitt
 
 **If the daemon fundamentally cannot run on HVF (BLOCKED):** stop and escalate — the design's fallback (probe thread in the per-VM supervisor) is a materially different plan.
 
+**Known limitation (surfaced by this task):** the wiring registers each admitted HVF VM with the per-tenant daemon (proven live — daemon tracks the VM, binds its `BROKER_PORT` socket, deregisters on stop while staying warm). But the *guest-side* `BROKER_PORT` bridge is not yet wired on HVF: `HvfSupervisorConfig` carries no broker-listen field and the HVF vsock dispatcher (`crates/mvm-backend/src/vmm/vsock.rs`) routes only `WORKLOAD_EXIT_PORT`/`EGRESS_PORT`, not `BROKER_PORT`. So `host.audit.v1` is registered-but-not-reachable-from-the-guest on HVF today. **Phase C's health probing is unaffected** — it uses the host→guest `GUEST_AGENT_PORT` exec path (Task 3), not the guest→daemon broker channel. Guest-side audit-log parity with libkrun/vz on HVF (wiring the `BROKER_PORT` bridge into `HvfSupervisorConfig` + the vsock dispatcher) is a separate follow-up, out of scope for this plan.
+
 ---
 
 ## Task 1: Pure health-state reducer
