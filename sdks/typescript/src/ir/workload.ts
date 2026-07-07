@@ -266,6 +266,10 @@ env?: {
  */
 files?: MaterializedFile[]
 /**
+ * Liveness declaration. `Some` marks the workload a long-running service (drives the persistent lifecycle); `None` is a task that tears down on entrypoint exit. Skip-serialized when absent so existing fixtures stay byte-identical.
+ */
+health_check?: (HealthCheck | null)
+/**
  * Lifecycle hooks. Each phase is a `Vec<HookCmd>`; the compiler unions addon hooks (in attachment order) before the app's hooks. `Hooks::is_empty()` skip-serializes the field so v0 IR documents that don't carry `hooks` remain byte-identical.
  */
 hooks?: Hooks
@@ -380,6 +384,16 @@ mode?: (string | null)
  * Absolute destination path in the guest rootfs.
  */
 path: string
+}
+/**
+ * A liveness declaration for a long-running workload. Its presence promotes a run to the persistent lifecycle (the run is a service, not a task). The command is exec'd in the guest via the agent; exit 0 means healthy — exec form because the guest is vsock-only. The timing fields are recorded for the active-probing follow-up and are not consulted while a workload only uses the presence signal.
+ */
+export interface HealthCheck {
+command: string[]
+interval_secs?: number
+retries?: number
+start_period_secs?: number
+timeout_secs?: number
 }
 export interface Mount {
 mode: MountMode

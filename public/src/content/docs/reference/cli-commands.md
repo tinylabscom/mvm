@@ -50,6 +50,8 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run --image <ref>` | Boot an OCI image (pulled/cached). Mutually exclusive with `--flake`/`--manifest` |
 | `mvmctl machine run --name <name>` | Run under a machine identity (auto-generated if omitted) |
 | `mvmctl machine run -d` | Boot a **persistent** machine detached and return immediately |
+| `mvmctl machine run --healthcheck '<cmd>'` | Declare the workload a long-running service: presence alone promotes the run to the **persistent** lifecycle (registered, shows in `machine ls`, torn down via `machine stop <name>`). Runs in the foreground unless combined with `-d`. `<cmd>` is exec'd in the guest as its liveness check (exit 0 = healthy); recorded on the machine spec now, not yet actively probed. A run whose entrypoint exits still tears down on that exit code — a healthcheck on a run-to-completion task is a no-op |
+| `mvmctl machine run --health-interval <secs> --health-timeout <secs> --health-retries <n> --health-start-period <secs>` | Tune the healthcheck cadence: seconds between checks (default `30`), per-check timeout (default `5`), consecutive failures before unhealthy (default `3`), and grace period after start before checks count (default `0`). Recorded on the machine spec; not yet enforced — active probing is a follow-up |
 | `mvmctl machine run --cpus N --memory SIZE` | vCPU count and memory (supports 512M, 4G, etc.) |
 | `mvmctl machine run -e KEY=VALUE` | Inject an environment variable (repeatable; gated by `--profile`) |
 | `mvmctl machine run --volume host:/guest[:mode]` | Share a host directory (mode defaults to `ro`; `rw` needs `--profile dev`/`permissive`) |
@@ -368,6 +370,17 @@ flag:
   name through `machine shell`/`exec`/`stop`. Bare `-d` auto-generates a name and
   prints it; `-d --name <N>` uses your chosen name.
 
+A fourth trigger promotes into the persistent lifecycle without `-d`:
+`--healthcheck '<cmd>'` declares the workload a long-running service — its mere
+presence registers the machine (shows in `machine ls`, torn down with `machine
+stop <name>`) and it runs in the **foreground** unless you also pass `-d`. The
+command is exec'd in the guest as a liveness check (exit 0 = healthy); the
+`--health-interval`/`--health-timeout`/`--health-retries`/`--health-start-period`
+tuning flags are recorded on the machine spec but not yet actively enforced
+(phase A is signal-only — active probing and restart-on-unhealthy are a
+follow-up). The entrypoint's own exit code still terminates the machine either
+way, so a healthcheck on a run-to-completion task has no effect.
+
 Identity and lifetime are separate: `--name <N>` names a foreground transient
 run but does not make it persistent. `-d`/`--detach`, `--up-json`, or the
 explicit `machine create`/`start` lifecycle make a long-lived machine.
@@ -394,6 +407,8 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine run --image <ref> --receipt <path> -- <cmd>` | Write a signed execution receipt |
 | `mvmctl machine run -d --image <ref>` | Boot a **persistent** machine, auto-name it (printed), return |
 | `mvmctl machine run -d --name <name> --image <ref>` | Boot a **persistent** named machine, return; reconnect via `machine shell <name>` |
+| `mvmctl machine run --healthcheck 'curl -fsS localhost/health' --image <ref>` | Boot a **persistent** machine in the foreground (registered, shows in `machine ls`); its presence alone promotes the lifecycle even without `-d` |
+| `mvmctl machine run -d --healthcheck 'curl -fsS localhost/health' --name <name> --image <ref>` | Same, detached — the usual way to run a long-lived service |
 | `mvmctl machine run --name <name> --image <ref> -- <cmd>` | Boot a named foreground transient machine, run `<cmd>`, tear down |
 | `mvmctl machine run -it --image <ref> -- <cmd>` | Run `<cmd>` attached to a PTY, return its exit code, tear down |
 | `mvmctl machine run -it --name <name> --image <ref> -- <cmd>` | Same, with a stable transient VM name while it runs |

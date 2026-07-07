@@ -81,6 +81,10 @@ pub(in crate::commands) struct Args {
     /// dispatch site when the host stdin pipe is non-empty.
     #[arg(skip)]
     pub stdin: Vec<u8>,
+    /// Internal (not a CLI flag): the resolved healthcheck declaration,
+    /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
+    #[arg(skip)]
+    pub healthcheck: Option<mvm_sdk::ir::HealthCheck>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -216,6 +220,10 @@ pub(in crate::commands) struct RunArgs {
     /// dispatch site when the host stdin pipe is non-empty.
     #[arg(skip)]
     pub stdin: Vec<u8>,
+    /// Internal (not a CLI flag): the resolved healthcheck declaration,
+    /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
+    #[arg(skip)]
+    pub healthcheck: Option<mvm_sdk::ir::HealthCheck>,
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
@@ -271,6 +279,7 @@ impl RunArgs {
             launch_plan: self.launch_plan,
             argv: self.argv,
             stdin: self.stdin,
+            healthcheck: self.healthcheck,
         }
     }
 }
@@ -727,6 +736,7 @@ fn build_exec_request(
         network_policy,
         warm_pool_size: args.warm_pool_size,
         stdin: args.stdin,
+        healthcheck: args.healthcheck,
     })
 }
 
@@ -1418,6 +1428,7 @@ mod tests {
             argv: vec!["/bin/true".to_string()],
             ack_divergence: Vec::new(),
             stdin: Vec::new(),
+            healthcheck: None,
         }
     }
 

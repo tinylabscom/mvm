@@ -861,6 +861,33 @@ fn machine_run_entrypoint_conflicts_with_interactive() {
 }
 
 #[test]
+fn machine_run_parses_healthcheck_flags() {
+    let args = parse_machine_run(&[
+        "--image",
+        "nginx",
+        "--healthcheck",
+        "curl -fsS localhost/health",
+        "--health-interval",
+        "10",
+        "--health-retries",
+        "5",
+        "--",
+        "nginx",
+        "-g",
+        "daemon off;",
+    ])
+    .expect("healthcheck flags parse");
+    assert_eq!(
+        args.healthcheck.as_deref(),
+        Some("curl -fsS localhost/health")
+    );
+    assert_eq!(args.health_interval, 10);
+    assert_eq!(args.health_timeout, 5); // default
+    assert_eq!(args.health_retries, 5);
+    assert_eq!(args.health_start_period, 0); // default
+}
+
+#[test]
 fn test_run_volume_dir_inject() {
     let cli = Cli::try_parse_from([
         "mvmctl",

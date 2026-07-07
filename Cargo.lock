@@ -2505,6 +2505,7 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-guest",
+ "mvm-sdk",
  "object_store",
  "rand 0.8.6",
  "secrecy",

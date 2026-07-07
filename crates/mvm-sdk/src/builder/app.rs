@@ -108,6 +108,7 @@ impl AppBuilder {
             network: self.network,
             resources,
             dependencies: self.dependencies,
+            health_check: None,
             threat_tier: Default::default(),
             addons: vec![],
             // `hooks` is a four-phase struct

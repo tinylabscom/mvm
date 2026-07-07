@@ -223,6 +223,25 @@ pub(in crate::commands) struct MachineRunArgs {
     /// or a bare number of seconds. The reaper tears down expired machines.
     #[arg(long, value_name = "DURATION")]
     pub ttl: Option<String>,
+    /// Declare this workload a long-running service: the shell command is
+    /// exec'd in the guest as its liveness check (exit 0 = healthy). Its
+    /// presence promotes the run to the persistent lifecycle — it will not tear
+    /// down on a backstop; it runs until `stop`. A run whose entrypoint exits
+    /// still tears down on that exit code.
+    #[arg(long, value_name = "CMD")]
+    pub healthcheck: Option<String>,
+    /// Seconds between checks. Recorded now; enforced when active probing lands.
+    #[arg(long = "health-interval", default_value_t = 30)]
+    pub health_interval: u32,
+    /// Per-check timeout in seconds. Recorded now; enforced later.
+    #[arg(long = "health-timeout", default_value_t = 5)]
+    pub health_timeout: u32,
+    /// Consecutive failures before unhealthy. Recorded now; enforced later.
+    #[arg(long = "health-retries", default_value_t = 3)]
+    pub health_retries: u32,
+    /// Grace period after start before checks count. Recorded now; enforced later.
+    #[arg(long = "health-start-period", default_value_t = 0)]
+    pub health_start_period: u32,
     /// Attach the foreground command to an interactive PTY.
     #[arg(short = 't', long, conflicts_with_all = ["detach", "up_json", "ttl"])]
     pub tty: bool,
@@ -329,6 +348,13 @@ impl MachineRunArgs {
             ack_divergence: Vec::new(),
             argv: self.argv,
             stdin: Vec::new(),
+            healthcheck: crate::exec::build_healthcheck(
+                self.healthcheck.as_deref(),
+                self.health_interval,
+                self.health_timeout,
+                self.health_retries,
+                self.health_start_period,
+            ),
         }
     }
 
@@ -337,11 +363,12 @@ impl MachineRunArgs {
         self.tty || self.interactive
     }
 
-    /// `-d`/`--detach`, `--up-json`, or `--ttl` makes the machine survive the command.
-    /// `--tty` is deliberately NOT consulted here — persistence and
-    /// interactivity are independent axes.
+    /// `-d`/`--detach`, `--up-json`, `--ttl`, or a declared `--healthcheck`
+    /// makes the machine survive the command. `--tty`/`--name` are deliberately
+    /// not consulted — persistence, interactivity, and identity are independent
+    /// axes.
     fn persistent(&self) -> bool {
-        self.detach || self.up_json || self.ttl.is_some()
+        self.detach || self.up_json || self.ttl.is_some() || self.healthcheck.is_some()
     }
 
     /// Resolve the lifecycle mode purely from the flags. Fresh foreground runs
@@ -539,6 +566,13 @@ fn machine_run_spec(
         agent_verb: args.agent_verb.clone(),
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
+        health_check: crate::exec::build_healthcheck(
+            args.healthcheck.as_deref(),
+            args.health_interval,
+            args.health_timeout,
+            args.health_retries,
+            args.health_start_period,
+        ),
     })
 }
 
@@ -1082,6 +1116,7 @@ impl MachineCreateArgs {
             agent_verb: Vec::new(),
             created_at: Some(mvm_core::time::utc_now()),
             last_started_at: None,
+            health_check: None,
         })
     }
 }
@@ -2655,6 +2690,11 @@ pub(in crate::commands) fn boot_persistent_by_name(
             no_supervisor: false,
             up_json: false,
             ttl: None,
+            healthcheck: None,
+            health_interval: 30,
+            health_timeout: 5,
+            health_retries: 3,
+            health_start_period: 0,
             entrypoint: false,
             fresh: false,
             reset: false,
@@ -3138,6 +3178,53 @@ mod tests {
     }
 
     #[test]
+    fn healthcheck_makes_run_persistent() {
+        let mut args = parse_run(&["run"]).expect("parse");
+        assert!(!args.persistent());
+        args.healthcheck = Some("true".into());
+        assert!(
+            args.persistent(),
+            "a healthcheck promotes the run to persistent"
+        );
+    }
+
+    #[test]
+    fn name_alone_stays_transient() {
+        let mut args = parse_run(&["run"]).expect("parse");
+        args.name = Some("web".into());
+        assert!(
+            !args.persistent(),
+            "--name is identity only, not persistence"
+        );
+    }
+
+    #[test]
+    fn healthcheck_run_routes_persistent_foreground() {
+        // A declared service without `-d`/`-it` boots and registers through the
+        // persistent lifecycle (streamed in the foreground by the argv arm of
+        // `run_persistent_post_start`), not the transient teardown path.
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "nginx",
+            "--healthcheck",
+            "true",
+            "--",
+            "nginx",
+            "-g",
+            "daemon off;",
+        ])
+        .expect("parse");
+        assert!(
+            args.persistent(),
+            "a healthcheck promotes the run to persistent"
+        );
+        assert!(!args.detach, "no -d");
+        assert!(!args.interactive(), "no -it");
+        assert_eq!(args.resolve_mode().unwrap(), MachineRunMode::Persistent);
+    }
+
+    #[test]
     fn tty_long_short_alias_and_it_bundle_request_interactivity() {
         for argv in [
             &["run", "--image", "alpine", "--tty"][..],
@@ -3271,6 +3358,7 @@ mod tests {
             agent_verb: vec![],
             created_at: None,
             last_started_at: None,
+            health_check: None,
         }
     }
 
@@ -4028,6 +4116,7 @@ mod tests {
             agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
+            health_check: None,
         };
         mark_machine_started(&mut spec, "sha256:abc".to_string());
         assert_eq!(spec.resolved_digest.as_deref(), Some("sha256:abc"));
@@ -4246,6 +4335,7 @@ ssh_agent = true
             agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
+            health_check: None,
         };
 
         let summary =
@@ -4287,6 +4377,7 @@ ssh_agent = true
             agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
+            health_check: None,
         };
 
         let summary = machine_start_preflight_summary(&spec, None).expect("preflight summary");
@@ -4359,6 +4450,7 @@ ssh_agent = true
             agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
+            health_check: None,
         };
         let input = machine_start_receipt_input(&spec, "firecracker").expect("receipt input");
         assert_eq!(input.auth.mode, "ssh-agent-socket");
@@ -4521,6 +4613,7 @@ ssh_agent = true
             agent_verb: Vec::new(),
             created_at: Some("2026-06-18T00:00:00Z".to_string()),
             last_started_at: None,
+            health_check: None,
         };
         let err = machine_start_receipt_input(&spec, "firecracker")
             .expect_err("standard profile must refuse ssh-agent");
@@ -4575,6 +4668,7 @@ ssh_agent = true
             agent_verb: Vec::new(),
             created_at: Some(mvm_core::time::utc_now()),
             last_started_at: None,
+            health_check: None,
         };
         save_machine_spec(&spec, false).expect("first save");
         let err = save_machine_spec(&spec, false).expect_err("overwrite rejected");
@@ -4618,6 +4712,7 @@ ssh_agent = true
             agent_verb: Vec::new(),
             created_at: Some(mvm_core::time::utc_now()),
             last_started_at: None,
+            health_check: None,
         };
         save_machine_spec(&spec, false).expect("save");
         let err = remove_machine_spec("web", false).expect_err("confirmation required");
@@ -4648,6 +4743,7 @@ ssh_agent = true
             agent_verb: Vec::new(),
             created_at: Some(mvm_core::time::utc_now()),
             last_started_at: None,
+            health_check: None,
         };
         save_machine_spec(&spec, false).expect("save");
     }
@@ -5036,6 +5132,7 @@ ssh_agent = true
             agent_verb: vec![],
             created_at: None,
             last_started_at: None,
+            health_check: None,
         }
     }
 

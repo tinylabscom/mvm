@@ -62,6 +62,10 @@ pub struct MachineSpec {
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_started_at: Option<String>,
+    /// Liveness check declared via `--healthcheck` at `machine run` time.
+    /// Recorded for inspection now; consumed by active probing later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check: Option<mvm_sdk::ir::HealthCheck>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -345,7 +349,30 @@ mod tests {
             agent_verb: vec![],
             created_at: None,
             last_started_at: None,
+            health_check: None,
         }
+    }
+
+    #[test]
+    fn machine_spec_roundtrips_health_check() {
+        let mut spec = spec_fixture("web");
+        spec.health_check = Some(mvm_sdk::ir::HealthCheck {
+            command: vec!["/bin/sh".into(), "-lc".into(), "true".into()],
+            interval_secs: 30,
+            timeout_secs: 5,
+            retries: 3,
+            start_period_secs: 0,
+        });
+        let json = serde_json::to_string(&spec).unwrap();
+        assert_eq!(spec, serde_json::from_str::<MachineSpec>(&json).unwrap());
+
+        // Absent healthcheck skip-serializes (old spec files stay readable).
+        let bare = spec_fixture("bare");
+        assert!(
+            !serde_json::to_string(&bare)
+                .unwrap()
+                .contains("health_check")
+        );
     }
 
     #[test]
@@ -497,6 +524,7 @@ mod tests {
             agent_verb: vec![],
             created_at: None,
             last_started_at: None,
+            health_check: None,
         }
     }
 

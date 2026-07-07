@@ -33,6 +33,7 @@ fn base_app() -> App {
         addons: vec![],
         hooks: Default::default(),
         files: vec![],
+        health_check: None,
     }
 }
 
