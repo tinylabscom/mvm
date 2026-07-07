@@ -1,0 +1,77 @@
+name: Pack signing smoke
+
+# Manual-only gate that proves the keyless pack signing round-trip works
+# against a REAL cosign bundle, not just the offline fixtures the unit
+# suite exercises. It produces a throwaway keyless manifest over dummy
+# artifacts, signs it with `cosign sign-blob` using this job's own GitHub
+# Actions OIDC identity, then feeds the real bundle through the Rust
+# sigstore-verify stack the pack verifier uses in production. Signs nothing
+# a real user consumes and publishes no artifacts.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Produce a keyless builder pack manifest over dummy artifacts
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p smoke
+          printf 'dummy-kernel' > smoke/vmlinux
+          printf 'dummy-rootfs' > smoke/rootfs.ext4
+          printf 'dummy-sbom'   > smoke/sbom.txt
+          # The SAN cosign embeds in the certificate for a GitHub Actions
+          # OIDC-keyless signature is this workflow file bound to the
+          # dispatch ref — reconstruct exactly that so the verify step
+          # below checks against the identity the signature actually
+          # carries.
+          IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/pack-signing-smoke.yml@${REF}"
+          echo "IDENTITY=${IDENTITY}" >> "$GITHUB_ENV"
+          cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
+            --vmlinux smoke/vmlinux --rootfs smoke/rootfs.ext4 --arch x86_64 --channel stable --keyless \
+            --identity "${IDENTITY}" --out-dir smoke --sbom smoke/sbom.txt \
+            --revocation-channel "https://example.test/rev.json"
+          mv smoke/manifest.json smoke/pack-manifest.json
+
+      - name: Keyless-sign the manifest with cosign
+        run: |
+          set -euo pipefail
+          cosign sign-blob \
+            --yes \
+            --bundle smoke/pack-manifest.json.bundle \
+            smoke/pack-manifest.json
+
+      - name: Verify the real cosign bundle through the Rust verifier
+        # This is the gap a real signature closes: every other pack-signing
+        # test signs with an in-process ed25519 key or feeds a synthetic
+        # bundle fixture. Here `cosign sign-blob`'s actual bundle output —
+        # certificate chain, signature, and transparency-log inclusion
+        # proof — is checked by the same `verify_signed_payload` primitive
+        # the production pack verifier calls. A nonzero exit here means the
+        # Rust sigstore-verify stack and the installed cosign CLI have
+        # drifted apart on bundle format, and fails the job.
+        run: |
+          set -euo pipefail
+          cargo run --release -p mvm-core --example verify-pack-signature --features manifest-verify -- \
+            --manifest smoke/pack-manifest.json --bundle smoke/pack-manifest.json.bundle \
+            --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
