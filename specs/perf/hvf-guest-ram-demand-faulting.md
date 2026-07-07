@@ -1,6 +1,7 @@
 # HVF guest RAM demand-faulting — density design
 
-**Status:** Design (spike-validated). Ready for implementation planning.
+**Status:** Phase 1 productionized + live-verified; Phase 2 baseline measured;
+Phase 3 decisions recorded (below). Follow-on: kernel-image sharing + slimming.
 **Owner:** Ari
 **Goal:** Make 1000 concurrent HVF microVMs feasible on a single host by
 paying host memory for a guest's *working set*, not its *allocation*.
@@ -108,26 +109,75 @@ Mostly measurement, one real check:
 3. Publish the numbers in this doc as the density baseline the reassessment
    in Phase 3 is judged against.
 
+### Phase 2 results (measured 2026-07-07, this host, `--image alpine` idle)
+
+**Release-build posture (step 1): correct.** The shipped supervisor is
+release-built — the release pipeline builds every per-VM host binary with
+`cargo build --release` and packages `mvm-hvf-supervisor` next to `mvmctl`
+so the adjacent-to-exe resolver finds it on a downloaded install. Phase 2 is
+therefore measurement only; no build-path fix is owed.
+
+**Density baseline (steps 2–3).** Release `mvm-hvf-supervisor`, idle:
+
+| Config (512 MB unless noted) | Host supervisor RSS | phys_footprint |
+|---|---|---|
+| Baseline `alloc_zeroed` (prior) | 638 MB | — (region fully resident) |
+| demand-zero, debug | 144 MB | — |
+| demand-zero, release, 128 MB | 136 MB | — |
+| demand-zero, release, 512 MB | 144 MB | **139.9 MB** |
+
+Reading the numbers:
+
+- **Allocation is no longer resident.** 128 MB→512 MB (a 384 MB bump) moves
+  RSS only 8 MB — a ~2% slope. `vmmap` on the idle 512 MB VM confirms it:
+  writable regions total 702.9 MB but only **82.2 MB written / 101.1 MB
+  resident** (86% of the guest region never faults in). The Phase 1 win holds
+  in release.
+- **The per-VM floor is real, not RSS inflation.** phys_footprint (139.9 MB)
+  ≈ RSS (144 MB), so the floor is genuine private-dirty memory, not
+  shared-framework pages double-counted across processes. Release does *not*
+  shave it to the ~40–50 MB the design speculated.
+- **What the floor is made of.** The ~82 MB written per idle VM is the guest
+  *working set*, and its largest fixed component is the kernel `Image` — a
+  ~20–40 MB arm64 kernel copied into each VM's *private* guest RAM at boot —
+  plus the guest's own ~19 MB runtime, page tables, and supervisor heap. The
+  512 MB allocation contributes almost nothing; the loaded kernel does.
+
+**1000-VM projection (honest).** At ~140 MB private-dirty per idle VM, 1000
+idle VMs land near **~140 GB**, not the earlier optimistic ~40–50 GB. Phase 1
+took the allocation off the table; the remaining floor is dominated by
+per-VM *kernel-image residency*, which is exactly what the Phase 3 levers
+target. Capacity still scales with real working sets, not allocations.
+
 ## Phase 3 — Reassess the smaller levers against real numbers
 
-With Phase 1+2 landed, decide each with data rather than assumption:
+The Phase 2 floor (~140 MB/VM, kernel-image-dominated) reorders the levers:
+guest RAM is solved, so the next real memory is the per-VM private kernel copy.
 
-- **Default `--memory` sizing (was #1).** Demand-faulting makes idle
-  over-allocation nearly free, so lowering the default mainly risks OOM-ing
-  real workloads. Expected outcome: keep a sane default, document that idle
-  allocation no longer costs its size; a modest default tweak only if the
-  release floor argues for it. Likely a doc + small config change, not a
-  workstream.
-- **Kernel sharing across VMs (was #4).** Kernel text is touched per VM, so
-  at 1000 VMs a shared read-only mapping of the kernel image still saves
-  real memory — but far less than Phase 1, and it is a distinct, larger
-  effort. Expected outcome: spin out as its own plan/spec, not folded here.
-- **Kernel slimming (was #5).** ~a few MB of Slab per guest; overlaps
-  existing in-repo kernel-slimming work. Expected outcome: fold into that
-  work or drop.
+- **Default `--memory` sizing — KEEP 512 MB (doc-only change).** The default
+  is `512M` (`--memory`, machine CLI). Idle 128 MB and 512 MB now cost within
+  8 MB of each other, so lowering the default frees almost nothing while
+  raising OOM risk for real workloads that touch their RAM. Decision: keep
+  `512M`; this doc records that idle allocation no longer costs its size. No
+  config change.
+- **Kernel sharing across VMs — GO, as its own follow-on (promoted).** This
+  was expected to be minor; the numbers say otherwise. The kernel `Image` is
+  `copy_nonoverlapping`'d into each VM's private demand-zero region, so every
+  guest carries its own ~20–40 MB dirty copy — the single largest movable
+  slice of the ~140 MB floor. A shared read-only mapping of the kernel image
+  across guests would save on the order of tens of GB at 1000 VMs. It is a
+  distinct, larger effort (guest RAM layout + `hv_vm_map` of a shared region
+  + boot-protocol placement) and gets its own spec — not folded here — but it
+  is now the priority density lever after Phase 1, not an afterthought.
+- **Kernel slimming — FOLD into existing kernel work.** Every megabyte cut
+  from the kernel `Image` is a megabyte off the per-VM private copy above, so
+  slimming compounds directly with (and partially substitutes for) kernel
+  sharing. Fold it into the in-repo kernel-slimming effort rather than run it
+  standalone; track the per-VM `Image` size as the metric.
 
-Phase 3 produces a written go/defer/drop decision for each, not necessarily
-more code.
+Net: Phase 1 shipped the big win (allocation → working set). The follow-on
+density work is kernel-image sharing + slimming, quantified above; default
+sizing needs no change.
 
 ## Risks / caveats
 
@@ -143,9 +193,12 @@ more code.
 
 ## Success criteria
 
-- Idle HVF VM host RSS is a small, bounded fraction of `--memory` (Phase 1),
-  verified live on this host.
-- Guest behavior, boot, and the zero-init guarantee are unchanged; existing
-  HVF tests pass; new `GuestRam` tests pass.
-- A recorded release-build density baseline (Phase 2).
-- A written decision on each smaller lever (Phase 3).
+- [x] Idle HVF VM host RSS is a small, bounded fraction of `--memory` (Phase 1),
+  verified live on this host — 512 MB idle: 638 MB → 144 MB, allocation not resident.
+- [x] Guest behavior, boot, and the zero-init guarantee are unchanged; existing
+  HVF tests pass; new `GuestRam` tests pass — `GUEST_OK`, `MemTotal 497424 kB`,
+  4/4 `guest_ram` tests, clippy clean.
+- [x] A recorded release-build density baseline (Phase 2) — 128/512 MB idle,
+  phys_footprint 139.9 MB, ~140 GB/1000-VM projection.
+- [x] A written decision on each smaller lever (Phase 3) — keep default sizing;
+  promote kernel-image sharing; fold in kernel slimming.

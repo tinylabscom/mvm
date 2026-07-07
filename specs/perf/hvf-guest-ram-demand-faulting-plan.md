@@ -48,7 +48,7 @@
   - `GuestRam::len(&self) -> usize`
   - `impl Drop for GuestRam` (calls `munmap`)
 
-- [ ] **Step 1: Declare the module**
+- [x] **Step 1: Declare the module**
 
 In `crates/mvm-backend/src/hvf/mod.rs`, add alongside the other `mod` lines:
 
@@ -56,7 +56,7 @@ In `crates/mvm-backend/src/hvf/mod.rs`, add alongside the other `mod` lines:
 mod guest_ram;
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Create `crates/mvm-backend/src/hvf/guest_ram.rs`:
 
@@ -136,12 +136,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Run: `RUSTC=$HOME/.cargo/bin/rustc PATH=$HOME/.cargo/bin:$PATH cargo nextest run -p mvm-backend guest_ram`
 Expected: FAIL (panics at `unimplemented!()` / `not yet implemented`).
 
-- [ ] **Step 4: Implement `new` and `Drop`**
+- [x] **Step 4: Implement `new` and `Drop`**
 
 Replace the two `unimplemented!()` bodies:
 
@@ -181,17 +181,17 @@ impl Drop for GuestRam {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `RUSTC=$HOME/.cargo/bin/rustc PATH=$HOME/.cargo/bin:$PATH cargo nextest run -p mvm-backend guest_ram`
 Expected: PASS (4 tests).
 
-- [ ] **Step 6: Clippy clean**
+- [x] **Step 6: Clippy clean**
 
 Run: `RUSTC=$HOME/.cargo/bin/rustc PATH=$HOME/.cargo/bin:$PATH cargo clippy -p mvm-backend -- -D warnings`
 Expected: no warnings.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/mvm-backend/src/hvf/guest_ram.rs crates/mvm-backend/src/hvf/mod.rs
@@ -209,7 +209,7 @@ git commit -m "feat(hvf): demand-zero GuestRam mmap type"
 - Consumes: `GuestRam::new`, `GuestRam::as_ptr`, `GuestRam::len` (Task 1).
 - Produces: no new public interface; `boot`/`run` internals switch from a raw `*mut u8` + `Layout` to a `GuestRam` owner. `run()` keeps its `ram: *mut u8` parameter, fed by `guest_ram.as_ptr()`.
 
-- [ ] **Step 1: Confirm current live baseline still reproduces**
+- [x] **Step 1: Confirm current live baseline still reproduces**
 
 The spike hack is already in this file. Reconfirm the number before refactoring so the refactor is proven behavior-preserving.
 
@@ -222,7 +222,7 @@ pkill -f "$PWD/target/debug/mvm-hvf-supervisor" 2>/dev/null || true
 ```
 Expected: ~140–150 MB (matches the spike; NOT ~638 MB).
 
-- [ ] **Step 2: Replace the allocation site**
+- [x] **Step 2: Replace the allocation site**
 
 In `kernel_boot.rs`, replace the current spike block (the `Layout` line, the `let _ = &layout;` line, the `mmap` block, the `MAP_FAILED` check, and `let ram = ram as *mut u8;`) with:
 
@@ -239,7 +239,7 @@ use super::guest_ram::GuestRam;
 
 Remove the now-unused `use std::alloc::Layout;` import.
 
-- [ ] **Step 3: Delete the manual free paths**
+- [x] **Step 3: Delete the manual free paths**
 
 Remove all three teardown calls that free `ram` (the two error-path frees and the success-path free) — RAII now unmaps when `guest_ram` leaves scope. The error paths become bare `return Err(...)`; the success path drops `guest_ram` at function end. Concretely, delete these lines wherever they appear:
 
@@ -255,12 +255,12 @@ Remove all three teardown calls that free `ram` (the two error-path frees and th
 
 Ensure `guest_ram` stays in scope until after `hv_vm_destroy()` (it is a local in `boot`, so it drops after the `run(...)` block that calls destroy — correct ordering).
 
-- [ ] **Step 4: Build the supervisor**
+- [x] **Step 4: Build the supervisor**
 
 Run: `RUSTC=$HOME/.cargo/bin/rustc PATH=$HOME/.cargo/bin:$PATH cargo build -p mvm-vm-host --bin mvm-hvf-supervisor`
 Expected: compiles, no `unused` warnings for `Layout`/`libc`.
 
-- [ ] **Step 5: Live re-verify (behavior-preserving + functional)**
+- [x] **Step 5: Live re-verify (behavior-preserving + functional)**
 
 Run (env per Global Constraints):
 ```bash
@@ -272,13 +272,13 @@ pkill -f "$PWD/target/debug/mvm-hvf-supervisor" 2>/dev/null || true
 ```
 Expected: `GUEST_OK`, `MemTotal ~497424 kB`, idle RSS ~140–150 MB (unchanged from Step 1 — the type refactor preserves behavior).
 
-- [ ] **Step 6: Full HVF test + clippy**
+- [x] **Step 6: Full HVF test + clippy**
 
 Run: `RUSTC=$HOME/.cargo/bin/rustc PATH=$HOME/.cargo/bin:$PATH cargo nextest run -p mvm-backend`
 Run: `RUSTC=$HOME/.cargo/bin/rustc PATH=$HOME/.cargo/bin:$PATH cargo clippy -p mvm-backend -p mvm-vm-host -- -D warnings`
 Expected: pass; zero warnings. (If mvm-backend tests hit the macOS codesign SIGKILL noted in project memory, run with `-E 'not test(/boot_smoke/)'` locally and rely on the live check in Step 5.)
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/mvm-backend/src/hvf/kernel_boot.rs
@@ -294,7 +294,7 @@ git commit -m "refactor(hvf): allocate guest RAM through GuestRam RAII"
 **Files:**
 - Inspect only (packaging/build scripts); Doc update if a fix is needed.
 
-- [ ] **Step 1: Find how the supervisor ships**
+- [x] **Step 1: Find how the supervisor ships**
 
 Run:
 ```bash
@@ -302,12 +302,12 @@ rg -n 'mvm-hvf-supervisor|release|--release|profile' crates/mvm-cli/build.rs Jus
 ```
 Determine whether the packaged/embedded supervisor is built with `--release`.
 
-- [ ] **Step 2: Record the finding**
+- [x] **Step 2: Record the finding**
 
 - If already release-built: note it in `specs/perf/hvf-guest-ram-demand-faulting.md` under Phase 2 and proceed to Task 4.
 - If debug-built in the shipping path: that is a real defect — capture the exact file/line in the doc and add a follow-up task here to switch it to `--release` (with the build command and the before/after verification). Do not guess; base it on the packaging code found in Step 1.
 
-- [ ] **Step 3: Commit the doc update**
+- [x] **Step 3: Commit the doc update**
 
 ```bash
 git add specs/perf/hvf-guest-ram-demand-faulting.md
@@ -321,11 +321,11 @@ git commit -m "docs(perf): record supervisor release-build posture"
 **Files:**
 - Doc: `specs/perf/hvf-guest-ram-demand-faulting.md`
 
-- [ ] **Step 1: Build the release supervisor**
+- [x] **Step 1: Build the release supervisor**
 
 Run: `RUSTC=$HOME/.cargo/bin/rustc PATH=$HOME/.cargo/bin:$PATH cargo build --release -p mvm-vm-host --bin mvm-hvf-supervisor`
 
-- [ ] **Step 2: Measure idle RSS at two allocations**
+- [x] **Step 2: Measure idle RSS at two allocations**
 
 Run (env per Global Constraints, but point `MVM_HVF_SUPERVISOR_PATH` at `target/release/mvm-hvf-supervisor`):
 ```bash
@@ -338,11 +338,11 @@ done
 ```
 Expected: idle RSS well below the debug ~144 MB (fixed VMM overhead shrinks in release). Derive per-VM fixed overhead = RSS(512M) − 384 MB slope check against RSS(128M).
 
-- [ ] **Step 3: Record the density baseline**
+- [x] **Step 3: Record the density baseline**
 
 In `specs/perf/hvf-guest-ram-demand-faulting.md` Phase 2 section, fill a table: release idle RSS at 128M/512M, derived fixed overhead, and the projected 1000-VM figure (idle-working-set × 1000). This is the number Phase 3 decisions are judged against.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add specs/perf/hvf-guest-ram-demand-faulting.md
@@ -358,7 +358,7 @@ git commit -m "docs(perf): record release density baseline"
 **Files:**
 - Doc: `specs/perf/hvf-guest-ram-demand-faulting.md`
 
-- [ ] **Step 1: Default `--memory` sizing decision**
+- [x] **Step 1: Default `--memory` sizing decision**
 
 Find the current default:
 ```bash
@@ -366,15 +366,15 @@ rg -n 'memory|mem_mib|default.*512|512.*default' crates/mvm-cli/src/commands cra
 ```
 Using the Phase 2 baseline, write a decision: keep default + document that idle allocation no longer costs its size, or a specific modest change (with the exact file/line and value). Justify against the OOM risk of under-provisioning real workloads.
 
-- [ ] **Step 2: Kernel-sharing decision**
+- [x] **Step 2: Kernel-sharing decision**
 
 State whether a shared read-only kernel-image mapping across VMs is worth a dedicated follow-on plan, quantified from the per-VM kernel-text residency observed in Phase 2. If yes, note it as a separate spec to file (do not implement here).
 
-- [ ] **Step 3: Kernel-slimming decision**
+- [x] **Step 3: Kernel-slimming decision**
 
 State whether to fold the ~few-MB Slab trim into existing in-repo kernel-slimming work or drop it. One or two sentences with the measured Slab figure.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add specs/perf/hvf-guest-ram-demand-faulting.md
