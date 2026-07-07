@@ -14,7 +14,7 @@ One rule spans both lifecycle types: **liveness is judged by the signal appropri
 - **Driver: the resident per-tenant `mvm-host-agent` daemon.** It is the project's sanctioned "resident daemon over per-VM spawn" (ADR-084), is already resident with a periodic tick, tracks the live VM registration set, and — critically — **outlives individual VMs**, which is what makes restart possible (a per-VM process cannot cleanly restart itself).
 - **Probe = agent exec.** The daemon runs the check in the guest via a host→guest exec client (exit 0 = healthy). Exec-form only (the guest is vsock-only).
 - **Restart the whole VM**, bounded by exponential backoff + a max-attempts cap, then park `Unhealthy` rather than crash-loop.
-- **Restart-on-exit for declared services.** A healthchecked service that exits is a *crash*, not a completion, so it restarts under the same policy — refining phase A's "exit always wins" for services only (a task with no healthcheck still tears down on exit).
+- **Restart-on-crash for declared services, via the probe path.** A crashed service is restarted — but *not* by watching for its disappearance from the daemon's live set. A genuine crash does not deregister the VM (no `stop()` call), so its registration lingers and the next probe hits an unreachable agent → `Fail` → `Unhealthy` → restart, through the same bounded policy. A *clean* disappearance from the live set is treated as possibly-intentional and is **not** restarted, because a deliberate `machine stop` also removes the registration (making vanish-detection unable to distinguish the two — it would spuriously resurrect stopped machines). This still refines phase A's "exit always wins" for services only: a task with no healthcheck tears down on exit; a service's crash is caught by probing.
 - **Scope: accessible/dev-tier persistent services** (`machine run`). Sealed prod images ship an agent without exec; their health needs a non-exec signal — an mvmd-deployment concern, out of scope here.
 
 ## Architecture
@@ -42,7 +42,7 @@ Persisted through the **existing** readiness seam — `record_vm_readiness(vm_na
 
 ### Restart — bounded
 
-On the transition **→ Unhealthy** (and on unexpected exit of a healthchecked service), the daemon restarts the whole VM by spawning `mvmctl machine restart <name>` (reuses `run_restart` = `stop_running_machine` + `start_machine`; a subprocess avoids an `mvm-hostd → mvm-cli` dependency and matches the daemon's existing subprocess model).
+On the transition **→ Unhealthy** (which a crashed service reaches via probe-detected unreachability — see restart-on-crash above), the daemon restarts the whole VM by spawning `mvmctl machine restart <name>` (reuses `run_restart` = `stop_running_machine` + `start_machine`; a subprocess avoids an `mvm-hostd → mvm-cli` dependency and matches the daemon's existing subprocess model).
 
 - **Backoff:** exponential from a base (1s → 2s → 4s …) capped (e.g. 5 min) between attempts.
 - **Cap:** after `MAX_RESTART_ATTEMPTS` (e.g. 5) without reaching a sustained Healthy state, stop restarting and leave the machine parked `Unhealthy` (stopped) — no thrash.
