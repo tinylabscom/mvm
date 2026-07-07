@@ -23,7 +23,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::{mvm_data_dir, vm_state_dir};
 use mvm_core::vm_backend::{
-    VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendSecurityProfile, ClaimStatus, LayerCoverage, VmBackend, VmCapabilities, VmExitStatus,
+    VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
 use crate::base::ui;
@@ -204,6 +205,33 @@ impl VmBackend for HvfBackend {
             virtiofs_root: true,
             // pause/snapshot/cow/remap land as they are wired onto the primitive.
             ..Default::default()
+        }
+    }
+
+    fn security_profile(&self) -> BackendSecurityProfile {
+        // Same Hypervisor.framework microVM tier as Vz (Tier 2), but the in-house
+        // VMM owns the surface and the data plane is vsock-only (no guest NIC;
+        // egress rides the host gating endpoint). Claims 1-2/4-7 hold as on FC;
+        // claim 3 (verified boot) does not hold on the default path — the
+        // virtiofs-root serves a host directory that cannot be dm-verity-sealed.
+        BackendSecurityProfile {
+            claims: [
+                ClaimStatus::Holds,       // 1 — host-fs isolation via the VMM + admitted shares
+                ClaimStatus::Holds,       // 2 — uid-0 protections, guest-side (same as FC)
+                ClaimStatus::DoesNotHold, // 3 — virtiofs-root has no dm-verity; block+ext4 (FC/Option B) only
+                ClaimStatus::Holds,       // 4 — guest agent has no do_exec in prod
+                ClaimStatus::Holds,       // 5 — vsock framing fuzzed
+                ClaimStatus::Holds,       // 6 — dev image hash verified
+                ClaimStatus::Holds,       // 7 — cargo deps audited
+            ],
+            layer_coverage: LayerCoverage::all_layers(),
+            tier: "Tier 2",
+            notes: &[
+                "In-house Hypervisor.framework VMM on macOS 26+ Apple silicon (the default tier).",
+                "vsock-only data plane: no guest NIC; egress rides the host gating endpoint (auditable).",
+                "Claim 3 (verified boot) does not hold on the virtiofs-root path — dm-verity targets the block+ext4 backends (Firecracker + Option B).",
+                "Pause/resume + snapshot land as they are wired onto the primitive.",
+            ],
         }
     }
 
@@ -502,6 +530,16 @@ mod tests {
     #[test]
     fn identifies_as_hvf() {
         assert_eq!(HvfBackend.name(), "hvf");
+    }
+
+    #[test]
+    fn security_profile_is_tier_2_with_claim_3_partial() {
+        // The macOS-26 default backend must report a real tier — doctor's
+        // security posture derives from this, and the trait default is "Unknown".
+        let profile = HvfBackend.security_profile();
+        assert_eq!(profile.tier, "Tier 2");
+        assert!(profile.layer_coverage.is_microvm());
+        assert_eq!(profile.dropped_claims(), vec![3]);
     }
 
     #[test]
