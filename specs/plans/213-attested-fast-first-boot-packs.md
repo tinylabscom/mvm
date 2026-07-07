@@ -412,3 +412,61 @@ claim, analogous to the libkrun resident builder), reusing the backend-agnostic
   quarantine dir behind. Readers skip `.incoming`, so this is disk-usage only, not
   a correctness or safety issue. A sweep of stale quarantine dirs belongs with the
   existing prefix-agnostic cache reaper rather than in this slice.
+
+## Slice 1 correction (2026-07-06): Stage-0 target retired → attested builder download
+
+Recon during Unit 3 design (plus an isolated live probe) invalidated the
+original Unit 3 target and re-pointed the slice. Recorded here so the earlier
+"seed the persistent builder store" framing above is understood as superseded
+for the installed path.
+
+### What we learned
+
+- **The builder-image acquisition path is source-vs-installed split.**
+  `resolve_builder_vm_bootstrap_action` returns `BuildFromSource` (which runs
+  Stage 0 — the multi-minute Nix store population) only on a **source checkout**;
+  an **installed binary** with no in-repo builder flake takes `DownloadPublished`
+  and never runs Stage 0. The pack path is (correctly) a no-op on source
+  checkouts, so a Stage-0-store materializer would have **no consumer on the
+  installed binaries the pack is for**. The multi-minute figure motivating the
+  slice was a source-checkout cost.
+- **The installed builder's base `/nix/store` ships inside `rootfs.ext4`** as the
+  overlay lowerdir (`mvm-host-vm-init` mounts `/nix` = overlay(seed lowerdir,
+  persistent `nix-store-<arch>.img` upperdir)). The upperdir is formatted empty
+  on first boot and holds only net-new paths. So there is no separately-seedable
+  base store; the base closure rides in the published rootfs seed, already
+  Nix-DB-registered via `/nix-path-registration`.
+- **`DownloadPublished` already delivers the fast base but with no attestation.**
+  `download_builder_vm_image` fetches `vmlinux` + `rootfs.ext4` under a plain
+  per-arch SHA-256 checksum — no signature, no content-addressing, no revocation.
+  That is the real gap the pack schema (Unit 1) + verified cache (Unit 2) close.
+
+### Corrected Unit 3 — attested builder-image download (supersedes the Stage-0-seed materializer)
+
+Unit 3 becomes the **attested-download materializer**: given a verified Builder
+`VerifiedPackDir` carrying `vmlinux` + `rootfs.ext4` (+ `kernels/`, `cmdline.txt`),
+place them into `BUILDER_DIR/<arch>` — the exact directory `DownloadPublished`
+writes — and write the `.mvm-source.sha256` / `.mvm-artifacts.sha256` /
+`.mvm-provenance.json` markers so `builder_vm_source_cache_ready` reports ready
+and the next resolve takes `UseCached`. Gated behind `MVM_BUILDER_PACK=1`; a no-op
+on source checkouts (`find_builder_vm_flake().is_ok()`) and byte-identical to
+today when off. The flag routes the `DownloadPublished` arm
+(`perform_builder_vm_download_published`) through the materializer instead of the
+plain checksum fetch.
+
+Offline-testable exactly like Units 1–2: promote a synthetic Builder pack via
+`PackBuilder`/`pack_cache::promote`, materialize into a temp `out_dir`, and assert
+the placed files + markers make `builder_vm_source_cache_ready` return true; plus
+flag-parse and source-checkout-no-op predicate tests. The **network fetch** of the
+attested pack from a release channel (trust store + URL scheme) is deferred to the
+release/trust workstreams (WS-B/I) — this unit is the local verify-and-place core.
+
+### Speed spun out to a measurement-gated pipeline follow-up
+
+"Fast first build" is decoupled from provenance. The installed first-build cost is
+the closure delta beyond the published rootfs seed; the structurally-clean lever is
+**fattening that published seed closure** at build time (delivered through the
+existing download + the attested pack above), not a runtime store materializer. It
+must be sized by a clean benchmark on a quiet box (the shared dev box was too
+contended, and an isolated harness broke the builder's virtiofs share wiring), so
+it is tracked as a follow-up, not part of this slice.
