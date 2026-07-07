@@ -356,11 +356,20 @@ impl MachineRunArgs {
         self.tty || self.interactive
     }
 
-    /// `-d`/`--detach`, `--up-json`, or `--ttl` makes the machine survive the command.
-    /// `--tty` is deliberately NOT consulted here — persistence and
-    /// interactivity are independent axes.
+    /// `-d`/`--detach`, `--up-json`, `--ttl`, or a declared `--healthcheck`
+    /// makes the machine survive the command. `--tty`/`--name` are deliberately
+    /// not consulted — persistence, interactivity, and identity are independent
+    /// axes.
     fn persistent(&self) -> bool {
-        self.detach || self.up_json || self.ttl.is_some()
+        self.detach || self.up_json || self.ttl.is_some() || self.healthcheck.is_some()
+    }
+
+    /// A persistent run that streams in the foreground instead of detaching:
+    /// a declared service (`--healthcheck`) launched without `-d`/`--up-json`
+    /// and without an interactive PTY. It boots/registers through the persistent
+    /// path but attaches to the guest console until `stop`/Ctrl-C.
+    fn attach_foreground(&self) -> bool {
+        self.persistent() && !self.detach && !self.up_json && !self.interactive()
     }
 
     /// Resolve the lifecycle mode purely from the flags. Fresh foreground runs
@@ -3159,6 +3168,36 @@ mod tests {
         assert!(!args.persistent());
         assert!(!args.detach);
         assert!(!args.interactive());
+    }
+
+    #[test]
+    fn healthcheck_makes_run_persistent() {
+        let mut args = parse_run(&["run"]).expect("parse");
+        assert!(!args.persistent());
+        args.healthcheck = Some("true".into());
+        assert!(
+            args.persistent(),
+            "a healthcheck promotes the run to persistent"
+        );
+    }
+
+    #[test]
+    fn name_alone_stays_transient() {
+        let mut args = parse_run(&["run"]).expect("parse");
+        args.name = Some("web".into());
+        assert!(
+            !args.persistent(),
+            "--name is identity only, not persistence"
+        );
+    }
+
+    #[test]
+    fn healthcheck_without_detach_attaches_foreground() {
+        let mut args = parse_run(&["run"]).expect("parse");
+        args.healthcheck = Some("true".into());
+        assert!(args.attach_foreground(), "healthcheck, no -d => foreground");
+        args.detach = true;
+        assert!(!args.attach_foreground(), "-d => detached, not foreground");
     }
 
     #[test]
