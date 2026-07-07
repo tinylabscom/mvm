@@ -471,14 +471,16 @@ which.workspace = true
 # There are exactly two: what the **host machine runs** to host sandboxes
 # (`host`), and what a **user runs** to drive them (`user`). Every capability
 # folds into one of the two; the individual pass-through flags that used to sit
-# here (builder-vm, pure-mkfs, custom-dns, hostd-transport, manifest-verify,
-# dev-watch, contributor-bootstrap) are GONE — inlined below. `dev` is the
-# host+user union (a contributor laptop is both). The only other root features
-# are unavoidable knobs that cannot be unconditional: the libkrun C-lib link
-# (absent on a macOS-26 HVF host), the release-only prebuilt download, and the
-# optional S3 template-registry storage backend (a heavy cloud dep kept opt-in).
-# `xtask check-two-surfaces` fails CI if a third consumer-facing product knob
-# appears.
+# here (builder-vm, pure-mkfs, custom-dns, manifest-verify, dev-watch,
+# contributor-bootstrap) are GONE — inlined below. `dev` is the host+user union
+# (a contributor laptop is both). The only other root features are internal
+# knobs that cannot be unconditional and are NOT consumer-facing product
+# surfaces: the libkrun C-lib link (absent on a macOS-26 HVF host), the
+# release-only prebuilt download, the optional S3 template-registry backend, and
+# `hostd-transport` (a lean library knob a downstream daemon flips through the
+# facade to compile mvm-core's gated hostd IPC transport without pulling all of
+# `host`). `xtask check-two-surfaces` fails CI if a third consumer-facing
+# *product* knob appears; internal knobs live on its allowlist.
 
 # The default binary is the lean host-runtime core (builder VM dispatch +
 # in-process rootfs materialize) — unchanged closure. mvmd builds lean with
@@ -529,6 +531,12 @@ dev = [
 # host opts in. Cannot be unconditional (no libkrun to link against on HVF).
 libkrun-sys = ["mvm-cli/libkrun-sys"]
 libkrun-live = ["mvm-cli/libkrun-live"]
+
+# Internal library knob (NOT a product surface): compile mvm-core's gated hostd
+# IPC transport. `host` already includes it; exposed standalone so a downstream
+# host-side daemon can flip just the transport through the facade and stay lean
+# (default-features = false), without dragging in the rest of `host`.
+hostd-transport = ["mvm-core/hostd-transport"]
 
 # Release-only: let an installed binary download mvm-published prebuilt builder
 # VM images on a cache miss. Off for source checkouts (they build locally); the

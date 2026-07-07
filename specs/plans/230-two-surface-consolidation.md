@@ -102,16 +102,24 @@ still ship together but the *code* boundary is the facade.
 - [ ] **WS-2 (quarantine scaffolding):** move fuzz + schema-emitter + test-tool
       bins behind a non-default gate / out of default workspace members; a product
       build compiles neither surface's scaffolding.
-- [x] **WS-3b (delete the pass-through flags):** the 7 forwarding flags
-      (`builder-vm`, `pure-mkfs`, `custom-dns`, `hostd-transport`, `manifest-verify`,
-      `dev-watch`, `contributor-bootstrap`) are **deleted** — their forwards inlined
-      into `host`/`user`/`dev`. Root features 14 → 8; the 6 non-surface ones
-      (`default`, `dev`, `libkrun-sys`, `libkrun-live`, `release-artifact-bootstrap`,
-      `template-registry-s3`) are the irreducible floor (platform link / release
-      download / heavy opt-in S3 backend — cannot be unconditional). release.yml /
-      security.yml / Justfile updated to build with `host,user[,…]`. Default closure
-      unchanged (`check-closure-budget` 337 @ 337); default/dev/release-set build
-      clean. *(this PR)*
+- [x] **WS-3b (delete the pass-through flags):** six forwarding flags
+      (`builder-vm`, `pure-mkfs`, `custom-dns`, `manifest-verify`, `dev-watch`,
+      `contributor-bootstrap`) are **deleted** — their forwards inlined into
+      `host`/`user`/`dev`. `hostd-transport` is **retained** as an internal
+      (non-surface) root feature: a downstream host-side daemon flips just the
+      gated hostd IPC transport through the facade, staying lean
+      (`default-features = false`) instead of pulling all of `host`. Root features
+      14 → 9; the 7 non-surface ones (`default`, `dev`, `libkrun-sys`,
+      `libkrun-live`, `release-artifact-bootstrap`, `template-registry-s3`,
+      `hostd-transport`) are the irreducible floor (platform link / release
+      download / heavy opt-in S3 backend / library transport knob — none can be
+      unconditional or a product surface). The two-surface lint keeps them on its
+      `INTERNAL` allowlist so exactly two *product* surfaces remain enforced.
+      release.yml / security.yml / Justfile build with `host,user[,…]`. Default
+      closure unchanged (`check-closure-budget` 337 @ 337); default/dev/release-set
+      build clean. Verified: the fleet daemon (mvmd) links `mvmctl` with
+      `features = ["hostd-transport"]` **unchanged** and `cargo check` passes
+      against this feature set. *(this PR)*
 - [ ] **WS-4 (CLI client/host split):** route every user verb through
       `MvmClient` (Plan 216 S2); move host-op verbs behind the `host` surface;
       the user client is a facade consumer only.

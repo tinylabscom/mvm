@@ -3471,3 +3471,120 @@ All three tasks merged on branch `feat-plan-215-agent-verbs-populate`:
 - [x] **`LocalBackend::reconfigure_machine`** real in-process impl for **cpus/memory** (load → `apply_patch` → `validate_machine_memory` → `overwrite_machine_spec` → relaunch via the in-process admitted boot when running; persist-only when stopped). `mvm-client-local` → `mvm` dep is acyclic.
 - [x] **Claim 10 guard**: `net`/`allow_host` changes are **refused** on `LocalBackend` (its boot path does not enforce network policy) — tested (`reconfigure_refuses_network_changes_on_local_backend` + allow_host variant). No silent fail-open.
 - [ ] **Plan 226 (deferred)**: give `LocalBackend`'s in-process boot network-policy + volume enforcement so reconfigure can change `net`/`allow_host` locally; add a behavioral test for the running-path stop+relaunch (needs a materialized-rootfs boot).
+
+## Sprint 64 — Radical simplification: two surfaces, minimal API, human-readable (proposed)
+
+**Goal:** shrink the project to the smallest, most human-readable form that a
+single expert developer can hold in their head — while preserving **every**
+security claim and enabling a **network of mvm hosts driven by `mvmd`**. The
+complexity is largely AI-accreted: dead code, duplicated helpers, oversized
+public APIs, crate sprawl, and CLI verb sprawl built without checking what
+already existed. This sprint removes it under CI-enforced guardrails so it
+cannot regrow.
+
+**Why now:** [Plan 230](plans/230-two-surface-consolidation.md) collapsed the
+feature set to exactly two product surfaces (`host` / `user`) and shipped
+`xtask check-two-surfaces` as an anti-regrowth ratchet. That work is **Phase 0**
+of this sprint — it gives the whole simplification its decision rule ("does this
+serve the host runtime, the user client, or is it scaffolding?") and the lint
+that stops a third surface reappearing. Everything below hangs off that spine.
+
+### Non-negotiable invariants (a cut that touches any of these is rejected)
+
+- All 15 security claims in [`claims/catalog.md`](claims/catalog.md) stay green;
+  `xtask check-claim-catalog` and every claim witness keep passing.
+- The **process moat** stays intact — separate signer / broker / substitution /
+  audit-signer processes are load-bearing for claims 12/13. "Simpler" never
+  means "one process."
+- **vsock-only auditable data plane** — no guest networking is ever introduced;
+  the substitution / PII-mask / audit seam stays on vsock.
+- dm-verity sealed prod (claim 3), no-console / no-`do_exec` prod gates
+  (claims 4/15) unchanged.
+- Exactly two **product** surfaces (`host` / `user`); internal library knobs
+  live on the lint's `INTERNAL` allowlist, never as a third surface.
+
+### Methodology — how we avoid re-making the mess
+
+- **Incremental, CI-green at every step.** No big-bang refactor. Each phase is
+  independently shippable and reversible.
+- **Evidence-driven cuts.** A deletion needs proof it is unreachable or
+  duplicative: `cargo machete` (unused deps), `cargo udeps`, `#![warn(unreachable_pub)]`,
+  rustc `dead_code`, and `cargo public-api` snapshots. No "looks unused" guesses.
+- **Reuse-first.** Before simplifying a function, search the workspace for the
+  existing helper — duplicated logic is this repo's most common bug source. Merge
+  into the canonical one; never fork a second copy.
+- **Tests are the safety net.** No coverage regressions; every simplified public
+  item keeps or gains a focused test. If a function can't be unit-tested, it's
+  too big — split it.
+- **Ratchets, not vibes.** Keep `check-closure-budget`; ADD a crate-count budget,
+  per-crate `cargo public-api` snapshot gates, and `cargo machete` to CI so the
+  reductions can't silently reverse.
+
+### Phases (each independently shippable)
+
+- [~] **P0 — Two-surface spine (in flight).** `host`/`user`/`dev` umbrellas +
+  `check-two-surfaces` lint (Plan 230 WS-1/3a/3b/5a). Feature set 14 → 9 (2
+  product surfaces + 7 internal knobs). *This is the organizing principle for
+  every phase below.*
+- [ ] **P1 — Dead-code & dependency sweep.** Run machete/udeps/`unreachable_pub`
+  across all 15 crates; delete unreachable code and unused deps; quantify the
+  LOC + dependency reduction. Wire `cargo machete` into the Lint job.
+- [ ] **P2 — Public-API minimization.** Per-crate `cargo public-api` snapshot;
+  drive `pub` → `pub(crate)` wherever nothing external consumes it; collapse
+  re-exports so **the root `src/lib.rs` facade is the one library surface**
+  (`core`/`runtime`/`build`/`guest`/`backend`/`security`). Document the intended
+  public API; gate future diffs on the snapshot.
+- [ ] **P3 — Crate audit & consolidation.** Evidence-based assessment of the 15
+  crates for merge/removal (the 32 → 15 fold already happened, so this is
+  careful, not aggressive). Produce a target crate map; execute only low-risk
+  merges with CI green. **Non-goal:** merging the process-moat bin crates.
+- [ ] **P4 — CLI surface simplification.** Inventory every verb + flag; delete
+  dead verbs, collapse aliases, and route user verbs through the `MvmClient`
+  facade (Plan 230 WS-4) so the CLI is a thin client. Snapshot `--help` in
+  `tests/cli.rs` so the surface can't silently regrow. Target: a small,
+  orthogonal verb set a new user can learn in one sitting.
+- [ ] **P5 — `mvmd` fleet enablement (network of mvm).** Ensure the `MvmClient`
+  facade (`LocalBackend` + remote `GatewayBackend`) cleanly drives a **network
+  of mvm hosts** from `mvmd`: `mvmd` links only the `user` surface (remote) to
+  orchestrate, and the `host` surface where it actually runs hosts. The
+  cross-repo build contract is already proven this session (mvmd links `mvmctl`
+  with the internal `hostd-transport` knob, `cargo check` green). Smoke test:
+  `mvmd` orchestrates ≥2 mvm hosts through the facade.
+- [ ] **P6 — Docs + DX.** README / CLAUDE.md / rustdoc describe exactly two
+  surfaces + the library API; every public item carries a doc example (kept
+  green by `just test-doc`); `just` recipes for the common flows. Best-in-class
+  "use it as a library" story.
+
+### Scoping decisions to confirm before execution (front-loaded)
+
+These are the judgment calls that need a human decision before cutting — recorded
+here so execution doesn't guess:
+
+1. **Crate-merge aggressiveness** — target crate count, and which of the 15 are
+   in scope vs frozen (e.g. `mvm-verify` is deliberately standalone / wasm-clean).
+2. **Public-API hiding vs consumers** — how much to make `pub(crate)` given
+   `mvmd` and `mvm-studio` link internal crates; the snapshot must reflect the
+   real external contract, not an aspirational one.
+3. **CLI verbs to delete outright vs deprecate** — nothing is in production
+   (no back-compat obligation), so hard deletion is on the table; confirm the
+   keep-list.
+4. **One sprint vs several** — P1/P2 are safe and fast; P3/P4 are larger. Likely
+   sequence P1 → P2 → P4 → P3 → P5 → P6.
+
+### Exit criteria
+
+- Measurable reductions: LOC, crate count, public-item count, dependency count
+  (numbers recorded here as each phase lands).
+- All 15 claims green; full `cargo nextest run --workspace` + doctests green;
+  `cargo clippy --workspace -- -D warnings` clean.
+- CLI verb count reduced with a snapshot test guarding it.
+- `mvmd` orchestrates a network of ≥2 mvm hosts via the facade (smoke test).
+- New CI ratchets live: crate-count budget, `cargo public-api` snapshots,
+  `cargo machete`.
+
+> **Does Plan 230 (this session's work) make this sprint harder? No — it is
+> Phase 0.** It supplies the decision rule (host/user/scaffolding), the
+> anti-regrowth lint, and the single library facade. The one coupling to respect:
+> the feature-forwards and the lint's `INTERNAL` allowlist name specific
+> sub-crates, so any P3 crate merge/rename must update both in the same change
+> (mechanical). Net, it de-risks the simplification.

@@ -26,13 +26,16 @@ const SURFACES: [&str; 2] = ["host", "user"];
 /// forwards are inlined in the root Cargo.toml); what remains here is `default`
 /// plus platform/storage opt-ins that genuinely cannot always be on. Keep this
 /// list tiny — a new entry is a conscious "this cannot live in a surface".
-const INTERNAL: [&str; 4] = [
+const INTERNAL: [&str; 5] = [
     "default",
     // Platform: link the libkrun C VMM (absent on a macOS-26 HVF host).
     "libkrun-sys",
     "libkrun-live",
     // Optional heavy S3 storage backend for the template registry (fleet-only).
     "template-registry-s3",
+    // Lean library knob: mvm-core's gated hostd IPC transport, flipped through
+    // the facade by a downstream host-side daemon without pulling all of `host`.
+    "hostd-transport",
 ];
 
 /// A couple of release/build-only flags are allowed but explicitly *not* part of
@@ -249,6 +252,7 @@ dev = ["host", "user", "dev-watch"]
             "dev",
             "libkrun-sys",
             "template-registry-s3",
+            "hostd-transport",
             "release-artifact-bootstrap",
         ] {
             assert!(allowed.contains(f), "{f} must be classified");
