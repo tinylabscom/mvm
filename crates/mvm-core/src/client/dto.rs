@@ -22,7 +22,7 @@ pub enum MachineStatus {
 /// Build one fluently with [`MachineSpec::builder`]:
 ///
 /// ```
-/// use mvm_client::MachineSpec;
+/// use mvm_core::client::dto::MachineSpec;
 ///
 /// let spec = MachineSpec::builder("web", "nginx")
 ///     .cpus(2)
