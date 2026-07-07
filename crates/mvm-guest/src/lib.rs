@@ -6,12 +6,12 @@
 /// `ServiceResponse`. The workload→host call half of the broker path.
 pub mod broker_client;
 pub mod builder_agent;
-/// The in-house-VMM builder's guest-side nix build (stages artifacts for the
+/// The hvf-VMM builder's guest-side nix build (stages artifacts for the
 /// session to stream back).
 pub mod builder_build;
-/// The in-house-VMM builder's host↔guest build session over one vsock stream.
+/// The hvf-VMM builder's host↔guest build session over one vsock stream.
 pub mod builder_session;
-/// Builder-VM file transfer over vsock (the in-house VMM has no virtio-fs).
+/// Builder-VM file transfer over vsock (the hvf VMM has no virtio-fs).
 pub mod builder_transfer;
 /// PTY-over-vsock interactive console — the single dev-only interactive path
 /// into a guest. Gated behind `dev-shell` so the relay symbols are absent from

@@ -1,6 +1,6 @@
 //! Read-only FUSE server for a virtio-fs **root** device.
 //!
-//! The in-house VMM serves the unpacked+injected OCI directory to the guest as
+//! The hvf VMM serves the unpacked+injected OCI directory to the guest as
 //! a virtiofs root (Plan-223 dev tier). virtio-fs carries the **FUSE** protocol
 //! over its virtqueues: the guest kernel's fuse client sends `fuse_in_header` +
 //! op body, and this server replies with `fuse_out_header` + op body. This
@@ -13,7 +13,7 @@
 //! answered `EROFS`. That keeps the server small and the trust surface minimal.
 //!
 //! Correctness of the exact wire layout is ultimately witnessed by a live guest
-//! mount on the in-house HVF backend; these unit tests pin the server's internal
+//! mount on the HVF backend; these unit tests pin the server's internal
 //! encode/decode + path resolution.
 
 use std::collections::HashMap;

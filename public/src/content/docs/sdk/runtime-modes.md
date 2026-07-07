@@ -14,10 +14,10 @@ The mode decides which job is happening.
 
 | Mode | Command | Executes SDK script on host | Boots a microVM | Output |
 | --- | --- | --- | --- | --- |
-| Record | `mvmctl compile ./sandbox.py` | Yes | No | Workload IR or build input. |
+| Record | `mvmctl build compile ./sandbox.py` | Yes | No | Workload IR or build input. |
 | Plan | `mvmctl run --mode plan ./sandbox.py` | Yes | No | Admission/preflight plan. |
 | Live | `mvmctl run --mode live ./sandbox.py` | Yes | Yes | Real VM lifecycle and operations. |
-| Static declaration | `mvmctl compile ./app.py` | No import of the user module | No | Workload IR from literal declarations. |
+| Static declaration | `mvmctl build compile ./app.py` | No import of the user module | No | Workload IR from literal declarations. |
 
 Runtime scripts are imperative. The host runs the script so `Sandbox.create(...)`,
 `sandbox.files.write(...)`, and `sandbox.commands.start(...)` can be recorded or
@@ -34,7 +34,7 @@ Record mode is the default SDK transport. The script creates one sandbox handle,
 then each supported operation appends to an in-process recording.
 
 ```sh
-mvmctl compile ./sandbox.py --out /tmp/workload-ir
+mvmctl build compile ./sandbox.py --out /tmp/workload-ir
 ```
 
 Equivalent explicit environment for direct debugging:
@@ -84,7 +84,7 @@ mvmctl run --mode live ./sandbox.py
 The CLI sets `MVM_SDK_MODE=live` and `MVM_CLI_BIN` for the child process. The SDK
 then uses the local CLI for operations such as:
 
-- `mvmctl up --up-json --detach --name <generated-id> --manifest <template>`
+- `mvmctl machine run --up-json --detach --name <generated-id> --manifest <template>`
 - `mvmctl machine fs write <vm> <path>`
 - `mvmctl proc start <vm> -- <argv>`
 - `mvmctl machine stop <vm>`

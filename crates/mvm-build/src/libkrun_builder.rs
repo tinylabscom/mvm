@@ -148,7 +148,7 @@ pub enum NetworkingPreference {
     /// supervisor spawns gvproxy with `-listen-vfkit unixgram://…`
     /// and libkrun connects to the listener path.
     Gvproxy,
-    /// virtio-net via the in-house native gateway. The native gateway speaks
+    /// virtio-net via the hvf native gateway. The native gateway speaks
     /// the same `-listen-vfkit` unixgram protocol as gvproxy, so it reuses the
     /// gvproxy vfkit backend wholesale — the only difference is the binary,
     /// located via `MVM_GATEWAY_BIN`. macOS selects native by default once
@@ -1467,10 +1467,18 @@ fn prepopulate_stage0_nix_store_image(
     }
 
     let Some(mkfs) = find_host_mkfs_ext4() else {
-        tracing::warn!(
-            image = %store_image.display(),
-            "mkfs.ext4 is not available on the host; Stage 0 will fall back to in-guest seed-store setup"
-        );
+        // No host mkfs.ext4 (macOS ships none): format the store image in-process
+        // with the memory-safe pure-Rust writer so Stage 0 gets a real,
+        // persistent Nix store instead of falling back to a throwaway tmpfs on
+        // every boot — the fallback recompiles the whole builder closure cold
+        // each time. The image is formatted empty; the guest seeds it from the
+        // verified root store on first boot. Record the same host marker the
+        // seeded path writes so a later run skips reformatting and preserves the
+        // guest-seeded, grown store instead of wiping it.
+        format_stage0_store_empty_in_process(store_image)?;
+        std::fs::write(&marker_path, marker).map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("write {}: {e}", marker_path.display()))
+        })?;
         return Ok(());
     };
 
@@ -1500,6 +1508,48 @@ fn prepopulate_stage0_nix_store_image(
     std::fs::write(&marker_path, marker).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!("write {}: {e}", marker_path.display()))
     })?;
+    Ok(())
+}
+
+/// Format the Stage 0 Nix store image as an empty, growable ext4 in-process,
+/// used when the host has no `mkfs.ext4` (macOS). Sized to the device minus the
+/// same 64 KiB margin the host-`mkfs` path leaves for libkrun virtio-blk
+/// geometry rounding. Leaves no seed marker: the guest treats the empty
+/// filesystem as uninitialized and seeds it from the verified root store.
+#[cfg(feature = "pure-mkfs")]
+fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), BuilderVmError> {
+    let blocks_4k = host_file_4k_blocks_for_ext4(store_image)?;
+    let size_bytes = blocks_4k * mvm_ext4::BLOCK_SIZE as u64;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(store_image)
+        .map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("open {}: {e}", store_image.display()))
+        })?;
+    let summary = mvm_ext4::mkfs::format_empty_ext4(&mut file, size_bytes).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "pure-Rust ext4 format of {}: {e}",
+            store_image.display()
+        ))
+    })?;
+    tracing::info!(
+        image = %store_image.display(),
+        free_blocks = summary.free_blocks,
+        groups = summary.groups,
+        "formatted Stage 0 Nix store image in-process (no host mkfs.ext4)"
+    );
+    Ok(())
+}
+
+/// Without the pure-Rust writer there is nothing to format on a host lacking
+/// `mkfs.ext4`; Stage 0 falls back to its in-guest tmpfs seed copy.
+#[cfg(not(feature = "pure-mkfs"))]
+fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), BuilderVmError> {
+    tracing::warn!(
+        image = %store_image.display(),
+        "mkfs.ext4 is not available on the host and pure-mkfs is disabled; Stage 0 will fall back to in-guest seed-store setup"
+    );
     Ok(())
 }
 
@@ -3281,6 +3331,98 @@ mod tests {
             .unwrap();
 
         assert_eq!(host_file_4k_blocks_for_ext4(&image).unwrap(), 16);
+    }
+
+    /// The no-host-mkfs path formats the store image into a valid ext4 in-process
+    /// and, crucially, writes no host seed marker — so the guest treats the fresh
+    /// filesystem as uninitialized and seeds it from the verified root store.
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn stage0_store_empty_format_writes_valid_ext4_without_marker() {
+        let scratch = TempDir::new().unwrap();
+        let image = scratch.path().join("nix-store-stage0-test.img");
+        std::fs::File::create(&image)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
+
+        format_stage0_store_empty_in_process(&image).unwrap();
+
+        // ext4 superblock magic (0xEF53) at byte offset 1024 + 0x38.
+        let bytes = std::fs::read(&image).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([bytes[1024 + 0x38], bytes[1024 + 0x39]]),
+            0xEF53,
+            "store image must be a valid ext4"
+        );
+        assert!(
+            !stage0_nix_store_host_marker_path(&image).exists(),
+            "no host seed marker: the guest must seed the empty store itself"
+        );
+    }
+
+    /// A second prepopulation of an already-prepared store must be a no-op — it
+    /// records the host marker on the first pass and honours it on the second,
+    /// so the guest-seeded, grown store survives instead of being reformatted
+    /// (which would wipe every persisted build result). Discriminated by
+    /// corrupting the superblock after pass one: a reformat would restore it.
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn stage0_store_prepopulate_is_idempotent_and_preserves_store() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let scratch = TempDir::new().unwrap();
+        let root_dir = scratch.path().join("root");
+        let seed_store = root_dir.join("nix").join("store");
+        std::fs::create_dir_all(&seed_store).unwrap();
+        std::fs::write(seed_store.join("aaa-seed-pkg"), b"x").unwrap();
+        let image = BuilderVmImage::RootDir {
+            root_dir: root_dir.clone(),
+            entry_path: "init".into(),
+        };
+        let store_image = scratch.path().join("nix-store-stage0-test.img");
+        std::fs::File::create(&store_image)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
+
+        // Pass 1: formats and records the host marker (macOS/no-mkfs path).
+        prepopulate_stage0_nix_store_image(&image, &store_image).unwrap();
+        assert!(
+            stage0_nix_store_host_marker_path(&store_image).exists(),
+            "first prepopulate records the host marker"
+        );
+        let magic_off = 1024 + 0x38;
+        let read_magic = |p: &Path| {
+            let mut f = std::fs::File::open(p).unwrap();
+            f.seek(SeekFrom::Start(magic_off)).unwrap();
+            let mut b = [0u8; 2];
+            f.read_exact(&mut b).unwrap();
+            u16::from_le_bytes(b)
+        };
+        assert_eq!(
+            read_magic(&store_image),
+            0xEF53,
+            "pass 1 wrote a valid ext4"
+        );
+
+        // Corrupt the superblock magic; only a reformat would restore it.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&store_image)
+                .unwrap();
+            f.seek(SeekFrom::Start(magic_off)).unwrap();
+            f.write_all(&[0, 0]).unwrap();
+        }
+
+        // Pass 2: marker matches → early return, no reformat.
+        prepopulate_stage0_nix_store_image(&image, &store_image).unwrap();
+        assert_eq!(
+            read_magic(&store_image),
+            0,
+            "second prepopulate must preserve the store, not reformat it"
+        );
     }
 
     // `read_job_result_*`, `extract_nix_store_hash_*`,

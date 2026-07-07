@@ -23,7 +23,7 @@ Reasoning:
 3. Toolchain tax compounds: Zig adds a CI compiler, a different fuzzer story, a different reproducibility-verification path, a different debugger, contributor onboarding, code-review skill — each manageable alone, significant in aggregate for a small team running 10+ CI lanes.
 4. The audit chain is Rust. Claim 8's `AuditEmitter` / `verify_audit_chain` live in `mvm-supervisor` / `mvm-core`. A Zig agent forks the chain (D2 violation + drift risk) or calls back over IPC (boundary surface grows).
 5. The protocol is Rust per D2. A Zig agent is a second implementation of every wire type with permanent drift risk; lean Rust v2 keeps `mvm-core` types as the single source of truth.
-6. Encryption (W3, Noise_NK) is the highest-leverage security upgrade and `snow` gives it to Rust on day one. Zig would need an in-house Noise impl.
+6. Encryption (W3, Noise_NK) is the highest-leverage security upgrade and `snow` gives it to Rust on day one. Zig would need an hvf Noise impl.
 7. Zig's real win is narrow: *tiny* boundary binaries (netinit, future single-purpose addons, ObjC/Swift shims) where there's no async runtime to amortize over. The agent isn't tiny.
 
 What this means for the plan structure:

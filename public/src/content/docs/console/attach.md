@@ -6,7 +6,7 @@ description: Open an interactive shell to a running microVM.
 Start a development microVM, then attach:
 
 ```sh
-mvmctl up ./my-app --name devbox
+mvmctl machine run --flake ./my-app --name devbox -d
 mvmctl machine console devbox
 ```
 
@@ -23,7 +23,7 @@ mvmctl machine console devbox --command "id && uname -a"
 Use this for terminal-shaped checks. For normal automation, prefer:
 
 ```sh
-mvmctl exec devbox -- id
+mvmctl machine exec devbox -- id
 mvmctl proc start devbox -- python /work/task.py
 ```
 
@@ -36,7 +36,7 @@ Console behavior depends on the active backend and image mode:
 - Terminal resize, signal forwarding, and scrollback are backend-specific.
 - Console sessions end when the VM stops.
 
-When a backend cannot provide a console, use `mvmctl machine logs`, `mvmctl exec`, and
+When a backend cannot provide a console, use `mvmctl machine logs`, `mvmctl machine exec`, and
 guest readiness probes to debug the workload.
 
 ## Security checklist

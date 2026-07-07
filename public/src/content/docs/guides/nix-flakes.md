@@ -74,7 +74,7 @@ mkGuest {
 }
 ```
 
-The host (`mvmctl up` or mvmd) reads these declarations via `passthru.volumeMounts`:
+The host (`mvmctl machine run` or mvmd) reads these declarations via `passthru.volumeMounts`:
 
 ```sh
 nix eval .#mvm-worker.passthru.volumeMounts --json
@@ -266,7 +266,7 @@ When you run `mvmctl build --flake .`:
 4. Kernel and rootfs artifacts are copied back to the host cache.
 5. Runtime commands boot those already-built artifacts on the selected backend.
 
-The same rootfs works on all backends (Firecracker, Apple Container, microvm.nix, Docker).
+The same rootfs works on all backends (Firecracker, Vz, microvm.nix).
 
 ## Profiles
 
@@ -328,9 +328,9 @@ printf '%s\n' 'sk-ant-…' > ~/.config/mvm/secrets/anthropic
 chmod 0400 ~/.config/mvm/secrets/anthropic
 
 cd my-claude-code-vm
-mvmctl build
-mvmctl up \
-  --add-dir "$PWD:/workspace:rw" \
+mvmctl machine build
+mvmctl machine run --manifest . --profile dev \
+  --volume "$PWD:/workspace:rw" \
   --volume "$HOME/.config/mvm/secrets:/mnt/secrets"
 ```
 

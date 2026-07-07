@@ -5,7 +5,7 @@ description: Drive model, mount points, and filesystem layout inside microVMs.
 
 ## Drive Model
 
-Each microVM gets up to four virtio-block drives (on all backends -- Firecracker, Apple Container, libkrun, microvm.nix, Docker):
+Each microVM gets up to four virtio-block drives (on all backends -- Firecracker, Vz, libkrun, microvm.nix):
 
 | Drive | Mount Point | Permissions | Purpose |
 |-------|-------------|-------------|---------|
@@ -66,7 +66,7 @@ The data drive (`/dev/vdd`, mounted at `/mnt/data/`) is a persistent ext4 volume
 Specify size with `--volume`:
 
 ```bash
-mvmctl up --flake . --volume ./data:/data:1024
+mvmctl machine run --flake . --volume ./data:/data:1024
 ```
 
 For managed encrypted local volumes and workspace cleanup policy, see

@@ -5,6 +5,40 @@
 - Owner: MVM Project
 - Related: `specs/notes/mvm-client-facade-design.md` + Plan 216 (the `mvm-client` facade), ADR-104 (cloud control-plane trust boundary — the facade's remote path), ADR-041 (signed audited execution plans — claim 8, the admission the local `run` path must not skip). Sequenced by: Plan 218.
 
+## Update (2026-07-06): the trait lives in `mvm-core`, one user-facing crate
+
+The original decision below put the trait + DTOs in a standalone `mvm-client`
+crate and pushed `LocalBackend` into a second `mvm-client-local` crate to keep
+the first `mvm-*`-free. Two crates, two imports (`mvm_client::{MvmClient, …}` +
+`mvm_client_local::LocalBackend`) — confusing for consumers.
+
+That two-crate split is replaced. The trait + DTOs + `MockBackend` + the remote
+`GatewayBackend` now live in **`mvm-core::client`**, behind a `client` feature
+(the gateway behind `client-remote`). `LocalBackend` and `connect` live in a
+single user-facing **`mvm-client`** crate that re-exports the `mvm-core::client`
+surface, so consumers write one import:
+
+```rust
+use mvm_client::{MvmClient, MachineSpec, LocalBackend};
+```
+
+**Why this is now the right home** — and why the "rejected: put it in
+`mvm-core`" bullet below was mistaken: it claimed the `check-core-runtime-free`
+gate "forbids pulling async runtimes there." The gate (`xtask
+check-core-runtime-free`) only forbids **`tokio`**. `async-trait` is a
+proc-macro (`proc-macro2`/`quote`/`syn`) that desugars async methods to boxed
+futures — it pulls no async runtime — so gating it behind `client` keeps
+`mvm-core`'s default closure `tokio`-free, and the guest-agent gate
+(`check-guest-agent-runtime-free`, which *does* forbid `async-trait`) stays
+green because the guest never enables the feature. The cycle the split existed
+to avoid also dissolves: `mvm-core` is the foundation everyone already depends
+on, so `mvm-sdk` reaches the trait via `mvm-core/client` with no new edge, and
+`LocalBackend`'s `mvm-backend` dependency stays above the foundation in
+`mvm-client`. `mvm-sdk`'s subprocess `SubprocessBackend` and the cycle guard
+(`no_backend_dep.rs`) are unchanged in intent.
+
+The prose below is the original (superseded) reasoning, kept for history.
+
 ## Context
 
 There are **two** clients that drive local microVM lifecycle, with overlapping responsibility and different mechanisms:

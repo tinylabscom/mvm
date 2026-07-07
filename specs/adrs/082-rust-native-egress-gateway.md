@@ -38,7 +38,7 @@ need from that chokepoint has to be bolted on around it:
   surface in the substrate, and it cannot be reviewed or fuzzed the way the
   rest of the host path is.
 
-Separately, an in-house Rust-native gateway daemon now exists that occupies the
+Separately, an hvf Rust-native gateway daemon now exists that occupies the
 same position as gvisor-tap-vsock: it binds a control API, accepts a VM
 transport session (VZ/vfkit, Firecracker on `/dev/kvm`, host-local QEMU over
 `qemu-unix`), runs a guest-network dataplane, and exposes a typed, plugin-aware

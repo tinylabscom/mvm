@@ -37,7 +37,7 @@ from that host.
 
 - Defending against a malicious host.
 - Running mutually distrusting tenants in one guest.
-- Treating Docker fallback as microVM isolation.
+- Treating the dev/test QEMU backend as a production isolation tier.
 - Claiming universal OCI compatibility before digest-pinned ingest is shipped.
 - Claiming secret non-leakage for manual guest-visible secret files.
 

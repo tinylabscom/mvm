@@ -30,7 +30,7 @@ A dev image is just an mkGuest call with `entrypoint.shell` set. Your project's 
     in
     {
       packages.${system} = {
-        # Production image — what `mvmctl up` builds.
+        # Production image — what `mvmctl machine run` builds.
         default = mvm.lib.${system}.mkGuest {
           name = "my-app";
           entrypoint.command = [ "/usr/local/bin/serve" ];

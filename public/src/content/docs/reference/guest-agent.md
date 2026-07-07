@@ -19,7 +19,7 @@ Every microVM built with `mkGuest` includes **mvm-guest-agent**, a lightweight R
 
 ## Protocol
 
-The agent communicates using **length-prefixed JSON frames** over vsock (Firecracker, Apple Container, microvm.nix) or a unix socket (Docker):
+The agent communicates using **length-prefixed JSON frames** over vsock (Firecracker, Vz, microvm.nix):
 
 1. Host writes `CONNECT 5252\n` to the socket
 2. Agent responds with `OK 5252\n`
@@ -104,7 +104,7 @@ payload bytes. The list is the authoritative one:
   unit tests pin this.
 - `BackpressureReason::ServiceHealthPending { pending }` — service
   names only.
-- Receipts written by `mvmctl run` / `mvmctl up` / `mvmctl build`
+- Receipts written by `mvmctl run` / `mvmctl machine run` / `mvmctl build`
   (plan 74 W6) store hashes and metadata. Raw stdout / stderr /
   stdin / env / argv values are never written.
 - `mvmctl ls --json` rows — the `readiness` and
@@ -230,7 +230,7 @@ once a background init thread actually ran.
 
 - `mvmctl boot-report <vm> [--json]` — Single round-trip; prints
   the same `ReadinessReport` `mvmctl wait` polls, including the
-  per-phase timing table. Useful right after `mvmctl up` to
+  per-phase timing table. Useful right after `mvmctl machine run` to
   inspect cold-path latency.
 
 Both verbs require `GuestCapability::Readiness` from the

@@ -275,7 +275,7 @@ fn materialize_ext4_in_builder_vm(
     let explicit = crate::builder_backend_select::resolve_env_override().is_some();
     crate::builder_backend_select::run_with_builder_fallback(selected, explicit, |choice| {
         match choice {
-            BuilderBackendChoice::Libkrun | BuilderBackendChoice::InHouse => {
+            BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => {
                 LibkrunBuilderVm::default()
                     .run_shell_script(&shell_job)
                     .map(|_| ())
@@ -292,7 +292,7 @@ fn materialize_ext4_in_builder_vm(
 #[cfg(feature = "builder-vm")]
 fn ext4_materializer_choice() -> crate::builder_backend_select::BuilderBackendChoice {
     // Use the resolved builder backend (override → env → auto-detect: macOS 26+
-    // Apple Silicon → in-house builder, everywhere else → libkrun). Delegates to
+    // Apple Silicon → hvf builder, everywhere else → libkrun). Delegates to
     // `resolve_choice()` so the materializer always uses the same backend as
     // every other build entry point.
     crate::builder_backend_select::resolve_choice()

@@ -7,7 +7,7 @@
   ADR-002 (microVM security posture — claim 3, claim 7, claim 11),
   ADR-046 / ADR-013 (no host tools / no host Nix),
   ADR-093 (builder auto-fallback), ADR-107 (virtiofs-root integrity — future),
-  Plan 221 (this decision is its B0 deliverable), Plan 214 (in-house HVF VMM),
+  Plan 221 (this decision is its B0 deliverable), Plan 214 (HVF VMM),
   the `#1388` seam (`mvm_hostd::plan_admission::admit_and_start`).
 
 ## Context

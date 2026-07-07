@@ -2,7 +2,7 @@ pub mod app_deps;
 pub mod app_deps_gate;
 pub mod artifacts;
 pub mod backend;
-/// Disk-only job/artifact transport for the in-house-VMM builder (tar-over-raw-
+/// Disk-only job/artifact transport for the hvf-VMM builder (tar-over-raw-
 /// disk, so the host never formats or reads a guest filesystem).
 pub mod builder_disk_transport;
 /// Vsock dispatch wire types for the persistent builder VM.
@@ -54,7 +54,7 @@ pub mod provenance;
 /// sparse file; formatting and copying happen inside the builder VM.
 pub mod rootfs;
 /// Self-hosting builder-rootfs bootstrap: inject freshly built mvm host binaries
-/// into a rootfs via an initramfs patcher on the in-house VMM (no legacy builder).
+/// into a rootfs via an initramfs patcher on the hvf VMM (no legacy builder).
 pub mod rootfs_inject;
 /// Shared run-path rootfs orchestration (inject runtime + materialize ext4),
 /// used by the CLI's `run --image` and the `mvm-client` local backend.

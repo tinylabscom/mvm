@@ -1,7 +1,7 @@
-//! In-house builder-image auto-resolver.
+//! HVF builder-image auto-resolver.
 //!
 //! Produces (or reuses from a hash-keyed cache) the HVF-bootable builder
-//! image pair (kernel + injected rootfs) that `InHouseBuilderVm` needs.
+//! image pair (kernel + injected rootfs) that `HvfBuilderVm` needs.
 //!
 //! The cache key is a SHA-256 over the digests of three inputs:
 //! - the base kernel image
@@ -10,7 +10,7 @@
 //!
 //! On a cache hit the existing pair is returned directly. On a miss the
 //! rootfs is re-baked via the vsock-less HVF patcher VM and the result is
-//! stored under `builder_vm_cache_dir()/inhouse/<key>/`.
+//! stored under `builder_vm_cache_dir()/hvf/<key>/`.
 //!
 //! Baking uses a `<key>.partial` staging directory that is promoted
 //! atomically via `fs::rename` only on full success. A failed bake
@@ -30,7 +30,7 @@ use crate::host_binaries::extract::ensure_extracted_for_boot;
 /// Derive a deterministic cache key from the SHA-256 digests of the three
 /// inputs that determine the baked image's content. Pure: reads files, never
 /// boots a VM.
-fn inhouse_image_cache_key(vmlinux: &Path, rootfs: &Path, host_init: &Path) -> String {
+fn hvf_image_cache_key(vmlinux: &Path, rootfs: &Path, host_init: &Path) -> String {
     let mut h = Sha256::new();
     for p in [vmlinux, rootfs, host_init] {
         h.update(sha256_file(p).unwrap_or_default().as_bytes());
@@ -49,12 +49,12 @@ fn is_cached(out_dir: &Path) -> bool {
 ///   (the same source the libkrun/vz builders use).
 /// - Injects `mvm-host-vm-init` into a copy of the base rootfs using the
 ///   vsock-less HVF patcher VM.
-/// - Caches the result under `builder_vm_cache_dir()/inhouse/<key>/`.
+/// - Caches the result under `builder_vm_cache_dir()/hvf/<key>/`.
 ///
 /// On cache hit the existing pair is returned without rebaking.
-/// On any VMM-level failure returns `BuilderVmError::InHouseVmmFailed` so the
+/// On any VMM-level failure returns `BuilderVmError::HvfVmmFailed` so the
 /// builder auto-detect fallback can retry libkrun.
-pub fn resolve_inhouse_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmError> {
+pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmError> {
     let arch = std::env::consts::ARCH;
     let arch_dir = builder_vm_cache_dir().join(arch);
 
@@ -62,7 +62,7 @@ pub fn resolve_inhouse_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmEr
     let base_rootfs = arch_dir.join("rootfs.ext4");
 
     if !vmlinux.is_file() {
-        return Err(BuilderVmError::InHouseVmmFailed {
+        return Err(BuilderVmError::HvfVmmFailed {
             detail: format!(
                 "base builder-VM kernel not found at {}; run `mvmctl dev up` \
                  with the libkrun builder to produce the base image first",
@@ -71,7 +71,7 @@ pub fn resolve_inhouse_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmEr
         });
     }
     if !base_rootfs.is_file() {
-        return Err(BuilderVmError::InHouseVmmFailed {
+        return Err(BuilderVmError::HvfVmmFailed {
             detail: format!(
                 "base builder-VM rootfs not found at {}; run `mvmctl dev up` \
                  with the libkrun builder to produce the base image first",
@@ -81,15 +81,14 @@ pub fn resolve_inhouse_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmEr
     }
 
     let host_bins_cache = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("host-bins");
-    let host_bin_dir = ensure_extracted_for_boot(&host_bins_cache).map_err(|e| {
-        BuilderVmError::InHouseVmmFailed {
+    let host_bin_dir =
+        ensure_extracted_for_boot(&host_bins_cache).map_err(|e| BuilderVmError::HvfVmmFailed {
             detail: format!("extract embedded host binaries: {e}"),
-        }
-    })?;
+        })?;
 
     let host_init = host_bin_dir.join("mvm-host-vm-init");
-    let key = inhouse_image_cache_key(&vmlinux, &base_rootfs, &host_init);
-    let out_dir = builder_vm_cache_dir().join("inhouse").join(&key);
+    let key = hvf_image_cache_key(&vmlinux, &base_rootfs, &host_init);
+    let out_dir = builder_vm_cache_dir().join("hvf").join(&key);
 
     if is_cached(&out_dir) {
         return Ok((out_dir.join("Image"), out_dir.join("rootfs.ext4")));
@@ -98,13 +97,13 @@ pub fn resolve_inhouse_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmEr
     // Bake into a staging directory; promote atomically so a partial bake
     // can never be mistaken for a complete cache entry.
     let partial = builder_vm_cache_dir()
-        .join("inhouse")
+        .join("hvf")
         .join(format!("{key}.partial"));
     let _ = fs::remove_dir_all(&partial);
     // Remove any incomplete out_dir from a previous failed rename step.
     let _ = fs::remove_dir_all(&out_dir);
 
-    fs::create_dir_all(&partial).map_err(|e| BuilderVmError::InHouseVmmFailed {
+    fs::create_dir_all(&partial).map_err(|e| BuilderVmError::HvfVmmFailed {
         detail: format!("create staging dir {}: {e}", partial.display()),
     })?;
 
@@ -113,7 +112,7 @@ pub fn resolve_inhouse_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmEr
 
     let bake_result = (|| {
         // Copy the base kernel — already a raw arm64 boot Image on aarch64.
-        fs::copy(&vmlinux, &partial_kernel).map_err(|e| BuilderVmError::InHouseVmmFailed {
+        fs::copy(&vmlinux, &partial_kernel).map_err(|e| BuilderVmError::HvfVmmFailed {
             detail: format!(
                 "copy base kernel {} -> {}: {e}",
                 vmlinux.display(),
@@ -122,16 +121,15 @@ pub fn resolve_inhouse_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmEr
         })?;
 
         let patcher_path = host_bin_dir.join("mvm-rootfs-patcher");
-        let patcher = fs::read(&patcher_path).map_err(|e| BuilderVmError::InHouseVmmFailed {
+        let patcher = fs::read(&patcher_path).map_err(|e| BuilderVmError::HvfVmmFailed {
             detail: format!("read embedded patcher at {}: {e}", patcher_path.display()),
         })?;
-        let host_init_bytes =
-            fs::read(&host_init).map_err(|e| BuilderVmError::InHouseVmmFailed {
-                detail: format!(
-                    "read embedded mvm-host-vm-init at {}: {e}",
-                    host_init.display()
-                ),
-            })?;
+        let host_init_bytes = fs::read(&host_init).map_err(|e| BuilderVmError::HvfVmmFailed {
+            detail: format!(
+                "read embedded mvm-host-vm-init at {}: {e}",
+                host_init.display()
+            ),
+        })?;
 
         let work_dir = partial.join("work");
         mvm_backend::builder_runner::inject::inject_host_binaries(
@@ -148,8 +146,8 @@ pub fn resolve_inhouse_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmEr
                 }],
             },
         )
-        .map_err(|e| BuilderVmError::InHouseVmmFailed {
-            detail: format!("bake in-house builder rootfs: {e}"),
+        .map_err(|e| BuilderVmError::HvfVmmFailed {
+            detail: format!("bake hvf builder rootfs: {e}"),
         })
     })();
 
@@ -170,7 +168,7 @@ pub fn resolve_inhouse_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmEr
         }
         Err(e) => {
             let _ = fs::remove_dir_all(&partial);
-            return Err(BuilderVmError::InHouseVmmFailed {
+            return Err(BuilderVmError::HvfVmmFailed {
                 detail: format!(
                     "promote staged image {} -> {}: {e}",
                     partial.display(),
@@ -198,13 +196,13 @@ mod tests {
         std::fs::write(&k, b"kernelA").unwrap();
         std::fs::write(&r, b"rootfsA").unwrap();
         std::fs::write(&h, b"initA").unwrap();
-        let key1 = inhouse_image_cache_key(&k, &r, &h);
-        let key2 = inhouse_image_cache_key(&k, &r, &h);
+        let key1 = hvf_image_cache_key(&k, &r, &h);
+        let key2 = hvf_image_cache_key(&k, &r, &h);
         assert_eq!(key1, key2, "same inputs → same key");
         std::fs::write(&h, b"initB").unwrap();
         assert_ne!(
             key1,
-            inhouse_image_cache_key(&k, &r, &h),
+            hvf_image_cache_key(&k, &r, &h),
             "host-init change → new key"
         );
     }
@@ -220,11 +218,11 @@ mod tests {
         std::fs::write(&k, b"kernelA").unwrap();
         std::fs::write(&r, b"rootfsA").unwrap();
         std::fs::write(&h, b"initA").unwrap();
-        let key1 = inhouse_image_cache_key(&k, &r, &h);
+        let key1 = hvf_image_cache_key(&k, &r, &h);
         std::fs::write(&k, b"kernelB").unwrap();
         assert_ne!(
             key1,
-            inhouse_image_cache_key(&k, &r, &h),
+            hvf_image_cache_key(&k, &r, &h),
             "kernel change → new key"
         );
     }

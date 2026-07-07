@@ -9,7 +9,7 @@
 //! writes the guest's replies back to the host socket.
 //!
 //! Like the egress relay it is **transport-agnostic**: keyed by an opaque
-//! connection id (the in-house VMM uses the host-assigned vsock `src_port`), it
+//! connection id (the hvf VMM uses the host-assigned vsock `src_port`), it
 //! speaks raw bytes, never a virtqueue or vsock header — the device owns the
 //! framing. Each connection is read only once the guest has accepted it
 //! (`on_established`), so a client that writes its request immediately leaves
@@ -132,9 +132,16 @@ impl AgentBridge {
     }
 
     /// Read each established host connection once (non-blocking). Returns
-    /// `(conn_id, bytes)` for the device to `OP_RW` to the guest. A peer EOF/error
-    /// closes that stream in place (dropping it from the open set).
-    pub fn drain_host(&mut self) -> Vec<(u32, Vec<u8>)> {
+    /// `(ready, closed)`: `ready` = `(conn_id, bytes)` for the device to `OP_RW`
+    /// to the guest; `closed` = conn ids whose host peer hit EOF/error and were
+    /// dropped from the open set. The caller MUST send the guest an `OP_RST` for
+    /// each `closed` id — otherwise a host-dropped connection (e.g. the reachability
+    /// probe `for_vm` opens then drops) leaks a half-open connection on the guest.
+    /// A single-threaded guest agent then blocks in `accept()`+`read()` on that
+    /// dead probe stream and never services the real request stream. (This is why
+    /// the non-interactive agent RPC hung on the in-house VMM but worked on
+    /// Firecracker, whose vsock resets the stream on host close.)
+    pub fn drain_host(&mut self) -> (Vec<(u32, Vec<u8>)>, Vec<u32>) {
         let mut ready = Vec::new();
         let mut closed = Vec::new();
         for (conn_id, c) in self.conns.iter_mut() {
@@ -152,10 +159,10 @@ impl AgentBridge {
                 Err(_) => closed.push(*conn_id),
             }
         }
-        for conn_id in closed {
-            self.close(conn_id);
+        for conn_id in &closed {
+            self.close(*conn_id);
         }
-        ready
+        (ready, closed)
     }
 
     /// Write guest→host data (`OP_RW` the device received) to the host socket.
@@ -253,7 +260,7 @@ mod tests {
 
         // Before the guest accepts, request bytes stay buffered (not yet read).
         assert!(
-            bridge.drain_host().is_empty(),
+            bridge.drain_host().0.is_empty(),
             "no host bytes read before the stream is established"
         );
 
@@ -261,7 +268,7 @@ mod tests {
         bridge.on_established(conn_id);
         let mut got = None;
         for _ in 0..200 {
-            let ready = bridge.drain_host();
+            let (ready, _closed) = bridge.drain_host();
             if let Some((cid, bytes)) = ready.into_iter().next() {
                 assert_eq!(cid, conn_id);
                 got = Some(bytes);
@@ -290,6 +297,43 @@ mod tests {
         bridge.close(conn_id);
         assert_eq!(active.load(Ordering::Relaxed), 0);
         assert!(!bridge.is_agent_stream(conn_id));
+    }
+
+    /// A host peer that connects, gets established, then drops (like the `for_vm`
+    /// reachability probe) must be surfaced in `drain_host`'s `closed` set so the
+    /// device can `OP_RST` the guest. Without this the guest leaks a half-open
+    /// connection that wedges a single-threaded agent's `accept()` loop.
+    #[test]
+    fn drain_host_reports_dropped_probe_as_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("agent.sock");
+        let mut bridge = AgentBridge::new();
+        bridge.bind(&sock).unwrap();
+
+        // Probe: connect, then drop immediately (no bytes sent) — the host-side
+        // reachability probe shape.
+        let client = UnixStream::connect(&sock).unwrap();
+        let opened = bridge.accept_new();
+        let conn_id = opened[0];
+        bridge.on_established(conn_id); // guest accepted (OP_RESPONSE)
+        drop(client); // host drops the probe
+
+        // The drop surfaces as a `closed` conn (EOF), and the stream is gone.
+        let mut closed_ids = Vec::new();
+        for _ in 0..200 {
+            let (_ready, closed) = bridge.drain_host();
+            if !closed.is_empty() {
+                closed_ids = closed;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            closed_ids,
+            vec![conn_id],
+            "dropped probe must be reported closed"
+        );
+        assert!(!bridge.is_agent_stream(conn_id), "closed stream removed");
     }
 
     /// No listener bound → accept is a no-op, never a panic.

@@ -6,6 +6,214 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-06-05
+
+### Added
+- **storage**: StorageProvider trait + LocalStorage (plan 123 B1)
+- **storage**: EncryptedStorage at-rest arm, macOS (plan 123 B2)
+- **storage**: Content-addressed + snapshot-upper volumes (plan 123 B3)
+- **storage**: MountProvider registry + IR MountSource::External (plan 123 B4 steps 1-3)
+- **storage**: S3 MountProvider via object_store, feature-gated (plan 123 B4 step 4)
+- **backend**: SnapshotCapability per-backend warm-start tier (plan 123 C1)
+- **network**: Mvm-network crate — NetworkProvider seam + NetworkMode::Custom (plan 123 A1/A2/A5)
+
+### Documentation
+- **plan-123**: Reconcile post-121 paths + pin B→A→C order
+- **plan-123**: Tick B1 (StorageProvider trait + LocalStorage)
+- **plan-123**: Mark Phase B storage/mount acceptance complete
+- **plan-141**: Mark closed (merged via #609/#614); track passt live-KVM follow-up
+- **plan-123**: Tick Phase A seam (A1/A2/A5); track claims-gated lift as follow-up
+
+### Fixed
+- **apple-container**: Don't re-copy an already-per-instance rootfs
+
+### Release
+- V0.16.1
+
+## [0.16.0] — 2026-06-05
+
+### Added
+- **compile**: Warn when Node package.json deps won't be baked
+- **cli**: Mvmctl kernel build (compile arm) via Stage 0
+- **cli**: Kernel build --source download/auto + --arch
+- **cli**: Dev up --kernel-source (boot on a downloaded kernel)
+- **xtask**: Machine-check the security-claim → witness map
+- **verify**: Serverless in-browser audit-log verifier (ADR-069)
+- **builder**: Add verbose-gated console echo helper
+- **builder**: Thread --verbose to stream Stage 0 console to stderr
+- **kernel**: Elapsed heartbeat + --verbose console stream on compile
+- **install**: Add curl-able install.sh
+- **homebrew**: Formula template + render script + test
+- **default-image**: Prod download (5-asset contract) + release job + test
+- **nix**: Default-tenant flake build-validated (both variants) on the dev host
+- **default-image**: BuildMode-aware resolution — dev builds locally (Task 3b)
+- **volumes**: Custom volumes + fix Vz read-write-disk flock collision
+- **dev**: Mount devpts in guest /init + add config::is_dev_mode (Plan 162)
+- **crypto**: Collapse AEAD call sites into crypto::aead (plan 122 A1)
+- **crypto**: MacOS volume-at-rest via per-file AEAD (plan 122 A2)
+- **crypto**: 90-day KEK rotation timer (plan 122 B1)
+- **crypto**: Per-rebuild DEK binding on WrappedKey (plan 122 B2)
+- **crypto**: Content-addressed, Ed25519-signed snapshots (plan 122 C)
+- **crypto**: VMGenID generation token + guest CSPRNG reseed (plan 122 D)
+- **network**: Etherparse dep + pure L3/L4 parse + payload rebuild (Plan 141 Tasks 1-2)
+- **network**: Observer::on_packet + Verdict/Directions/PacketCtx (Plan 141 Task 3)
+- **audit**: Flow_observer_fault chain entry (Plan 141 Task 4)
+- **network**: Per-observer latency recorder + scrape file (Plan 141 Task 5)
+- **network**: Synchronous observer fan-out runner (Plan 141 Task 6)
+- Flow-byte-log policy field + append-only writer (Plan 141 Task 7)
+- **bridge**: Wire packet-observer pipeline into libkrun/gvproxy (Plan 141 Task 8)
+- **bridge**: Frame-aware Passt loop + broaden metrics scrape filter (Plan 141 Task 9)
+- **cache**: Flow-byte-log retention sweep in cache prune (Plan 141 Task 10)
+- **vz-builder**: Gvproxy networking so cold nix builds can fetch nixpkgs
+
+### Changed
+- **sdk-ts**: Trailing commas in tsconfig (JSONC)
+- **network**: Clippy — drop unnecessary drop(), flatten sweep with let-else (Plan 141)
+- **release**: Defer x86_64-apple-darwin (Intel-macOS runners unavailable)
+
+### Documentation
+- **plan**: 145 — complete the build-time application-deps story
+- **plan**: 145 — WS-B/C corrected (pnpm/yarn route to WS-A; warnings done in #553)
+- **plan120**: Lead README + Python quickstart with the five-line Sandbox.exec
+- **adr-046**: Kernel acquisition — compile or download
+- **plan**: 147 — Lima test backend + Linux/FC core_demo E2E parity (deferred)
+- **plan120**: Back-reference the deferred Lima/FC-parity/default-microvm bullets → Plan 147
+- **plan**: 146 — WASI-polyglot workload language (deferred to the refactor)
+- **notes**: WebAssembly support exploration — two framings, status, B recommendation
+- **audit-verify**: Build the wasm bundle in the builder/dev VM, not the host
+- **plans**: Add Plan 146 — cloud-hypervisor Tier-1 parity (Kuasar-referenced)
+- **plans**: Add Plan 147 — portable runnable artifacts (mvmctl artifact run)
+- **plan**: Add Plan 149 — mvmctl watch unified live operator event stream
+- **plans**: Add Plan 150 (OSV deps scan + remediation) and Plan 151 (fs-access evidence)
+- Contributor host-setup (libkrun vs Vz builder) + plan drafts 144/148
+- **plan120**: Mark Status: COMPLETE — all acceptance boxes ticked
+- **plans**: Resolve duplicate plan numbers 144/146/147 on main
+- **plans**: Fix internal titles after 144/146/147 → 153/154/155 rename
+- **plans**: Add 156 binary-size reduction; refresh 126 baseline + cross-refs
+- **plans**: Add Plan 157 — warmed parent recipes (forkd-inspired)
+- **spec**: Design for install.sh, Homebrew tap, download docs, compile logging
+- **plan**: Implementation plan for install & download experience
+- **kernel**: Note heartbeat + verbose streaming in module doc
+- Guide for mvmctl kernel build (compile/download/auto)
+- Releases & downloads reference
+- **releases**: Expand Homebrew tap token setup steps
+- **adr-002**: Document the verified-boot verity surface post-consolidation
+- **plan-158**: Plan to restore the bundled default microVM image
+- **specs**: Scrub prior-art product name from Plan 143
+- **specs**: Record host-side Landlock-envelope widening as a deferred Plan 143 follow-up
+- **specs**: Plan 161 — OCI-unpacker openat2 TOCTTOU fix + ADR-002 note
+- **plan-158**: Dual dev/prod default image keyed on BuildMode
+- **crates**: Finalize plan 121 — ADR-066 corrections, CLAUDE.md, old→new ident map
+- **adr**: Descope B4 framing — authenticated frame stays its own protocol
+- **plan**: Record B4 Option B as a tracked deferred follow-up
+- **vz**: Stop over-claiming in-supervisor share refusal
+- **plan**: Record B4 Step 2 (config_envelope) descope + Step 3 (paths) outcome
+- **plan**: Close out B4 — descope Step 4 (subprocess) + Step 5, reconcile Acceptance
+- Close out plan 121 — stamp COMPLETE + reconcile mvm-core runtime-free claim
+- **plans**: Fold plan-121's 3 spawned follow-ups into their active plans
+- **plan-121**: Record the production verification in the Status header
+- **plan-121**: Cross-ref #587 extending the B4 paths centralization
+- **plans**: Add Plan 162 — dev-mode interactivity (guest devpts + MVM_ENV=dev)
+- **plans**: VZ support research — Rust-objc2 supervisor (152) + vz-inspired DX (159)
+- **plan-141**: Note the Plan 152 drop-Swift conflict (reciprocal)
+- **plans**: Resolve 152↔141 — split scope, Vz payload-tap rides Plan 152
+- **plan-122**: Tick A1, mark A0 deferred
+- **plans**: Reconcile 152 WS-D nested-virt with Plan 147 Lima
+- **plans**: Add Plan 163 — Apple VZ support execution roadmap
+- **plan-159**: Add vz DX/UX parity checklist + long-tail items
+- **plan-126**: A1 dependency baseline + correct the Phase-B premises
+- **plan-126**: B4 finding — aws-lc-rs is the oci-client/reqwest-0.13 chain (= C1)
+- **plan-126**: B4 is upstream-blocked — oci-client hardcodes aws-lc
+- **adr-066**: Reconcile §5/§7 with plan 122 (Phase E)
+- **plans 123,140**: Cross-ref the plan 122 D VMGenID substrate + entropy-source decision
+
+### Fixed
+- **nix**: Keep kernel base.nix inside the builder-vm flake tree
+- **cli**: Gate host_arch + download_kernel behind builder-vm
+- **specs**: Renumber duplicate ADR-069 (browser verifier) to 070
+- **gvproxy**: Free ssh-port + reap orphaned daemons on startup
+- **nix**: Default-tenant flake evals — description must be a literal
+- **nix**: Expose passthru.rootfs so the builder-VM dev build emits mvm-meta.json
+- **ci**: Repair plan-121 CI breaks — architecture invariant allowlist + mvm-build dev-shell feature
+- **hostd**: Drop useless i64::from on c_long syscall nr (clippy 1.95 on Linux)
+- **volumes**: Mount user volumes in mkGuest /init (the dev VM's PID 1)
+- **volumes**: Default user volumes read-only; allow-list mount roots
+- **mkguest**: Gate Stage 2.3 modprobe behind user-volume presence
+- **dev**: Libkrun dev VM console attach + e2e-core-demo recipe
+- **bootstrap**: Drop stale per-crate source hash from builder-vm fingerprint
+- **libkrun**: Wait for the vsock socket in start(), not just the PID file
+- **dev**: Only open the interactive console when stdin is a TTY
+- **release**: Install zig/cargo-zigbuild in the binary build job
+- **ci**: Correct zig macOS arch name + ensure /opt in install-zigbuild
+- **ci**: Install libkrun for macOS release builds; Intel on native runner
+- **dev**: Idle PID 1 in the dev VM /init so it survives the console EOF (Plan 162)
+- **bridge**: Bind gvproxy-facing datagram socket; live DHCP e2e test (Plan 141 follow-up)
+- **build**: Give nested host-vm cargo its own target dir (release deadlock)
+- **ci**: Smoke test reads global.requests_total (metrics now sectioned)
+- **jailer**: Use SYS_newfstatat on aarch64 (no SYS_fstatat there)
+
+### Performance
+- **test**: Faster workspace test runs (nextest gate + embed-skip fast path)
+
+### Refactored
+- **kernel**: Use Relaxed ordering for heartbeat stop flag
+- **crates**: Fold mvm-runner into mvm-guest as a [[bin]]
+- **crates**: Fold mvm-base into mvm-backend::base (Lima-era leftover)
+- **sdk**: Fold mvm-ir into mvm-sdk::ir (one SDK crate)
+- **core**: Fold mvm-plan into mvm-core::plan
+- **core**: Fold mvm-policy into mvm-core::policy (keep policy::security re-export)
+- **core**: Fold mvm-security into mvm-core::crypto (pure crypto; no async in core)
+- **backend**: Relocate+rename mvm-libkrun -> crates/deps/libkrun-sys
+- **backend**: Fold mvm-providers into mvm-backend::providers
+- **build**: Fold mvm-vz into mvm-build::vz (Swift-interface; cycle-avoided)
+- **backend**: Relocate orphaned MvmContainerBridge swift pkg with providers
+- **hostd**: Consolidate supervisor/broker/signers/jailer into mvm-hostd
+- **vm-host**: Consolidate per-VM supervisors into mvm-vm-host (cfg-gated [[bin]]s)
+- **guest**: Consolidate addon-dns + vsock-bridge into mvm-guest-helpers
+- **build**: Move host-vm-init + egress-proxy into mvm-build [[bin]]s (ADR-065)
+- **core**: Dedup length-prefixed framing into core::framing (B4 Option A)
+- **core**: Route mvm-core data-dir derivations through a strict resolver (plan 121 B4)
+- **cli,hostd,build**: Route data/cache-dir derivations through canonical resolvers (plan 121 B4)
+- **core**: Centralize per-VM vsock/state paths in mvm-core::config
+- **backend,build**: Route per-VM paths through mvm-core::config
+- **cli**: Centralize ~/.mvm keys/audit/overlays/secrets via mvm-core::config
+- **core**: Drop tokio from mvm-core's default closure (plan 126 B5 PR-1)
+- **core**: Make mvm-core's default build runtime-free (plan 126 B5 PR-2)
+- **crypto**: Sign snapshots with attestation identity, trusted-signer set (plan 122 C)
+
+### Testing
+- **cli**: Declare audit posture for the kernel command
+- **install**: Hermetic install.sh download + tamper-reject test
+- **fuzz**: Packet parse+rebuild fuzz target; tick Plan 141 (Task 11)
+
+### Dev
+- Default dev up to an interactive shell
+- Fall back to libkrun for auto-selected vz builder
+
+### Draft
+- **nix**: Default-tenant flake — dev + prod variants (Plan 158 Task 1)
+
+### Merge
+- Bring feat/custom-volumes up to date with main
+
+### Nix
+- **kernel**: Shared config base + slim builder/workload split
+
+### Security
+- **volumes**: Admission-enforced shares + libkrun ro guard + claim witnesses
+
+## [0.15.2] — 2026-06-03
+
+### Added
+- **security**: Implement claim-4 prod-agent symbol-contract check
+- **sdk**: TypeScript/Node workloads end-to-end
+
+### Documentation
+- **notes**: File Vz + Apple Container builder papercuts from TS E2E
+
+### Fixed
+- **security**: Scope agent symbol greps to the mvm_guest_agent crate
+
 ## [0.15.1] — 2026-06-03
 
 ### Added

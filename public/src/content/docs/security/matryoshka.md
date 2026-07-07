@@ -43,7 +43,7 @@ L1 (host + hypervisor) doesn't carry its own claim — the host is **trusted** b
 
 ## Intent-bound admission profiles
 
-Every workload also goes through a signed admission step before boot. `mvmctl up` synthesizes an `ExecutionPlan`, signs it with the host key, checks its validity window and replay nonce, then emits a chain-signed audit entry.
+Every workload also goes through a signed admission step before boot. `mvmctl machine run` synthesizes an `ExecutionPlan`, signs it with the host key, checks its validity window and replay nonce, then emits a chain-signed audit entry.
 
 The plan now carries an `admission_profile`: a compact record of the workload's declared intent and the controls selected for that intent:
 
@@ -62,38 +62,23 @@ mvm runs on multiple backends. Not all backends carry all seven claims. The tier
 | Backend | L1 | L2 | L3 | L4 | L5 | Tier |
 |---|---|---|---|---|---|---|
 | **Firecracker** (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — full ADR-002. All seven claims hold. |
-| **Apple Container** (macOS 26+ Apple Silicon) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — claim 3 (verified boot) is partial. Other six claims hold. |
-| **libkrun** (Linux KVM, macOS Apple Silicon HVF) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — same as Apple Container. |
-| **Docker** (any host with Docker) | ❌ | ❌ | ❌ | ✅ | ✅ | **Tier 3** — claims 1, 2, 3 do **not** hold. L1–L3 collapse to the host kernel. |
-| **microvm.nix** (QEMU + KVM) | ✅ | ⚠️ | ⚠️ | ✅ | ✅ | Tier 2 — QEMU's larger device model raises L2 audit cost. |
+| **HVF** (macOS 26+ Apple Silicon — auto-default) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — claim 3 (verified boot) partial; `Hypervisor.framework`, vsock-only egress (no guest NIC). The macOS-26 auto-default. |
+| **Vz** (macOS 26+ Apple Silicon — opt-in) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — same claims as HVF; Apple AVF API on the same `Hypervisor.framework` primitive. Opt-in (`--hypervisor vz`), sunsetting. |
+| **libkrun** (Linux KVM, macOS Apple Silicon HVF) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — same as HVF/Vz. |
+| **QEMU** (Linux KVM/TCG) | ✅ | ⚠️ | ⚠️ | ✅ | ✅ | Tier 2 — claim 3 partial; QEMU's larger device model raises L2 audit cost. **Dev/test only** (`--hypervisor qemu`; the no-`/dev/kvm` path via TCG software emulation). Never selected by `mvmd`. |
 
 ✅ = layer fully enforced.  ⚠️ = layer partial (named exception).  ❌ = layer collapsed (claim does not apply).
 
-### Tier 3 (Docker) is convenience, not isolation
+### No container fallback
 
-mvm's Docker backend exists so you can run a workload in a non-virt environment (e.g., a CI host without `/dev/kvm`, a developer laptop without nested virt). It's **not** a microVM. The isolation comes from the Linux kernel's namespace and cgroup machinery, which is *shared with the host kernel*.
-
-In 2024–2025 the container ecosystem produced seven CVEs (Leaky Vessels, NVIDIAScape, runc race conditions, Buildah mount, Docker Desktop priv-esc, runc masked-path, runc `/dev/console`) that all yielded **host escape** from inside a container. None of those matter inside a microVM — the guest kernel is isolated by hardware. They all matter inside a Docker container.
-
-If `mvmctl` auto-selects Tier 3 because no microVM-capable backend is available, the CLI prints a banner naming the dropped claims and the recent CVEs. You can suppress the banner once you've acknowledged the tier with:
-
-```sh
-export MVM_ACK_DOCKER_TIER=1
-```
-
-or in `~/.mvm/config.toml`:
-
-```toml
-[security]
-ack_docker_tier = true
-```
+mvm has **no Tier 3** and no container/Docker fallback. A shared-kernel container is not a microVM: its isolation comes from the host kernel's namespace and cgroup machinery, which is shared with the host. In 2024–2025 the container ecosystem produced multiple CVEs (Leaky Vessels, NVIDIAScape, runc race conditions, Docker Desktop priv-esc, runc masked-path) that yielded **host escape** from inside a container — none of which matter inside a microVM, where the guest kernel is isolated by hardware. If a host has no microVM-capable backend, mvm does not silently drop to a weaker boundary; it fails closed.
 
 ### Choosing a tier
 
 - **Production / untrusted code** → Tier 1. Linux + KVM + Firecracker. No exceptions.
-- **macOS dev or CI on Apple Silicon** → Tier 2 (Apple Container or libkrun). Verified boot is the open item.
-- **macOS Intel / native Windows / WSL2** → unsupported for local microVM isolation today. WSL2 nested KVM and Hyper-V managed Linux builder support are future backend work.
-- **Anywhere else** → Tier 3 (Docker), with the banner caveats.
+- **macOS dev or CI on Apple Silicon** → Tier 2 (Vz or libkrun). Verified boot is the open item.
+- **Linux dev/test without `/dev/kvm`** → Tier 2 QEMU (`--hypervisor qemu`, TCG software emulation). A real microVM, slower; dev/test only.
+- **macOS Intel / native Windows** → unsupported for local microVM isolation today (no container fallback). WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work.
 
 `mvmctl doctor` reports your current tier on the running host.
 

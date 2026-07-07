@@ -73,8 +73,8 @@ def main() -> str:
 Compile and build:
 
 ```sh
-mvmctl compile ./app.py --out /tmp/hello-python
-mvmctl build /tmp/hello-python
+mvmctl build compile ./app.py --out /tmp/hello-python
+mvmctl machine build --flake /tmp/hello-python
 ```
 
 ## Security checklist

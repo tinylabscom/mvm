@@ -6,10 +6,10 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 
 use crate::client::MvmClient;
-use crate::dto::{
+use crate::client::dto::{
     LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus, ReconfigureRequest,
 };
-use crate::error::{MvmError, Result};
+use crate::client::error::{MvmError, Result};
 
 #[derive(Default)]
 pub struct MockBackend {
@@ -107,10 +107,10 @@ impl MvmClient for MockBackend {
         &self,
         id: &MachineId,
         _command: Vec<String>,
-    ) -> Result<crate::dto::ExecResult> {
+    ) -> Result<crate::client::dto::ExecResult> {
         let all = self.machines.lock().unwrap();
         if all.iter().any(|m| m.id == *id) {
-            Ok(crate::dto::ExecResult {
+            Ok(crate::client::dto::ExecResult {
                 exit_code: 0,
                 stdout: Vec::new(),
                 stderr: Vec::new(),
@@ -136,7 +136,7 @@ impl MvmClient for MockBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::*;
+    use crate::client::dto::*;
 
     #[tokio::test]
     async fn run_then_list_then_stop_roundtrips() {

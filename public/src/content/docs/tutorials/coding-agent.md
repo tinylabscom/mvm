@@ -27,8 +27,8 @@ For local development through this repository, the builder VM is the Linux build
 ## Run the task
 
 ```sh
-mvmctl up --flake . --name coding-agent
-mvmctl exec coding-agent -- bash -lc 'cd /work && python task.py'
+mvmctl machine run --flake . --name coding-agent
+mvmctl machine exec coding-agent -- bash -lc 'cd /work && python task.py'
 ```
 
 Use file transfer or a narrow mount for input/output. Keep generated patches and logs outside broad host write access.

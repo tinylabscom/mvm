@@ -4,8 +4,7 @@ description: Current host, architecture, backend, and support-status matrix for 
 ---
 
 `mvm` supports local microVM workflows on native Linux with KVM and on Apple
-Silicon macOS. Windows is tracked as future host work. Docker exists as a
-convenience fallback, not as a security-equivalent microVM backend.
+Silicon macOS. Windows is tracked as future host work. Linux hosts without `/dev/kvm` can run the dev/test QEMU/TCG backend (`--hypervisor qemu`); there is no container fallback.
 
 Use this page to decide where to run `mvmctl`, where Linux image builds happen,
 and which backend limitations apply.
@@ -16,7 +15,7 @@ and which backend limitations apply.
 | --- | --- | --- | --- | --- |
 | Linux with `/dev/kvm` | x86_64, aarch64 | Firecracker | Supported | Strongest local target; direct KVM microVM path. |
 | macOS Apple Silicon | aarch64 | Apple Virtualization / libkrun-backed paths | Supported | Local development and runtime path for M-series Macs. |
-| Linux without `/dev/kvm` | x86_64, aarch64 | Docker fallback | Limited | Convenience only; not a microVM isolation boundary. |
+| Linux without `/dev/kvm` | x86_64, aarch64 | QEMU (TCG) | Dev/test | Software-emulated microVM (`--hypervisor qemu`); Tier 2 dev/test — slower, not for production. |
 | Windows native | x86_64, aarch64 | None | Future | Tracked in [mvm#428](https://github.com/tinylabscom/mvm/issues/428). |
 | WSL2 with nested KVM | x86_64, aarch64 | Experimental Linux path | Future/experimental | May expose `/dev/kvm`; not a supported host path today. |
 | Intel macOS | x86_64 | None | Unsupported | Use Linux KVM or Apple Silicon macOS. |
@@ -42,7 +41,7 @@ Build time and runtime are separate. After an image is built:
 
 - Linux with KVM boots through Firecracker.
 - Apple Silicon macOS uses the supported macOS runtime backend path.
-- Docker fallback runs containers and drops microVM isolation claims.
+- Linux without `/dev/kvm` runs QEMU/TCG — a software-emulated microVM for dev/test (Tier 2), not a production isolation target.
 - Windows native does not have a supported runtime backend today.
 
 When reporting runtime behavior, include host OS, CPU architecture, selected
@@ -67,7 +66,7 @@ The OS segment is `linux` because the workload runs inside a Linux guest.
 | --- | --- |
 | Firecracker on Linux/KVM | Preferred local microVM isolation target. |
 | Apple Virtualization / libkrun-backed macOS path | Supported local microVM path with backend-specific feature differences. |
-| Docker fallback | Reduced isolation; do not use for untrusted code or security-sensitive workloads. |
+| QEMU (TCG, no `/dev/kvm`) | Tier 2 dev/test microVM; do not use for untrusted code or security-sensitive workloads. |
 | WSL2 nested KVM | Research/future path until tested and documented as supported. |
 
 Security-sensitive examples should name the backend when behavior differs.

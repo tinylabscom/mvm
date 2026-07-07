@@ -36,6 +36,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod mkfs;
 pub mod verity;
 
 use std::collections::BTreeMap;

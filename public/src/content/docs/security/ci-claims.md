@@ -26,7 +26,7 @@ name the backend.
 
 ## What not to claim
 
-- Do not claim Docker has the same isolation as Firecracker.
+- Do not claim the dev/test QEMU backend carries the same claims as Firecracker (claim 3 partial; Tier 2 dev/test only).
 - Do not claim secret non-leakage for manual file mounts.
 - Do not claim cold-start numbers without a published benchmark.
 - Do not imply Windows local runtime support is shipped.

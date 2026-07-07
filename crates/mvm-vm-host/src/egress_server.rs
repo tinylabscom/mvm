@@ -5,16 +5,16 @@
 //! bytes. libkrun forwards that guest vsock stream to a host-bound UDS
 //! (`add_host_listen_port`). This server terminates that UDS: it reads the target
 //! line, decides it against the claim-10 [`EgressGate`] (the same decision HVF's
-//! in-house gateway makes), and on admit pumps bytes both ways to a fresh host TCP
+//! hvf gateway makes), and on admit pumps bytes both ways to a fresh host TCP
 //! connection. A refused target never reaches the network.
 //!
-//! Unlike the in-house VMM's poll-based egress relay (single-threaded run loop),
+//! Unlike the hvf VMM's poll-based egress relay (single-threaded run loop),
 //! this is an async per-connection pump — the natural shape for the supervisor's
 //! tokio runtime. The *decision* (`EgressGate`) is the shared core; the pump is
 //! per-VMM.
 //!
 //! Why a newline delimiter: the UDS is a raw byte stream with no packet boundary
-//! (unlike vsock on the in-house VMM), so the target needs an explicit terminator.
+//! (unlike vsock on the hvf VMM), so the target needs an explicit terminator.
 //! `BufReader` absorbs any workload bytes that arrive in the same read after the
 //! newline and replays them into the proxy, so none are lost.
 
@@ -85,6 +85,18 @@ where
         }
     }
     Ok(out.len())
+}
+
+/// Phase A guard: serve transparent-TCP vsock egress only when the host opted in,
+/// the workload carries NO bound secrets (else the substitution endpoint owns
+/// `EGRESS_PORT`), and `EGRESS_PORT` is actually forwarded. All three required —
+/// fail closed on any missing.
+pub fn should_serve_vsock_egress(
+    host_listen_ports: &[u32],
+    opt_in: bool,
+    has_bound_secrets: bool,
+) -> bool {
+    opt_in && !has_bound_secrets && host_listen_ports.contains(&mvm_guest::vsock::EGRESS_PORT)
 }
 
 /// Accept egress connections on `listener` (the host-bound UDS libkrun forwards the
@@ -202,5 +214,16 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn serves_only_when_opted_in_no_secrets_and_port_present() {
+        let egress = mvm_guest::vsock::EGRESS_PORT;
+        // Happy path: opted in, no secrets, port listed.
+        assert!(should_serve_vsock_egress(&[egress], true, false));
+        // Any single disqualifier fails closed.
+        assert!(!should_serve_vsock_egress(&[egress], false, false)); // not opted in
+        assert!(!should_serve_vsock_egress(&[egress], true, true)); // has secrets
+        assert!(!should_serve_vsock_egress(&[], true, false)); // port absent
     }
 }

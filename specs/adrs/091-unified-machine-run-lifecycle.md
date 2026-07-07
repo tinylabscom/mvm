@@ -85,7 +85,7 @@ silently ignoring the new flags is still rejected.)*
 
 A microVM always has an entrypoint (the user's workload), and it is preserved end
 to end: the CLI/SDK/flake declare it, mkGuest bakes it to `/etc/mvm/entrypoint`,
-and every backend — including the in-house HVF/KVM VMM — boots `init=/init`, the
+and every backend — including the HVF/KVM VMM — boots `init=/init`, the
 mkGuest PID-1 wrapper that runs the baked entrypoint. `init=/init` is never a
 bypass; the entrypoint survives the boot path unchanged.
 

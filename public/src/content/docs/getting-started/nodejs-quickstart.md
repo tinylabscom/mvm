@@ -44,8 +44,8 @@ export const hello = mvm.app({
 The static compiler reads the declaration from source. It rejects non-literal values in declaration position so build-time behavior stays inspectable.
 
 ```sh
-mvmctl compile ./app.ts --out /tmp/hello-node
-mvmctl build /tmp/hello-node
+mvmctl build compile ./app.ts --out /tmp/hello-node
+mvmctl machine build --flake /tmp/hello-node
 ```
 
 ## Security checklist

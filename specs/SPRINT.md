@@ -32,6 +32,8 @@ plan 25 sequences the work into six independently-shippable workstreams.
 > given sprint's own section for its live status; the table below is the current
 > workspace snapshot, not Sprint 42's.
 
+- [x] 2026-07-06 internal `mvm-cli` modularity cleanup: `commands::run()` now delegates startup sequencing to small helpers and command execution to a trait-backed dispatcher in `crates/mvm-cli/src/commands/dispatch.rs`, and `crates/mvm-cli/src/commands/image/trust.rs` now owns the OCI registry-auth / cosign trust helpers previously in `image/mod.rs`. Validation used `MVM_SKIP_EMBED_BINARIES=1` for local dev-only build-script bypass: `cargo fmt --all`, targeted `cargo test -p mvm-cli --lib commands::tests::internal_helper_commands_short_circuit_before_startup_side_effects`, and `cargo clippy -p mvm-cli --all-targets -- -D warnings` green.
+
 | Metric           | Value                                  |
 | ---------------- | -------------------------------------- |
 | Version          | v0.16.1                                |
@@ -529,7 +531,7 @@ project only uses a narrow slice of functionality.
       in isolation) and `libclang` coupling during normal builds.
 
 - [ ] Evaluate replacing `hickory-proto` in `mvm-addon-dns` with a
-      minimal in-house DNS codec for the exact record types and packet
+      minimal hvf DNS codec for the exact record types and packet
       shapes the addon resolver supports.
       Current surface: `crates/mvm-addon-dns/src/lib.rs`.
       Expected impact: moderate package-count reduction (`~71` unique
@@ -3461,4 +3463,11 @@ All three tasks merged on branch `feat-plan-215-agent-verbs-populate`:
 - [x] **`LocalBackend`** (`mvm-client-local`): returns `MvmError::Backend { reason: "reconfigure is not supported on the in-process local backend …" }`. No persistent-machine layer in-process; no fake capability.
 - [x] **Mock**: trivial pass-through impl keeps the trait object-safe.
 - [x] **Docs**: CLI reference updated (`public/src/content/docs/reference/cli-commands.md`) — `machine reconfigure` rows added to the machine-verb table; prose lifecycle paragraph updated.
-- [ ] **Plan 225 (Phase 2) pending**: lift the persistent-machine engine (`load_machine_spec` / `save_machine_spec` / `overwrite_machine_spec` / stop→overwrite→reboot logic) out of `mvm-cli` into a shared lower crate; wire `LocalBackend`'s `reconfigure_machine` to that engine so in-process callers get a real implementation. `LocalBackend` unsupported error intentional until Plan 225 lands.
+- [x] **Plan 225 (Phase 2) COMPLETE** (branch `worktree-machine-reconfigure-phase2`): lifted the persistent-machine engine out of `mvm-cli` into the shared module `mvm::machine::persist` (`MachineSpec` + `load`/`save`/`overwrite`/`list`, `machine_config_matches`/`machine_config_diff`/`SpecReconcile`/`reconcile_machine_spec`, `ReconfigurePatch`/`apply_patch`, `validate_machine_memory`); `mvm-cli` now consumes it via `use` imports (pure refactor, call sites unchanged). `mvm-client-local` gained a `mvm` dep and `LocalBackend::reconfigure_machine` does real in-process reconfigure of cpus/memory, replacing the Phase-1 unsupported error.
+
+### Plan 225 Phase 2 — engine lift + local in-process reconfigure — COMPLETE (2026-07-05)
+
+- [x] **Engine lift** to `mvm::machine::persist` (new submodule, distinct from the builder `mvm::machine::MachineSpec`); `mvm-cli` consumes via `use` (behavior unchanged; full mvm-cli suite green; −381 lines net).
+- [x] **`LocalBackend::reconfigure_machine`** real in-process impl for **cpus/memory** (load → `apply_patch` → `validate_machine_memory` → `overwrite_machine_spec` → relaunch via the in-process admitted boot when running; persist-only when stopped). `mvm-client-local` → `mvm` dep is acyclic.
+- [x] **Claim 10 guard**: `net`/`allow_host` changes are **refused** on `LocalBackend` (its boot path does not enforce network policy) — tested (`reconfigure_refuses_network_changes_on_local_backend` + allow_host variant). No silent fail-open.
+- [ ] **Plan 226 (deferred)**: give `LocalBackend`'s in-process boot network-policy + volume enforcement so reconfigure can change `net`/`allow_host` locally; add a behavioral test for the running-path stop+relaunch (needs a materialized-rootfs boot).

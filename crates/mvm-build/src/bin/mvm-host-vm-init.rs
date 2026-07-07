@@ -211,7 +211,7 @@ fn parse_user_volumes_cmdline(cmdline: &str) -> Vec<UserVolMount> {
     out
 }
 
-/// Disk-transport config parsed from the kernel cmdline. The in-house VMM has no
+/// Disk-transport config parsed from the kernel cmdline. The hvf VMM has no
 /// virtio-fs, so the builder moves the job in and the artifacts out over raw
 /// disks (tar-on-a-block-device) instead of virtio-fs shares.
 /// `mvm.builder_transport=disk` enables it; `mvm.builder_input=` /
@@ -892,7 +892,7 @@ mod linux {
         // Threads write into the same `Mutex<BootTimings>`;
         // contention is a non-issue (a handful of writes per
         // boot, none on the hot path).
-        // Disk-transport mode (the in-house VMM has no virtio-fs): decided once
+        // Disk-transport mode (the hvf VMM has no virtio-fs): decided once
         // from the cmdline. `None` keeps the virtio-fs builder path unchanged.
         let disk_transport = crate::parse_disk_transport_cmdline(
             &std::fs::read_to_string("/proc/cmdline").unwrap_or_default(),
@@ -2207,7 +2207,7 @@ mod linux {
 
     /// Populate `/job`, `/work`, `/mvm-bins` from the input disk and back `/out`
     /// with a writable dir on the persistent nix-store disk. This is the
-    /// disk-transport equivalent of the virtio-fs shares, for the in-house VMM
+    /// disk-transport equivalent of the virtio-fs shares, for the hvf VMM
     /// (which has no virtio-fs). A tmpfs `/out` would be capped by guest RAM —
     /// too small for a built rootfs — so `/out` lives on the big nix-store disk.
     fn stage_disk_transport_input(t: &crate::DiskTransport) -> Result<(), String> {

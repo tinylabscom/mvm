@@ -22,7 +22,7 @@ use crate::ui;
 ///    its socket is present (the dev VM lives in the builder cache, a
 ///    different path than `VzTransport::for_vm` resolves).
 /// 2. libkrun per-port Unix socket.
-/// 3. In-house runner (`WorkloadRunner` / HVF) agent socket at
+/// 3. HVF runner (`WorkloadRunner` / HVF) agent socket at
 ///    `<vm_state_dir>/agent.sock`, only when `is_dev_mode()` — the
 ///    pre-opened console sockets exist only when the dev console was
 ///    enabled at boot.
@@ -58,15 +58,15 @@ fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
     if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Arc::new(libkrun));
     }
-    // In-house runner (WorkloadRunner / HVF) exposes the agent at
+    // HVF runner (WorkloadRunner / HVF) exposes the agent at
     // `<vm_state_dir>/agent.sock` and console data ports at
     // `<vm_state_dir>/vsock/vsock-<port>.sock`. Dev-only: the pre-opened
     // console sockets are only present when `dev_console` was set at boot,
     // and this arm is gated on `is_dev_mode()`.
     if mvm_core::config::is_dev_mode() {
-        let inhouse = DevConsoleTransport::for_vm(name);
-        if inhouse.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
-            return Ok(Arc::new(inhouse));
+        let hvf = DevConsoleTransport::for_vm(name);
+        if hvf.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+            return Ok(Arc::new(hvf));
         }
     }
     // Vz workloads expose the agent at `<vm_state_dir>/vsock/vsock-<port>.sock`
@@ -660,6 +660,7 @@ mod accessible_gate_tests {
                 &VmRuntimeMeta {
                     mode: StartModeKind::Attached,
                     accessible: true,
+                    rootfs_path: None,
                 },
             )
             .expect("write");
@@ -701,6 +702,7 @@ mod accessible_gate_tests {
                 &VmRuntimeMeta {
                     mode: StartModeKind::Detached,
                     accessible: false,
+                    rootfs_path: None,
                 },
             )
             .expect("write");
@@ -725,6 +727,7 @@ mod accessible_gate_tests {
                 &VmRuntimeMeta {
                     mode: StartModeKind::Detached,
                     accessible: false,
+                    rootfs_path: None,
                 },
             )
             .expect("write");
@@ -742,6 +745,7 @@ mod accessible_gate_tests {
                 &VmRuntimeMeta {
                     mode: StartModeKind::Attached,
                     accessible: false,
+                    rootfs_path: None,
                 },
             )
             .expect("write");
@@ -753,16 +757,16 @@ mod accessible_gate_tests {
 }
 
 #[cfg(test)]
-mod picker_inhouse_tests {
+mod picker_hvf_tests {
     use std::os::unix::net::UnixListener;
 
     use super::*;
 
     /// Bind `agent.sock` under a fresh temp state-dir, set `MVM_DATA_DIR` so
-    /// `vm_state_dir` resolves there, and set `MVM_ENV=dev` so the inhouse arm
+    /// `vm_state_dir` resolves there, and set `MVM_ENV=dev` so the hvf arm
     /// in `pick_console_transport` fires. Returns the guard objects that keep
     /// the socket and env alive for the test.
-    fn setup_inhouse_agent(
+    fn setup_hvf_agent(
         name: &str,
     ) -> (
         tempfile::TempDir,
@@ -775,42 +779,41 @@ mod picker_inhouse_tests {
         env.set("MVM_ENV", "dev");
         let state = mvm_core::config::vm_state_dir(name);
         std::fs::create_dir_all(&state).unwrap();
-        let agent = mvm_core::config::vm_inhouse_agent_socket_at(&state);
+        let agent = mvm_core::config::vm_hvf_agent_socket(name);
         let listener = UnixListener::bind(&agent).unwrap();
         (tmp, env, listener)
     }
 
-    // TDD RED: picker selects DevConsoleTransport for an in-house dev workload
+    // TDD RED: picker selects DevConsoleTransport for an hvf dev workload
     // when agent.sock is reachable and MVM_ENV=dev.
     #[test]
-    fn pick_console_transport_selects_inhouse_for_dev_workload() {
-        let name = "inhouse-dev-workload";
-        let (_tmp, _env, _listener) = setup_inhouse_agent(name);
+    fn pick_console_transport_selects_hvf_for_dev_workload() {
+        let name = "hvf-dev-workload";
+        let (_tmp, _env, _listener) = setup_hvf_agent(name);
 
-        let transport =
-            pick_console_transport(name).expect("picker must resolve inhouse transport");
+        let transport = pick_console_transport(name).expect("picker must resolve hvf transport");
         transport
             .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect("selected transport must connect to agent.sock");
     }
 
-    // TDD RED: without MVM_ENV=dev the inhouse arm must NOT fire even when
+    // TDD RED: without MVM_ENV=dev the hvf arm must NOT fire even when
     // agent.sock is present — falls through to Firecracker (or errors).
     #[test]
-    fn pick_console_transport_skips_inhouse_when_not_dev_mode() {
+    fn pick_console_transport_skips_hvf_when_not_dev_mode() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir_in("/tmp").expect("state tempdir");
         env.set("MVM_DATA_DIR", tmp.path());
         // Explicitly not dev mode — either unset or prod.
         env.set("MVM_ENV", "prod");
 
-        let name = "inhouse-prod-workload";
+        let name = "hvf-prod-workload";
         let state = mvm_core::config::vm_state_dir(name);
         std::fs::create_dir_all(&state).unwrap();
-        let agent = mvm_core::config::vm_inhouse_agent_socket_at(&state);
+        let agent = mvm_core::config::vm_hvf_agent_socket(name);
         let _listener = UnixListener::bind(&agent).unwrap();
 
-        // Non-dev: inhouse arm must not fire. The picker falls through; the Vz
+        // Non-dev: hvf arm must not fire. The picker falls through; the Vz
         // probe will also miss (no vsock/ socket), so Firecracker fallback runs.
         // A successful fallback would be wrong here (no FC socket either), so we
         // accept either an Err OR a transport that can't connect to agent.sock —
@@ -820,27 +823,27 @@ mod picker_inhouse_tests {
                 // Expected: picker fell through to FC which failed — fine.
             }
             Ok(transport) => {
-                // If somehow a transport was selected, it must NOT be the inhouse
+                // If somehow a transport was selected, it must NOT be the hvf
                 // one — it must fail to connect to agent.sock (FC path won't know
                 // about agent.sock).
                 assert!(
                     transport
                         .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
                         .is_err(),
-                    "non-dev mode must not route to the inhouse agent socket"
+                    "non-dev mode must not route to the hvf agent socket"
                 );
             }
         }
     }
 
     // Extend the boundary test: even with MVM_ENV=dev (which enables the
-    // inhouse arm), the picker selects the workload's OWN inhouse socket — not
-    // the dev/builder VM socket — when both are present. The inhouse arm probes
+    // hvf arm), the picker selects the workload's OWN hvf socket — not
+    // the dev/builder VM socket — when both are present. The hvf arm probes
     // agent.sock under the workload's own state dir, which is disjoint from the
     // builder cache, so it can never cross-route.
     #[cfg(feature = "builder-vm")]
     #[test]
-    fn pick_console_transport_inhouse_uses_workload_not_dev_socket() {
+    fn pick_console_transport_hvf_uses_workload_not_dev_socket() {
         // /tmp root — see SUN_LEN note in the original boundary test.
         let cache = tempfile::tempdir_in("/tmp").expect("cache tempdir");
         let data = tempfile::tempdir_in("/tmp").expect("data tempdir");
@@ -854,24 +857,24 @@ mod picker_inhouse_tests {
         std::fs::create_dir_all(dev_sock.parent().unwrap()).unwrap();
         let _dev_listener = UnixListener::bind(&dev_sock).unwrap();
 
-        // Workload's inhouse agent.sock also present.
-        let name = "inhouse-with-dev-present";
+        // Workload's hvf agent.sock also present.
+        let name = "hvf-with-dev-present";
         let state = mvm_core::config::vm_state_dir(name);
         std::fs::create_dir_all(&state).unwrap();
-        let workload_agent = mvm_core::config::vm_inhouse_agent_socket_at(&state);
+        let workload_agent = mvm_core::config::vm_hvf_agent_socket(name);
         let _workload_listener = UnixListener::bind(&workload_agent).unwrap();
 
-        // The picker must select the workload's own inhouse socket, not the
+        // The picker must select the workload's own hvf socket, not the
         // dev/builder socket. Connection to agent.sock must succeed.
         let transport = pick_console_transport(name)
-            .expect("picker must find the inhouse transport for the workload");
+            .expect("picker must find the hvf transport for the workload");
         transport
             .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect("selected transport must connect to the workload's agent.sock");
     }
 
     // Extend the boundary test: the dev VM path must still work even when
-    // MVM_ENV=dev is set (which enables the inhouse arm for workloads).
+    // MVM_ENV=dev is set (which enables the hvf arm for workloads).
     #[cfg(feature = "builder-vm")]
     #[test]
     fn pick_console_transport_selects_dev_socket_for_dev_vm_with_dev_mode() {

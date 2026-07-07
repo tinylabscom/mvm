@@ -54,7 +54,7 @@ pub mod compat;
 pub mod egress_redirect;
 /// Cfg-free decode of the admitted plan's egress secret bindings, shared by
 /// the libkrun + Firecracker substitution-endpoint spawn paths.
-pub(crate) mod egress_shared;
+pub mod egress_shared;
 pub mod firecracker;
 pub mod handle_registry;
 pub(crate) mod host_agent_spawn;

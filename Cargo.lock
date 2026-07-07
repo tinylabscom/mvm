@@ -2646,22 +2646,10 @@ name = "mvm-client"
 version = "0.16.1"
 dependencies = [
  "async-trait",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
-name = "mvm-client-local"
-version = "0.16.1"
-dependencies = [
- "async-trait",
  "flate2",
+ "mvm",
  "mvm-backend",
  "mvm-build",
- "mvm-client",
  "mvm-core",
  "mvm-hostd",
  "mvm-oci",
@@ -2676,6 +2664,7 @@ dependencies = [
  "aes-gcm",
  "aho-corasick",
  "anyhow",
+ "async-trait",
  "base64",
  "chrono",
  "ed25519-dalek",
@@ -2687,6 +2676,7 @@ dependencies = [
  "rand 0.8.6",
  "rcgen",
  "regex",
+ "reqwest 0.12.28",
  "rustls",
  "schemars",
  "secrecy",
@@ -2863,7 +2853,6 @@ dependencies = [
  "globset",
  "hex",
  "hmac",
- "mvm-client",
  "mvm-core",
  "mvm-guest",
  "schemars",

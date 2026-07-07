@@ -14,7 +14,7 @@ Use the existing console and guest RPC surfaces:
 ## Recommended flow
 
 ```sh
-mvmctl up ./mvm.toml --name debug-vm
+mvmctl machine run --manifest ./mvm.toml --name debug-vm -d
 mvmctl machine console debug-vm
 mvmctl machine logs debug-vm -f
 ```

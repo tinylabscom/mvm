@@ -43,8 +43,8 @@ def run(prompt: str) -> str:
 Compile and build:
 
 ```sh
-mvmctl compile ./tool.py --out /tmp/hello-python
-mvmctl build /tmp/hello-python
+mvmctl build compile ./tool.py --out /tmp/hello-python
+mvmctl machine build --flake /tmp/hello-python
 ```
 
 Security posture:
@@ -80,8 +80,8 @@ export const run = mvm.app({
 Compile and build:
 
 ```sh
-mvmctl compile ./tool.ts --out /tmp/hello-node
-mvmctl build /tmp/hello-node
+mvmctl build compile ./tool.ts --out /tmp/hello-node
+mvmctl machine build --flake /tmp/hello-node
 ```
 
 </TabItem>

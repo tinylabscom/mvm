@@ -4,23 +4,45 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# The `MvmClient` facade users touch. The trait + DTOs + `MockBackend` + remote
+# `GatewayBackend` live in `mvm-core` behind its `client` feature (a proc-macro
+# `async-trait`, no async runtime — so the foundation stays runtime-free); this
+# crate re-exports them and adds the in-process `LocalBackend`, which links the
+# runtime backend. `LocalBackend` stays here, above the runtime, so `mvm-core`
+# never gains an `mvm-backend` edge — that is what lets `mvm-sdk` enable
+# `mvm-core/client` for the trait without dragging the backend into a cycle.
+
 [features]
 default = []
-# The remote GatewayBackend (REST -> mvmd-gateway). Off by default so a
-# pure-local consumer stays light; a remote/studio build turns it on.
-remote = ["dep:reqwest"]
-
-# The in-process LocalBackend lives in the `mvm-client-local` crate, not here —
-# it links the runtime backend, and keeping that dependency out of this manifest
-# is what lets `mvm-sdk` depend on the trait without a dependency cycle
-# (sdk -> mvm-client -> mvm-backend -> mvm-build -> mvm-network -> mvm-sdk).
+# The remote REST `GatewayBackend` + `connect(Target::Gateway)`. Off by default
+# so a pure-local consumer stays light; a fleet/studio build turns it on.
+remote = ["mvm-core/client-remote"]
 
 [dependencies]
-async-trait.workspace = true
-serde = { workspace = true, features = ["derive"] }
-thiserror = "1"
-reqwest = { workspace = true, optional = true }
+mvm-core = { workspace = true, features = ["client"] }
+mvm-backend = { workspace = true, default-features = false }
+# Persistent machine spec engine (`machine::persist::{load,overwrite,apply_patch,…}`).
+# mvm does NOT depend on this crate, so this edge is acyclic.
+mvm = { workspace = true }
+# The in-process admitted-boot seam (`run::admit_and_boot_local`). mvm-hostd is
+# already in the mvmctl closure (the CLI links it), so this edge adds no crates
+# to the default build; it does not form a cycle because mvm-sdk — which
+# mvm-hostd pulls in — carries no dependency back on this crate.
+mvm-hostd = { workspace = true }
+# Shared run-path orchestration (`run_image::inject_and_materialize`) — the same
+# pure-Rust materialize the CLI's `run --image` uses. `pure-mkfs` pulls mvm-ext4,
+# already in the mvmctl closure via the CLI, so this adds no default crates.
+mvm-build = { workspace = true, default-features = false, features = ["pure-mkfs"] }
+# OCI pull + hardened unpack for registry-ref resolution. Already in the mvmctl
+# closure (the CLI links it); mvm-oci carries no back-edge to this crate.
+mvm-oci = { workspace = true }
+# gzip layer decode at this crate's boundary (mvm-oci stays decompressor-free by
+# design; the CLI decodes at its boundary the same way).
+flate2 = { workspace = true }
+# `Vec<u8>` implements tokio's `AsyncWrite`, the sink for `fetch_layer`.
+tokio = { workspace = true, features = ["rt"] }
+tempfile = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

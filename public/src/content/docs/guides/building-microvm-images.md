@@ -56,8 +56,8 @@ mvmctl run                # builds (if needed) + boots
 `mvmctl` selects the runtime backend automatically when you boot the finished image. Use `--hypervisor` on runtime commands when you want to force a specific runtime backend:
 
 ```sh
-mvmctl up --flake . --hypervisor apple-container
-mvmctl up --flake . --hypervisor firecracker
+mvmctl machine run --flake . --hypervisor hvf
+mvmctl machine run --flake . --hypervisor firecracker
 ```
 
 If you want to drive `nix build` directly without `mvmctl` in the loop:
@@ -115,7 +115,7 @@ Independent of the sealed/accessible distinction, mvm exposes two **runtime life
 | Mode | What it means | When to use |
 |---|---|---|
 | `attached` | VM lifecycle bound to the calling process — Ctrl-C / process exit sends SIGTERM to the VM. | `mvmctl run` interactive, `mvmctl dev` shell sessions, test harnesses that want deterministic teardown. |
-| `detached` | VM survives caller exit — only `mvmctl machine stop` (or `VmBackend::stop`) terminates it. | `mvmctl up` (background), production agents, CI fixtures that boot once and run multiple phases. |
+| `detached` | VM survives caller exit — only `mvmctl machine stop` (or `VmBackend::stop`) terminates it. | `mvmctl machine run` (background), production agents, CI fixtures that boot once and run multiple phases. |
 
 The default is `detached`. Override:
 
@@ -202,7 +202,7 @@ nix flake check --no-build
 mvm runs Nix builds inside the project builder VM and copies the finished kernel/rootfs artifacts back to the host cache. You don't need host-side Nix, and you don't need to enter a dev shell before building.
 
 - **Linux**: the builder VM provides the Linux build boundary and cache policy. Firecracker is the default runtime backend when `/dev/kvm` is available.
-- **macOS**: the host `mvmctl build` command orchestrates a Linux builder VM. The resulting runtime image can then boot with Apple Virtualization (`--hypervisor apple-container`) or another available macOS runtime backend.
+- **macOS**: the host `mvmctl build` command orchestrates a Linux builder VM. The resulting runtime image boots on the HVF backend by default on macOS 26+; `--hypervisor vz` opts into Apple Virtualization instead.
 - **Windows**: Tauri-only (the `mvm-studio` desktop app packages a WSL2-backed builder + runtime). See [ADR-031](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/031-cross-platform-strategy.md).
 
 ## Rootless workloads

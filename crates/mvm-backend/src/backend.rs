@@ -11,7 +11,7 @@ use mvm_core::vm_backend::{
 // (`config`, `shell`, `runtime_meta`) lives in `crate::base`.
 use crate::base::config::{PortMapping, VMS_DIR, VmSlot};
 use crate::base::shell::run_in_vm_stdout;
-use crate::driver::InHouseDriver;
+use crate::driver::HvfDriver;
 use crate::hvf_backend::HvfBackend;
 use crate::image::RuntimeVolume;
 use crate::libkrun::LibkrunBackend;
@@ -22,10 +22,10 @@ use crate::vz::VzBackend;
 use crate::workload_runner::{RealEndpointSpawner, WorkloadRunner};
 use crate::{firecracker, microvm};
 
-/// The in-house VMM driven through the unified workload-runner role over the
+/// The hvf VMM driven through the unified workload-runner role over the
 /// driver seam. One alias keeps the long generic instantiation readable at the
 /// enum variant and its construction site.
-type InHouseRunner = WorkloadRunner<InHouseDriver, RealEndpointSpawner>;
+type HvfRunner = WorkloadRunner<HvfDriver, RealEndpointSpawner>;
 
 /// Firecracker VM configuration for the [`VmBackend`] trait.
 ///
@@ -470,9 +470,8 @@ pub enum AnyBackend {
     Libkrun(LibkrunBackend),
     /// Vz — the one Apple Virtualization.framework backend (per-VM Rust
     /// objc2 supervisor: snapshot/restore, pause/resume, flow-audited
-    /// networking). Opt-in via `--hypervisor vz` / `MVM_BACKEND=vz`; the
-    /// macOS-26 auto-default is now the in-house VMM (`InHouse`), and Vz
-    /// is on the sunset path.
+    /// networking). The macOS-26 auto-default; opt-in elsewhere via
+    /// `--hypervisor vz` / `MVM_BACKEND=vz`.
     Vz(VzBackend),
     /// QEMU workload runtime — Linux dev/test substrate (KVM where
     /// present, TCG fallback). Opt-in via `--hypervisor qemu` /
@@ -489,17 +488,18 @@ pub enum AnyBackend {
     Mock(MockBackend),
     /// Raw HVF — Hypervisor.framework on macOS / Apple silicon,
     /// driven by the unified `vmm::run` loop via the detached
-    /// `mvm-hvf-supervisor`. Opt-in via `--hypervisor hvf` / `MVM_BACKEND=hvf`.
-    /// The macOS-26 auto-default reaches the same in-house VMM through the
-    /// `InHouse` runner role; this raw variant is the direct-backend selector.
+    /// `mvm-hvf-supervisor`. Selectable via `--hypervisor hvf` / `MVM_BACKEND=hvf`,
+    /// and the macOS-26 auto-detect default (Vz is sunset, opt-in only). Its
+    /// `start()` spawns the per-VM gating endpoint that is the sole claim-10 egress
+    /// gate over vsock — no gvproxy sidecar. The destination macOS backend.
     Hvf(HvfBackend),
-    /// The in-house VMM driven through the unified `WorkloadRunner` over the
-    /// driver seam — the role-runner that replaces the per-backend
-    /// Hvf/Libkrun/Vz/FC `start()` copies. The macOS-26 Apple Silicon
-    /// auto-default (also selectable via `--hypervisor inhouse`); the `hvf`
-    /// selector still resolves to the raw `HvfBackend`. Same in-house VMM,
-    /// tier, and security profile as `Hvf` — just reached via the runner role.
-    InHouse(InHouseRunner),
+    /// The hvf VMM driven through the unified `WorkloadRunner` over the
+    /// driver seam — the role-runner that will replace the per-backend
+    /// Hvf/Libkrun/Vz/FC `start()` copies. Opt-in via `--hypervisor hvf`.
+    /// Same hvf VMM, tier, and security profile as `Hvf` — just reached via
+    /// the runner role. `auto_select` picks the raw [`Self::Hvf`] variant on the
+    /// macOS-26 tier today, not this one.
+    HvfRunner(HvfRunner),
 }
 
 impl AnyBackend {
@@ -528,11 +528,8 @@ impl AnyBackend {
         // The runner isn't const-constructible, so it can't live in the catalog
         // table; special-case its opt-in selector before the descriptor lookup.
         // Every other selector — `hvf` included — stays byte-identical.
-        if matches!(name, "inhouse" | "in-house") {
-            return Self::InHouse(WorkloadRunner::new(
-                InHouseDriver::new(),
-                RealEndpointSpawner,
-            ));
+        if matches!(name, "hvf-runner") {
+            return Self::HvfRunner(WorkloadRunner::new(HvfDriver::new(), RealEndpointSpawner));
         }
         catalog::descriptor_for_selector(name)
             .map(|descriptor| descriptor.instantiate())
@@ -546,7 +543,7 @@ impl AnyBackend {
     ///
     /// Priority:
     /// 1. **Firecracker** (if native Linux `/dev/kvm` is available — production Tier 1)
-    /// 2. In-house HVF VMM via the WorkloadRunner (macOS 26+ Apple Silicon)
+    /// 2. HVF VMM (macOS 26+ Apple Silicon — vsock-only egress, no Vz/gvproxy)
     /// 3. raw libkrun
     ///
     /// If none of the above match, the function returns Firecracker as
@@ -563,14 +560,11 @@ impl AnyBackend {
             return Self::Firecracker(FirecrackerBackend);
         }
 
-        // 2. macOS 26+ Apple Silicon → the in-house HVF VMM via the unified
-        //    WorkloadRunner (vsock-only egress; no Vz supervisor, no
-        //    gvproxy/passt NIC). Vz is opt-in via `--hypervisor vz`.
+        // 2. macOS 26+ Apple Silicon → the HVF VMM (`hvf`). Vz is sunset
+        //    (opt-in only via `--hypervisor vz`); the hvf path enforces claim-10
+        //    egress via its per-VM gating endpoint over vsock — no gvproxy sidecar.
         if plat.is_vz_default_tier() {
-            return Self::InHouse(WorkloadRunner::new(
-                InHouseDriver::new(),
-                RealEndpointSpawner,
-            ));
+            return Self::Hvf(HvfBackend);
         }
 
         // 3. libkrun installed → use the raw libkrun shim.
@@ -621,7 +615,7 @@ impl AnyBackend {
 
     /// The typed discriminant for this backend. Lets callers branch on
     /// `BackendKind::Vz` etc. instead of string-matching `name()`. The runner-role
-    /// variant reports the same in-house VMM kind as the raw `Hvf` variant.
+    /// variant reports the same hvf VMM kind as the raw `Hvf` variant.
     pub fn kind(&self) -> catalog::BackendKind {
         match self {
             Self::Firecracker(_) => catalog::BackendKind::Firecracker,
@@ -629,7 +623,7 @@ impl AnyBackend {
             Self::Vz(_) => catalog::BackendKind::Vz,
             Self::Qemu(_) => catalog::BackendKind::Qemu,
             Self::Mock(_) => catalog::BackendKind::Mock,
-            Self::Hvf(_) | Self::InHouse(_) => catalog::BackendKind::Hvf,
+            Self::Hvf(_) | Self::HvfRunner(_) => catalog::BackendKind::Hvf,
         }
     }
 
@@ -641,7 +635,7 @@ impl AnyBackend {
             Self::Qemu(backend) => backend,
             Self::Mock(backend) => backend,
             Self::Hvf(backend) => backend,
-            Self::InHouse(backend) => backend,
+            Self::HvfRunner(backend) => backend,
         }
     }
 
@@ -657,7 +651,9 @@ impl AnyBackend {
             Self::Qemu(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Mock(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Hvf(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
-            Self::InHouse(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
+            Self::HvfRunner(backend) => {
+                std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>
+            }
         }
     }
 
@@ -710,11 +706,11 @@ impl AnyBackend {
             // HVF carries untrusted workloads: claim-10 default-deny egress, a real
             // mkGuest workload boot, a host-reachable guest agent, and now the
             // secret-substitution gateway (claim-10 at the substitution bridge,
-            // claims 12/13 at the per-VM endpoint) all run on the in-house VMM.
+            // claims 12/13 at the per-VM endpoint) all run on the hvf VMM.
             AnyBackend::Hvf(b) => Some(b),
-            // Same in-house VMM as Hvf, reached via the runner role: claim-10 at
+            // Same hvf VMM as Hvf, reached via the runner role: claim-10 at
             // the endpoint, claims 12/13 at the per-VM substitution endpoint.
-            AnyBackend::InHouse(b) => Some(b),
+            AnyBackend::HvfRunner(b) => Some(b),
         }
     }
 
@@ -987,8 +983,9 @@ mod tests {
     #[test]
     fn test_any_backend_from_hypervisor_vz() {
         // `--backend vz` and the longer `--backend virtualization`
-        // both route to the Vz backend. Vz is opt-in only now — the
-        // macOS-26 `auto_select()` default is the in-house VMM.
+        // both still route to the Vz backend — Vz stays selectable as an
+        // opt-in. `auto_select()` no longer picks it on macOS 26+; the
+        // hvf VMM is the workload default there.
         for alias in ["vz", "virtualization"] {
             let backend = AnyBackend::from_hypervisor(alias);
             assert!(matches!(backend, AnyBackend::Vz(_)), "alias {alias}");
@@ -1074,20 +1071,18 @@ mod tests {
     }
 
     #[test]
-    fn from_hypervisor_inhouse_selects_the_workload_runner() {
-        // The opt-in `inhouse`/`in-house` selector constructs the runner-role
-        // backend. Its VmBackend name delegates to the in-house driver ("hvf"),
-        // and it is a workload backend (carries untrusted workloads).
-        for sel in ["inhouse", "in-house"] {
-            let backend = AnyBackend::from_hypervisor(sel);
-            assert!(matches!(backend, AnyBackend::InHouse(_)), "selector {sel}");
-            assert_eq!(backend.as_vm_backend().name(), "hvf", "selector {sel}");
-            assert!(
-                backend.as_workload_backend().is_some(),
-                "selector {sel}: runner must be a workload backend"
-            );
-            assert_eq!(backend.kind(), catalog::BackendKind::Hvf, "selector {sel}");
-        }
+    fn from_hypervisor_hvf_selects_the_workload_runner() {
+        // The opt-in `hvf-runner` selector constructs the runner-role backend.
+        // Its VmBackend name delegates to the hvf driver ("hvf"), and it is a
+        // workload backend (carries untrusted workloads).
+        let backend = AnyBackend::from_hypervisor("hvf-runner");
+        assert!(matches!(backend, AnyBackend::HvfRunner(_)));
+        assert_eq!(backend.as_vm_backend().name(), "hvf");
+        assert!(
+            backend.as_workload_backend().is_some(),
+            "runner must be a workload backend"
+        );
+        assert_eq!(backend.kind(), catalog::BackendKind::Hvf);
     }
 
     #[test]
@@ -1169,7 +1164,9 @@ mod tests {
         let name = backend.name();
         assert!(
             // The full set of legitimate auto_select returns is:
-            // firecracker (KVM), hvf (macOS-26 in-house runner), libkrun.
+            //   firecracker (KVM), hvf (macOS 26+ hvf VMM, via the HvfRunner
+            //   runner whose name() delegates to the hvf driver), libkrun
+            //   (macOS 13-25 / Linux non-KVM fallback).
             matches!(name, "firecracker" | "hvf" | "libkrun"),
             "auto_select returned unexpected backend: {name}"
         );

@@ -238,8 +238,8 @@ fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
 
 /// Resolve the requested hypervisor to the effective one for this host. `firecracker`
 /// (the default `--hypervisor`) auto-detects: KVM → firecracker, macOS 26+ Apple Silicon
-/// → inhouse (the in-house HVF VMM; Vz is opt-in via `--hypervisor vz`), macOS 13-25 +
-/// libkrun → libkrun, else firecracker (surfaces a clear
+/// → hvf (the HVF VMM with vsock-only egress — no Vz supervisor, no
+/// gvproxy), macOS 13-25 + libkrun → libkrun, else firecracker (surfaces a clear
 /// "not available" error). Any explicit value is returned as-is. The `MVM_HYPERVISOR`
 /// env var (alias `MVM_BACKEND`) overrides auto-detect — the workload-VMM override
 /// mirroring `MVM_BUILDER_BACKEND` for the builder, so a Linux/KVM host can opt into
@@ -264,10 +264,11 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
     if plat.has_kvm() {
         "firecracker"
     } else if plat.is_vz_default_tier() {
-        // macOS 26+ Apple Silicon: the in-house HVF VMM (vsock-only egress) is
-        // the destination workload backend — no Vz supervisor, no gvproxy/passt
-        // NIC. Vz stays reachable via an explicit `--hypervisor vz`.
-        "inhouse"
+        // macOS 26+ Apple Silicon: the HVF VMM (`hvf`) is the workload
+        // default. Vz is sunset (opt-in only via `--hypervisor vz`); the hvf path
+        // carries claim-10 egress over vsock via its per-VM gating endpoint — no
+        // gvproxy sidecar.
+        "hvf"
     } else if plat.has_libkrun() {
         "libkrun"
     } else {
@@ -408,6 +409,37 @@ mod tests {
         unsafe {
             std::env::remove_var("MVM_HYPERVISOR");
             std::env::set_var("MVM_BACKEND", "hvf");
+        }
+        assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
+        // SAFETY: restore prior values.
+        unsafe {
+            match saved_hv {
+                Some(v) => std::env::set_var("MVM_HYPERVISOR", v),
+                None => std::env::remove_var("MVM_HYPERVISOR"),
+            }
+            match saved_be {
+                Some(v) => std::env::set_var("MVM_BACKEND", v),
+                None => std::env::remove_var("MVM_BACKEND"),
+            }
+        }
+    }
+
+    /// On the macOS-26 Apple Silicon tier the auto-detect default is the
+    /// HVF VMM (`hvf`) — never `vz`. Vz is sunset and reachable
+    /// only via an explicit `--hypervisor vz`. Host-conditioned: the assertion
+    /// only fires on a host that actually reports the tier.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_26_default_is_hvf_not_vz() {
+        if !mvm_core::platform::current().is_vz_default_tier() {
+            return; // Not on the macOS-26 tier (e.g. macOS 13-25 CI runner).
+        }
+        let saved_hv = std::env::var_os("MVM_HYPERVISOR");
+        let saved_be = std::env::var_os("MVM_BACKEND");
+        // SAFETY: test-local env mutation, restored before returning.
+        unsafe {
+            std::env::remove_var("MVM_HYPERVISOR");
+            std::env::remove_var("MVM_BACKEND");
         }
         assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
         // SAFETY: restore prior values.

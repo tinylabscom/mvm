@@ -81,9 +81,9 @@ For repeated calls, build and boot a named sandbox instead:
 
 ```sh
 mvmctl init ./llm-tool --preset python
-mvmctl build ./llm-tool
-mvmctl up ./llm-tool --name llm-tool
-mvmctl exec llm-tool -- python /work/tool.py
+mvmctl machine build --flake ./llm-tool
+mvmctl machine run --flake ./llm-tool --name llm-tool -d
+mvmctl machine exec llm-tool -- python /work/tool.py
 ```
 
 ## Security checklist

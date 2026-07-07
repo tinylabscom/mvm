@@ -24,7 +24,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  MVMCTL_RELEASE_FEATURES: template-registry-s3,dev-watch,custom-dns,manifest-verify
+  MVMCTL_RELEASE_FEATURES: template-registry-s3,dev-watch,custom-dns,manifest-verify,release-artifact-bootstrap
 
 jobs:
   build:

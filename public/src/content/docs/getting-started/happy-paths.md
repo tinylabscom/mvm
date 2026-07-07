@@ -61,7 +61,7 @@ booted from it.
 
 ```bash
 mvmctl doctor --workflow cli-run                # preflight
-mvmctl up --flake . --cpus 2 --memory 1024      # build + boot
+mvmctl machine run --flake . --cpus 2 --memory 1024      # build + boot
 mvmctl machine stop --all                                     # tear down
 ```
 
@@ -76,7 +76,7 @@ source checkout); subsequent runs reuse the warm builder. Skip the
   owns Nix; the host doesn't need it.
 - `dev VM not running — run mvmctl dev up to verify` → that's just
   doctor telling you tool checks were skipped because the builder
-  VM is asleep. It's not a failure; `mvmctl up` boots it on
+  VM is asleep. It's not a failure; `mvmctl machine run` boots it on
   demand.
 - `disk space < N GiB` → free space on `~/.mvm/` (default cache
   location); `mvmctl cache info` shows what's there.
@@ -89,13 +89,15 @@ callable function.
 
 ```bash
 mvmctl doctor --workflow python-sdk                              # preflight
-mvmctl compile my_app.py --out /tmp/my-app && mvmctl up my-app   # compile + boot
-mvmctl invoke my-app --input name='ari'                          # call
+mvmctl build compile my_app.py --out /tmp/my-app                 # compile (static parse)
+echo '[[], {"name":"ari"}]' | \
+  mvmctl machine run --entrypoint --flake /tmp/my-app            # build + boot + call → "hello ari"
 ```
 
-`mvmctl compile` parses the decorator statically; user code does not
-execute on the host (only inside the microVM). `mvmctl invoke` accepts
-function arguments via `--input key=value` (repeatable). See
+`mvmctl build compile` parses the decorator statically; user code does not
+execute on the host (only inside the microVM). `mvmctl machine run --entrypoint`
+invokes the baked function, taking its arguments as an `[args, kwargs]` JSON
+payload on stdin (empty ⇒ `[[], {}]`). See
 [SDK guide](/guides/sdk/) for the decorator surface.
 
 **Failure recovery:**
@@ -113,8 +115,9 @@ Same shape as the Python flow with a `.ts` (or `.js`) entry file.
 
 ```bash
 mvmctl doctor --workflow typescript-sdk                          # preflight
-mvmctl compile my-app.ts --out /tmp/my-app && mvmctl up my-app   # compile + boot
-mvmctl invoke my-app --input name='ari'                          # call
+mvmctl build compile my-app.ts --out /tmp/my-app                 # compile (static parse)
+echo '[[], {"name":"ari"}]' | \
+  mvmctl machine run --entrypoint --flake /tmp/my-app            # build + boot + call → "hello ari"
 ```
 
 The preflight specifically checks the local TypeScript runner
@@ -133,7 +136,7 @@ to launch.
 
 ```bash
 mvmctl doctor --workflow bundle-run             # preflight (no host rust needed)
-mvmctl up --bundle ./my-app.mvmpkg              # boot
+mvmctl machine check-artifact ./my-app.mvm   # verify the signed artifact before launch
 mvmctl machine stop --all                                     # tear down
 ```
 

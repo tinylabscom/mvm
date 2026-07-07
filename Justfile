@@ -168,6 +168,12 @@ release-auto:
     git add Cargo.toml Cargo.lock
     # 4. Generate changelog and create tag
     git-cliff --tag "v$NEXT_VERSION" --unreleased --prepend CHANGELOG.md
+    # Fail closed if git-cliff did not add the new section (silently shipped
+    # v0.15.2/v0.16.0/v0.16.1 with no changelog entry — never again).
+    if ! grep -qE "^## \[$NEXT_VERSION\]" CHANGELOG.md; then
+        echo "ERROR: git-cliff did not add a '## [$NEXT_VERSION]' section to CHANGELOG.md — aborting (no changelog for the release)." >&2
+        exit 1
+    fi
     git add CHANGELOG.md
     git commit -m "chore(release): prepare v$NEXT_VERSION"
     git tag "v$NEXT_VERSION"
@@ -195,6 +201,11 @@ release VERSION:
     # --tag: use specified version instead of auto-bump
     # --prepend: add new changelog entry to CHANGELOG.md
     git-cliff --tag "v{{VERSION}}" --unreleased --prepend CHANGELOG.md
+    # Fail closed if git-cliff did not add the new section (see release-auto).
+    if ! grep -qE "^## \[{{VERSION}}\]" CHANGELOG.md; then
+        echo "ERROR: git-cliff did not add a '## [{{VERSION}}]' section to CHANGELOG.md — aborting (no changelog for the release)." >&2
+        exit 1
+    fi
     git add CHANGELOG.md
     git commit -m "chore(release): prepare v{{VERSION}}"
     git tag "v{{VERSION}}"

@@ -557,7 +557,7 @@ enum Entrypoint {
 Once the rootfs is booted and the agent is up, a function call is just a vsock RPC. The shape:
 
 ```
-host (mvmctl invoke <id> --input name=Alice)
+host (mvmctl machine run --entrypoint --flake <dir>, stdin=[[], {"name": "Alice"}])
      │
      ▼  vsock: RunEntrypoint { stdin = encoded([args, kwargs]) }
 agent (uid 990, dev_image: do_exec gated by `dev-shell` feature)
@@ -607,7 +607,7 @@ The rootfs itself stays minimal — it carries only the interpreter and the lang
 
 The IR hash isn't decorative — it's load-bearing in the admission path.
 
-**`mvmctl up`** (`crates/mvm-cli/src/commands/vm/plan_admission.rs`):
+**`mvmctl machine run`** (`crates/mvm-cli/src/commands/vm/plan_admission.rs`):
 
 1. Resolves the workload → IR JSON → `ir_hash`.
 2. Calls `synthesize_plan(input)` (`plan_builder.rs`) to build a typed `ExecutionPlan` carrying the IR hash, image ref, resources, policy refs, an intent-bound admission profile, validity window, and a fresh nonce.

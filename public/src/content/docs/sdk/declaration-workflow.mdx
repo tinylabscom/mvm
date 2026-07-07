@@ -6,7 +6,7 @@ description: Compile Python and TypeScript workload declarations into Workload I
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 The declaration workflow is the security-first path for deployable workloads.
-You write a small code declaration, `mvmctl compile` extracts the supported
+You write a small code declaration, `mvmctl build compile` extracts the supported
 literal shape, and the result becomes Workload IR plus staged build artifacts.
 
 Use this path when you want code-first ergonomics without treating module import
@@ -15,9 +15,9 @@ side effects as part of the build.
 ## Workflow
 
 ```sh
-mvmctl compile ./tool.py --out /tmp/tool-build
-mvmctl build /tmp/tool-build
-mvmctl up /tmp/tool-build --name tool-dev
+mvmctl build compile ./tool.py --out /tmp/tool-build
+mvmctl machine build --flake /tmp/tool-build
+mvmctl machine run --flake /tmp/tool-build --name tool-dev
 ```
 
 The compile step accepts:
@@ -63,7 +63,7 @@ def run(prompt: str) -> str:
 Compile it:
 
 ```sh
-mvmctl compile ./tool.py --out /tmp/agent-tool
+mvmctl build compile ./tool.py --out /tmp/agent-tool
 ```
 
 The compiler handles the declaration. The function body is workload code; it is
@@ -92,7 +92,7 @@ export const run = mvm.app({
 Compile it:
 
 ```sh
-mvmctl compile ./tool.ts --out /tmp/agent-tool
+mvmctl build compile ./tool.ts --out /tmp/agent-tool
 ```
 
 For TypeScript, install a project-local runner when a script needs runtime
@@ -114,25 +114,25 @@ posture because the script executes on the host.
 Compile a Workload IR file directly:
 
 ```sh
-mvmctl compile --from-ir ./workload.json --out /tmp/agent-tool
+mvmctl build compile --from-ir ./workload.json --out /tmp/agent-tool
 ```
 
 Compile IR from stdin:
 
 ```sh
-cat ./workload.json | mvmctl compile - --out /tmp/agent-tool
+cat ./workload.json | mvmctl build compile - --out /tmp/agent-tool
 ```
 
 Compile a deterministic archive:
 
 ```sh
-mvmctl compile --from-ir ./workload.json --out /tmp/agent-tool.tgz
+mvmctl build compile --from-ir ./workload.json --out /tmp/agent-tool.tgz
 ```
 
 Compile from an explicit runtime recording:
 
 ```sh
-mvmctl compile --from-recording ./recording.json --out /tmp/agent-tool
+mvmctl build compile --from-recording ./recording.json --out /tmp/agent-tool
 ```
 
 Use IR inputs when another tool already produced the workload contract. Use

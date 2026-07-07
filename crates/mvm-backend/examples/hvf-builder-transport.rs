@@ -1,8 +1,8 @@
 //! Step 1 of the builder-on-HVF capstone: live-prove the disk-only job/artifact
 //! transport end to end, with NO nix and NO egress. Drives the real
-//! `BuilderRunner<InHouseDriver>` with a trivial `cmd.sh`, so a green run means
+//! `BuilderRunner<HvfDriver>` with a trivial `cmd.sh`, so a green run means
 //! the guest init's disk-transport fallback (extract input disk → run cmd.sh →
-//! tar /out onto the output disk) works on the in-house HVF VMM.
+//! tar /out onto the output disk) works on the HVF VMM.
 //!
 //! Needs a built dev image at `~/.mvm/dev/current` (kernel + builder rootfs).
 //!
@@ -16,7 +16,7 @@ fn main() {
     use std::path::PathBuf;
 
     use mvm_backend::builder_runner::{BuilderBuild, BuilderRunner};
-    use mvm_backend::driver::InHouseDriver;
+    use mvm_backend::driver::HvfDriver;
     use mvm_build::builder_disk_transport::create_output_disk;
 
     let home = std::env::var("HOME").unwrap();
@@ -67,7 +67,7 @@ fn main() {
     unsafe { std::env::set_var("MVM_HVF_TIMEOUT", "180") };
 
     println!("booting the builder VM on HVF (disk transport, no nix)…");
-    let runner = BuilderRunner::new(InHouseDriver::new());
+    let runner = BuilderRunner::new(HvfDriver::new());
     let outcome = runner
         .build(&BuilderBuild {
             name: "hvf-builder-step1",
@@ -119,7 +119,7 @@ fn main() {
     };
     if ok {
         println!(
-            "PROOF: the builder ran on the in-house HVF VMM and the output tar came \
+            "PROOF: the builder ran on the HVF VMM and the output tar came \
              back to the host. No vz, no virtio-fs."
         );
     } else {

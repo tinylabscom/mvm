@@ -9,6 +9,7 @@ use fs_ext4::block_io::BlockDevice;
 use fs_ext4::dir::{self, DirEntryType};
 use fs_ext4::file_io;
 use fs_ext4::fs::Filesystem;
+use mvm_ext4::mkfs::format_empty_ext4;
 use mvm_ext4::{Node, build_image};
 
 /// An in-memory block device over our image bytes (safe).
@@ -126,6 +127,44 @@ fn tree_round_trips_through_real_reader() {
     let (link_inode, _) = fs.read_inode_verified(link_ino).unwrap();
     assert!(link_inode.is_symlink());
     assert_eq!(link_inode.size, "hosts".len() as u64);
+}
+
+/// The empty-growable `mkfs` path (a writable Stage 0 store, not a sealed
+/// rootfs) must also produce a filesystem the independent reader mounts: a bare
+/// root directory holding only "." and "..", sized to the full device with free
+/// space to grow. Exercises both a single partial group and a multi-group
+/// layout (with backup superblocks).
+#[test]
+fn empty_mkfs_mounts_in_real_reader() {
+    for size in [64 * 1024 * 1024u64, 160 * 1024 * 1024] {
+        let mut cur = std::io::Cursor::new(vec![0u8; size as usize]);
+        let summary = format_empty_ext4(&mut cur, size).expect("format empty ext4");
+        assert!(
+            summary.free_blocks > 0,
+            "a fresh store must have free space"
+        );
+
+        let fs = mount(cur.into_inner());
+        let (root, _) = fs.read_inode_verified(2).expect("read root inode");
+        assert_eq!(
+            root.mode & 0o170000,
+            0o040000,
+            "root must be a directory (size {size})"
+        );
+        let names: Vec<String> = list_dir(&fs, 2).into_iter().map(|(n, ..)| n).collect();
+        assert!(
+            names.contains(&".".to_string()),
+            "root has '.' (size {size})"
+        );
+        assert!(
+            names.contains(&"..".to_string()),
+            "root has '..' (size {size})"
+        );
+        assert!(
+            names.iter().all(|n| n == "." || n == ".."),
+            "a fresh store's root holds only '.' and '..' (size {size})"
+        );
+    }
 }
 
 #[test]

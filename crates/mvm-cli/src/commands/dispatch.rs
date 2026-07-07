@@ -1,0 +1,69 @@
+use anyhow::Result;
+
+use mvm_core::user_config::MvmConfig;
+
+use super::*;
+
+pub(super) trait TopLevelCommand {
+    fn run(self, cli: &Cli, cfg: &MvmConfig) -> Result<()>;
+    fn is_early_command(&self) -> bool;
+    fn try_run_early(&self) -> Option<Result<()>>;
+}
+
+impl TopLevelCommand for Commands {
+    fn run(self, cli: &Cli, cfg: &MvmConfig) -> Result<()> {
+        match self {
+            Commands::Env(a) => env::group::run(cli, a, cfg),
+            Commands::Bootstrap(a) => bootstrap::run(cli, a, cfg),
+            Commands::Dev(a) => env::dev::run(cli, a, cfg),
+            Commands::Ls(a) => vm::ps::run(cli, a, cfg),
+            Commands::Run(a) => vm::exec::run_secure(cli, a, cfg),
+            Commands::SdkNoVm(a) => vm::sdk_no_vm::run(&a),
+            Commands::Doctor(a) => env::doctor::run(cli, a, cfg),
+            Commands::Build(a) => build::group::run(cli, a, cfg),
+            Commands::Manifest(a) => manifest::run(cli, a, cfg),
+            Commands::Image(a) => image::run(cli, a, cfg),
+            Commands::Machine(a) => machine::run(cli, a, cfg),
+            Commands::Storage(a) => storage::run(cli, a, cfg),
+            Commands::ShellInit(a) => env::shell_init::run(cli, a, cfg),
+            Commands::Ops(a) => ops::group::run(cli, a, cfg),
+            Commands::Network(a) => ops::network::run(cli, a, cfg),
+            Commands::Catalog(a) => catalog::run(cli, a, cfg),
+            Commands::Cache(a) => ops::cache::run(cli, a, cfg),
+            Commands::Pool(a) => pool::run(cli, a, cfg),
+            Commands::Reconcile(a) => ops::reconcile::run(cli, a, cfg),
+            Commands::Init(a) => env::init::run(cli, a, cfg),
+            Commands::Secret(a) => ops::secret::run(cli, a, cfg),
+            Commands::Bundle(a) => bundle::run(cli, a, cfg),
+            Commands::Trust(a) => trust::run(cli, a, cfg),
+            Commands::Deps(a) => deps::run(cli, a, cfg),
+            Commands::Artifact(a) => vm::artifact::run(cli, a, cfg),
+            #[cfg(feature = "builder-vm")]
+            Commands::PersistentBuilder(a) => build::persistent_builder::run(cli, a),
+            Commands::QemuVsockBridge(_) => {
+                unreachable!("qemu vsock bridge short-circuits in run()")
+            }
+            Commands::SshAgentProxy(_) => {
+                unreachable!("ssh-agent proxy short-circuits in run()")
+            }
+        }
+    }
+
+    fn is_early_command(&self) -> bool {
+        matches!(
+            self,
+            Commands::QemuVsockBridge(_) | Commands::SshAgentProxy(_)
+        )
+    }
+
+    fn try_run_early(&self) -> Option<Result<()>> {
+        if !self.is_early_command() {
+            return None;
+        }
+        match self {
+            Commands::QemuVsockBridge(a) => Some(qemu_bridge::run(a)),
+            Commands::SshAgentProxy(a) => Some(ssh_agent_proxy::run(a)),
+            _ => None,
+        }
+    }
+}

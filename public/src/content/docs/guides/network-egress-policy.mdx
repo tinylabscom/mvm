@@ -16,10 +16,10 @@ forwarding mechanics, see [Networking](/guides/networking/).
 
 | Level | Use when | Example |
 | --- | --- | --- |
-| No egress | Generated code, code interpreters, offline analysis. | `--network-preset none` |
-| Package registries | Build or install steps need language registries. | `--network-preset registries` |
-| Local development | A developer needs common dev services. | `--network-preset dev` |
-| Explicit allowlist | Production-like agent or service path. | `--network-allow api.example.com:443` |
+| No egress | Generated code, code interpreters, offline analysis. | (default — deny-all) |
+| Package registries | Build or install steps need language registries. | `--net` |
+| Local development | A developer needs common dev services. | `--net` |
+| Explicit allowlist | Production-like agent or service path. | `--allow-host api.example.com:443` |
 | Unrestricted | Local debugging only. | Avoid for untrusted workloads. |
 
 For security-sensitive examples, use no egress or explicit allowlists. Broad
@@ -30,30 +30,29 @@ presets are convenience tools, not production policy.
 Start closed:
 
 ```sh
-mvmctl up --flake . --name agent-sandbox --network-preset none
+mvmctl machine run --flake . --name agent-sandbox
 ```
 
 Allow only package registries for install-heavy workflows:
 
 ```sh
-mvmctl up --flake . --name build-sandbox --network-preset registries
+mvmctl machine run --flake . --name build-sandbox --net
 ```
 
 Allow named destinations:
 
 ```sh
-mvmctl up --flake . --name agent-sandbox \
-  --network-preset none \
-  --network-allow api.openai.com:443 \
-  --network-allow github.com:443
+mvmctl machine run --flake . --name agent-sandbox \
+  \
+  --allow-host api.openai.com:443 \
+  --allow-host github.com:443
 ```
 
 Keep inbound ports separate from outbound egress:
 
 ```sh
-mvmctl up --flake . --name api-dev \
-  --network-preset none \
-  -p 127.0.0.1:8080:8080
+mvmctl machine run --flake . --name api-dev -d
+mvmctl machine forward api-dev -p 8080:8080
 ```
 
 Opening a host port does not mean the guest should have outbound internet

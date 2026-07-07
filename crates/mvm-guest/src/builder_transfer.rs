@@ -1,6 +1,6 @@
 //! Builder-VM file transfer over the guest↔host vsock channel.
 //!
-//! The in-house VMM (HVF on macOS, KVM on Linux) has no virtio-fs and no
+//! The hvf VMM (HVF on macOS, KVM on Linux) has no virtio-fs and no
 //! writable host-shared disk — only virtio-blk + vsock. So the builder VM moves
 //! files the way everything moves under the vsock-only guest channel: over vsock.
 //! The host streams the source tree (and host binaries) *into* the builder guest,

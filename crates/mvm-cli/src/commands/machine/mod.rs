@@ -28,12 +28,16 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use mvm_core::atomic_io::atomic_write;
 use mvm_core::manifest::{Manifest, ManifestMachineWorkflow, resolve_manifest_config_path};
 use mvm_core::user_config::MvmConfig;
-use mvm_core::util::parse_human_size;
 use mvm_core::vm_backend::{VmId, VmStatus};
 use mvm_core::{config, naming};
+
+use mvm::machine::persist::{
+    MACHINE_SPEC_SCHEMA_VERSION, MachineSpec, ReconfigurePatch, SpecReconcile, apply_patch,
+    list_machine_specs, load_machine_spec, machine_config_diff, overwrite_machine_spec,
+    reconcile_machine_spec, save_machine_spec, validate_machine_memory,
+};
 
 use super::Cli;
 use super::build::build;
@@ -46,8 +50,6 @@ use super::vm::{console, down};
 use crate::commands::ssh_agent_proxy::{
     SSH_AGENT_GUEST_SOCKET, SshAgentProxyListen, reap_proxy, spawn_proxy, ssh_auth_sock_from_env,
 };
-
-const MACHINE_SPEC_SCHEMA_VERSION: u32 = 1;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -417,19 +419,6 @@ impl MachineRunMode {
     }
 }
 
-/// What the persistent path should do with the on-disk spec for the target name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SpecReconcile {
-    /// No spec on disk — write `desired` and boot.
-    Create,
-    /// A spec with the same launch config already exists — keep it.
-    Reuse,
-    /// A spec with a different config exists — stop the old instance, overwrite,
-    /// and reboot. `changed` is a human summary of the differing fields for the
-    /// loud notice.
-    Recreate { changed: String },
-}
-
 /// An auto-generated machine name for `-d` without `--name`. Reuses the
 /// `mvm-core` helper so foreground and persistent generated names share one
 /// human-friendly naming scheme.
@@ -446,90 +435,6 @@ fn resolve_machine_run_name(args: &MachineRunArgs) -> Result<String> {
             Ok(name.to_string())
         }
         None => Ok(auto_machine_name()),
-    }
-}
-
-/// Two specs share a launch config when every boot-affecting field matches.
-/// Runtime metadata (resolved digest, timestamps) is deliberately excluded —
-/// it changes on every start and must not trigger a collision.
-fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
-    a.image == b.image
-        && a.manifest == b.manifest
-        && a.net == b.net
-        && a.allow_host == b.allow_host
-        && a.cpus == b.cpus
-        && a.memory == b.memory
-        && a.mem_initial == b.mem_initial
-        && a.profile == b.profile
-        && a.volumes == b.volumes
-        && a.init == b.init
-        && a.ssh_agent == b.ssh_agent
-        && a.agent_verb == b.agent_verb
-}
-
-/// Human summary of which boot-affecting fields differ, for the loud
-/// "config changed, recreating" notice. Mirrors [`machine_config_matches`].
-fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> String {
-    let mut changed = Vec::new();
-    // `image` and `manifest` are mutually-exclusive sources; report either as a
-    // single "source" change. `machine_config_matches` already compares both, so
-    // without this a manifest-only swap recreates with an empty `changed` list.
-    if current.image != desired.image || current.manifest != desired.manifest {
-        changed.push("source");
-    }
-    if current.net != desired.net {
-        changed.push("net");
-    }
-    if current.allow_host != desired.allow_host {
-        changed.push("allow-host");
-    }
-    if current.cpus != desired.cpus {
-        changed.push("cpus");
-    }
-    if current.memory != desired.memory || current.mem_initial != desired.mem_initial {
-        changed.push("memory");
-    }
-    if current.profile != desired.profile {
-        changed.push("profile");
-    }
-    if current.volumes != desired.volumes {
-        changed.push("volumes");
-    }
-    if current.init != desired.init {
-        changed.push("init");
-    }
-    if current.ssh_agent != desired.ssh_agent {
-        changed.push("ssh-agent");
-    }
-    if current.agent_verb != desired.agent_verb {
-        changed.push("agent-verb");
-    }
-    changed.join(", ")
-}
-
-/// Decide how to reconcile a desired spec against what's on disk. A
-/// same-config spec is reused; a different-config spec **auto-recreates**
-/// (the caller stops the old instance, overwrites the spec, and reboots) so a
-/// config change converges like `compose up`. The machine is cattle —
-/// durable data belongs in `--volume` host shares, which live on the host and
-/// survive the recreate. The recreate is announced loudly by the caller (never
-/// silent) so an unintended clobber (e.g. a typo'd `--image`) is observable.
-fn reconcile_machine_spec(
-    existing: Option<&MachineSpec>,
-    desired: &MachineSpec,
-    force: bool,
-) -> Result<SpecReconcile> {
-    match existing {
-        None => Ok(SpecReconcile::Create),
-        Some(current) if machine_config_matches(current, desired) => Ok(SpecReconcile::Reuse),
-        Some(current) if force => Ok(SpecReconcile::Recreate {
-            changed: machine_config_diff(current, desired),
-        }),
-        Some(_) => bail!(
-            "machine {:?} exists with a different config; pass --force to recreate, \
-             or use a different name",
-            desired.name
-        ),
     }
 }
 
@@ -635,48 +540,6 @@ fn machine_run_spec(
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
     })
-}
-
-/// Declarative persistent machine spec. Runtime state lives elsewhere.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MachineSpec {
-    schema_version: u32,
-    name: String,
-    /// OCI image reference. Present for image-backed machines.
-    /// Absent for manifest-backed machines (`manifest` is set instead).
-    /// Kept optional to remain deserializable from old spec files that
-    /// always serialised `image`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    image: Option<String>,
-    /// Pre-built manifest slot hash or path. Present when the machine was
-    /// created with `--manifest` or (after a build) `--flake`. Absent for
-    /// image-backed machines.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    manifest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    resolved_digest: Option<String>,
-    net: bool,
-    allow_host: Vec<String>,
-    cpus: u32,
-    memory: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    mem_initial: Option<String>,
-    profile: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    volumes: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    init: Vec<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    ssh_agent: bool,
-    /// Explicit agent verb allowlist from `--agent-verb`. Empty ⇒ use the
-    /// computed sealed-prod default at each start.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    agent_verb: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    created_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    last_started_at: Option<String>,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -1232,10 +1095,6 @@ fn run_profile_name(profile: RunProfile) -> &'static str {
     }
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 fn load_machine_manifest_source(arg: &Path) -> Result<MachineManifestSource> {
     let manifest_path = resolve_manifest_config_path(arg)
         .with_context(|| format!("resolving machine manifest {}", arg.display()))?;
@@ -1307,26 +1166,6 @@ fn absolutize_manifest_volume_spec(spec: &str, base_dir: &Path) -> Result<String
             Ok(rendered)
         }
     }
-}
-
-fn validate_machine_memory(memory: &str, mem_initial: Option<&str>) -> Result<(u32, Option<u32>)> {
-    let memory_mib = parse_human_size(memory).context("invalid machine memory")?;
-    let mem_initial_mib = match mem_initial {
-        Some(value) => {
-            let parsed = parse_human_size(value).context("invalid machine mem_initial")?;
-            if parsed == 0 {
-                bail!("machine mem_initial must be > 0 when set");
-            }
-            if parsed >= memory_mib {
-                bail!(
-                    "machine mem_initial ({parsed} MiB) must be strictly less than memory ({memory_mib} MiB)"
-                );
-            }
-            Some(parsed)
-        }
-        None => None,
-    };
-    Ok((memory_mib, mem_initial_mib))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1679,76 +1518,6 @@ fn enforce_ssh_agent_profile(profile: &str, enabled: bool) -> Result<()> {
 
 fn validate_machine_name(name: &str) -> Result<()> {
     naming::validate_id(name, "machine name")
-}
-
-fn save_machine_spec(spec: &MachineSpec, force: bool) -> Result<()> {
-    let path = config::machine_spec_path(&spec.name);
-    if path.exists() && !force {
-        bail!(
-            "machine {:?} already exists; pass --force to overwrite",
-            spec.name
-        );
-    }
-    let bytes = serde_json::to_vec_pretty(spec).context("serializing machine spec")?;
-    atomic_write(&path, &bytes)
-        .with_context(|| format!("writing machine spec {}", path.display()))?;
-    Ok(())
-}
-
-fn overwrite_machine_spec(spec: &MachineSpec) -> Result<()> {
-    let path = config::machine_spec_path(&spec.name);
-    let bytes = serde_json::to_vec_pretty(spec).context("serializing machine spec")?;
-    atomic_write(&path, &bytes)
-        .with_context(|| format!("writing machine spec {}", path.display()))?;
-    Ok(())
-}
-
-fn load_machine_spec(name: &str) -> Result<MachineSpec> {
-    validate_machine_name(name)?;
-    let path = config::machine_spec_path(name);
-    if !path.exists() {
-        // A missing spec is the common beginner error (typo'd name, or the
-        // machine was never created). Give an actionable message with the two
-        // recovery verbs instead of leaking the internal `machine.json` path
-        // through a raw `No such file or directory`.
-        bail!(
-            "machine {name:?} does not exist. \
-             Run `mvmctl machine ls` to list machines, \
-             or `mvmctl machine create --name {name} --image <ref>` to create one."
-        );
-    }
-    load_machine_spec_from_path(&path)
-}
-
-fn load_machine_spec_from_path(path: &Path) -> Result<MachineSpec> {
-    let bytes =
-        fs::read(path).with_context(|| format!("reading machine spec {}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing machine spec {}", path.display()))
-}
-
-fn list_machine_specs() -> Result<Vec<MachineSpec>> {
-    let root = config::machine_state_root();
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut specs = Vec::new();
-    for entry in fs::read_dir(&root).with_context(|| format!("listing {}", root.display()))? {
-        let entry = entry.with_context(|| format!("reading entry in {}", root.display()))?;
-        if !entry
-            .file_type()
-            .with_context(|| format!("reading file type for {}", entry.path().display()))?
-            .is_dir()
-        {
-            continue;
-        }
-        let spec_path = entry.path().join("machine.json");
-        if spec_path.exists() {
-            specs.push(load_machine_spec_from_path(&spec_path)?);
-        }
-    }
-    specs.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(specs)
 }
 
 fn remove_machine_spec(name: &str, yes: bool) -> Result<MachineRemoveSummary> {
@@ -2920,16 +2689,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
     }
 }
 
-/// A resolved patch over the reconfigurable `MachineSpec` fields. `None`
-/// means "leave unchanged".
-struct ReconfigurePatch {
-    net: Option<bool>,
-    allow_host: Option<Vec<String>>,
-    cpus: Option<u32>,
-    memory: Option<String>,
-    mem_initial: Option<String>,
-}
-
 /// Resolve CLI flags into a patch, validating memory eagerly so a bad
 /// size fails before we overwrite anything or bounce the VM.
 fn patch_from_args(args: &MachineReconfigureArgs) -> Result<ReconfigurePatch> {
@@ -2959,27 +2718,6 @@ fn patch_from_args(args: &MachineReconfigureArgs) -> Result<ReconfigurePatch> {
         memory: args.memory.clone(),
         mem_initial: args.mem_initial.clone(),
     })
-}
-
-/// Apply the patch: each `Some` overrides the corresponding field; the
-/// rest of `spec` is inherited unchanged.
-fn apply_patch(mut spec: MachineSpec, patch: &ReconfigurePatch) -> MachineSpec {
-    if let Some(v) = patch.net {
-        spec.net = v;
-    }
-    if let Some(v) = &patch.allow_host {
-        spec.allow_host = v.clone();
-    }
-    if let Some(v) = patch.cpus {
-        spec.cpus = v;
-    }
-    if let Some(v) = &patch.memory {
-        spec.memory = v.clone();
-    }
-    if let Some(v) = &patch.mem_initial {
-        spec.mem_initial = Some(v.clone());
-    }
-    spec
 }
 
 /// `machine reconfigure <name>`: patch the persisted spec and relaunch.
@@ -3042,6 +2780,7 @@ mod tests {
     use super::*;
     use crate::commands::{Cli, Commands};
     use clap::{CommandFactory, Parser};
+    use mvm_core::atomic_io::atomic_write;
     use mvm_core::util::test_env::TestEnv;
 
     /// Minimal standalone parser so `MachineAction` can be exercised without
@@ -3536,67 +3275,6 @@ mod tests {
     }
 
     #[test]
-    fn config_match_ignores_runtime_metadata_but_not_launch_config() {
-        let mut a = spec_fixture("web");
-        let mut b = spec_fixture("web");
-        // Runtime metadata differs — still the same launch config.
-        a.resolved_digest = Some("sha256:aaa".to_string());
-        a.created_at = Some("t0".to_string());
-        b.last_started_at = Some("t1".to_string());
-        assert!(machine_config_matches(&a, &b));
-        // A launch-config field differs — no longer a match.
-        b.cpus = 4;
-        assert!(!machine_config_matches(&a, &b));
-    }
-
-    #[test]
-    fn reconcile_creates_reuses_and_force_recreates_on_config_change() {
-        let desired = spec_fixture("web");
-
-        assert_eq!(
-            reconcile_machine_spec(None, &desired, false).expect("create"),
-            SpecReconcile::Create
-        );
-
-        let same = spec_fixture("web");
-        assert_eq!(
-            reconcile_machine_spec(Some(&same), &desired, false).expect("reuse"),
-            SpecReconcile::Reuse
-        );
-
-        // A different config is force-gated: error without --force, recreate with.
-        let mut different = spec_fixture("web");
-        different.image = Some("ubuntu:24.04".to_string());
-        different.cpus += 1;
-        // A different config errors without --force, and recreates (reporting
-        // what changed) with it.
-        let err = reconcile_machine_spec(Some(&different), &desired, false)
-            .expect_err("different config errors without --force");
-        assert!(err.to_string().contains("different config"), "msg: {err}");
-        match reconcile_machine_spec(Some(&different), &desired, true).expect("recreate") {
-            SpecReconcile::Recreate { changed } => {
-                assert!(changed.contains("source"), "changed: {changed}");
-                assert!(changed.contains("cpus"), "changed: {changed}");
-            }
-            other => panic!("expected Recreate, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn config_diff_names_a_manifest_only_source_change() {
-        // A manifest-only swap (no image) must be named — `machine_config_matches`
-        // compares `manifest`, so without this the recreate notice would be empty.
-        let mut current = spec_fixture("web");
-        current.image = None;
-        current.manifest = Some("slot-aaaa".to_string());
-        let mut desired = spec_fixture("web");
-        desired.image = None;
-        desired.manifest = Some("slot-bbbb".to_string());
-        let changed = machine_config_diff(&current, &desired);
-        assert!(changed.contains("source"), "changed: {changed}");
-    }
-
-    #[test]
     fn run_spec_maps_run_args_into_a_machine_spec() {
         let args = parse_run(&[
             "run",
@@ -3789,6 +3467,7 @@ mod tests {
             &mvm::vm::runtime_meta::VmRuntimeMeta {
                 mode: mvm::vm::runtime_meta::StartModeKind::Detached,
                 accessible: false,
+                rootfs_path: None,
             },
         )
         .expect("write sealed runtime meta");
@@ -4904,39 +4583,6 @@ ssh_agent = true
     }
 
     #[test]
-    fn list_machine_specs_returns_sorted_specs() {
-        let _state = IsolatedMachineState::new();
-        for name in ["zeta", "alpha"] {
-            let spec = MachineSpec {
-                schema_version: MACHINE_SPEC_SCHEMA_VERSION,
-                name: name.to_string(),
-                image: Some(format!("example/{name}:latest")),
-                manifest: None,
-                resolved_digest: None,
-                net: false,
-                allow_host: Vec::new(),
-                cpus: 2,
-                memory: "512M".to_string(),
-                mem_initial: None,
-                profile: "standard".to_string(),
-                volumes: Vec::new(),
-                init: Vec::new(),
-                ssh_agent: false,
-                agent_verb: Vec::new(),
-                created_at: Some(mvm_core::time::utc_now()),
-                last_started_at: None,
-            };
-            save_machine_spec(&spec, false).expect("save");
-        }
-        let names = list_machine_specs()
-            .expect("list")
-            .into_iter()
-            .map(|spec| spec.name)
-            .collect::<Vec<_>>();
-        assert_eq!(names, vec!["alpha", "zeta"]);
-    }
-
-    #[test]
     fn machine_list_entry_flattens_spec_and_adds_status() {
         let spec = spec_fixture("web");
         let entry = MachineListEntry {
@@ -4949,32 +4595,6 @@ ssh_agent = true
         assert_eq!(v["name"], "web");
         assert_eq!(v["status"], "running");
         assert!(v.get("spec").is_none());
-    }
-
-    #[test]
-    fn inspect_rejects_unknown_spec_fields() {
-        let _state = IsolatedMachineState::new();
-        let path = config::machine_spec_path("web");
-        atomic_write(
-            &path,
-            br#"{
-              "schema_version": 1,
-              "name": "web",
-              "image": "alpine:latest",
-              "resolved_digest": null,
-              "net": false,
-              "allow_host": [],
-              "cpus": 2,
-              "memory": "512M",
-              "profile": "standard",
-              "created_at": "2026-06-18T00:00:00Z",
-              "last_started_at": null,
-              "unexpected": true
-            }"#,
-        )
-        .expect("write");
-        let err = load_machine_spec("web").expect_err("unknown field rejected");
-        assert!(err.to_string().contains("parsing machine spec"));
     }
 
     #[test]

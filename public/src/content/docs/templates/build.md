@@ -12,8 +12,8 @@ mvmctl build
 Or point at a project directory or manifest file:
 
 ```sh
-mvmctl build ./my-worker
-mvmctl build ./my-worker/mvm.toml
+mvmctl machine build --flake ./my-worker
+mvmctl machine build --flake ./my-worker/mvm.toml
 ```
 
 `mvmctl build` discovers `mvm.toml` or `Mvmfile.toml`, runs the Nix build
@@ -49,11 +49,11 @@ VMs. Use `mvmctl manifest *` for build slots and registry state.
 ## Boot after build
 
 ```sh
-mvmctl up
-mvmctl exec ./my-worker -- uname -a
+mvmctl machine run --manifest .
+mvmctl machine run --manifest ./my-worker -- uname -a
 ```
 
-If there is no built revision for the manifest, `mvmctl up` should fail with a
+If there is no built revision for the manifest, `mvmctl machine run` should fail with a
 hint to run `mvmctl build`.
 
 ## Security checklist

@@ -9,11 +9,11 @@ Use `mvmctl` when you need the local management layer for sandboxes.
 
 ```sh
 mvmctl init ./agent-sandbox --preset python
-mvmctl build ./agent-sandbox
-mvmctl up ./agent-sandbox --name agent-sandbox
+mvmctl machine build --flake ./agent-sandbox
+mvmctl machine run --flake ./agent-sandbox --name agent-sandbox -d
 ```
 
-`mvmctl build` uses the builder VM for Linux image construction. `mvmctl up` boots the runtime guest from the built artifact.
+`mvmctl build` uses the builder VM for Linux image construction. `mvmctl machine run` boots the runtime guest from the built artifact.
 
 ## Inspect
 
@@ -28,9 +28,9 @@ Use JSON output where commands support it when integrating with tooling.
 ## Operate
 
 ```sh
-mvmctl exec agent-sandbox -- python /work/task.py
+mvmctl machine exec agent-sandbox -- python /work/task.py
 mvmctl machine fs ls agent-sandbox /work
-mvmctl forward agent-sandbox -p 8080:8080
+mvmctl machine forward agent-sandbox -p 8080:8080
 ```
 
 Command execution, file operations, and port forwarding cross trust boundaries. Keep command args explicit, file paths narrow, and ports intentional.

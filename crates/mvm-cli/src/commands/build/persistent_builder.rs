@@ -203,8 +203,8 @@ fn persistent_backend(explicit: Option<BuilderBackendChoice>) -> Result<Persiste
     match explicit {
         None | Some(BuilderBackendChoice::Libkrun) => Ok(PersistentBackend::Libkrun),
         Some(BuilderBackendChoice::Vz) => Ok(PersistentBackend::Vz),
-        Some(BuilderBackendChoice::InHouse) => bail!(
-            "`mvmctl persistent-builder start` does not yet have an in-house persistent builder; \
+        Some(BuilderBackendChoice::Hvf) => bail!(
+            "`mvmctl persistent-builder start` does not yet have an hvf persistent builder; \
              pass `--builder libkrun` to use the libkrun persistent builder instead."
         ),
         Some(BuilderBackendChoice::Qemu) => bail!(

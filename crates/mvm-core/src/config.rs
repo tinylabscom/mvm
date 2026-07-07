@@ -515,15 +515,25 @@ pub fn vm_substitution_env_path(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("substitution-env.json")
 }
 
-/// Per-VM Unix socket the `mvm-substitution-endpoint` binds and the in-house VMM's
+/// Per-VM Unix socket the `mvm-substitution-endpoint` binds and the hvf VMM's
 /// substitution bridge connects to: `<vm_state_dir>/substitution-endpoint.sock`
 ///. Unlike the Vz path (where the Swift supervisor proxies the guest
-/// vsock dial to a `vsock/`-nested socket), the in-house VMM's device bridges
+/// vsock dial to a `vsock/`-nested socket), the hvf VMM's device bridges
 /// `EGRESS_PORT` straight to this socket, so it lives at the state-dir root. Single
 /// source of truth: the backend spawn (which binds it) and the supervisor config
 /// (which hands it to the device) both resolve it here.
 pub fn vm_substitution_endpoint_socket(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("substitution-endpoint.sock")
+}
+
+/// The hvf (HVF / `WorkloadRunner`) VMM's host→guest agent-RPC socket:
+/// `<vm_state_dir>/hvf-agent.sock`. The device's `AgentBridge` binds it and
+/// bridges every host connection to the guest agent on `GUEST_AGENT_PORT`.
+/// Single source of truth so the backend (which binds it) and the host-side
+/// agent-RPC transport (which connects to it) cannot drift — the drift that
+/// silently broke non-interactive `machine run` on the hvf VMM.
+pub fn vm_hvf_agent_socket(name: &str) -> std::path::PathBuf {
+    vm_state_dir(name).join("hvf-agent.sock")
 }
 
 // ============================================================================
@@ -988,7 +998,7 @@ mod tests {
             vm_state_dir("foo").join(vsock_socket_filename(5252)),
             vm_vsock_port_socket("foo", 5252)
         );
-        // The in-house VMM's substitution-endpoint socket sits at the state-dir
+        // The hvf VMM's substitution-endpoint socket sits at the state-dir
         // root (the device bridges to it directly) and honors MVM_DATA_DIR.
         assert_eq!(
             vm_substitution_endpoint_socket("foo"),

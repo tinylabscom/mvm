@@ -13,13 +13,13 @@ cleanup is still required.
 | State | What it means | Common next action | Security note |
 | --- | --- | --- | --- |
 | No image | No build artifact exists for the workload yet. | `mvmctl build` | Build inputs still need policy and secret review before launch. |
-| Built | A launchable artifact exists, but no sandbox is running. | `mvmctl up` or `mvmctl run` | Artifact metadata can reveal package, path, and configuration choices. |
+| Built | A launchable artifact exists, but no sandbox is running. | `mvmctl machine run` or `mvmctl run` | Artifact metadata can reveal package, path, and configuration choices. |
 | Starting | The backend is creating the VM, attaching drives, and waiting for readiness. | `mvmctl wait` or `mvmctl boot-report` | Admission failures should be reported without leaking secrets. |
-| Running | Guest compute is active and can execute commands, expose ports, write files, and emit logs. | `mvmctl exec`, `mvmctl machine logs`, `mvmctl machine fs`, `mvmctl machine stop`, or snapshot commands | Treat command output, files, logs, ports, and receipts as boundary-crossing data. |
+| Running | Guest compute is active and can execute commands, expose ports, write files, and emit logs. | `mvmctl machine exec`, `mvmctl machine logs`, `mvmctl machine fs`, `mvmctl machine stop`, or snapshot commands | Treat command output, files, logs, ports, and receipts as boundary-crossing data. |
 | Paused | Guest execution is suspended and can be resumed by the backend path that created the pause. | `mvmctl resume` | Paused memory can contain tokens, browser sessions, plaintext files, and process state. |
 | Cold | Compute is released while recoverable state is retained through a backend snapshot or checkpoint. | `mvmctl resume` or `mvmctl checkpoint restore` | Cold state is persistence, not a security boundary. Protect it like sensitive data. |
 | Restoring | The backend is loading saved state and re-establishing runtime control. | Wait for readiness, then verify workload health | Restore can fail because of backend, host, image, or policy drift. |
-| Stopped | Guest compute is no longer running, while build artifacts, logs, receipts, volumes, or snapshots may remain. | `mvmctl up`, `mvmctl sandbox gc`, or `mvmctl cleanup` | Stop is not erase. Review retained state before reusing or sharing the host. |
+| Stopped | Guest compute is no longer running, while build artifacts, logs, receipts, volumes, or snapshots may remain. | `mvmctl machine run`, `mvmctl sandbox gc`, or `mvmctl cleanup` | Stop is not erase. Review retained state before reusing or sharing the host. |
 | Cleaned | Local registry entries and selected generated state have been removed by cleanup commands. | Rebuild from source if needed | Strong erasure depends on filesystem, volume, snapshot, and cache behavior. |
 
 ## Command map
@@ -27,9 +27,9 @@ cleanup is still required.
 | Transition | CLI surface |
 | --- | --- |
 | Source to image | `mvmctl build` |
-| Image to running sandbox | `mvmctl up` or `mvmctl run` |
+| Image to running sandbox | `mvmctl machine run` or `mvmctl run` |
 | Wait for readiness | `mvmctl wait`, `mvmctl boot-report` |
-| Run work | `mvmctl exec`, `mvmctl machine fs`, `mvmctl machine logs`, port-forwarding commands |
+| Run work | `mvmctl machine exec`, `mvmctl machine fs`, `mvmctl machine logs`, port-forwarding commands |
 | Running to paused or cold | `mvmctl pause`, `mvmctl checkpoint create` |
 | Paused or cold to running | `mvmctl resume`, `mvmctl checkpoint restore` |
 | Running to stopped | `mvmctl machine stop` |

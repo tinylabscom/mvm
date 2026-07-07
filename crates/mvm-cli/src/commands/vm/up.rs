@@ -12,7 +12,7 @@ use mvm_backend::image;
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::naming::validate_vm_name;
 
-use super::super::env::dev_vz::ensure_default_microvm_image;
+use super::super::env::dev_vz::ensure_workload_kernel;
 use super::audit_chain::{AuditEmitter, default_audit_dir};
 use super::host_signer::load_or_init_at;
 use super::policy_resolver::{
@@ -830,6 +830,26 @@ pub(super) fn emit_launched_if(ctx: &Option<AdmissionContext>, backend: &str) {
     }
 }
 
+/// Record the resolved boot posture (which rootfs strategy the run-path tier
+/// gate actually selected) on the chain-signed admission log. Fires alongside
+/// `plan.launched`, reflecting the decision `run_inner` made — never a
+/// re-derivation — so a virtiofs-root dev boot and an Option-B block boot are
+/// distinguishable in the tamper-evident chain. No-op when admission was
+/// skipped (no plan to bind to).
+pub(super) fn emit_boot_posture_if(
+    ctx: &Option<AdmissionContext>,
+    strategy: mvm_build::run_image::RootStrategy,
+) {
+    let Some(ctx) = ctx else { return };
+    let label = match strategy {
+        mvm_build::run_image::RootStrategy::VirtiofsRoot => "virtiofs-root",
+        mvm_build::run_image::RootStrategy::BlockExt4 => "block-ext4",
+    };
+    if let Err(e) = ctx.emitter.emit_boot_posture(&ctx.admitted.plan, label) {
+        tracing::warn!(error = %e, "audit emit_boot_posture failed (non-fatal)");
+    }
+}
+
 /// Tier A.1 admission enforcement: refuse to boot if any volume about to
 /// be attached isn't named in the verified `ExecutionPlan.shares`. No-op
 /// when admission was skipped (no plan to enforce against). Called right
@@ -1100,7 +1120,7 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub hypervisor_override: Option<&'a str>,
     /// Skip plan-admission signing (test escape).
     pub no_supervisor: bool,
-    /// Pre-built kernel path: skips `ensure_default_microvm_image` when set.
+    /// Pre-built kernel path: skips `ensure_workload_kernel` when set.
     pub kernel_path: Option<String>,
     /// Raw `--agent-verb` strings from the CLI. Empty ⇒ use the computed
     /// sealed-prod default.
@@ -1159,8 +1179,13 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     let kernel_path = if let Some(k) = kernel_path {
         k
     } else {
-        let (k, _) = ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
-        k
+        // The rootfs is supplied (OCI image / manifest); we need only a kernel.
+        // Resolve just the workload kernel — same as the transient OCI path
+        // (`exec.rs`) — rather than building/downloading a whole default-microvm
+        // image whose 220 MB rootfs we'd discard. This also routes through the
+        // kernel's source-fingerprint cache, so a `nix/images/kernel/` edit
+        // rebuilds on the next boot instead of reusing a stale default image.
+        ensure_workload_kernel()?
     };
     register_vm_name(name, "default");
 
@@ -2758,7 +2783,7 @@ port_hi  = 443
     fn persists_plan_before_start_covers_the_substitution_backends() {
         // The substitution endpoint reads <state_dir>/plan.json inside start() to
         // decide whether to spawn, so every backend that spawns it must persist the
-        // plan first — including the in-house hvf backend. QEMU must not (it would
+        // plan first — including the hvf backend. QEMU must not (it would
         // overwrite the in-memory config).
         for hv in ["firecracker", "vz", "libkrun", "hvf"] {
             assert!(

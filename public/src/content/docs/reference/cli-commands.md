@@ -22,7 +22,7 @@ verification under `trust`. Domains that already own their own subcommands
 
 | Group / top-level | Commands |
 |--------|----------|
-| Daily drivers (top-level) | `up`, `run`, `invoke`, `ls`, `console`, `down`, `logs`, `dev`, `doctor`, `init` |
+| Daily drivers (top-level) | `machine` (`run`/`exec`/`console`/`logs`/`stop`/`forward`/…), `ls`, `dev`, `build`, `doctor`, `init`, `bootstrap` |
 | `vm <sub>` | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
 | `build <sub>` | `image` (the former `build`), `compile`, `validate`, `kernel` |
 | `ops <sub>` | `metrics`, `bench`, `config`, `mcp` |
@@ -36,33 +36,29 @@ the common "run something in a microVM" cases, and the path the
 [getting-started docs](/getting-started/machine-scenarios/) lead with. Every
 verb in the grouping above is an **advanced / underlying surface**: `machine`
 is a thin UX layer over the *same* signed, audited, OCI-provenance execution
-path these verbs use, so the lower-level commands (`up`, `run`, `invoke`,
-`vm *`, `build *`, `console`, …) stay fully supported for power users and
-scripts. They are **not deprecated and not going away** — reach for them when
-you need finer control than `machine` exposes (custom flakes, snapshots,
-templates, the guest-RPC surface, fleet-shaped workflows).
+path. The former top-level `up`/`invoke`/`console`/`down` verbs have folded into
+`machine` (`machine run`, `machine run --entrypoint`, `machine console`,
+`machine stop`); the `vm *` and `build *` noun-groups and the internal `run`
+SDK transport remain for power users and scripts — reach for them when you need
+finer control than `machine` exposes (custom flakes, snapshots, templates, the
+guest-RPC surface, fleet-shaped workflows).
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl up --flake <ref>` | Build and run a VM from a Nix flake |
-| `mvmctl up --manifest <path>` | Boot a pre-built manifest (path to `mvm.toml`, its directory, or a legacy slot name; mutually exclusive with `--flake`). Short form: `-m <path>` |
-| `mvmctl up --name <name>` | Specify VM name (auto-generated if omitted) |
-| `mvmctl up --profile <variant>` | Flake package variant (e.g. worker, gateway) |
-| `mvmctl up --cpus N --memory SIZE` | Override vCPU count and memory (supports 512M, 4G, etc.) |
-| `mvmctl up -p HOST:GUEST` | Forward a port mapping into the VM (repeatable) |
-| `mvmctl up -e KEY=VALUE` | Inject an environment variable (repeatable) |
-| `mvmctl up -v host:guest:size` | Mount a volume into the VM (repeatable) |
-| `mvmctl up -d` | Run in background (detached mode, via launchd) |
-| `mvmctl up --forward` | Auto-forward declared ports after boot (blocks until Ctrl-C) |
-| `mvmctl up --hypervisor <backend>` | Backend: `firecracker` (default), `apple-container`, `docker`, or `qemu` |
-| `mvmctl up --config <path>` | Runtime config (TOML) for persistent resources/volumes |
-| `mvmctl up --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |
-| `mvmctl up --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
-| `mvmctl up --watch` | Watch flake for changes and auto-rebuild + reboot |
-| `mvmctl up --network-preset <preset>` | Network egress policy: `unrestricted` (default), `none`, `registries`, `dev`, `agent` (LLM-inference + GitHub bundle — see [ADR-004](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/004-hypervisor-egress-policy.md)) |
-| `mvmctl up --network-allow host:port` | Allow egress to specific host:port (repeatable, mutually exclusive with preset) |
-| `mvmctl up --seccomp <tier>` | Seccomp profile: `essential`, `minimal`, `standard` (default), `network`, `unrestricted`. The selected tier is enforced through the guest `seccomp.json` manifest and recorded in the signed admission profile for audit. |
-| `mvmctl up --network <name>` | Named dev network to attach VM to (default: "default") |
+| `mvmctl machine run --flake <ref>` | Build a Nix flake and boot a transient VM |
+| `mvmctl machine run --manifest <path>` | Boot a pre-built manifest (`mvm.toml`, its directory, or a slot name; short form `-m`). Mutually exclusive with `--flake`/`--image` |
+| `mvmctl machine run --image <ref>` | Boot an OCI image (pulled/cached). Mutually exclusive with `--flake`/`--manifest` |
+| `mvmctl machine run --name <name>` | Run under a machine identity (auto-generated if omitted) |
+| `mvmctl machine run -d` | Boot a **persistent** machine detached and return immediately |
+| `mvmctl machine run --cpus N --memory SIZE` | vCPU count and memory (supports 512M, 4G, etc.) |
+| `mvmctl machine run -e KEY=VALUE` | Inject an environment variable (repeatable; gated by `--profile`) |
+| `mvmctl machine run --volume host:/guest[:mode]` | Share a host directory (mode defaults to `ro`; `rw` needs `--profile dev`/`permissive`) |
+| `mvmctl machine run --profile <p>` | Security posture: `restrictive`, `standard` (default), `dev`, `permissive` |
+| `mvmctl machine run --net` | Enable broad dev-tier outbound egress (default is deny-all) |
+| `mvmctl machine run --allow-host HOST[:PORT]` | Allow egress only to these hosts (repeatable; PORT defaults to 443; wins over `--net`) |
+| `mvmctl machine run --hypervisor <backend>` | Backend: `firecracker` (Linux/KVM), `hvf` (macOS 26+ default, vsock-only), `vz` (macOS 26+ opt-in, sunsetting), `libkrun` (macOS 13–25 & Linux), `qemu` (dev/test) |
+| `mvmctl machine run --flake <ref> --flake-profile <variant>` | Flake package variant (e.g. worker, gateway) |
+| `mvmctl machine build --flake <ref> --watch` | Watch the flake and rebuild on change |
 | `mvmctl machine stop [name...]` | Stop one or more VMs by name, or `--all` |
 | `mvmctl ls` | List running VMs (aliases: `ps`, `status`) |
 | `mvmctl ls -a` | Show all VMs including stopped |
@@ -84,8 +80,8 @@ templates, the guest-RPC surface, fleet-shaped workflows).
 | `mvmctl bootstrap` | Prepare the environment: host tooling **and pre-fetch the builder VM image** so the first `dev up` is fast (no first-run download/build on the hot path). `install.sh` runs this automatically unless `MVM_SKIP_BUILDER_PREFETCH=1`. Idempotent — safe to re-run |
 | `mvmctl bootstrap --production` | Production mode (skip Homebrew, assume Linux with apt) |
 | `mvmctl env bootstrap` | Same as `mvmctl bootstrap` (the `env`-grouped form) |
-| `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects Vz on macOS 26+ Apple Silicon and retries with libkrun when that auto-selected Vz builder path fails; native KVM is used on Linux. |
-| `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects Vz on macOS 26+ Apple Silicon and retries with libkrun when that auto-selected Vz builder path fails; native KVM is used on Linux. |
+| `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects the HVF builder on macOS 26+ Apple Silicon and retries with libkrun when the HVF builder path fails; native KVM is used on Linux. |
+| `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects the HVF builder on macOS 26+ Apple Silicon and retries with libkrun when the HVF builder path fails; native KVM is used on Linux. |
 | `mvmctl dev up --project ~/dir` | Auto-bootstrap then cd into a project directory |
 | `mvmctl dev up --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |
 | `mvmctl dev up --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
@@ -152,7 +148,7 @@ templates, the guest-RPC surface, fleet-shaped workflows).
 
 ### Running (top-level — already manifest-aware)
 
-`mvmctl up [PATH]` and `mvmctl run [PATH] -- <cmd>` accept a manifest path or its directory and look up the manifest-keyed slot. If no current revision exists, they error with a hint to run `mvmctl build image`. See the [VM Lifecycle](#vm-lifecycle) and [One-shot Exec](#one-shot-run-transient-runner) sections for full flag lists. (Plan 40 dropped the `start` and `run` aliases on `up`.)
+`mvmctl machine run [PATH]` and `mvmctl run [PATH] -- <cmd>` accept a manifest path or its directory and look up the manifest-keyed slot. If no current revision exists, they error with a hint to run `mvmctl build image`. See the [VM Lifecycle](#vm-lifecycle) and [One-shot Exec](#one-shot-run-transient-runner) sections for full flag lists. (Plan 40 dropped the `start` and `run` aliases on `up`.)
 
 ### Inspection / registry (`mvmctl manifest *`)
 
@@ -193,6 +189,7 @@ fail honestly instead of emitting fake numbers.
 | `mvmctl ops bench microvm-launch --baseline <path> --max-regression-pct <pct>` | Compare serial median `total_ready_ms` against a comparable baseline and fail if it regresses beyond the threshold. |
 | `mvmctl ops bench microvm-density --count K --max-count M` | Boot and hold `K` admitted libkrun probe VMs, sample each supervisor/VMM process footprint, and report total plus per-instance bytes. `--max-count` is a safety cap (default 16). |
 | `mvmctl ops bench microvm-density --out <path> --json` | Write the density JSON report and optionally print it to stdout. Linux samples PSS from `/proc/<pid>/smaps_rollup`; macOS samples `phys_footprint` through `proc_pid_rusage`. |
+| `mvmctl ops bench overall --hypervisor <backend>` | Holistic benchmark: cold boot + snapshot save + snapshot restore + live migration + shutdown. The report prints per-phase milliseconds and total latency. See the [Performance](/reference/performance/) page for target numbers and automation hooks. |
 
 ## Audit
 
@@ -229,7 +226,7 @@ metadata plus `secret_visibility: "write_only"` and
 
 ## Policy Contracts
 
-`mvmctl up` still synthesizes and admits signed execution plans with policy
+`mvmctl machine run` still synthesizes and admits signed execution plans with policy
 references. The default local ref is `local-default`; tenant-scoped policy
 authoring, diffing, rollout, and review are exposed by `mvmd`, not by a public
 `mvmctl policy` command.
@@ -312,7 +309,7 @@ with a Firecracker microVM as the sandbox. Plan 178 merged the former bare
 security `--profile`, OCI `--image`, signed `--receipt`, `--json`/`--dry-run`,
 and the SDK `--mode`/`--dev`/`--prod` transport. Arbitrary command dispatch
 requires a dev-feature guest agent (the `do_exec` handler is `dev-shell`-gated,
-claim 4); production guests should use `mvmctl invoke` (no shell).
+claim 4); production guests run their baked entrypoint via `mvmctl machine run --entrypoint` (no shell).
 
 | Command | Description |
 |---------|-------------|
@@ -511,7 +508,7 @@ signed artifacts and live `machine run <artifact.mvm>` are still follow-up work.
 `machine check-artifact` is the current read-only portable-artifact gate: it
 verifies the signed manifest, file hashes, format version, sealed-prod verity
 requirements, host architecture, and fail-closed admission posture before
-printing a preview. Use `mvmctl up` for the manifest/flake path that already
+printing a preview. Use `mvmctl machine run` for the manifest/flake path that already
 exposes named networks and policy bundles.
 
 ## Sandbox State
@@ -638,7 +635,7 @@ The snapshot path activates only when *all* of the following hold:
   snapshot's recorded drive layout);
 - the active backend reports snapshot support.
 
-On macOS backends without Firecracker (Apple Container, libkrun), vsock
+On macOS backends without Firecracker (HVF, Vz, libkrun), vsock
 snapshots return `os error 95` (EOPNOTSUPP); restore failures fall back
 to cold boot with a warning rather than aborting the exec. See the
 [Sandboxed Exec](/guides/exec/) guide for the full background.
@@ -681,7 +678,7 @@ When an image-taking command is invoked without `--flake` or `--manifest`,
 This applies to:
 
 - `mvmctl run -- <cmd>` — boots a fresh transient microVM and runs `<cmd>`
-- `mvmctl up` — boots a long-running microVM with the same image
+- `mvmctl machine run` — boots a long-running microVM with the same image
 
 The image is the bundled default — a minimal `mkGuest` rootfs shipped
 with mvm. Built via Nix on first use, cached at

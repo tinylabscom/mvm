@@ -108,7 +108,7 @@ Snapshot may be corrupted after a Firecracker version change.
 **Fix**: Delete the snapshot and cold boot:
 ```bash
 mvmctl build <project-dir> --force
-mvmctl up <project-dir> --name <name>
+mvmctl machine run --flake <project-dir> --name <name> -d
 ```
 
 ## Build Issues
@@ -172,7 +172,7 @@ error: hash mismatch in fixed-output derivation
 **Fix**: Update the hash to the value shown after `got:` in the error message, or use `--update-hash`:
 
 ```bash
-mvmctl build ./my-service --update-hash
+mvmctl machine build --flake ./my-service --update-hash
 ```
 
 ### Manifest not found
@@ -279,26 +279,26 @@ mvmctl dev up --cpus 8 --memory 16
 
 Force a specific backend:
 ```bash
-mvmctl up --flake . --hypervisor firecracker
-mvmctl up --flake . --hypervisor apple-container
-mvmctl up --flake . --hypervisor docker
-mvmctl up --flake . --hypervisor qemu    # microvm.nix
+mvmctl machine run --flake . --hypervisor firecracker
+mvmctl machine run --flake . --hypervisor vz
+mvmctl machine run --flake . --hypervisor libkrun
+mvmctl machine run --flake . --hypervisor qemu    # dev/test, no /dev/kvm
 mvmctl doctor   # check available backends
 ```
 
-### macOS: first-run codesigning for `apple-container` and `libkrun`
+### macOS: first-run codesigning for `hvf`, `vz`, and `libkrun`
 
-Both `mvmctl up --hypervisor apple-container` and (once plan 57 W3 wires guest boot) `mvmctl up --hypervisor libkrun` need ad-hoc codesigning before the macOS kernel will let the binary touch the hypervisor APIs:
+The macOS backends — `hvf` (the default), `vz`, and `libkrun` — need ad-hoc codesigning before the macOS kernel will let the binary touch the hypervisor APIs:
 
-- `com.apple.security.virtualization` — required by `Virtualization.framework` (the `apple-container` backend).
-- `com.apple.security.hypervisor` — required by direct `Hypervisor.framework` callers (the `libkrun` backend).
+- `com.apple.security.virtualization` — required by `Virtualization.framework` (the `vz` backend).
+- `com.apple.security.hypervisor` — required by direct `Hypervisor.framework` callers (the `hvf` and `libkrun` backends).
 
-On the **first** run of either backend, `mvmctl` ad-hoc signs itself with both entitlements and re-spawns the current invocation. The same signed binary covers both backends, so swapping `--hypervisor` between `apple-container` and `libkrun` does not re-sign.
+On the **first** run of either backend, `mvmctl` ad-hoc signs itself with both entitlements and re-spawns the current invocation. The same signed binary covers both backends, so swapping `--hypervisor` between `hvf`, `vz`, and `libkrun` does not re-sign.
 
 What you'll see on the first run:
 
 ```
-$ mvmctl up --flake . --hypervisor apple-container
+$ mvmctl machine run --flake . --hypervisor hvf
 INFO Signing binary with virtualization + hypervisor entitlements...
 …starts the VM…
 ```
@@ -326,12 +326,10 @@ Hitting `KVM not available` on a cloud instance? Three options, in order of reco
 | GCE | n2 with `--enable-nested-virtualization` |
 | Azure | Dasv5 / Easv5 |
 
-**Option 2 — Use the Tier 3 Docker fallback.** Works in any environment with Docker Engine. **Reduced security tier** — see the [Matryoshka model](/security/matryoshka). The L1–L3 layers collapse to the host kernel, so claims 1, 2, and 3 do not hold. Use only for non-security-sensitive workloads (CI scratch, local experiments).
+**Option 2 — Use the QEMU dev/test backend.** On a Linux host without `/dev/kvm`, run the software-emulated QEMU/TCG backend. It's a real microVM but **Tier 2 dev/test** — slower, larger TCB, partial verified boot (see the [Matryoshka model](/security/matryoshka)) — so use it for local dev/test, not production or untrusted workloads.
 
 ```bash
-mvmctl up --flake . --hypervisor docker
-# Suppress the per-run banner once you've acknowledged the tier:
-export MVM_ACK_DOCKER_TIER=1
+mvmctl machine run --flake . --hypervisor qemu
 ```
 
 **Option 3 — PVM (advanced, external).** [SlicerVM's PVM mode](https://docs.slicervm.com/tasks/pvm/) runs real microVMs without `/dev/kvm` via a patched Firecracker plus a `kvm_pvm` host kernel module. mvm doesn't ship this — the maintenance cost (kernel patch + custom guest images, x86_64 only) is outside mvm's scope. If you need real microVM isolation on a non-nested-virt cloud VM and Option 1 isn't available, SlicerVM is the working answer in the ecosystem today.

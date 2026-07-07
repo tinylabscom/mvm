@@ -1,9 +1,8 @@
 # Plan 226 — Clean-Replacement release roadmap (v0.17 macOS → v0.18 Linux)
 
-**Status:** Proposed (2026-07-06)
+**Status:** Strategic reference (2026-07-06). This roadmap's macOS→Linux *sequencing* stands, but its **R1P1 execution was superseded** and not landed — the 0.17.0 HVF-default release is driven by **Plan 228** (`228-release-0-17-0.md`) and the full Vz deletion by the **`feat/plan-222-delete-vz`** branch. Kept for the strategic framing (keep libkrun; gvproxy=macOS / passt=Linux; Hetzner KVM box for R2 validation). Two findings for those owners: `create_linux_env()`→`VzDevEnv` is the live macOS build substrate that must be flipped before the Vz files can be deleted, and `just check-linux` needs the rustup toolchain (`PATH=$HOME/.cargo/bin:$PATH`).
 **Owner:** Ari
 **Supersedes nothing; sequences the tail of:** Plan 214 (clean-replacement architecture), ADR-098 (HVF macOS backend), ADR-102 (`VmmDriver` seam), ADR-108 (verb-grant measured trust).
-**Related ADRs to ratify:** ADR-098 (Proposed→Accepted, macOS-scoped sunset criteria).
 
 ## 1. Purpose
 

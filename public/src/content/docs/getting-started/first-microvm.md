@@ -10,9 +10,9 @@ This guide walks through writing a Nix flake that builds a microVM image, then b
 mvmctl auto-selects the best backend for your platform:
 
 ```
-Linux (KVM):       mvmctl up  -->  Firecracker microVM (direct)
-macOS 26+ (AS):    mvmctl up  -->  Vz microVM (Apple Virtualization.framework)
-macOS 13-25 (AS):  mvmctl up  -->  libkrun microVM
+Linux (KVM):       mvmctl machine run  -->  Firecracker microVM (direct)
+macOS 26+ (AS):    mvmctl machine run  -->  HVF microVM (Hypervisor.framework, vsock-only)
+macOS 13-25 (AS):  mvmctl machine run  -->  libkrun microVM
 ```
 
 | Layer | Access command | Has your project files? |
@@ -84,20 +84,21 @@ With a `mvm.toml` next to `flake.nix`:
 
 ```bash
 # Build (manifest discovered from cwd)
-mvmctl build
+mvmctl machine build
 
 # Boot (auto-selects best backend)
-mvmctl up
+mvmctl machine run --manifest .
 
-# Or run in background with port forwarding
-mvmctl up -d -p 8080:8080
+# Or run in the background, then forward a port
+mvmctl machine run --manifest . --name my-vm -d
+mvmctl machine forward my-vm -p 8080:8080
 ```
 
 Without a `mvm.toml` (just a flake), pass `--flake` explicitly — that legacy path still works:
 
 ```bash
 mvmctl build --flake .
-mvmctl up --flake . --cpus 2 --memory 1024
+mvmctl machine run --flake . --cpus 2 --memory 1024
 ```
 
 ## Check Status
@@ -119,7 +120,7 @@ mkdir -p /tmp/config /tmp/secrets
 echo '{"port": 8080}' > /tmp/config/app.json
 echo 'API_KEY=sk-...' > /tmp/secrets/app.env
 
-mvmctl up --flake . \
+mvmctl machine run --flake . \
     -v /tmp/config:/mnt/config \
     -v /tmp/secrets:/mnt/secrets
 ```

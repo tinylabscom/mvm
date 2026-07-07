@@ -11,6 +11,7 @@ use super::build::build;
 use super::build::compile;
 use super::build::group as build_group;
 use super::catalog;
+use super::dispatch::TopLevelCommand;
 use super::env::group as env_group;
 use super::env::{cleanup, dev, init, uninstall};
 use super::image;
@@ -3673,19 +3674,19 @@ fn builder_flag_unset_by_default() {
 }
 
 #[test]
-fn builder_flag_lists_inhouse() {
+fn builder_flag_lists_hvf() {
     let cmd = cli_command();
     let help = cmd.clone().render_help().to_string();
     assert!(
-        help.contains("inhouse"),
-        "expected --builder to accept inhouse; help text was:\n{help}"
+        help.contains("hvf"),
+        "expected --builder to accept hvf; help text was:\n{help}"
     );
 }
 
 #[test]
-fn builder_flag_accepts_inhouse() {
-    let cli = Cli::try_parse_from(["mvmctl", "--builder", "inhouse", "doctor"]).expect("parse");
-    assert_eq!(cli.builder.as_deref(), Some("inhouse"));
+fn builder_flag_accepts_hvf() {
+    let cli = Cli::try_parse_from(["mvmctl", "--builder", "hvf", "doctor"]).expect("parse");
+    assert_eq!(cli.builder.as_deref(), Some("hvf"));
 }
 
 // --- Session start --ephemeral tests ---
@@ -3815,6 +3816,13 @@ fn emits_machine_readable_stdout(argv: &[&str]) -> bool {
         .emits_machine_readable_stdout()
 }
 
+fn exits_early(argv: &[&str]) -> bool {
+    Cli::try_parse_from(argv)
+        .unwrap()
+        .command
+        .is_early_command()
+}
+
 #[test]
 fn state_touching_commands_trigger_entry_convergence() {
     // Lifecycle mutate/read commands run the cheap converge pass.
@@ -3895,6 +3903,40 @@ fn state_touching_json_commands_reserve_stdout_before_entry_convergence() {
     assert!(!emits_machine_readable_stdout(&["mvmctl", "ls"]));
     assert!(!emits_machine_readable_stdout(&["mvmctl", "dev", "status"]));
     // `mvmctl up` is retired; `up_removed` pins the removal separately.
+}
+
+#[test]
+fn internal_helper_commands_short_circuit_before_startup_side_effects() {
+    assert!(exits_early(&[
+        "mvmctl",
+        "__qemu-vsock-bridge",
+        "--uds",
+        "/tmp/bridge.sock",
+        "--cid",
+        "3",
+        "--port",
+        "5252",
+        "--watch-pid-file",
+        "/tmp/qemu.pid",
+    ]));
+    assert!(exits_early(&[
+        "mvmctl",
+        "__ssh-agent-proxy",
+        "--host-sock",
+        "/tmp/ssh-agent.sock",
+        "--listen-vsock-port",
+        "5000",
+    ]));
+    assert!(!exits_early(&["mvmctl", "doctor"]));
+    assert!(!exits_early(&[
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--",
+        "true",
+    ]));
 }
 
 // --- Top-level help surface tests ---
@@ -4075,6 +4117,7 @@ fn machine_console_refused_on_sealed_image() {
         &VmRuntimeMeta {
             mode: StartModeKind::Detached,
             accessible: false,
+            rootfs_path: None,
         },
     )
     .expect("write");

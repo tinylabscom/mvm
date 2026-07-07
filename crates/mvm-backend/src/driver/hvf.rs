@@ -1,4 +1,4 @@
-//! `InHouseDriver` — the `VmmDriver` for the first-party VMM (HVF on macOS, KVM
+//! `HvfDriver` — the `VmmDriver` for the first-party VMM (HVF on macOS, KVM
 //! on Linux via the shared `vmm` device model). Identity and capabilities
 //! delegate to the proven `HvfBackend`. `boot` maps a policy-free `VmmSpec` to a
 //! relay supervisor config, spawns `mvm-hvf-supervisor`, and returns a live
@@ -30,11 +30,11 @@ use crate::hvf_backend::{
 /// It boots what a `VmmSpec` describes and relays the guest's egress port to the
 /// host-side bridge; the claim-10 gate and substitution live in that bridge, not
 /// here.
-pub struct InHouseDriver {
+pub struct HvfDriver {
     backend: HvfBackend,
 }
 
-impl InHouseDriver {
+impl HvfDriver {
     pub fn new() -> Self {
         Self {
             backend: HvfBackend,
@@ -42,7 +42,7 @@ impl InHouseDriver {
     }
 }
 
-impl Default for InHouseDriver {
+impl Default for HvfDriver {
     fn default() -> Self {
         Self::new()
     }
@@ -87,13 +87,13 @@ fn vsock_socket(spec: &VmmSpec, guest_port: u32) -> Option<PathBuf> {
 /// Map a policy-free `VmmSpec` to a relay `HvfSupervisorConfig`: the supervisor
 /// wires the guest's `EGRESS_PORT` straight to the host-side endpoint bound at
 /// `egress_relay_socket`, which owns the claim-10 gate and substitution. The
-/// spec MUST carry that egress socket — an in-house workload has no other path
+/// spec MUST carry that egress socket — an hvf workload has no other path
 /// off the box, so a spec without it fails closed rather than booting ungated.
 fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<HvfSupervisorConfig> {
     let kernel = match &spec.kernel {
         KernelImage::Path(p) => p.clone(),
         KernelImage::Bundled => {
-            bail!("the in-house VMM requires an explicit kernel Image; VmmSpec.kernel is Bundled")
+            bail!("the hvf VMM requires an explicit kernel Image; VmmSpec.kernel is Bundled")
         }
     };
 
@@ -120,7 +120,7 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         None
     } else {
         Some(vsock_socket(spec, EGRESS_PORT).ok_or_else(|| {
-            anyhow!("in-house workload spec is missing the EGRESS_PORT vsock relay socket")
+            anyhow!("hvf workload spec is missing the EGRESS_PORT vsock relay socket")
         })?)
     };
 
@@ -164,7 +164,7 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
     })
 }
 
-impl VmmDriver for InHouseDriver {
+impl VmmDriver for HvfDriver {
     fn name(&self) -> &str {
         self.backend.name()
     }
@@ -250,8 +250,8 @@ impl VmmDriver for InHouseDriver {
         // bridge on GUEST_AGENT_PORT). Prefer the spec's own port; fall back to the
         // standing convention so a later `attach` re-derives the same path.
         let agent_socket = vsock_socket(spec, GUEST_AGENT_PORT)
-            .unwrap_or_else(|| in_house_agent_socket(&paths.state_dir));
-        Ok(Box::new(InHouseRunningVm {
+            .unwrap_or_else(|| hvf_agent_socket(&paths.state_dir));
+        Ok(Box::new(HvfRunningVm {
             id: VmId(spec.name.clone()),
             state_dir: paths.state_dir,
             pid_file: paths.pid_file,
@@ -264,9 +264,9 @@ impl VmmDriver for InHouseDriver {
         // persisted workload-exit code under the VM's state dir), so reattaching is
         // just re-deriving those paths — no live boot state to recover.
         let state_dir = vm_state_dir(&id.0);
-        Ok(Box::new(InHouseRunningVm {
+        Ok(Box::new(HvfRunningVm {
             pid_file: state_dir.join(PID_FILE_NAME),
-            agent_socket: in_house_agent_socket(&state_dir),
+            agent_socket: hvf_agent_socket(&state_dir),
             state_dir,
             id: id.clone(),
         }))
@@ -276,7 +276,7 @@ impl VmmDriver for InHouseDriver {
 /// The per-VM agent RPC socket path (host→guest agent bridge). Matches the
 /// standing socket a `WorkloadRunner` binds so `attach` re-derives it — via
 /// the single source of truth shared with the host-side resolver.
-fn in_house_agent_socket(state_dir: &std::path::Path) -> PathBuf {
+fn hvf_agent_socket(state_dir: &std::path::Path) -> PathBuf {
     mvm_core::config::vm_inhouse_agent_socket_at(state_dir)
 }
 
@@ -295,9 +295,9 @@ fn console_socket_for_port(state_dir: &std::path::Path, guest_port: u32) -> Opti
     }
 }
 
-/// A live in-house VM: the detached `mvm-hvf-supervisor` tracked by its PID file,
+/// A live hvf VM: the detached `mvm-hvf-supervisor` tracked by its PID file,
 /// with the workload's exit code persisted under its state dir.
-struct InHouseRunningVm {
+struct HvfRunningVm {
     id: VmId,
     state_dir: PathBuf,
     pid_file: PathBuf,
@@ -305,7 +305,7 @@ struct InHouseRunningVm {
     agent_socket: PathBuf,
 }
 
-impl RunningVm for InHouseRunningVm {
+impl RunningVm for HvfRunningVm {
     fn id(&self) -> &VmId {
         &self.id
     }
@@ -325,11 +325,11 @@ impl RunningVm for InHouseRunningVm {
     }
 
     fn pause(&self) -> Result<()> {
-        bail!("in-house pause/resume is not yet implemented")
+        bail!("hvf pause/resume is not yet implemented")
     }
 
     fn resume(&self) -> Result<()> {
-        bail!("in-house pause/resume is not yet implemented")
+        bail!("hvf pause/resume is not yet implemented")
     }
 
     fn status(&self) -> Result<VmStatus> {
@@ -349,15 +349,14 @@ impl RunningVm for InHouseRunningVm {
             path
         } else {
             bail!(
-                "in-house driver vsock_connect supports only the agent port \
+                "hvf driver vsock_connect supports only the agent port \
                  ({GUEST_AGENT_PORT}) and dev console data ports ({}..={}); got {guest_port}",
                 CONSOLE_PORT_BASE + 1,
                 CONSOLE_PORT_BASE + 128,
             );
         };
-        let stream = std::os::unix::net::UnixStream::connect(&socket_path).with_context(|| {
-            format!("connect to in-house vsock socket {}", socket_path.display())
-        })?;
+        let stream = std::os::unix::net::UnixStream::connect(&socket_path)
+            .with_context(|| format!("connect to hvf vsock socket {}", socket_path.display()))?;
         Ok(Box::new(stream))
     }
 }
@@ -407,7 +406,7 @@ mod tests {
 
     #[test]
     fn identity_and_capabilities_delegate_to_the_hvf_backend() {
-        let d = InHouseDriver::new();
+        let d = HvfDriver::new();
         assert_eq!(d.name(), "hvf");
         assert!(d.capabilities().vsock);
         assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
@@ -417,7 +416,7 @@ mod tests {
     fn attach_builds_a_disk_backed_handle_that_reports_stopped_for_a_missing_vm() {
         // Reattaching needs no boot state — it re-derives the state dir. A VM that
         // never ran (or has exited) reports Stopped rather than erroring.
-        let vm = InHouseDriver::new()
+        let vm = HvfDriver::new()
             .attach(&VmId("hvf-nonexistent-attach-test-vm".into()))
             .unwrap();
         assert_eq!(vm.id().0, "hvf-nonexistent-attach-test-vm");
@@ -526,7 +525,7 @@ mod tests {
 
     #[test]
     fn relay_config_missing_egress_port_fails_closed() {
-        // No EGRESS_PORT: the in-house VMM has no other path off the box, so this
+        // No EGRESS_PORT: the hvf VMM has no other path off the box, so this
         // must not boot an ungated guest.
         let spec = spec_with(
             KernelImage::Path("/img/Image".into()),
@@ -569,7 +568,7 @@ mod tests {
             }
         });
 
-        let vm = InHouseRunningVm {
+        let vm = HvfRunningVm {
             id: VmId("agent-vm".into()),
             state_dir: dir.path().to_path_buf(),
             pid_file: dir.path().join(PID_FILE_NAME),
@@ -634,7 +633,7 @@ mod tests {
             }
         });
 
-        let vm = InHouseRunningVm {
+        let vm = HvfRunningVm {
             id: VmId("console-vm".into()),
             state_dir: dir.path().to_path_buf(),
             pid_file: dir.path().join(PID_FILE_NAME),
