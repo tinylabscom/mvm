@@ -302,6 +302,9 @@ pub struct SignatureBundle {
 #[serde(rename_all = "snake_case")]
 pub enum SignatureFormat {
     Ed25519,
+    /// Keyless authority: the detached cosign bundle sidecar is authoritative and
+    /// the in-manifest `signatures` list is empty.
+    Sigstore,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -958,6 +961,17 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn signature_format_sigstore_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SignatureFormat::Sigstore).expect("serialize"),
+            "\"sigstore\""
+        );
+        let back: SignatureFormat =
+            serde_json::from_str("\"sigstore\"").expect("deserialize sigstore");
+        assert_eq!(back, SignatureFormat::Sigstore);
+    }
 
     #[test]
     fn host_pack_policy_hash_matches_sha256_of_nix_system() {
