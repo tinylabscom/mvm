@@ -116,7 +116,7 @@ pub async fn run_idle_watcher(daemon: Arc<Mutex<HostAgentDaemon>>, timeout: Opti
 ///
 /// [`HealthProber`]: crate::health_probe::HealthProber
 pub async fn run_health_watcher(daemon: Arc<Mutex<HostAgentDaemon>>) {
-    use crate::health_probe::{AgentExec, HealthProber, now_unix};
+    use crate::health_probe::{AgentExec, HealthProber, MachineRestarter, now_unix};
 
     const PROBE: Duration = Duration::from_secs(2);
     let mut ticker = tokio::time::interval(PROBE);
@@ -129,9 +129,13 @@ pub async fn run_health_watcher(daemon: Arc<Mutex<HostAgentDaemon>>) {
         }
         // Move the prober into the blocking pass and take it back afterwards so
         // its tracker state survives. A panic in the pass costs the tracker
-        // history but not the watcher loop.
+        // history but not the watcher loop. The restart spawn itself is
+        // non-blocking (fire-and-forget), so it rides along in the same
+        // blocking pass rather than needing its own task.
         prober = tokio::task::spawn_blocking(move || {
-            let _ = prober.tick(&vm_ids, now_unix(), &AgentExec);
+            let now = now_unix();
+            let actions = prober.tick(&vm_ids, now, &AgentExec);
+            prober.act(&actions, now, &MachineRestarter);
             prober
         })
         .await

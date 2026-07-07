@@ -7,6 +7,8 @@
 //! it to the real vsock transport.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 use mvm::machine::persist::load_machine_spec;
 use mvm::vm::name_registry::record_readiness;
@@ -118,6 +120,50 @@ pub fn probe_with<E: GuestExec + ?Sized>(exec: &E, vm_name: &str, hc: &HealthChe
 /// and decide pass/fail.
 pub fn probe_once(vm_name: &str, hc: &HealthCheck) -> ProbeResult {
     probe_with(&AgentExec, vm_name, hc)
+}
+
+/// Seam over "restart this VM," so restart *decisions* stay unit-testable
+/// without ever spawning a real subprocess.
+pub trait Restarter {
+    fn restart(&self, vm_name: &str);
+}
+
+/// Real [`Restarter`] impl: fire-and-forgets `mvmctl machine restart
+/// <vm_name>` as a detached child process. Never waits on the child — a
+/// restart that hangs must not block the health watcher's own loop.
+pub struct MachineRestarter;
+
+impl Restarter for MachineRestarter {
+    fn restart(&self, vm_name: &str) {
+        let mvmctl = mvmctl_path();
+        let spawned = Command::new(&mvmctl)
+            .args(["machine", "restart", vm_name])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Err(err) = spawned {
+            tracing::warn!(
+                vm = %vm_name,
+                mvmctl = %mvmctl.display(),
+                %err,
+                "failed to spawn mvmctl machine restart"
+            );
+        }
+    }
+}
+
+/// Resolve the `mvmctl` binary to run for a restart: prefer the sibling of
+/// this daemon binary's own executable path (both binaries ship side by side
+/// in the same target/install directory), falling back to a bare `mvmctl`
+/// resolved via `PATH` when that sibling doesn't exist or the current
+/// executable's path can't be determined.
+fn mvmctl_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("mvmctl")))
+        .filter(|candidate| candidate.exists())
+        .unwrap_or_else(|| PathBuf::from("mvmctl"))
 }
 
 /// Current wall clock in unix seconds, saturating to 0 before the epoch.
@@ -233,6 +279,37 @@ impl HealthProber {
             }
         }
         actions
+    }
+
+    /// Execute the restart-worthy actions `tick` returned, gated by each
+    /// tracker's backoff schedule.
+    ///
+    /// `Restart` only fires `restarter.restart(vm)` once `now_unix` has
+    /// reached the tracker's `next_restart_after_unix`. `fold` sets that gate
+    /// to a future second the moment it returns `Restart`, so a call to `act`
+    /// at the same `now_unix` the action was produced always defers; the
+    /// restart fires once a later call observes the gate has elapsed.
+    /// `GiveUp` never restarts (`tick` already logged the give-up); `None`
+    /// never appears in `actions` in the first place.
+    pub fn act(
+        &self,
+        actions: &[(String, HealthAction)],
+        now_unix: u64,
+        restarter: &dyn Restarter,
+    ) {
+        for (vm, action) in actions {
+            if *action != HealthAction::Restart {
+                continue;
+            }
+            let due = self
+                .trackers
+                .get(vm)
+                .and_then(|(tracker, _)| tracker.next_restart_after_unix)
+                .is_some_and(|gate| now_unix >= gate);
+            if due {
+                restarter.restart(vm);
+            }
+        }
     }
 }
 
@@ -412,6 +489,117 @@ mod tests {
         // Next pass without "gone" in the live set forgets its tracker.
         prober.tick(&[], 1100, &Fake(ExecOutcome::Exited(1)));
         assert!(!prober.trackers.contains_key("gone"));
+    }
+
+    // ---- restart execution (fake Restarter) ----
+
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct FakeRestarter {
+        calls: Mutex<Vec<String>>,
+    }
+    impl Restarter for FakeRestarter {
+        fn restart(&self, vm_name: &str) {
+            self.calls.lock().unwrap().push(vm_name.to_string());
+        }
+    }
+
+    #[test]
+    fn restart_gated_by_backoff_not_before_not_missing_after() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = data_env(tmp.path());
+
+        save_machine_spec(&spec_with_hc("web", Some(hc())), true).unwrap();
+
+        let mut prober = HealthProber::new();
+        let exec = Fake(ExecOutcome::Exited(1));
+        let vms = vec!["web".to_string()];
+
+        // Same walk as `tick_failing_check_goes_unhealthy_and_restarts`: three
+        // due probes (interval=30) drive consecutive_failures past retries=3,
+        // flipping Unhealthy and returning the first Restart action.
+        let mut actions = Vec::new();
+        let mut last_tick_now = 0u64;
+        for i in 0..3u64 {
+            let now = 1000 + i * 30;
+            last_tick_now = now;
+            actions = prober.tick(&vms, now, &exec);
+        }
+        assert!(
+            actions
+                .iter()
+                .any(|(vm, a)| vm == "web" && *a == HealthAction::Restart),
+            "expected a Restart action, got {actions:?}"
+        );
+
+        let gate = prober
+            .trackers
+            .get("web")
+            .unwrap()
+            .0
+            .next_restart_after_unix
+            .expect("Restart action must set a backoff gate");
+        assert!(
+            gate > last_tick_now,
+            "backoff gate must be strictly in the future of the tick that set it"
+        );
+
+        // Before the gate: no restart fires.
+        let restarter = FakeRestarter::default();
+        prober.act(&actions, last_tick_now, &restarter);
+        assert!(
+            restarter.calls.lock().unwrap().is_empty(),
+            "restart must not fire before the backoff gate elapses"
+        );
+
+        // At/after the gate: the restart fires exactly once.
+        prober.act(&actions, gate, &restarter);
+        assert_eq!(*restarter.calls.lock().unwrap(), vec!["web".to_string()]);
+    }
+
+    #[test]
+    fn give_up_never_restarts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = data_env(tmp.path());
+
+        save_machine_spec(&spec_with_hc("web", Some(hc())), true).unwrap();
+
+        let mut prober = HealthProber::new();
+        let exec = Fake(ExecOutcome::Exited(1));
+        let vms = vec!["web".to_string()];
+
+        // Drive past `max_restart_attempts` (5) restarts by repeatedly
+        // failing once already Unhealthy: each due probe past the initial
+        // Unhealthy flip earns another restart attempt.
+        let mut now = 1000u64;
+        for _ in 0..3u64 {
+            prober.tick(&vms, now, &exec);
+            now += 30;
+        }
+        // Tracker is now Unhealthy with restart_attempts == 1. Keep failing
+        // until restart_attempts saturates at max_restart_attempts (5) and
+        // the next fail after that yields GiveUp.
+        let mut last_actions = Vec::new();
+        for _ in 0..6u64 {
+            last_actions = prober.tick(&vms, now, &exec);
+            now += 30;
+        }
+
+        assert!(
+            last_actions
+                .iter()
+                .any(|(vm, a)| vm == "web" && *a == HealthAction::GiveUp),
+            "expected GiveUp once max_restart_attempts is exhausted, got {last_actions:?}"
+        );
+
+        let restarter = FakeRestarter::default();
+        // Even at a far-future now_unix, GiveUp must never trigger a restart.
+        prober.act(&last_actions, now + 10_000, &restarter);
+        assert!(
+            restarter.calls.lock().unwrap().is_empty(),
+            "GiveUp must never spawn a restart"
+        );
     }
 
     #[test]
