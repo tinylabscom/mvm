@@ -550,7 +550,7 @@ The design decisions (settled before this slice; see ADR-097 §9):
 
 ### Unit 1 — keyless verifier + manifest authority shape (`mvm-core`, `manifest-verify`-gated)
 
-- [ ] Make a pack self-declare its signing authority (settled reshape): add
+- [x] Make a pack self-declare its signing authority (settled reshape): add
       `SignatureFormat::Sigstore`; the bundle's `format` is the authority
       declaration. A `Sigstore` pack carries empty `signatures` (the detached
       sidecar is authoritative) and a `signing_key_id` set via a new
@@ -559,19 +559,19 @@ The design decisions (settled before this slice; see ADR-097 §9):
       no fake ed25519 key is invented. Downgrade safety falls out: the ed25519
       `validate_signature_bundle` already rejects a non-`Ed25519` format, and the
       keyless path rejects a non-`Sigstore` format.
-- [ ] Factor `validate_manifest` into `validate_manifest_structural` (everything
+- [x] Factor `validate_manifest` into `validate_manifest_structural` (everything
       except `validate_signature_bundle`) + the per-authority signature-shape check.
       Shared middle both verifiers call = `validate_manifest_structural` +
       `verify_files` + `verify_pack_hash` + `verify_revocation`; the signature-shape
       and signature-verify steps stay per-authority.
-- [ ] Add `verify_pack_keyless_at(manifest, root, policy, cosign_bundle,
+- [x] Add `verify_pack_keyless_at(manifest, root, policy, cosign_bundle,
       keyless_trust, revocations)`: check `format == Sigstore` + empty signatures,
       call `image_verify::verify_signed_payload(manifest.canonical_bytes, bundle,
       identity, issuer)` for each accepted identity in `keyless_trust` (exact-match;
       succeed on any), then run the shared middle. `keyless_trust` (accepted-identity
       list + issuer) is a parameter; no `mvm-cli` dep. Populate
       `TrustMetadata.transparency_log` from the verified Rekor entry.
-- [ ] Tests: valid bundle + pinned identity verifies; wrong issuer rejected; wrong
+- [x] Tests: valid bundle + pinned identity verifies; wrong issuer rejected; wrong
       subject/SAN rejected; tampered manifest rejected; absent/bad Rekor inclusion
       proof rejected; expired cert rejected; a keyless pack presented to the ed25519
       verifier (and vice versa) is rejected — no downgrade; shared-middle rejections
@@ -580,20 +580,20 @@ The design decisions (settled before this slice; see ADR-097 §9):
 
 ### Unit 2 — embedded identity allow-list + trust-root wiring
 
-- [ ] Add a compiled-in `RELEASE_IDENTITY_TEMPLATES` constant (issuer + a list of
+- [x] Add a compiled-in `RELEASE_IDENTITY_TEMPLATES` constant (issuer + a list of
       subject templates like `https://github.com/<org>/<repo>/.github/workflows/<release>.yml@refs/tags/v{version}`),
       validated by test, multi-entry for identity migration. A helper interpolates
       the binary's `CARGO_PKG_VERSION` into each template to build the concrete
       exact-match accepted-identity list. Fulcio/Rekor roots come from the vendored
       Sigstore trust root via `verify_signed_payload` (no separate wiring).
-- [ ] Build the host keyless verify context: embedded allow-list always active;
+- [x] Build the host keyless verify context: embedded allow-list always active;
       `pack-trust.json` additive for ed25519 publishers/channels/revocations. Update
       `host_pack_verify_inputs` (and any runtime consumer) to construct the keyless
       context when `manifest-verify` is on, ed25519-only otherwise.
-- [ ] Un-inert the installed pack path: with the embedded allow-list present,
+- [x] Un-inert the installed pack path: with the embedded allow-list present,
       `resolve_pack` on an installed binary verifies a real release pack instead of
       always returning `None`; source checkouts stay a no-op.
-- [ ] Tests: allow-list constant is well-formed; a pack signed by the pinned
+- [x] Tests: allow-list constant is well-formed; a pack signed by the pinned
       identity verifies against the embedded default with no on-disk config; an
       off-pattern identity is rejected; an additive `pack-trust.json` still adds
       ed25519 publishers alongside the embedded keyless root.
@@ -643,3 +643,40 @@ The design decisions (settled before this slice; see ADR-097 §9):
 - Live revocation-channel fetch + offline-cache behavior → §I.
 - Runtime-pack keyless launch path (§E) beyond producing/publishing the runtime
   pack in Unit 3.
+
+### Units 1–2 status: COMPLETE (2026-07-07)
+
+Landed on `worktree-plan-213-release-signing-custody`, TDD + subagent-driven,
+final whole-branch security review clean (no Critical/Important):
+
+- U1: `KeyId::from_identity` (`e4d4df15`), `SignatureFormat::Sigstore` (`5dbf9392`),
+  `validate_manifest_structural` split (`10835671`), `verify_pack_keyless_at` +
+  `KeylessTrust` + keyless shape gate (`08d7c5d9`).
+- U2: `release_trust` embedded identity templates + channels (`9ce91a08`),
+  `PackVerifyCtx` keyless strategy + bundle-sidecar carry/reserve (`aec75ab7`),
+  un-inert the installed `mvm-cli` path + `keyless_release_policy` (`48d02464`).
+
+Verified: mvm-core `1562` tests under `manifest-verify`, mvm-cli attested suite
+`11/11` (both features) / `10/10` (ed25519-only); default build stays
+runtime-free (no `tokio`); both feature paths compile; downgrade-safe both
+directions; no fabricated-positive tests (the keyless-signature success path is
+proven by Unit 3's pipeline, not offline).
+
+**Operational note for Unit 3:** the keyless path is `manifest-verify`-gated and
+the root `default` feature set does NOT include it — the un-inert behavior only
+engages in a build that pulls `manifest-verify` (the `user` bundle). The release
+pipeline (and the published binaries) MUST build with that feature or the
+embedded root stays inert.
+
+### Review follow-ups (Minor, deferred with a home)
+
+- **Cross-bind `signing_key_id` to the matched keyless identity** — the keyless
+  verifier trusts the producer-stamped `signing_key_id` (it is inside the signed
+  payload, so unforgeable, but not checked to equal `from_identity(matched)`).
+  No practical impact until keyless revocation has teeth; fold into the
+  live-revocation work (§I) so revocation-keying can't drift.
+- **Keyless materialization error short-circuits the ed25519 fallback** — a
+  placement (not resolution) error in the keyless attempt propagates and skips
+  the ed25519 attempt before falling through to the plain download. Fail-safe
+  (same cache, ends at download); tighten when Unit 4 reworks the attempt
+  ordering around the network fetch.
