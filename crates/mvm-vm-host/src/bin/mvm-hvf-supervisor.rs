@@ -112,9 +112,25 @@ fn ensure_self_signed() {
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Set/cleared by the SIGUSR1/SIGUSR2 handlers; `boot_kernel_until` parks the
+/// guest vCPU out of execution (RAM + devices intact) while this is true, so
+/// `HvfBackend::pause`/`resume` freeze and thaw the guest in place.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+static PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 extern "C" fn on_stop_signal(_: libc::c_int) {
     STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+extern "C" fn on_pause_signal(_: libc::c_int) {
+    PAUSED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+extern "C" fn on_resume_signal(_: libc::c_int) {
+    PAUSED.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -130,11 +146,17 @@ fn main() -> anyhow::Result<()> {
 
     // Graceful stop: SIGTERM/SIGINT set STOP, which the boot watchdog observes and
     // force-exits the guest (then we flush the console + drop the PID file).
-    // SAFETY: installing a trivial async-signal-safe handler (an atomic store).
+    // Pause/resume: SIGUSR1 sets PAUSED (park the vCPU out of guest execution),
+    // SIGUSR2 clears it (thaw and re-enter the guest).
+    // SAFETY: installing trivial async-signal-safe handlers (each an atomic store).
     unsafe {
         let h = on_stop_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
         libc::signal(libc::SIGTERM, h);
         libc::signal(libc::SIGINT, h);
+        let pause_h = on_pause_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        libc::signal(libc::SIGUSR1, pause_h);
+        let resume_h = on_resume_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        libc::signal(libc::SIGUSR2, resume_h);
     }
 
     let mut raw = String::new();
@@ -189,29 +211,30 @@ fn main() -> anyhow::Result<()> {
     // whole egress decision (claim-10 default-deny + secret substitution). The
     // supervisor only wires the relay socket paths through.
     let result = mvm_backend::hvf::boot_kernel_until(
-        &image,
-        initramfs.as_deref(),
-        disks,
-        cfg.vsock,
-        timeout,
-        &STOP,
-        mvm_backend::hvf::HostChannels {
-            agent_socket: cfg.agent_socket.clone(),
-            substitution_socket: cfg.substitution_socket.clone(),
-            egress_relay: cfg.egress_relay_socket.clone(),
-            console_data_sockets: cfg
-                .console_data_sockets
-                .iter()
-                .map(|c| (c.guest_port, c.host_socket.clone()))
-                .collect(),
-            cmdline: cfg.cmdline.clone(),
-            mem_mib: cfg.memory_mib,
-            // Dev hook: `MVM_HVF_VIRTIOFS_ROOT=<dir>` boots a virtiofs root without
-            // the full run-path gate wiring, for live-mount iteration on HVF.
-            virtiofs_root: cfg.virtiofs_root.clone().or_else(|| {
-                std::env::var_os("MVM_HVF_VIRTIOFS_ROOT").map(std::path::PathBuf::from)
-            }),
-        },
+        mvm_backend::hvf::KernelBootUntilParams::builder(&image, timeout)
+            .initramfs(initramfs.as_deref())
+            .disks(disks)
+            .vsock(cfg.vsock)
+            .stop(&STOP)
+            .paused(&PAUSED)
+            .channels(mvm_backend::hvf::HostChannels {
+                agent_socket: cfg.agent_socket.clone(),
+                substitution_socket: cfg.substitution_socket.clone(),
+                egress_relay: cfg.egress_relay_socket.clone(),
+                console_data_sockets: cfg
+                    .console_data_sockets
+                    .iter()
+                    .map(|c| (c.guest_port, c.host_socket.clone()))
+                    .collect(),
+                cmdline: cfg.cmdline.clone(),
+                mem_mib: cfg.memory_mib,
+                // Dev hook: `MVM_HVF_VIRTIOFS_ROOT=<dir>` boots a virtiofs root without
+                // the full run-path gate wiring, for live-mount iteration on HVF.
+                virtiofs_root: cfg.virtiofs_root.clone().or_else(|| {
+                    std::env::var_os("MVM_HVF_VIRTIOFS_ROOT").map(std::path::PathBuf::from)
+                }),
+            })
+            .build(),
     );
 
     // The VM has stopped. Persist the outputs (console + workload exit code)
