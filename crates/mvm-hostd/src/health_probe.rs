@@ -6,25 +6,26 @@
 //! [`probe_with`] is unit-testable without a live VM; [`probe_once`] wires
 //! it to the real vsock transport.
 //!
-//! [`HealthProber::tick`] also detects crash-exits: a declared service (one
-//! carrying a `health_check`) whose VM process disappears without a
-//! deliberate `machine stop` gets the same bounded restart treatment as a
-//! failing probe. Health-state transitions and restart decisions are
-//! recorded as structured `tracing` events (`vm`/`event`/`state` fields);
-//! wiring them into the chain-signed audit log is a follow-up — the
+//! Restart-on-crash rides the probe path: a crashed service is not stopped,
+//! so its daemon registration lingers and stays in the live set, where its
+//! probe hits an unreachable agent (`Unreachable` → `Fail`), flips
+//! `Unhealthy` after `retries`, and earns a bounded restart. A clean
+//! disappearance from the live set is treated as possibly-intentional (a
+//! `machine stop` early-deregisters and then erases the registry entry), so
+//! it triggers no restart. Health-state transitions and restart decisions
+//! are recorded as structured `tracing` events (`vm`/`event`/`state`
+//! fields); wiring them into the chain-signed audit log is a follow-up — the
 //! existing `AuditEmitter` binds every entry to a signed `ExecutionPlan`,
 //! which this bare-VM-name probe loop doesn't hold.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use mvm::machine::persist::load_machine_spec;
-use mvm::vm::name_registry::{VmNameRegistry, record_readiness, registry_path};
+use mvm::vm::name_registry::record_readiness;
 use mvm_core::domain::instance::InstanceReadiness;
-use mvm_core::health::{
-    HealthAction, HealthPolicy, HealthState, HealthTracker, ProbeResult, backoff_secs, fold,
-};
+use mvm_core::health::{HealthAction, HealthPolicy, HealthState, HealthTracker, ProbeResult, fold};
 use mvm_guest::vsock::{ExecEvent, GUEST_AGENT_PORT, send_exec_streaming};
 use mvm_sdk::ir::HealthCheck;
 
@@ -211,38 +212,6 @@ pub fn map_state(state: HealthState) -> InstanceReadiness {
     }
 }
 
-/// Look up a VM's current host-observed readiness in the name registry.
-/// Best-effort: a load failure or an unregistered name both read as
-/// "no readiness signal" rather than erroring, mirroring
-/// [`record_readiness`]'s own fail-open posture.
-fn registry_readiness(vm_name: &str) -> Option<InstanceReadiness> {
-    VmNameRegistry::load(&registry_path())
-        .ok()
-        .and_then(|reg| reg.lookup(vm_name).and_then(|reg| reg.readiness.clone()))
-}
-
-/// Fold a crash-exit observation into the tracker and return the bounded
-/// restart decision. Unlike [`fold`], a single observation is unambiguous
-/// evidence of failure — there is no probe to retry, so it skips straight to
-/// the "already unhealthy" restart-budget arithmetic `fold` uses once a
-/// tracker has flipped `Unhealthy`, reusing the same backoff schedule and
-/// `max_restart_attempts` cap.
-fn crash_exit_action(
-    tracker: &mut HealthTracker,
-    policy: &HealthPolicy,
-    now_unix: u64,
-) -> HealthAction {
-    tracker.state = HealthState::Unhealthy;
-    tracker.consecutive_failures = 0;
-    if tracker.restart_attempts >= policy.max_restart_attempts {
-        return HealthAction::GiveUp;
-    }
-    tracker.restart_attempts = tracker.restart_attempts.saturating_add(1);
-    tracker.next_restart_after_unix =
-        Some(now_unix + backoff_secs(tracker.restart_attempts, policy));
-    HealthAction::Restart
-}
-
 /// Emit a structured event for a health-state transition. Best-effort
 /// observability: the daemon has no reachable chain-signed audit surface for
 /// a bare VM name (the existing `AuditEmitter` binds every entry to a signed
@@ -266,16 +235,10 @@ fn log_health_transition(vm: &str, new_state: HealthState) {
 ///
 /// Holds one [`HealthTracker`] plus its last-probe unix second per healthchecked
 /// VM, so [`tick`](HealthProber::tick) can skip VMs that aren't yet due and drop
-/// trackers for VMs that have gone away or lost their healthcheck. `previously_live`
-/// remembers which healthchecked VMs carried a tracker after the prior call —
-/// including one mid-backoff after a still-unresolved crash-restart, not just
-/// currently-live ones — so a VM's disappearance can be told apart from "never
-/// seen" and a still-vanished VM keeps being re-considered until it either
-/// reappears or its restart budget gives up. See [`tick`](HealthProber::tick).
+/// trackers for VMs that have gone away or lost their healthcheck.
 #[derive(Default)]
 pub struct HealthProber {
     trackers: HashMap<String, (HealthTracker, u64)>,
-    previously_live: HashSet<String>,
 }
 
 impl HealthProber {
@@ -286,37 +249,41 @@ impl HealthProber {
     /// Run one probe pass over `live_vm_ids` and return the restart-worthy
     /// actions (`Restart` / `GiveUp`) keyed by VM; `None` actions are dropped.
     ///
-    /// Two passes happen here:
+    /// For each live VM it loads the persisted spec, skips (and forgets) any VM
+    /// without a healthcheck, ensures a tracker exists, and — only when the VM
+    /// is due — runs the probe, folds the result, records the mapped readiness,
+    /// and collects the resulting action. Executing a restart is deliberately
+    /// left to the caller ([`act`](Self::act)).
     ///
-    /// 1. Crash-exit detection: any healthchecked VM that was live last call
-    ///    but has vanished from `live_vm_ids` this call is either a deliberate
-    ///    `machine stop` (registry readiness `Stopping` — silently forgotten)
-    ///    or a crash (bounded restart through [`crash_exit_action`]).
-    /// 2. The ordinary probe pass: for each live VM it loads the persisted
-    ///    spec, skips (and forgets) any VM without a healthcheck, ensures a
-    ///    tracker exists, and — only when the VM is due — runs the probe,
-    ///    folds the result, records the mapped readiness, and collects the
-    ///    resulting action.
-    ///
-    /// Executing a restart is deliberately left to the caller ([`act`](Self::act)).
+    /// Restart-on-crash is delivered here, not by disappearance-detection: a
+    /// crashed service is not stopped, so its registration lingers in
+    /// `live_vm_ids` and its next probe finds the agent unreachable
+    /// (`Unreachable` → `Fail`), flips `Unhealthy`, and restarts. A VM that
+    /// cleanly leaves the live set is treated as possibly-intentional and its
+    /// tracker is simply forgotten — no restart.
     pub fn tick(
         &mut self,
         live_vm_ids: &[String],
         now_unix: u64,
         exec: &dyn GuestExec,
     ) -> Vec<(String, HealthAction)> {
+        // Forget trackers for VMs no longer in the live set. A departed
+        // healthchecked VM is logged as an observability signal only — a
+        // deliberate `machine stop` and a crash-that-already-deregistered are
+        // indistinguishable here, so neither is restarted from this path.
+        self.trackers.retain(|vm, _| {
+            let live = live_vm_ids.iter().any(|id| id == vm);
+            if !live {
+                tracing::info!(
+                    vm = %vm,
+                    event = "health.left_live_set",
+                    "healthchecked machine left the live set; forgetting tracker (no restart)"
+                );
+            }
+            live
+        });
+
         let mut actions = Vec::new();
-
-        let vanished: Vec<String> = self
-            .previously_live
-            .iter()
-            .filter(|vm| !live_vm_ids.iter().any(|live| live == *vm))
-            .cloned()
-            .collect();
-        for vm in &vanished {
-            self.handle_crash_exit(vm, now_unix, &mut actions);
-        }
-
         for vm in live_vm_ids {
             let spec = match load_machine_spec(vm) {
                 Ok(spec) => spec,
@@ -376,84 +343,7 @@ impl HealthProber {
                 }
             }
         }
-        // Anything still tracked after this pass — currently live, or mid
-        // crash-restart backoff — is worth re-checking on the next call.
-        // Trackers removed above (no spec, no healthcheck, deliberate stop,
-        // or a just-exhausted restart budget) drop out here too.
-        self.previously_live = self.trackers.keys().cloned().collect();
         actions
-    }
-
-    /// Decide what to do about a healthchecked VM that was live last tick and
-    /// is gone this tick: forget it silently if it's no longer a declared
-    /// service (spec removed / healthcheck dropped) or was deliberately
-    /// stopped (registry readiness `Stopping`); otherwise it crashed, so
-    /// fold a bounded restart decision and push it onto `actions`. The
-    /// tracker survives a `Restart` decision (so [`act`](Self::act) can gate
-    /// the actual restart on the backoff schedule) but is dropped on
-    /// `GiveUp` or when the disappearance turned out not to be a crash.
-    fn handle_crash_exit(
-        &mut self,
-        vm: &str,
-        now_unix: u64,
-        actions: &mut Vec<(String, HealthAction)>,
-    ) {
-        let Ok(spec) = load_machine_spec(vm) else {
-            // Spec is gone entirely (e.g. `machine rm`): nothing left to restart.
-            self.trackers.remove(vm);
-            return;
-        };
-        let Some(hc) = spec.health_check else {
-            // No declared healthcheck: phase-A teardown-on-exit semantics apply
-            // (the caller already tears the machine down; nothing to restart).
-            self.trackers.remove(vm);
-            return;
-        };
-        if registry_readiness(vm) == Some(InstanceReadiness::Stopping) {
-            // `mvmctl machine stop` recorded this as intentional.
-            tracing::info!(vm = %vm, event = "health.stopped", "machine stop recorded; not a crash");
-            self.trackers.remove(vm);
-            return;
-        }
-
-        let policy = policy_from(&hc);
-        let Some((tracker, _)) = self.trackers.get_mut(vm) else {
-            // previously_live only ever tracks VMs that had a tracker.
-            return;
-        };
-        // Pace re-evaluation off the same backoff gate `act` uses to fire the
-        // actual restart, so a still-vanished VM doesn't rack up restart
-        // attempts every single tick.
-        let due = tracker
-            .next_restart_after_unix
-            .is_none_or(|gate| now_unix >= gate);
-        if !due {
-            return;
-        }
-
-        let action = crash_exit_action(tracker, &policy, now_unix);
-        match action {
-            HealthAction::None => {}
-            HealthAction::Restart => {
-                tracing::warn!(
-                    vm = %vm,
-                    event = "health.crash_restart",
-                    state = ?tracker.state,
-                    "healthchecked service crash-exited; restart requested"
-                );
-                actions.push((vm.to_string(), action));
-            }
-            HealthAction::GiveUp => {
-                tracing::warn!(
-                    vm = %vm,
-                    event = "health.crash_give_up",
-                    state = ?tracker.state,
-                    "healthchecked service crash-exited; restart budget exhausted"
-                );
-                actions.push((vm.to_string(), action));
-                self.trackers.remove(vm);
-            }
-        }
     }
 
     /// Execute the restart-worthy actions `tick` returned, gated by each
@@ -651,155 +541,60 @@ mod tests {
     }
 
     #[test]
-    fn tick_drops_tracker_when_deliberately_stopped() {
+    fn tick_drops_tracker_when_vm_leaves_live_set() {
         let tmp = tempfile::tempdir().unwrap();
         let _env = data_env(tmp.path());
 
         save_machine_spec(&spec_with_hc("gone", Some(hc())), true).unwrap();
-        let rpath = registry_path();
-        let mut reg = VmNameRegistry::default();
-        reg.register("gone", "/tmp/gone", "default", None, 0)
-            .unwrap();
-        reg.save(&rpath).unwrap();
 
         let mut prober = HealthProber::new();
         prober.tick(&["gone".to_string()], 1000, &Fake(ExecOutcome::Exited(1)));
         assert!(prober.trackers.contains_key("gone"));
 
-        // `machine stop` fires between this tick and the next, recording
-        // `Stopping` before the process actually exits — mirrors the real
-        // ordering in `down.rs` (the last write wins once the vm leaves the
-        // live set, since the probe loop won't touch its readiness again).
-        reg = VmNameRegistry::load(&rpath).unwrap();
-        reg.set_readiness(
-            "gone",
-            InstanceReadiness::Stopping,
-            mvm_core::time::utc_now(),
-        )
-        .unwrap();
-        reg.save(&rpath).unwrap();
-
-        // Next pass without "gone" in the live set: a deliberate stop, not a
-        // crash, so the tracker is dropped and no restart is requested.
+        // A VM leaving the live set is possibly-intentional (a `machine stop`
+        // early-deregisters and then erases the registry entry, so the
+        // `Stopping` marker can already be gone by the time the poll lands).
+        // We forget the tracker and never restart from this path — a genuine
+        // crash keeps its lingering registration and is restarted by the
+        // probe path (unreachable agent → unhealthy) instead.
         let actions = prober.tick(&[], 1100, &Fake(ExecOutcome::Exited(1)));
         assert!(!prober.trackers.contains_key("gone"));
         assert!(
             actions.is_empty(),
-            "a deliberate stop must never request a restart, got {actions:?}"
+            "a clean disappearance must never request a restart, got {actions:?}"
         );
     }
 
-    // ---- crash-exit detection (no probe involved — the VM just vanished) ----
-
     #[test]
-    fn crash_exit_without_stop_marker_requests_bounded_restart() {
+    fn unreachable_agent_flips_unhealthy_and_restarts() {
+        // The restart-on-crash contract: a crashed service is not stopped, so
+        // its registration lingers in the live set and its probe finds the
+        // agent unreachable. That drives the same failing-probe path a bad
+        // healthcheck does, so after `retries` the tracker flips Unhealthy and
+        // asks for a restart.
         let tmp = tempfile::tempdir().unwrap();
         let _env = data_env(tmp.path());
 
         save_machine_spec(&spec_with_hc("svc", Some(hc())), true).unwrap();
 
         let mut prober = HealthProber::new();
-        let passing = Fake(ExecOutcome::Exited(0));
+        let unreachable = Fake(ExecOutcome::Unreachable);
+        let vms = vec!["svc".to_string()];
 
-        // Seed a tracker via a normal live pass (no registry entry at all —
-        // most persistent machines have one, but a crash-exit must not
-        // depend on it existing to notice the disappearance).
-        prober.tick(&["svc".to_string()], 1000, &passing);
-        assert!(prober.trackers.contains_key("svc"));
+        let mut actions = Vec::new();
+        for i in 0..3u64 {
+            actions.extend(prober.tick(&vms, 1000 + i * 30, &unreachable));
+        }
 
-        // Next tick: "svc" vanished from the live set without ever recording
-        // `Stopping` — a crash. The very first observation restarts
-        // immediately (no need to re-confirm across multiple probes).
-        let actions = prober.tick(&[], 1030, &passing);
         assert!(
             actions
                 .iter()
                 .any(|(vm, a)| vm == "svc" && *a == HealthAction::Restart),
-            "expected an immediate Restart action on first crash observation, got {actions:?}"
+            "an unreachable agent must drive a Restart via the probe path, got {actions:?}"
         );
         assert_eq!(
             prober.trackers.get("svc").unwrap().0.state,
             HealthState::Unhealthy
-        );
-
-        // Keep advancing well past the backoff cap so every subsequent tick
-        // is due; the restart budget must still cap out at GiveUp rather
-        // than restarting forever. Once GiveUp fires the tracker is dropped,
-        // so later iterations produce no further action — collect across the
-        // whole run rather than asserting on the very last tick's result.
-        let mut now = 1030u64;
-        let mut all_actions = actions;
-        for _ in 0..6u64 {
-            now += 301;
-            all_actions.extend(prober.tick(&[], now, &passing));
-        }
-        assert!(
-            all_actions
-                .iter()
-                .any(|(vm, a)| vm == "svc" && *a == HealthAction::GiveUp),
-            "expected GiveUp once the crash-restart budget is exhausted, got {all_actions:?}"
-        );
-        assert!(
-            !prober.trackers.contains_key("svc"),
-            "GiveUp must forget the tracker so it stops re-firing every tick"
-        );
-    }
-
-    #[test]
-    fn crash_exit_act_restarts_only_after_backoff_gate() {
-        let tmp = tempfile::tempdir().unwrap();
-        let _env = data_env(tmp.path());
-
-        save_machine_spec(&spec_with_hc("svc", Some(hc())), true).unwrap();
-
-        let mut prober = HealthProber::new();
-        let passing = Fake(ExecOutcome::Exited(0));
-        prober.tick(&["svc".to_string()], 1000, &passing);
-
-        let actions = prober.tick(&[], 1030, &passing);
-        assert!(
-            actions
-                .iter()
-                .any(|(vm, a)| vm == "svc" && *a == HealthAction::Restart)
-        );
-
-        let gate = prober
-            .trackers
-            .get("svc")
-            .unwrap()
-            .0
-            .next_restart_after_unix
-            .expect("Restart must set a backoff gate");
-
-        let restarter = FakeRestarter::default();
-        prober.act(&actions, 1030, &restarter);
-        assert!(
-            restarter.calls.lock().unwrap().is_empty(),
-            "restart must not fire before the backoff gate elapses"
-        );
-
-        prober.act(&actions, gate, &restarter);
-        assert_eq!(*restarter.calls.lock().unwrap(), vec!["svc".to_string()]);
-    }
-
-    #[test]
-    fn crash_exit_skipped_when_no_healthcheck_declared() {
-        let tmp = tempfile::tempdir().unwrap();
-        let _env = data_env(tmp.path());
-
-        save_machine_spec(&spec_with_hc("bare", None), true).unwrap();
-
-        let mut prober = HealthProber::new();
-        prober.tick(&["bare".to_string()], 1000, &Fake(ExecOutcome::Exited(0)));
-        assert!(!prober.trackers.contains_key("bare"));
-
-        // A no-healthcheck machine never earns a tracker in the first place
-        // (phase-A teardown-on-exit semantics apply), so its disappearance
-        // yields no restart-worthy action.
-        let actions = prober.tick(&[], 1030, &Fake(ExecOutcome::Exited(0)));
-        assert!(
-            actions.is_empty(),
-            "a no-healthcheck machine must never be restarted, got {actions:?}"
         );
     }
 
