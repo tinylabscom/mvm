@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust; `mvm-hostd` (daemon), `mvm-guest::vsock` (agent exec), `mvm` (`name_registry`, `machine::persist`), `mvm-cli` (`machine ls`/`inspect`/`restart`), `mvm-core` (`InstanceReadiness`).
 
-**Design:** `specs/notes/2026-07-07-workload-healthcheck-phase-c-design.md`. Builds on phase A (`specs/plans/231-workload-healthcheck-lifecycle.md`).
+**Design:** `specs/notes/2026-07-07-workload-healthcheck-phase-c-design.md`. Builds on phase A (`specs/plans/232-workload-healthcheck-lifecycle.md`).
 
 ## Global Constraints
 
