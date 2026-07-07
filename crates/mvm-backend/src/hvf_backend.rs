@@ -99,95 +99,15 @@ pub(crate) fn terminate_pid(pid: libc::pid_t) {
     }
 }
 
-/// Locate the per-VM supervisor binary: `$MVM_HVF_SUPERVISOR_PATH`, else
-/// alongside the current executable (release + `cargo` layouts both put it there).
+/// Locate the per-VM supervisor binary, building it once on a source checkout if
+/// `cargo run` produced only `mvmctl`. See [`crate::aux_bin`].
 pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
-    if let Some(p) = std::env::var_os("MVM_HVF_SUPERVISOR_PATH") {
-        let path = PathBuf::from(p);
-        if path.is_file() {
-            return Ok(path);
-        }
-        bail!(
-            "MVM_HVF_SUPERVISOR_PATH points at {} which is not a file",
-            path.display()
-        );
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join("mvm-hvf-supervisor");
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    // Workspace `target/{release,debug}` fallback, mirroring the substitution
-    // endpoint resolver: a source checkout that builds the root `mvmctl` bin
-    // without also building this per-VM helper still resolves it, instead of
-    // hard-failing on one binary while silently reaching for a stale copy of
-    // the other.
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
-        for variant in ["release", "debug"] {
-            let candidate = workspace_root
-                .join("target")
-                .join(variant)
-                .join("mvm-hvf-supervisor");
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-        // Source checkout: `cargo run` builds only `mvmctl`, never this separate
-        // per-VM bin, so the first `machine run` finds nothing. Build it once (into
-        // the workspace target dir, matching the running profile) so the command
-        // just works with no manual `cargo build -p mvm-vm-host` step. The outer
-        // `cargo run` has already released the build lock by the time this process
-        // runs, so the nested build does not contend.
-        if workspace_root.join("Cargo.toml").is_file()
-            && let Some(built) = build_supervisor_in_workspace(workspace_root)
-        {
-            return Ok(built);
-        }
-    }
-    bail!(
-        "mvm-hvf-supervisor binary not found (looked at $MVM_HVF_SUPERVISOR_PATH, \
-         alongside the current exe, and <workspace>/target/{{release,debug}})"
-    )
-}
-
-/// One-time on-demand build of the per-VM supervisor for a source checkout, so
-/// `cargo run -- machine run` works without a separate manual build. Returns the
-/// built binary, or `None` if the build could not run (no cargo, build failed) —
-/// the caller then falls through to the bail with the manual-build hint.
-fn build_supervisor_in_workspace(workspace_root: &Path) -> Option<PathBuf> {
-    let release = std::env::current_exe()
-        .ok()
-        .map(|p| p.components().any(|c| c.as_os_str() == "release"))
-        .unwrap_or(false);
-    let variant = if release { "release" } else { "debug" };
-    ui::info(
-        "building the per-VM supervisor (mvm-hvf-supervisor) once — `cargo run` \
-         builds only mvmctl, not this helper",
-    );
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut cmd = Command::new(cargo);
-    cmd.current_dir(workspace_root).args([
-        "build",
-        "-p",
-        "mvm-vm-host",
-        "--bin",
-        "mvm-hvf-supervisor",
-    ]);
-    if release {
-        cmd.arg("--release");
-    }
-    if !cmd.status().map(|s| s.success()).unwrap_or(false) {
-        return None;
-    }
-    let built = workspace_root
-        .join("target")
-        .join(variant)
-        .join("mvm-hvf-supervisor");
-    built.is_file().then_some(built)
+    crate::aux_bin::resolve_or_build(&crate::aux_bin::AuxBin {
+        bin: "mvm-hvf-supervisor",
+        package: "mvm-vm-host",
+        env_var: "MVM_HVF_SUPERVISOR_PATH",
+        features: &[],
+    })
 }
 
 /// Rebuild command for the hvf per-VM supervisor bin. `cargo run` rebuilds only

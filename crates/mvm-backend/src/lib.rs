@@ -43,6 +43,9 @@ pub mod driver;
 // (`mvm → mvm-backend → mvm`). `mvm` re-exports these at their old
 // paths so the mvmd `mvmctl::runtime::{shell,ui,shell_mock}` contract
 // surface keeps resolving.
+/// Shared resolve-or-build for the per-VM helper binaries `mvmctl` spawns
+/// (supervisors + the substitution endpoint); one impl, no drift.
+pub(crate) mod aux_bin;
 pub mod base;
 /// Per-VM broker-services (`mvm-broker` / `mvm-audit-signer`) subprocess
 /// spawn/reap helpers, mirroring [`substitution_spawn`].
