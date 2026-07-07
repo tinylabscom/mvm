@@ -98,6 +98,15 @@ class Format2(Enum):
 Format = Union[Format1, Format2]
 
 
+@dataclass
+class HealthCheck:
+    command: List[str]
+    interval_secs: Optional[int] = 30
+    retries: Optional[int] = 3
+    start_period_secs: Optional[int] = 0
+    timeout_secs: Optional[int] = 5
+
+
 class Kind10(Enum):
     shell = 'shell'
 
@@ -530,6 +539,7 @@ class App:
     dependencies: Optional[Dependencies] = None
     env: Optional[Dict[str, EnvValue]] = field(default_factory=lambda: {})
     files: Optional[List[MaterializedFile]] = None
+    health_check: Optional[HealthCheck] = None
     hooks: Optional[Hooks] = None
     mounts: Optional[List[Mount]] = field(default_factory=lambda: [])
     network: Optional[Network] = None
