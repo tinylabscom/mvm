@@ -156,6 +156,10 @@ tempfile.workspace = true
 
 [features]
 default = []
+# Forwards to mvm-core's sigstore keyless-verification feature so
+# `builder_pack`'s tests can exercise `verify_pack_keyless_at` without
+# every mvm-build build pulling the sigstore dependency tree.
+manifest-verify = ["mvm-core/manifest-verify"]
 # In-process, pure-Rust ext4 materialization (no builder VM / mkfs). Off by
 # default so the mvmctl default closure does not gain `mvm-ext4` until the pure
 # path is the run-path default; enabled where `materialize_ext4_pure` is used.

@@ -142,6 +142,59 @@ pub fn build_builder_pack(
     Ok(manifest)
 }
 
+/// A keyless (Sigstore-authority) Builder pack: the manifest plus the path of
+/// the file its signable bytes were written to. That file is what a release
+/// pipeline hands to `cosign sign-blob` — the resulting detached bundle, not
+/// an in-manifest signature, is the pack's authority.
+#[derive(Debug, Clone)]
+pub struct KeylessBuilderPack {
+    pub manifest: PackManifest,
+    pub manifest_path: PathBuf,
+}
+
+/// Keyless counterpart to [`build_builder_pack`]: same artifact layout and typed
+/// output hashes, but the manifest is assembled via `PackBuilder::build_sigstore`
+/// (no ed25519 key, no in-manifest signature) and the file written to
+/// `out_dir/manifest.json` is `manifest.canonical_bytes()` verbatim — the exact
+/// bytes a release pipeline signs out of band and a keyless verifier re-derives
+/// at verify time. This function never signs anything.
+pub fn build_keyless_builder_pack(
+    params: &BuildBuilderPackParams,
+    identity: &str,
+    out_dir: &Path,
+) -> Result<KeylessBuilderPack, BuilderPackError> {
+    fs::create_dir_all(out_dir).map_err(io_at(out_dir))?;
+
+    let kernel_dest = out_dir.join(KERNEL_FILE);
+    copy_file(&params.vmlinux, &kernel_dest)?;
+    let rootfs_dest = out_dir.join(ROOTFS_FILE);
+    copy_file(&params.rootfs, &rootfs_dest)?;
+
+    let kernel_hash = sha256_file(&kernel_dest)?;
+    let builder_image_hash = sha256_file(&rootfs_dest)?;
+
+    let manifest = PackBuilder::new_keyless(out_dir, builder_metadata(params))
+        .files([KERNEL_FILE, ROOTFS_FILE])
+        .output_hashes(PackOutputHashes {
+            kernel_hash: Some(kernel_hash),
+            builder_image_hash: Some(builder_image_hash),
+            ..Default::default()
+        })
+        .build_sigstore(identity)?;
+
+    // Not pretty-printed: this file's bytes are exactly what gets signed, so it
+    // must match `manifest.canonical_bytes()` byte-for-byte rather than a
+    // re-serialization a verifier would need to normalize.
+    let manifest_bytes = manifest.canonical_bytes()?;
+    let manifest_path = out_dir.join(MANIFEST_FILE);
+    fs::write(&manifest_path, &manifest_bytes).map_err(io_at(&manifest_path))?;
+
+    Ok(KeylessBuilderPack {
+        manifest,
+        manifest_path,
+    })
+}
+
 /// Assemble the [`PackMetadata`] a produced Builder pack carries. The hash-derived
 /// outputs and the signature bundle are the builder's job; this is everything the
 /// caller supplies plus the fixed hvf/vsock host contract.
@@ -419,5 +472,108 @@ mod tests {
             err,
             PackVerifyError::FileHashMismatch { .. } | PackVerifyError::FileSizeMismatch { .. }
         ));
+    }
+
+    const KEYLESS_IDENTITY: &str =
+        "https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/v0.17.0";
+
+    #[test]
+    fn keyless_builder_pack_writes_no_signature() {
+        let src = TempDir::new().expect("src tempdir");
+        let out = TempDir::new().expect("out tempdir");
+        let produced = build_keyless_builder_pack(&params_in(&src), KEYLESS_IDENTITY, out.path())
+            .expect("produce keyless pack");
+
+        assert_eq!(
+            produced.manifest.provenance.signature_bundle.format,
+            mvm_core::packs::SignatureFormat::Sigstore
+        );
+        assert!(
+            produced
+                .manifest
+                .provenance
+                .signature_bundle
+                .signatures
+                .is_empty()
+        );
+        assert_eq!(
+            produced.manifest.trust.signing_key_id,
+            mvm_core::plan::bundle::KeyId::from_identity(KEYLESS_IDENTITY)
+        );
+        assert!(out.path().join(KERNEL_FILE).exists());
+        assert!(out.path().join(ROOTFS_FILE).exists());
+    }
+
+    #[test]
+    fn keyless_builder_pack_manifest_file_bytes_equal_canonical_bytes() {
+        let src = TempDir::new().expect("src tempdir");
+        let out = TempDir::new().expect("out tempdir");
+        let produced = build_keyless_builder_pack(&params_in(&src), KEYLESS_IDENTITY, out.path())
+            .expect("produce keyless pack");
+
+        assert_eq!(produced.manifest_path, out.path().join(MANIFEST_FILE));
+        let on_disk = fs::read(&produced.manifest_path).expect("read manifest file");
+        assert_eq!(
+            on_disk,
+            produced
+                .manifest
+                .canonical_bytes()
+                .expect("canonical bytes"),
+            "the written file must be exactly what a release pipeline signs"
+        );
+
+        let recovered: PackManifest =
+            serde_json::from_slice(&on_disk).expect("decode keyless manifest file");
+        assert_eq!(recovered, produced.manifest);
+    }
+
+    #[test]
+    fn keyless_builder_pack_uses_params_channel_kind_backends() {
+        let src = TempDir::new().expect("src tempdir");
+        let out = TempDir::new().expect("out tempdir");
+        let params = params_in(&src);
+        let produced = build_keyless_builder_pack(&params, KEYLESS_IDENTITY, out.path())
+            .expect("produce keyless pack");
+
+        assert_eq!(produced.manifest.kind, PackKind::Builder);
+        assert_eq!(
+            produced.manifest.backend_compatibility,
+            vec![PackBackend::Hvf]
+        );
+        assert_eq!(
+            produced.manifest.policy_compatibility.allowed_channels,
+            vec![params.channel.clone()]
+        );
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn keyless_builder_pack_manifest_passes_keyless_shape_gate() {
+        use mvm_core::packs::{KeylessTrust, verify_pack_keyless_at};
+
+        let src = TempDir::new().expect("src tempdir");
+        let out = TempDir::new().expect("out tempdir");
+        let produced = build_keyless_builder_pack(&params_in(&src), KEYLESS_IDENTITY, out.path())
+            .expect("produce keyless pack");
+
+        let policy = host_policy(&[CHANNEL]);
+        let keyless = KeylessTrust {
+            accepted_identities: vec![KEYLESS_IDENTITY.to_string()],
+            issuer: "https://token.actions.githubusercontent.com".to_string(),
+        };
+        let revocations = trust_config(&signing_key(), &[CHANNEL]);
+        // No real cosign bundle here — this only exercises that the manifest
+        // shape reaches the signature step (garbage bundle) rather than
+        // failing on `WrongSignatureAuthority` or a shape gate.
+        let err = verify_pack_keyless_at(
+            &produced.manifest,
+            out.path(),
+            &policy,
+            b"not a real cosign bundle",
+            &keyless,
+            &revocations,
+        )
+        .expect_err("garbage bundle fails the signature step, not the shape gate");
+        assert!(matches!(err, PackVerifyError::KeylessSignatureInvalid(_)));
     }
 }

@@ -951,12 +951,15 @@ pub struct PackOutputHashes {
 /// hash, and signs the manifest so `verify_pack_at` accepts the result. Files are
 /// addressed by their in-pack relative path and hashed with the same helper the
 /// verifier uses, so producer and verifier can never drift.
+///
+/// `signing_key` is absent for a keyless (Sigstore-authority) build: construct
+/// with `new_keyless` and finish with `build_sigstore` instead of `build`.
 pub struct PackBuilder<'a> {
     root: PathBuf,
     metadata: PackMetadata,
     output_hashes: PackOutputHashes,
     files: Vec<String>,
-    signing_key: &'a SigningKey,
+    signing_key: Option<&'a SigningKey>,
 }
 
 impl<'a> PackBuilder<'a> {
@@ -970,7 +973,20 @@ impl<'a> PackBuilder<'a> {
             metadata,
             output_hashes: PackOutputHashes::default(),
             files: Vec::new(),
-            signing_key,
+            signing_key: Some(signing_key),
+        }
+    }
+
+    /// Keyless counterpart to `new`: no ed25519 key, since the produced manifest
+    /// carries no in-manifest signature — the detached cosign bundle a release
+    /// pipeline signs separately is authoritative. Finish with `build_sigstore`.
+    pub fn new_keyless(root: impl Into<PathBuf>, metadata: PackMetadata) -> Self {
+        Self {
+            root: root.into(),
+            metadata,
+            output_hashes: PackOutputHashes::default(),
+            files: Vec::new(),
+            signing_key: None,
         }
     }
 
@@ -992,8 +1008,49 @@ impl<'a> PackBuilder<'a> {
     }
 
     pub fn build(self) -> Result<PackManifest, PackManifestError> {
+        let signing_key = self
+            .signing_key
+            .expect("PackBuilder::build requires a signing key; construct via PackBuilder::new, or use build_sigstore for a keyless pack");
+        let signing_key_id = KeyId::from_pubkey(&signing_key.verifying_key());
+        let signature_validity = self.metadata.signature.clone();
+        let mut manifest = self.assemble(signing_key_id.clone(), SignatureFormat::Ed25519)?;
+        let signature = signing_key.sign(&manifest.signature_payload_bytes()?);
+        manifest
+            .provenance
+            .signature_bundle
+            .signatures
+            .push(PackSignature {
+                key_id: signing_key_id,
+                signature_base64: B64.encode(signature.to_bytes()),
+                signed_at: signature_validity.signed_at,
+                expires_at: signature_validity.expires_at,
+            });
+        Ok(manifest)
+    }
+
+    /// Keyless counterpart to `build`: stamps a `Sigstore`-authority manifest
+    /// with an identity-derived `signing_key_id` and an empty in-manifest
+    /// signature list, and leaves it unsigned. The caller (a release pipeline)
+    /// signs `manifest.canonical_bytes()` out of band with `cosign sign-blob`
+    /// and ships the detached bundle as the pack's authority.
+    pub fn build_sigstore(self, identity: &str) -> Result<PackManifest, PackManifestError> {
+        let signing_key_id = KeyId::from_identity(identity);
+        self.assemble(signing_key_id, SignatureFormat::Sigstore)
+    }
+
+    /// Shared assembly for both authority shapes: hash the declared files,
+    /// stamp outputs/provenance/trust from `self.metadata`, validate the
+    /// required-output shape for `kind`, and compute the real pack hash (which
+    /// covers `trust.signing_key_id`, so it must be computed after that field is
+    /// set). Leaves the signature bundle's `signatures` list empty — `build`
+    /// fills it in for the ed25519 authority; the Sigstore authority stays
+    /// empty by design.
+    fn assemble(
+        self,
+        signing_key_id: KeyId,
+        signature_format: SignatureFormat,
+    ) -> Result<PackManifest, PackManifestError> {
         let files = self.hash_files()?;
-        let signing_key_id = KeyId::from_pubkey(&self.signing_key.verifying_key());
         let outputs = PackOutputs {
             pack_hash: Sha256Hex::new(EMPTY_PACK_HASH)?,
             files,
@@ -1011,13 +1068,13 @@ impl<'a> PackBuilder<'a> {
             reproducibility: self.metadata.provenance.reproducibility,
             sbom: self.metadata.provenance.sbom,
             signature_bundle: SignatureBundle {
-                format: SignatureFormat::Ed25519,
+                format: signature_format,
                 payload: SignaturePayload::ManifestV1,
                 signatures: Vec::new(),
             },
         };
         let trust = TrustMetadata {
-            signing_key_id: signing_key_id.clone(),
+            signing_key_id,
             expires_at: self.metadata.trust.expires_at,
             revocation_channel: self.metadata.trust.revocation_channel,
             channel_identity: self.metadata.trust.channel_identity,
@@ -1036,21 +1093,10 @@ impl<'a> PackBuilder<'a> {
             provenance,
             trust,
         };
-        // Refuse to sign a manifest the verifier would reject for missing the
-        // outputs this kind requires, rather than shipping a dead signed pack.
+        // Refuse to produce a manifest the verifier would reject for missing the
+        // outputs this kind requires, rather than shipping a dead pack.
         validate_required_outputs(&manifest)?;
         manifest.outputs.pack_hash = manifest.computed_pack_hash()?;
-        let signature = self.signing_key.sign(&manifest.signature_payload_bytes()?);
-        manifest
-            .provenance
-            .signature_bundle
-            .signatures
-            .push(PackSignature {
-                key_id: signing_key_id,
-                signature_base64: B64.encode(signature.to_bytes()),
-                signed_at: self.metadata.signature.signed_at,
-                expires_at: self.metadata.signature.expires_at,
-            });
         Ok(manifest)
     }
 
@@ -1711,6 +1757,71 @@ mod tests {
             Err(PackManifestError::Invalid(inner))
                 if matches!(*inner, PackVerifyError::UnsafeFilePath(_))
         ));
+    }
+
+    const SIGSTORE_IDENTITY: &str =
+        "https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/v0.17.0";
+
+    /// Produce a `Builder` pack via `PackBuilder::new_keyless` +
+    /// `build_sigstore`, exercising the same file set as
+    /// `produced_hvf_builder_pack` but with no ed25519 key.
+    fn produced_keyless_builder_pack(dir: &TempDir) -> PackManifest {
+        fs::write(dir.path().join("kernel"), b"builder-kernel").expect("write kernel");
+        fs::write(dir.path().join("builder.img"), b"builder-image").expect("write builder");
+        PackBuilder::new_keyless(dir.path(), producer_metadata(PackKind::Builder))
+            .files(["kernel", "builder.img"])
+            .output_hashes(PackOutputHashes {
+                kernel_hash: Some(Sha256Hex::from_bytes(b"builder-kernel")),
+                builder_image_hash: Some(Sha256Hex::from_bytes(b"builder-image")),
+                ..Default::default()
+            })
+            .build_sigstore(SIGSTORE_IDENTITY)
+            .expect("produce keyless pack")
+    }
+
+    #[test]
+    fn build_sigstore_produces_sigstore_authority_manifest() {
+        let dir = TempDir::new().expect("tempdir");
+        let manifest = produced_keyless_builder_pack(&dir);
+        assert_eq!(
+            manifest.provenance.signature_bundle.format,
+            SignatureFormat::Sigstore
+        );
+        assert!(manifest.provenance.signature_bundle.signatures.is_empty());
+        assert_eq!(
+            manifest.trust.signing_key_id,
+            KeyId::from_identity(SIGSTORE_IDENTITY)
+        );
+    }
+
+    #[test]
+    fn build_sigstore_canonical_bytes_equal_signature_payload_bytes() {
+        let dir = TempDir::new().expect("tempdir");
+        let manifest = produced_keyless_builder_pack(&dir);
+        // The empty-signatures invariant: for a Sigstore manifest the payload a
+        // release pipeline signs is exactly the manifest's canonical bytes.
+        assert_eq!(
+            manifest.canonical_bytes().expect("canonical bytes"),
+            manifest.signature_payload_bytes().expect("payload bytes")
+        );
+    }
+
+    #[test]
+    fn build_sigstore_pack_hash_is_self_consistent() {
+        let dir = TempDir::new().expect("tempdir");
+        let manifest = produced_keyless_builder_pack(&dir);
+        assert_eq!(
+            manifest.computed_pack_hash().expect("computed hash"),
+            manifest.outputs.pack_hash
+        );
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn build_sigstore_manifest_passes_keyless_shape_gate() {
+        let dir = TempDir::new().expect("tempdir");
+        let manifest = produced_keyless_builder_pack(&dir);
+        assert!(validate_signature_bundle_keyless(&manifest).is_ok());
     }
 
     fn resign(manifest: &mut PackManifest) {
