@@ -553,6 +553,17 @@ pub fn vm_hvf_agent_socket(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("hvf-agent.sock")
 }
 
+/// The hvf VMM's per-VM `BROKER_PORT` listener socket the host-agent daemon
+/// (or, on the fork path, the per-VM broker) binds on behalf of this VM:
+/// `<vm_state_dir>/hvf-broker.sock`. Sits at the state-dir root like the
+/// substitution-endpoint socket (the hvf device model has no `vsock/` subdir
+/// the way vz does). Single source of truth so the backend (which passes it
+/// to registration) and whatever eventually bridges the guest's `BROKER_PORT`
+/// dial to it cannot drift.
+pub fn vm_hvf_broker_socket(name: &str) -> std::path::PathBuf {
+    vm_state_dir(name).join("hvf-broker.sock")
+}
+
 // ============================================================================
 // Sensitive ~/.mvm subdirectories
 // ============================================================================
@@ -1020,6 +1031,11 @@ mod tests {
         assert_eq!(
             vm_substitution_endpoint_socket("foo"),
             std::path::PathBuf::from("/custom/data/vms/foo/substitution-endpoint.sock")
+        );
+        // Same shape for the hvf VMM's per-VM BROKER_PORT socket.
+        assert_eq!(
+            vm_hvf_broker_socket("foo"),
+            std::path::PathBuf::from("/custom/data/vms/foo/hvf-broker.sock")
         );
 
         env.remove("MVM_DATA_DIR");
