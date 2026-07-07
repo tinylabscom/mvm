@@ -363,8 +363,9 @@ impl HealthProber {
         actions
     }
 
-    /// Fire every scheduled restart whose backoff gate has elapsed, then consume
-    /// the gate so each scheduled restart fires exactly once.
+    /// Fire every scheduled restart whose backoff gate has elapsed for a machine
+    /// currently in `live_vm_ids`, then consume the gate so each scheduled
+    /// restart fires exactly once.
     ///
     /// Runs on every watcher tick over *all* trackers, independent of the
     /// actions the current pass produced. `fold` schedules a restart into the
@@ -374,8 +375,19 @@ impl HealthProber {
     /// defers (`now < gate`), and a later tick — past the gate — fires it. A
     /// give-up clears the gate, so a parked machine is never restarted from
     /// here.
-    pub fn act(&mut self, now_unix: u64, restarter: &dyn Restarter) {
+    ///
+    /// Firing is gated on liveness: a machine absent from `live_vm_ids` is never
+    /// restarted, even with an elapsed gate. A deliberate `machine stop`
+    /// deregisters a machine that may be Unhealthy with a pending gate, and
+    /// resurrecting it would be wrong; the gate is simply left pending (nothing
+    /// fires while absent) and only fires if the machine returns to the live set.
+    /// During a genuine restart the machine is still live when the gate fires —
+    /// its own stop hasn't deregistered it yet — so real restarts are unaffected.
+    pub fn act(&mut self, live_vm_ids: &[String], now_unix: u64, restarter: &dyn Restarter) {
         for (vm, (tracker, _)) in self.trackers.iter_mut() {
+            if !live_vm_ids.iter().any(|id| id == vm) {
+                continue;
+            }
             let due = tracker
                 .next_restart_after_unix
                 .is_some_and(|gate| now_unix >= gate);
@@ -654,7 +666,7 @@ mod tests {
         // watcher loop; the restart must NOT fire on the instant it was set.
         for now in [1000u64, 1030, 1060] {
             prober.tick(&vms, now, &exec);
-            prober.act(now, &restarter);
+            prober.act(&vms, now, &restarter);
         }
         assert!(
             restarter.calls.lock().unwrap().is_empty(),
@@ -677,7 +689,7 @@ mod tests {
         // the pending restart exactly once and consumes the gate. This is the
         // path the old `act` never reached — the bug left it dead.
         prober.tick(&vms, gate, &exec);
-        prober.act(gate, &restarter);
+        prober.act(&vms, gate, &restarter);
         assert_eq!(*restarter.calls.lock().unwrap(), vec!["web".to_string()]);
         assert!(
             prober
@@ -692,12 +704,67 @@ mod tests {
 
         // Further ticks at/after the gate do not re-fire the consumed restart.
         prober.tick(&vms, gate + 1, &exec);
-        prober.act(gate + 1, &restarter);
+        prober.act(&vms, gate + 1, &restarter);
         assert_eq!(
             restarter.calls.lock().unwrap().len(),
             1,
             "a consumed gate never re-fires"
         );
+    }
+
+    #[test]
+    fn restart_not_fired_for_machine_absent_from_live_set_with_pending_gate() {
+        // A deliberately-stopped machine that was Unhealthy with a pending
+        // restart gate must not be resurrected: `machine stop` deregisters it
+        // (leaves the live set) but keeps its spec+healthcheck, so its tracker
+        // survives with a gate that has since elapsed. `act` must gate firing on
+        // liveness and never restart a machine absent from the live set.
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = data_env(tmp.path());
+
+        save_machine_spec(&spec_with_hc("web", Some(hc())), true).unwrap();
+
+        let mut prober = HealthProber::new();
+        let exec = Fake(ExecOutcome::Exited(1));
+        let restarter = FakeRestarter::default();
+        let vms = vec!["web".to_string()];
+
+        // Drive to Unhealthy with a pending, not-yet-fired gate (act on the
+        // setting instant defers, so nothing fires during the drive).
+        for now in [1000u64, 1030, 1060] {
+            prober.tick(&vms, now, &exec);
+            prober.act(&vms, now, &restarter);
+        }
+        let gate = prober
+            .trackers
+            .get("web")
+            .unwrap()
+            .0
+            .next_restart_after_unix
+            .expect("Unhealthy machine must hold a pending restart gate");
+        assert!(restarter.calls.lock().unwrap().is_empty());
+
+        // Machine is stopped (absent from the live set) and the clock is well
+        // past the gate: no restart may fire, and the gate stays pending.
+        prober.act(&[], gate + 100, &restarter);
+        assert!(
+            restarter.calls.lock().unwrap().is_empty(),
+            "a stopped machine (absent from live set) must never be restarted"
+        );
+        assert_eq!(
+            prober
+                .trackers
+                .get("web")
+                .unwrap()
+                .0
+                .next_restart_after_unix,
+            Some(gate),
+            "an unfired gate for an absent machine is left pending"
+        );
+
+        // Once the machine is live again the same elapsed gate fires exactly once.
+        prober.act(&vms, gate + 100, &restarter);
+        assert_eq!(*restarter.calls.lock().unwrap(), vec!["web".to_string()]);
     }
 
     #[test]
@@ -719,12 +786,12 @@ mod tests {
         // Drive to the first restart (Unhealthy, restart_attempts=1 at t=1060).
         for now in [1000u64, 1030, 1060] {
             prober.tick(&vms, now, &exec);
-            prober.act(now, &restarter);
+            prober.act(&vms, now, &restarter);
         }
         assert_eq!(prober.trackers.get("web").unwrap().0.restart_attempts, 1);
         // The gate fires on a later, non-probe tick.
         prober.tick(&vms, 1062, &exec);
-        prober.act(1062, &restarter);
+        prober.act(&vms, 1062, &restarter);
         assert_eq!(
             restarter.calls.lock().unwrap().len(),
             1,
@@ -735,7 +802,7 @@ mod tests {
         // couple of ticks. The tracker — and its restart_attempts — must survive.
         for now in [1064u64, 1066] {
             prober.tick(&[], now, &exec);
-            prober.act(now, &restarter);
+            prober.act(&[], now, &restarter);
         }
         assert!(
             prober.trackers.contains_key("web"),
@@ -753,7 +820,7 @@ mod tests {
         let mut gave_up = false;
         while now < 1600 && !gave_up {
             let actions = prober.tick(&vms, now, &exec);
-            prober.act(now, &restarter);
+            prober.act(&vms, now, &restarter);
             if actions
                 .iter()
                 .any(|(vm, a)| vm == "web" && *a == HealthAction::GiveUp)
@@ -782,7 +849,7 @@ mod tests {
         // Ticking on past give-up spawns no further restarts.
         for _ in 0..5u64 {
             prober.tick(&vms, now, &exec);
-            prober.act(now, &restarter);
+            prober.act(&vms, now, &restarter);
             now += 30;
         }
         assert_eq!(
@@ -830,7 +897,7 @@ mod tests {
         let restarter = FakeRestarter::default();
         // GiveUp clears the backoff gate, so even at a far-future now_unix `act`
         // finds no pending restart to fire.
-        prober.act(now + 10_000, &restarter);
+        prober.act(&vms, now + 10_000, &restarter);
         assert!(
             restarter.calls.lock().unwrap().is_empty(),
             "GiveUp must never spawn a restart"

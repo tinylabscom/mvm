@@ -139,7 +139,7 @@ pub async fn run_health_watcher(daemon: Arc<Mutex<HostAgentDaemon>>) {
             // future, and `act` fires any gate that has since elapsed. A restart
             // scheduled this pass therefore fires on a later pass, not this one.
             prober.tick(&vm_ids, now, &AgentExec);
-            prober.act(now, &MachineRestarter);
+            prober.act(&vm_ids, now, &MachineRestarter);
             prober
         })
         .await
