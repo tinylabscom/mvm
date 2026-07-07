@@ -16,8 +16,9 @@ use thiserror::Error;
 use crate::arch::GuestArch;
 use crate::config::{pack_cache_dir, pack_dir};
 use crate::packs::{
-    LocalPackPolicy, PackBackend, PackKind, PackManifest, PackManifestError, PackRevocationChecker,
-    PackTrustStore, PackVerifyError, VerifiedPack, verify_pack_at,
+    COSIGN_BUNDLE_FILE_NAME, KeylessTrust, LocalPackPolicy, PackBackend, PackKind, PackManifest,
+    PackManifestError, PackRevocationChecker, PackTrustStore, PackVerifyError, VerifiedPack,
+    verify_pack_at, verify_pack_keyless_at,
 };
 
 /// Serialized manifest written alongside the verified file set so a promoted
@@ -35,23 +36,44 @@ const QUARANTINE_DIR_NAME: &str = ".incoming";
 /// within this process, and the pid disambiguates concurrent processes.
 static QUARANTINE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// The trust inputs `verify_pack_at` needs, grouped so promotion and resolution
-/// take one borrow instead of threading three references through every call.
-pub struct PackVerifyCtx<'a> {
-    pub policy: &'a LocalPackPolicy,
-    pub trust: &'a dyn PackTrustStore,
-    pub revocations: &'a dyn PackRevocationChecker,
+/// The trust inputs a verification pass needs, grouped so promotion and
+/// resolution take one borrow instead of threading references through every
+/// call. Authority-agnostic: `promote`/`resolve_pack` dispatch on the variant
+/// rather than knowing which signing authority produced the pack.
+pub enum PackVerifyCtx<'a> {
+    Ed25519 {
+        policy: &'a LocalPackPolicy,
+        trust: &'a dyn PackTrustStore,
+        revocations: &'a dyn PackRevocationChecker,
+    },
+    Keyless {
+        policy: &'a LocalPackPolicy,
+        keyless: &'a KeylessTrust,
+        revocations: &'a dyn PackRevocationChecker,
+    },
 }
 
 impl<'a> PackVerifyCtx<'a> {
-    pub fn new(
+    pub fn ed25519(
         policy: &'a LocalPackPolicy,
         trust: &'a dyn PackTrustStore,
         revocations: &'a dyn PackRevocationChecker,
     ) -> Self {
-        Self {
+        Self::Ed25519 {
             policy,
             trust,
+            revocations,
+        }
+    }
+
+    pub fn keyless(
+        policy: &'a LocalPackPolicy,
+        keyless: &'a KeylessTrust,
+        revocations: &'a dyn PackRevocationChecker,
+    ) -> Self {
+        Self::Keyless {
+            policy,
+            keyless,
             revocations,
         }
     }
@@ -61,7 +83,23 @@ impl<'a> PackVerifyCtx<'a> {
         manifest: &PackManifest,
         root: &Path,
     ) -> Result<VerifiedPack, PackVerifyError> {
-        verify_pack_at(manifest, root, self.policy, self.trust, self.revocations)
+        match self {
+            Self::Ed25519 {
+                policy,
+                trust,
+                revocations,
+            } => verify_pack_at(manifest, root, policy, *trust, *revocations),
+            Self::Keyless {
+                policy,
+                keyless,
+                revocations,
+            } => {
+                let bundle = std::fs::read(root.join(COSIGN_BUNDLE_FILE_NAME)).map_err(|e| {
+                    PackVerifyError::KeylessSignatureInvalid(format!("reading cosign bundle: {e}"))
+                })?;
+                verify_pack_keyless_at(manifest, root, policy, &bundle, keyless, *revocations)
+            }
+        }
     }
 }
 
@@ -107,14 +145,16 @@ pub fn promote(
     manifest: &PackManifest,
     ctx: &PackVerifyCtx<'_>,
 ) -> Result<VerifiedPackDir, PackCacheError> {
-    // A pack may not declare a file whose name collides with the manifest sidecar
-    // this cache writes: doing so would let the sidecar clobber a declared file
-    // (breaking re-verify forever) or vice versa. Reject before touching the cache.
+    // A pack may not declare a file whose name collides with a sidecar this
+    // cache writes (the manifest, or — for a keyless-authority pack — the
+    // detached cosign bundle): doing so would let the sidecar clobber a
+    // declared file (breaking re-verify forever) or vice versa. Reject before
+    // touching the cache.
     if let Some(file) = manifest
         .outputs
         .files
         .iter()
-        .find(|file| file.path == MANIFEST_FILE_NAME)
+        .find(|file| file.path == MANIFEST_FILE_NAME || file.path == COSIGN_BUNDLE_FILE_NAME)
     {
         return Err(PackCacheError::ReservedFileName(file.path.clone()));
     }
@@ -170,6 +210,16 @@ fn populate_and_rename(
     }
     let manifest_path = quarantine.join(MANIFEST_FILE_NAME);
     std::fs::write(&manifest_path, manifest.canonical_bytes()?).map_err(io_at(&manifest_path))?;
+
+    // A keyless-authority pack carries a detached cosign bundle sidecar
+    // alongside the staged files; an ed25519 pack simply won't have one. Carry
+    // it through so it rides the atomic rename into the content-addressed dir,
+    // where `resolve_pack`'s re-verify expects to find it.
+    let staged_bundle = staged_root.join(COSIGN_BUNDLE_FILE_NAME);
+    if staged_bundle.exists() {
+        let dest_bundle = quarantine.join(COSIGN_BUNDLE_FILE_NAME);
+        std::fs::copy(&staged_bundle, &dest_bundle).map_err(io_at(&staged_bundle))?;
+    }
 
     if let Some(parent) = final_dir.parent() {
         harden_dir(parent)?;
@@ -281,9 +331,10 @@ mod tests {
 
     use super::*;
     use crate::packs::{
-        HostCapability, PackBuilder, PackMetadata, PackOutputHashes, PackProvenanceMeta,
-        PackTrustMeta, PolicyCompatibility, ReproducibilityStatus, RevocationStatus, SbomReference,
-        Sha256Hex, SignatureValidity,
+        COSIGN_BUNDLE_FILE_NAME, HostCapability, KeylessTrust, PackBuilder, PackMetadata,
+        PackOutputHashes, PackProvenanceMeta, PackTrustMeta, PolicyCompatibility,
+        ReproducibilityStatus, RevocationStatus, SbomReference, Sha256Hex, SignatureFormat,
+        SignatureValidity,
     };
     use crate::plan::bundle::KeyId;
     use crate::util::test_env::TestEnv;
@@ -392,6 +443,28 @@ mod tests {
         (dir, manifest)
     }
 
+    /// Stage a `Builder` pack rewritten for the keyless (Sigstore) authority:
+    /// format flipped, the in-manifest signature cleared (a detached bundle
+    /// would be authoritative instead), and `signing_key_id` swapped for an
+    /// identity-derived id. The pack hash is recomputed since `signing_key_id`
+    /// is covered by the pack-hash payload. No cosign bundle sidecar is written
+    /// — callers that need one write it themselves.
+    fn staged_sigstore_builder_pack() -> (TempDir, PackManifest) {
+        let (dir, mut manifest) = staged_builder_pack();
+        manifest.provenance.signature_bundle.format = SignatureFormat::Sigstore;
+        manifest.provenance.signature_bundle.signatures.clear();
+        manifest.trust.signing_key_id = KeyId::from_identity("test-identity");
+        manifest.outputs.pack_hash = manifest.computed_pack_hash().expect("pack hash");
+        (dir, manifest)
+    }
+
+    fn keyless_trust() -> KeylessTrust {
+        KeylessTrust {
+            accepted_identities: vec!["test-identity".to_string()],
+            issuer: "https://token.actions.githubusercontent.com".to_string(),
+        }
+    }
+
     fn policy() -> LocalPackPolicy {
         LocalPackPolicy {
             host_arch: GuestArch::host(),
@@ -436,7 +509,7 @@ mod tests {
         let trust = trust_store();
         let rev = good_revocation();
         let policy = policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
 
         let promoted = promote(staged.path(), &manifest, &ctx).expect("promote");
 
@@ -455,7 +528,7 @@ mod tests {
         let trust = trust_store();
         let rev = good_revocation();
         let policy = policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
 
         let first = promote(staged.path(), &manifest, &ctx).expect("first promote");
         let second = promote(staged.path(), &manifest, &ctx).expect("second promote");
@@ -471,7 +544,7 @@ mod tests {
         let trust = trust_store();
         let rev = good_revocation();
         let policy = policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
 
         let err = promote(staged.path(), &manifest, &ctx).expect_err("tamper refused");
         assert!(matches!(err, PackCacheError::Verify(_)));
@@ -487,7 +560,7 @@ mod tests {
         let trust = trust_store();
         let rev = good_revocation();
         let policy = policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
 
         let err = promote(staged.path(), &manifest, &ctx).expect_err("missing file refused");
         assert!(matches!(err, PackCacheError::Verify(_)));
@@ -501,7 +574,7 @@ mod tests {
         let trust = trust_store();
         let rev = good_revocation();
         let policy = policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
         promote(staged.path(), &manifest, &ctx).expect("promote");
 
         let found = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
@@ -518,7 +591,7 @@ mod tests {
         let trust = trust_store();
         let rev = good_revocation();
         let policy = policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
         promote(staged.path(), &manifest, &ctx).expect("promote");
 
         // Runtime kind is not present, so no compatible pack exists.
@@ -534,7 +607,7 @@ mod tests {
         let trust = trust_store();
         let rev = good_revocation();
         let policy = policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
         let promoted = promote(staged.path(), &manifest, &ctx).expect("promote");
 
         // Poison the promoted copy after the fact.
@@ -554,7 +627,7 @@ mod tests {
         let trust = trust_store();
         let rev = good_revocation();
         let policy = policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
         let promoted = promote(staged.path(), &manifest, &ctx).expect("promote");
 
         let mode = fs::metadata(&promoted.root)
@@ -571,7 +644,7 @@ mod tests {
         let trust = trust_store();
         let rev = good_revocation();
         let policy = policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
         let promoted = promote(staged.path(), &manifest, &ctx).expect("promote");
 
         assert!(
@@ -589,7 +662,7 @@ mod tests {
         let trust = trust_store();
         let rev = good_revocation();
         let policy = policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
         let promoted = promote(staged.path(), &manifest, &ctx).expect("first promote");
 
         // Poison the promoted copy, then re-promote from the good staged dir.
@@ -607,7 +680,7 @@ mod tests {
         let trust = trust_store();
         let rev = good_revocation();
         let policy = policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
         promote(staged.path(), &manifest, &ctx).expect("promote");
 
         let incoming = cache.path().join("packs").join(super::QUARANTINE_DIR_NAME);
@@ -623,7 +696,7 @@ mod tests {
         let trust = trust_store();
         let rev = good_revocation();
         let policy = policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
 
         let (staged_a, manifest_a) = staged_builder_pack_bytes(b"kernel-a", b"image-a");
         let (staged_b, manifest_b) = staged_builder_pack_bytes(b"kernel-b", b"image-b");
@@ -657,7 +730,7 @@ mod tests {
         let trust = trust_store();
         let rev = good_revocation();
         let policy = policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
 
         // Mint a pack that legitimately declares a file named like the sidecar.
         let dir = TempDir::new().expect("tempdir");
@@ -698,7 +771,7 @@ mod tests {
         let trust = trust_store();
         let rev = good_revocation();
         let policy = policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
         let promoted = promote(staged.path(), &manifest, &ctx).expect("promote");
 
         // Rename the content-addressed dir so its name no longer equals the hash.
@@ -708,5 +781,56 @@ mod tests {
         let found = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
             .expect("resolve ok");
         assert!(found.is_none(), "pack under wrong name must not be served");
+    }
+
+    #[test]
+    fn keyless_ctx_missing_bundle_sidecar_is_signature_invalid() {
+        let (_cache, _env) = isolated_cache();
+        let (staged, manifest) = staged_sigstore_builder_pack();
+        let keyless = keyless_trust();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::keyless(&policy, &keyless, &rev);
+
+        // No COSIGN_BUNDLE_FILE_NAME sidecar was written under `staged`, so the
+        // keyless ctx must fail closed before any signature bytes are touched.
+        let err = promote(staged.path(), &manifest, &ctx).expect_err("missing bundle refused");
+        assert!(matches!(
+            err,
+            PackCacheError::Verify(PackVerifyError::KeylessSignatureInvalid(_))
+        ));
+        assert!(!pack_dir(manifest.outputs.pack_hash.as_str()).exists());
+    }
+
+    #[test]
+    fn reserved_cosign_bundle_filename_rejected() {
+        let (_cache, _env) = isolated_cache();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        // Mint a pack that legitimately declares a file named like the cosign
+        // bundle sidecar.
+        let dir = TempDir::new().expect("tempdir");
+        fs::write(dir.path().join("boot-kernel"), b"builder-kernel").expect("write kernel");
+        fs::write(dir.path().join("builder.img"), b"builder-image").expect("write image");
+        fs::write(dir.path().join(COSIGN_BUNDLE_FILE_NAME), b"collides").expect("write reserved");
+        let key = signing_key();
+        let manifest = PackBuilder::new(dir.path(), metadata(PackKind::Builder), &key)
+            .files(["boot-kernel", "builder.img", COSIGN_BUNDLE_FILE_NAME])
+            .output_hashes(PackOutputHashes {
+                kernel_hash: Some(Sha256Hex::from_bytes(b"builder-kernel")),
+                builder_image_hash: Some(Sha256Hex::from_bytes(b"builder-image")),
+                ..Default::default()
+            })
+            .build()
+            .expect("build pack");
+
+        let err = promote(dir.path(), &manifest, &ctx).expect_err("reserved name refused");
+        assert!(
+            matches!(err, PackCacheError::ReservedFileName(name) if name == COSIGN_BUNDLE_FILE_NAME)
+        );
+        assert!(!pack_dir(manifest.outputs.pack_hash.as_str()).exists());
     }
 }

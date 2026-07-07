@@ -372,7 +372,7 @@ mod tests {
 
         let policy = host_policy(&[CHANNEL]);
         let config = trust_config(&key, &[CHANNEL]);
-        let ctx = PackVerifyCtx::new(&policy, &config, &config);
+        let ctx = PackVerifyCtx::ed25519(&policy, &config, &config);
 
         let promoted = promote(out.path(), &manifest, &ctx).expect("promote produced pack");
         assert!(promoted.root.starts_with(cache.path()));

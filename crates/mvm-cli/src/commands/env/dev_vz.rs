@@ -2706,7 +2706,7 @@ mod attested_builder_pack {
         let inputs = host_pack_verify_inputs(target_arch);
         // The config answers both trust and revocation queries, so it is passed
         // as the trust store and the revocation checker.
-        let ctx = PackVerifyCtx::new(&inputs.policy, &inputs.trust, &inputs.trust);
+        let ctx = PackVerifyCtx::ed25519(&inputs.policy, &inputs.trust, &inputs.trust);
         resolve_and_materialize_builder_pack(target_arch, Path::new(out_dir), &ctx)
     }
 
@@ -2949,7 +2949,7 @@ mod attested_builder_pack_tests {
         let trust = trust_store(&key);
         let rev = good_revocations();
         let policy = hvf_policy();
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
 
         promote(staged.path(), &manifest, &ctx).expect("promote");
         let verified = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
@@ -3190,7 +3190,7 @@ mod attested_builder_pack_tests {
         let trust = trust_store(key);
         let rev = good_revocations();
         let policy = attested_host_policy(&["stable"]);
-        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
         promote(staged, &manifest, &ctx).expect("promote");
         manifest
     }
