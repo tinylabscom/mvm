@@ -2532,7 +2532,7 @@ fn perform_builder_vm_download_published(arch: &str, out_dir: &str) -> Result<()
         // one) falls through to the download below.
         #[cfg(feature = "builder-vm")]
         if attested_builder_pack::attested_builder_pack_selected() {
-            match attested_builder_pack::attempt_attested_builder_pack(arch, out_dir) {
+            match attested_builder_pack::attempt_attested_builder_pack(arch, out_dir, true) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
                 Err(error) => ui::warn(&format!(
@@ -2614,12 +2614,18 @@ mod attested_builder_pack {
 
     use mvm_core::arch::GuestArch;
     use mvm_core::config::mvm_keys_dir;
+    #[cfg(feature = "manifest-verify")]
+    use mvm_core::pack_cache::promote;
     use mvm_core::pack_cache::{PackVerifyCtx, VerifiedPackDir, resolve_pack};
     use mvm_core::pack_trust::{PackTrustConfig, load_pack_trust_config};
+    #[cfg(feature = "manifest-verify")]
+    use mvm_core::packs::{COSIGN_BUNDLE_FILE_NAME, PackManifest};
     use mvm_core::packs::{
         HostCapability, LocalPackPolicy, PackBackend, PackKind, host_pack_policy_hash,
     };
 
+    #[cfg(feature = "manifest-verify")]
+    use super::{builder_vm_artifact_names, download_file};
     use super::{
         promote_builder_vm_stage0_cache, unique_builder_vm_stage0_staging_dir,
         write_builder_vm_cache_sidecars,
@@ -2709,6 +2715,139 @@ mod attested_builder_pack {
         policy
     }
 
+    /// Parse a staged release pack's manifest and verify+promote it into the
+    /// local pack cache. `Ok(Some(_))` means the pack now exists in the cache
+    /// (freshly promoted, or already there) and the caller's next resolve will
+    /// find it. A verification failure is `Ok(None)` — fail-open on
+    /// availability, so the caller falls through to the plain checksum
+    /// download — but the rejection is logged so an operator can see why the
+    /// acceleration path was skipped. A missing or unparsable staged manifest
+    /// is a genuine error: the fetch step is expected to have already placed
+    /// valid bytes there, so this signals a caller bug rather than an
+    /// untrusted-publisher condition.
+    #[cfg(feature = "manifest-verify")]
+    pub(super) fn promote_staged_builder_pack(
+        staging: &Path,
+        ctx: &PackVerifyCtx<'_>,
+    ) -> Result<Option<VerifiedPackDir>> {
+        let manifest_path = staging.join("pack-manifest.json");
+        let manifest_bytes = std::fs::read(&manifest_path).with_context(|| {
+            format!(
+                "reading staged builder pack manifest at {}",
+                manifest_path.display()
+            )
+        })?;
+        let manifest: PackManifest =
+            serde_json::from_slice(&manifest_bytes).with_context(|| {
+                format!(
+                    "parsing staged builder pack manifest at {}",
+                    manifest_path.display()
+                )
+            })?;
+        match promote(staging, &manifest, ctx) {
+            Ok(dir) => Ok(Some(dir)),
+            Err(error) => {
+                ui::warn(&format!(
+                    "Published builder pack failed verification ({error}); \
+                     falling back to the checksum download."
+                ));
+                Ok(None)
+            }
+        }
+    }
+
+    /// Download the release channel's published builder pack — manifest,
+    /// detached cosign bundle, and artifacts — into a fresh staging dir laid
+    /// out exactly as [`promote_staged_builder_pack`] expects:
+    /// `pack-manifest.json`, [`COSIGN_BUNDLE_FILE_NAME`], `vmlinux`,
+    /// `rootfs.ext4`, and a best-effort `cmdline.txt`. Asset basenames mirror
+    /// [`super::download_builder_vm_image`]'s naming exactly, so the two
+    /// download paths can never drift apart. The staging dir is a
+    /// process-local tempdir; `promote` only ever copies out of it (never
+    /// renames it), so it need not share a filesystem with the pack cache,
+    /// and its `Drop` cleans it up on any early return here.
+    #[cfg(feature = "manifest-verify")]
+    fn fetch_release_builder_pack_staging(arch: &str) -> Result<tempfile::TempDir> {
+        let staging = tempfile::Builder::new()
+            .prefix("mvm-builder-pack-")
+            .tempdir()
+            .context("creating builder pack staging dir")?;
+        let names = builder_vm_artifact_names(arch);
+        let manifest_name = format!("builder-vm-{arch}.pack-manifest.json");
+        let bundle_name = format!("{manifest_name}.bundle");
+        let version = env!("CARGO_PKG_VERSION");
+        let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/v{version}");
+
+        let manifest_dest = staging
+            .path()
+            .join("pack-manifest.json")
+            .to_string_lossy()
+            .into_owned();
+        download_file(&format!("{base_url}/{manifest_name}"), &manifest_dest)
+            .with_context(|| format!("downloading builder pack manifest {manifest_name}"))?;
+
+        let bundle_dest = staging
+            .path()
+            .join(COSIGN_BUNDLE_FILE_NAME)
+            .to_string_lossy()
+            .into_owned();
+        download_file(&format!("{base_url}/{bundle_name}"), &bundle_dest)
+            .with_context(|| format!("downloading builder pack cosign bundle {bundle_name}"))?;
+
+        let kernel_dest = staging
+            .path()
+            .join("vmlinux")
+            .to_string_lossy()
+            .into_owned();
+        download_file(&format!("{base_url}/{}", names.kernel), &kernel_dest)
+            .context("downloading builder pack vmlinux artifact")?;
+
+        let rootfs_dest = staging
+            .path()
+            .join("rootfs.ext4")
+            .to_string_lossy()
+            .into_owned();
+        download_file(&format!("{base_url}/{}", names.rootfs), &rootfs_dest)
+            .context("downloading builder pack rootfs artifact")?;
+
+        // Best-effort: a missing cmdline.txt sidecar has a documented
+        // fallback at the materializer, so a 404 here is not fatal.
+        let cmdline_dest = staging
+            .path()
+            .join("cmdline.txt")
+            .to_string_lossy()
+            .into_owned();
+        let _ = download_file(&format!("{base_url}/{}", names.cmdline), &cmdline_dest);
+
+        Ok(staging)
+    }
+
+    /// Fetch the release channel's published builder pack and promote it into
+    /// the local cache when it verifies. Both the fetch and the promote step
+    /// are fail-open: any error is logged and swallowed here, never
+    /// propagated, so [`attempt_attested_builder_pack`] always falls
+    /// back to the plain checksum download rather than hard-failing `dev up`
+    /// on a network hiccup or a broken publish.
+    #[cfg(feature = "manifest-verify")]
+    fn fetch_and_promote_release_builder_pack(arch: &str, ctx: &PackVerifyCtx<'_>) {
+        let staging = match fetch_release_builder_pack_staging(arch) {
+            Ok(staging) => staging,
+            Err(error) => {
+                ui::warn(&format!(
+                    "Fetching the published builder pack failed ({error:#}); \
+                     falling back to the checksum download."
+                ));
+                return;
+            }
+        };
+        if let Err(error) = promote_staged_builder_pack(staging.path(), ctx) {
+            ui::warn(&format!(
+                "Published builder pack was malformed ({error:#}); falling back \
+                 to the checksum download."
+            ));
+        }
+    }
+
     /// Entry point for the download arm: build the host verification context,
     /// resolve a compatible verified builder pack, and place it. `Ok(true)` when
     /// a pack was materialized (caller skips the download); `Ok(false)` when none
@@ -2720,12 +2859,23 @@ mod attested_builder_pack {
     /// operator's ed25519 `pack-trust.json` (fleet/self-built packs). Both
     /// resolve against the same on-disk cache and fail open to the caller's
     /// plain download when neither yields a pack.
-    pub(super) fn attempt_attested_builder_pack(arch: &str, out_dir: &str) -> Result<bool> {
+    ///
+    /// `fetch_on_miss` gates the release-channel network fetch that runs when
+    /// the embedded keyless root finds nothing locally cached: the production
+    /// call site always passes `true`; a test passes `false` to exercise the
+    /// local-cache-only resolve/materialize behavior without touching the
+    /// network.
+    pub(super) fn attempt_attested_builder_pack(
+        arch: &str,
+        out_dir: &str,
+        fetch_on_miss: bool,
+    ) -> Result<bool> {
         let target_arch: GuestArch = arch
             .parse()
             .with_context(|| format!("unsupported builder pack arch {arch}"))?;
         let inputs = host_pack_verify_inputs(target_arch);
         let out_dir = Path::new(out_dir);
+        let _ = fetch_on_miss;
 
         #[cfg(feature = "manifest-verify")]
         {
@@ -2734,6 +2884,12 @@ mod attested_builder_pack {
             let ctx = PackVerifyCtx::keyless(&policy, &keyless, &inputs.trust);
             if resolve_and_materialize_builder_pack(target_arch, out_dir, &ctx)? {
                 return Ok(true);
+            }
+            if fetch_on_miss {
+                fetch_and_promote_release_builder_pack(arch, &ctx);
+                if resolve_and_materialize_builder_pack(target_arch, out_dir, &ctx)? {
+                    return Ok(true);
+                }
             }
         }
 
@@ -2867,15 +3023,19 @@ mod attested_builder_pack_tests {
     use mvm_core::util::test_env::TestEnv;
     use tempfile::TempDir;
 
-    #[cfg(feature = "manifest-verify")]
-    use super::attested_builder_pack::keyless_release_policy;
     use super::attested_builder_pack::{
         attempt_attested_builder_pack, attested_builder_pack_selected, builder_pack_requested_for,
         materialize_builder_pack,
     };
+    #[cfg(feature = "manifest-verify")]
+    use super::attested_builder_pack::{keyless_release_policy, promote_staged_builder_pack};
     use super::{
         MVM_BUILDER_PACK_ENV, builder_vm_source_cache_ready, validate_builder_vm_stage0_artifacts,
     };
+    #[cfg(feature = "manifest-verify")]
+    use mvm_build::builder_pack::{BuildBuilderPackParams, build_keyless_builder_pack};
+    #[cfg(feature = "manifest-verify")]
+    use mvm_core::packs::{COSIGN_BUNDLE_FILE_NAME, KeylessTrust};
 
     const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
 
@@ -3047,8 +3207,9 @@ mod attested_builder_pack_tests {
         let out = TempDir::new().expect("out tempdir");
         let out_dir = out.path().join("builder-vm").join("aarch64");
 
-        let placed = attempt_attested_builder_pack("aarch64", out_dir.to_str().expect("utf-8"))
-            .expect("attempt is fail-open, not an error");
+        let placed =
+            attempt_attested_builder_pack("aarch64", out_dir.to_str().expect("utf-8"), false)
+                .expect("attempt is fail-open, not an error");
         assert!(
             !placed,
             "no promoted pack ⇒ no materialization ⇒ fall through"
@@ -3277,9 +3438,12 @@ mod attested_builder_pack_tests {
 
         let out = TempDir::new().expect("out tempdir");
         let out_dir = host_out_dir(out.path());
-        let placed =
-            attempt_attested_builder_pack(&host_arch_str(), out_dir.to_str().expect("utf-8"))
-                .expect("attempt ok");
+        let placed = attempt_attested_builder_pack(
+            &host_arch_str(),
+            out_dir.to_str().expect("utf-8"),
+            false,
+        )
+        .expect("attempt ok");
 
         assert!(placed, "trusted pack must materialize");
         assert!(out_dir.join("vmlinux").exists(), "vmlinux placed");
@@ -3305,9 +3469,12 @@ mod attested_builder_pack_tests {
 
         let out = TempDir::new().expect("out tempdir");
         let out_dir = host_out_dir(out.path());
-        let placed =
-            attempt_attested_builder_pack(&host_arch_str(), out_dir.to_str().expect("utf-8"))
-                .expect("attempt is fail-open");
+        let placed = attempt_attested_builder_pack(
+            &host_arch_str(),
+            out_dir.to_str().expect("utf-8"),
+            false,
+        )
+        .expect("attempt is fail-open");
 
         assert!(!placed, "absent config ⇒ nothing trusted ⇒ fall through");
         assert!(!out_dir.exists(), "fall-through must not touch out_dir");
@@ -3330,9 +3497,12 @@ mod attested_builder_pack_tests {
 
         let out = TempDir::new().expect("out tempdir");
         let out_dir = host_out_dir(out.path());
-        let placed =
-            attempt_attested_builder_pack(&host_arch_str(), out_dir.to_str().expect("utf-8"))
-                .expect("attempt is fail-open");
+        let placed = attempt_attested_builder_pack(
+            &host_arch_str(),
+            out_dir.to_str().expect("utf-8"),
+            false,
+        )
+        .expect("attempt is fail-open");
 
         assert!(
             !placed,
@@ -3358,9 +3528,12 @@ mod attested_builder_pack_tests {
 
         let out = TempDir::new().expect("out tempdir");
         let out_dir = host_out_dir(out.path());
-        let placed =
-            attempt_attested_builder_pack(&host_arch_str(), out_dir.to_str().expect("utf-8"))
-                .expect("attempt is fail-open");
+        let placed = attempt_attested_builder_pack(
+            &host_arch_str(),
+            out_dir.to_str().expect("utf-8"),
+            false,
+        )
+        .expect("attempt is fail-open");
 
         assert!(!placed, "disallowed channel ⇒ fall through");
         assert!(!out_dir.exists(), "channel mismatch must not materialize");
@@ -3393,6 +3566,186 @@ mod attested_builder_pack_tests {
             2,
             "union must not duplicate or drop entries"
         );
+    }
+
+    // ---- promote_staged_builder_pack (release-fetch staging → cache) ----
+
+    #[cfg(feature = "manifest-verify")]
+    const RELEASE_PACK_IDENTITY: &str =
+        "https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/v0.17.0";
+
+    /// Producer params for a real keyless builder pack, matching the shape
+    /// [`mvm_build::builder_pack::build_keyless_builder_pack`]'s own tests use.
+    /// Reused across the `promote_staged_builder_pack` tests so each only
+    /// supplies the staging quirk (garbage bundle, missing bundle, missing or
+    /// malformed manifest) it's exercising.
+    #[cfg(feature = "manifest-verify")]
+    fn release_pack_producer_params(src: &std::path::Path) -> BuildBuilderPackParams {
+        let vmlinux = src.join("vmlinux.src");
+        let rootfs = src.join("rootfs.src");
+        std::fs::write(&vmlinux, b"release-pack-kernel-bytes").expect("write kernel src");
+        std::fs::write(&rootfs, b"release-pack-rootfs-bytes").expect("write rootfs src");
+        BuildBuilderPackParams {
+            vmlinux,
+            rootfs,
+            target_arch: GuestArch::host(),
+            channel: "stable".to_string(),
+            builder_identity: "release-ci".to_string(),
+            build_environment_identity: "github-actions".to_string(),
+            build_timestamp: utc(2026, 6, 23),
+            reproducibility: ReproducibilityStatus::Reproduced,
+            sbom: SbomReference {
+                uri: "https://example.test/sbom.spdx.json".to_string(),
+                sha256: hash("sbom"),
+            },
+            expires_at: utc(2027, 12, 31),
+            revocation_channel: "https://example.test/revocations.json".to_string(),
+            mirror_identity: None,
+            transparency_log: None,
+            signature: SignatureValidity {
+                signed_at: utc(2026, 6, 24),
+                expires_at: utc(2027, 12, 31),
+            },
+        }
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    fn release_pack_keyless_trust() -> KeylessTrust {
+        KeylessTrust {
+            accepted_identities: vec![RELEASE_PACK_IDENTITY.to_string()],
+            issuer: "https://token.actions.githubusercontent.com".to_string(),
+        }
+    }
+
+    /// A garbage cosign bundle sidecar must fail keyless verification —
+    /// `promote_staged_builder_pack` is fail-open on that (`Ok(None)`, not an
+    /// error), and the pack cache must stay untouched so the caller falls
+    /// through to the plain checksum download.
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn promote_staged_builder_pack_rejects_garbage_bundle() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+
+        let src = TempDir::new().expect("src tempdir");
+        let staging = TempDir::new().expect("staging tempdir");
+        let produced = build_keyless_builder_pack(
+            &release_pack_producer_params(src.path()),
+            RELEASE_PACK_IDENTITY,
+            staging.path(),
+        )
+        .expect("produce keyless pack");
+        std::fs::write(
+            staging.path().join("pack-manifest.json"),
+            produced
+                .manifest
+                .canonical_bytes()
+                .expect("canonical bytes"),
+        )
+        .expect("write staged manifest");
+        std::fs::write(
+            staging.path().join(COSIGN_BUNDLE_FILE_NAME),
+            b"not a real cosign bundle",
+        )
+        .expect("write garbage bundle");
+
+        let policy = hvf_policy();
+        let keyless = release_pack_keyless_trust();
+        let rev = good_revocations();
+        let ctx = PackVerifyCtx::keyless(&policy, &keyless, &rev);
+
+        let result = promote_staged_builder_pack(staging.path(), &ctx)
+            .expect("verify failure is fail-open, not an error");
+        assert!(result.is_none(), "garbage bundle must not verify");
+
+        let resolved = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
+            .expect("resolve ok");
+        assert!(resolved.is_none(), "cache must stay unpromoted");
+    }
+
+    /// A missing cosign bundle sidecar is the same fail-open shape as a
+    /// garbage one — the pack cache never sees an unattested pack.
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn promote_staged_builder_pack_rejects_missing_bundle() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+
+        let src = TempDir::new().expect("src tempdir");
+        let staging = TempDir::new().expect("staging tempdir");
+        let produced = build_keyless_builder_pack(
+            &release_pack_producer_params(src.path()),
+            RELEASE_PACK_IDENTITY,
+            staging.path(),
+        )
+        .expect("produce keyless pack");
+        std::fs::write(
+            staging.path().join("pack-manifest.json"),
+            produced
+                .manifest
+                .canonical_bytes()
+                .expect("canonical bytes"),
+        )
+        .expect("write staged manifest");
+        // No manifest.cosign.bundle written.
+
+        let policy = hvf_policy();
+        let keyless = release_pack_keyless_trust();
+        let rev = good_revocations();
+        let ctx = PackVerifyCtx::keyless(&policy, &keyless, &rev);
+
+        let result = promote_staged_builder_pack(staging.path(), &ctx)
+            .expect("verify failure is fail-open, not an error");
+        assert!(result.is_none(), "missing bundle must not verify");
+
+        let resolved = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
+            .expect("resolve ok");
+        assert!(resolved.is_none(), "cache must stay unpromoted");
+    }
+
+    /// Malformed JSON in the staged manifest is a genuine error — the fetch
+    /// step is expected to have already placed valid bytes, so this signals a
+    /// caller bug, not an untrusted-publisher condition.
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn promote_staged_builder_pack_malformed_manifest_is_an_error() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+
+        let staging = TempDir::new().expect("staging tempdir");
+        std::fs::write(staging.path().join("pack-manifest.json"), b"not json")
+            .expect("write garbage manifest");
+
+        let policy = hvf_policy();
+        let keyless = release_pack_keyless_trust();
+        let rev = good_revocations();
+        let ctx = PackVerifyCtx::keyless(&policy, &keyless, &rev);
+
+        promote_staged_builder_pack(staging.path(), &ctx)
+            .expect_err("malformed manifest must error");
+    }
+
+    /// A missing staged manifest is the same hard-error shape as a malformed
+    /// one.
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn promote_staged_builder_pack_missing_manifest_is_an_error() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+
+        let staging = TempDir::new().expect("staging tempdir");
+        // No pack-manifest.json written at all.
+
+        let policy = hvf_policy();
+        let keyless = release_pack_keyless_trust();
+        let rev = good_revocations();
+        let ctx = PackVerifyCtx::keyless(&policy, &keyless, &rev);
+
+        promote_staged_builder_pack(staging.path(), &ctx).expect_err("missing manifest must error");
     }
 }
 
