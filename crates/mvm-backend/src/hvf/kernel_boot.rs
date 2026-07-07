@@ -15,13 +15,13 @@
 //! It then panics mounting the root fs because none is supplied — providing a
 //! root filesystem (initramfs / virtio-blk) is the next slice.
 
-use std::alloc::Layout;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::HvfError;
+use super::guest_ram::GuestRam;
 use super::hv_impl::{HvfHandle, HvfVcpu};
 use super::sys::*;
 use super::vcpu::esr_ec;
@@ -38,10 +38,10 @@ const RAM_BASE: u64 = 0x8000_0000;
 /// Default guest RAM (512 MiB) when the caller specifies none — enough for a
 /// demo/agent boot. A builder overrides it (a `nix build` OOMs at 512 MiB).
 const DEFAULT_RAM_SIZE: usize = 0x2000_0000;
-const PAGE: usize = 16384;
 
 /// Guest RAM in bytes for `mem_mib` MiB, or the default when `mem_mib` is 0.
-/// A MiB is a multiple of `PAGE` (16 KiB), so the result is always page-aligned.
+/// A MiB is a multiple of the 16 KiB hypervisor page size, so the result is
+/// always page-aligned.
 fn ram_size_bytes(mem_mib: u32) -> usize {
     if mem_mib == 0 {
         DEFAULT_RAM_SIZE
@@ -345,25 +345,11 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         return Err(HvfError::BadKernel);
     }
 
-    let layout = Layout::from_size_align(ram_size, PAGE).map_err(|_| HvfError::Alloc)?;
-    let _ = &layout; // SPIKE: retained for size/align validation only
-    // SPIKE: demand-zero anonymous mapping (untouched) instead of alloc_zeroed,
-    // to measure whether guest RAM residency comes from the allocation memset or
-    // from hv_vm_map faulting/wiring the region.
-    let ram = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            ram_size,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANON,
-            -1,
-            0,
-        )
-    };
-    if ram == libc::MAP_FAILED {
-        return Err(HvfError::Alloc);
-    }
-    let ram = ram as *mut u8;
+    // Demand-zero anonymous mapping: host pages fault in as the guest touches
+    // them, so idle residency tracks the working set instead of `ram_size`.
+    // `guest_ram` owns the region and unmaps it on drop, after `hv_vm_destroy`.
+    let guest_ram = GuestRam::new(ram_size)?;
+    let ram = guest_ram.as_ptr();
 
     // Base cmdline, plus optional appended args. Precedence: the `MVM_HVF_BOOTARGS`
     // dev override wins, then the caller-supplied cmdline (the builder rootfs needs
@@ -412,8 +398,6 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         &virtio_nodes,
     );
     if dtb.len() > FDT_MAX_SIZE as usize {
-        // SAFETY: same layout.
-        unsafe { libc::munmap(ram.cast(), ram_size); };
         return Err(HvfError::BadKernel);
     }
     if let Ok(path) = std::env::var("MVM_HVF_DUMP_DTB") {
@@ -437,7 +421,6 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     let result = unsafe {
         let rc = hv_vm_create(core::ptr::null_mut());
         if rc != HV_SUCCESS {
-            libc::munmap(ram.cast(), ram_size);
             return Err(HvfError::VmCreate(rc));
         }
         let r = run(
@@ -448,7 +431,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 disks,
                 vsock,
                 timeout,
-                ram_size,
+                ram_size: guest_ram.len(),
                 agent_socket: channels.agent_socket,
                 substitution_socket: channels.substitution_socket,
                 egress_relay: channels.egress_relay,
@@ -461,8 +444,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         hv_vm_destroy();
         r
     };
-    // SAFETY: same layout.
-    unsafe { libc::munmap(ram.cast(), ram_size); };
+    // `guest_ram` unmaps here as it drops, after `hv_vm_destroy` above.
     result
 }
 
