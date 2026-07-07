@@ -224,11 +224,11 @@ release VERSION:
 
 # Build optimized release binary
 release-build:
-    cargo build --release --features backends-libkrun,template-registry-s3,dev-watch,custom-dns,manifest-verify
+    cargo build --release --features host,user,template-registry-s3
 
 # Cross-compile release binary for a target
 release-build-target TARGET:
-    cargo build --release --target {{TARGET}} --features backends-libkrun,template-registry-s3,dev-watch,custom-dns,manifest-verify
+    cargo build --release --target {{TARGET}} --features host,user,template-registry-s3
 
 # Dry-run crates.io publish (all crates in dependency order)
 publish-dry-run:

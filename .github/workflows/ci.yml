@@ -101,6 +101,9 @@ jobs:
       - name: Unique spec numbers
         run: cargo run -p xtask -- check-spec-numbers
 
+      - name: Two product surfaces only (host + user)
+        run: cargo run -p xtask -- check-two-surfaces
+
       - name: No spec refs in source comments
         run: cargo run -p xtask -- check-no-spec-refs-in-comments
 
