@@ -93,6 +93,7 @@ jobs:
       - name: Install cross-compilation tools (Linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
