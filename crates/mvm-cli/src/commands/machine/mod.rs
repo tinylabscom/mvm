@@ -223,6 +223,25 @@ pub(in crate::commands) struct MachineRunArgs {
     /// or a bare number of seconds. The reaper tears down expired machines.
     #[arg(long, value_name = "DURATION")]
     pub ttl: Option<String>,
+    /// Declare this workload a long-running service: the shell command is
+    /// exec'd in the guest as its liveness check (exit 0 = healthy). Its
+    /// presence promotes the run to the persistent lifecycle — it will not tear
+    /// down on a backstop; it runs until `stop`. A run whose entrypoint exits
+    /// still tears down on that exit code.
+    #[arg(long, value_name = "CMD")]
+    pub healthcheck: Option<String>,
+    /// Seconds between checks. Recorded now; enforced when active probing lands.
+    #[arg(long = "health-interval", default_value_t = 30)]
+    pub health_interval: u32,
+    /// Per-check timeout in seconds. Recorded now; enforced later.
+    #[arg(long = "health-timeout", default_value_t = 5)]
+    pub health_timeout: u32,
+    /// Consecutive failures before unhealthy. Recorded now; enforced later.
+    #[arg(long = "health-retries", default_value_t = 3)]
+    pub health_retries: u32,
+    /// Grace period after start before checks count. Recorded now; enforced later.
+    #[arg(long = "health-start-period", default_value_t = 0)]
+    pub health_start_period: u32,
     /// Attach the foreground command to an interactive PTY.
     #[arg(short = 't', long, conflicts_with_all = ["detach", "up_json", "ttl"])]
     pub tty: bool,
@@ -2655,6 +2674,11 @@ pub(in crate::commands) fn boot_persistent_by_name(
             no_supervisor: false,
             up_json: false,
             ttl: None,
+            healthcheck: None,
+            health_interval: 30,
+            health_timeout: 5,
+            health_retries: 3,
+            health_start_period: 0,
             entrypoint: false,
             fresh: false,
             reset: false,
