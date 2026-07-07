@@ -22,7 +22,7 @@ Demonstrates:
 1. **Host stores it** — `mvmctl secret set echo-key --host httpbin.org
    --type bearer --value -` writes the encrypted value + its binding into
    `~/.mvm` (never the guest).
-2. **Boot** — `mvmctl up` spawns the per-VM substitution endpoint (the only
+2. **Boot** — `mvmctl machine run` spawns the per-VM substitution endpoint (the only
    process holding the value in the clear), which mints the placeholder.
 3. **Invoke** — the host injects `HTTP_PROXY` + the placeholder env var; the
    workload's request carries the placeholder; the endpoint substitutes the
@@ -41,14 +41,14 @@ printf '%s' "$REAL_KEY" | mvmctl secret set echo-key \
 Compile the app to local boot artifacts, then boot it on a `/dev/kvm` host:
 
 ```sh
-mvmctl compile examples/python/secret-egress/app.py --out /tmp/secret-egress
-mvmctl up --flake /tmp/secret-egress
+mvmctl build compile examples/python/secret-egress/app.py --out /tmp/secret-egress
+mvmctl machine run --flake /tmp/secret-egress
 ```
 
 `mvmctl compile` strips the managed `SecretRef` out of the baked image — the
 rootfs is secret-free by construction, the guest var is injected as an opaque
 placeholder only at boot — and writes the binding into `workload.json`, the
-admission input. `mvmctl up` auto-discovers `/tmp/secret-egress/workload.json`,
+admission input. `mvmctl machine run` auto-discovers `/tmp/secret-egress/workload.json`,
 lowers its `SecretRef` into a signed `ExecutionPlan.secrets`, and admits it —
 which is what spawns the per-VM substitution endpoint at boot. (Pass
 `--from-workload-ir <path>` to point elsewhere.) Deploying to a multi-tenant

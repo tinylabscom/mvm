@@ -12,8 +12,8 @@ pub mod local;
 
 pub use mvm_core::client::dto;
 pub use mvm_core::client::dto::{
-    ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
-    ReconfigureRequest,
+    ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineSpecBuilder, MachineState,
+    MachineStatus, ReconfigureRequest,
 };
 #[cfg(feature = "remote")]
 pub use mvm_core::client::gateway;
