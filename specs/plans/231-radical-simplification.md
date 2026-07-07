@@ -36,8 +36,10 @@
 ## One-line goal
 
 Shrink the project to the smallest, most human-readable form a single expert
-developer can hold in their head — preserving **every** security claim and
-enabling a **network of mvm hosts driven by `mvmd`**.
+developer can hold in their head — and the smallest **dependency / attack
+surface** — preserving **every** security claim and enabling a **network of mvm
+hosts driven by `mvmd`**. Fewer dependencies is not tidiness; each one is
+supply-chain risk (P7).
 
 ## Non-negotiable invariants (a change that touches any of these is rejected)
 
@@ -114,9 +116,27 @@ validate or right-size the whole effort before the riskier phases).
 - [ ] **P6 — Docs + DX.** README / CLAUDE.md / rustdoc describe exactly two
   surfaces + the library API; every public item carries a doc example (green
   under `just test-doc`); `just` recipes for the common flows.
+- [ ] **P7 — Dependency surface reduction (security-driven).** The workspace
+  carries ~734 crates — every one is attack surface and a potential supply-chain
+  CVE, which is a direct, stated security concern (not just tidiness). Beyond
+  P1's *unused*-dep removal, audit the *used* deps: for each direct dependency,
+  measure how much of it we actually consume. Categorize:
+  **(a) unused** → remove (P1); **(b) barely-used** (a single function or a
+  handful) → reimplement in-house behind a small, focused, tested module **or**
+  swap for a lighter-weight / `std` alternative; **(c) heavy-but-justified** →
+  keep, with a one-line rationale recorded. Prioritize by risk: unmaintained
+  crates, large transitive footprints, duplicate crates at multiple versions, and
+  categories that pull broad native/parsing surface. Every removal/replacement is
+  evidence-driven (`cargo tree -i`, actual call-site count) and tested, and must
+  **not** weaken any security claim — claim 7's `cargo-audit` + `deny.toml`
+  posture is the backstop, and a reimplementation is only worth it when it is
+  *simpler and auditable*, never a subtle re-bug. Ratchet: a **dependency-count
+  budget** in CI so the total can't silently grow, plus `cargo deny` on every PR.
 
-Likely order: **P1 → P2 → P4 → P3 → P5 → P6** (safe/fast first; larger surgery
-after the scoping call).
+Likely order: **P1 → P7 → P2 → P4 → P3 → P5 → P6** — P1 and P7 are the
+dependency/attack-surface pair and run first (P1 removes what's unused, P7
+shrinks what's barely-used); the larger structural surgery follows the scoping
+call.
 
 ## Scoping decisions to confirm before P3/P4 (front-loaded)
 
@@ -131,6 +151,9 @@ doesn't guess:
 3. **CLI verbs to delete outright vs deprecate** — nothing is in production, so
    hard deletion is on the table; confirm the keep-list.
 4. **One sprint vs several** — P1/P2 are safe and fast; P3/P4 are larger.
+5. **Reimplement-vs-replace threshold (P7)** — at what usage does a dep get cut:
+   e.g. "≤ N call-sites of a single function → reimplement or drop." Confirm the
+   threshold and the target dependency count (from ~734).
 
 ## Exit criteria
 
@@ -140,8 +163,10 @@ doesn't guess:
   `cargo clippy --workspace -- -D warnings` clean.
 - CLI verb count reduced with a snapshot test guarding it.
 - `mvmd` orchestrates a network of ≥2 mvm hosts via the facade (smoke test).
-- New CI ratchets live: crate-count budget, `cargo public-api` snapshots,
-  `cargo machete`.
+- Dependency count materially reduced from ~734 (target set in the scoping call);
+  barely-used deps reimplemented or replaced with a recorded rationale.
+- New CI ratchets live: crate-count budget, **dependency-count budget**,
+  `cargo public-api` snapshots, `cargo machete`, `cargo deny`.
 
 ## Note on Phase 0 coupling
 
