@@ -136,6 +136,14 @@ name = "emit_broker_schema"
 path = "src/bin/emit_broker_schema.rs"
 required-features = ["schema"]
 
+# Standalone cosign-bundle verifier for a pack manifest's signature payload —
+# used by the pack-signing CI smoke to prove a real `cosign sign-blob` bundle
+# round-trips through the sigstore-verify stack. `required-features` keeps it
+# out of any default build, matching `manifest-verify`'s opt-in cosign deps.
+[[example]]
+name = "verify-pack-signature"
+required-features = ["manifest-verify"]
+
 [dev-dependencies]
 # `OsRng` for generating fresh ed25519 keys in signed_config tests
 # without committing static fixtures. (Also a non-dev dep above for the
