@@ -202,29 +202,12 @@ fn unpack_one_layer(layer: &LayerDescriptor, bytes: &[u8], dest: &Path) -> Resul
 }
 
 /// Probe the dm-verity sidecars the pure materializer writes beside the image
-/// (`rootfs.verity` + `rootfs.roothash`), reading them from the host filesystem
-/// directly. Returns `(verity_path, roothash)` when both are present and the
-/// hash is well-formed (64-hex); `(None, None)` for an unverified image.
-///
-/// Distinct from `mvm_backend::probe_verity_sidecar`, which reads the sidecars
-/// from inside a builder VM — wrong for a host-materialized rootfs.
+/// (`rootfs.verity` + `rootfs.roothash`) from the host filesystem. Returns
+/// `(verity_path, roothash)` when both are present and the hash is well-formed
+/// (64-hex); `(None, None)` for an unverified image. A `&Path` adapter over
+/// `mvm_backend::microvm::probe_verity_sidecar`, which does the host-side read.
 fn host_verity_sidecars(rootfs: &Path) -> (Option<String>, Option<String>) {
-    let Some(parent) = rootfs.parent() else {
-        return (None, None);
-    };
-    let verity = parent.join("rootfs.verity");
-    let roothash_file = parent.join("rootfs.roothash");
-    if !verity.is_file() {
-        return (None, None);
-    }
-    let Ok(raw) = std::fs::read_to_string(&roothash_file) else {
-        return (None, None);
-    };
-    let hash = raw.trim().to_string();
-    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-        return (None, None);
-    }
-    (Some(verity.to_string_lossy().into_owned()), Some(hash))
+    mvm_backend::microvm::probe_verity_sidecar(&rootfs.to_string_lossy())
 }
 
 #[async_trait]

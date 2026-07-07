@@ -120,6 +120,15 @@ e2e-core-demo:
     cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys
     MVM_E2E_SMOKE=1 MVM_BUILDER_BACKEND=libkrun cargo test -p mvm-cli --test core_demo_e2e -- --nocapture
 
+# Build the per-VM host helper bins `mvmctl` spawns. `cargo run` builds only
+# `mvmctl`; the backend resolves these alongside the exe / in `target/` and also
+# self-builds them on the first `machine run`, so this is just the explicit route.
+build-supervisors:
+    cargo build -p mvm-hostd --bin mvm-substitution-endpoint
+    cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
+    cargo build -p mvm-vm-host --bin mvm-vz-supervisor
+    cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys
+
 # ── Lint & Format ────────────────────────────────────────────────────────
 
 # Format all code
@@ -215,11 +224,11 @@ release VERSION:
 
 # Build optimized release binary
 release-build:
-    cargo build --release --features backends-libkrun,template-registry-s3,dev-watch,custom-dns,manifest-verify
+    cargo build --release --features host,user,template-registry-s3
 
 # Cross-compile release binary for a target
 release-build-target TARGET:
-    cargo build --release --target {{TARGET}} --features backends-libkrun,template-registry-s3,dev-watch,custom-dns,manifest-verify
+    cargo build --release --target {{TARGET}} --features host,user,template-registry-s3
 
 # Dry-run crates.io publish (all crates in dependency order)
 publish-dry-run:
