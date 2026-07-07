@@ -59,6 +59,9 @@ mvm-network.workspace = true
 mvm-sdk.workspace = true
 # `mvm` provides the `VmNameRegistry` the TTL reaper walks.
 mvm.workspace = true
+# guest vsock exec protocol (`send_exec_streaming`, `GUEST_AGENT_PORT`) —
+# the healthcheck probe's host->guest exec leg.
+mvm-guest.workspace = true
 anyhow.workspace = true
 async-trait = "0.1"
 base64.workspace = true
