@@ -96,7 +96,9 @@ struct StandingSockets {
 
 fn standing_sockets(state_dir: &Path, dev_console: bool) -> StandingSockets {
     StandingSockets {
-        agent: state_dir.join("agent.sock"),
+        // Single source of truth shared with the host-side resolver so the
+        // guest agent bridge can't drift out of the host's reach.
+        agent: mvm_core::config::vm_inhouse_agent_socket_at(state_dir),
         exit: state_dir.join("workload.exit"),
         console_log: state_dir.join("console.log"),
         console_data: console_data_sockets(state_dir, dev_console),
