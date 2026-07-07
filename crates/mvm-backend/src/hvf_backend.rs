@@ -126,6 +126,23 @@ pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
     )
 }
 
+/// Rebuild command for the hvf per-VM supervisor bin. `cargo run` rebuilds only
+/// `mvmctl`, never this separate `mvm-vm-host` bin.
+const HVF_AUX_REBUILD_CMD: &str = "cargo build -p mvm-vm-host --bin mvm-hvf-supervisor";
+
+/// Warn once, before spawning, when the resolved supervisor predates the running
+/// `mvmctl` — the `cargo run` skew where the supervisor was left unrebuilt. On
+/// this path staleness is a silent behavioural regression (a stale agent bridge
+/// still boots cleanly, then wedges the guest agent), so unlike the vz path there
+/// is no early crash to hang a hint on; this makes it self-diagnosing up front.
+pub(crate) fn warn_if_supervisor_stale(supervisor: &Path) {
+    if let Some(hint) =
+        crate::supervisor_stale::supervisor_stale_hint(supervisor, HVF_AUX_REBUILD_CMD)
+    {
+        ui::warn(&hint);
+    }
+}
+
 fn vms_root() -> PathBuf {
     PathBuf::from(mvm_data_dir()).join("vms")
 }
@@ -301,6 +318,7 @@ impl VmBackend for HvfBackend {
             .map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
 
         let supervisor = resolve_supervisor_path()?;
+        warn_if_supervisor_stale(&supervisor);
         ui::info(&format!(
             "Starting HVF VM '{}' via {}...",
             config.name,
@@ -490,6 +508,20 @@ mod tests {
     #[test]
     fn identifies_as_hvf() {
         assert_eq!(HvfBackend.name(), "hvf");
+    }
+
+    #[test]
+    fn rebuild_hint_names_the_supervisor_bin() {
+        // The whole point of the stale warning is telling the user the exact
+        // command; guard against the bin name drifting out of the hint.
+        assert!(HVF_AUX_REBUILD_CMD.contains("mvm-hvf-supervisor"));
+        assert!(HVF_AUX_REBUILD_CMD.contains("mvm-vm-host"));
+    }
+
+    #[test]
+    fn warn_if_supervisor_stale_is_silent_for_unreadable_path() {
+        // No mtime → no hint → no panic (don't guess on a missing binary).
+        warn_if_supervisor_stale(Path::new("/nonexistent/mvm-hvf-supervisor"));
     }
 
     #[test]
