@@ -120,9 +120,26 @@ pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
             return Ok(candidate);
         }
     }
+    // Workspace `target/{release,debug}` fallback, mirroring the substitution
+    // endpoint resolver: a source checkout that builds the root `mvmctl` bin
+    // without also building this per-VM helper still resolves it, instead of
+    // hard-failing on one binary while silently reaching for a stale copy of
+    // the other.
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
+        for variant in ["release", "debug"] {
+            let candidate = workspace_root
+                .join("target")
+                .join(variant)
+                .join("mvm-hvf-supervisor");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
     bail!(
-        "mvm-hvf-supervisor binary not found (looked at $MVM_HVF_SUPERVISOR_PATH \
-         and alongside the current exe)"
+        "mvm-hvf-supervisor binary not found (looked at $MVM_HVF_SUPERVISOR_PATH, \
+         alongside the current exe, and <workspace>/target/{{release,debug}})"
     )
 }
 
